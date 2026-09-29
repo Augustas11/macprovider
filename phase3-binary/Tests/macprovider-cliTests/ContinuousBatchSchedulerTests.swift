@@ -4899,12 +4899,14 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
 
         XCTAssertEqual(result.outputTokens, [6])
         XCTAssertEqual(result.terminalStatus, .stop)
-        let proposalDepths = await backend.nativeProposalBatches().flatMap {
-            $0.map(\.maximumProposalDepth)
-        }
+        let proposalInputs = await backend.nativeProposalBatches().flatMap { $0 }
+        let proposalDepths = proposalInputs.map(\.maximumProposalDepth)
         XCTAssertEqual(proposalDepths, [0])
+        XCTAssertEqual(proposalInputs.map(\.shouldAdvanceDeferredDrafter), [true])
         let verifyInputs = await backend.nativeVerifyInputTokenCounts()
         XCTAssertEqual(verifyInputs, [["fallback-depth": 1]])
+        let finalization = await backend.nativeFinalizations().last?.first
+        XCTAssertEqual(finalization?.retainDrafterTransition, false)
         let reservedRoundBytes = await scheduler.nativeMTPReservedRoundBytesSnapshot()
         XCTAssertEqual(reservedRoundBytes, 0)
     }

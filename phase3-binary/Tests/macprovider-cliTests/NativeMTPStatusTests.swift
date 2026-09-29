@@ -1,4 +1,5 @@
 import Foundation
+import MLX
 import XCTest
 @testable import macprovider_cli
 
@@ -280,5 +281,209 @@ final class NativeMTPStatusTests: XCTestCase {
         XCTAssertEqual(object["family"] as? String, "qwen3_mtp_v1")
         XCTAssertEqual(object["throughput_delta_ppm"] as? Int, -10)
         XCTAssertEqual((object["reset_generation"] as? NSNumber)?.uint64Value, 9)
+    }
+
+    func testRoundProfileDeltaPublishesEveryPhaseAndCounts() throws {
+        let before = NativeMTPRoundProfileSnapshot(
+            phaseNanoseconds: [NativeMTPRoundProfilePhase.tokenDelivery.rawValue: 1_000_000],
+            roundCount: 2,
+            rows: 4,
+            proposals: 2,
+            targetForwardCalls: 2,
+            drafterForwardCalls: 4,
+            perRowModelCallLoops: 4
+        )
+        let after = NativeMTPRoundProfileSnapshot(
+            phaseNanoseconds: [
+                NativeMTPRoundProfilePhase.targetVerificationForward.rawValue: 5_000_000,
+                NativeMTPRoundProfilePhase.tokenDelivery.rawValue: 3_000_000,
+            ],
+            roundCount: 4,
+            rows: 8,
+            proposals: 4,
+            targetForwardCalls: 4,
+            drafterForwardCalls: 8,
+            perRowModelCallLoops: 8
+        )
+
+        let delta = after.delta(since: before)
+        XCTAssertEqual(delta.roundCount, 2)
+        XCTAssertEqual(delta.rows, 4)
+        XCTAssertEqual(delta.proposals, 2)
+        XCTAssertEqual(delta.targetForwardCalls, 2)
+        XCTAssertEqual(delta.drafterForwardCalls, 4)
+        XCTAssertEqual(delta.perRowModelCallLoops, 4)
+
+        let totals = try XCTUnwrap(delta.record["phase_total_ms"] as? [String: Double])
+        XCTAssertEqual(Set(totals.keys), Set(NativeMTPRoundProfilePhase.allCases.map(\.rawValue)))
+        XCTAssertEqual(totals[NativeMTPRoundProfilePhase.targetVerificationForward.rawValue], 5.0)
+        XCTAssertEqual(totals[NativeMTPRoundProfilePhase.tokenDelivery.rawValue], 2.0)
+    }
+
+    func testNativeMTPParityClassifierCountsBoundedOwnRowRunnerUp() {
+        let result = NativeMTPParityClassifier.classify(positions: [
+            NativeMTPParityPosition(
+                nativeToken: 9,
+                ordinaryTop1: 5,
+                ordinaryTop2: 9,
+                ordinaryTop1Logit: 16.0,
+                ordinaryTop2Logit: 15.75,
+                maxAbsTargetLogitDifference: 0.05,
+                otherRowArgmaxes: [42]
+            )
+        ])
+        XCTAssertFalse(result.hardMismatch)
+        XCTAssertEqual(result.toleratedTies, 1)
+    }
+
+    func testNativeMTPParityClassifierRejectsBeyondTwoBF16ULPs() {
+        let result = NativeMTPParityClassifier.classify(positions: [
+            NativeMTPParityPosition(
+                nativeToken: 9,
+                ordinaryTop1: 5,
+                ordinaryTop2: 9,
+                ordinaryTop1Logit: 2.0,
+                ordinaryTop2Logit: 1.96875,
+                maxAbsTargetLogitDifference: 0.031_251,
+                otherRowArgmaxes: [42]
+            )
+        ])
+        XCTAssertTrue(result.hardMismatch)
+    }
+
+    func testNativeMTPParityClassifierEnforcesGlobalLogitBoundOnExactArgmax() {
+        let result = NativeMTPParityClassifier.classify(positions: [
+            NativeMTPParityPosition(
+                nativeToken: 5,
+                ordinaryTop1: 5,
+                ordinaryTop2: 9,
+                ordinaryTop1Logit: 16.0,
+                ordinaryTop2Logit: 15.0,
+                maxAbsTargetLogitDifference: 0.050_001,
+                otherRowArgmaxes: [42]
+            )
+        ])
+        XCTAssertTrue(result.hardMismatch)
+    }
+
+    func testNativeMTPParityClassifierRejectsCrossRowArgmax() {
+        let result = NativeMTPParityClassifier.classify(positions: [
+            NativeMTPParityPosition(
+                nativeToken: 9,
+                ordinaryTop1: 5,
+                ordinaryTop2: 9,
+                ordinaryTop1Logit: 16.0,
+                ordinaryTop2Logit: 15.75,
+                maxAbsTargetLogitDifference: 0.05,
+                otherRowArgmaxes: [9]
+            )
+        ])
+        XCTAssertTrue(result.hardMismatch)
+    }
+
+    func testNativeMTPParityClassifierRejectsWrongRank() {
+        let result = NativeMTPParityClassifier.classify(positions: [
+            NativeMTPParityPosition(
+                nativeToken: 11,
+                ordinaryTop1: 5,
+                ordinaryTop2: 9,
+                ordinaryTop1Logit: 16.0,
+                ordinaryTop2Logit: 15.875,
+                maxAbsTargetLogitDifference: 0.05,
+                otherRowArgmaxes: [42]
+            )
+        ])
+        XCTAssertTrue(result.hardMismatch)
+    }
+
+    func testNativeMTPParityCrossRowGuardUsesPackedRoundCoordinate() {
+        let round1Column0 = NativeMTPParityCoordinate(packedRoundID: 10, verificationColumn: 0)
+        let round1Column1 = NativeMTPParityCoordinate(packedRoundID: 10, verificationColumn: 1)
+        let round2Column0 = NativeMTPParityCoordinate(packedRoundID: 11, verificationColumn: 0)
+        let observations = [
+            [
+                NativeMTPParityArgmaxObservation(coordinate: round1Column0, ordinaryTop1: 5),
+                NativeMTPParityArgmaxObservation(coordinate: round2Column0, ordinaryTop1: 6),
+            ],
+            [
+                NativeMTPParityArgmaxObservation(coordinate: round1Column0, ordinaryTop1: 40),
+                NativeMTPParityArgmaxObservation(coordinate: round1Column1, ordinaryTop1: 41),
+                NativeMTPParityArgmaxObservation(coordinate: round2Column0, ordinaryTop1: 77),
+            ],
+        ]
+
+        XCTAssertEqual(
+            NativeMTPParityClassifier.otherRowArgmaxes(
+                observations: observations,
+                requestIndex: 0,
+                positionIndex: 1
+            ),
+            [77]
+        )
+    }
+
+    func testNativeMTPParityCollectorRetainsOtherRowUncommittedSuffixArgmax() throws {
+        let collector = NativeMTPParityTraceCollector.shared
+        let requestA = "parity-packed-a-\(UUID().uuidString)"
+        let requestB = "parity-packed-b-\(UUID().uuidString)"
+        collector.begin(requestID: requestA)
+        collector.begin(requestID: requestB)
+        collector.recordPrompt(requestID: requestA, tokens: [1])
+        collector.recordPrompt(requestID: requestB, tokens: [1])
+        let roundID = collector.allocatePackedRoundID()
+        collector.stageVerification(
+            requestID: requestA,
+            packedRoundID: roundID,
+            targetLogits: [
+                MLXArray([3, 1, 0] as [Float]).reshaped([1, 3]),
+                MLXArray([0, 1, 3] as [Float]).reshaped([1, 3]),
+            ],
+            targetArgmaxes: [0, 2]
+        )
+        collector.stageVerification(
+            requestID: requestB,
+            packedRoundID: roundID,
+            targetLogits: [
+                MLXArray([1, 3, 0] as [Float]).reshaped([1, 3]),
+                MLXArray([0, 1, 4] as [Float]).reshaped([1, 3]),
+            ],
+            targetArgmaxes: [1, 2]
+        )
+        collector.commitVerification(requestID: requestA, tokens: [0, 2])
+        collector.commitVerification(requestID: requestB, tokens: [1])
+
+        let traceA = try XCTUnwrap(collector.take(requestID: requestA))
+        _ = collector.take(requestID: requestB)
+        XCTAssertEqual(traceA.positions[1].otherRowPackedArgmaxes, [2])
+    }
+
+    func testNativeMTPParityCollectorSealsFirstPositionCrossRowArgmaxes() throws {
+        let collector = NativeMTPParityTraceCollector.shared
+        let requestA = "parity-prefill-a-\(UUID().uuidString)"
+        let requestB = "parity-prefill-b-\(UUID().uuidString)"
+        collector.begin(requestID: requestA)
+        collector.begin(requestID: requestB)
+        collector.recordPrompt(requestID: requestA, tokens: [1])
+        collector.recordPrompt(requestID: requestB, tokens: [1])
+        let roundID = collector.allocatePackedRoundID()
+        collector.recordPrefillToken(
+            requestID: requestA,
+            token: 1,
+            targetLogits: MLXArray([0, 3, 1] as [Float]).reshaped([1, 3]),
+            packedRoundID: roundID
+        )
+        collector.recordPrefillToken(
+            requestID: requestB,
+            token: 2,
+            targetLogits: MLXArray([0, 1, 3] as [Float]).reshaped([1, 3]),
+            packedRoundID: roundID
+        )
+        collector.sealPackedCoordinates([
+            NativeMTPParityCoordinate(packedRoundID: roundID, verificationColumn: 0)
+        ])
+
+        let traceA = try XCTUnwrap(collector.take(requestID: requestA))
+        _ = collector.take(requestID: requestB)
+        XCTAssertEqual(traceA.positions[0].otherRowPackedArgmaxes, [2])
     }
 }

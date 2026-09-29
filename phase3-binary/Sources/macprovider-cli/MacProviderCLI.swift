@@ -36,11 +36,32 @@ enum AdmissionIdentityStartupTopology: Equatable {
 
 @main
 struct MacProviderCLI: AsyncParsableCommand {
+    private static var nativeMTPBenchSubcommands: [ParsableCommand.Type] {
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+        [NativeMTPBenchCommand.self]
+#else
+        []
+#endif
+    }
+
     static let configuration = CommandConfiguration(
         commandName: "malibu-cli",
         abstract: "OpenAI-compatible Malibu (Mac Provider) inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ProviderCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self, NativeMTPHardwareE2ECommand.self, NativeMTPBenchCommand.self, MSBThroughputCommand.self, MSBLoopbackCommand.self, MSBPerplexityCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self, RelayBlindKeyCommand.self, RelayBlindFixtureCommand.self],
+        subcommands: [
+            ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ProviderCommand.self,
+            ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self,
+            AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self,
+            CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self,
+            LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self,
+            LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self,
+            DecodeBenchCommand.self, NativeMTPHardwareE2ECommand.self,
+        ] + nativeMTPBenchSubcommands + [
+            MSBThroughputCommand.self, MSBLoopbackCommand.self, MSBPerplexityCommand.self,
+            EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self,
+            DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self,
+            RelayBlindKeyCommand.self, RelayBlindFixtureCommand.self,
+        ],
         defaultSubcommand: ServeCommand.self
     )
 }

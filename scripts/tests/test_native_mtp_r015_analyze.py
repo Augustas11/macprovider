@@ -22,10 +22,26 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         self.assertEqual(result["overall_status"], "FAIL")
         self.assertIn("ttft", result["cells"][0]["metric_failures"])
 
-    def test_parity_fail(self):
-        result = self._run_case(parity_mismatch=True)
+    def test_hard_parity_mismatch_fails(self):
+        result = self._run_case(parity_hard_mismatch=True)
         self.assertEqual(result["overall_status"], "FAIL")
-        self.assertIn("parity_mismatch", result["cells"][0]["hard_failures"])
+        self.assertIn("parity_hard_mismatch", result["cells"][0]["hard_failures"])
+        self.assertGreater(result["cells"][0]["parity_hard_mismatches"], 0)
+
+    def test_tolerated_ties_are_reported_without_failing(self):
+        result = self._run_case(parity_tolerated_ties=3)
+        self.assertEqual(result["overall_status"], "PASS")
+        self.assertEqual(result["cells"][0]["parity_hard_mismatches"], 0)
+        self.assertEqual(result["cells"][0]["parity_tolerated_ties"], 33)
+        self.assertNotIn("parity_hard_mismatch", result["cells"][0]["hard_failures"])
+
+    def test_legacy_or_missing_parity_evidence_fails_closed(self):
+        result = self._run_case(omit_parity_evidence=True)
+        self.assertEqual(result["overall_status"], "FAIL")
+        self.assertIn(
+            "parity_evidence_missing_or_invalid",
+            result["cells"][0]["hard_failures"],
+        )
 
     def test_incomplete_cell(self):
         result = self._run_case(blocks_written=3)
@@ -90,13 +106,22 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         result = self._run_case(exploratory_policy=True, blocks_written=3, header_exploratory=False)
         self.assertEqual(result["overall_status"], "FAIL")
 
+    def test_profile_and_self_check_are_diagnostic_only(self):
+        result = self._run_case(header_profile=True, header_ordinary_self_check=True)
+        self.assertEqual(result["overall_status"], "DIAGNOSTIC_NO_VERDICT")
+        self.assertEqual(
+            result["diagnostic_modes"],
+            ["native_mtp_profile", "ordinary_self_check"],
+        )
+
     def _run_case(
         self,
         *,
         native_tps=130.0,
         native_ttft=0.105,
         native_itl=0.009,
-        parity_mismatch=False,
+        parity_hard_mismatch=False,
+        parity_tolerated_ties=0,
         blocks_written=10,
         header_policy_sha=None,
         run_policy_sha=None,
@@ -109,6 +134,9 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         header_ram_gb=256,
         exploratory_policy=False,
         header_exploratory=None,
+        header_profile=False,
+        header_ordinary_self_check=False,
+        omit_parity_evidence=False,
     ):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -167,17 +195,28 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
                     "unavailable_metrics": [],
                     "mlx_fork_revision": "b" * 40,
                     "exploratory": exploratory_policy if header_exploratory is None else header_exploratory,
+                    "native_mtp_profile": header_profile,
+                    "ordinary_self_check": header_ordinary_self_check,
                 }
             ]
             for block in range(blocks_written):
-                ordinary = self._run_record("ordinary", block, 100.0, 0.100, 0.010, False, policy_sha=run_policy_sha or policy_sha, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=matrix_min_available_memory_fraction)
+                ordinary = self._run_record("ordinary", block, 100.0, 0.100, 0.010, False, 0, policy_sha=run_policy_sha or policy_sha, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=matrix_min_available_memory_fraction)
+                if omit_parity_evidence:
+                    ordinary.pop("parity_hard_mismatch")
+                    ordinary.pop("parity_tolerated_ties")
+                    ordinary["parity_mismatch"] = True
                 records.append(ordinary)
                 if duplicate_matrix_path and block == 0:
                     records.append(dict(ordinary))
-                records.append(self._run_record("native_mtp", block, native_tps, native_ttft, native_itl, parity_mismatch, policy_sha=run_policy_sha or policy_sha, native_admissions=native_admissions, peak_phys_footprint_bytes=peak_phys_footprint_bytes))
+                native = self._run_record("native_mtp", block, native_tps, native_ttft, native_itl, parity_hard_mismatch, parity_tolerated_ties, policy_sha=run_policy_sha or policy_sha, native_admissions=native_admissions, peak_phys_footprint_bytes=peak_phys_footprint_bytes)
+                if omit_parity_evidence:
+                    native.pop("parity_hard_mismatch")
+                    native.pop("parity_tolerated_ties")
+                    native["parity_mismatch"] = True
+                records.append(native)
             if blocks_written >= 10:
-                records.append(self._run_record("ordinary", 100, 100.0, 0.100, 0.010, False, sustained=True, policy_sha=run_policy_sha or policy_sha, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=sustained_min_available_memory_fraction, wall_seconds=sustained_wall_seconds))
-                records.append(self._run_record("native_mtp", 100, native_tps, native_ttft, native_itl, parity_mismatch, sustained=True, policy_sha=run_policy_sha or policy_sha, native_admissions=native_admissions, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=sustained_min_available_memory_fraction, wall_seconds=sustained_wall_seconds))
+                records.append(self._run_record("ordinary", 100, 100.0, 0.100, 0.010, False, 0, sustained=True, policy_sha=run_policy_sha or policy_sha, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=sustained_min_available_memory_fraction, wall_seconds=sustained_wall_seconds))
+                records.append(self._run_record("native_mtp", 100, native_tps, native_ttft, native_itl, parity_hard_mismatch, parity_tolerated_ties, sustained=True, policy_sha=run_policy_sha or policy_sha, native_admissions=native_admissions, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=sustained_min_available_memory_fraction, wall_seconds=sustained_wall_seconds))
             jsonl_path.write_text("\n".join(json.dumps(r, sort_keys=True) for r in records) + "\n", encoding="utf-8")
             return analyze(jsonl_path, policy_path)
 
@@ -188,7 +227,8 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         tps,
         ttft,
         itl,
-        parity_mismatch,
+        parity_hard_mismatch,
+        parity_tolerated_ties,
         sustained=False,
         *,
         policy_sha,
@@ -213,7 +253,8 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
             "capacity_rejections": 0,
             "fallbacks": 0,
             "errors": 0,
-            "parity_mismatch": parity_mismatch,
+            "parity_hard_mismatch": parity_hard_mismatch,
+            "parity_tolerated_ties": parity_tolerated_ties,
             "non_native_admissions": 0,
             "native_admissions": native_admissions if path == "native_mtp" else 0,
             "native_requests": 1 if path == "native_mtp" else 0,

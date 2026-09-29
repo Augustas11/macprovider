@@ -748,6 +748,10 @@ struct ContinuousBatchNativeMTPProposalInput: Sendable, Equatable {
     let generatedTokens: [Int]
     let samplerSeed: Int
     let maximumProposalDepth: Int
+    /// A depth-zero row may be a temporary memory/adaptation downgrade rather
+    /// than a terminal row. Its deferred drafter transition must still advance
+    /// when more target tokens can follow.
+    let shouldAdvanceDeferredDrafter: Bool
     let samplerStep: Int
 }
 
@@ -765,6 +769,9 @@ struct ContinuousBatchNativeMTPFinalizeInput: Sendable, Equatable {
     /// on abort/cancel/invalid rows.
     let committedInputTokenCount: Int
     let shouldCommit: Bool
+    /// False when stop/max-token semantics prove that no future proposal can
+    /// consume the accepted transition.
+    let retainDrafterTransition: Bool
 }
 
 struct ContinuousBatchTerminalKVCommitInput: Sendable, Equatable {
@@ -1620,6 +1627,12 @@ actor ContinuousBatchScheduler {
         _ request: ContinuousBatchSchedulerRequest,
         tokenSink: @escaping ContinuousBatchSchedulerTokenSink = { _ in }
     ) async throws -> ContinuousBatchSchedulerResult {
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+        NativeMTPParityTraceCollector.shared.recordPrompt(
+            requestID: request.id,
+            tokens: request.promptTokens
+        )
+#endif
         do {
             try Task.checkCancellation()
         } catch {
@@ -2583,6 +2596,22 @@ actor ContinuousBatchScheduler {
         return selected
     }
 
+    private func nativeMTPRowWillContinue(
+        _ row: Row,
+        after selected: [NativeMTPTokenCandidate]
+    ) -> Bool {
+        guard !selected.isEmpty else { return false }
+        let generated = row.generatedTokens + selected.map(\.tokenID)
+        guard generated.count < row.request.maxOutputTokens,
+              matchingStopLength(
+                generated,
+                stopSequences: row.request.stopTokenSequences
+              ) == nil,
+              !earlyStopIDs.contains(row.request.id)
+        else { return false }
+        return true
+    }
+
     private func abortNativeMTPRound(_ prepared: [PreparedNativeMTPRow]) async throws {
         guard !prepared.isEmpty else { return }
         var failure: (any Error)?
@@ -2594,7 +2623,8 @@ actor ContinuousBatchScheduler {
                     committedProposalTokenCount: 0,
                     acceptedTokenIDs: [],
                     committedInputTokenCount: 0,
-                    shouldCommit: false
+                    shouldCommit: false,
+                    retainDrafterTransition: false
                 )
             })
         } catch {
@@ -2766,6 +2796,9 @@ actor ContinuousBatchScheduler {
 
     private func runNativeMTPDecodeStep(rows: [Row]) async {
         let nativeMTPStatusSink = configuration.nativeMTPStatusSink
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+        let reservationProfileStarted = NativeMTPRoundProfileCollector.start()
+#endif
         var nativeMTPStatusRoundStarted = false
         let nativeMTPStatusStartedAt = Date()
         defer {
@@ -2903,14 +2936,26 @@ actor ContinuousBatchScheduler {
                 generatedTokens: row.generatedTokens,
                 samplerSeed: row.request.samplerSeed,
                 maximumProposalDepth: reservation.maximumDepth,
+                shouldAdvanceDeferredDrafter:
+                    row.generatedTokens.count + 1 < row.request.maxOutputTokens,
                 samplerStep: row.generatedTokens.count
             )
         }
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+        NativeMTPRoundProfileCollector.shared.record(
+            .reservationCheckpointStage,
+            since: reservationProfileStarted
+        )
+        let proposalProfileStarted = NativeMTPRoundProfileCollector.start()
+#endif
         nativeMTPStatusSink?.beginRound(requestedDepths: proposalInputs.map(\.maximumProposalDepth))
         nativeMTPStatusRoundStarted = true
         let backendProposals: [String: [Int]]?
         do {
             backendProposals = try await backend.proposeNativeMTPPackedRound(rows: proposalInputs)
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+            NativeMTPRoundProfileCollector.shared.record(.drafterProposalForward, since: proposalProfileStarted)
+#endif
         } catch {
             recordNativeMTPPostoutputFailureIfVisible(
                 sink: nativeMTPStatusSink,
@@ -3058,10 +3103,27 @@ actor ContinuousBatchScheduler {
         record(.decodeFirstStep)
         sharedForwardCalls += 1
         maxObservedBatchDepth = max(maxObservedBatchDepth, prepared.count)
+        let proposedTokens = prepared.reduce(0) { $0 + $1.input.proposalTokens.count }
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+        NativeMTPRoundProfileCollector.shared.recordRound(
+            rows: prepared.count,
+            proposals: proposedTokens,
+            targetForwardCalls: 1
+        )
+#endif
 
         let verifiedRows: [NativeMTPVerifiedRow]
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+        let verificationProfileStarted = NativeMTPRoundProfileCollector.start()
+#endif
         do {
             verifiedRows = try await backend.verifyNativeMTPPackedRound(rows: prepared.map(\.input))
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+            NativeMTPRoundProfileCollector.shared.record(
+                .targetVerificationForward,
+                since: verificationProfileStarted
+            )
+#endif
         } catch {
             recordNativeMTPPostoutputFailureIfVisible(
                 sink: nativeMTPStatusSink,
@@ -3115,6 +3177,9 @@ actor ContinuousBatchScheduler {
             return
         }
 
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+        let acceptanceProfileStarted = NativeMTPRoundProfileCollector.start()
+#endif
         let acceptedRows: [NativeMTPAcceptedRow]
         do {
             acceptedRows = try NativeMTPAcceptance.acceptGreedy(
@@ -3176,6 +3241,8 @@ actor ContinuousBatchScheduler {
             }
             let shouldCommit = !cancelledIDs.contains(item.row.request.id)
                 && !invalidCandidateIDs.contains(item.row.request.id)
+            let retainDrafterTransition = shouldCommit
+                && nativeMTPRowWillContinue(item.row, after: selected)
             let committedProposalCount = selected.last?.cumulativeProposalCommitCount ?? 0
             proposalCountByID[item.row.request.id] = item.input.proposalTokens.count
             committedProposalCountByID[item.row.request.id] = shouldCommit ? committedProposalCount : 0
@@ -3185,12 +3252,24 @@ actor ContinuousBatchScheduler {
                 committedProposalTokenCount: shouldCommit ? committedProposalCount : 0,
                 acceptedTokenIDs: shouldCommit ? selected.map(\.tokenID) : [],
                 committedInputTokenCount: shouldCommit ? committedProposalCount + 1 : 0,
-                shouldCommit: shouldCommit
+                shouldCommit: shouldCommit,
+                retainDrafterTransition: retainDrafterTransition
             ))
         }
 
         do {
             try await backend.finalizeNativeMTPPackedRound(rows: finalizeRows)
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+            for row in finalizeRows where row.shouldCommit {
+                NativeMTPParityTraceCollector.shared.commitVerification(
+                    requestID: row.requestID,
+                    tokens: row.acceptedTokenIDs
+                )
+            }
+#endif
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+            NativeMTPRoundProfileCollector.shared.record(.acceptanceCommit, since: acceptanceProfileStarted)
+#endif
         } catch {
             recordNativeMTPPostoutputFailureIfVisible(
                 sink: nativeMTPStatusSink,
@@ -3233,6 +3312,9 @@ actor ContinuousBatchScheduler {
             }
             return
         }
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+        let finalizeProfileStarted = NativeMTPRoundProfileCollector.start()
+#endif
         let staleFinalizedRows = staleNativeMTPRows(prepared.map(\.row))
         guard staleFinalizedRows.isEmpty else {
             let abortError: (any Error)?
@@ -3365,11 +3447,13 @@ actor ContinuousBatchScheduler {
         guard !cleanupFailedClosed else { return }
 
         let acceptedProposalTokens = finalizeRows.reduce(0) { $0 + $1.committedProposalTokenCount }
-        let proposedTokens = prepared.reduce(0) { $0 + $1.input.proposalTokens.count }
         let committedTokens = candidatesByID.values.reduce(0) { $0 + $1.count }
         let bonusTokens = candidatesByID.values.reduce(0) { partial, candidates in
             partial + candidates.filter { $0.source == .bonus }.count
         }
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+        NativeMTPRoundProfileCollector.shared.record(.finalizeRelease, since: finalizeProfileStarted)
+#endif
         let overheadMS = UInt64(max(0, Date().timeIntervalSince(nativeMTPStatusStartedAt) * 1000.0))
         nativeMTPStatusSink?.recordRound(NativeMTPStatusSink.Round(
             requestedDepths: proposalInputs.map(\.maximumProposalDepth),
@@ -3394,6 +3478,9 @@ actor ContinuousBatchScheduler {
             if !released { return }
         }
 
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+        let deliveryProfileStarted = NativeMTPRoundProfileCollector.start()
+#endif
         let stillActive = Set(activeDecode.keys)
         for item in prepared where healthyOutputIDs.contains(item.row.request.id)
             && stillActive.contains(item.row.request.id) {
@@ -3426,6 +3513,9 @@ actor ContinuousBatchScheduler {
                 if cleanupFailedClosed { return }
             }
         }
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+        NativeMTPRoundProfileCollector.shared.record(.tokenDelivery, since: deliveryProfileStarted)
+#endif
     }
 
     private func recordNativeMTPPostoutputFailureIfVisible(
@@ -3527,6 +3617,9 @@ actor ContinuousBatchScheduler {
 
     private func runOrdinaryDecodeStep(rows: [Row]) async {
         guard !rows.isEmpty else { return }
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+        let reservationProfileStarted = NativeMTPRoundProfileCollector.start()
+#endif
         let windowSteps = lockstepDecodeWindowSteps(for: rows)
         var prepared: [(row: Row, input: ContinuousBatchDecodeInput)] = []
         prepared.reserveCapacity(rows.count)
@@ -3623,12 +3716,30 @@ actor ContinuousBatchScheduler {
         record(.decodeFirstStep)
         sharedForwardCalls += 1
         maxObservedBatchDepth = max(maxObservedBatchDepth, prepared.count)
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+        NativeMTPRoundProfileCollector.shared.record(
+            .reservationCheckpointStage,
+            since: reservationProfileStarted
+        )
+        NativeMTPRoundProfileCollector.shared.recordRound(
+            rows: prepared.count,
+            proposals: 0,
+            targetForwardCalls: windowSteps
+        )
+        let verificationProfileStarted = NativeMTPRoundProfileCollector.start()
+#endif
         let outcomes: [ContinuousBatchDecodeOutcome]
         do {
             outcomes = try await backend.decodeLockstepWindow(
                 rows: prepared.map(\.input),
                 steps: windowSteps
             )
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+            NativeMTPRoundProfileCollector.shared.record(
+                .targetVerificationForward,
+                since: verificationProfileStarted
+            )
+#endif
             try validateDecodeOutputStructure(outcomes, expectedRequestIDs: prepared.map { $0.row.request.id })
         } catch {
             for item in prepared {
@@ -3652,6 +3763,9 @@ actor ContinuousBatchScheduler {
             return
         }
 
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+        let finalizeProfileStarted = NativeMTPRoundProfileCollector.start()
+#endif
         var healthyOutputIDs: Set<String> = []
         for item in prepared {
             if await endDecodeStep(item.row.handle) {
@@ -3668,6 +3782,9 @@ actor ContinuousBatchScheduler {
         if backendCancellationPending { return }
         await processCancellations()
         guard !cleanupFailedClosed else { return }
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+        NativeMTPRoundProfileCollector.shared.record(.finalizeRelease, since: finalizeProfileStarted)
+#endif
         for outcome in outcomes {
             guard case .rowFailure(let requestID) = outcome,
                   let removed = activeDecode.removeValue(forKey: requestID) else { continue }
@@ -3707,11 +3824,17 @@ actor ContinuousBatchScheduler {
             }
         }
         let stillActive = Set(activeDecode.keys)
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+        let deliveryProfileStarted = NativeMTPRoundProfileCollector.start()
+#endif
         await applyDecodeOutputs(outputs.filter {
             healthyOutputIDs.contains($0.requestID)
                 && stillActive.contains($0.requestID)
                 && !invalidOutputIDs.contains($0.requestID)
         })
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+        NativeMTPRoundProfileCollector.shared.record(.tokenDelivery, since: deliveryProfileStarted)
+#endif
     }
 
     private func applyDecodeOutputs(_ outputs: [ContinuousBatchDecodeOutput]) async {

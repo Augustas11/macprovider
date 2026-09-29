@@ -3,8 +3,10 @@ import CryptoKit
 import Darwin
 import Foundation
 import MacProviderCore
+import MLX
 import MLXLMCommon
 
+#if DEBUG || MACPROVIDER_LAB_HARNESS
 struct NativeMTPBenchCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "native-mtp-bench",
@@ -30,8 +32,10 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
     @Option(name: .customLong("provider-commit"), help: "Provider git commit for the header.")
     var providerCommit: String
 
+    @Flag(name: .customLong("ordinary-self-check"), help: "Run the ordinary path twice per measured block and record determinism mismatches.")
+    var ordinarySelfCheck = false
+
     func run() async throws {
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         let environment = ProcessInfo.processInfo.environment
         guard environment["MACPROVIDER_NATIVE_MTP_E2E"] == "1" else {
             FileHandle.standardError.write(Data("native-mtp-bench: set MACPROVIDER_NATIVE_MTP_E2E=1 on the Mac Studio\n".utf8))
@@ -47,17 +51,97 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
             policyPath: policyPath,
             outPath: outPath,
             onlyCell: onlyCell,
-            providerCommit: providerCommit
+            providerCommit: providerCommit,
+            ordinarySelfCheck: ordinarySelfCheck
         )
         try await bench.run()
-        #else
-        FileHandle.standardError.write(Data("native-mtp-bench: unavailable without DEBUG or MACPROVIDER_LAB_HARNESS\n".utf8))
-        throw ExitCode(2)
-        #endif
     }
 }
 
-#if DEBUG || MACPROVIDER_LAB_HARNESS
+struct NativeMTPParityPosition: Sendable, Equatable {
+    let nativeToken: Int
+    let ordinaryTop1: Int
+    let ordinaryTop2: Int
+    let ordinaryTop1Logit: Float
+    let ordinaryTop2Logit: Float
+    let maxAbsTargetLogitDifference: Float
+    let otherRowArgmaxes: Set<Int>
+}
+
+struct NativeMTPParityClassification: Sendable, Equatable {
+    let hardMismatch: Bool
+    let toleratedTies: Int
+
+    static let hardFailure = NativeMTPParityClassification(
+        hardMismatch: true,
+        toleratedTies: 0
+    )
+}
+
+struct NativeMTPParityArgmaxObservation: Sendable, Equatable {
+    let coordinate: NativeMTPParityCoordinate?
+    let ordinaryTop1: Int
+}
+
+enum NativeMTPParityClassifier {
+    static func classify(positions: [NativeMTPParityPosition]) -> NativeMTPParityClassification {
+        var toleratedTies = 0
+        for position in positions {
+            guard position.maxAbsTargetLogitDifference.isFinite,
+                  position.maxAbsTargetLogitDifference <= 0.05
+            else { return .hardFailure }
+            if position.nativeToken == position.ordinaryTop1 { continue }
+            guard position.nativeToken == position.ordinaryTop2,
+                  !position.otherRowArgmaxes.contains(position.nativeToken),
+                  position.ordinaryTop1Logit.isFinite,
+                  position.ordinaryTop2Logit.isFinite
+            else { return .hardFailure }
+            let magnitude = max(
+                abs(position.ordinaryTop1Logit),
+                abs(position.ordinaryTop2Logit)
+            )
+            let limit = 2 * bf16ULP(atMagnitude: magnitude)
+            let margin = position.ordinaryTop1Logit - position.ordinaryTop2Logit
+            guard margin >= 0,
+                  margin <= limit,
+                  position.maxAbsTargetLogitDifference <= limit
+            else { return .hardFailure }
+            toleratedTies += 1
+        }
+        return NativeMTPParityClassification(
+            hardMismatch: false,
+            toleratedTies: toleratedTies
+        )
+    }
+
+    /// Adjacent-value spacing for bfloat16 at `magnitude`. bfloat16 has seven
+    /// explicit fraction bits; zero/subnormals use the fixed 2^-133 spacing.
+    static func bf16ULP(atMagnitude magnitude: Float) -> Float {
+        let value = abs(magnitude)
+        guard value.isFinite else { return .infinity }
+        guard value >= Float.leastNormalMagnitude else {
+            return Float(pow(2.0, -133.0))
+        }
+        let exponent = floor(log2(Double(value)))
+        return Float(pow(2.0, exponent - 7.0))
+    }
+
+    static func otherRowArgmaxes(
+        observations: [[NativeMTPParityArgmaxObservation]],
+        requestIndex: Int,
+        positionIndex: Int
+    ) -> Set<Int> {
+        guard observations.indices.contains(requestIndex),
+              observations[requestIndex].indices.contains(positionIndex),
+              let coordinate = observations[requestIndex][positionIndex].coordinate
+        else { return [] }
+        return Set(observations.enumerated().compactMap { otherIndex, row in
+            guard otherIndex != requestIndex else { return nil }
+            return row.first(where: { $0.coordinate == coordinate })?.ordinaryTop1
+        })
+    }
+}
+
 private final class NativeMTPBenchRunner {
     private let root: URL
     private let modelID: String
@@ -67,6 +151,7 @@ private final class NativeMTPBenchRunner {
     private let providerCommit: String
     private let policy: NativeMTPBenchPolicy
     private let policySHA256: String
+    private let ordinarySelfCheck: Bool
 
     init(
         rootPath: String,
@@ -74,7 +159,8 @@ private final class NativeMTPBenchRunner {
         policyPath: String,
         outPath: String,
         onlyCell: String?,
-        providerCommit: String
+        providerCommit: String,
+        ordinarySelfCheck: Bool
     ) async throws {
         self.root = URL(fileURLWithPath: (rootPath as NSString).expandingTildeInPath, isDirectory: true)
             .standardizedFileURL
@@ -85,6 +171,7 @@ private final class NativeMTPBenchRunner {
             .standardizedFileURL
         self.onlyCell = onlyCell
         self.providerCommit = providerCommit
+        self.ordinarySelfCheck = ordinarySelfCheck
         self.policySHA256 = try Self.sha256(of: self.policyURL)
         self.policy = try NativeMTPBenchPolicy.load(from: self.policyURL)
     }
@@ -114,7 +201,9 @@ private final class NativeMTPBenchRunner {
             targetSHA256: targetIdentity.digest,
             mtpSHA256: mtpIdentity.digest,
             tokenizerSHA256: tokenizerSHA,
-            environment: environment
+            environment: environment,
+            ordinarySelfCheck: ordinarySelfCheck,
+            profilingEnabled: NativeMTPRoundProfileCollector.enabled
         )
         if existing.hasRecords, onlyCell == nil {
             throw NativeMTPBenchError.assertionFailed(
@@ -190,9 +279,30 @@ private final class NativeMTPBenchRunner {
             guard var ordinary = ordinaryResult, var native = nativeResult else {
                 throw NativeMTPBenchError.assertionFailed("missing paired block result")
             }
-            let mismatch = parityMismatch(ordinary: ordinary, native: native)
-            ordinary.parityMismatch = mismatch
-            native.parityMismatch = mismatch
+            if ordinarySelfCheck {
+                let repeated = try await runPath(
+                    .ordinary,
+                    cell: cell,
+                    block: block,
+                    order: 2,
+                    prompts: prompts,
+                    runtime: fixture.runtimes.ordinary,
+                    fixture: fixture,
+                    writer: nil,
+                    warmup: false,
+                    requestIDSuffix: "-repeat"
+                )
+                let repeatMismatch = completionMismatch(ordinary: ordinary, comparison: repeated)
+                ordinary.ordinaryRepeatMismatch = repeatMismatch
+                native.ordinaryRepeatMismatch = repeatMismatch
+            }
+            let parity = try await parityClassification(
+                ordinary: ordinary,
+                native: native,
+                targetContainer: fixture.runtimes.targetContainer
+            )
+            native.parityHardMismatch = parity.hardMismatch
+            native.parityToleratedTies = parity.toleratedTies
             try writer.write(ordinary.record(policySHA256: policySHA256, sustained: false, warmup: false))
             try writer.write(native.record(policySHA256: policySHA256, sustained: false, warmup: false))
         }
@@ -227,9 +337,30 @@ private final class NativeMTPBenchRunner {
             guard var ordinary = ordinaryResult, var native = nativeResult else {
                 throw NativeMTPBenchError.assertionFailed("missing sustained pair")
             }
-            let mismatch = parityMismatch(ordinary: ordinary, native: native)
-            ordinary.parityMismatch = mismatch
-            native.parityMismatch = mismatch
+            if ordinarySelfCheck {
+                let repeated = try await runPath(
+                    .ordinary,
+                    cell: cell,
+                    block: block,
+                    order: 2,
+                    prompts: prompts,
+                    runtime: fixture.runtimes.ordinary,
+                    fixture: fixture,
+                    writer: nil,
+                    warmup: false,
+                    requestIDSuffix: "-repeat"
+                )
+                let repeatMismatch = completionMismatch(ordinary: ordinary, comparison: repeated)
+                ordinary.ordinaryRepeatMismatch = repeatMismatch
+                native.ordinaryRepeatMismatch = repeatMismatch
+            }
+            let parity = try await parityClassification(
+                ordinary: ordinary,
+                native: native,
+                targetContainer: fixture.runtimes.targetContainer
+            )
+            native.parityHardMismatch = parity.hardMismatch
+            native.parityToleratedTies = parity.toleratedTies
             let elapsed = completedSeconds + Date().timeIntervalSince(windowStarted)
             try writer.write(ordinary.record(
                 policySHA256: policySHA256,
@@ -275,9 +406,11 @@ private final class NativeMTPBenchRunner {
         runtime: ModelRuntime,
         fixture: NativeMTPHardwareRuntimeFixture,
         writer: NativeMTPJSONLWriter?,
-        warmup: Bool
+        warmup: Bool,
+        requestIDSuffix: String = ""
     ) async throws -> NativeMTPBenchRunResult {
         let statusBefore = await runtime.currentSnapshot().nativeMTPStatus
+        let profileBefore = NativeMTPRoundProfileCollector.shared.snapshot()
         let memorySampler = NativeMTPMemorySampler()
         memorySampler.start()
         let started = Date()
@@ -286,9 +419,13 @@ private final class NativeMTPBenchRunner {
         let results = try await withThrowingTaskGroup(of: NativeMTPBenchRequestResult.self) { group in
             for (index, prompt) in prompts.enumerated() {
                 group.addTask {
-                    let requestID = "\(cell.id)-b\(block)-\(path.rawValue)-r\(index)"
+                    let requestID = "\(cell.id)-b\(block)-\(path.rawValue)-r\(index)\(requestIDSuffix)"
                     let request = try Self.makeRequest(modelID: modelID, requestID: requestID, prompt: prompt, maxTokens: cell.maxTokens)
-                    return try await Self.runStreamingRequest(request, runtime: runtime)
+                    return try await Self.runStreamingRequest(
+                        request,
+                        runtime: runtime,
+                        captureParity: path == .nativeMTP
+                    )
                 }
             }
             var values: [NativeMTPBenchRequestResult] = []
@@ -300,6 +437,9 @@ private final class NativeMTPBenchRunner {
         let ended = Date()
         memorySampler.stop()
         let statusAfter = await runtime.currentSnapshot().nativeMTPStatus
+        let profile = NativeMTPRoundProfileCollector.enabled
+            ? NativeMTPRoundProfileCollector.shared.snapshot().delta(since: profileBefore)
+            : nil
         let statusDelta = NativeMTPStatusDelta(before: statusBefore, after: statusAfter)
         let wall = max(ended.timeIntervalSince(started), 0.000_001)
         let committed = results.reduce(0) { $0 + $1.completion.completionTokens }
@@ -344,7 +484,10 @@ private final class NativeMTPBenchRunner {
             minAvailableMemoryFraction: memorySampler.minAvailableFraction,
             thermalStart: thermalStart,
             thermalEnd: ProcessInfo.processInfo.thermalState.label,
-            parityMismatch: false
+            parityHardMismatch: false,
+            parityToleratedTies: 0,
+            ordinaryRepeatMismatch: nil,
+            profile: profile
         )
         if path == .nativeMTP, run.nonNativeAdmissions > 0 || run.missingNativeAdmissions > 0 {
             run.errors += 1
@@ -376,13 +519,116 @@ private final class NativeMTPBenchRunner {
         }
     }
 
-    private func parityMismatch(ordinary: NativeMTPBenchRunResult, native: NativeMTPBenchRunResult) -> Bool {
-        guard ordinary.requests.count == native.requests.count else { return true }
-        for (lhs, rhs) in zip(ordinary.requests, native.requests) {
-            if lhs.completion.content != rhs.completion.content { return true }
-            if lhs.completion.completionTokens != rhs.completion.completionTokens { return true }
+    private func completionMismatch(
+        ordinary: NativeMTPBenchRunResult,
+        comparison: NativeMTPBenchRunResult
+    ) -> Bool {
+        guard ordinary.requests.count == comparison.requests.count else { return true }
+        return zip(ordinary.requests, comparison.requests).contains { lhs, rhs in
+            lhs.completion.content != rhs.completion.content
+                || lhs.completion.completionTokens != rhs.completion.completionTokens
         }
-        return false
+    }
+
+    private func parityClassification(
+        ordinary: NativeMTPBenchRunResult,
+        native: NativeMTPBenchRunResult,
+        targetContainer: ModelContainer
+    ) async throws -> NativeMTPParityClassification {
+        guard ordinary.requests.count == native.requests.count else { return .hardFailure }
+        guard native.requests.allSatisfy({ request in
+            request.parityTrace?.positions.count == request.completion.completionTokens
+        }) else { return .hardFailure }
+
+        let provisional = try await targetContainer.perform { context in
+            try native.requests.map { request -> [NativeMTPParityProvisionalPosition] in
+                guard let trace = request.parityTrace, !trace.promptTokens.isEmpty else {
+                    throw NativeMTPBenchError.assertionFailed("native parity trace is incomplete")
+                }
+                let cache = try context.model.newCache(parameters: nil)
+                let prompt = MLXArray(trace.promptTokens.map(Int32.init))
+                    .reshaped([1, trace.promptTokens.count])
+                var logits = context.model(prompt, cache: cache)
+                var positions: [NativeMTPParityProvisionalPosition] = []
+                positions.reserveCapacity(trace.positions.count)
+                for (positionIndex, captured) in trace.positions.enumerated() {
+                    let ordinaryRow = Self.lastLogitRow(logits)
+                    let nativeRow = Self.lastLogitRow(captured.nativeTargetLogits)
+                    guard ordinaryRow.dim(0) == nativeRow.dim(0), ordinaryRow.dim(0) >= 2 else {
+                        throw NativeMTPBenchError.assertionFailed("native parity logit shape mismatch")
+                    }
+                    let order = argSort(ordinaryRow, axis: -1)
+                    let count = order.dim(0)
+                    let top1 = Int(order[count - 1].item(Int32.self))
+                    let top2 = Int(order[count - 2].item(Int32.self))
+                    let ordinaryTop1Logit = ordinaryRow[top1].item(Float.self)
+                    let ordinaryTop2Logit = ordinaryRow[top2].item(Float.self)
+                    let maxDifference = (nativeRow.asType(.float32) - ordinaryRow.asType(.float32))
+                        .abs()
+                        .max()
+                        .item(Float.self)
+                    positions.append(NativeMTPParityProvisionalPosition(
+                        nativeToken: captured.nativeToken,
+                        ordinaryTop1: top1,
+                        ordinaryTop2: top2,
+                        ordinaryTop1Logit: ordinaryTop1Logit,
+                        ordinaryTop2Logit: ordinaryTop2Logit,
+                        maxAbsTargetLogitDifference: maxDifference,
+                        coordinate: captured.coordinate,
+                        otherRowPackedArgmaxes: captured.otherRowPackedArgmaxes
+                    ))
+                    if positionIndex + 1 < trace.positions.count {
+                        let token = MLXArray([Int32(captured.nativeToken)]).reshaped([1, 1])
+                        logits = context.model(token, cache: cache)
+                    }
+                }
+                return positions
+            }
+        }
+
+        var toleratedTies = 0
+        let argmaxObservations = provisional.map { row in
+            row.map {
+                NativeMTPParityArgmaxObservation(
+                    coordinate: $0.coordinate,
+                    ordinaryTop1: $0.ordinaryTop1
+                )
+            }
+        }
+        for (requestIndex, pair) in zip(ordinary.requests, native.requests).enumerated() {
+            let (ordinaryRequest, nativeRequest) = pair
+            guard ordinaryRequest.completion.completionTokens == nativeRequest.completion.completionTokens,
+                  ordinaryRequest.completion.finishReason == nativeRequest.completion.finishReason
+            else { return .hardFailure }
+            let positions = provisional[requestIndex].enumerated().map { positionIndex, item in
+                NativeMTPParityPosition(
+                    nativeToken: item.nativeToken,
+                    ordinaryTop1: item.ordinaryTop1,
+                    ordinaryTop2: item.ordinaryTop2,
+                    ordinaryTop1Logit: item.ordinaryTop1Logit,
+                    ordinaryTop2Logit: item.ordinaryTop2Logit,
+                    maxAbsTargetLogitDifference: item.maxAbsTargetLogitDifference,
+                    otherRowArgmaxes: NativeMTPParityClassifier.otherRowArgmaxes(
+                        observations: argmaxObservations,
+                        requestIndex: requestIndex,
+                        positionIndex: positionIndex
+                    ).union(item.otherRowPackedArgmaxes)
+                )
+            }
+            let classification = NativeMTPParityClassifier.classify(
+                positions: positions
+            )
+            if classification.hardMismatch { return .hardFailure }
+            toleratedTies += classification.toleratedTies
+            if ordinaryRequest.completion.content != nativeRequest.completion.content,
+               classification.toleratedTies == 0 {
+                return .hardFailure
+            }
+        }
+        return NativeMTPParityClassification(
+            hardMismatch: false,
+            toleratedTies: toleratedTies
+        )
     }
 
     private func stableBlockSeed(cell: NativeMTPBenchCell, block: Int) -> UInt64 {
@@ -419,6 +665,8 @@ private final class NativeMTPBenchRunner {
             "tokenizer_sha256": tokenizerSHA256,
             "policy_sha256": policySHA256,
             "exploratory": policy.exploratory,
+            "ordinary_self_check": ordinarySelfCheck,
+            "native_mtp_profile": NativeMTPRoundProfileCollector.enabled,
         ]
     }
 
@@ -435,12 +683,25 @@ private final class NativeMTPBenchRunner {
         return try ChatCompletionRequest.parse(data: data).withRequestID(requestID)
     }
 
-    private static func runStreamingRequest(_ request: ChatCompletionRequest, runtime: ModelRuntime) async throws -> NativeMTPBenchRequestResult {
+    private static func runStreamingRequest(
+        _ request: ChatCompletionRequest,
+        runtime: ModelRuntime,
+        captureParity: Bool
+    ) async throws -> NativeMTPBenchRequestResult {
         guard let requestID = request.requestID else {
             throw NativeMTPBenchError.assertionFailed("request missing id")
         }
+        if captureParity {
+            NativeMTPParityTraceCollector.shared.begin(requestID: requestID)
+        }
         let start = Date()
-        let handle = try await runtime.acquireRequestHandle(request)
+        let handle: RequestHandle
+        do {
+            handle = try await runtime.acquireRequestHandle(request)
+        } catch {
+            NativeMTPParityTraceCollector.shared.cancel(requestID: requestID)
+            throw error
+        }
         let chunks = NativeMTPChunkTimeRecorder()
         let completion: CompletionResult
         do {
@@ -451,6 +712,7 @@ private final class NativeMTPBenchRunner {
             }
         } catch {
             await runtime.unregisterInFlight(handle.registrationID)
+            NativeMTPParityTraceCollector.shared.cancel(requestID: requestID)
             throw error
         }
         await runtime.unregisterInFlight(handle.registrationID)
@@ -462,8 +724,17 @@ private final class NativeMTPBenchRunner {
             completion: completion,
             wallSeconds: end.timeIntervalSince(start),
             ttftSeconds: chunkTimes.first?.timeIntervalSince(start),
-            interTokenGaps: gaps
+            interTokenGaps: gaps,
+            parityTrace: captureParity
+                ? NativeMTPParityTraceCollector.shared.take(requestID: requestID)
+                : nil
         )
+    }
+
+    private static func lastLogitRow(_ logits: MLXArray) -> MLXArray {
+        let vocabulary = logits.dim(logits.ndim - 1)
+        let rows = logits.reshaped([-1, vocabulary])
+        return rows[rows.dim(0) - 1]
     }
 
     private static func requireDirectory(_ url: URL) throws {
@@ -573,10 +844,22 @@ private struct NativeMTPBenchRequestResult: Sendable {
     let wallSeconds: TimeInterval
     let ttftSeconds: TimeInterval?
     let interTokenGaps: [TimeInterval]
+    let parityTrace: NativeMTPParityTrace?
 
     var contentSHA256: String {
         SHA256.hash(data: Data(completion.content.utf8)).map { String(format: "%02x", $0) }.joined()
     }
+}
+
+private struct NativeMTPParityProvisionalPosition: Sendable {
+    let nativeToken: Int
+    let ordinaryTop1: Int
+    let ordinaryTop2: Int
+    let ordinaryTop1Logit: Float
+    let ordinaryTop2Logit: Float
+    let maxAbsTargetLogitDifference: Float
+    let coordinate: NativeMTPParityCoordinate?
+    let otherRowPackedArgmaxes: Set<Int>
 }
 
 private struct NativeMTPBenchRunResult {
@@ -610,7 +893,10 @@ private struct NativeMTPBenchRunResult {
     let minAvailableMemoryFraction: Double?
     let thermalStart: String
     let thermalEnd: String
-    var parityMismatch: Bool
+    var parityHardMismatch: Bool
+    var parityToleratedTies: Int
+    var ordinaryRepeatMismatch: Bool?
+    let profile: NativeMTPRoundProfileSnapshot?
 
     func record(
         policySHA256: String,
@@ -618,7 +904,7 @@ private struct NativeMTPBenchRunResult {
         warmup: Bool,
         sustainedWindowElapsedSeconds: Double? = nil
     ) -> [String: Any] {
-        [
+        var value: [String: Any] = [
             "schema": "macprovider.native-mtp-r015-run.v1",
             "record_type": "run",
             "policy_sha256": policySHA256,
@@ -677,8 +963,14 @@ private struct NativeMTPBenchRunResult {
             "min_available_memory_fraction": minAvailableMemoryFraction as Any,
             "thermal_state_start": thermalStart,
             "thermal_state_end": thermalEnd,
-            "parity_mismatch": parityMismatch,
+            "parity_hard_mismatch": parityHardMismatch,
+            "parity_tolerated_ties": parityToleratedTies,
+            "ordinary_repeat_mismatch": ordinaryRepeatMismatch as Any,
         ]
+        if let profile {
+            value["profile"] = profile.record
+        }
+        return value
     }
 }
 
@@ -972,7 +1264,9 @@ private struct NativeMTPExistingEvidence {
         targetSHA256: String,
         mtpSHA256: String,
         tokenizerSHA256: String,
-        environment: NativeMTPBenchEnvironment
+        environment: NativeMTPBenchEnvironment,
+        ordinarySelfCheck: Bool,
+        profilingEnabled: Bool
     ) throws -> NativeMTPExistingEvidence {
         guard FileManager.default.fileExists(atPath: url.path) else {
             return empty
@@ -996,6 +1290,10 @@ private struct NativeMTPExistingEvidence {
         ]
         for (key, value) in expected where header[key] as? String != value {
             throw NativeMTPBenchError.assertionFailed("existing --out \(key) mismatch")
+        }
+        guard header["ordinary_self_check"] as? Bool == ordinarySelfCheck,
+              header["native_mtp_profile"] as? Bool == profilingEnabled else {
+            throw NativeMTPBenchError.assertionFailed("existing --out lab mode mismatch")
         }
         guard let machine = header["machine"] as? [String: Any],
               machine["hw_model"] as? String == environment.hwModel,

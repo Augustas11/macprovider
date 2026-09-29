@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.11
+**Version:** 0.1.12
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -418,25 +418,54 @@ MAY add at most one target-selected bonus token under one documented convention
 bound to the qualified runtime revision.
 
 For the serial deterministic acceptance corpus, native MTP MUST produce the
-exact token-ID sequence, ordering, decoded bytes, completion-token count, and
-terminal reason produced by isolated ordinary greedy decode on the same model
-snapshot and request. The preregistered corpus MUST contain at least 200
-prompts, at least 20 per short/1.5k/4k/8k/near-boundary stratum, and at least
-6,400 compared generated positions, including all/none/partial acceptance,
-stop/EOS/max-token terminals, and deliberately near-tied logits. No prompt is
-excluded by observed margin: any token-ID divergence is a hard tuple failure.
+same token-ID sequence, ordering, decoded bytes, completion-token count, and
+terminal reason as isolated ordinary greedy decode on the same model snapshot
+and request, subject only to the bounded batch-kernel drift rule below. The
+preregistered corpus MUST contain at least 200 prompts, at least 20 per
+short/1.5k/4k/8k/near-boundary stratum, and at least 6,400 compared generated
+positions, including all/none/partial acceptance, stop/EOS/max-token terminals,
+and deliberately near-tied logits. No prompt or position may be excluded by an
+observed margin.
 
 The numerical oracle for both serial and multi-row tests is teacher-forced:
 for every emitted prefix, run that row's ordinary path on the same served
 snapshot and prefix, cast both target-logit vectors to float32, and compare the
-next-token result before advancing. Top-1 token ID MUST be exact. Maximum
-absolute target-logit difference MUST be `<= 0.05`, and the ordinary top-1
-versus runner-up gap is recorded for every position. On any token divergence,
-comparison stops for that row, the tuple fails, and later positions are not
-claimed. Multi-row evidence additionally runs the same emitted prefixes in
-the qualified ordinary SPEC-038 batch to detect cross-row state, but it does
-not reuse FR-CB6's load-time runner-up allowance. A token equal to another
-row's argmax is cross-row corruption, not tolerated numerical drift.
+next-token result before advancing. Maximum absolute target-logit difference
+MUST remain `<= 0.05`, and the ordinary top-1 versus runner-up gap is recorded
+for every position.
+
+A native top-1 that differs from the teacher-forced ordinary top-1 is a
+**tolerated batch-kernel tie** only when all of the following hold at that
+position:
+
+1. the ordinary top-1 versus runner-up margin is at most two bf16 ULPs at the
+   larger absolute magnitude of those two ordinary logits;
+2. the native token is exactly the ordinary runner-up;
+3. the maximum absolute difference between the native and ordinary target-logit
+   vectors is at most the same two-bf16-ULP bound; and
+4. the native token is not any other active row's teacher-forced ordinary
+   argmax at that position.
+
+For this rule, one bf16 ULP is the spacing of adjacent finite bf16 values in
+the binade containing the reference magnitude (with the bf16 subnormal spacing
+used at zero). Tolerated ties MUST be counted and reported separately and MUST
+NOT fail a benchmark cell. Any other divergence is a hard tuple failure. A
+hard failure stops comparison for that row. After a tolerated tie, comparison
+for that row MUST continue from the native-emitted
+prefix only, with the ordinary oracle teacher-forced on that prefix; it MUST
+NOT resume from the ordinary-generated prefix. Multi-row evidence additionally
+runs the same emitted prefixes in the qualified ordinary SPEC-038 batch to
+detect cross-row state. Cross-row corruption remains a hard failure regardless
+of numerical margin.
+
+This narrow allowance mirrors the bounded intent of SPEC-038 FR-CB6 while
+using an explicit bf16-scale bound. MLX selects QMV or QMM through
+`get_qmv_batch_limit`; on M3 Ultra with `K` or `N > 4096`, the packed native
+verification shape crosses from QMV to QMM at packed `M >= 12`. The measured
+Qwen3.5-9B cliff occurs between 10 and 12 packed tokens. That kernel switch can
+change accumulation order enough to exchange two bf16-near-tied logits without
+indicating row-state corruption, but it does not justify any wider margin or
+rank exclusion.
 
 Proposed, verified, rejected, and discarded tokens are internal work. Only
 tokens that the ordinary-decode oracle would emit count as committed or buyer
@@ -994,6 +1023,14 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.12 (2026-09-29)** — Amends SPEC-048-R005 for issue #1770 with a
+  bounded two-bf16-ULP batch-kernel tie allowance: only an own-row ordinary
+  runner-up may be tolerated, target-logit drift must satisfy the same bound,
+  another row's argmax remains a hard failure, tolerated ties are reported
+  separately, and teacher forcing continues from the native-emitted prefix.
+  Records the M3 Ultra `get_qmv_batch_limit` QMV-to-QMM transition at packed
+  `M >= 12` (`K` or `N > 4096`) and the measured Qwen3.5-9B 10-to-12-token
+  cliff as the rationale for the narrowly bounded allowance.
 - **0.1.11 (2026-09-29)** — Admits SPEC-023-R024 `mlx_affine`
   native-MTP artifacts for issue #1770 by binding observed MLX affine 4-bit
   target/MTP representation manifests, per-module overrides, and unquantized

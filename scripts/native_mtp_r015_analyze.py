@@ -150,6 +150,14 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
     policy = _load_policy(policy_path)
     policy_sha = _sha256(policy_path)
     header, runs = _load_jsonl(jsonl_path)
+    diagnostic_modes = [
+        name
+        for name, enabled in (
+            ("native_mtp_profile", header.get("native_mtp_profile") is True),
+            ("ordinary_self_check", header.get("ordinary_self_check") is True),
+        )
+        if enabled
+    ]
     if header.get("policy_sha256") != policy_sha:
         return {
             "schema": "macprovider.native-mtp-r015-analysis.v1",
@@ -256,7 +264,26 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
             if run.get("cell_id") == cell_id and run.get("sustained") is True and run.get("warmup") is not True
         ]
         hard_gate_runs = [run for pair in pairs for run in pair] + sustained_runs
-        parity_mismatches = sum(int(r.get("parity_mismatch", False)) for r in hard_gate_runs)
+        parity_evidence_invalid = any(
+            not isinstance(r.get("parity_hard_mismatch"), bool)
+            or isinstance(r.get("parity_tolerated_ties"), bool)
+            or not isinstance(r.get("parity_tolerated_ties"), int)
+            or r["parity_tolerated_ties"] < 0
+            for r in hard_gate_runs
+        )
+        native_runs = [r for r in hard_gate_runs if r.get("path") == "native_mtp"]
+        parity_hard_mismatches = sum(
+            int(r["parity_hard_mismatch"])
+            for r in native_runs
+            if isinstance(r.get("parity_hard_mismatch"), bool)
+        )
+        parity_tolerated_ties = sum(
+            r["parity_tolerated_ties"]
+            for r in native_runs
+            if isinstance(r.get("parity_tolerated_ties"), int)
+            and not isinstance(r.get("parity_tolerated_ties"), bool)
+            and r["parity_tolerated_ties"] >= 0
+        )
         non_native_admissions = sum(int(r.get("non_native_admissions", 0)) for r in hard_gate_runs)
         missing_native_admissions = sum(
             max(0, int(r.get("native_requests", 0)) - int(r.get("native_admissions", 0)))
@@ -264,9 +291,10 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
             if r.get("path") == "native_mtp"
         )
         fallback_errors = sum(int(r.get("fallbacks", 0)) + int(r.get("errors", 0)) for r in hard_gate_runs)
-        native_runs = [r for r in hard_gate_runs if r.get("path") == "native_mtp"]
-        if parity_mismatches:
-            hard_failures.append("parity_mismatch")
+        if parity_evidence_invalid:
+            hard_failures.append("parity_evidence_missing_or_invalid")
+        if parity_hard_mismatches:
+            hard_failures.append("parity_hard_mismatch")
         if non_native_admissions:
             hard_failures.append("non_native_admissions")
         if missing_native_admissions:
@@ -339,6 +367,8 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
             "paired_blocks": len(pairs),
             "required_blocks": required_blocks,
             "hard_failures": hard_failures,
+            "parity_hard_mismatches": parity_hard_mismatches,
+            "parity_tolerated_ties": parity_tolerated_ties,
             "metrics": metrics,
             "acceptance_rate": _median([
                 value
@@ -416,11 +446,14 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
             overall = "FAIL"
         else:
             overall = "EXPLORATORY_NO_VERDICT"
+    elif diagnostic_modes and overall == "PASS":
+        overall = "DIAGNOSTIC_NO_VERDICT"
     return {
         "schema": "macprovider.native-mtp-r015-analysis.v1",
         "overall_status": overall,
         "policy_sha256": policy_sha,
         "provider_commit": header.get("provider_commit"),
+        "diagnostic_modes": diagnostic_modes,
         "unavailable_metrics": header.get("unavailable_metrics", []),
         "cells": cell_results,
     }
