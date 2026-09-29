@@ -665,7 +665,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.22.2",
+      "version": "v0.22.3",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1474,7 +1474,7 @@
     {
       "spec_id": "SPEC-048",
       "title": "Native Multi-Token Prediction Serving",
-      "version": "0.1.10",
+      "version": "0.1.11",
       "path": "specs/SPEC-048-native-mtp-serving.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -3240,7 +3240,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "SPEC-023 v0.21.2 defines the closed signed native-MTP admission sidecar, including the authenticated live executable CDHash binding and complete-window byte closure; generator, strict consumers, release-ledger binding, negative fixtures, and signed release evidence are not implemented."
+        "rationale": "SPEC-023 v0.22.3 defines the closed signed native-MTP admission sidecar, including the authenticated live executable CDHash binding, complete-window byte closure, and MLX affine 4-bit representation binding; generator, strict consumers, release-ledger binding, negative fixtures, and signed release evidence are not implemented."
       }
     },
     {

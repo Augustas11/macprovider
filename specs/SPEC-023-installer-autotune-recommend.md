@@ -1,12 +1,18 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.2
+version: v0.22.3
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-01
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.22.3 (2026-10-01)** — Native-MTP MLX affine 4-bit admission
+  (#1770). SPEC-023-R024 now admits the closed `mlx_affine` quantization
+  representation used by mlx-community 4-bit Qwen target and MTP artifacts,
+  including the canonical representation manifest digest and sorted
+  per-layer/unquantized exception arrays consumed by SPEC-048.
 
 - **v0.22.2 (2026-10-01)** — Default context memory residency now uses the
   verified artifact byte footprint when it is available (#1794). Catalog
@@ -3116,20 +3122,54 @@ unsigned JSON integers and never floats.
 `quantization` is exactly `{kind, packed_data_dtype, packed_layout,
 scale_dtype, scale_layout, block_size_elements, alignment_bytes, padding_rule,
 unquantized_exceptions, per_layer_exceptions,
-representation_manifest_sha256}`. `kind` is `base` or `mlx_mxfp8`.
-`packed_data_dtype` is `none|uint8`; `packed_layout` is
-`none|mlx_array_native_v1`; `scale_dtype` is `none|float16|float32`;
-`scale_layout` is `none|per_block`; `block_size_elements` is null or integer
-`1..1024`; `alignment_bytes` is null or a power of two `1..4096`;
-`padding_rule` is `none|zero_pad_to_alignment`; each exceptions field is a
-sorted unique array of at most 256 tensor-name patterns, each 1..128 printable
-ASCII bytes; and the manifest is a `sha256`. `base` requires the three layout/
-dtype values `none`, numeric fields null, `padding_rule=none`, empty exception
-arrays, and a manifest describing the loaded base representation. `mlx_mxfp8`
-requires `uint8`, `mlx_array_native_v1`, non-`none` scale fields, non-null
-numeric fields, and passes the SPEC-048-R012 `1.01x` perplexity, one-point task,
-5% fit-error, and 10% system-headroom bounds. Compressed-tensors FP8, TorchAO
+representation_manifest_sha256}`. `kind` is `base`, `mlx_mxfp8`, or
+`mlx_affine`. `packed_data_dtype` is `none|uint8|uint32`; `packed_layout` is
+`none|mlx_array_native_v1`; `scale_dtype` is
+`none|float16|float32|bfloat16`; `scale_layout` is `none|per_block`;
+`block_size_elements` is null or integer `1..1024`; `alignment_bytes` is null
+or a power of two `1..4096`; `padding_rule` is
+`none|zero_pad_to_alignment`; and the manifest is a lowercase `sha256`.
+
+Each exceptions field is sorted bytewise, unique, and contains at most 256
+entries. Every entry is exactly `target/<module>` or `mtp/<module>` and the
+full prefixed entry is 1..128 printable ASCII bytes; `<module>` is the config
+module key and contains no slash. The
+`per_layer_exceptions` array names every per-module quantization override in
+the target and MTP configs; override widths are `4` or `8` bits and group sizes
+are `32`, `64`, or `128`. The `unquantized_exceptions` array names every
+config entry whose value is exactly `false`. Consumers MUST fail closed above
+the array bound, on unsorted or duplicate arrays, on an invalid prefix, or when
+the arrays do not match the observed target/MTP artifacts.
+
+`base` requires the three layout/dtype values `none`, numeric fields null,
+`padding_rule=none`, empty exception arrays, and a manifest describing the
+loaded base representation. `mlx_mxfp8` requires `uint8`,
+`mlx_array_native_v1`, non-`none` scale fields, non-null numeric fields, and
+passes the SPEC-048-R012 `1.01x` perplexity, one-point task, 5% fit-error, and
+10% system-headroom bounds. `mlx_affine` requires `packed_data_dtype=uint32`,
+`packed_layout=mlx_array_native_v1`, `scale_dtype=bfloat16`,
+`scale_layout=per_block`, `block_size_elements` equal to the global group size
+`32`, `64`, or `128`, `alignment_bytes=null`, and `padding_rule=none`. v0.1
+admits only global width `4`, represented to the runtime as
+`mlx_affine_4bit` for both target and MTP. Compressed-tensors FP8, TorchAO
 FP8, GGUF, a name containing `FP8`, or another microscaling format is invalid.
+
+For `mlx_affine`, `representation_manifest_sha256` is SHA-256 of the UTF-8
+bytes of the canonical representation manifest:
+
+```json
+{"mtp":{"bits":B,"group_size":G,"overrides":{"<module>":{"bits":b,"group_size":g}},"unquantized":["<module>"]},"schema":"macprovider.native-mtp-representation.v1","target":{"bits":B,"group_size":G,"overrides":{"<module>":{"bits":b,"group_size":g}},"unquantized":["<module>"]}}
+```
+
+The canonical form uses sorted object keys at every depth, no insignificant
+whitespace, UTF-8 encoding, decimal JSON integers only, the exact schema string
+shown above, the top-level key order `mtp`, `schema`, `target` as a consequence
+of sorted keys, and
+sorted unique `unquantized` arrays. `overrides` contains every config override
+except entries set to `false`, keyed by the unprefixed module name and valued
+as exactly `{bits,group_size}`. The global `{bits,group_size}` are the observed
+global config values for the target or MTP artifact. Recomputing this canonical
+manifest from the observed artifacts MUST produce the signed digest exactly.
 
 `ordinary_baseline` is exactly `{decode_path, runtime_revision,
 provider_revision, artifact_hash, qualified_slots, measurement_sha256,
