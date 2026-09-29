@@ -166,11 +166,16 @@ around 2026-10-23. The fix takes effect at the next renewal (Wed 2026-09-30
 16:00 UTC), or earlier with a manual dispatch of
 `renew-autotune-static-feed-signed.yml`.
 
-## Next coordinator release — net changes vs v1.8.206
+## Next coordinator release — v1.8.208, net changes vs v1.8.206
+
+Release owner: Augustas11/Codex, 2026-09-29. The signed runtime tag is
+reserved for the current `main` tip and contains the merged #1752 drain code.
+It is not applied to Pearl until the signed workflow and updater provenance
+checks pass.
 
 | Net change in coordinator / gateway / Pearl assets | Status | PR |
 |---|---|---|
-| #1752 operator drain: gateway `POST /admin/settlement/release-holds` (operator-only, one account per call, required `created_before`, dry-run by default; verified finality settles, refund finality refunds, anything else is released via the reservation-type-correct path, recording a terminal `operator_drain_*` reconcile result). Rollout: in the same gateway restart, set Pearl `settlement.reconcile_interval_s`/`reconcile_batch_limit` back to the repo defaults 30 s / 100 (they are 3600 s / 1 since 2026-09-15). Then dry-run each held account, apply, and report the held count on #1752. | merged 2026-09-28, not deployed | #1783 (#1752) |
+| #1752 operator drain: gateway `POST /admin/settlement/release-holds` (operator-only, one account per call, required `created_before`, dry-run by default; verified finality settles, refund finality refunds, anything else is released via the reservation-type-correct path, recording a terminal `operator_drain_*` reconcile result). Rollout: in the same gateway restart, set Pearl `settlement.reconcile_interval_s`/`reconcile_batch_limit` back to the repo defaults 30 s / 100 (they are 3600 s / 1 since 2026-09-15). Then dry-run each held account, apply, and report the held count on #1752. | merged 2026-09-28; v1.8.208 cut pending signed workflow/apply | #1783 (#1752) |
 
 ## Open Pearl actions (not new code)
 
