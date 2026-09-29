@@ -498,6 +498,46 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     enum CacheKind: Equatable, Sendable {
         case pagedAttention
         case recurrentMamba
+        /// keep=0 sliding-window attention. Stored as full paged history with a
+        /// windowed causal mask — not a ring buffer, and not sink-token keep>0.
+        case slidingWindow(windowTokens: Int)
+
+        var usesPagedKVCache: Bool {
+            switch self {
+            case .pagedAttention, .slidingWindow: true
+            case .recurrentMamba: false
+            }
+        }
+
+        var hasSlidingWindow: Bool {
+            if case .slidingWindow = self { return true }
+            return false
+        }
+
+        static func recognized(from cache: KVCache) -> CacheKind? {
+            if cache is KVCacheSimple { return .pagedAttention }
+            if cache is MambaCache { return .recurrentMamba }
+            if cache is RotatingKVCache {
+                guard let window = cache.maxSize, window > 0 else { return nil }
+                // RotatingKVCache.metaState is [keep, maxSize, step, offset, idx].
+                // keep>0 preserves a sink-token prefix the windowed full-history
+                // mask does not reconstruct.
+                guard cache.metaState.first == "0" else { return nil }
+                return .slidingWindow(windowTokens: window)
+            }
+            return nil
+        }
+
+        static func kinds(from caches: [KVCache]) -> [CacheKind]? {
+            guard !caches.isEmpty else { return nil }
+            var kinds: [CacheKind] = []
+            kinds.reserveCapacity(caches.count)
+            for cache in caches {
+                guard let kind = recognized(from: cache) else { return nil }
+                kinds.append(kind)
+            }
+            return kinds.contains(where: \.usesPagedKVCache) ? kinds : nil
+        }
     }
 
     private struct RowState {
@@ -1080,7 +1120,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         var caches: [KVCache] = []
         for (index, kind) in cacheKinds.enumerated() {
             switch kind {
-            case .pagedAttention:
+            case .pagedAttention, .slidingWindow:
                 guard let cache = attention.next() else { throw unavailable }
                 caches.append(cache)
             case .recurrentMamba:
@@ -1160,7 +1200,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             var layers: [KVCache] = []
             for kind in self.cacheKinds {
                 switch kind {
-                case .pagedAttention:
+                case .pagedAttention, .slidingWindow:
                     guard let cache = attention.next() else {
                         throw PagedKVContiguousCacheBridgeError.blockTableMismatch
                     }
@@ -1237,7 +1277,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         return RowState(
             caches: cacheKinds.map { kind in
                 switch kind {
-                case .pagedAttention:
+                case .pagedAttention, .slidingWindow:
                     PagedKVCache(
                         blockSizeTokens: blockSizeTokens,
                         maxPhysicalBlocks: maxPhysicalBlocks,
@@ -1778,6 +1818,18 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         try cache.prepareMTPPackedVerification(rowMaps: rowMaps)
     }
 
+    static func batchLayerMaskForTest(
+        rowCaches: [PagedKVCache],
+        n: Int,
+        windowSize: Int?
+    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        PagedKVBatchLayerCache(rowCaches: rowCaches).makeMask(
+            n: n,
+            windowSize: windowSize,
+            returnArray: true
+        )
+    }
+
     static func exerciseMTPPackedCacheForTest(
         rowCaches: [PagedKVCache],
         rowMaps: [MTPPackedVerificationRowMap],
@@ -1911,7 +1963,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
         return try (0 ..< layerCount).map { layerIndex in
             switch cacheKinds[layerIndex] {
-            case .pagedAttention:
+            case .pagedAttention, .slidingWindow:
                 let rows = rowCaches.compactMap { $0[layerIndex] as? PagedKVCache }
                 guard rows.count == rowCaches.count else {
                     throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
@@ -2511,8 +2563,14 @@ private final class PagedKVBatchLayerCache: MTPPackedVerificationCache, @uncheck
         // `update`, so these are PRE-update per-row token counts.
         let preUpdateOffsets = self.preUpdateOffsets
         // Equal-length rows have no cross-row padding post-update, so a single query
-        // token correctly attends every key (including itself) with no mask.
-        if n == 1, Set(preUpdateOffsets).count <= 1 { return .none }
+        // token correctly attends every key (including itself) with no mask — unless
+        // a sliding window excludes older keys from that shared history.
+        let postUpdateLengths = preUpdateOffsets.map { offset -> Int in
+            let (postUpdate, overflow) = offset.addingReportingOverflow(n)
+            return overflow ? Int.max : postUpdate
+        }
+        let needsWindow = windowSize.map { window in postUpdateLengths.contains { $0 > window } } ?? false
+        if n == 1, Set(preUpdateOffsets).count <= 1, !needsWindow { return .none }
         // Fail-safe: the single shared causal `offset` (max) below is only correct when
         // every row advances by the same `n` from a comparable base. Today `decode(rows:)`
         // — the sole batched caller — is always n==1, so this is unreachable; a future
@@ -2533,7 +2591,6 @@ private final class PagedKVBatchLayerCache: MTPPackedVerificationCache, @uncheck
         // input-isolation probe catches. `offset` stays the pre-update max: it only
         // sets the query's absolute position for the causal check, which the per-row
         // `lengths` gate then restricts correctly.
-        let postUpdateLengths = preUpdateOffsets.map { $0 + n }
         return .array(createCausalMask(
             n: n,
             offset: preUpdateOffsets.max() ?? offset,

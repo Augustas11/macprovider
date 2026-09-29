@@ -146,9 +146,10 @@ private final class NativeMTPHardwareE2ERunner {
 
         let cacheKinds = try await targetContainer.perform { context in
             try context.model.newCache(parameters: nil as GenerateParameters?).map { cache in
-                if cache is KVCacheSimple { return PagedKVSharedForwardBackend.CacheKind.pagedAttention }
-                if cache is MambaCache { return PagedKVSharedForwardBackend.CacheKind.recurrentMamba }
-                throw NativeMTPHardwareE2EError.unsupportedCache(String(describing: type(of: cache)))
+                guard let kind = PagedKVSharedForwardBackend.CacheKind.recognized(from: cache) else {
+                    throw NativeMTPHardwareE2EError.unsupportedCache(String(describing: type(of: cache)))
+                }
+                return kind
             }
         }
         try require(cacheKinds.contains(.pagedAttention), "paged-attention cache not observed")

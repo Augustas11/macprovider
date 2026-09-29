@@ -1,7 +1,10 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.9
-Status: draft (normative design). v0.1.9 adds the individually measured
+Version: v0.1.10
+Status: draft (normative design). v0.1.10 teaches the paged engine a keep=0
+sliding-window cache kind (full-history paged KV plus a windowed causal mask)
+so isolated harnesses can measure gpt-oss-class models. No sliding-window
+identity is admitted to FR-PKV12. v0.1.9 adds the individually measured
 `qwen/qwen3.5-27b`, `qwen/qwen3.5-35b-a3b`, and `qwen/qwen3.8-27b` hybrids to
 the FR-PKV12 per-identity allowlist after exact serial/shared-forward parity,
 row-isolation, lifecycle-leftovers, and rows=8 throughput evidence on the
@@ -31,6 +34,13 @@ is `RotatingKVCache` only because the serve path caps KV for memory attaches to
 paged mode (the block pool bounds memory), while a genuine sliding-window model
 stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
+Change log v0.1.10 (2026-09-29): the paged shared-forward backend recognizes
+keep=0 `RotatingKVCache` layers as a third cache kind and pages them as full
+history with a windowed causal mask, including single-token decode. `keep>0`
+sink-token rotating caches stay unrecognized. Isolated `msb-throughput` may
+drive the layout. Production attach remains fail-closed: no sliding-window
+identity is added to FR-PKV12. `gpt_oss` family recognition is not cache-class
+admission. Refines SPEC-039-R012; does not broaden the allowlist.
 Change log v0.1.9 (2026-09-28): FR-PKV12 admits the measured
 `qwen/qwen3.5-27b`, `qwen/qwen3.5-35b-a3b`, and `qwen/qwen3.8-27b` identities.
 Each passed exact 48-token serial/shared-forward parity at prompt lengths 511,
@@ -601,20 +611,37 @@ unless the SPEC-038 FR-CB10 accepted tuple covering the requested runtime tuple
 records `cached_turns_accepted: true`. That grant is the recurrent-state
 handoff's reviewed proof: the SPEC-038 AC-26 packaged proof, including a
 checkpoint-resumed turn, on that exact tuple and runtime revision.
+The engine MAY represent keep=0 `RotatingKVCache` layers as paged full-history
+KV plus the model's sliding-window causal mask for isolated harness and
+future measured attach. That representation is **not** an admission grant:
+no sliding-window serving identity is on the FR-PKV12 allowlist in this
+revision. keep>0 sink-token rotation MUST remain unrecognized. A mixed
+rotating+simple layout (gpt-oss) MUST NOT ride the Qwen Mamba+attention
+hybrid exception.
+
 A model whose runtime cache class is **not** on the allowlist — enumerated
-non-allowlisted classes include `RotatingKVCache` (sliding-window),
+non-allowlisted classes include unverified `mixed` sliding-window layouts,
+`RotatingKVCache` (including keep>0 sink-token rotation),
 `CacheList` (unproven hybrid), and `QuantizedKVCache` — MUST **fail safe to the stock
 contiguous path** with an **observable reason code** (`paged_fallback_cache_class`,
 FR-PKV7), logged **once at attach**. Paged mode MUST NOT be advertised in the
 FR-PKV11 descriptor for a non-allowlisted class.
 
-This gate is correctness-load-bearing, not merely an optimization guard: the
-v0.1 gather-feeds-SDPA path assumes the stock full-context causal mask. Paging
-a **sliding-window** (`RotatingKVCache`) model through it would silently defeat
-the model's own windowed masking and produce **wrong tokens billed as
-correct** — so a non-allowlisted cache class MUST never be served in paged
-mode, exactly as SPEC-037 AC-10 fails a non-`KVCacheSimple` family safe to a
-miss with an observable skip.
+This gate is correctness-load-bearing, not merely an optimization guard. A
+sliding-window layer paged through a full-context mask (including the
+single-token `.none` shortcut) would attend keys outside the model's window
+and produce **wrong tokens billed as correct**. The engine MUST therefore
+apply the windowed causal mask whenever post-update key count exceeds the
+window, including single-token decode and equal-length batched rows. That
+engine path does **not** admit any sliding-window identity: keep=0
+`RotatingKVCache` layers MAY be represented as paged full-history KV plus
+that mask so an isolated harness can measure a candidate, and `keep>0`
+sink-token rotating caches remain unrecognized. Production attach MUST still
+fail closed with `paged_fallback_cache_class` until the exact identity is
+added to the FR-PKV12 allowlist after packaged-runtime parity past the
+model's window, isolation, and leftovers proof. Recognizing `gpt_oss` as a
+model family (v0.1.2) is identity-family only; gpt-oss alternating
+sliding/full layers remain an unallowlisted `mixed` class.
 
 **Serve-time memory cap vs. model attention type (v0.1.1 clarification).** The
 runtime `newCache()` class conflates two independent reasons a model presents a
@@ -893,12 +920,13 @@ The implementation PR for this SPEC MUST include fixtures that prove:
   `mlx-swift-lm` fork.
 - Paged quantized KV remains a future numerical surface if the provider later
   enables `kvBits` in production.
-- Sliding-window and general hybrid cache support remain future work; FR-PKV12
-  admits only full-context, non-rotating `KVCacheSimple`-equivalent fp16 caches
-  plus the narrow measured per-identity Qwen3.x first-turn exceptions. The
-  existing uncapped attach probe prevents false rejection of full-context
-  models capped for memory, but it does not authorize genuine sliding-window
-  paged attention.
+- Sliding-window **admission** remains future work: v0.1.10 gives the engine a
+  keep=0 rotating layout (full-history paged KV plus windowed mask) for
+  isolated measurement, but FR-PKV12 still admits no sliding-window identity.
+  `keep>0` sink-token rotating caches, and Gemma-4 shared-KV layouts that emit
+  fewer caches than layers, stay unrecognized. The existing uncapped attach
+  probe prevents false rejection of full-context models capped for memory.
+  Qwen3.x first-turn exceptions remain the only measured mixed-layout grant.
 - KV offload and LRU/priority eviction policy remain future work. v0.1 owns a
   bounded resident pool and sequence-scoped reclaim mechanism, not an
   offloaded or globally shared cache manager.

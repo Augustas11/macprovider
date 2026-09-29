@@ -168,10 +168,11 @@ enum PagedKVRuntimeParityProbe {
             return try await container.perform { context in
                 let model = context.model
                 let stockLayout = try model.newCache(parameters: nil)
-                let nLayers = stockLayout.filter { $0 is KVCacheSimple }.count
-                guard nLayers > 0,
-                      stockLayout.allSatisfy({ $0 is KVCacheSimple || $0 is MambaCache })
-                else { return .failClosed(nNew: nNew) }
+                guard let kinds = PagedKVSharedForwardBackend.CacheKind.kinds(from: stockLayout) else {
+                    return .failClosed(nNew: nNew)
+                }
+                let nLayers = kinds.filter(\.usesPagedKVCache).count
+                guard nLayers > 0 else { return .failClosed(nNew: nNew) }
 
                 let stock = try Self.greedyGenerate(model: model, promptTokens: promptTokens, nNew: nNew) {
                     try model.newCache(parameters: nil)
@@ -179,8 +180,8 @@ enum PagedKVRuntimeParityProbe {
 
                 PagedKVCache.resetGatherDiagnostics()
                 let paged = try Self.greedyGenerate(model: model, promptTokens: promptTokens, nNew: nNew) {
-                    stockLayout.map { cache in
-                        if cache is MambaCache { return MambaCache() as KVCache }
+                    zip(stockLayout, kinds).map { _, kind in
+                        if case .recurrentMamba = kind { return MambaCache() as KVCache }
                         return PagedKVCache(
                             blockSizeTokens: blockSizeTokens,
                             maxPhysicalBlocks: maxPhysicalBlocks,
