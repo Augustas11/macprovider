@@ -679,7 +679,7 @@ final class InferenceRelayTests: XCTestCase {
                     toolCalls: [ToolCall(
                         id: "call_0123456789abcdef",
                         functionName: "lookup",
-                        arguments: #"{"query":"It's fine"}"#
+                        arguments: #"{"query":"Done. Next"}"#
                     )],
                     settlementDisposition: .eligibleOwner
                 )
@@ -690,7 +690,7 @@ final class InferenceRelayTests: XCTestCase {
                     id: "call_0123456789abcdef",
                     type: "function",
                     functionName: "lookup",
-                    arguments: #"{"query":"It 's"#
+                    arguments: #"{"query":"Done ."#
                 )),
             ]
         )
@@ -723,7 +723,7 @@ final class InferenceRelayTests: XCTestCase {
         XCTAssertEqual(end["status"] as? String, "error_internal")
         XCTAssertNil(end["receipt"])
         XCTAssertFalse(frames.contains { frame in
-            (frame["data"] as? String)?.contains(#""finish_reason":"tool_calls""#) == true
+            (frame["data"] as? String)?.contains("\"finish_reason\":\"tool_calls\"") == true
         })
     }
 
