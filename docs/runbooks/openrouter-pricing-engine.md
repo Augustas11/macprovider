@@ -109,15 +109,16 @@ normalizer drops endpoints of the policy's `excluded_provider_names` (our own
 listings), keeps active (`status == 0`) paid endpoints with at least
 `min_endpoint_request_count_30m` 30-minute text requests, collapses them to one
 quote per provider, and records the UNWEIGHTED lower median of prompt and of
-completion (SPEC-023 §3.3.2 rule 4). The cheapest listing is never the base
-price; it enters only as the rule 5a cap below. Decimal strings—not binary
-floats—are used for stored money and all calculations.
+completion (SPEC-023 §3.3.2 rule 4). The cheapest listing is never a price;
+it only feeds the rule 5a advisory hold below. Decimal strings—not binary
+floats—are used for stored money and all calculations, and money strings with
+extreme exponents or more than 64 characters are rejected before arithmetic.
 
 The current snapshot schema is version `6`. It is the version `5` shape below
 plus `fetch_metadata.skipped_free_ranked_models`, `pricing.liquidity_filter`
-(the retained liquid cohort and median provenance), and `pricing.listing_floor`
-(every retained active listing and the per-axis cheapest listing; validation
-re-derives both the liquid cohort and the floor from it). Version `5`:
+(the retained liquid cohort and median provenance), and
+`pricing.listing_evidence` (every retained active non-own listing, liquid or
+not, used only by the rule 5a advisory check). Version `5`:
 
 ```json
 {
@@ -246,18 +247,17 @@ The policy's target rules are from `RESEARCH_227_RATE_CARD_V3_PROMPT.md`:
   general-purpose baseline, is capped to undercut market by at least 10%, and
   must produce at least $0.10/hour at its documented M-Max TPS.
 
-A mapping flagged `openrouter_listed: true` is also capped by SPEC-023 §3.3.2
-rule 5a: each of prompt and completion is at most the cheapest active paid
-OpenRouter listing on that axis (any 30-minute activity, own providers
-excluded) less `openrouter_listing_undercut.undercut_fraction`. The final rate
-must stay at or above `min_fraction_of_liquid_price` of the liquid median taken
-without the floor-setting provider, with that reduced cohort still meeting
-`min_distinct_providers`. Otherwise, or when a listing is `$0` on an axis, only
-that row is held: the proposal lists it under `blocked` with the listing named,
-every other row is proposed, and the release cannot ship until the operator
-adds the exact listing to `acknowledged_listings` (guard holds only) or removes
-`openrouter_listed`. When Malibu's OpenRouter provider name is assigned,
-confirm it is in `excluded_provider_names` before the next fetch.
+A mapping with `openrouter_listed` (SPEC-023 §3.3.2 rule 5a) is priced at its
+operator pin: the three credit rates plus an `evidence` note, set by hand after
+reviewing the OpenRouter endpoints. Compute only checks the pin. If the pin is
+not strictly below every active non-own listing on prompt or completion (liquid
+or not, `$0` included), or exceeds the rule-4/5 mint, that row alone is held:
+the proposal lists it under `blocked` naming the listing or the mint, every
+other row is proposed, and the release cannot ship until the operator
+re-reviews and edits the pin (or removes `openrouter_listed`). Compute never
+lowers or raises a pin. When Malibu's OpenRouter provider name is assigned,
+confirm it is in `openrouter_listing.excluded_provider_names` before the next
+fetch.
 
 The internal proposal rate is a completion-token rate in the existing
 rate-card's integer `completion_rate_per_mtok` encoding. It is derived from

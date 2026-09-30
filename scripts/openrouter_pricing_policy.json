@@ -272,7 +272,12 @@
         "residency_gb": "26.5",
         "projected_tps": "35"
       },
-      "openrouter_listed": true
+      "openrouter_listed": {
+        "prompt_rate_per_mtok": 47500,
+        "completion_rate_per_mtok": 665000,
+        "prompt_cache_hit_rate_per_mtok": 11875,
+        "evidence": "2026-09-30 OpenRouter endpoints: cheapest listing Darkbloom fp4 $0.05/M prompt, $0.70/M completion, $0.025/M cache read; pin is 5% below on each axis"
+      }
     },
     {
       "source_model_id": "qwen/qwen3.5-35b-a3b",
@@ -333,12 +338,9 @@
     }
   ],
   "cache_hit_fraction": "0.25",
-  "openrouter_listing_undercut": {
-    "undercut_fraction": "0.05",
-    "min_fraction_of_liquid_price": "0.25",
+  "openrouter_listing": {
     "excluded_provider_names": [
       "Malibu"
-    ],
-    "acknowledged_listings": []
+    ]
   }
 }

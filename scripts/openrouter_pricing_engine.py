@@ -25,7 +25,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation, ROUND_FLOOR, ROUND_HALF_UP
+from decimal import Decimal, DecimalException, InvalidOperation, ROUND_FLOOR, ROUND_HALF_UP
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
@@ -51,25 +51,29 @@ LEGACY_POLICY_KEYS = frozenset({
     "policy_version", "demand_top_n", "broad_fleet_undercut_fraction",
     "coding_minimum_undercut_fraction", "coding_premium_fraction", "models",
 })
-# SPEC-023 v0.22.0 rule 5a: optional current-policy block that caps
-# `openrouter_listed` mappings strictly below the cheapest competing listing.
-LISTING_UNDERCUT_POLICY_KEY = "openrouter_listing_undercut"
-LISTING_UNDERCUT_KEYS = frozenset({"undercut_fraction", "min_fraction_of_liquid_price", "excluded_provider_names", "acknowledged_listings"})
-LISTING_ACK_KEYS = frozenset({"source_model_id", "axis", "provider_name", "usd_per_mtok"})
-LISTING_FLOOR_BASIS = "openrouter_active_paid_endpoints_all_providers"
-LISTING_FLOOR_KEYS = frozenset({
-    "basis", "excluded_provider_names", "listings",
-    "prompt_usd_per_mtok", "prompt_provider", "completion_usd_per_mtok", "completion_provider",
-})
+# SPEC-023 v0.22.0: own-provider exclusion (rule 4) and the rule 5a operator
+# pin with advisory listing check. The pin is operator-authored; market data
+# can only hold a listed row, never change its price.
+LISTING_POLICY_KEY = "openrouter_listing"
+LISTING_POLICY_KEYS = frozenset({"excluded_provider_names"})
+LISTING_PIN_KEYS = frozenset({"prompt_rate_per_mtok", "completion_rate_per_mtok", "prompt_cache_hit_rate_per_mtok", "evidence"})
+LISTING_EVIDENCE_BASIS = "openrouter_active_paid_endpoints_all_providers"
+LISTING_EVIDENCE_KEYS = frozenset({"basis", "excluded_provider_names", "listings"})
 LISTING_ENTRY_KEYS = frozenset({"provider_name", "endpoint_model_id", "prompt_usd_per_mtok", "completion_usd_per_mtok", "request_count_last_30m"})
+# Bounds applied before any Decimal arithmetic or formatting on upstream or
+# snapshot money strings (an exponent like 1e-1000000 expands on format).
+DECIMAL_MAX_CHARS = 64
+DECIMAL_MAX_DIGITS = 40
+DECIMAL_MIN_EXPONENT = -40
+DECIMAL_MAX_ADJUSTED = 12
 
 
 def is_current_policy_keys(keys: set[str] | frozenset[str]) -> bool:
-    return CURRENT_POLICY_KEYS <= keys <= CURRENT_POLICY_KEYS | {LISTING_UNDERCUT_POLICY_KEY}
+    return CURRENT_POLICY_KEYS <= keys <= CURRENT_POLICY_KEYS | {LISTING_POLICY_KEY}
 
 
 def listing_excluded_provider_names(policy: Mapping[str, Any]) -> list[str]:
-    block = policy.get(LISTING_UNDERCUT_POLICY_KEY)
+    block = policy.get(LISTING_POLICY_KEY)
     if not isinstance(block, dict):
         return []
     return sorted(block["excluded_provider_names"])
@@ -315,12 +319,17 @@ LEGACY_SCHEMA_CONTRACT_FINGERPRINT = "sha256:606dd02557e635ea7f0ab640fda22a9352f
 def parse_decimal(value: Any, field: str, *, allow_zero: bool = True) -> Decimal:
     if not isinstance(value, str) or not value.strip():
         raise SchemaError(f"{field} must be a non-empty decimal string")
+    if len(value) > DECIMAL_MAX_CHARS:
+        raise SchemaError(f"{field} decimal string exceeds {DECIMAL_MAX_CHARS} characters")
     try:
         result = Decimal(value)
-    except InvalidOperation as error:
+    except (InvalidOperation, DecimalException) as error:
         raise SchemaError(f"{field} is not a decimal: {value!r}") from error
     if not result.is_finite() or result < 0 or (not allow_zero and result == 0):
         raise SchemaError(f"{field} must be finite and {'positive' if not allow_zero else 'non-negative'}")
+    digits = result.as_tuple()
+    if result != 0 and (len(digits.digits) > DECIMAL_MAX_DIGITS or digits.exponent < DECIMAL_MIN_EXPONENT or result.adjusted() > DECIMAL_MAX_ADJUSTED):
+        raise SchemaError(f"{field} is outside the supported decimal range: {value!r}")
     return result
 
 
@@ -754,21 +763,6 @@ def listing_sort_key(listing: Mapping[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def listing_axis_minima(listings: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Cheapest listing per axis, tie broken by provider then endpoint model id."""
-    result: dict[str, Any] = {}
-    for axis in ("prompt", "completion"):
-        field = f"{axis}_usd_per_mtok"
-        if not listings:
-            result[field] = None
-            result[f"{axis}_provider"] = None
-            continue
-        cheapest = min(listings, key=lambda item: (Decimal(item[field]), item["provider_name"], item["endpoint_model_id"]))
-        result[field] = decimal_string(Decimal(cheapest[field]))
-        result[f"{axis}_provider"] = cheapest["provider_name"]
-    return result
-
-
 def cheapest_endpoint_pricing(
     document: Mapping[str, Any],
     model_id: str,
@@ -792,9 +786,9 @@ def cheapest_endpoint_pricing(
     if not endpoints:
         return None
     priced: list[tuple[Decimal, Decimal, str, int, str]] = []
-    # Every active paid listing, independent of 30m activity (SPEC-023 rule 5a),
-    # retained in full so validation can re-derive both the liquid cohort and
-    # the cheapest listing. Own providers never enter either (no self-reference).
+    # Every active paid listing, independent of 30m activity, retained as the
+    # evidence for the rule 5a advisory check (it can only hold a row). Own
+    # providers enter neither the evidence nor the liquid cohort (rule 4).
     listed: list[dict[str, Any]] = []
     excluded_listing = frozenset(excluded_listing_providers)
     for index, endpoint in enumerate(endpoints):
@@ -859,12 +853,10 @@ def cheapest_endpoint_pricing(
         }
         for item in sorted(reps)
     ]
-    listings = sorted(listed, key=listing_sort_key)
-    listing_floor = {
-        "basis": LISTING_FLOOR_BASIS,
+    listing_evidence = {
+        "basis": LISTING_EVIDENCE_BASIS,
         "excluded_provider_names": sorted(excluded_listing),
-        "listings": listings,
-        **listing_axis_minima(listings),
+        "listings": sorted(listed, key=listing_sort_key),
     }
     return {
         "input_per_token": decimal_string(prompt),
@@ -886,7 +878,7 @@ def cheapest_endpoint_pricing(
             "selected_prompt_request_count_last_30m": prompt_activity,
             "eligible_endpoint_liquidity": liquidity_candidates,
         },
-        "listing_floor": listing_floor,
+        "listing_evidence": listing_evidence,
     }
 
 
@@ -897,16 +889,11 @@ def snapshot_digest_payload(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def validate_listing_floor(
-    listing: Any,
-    eligible: Sequence[tuple[Decimal, Decimal, str, int, str]],
-    minimum_activity: int,
-    index: int,
-) -> None:
-    """Re-derive the liquid cohort and the per-axis cheapest listing from the
-    retained listings; any disagreement is tampering or a generator defect."""
-    location = f"snapshot.rows[{index}].pricing.listing_floor"
-    if not isinstance(listing, dict) or set(listing) != LISTING_FLOOR_KEYS or listing["basis"] != LISTING_FLOOR_BASIS:
+def validate_listing_evidence(listing: Any, index: int) -> None:
+    """Shape-check the retained listings. They feed only the rule 5a advisory
+    check, which can hold a row but never change a price."""
+    location = f"snapshot.rows[{index}].pricing.listing_evidence"
+    if not isinstance(listing, dict) or set(listing) != LISTING_EVIDENCE_KEYS or listing["basis"] != LISTING_EVIDENCE_BASIS:
         raise SchemaError(f"{location} has invalid fields")
     excluded = listing["excluded_provider_names"]
     if not isinstance(excluded, list) or excluded != sorted(set(excluded)) or not all(isinstance(name, str) and name for name in excluded):
@@ -914,7 +901,6 @@ def validate_listing_floor(
     listings = listing["listings"]
     if not isinstance(listings, list):
         raise SchemaError(f"{location}.listings must be an array")
-    priced: list[tuple[Decimal, Decimal, str, int, str]] = []
     for entry_index, entry in enumerate(listings):
         entry_location = f"{location}.listings[{entry_index}]"
         if not isinstance(entry, dict) or set(entry) != LISTING_ENTRY_KEYS:
@@ -927,22 +913,13 @@ def validate_listing_floor(
             raise SchemaError(f"{entry_location}.endpoint_model_id is invalid")
         prompt = parse_decimal(entry["prompt_usd_per_mtok"], f"{entry_location}.prompt_usd_per_mtok")
         completion = parse_decimal(entry["completion_usd_per_mtok"], f"{entry_location}.completion_usd_per_mtok")
-        if decimal_string(prompt) != entry["prompt_usd_per_mtok"] or decimal_string(completion) != entry["completion_usd_per_mtok"]:
-            raise SchemaError(f"{entry_location} prices are not canonical decimal strings")
         if prompt == 0 and completion == 0:
             raise SchemaError(f"{entry_location} is not a paid listing")
         count = entry["request_count_last_30m"]
         if count is not None and (isinstance(count, bool) or not isinstance(count, int) or count < 0):
             raise SchemaError(f"{entry_location}.request_count_last_30m is invalid")
-        if count is not None and prompt > 0 and completion > 0 and count >= minimum_activity:
-            priced.append((completion, prompt, provider, count, endpoint_model_id))
     if listings != sorted(listings, key=listing_sort_key):
         raise SchemaError(f"{location}.listings are not in canonical order")
-    if sorted(collapse_provider_quotes(priced)) != sorted(eligible):
-        raise SchemaError(f"{location}.listings do not reproduce the liquid cohort")
-    derived = listing_axis_minima(listings)
-    if any(listing[key] != value for key, value in derived.items()):
-        raise SchemaError(f"{location} does not equal the cheapest retained listing")
 
 
 def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
@@ -1060,9 +1037,9 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
         expected_pricing_keys = {"input_per_token", "completion_per_token", "input_per_mtok", "completion_per_mtok", "currency", "benchmark_provider", "liquidity_filter"}
         if schema_version == LEGACY_SNAPSHOT_SCHEMA_VERSION:
             expected_pricing_keys.discard("liquidity_filter")
-        # `listing_floor` (SPEC-023 v0.22.0 rule 5a) is additive on schema 6:
+        # `listing_evidence` (SPEC-023 v0.22.0) is additive on schema 6:
         # snapshots fetched before it lack the key and cannot price a listed row.
-        optional_pricing_keys = set() if schema_version == LEGACY_SNAPSHOT_SCHEMA_VERSION else {"listing_floor"}
+        optional_pricing_keys = set() if schema_version == LEGACY_SNAPSHOT_SCHEMA_VERSION else {"listing_evidence"}
         if pricing is not None and (not isinstance(pricing, dict) or not expected_pricing_keys <= set(pricing) <= expected_pricing_keys | optional_pricing_keys):
             raise SchemaError(f"snapshot.rows[{index}] has invalid pricing")
         if pricing_status == "active_priced" and not isinstance(pricing, dict):
@@ -1143,8 +1120,11 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
                 raise SchemaError(f"snapshot.rows[{index}] liquidity-filtered completion endpoint is invalid")
             if liquidity["selected_prompt_provider"] != prompt_endpoint[2] or selected_prompt_activity != prompt_endpoint[3]:
                 raise SchemaError(f"snapshot.rows[{index}] liquidity-filtered prompt endpoint is invalid")
-            if "listing_floor" in pricing:
-                validate_listing_floor(pricing["listing_floor"], weighted_candidates, minimum_activity, index)
+            if "listing_evidence" in pricing:
+                validate_listing_evidence(pricing["listing_evidence"], index)
+                excluded_names = set(pricing["listing_evidence"]["excluded_provider_names"])
+                if any(candidate[2] in excluded_names for candidate in weighted_candidates):
+                    raise SchemaError(f"snapshot.rows[{index}] liquid cohort includes an excluded (own) provider")
         if not isinstance(row.get("source_metadata"), dict) or set(row["source_metadata"]) != {"ranking_model_permaslug", "catalog_canonical_slug", "catalog_name", "identity_resolution", "endpoint_set_confirmation"}:
             raise SchemaError(f"snapshot.rows[{index}] has invalid source metadata")
         source_metadata = row["source_metadata"]
@@ -1355,8 +1335,18 @@ def validate_policy_model(model: Mapping[str, Any], index: int) -> None:
     if not isinstance(license_info.get("verification_note"), str) or not license_info["verification_note"].strip():
         raise SchemaError(f"policy.models[{index}].license.verification_note must be non-empty")
     expected_keys = {"source_model_id", "canonical_model_id", "serving_path", "license", "profile", "openrouter_listed"}
-    if "openrouter_listed" in model and model["openrouter_listed"] is not True:
-        raise SchemaError(f"policy.models[{index}].openrouter_listed must be true when present")
+    if "openrouter_listed" in model:
+        pin = model["openrouter_listed"]
+        if not isinstance(pin, dict) or set(pin) != LISTING_PIN_KEYS:
+            raise SchemaError(f"policy.models[{index}].openrouter_listed must be an operator pin with exactly {sorted(LISTING_PIN_KEYS)}")
+        for field in ("prompt_rate_per_mtok", "completion_rate_per_mtok", "prompt_cache_hit_rate_per_mtok"):
+            value = pin[field]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise SchemaError(f"policy.models[{index}].openrouter_listed.{field} must be a positive integer credit rate")
+        if pin["prompt_cache_hit_rate_per_mtok"] > pin["prompt_rate_per_mtok"]:
+            raise SchemaError(f"policy.models[{index}].openrouter_listed cache-hit rate exceeds its prompt rate")
+        if not isinstance(pin["evidence"], str) or not pin["evidence"].strip():
+            raise SchemaError(f"policy.models[{index}].openrouter_listed.evidence must name the reviewed snapshot and cheapest listing")
     if profile["kind"] == "coding_dense":
         expected_keys.add("coding_specialist")
         expected_keys.add("general_purpose_baseline_per_mtok")
@@ -1405,7 +1395,9 @@ def validate_policy(policy: Mapping[str, Any]) -> None:
         premium = parse_decimal(policy.get("coding_premium_fraction"), "policy coding_premium_fraction", allow_zero=False)
         if not Decimal("0.10") <= premium <= Decimal("0.30"):
             raise SchemaError("policy coding premium fraction must be within 10%-30%")
-        policy_model_index(policy)
+        legacy_models = policy_model_index(policy)
+        if any("openrouter_listed" in model for model in legacy_models.values()):
+            raise SchemaError("policy openrouter_listed requires the current (schema 6) pricing policy")
         return
     undercut = parse_decimal(
         policy.get("undercut_fraction"),
@@ -1432,40 +1424,24 @@ def validate_policy(policy: Mapping[str, Any]) -> None:
     if isinstance(min_providers, bool) or not isinstance(min_providers, int) or min_providers < 1:
         raise SchemaError("policy min_distinct_providers must be an integer of at least 1")
     models = policy_model_index(policy)
-    listing = policy.get(LISTING_UNDERCUT_POLICY_KEY)
+    listing = policy.get(LISTING_POLICY_KEY)
     if listing is not None:
-        if not isinstance(listing, dict) or set(listing) != LISTING_UNDERCUT_KEYS:
-            raise SchemaError("policy openrouter_listing_undercut has missing or unexpected fields")
-        listing_undercut = parse_decimal(listing["undercut_fraction"], "policy openrouter_listing_undercut.undercut_fraction", allow_zero=False)
-        if not Decimal("0.01") <= listing_undercut <= Decimal("0.30"):
-            raise SchemaError("policy openrouter_listing_undercut.undercut_fraction must be within 1%-30%")
-        # Guard against a dumped or manipulated listing: a listed row's final
-        # rate below this fraction of the independent reference median is held
-        # for operator acknowledgement. Capped at (1 - undercut_fraction) so an
-        # undisturbed rule-5 mint always clears it.
-        floor_fraction = parse_decimal(listing["min_fraction_of_liquid_price"], "policy openrouter_listing_undercut.min_fraction_of_liquid_price", allow_zero=False)
-        if not Decimal("0.10") <= floor_fraction <= Decimal("1") - undercut:
-            raise SchemaError("policy openrouter_listing_undercut.min_fraction_of_liquid_price must be within 10% and (1 - undercut_fraction)")
+        if not isinstance(listing, dict) or set(listing) != LISTING_POLICY_KEYS:
+            raise SchemaError("policy openrouter_listing has missing or unexpected fields")
         names = listing["excluded_provider_names"]
         if not isinstance(names, list) or names != sorted(set(names)) or not all(isinstance(name, str) and name.strip() == name and name for name in names):
-            raise SchemaError("policy openrouter_listing_undercut.excluded_provider_names must be a sorted unique list of provider names")
-        acknowledgements = listing["acknowledged_listings"]
-        if not isinstance(acknowledgements, list):
-            raise SchemaError("policy openrouter_listing_undercut.acknowledged_listings must be an array")
-        listed_sources = {source for source, model in models.items() if model.get("openrouter_listed")}
-        for ack_index, ack in enumerate(acknowledgements):
-            ack_location = f"policy openrouter_listing_undercut.acknowledged_listings[{ack_index}]"
-            if not isinstance(ack, dict) or set(ack) != LISTING_ACK_KEYS:
-                raise SchemaError(f"{ack_location} has missing or unexpected fields")
-            if ack["source_model_id"] not in listed_sources:
-                raise SchemaError(f"{ack_location}.source_model_id is not an openrouter_listed mapping")
-            if ack["axis"] not in {"prompt", "completion"}:
-                raise SchemaError(f"{ack_location}.axis is invalid")
-            if not isinstance(ack["provider_name"], str) or not ack["provider_name"] or ack["provider_name"] in names:
-                raise SchemaError(f"{ack_location}.provider_name is invalid")
-            parse_decimal(ack["usd_per_mtok"], f"{ack_location}.usd_per_mtok", allow_zero=False)
-    if any(model.get("openrouter_listed") for model in models.values()) and listing is None:
-        raise SchemaError("policy maps an openrouter_listed model without openrouter_listing_undercut")
+            raise SchemaError("policy openrouter_listing.excluded_provider_names must be a sorted unique list of provider names")
+    cache_hit_fraction_value = parse_decimal(policy["cache_hit_fraction"], "policy cache_hit_fraction")
+    for model in models.values():
+        pin = model.get("openrouter_listed")
+        if pin is None:
+            continue
+        if listing is None:
+            raise SchemaError("policy maps an openrouter_listed model without openrouter_listing")
+        # The pin follows the rule 5 cache-hit mint of its own prompt rate.
+        expected_cache_hit = int((Decimal(pin["prompt_rate_per_mtok"]) * cache_hit_fraction_value).to_integral_value(rounding=ROUND_FLOOR))
+        if pin["prompt_cache_hit_rate_per_mtok"] != expected_cache_hit:
+            raise SchemaError(f"policy openrouter_listed pin for {model['source_model_id']!r}: cache-hit must be floor(prompt x cache_hit_fraction) = {expected_cache_hit}")
 
 
 def load_json_file(path: Path, description: str) -> dict[str, Any]:
@@ -1726,12 +1702,12 @@ def validate_market_peg_snapshot_requirements(snapshot: Mapping[str, Any], polic
         recorded_quorum = liquidity.get("min_distinct_providers")
         if recorded_quorum != policy_quorum:
             raise SchemaError(f"snapshot.rows[{index}] priced under distinct-provider quorum {recorded_quorum!r} but policy quorum is {policy_quorum!r}; re-fetch under the current policy")
-        if LISTING_UNDERCUT_POLICY_KEY in policy:
+        if LISTING_POLICY_KEY in policy:
             # Own-provider exclusion governs the liquid cohort of EVERY row, so
             # a policy that declares it needs a snapshot fetched under it.
-            if "listing_floor" not in (row.get("pricing") or {}):
-                raise SchemaError(f"snapshot.rows[{index}] predates listing_floor; re-fetch under the current engine and policy")
-            recorded_exclusions = row["pricing"]["listing_floor"].get("excluded_provider_names")
+            if "listing_evidence" not in (row.get("pricing") or {}):
+                raise SchemaError(f"snapshot.rows[{index}] predates listing_evidence; re-fetch under the current engine and policy")
+            recorded_exclusions = row["pricing"]["listing_evidence"].get("excluded_provider_names")
             if recorded_exclusions != listing_excluded_provider_names(policy):
                 raise SchemaError(f"snapshot.rows[{index}] fetched excluding {recorded_exclusions!r} but policy excludes {listing_excluded_provider_names(policy)!r}; re-fetch under the current policy")
     ranking_end_date = coverage["ranking_window_end_date"]
@@ -1742,99 +1718,57 @@ def validate_market_peg_snapshot_requirements(snapshot: Mapping[str, Any], polic
 
 
 class ListingHold(EngineError):
-    """A listed row whose rule-5a price needs operator acknowledgement.
+    """A listed row whose operator pin fails the rule 5a advisory check.
 
     Scoped to that row: build_proposal reports it as blocked instead of
-    failing the whole compute, so one listing cannot deny every proposal."""
+    failing the whole compute. A hold never changes a price."""
 
 
-def listing_reference_median(eligible: Sequence[Mapping[str, Any]], axis: str, floor_provider: str | None) -> Decimal | None:
-    """Lower median of the liquid (own-excluded) cohort without the provider
-    that sets the cheapest listing, so the guard is not set by that listing."""
-    field = f"{axis}_usd_per_mtok"
-    prices = sorted(Decimal(candidate[field]) for candidate in eligible if candidate["provider_name"] != floor_provider)
-    if not prices:
-        return None
-    return prices[(len(prices) - 1) // 2]
-
-
-def apply_listing_cap(
+def apply_listing_pin(
     market: Mapping[str, Any],
-    policy: Mapping[str, Any],
     rate_card: Mapping[str, Any],
     model: Mapping[str, Any],
     model_id: str,
-    completion: tuple[Decimal, int],
-    prompt: tuple[Decimal, int],
+    minted_completion_credits: int,
+    minted_prompt_credits: int,
 ) -> tuple[Decimal, int, Decimal, int, list[str]]:
-    """SPEC-023 rule 5a: price an OpenRouter-listed row strictly below the
-    cheapest competing listing on each axis.
-
-    Each axis tuple is (rule-5 USD/MTok, its credits). The FINAL per-axis rate
-    must clear min_fraction_of_liquid_price of a reference median that excludes
-    the floor-setting provider and still meets min_distinct_providers;
-    otherwise the row is held (ListingHold) unless the policy acknowledges that
-    exact floor-setting listing."""
-    if "listing_floor" not in market:
-        raise SchemaError(f"openrouter_listed row {model_id!r}: snapshot predates listing_floor; re-fetch under the current engine")
-    listing = market["listing_floor"]
-    config = policy[LISTING_UNDERCUT_POLICY_KEY]
-    undercut = parse_decimal(config["undercut_fraction"], "policy openrouter_listing_undercut.undercut_fraction", allow_zero=False)
-    floor_fraction = parse_decimal(config["min_fraction_of_liquid_price"], "policy openrouter_listing_undercut.min_fraction_of_liquid_price", allow_zero=False)
-    quorum = policy.get("min_distinct_providers", 1)
-    eligible = market["liquidity_filter"]["eligible_endpoint_liquidity"]
-    acknowledged = {
-        (ack["axis"], ack["provider_name"], Decimal(ack["usd_per_mtok"]))
-        for ack in config["acknowledged_listings"]
-        if ack["source_model_id"] == model["source_model_id"]
-    }
-    results: list[tuple[Decimal, int]] = []
-    reasons: list[str] = []
+    """SPEC-023 rule 5a: an openrouter_listed row is priced at its operator
+    pin. Market data only checks it: the row is held when the pin exceeds the
+    rule-5 mint, or is not strictly below every active non-own listing on each
+    axis (liquid or not). Returns (completion USD, credits, prompt USD, credits,
+    reasons)."""
+    if "listing_evidence" not in market:
+        raise SchemaError(f"openrouter_listed row {model_id!r}: snapshot predates listing_evidence; re-fetch under the current engine")
+    pin = model["openrouter_listed"]
+    usd_per_million_credits, _, _, _ = rate_card_economics(rate_card, model_id)
     holds: list[str] = []
-    for axis, (minted_usd, minted_credits) in (("completion", completion), ("prompt", prompt)):
-        listed_field = listing[f"{axis}_usd_per_mtok"]
-        if listed_field is None:
-            results.append((minted_usd, minted_credits))
-            reasons.append(f"OpenRouter listing cap: no competing {axis} listing; rule-5 mint applies")
-            continue
-        listed_usd = Decimal(listed_field)
-        floor_provider = listing[f"{axis}_provider"]
-        if listed_usd == 0:
-            holds.append(f"{axis}: {floor_provider} lists $0/MTok; strictly undercutting it is impossible")
-            continue
-        cap_usd = listed_usd * (Decimal("1") - undercut)
-        # floor() of a value strictly below the listed price stays strictly below it.
-        cap_credits = internal_rate(cap_usd, rate_card, model_id)
-        if cap_credits == 0:
-            holds.append(f"{axis}: cap below {decimal_string(listed_usd)}/MTok ({floor_provider}) rounds to zero credits")
-            continue
-        final_usd, final_credits = (cap_usd, cap_credits) if cap_credits < minted_credits else (minted_usd, minted_credits)
-        reference_candidates = [candidate for candidate in eligible if candidate["provider_name"] != floor_provider]
-        reference = listing_reference_median(eligible, axis, floor_provider)
-        guard_problem = None
-        if reference is None or len(reference_candidates) < quorum:
-            guard_problem = f"fewer than {quorum} liquid providers besides {floor_provider} to bound the price"
-        else:
-            guard_credits = internal_rate(reference * floor_fraction, rate_card, model_id)
-            if final_credits < guard_credits:
-                guard_problem = (
-                    f"final {final_credits} credits is below {decimal_string(floor_fraction)} of the reference "
-                    f"median {decimal_string(reference)}/MTok ({guard_credits} credits)"
-                )
-        if guard_problem is not None:
-            if (axis, floor_provider, listed_usd) not in acknowledged:
-                holds.append(f"{axis}: {guard_problem}; acknowledge {floor_provider} at {decimal_string(listed_usd)}/MTok to accept")
-                continue
-            reasons.append(f"OpenRouter listing cap: {axis} {floor_provider} at {decimal_string(listed_usd)}/MTok operator-acknowledged ({guard_problem})")
-        results.append((final_usd, final_credits))
-        reasons.append(
-            f"OpenRouter listing cap ({'binding' if final_credits == cap_credits and cap_credits < minted_credits else 'not binding'}): "
-            f"{axis} {decimal_string(listed_usd)}/MTok cheapest listing ({floor_provider}) less {decimal_string(undercut)}"
+    pinned: dict[str, tuple[Decimal, int]] = {}
+    for axis, minted in (("completion", minted_completion_credits), ("prompt", minted_prompt_credits)):
+        credits = pin[f"{axis}_rate_per_mtok"]
+        usd = Decimal(credits) * usd_per_million_credits / Decimal("1000000")
+        pinned[axis] = (usd, credits)
+        if credits > minted:
+            # Pin may only lower the market peg; a mint below it means the
+            # market moved since review, which the operator must re-review.
+            holds.append(f"{axis} pin {credits} credits exceeds the rule-5 mint {minted}; re-review the pin")
+        not_below = sorted(
+            {
+                f"{entry['provider_name']} {entry[f'{axis}_usd_per_mtok']}/MTok"
+                for entry in market["listing_evidence"]["listings"]
+                if usd >= parse_decimal(entry[f"{axis}_usd_per_mtok"], f"listing_evidence {axis} price")
+            }
         )
+        if not_below:
+            holds.append(f"{axis} pin {decimal_string(usd)}/MTok is not strictly below {', '.join(not_below)}")
     if holds:
-        raise ListingHold(f"openrouter_listed row {model_id!r} held for operator acknowledgement: " + "; ".join(holds))
-    (completion_usd, completion_credits), (prompt_usd, prompt_credits) = results
-    return completion_usd, completion_credits, prompt_usd, prompt_credits, reasons
+        raise ListingHold(f"openrouter_listed row {model_id!r} held for operator review: " + "; ".join(holds))
+    reasons = [
+        "OpenRouter listing pin (operator-reviewed): "
+        f"prompt {pin['prompt_rate_per_mtok']}, completion {pin['completion_rate_per_mtok']}, "
+        f"cache-hit {pin['prompt_cache_hit_rate_per_mtok']} credits/MTok; {pin['evidence']}",
+        f"advisory check passed: pin strictly below all {len(market['listing_evidence']['listings'])} active non-own OpenRouter listings and at or below the rule-5 mint",
+    ]
+    return pinned["completion"][0], pinned["completion"][1], pinned["prompt"][0], pinned["prompt"][1], reasons
 
 
 def proposed_price(
@@ -1860,11 +1794,9 @@ def proposed_price(
     if completion_internal == 0 or prompt_internal == 0:
         raise SchemaError(f"rate card row {model_id!r} market credit rounds to zero")
     listing_reasons: list[str] = []
-    if model.get("openrouter_listed") is True:
-        target, completion_internal, target_prompt, prompt_internal, listing_reasons = apply_listing_cap(
-            market, policy, rate_card, model, model_id,
-            (target, completion_internal),
-            (target_prompt, prompt_internal),
+    if "openrouter_listed" in model:
+        target, completion_internal, target_prompt, prompt_internal, listing_reasons = apply_listing_pin(
+            market, rate_card, model, model_id, completion_internal, prompt_internal,
         )
     cache_hit_fraction = parse_decimal(policy.get("cache_hit_fraction", "0.25"), "policy cache_hit_fraction", allow_zero=True)
     cache_hit_internal = int((prompt_internal * cache_hit_fraction).to_integral_value(rounding=ROUND_FLOOR))
@@ -2843,7 +2775,13 @@ def fetch_catalog_records(
             data = document.get("data") if isinstance(document, dict) else None
             endpoints = data.get("endpoints") if isinstance(data, dict) else None
             record["endpoint_count"] = len(endpoints) if isinstance(endpoints, list) else 0
-            record["pricing"] = cheapest_endpoint_pricing(document, model_id, min_request_count_30m=min_endpoint_requests, min_distinct_providers=min_distinct_providers)
+            record["pricing"] = cheapest_endpoint_pricing(
+                document,
+                model_id,
+                min_request_count_30m=min_endpoint_requests,
+                min_distinct_providers=min_distinct_providers,
+                excluded_listing_providers=listing_excluded_provider_names(policy),
+            )
         except EngineError as error:
             record["servability"] = {"verdict": "error", "reasons": [f"OpenRouter endpoint pricing failed: {error}"]}
             records.append(record)
