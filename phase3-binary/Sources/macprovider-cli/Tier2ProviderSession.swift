@@ -18,6 +18,7 @@ final class Tier2ProviderSession: @unchecked Sendable {
 
     struct RequestPayload: @unchecked Sendable {
         let body: String
+        let maxOutputTokens: Int?
         let conversationKey: String?
         let bodyEncoding: String?
         let relayBlindContext: [String: Any]?
@@ -212,8 +213,18 @@ final class Tier2ProviderSession: @unchecked Sendable {
         }
         let conversationKey = (envelope["conversation_key"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let maxOutputTokens: Int?
+        if let rawLimit = envelope["max_output_tokens"] {
+            guard !(rawLimit is Bool), let limit = rawLimit as? Int, limit >= 0 else {
+                throw Tier2ProviderError.invalidPlaintext
+            }
+            maxOutputTokens = limit
+        } else {
+            maxOutputTokens = nil
+        }
         return RequestPayload(
             body: envelopeBody,
+            maxOutputTokens: maxOutputTokens,
             conversationKey: conversationKey?.isEmpty == false ? conversationKey : nil,
             bodyEncoding: envelope["body_encoding"] as? String,
             relayBlindContext: envelope["relay_blind_context"] as? [String: Any]
@@ -396,6 +407,7 @@ final class Tier2ProviderSession: @unchecked Sendable {
         requestID: String,
         stream: Bool,
         plaintext: String,
+        maxOutputTokens: Int? = nil,
         conversationKey: String? = nil,
         bodyEncoding: String? = nil,
         relayBlindContext: [String: Any]? = nil,
@@ -414,6 +426,7 @@ final class Tier2ProviderSession: @unchecked Sendable {
             "type": "inference_request_plaintext",
             "body": plaintext,
         ]
+        if let maxOutputTokens { plaintextEnvelope["max_output_tokens"] = maxOutputTokens }
         if let conversationKey = conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines), !conversationKey.isEmpty {
             plaintextEnvelope["conversation_key"] = conversationKey
         }

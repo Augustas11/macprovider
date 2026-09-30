@@ -52,8 +52,8 @@ def parse_semver(value: str) -> tuple[int, int, int]:
     return (major, minor, patch)
 
 
-# SPEC-023 §3.7.8 Stage A: `autotune-artifacts.json` is bound in release.json and
-# recorded in the artifact-bound ledger feed set, but it MUST NOT join this map.
+# SPEC-023 §3.7.8 Stage A: release sidecars are bound in release.json and the
+# ledger, but they MUST NOT join this map.
 # The deployed CLI validates an exact nine-name `components.catalog.files` set
 # (CompatibilitySetManifest.swift); adding a tenth name would make every
 # ALREADY-INSTALLED updater reject the payload before the binary that understands
@@ -71,10 +71,13 @@ CATALOG_FILES = (
     "rate-card.json.sig",
 )
 CATALOG_ARTIFACT_FEED = "autotune-artifacts.json"
+CB_POLICY_FEED = "continuous-batching-policy.json"
 RATE_CARD_BOUND_RELEASE_FEEDS = {
     "autotune-candidates.json", "demand-rank.json", "rate-card.json", "tier2-catalog.json",
 }
-ARTIFACT_BOUND_RELEASE_FEEDS = RATE_CARD_BOUND_RELEASE_FEEDS | {CATALOG_ARTIFACT_FEED}
+LEGACY_ARTIFACT_BOUND_RELEASE_FEEDS = RATE_CARD_BOUND_RELEASE_FEEDS | {CATALOG_ARTIFACT_FEED}
+CB_POLICY_BOUND_RELEASE_FEEDS = RATE_CARD_BOUND_RELEASE_FEEDS | {CB_POLICY_FEED}
+ARTIFACT_BOUND_RELEASE_FEEDS = CB_POLICY_BOUND_RELEASE_FEEDS | {CATALOG_ARTIFACT_FEED}
 LOCAL_ARTIFACT_FILES = {
     "install_contract": "install.sh",
     "provider_plist_template": "provider-launch-agent.plist.template",
@@ -504,13 +507,14 @@ def validate_payload_artifacts(payload: dict, payload_directory: pathlib.Path) -
         actual = hashlib.sha256(read_regular(payload_directory / "catalog-release" / name, f"payload catalog {name}")).hexdigest()
         if actual != expected:
             fail(f"payload catalog digest mismatch: {name}")
-    # SPEC-023 §3.7.8 Stage A: the artifact feed is release-bound through
-    # release.json and published as a release asset, but it is NOT a
+    # SPEC-023 §3.7.8 Stage A: release sidecars are bound through release.json
+    # and published as release assets, but they are NOT
     # provider-payload member — the deployed updater and installer enforce the
     # exact nine-name catalog-release set, so shipping it inside the payload
     # would fail-close the fleet. Its presence here is a producer error.
     catalog_directory = payload_directory / "catalog-release"
-    present = [name for name in (CATALOG_ARTIFACT_FEED, CATALOG_ARTIFACT_FEED + ".sig") if (catalog_directory / name).exists()]
+    sidecars = (CATALOG_ARTIFACT_FEED, CB_POLICY_FEED)
+    present = [name for feed in sidecars for name in (feed, feed + ".sig") if (catalog_directory / name).exists()]
     if present:
         fail(f"payload catalog: {', '.join(present)} is not a provider-payload member at Stage A (SPEC-023 §3.7.8); publish it as a release asset")
 
@@ -567,20 +571,22 @@ def catalog_component(catalog_directory: pathlib.Path, catalog_feed_directory: p
     feeds = manifest["feeds"]
     if not isinstance(feeds, dict):
         fail("catalog release.json feeds: must be an object")
-    # SPEC-023 §3.7.8 Stage A widens THIS producer-side check to the five-feed
-    # artifact-bound set. It runs on the release host and in acceptance, never on
-    # an installed provider, so widening it fails-closes no fleet member. The
-    # `components.catalog.files` map above stays the exact nine-name set.
-    if set(feeds) == RATE_CARD_BOUND_RELEASE_FEEDS:
-        pass
-    elif set(feeds) == ARTIFACT_BOUND_RELEASE_FEEDS:
-        artifact_bytes = read_regular(
-            catalog_feed_directory / CATALOG_ARTIFACT_FEED,
-            f"catalog {CATALOG_ARTIFACT_FEED}",
-        )
-        catalog_bytes = {**catalog_bytes, CATALOG_ARTIFACT_FEED: artifact_bytes}
+    # This producer-side check accepts every exact historical/current ledger
+    # feed set while keeping installed-provider payloads on the bridge-safe
+    # nine-name contract above.
+    feed_names = set(feeds)
+    allowed_sets = (
+        RATE_CARD_BOUND_RELEASE_FEEDS,
+        LEGACY_ARTIFACT_BOUND_RELEASE_FEEDS,
+        CB_POLICY_BOUND_RELEASE_FEEDS,
+        ARTIFACT_BOUND_RELEASE_FEEDS,
+    )
+    if feed_names in allowed_sets:
+        for sidecar in sorted(feed_names - RATE_CARD_BOUND_RELEASE_FEEDS):
+            sidecar_bytes = read_regular(catalog_feed_directory / sidecar, f"catalog {sidecar}")
+            catalog_bytes = {**catalog_bytes, sidecar: sidecar_bytes}
     else:
-        exact_keys(feeds, RATE_CARD_BOUND_RELEASE_FEEDS, "catalog release.json feeds")
+        exact_keys(feeds, CB_POLICY_BOUND_RELEASE_FEEDS, "catalog release.json feeds")
     for name, record in feeds.items():
         if not isinstance(record, dict):
             fail(f"catalog release.json feed {name}: must be an object")
@@ -595,9 +601,10 @@ def catalog_component(catalog_directory: pathlib.Path, catalog_feed_directory: p
             fail(f"catalog release.json feed {name}: digest does not match packaged feed")
         if name not in {"tier2-catalog.json", "rate-card.json"} and record["version"] != manifest["release_id"]:
             fail(f"catalog release.json feed {name}: version does not match release_id")
-    # The artifact feed is release-bound and digest-checked above, but it is NOT
-    # a member of the signed `files` map at Stage A (see CATALOG_FILES).
+    # Release sidecars are digest-checked above but are not members of the
+    # bridge-safe signed `files` map at Stage A (see CATALOG_FILES).
     catalog_bytes.pop(CATALOG_ARTIFACT_FEED, None)
+    catalog_bytes.pop(CB_POLICY_FEED, None)
     return {
         "activation": "local",
         "files": {name: hashlib.sha256(data).hexdigest() for name, data in sorted(catalog_bytes.items())},

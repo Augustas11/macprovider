@@ -268,6 +268,8 @@ class PearlUpdaterTests(unittest.TestCase):
                 "autotune-candidates.json.sig": REPO_ROOT / "phase3-binary/dist/static/autotune-candidates.json.sig",
                 "demand-rank.json": REPO_ROOT / "phase3-binary/dist/static/demand-rank.json",
                 "demand-rank.json.sig": REPO_ROOT / "phase3-binary/dist/static/demand-rank.json.sig",
+                "continuous-batching-policy.json": REPO_ROOT / "phase3-binary/dist/static/continuous-batching-policy.json",
+                "continuous-batching-policy.json.sig": REPO_ROOT / "phase3-binary/dist/static/continuous-batching-policy.json.sig",
             }
             for name, source in catalog_sources.items():
                 shutil.copyfile(source, self.bundle / name)

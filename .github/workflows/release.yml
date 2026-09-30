@@ -1477,6 +1477,8 @@ jobs:
           catalog_demand_sig_src="phase3-binary/dist/static/demand-rank.json.sig"
           catalog_rate_card_src="phase3-binary/dist/static/rate-card.json"
           catalog_rate_card_sig_src="phase3-binary/dist/static/rate-card.json.sig"
+          catalog_cb_policy_src="phase3-binary/dist/static/continuous-batching-policy.json"
+          catalog_cb_policy_sig_src="phase3-binary/dist/static/continuous-batching-policy.json.sig"
           catalog_artifacts_src="phase3-binary/dist/static/autotune-artifacts.json"
           catalog_artifacts_sig_src="phase3-binary/dist/static/autotune-artifacts.json.sig"
           # SPEC-023 §3.7.8 Stage A: release.json decides whether the artifact
@@ -1513,6 +1515,8 @@ jobs:
           cp "$catalog_demand_sig_src" demand-rank.json.sig
           cp "$catalog_rate_card_src" rate-card.json
           cp "$catalog_rate_card_sig_src" rate-card.json.sig
+          cp "$catalog_cb_policy_src" continuous-batching-policy.json
+          cp "$catalog_cb_policy_sig_src" continuous-batching-policy.json.sig
           catalog_assets=(
             release.json
             trusted-keys.json
@@ -1523,6 +1527,8 @@ jobs:
             demand-rank.json.sig
             rate-card.json
             rate-card.json.sig
+            continuous-batching-policy.json
+            continuous-batching-policy.json.sig
           )
           if [ "$catalog_artifact_bound" = bound ]; then
             # The published bytes must be the ones release.json binds.
@@ -1602,6 +1608,8 @@ jobs:
               "demand-rank.json.sig",
               "rate-card.json",
               "rate-card.json.sig",
+              "continuous-batching-policy.json",
+              "continuous-batching-policy.json.sig",
           )
           if "autotune-artifacts.json" in catalog_manifest["feeds"]:
               catalog_names += ("autotune-artifacts.json", "autotune-artifacts.json.sig")

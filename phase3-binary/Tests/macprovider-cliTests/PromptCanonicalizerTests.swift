@@ -39,6 +39,32 @@ final class PromptCanonicalizerTests: XCTestCase {
         )
     }
 
+    func testDispatchOutputLimitDoesNotRewritePromptHash() throws {
+        let omitted = try parseRequest([
+            "model": "fixture-model",
+            "messages": [["role": "user", "content": "hello"]],
+        ])
+        let explicit = try parseRequest([
+            "model": "fixture-model",
+            "messages": [["role": "user", "content": "hello"]],
+            "max_tokens": 12,
+        ])
+
+        let limitedOmitted = omitted.withMaxTokensLimit(32)
+        let limitedExplicit = explicit.withMaxTokensLimit(8)
+
+        XCTAssertEqual(limitedOmitted.maxTokens, 32)
+        XCTAssertEqual(limitedExplicit.maxTokens, 8)
+        XCTAssertEqual(
+            try PromptCanonicalizer.promptHash(for: limitedOmitted),
+            try PromptCanonicalizer.promptHash(for: omitted)
+        )
+        XCTAssertEqual(
+            try PromptCanonicalizer.promptHash(for: limitedExplicit),
+            try PromptCanonicalizer.promptHash(for: explicit)
+        )
+    }
+
     func testMessageContentNormalizesCRLFAndNFCBeforeHashing() throws {
         let decomposed = try parseRequest([
             "model": "fixture-model",

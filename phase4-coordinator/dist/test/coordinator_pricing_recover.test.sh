@@ -629,7 +629,7 @@ grep -v '^#' "$REPO_ROOT/scripts/catalog-verifier-bundle.txt" | grep -v '^$' | w
 real_release() { # the repo's committed release, assembled as the lane does, as releases/new
   rm -rf "$A/releases/new"; mkdir -p "$A/releases/new"
   for n in release.json trusted-keys.json tier2-catalog.json; do cp "$REPO_ROOT/phase3-binary/catalog/autotune/$n" "$A/releases/new/"; done
-  for n in autotune-candidates.json autotune-candidates.json.sig demand-rank.json demand-rank.json.sig rate-card.json rate-card.json.sig; do
+  for n in autotune-candidates.json autotune-candidates.json.sig demand-rank.json demand-rank.json.sig rate-card.json rate-card.json.sig continuous-batching-policy.json continuous-batching-policy.json.sig; do
     cp "$REPO_ROOT/phase3-binary/dist/static/$n" "$A/releases/new/"
   done
   if grep -q '"autotune-artifacts.json"' "$A/releases/new/release.json"; then

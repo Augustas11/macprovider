@@ -377,7 +377,8 @@ import hashlib, json, pathlib, sys
 d = pathlib.Path(sys.argv[1])
 names = ["release.json", "trusted-keys.json", "tier2-catalog.json",
          "autotune-candidates.json", "autotune-candidates.json.sig",
-         "demand-rank.json", "demand-rank.json.sig", "rate-card.json", "rate-card.json.sig"]
+         "demand-rank.json", "demand-rank.json.sig", "rate-card.json", "rate-card.json.sig",
+         "continuous-batching-policy.json", "continuous-batching-policy.json.sig"]
 if "autotune-artifacts.json" in json.loads((d / "release.json").read_bytes())["feeds"]:
     names += ["autotune-artifacts.json", "autotune-artifacts.json.sig"]
 h = hashlib.sha256()
@@ -477,7 +478,7 @@ pf_assemble() {
   for name in release.json trusted-keys.json tier2-catalog.json; do
     cp "$a/phase3-binary/catalog/autotune/$name" "$REL/$name" || { record release_assembled 0 "commit lacks $name"; return 1; }
   done
-  for name in autotune-candidates.json autotune-candidates.json.sig demand-rank.json demand-rank.json.sig rate-card.json rate-card.json.sig; do
+  for name in autotune-candidates.json autotune-candidates.json.sig demand-rank.json demand-rank.json.sig rate-card.json rate-card.json.sig continuous-batching-policy.json continuous-batching-policy.json.sig; do
     cp "$a/phase3-binary/dist/static/$name" "$REL/$name" || { record release_assembled 0 "commit lacks dist/static/$name"; return 1; }
   done
   release_identity "$REL" REL || { record release_assembled 0 "release.json/tier2-catalog.json identity is malformed"; return 1; }
@@ -1380,7 +1381,7 @@ ev_fail() { CCR_FAILED_STEP="$1"; AA_EVIDENCE_FAILURE="evidence ($1) failed: $2"
 # (a) coordinator-direct served bytes == release, and the release id is live.
 ev_a_served_bytes() {
   local spec path name deadline=$((SECONDS + SETTLE_SECONDS)) bad
-  local specs="/v1/autotune-candidates|autotune-candidates.json /v1/autotune-candidates.sig|autotune-candidates.json.sig /v1/demand-rank|demand-rank.json /v1/demand-rank.sig|demand-rank.json.sig /v1/rate-card|rate-card.json /v1/rate-card.sig|rate-card.json.sig"
+  local specs="/v1/autotune-candidates|autotune-candidates.json /v1/autotune-candidates.sig|autotune-candidates.json.sig /v1/demand-rank|demand-rank.json /v1/demand-rank.sig|demand-rank.json.sig /v1/rate-card|rate-card.json /v1/rate-card.sig|rate-card.json.sig /v1/continuous-batching-policy|continuous-batching-policy.json /v1/continuous-batching-policy.sig|continuous-batching-policy.json.sig"
   [ "$REL_BOUND" != bound ] || specs="$specs /v1/catalog-artifacts|autotune-artifacts.json /v1/catalog-artifacts.sig|autotune-artifacts.json.sig"
   while :; do
     bad=""

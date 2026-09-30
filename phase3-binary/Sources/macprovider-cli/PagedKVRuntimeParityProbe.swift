@@ -211,10 +211,11 @@ enum PagedKVRuntimeParityProbe {
     }
 
     /// AC-3 MoE input-isolation self-test: prefill two distinct prompts as two rows,
-    /// then run a batched `[B,1]` shared-forward decode step. Recurrent mixed-cache
+    /// sample each row's first token from the final prompt position, then run a batched
+    /// `[B,1]` shared-forward decode step. Recurrent mixed-cache
     /// layouts additionally remove one peer, join a fresh peer, and run a second batched
     /// `[B,1]` shared-forward step. Each sampled token is compared to an independent
-    /// serial `KVCacheSimple` reference for the exact row continuation being decoded.
+    /// production `TokenIterator` reference for the exact row continuation being decoded.
     ///
     /// `PagedKVSharedForwardBackend.decode` returns ALL `.rowFailure` if the multi-row
     /// path is degenerate (a single-row fallback or a carried `LMOutput.State`), so
@@ -264,7 +265,10 @@ enum PagedKVRuntimeParityProbe {
             )
 
             let needsRecurrentMembershipProbe = cacheKinds?.contains(.recurrentMamba) == true
-            let firstSteps = needsRecurrentMembershipProbe ? 2 : 1
+            // Production hybrid scheduling splits and writes recurrent state back at
+            // every token boundary. Exercise one shared decode before the leave/join
+            // transition instead of the non-production multi-token packed-cache window.
+            let firstSteps = 1
             let rowA = try await Self.makeMoEProbeRow(
                 requestID: "moe-probe-a",
                 prompt: promptA,
@@ -278,12 +282,47 @@ enum PagedKVRuntimeParityProbe {
                 decodeSteps: firstSteps
             )
 
-            _ = try await backend.prefill(rows: [rowA.prefill, rowB.prefill])
+            let firstPrefill = try await backend.prefill(rows: [rowA.prefill, rowB.prefill])
+            let firstPrefillTokens = Self.sampledTokensByID(from: firstPrefill)
+            guard let initialA = firstPrefillTokens["moe-probe-a"],
+                  let initialB = firstPrefillTokens["moe-probe-b"]
+            else {
+                return PagedKVRuntimeMoEProbeResult(
+                    proven: false,
+                    rowsDecodedInSharedForward: 0,
+                    rowFailures: firstPrefill.filter { $0.failureCode != nil }.count,
+                    crossRowDivergences: 0,
+                    sharedForwardParityProven: sharedForwardParityProven,
+                    parityTokensCompared: Self.sharedForwardParityTokens,
+                    challengeDistinguishing: false
+                )
+            }
+            let rowAFirst = try await Self.makeMoEProbeContinuationRow(
+                requestID: "moe-probe-a",
+                prompt: promptA,
+                generatedTokens: [initialA],
+                currentToken: initialA,
+                handle: rowA.handle,
+                allocator: allocator,
+                decodeSteps: firstSteps
+            )
+            let rowBFirst = try await Self.makeMoEProbeContinuationRow(
+                requestID: "moe-probe-b",
+                prompt: promptB,
+                generatedTokens: [initialB],
+                currentToken: initialB,
+                handle: rowB.handle,
+                allocator: allocator,
+                decodeSteps: firstSteps
+            )
             let firstOutcomes: [ContinuousBatchDecodeOutcome]
             if needsRecurrentMembershipProbe {
-                firstOutcomes = try await backend.decodeLockstepWindow(rows: [rowA.decode, rowB.decode], steps: firstSteps)
+                firstOutcomes = try await backend.decodeLockstepWindow(
+                    rows: [rowAFirst.decode, rowBFirst.decode],
+                    steps: firstSteps
+                )
             } else {
-                firstOutcomes = try await backend.decode(rows: [rowA.decode, rowB.decode])
+                firstOutcomes = try await backend.decode(rows: [rowAFirst.decode, rowBFirst.decode])
             }
             try await allocator.endDecodeStep(rowA.handle)
             try await allocator.endDecodeStep(rowB.handle)
@@ -305,15 +344,57 @@ enum PagedKVRuntimeParityProbe {
                 )
             }
 
-            let referenceA1 = try await Self.serialContinuationReferences(container: container, prompt: promptA, nNew: firstSteps)
-            let referenceB1 = try await Self.serialContinuationReferences(container: container, prompt: promptB, nNew: firstSteps)
+            let serialReferenceCount = firstSteps + (needsRecurrentMembershipProbe ? 2 : 1)
+            let serialA = try await Self.serialContinuationReferences(
+                container: container,
+                prompt: promptA,
+                nNew: serialReferenceCount,
+                useProductionIterator: needsRecurrentMembershipProbe
+            )
+            let serialB = try await Self.serialContinuationReferences(
+                container: container,
+                prompt: promptB,
+                nNew: serialReferenceCount,
+                useProductionIterator: needsRecurrentMembershipProbe
+            )
+            guard serialA.count == serialReferenceCount,
+                  serialB.count == serialReferenceCount
+            else {
+                return PagedKVRuntimeMoEProbeResult(
+                    proven: false,
+                    rowsDecodedInSharedForward: first.rowsDecoded,
+                    rowFailures: first.rowFailures,
+                    crossRowDivergences: 0,
+                    sharedForwardParityProven: sharedForwardParityProven,
+                    parityTokensCompared: Self.sharedForwardParityTokens,
+                    challengeDistinguishing: false
+                )
+            }
+            let referenceA1 = Array(serialA.dropFirst().prefix(firstSteps))
+            let referenceB1 = Array(serialB.dropFirst().prefix(firstSteps))
+            PagedKVRuntimeDiagnostics.log(
+                "moe-isolation first prefill=[\(initialA),\(initialB)] serial=[\(serialA[0].top1),\(serialB[0].top1)] "
+                    + "decodeA=\(firstA) serialA=\(referenceA1.map(\.top1)) "
+                    + "decodeB=\(firstB) serialB=\(referenceB1.map(\.top1))"
+            )
+            let prefillDivergences = [
+                (initialA, serialA[0]),
+                (initialB, serialB[0]),
+            ].filter { decoded, reference in
+                !Self.batchedTokenIsConformant(
+                    decoded: decoded,
+                    own: reference,
+                    otherRowSerialTop1: nil,
+                    tolerance: Self.batchedArgmaxLogitTolerance
+                )
+            }.count
             let firstCrossRowDivergences = Self.divergenceCount(
                 decodedByID: first.tokens,
                 referencesByID: [
                     "moe-probe-a": referenceA1,
                     "moe-probe-b": referenceB1,
                 ]
-            )
+            ) + prefillDivergences
             let firstChallengeDistinguishing = Self.challengeDistinguishing([referenceA1, referenceB1])
 
             guard needsRecurrentMembershipProbe else {
@@ -334,27 +415,52 @@ enum PagedKVRuntimeParityProbe {
 
             backend.finish(requestID: "moe-probe-b")
             let rowBRejoin = try await Self.makeMoEProbeRow(requestID: "moe-probe-b-rejoin", prompt: promptB, allocator: allocator)
-            _ = try await backend.prefill(rows: [rowBRejoin.prefill])
+            let rejoinPrefill = try await backend.prefill(rows: [rowBRejoin.prefill])
+            guard let rejoinInitialB = Self.sampledTokensByID(from: rejoinPrefill)["moe-probe-b-rejoin"] else {
+                return PagedKVRuntimeMoEProbeResult(
+                    proven: false,
+                    rowsDecodedInSharedForward: first.rowsDecoded,
+                    rowFailures: first.rowFailures + rejoinPrefill.filter { $0.failureCode != nil }.count,
+                    crossRowDivergences: firstCrossRowDivergences,
+                    sharedForwardParityProven: sharedForwardParityProven,
+                    parityTokensCompared: Self.sharedForwardParityTokens,
+                    challengeDistinguishing: false
+                )
+            }
             let rowASecond = try await Self.makeMoEProbeContinuationRow(
                 requestID: "moe-probe-a",
                 prompt: promptA,
-                generatedTokens: firstA,
+                generatedTokens: [initialA] + firstA,
                 currentToken: firstA[firstA.count - 1],
                 handle: rowA.handle,
                 allocator: allocator
             )
-            let secondOutcomes = try await backend.decode(rows: [rowASecond.decode, rowBRejoin.decode])
+            let rowBRejoinDecode = try await Self.makeMoEProbeContinuationRow(
+                requestID: "moe-probe-b-rejoin",
+                prompt: promptB,
+                generatedTokens: [rejoinInitialB],
+                currentToken: rejoinInitialB,
+                handle: rowBRejoin.handle,
+                allocator: allocator
+            )
+            let secondOutcomes = try await backend.decode(rows: [rowASecond.decode, rowBRejoinDecode.decode])
             try await allocator.endDecodeStep(rowA.handle)
             try await allocator.endDecodeStep(rowBRejoin.handle)
 
             let second = Self.decodedTokensByID(from: secondOutcomes)
 
-            // Serial reference: the greedy next token after each full prompt, computed
-            // independently through stock KVCacheSimple, plus the row's own runner-up and
-            // full logits. The second A reference includes A's full first-window
-            // continuation, so it validates retained recurrent row state across the
-            // B leave / B' join churn.
-            let referenceA2 = try await Self.serialContinuationReferences(container: container, prompt: promptA + firstA, nNew: 1)
+            // The second A reference includes A's full first-window continuation, so it
+            // validates retained recurrent row state across the B leave / B' join churn.
+            let referenceA2 = Array(serialA.dropFirst(firstSteps + 1).prefix(1))
+            let referenceB2 = Array(serialB.dropFirst().prefix(1))
+            let secondA = second.tokens["moe-probe-a"] ?? []
+            let secondB = second.tokens["moe-probe-b-rejoin"] ?? []
+            PagedKVRuntimeDiagnostics.log(
+                "moe-isolation rejoin decodeA=\(secondA) "
+                    + "serialA=\(referenceA2.map(\.top1)) "
+                    + "decodeB=\(secondB) "
+                    + "serialB=\(referenceB2.map(\.top1))"
+            )
 
             // SPEC-038 FR-CB6 requires the batched temperature-0 output to match the serial
             // path "within the accepted numerical tolerance" — NOT bit-exactly. Batched and
@@ -375,7 +481,7 @@ enum PagedKVRuntimeParityProbe {
                 decodedByID: second.tokens,
                 referencesByID: [
                     "moe-probe-a": referenceA2,
-                    "moe-probe-b-rejoin": Array(referenceB1.prefix(1)),
+                    "moe-probe-b-rejoin": referenceB2,
                 ]
             )
 
@@ -385,7 +491,7 @@ enum PagedKVRuntimeParityProbe {
             // the leak. Require distinct references for both shared forwards and fail
             // closed otherwise.
             let challengeDistinguishing = firstChallengeDistinguishing
-                && Self.challengeDistinguishing([referenceA2, Array(referenceB1.prefix(1))])
+                && Self.challengeDistinguishing([referenceA2, referenceB2])
             let rowsDecoded = min(first.rowsDecoded, second.rowsDecoded)
             let rowFailures = first.rowFailures + second.rowFailures
             let proven = challengeDistinguishing
@@ -640,9 +746,13 @@ enum PagedKVRuntimeParityProbe {
         return a.count == b.count ? nil : min(a.count, b.count)
     }
 
-    private struct MoEProbeRow {
+    private struct MoEPrefillRow {
         let handle: PagedKVBlockTableHandle
         let prefill: ContinuousBatchPrefillInput
+    }
+
+    private struct MoEDecodeRow {
+        let handle: PagedKVBlockTableHandle
         let decode: ContinuousBatchDecodeInput
     }
 
@@ -652,58 +762,35 @@ enum PagedKVRuntimeParityProbe {
         let tokens: [String: [Int]]
     }
 
-    /// Builds the independent P-1/decode challenge used to detect row leakage and
-    /// near-tie routing changes. Exact scheduler-lifecycle parity is proved separately
-    /// by `runSharedForwardExactParityProbe` before this isolation challenge runs.
+    /// Builds the production-lifecycle prefill used by the isolation challenge. The
+    /// full prompt is committed and the first generated token is sampled from its final
+    /// position, matching the scheduler and serial `TokenIterator` partition exactly.
     private static func makeMoEProbeRow(
         requestID: String,
         prompt: [Int],
         allocator: PagedKVBlockAllocator,
         decodeSteps: Int = 1
-    ) async throws -> MoEProbeRow {
+    ) async throws -> MoEPrefillRow {
         let promptLength = prompt.count
-        let prefixLength = promptLength - 1
-        let targetKVTokenCount = prefixLength + max(1, decodeSteps)
+        let targetKVTokenCount = promptLength + max(1, decodeSteps)
         let handle = try await allocator.allocate(
             conversationKey: requestID,
             maxTokens: max(targetKVTokenCount + 1, 1),
             initialTokens: 0
         )
-        if prefixLength > 0 {
-            _ = try await allocator.extend(handle, by: prefixLength)
-        }
+        _ = try await allocator.extend(handle, by: promptLength)
         let prefillBinding = try await allocator.binding(for: handle)
         let prefill = ContinuousBatchPrefillInput(
             requestID: requestID,
-            promptTokens: Array(prompt.prefix(prefixLength)),
+            promptTokens: prompt,
             binding: prefillBinding,
             promptTokenOffset: 0,
             committedKVTokenCount: 0,
-            targetKVTokenCount: prefixLength,
+            targetKVTokenCount: promptLength,
             isFinalChunk: true,
-            sampleFirstToken: false
+            sampleFirstToken: true
         )
-
-        _ = try await allocator.extend(handle, by: max(1, decodeSteps))
-        try await allocator.beginDecodeStep(handle)
-        let decodeBinding = try await allocator.binding(for: handle)
-        let decode = ContinuousBatchDecodeInput(
-            requestID: requestID,
-            currentToken: prompt[promptLength - 1],
-            generatedTokens: [],
-            promptTokens: prompt,
-            samplerSeed: 0,
-            temperature: 0,
-            topP: 1,
-            presencePenalty: 0,
-            frequencyPenalty: 0,
-            binding: decodeBinding,
-            blockTable: decodeBinding.currentTable,
-            committedKVTokenCount: prefixLength,
-            targetKVTokenCount: targetKVTokenCount,
-            samplerStep: 0
-        )
-        return MoEProbeRow(handle: handle, prefill: prefill, decode: decode)
+        return MoEPrefillRow(handle: handle, prefill: prefill)
     }
 
     private static func makeMoEProbeContinuationRow(
@@ -712,10 +799,11 @@ enum PagedKVRuntimeParityProbe {
         generatedTokens: [Int],
         currentToken: Int,
         handle: PagedKVBlockTableHandle,
-        allocator: PagedKVBlockAllocator
-    ) async throws -> MoEProbeRow {
+        allocator: PagedKVBlockAllocator,
+        decodeSteps: Int = 1
+    ) async throws -> MoEDecodeRow {
         let committedKVTokenCount = prompt.count - 1 + generatedTokens.count
-        _ = try await allocator.extend(handle, by: 1)
+        _ = try await allocator.extend(handle, by: max(1, decodeSteps))
         try await allocator.beginDecodeStep(handle)
         let binding = try await allocator.binding(for: handle)
         let decode = ContinuousBatchDecodeInput(
@@ -731,70 +819,93 @@ enum PagedKVRuntimeParityProbe {
             binding: binding,
             blockTable: binding.currentTable,
             committedKVTokenCount: committedKVTokenCount,
-            targetKVTokenCount: committedKVTokenCount + 1,
+            targetKVTokenCount: committedKVTokenCount + max(1, decodeSteps),
             samplerStep: generatedTokens.count
         )
-        return MoEProbeRow(
+        return MoEDecodeRow(
             handle: handle,
-            prefill: ContinuousBatchPrefillInput(
-                requestID: requestID,
-                promptTokens: [],
-                binding: binding,
-                promptTokenOffset: committedKVTokenCount,
-                committedKVTokenCount: committedKVTokenCount,
-                targetKVTokenCount: committedKVTokenCount,
-                isFinalChunk: true,
-                sampleFirstToken: false
-            ),
             decode: decode
         )
     }
 
-    /// The stock serial next-token distributions for a greedy continuation. Each step
-    /// records the argmax (`top1`), immediate runner-up (`top2`), and full last-position
-    /// logits so the batched isolation check can measure any candidate token against
-    /// that step's serial distribution.
+    private static func sampledTokensByID(
+        from outputs: [ContinuousBatchPrefillOutput]
+    ) -> [String: Int] {
+        Dictionary(uniqueKeysWithValues: outputs.compactMap { output in
+            guard output.failureCode == nil, let token = output.sampledToken else { return nil }
+            return (output.requestID, token)
+        })
+    }
+
+    /// Serial references for a greedy continuation. Recurrent hybrids must use the
+    /// production `TokenIterator` because `model.prepare` may establish recurrent state
+    /// differently from a direct full-prompt forward even when the first argmax agrees.
+    /// Iterator references intentionally require exact token equality: the iterator does
+    /// not expose processed logits, so manufacturing a runner-up from another forward
+    /// would make the tolerance test unsound. Attention-only layouts retain the existing
+    /// full-distribution oracle so legitimate batched accumulation near-ties remain
+    /// eligible under FR-CB6.
     private static func serialContinuationReferences(
         container: ModelContainer,
         prompt: [Int],
-        nNew: Int
+        nNew: Int,
+        useProductionIterator: Bool
     ) async throws -> [SerialReference] {
         try await container.perform { context in
-            var tokens = prompt
+            guard useProductionIterator else {
+                var promptAndGenerated = prompt
+                var references: [SerialReference] = []
+                references.reserveCapacity(nNew)
+                for _ in 0 ..< nNew {
+                    let reference = try Self.serialReference(
+                        model: context.model,
+                        prompt: promptAndGenerated
+                    )
+                    references.append(reference)
+                    promptAndGenerated.append(reference.top1)
+                }
+                return references
+            }
+            let parameters = GenerateParameters(
+                maxTokens: nNew,
+                temperature: 0,
+                topP: 1
+            )
+            let cache = try context.model.newCache(parameters: parameters)
+            // `TokenIterator` owns the batch-axis insertion; production processor
+            // output is a one-dimensional prompt token vector.
+            let tokens = MLXArray(prompt.map(Int32.init))
+            let input = LMInput(text: LMInput.Text(tokens: tokens))
+            var iterator = try TokenIterator(
+                input: input,
+                model: context.model,
+                cache: cache,
+                parameters: parameters
+            )
             var references: [SerialReference] = []
             references.reserveCapacity(nNew)
             for _ in 0 ..< nNew {
-                let reference = try Self.serialReference(model: context.model, prompt: tokens)
-                references.append(reference)
-                tokens.append(reference.top1)
+                guard let token = iterator.next() else { break }
+                references.append(SerialReference(top1: token, top2: token, logits: []))
             }
             return references
         }
     }
 
-    /// The stock serial next-token distribution for a prompt: the greedy argmax (`top1`),
-    /// the immediate runner-up (`top2`), and the full last-position logits so the batched
-    /// isolation check can measure the logit gap of any candidate token against `top1`.
     private static func serialReference(
-        container: ModelContainer,
+        model: any LanguageModel,
         prompt: [Int]
-    ) async throws -> SerialReference {
-        try await container.perform { context in
-            try Self.serialReference(model: context.model, prompt: prompt)
-        }
-    }
-
-    private static func serialReference(model: any LanguageModel, prompt: [Int]) throws -> SerialReference {
+    ) throws -> SerialReference {
         let cache = try model.newCache(parameters: nil)
-        let y = MLXArray(prompt.map { Int32($0) }).reshaped([1, prompt.count])
-        let logits = model(y, cache: cache)
+        let tokens = MLXArray(prompt.map(Int32.init)).reshaped([1, prompt.count])
+        let logits = model(tokens, cache: cache)
         let vocab = logits.dim(logits.ndim - 1)
         let flat = logits.reshaped([-1, vocab])
         let row = flat[flat.dim(0) - 1]
-        let order = argSort(row, axis: -1) // ascending; last entries are the largest
-        let n = order.dim(0)
-        let top1 = n >= 1 ? Int(order[n - 1].item(Int32.self)) : 0
-        let top2 = n >= 2 ? Int(order[n - 2].item(Int32.self)) : top1
+        let order = argSort(row, axis: -1)
+        let count = order.dim(0)
+        let top1 = count >= 1 ? Int(order[count - 1].item(Int32.self)) : 0
+        let top2 = count >= 2 ? Int(order[count - 2].item(Int32.self)) : top1
         return SerialReference(top1: top1, top2: top2, logits: row.asArray(Float.self))
     }
 
