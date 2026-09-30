@@ -106,6 +106,7 @@ var spec018RetryableByCode = map[string]bool{
 	"context_exceeds_capacity":                                false,
 	"unsupported_content_shape":                               false,
 	"invalid_request":                                         false,
+	"invalid_internal_max_output_tokens":                      false,
 	"invalid_json":                                            false,
 	"byte_cap_exceeded":                                       false,
 	"response_byte_cap_exceeded":                              false,

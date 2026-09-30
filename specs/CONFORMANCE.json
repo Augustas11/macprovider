@@ -4443,11 +4443,21 @@
         "phase3-binary/Tests/macprovider-cliTests/InferenceRelayQueuePressureTests.swift:testBatchedContextRejectionReachesTheCoordinatorAsContextExceeded",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchToolStructuredRowTests.swift:testImplicitContextBudgetReportsLengthForEveryBatchedRowShape",
         "phase3-binary/Tests/macprovider-cliTests/ReceiptAuditTests.swift:testErrorReceiptResultIssuesForContextLengthExceeded",
+        "phase3-binary/Tests/macprovider-cliTests/StreamIntervalBatchingTests.swift:testRelayAppliesAuthenticatedOutputLimitWhenBodyOmitsMaxTokens",
+        "phase3-binary/Tests/macprovider-cliTests/Tier2ProviderSessionTests.swift:testEncryptedRequestCarriesAuthenticatedOutputLimit",
+        "phase4-coordinator/internal/buyer/output_limit_test.go:TestEffectiveMaxOutputTokensValidationAndProviderForwarding",
+        "phase4-coordinator/internal/buyer/forward_loop_test.go:TestHTTPNonStreamingContextExceededDoesNotRetryOrFault",
+        "phase4-coordinator/internal/buyer/forward_loop_test.go:TestHTTPStreamingContextExceededDoesNotRetryOrFault",
         "phase4-coordinator/internal/buyer/stream_context_exceeded_internal_test.go:TestChatCompletionsStreamingContextExceededDoesNotRetryOrFailover",
-        "phase4-coordinator/internal/buyer/stream_context_exceeded_internal_test.go:TestStreamingPreCommitContextExceededIsNonRetryableNonFaulting"
+        "phase4-coordinator/internal/buyer/stream_context_exceeded_internal_test.go:TestStreamingPreCommitContextExceededIsNonRetryableNonFaulting",
+        "phase4-coordinator/internal/ws/relay_test.go:TestRelayDispatchCarriesConversationKeyFromContext",
+        "phase4-coordinator/internal/ws/relay_test.go:TestEncryptedRelayDispatchSealsConversationKeyInsideBodyEnvelope",
+        "phase5-gateway/internal/router/server_test.go:TestChatForwardsEffectiveOutputLimitWithoutRewritingBody"
       ],
       "journeys": [],
-      "evidence": [],
+      "evidence": [
+        "audits/2026-09-30-cb-context-cap/RESULT_studio_r3.md"
+      ],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
