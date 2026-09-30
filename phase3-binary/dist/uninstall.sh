@@ -178,7 +178,10 @@ def status(value):
         os.close(fd)
 
 def command(argv):
-    result = subprocess.run(argv, check=False, capture_output=True, text=True)
+    try:
+        result = subprocess.run(argv, check=False, capture_output=True, text=True)
+    except OSError:
+        return ""
     return result.stdout.strip() if result.returncode == 0 else ""
 
 def boot_session():

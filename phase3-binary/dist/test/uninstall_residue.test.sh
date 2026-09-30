@@ -205,7 +205,10 @@ owner=$!
 python3 - "$HOME/.config/macprovider/install.lock" "$owner" <<'RECORD'
 import json, subprocess, sys
 start = subprocess.run(["ps", "-p", sys.argv[2], "-o", "lstart="], capture_output=True, text=True).stdout.strip()
-boot = subprocess.run(["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"], capture_output=True, text=True).stdout.strip()
+try:
+    boot = subprocess.run(["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"], capture_output=True, text=True).stdout.strip()
+except OSError:
+    boot = ""
 if not boot:
     try:
         boot = open("/proc/sys/kernel/random/boot_id", encoding="ascii").read().strip()
