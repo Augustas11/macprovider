@@ -230,17 +230,16 @@ final class PagedKVParityTests: XCTestCase {
     // MARK: - Batched shared-forward input-isolation probe (real attention model)
     //
     // The single-row AC-1/2/3 gather-parity tests above never exercise the batched
-    // `[B,1]` shared forward that `runMoEInputIsolationProbe` uses to gate MoE attach,
-    // and no other test runs that path against a real attention model. The probe's
-    // `makeMask` builds a variable-length causal mask across rows; a wrong (pre-update)
-    // `lengths` masks each row's own current token when rows differ in length, which
-    // shows up here as `crossRowDivergences > 0` / `proven=false`. The production probe
-    // prompts tokenize to different lengths (10 vs 11 with the Qwen3 tokenizer), so this
-    // test takes exactly that unequal-length path. Qwen3-8B is dense but shares the same
-    // attention/mask path, so it is a valid discriminator for the mask correctness.
+    // shared forward that `runMoEInputIsolationProbe` uses to gate attach, and no other
+    // test runs that path against a real attention model. The probe drives the same
+    // final-prefill plus lockstep-decode lifecycle as production serving and compares
+    // each row with its own serial reference. Qwen3-8B is dense but shares
+    // the attention/mask path, so it is a valid discriminator for mask correctness; the
+    // Qwen3.8 regression additionally exercises the recurrent-hybrid leave/join gate.
     //
     //   MACPROVIDER_RUN_PAGED_MOE_ISOLATION=1  → Qwen3-8B-4bit (~5GB)
     //   MACPROVIDER_RUN_PAGED_MOE_ISOLATION_GPT_OSS=1  → gpt-oss-20b-MXFP4-Q8 (~13GB)
+    //   MACPROVIDER_RUN_PAGED_MOE_ISOLATION_QWEN38=1  → Qwen3.8-27B-4bit (~17GB)
     func testBatchedSharedForward_InputIsolation_RealModel() async throws {
         try XCTSkipUnless(
             ProcessInfo.processInfo.environment["MACPROVIDER_RUN_PAGED_MOE_ISOLATION"] == "1",
@@ -257,6 +256,14 @@ final class PagedKVParityTests: XCTestCase {
         try await assertBatchedSharedForwardIsolation(modelName: "gpt-oss-20b-MXFP4-Q8", label: "gpt-oss-isolation")
     }
 
+    func testBatchedSharedForward_InputIsolation_Qwen38RealModel() async throws {
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["MACPROVIDER_RUN_PAGED_MOE_ISOLATION_QWEN38"] == "1",
+            "set MACPROVIDER_RUN_PAGED_MOE_ISOLATION_QWEN38=1 to run the Qwen3.8 recurrent-hybrid isolation probe (needs local HF model)"
+        )
+        try await assertBatchedSharedForwardIsolation(modelName: "Qwen3.8-27B-4bit", label: "qwen38-isolation")
+    }
+
     private func assertBatchedSharedForwardIsolation(modelName: String, label: String) async throws {
         guard let dir = findSnapshotDir(modelName) else {
             throw XCTSkip("snapshot for \(modelName) not found in local HF cache")
@@ -264,10 +271,19 @@ final class PagedKVParityTests: XCTestCase {
         MLX.GPU.set(cacheLimit: 256 * 1024 * 1024)
         let ctx = try await loadLocal(dir)
         let container = ModelContainer(context: ctx)
-        let layerCount = try ctx.model.newCache(parameters: nil).count
+        let cacheKinds = try PagedKVSharedForwardBackend.CacheKind.kinds(from: ctx.model.newCache(parameters: nil))
+        let layerCount = cacheKinds?.count ?? (try ctx.model.newCache(parameters: nil).count)
         // Same strings and tokenization as production (ModelRuntime.swift:1532-1533,1575-1578).
         let promptA = ctx.tokenizer.encode(text: "Draft a short summary of today's shipping forecast.", addSpecialTokens: true)
         let promptB = ctx.tokenizer.encode(text: "List three ingredients commonly used in a simple tomato soup.", addSpecialTokens: true)
+        let parityPromptA = repeatedProbeTokens(
+            promptA,
+            targetCount: PagedKVRuntimeParityProbe.sharedForwardParityPromptTokens
+        )
+        let parityPromptB = repeatedProbeTokens(
+            promptB,
+            targetCount: PagedKVRuntimeParityProbe.sharedForwardParityPromptTokens
+        )
         print("  [\(label)] \(modelName) loaded; layers=\(layerCount); promptA=\(promptA.count) tok; promptB=\(promptB.count) tok")
 
         let result = await PagedKVRuntimeParityProbe.runMoEInputIsolationProbe(
@@ -277,7 +293,10 @@ final class PagedKVParityTests: XCTestCase {
             poolEpoch: 1,
             layerCount: layerCount,
             promptA: promptA,
-            promptB: promptB
+            promptB: promptB,
+            parityPromptA: parityPromptA,
+            parityPromptB: parityPromptB,
+            cacheKinds: cacheKinds
         )
         print("  [\(label)] proven=\(result.proven) rowsDecoded=\(result.rowsDecodedInSharedForward) "
             + "rowFailures=\(result.rowFailures) crossRowDivergences=\(result.crossRowDivergences) "
@@ -287,6 +306,22 @@ final class PagedKVParityTests: XCTestCase {
         XCTAssertEqual(result.rowsDecodedInSharedForward, 2, "batched shared forward must decode both rows (a degenerate single-row path decodes fewer)")
         XCTAssertEqual(result.rowFailures, 0, "no row may fail in the shared forward")
         XCTAssertEqual(result.crossRowDivergences, 0, "each row's batched token must match its serial KVCacheSimple reference (a wrong mask masks the row's own current token)")
+        XCTAssertTrue(result.sharedForwardParityProven, "the 48-token shared-forward parity subgate must pass")
+        XCTAssertGreaterThanOrEqual(
+            result.parityTokensCompared,
+            PagedKVRuntimeParityProbe.sharedForwardParityTokens,
+            "the production parity window must be fully exercised"
+        )
         XCTAssertTrue(result.proven, "batched shared-forward input isolation must be proven")
+    }
+
+    private func repeatedProbeTokens(_ seed: [Int], targetCount: Int) -> [Int] {
+        guard targetCount > 0, !seed.isEmpty else { return seed }
+        var tokens: [Int] = []
+        tokens.reserveCapacity(targetCount)
+        while tokens.count < targetCount {
+            tokens.append(contentsOf: seed.prefix(targetCount - tokens.count))
+        }
+        return tokens
     }
 }

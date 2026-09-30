@@ -11,6 +11,12 @@ The isolated Mac Studio campaign is a **partial pass and release hold**.
 
 This evidence does not authorize a production policy entry or close #1778.
 
+> Follow-up: the Qwen3.8 failure below was traced to the synthetic serial
+> verifier oracle rather than the serving backend. The corrected verifier and
+> isolated three-model rerun are recorded in
+> [`audits/2026-09-30-issue-1778-verifier/RESULT_studio.md`](../../audits/2026-09-30-issue-1778-verifier/RESULT_studio.md).
+> This document remains the historical record of the earlier #1808 campaign.
+
 ## Boundary and provenance
 
 - Host: `1deMac-Studio.local`, `Mac15,14`, Apple M3 Ultra, 256 GiB, arm64,
@@ -63,7 +69,8 @@ expected model hash.
 
 ## Remaining closure gates
 
-1. Resolve and rerun the reproducible Qwen3.8 batched-isolation failure.
+1. ~~Resolve and rerun the reproducible Qwen3.8 batched-isolation failure.~~
+   Resolved by the verifier-only follow-up linked above.
 2. Build and test a reviewed, signed, notarized packaged candidate without lab
    identity or catalog-trust shims.
 3. Prove standalone/Malibu embedded CLI byte identity and the updater path from
