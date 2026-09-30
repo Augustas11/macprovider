@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.26",
+      "version": "1.9.27",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -35,7 +35,7 @@
     {
       "spec_id": "SPEC-002",
       "title": "Phase 4 Coordinator: Mac Provider Request Router",
-      "version": "1.6.3",
+      "version": "1.6.4",
       "path": "specs/SPEC-002-coordinator.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -152,7 +152,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.40",
+      "version": "0.9.41",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1100,7 +1100,7 @@
     {
       "spec_id": "SPEC-038",
       "title": "Continuous batching for concurrent provider inference",
-      "version": "v0.3.4",
+      "version": "v0.3.6",
       "path": "specs/SPEC-038-continuous-batching.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -4429,14 +4429,45 @@
       "requirement_id": "SPEC-038-R001",
       "spec_id": "SPEC-038",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:nonisolated static func productionContinuousBatchSchedulerConfiguration",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func continuousBatchMaxOutputTokens",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:static func contextRejectedTelemetryLine",
+        "phase4-coordinator/internal/buyer/transport_result.go:func classifyStreamResult"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testProductionSchedulerConfigurationCapsRowsAtServedContext",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testBatchedOutputBudgetIsRemainingContextAndClampsExplicitMaxTokens",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testContextLengthExceededMapsToSerialContextError",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testRequestTokenCapAboveLegacyDefaultAdmitsLongRows",
+        "phase3-binary/Tests/macprovider-cliTests/InferenceRelayQueuePressureTests.swift:testBatchedContextRejectionReachesTheCoordinatorAsContextExceeded",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchToolStructuredRowTests.swift:testImplicitContextBudgetReportsLengthForEveryBatchedRowShape",
+        "phase3-binary/Tests/macprovider-cliTests/ReceiptAuditTests.swift:testErrorReceiptResultIssuesForContextLengthExceeded",
+        "phase3-binary/Tests/macprovider-cliTests/StreamIntervalBatchingTests.swift:testRelayAppliesAuthenticatedOutputLimitWhenBodyOmitsMaxTokens",
+        "phase3-binary/Tests/macprovider-cliTests/Tier2ProviderSessionTests.swift:testEncryptedRequestCarriesAuthenticatedOutputLimit",
+        "phase4-coordinator/internal/buyer/output_limit_test.go:TestEffectiveMaxOutputTokensValidationAndProviderForwarding",
+        "phase4-coordinator/internal/buyer/forward_loop_test.go:TestHTTPNonStreamingContextExceededDoesNotRetryOrFault",
+        "phase4-coordinator/internal/buyer/forward_loop_test.go:TestHTTPStreamingContextExceededDoesNotRetryOrFault",
+        "phase4-coordinator/internal/buyer/stream_context_exceeded_internal_test.go:TestChatCompletionsStreamingContextExceededDoesNotRetryOrFailover",
+        "phase4-coordinator/internal/buyer/stream_context_exceeded_internal_test.go:TestStreamingPreCommitContextExceededIsNonRetryableNonFaulting",
+        "phase4-coordinator/internal/ws/relay_test.go:TestRelayDispatchCarriesConversationKeyFromContext",
+        "phase4-coordinator/internal/ws/relay_test.go:TestEncryptedRelayDispatchSealsConversationKeyInsideBodyEnvelope",
+        "phase5-gateway/internal/router/server_test.go:TestChatForwardsEffectiveOutputLimitWithoutRewritingBody"
+      ],
       "journeys": [],
-      "evidence": [],
+      "evidence": [
+        {
+          "artifact": "commit:79050f12f12ec25221ad0cf369f6319f6e551184",
+          "source": "audits/2026-09-30-cb-context-cap/RESULT_studio_r3.md",
+          "captured_at": "2026-09-30",
+          "expires_at": "2026-12-29"
+        }
+      ],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "SPEC-038 v0.3.6 lifecycle overlay (batched row context budget plus authenticated reservation-bound output dispatch) is mapped to local provider, coordinator, and gateway tests; packaged Studio real-serving evidence for the enable gate remains pending."
       }
     },
     {
@@ -4518,14 +4549,28 @@
       "requirement_id": "SPEC-038-R006",
       "spec_id": "SPEC-038",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:runOrdinaryDecodeStep",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func continuousBatchMaxOutputTokens"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testAC17AC24MidDecodeAllocatorExtensionFailureFailsOnlyThatRowAndReleasesBlocks",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchToolStructuredRowTests.swift:testImplicitContextBudgetReportsLengthForEveryBatchedRowShape"
+      ],
       "journeys": [],
-      "evidence": [],
+      "evidence": [
+        {
+          "artifact": "commit:79050f12f12ec25221ad0cf369f6319f6e551184",
+          "source": "audits/2026-09-30-cb-context-cap/RESULT_studio_r3.md",
+          "captured_at": "2026-09-30",
+          "expires_at": "2026-12-29"
+        }
+      ],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "The lifecycle overlay has request-local terminal and context-budget coverage plus isolated Studio parity evidence; the full packaged shared-forward isolation enable gate remains pending."
       }
     },
     {
@@ -4560,14 +4605,21 @@
       "requirement_id": "SPEC-038-R009",
       "spec_id": "SPEC-038",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:nonisolated static func productionContinuousBatchSchedulerConfiguration",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func failClosedIfNeeded"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testContextLengthExceededMapsToSerialContextError",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testSerialPrefillFallbackFailureIsRequestLocal"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Default-off configuration and request-local fail-closed behavior are covered; complete packaged serial-parity and scheduler-failure fallback evidence remains pending."
       }
     },
     {
@@ -4616,14 +4668,21 @@
       "requirement_id": "SPEC-038-R013",
       "spec_id": "SPEC-038",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:func drain",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:finishQueued"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testAC20AC10DrainRejectsQueuedWorkAndDuplicateSubmitReturnsSameTerminal",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testAC10DrainTimeoutFailsClosedAndLeavesOldWorkOnItsSnapshot"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Drain, duplicate-submit, and old-snapshot fail-closed behavior are locally covered; packaged warm-swap and receipt/model-hash parity evidence remains pending."
       }
     },
     {
@@ -4644,14 +4703,28 @@
       "requirement_id": "SPEC-038-R015",
       "spec_id": "SPEC-038",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:nonisolated static func productionContinuousBatchSchedulerConfiguration",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func continuousBatchMaxOutputTokens"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testProductionSchedulerConfigurationCapsRowsAtServedContext",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testAttachedServePathBoundsRowsByServedContext"
+      ],
       "journeys": [],
-      "evidence": [],
+      "evidence": [
+        {
+          "artifact": "commit:79050f12f12ec25221ad0cf369f6319f6e551184",
+          "source": "audits/2026-09-30-cb-context-cap/RESULT_studio_r3.md",
+          "captured_at": "2026-09-30",
+          "expires_at": "2026-12-29"
+        }
+      ],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Isolated Studio context-budget acceptance passed for the tested source/landing patch; the full packaged real-serving economics, isolation, warm-swap, and promotion gate remains pending."
       }
     },
     {
@@ -4719,15 +4792,22 @@
       "requirement_id": "SPEC-039-R002",
       "spec_id": "SPEC-039",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/MacProviderCore/PagedKVEngine.swift:public actor PagedKVBlockAllocator",
+        "phase3-binary/Sources/macprovider-cli/PagedKVCache.swift:final class PagedKVCache"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVCacheStorageTests.swift:testSingleTokenUpdatesMatchConcatenatedHistoryAcrossBlockAndGrowthBoundaries",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVCacheStorageTests.swift:testRecordAndMaterializeAfterInPlaceUpdatesYieldSamePhysicalBlocks",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testAttachedServePathBoundsRowsByServedContext"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "FR-PKV2 (paged storage and block allocator): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+        "rationale": "FR-PKV2 paged storage and block allocation are implemented and locally covered; complete packaged hardware, allocator-pressure, and promotion evidence remains pending."
       }
     },
     {

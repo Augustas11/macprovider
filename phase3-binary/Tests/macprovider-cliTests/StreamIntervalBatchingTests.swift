@@ -83,6 +83,25 @@ final class StreamIntervalBatchingTests: XCTestCase {
         XCTAssertEqual(chunks.joined(), (0..<tokenCount).map { "t\($0)" }.joined())
     }
 
+    func testRelayAppliesAuthenticatedOutputLimitWhenBodyOmitsMaxTokens() async throws {
+        let runtime = CountingTokenRuntime(tokens: 1)
+        let recorder = FrameRecorder()
+        let relay = makeRelay(runtime: runtime, streamInterval: 1, recorder: recorder)
+        let body = #"{"model":"mlx-community/Test-Model","messages":[{"role":"user","content":"hi"}],"stream":true}"#
+
+        try await relay.handleInferenceRequest([
+            "type": "inference_request",
+            "request_id": "req-output-limit",
+            "stream": true,
+            "body": body,
+            "max_output_tokens": 7,
+        ])
+
+        try await waitForEndFrame(recorder: recorder, requestID: "req-output-limit")
+        let observedMaxTokens = await runtime.lastMaxTokens()
+        XCTAssertEqual(observedMaxTokens, 7)
+    }
+
     // MARK: - interval=4 (75% reduction on 8 tokens → 2 content frames)
 
     func testInterval4BatchesFourTokensPerFrame() async throws {
@@ -227,6 +246,7 @@ final class StreamIntervalBatchingTests: XCTestCase {
 
 private actor CountingTokenRuntime: ModelRuntimeServing {
     private let tokenCount: Int
+    private var observedMaxTokens: Int?
     init(tokens: Int) { self.tokenCount = tokens }
 
     var loadedModelHash: String? { nil }
@@ -269,12 +289,15 @@ private actor CountingTokenRuntime: ModelRuntimeServing {
         shouldCancel: @escaping @Sendable () -> Bool,
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
+        observedMaxTokens = request.maxTokens
         for i in 0..<tokenCount {
             onChunk(.content("t\(i)"))
         }
         return CompletionResult(content: (0..<tokenCount).map { "t\($0)" }.joined(),
                                 finishReason: "stop", promptTokens: 1, completionTokens: tokenCount, settlementDisposition: .eligibleOwner)
     }
+
+    func lastMaxTokens() -> Int? { observedMaxTokens }
 
     func unregisterInFlight(_ id: Int) { }
 }

@@ -1305,6 +1305,12 @@ enum ContinuousBatchSchedulerError: Error, Equatable {
     /// `.backpressure`, which rejects at submit because the queue was already
     /// full; this request was queued and never reached a slot in time.
     case queueWaitTimedOut
+    /// Prompt plus output budget exceeds the served context
+    /// (`maxRequestTokens`). A property of the request, rejected before any
+    /// inference, so it maps to the serial path's 413
+    /// `context_length_exceeded` and the relay's `error_context_exceeded`
+    /// (zero settlement; error receipt per SPEC-015 §7.6).
+    case contextLengthExceeded(promptTokens: Int, maxOutputTokens: Int, contextTokens: Int)
 }
 
 extension ContinuousBatchSchedulerError {
@@ -1406,6 +1412,16 @@ extension ContinuousBatchSchedulerError {
                 inferenceRan: false,
                 settlementRan: false
             )
+        case let .contextLengthExceeded(promptTokens, maxOutputTokens, contextTokens):
+            return APIError(
+                status: 413,
+                message: "Prompt length (\(promptTokens) tokens) plus max_tokens (\(maxOutputTokens)) exceeds this provider's context window (\(contextTokens) tokens).",
+                type: "context_length_exceeded",
+                code: "context_length_exceeded",
+                param: "max_tokens",
+                inferenceRan: false,
+                settlementRan: false
+            )
         case .drained, .drainTimedOut:
             return nil
         }
@@ -1462,6 +1478,12 @@ extension ContinuousBatchSchedulerError {
 }
 
 actor ContinuousBatchScheduler {
+    /// Operator log line for a submit-time context rejection; the relay
+    /// collapses it into `error_context_exceeded`, so the numbers live here.
+    static func contextRejectedTelemetryLine(promptTokens: Int, maxOutputTokens: Int, cap: Int) -> String {
+        "event=batching_rejected code=context_length_exceeded prompt_tokens=\(promptTokens) max_output_tokens=\(maxOutputTokens) cap=\(cap)\n"
+    }
+
     private struct Waiter {
         let id: UUID
         let continuation: CheckedContinuation<ContinuousBatchSchedulerResult, Error>
@@ -1657,6 +1679,22 @@ actor ContinuousBatchScheduler {
             record(.stickyCacheUnsupported)
             await discardUnacceptedRetainedCache(for: request)
             throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_invalid_cached_prompt_tokens")
+        }
+        let (contextTokens, contextOverflow) = request.promptTokens.count.addingReportingOverflow(
+            request.maxOutputTokens
+        )
+        if contextOverflow || contextTokens > configuration.maxRequestTokens {
+            try? FileHandle.standardError.write(contentsOf: Data(Self.contextRejectedTelemetryLine(
+                promptTokens: request.promptTokens.count,
+                maxOutputTokens: request.maxOutputTokens,
+                cap: configuration.maxRequestTokens
+            ).utf8))
+            await discardUnacceptedRetainedCache(for: request)
+            throw ContinuousBatchSchedulerError.contextLengthExceeded(
+                promptTokens: request.promptTokens.count,
+                maxOutputTokens: request.maxOutputTokens,
+                contextTokens: configuration.maxRequestTokens
+            )
         }
         guard !request.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               request.id.lengthOfBytes(using: .utf8) <= configuration.maxRequestIDBytes,

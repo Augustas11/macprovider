@@ -1,7 +1,14 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.3 (2026-09-25, `/healthz` release fields)
+**Version:** 1.6.4 (2026-09-30, authenticated dispatch output limit)
 **Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9); SPEC-003 FR-C9.4 composed contract — base AuthState enum (`bearer_validated`, `self_minted`, `bearerless_duplicate`) introduced in v0.8.3; `mint_failed` reserved value added in v0.8.4.
+
+**Change log v1.6.4 (2026-09-30, authenticated dispatch output limit):**
+The coordinator accepts `X-MacProvider-Internal-Max-Output-Tokens` only under
+the existing authenticated gateway context, validates it as a non-negative
+integer, and preserves it across every provider transport. WS cleartext and
+Tier-2 dispatch use SPEC-001 `max_output_tokens`; HTTP forwarding uses
+`X-MacProvider-Max-Output-Tokens`. The buyer request body is never rewritten.
 
 **Change log v1.6.3 (2026-09-25, issue #1737):** FR-O1 lists the `/healthz`
 `recommended_binary_version` and `required_binary_version` fields. The first is
@@ -825,6 +832,14 @@ over the provider's existing WebSocket (SPEC-001 v1.2 § 6.6). The
 provider returns response chunks over the same WebSocket. No inbound
 network required — provider needs only outbound WSS to the
 coordinator. Works behind any NAT, firewall, or hotspot.
+
+When an authenticated gateway supplies
+`X-MacProvider-Internal-Max-Output-Tokens`, both paths MUST carry that exact
+non-negative ceiling to the selected provider using the SPEC-001 transport
+field/header. The coordinator MUST reject a malformed value before dispatch,
+MUST NOT copy an unauthenticated buyer value, and MUST NOT insert or rewrite
+`max_tokens` in the buyer body because that would change the receipt prompt
+hash.
 
 #### Mode resolution (normative)
 

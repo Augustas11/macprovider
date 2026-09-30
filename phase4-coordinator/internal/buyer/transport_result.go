@@ -157,6 +157,10 @@ func classifyStreamResult(result wsForwardResult, status int, attempt requestLog
 		// non-streaming WS.
 		tr.retryable = true
 		tr.failoverEligible = true
+	case wsForwardContextExceeded:
+		// The request exceeds the provider's context: not retryable, not
+		// failover-eligible, and 413 keeps shouldRetry from advancing.
+		tr.status = http.StatusRequestEntityTooLarge
 	case wsForwardQueueFull:
 		tr.markBusy = true
 		tr.retryable = true
