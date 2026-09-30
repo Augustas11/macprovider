@@ -182,10 +182,11 @@ around 2026-10-23. The fix takes effect at the next renewal (Wed 2026-09-30
 `v1.8.209` was applied through the signed runtime-only updater on 2026-09-30.
 The public model document then returned exactly one paid Qwen3.6 row with the
 #1804 feature descriptors, while the live catalog stayed on the September 25
-release. Start a new row when another coordinator/gateway change merges.
+release. The table below tracks changes for the next runtime cut.
 
 | Net change in coordinator / gateway / Pearl assets | Status | PR |
 |---|---|---|
+| The authenticated gateway default output cap is 32,768 tokens while the demo surface remains capped at 512. Served buyer documentation and OpenRouter model metadata now report the effective configured/live-context limit consistently; SPEC-006 is v0.9.42. | merged `d5767b4a5` 2026-09-30 | #1801 |
 
 ## Open Pearl actions (not new code)
 
