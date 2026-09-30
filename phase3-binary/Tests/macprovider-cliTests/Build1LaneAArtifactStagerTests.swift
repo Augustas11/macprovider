@@ -727,7 +727,7 @@ final class Build1LaneAArtifactStagerTests: XCTestCase {
                 fetch: { request in
                     let url = try XCTUnwrap(request.url)
                     let response = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil))
-                    return (Data(#"{"siblings":[{"rfilename":"weights.bin"}]}"#.utf8), response)
+                    return (Data(#"{"siblings":[{"rfilename":"weights.bin","size":5}]}"#.utf8), response)
                 },
                 download: { _ in
                     started.fulfill()
@@ -907,7 +907,7 @@ final class Build1LaneAArtifactStagerTests: XCTestCase {
             fetch: { request in
                 let url = try XCTUnwrap(request.url)
                 let response = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil))
-                return (Data(#"{"siblings":[{"rfilename":"weights.bin"}]}"#.utf8), response)
+                return (Data("{\"siblings\":[{\"rfilename\":\"weights.bin\",\"size\":\(payload.utf8.count)}]}".utf8), response)
             },
             download: { request in
                 counter.increment()

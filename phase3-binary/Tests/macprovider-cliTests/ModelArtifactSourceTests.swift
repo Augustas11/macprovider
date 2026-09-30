@@ -230,7 +230,7 @@ final class ModelArtifactSourceTests: XCTestCase {
             )
             XCTFail("oversized mirror bytes were accepted")
         } catch {
-            XCTAssertTrue(String(describing: error).contains("exceeds signed size"), "\(error)")
+            XCTAssertTrue(String(describing: error).contains("exceeds allowed size"), "\(error)")
         }
     }
 
@@ -276,7 +276,7 @@ final class ModelArtifactSourceTests: XCTestCase {
             fetch: { request in
                 requests.append(request)
                 guard request.url?.host == "hf-mirror.example" else { throw URLError(.cannotConnectToHost) }
-                return (Data(#"{"siblings":[{"rfilename":"w.bin"}]}"#.utf8), Self.ok(request.url!))
+                return (Data(#"{"siblings":[{"rfilename":"w.bin","size":7}]}"#.utf8), Self.ok(request.url!))
             },
             download: { request in
                 requests.append(request)
