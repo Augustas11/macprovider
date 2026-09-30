@@ -6,8 +6,8 @@ Verdict: PASS for the provider-runtime hardware gate at source commit
 `275c1cffc17eab0dae3c3f3c6b442fa9af163b5e`.
 
 Rebase traceability: the source commit's stable patch ID
-`3c23c768b9d67b90f68a631d92c8877df5ce50ce` is byte-for-byte equivalent to
-landing-lineage commit `79050f12f12ec25221ad0cf369f6319f6e551184`.
+`3c23c768b9d67b90f68a631d92c8877df5ce50ce` is carried by reachable squash
+commit `9eb1553bc5c10c13e3053894b6802ba7858587e0` (#1806).
 
 ## Boundary proof
 

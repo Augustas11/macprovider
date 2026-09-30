@@ -4457,7 +4457,7 @@
       "journeys": [],
       "evidence": [
         {
-          "artifact": "commit:79050f12f12ec25221ad0cf369f6319f6e551184",
+          "artifact": "commit:9eb1553bc5c10c13e3053894b6802ba7858587e0",
           "source": "audits/2026-09-30-cb-context-cap/RESULT_studio_r3.md",
           "captured_at": "2026-09-30",
           "expires_at": "2026-12-29"
@@ -4560,7 +4560,7 @@
       "journeys": [],
       "evidence": [
         {
-          "artifact": "commit:79050f12f12ec25221ad0cf369f6319f6e551184",
+          "artifact": "commit:9eb1553bc5c10c13e3053894b6802ba7858587e0",
           "source": "audits/2026-09-30-cb-context-cap/RESULT_studio_r3.md",
           "captured_at": "2026-09-30",
           "expires_at": "2026-12-29"
@@ -4714,7 +4714,7 @@
       "journeys": [],
       "evidence": [
         {
-          "artifact": "commit:79050f12f12ec25221ad0cf369f6319f6e551184",
+          "artifact": "commit:9eb1553bc5c10c13e3053894b6802ba7858587e0",
           "source": "audits/2026-09-30-cb-context-cap/RESULT_studio_r3.md",
           "captured_at": "2026-09-30",
           "expires_at": "2026-12-29"
