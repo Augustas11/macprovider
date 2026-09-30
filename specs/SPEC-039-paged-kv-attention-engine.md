@@ -1,7 +1,10 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.11
-Status: draft (normative design). v0.1.11 sizes an unset pool
+Version: v0.1.12
+Status: draft (normative design). v0.1.12 clarifies that SPEC-023's signed
+continuous-batching policy may distribute FR-CB10 acceptance, while this SPEC
+continues to own only provider-local descriptor/attach/probe correctness; the
+policy feed is never descriptor self-certification. v0.1.11 sizes an unset pool
 (`max_physical_blocks` not given by CLI, env, or YAML) to cover the provider's
 advertised `max_context_tokens`: `max(1024, ceil(max_context_tokens /
 block_size_tokens))`, clamped to the resolver maximum. The 16,384-token default
@@ -46,6 +49,10 @@ sink-token rotating caches stay unrecognized. Isolated `msb-throughput` may
 drive the layout. Production attach remains fail-closed: no sliding-window
 identity is added to FR-PKV12. `gpt_oss` family recognition is not cache-class
 admission. Refines SPEC-039-R012; does not broaden the allowlist.
+Change log v0.1.12 (2026-09-30): FR-PKV13/FR-PKV12 references to SPEC-038
+acceptance now include the SPEC-023 signed CB policy feed as a distribution
+surface for exact FR-CB10 coverage. Descriptor membership and attach probes
+remain necessary but insufficient for production authorization.
 Change log v0.1.9 (2026-09-28): FR-PKV12 admits the measured
 `qwen/qwen3.5-27b`, `qwen/qwen3.5-35b-a3b`, and `qwen/qwen3.8-27b` identities.
 Each passed exact 48-token serial/shared-forward parity at prompt lengths 511,
@@ -712,10 +719,14 @@ coverage, not by a startup micro-benchmark. A throughput measurement at
 process start is too short and too noisy to gate on, and a false failure would
 turn batching off at random. The ceiling MUST be measured on the packaged
 build, serial versus batched in the same window on the same hardware, before
-the operator records acceptance for that tuple. Acceptance coverage binds the
-runtime revision (Metal library SHA-256 and paged-KV kernel identifier). A path
-that has not met the ceiling on that revision has no acceptance, so it
-serial-routes in canary and fails closed in strict `on`. A new runtime revision
+the operator records acceptance for that tuple. SPEC-023's signed
+`macprovider.continuous-batching-policy.v1` feed may distribute that exact
+acceptance, but the feed does not replace this SPEC's descriptor, attach,
+parity, and row-isolation obligations. Acceptance coverage binds the runtime
+revision (Metal library SHA-256 and paged-KV kernel identifier) plus the exact
+SPEC-038 model/cache/KV/hardware identity. A path that has not met the ceiling
+on that revision has no acceptance, so it serial-routes in canary and fails
+closed in strict `on`. A new runtime revision
 must re-measure before it can serve batched traffic.
 
 ### FR-PKV14 — operator configuration surface (SPEC-039-R014)

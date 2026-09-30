@@ -665,7 +665,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.21.2",
+      "version": "v0.21.3",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1100,7 +1100,7 @@
     {
       "spec_id": "SPEC-038",
       "title": "Continuous batching for concurrent provider inference",
-      "version": "v0.3.3",
+      "version": "v0.3.4",
       "path": "specs/SPEC-038-continuous-batching.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1135,7 +1135,7 @@
     {
       "spec_id": "SPEC-039",
       "title": "Paged KV / paged-attention engine",
-      "version": "v0.1.11",
+      "version": "v0.1.12",
       "path": "specs/SPEC-039-paged-kv-attention-engine.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -3203,6 +3203,33 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
         "rationale": "SPEC-023 v0.21.2 defines the closed signed native-MTP admission sidecar, including the authenticated live executable CDHash binding and complete-window byte closure; generator, strict consumers, release-ledger binding, negative fixtures, and signed release evidence are not implemented."
+      }
+    },
+    {
+      "requirement_id": "SPEC-023-R025",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [
+        "scripts/catalog-release.py:validate_cb_policy",
+        "scripts/catalog-release.py:default_cb_policy",
+        "scripts/catalog-release.py:manifest",
+        "scripts/catalog-release.py:verify_directory",
+        "scripts/resign-autotune-static.sh:continuous-batching-policy.json",
+        "scripts/compatibility-set-manifest.py:CB_POLICY_BOUND_RELEASE_FEEDS",
+        "phase3-binary/Sources/macprovider-cli/AutotuneCatalog.generated.swift:bakedContinuousBatchingPolicyBase64"
+      ],
+      "tests": [
+        "scripts/test-catalog-release.sh:continuous-batching-policy.json"
+      ],
+      "journeys": [
+        "JOURNEY-PROVIDER-PREBETA-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1778",
+        "rationale": "SPEC-023 v0.21.3 defines and wires the signed continuous-batching policy feed as a separate same-signer release/static asset bound by release.json, release-ledger.json, and the generated Swift baked snapshot. The separate feed files remain outside the bridge-sensitive provider payload's exact nine-name catalog map. The committed feed is default-empty with no enabling entries because packaged Studio hardware acceptance for the intended tuples is still pending; CLI/runtime consumer promotion remains release-gated."
       }
     },
     {

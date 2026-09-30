@@ -2334,12 +2334,29 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         _ snapshot: RuntimeContinuousBatchingSnapshot?
     ) -> [String: Any] {
         let scheduler = snapshot?.scheduler
+        let policy = snapshot?.policy
         return [
             "mode": snapshot?.mode.rawValue ?? ContinuousBatchingMode.off.rawValue,
             "active": snapshot?.active ?? false,
             "unsupported_reason": jsonNullable(snapshot?.unsupportedReason),
             "paged_kv_decision": jsonNullable(snapshot?.pagedKVDecision),
             "cache_class": jsonNullable(snapshot?.cacheClass),
+            "policy": [
+                "authorization_source": policy?.authorizationSource ?? "none",
+                "load_status": policy?.loadStatus ?? ContinuousBatchingPolicyLoadStatus.absentFallback.rawValue,
+                "release_id": jsonNullable(policy?.releaseID),
+                "policy_version": jsonNullable(policy?.policyVersion),
+                "signer_key_id": jsonNullable(policy?.signerKeyID),
+                "policy_sha256": jsonNullable(policy?.policySHA256),
+                "expires_at": jsonNullable(policy?.expiresAt),
+                "rollout_mode": policy?.rolloutMode ?? ContinuousBatchingMode.off.rawValue,
+                "tuple_sha256": jsonNullable(policy?.tupleSHA256),
+                "authorized": policy?.authorized ?? false,
+                "cached_turns_authorized": policy?.cachedTurnsAuthorized ?? false,
+                "emergency_off_override": policy?.emergencyOffOverride ?? false,
+                "local_proof_result": policy?.localProofResult ?? "not_run",
+                "decision_reason": policy?.decisionReason ?? "policy_absent",
+            ],
             "scheduler": [
                 "active_decode_rows": scheduler?.activeDecodeRows ?? 0,
                 "waiting_count": scheduler?.waitingCount ?? 0,

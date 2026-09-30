@@ -170,6 +170,8 @@ make_release_dir() {
   printf '%s\n' demand-rank-sig > "$directory/demand-rank.json.sig"
   printf '%s\n' rate-card > "$directory/rate-card.json"
   printf '%s\n' rate-card-sig > "$directory/rate-card.json.sig"
+  printf '%s\n' continuous-batching-policy > "$directory/continuous-batching-policy.json"
+  printf '%s\n' continuous-batching-policy-sig > "$directory/continuous-batching-policy.json.sig"
   if [[ "$lane" == pearl_runtime_catalog_artifacts ]]; then
     printf '%s\n' autotune-artifacts > "$directory/autotune-artifacts.json"
     printf '%s\n' autotune-artifacts-sig > "$directory/autotune-artifacts.json.sig"
@@ -214,6 +216,8 @@ if lane == "pearl_runtime_catalog":
             "demand-rank.json.sig": digest("demand-rank.json.sig"),
             "rate-card.json": digest("rate-card.json"),
             "rate-card.json.sig": digest("rate-card.json.sig"),
+            "continuous-batching-policy.json": digest("continuous-batching-policy.json"),
+            "continuous-batching-policy.json.sig": digest("continuous-batching-policy.json.sig"),
         },
     }
     if artifact_bound:
@@ -356,7 +360,11 @@ rm "$work/release-runtime-only"/release.json \
   "$work/release-runtime-only"/autotune-candidates.json \
   "$work/release-runtime-only"/autotune-candidates.json.sig \
   "$work/release-runtime-only"/demand-rank.json \
-  "$work/release-runtime-only"/demand-rank.json.sig
+  "$work/release-runtime-only"/demand-rank.json.sig \
+  "$work/release-runtime-only"/rate-card.json \
+  "$work/release-runtime-only"/rate-card.json.sig \
+  "$work/release-runtime-only"/continuous-batching-policy.json \
+  "$work/release-runtime-only"/continuous-batching-policy.json.sig
 bash "$guard" --tag v1.8.66 --expected-commit "$second" \
   --remote "$work/remote.git" --release-dir "$work/release-runtime-only" |
   grep -q 'ok: v1.8.66 has Pearl runtime assets'
@@ -604,7 +612,9 @@ rm "$work/release-github-sidecars"/release.json \
   "$work/release-github-sidecars"/demand-rank.json \
   "$work/release-github-sidecars"/demand-rank.json.sig \
   "$work/release-github-sidecars"/rate-card.json \
-  "$work/release-github-sidecars"/rate-card.json.sig
+  "$work/release-github-sidecars"/rate-card.json.sig \
+  "$work/release-github-sidecars"/continuous-batching-policy.json \
+  "$work/release-github-sidecars"/continuous-batching-policy.json.sig
 resign_checksums "$work/release-github-sidecars"
 mkdir "$work/deploy-github-sidecars"
 FAKE_GH_RELEASE_DIR="$work/release-github-sidecars" PATH="$fake_gh_dir:$PATH" \

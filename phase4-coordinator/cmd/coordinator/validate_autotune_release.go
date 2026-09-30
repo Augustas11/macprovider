@@ -224,6 +224,7 @@ func redirectAutotuneReleasePaths(cfg *config.Config, dir string) {
 		&feeds.RateCardPath, &feeds.RateCardSigPath,
 		&feeds.DemandRankPath, &feeds.DemandRankSigPath,
 		&feeds.AutotuneCandidatesPath, &feeds.AutotuneCandidatesSigPath,
+		&feeds.ContinuousBatchingPolicyPath, &feeds.ContinuousBatchingPolicySigPath,
 		&feeds.CatalogArtifactsPath, &feeds.CatalogArtifactsSigPath,
 		&cfg.Tier2.CatalogPath,
 	} {

@@ -24,11 +24,50 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertNil(config.maxContextOverride)
         XCTAssertNil(config.maxConcurrencyOverride)
         XCTAssertEqual(config.continuousBatching, .off)
+        XCTAssertFalse(config.continuousBatchingExplicitlyConfigured)
         XCTAssertNil(config.continuousBatchQueueLimit)
         XCTAssertFalse(config.enableReceipts)
         XCTAssertFalse(config.pagedKV.enabled)
         XCTAssertFalse(config.pagedKV.effectiveEnabled)
+        XCTAssertFalse(config.pagedKVEnabledExplicitlyConfigured)
         XCTAssertNil(config.modelArtifactRoot)
+    }
+
+    func testContinuousBatchingAndPagedKVExplicitOffAreTrackedAsEmergencyOverrides() throws {
+        let yaml = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in "continuous_batching: off\npaged_kv:\n  enabled: false\n" }
+        )
+        XCTAssertEqual(yaml.continuousBatching, .off)
+        XCTAssertTrue(yaml.continuousBatchingExplicitlyConfigured)
+        XCTAssertFalse(yaml.pagedKV.enabled)
+        XCTAssertTrue(yaml.pagedKVEnabledExplicitlyConfigured)
+
+        let environment = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [
+                "MACPROVIDER_CONTINUOUS_BATCHING": "off",
+                "MACPROVIDER_PAGED_KV_ENABLED": "false",
+            ],
+            fileExists: { _ in false },
+            readFile: { _ in "" }
+        )
+        XCTAssertTrue(environment.continuousBatchingExplicitlyConfigured)
+        XCTAssertTrue(environment.pagedKVEnabledExplicitlyConfigured)
+
+        let cli = try ConfigLoader.load(
+            cli: CLIOverrides(
+                continuousBatching: "off",
+                pagedKV: PagedKVCLIOverrides(enabled: false)
+            ),
+            environment: [:],
+            fileExists: { _ in false },
+            readFile: { _ in "" }
+        )
+        XCTAssertTrue(cli.continuousBatchingExplicitlyConfigured)
+        XCTAssertTrue(cli.pagedKVEnabledExplicitlyConfigured)
     }
 
     func testModelArtifactRootYAMLAndEnvironment() throws {
