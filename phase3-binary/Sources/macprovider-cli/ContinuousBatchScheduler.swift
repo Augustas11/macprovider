@@ -4047,6 +4047,10 @@ actor ContinuousBatchScheduler {
                     await finishQueued(request, status: .rejected, errorCode: "continuous_batching_draining")
                 } else if activeDecode.isEmpty && activePrompt.isEmpty && admittingRequests.isEmpty {
                     record(.poolCapacityRejected)
+                    let poolTokens = configuration.descriptor.blockSizeTokens * configuration.descriptor.maxPhysicalBlocks
+                    try? FileHandle.standardError.write(contentsOf: Data(
+                        "event=batching_pool_capacity_rejected request_id=\(request.id) prompt_tokens=\(request.promptTokens.count) max_output_tokens=\(request.maxOutputTokens) pool_tokens=\(poolTokens)\n".utf8
+                    ))
                     await finishQueued(
                         request,
                         status: .rejected,

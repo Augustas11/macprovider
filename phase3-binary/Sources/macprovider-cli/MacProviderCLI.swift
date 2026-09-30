@@ -2476,7 +2476,9 @@ struct ServeCommand: AsyncParsableCommand {
                     speculativeCacheWrapValidated: speculativeCacheWrapValidated,
                     maxContextTokensOverride: resolved.maxContextOverride,
                     kvBitsOverride: effectiveKVBits,
-                    pagedKVConfig: resolved.pagedKV,
+                    pagedKVConfig: resolved.pagedKV.sizedToCover(
+                        contextTokens: ProviderCapacity(maxContextOverride: resolved.maxContextOverride, maxConcurrencyOverride: nil).maxContextTokens
+                    ),
                     prefillStepSize: resolved.prefillStepSize,
                     maxBatch: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride),
                     continuousBatchingMode: resolved.continuousBatching,
