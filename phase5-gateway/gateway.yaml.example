@@ -76,7 +76,7 @@ quotas:
   reservation_max_age_hours: 24
 
 limits:
-  max_tokens_per_request: 4096
+  max_tokens_per_request: 32768
   demo_max_tokens_per_request: 512
   max_feedback_comment_bytes: 2000
   max_feedback_body_bytes: 16384
