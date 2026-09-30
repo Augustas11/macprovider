@@ -32,6 +32,8 @@ CLI_HTTP_STORAGE_DIR="$HOME/Library/HTTPStorages/macprovider-cli"
 # sit there as well as in the user's TMPDIR. Overridable for tests.
 SYSTEM_TMP_DIR="${MACPROVIDER_UNINSTALL_SYSTEM_TMPDIR:-/tmp}"
 CLI_DELEGATED=0
+UNINSTALL_LOCK_HELPER_PID=""
+UNINSTALL_LOCK_STATUS_PATH=""
 DRY_RUN=0
 NO_PROMPT="${MACPROVIDER_NO_PROMPT:-0}"
 
@@ -141,51 +143,281 @@ EOF
   esac
 }
 
-# True while an installer is live: it holds install.lock, or (as install.sh
-# itself fences) the lock's owner record names a process that is still
-# running in this boot session even though its flock helper has died.
-# Uninstalling underneath it would pull launchd jobs, transaction and
-# staging state from a live install.
-installer_active() {
-  [ -f "$INSTALL_LOCK_PATH" ] || return 1
-  python3 - "$INSTALL_LOCK_PATH" <<'LOCKCHECK'
-import fcntl, json, os, subprocess, sys
-try:
-    fd = os.open(sys.argv[1], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-except OSError:
-    sys.exit(1)
-try:
-    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-except BlockingIOError:
-    sys.exit(0)
-try:
-    record = json.loads(os.read(fd, 4097).decode("utf-8") or "{}")
-except (ValueError, UnicodeDecodeError, OSError):
-    sys.exit(1)
-if not isinstance(record, dict):
-    sys.exit(1)
-pid, started, boot = record.get("pid"), record.get("process_start"), record.get("boot_session")
-if not (isinstance(pid, int) and isinstance(started, str) and started and isinstance(boot, str) and boot):
-    sys.exit(1)
-def run(argv):
+release_uninstall_lock() {
+  if [ -n "$UNINSTALL_LOCK_HELPER_PID" ]; then
+    kill "$UNINSTALL_LOCK_HELPER_PID" 2>/dev/null || true
+    wait "$UNINSTALL_LOCK_HELPER_PID" 2>/dev/null || true
+    UNINSTALL_LOCK_HELPER_PID=""
+  fi
+  if [ -n "$UNINSTALL_LOCK_STATUS_PATH" ]; then
+    rm -f "$UNINSTALL_LOCK_STATUS_PATH"
+    UNINSTALL_LOCK_STATUS_PATH=""
+  fi
+}
+
+# Hold the installer's kernel lock for the whole destructive transaction.
+# A live owner record remains authoritative even if its flock helper died,
+# matching install.sh recovery fencing. Unsafe lock paths/records fail closed.
+acquire_uninstall_lock() {
+  [ "$DRY_RUN" -eq 0 ] || return 0
+  UNINSTALL_LOCK_STATUS_PATH="$(mktemp "${TMPDIR:-/tmp}/macprovider-uninstall-lock.XXXXXX")" \
+    || die "could not allocate uninstall lock handshake"
+  python3 - "$HOME" "$INSTALL_LOCK_PATH" "$$" "$UNINSTALL_LOCK_STATUS_PATH" <<'LOCKHOLDER' &
+import fcntl, json, os, signal, stat, subprocess, sys, time
+
+home, lock_path, owner_pid_text, status_path = sys.argv[1:]
+owner_pid = int(owner_pid_text)
+uid = os.getuid()
+
+def status(value):
+    fd = os.open(status_path, os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        os.write(fd, (value + "\n").encode())
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+def command(argv):
     result = subprocess.run(argv, check=False, capture_output=True, text=True)
     return result.stdout.strip() if result.returncode == 0 else ""
-if run(["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"]) == boot and run(["ps", "-p", str(pid), "-o", "lstart="]) == started:
-    sys.exit(0)
-sys.exit(1)
-LOCKCHECK
+
+try:
+    home = os.path.realpath(home)
+    config_dir = os.path.realpath(os.path.dirname(lock_path))
+    if os.path.commonpath((home, config_dir)) != home:
+        raise RuntimeError("lock directory escapes HOME")
+    current = home
+    for component in os.path.relpath(config_dir, home).split(os.sep):
+        current = os.path.join(current, component)
+        if not os.path.lexists(current):
+            os.mkdir(current, 0o700)
+        info = os.lstat(current)
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != uid or info.st_mode & 0o022:
+            raise RuntimeError("unsafe lock directory")
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_nlink != 1 or info.st_mode & 0o077:
+        raise RuntimeError("install lock is not an owned private regular file")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        status("busy")
+        sys.exit(0)
+    payload = os.read(fd, 4097)
+    if len(payload) > 4096:
+        raise RuntimeError("install lock record is oversized")
+    if payload.strip():
+        try:
+            record = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise RuntimeError("install lock record is malformed") from exc
+        if not isinstance(record, dict):
+            raise RuntimeError("install lock record is malformed")
+        pid, started, boot = record.get("pid"), record.get("process_start"), record.get("boot_session")
+        if not (isinstance(pid, int) and isinstance(started, str) and started and isinstance(boot, str) and boot):
+            raise RuntimeError("install lock record is malformed")
+        if command(["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"]) == boot \
+                and command(["ps", "-p", str(pid), "-o", "lstart="]) == started:
+            status("busy")
+            sys.exit(0)
+    record = {
+        "pid": owner_pid,
+        "process_start": command(["ps", "-p", str(owner_pid), "-o", "lstart="]),
+        "boot_session": command(["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"]),
+        "operation": "uninstall",
+        "holder_pid": os.getpid(),
+    }
+    if not record["process_start"] or not record["boot_session"]:
+        raise RuntimeError("could not establish uninstall lock identity")
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.ftruncate(fd, 0)
+    os.write(fd, json.dumps(record, sort_keys=True).encode())
+    os.fsync(fd)
+    status("acquired")
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+    while True:
+        try:
+            os.kill(owner_pid, 0)
+        except OSError:
+            break
+        time.sleep(0.2)
+except Exception as exc:
+    try:
+        status("unsafe:" + str(exc))
+    except Exception:
+        pass
+    sys.exit(1)
+LOCKHOLDER
+  UNINSTALL_LOCK_HELPER_PID=$!
+  for _ in $(seq 1 400); do
+    [ -s "$UNINSTALL_LOCK_STATUS_PATH" ] && break
+    kill -0 "$UNINSTALL_LOCK_HELPER_PID" 2>/dev/null || break
+    sleep 0.05
+  done
+  lock_status="$(cat "$UNINSTALL_LOCK_STATUS_PATH" 2>/dev/null || true)"
+  case "$lock_status" in
+    acquired)
+      trap release_uninstall_lock EXIT
+      trap 'release_uninstall_lock; exit 130' HUP INT TERM
+      ;;
+    busy) release_uninstall_lock; die "an installer is still running; let it finish or stop it, then re-run." ;;
+    unsafe:*) release_uninstall_lock; die "refusing unsafe install lock state: ${lock_status#unsafe:}" ;;
+    *) release_uninstall_lock; die "could not acquire the install lock safely" ;;
+  esac
+}
+
+assert_safe_application_support() {
+  python3 - "$HOME" "$MANIFEST_DIR" <<'PY'
+import os, stat, sys
+home, support = map(os.path.abspath, sys.argv[1:])
+uid = os.getuid()
+if os.path.commonpath((home, support)) != home:
+    raise SystemExit("Application Support path escapes HOME")
+current = home
+for component in os.path.relpath(support, home).split(os.sep):
+    current = os.path.join(current, component)
+    if not os.path.lexists(current):
+        break
+    info = os.lstat(current)
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != uid or info.st_mode & 0o022:
+        raise SystemExit("unsafe Application Support directory: " + current)
+lifecycle = os.path.join(support, "lifecycle")
+if os.path.lexists(lifecycle):
+    info = os.lstat(lifecycle)
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != uid or info.st_mode & 0o022:
+        raise SystemExit("unsafe lifecycle directory: " + lifecycle)
+PY
+}
+
+manifest_cli_path() {
+  [ -e "$MANIFEST_PATH" ] || [ -L "$MANIFEST_PATH" ] || return 1
+  python3 - "$MANIFEST_PATH" <<'PY'
+import json, os, stat, sys
+path = sys.argv[1]
+uid = os.getuid()
+flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+try:
+    fd = os.open(path, flags)
+except OSError as exc:
+    raise SystemExit("unsafe install manifest: " + str(exc))
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_nlink != 1 or info.st_mode & 0o022:
+        raise SystemExit("install manifest is not a trusted regular file")
+    payload = os.read(fd, 65537)
+    if len(payload) > 65536:
+        raise SystemExit("install manifest is oversized")
+finally:
+    os.close(fd)
+try:
+    manifest = json.loads(payload.decode("utf-8"))
+except (UnicodeDecodeError, ValueError) as exc:
+    raise SystemExit("install manifest is malformed: " + str(exc))
+prefix = manifest.get("install_prefix")
+binary = manifest.get("binary_path")
+if not isinstance(prefix, str) or not isinstance(binary, str) or not prefix or not binary:
+    raise SystemExit("install manifest lacks install_prefix/binary_path")
+prefix = os.path.normpath(prefix)
+binary = os.path.normpath(binary)
+if not os.path.isabs(prefix) or binary != os.path.join(prefix, "macprovider-cli"):
+    raise SystemExit("install manifest binary_path is not the installed CLI")
+try:
+    info = os.stat(binary, follow_symlinks=False)
+except OSError as exc:
+    raise SystemExit("manifest-installed CLI is unavailable: " + str(exc))
+if not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_mode & 0o022 or not os.access(binary, os.X_OK):
+    raise SystemExit("manifest-installed CLI is not a trusted executable")
+print(binary)
+PY
+}
+
+validate_manifest_removal_paths() {
+  [ -e "$MANIFEST_PATH" ] || [ -L "$MANIFEST_PATH" ] || return 0
+  python3 - "$MANIFEST_PATH" "$INSTALL_DIR" "$LOG_DIR" "$WATCHDOG_DIR" <<'PY'
+import json, os, stat, sys
+path, default_prefix, log_dir, watchdog_dir = sys.argv[1:]
+fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+        raise SystemExit("unsafe install manifest")
+    payload = os.read(fd, 65537)
+finally:
+    os.close(fd)
+if len(payload) > 65536:
+    raise SystemExit("unsafe install manifest")
+try:
+    manifest = json.loads(payload.decode("utf-8"))
+except (UnicodeDecodeError, ValueError):
+    raise SystemExit("unsafe install manifest")
+prefix = manifest.get("install_prefix") or default_prefix
+if not isinstance(prefix, str) or not os.path.isabs(prefix):
+    raise SystemExit("unsafe install manifest")
+allowed = {os.path.realpath(value) for value in (prefix, log_dir, watchdog_dir)}
+for candidate in manifest.get("data_dirs") or []:
+    if not isinstance(candidate, str) or os.path.realpath(candidate) not in allowed:
+        raise SystemExit("refusing unsafe data directory path: " + str(candidate))
+PY
+}
+
+canonical_cli_path() {
+  [ -x "$BINARY_PATH" ] || return 1
+  python3 - "$BINARY_PATH" <<'PY'
+import os, stat, sys
+path = os.path.realpath(sys.argv[1])
+try:
+    info = os.stat(path, follow_symlinks=False)
+except OSError:
+    raise SystemExit(1)
+if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022 or not os.access(path, os.X_OK):
+    raise SystemExit("canonical CLI does not resolve to a trusted executable")
+print(path)
+PY
 }
 
 # The installed CLI's typed uninstall proves launchd absence (including the
-# system domain) and purges the KV tier. If it refuses, services may still be
-# running, so stop instead of deleting files underneath them.
+# system domain) and purges the KV tier. Resolve the install-manifest binary
+# before the canonical PATH symlink so custom-prefix installs cannot be skipped.
 delegate_to_cli() {
-  [ -x "$BINARY_PATH" ] || return 0
-  log "Running the installed CLI uninstaller: $BINARY_PATH uninstall --yes"
-  if ! run "$BINARY_PATH" uninstall --yes; then
-    die "the CLI uninstaller did not complete; resolve the message above and re-run. Only if $BINARY_PATH fails to start at all (not when it refused because services are still running) remove it and re-run this script."
+  cli_path=""
+  if [ -e "$MANIFEST_PATH" ] || [ -L "$MANIFEST_PATH" ]; then
+    cli_path="$(manifest_cli_path)" || die "could not validate the CLI recorded in $MANIFEST_PATH"
+  else
+    cli_path="$(canonical_cli_path 2>/dev/null || true)"
+  fi
+  [ -n "$cli_path" ] || return 0
+  log "Running the installed CLI uninstaller: $cli_path uninstall --yes"
+  if ! run "$cli_path" uninstall --yes; then
+    die "the CLI uninstaller did not complete; resolve the message above and re-run. Only if $cli_path fails to start at all (not when it refused because services are still running) remove it and re-run this script."
   fi
   CLI_DELEGATED=1
+}
+
+# Fallback cleanup may run without the typed CLI uninstaller, so it must prove
+# every user launchd job is absent before deleting files that a live process
+# could still be using. `bootout` alone is not proof: launchctl can fail for
+# reasons other than an already-absent job.
+stop_user_launchd_job() {
+  local label="$1"
+  local target="gui/$UID/$label"
+  local bootout_status=0 print_output="" print_status=0
+  if [ "$DRY_RUN" -eq 1 ]; then
+    run launchctl bootout "$target"
+    return 0
+  fi
+
+  launchctl bootout "$target" >/dev/null 2>&1 || bootout_status=$?
+  print_output="$(launchctl print "$target" 2>&1)" && print_status=0 || print_status=$?
+  if [ "$print_status" -eq 0 ]; then
+    die "launchd job is still loaded after bootout: $label"
+  fi
+  case "$print_output" in
+    *"Could not find service"*|*"could not find service"*|*"No such process"*|*"no such process"*)
+      return 0
+      ;;
+  esac
+  die "could not prove launchd job is absent: $label (bootout status $bootout_status, print status $print_status)"
 }
 
 remove_owned_temp() {
@@ -228,8 +460,23 @@ remove_temp_residue() {
 # here.
 cleanup_application_support() {
   [ -d "$MANIFEST_DIR" ] || return 0
+  assert_safe_application_support || die "refusing unsafe Application Support cleanup"
   keep_tombstone=0
-  if [ -f "$MANIFEST_DIR/lifecycle/state-v1.json" ]; then
+  if python3 - "$MANIFEST_DIR/lifecycle/state-v1.json" <<'PY'
+import json, os, stat, sys
+path = sys.argv[1]
+try:
+    info = os.lstat(path)
+    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != os.getuid():
+        raise ValueError("unsafe lifecycle state")
+    with open(path, encoding="utf-8") as handle:
+        state = json.load(handle)
+    if not isinstance(state, dict) or state.get("state") != "uninstalled":
+        raise ValueError("not an uninstall tombstone")
+except (OSError, UnicodeDecodeError, ValueError):
+    raise SystemExit(1)
+PY
+  then
     keep_tombstone=1
   fi
   for entry in "$MANIFEST_DIR"/* "$MANIFEST_DIR"/.[!.]*; do
@@ -261,9 +508,9 @@ main() {
     log "Aborted."
     exit 7
   fi
-  if installer_active; then
-    die "an installer is still running (it holds $INSTALL_LOCK_PATH); let it finish or stop it, then re-run."
-  fi
+  acquire_uninstall_lock
+  assert_safe_application_support || die "refusing unsafe Application Support path"
+  validate_manifest_removal_paths
   delegate_to_cli
 
   manifest_missing=0
@@ -283,11 +530,11 @@ live.streamvc.macprovider-watchdog"
   fi
   while IFS= read -r label; do
     [ -n "$label" ] || continue
-    run launchctl bootout "gui/$UID/$label" >/dev/null 2>&1 || true
+    stop_user_launchd_job "$label"
   done <<EOF
 $labels
 EOF
-  run launchctl bootout "gui/$UID/$INSTALL_RECOVERY_LABEL" >/dev/null 2>&1 || true
+  stop_user_launchd_job "$INSTALL_RECOVERY_LABEL"
   remove_tree_if_allowed "plist" "$INSTALL_RECOVERY_PLIST_PATH" "$INSTALL_RECOVERY_PLIST_PATH"
 
   plists="$(manifest_json_value launchd_plists 2>/dev/null || true)"

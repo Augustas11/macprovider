@@ -21,18 +21,55 @@ setup() {
   : >"$TMP/calls"
   export HOME="$TMP/home" TMPDIR="$TMP/tmpdir/" MACPROVIDER_NO_PROMPT=1
   export MACPROVIDER_UNINSTALL_SYSTEM_TMPDIR="$TMP/systmp"
+  unset ASSERT_UNINSTALL_LOCK_HELD
+  unset FAIL_LAUNCHCTL_BOOTOUT
   # Never let the test resolve the developer's real model cache.
   unset HF_HOME HF_HUB_CACHE
   mkdir -p "$HOME" "$TMPDIR" "$MACPROVIDER_UNINSTALL_SYSTEM_TMPDIR" "$TMP/stubs"
-  for tool in launchctl defaults security; do
+  for tool in defaults security; do
     printf '#!/usr/bin/env bash\necho "%s $*" >>"%s"\n' "$tool" "$TMP/calls" >"$TMP/stubs/$tool"
     chmod +x "$TMP/stubs/$tool"
   done
+  cat >"$TMP/stubs/launchctl" <<EOF
+#!/usr/bin/env bash
+if [ "\${ASSERT_UNINSTALL_LOCK_HELD:-0}" = 1 ]; then
+  python3 - "\$HOME/.config/macprovider/install.lock" <<'PY'
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDWR)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    raise SystemExit(0)
+raise SystemExit(91)
+PY
+fi
+echo "launchctl \$*" >>"$TMP/calls"
+case "\${1:-}" in
+  bootout)
+    if [ "\${FAIL_LAUNCHCTL_BOOTOUT:-0}" = 1 ]; then
+      echo "Boot-out failed: 5: Input/output error" >&2
+      exit 5
+    fi
+    exit 0
+    ;;
+  print)
+    if [ "\${FAIL_LAUNCHCTL_BOOTOUT:-0}" = 1 ]; then
+      echo "service = { state = running }"
+      exit 0
+    fi
+    echo "Could not find service \"\${2:-}\" in domain" >&2
+    exit 113
+    ;;
+esac
+EOF
+  chmod +x "$TMP/stubs/launchctl"
   export PATH="$TMP/stubs:$ORIGINAL_PATH"
 
   cfg="$HOME/.config/macprovider"
   mkdir -p "$cfg/install-recovery-20260908T022203Z-75088" "$cfg/protected-credentials"
-  for f in install.lock autotune-hmac-secret config.yaml provider_id; do echo x >"$cfg/$f"; done
+  : >"$cfg/install.lock"
+  chmod 600 "$cfg/install.lock"
+  for f in autotune-hmac-secret config.yaml provider_id; do echo x >"$cfg/$f"; done
 
   support="$HOME/Library/Application Support/macprovider"
   mkdir -p "$support/models/mlx-community--Qwen3-8B-4bit/rev/sha" "$support/lifecycle" "$support/protected-credentials-v1"
@@ -178,5 +215,70 @@ grep -q "an installer is still running" "$TMP/out" || fail "owner-record install
 kept "$HOME/Library/Application Support/macprovider/models"
 # A stale record (owner gone) must not block uninstall.
 bash "$UNINSTALL_SH" >"$TMP/out" 2>&1 || { cat "$TMP/out"; fail "stale owner record blocked uninstall"; }
+
+# 8. The kernel lock remains held while destructive launchctl/removal work runs.
+setup
+export ASSERT_UNINSTALL_LOCK_HELD=1
+bash "$UNINSTALL_SH" >"$TMP/out" 2>&1 || { cat "$TMP/out"; fail "uninstall did not retain transaction lock"; }
+
+# 9. A trusted manifest binary_path is authoritative for custom-prefix installs.
+setup
+custom="$HOME/custom-provider"
+mkdir -p "$custom"
+cat >"$custom/macprovider-cli" <<EOF
+#!/usr/bin/env bash
+echo "manifest-cli \$*" >>"$TMP/calls"
+exit 0
+EOF
+chmod 700 "$custom/macprovider-cli"
+cat >"$HOME/Library/Application Support/macprovider/install_manifest.json" <<EOF
+{"install_prefix":"$custom","binary_path":"$custom/macprovider-cli","launchd_labels":[],"launchd_plists":[],"data_dirs":["$custom"]}
+EOF
+bash "$UNINSTALL_SH" >"$TMP/out" 2>&1 || { cat "$TMP/out"; fail "manifest CLI delegation failed"; }
+grep -q "^manifest-cli uninstall --yes$" "$TMP/calls" || fail "manifest binary_path was not delegated"
+
+# 10. Only a parsed uninstalled tombstone is retained.
+for state in serving_buyers update_in_progress rollback_in_progress; do
+  setup
+  printf '{"state":"%s"}\n' "$state" >"$HOME/Library/Application Support/macprovider/lifecycle/state-v1.json"
+  bash "$UNINSTALL_SH" >"$TMP/out" 2>&1 || { cat "$TMP/out"; fail "cleanup failed for lifecycle state $state"; }
+  gone "$HOME/Library/Application Support/macprovider/lifecycle"
+done
+setup
+printf '{malformed\n' >"$HOME/Library/Application Support/macprovider/lifecycle/state-v1.json"
+bash "$UNINSTALL_SH" >"$TMP/out" 2>&1 || { cat "$TMP/out"; fail "cleanup failed for malformed lifecycle state"; }
+gone "$HOME/Library/Application Support/macprovider/lifecycle"
+
+# 11. Symlinked support/lifecycle roots fail before any outside deletion.
+setup
+rm -rf "$HOME/Library/Application Support/macprovider"
+ln -s "$TMP/outside" "$HOME/Library/Application Support/macprovider"
+if bash "$UNINSTALL_SH" >"$TMP/out" 2>&1; then fail "symlinked support root was accepted"; fi
+kept "$TMP/outside/keep"
+[ -s "$TMP/calls" ] && fail "commands ran for symlinked support root"
+setup
+rm -rf "$HOME/Library/Application Support/macprovider/lifecycle"
+mkdir -p "$TMP/outside/lifecycle"
+echo precious >"$TMP/outside/lifecycle/keep"
+ln -s "$TMP/outside/lifecycle" "$HOME/Library/Application Support/macprovider/lifecycle"
+if bash "$UNINSTALL_SH" >"$TMP/out" 2>&1; then fail "symlinked lifecycle root was accepted"; fi
+kept "$TMP/outside/lifecycle/keep"
+
+# 12. Malformed lock records fail closed without touching installation data.
+setup
+printf '{malformed\n' >"$HOME/.config/macprovider/install.lock"
+if bash "$UNINSTALL_SH" >"$TMP/out" 2>&1; then fail "malformed lock record was accepted"; fi
+grep -q "refusing unsafe install lock state" "$TMP/out" || fail "unsafe lock was not reported"
+kept "$HOME/Library/Application Support/macprovider/models"
+
+# 13. Fallback cleanup must not remove files underneath a launchd job that
+# could not be stopped and is still reported as loaded.
+setup
+export FAIL_LAUNCHCTL_BOOTOUT=1
+if bash "$UNINSTALL_SH" >"$TMP/out" 2>&1; then fail "cleanup continued after launchd stop failure"; fi
+grep -q "launchd job is still loaded" "$TMP/out" || fail "loaded launchd job was not reported"
+kept "$HOME/Library/Application Support/macprovider/models"
+kept "$HOME/Library/LaunchAgents/live.malibu.provider-install-recovery.plist"
+kept "${TMPDIR%/}/tmp.installer"
 
 echo "uninstall residue ok"
