@@ -3396,6 +3396,9 @@ func (s *Server) forwardHTTPSequence(
 				_ = resp.Body.Close()
 				state.phaseTiming.markProviderDone(phaseTimingNow(s))
 				attempt.ErrorCode = nullUsageProviderErrorCode(respBody)
+				if code := httpProviderContextExceededCode(status, respBody); code != "" {
+					attempt.ErrorCode = code
+				}
 				receiptValue := normalizeReceiptHeaderValue(resp.Header.Get("X-MacProvider-Receipt"))
 				terminalState := terminalStateFromAttempt(status, http.StatusText(status), attempt.ErrorCode)
 				terminalTS := time.Now().UTC().UnixMilli()
@@ -3403,6 +3406,35 @@ func (s *Server) forwardHTTPSequence(
 					terminalTS = providerTS
 				}
 				attempt.SettlementOutput = settlementOutputForContentAt("", nil, nil, terminalState, terminalTS)
+				if attempt.ErrorCode == "context_length_exceeded" {
+					if cancelled, ok := s.poolAttemptCancelledDuringDispatch(r, state); ok {
+						cancelAttempt()
+						return cancelled, true
+					}
+					if err := rec.withPendingReceipt(state.provider, receiptValue, func() error {
+						return rec.recordRow(state.provider.AssignedID, state.provider.ProviderID, state.provider.RuntimeSource, status, nil, nil, nil, "Request exceeds provider context capacity", attempt.ErrorCode, state.explicitRetries, nil, billing.FaultNone, attempt.SettlementOutput)
+					}); err != nil {
+						cancelAttempt()
+						writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
+						return dispatchedAttempt{}, false
+					}
+					receiptState, hasReceiptState, err := rec.ingestSettlementReceipt(state.provider, receiptValue)
+					if err != nil {
+						cancelAttempt()
+						writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log settlement receipt")
+						return dispatchedAttempt{}, false
+					}
+					if hasReceiptState {
+						setInternalSettlementOutcomeHeaders(w.Header(), rec, receiptState)
+					}
+					setReceiptHeaderForProvider(w.Header(), receiptValue, state.provider)
+					w.Header().Set("X-MacProvider-Provider", state.provider.ProviderID)
+					w.Header().Set(engineResponseHeader, providerEngineClass(state.provider))
+					w.Header().Set("X-MacProvider-Route", state.provider.AssignedID)
+					writeError(w, http.StatusRequestEntityTooLarge, "context_exceeds_capacity", "Request exceeds provider context capacity")
+					cancelAttempt()
+					return dispatchedAttempt{}, false
+				}
 				if isSpec019ProviderDetailCode(attempt.ErrorCode) {
 					attempt.SettlementOutput = settlementOutputForContentAt("", nil, nil, terminalState, terminalTS)
 					if cancelled, ok := s.poolAttemptCancelledDuringDispatch(r, state); ok {
@@ -4691,8 +4723,6 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	streamingMode := s.streamingMode(r, provider)
 	streamingBuyer := s.streamingBuyerKey(r)
 	if resp.StatusCode != http.StatusOK {
-		s.log.Warn().Int("status", resp.StatusCode).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider returned non-200")
-		s.handleProviderFailure(provider, resp.StatusCode)
 		body := io.Reader(resp.Body)
 		if state != nil {
 			body = &firstByteTimingReader{
@@ -4705,6 +4735,23 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		respBody, _ := readLimitedBody(body, maxUpstreamResponseBodyBytes)
 		markProviderDone()
 		attempt := requestLogAttempt{Status: resp.StatusCode, Error: http.StatusText(resp.StatusCode), ErrorCode: spec001StatusFromBody(respBody)}
+		if code := httpProviderContextExceededCode(resp.StatusCode, respBody); code != "" {
+			terminalTS := time.Now().UTC().UnixMilli()
+			if providerTS, ok := trustedProviderTerminalStateTS(resp.Header.Get(receiptTerminalStateTSHeaderName), started, time.Now().UTC()); ok {
+				terminalTS = providerTS
+			}
+			attempt.Error = "Request exceeds provider context capacity"
+			attempt.ErrorCode = code
+			attempt.SettlementReceipt = normalizeReceiptHeaderValue(resp.Header.Get("X-MacProvider-Receipt"))
+			attempt.SettlementOutput = settlementOutputForContentAt("", nil, nil, billing.TerminalStateProviderError, terminalTS)
+			setReceiptHeaderForProvider(w.Header(), attempt.SettlementReceipt, provider)
+			w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
+			w.Header().Set(engineResponseHeader, providerEngineClass(provider))
+			w.Header().Set("X-MacProvider-Route", provider.AssignedID)
+			return wsForwardContextExceeded, resp.StatusCode, attempt
+		}
+		s.log.Warn().Int("status", resp.StatusCode).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider returned non-200")
+		s.handleProviderFailure(provider, resp.StatusCode)
 		if resp.StatusCode == http.StatusGatewayTimeout {
 			return wsForwardTimedOut, resp.StatusCode, attempt
 		}
@@ -10663,6 +10710,24 @@ func nullUsageProviderErrorCode(body []byte) string {
 		return ""
 	}
 	return spec001EndStatus(envelope.Error.Code)
+}
+
+func httpProviderContextExceededCode(status int, body []byte) string {
+	if status != http.StatusRequestEntityTooLarge {
+		return ""
+	}
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return ""
+	}
+	if strings.TrimSpace(envelope.Error.Code) != "context_length_exceeded" {
+		return ""
+	}
+	return "context_length_exceeded"
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
