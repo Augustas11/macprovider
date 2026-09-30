@@ -1,7 +1,13 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.41 (2026-09-30, reservation-bound provider output)
+**Version:** 0.9.42 (2026-09-30, 32k default per-request output cap)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.42 (2026-09-30 — per-request output cap default):**
+- `limits.max_tokens_per_request` default raises from 4096 to 32768. The cap bounds generated
+  output only; reasoning models (qwen3.6, gpt-oss) exhaust 4096 before the visible answer.
+  Reservation, reject-not-clamp, and demo cap (512) are unchanged. Production Pearl was
+  hot-fixed to 32768 in the installed gateway config on 2026-09-30.
 
 **Change log v0.9.41 (2026-09-30, reservation-bound provider output):**
 For each canonical chat request, the gateway forwards its resolved completion
@@ -702,7 +708,7 @@ This section is read-only design input and MUST NOT be treated as a place to pro
 - **Unauthenticated demo quota: 1,000 total tokens per IP per day.** Demo traffic is allowed via specific endpoints (chat playground through front door) and a tiny `X-Demo-Token` header sourced from the Vercel demo's session cookie.
 - **Per-account concurrency cap: 2 concurrent requests** at v1. Adjustable.
 - **Per-IP signup issuance: 3 accounts per IP per day** (Sybil defense).
-- **Per-request `max_tokens` cap: 4,096** at v1. Adjustable.
+- **Per-request `max_tokens` cap: 32,768** at v1. Adjustable.
 
 ### 2.5 Provider transparency
 
@@ -1591,10 +1597,10 @@ Document shape (schema 2.4):
       "output_modalities": [
         {
           "type": "text",
-          "max_length": { "value": 4096, "unit": "token" },
+          "max_length": { "value": 32768, "unit": "token" },
           "streaming": true,
           "supported_parameters": {
-            "max_tokens": { "type": "integer", "min": 1, "max": 4096, "unit": "token" },
+            "max_tokens": { "type": "integer", "min": 1, "max": 32768, "unit": "token" },
             "temperature": { "type": "range", "min": 0, "max": 2 },
             "top_p": { "type": "range", "min": 0, "max": 1 },
             "stop": { "type": "array", "max_items": 4 },
@@ -1708,7 +1714,7 @@ otherwise non-text content parts MUST be rejected with HTTP 400,
 
 Gateway request caps:
 
-- `max_tokens` MUST be capped at `limits.max_tokens_per_request`, default 4096.
+- `max_tokens` MUST be capped at `limits.max_tokens_per_request`, default 32768. The cap bounds generated output tokens only (prompt plus output stays bounded by the provider context window); reasoning models spend part of the budget before the visible answer, so 4096 truncated real work.
 - Demo `max_tokens` SHOULD be further capped by `demo.max_tokens_per_request`, default 512.
 - Requests exceeding configured caps MUST receive `400` or be clamped only if the clamping behavior is documented. v1 SHOULD reject rather than silently clamp authenticated API requests.
 
@@ -2484,7 +2490,7 @@ Default quotas:
 - Per-account concurrent requests: 4.
 - Per-account request-start rate: 30 requests per second per gateway instance.
 - Per-IP signup issuance per day: 3 accounts.
-- Authenticated max tokens per request: 4,096.
+- Authenticated max tokens per request: 32,768.
 - Demo max tokens per request: 512 unless configured otherwise.
 
 All defaults MUST be configurable in `gateway.yaml`.
@@ -3378,7 +3384,7 @@ quotas:
   signup_accounts_per_ip_per_day: 3
 
 limits:
-  max_tokens_per_request: 4096
+  max_tokens_per_request: 32768
   demo_max_tokens_per_request: 512
   max_feedback_comment_bytes: 2000
   request_body_bytes: 1048576
