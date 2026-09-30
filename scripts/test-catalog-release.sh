@@ -641,7 +641,7 @@ with tempfile.TemporaryDirectory() as directory:
         "model_sha256": qwen_row["model_sha256"],
         "tokenizer_sha256": "c" * 64,
         "chat_template_sha256": "d" * 64,
-        "cache_class": "KVCacheSimple",
+        "cache_class": "mixed",
         "kv_dtype": "fp16",
         "requires_moe": False,
         "hardware_class": "apple-silicon:m4-max:ram-64gb",
@@ -668,7 +668,7 @@ with tempfile.TemporaryDirectory() as directory:
     if len(generated_policy_obj["entries"]) != 1:
         raise SystemExit("curated CB policy source entry was not preserved by generation")
     generated_entry = generated_policy_obj["entries"][0]
-    if generated_entry["rollout"] != "canary" or len(generated_entry["tuple_sha256"]) != 64:
+    if generated_entry["cache_class"] != "mixed" or generated_entry["rollout"] != "canary" or len(generated_entry["tuple_sha256"]) != 64:
         raise SystemExit("curated CB policy source entry was not canonically completed")
 module.CB_POLICY_SOURCE_PATH = original_cb_source_path
 

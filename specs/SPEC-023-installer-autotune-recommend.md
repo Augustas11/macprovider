@@ -1,12 +1,18 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.0
+version: v0.22.1
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-09-30
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.22.1 (2026-09-30)** — Signed continuous-batching policy admits measured
+  mixed cache identities (#1778). The closed `cache_class` enum for
+  `continuous-batching-policy.json` now permits exactly `KVCacheSimple` and
+  `mixed`, matching the current paged-KV runtime identities without weakening
+  tuple digest, signer, provenance, or local-proof gates.
 
 - **v0.22.0 (2026-09-30)** — Operator-pinned price for OpenRouter-listed rows
   (§3.3.2 rule 5a) and own-provider exclusion (rule 4). A Malibu row that
@@ -3336,7 +3342,9 @@ studio_campaign_sha256, provider_cli_version, live_executable_cdhash}`.
 with `tuple_sha256` removed, under the domain
 `macprovider.continuous-batching-policy-tuple.v1`. For the current runtime
 descriptor contract, `model_id` MUST equal `model_key`; `model_sha256` binds
-the candidate row. Unknown, missing, stale, unsigned, wrong-signer, malformed,
+the candidate row; and `cache_class` MUST be either `KVCacheSimple` or `mixed`,
+the two cache identities the current paged-KV runtime can measure and admit.
+Unknown, missing, stale, unsigned, wrong-signer, malformed,
 expired, catalog-mismatched, or identity-mismatched policy cannot authorize CB;
 the policy bytes recorded for one release are immutable. V1 remote invalidation
 is bounded by `expires_at`, which the decode path rechecks before admission; a

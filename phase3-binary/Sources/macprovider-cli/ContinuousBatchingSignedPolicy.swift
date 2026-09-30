@@ -322,7 +322,12 @@ enum ContinuousBatchingSignedPolicy {
                 modelSHA256: try requireSHA256(entry, "model_sha256", path: path),
                 tokenizerSHA256: try requireSHA256(entry, "tokenizer_sha256", path: path),
                 chatTemplateSHA256: try requireSHA256(entry, "chat_template_sha256", path: path),
-                cacheClass: try requireString(entry, "cache_class", path: path, allowed: ["KVCacheSimple"]),
+                cacheClass: try requireString(
+                    entry,
+                    "cache_class",
+                    path: path,
+                    allowed: ["KVCacheSimple", "mixed"]
+                ),
                 kvDType: PagedKVDType(rawValue: kvDTypeRaw)!,
                 requiresMoE: try requireBool(entry, "requires_moe", path: path),
                 hardwareClass: try requireShortString(entry, "hardware_class", path: path),
