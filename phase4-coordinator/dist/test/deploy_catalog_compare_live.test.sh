@@ -73,11 +73,11 @@ awk '/^_append_catalog_window_override\(\) \{$/{f=1} f{print} f&&/^}$/{exit}' \
 grep -q 'cwo_override_remote_command' "$TMP/append-helper.sh" || fail "could not extract the override append helper"
 
 # --- Fake Pearl --------------------------------------------------------------
-BASE_FILES="demand-rank.json demand-rank.json.sig autotune-candidates.json autotune-candidates.json.sig rate-card.json rate-card.json.sig tier2-catalog.json release.json trusted-keys.json"
+BASE_FILES="demand-rank.json demand-rank.json.sig autotune-candidates.json autotune-candidates.json.sig rate-card.json rate-card.json.sig continuous-batching-policy.json continuous-batching-policy.json.sig tier2-catalog.json release.json trusted-keys.json"
 BOUND_FILES="$BASE_FILES autotune-artifacts.json autotune-artifacts.json.sig"
 COMMITTED_ID="published-2026-09-25-artifact-hash-correction-v1"
 BOUND_ID="published-2026-09-30-artifact-bound-v1"
-# BOUND=1 switches every fixture to the artifact-bound (eleven-file) release.
+# BOUND=1 switches every fixture to the artifact-bound (thirteen-file) release.
 BOUND=0
 RELEASE_FILES="$BASE_FILES"
 INCOMING_ID="$COMMITTED_ID"
@@ -107,17 +107,24 @@ for name in ("autotune-candidates.json", "demand-rank.json", "rate-card.json"):
     o["generated_at"] = gen
     (d / name).write_bytes(cr.canonical_bytes(o))
 candidate = (d / "autotune-candidates.json").read_bytes()
+cb_policy = json.loads((d / "continuous-batching-policy.json").read_bytes())
+cb_policy["release_id"] = rid
+cb_policy["generated_at"] = gen
+cb_policy["candidate_catalog_sha256"] = cr.sha256(candidate)
+(d / "continuous-batching-policy.json").write_bytes(cr.canonical_sorted_bytes(cb_policy))
 artifact = {"models": [], "version": rid, "release_id": rid, "generated_at": gen,
             "candidate_catalog_sha256": cr.sha256(candidate), "policy_version": "autotune-policy-v1", "source": "deploy-test"}
 (d / "autotune-artifacts.json").write_bytes(cr.canonical_sorted_bytes(artifact))
 (d / "autotune-artifacts.json.sig").write_bytes((d / "autotune-candidates.json.sig").read_bytes())
 m = json.loads((d / "release.json").read_bytes())
 m["release_id"], m["generated_at"] = rid, gen
-for name in ("autotune-candidates.json", "demand-rank.json", "rate-card.json", "autotune-artifacts.json"):
+for name in ("autotune-candidates.json", "demand-rank.json", "rate-card.json", "continuous-batching-policy.json", "autotune-artifacts.json"):
     raw = (d / name).read_bytes()
     entry = m["feeds"].setdefault(name, dict(m["feeds"]["autotune-candidates.json"]))
     entry.update(sha256=cr.sha256(raw), bytes=len(raw))
-    if name != "rate-card.json":
+    if name not in ("rate-card.json", "continuous-batching-policy.json"):
+        entry["version"] = rid
+    if name == "continuous-batching-policy.json":
         entry["version"] = rid
 (d / "release.json").write_text(json.dumps(m, indent=2))
 PY
@@ -533,18 +540,18 @@ else
 fi
 VERIFY_MODE=stub
 
-# --- Artifact-bound (eleven-file) release set --------------------------------
+# --- Artifact-bound (thirteen-file) release set ------------------------------
 BOUND=1
 RELEASE_FILES="$BOUND_FILES"
 INCOMING_ID="$BOUND_ID"
-[ "$(echo $RELEASE_FILES | wc -w | tr -d ' ')" = 11 ] || fail "artifact-bound set must be eleven files"
+[ "$(echo $RELEASE_FILES | wc -w | tr -d ' ')" = 13 ] || fail "artifact-bound set must be thirteen files"
 bound_block="$(sed -n '/^CATALOG_RELEASE_FILES="demand-rank.json/,/^fi$/p' "$DEPLOY_SH")"
 # shellcheck disable=SC2034 # consumed by the eval'd deploy block
 bound_deploy_files="$(AUTOTUNE_ARTIFACT_BOUND=bound; eval "$bound_block"; echo "$CATALOG_RELEASE_FILES")"
 [ "$bound_deploy_files" = "$BOUND_FILES" ] || fail "harness bound file set drifted from deploy's CATALOG_RELEASE_FILES"
 
 # bound equivalent: live is a renewal restamp of the bound release; the smoke
-# expectations rebind to a snapshot of all eleven live files.
+# expectations rebind to a snapshot of all thirteen live files.
 reset
 live_release renewed-live
 restamp "$ROOT/autotune/releases/renewed-live" published-2026-10-01-renewal-v1

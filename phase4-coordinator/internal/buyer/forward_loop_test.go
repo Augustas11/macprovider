@@ -207,6 +207,96 @@ func TestM2_1C_RowSequence_HTTPRetryToSuccess(t *testing.T) {
 	}
 }
 
+func TestHTTPNonStreamingContextExceededDoesNotRetryOrFault(t *testing.T) {
+	testHTTPContextExceededDoesNotRetryOrFault(t, false)
+}
+
+func TestHTTPStreamingContextExceededDoesNotRetryOrFault(t *testing.T) {
+	testHTTPContextExceededDoesNotRetryOrFault(t, true)
+}
+
+func testHTTPContextExceededDoesNotRetryOrFault(t *testing.T, stream bool) {
+	t.Helper()
+	const receipt = "trusted.context-exceeded.receipt"
+	badCalls := 0
+	badUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		badCalls++
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-MacProvider-Receipt", receipt)
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+		_, _ = w.Write([]byte(`{"error":{"message":"request exceeds served context","type":"context_length_exceeded","param":"max_tokens","code":"context_length_exceeded"}}`))
+	}))
+	defer badUpstream.Close()
+
+	okCalls := 0
+	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		okCalls++
+		if stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"id\":\"unexpected\",\"choices\":[{\"delta\":{\"content\":\"unexpected\"}}]}\n\ndata: [DONE]\n\n"))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"unexpected","choices":[{"message":{"content":"unexpected"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer okUpstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "context", EndpointURL: badUpstream.URL},
+		{ProviderID: "fallback", EndpointURL: okUpstream.URL},
+	})
+	pubkey := bytes.Repeat([]byte{0x63}, 32)
+	registerWithEndpointReceiptPubkey(registry, "context", "s1", "model-a", pool.StateReady, 20000, 1, badUpstream.URL, 30, pubkey)
+	registerWithEndpointReceiptPubkey(registry, "fallback", "s2", "model-a", pool.StateReady, 20000, 1, okUpstream.URL, 20, pubkey)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              1,
+			RetryPerAttemptTimeoutS: 5,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+	)
+
+	body := []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":false}`)
+	if stream {
+		body = []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`)
+	}
+	rr := postChat(t, server, body, http.Header{"X-MacProvider-Retry": []string{"1"}})
+
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d body=%s, want 413", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"context_exceeds_capacity"`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"type":"invalid_request_error"`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"retryable":false`)) {
+		t.Fatalf("body=%s, want canonical non-retryable context capacity error", rr.Body.String())
+	}
+	if bytes.Contains(rr.Body.Bytes(), []byte(`"usage"`)) {
+		t.Fatalf("body=%s, want null/absent usage on context rejection", rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Receipt"); got != receipt {
+		t.Fatalf("receipt=%q, want %q", got, receipt)
+	}
+	if badCalls != 1 || okCalls != 0 {
+		t.Fatalf("provider calls context=%d fallback=%d, want 1/0 despite retry budget", badCalls, okCalls)
+	}
+	rows := queryAllRequestLogRows(t, dbPath)
+	if len(rows) != 1 {
+		t.Fatalf("request_log rows=%d, want exactly one terminal attempt: %#v", len(rows), rows)
+	}
+	if rows[0].Status != http.StatusRequestEntityTooLarge || !rows[0].ErrorCode.Valid || rows[0].ErrorCode.String != "context_length_exceeded" || rows[0].Retried != 0 {
+		t.Fatalf("row=%+v, want 413/context_length_exceeded/retried=0", rows[0])
+	}
+	if rows[0].PromptTokens.Valid || rows[0].CompletionTokens.Valid {
+		t.Fatalf("usage=%#v/%#v, want NULL/NULL", rows[0].PromptTokens, rows[0].CompletionTokens)
+	}
+	for _, provider := range registry.Snapshot() {
+		if provider.State != pool.StateReady {
+			t.Fatalf("provider %s state=%s, want ready after buyer context error", provider.ProviderID, provider.State)
+		}
+	}
+}
+
 func TestB1_RequestLogNoProviderRetryRowDoesNotInheritProviderTiming(t *testing.T) {
 	const requestID = "eeeeeeee-5555-4555-8555-555555555555"
 	failUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

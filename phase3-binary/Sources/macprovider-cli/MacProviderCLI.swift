@@ -393,7 +393,7 @@ struct ServeCommand: AsyncParsableCommand {
     )
     var prefillStepSize: Int?
 
-    @Option(help: "Continuous batching mode: off, canary, or on. Default off. Strict on fails closed unless the requested tuple is both advertised by the local paged-KV engine and listed under config key continuous_batching_accepted_tuples; canary serial-routes with reason tuple_acceptance_coverage_unavailable instead. Overrides MACPROVIDER_CONTINUOUS_BATCHING and config key continuous_batching.")
+    @Option(help: "Continuous batching mode: off, canary, or on. When unset, verified signed model capability policy selects the rollout automatically. Explicit off is the emergency override. Explicit canary/on cannot bypass signed tuple authorization or local paged-KV proofs. Overrides MACPROVIDER_CONTINUOUS_BATCHING and config key continuous_batching.")
     var continuousBatching: String?
 
     @Option(help: "Bounded continuous-batching waiting queue limit. Default 2 * active slots. Overrides MACPROVIDER_CONTINUOUS_BATCH_QUEUE_LIMIT and config key continuous_batch_queue_limit.")
@@ -875,6 +875,32 @@ struct ServeCommand: AsyncParsableCommand {
             self.siblingSnapshotSHA256 = siblingSnapshotSHA256
             self.siblingSnapshotRevision = siblingSnapshotRevision
         }
+    }
+
+    static func loadContinuousBatchingPolicy(
+        catalogTrust: CatalogRuntimeTrust?,
+        staticInputs: AutotuneStaticInputs = AutotuneStaticInputs()
+    ) async -> ContinuousBatchingPolicyLoadResult {
+        guard let catalogTrust else {
+            return ContinuousBatchingPolicyLoadResult(
+                selection: .emptyOff,
+                status: .absentFallback,
+                policySHA256: nil,
+                signerKeyID: nil
+            )
+        }
+        let candidate = await staticInputs.loadCandidateCatalog()
+        guard candidate.value.version == catalogTrust.releaseID,
+              AutotuneStaticInputs.candidateCatalogSHA256(bytes: candidate.selectedBytes) == catalogTrust.digest,
+              candidate.signerKeyID == catalogTrust.signerKeyID else {
+            return ContinuousBatchingPolicyLoadResult(
+                selection: .emptyOff,
+                status: .updateRequiredFallback,
+                policySHA256: nil,
+                signerKeyID: nil
+            )
+        }
+        return await staticInputs.loadContinuousBatchingPolicy(candidateCatalog: candidate)
     }
 
     struct VerifiedModelRuntimeBinding {
@@ -2281,6 +2307,40 @@ struct ServeCommand: AsyncParsableCommand {
         }
         let verifiedDraftModelLoadPath = startupPreflight.verifiedDraftModelLoadPath
 
+        let continuousBatchingPolicy = await Self.loadContinuousBatchingPolicy(
+            catalogTrust: startupPreflight.catalogTrust
+        )
+        let continuousBatchingRunningBuildIdentity = ModelRuntime.nativeMTPRunningBuildIdentity()
+        let runtimeCompatiblePolicyEntries = continuousBatchingPolicy.selection.entries.filter {
+            ContinuousBatchingSignedPolicy.matchesRuntimeProvenance(
+                $0,
+                liveExecutableCDHash: continuousBatchingRunningBuildIdentity?.liveExecutableCDHash
+            )
+        }
+        let currentPolicyKeys = Set([resolved.modelCatalogKey, resolved.model].compactMap { $0 })
+        let currentPolicyEntries = runtimeCompatiblePolicyEntries.filter {
+            currentPolicyKeys.contains($0.modelKey)
+        }
+        let emergencyOffOverride = resolved.continuousBatchingExplicitlyConfigured
+            && resolved.continuousBatching == .off
+        if !emergencyOffOverride,
+           !currentPolicyEntries.isEmpty,
+           !resolved.pagedKVEnabledExplicitlyConfigured,
+           resolved.pagedKV.errors.isEmpty {
+            resolved.pagedKV.enabled = true
+        }
+        if !resolved.continuousBatchingAcceptedTuples.isEmpty, !noJoin {
+            FileHandle.standardError.write(Data(
+                "event=continuous_batching_manual_tuple action=ignored reason=signed_policy_required\n".utf8
+            ))
+        }
+        let policyAcceptedTuples = runtimeCompatiblePolicyEntries.map(\.tuple)
+        let effectiveAcceptedTuples = policyAcceptedTuples
+            + (noJoin ? resolved.continuousBatchingAcceptedTuples : [])
+        FileHandle.standardError.write(Data(
+            "event=continuous_batching_policy action=resolved status=\(continuousBatchingPolicy.status.rawValue) entries=\(runtimeCompatiblePolicyEntries.count) rejected_runtime_provenance=\(continuousBatchingPolicy.selection.entries.count - runtimeCompatiblePolicyEntries.count) emergency_off=\(emergencyOffOverride)\n".utf8
+        ))
+
         printResolvedConfiguration(resolved)
 
         // T3-03: apply family-based KV-quant default when the operator has
@@ -2476,7 +2536,9 @@ struct ServeCommand: AsyncParsableCommand {
                     speculativeCacheWrapValidated: speculativeCacheWrapValidated,
                     maxContextTokensOverride: resolved.maxContextOverride,
                     kvBitsOverride: effectiveKVBits,
-                    pagedKVConfig: resolved.pagedKV,
+                    pagedKVConfig: resolved.pagedKV.sizedToCover(
+                        contextTokens: ProviderCapacity(maxContextOverride: resolved.maxContextOverride, maxConcurrencyOverride: nil).maxContextTokens
+                    ),
                     prefillStepSize: resolved.prefillStepSize,
                     maxBatch: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride),
                     continuousBatchingMode: resolved.continuousBatching,
@@ -2485,8 +2547,11 @@ struct ServeCommand: AsyncParsableCommand {
                     continuousBatchPrefillTokensPerIteration: resolved.continuousBatchPrefillTokensPerIteration,
                     continuousBatchingCachedTurns: resolved.continuousBatchingCachedTurns,
                     continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage(
-                        acceptedTuples: resolved.continuousBatchingAcceptedTuples
+                        acceptedTuples: effectiveAcceptedTuples
                     ),
+                    continuousBatchingPolicyLoadResult: continuousBatchingPolicy,
+                    continuousBatchingEmergencyOffOverride: emergencyOffOverride,
+                    continuousBatchingModeExplicitlyConfigured: resolved.continuousBatchingExplicitlyConfigured,
                     nativeMTPMode: resolved.nativeMTPMode,
                     nativeMTPResolvedArtifactAuthority: startupPreflight.runtimeBinding?.nativeMTPResolvedArtifactAuthority,
                     warmSwapEnabled: resolved.enableWarmSwap,

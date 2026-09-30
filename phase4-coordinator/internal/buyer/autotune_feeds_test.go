@@ -53,14 +53,24 @@ func TestAutotuneFeedsServeLiteralSignedBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read autotune-candidates.json.sig: %v", err)
 	}
+	cbPolicyJSON, err := os.ReadFile(filepath.Join(staticDir, "continuous-batching-policy.json"))
+	if err != nil {
+		t.Fatalf("read continuous-batching-policy.json: %v", err)
+	}
+	cbPolicySig, err := os.ReadFile(filepath.Join(staticDir, "continuous-batching-policy.json.sig"))
+	if err != nil {
+		t.Fatalf("read continuous-batching-policy.json.sig: %v", err)
+	}
 
 	feeds, err := buyer.LoadAutotuneFeeds(config.AutotuneFeedsConfig{
-		RateCardPath:              filepath.Join(staticDir, "rate-card.json"),
-		RateCardSigPath:           filepath.Join(staticDir, "rate-card.json.sig"),
-		DemandRankPath:            filepath.Join(staticDir, "demand-rank.json"),
-		DemandRankSigPath:         filepath.Join(staticDir, "demand-rank.json.sig"),
-		AutotuneCandidatesPath:    filepath.Join(staticDir, "autotune-candidates.json"),
-		AutotuneCandidatesSigPath: filepath.Join(staticDir, "autotune-candidates.json.sig"),
+		RateCardPath:                    filepath.Join(staticDir, "rate-card.json"),
+		RateCardSigPath:                 filepath.Join(staticDir, "rate-card.json.sig"),
+		DemandRankPath:                  filepath.Join(staticDir, "demand-rank.json"),
+		DemandRankSigPath:               filepath.Join(staticDir, "demand-rank.json.sig"),
+		AutotuneCandidatesPath:          filepath.Join(staticDir, "autotune-candidates.json"),
+		AutotuneCandidatesSigPath:       filepath.Join(staticDir, "autotune-candidates.json.sig"),
+		ContinuousBatchingPolicyPath:    filepath.Join(staticDir, "continuous-batching-policy.json"),
+		ContinuousBatchingPolicySigPath: filepath.Join(staticDir, "continuous-batching-policy.json.sig"),
 		PublicKeys: map[string]string{
 			"streamvc-autotune-static-v4": autotuneV4PublicKeyBase64,
 			"streamvc-autotune-static-v5": autotuneV5PublicKeyBase64,
@@ -70,9 +80,10 @@ func TestAutotuneFeedsServeLiteralSignedBytes(t *testing.T) {
 		t.Fatalf("LoadAutotuneFeeds: %v", err)
 	}
 	for name, verification := range map[string]buyer.AutotuneFeedVerification{
-		"rate_card":           feeds.RateCardVerification,
-		"demand_rank":         feeds.DemandRankVerification,
-		"autotune_candidates": feeds.AutotuneCandidatesVerification,
+		"rate_card":                  feeds.RateCardVerification,
+		"demand_rank":                feeds.DemandRankVerification,
+		"autotune_candidates":        feeds.AutotuneCandidatesVerification,
+		"continuous_batching_policy": feeds.ContinuousBatchingPolicyVerification,
 	} {
 		if verification.KeyID != "streamvc-autotune-static-v4" {
 			t.Fatalf("%s key ID=%q", name, verification.KeyID)
@@ -102,6 +113,10 @@ func TestAutotuneFeedsServeLiteralSignedBytes(t *testing.T) {
 	if feeds.RateCardVerification.SHA256 != hex.EncodeToString(rateCardDigest[:]) {
 		t.Fatalf("rate-card digest=%q", feeds.RateCardVerification.SHA256)
 	}
+	cbPolicyDigest := sha256.Sum256(cbPolicyJSON)
+	if feeds.ContinuousBatchingPolicyVerification.SHA256 != hex.EncodeToString(cbPolicyDigest[:]) {
+		t.Fatalf("continuous-batching-policy digest=%q", feeds.ContinuousBatchingPolicyVerification.SHA256)
+	}
 
 	server := buyer.NewServer(
 		pool.NewRegistry(nil),
@@ -121,6 +136,8 @@ func TestAutotuneFeedsServeLiteralSignedBytes(t *testing.T) {
 		{"/v1/demand-rank.sig", demandSig},
 		{"/v1/autotune-candidates", candidatesJSON},
 		{"/v1/autotune-candidates.sig", candidatesSig},
+		{"/v1/continuous-batching-policy", cbPolicyJSON},
+		{"/v1/continuous-batching-policy.sig", cbPolicySig},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -163,6 +180,9 @@ func TestAutotuneFeedsServeLiteralSignedBytes(t *testing.T) {
 	}
 	if release.Feeds["autotune_candidates"].SHA256 != feeds.AutotuneCandidatesVerification.SHA256 || release.Feeds["demand_rank"].SignerKeyID != "streamvc-autotune-static-v4" {
 		t.Fatalf("autotune release feeds=%+v", release.Feeds)
+	}
+	if release.Feeds["continuous_batching_policy"].SHA256 != feeds.ContinuousBatchingPolicyVerification.SHA256 {
+		t.Fatalf("autotune release continuous batching policy=%+v", release.Feeds["continuous_batching_policy"])
 	}
 	partialFeeds := feeds
 	partialFeeds.RateCardJSON = nil
@@ -581,6 +601,8 @@ func TestAutotuneFeedsDisabledWhenUnset(t *testing.T) {
 		"/v1/demand-rank.sig",
 		"/v1/autotune-candidates",
 		"/v1/autotune-candidates.sig",
+		"/v1/continuous-batching-policy",
+		"/v1/continuous-batching-policy.sig",
 		"/v1/catalog-artifacts",
 		"/v1/catalog-artifacts.sig",
 		"/v1/autotune-release",

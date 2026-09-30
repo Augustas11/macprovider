@@ -148,6 +148,8 @@ for value in (
     "CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER=1",
     'python3 "$root/scripts/catalog-release.py" verify-directory',
     '--directory "$catalog_verify_dir"',
+    'install -m 0644 "$cb_policy_unsigned" "$catalog_verify_dir/continuous-batching-policy.json"',
+    'install -m 0644 "$cb_policy_sig_unsigned" "$catalog_verify_dir/continuous-batching-policy.json.sig"',
 ):
     if value not in signer:
         raise SystemExit(f"protected signer does not reverify Tier-2 catalog release: {value}")
@@ -155,6 +157,13 @@ if signer.find("validate-provider-payload --directory") > signer.find("catalog-r
     raise SystemExit("protected Tier-2 verification must run after provider payload extraction/shape validation")
 if signer.find("catalog-release.py") > signer.find('python3 "$compatibility" sign'):
     raise SystemExit("protected Tier-2 verification must run before compatibility signing")
+for value in (
+    'candidate/phase3-binary/dist/static/continuous-batching-policy.json',
+    '--asset "continuous-batching-policy.json=$destination/continuous-batching-policy.json"',
+    '--asset "continuous-batching-policy.json.sig=$destination/continuous-batching-policy.json.sig"',
+):
+    if value not in build:
+        raise SystemExit(f"candidate CB policy does not cross the unsigned release boundary: {value}")
 if (
     "pearl-release.json.sig" not in signer
     or 'pearl_signing_key="$private_key"' not in signer
@@ -411,11 +420,16 @@ unsigned_arguments=(
 mkdir -p "$work/bound"
 printf 'artifact-feed\n' > "$work/assets/autotune-artifacts.json"
 printf 'artifact-feed-sig\n' > "$work/assets/autotune-artifacts.json.sig"
-python3 - "$work/bound/phase3-binary-m4-${tag}.tar.gz" "$work/assets/autotune-artifacts.json" <<'PY'
+printf 'cb-policy-feed\n' > "$work/assets/continuous-batching-policy.json"
+printf 'cb-policy-feed-sig\n' > "$work/assets/continuous-batching-policy.json.sig"
+python3 - "$work/bound/phase3-binary-m4-${tag}.tar.gz" \
+  "$work/assets/autotune-artifacts.json" "$work/assets/continuous-batching-policy.json" <<'PY'
 import hashlib, io, json, pathlib, sys, tarfile
 feed = pathlib.Path(sys.argv[2]).read_bytes()
+policy = pathlib.Path(sys.argv[3]).read_bytes()
 feeds = {name: {} for name in ("autotune-candidates.json", "demand-rank.json", "rate-card.json", "tier2-catalog.json")}
 feeds["autotune-artifacts.json"] = {"sha256": hashlib.sha256(feed).hexdigest(), "bytes": len(feed)}
+feeds["continuous-batching-policy.json"] = {"sha256": hashlib.sha256(policy).hexdigest(), "bytes": len(policy)}
 manifest = (json.dumps({"feeds": feeds}) + "\n").encode()
 with tarfile.open(sys.argv[1], "w:gz") as archive:
     info = tarfile.TarInfo("./catalog-release/release.json"); info.size = len(manifest)
@@ -441,6 +455,8 @@ grep -q 'differ from the exact build boundary' "$work/bound-missing.out"
 bound_unsigned_arguments+=(
   --asset "autotune-artifacts.json=$work/assets/autotune-artifacts.json"
   --asset "autotune-artifacts.json.sig=$work/assets/autotune-artifacts.json.sig"
+  --asset "continuous-batching-policy.json=$work/assets/continuous-batching-policy.json"
+  --asset "continuous-batching-policy.json.sig=$work/assets/continuous-batching-policy.json.sig"
 )
 python3 "$metadata" build-unsigned \
   --repository Augustas11/macprovider --tag "$tag" --candidate-ref "$candidate_ref" \
@@ -469,6 +485,16 @@ if python3 "$metadata" verify-unsigned --repository Augustas11/macprovider --tag
   exit 1
 fi
 grep -q 'does not match its release.json binding' "$work/bound-tampered.out"
+printf 'artifact-feed\n' > "$work/assets/autotune-artifacts.json"
+printf 'tampered\n' >> "$work/assets/continuous-batching-policy.json"
+if python3 "$metadata" verify-unsigned --repository Augustas11/macprovider --tag "$tag" --candidate-ref "$candidate_ref" \
+  --candidate-commit "$candidate_commit" --control-commit "$control_commit" \
+  --provider-admission-policy strict_post_migration --input "$work/bound-unsigned.json" \
+  "${bound_unsigned_arguments[@]}" >"$work/bound-policy-tampered.out" 2>&1; then
+  echo "unsigned manifest accepted CB policy bytes that differ from the archived release.json binding" >&2
+  exit 1
+fi
+grep -q 'does not match its release.json binding' "$work/bound-policy-tampered.out"
 
 python3 "$metadata" build-unsigned \
   --repository Augustas11/macprovider \
@@ -533,6 +559,13 @@ if python3 "$metadata" validate-provider-payload --directory "$work/provider" >"
 fi
 grep -q 'is not a provider-payload member at Stage A' "$work/payload-artifact.out"
 rm "$work/provider/catalog-release/autotune-artifacts.json"
+printf 'fixture:%s\n' continuous-batching-policy.json > "$work/provider/catalog-release/continuous-batching-policy.json"
+if python3 "$metadata" validate-provider-payload --directory "$work/provider" >"$work/payload-policy.out" 2>&1; then
+  echo "provider payload validator accepted the CB policy feed as a payload member" >&2
+  exit 1
+fi
+grep -q 'continuous-batching-policy.json is not a provider-payload member' "$work/payload-policy.out"
+rm "$work/provider/catalog-release/continuous-batching-policy.json"
 python3 "$metadata" validate-provider-payload --directory "$work/provider"
 
 # Catalog release manifests have their own deterministic pretty-JSON contract.
@@ -549,6 +582,8 @@ cp "$root/phase3-binary/catalog/autotune/release.json" \
   "$root/phase3-binary/dist/static/demand-rank.json.sig" \
   "$root/phase3-binary/dist/static/rate-card.json" \
   "$root/phase3-binary/dist/static/rate-card.json.sig" \
+  "$root/phase3-binary/dist/static/continuous-batching-policy.json" \
+  "$root/phase3-binary/dist/static/continuous-batching-policy.json.sig" \
   "$work/pearl-catalog/"
 cat > "$work/pearl-compatibility.json.tmp" <<EOF
 {"schema_version":"macprovider.compatibility-set-envelope.v1","signatures":[{"algorithm":"fixture"}],"signed":{"compatibility_set_id":"Augustas11/macprovider:${tag}@${candidate_commit}","components":{"provider_cli":{"version":"1.8.31"}},"release":{"commit":"${candidate_commit}","repository":"Augustas11/macprovider","tag":"${tag}","version":"1.8.33"}}}

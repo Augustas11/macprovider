@@ -38,6 +38,8 @@ public enum NativeMTPMode: String, Sendable {
 public struct ContinuousBatchingAcceptedTuple: Sendable, Equatable {
     public let modelID: String
     public let modelSHA256: String
+    public let tokenizerSHA256: String?
+    public let chatTemplateSHA256: String?
     public let cacheClass: String
     public let kvDType: PagedKVDType
     public let requiresMoE: Bool
@@ -57,6 +59,8 @@ public struct ContinuousBatchingAcceptedTuple: Sendable, Equatable {
     public init(
         modelID: String,
         modelSHA256: String,
+        tokenizerSHA256: String? = nil,
+        chatTemplateSHA256: String? = nil,
         cacheClass: String,
         kvDType: PagedKVDType,
         requiresMoE: Bool,
@@ -67,6 +71,8 @@ public struct ContinuousBatchingAcceptedTuple: Sendable, Equatable {
     ) {
         self.modelID = modelID
         self.modelSHA256 = modelSHA256
+        self.tokenizerSHA256 = tokenizerSHA256
+        self.chatTemplateSHA256 = chatTemplateSHA256
         self.cacheClass = cacheClass
         self.kvDType = kvDType
         self.requiresMoE = requiresMoE
@@ -273,6 +279,10 @@ public struct AppConfig: Equatable, Sendable {
     // CLI `--prefill-step-size`.
     public var prefillStepSize: Int
     public var continuousBatching: ContinuousBatchingMode
+    /// True only when YAML, environment, or CLI explicitly selected a mode.
+    /// An explicit `off` is the local emergency override; an implicit default
+    /// may be promoted by a verified signed capability policy.
+    public var continuousBatchingExplicitlyConfigured: Bool
     public var continuousBatchQueueLimit: Int?
     // SPEC-038 AC-25: bounded continuous-batching admission wait, in
     // milliseconds. Unset ⇒ the scheduler's 30s default. A request still
@@ -316,6 +326,10 @@ public struct AppConfig: Equatable, Sendable {
     // resolved fail-closed (invalid value ⇒ paged mode disabled + `errors`
     // populated, never a partial enable).
     public var pagedKV: PagedKVConfig
+    /// True only when the operator explicitly set `paged_kv.enabled` through
+    /// YAML, environment, or CLI. This preserves an explicit local disable
+    /// while allowing verified capability policy to enable the engine.
+    public var pagedKVEnabledExplicitlyConfigured: Bool
 
     // SPEC-046-R002 loopback serving (#1690 M2): origin of the loopback
     // runtime a `--model ollama:<tag>` / `llamacpp:<stem>` serve proxies to.
@@ -385,6 +399,7 @@ public struct AppConfig: Equatable, Sendable {
             streamInterval: 1,
             prefillStepSize: 512,
             continuousBatching: .off,
+            continuousBatchingExplicitlyConfigured: false,
             continuousBatchQueueLimit: nil,
             continuousBatchQueueWaitTimeoutMS: nil,
             continuousBatchPrefillTokensPerIteration: nil,
@@ -392,7 +407,8 @@ public struct AppConfig: Equatable, Sendable {
             mlxCacheLimitMB: nil,
             continuousBatchingAcceptedTuples: [],
             kvDiskCache: .defaults(),
-            pagedKV: .defaults()
+            pagedKV: .defaults(),
+            pagedKVEnabledExplicitlyConfigured: false
         )
     }
 }
@@ -608,6 +624,9 @@ public enum ConfigLoader {
         }
         config.pagedKV = PagedKVConfigResolver.resolve(
             yaml: pagedYAML, environment: environment, cli: cli.pagedKV)
+        config.pagedKVEnabledExplicitlyConfigured = pagedYAML?["enabled"] != nil
+            || environment["MACPROVIDER_PAGED_KV_ENABLED"] != nil
+            || cli.pagedKV.enabled != nil
         // A malformed `paged_kv:` block (scalar/list where a map is required) is a config
         // shape error that must NEVER be silently dropped: always surface the warning and
         // fail closed by disabling paged mode, regardless of any env/CLI override presence.
@@ -756,6 +775,7 @@ public enum ConfigLoader {
                 )
             }
             config.continuousBatching = mode
+            config.continuousBatchingExplicitlyConfigured = true
         }
         try assign(&config.continuousBatchQueueLimit, from: dict, key: "continuous_batch_queue_limit", expected: "integer >= 1")
         try assign(
@@ -804,7 +824,7 @@ public enum ConfigLoader {
                 throw ConfigError.invalidValue(
                     key: entryKey,
                     value: String(describing: entry),
-                    expected: "map with model_id, model_sha256, cache_class, kv_dtype, requires_moe, hardware_class, metallib_sha256, kernel_identifier, optional cached_turns_accepted"
+                    expected: "map with model_id, model_sha256, optional tokenizer_sha256/chat_template_sha256, cache_class, kv_dtype, requires_moe, hardware_class, metallib_sha256, kernel_identifier, optional cached_turns_accepted"
                 )
             }
             // Coverage matching in `ContinuousBatchingAcceptanceCoverage.covers(_:)`
@@ -846,6 +866,10 @@ public enum ConfigLoader {
                 }
                 return value
             }
+            func optionalSHA256(_ field: String) throws -> String? {
+                guard fields[field] != nil else { return nil }
+                return try requiredSHA256(field)
+            }
             let rawDType = try requiredString("kv_dtype")
             guard let kvDType = PagedKVDType(rawValue: rawDType.lowercased()) else {
                 throw ConfigError.invalidValue(
@@ -877,6 +901,8 @@ public enum ConfigLoader {
             return ContinuousBatchingAcceptedTuple(
                 modelID: try requiredString("model_id"),
                 modelSHA256: try requiredSHA256("model_sha256"),
+                tokenizerSHA256: try optionalSHA256("tokenizer_sha256"),
+                chatTemplateSHA256: try optionalSHA256("chat_template_sha256"),
                 cacheClass: try requiredString("cache_class"),
                 kvDType: kvDType,
                 requiresMoE: requiresMoE,
@@ -956,6 +982,9 @@ public enum ConfigLoader {
         try assign(&config.streamInterval, from: environment, env: "MACPROVIDER_STREAM_INTERVAL", expected: "integer >= 1")
         try assign(&config.prefillStepSize, from: environment, env: "MACPROVIDER_PREFILL_STEP_SIZE", expected: "integer >= 1")
         try assign(&config.continuousBatching, from: environment, env: "MACPROVIDER_CONTINUOUS_BATCHING", expected: "off, canary, or on")
+        if environment["MACPROVIDER_CONTINUOUS_BATCHING"] != nil {
+            config.continuousBatchingExplicitlyConfigured = true
+        }
         try assign(&config.continuousBatchQueueLimit, from: environment, env: "MACPROVIDER_CONTINUOUS_BATCH_QUEUE_LIMIT", expected: "integer >= 1")
         try assign(
             &config.continuousBatchQueueWaitTimeoutMS,
@@ -1159,6 +1188,7 @@ public enum ConfigLoader {
                 )
             }
             config.continuousBatching = mode
+            config.continuousBatchingExplicitlyConfigured = true
         }
         if let continuousBatchQueueLimit = cli.continuousBatchQueueLimit {
             config.continuousBatchQueueLimit = continuousBatchQueueLimit

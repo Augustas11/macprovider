@@ -20,4 +20,18 @@ final class InferenceRelayQueuePressureTests: XCTestCase {
             "tokens may already have reached the buyer; re-routing would re-run work that partly happened"
         )
     }
+
+    func testBatchedContextRejectionReachesTheCoordinatorAsContextExceeded() throws {
+        let error = try XCTUnwrap(ContinuousBatchSchedulerError.contextLengthExceeded(
+            promptTokens: 40,
+            maxOutputTokens: 199_960,
+            contextTokens: 131_072
+        ).asAPIError())
+        let frame = InferenceRelay.errorEndFrame(requestID: "req-1", error: error, chunksSent: 0)
+        XCTAssertEqual(
+            frame["status"] as? String,
+            "error_context_exceeded",
+            "a request over the batched context cap is the buyer's 413, not a retryable provider 502"
+        )
+    }
 }

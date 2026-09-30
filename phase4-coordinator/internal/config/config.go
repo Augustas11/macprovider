@@ -386,6 +386,13 @@ type AutotuneFeedsConfig struct {
 	DemandRankSigPath         string `yaml:"demand_rank_sig_path"`
 	AutotuneCandidatesPath    string `yaml:"autotune_candidates_path"`
 	AutotuneCandidatesSigPath string `yaml:"autotune_candidates_sig_path"`
+	// ContinuousBatchingPolicyPath / ContinuousBatchingPolicySigPath point at
+	// the signed release-bound SPEC-038 policy served at
+	// /v1/continuous-batching-policy (+ .sig). The pair is OPTIONAL until a
+	// deploy installs it; when set, it requires the three base feeds and is
+	// verified against the candidate catalog of the SAME release at load.
+	ContinuousBatchingPolicyPath    string `yaml:"continuous_batching_policy_path"`
+	ContinuousBatchingPolicySigPath string `yaml:"continuous_batching_policy_sig_path"`
 	// CatalogArtifactsPath / CatalogArtifactsSigPath point at the SPEC-023 §3.7
 	// artifact feed served at /v1/catalog-artifacts (+ .sig). The pair is
 	// OPTIONAL and release-bound: unset, both routes answer 404 and the served
@@ -3667,6 +3674,16 @@ func (c Config) validateAutotuneFeeds() error {
 		}
 		if !configured {
 			return fmt.Errorf("autotune.catalog_artifacts_path requires the rate_card, demand_rank, and autotune_candidates feeds of the same release to be configured")
+		}
+	}
+	cbPolicyPath := strings.TrimSpace(a.ContinuousBatchingPolicyPath)
+	cbPolicySigPath := strings.TrimSpace(a.ContinuousBatchingPolicySigPath)
+	if cbPolicyPath != "" || cbPolicySigPath != "" {
+		if cbPolicyPath == "" || cbPolicySigPath == "" {
+			return fmt.Errorf("autotune.continuous_batching_policy_path and continuous_batching_policy_sig_path must both be set")
+		}
+		if !configured {
+			return fmt.Errorf("autotune.continuous_batching_policy_path requires the rate_card, demand_rank, and autotune_candidates feeds of the same release to be configured")
 		}
 	}
 	keyring, err := a.DecodePublicKeyring()

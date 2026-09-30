@@ -14,14 +14,10 @@ import (
 const (
 	openRouterModelsPath               = "/v1/openrouter/models"
 	openRouterSchemaVersion            = "2.4"
-	openRouterLlama3BCreatedAt         = 1729728000
 	openRouterCatalogCreatedAt         = 1789776000 // 2026-09-19 priced-v1 cut
-	openRouterLlama3BPaidID            = "mlx-community/Llama-3.2-3B-Instruct-4bit"
-	openRouterLlama3BFreeID            = "mlx-community/Llama-3.2-3B-Instruct-4bit-free"
-	openRouterLlama3BCatalogKey        = "meta-llama/llama-3.2-3b-instruct"
-	openRouterQwen8BID                 = "mlx-community/Qwen3-8B-4bit"
-	openRouterQwen8BCatalogKey         = "qwen3-8b"
-	openRouterQwen8BSlug               = "qwen/qwen3-8b"
+	openRouterQwen36A3BID              = "mlx-community/Qwen3.6-35B-A3B-4bit"
+	openRouterQwen36A3BCatalogKey      = "qwen3.6-35b-a3b"
+	openRouterQwen36A3BSlug            = "qwen/qwen3.6-35b-a3b"
 	openRouterRateCardMaxBytes         = 4 << 20
 	openRouterRequestsPerMinutePerSlot = 1
 	openRouterTokensPerSecondPerSlot   = 10
@@ -40,161 +36,17 @@ type openRouterListingSpec struct {
 	DualFree       bool
 }
 
+// openRouterListings is the operator-chosen OpenRouter listing set
+// (SPEC-006 §5.3.2). Other catalog rows stay buyer-routable on
+// /v1/chat/completions but are not offered to OpenRouter.
 var openRouterListings = []openRouterListingSpec{
 	{
-		PoolID:         openRouterLlama3BPaidID,
-		FreeID:         openRouterLlama3BFreeID,
-		CatalogKey:     openRouterLlama3BCatalogKey,
-		OpenRouterSlug: openRouterLlama3BCatalogKey,
-		Name:           "Llama 3.2 3B Instruct (4-bit)",
-		HuggingFaceID:  openRouterLlama3BPaidID,
-		Tokenizer:      "Llama3",
-		Created:        openRouterLlama3BCreatedAt,
-		DualFree:       true,
-	},
-	{
-		PoolID:         "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
-		CatalogKey:     "meta-llama/llama-3.1-8b-instruct",
-		OpenRouterSlug: "meta-llama/llama-3.1-8b-instruct",
-		Name:           "Llama 3.1 8B Instruct (4-bit)",
-		HuggingFaceID:  "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
-		Tokenizer:      "Llama3",
-		Created:        openRouterCatalogCreatedAt,
-	},
-	{
-		PoolID:         openRouterQwen8BID,
-		CatalogKey:     openRouterQwen8BCatalogKey,
-		OpenRouterSlug: openRouterQwen8BSlug,
-		Name:           "Qwen3 8B (4-bit)",
-		HuggingFaceID:  openRouterQwen8BID,
-		Tokenizer:      "Qwen",
-		Created:        openRouterCatalogCreatedAt,
-	},
-	{
-		PoolID:         "mlx-community/Qwen3-32B-4bit",
-		CatalogKey:     "qwen3-32b",
-		OpenRouterSlug: "qwen/qwen3-32b",
-		Name:           "Qwen3 32B (4-bit)",
-		HuggingFaceID:  "mlx-community/Qwen3-32B-4bit",
-		Tokenizer:      "Qwen",
-		Created:        openRouterCatalogCreatedAt,
-	},
-	{
-		PoolID:         "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit",
-		CatalogKey:     "qwen2.5-coder-32b-instruct",
-		OpenRouterSlug: "qwen/qwen2.5-coder-32b-instruct",
-		Name:           "Qwen2.5 Coder 32B Instruct (4-bit)",
-		HuggingFaceID:  "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit",
-		Tokenizer:      "Qwen",
-		Created:        openRouterCatalogCreatedAt,
-	},
-	{
-		PoolID:         "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
-		CatalogKey:     "qwen3-coder-30b-a3b-instruct",
-		OpenRouterSlug: "qwen/qwen3-coder-30b-a3b-instruct",
-		Name:           "Qwen3 Coder 30B A3B Instruct (4-bit)",
-		HuggingFaceID:  "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
-		Tokenizer:      "Qwen",
-		Created:        openRouterCatalogCreatedAt,
-	},
-	{
-		PoolID:         "mlx-community/gemma-4-26b-a4b-it-4bit",
-		CatalogKey:     "gemma-4-26b-a4b-it",
-		OpenRouterSlug: "google/gemma-4-26b-a4b-it",
-		Name:           "Gemma 4 26B A4B IT (4-bit)",
-		HuggingFaceID:  "mlx-community/gemma-4-26b-a4b-it-4bit",
-		Tokenizer:      "Gemma",
-		Created:        openRouterCatalogCreatedAt,
-	},
-	{
-		PoolID:         "mlx-community/gpt-oss-20b-MXFP4-Q8",
-		CatalogKey:     "openai/gpt-oss-20b",
-		OpenRouterSlug: "openai/gpt-oss-20b",
-		Name:           "GPT OSS 20B (MXFP4 Q8)",
-		HuggingFaceID:  "mlx-community/gpt-oss-20b-MXFP4-Q8",
-		Tokenizer:      "Harmony",
-		Quantization:   "mxfp4",
-		Created:        openRouterCatalogCreatedAt,
-	},
-	{
-		PoolID:         "mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit",
-		CatalogKey:     "nemotron-3-nano-30b-a3b",
-		OpenRouterSlug: "nvidia/nemotron-3-nano-30b-a3b",
-		Name:           "Nemotron 3 Nano 30B A3B (4-bit)",
-		HuggingFaceID:  "mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit",
-		Tokenizer:      "Nemotron",
-		Created:        openRouterCatalogCreatedAt,
-	},
-	{
-		PoolID:         "mlx-community/gpt-oss-120b-4bit",
-		CatalogKey:     "openai/gpt-oss-120b",
-		OpenRouterSlug: "openai/gpt-oss-120b",
-		Name:           "GPT OSS 120B (4-bit)",
-		HuggingFaceID:  "mlx-community/gpt-oss-120b-4bit",
-		Tokenizer:      "Harmony",
-		Created:        openRouterCatalogCreatedAt,
-	},
-	{
-		PoolID:         "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
-		CatalogKey:     "qwen3-30b-a3b-instruct-2507",
-		OpenRouterSlug: "qwen/qwen3-30b-a3b-instruct-2507",
-		Name:           "Qwen3 30B A3B Instruct 2507 (4-bit)",
-		HuggingFaceID:  "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
-		Tokenizer:      "Qwen",
-		Created:        openRouterCatalogCreatedAt,
-	},
-	{
-		PoolID:         "mlx-community/Qwen3.5-27B-4bit",
-		CatalogKey:     "qwen3.5-27b",
-		OpenRouterSlug: "qwen/qwen3.5-27b",
-		Name:           "Qwen3.5 27B (4-bit)",
-		HuggingFaceID:  "mlx-community/Qwen3.5-27B-4bit",
-		Tokenizer:      "Qwen",
-		Created:        openRouterCatalogCreatedAt,
-	},
-	{
-		PoolID:         "mlx-community/Qwen3.5-35B-A3B-4bit",
-		CatalogKey:     "qwen3.5-35b-a3b",
-		OpenRouterSlug: "qwen/qwen3.5-35b-a3b",
-		Name:           "Qwen3.5 35B A3B (4-bit)",
-		HuggingFaceID:  "mlx-community/Qwen3.5-35B-A3B-4bit",
-		Tokenizer:      "Qwen",
-		Created:        openRouterCatalogCreatedAt,
-	},
-	{
-		PoolID:         "mlx-community/Qwen3.6-27B-4bit",
-		CatalogKey:     "qwen3.6-27b",
-		OpenRouterSlug: "qwen/qwen3.6-27b",
-		Name:           "Qwen3.6 27B (4-bit)",
-		HuggingFaceID:  "mlx-community/Qwen3.6-27B-4bit",
-		Tokenizer:      "Qwen",
-		Created:        openRouterCatalogCreatedAt,
-	},
-	{
-		PoolID:         "mlx-community/Qwen3.6-35B-A3B-4bit",
-		CatalogKey:     "qwen3.6-35b-a3b",
-		OpenRouterSlug: "qwen/qwen3.6-35b-a3b",
+		PoolID:         openRouterQwen36A3BID,
+		CatalogKey:     openRouterQwen36A3BCatalogKey,
+		OpenRouterSlug: openRouterQwen36A3BSlug,
 		Name:           "Qwen3.6 35B A3B (4-bit)",
-		HuggingFaceID:  "mlx-community/Qwen3.6-35B-A3B-4bit",
+		HuggingFaceID:  openRouterQwen36A3BID,
 		Tokenizer:      "Qwen",
-		Created:        openRouterCatalogCreatedAt,
-	},
-	{
-		PoolID:         "mlx-community/Qwen3.8-27B-4bit",
-		CatalogKey:     "qwen3.8-27b",
-		OpenRouterSlug: "qwen/qwen3.8-27b",
-		Name:           "Qwen3.8 27B (4-bit)",
-		HuggingFaceID:  "mlx-community/Qwen3.8-27B-4bit",
-		Tokenizer:      "Qwen",
-		Created:        openRouterCatalogCreatedAt,
-	},
-	{
-		PoolID:         "mlx-community/GLM-4.5-Air-4bit",
-		CatalogKey:     "z-ai/glm-4.5-air",
-		OpenRouterSlug: "z-ai/glm-4.5-air",
-		Name:           "GLM 4.5 Air (4-bit)",
-		HuggingFaceID:  "mlx-community/GLM-4.5-Air-4bit",
-		Tokenizer:      "GLM",
 		Created:        openRouterCatalogCreatedAt,
 	},
 }
@@ -260,11 +112,13 @@ type openRouterOutputModality struct {
 }
 
 type openRouterParameterDescriptor struct {
-	Type     string   `json:"type"`
-	Min      *float64 `json:"min,omitempty"`
-	Max      *float64 `json:"max,omitempty"`
-	Unit     string   `json:"unit,omitempty"`
-	MaxItems int      `json:"max_items,omitempty"`
+	Type       string                                   `json:"type"`
+	Min        *float64                                 `json:"min,omitempty"`
+	Max        *float64                                 `json:"max,omitempty"`
+	Values     []string                                 `json:"values,omitempty"`
+	Unit       string                                   `json:"unit,omitempty"`
+	MaxItems   int                                      `json:"max_items,omitempty"`
+	Properties map[string]openRouterParameterDescriptor `json:"properties,omitempty"`
 }
 
 type openRouterTextCostUSD struct {
@@ -323,7 +177,7 @@ func (s *Server) handleOpenRouterModels(w http.ResponseWriter, r *http.Request) 
 			MaxContextTokens:   model.MaxContextTokens,
 		})
 	}
-	doc, err := projectOpenRouterModels(pool, rateCard, s.now())
+	doc, err := projectOpenRouterModels(pool, rateCard, s.cfg.Limits.MaxTokensPerRequest, s.now())
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "api_error", "coordinator_rate_card_error", "Coordinator rate-card error")
 		return
@@ -366,7 +220,7 @@ func (s *Server) fetchOpenRouterRateCard(r *http.Request) (openRouterRateCard, e
 	return card, nil
 }
 
-func projectOpenRouterModels(pool []openRouterPoolSnapshot, rateCard openRouterRateCard, now time.Time) (openRouterModelsDocument, error) {
+func projectOpenRouterModels(pool []openRouterPoolSnapshot, rateCard openRouterRateCard, maxTokensPerRequest int64, now time.Time) (openRouterModelsDocument, error) {
 	byID := make(map[string]openRouterPoolSnapshot, len(pool))
 	for _, model := range pool {
 		byID[model.ID] = model
@@ -391,16 +245,16 @@ func projectOpenRouterModels(pool []openRouterPoolSnapshot, rateCard openRouterR
 		if err != nil {
 			return openRouterModelsDocument{}, err
 		}
-		data = append(data, openRouterModelRow(listing, listing.PoolID, false, ready, contextLength, live, 0, shareCount, paidCost, created))
+		data = append(data, openRouterModelRow(listing, listing.PoolID, false, ready, contextLength, maxTokensPerRequest, live, 0, shareCount, paidCost, created))
 		if shareCount == 2 {
 			freeCost := openRouterTextCostUSD{Prompt: "0", Completion: "0"}
-			data = append(data, openRouterModelRow(listing, listing.FreeID, true, ready, contextLength, live, 1, shareCount, freeCost, created))
+			data = append(data, openRouterModelRow(listing, listing.FreeID, true, ready, contextLength, maxTokensPerRequest, live, 1, shareCount, freeCost, created))
 		}
 	}
 	return openRouterModelsDocument{Data: data}, nil
 }
 
-func openRouterModelRow(listing openRouterListingSpec, id string, isFree, ready bool, contextLength int, live openRouterPoolSnapshot, shareIndex, shareCount int, cost openRouterTextCostUSD, created int64) openRouterModelV24 {
+func openRouterModelRow(listing openRouterListingSpec, id string, isFree, ready bool, contextLength int, maxTokensPerRequest int64, live openRouterPoolSnapshot, shareIndex, shareCount int, cost openRouterTextCostUSD, created int64) openRouterModelV24 {
 	name := listing.Name
 	if isFree {
 		name += " (free)"
@@ -413,8 +267,8 @@ func openRouterModelRow(listing openRouterListingSpec, id string, isFree, ready 
 		quantization = "int4"
 	}
 	maxOutput := contextLength
-	if maxOutput > 4096 {
-		maxOutput = 4096
+	if int64(maxOutput) > maxTokensPerRequest {
+		maxOutput = int(maxTokensPerRequest)
 	}
 	capacity := openRouterCapacityEntries(live, maxOutput, shareIndex, shareCount)
 	return openRouterModelV24{
@@ -435,7 +289,7 @@ func openRouterModelRow(listing openRouterListingSpec, id string, isFree, ready 
 			Type:                "text",
 			MaxLength:           openRouterIntegerLimit{Value: maxOutput, Unit: "token"},
 			Streaming:           true,
-			SupportedParameters: openRouterSupportedParameters(maxOutput),
+			SupportedParameters: openRouterSupportedParameters(listing.PoolID, maxOutput),
 			Pricing:             []openRouterPricingEntry{{Type: "completion", Unit: "token", CostUSD: cost.Completion}},
 			Capacity:            []openRouterCapacityEntry{{Type: "completion", Unit: "token", Per: "minute", Value: capacity.TokensPerMinute}},
 		}},
@@ -496,8 +350,8 @@ func openRouterSlug(listing openRouterListingSpec, isFree bool) string {
 	return listing.OpenRouterSlug + ":free"
 }
 
-func openRouterSupportedParameters(maxTokens int) map[string]openRouterParameterDescriptor {
-	return map[string]openRouterParameterDescriptor{
+func openRouterSupportedParameters(modelID string, maxTokens int) map[string]openRouterParameterDescriptor {
+	params := map[string]openRouterParameterDescriptor{
 		"max_tokens":        openRouterIntegerParameter(1, maxTokens, "token"),
 		"temperature":       openRouterRangeParameter(0, 2),
 		"top_p":             openRouterRangeParameter(0, 1),
@@ -507,6 +361,43 @@ func openRouterSupportedParameters(maxTokens int) map[string]openRouterParameter
 		"frequency_penalty": openRouterRangeParameter(-2, 2),
 		"seed":              openRouterIntegerParameter(0, 9007199254740991, ""),
 	}
+	if openRouterToolFamilyModel(modelID) {
+		// tool_choice "required" is rewritten to "auto" by the coordinator
+		// and "none" is rejected by providers, so only "auto" is declared.
+		params["tools"] = openRouterParameterDescriptor{Type: "boolean"}
+		params["tool_choice"] = openRouterParameterDescriptor{Type: "enum", Values: []string{"auto"}}
+	}
+	if openRouterStructuredOutputModel(modelID) {
+		// response_format is an object on the wire, so it is an OpenRouter
+		// object descriptor: its "type" member is the closed SPEC-019 enum
+		// and the json_schema body is not machine-described ("unknown").
+		params["response_format"] = openRouterParameterDescriptor{
+			Type: "object",
+			Properties: map[string]openRouterParameterDescriptor{
+				"type":        {Type: "enum", Values: []string{"text", "json_object", "json_schema"}},
+				"json_schema": {Type: "unknown"},
+			},
+		}
+		params["structured_outputs"] = openRouterParameterDescriptor{Type: "boolean"}
+	}
+	return params
+}
+
+// openRouterToolFamilyModel mirrors the SPEC-018 §3.1/§3.8 modelID predicates
+// that have both a tool-call parser and a multi-turn prompt profile. gpt-oss
+// parses Harmony tool calls but has no multi-turn profile, so it is excluded.
+func openRouterToolFamilyModel(modelID string) bool {
+	lower := strings.ToLower(modelID)
+	return strings.Contains(lower, "qwen2.5") || strings.Contains(lower, "qwen3") || strings.Contains(lower, "llama-3.3")
+}
+
+// openRouterStructuredOutputModel mirrors the SPEC-019 §4 family-rendering
+// predicate: only these families have a specified structured-output schema
+// instruction. It is kept separate from the SPEC-018 predicate because the two
+// specs govern them independently, even though the families coincide today.
+func openRouterStructuredOutputModel(modelID string) bool {
+	lower := strings.ToLower(modelID)
+	return strings.Contains(lower, "qwen2.5") || strings.Contains(lower, "qwen3") || strings.Contains(lower, "llama-3.3")
 }
 
 func openRouterRangeParameter(minValue, maxValue float64) openRouterParameterDescriptor {

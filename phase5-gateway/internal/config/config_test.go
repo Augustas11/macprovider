@@ -17,6 +17,16 @@ func TestQuotaReaperDefaults(t *testing.T) {
 	}
 }
 
+func TestRequestTokenLimitDefaults(t *testing.T) {
+	cfg := Default()
+	if cfg.Limits.MaxTokensPerRequest != 32768 {
+		t.Fatalf("MaxTokensPerRequest=%d want 32768", cfg.Limits.MaxTokensPerRequest)
+	}
+	if cfg.Limits.DemoMaxTokensPerRequest != 512 {
+		t.Fatalf("DemoMaxTokensPerRequest=%d want 512", cfg.Limits.DemoMaxTokensPerRequest)
+	}
+}
+
 func TestAccountAdmissionDefaults(t *testing.T) {
 	cfg := Default()
 	if cfg.Quotas.AccountConcurrency != 4 {
