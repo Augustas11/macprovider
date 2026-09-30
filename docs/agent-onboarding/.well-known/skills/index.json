@@ -1,6 +1,6 @@
 {
   "schema_version": "https://get.malibu.tech/.well-known/skills/index.v1",
-  "updated_at": "2026-09-23",
+  "updated_at": "2026-09-24",
   "skills": [
     {
       "id": "malibu-provider-api-onboarding",
@@ -8,7 +8,7 @@
       "description": "Agent-readable Malibu provider onboarding, recovery, uninstall, and coding-agent API compatibility guidance.",
       "url": "https://get.malibu.tech/skill.md",
       "content_type": "text/markdown; charset=utf-8",
-      "sha256": "2f88254e917b66129e2f3520408407ee562ebe6d307e5e22ad4637db9943c49e"
+      "sha256": "049f93be4238b637d7d7e6950dfc114fecf4802bc527ca6110c2301617dafaf0"
     }
   ]
 }
