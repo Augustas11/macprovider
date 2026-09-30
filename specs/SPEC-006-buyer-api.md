@@ -1,7 +1,14 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.39 (2026-09-27, auto-prefix cached-token billing)
+**Version:** 0.9.40 (2026-09-30, OpenRouter Qwen3.6-only listing and tool/structured-output descriptors)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.40 (2026-09-30, OpenRouter Qwen3.6-only listing):**
+- `GET /v1/openrouter/models` publishes the operator-chosen OpenRouter listing set, not every recommendable catalog row. The set is exactly `mlx-community/Qwen3.6-35B-A3B-4bit` (slug `qwen/qwen3.6-35b-a3b`), paid only, with no free alias. This supersedes the v0.9.29 "every live recommendable catalog model" rule. Reason: the operator lists only Qwen3.6-35B-A3B on OpenRouter. Llama 3.2 3B has low demand at its price, and a listed row that cannot serve tool traffic hurts OpenRouter tool routing. Every catalog row stays routable on `POST /v1/chat/completions`.
+- Tool descriptors: a text output modality MUST declare `tools` (`boolean`) and `tool_choice` (`enum` `["auto"]`) only for a row whose modelID matches a SPEC-018 §3.1 family that also has a §3.8 multi-turn profile (`qwen2.5`, `qwen3`, `llama-3.3`). Other rows MUST omit both. `tool_choice` omits `"required"` because the coordinator rewrites it to `"auto"`, and omits `"none"` because providers reject it.
+- Structured-output descriptors: a text output modality MUST declare `structured_outputs` (`boolean`) and `response_format` only for a row whose modelID matches the SPEC-019 §4 family-rendering predicate (today the same `qwen2.5` / `qwen3` / `llama-3.3` substrings; the two predicates are kept separate because SPEC-018 and SPEC-019 govern them independently). Other rows MUST omit both. `response_format` is an object on the wire, so it uses the OpenRouter schema-2.4 `object` descriptor: `{"type":"object","properties":{"type":{"type":"enum","values":["text","json_object","json_schema"]},"json_schema":{"type":"unknown"}}}`. The OpenRouter provider guide defines `object` as "Nested object with per-key descriptors" and `unknown` as accepted but not machine-described. The guide's own example declares `tools` and `structured_outputs` as `boolean`.
+- `response_format.json_schema` stays SPEC-019 strict-only. This change does not relax that.
+- The dual paid/free projection rule stays for a listing that declares a free alias. The current set declares none. `SPEC-006-R010` stays pending.
 
 **Change log v0.9.39 (2026-09-27, issue #1768 — auto-prefix cached-token billing):**
 - Authenticated non-demo auto-prefix reuse remains non-sticky and continues to use
@@ -301,7 +308,7 @@
 
 ## Preliminary conformance unit IDs
 
-SPEC-006 v0.9.39 registers `SPEC-006-R001`..`SPEC-006-R017` in
+SPEC-006 v0.9.40 registers `SPEC-006-R001`..`SPEC-006-R017` in
 `specs/CONFORMANCE.json`. R001–R003 remain the paid-path chat, error, and
 quota units. R004–R009 group additional existing obligation areas without
 changing them:
@@ -320,7 +327,8 @@ changing them:
   (§2.2, §4.2); public rate-card cache bound of at most 300 s at the gateway
   plus the forwarded `max-age=300` (§2.2, v0.9.36; SPEC-005-R013 I3).
 - `SPEC-006-R009` — demo-token traffic isolation from paid quota (§3.6).
-- `SPEC-006-R010` — OpenRouter schema-2.4 models document, wholesale
+- `SPEC-006-R010` — OpenRouter schema-2.4 models document (operator listing
+  set, SPEC-018 tool and SPEC-019 structured-output descriptors), wholesale
   partner chat flags, dual SKU alias ids (§2.2, §5.3.2, §7.8, §17.9).
 - `SPEC-006-R011` — OpenAI-compat tool_call_id rewrite before coordinator
   validation (§5, v0.9.27).
@@ -1548,12 +1556,12 @@ Document shape (schema 2.4):
   "data": [
     {
       "schema_version": "2.4",
-      "id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
-      "name": "Llama 3.2 3B Instruct (4-bit)",
-      "created": 1729728000,
+      "id": "mlx-community/Qwen3.6-35B-A3B-4bit",
+      "name": "Qwen3.6 35B A3B (4-bit)",
+      "created": 1789776000,
       "quantization": "int4",
-      "tokenizer": "Llama3",
-      "hugging_face_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+      "tokenizer": "Qwen",
+      "hugging_face_id": "mlx-community/Qwen3.6-35B-A3B-4bit",
       "input_modalities": [
         {
           "type": "text",
@@ -1578,7 +1586,17 @@ Document shape (schema 2.4):
             "temperature": { "type": "range", "min": 0, "max": 2 },
             "top_p": { "type": "range", "min": 0, "max": 1 },
             "stop": { "type": "array", "max_items": 4 },
-            "stream": { "type": "boolean" }
+            "stream": { "type": "boolean" },
+            "tools": { "type": "boolean" },
+            "tool_choice": { "type": "enum", "values": ["auto"] },
+            "response_format": {
+              "type": "object",
+              "properties": {
+                "type": { "type": "enum", "values": ["text", "json_object", "json_schema"] },
+                "json_schema": { "type": "unknown" }
+              }
+            },
+            "structured_outputs": { "type": "boolean" }
           },
           "pricing": [
             { "type": "completion", "unit": "token", "cost_usd": "0.000000027" }
@@ -1596,7 +1614,7 @@ Document shape (schema 2.4):
       "compliance": { "zdr": false },
       "is_ready": true,
       "is_free": false,
-      "openrouter": { "slug": "meta-llama/llama-3.2-3b-instruct" }
+      "openrouter": { "slug": "qwen/qwen3.6-35b-a3b" }
     }
   ]
 }
@@ -1604,14 +1622,16 @@ Document shape (schema 2.4):
 
 Normative rules:
 
-- Dual Llama 3B rows when that pool id has enough ready-slot capacity to split without double-counting: paid id equals the pool `ModelID`; free id is that string plus `-free` with `is_free: true` and `$0` cost. OpenRouter's catalog `:free` suffix is **their** display form, not the wire id.
+- The document publishes exactly the gateway's OpenRouter listing set (v0.9.40: `mlx-community/Qwen3.6-35B-A3B-4bit` only, paid, no free alias). Catalog rows outside the set MUST NOT appear, even when served.
+- A listing that declares a free alias emits dual rows when that pool id has enough ready-slot capacity to split without double-counting: paid id equals the pool `ModelID`; free id is that string plus `-free` with `is_free: true` and `$0` cost. OpenRouter's catalog `:free` suffix is **their** display form, not the wire id.
+- `supported_parameters` MUST declare `tools` and `tool_choice` only for a row whose modelID matches a SPEC-018 §3.1 family with a §3.8 multi-turn profile (`qwen2.5`, `qwen3`, `llama-3.3`). It MUST declare `response_format` and `structured_outputs` only for a row matching the SPEC-019 §4 family-rendering predicate. The shapes are exactly those in the example above; other rows MUST omit them.
 - `is_ready` MUST be true only when that pool id currently has at least one free slot on a provider in `ready` state.
 - Modality-owned `pricing[].cost_usd` MUST be decimal per-token strings from the live rate card (`credits_per_mtok × usd_per_million_credits / 1e12`). Missing paid catalog keys, non-positive paid rates, and non-positive/non-finite USD conversion inputs MUST fail the document projection instead of emitting a paid `$0` row. Free rows MUST be `"0"`.
 - Root capacity MUST declare conservative request/minute and concurrency limits from live ready slots, and text modalities MUST declare prompt/completion token-per-minute capacity using a conservative generated-token filing cap rather than the maximum output length. Until the gateway carries coordinator per-provider throughput estimates into this projection, that filing cap is 10 generated tokens/second per ready slot. If multiple rows route to the same backing pool, their advertised per-row capacity MUST be split so the rows do not imply independent full-pool capacity.
 - `deployment_region` MUST be an honest volunteer-fleet descriptor. `datacenters` MUST be omitted unless the gateway has operator-verified country/region provenance for the live fleet. Neither field may invent a cloud datacenter region such as `us-east-1` or an unsupported country claim.
 - `compliance.zdr` MUST be `false`. Prompts are plaintext on provider Macs.
 - `openrouter.slug` MUST name the OpenRouter catalog slug for the row, not echo a Malibu pool id.
-- The document MUST include one paid row for every live recommendable catalog model that has a complete positive coordinator rate-card row. Warm-provider count is not a listing gate. Rows with no current ready providers remain listed with `is_ready: false` and MUST advertise 0 request/concurrency/token-per-minute capacity. The document MUST NOT invent `is_ready: true`.
+- The document MUST include one paid row for every listing in the set whose catalog key has a complete positive coordinator rate-card row; a missing or non-positive row fails the projection. Warm-provider count is not a listing gate. Rows with no current ready providers remain listed with `is_ready: false` and MUST advertise 0 request/concurrency/token-per-minute capacity. The document MUST NOT invent `is_ready: true`.
 - The document MUST NOT include legacy fields (`architecture`, `context_length`, root `cost_usd`, flat `supported_sampling_parameters`, `supported_features`, or `capacity_tpm`) and MUST NOT include `compute_integrity`, `tier1_disclosure`, provider ids, hostnames, or IPs.
 - Gateway sanitizer for `/v1/models` MUST NOT run on this path.
 

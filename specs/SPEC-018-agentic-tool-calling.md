@@ -1,6 +1,6 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.2.10 (2026-09-28, streaming cleanup-prefix holdback clarified)
+**Version:** 0.2.11 (2026-09-30, §3.8 coordinator pre-dispatch enforcement clarified)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.5.5, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.4 (receipts canonical output binding — see AC-17 and §N.5)
 **Status:** **LOCKED** at v0.2.10 by the streaming cleanup-rewrite byte-domain clarification. Previously LOCKED at v0.2.9 by the serial-turn `parallel_tool_calls` amendment (omitted/`false` stop after the first complete valid tool). Previously LOCKED at v0.2.8 by the #1594 OpenRouter-aligned AC-53 amendment (no independent messages[] count cap). Previously LOCKED at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
 
@@ -17,6 +17,35 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 **Money-path**: all v0.2 changes preserve v0.1.5 settlement protection (`FaultBreakerQualifying` + zero credits on malformed streams via `billing_recorder.go:176` + `formula.go:112`).
 
 ## Change log
+
+- **v0.2.11 (2026-09-30, §3.8 enforcement point clarified):** The native
+  provider already returns HTTP 400 `unsupported_modelID_for_multi_turn`.
+  Over the WS relay that 400 collapsed to `error_internal`, so buyers got a
+  502 and the provider could be marked degraded. The coordinator now also
+  enforces §3.8 before dispatch. It resolves the buyer `model` to catalogued
+  ids with the routing equivalence (`billing.ModelsEquivalent`: `-free`
+  aliases, OpenRouter slugs, case variants). It judges the §3.8 family on the
+  resolved id, because routing rewrites the request to that id before the
+  provider selects a profile. A SPEC-004 FR-SR-7 model-class alias resolves
+  to its concrete members, and FR-SR-7a rewrites the request to the selected
+  member. For a request with tool history the coordinator therefore keeps
+  only members that have a §3.8 profile. This is the FR-SR-7 "eligible
+  concrete model IDs" step, so the member is filtered before candidate
+  filtering. A class with no profiled member gets this 400 before dispatch.
+  A class whose profiled members have no available provider keeps the
+  FR-SR-9 503. The coordinator check covers every route that can reach only
+  native providers. That means global routes (SPEC-042-R014 (b): global is
+  native-only), an explicit `native` engine selection, and a Trusted Pool
+  route with no selection whose effective runtime allowlist is empty. An
+  empty allowlist is native MLX only under SPEC-042 R001, and so is one
+  withheld under SPEC-022 R-12.8. On pool routes the check runs on every
+  selection attempt, after R002/R010 pool authorization. SPEC-042 defines
+  no pass-through contract for tool semantics, and R014 filters "can only
+  remove candidates". Explicit non-native engine selections, pool routes
+  that may reach an allowlisted external runtime, and models that resolve
+  to no catalog id (BYOM) keep the provider-side check. This is
+  not a §10c.1 amendment: the §3.8 MUST, its code and HTTP status are
+  unchanged, and there is no wire-shape change. Registers `SPEC-018-R005`.
 
 **v0.2.10 buyer-visible deltas (read this if you're skimming):**
 - For streaming output, the immutable concatenation of buyer-delivered
@@ -387,6 +416,8 @@ Llama-3.3 renderer fixture structure:
 - the final user turn follows the tool-result block without dropping or reordering any prior turn.
 
 If no §3.8 family profile maps for the request `modelID`, a multi-turn request containing assistant-history `tool_calls[]` or `role:"tool"` messages MUST fail before inference with HTTP 400 `unsupported_modelID_for_multi_turn`. It MUST NOT silently render the structured fields as plain text or drop them.
+
+v0.2.11 enforcement point: on every route that can reach only native providers, the coordinator MUST apply this rule before provider dispatch. That covers a global route, an explicit `native` engine selection, and a Trusted Pool route whose effective runtime allowlist is empty. On global routes it also applies before idempotency reservation. It resolves the buyer `model` to catalogued ids with the same equivalence routing uses, and applies the family predicate to the resolved id. For a SPEC-004 model-class alias, candidate selection keeps only class members with a §3.8 profile. The request fails with this 400 only when no member has one. Source: `phase4-coordinator/internal/buyer/server.go` `unsupportedMultiTurnToolModel`; tests `phase4-coordinator/internal/buyer/multi_turn_test.go`. Registers `SPEC-018-R005`.
 
 ### 3.7 Adding a new family
 

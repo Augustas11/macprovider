@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 )
 
@@ -56,6 +57,17 @@ type forwardState struct {
 	// captured with the same pool snapshot as membership/generation. Empty
 	// means no allowlist is configured.
 	poolModelAllowlist []string
+	// poolModelClass is the original request class used for Trusted Pool
+	// model-allowlist authorization. It is intentionally not narrowed by
+	// SPEC-018 tool-history routing, so a class alias cannot authorize a
+	// partially allowlisted pool request.
+	poolModelClass *config.ModelClassConfig
+	// requestedModel and multiTurnToolHistory preserve the original request
+	// predicate for slot-queue polling. A same-providerID reconnect may change
+	// runtime class while queued, so polling must re-apply the SPEC-018 native
+	// tool-history gate against the fresh provider session.
+	requestedModel       string
+	multiTurnToolHistory bool
 	// poolRequiresSettlementEnforce is captured from the selected pool
 	// snapshot. It is re-checked at the dispatch boundary so a coordinator
 	// settlement-mode hot reload cannot downgrade an enforce-required pool

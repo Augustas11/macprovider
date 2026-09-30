@@ -14,7 +14,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-003 | Open Onboarding: Distribution, Lifecycle & Onboarding UX | 0.12.0 | normative | pending | pending: 5 | [SPEC-003-open-onboarding.md](SPEC-003-open-onboarding.md) |
 | SPEC-004 | Smart Router | 0.3.5 | normative | pending | pending corpus migration | [SPEC-004-smart-router.md](SPEC-004-smart-router.md) |
 | SPEC-005 | Billing, Settlement, and Provider Rewards | 0.6.10 | normative | complete | conformant: 2, pending: 12 | [SPEC-005-billing.md](SPEC-005-billing.md) |
-| SPEC-006 | Buyer API Gateway: Mac Provider's first public buyer surface | 0.9.39 | normative | complete | conformant: 2, pending: 15 | [SPEC-006-buyer-api.md](SPEC-006-buyer-api.md) |
+| SPEC-006 | Buyer API Gateway: Mac Provider's first public buyer surface | 0.9.40 | normative | complete | conformant: 2, pending: 15 | [SPEC-006-buyer-api.md](SPEC-006-buyer-api.md) |
 | SPEC-007 | Internal Operator Protocol Explorer | 0.5.1 | normative | pending | pending corpus migration | [SPEC-007-explorer.md](SPEC-007-explorer.md) |
 | SPEC-008 | Tier-2 Trust Layer | 0.7.0 | normative | pending | pending: 4 | [SPEC-008-tier2.md](SPEC-008-tier2.md) |
 | SPEC-009 | MacProvider Console v2 | 0.1 | normative | pending | pending corpus migration | [SPEC-009-console-v2.md](SPEC-009-console-v2.md) |
@@ -26,7 +26,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-015 | Verifiable inference receipts | 0.4.11 | normative | complete | pending: 6 | [SPEC-015-receipts.md](SPEC-015-receipts.md) |
 | SPEC-016 | Provider payout pipeline (USDC on Base) | 0.1.26 | draft | pending | pending: 11 | [SPEC-016-payout-pipeline.md](SPEC-016-payout-pipeline.md) |
 | SPEC-017 | Network Stats API | 0.2.1 | normative | pending | pending: 2 | [SPEC-017-network-stats-api.md](SPEC-017-network-stats-api.md) |
-| SPEC-018 | Agentic tool calling (provider-side response synthesis) | 0.2.10 | normative | pending | pending: 4 | [SPEC-018-agentic-tool-calling.md](SPEC-018-agentic-tool-calling.md) |
+| SPEC-018 | Agentic tool calling (provider-side response synthesis) | 0.2.11 | normative | pending | pending: 5 | [SPEC-018-agentic-tool-calling.md](SPEC-018-agentic-tool-calling.md) |
 | SPEC-019 | Structured output (`response_format: json_schema`) | 0.2.6 | normative | pending | pending corpus migration | [SPEC-019-structured-output.md](SPEC-019-structured-output.md) |
 | SPEC-020 | Provider autoupdate | v0.1.20 | normative | pending | pending: 6 | [SPEC-020-provider-autoupdate.md](SPEC-020-provider-autoupdate.md) |
 | SPEC-021 | MALIBU rewards emission ledger | 0.4.0 | draft | complete | pending: 10 | [SPEC-021-malibu-emission-ledger.md](SPEC-021-malibu-emission-ledger.md) |
