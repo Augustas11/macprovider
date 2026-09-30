@@ -4414,6 +4414,11 @@ actor ModelRuntime: ModelRuntimeServing {
                 ),
                 tokenDeliveryBufferLimit: ContinuousBatchSchedulerConfiguration.productionTokenDeliveryBufferLimit,
                 queueWaitTimeoutNanoseconds: Self.queueWaitTimeoutNanoseconds(queueWaitTimeoutMS),
+                // The row cap is the served context, not the scheduler's
+                // 131,072 test default: a 200k-context provider must batch
+                // what its serial path accepts. `maxQueuedTokens` is lifted
+                // to at least this by the configuration.
+                maxRequestTokens: maxContextTokens,
                 snapshot: ContinuousBatchSchedulerSnapshot(
                     modelID: modelID,
                     modelSHA256: modelSHA256,
@@ -5599,6 +5604,22 @@ actor ModelRuntime: ModelRuntimeServing {
         let schedulerRequest: ContinuousBatchSchedulerRequest
     }
 
+    /// Output budget of a batched row. An explicit `max_tokens` is kept as
+    /// sent (the scheduler rejects it with 413 when prompt + max_tokens
+    /// exceeds the context). An omitted one takes the rest of the context,
+    /// capped at `defaultImplicitMaxOutputTokens`, so it always fits.
+    static func continuousBatchMaxOutputTokens(
+        requested: Int?,
+        promptTokens: Int,
+        maxContextTokens: Int
+    ) -> Int {
+        if let requested { return requested }
+        return max(1, min(
+            maxContextTokens - promptTokens,
+            ContinuousBatchSchedulerConfiguration.defaultImplicitMaxOutputTokens
+        ))
+    }
+
     /// The single relay-request to scheduler-row mapping used by both live
     /// inference and the durable-replay fixture. Keeping stable identity,
     /// sampling inputs, and conversation identity here makes the fixture fail
@@ -5992,7 +6013,11 @@ actor ModelRuntime: ModelRuntimeServing {
         try drainCancelled.check()
         try Task.checkCancellation()
         if shouldCancel() { throw CancellationError() }
-        let maxOutputTokens = request.maxTokens ?? max(1, maxContextTokens - prepared.promptTokens.count)
+        let maxOutputTokens = Self.continuousBatchMaxOutputTokens(
+            requested: request.maxTokens,
+            promptTokens: prepared.promptTokens.count,
+            maxContextTokens: maxContextTokens
+        )
         let nativeMTPAdmission = nativeMTPAdmission.resolvingTokenBounds(
             promptTokenCount: prepared.promptTokens.count,
             maxOutputTokens: maxOutputTokens,
@@ -6233,7 +6258,11 @@ actor ModelRuntime: ModelRuntimeServing {
             detokenizer: detokenizer,
             stopTokenFilter: stopTokenFilter
         )
-        let maxOutputTokens = request.maxTokens ?? max(1, maxContextTokens - prepared.promptTokens.count)
+        let maxOutputTokens = Self.continuousBatchMaxOutputTokens(
+            requested: request.maxTokens,
+            promptTokens: prepared.promptTokens.count,
+            maxContextTokens: maxContextTokens
+        )
         let nativeMTPAdmission = nativeMTPAdmission.resolvingTokenBounds(
             promptTokenCount: prepared.promptTokens.count,
             maxOutputTokens: maxOutputTokens,

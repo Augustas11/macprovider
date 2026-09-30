@@ -1674,6 +1674,54 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(Array(allDecodeBatches.suffix(1)), [["relay-request-1501"]])
     }
 
+    // The production scheduler's row cap is the served context, not the
+    // scheduler's 131,072 default: prompt + max_tokens over a 64-token
+    // context is the serial 413, rejected before any backend work.
+    func testAttachedServePathCapsRowsAtServedContext() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
+        let modelID = "mlx-community/Qwen-Test"
+        let modelSHA = String(repeating: "a", count: 64)
+        let proof = Self.sizingProof(modelID: modelID, modelSHA: modelSHA)
+        let backend = RuntimeBridgeScriptedBackend(scripts: [:])
+        let runtime = ModelRuntime(
+            modelID: modelID,
+            modelHash: modelSHA,
+            maxContextTokensOverride: 64,
+            pagedKVConfig: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
+            maxBatch: 2,
+            continuousBatchingMode: .on,
+            continuousBatchingDurableReplayAuthorityAvailable: true,
+            warmSwapEnabled: false,
+            pagedKVObservedRuntimeIdentity: Self.observedIdentity(from: proof),
+            pagedKVHardwareSizingProof: proof,
+            pagedKVRuntimeCacheClass: "KVCacheSimple",
+            pagedKVSchedulerBackendInstalled: true,
+            container: ModelContainer(context: ModelContext(
+                configuration: ModelConfiguration(id: modelID),
+                model: RuntimeBridgeFakeModel(nextTokenByInput: [:]),
+                processor: RuntimeBridgePromptProcessor(tokens: [3]),
+                tokenizer: RuntimeBridgeFakeTokenizer()
+            )),
+            continuousBatchingBackend: backend,
+            loader: { _ in throw PagedKVRuntimeBridgeTestError.notExpected }
+        )
+        let request = try Self.chatRequest(modelID: modelID, maxTokens: 100)
+            .withRequestID("context-cap-1")
+
+        do {
+            _ = try await runtime.complete(request)
+            XCTFail("expected a context rejection")
+        } catch let error as APIError {
+            XCTAssertEqual(error.status, 413)
+            XCTAssertEqual(error.code, "context_length_exceeded")
+        }
+        let prefillCalls = await backend.prefillCallCount()
+        XCTAssertEqual(prefillCalls, 0)
+    }
+
     func testAttachedServePathPrefillsChatPreparedMultiTokenPrompt() async throws {
         guard PagedKVMetallibGate.defaultMetallibExists() else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
