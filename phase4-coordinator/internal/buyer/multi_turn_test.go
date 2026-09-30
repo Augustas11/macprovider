@@ -336,7 +336,7 @@ func TestUnsupportedMultiTurnToolModelGate(t *testing.T) {
 		{name: "non_catalog_model_untouched", req: gateMultiTurnRequest(t, "byom/some-local-model")},
 		{name: "native_only_pool_rejected", req: poolRoute, wantCode: reject},
 		{name: "pool_explicit_native_rejected_despite_allowlist", req: poolNativeSelected, allowlist: externalAllowlist, wantCode: reject},
-		{name: "pool_with_external_allowlist_no_selection_untouched", req: poolRoute, allowlist: externalAllowlist},
+		{name: "pool_with_external_allowlist_no_selection_keeps_candidate_filter", req: poolRoute, allowlist: externalAllowlist},
 		{name: "pool_external_engine_untouched", req: poolExternal, allowlist: externalAllowlist},
 		{name: "external_engine_route_untouched", req: externalRoute},
 	}
@@ -644,8 +644,39 @@ func TestMultiTurnGateNativeTrustedPoolRoute(t *testing.T) {
 	t.Run("negotiated_external_allowlist_without_selection_passes_gate", func(t *testing.T) {
 		s, _ := gatePoolServer(t, []string{"llamacpp_loopback"}, gatePoolMember("member-llama", gateLlama32ID))
 		_, routeErr := s.selectProviderExcluding(context.Background(), "rid", gatePoolToolRequest(t, gateLlama32ID), http.Header{}, nil, "2024-01-01", &forwardState{settlementTrailersNegotiated: true})
-		if routeErr != nil && routeErr.code == "unsupported_modelID_for_multi_turn" {
-			t.Fatalf("pool that may reach an external runtime keeps provider-side behavior, got %+v", routeErr)
+		if routeErr == nil || routeErr.code != "unsupported_modelID_for_multi_turn" {
+			t.Fatalf("allowlist without reachable external runtime must reject native candidate, got %+v", routeErr)
+		}
+	})
+
+	t.Run("mixed_pool_candidate_filter_keeps_external_runtime_candidate", func(t *testing.T) {
+		configureGateCatalog(t)
+		native := gatePoolMember("member-native", gateLlama32ID)
+		external := gatePoolMember("member-external", gateLlama32ID)
+		external.RuntimeSource = "llamacpp_loopback"
+		got, dropped := filterUnsupportedMultiTurnNativeCandidates(gatePoolToolRequest(t, gateLlama32ID), []pool.Provider{native, external}, tier2.Default().ModelIDs, nil)
+		if dropped != 1 || len(got) != 1 || got[0].ProviderID != "member-external" {
+			t.Fatalf("candidate filter dropped=%d kept=%v, want only external member", dropped, got)
+		}
+	})
+
+	t.Run("tool_history_pool_class_authorization_uses_original_class", func(t *testing.T) {
+		s, _ := gatePoolServer(t, nil, gatePoolMember("member-qwen", gateQwen36ID))
+		s.SetRoutingClasses(map[string]config.ModelClassConfig{"mlx-fast": {Objective: "latency", Models: []string{gateLlama32ID, gateQwen36ID}}})
+		snap := trustpool.RouteableSnapshot{
+			PoolID:         "P",
+			Members:        []string{"member-qwen"},
+			ModelAllowlist: []string{gateQwen36ID},
+			SettlementMode: "observe",
+			Routeable:      true,
+			Generation:     1,
+		}
+		if err := s.trustPools.LoadRouteableSnapshot(snap); err != nil {
+			t.Fatalf("LoadRouteableSnapshot: %v", err)
+		}
+		_, routeErr := s.selectProviderExcluding(context.Background(), "rid", gatePoolToolRequest(t, "mlx-fast"), http.Header{}, nil, "2024-01-01", &forwardState{})
+		if routeErr == nil || routeErr.status != http.StatusBadRequest || routeErr.code != "pool_model_not_allowed" {
+			t.Fatalf("partial class allowlist must reject before narrowed selection, got %+v", routeErr)
 		}
 	})
 }

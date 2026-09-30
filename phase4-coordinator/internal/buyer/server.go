@@ -6832,13 +6832,14 @@ func validateMessages(messages []chatMessage, rawMessages []map[string]json.RawM
 //   - a model-class alias is rejected when no class member has a profile;
 //     otherwise selection keeps only profiled members (multiTurnToolClass).
 //
-// It applies to every route that can only reach native providers: global
-// routes (SPEC-042-R014 (b): global is native-only), an explicit native
-// engine selection, and a Trusted Pool route with no selection whose active
-// runtime allowlist is empty (SPEC-042 R001: empty means native MLX only).
-// Explicit non-native engine selections, pool routes that may reach an
-// allowlisted external runtime, and models that resolve to no catalog id or
-// class (BYOM) keep provider-side behavior.
+// It applies before dispatch only when the whole route can reach native
+// providers exclusively: global routes (SPEC-042-R014 (b): global is
+// native-only), an explicit native engine selection, and a Trusted Pool route
+// with no active external runtime allowlist. Pool routes with an external
+// allowlist are evaluated per candidate/attempt so unsupported native members
+// are excluded while genuinely reachable external-runtime members remain
+// selectable. Explicit non-native engine selections and models that resolve to
+// no catalog id or class (BYOM) keep provider-side behavior.
 func unsupportedMultiTurnToolModel(req chatRequest, catalogModelIDs func() []string, class *config.ModelClassConfig, poolRuntimeAllowlist []string) (int, string, string) {
 	if !multiTurnToolGateApplies(req, poolRuntimeAllowlist) {
 		return 0, "", ""
@@ -6859,6 +6860,65 @@ func unsupportedMultiTurnToolModel(req chatRequest, catalogModelIDs func() []str
 		return 0, "", ""
 	}
 	return http.StatusBadRequest, "unsupported_modelID_for_multi_turn", "Model does not support multi-turn tool history rendering"
+}
+
+func unsupportedMultiTurnNativeCandidate(req chatRequest, provider pool.Provider, catalogModelIDs func() []string, class *config.ModelClassConfig) bool {
+	if !req.multiTurnToolHistory || providerEngineClass(provider) != engineClassNative {
+		return false
+	}
+	if class != nil {
+		for _, member := range modelClassMembers(class) {
+			if modelIDEqual(provider.ModelID, member) {
+				return !spec018MultiTurnProfileModel(member)
+			}
+		}
+		return false
+	}
+	if catalogModelIDs == nil {
+		return false
+	}
+	for _, id := range catalogModelIDs() {
+		if !billing.ModelsEquivalent(req.Model, id) || !modelIDEqual(provider.ModelID, id) {
+			continue
+		}
+		return !spec018MultiTurnProfileModel(id)
+	}
+	return false
+}
+
+func filterUnsupportedMultiTurnNativeCandidates(req chatRequest, providers []pool.Provider, catalogModelIDs func() []string, class *config.ModelClassConfig) ([]pool.Provider, int) {
+	if !req.multiTurnToolHistory || len(providers) == 0 {
+		return providers, 0
+	}
+	out := providers[:0]
+	dropped := 0
+	for _, provider := range providers {
+		if unsupportedMultiTurnNativeCandidate(req, provider, catalogModelIDs, class) {
+			dropped++
+			continue
+		}
+		out = append(out, provider)
+	}
+	return out, dropped
+}
+
+func anyProviderModelCandidate(providers []pool.Provider, model string, class *config.ModelClassConfig) bool {
+	if class == nil {
+		for _, provider := range providers {
+			if modelIDEqual(provider.ModelID, model) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, provider := range providers {
+		for _, member := range modelClassMembers(class) {
+			if modelIDEqual(provider.ModelID, member) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // multiTurnToolGateApplies reports whether the request carries tool history
@@ -7172,6 +7232,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		return pool.Provider{}, requestCanceledRouteError()
 	}
 	class := classResolution.class
+	poolModelClass := class
 	tier2Cfg := s.tier2Config()
 	// SPEC-042 R005: capture a single consistent membership+generation
 	// snapshot for the selected pool (nil for global). poolActive gates
@@ -7236,6 +7297,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			state.poolGeneration = snap.Generation
 			state.poolMinBinaryVersion = snap.MinBinaryVersion
 			state.poolModelAllowlist = append([]string(nil), snap.ModelAllowlist...)
+			state.poolModelClass = poolModelClass
 			state.poolRequiresSettlementEnforce = poolRequiresSettlementEnforce
 			state.poolManifestVersion = snap.ManifestVersion
 			state.poolManifestCoreDigest = snap.ManifestCoreDigest
@@ -7294,8 +7356,11 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 					// under-version member — a pin must not bypass the floor.
 					return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_binary_too_old", message: "Pinned session provider is below the pool minimum binary version"}
 				}
-				if poolActive && !poolModelAllowed(req.Model, class, poolModelAllowlist) {
+				if poolActive && !poolModelAllowed(req.Model, poolModelClass, poolModelAllowlist) {
 					return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "pool_model_not_allowed", message: "Requested model is not allowed by the selected pool"}
+				}
+				if poolActive && unsupportedMultiTurnNativeCandidate(req, p, tier2.Default().ModelIDs, poolModelClass) {
+					return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "unsupported_modelID_for_multi_turn", message: "Model does not support multi-turn tool history rendering"}
 				}
 				// SPEC-042-R014 (c): a pin never bypasses the engine filter.
 				if engineClass != "" && providerEngineClass(p) != engineClass {
@@ -7325,8 +7390,11 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				if poolActive && !poolBinaryFloorMet(p.BinaryVersion, poolMin) {
 					return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_binary_too_old", message: "Pinned provider is below the pool minimum binary version"}
 				}
-				if poolActive && !poolModelAllowed(req.Model, class, poolModelAllowlist) {
+				if poolActive && !poolModelAllowed(req.Model, poolModelClass, poolModelAllowlist) {
 					return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "pool_model_not_allowed", message: "Requested model is not allowed by the selected pool"}
+				}
+				if poolActive && unsupportedMultiTurnNativeCandidate(req, p, tier2.Default().ModelIDs, poolModelClass) {
+					return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "unsupported_modelID_for_multi_turn", message: "Model does not support multi-turn tool history rendering"}
 				}
 				// SPEC-042-R014 (c): a pin never bypasses the engine filter.
 				if engineClass != "" && providerEngineClass(p) != engineClass {
@@ -7344,7 +7412,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		}
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "Pinned provider not in pool"}
 	}
-	if poolActive && !poolModelAllowed(req.Model, class, poolModelAllowlist) {
+	if poolActive && !poolModelAllowed(req.Model, poolModelClass, poolModelAllowlist) {
 		return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "pool_model_not_allowed", message: "Requested model is not allowed by the selected pool"}
 	}
 
@@ -7355,6 +7423,13 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		providers = providersForEngine(providers, engineClass)
 		if !s.engineServesModelInScope(providers, req.Model, class, poolActive, poolMembers) {
 			return pool.Provider{}, engineUnavailableRouteError("No provider serves the requested model with the selected engine")
+		}
+	}
+	unsupportedNativeDropped := 0
+	if poolActive {
+		providers, unsupportedNativeDropped = filterUnsupportedMultiTurnNativeCandidates(req, providers, tier2.Default().ModelIDs, poolModelClass)
+		if unsupportedNativeDropped > 0 && !anyProviderModelCandidate(providers, req.Model, poolModelClass) {
+			return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "unsupported_modelID_for_multi_turn", message: "Model does not support multi-turn tool history rendering"}
 		}
 	}
 	exSet := routing.NewExcluded(len(excluded))
@@ -7380,6 +7455,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		checker.poolGeneration = poolGen // local snapshot value; avoids a nil-state deref
 		checker.poolMinBinaryVersion = poolMin
 		checker.poolModelAllowlist = poolModelAllowlist
+		checker.poolModelClass = poolModelClass
 		checker.settlementEnforce = checker.settlementEnforce || poolRequiresSettlementEnforce
 		checker.poolView = poolRouteView{
 			poolID:           req.poolID,
@@ -8564,7 +8640,11 @@ func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slot
 		if state != nil && state.poolID != "" && !poolBinaryFloorMet(provider.BinaryVersion, state.poolMinBinaryVersion) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
-		if state != nil && state.poolID != "" && !poolModelAllowed(model, class, state.poolModelAllowlist) {
+		poolModelClass := class
+		if state != nil && state.poolModelClass != nil {
+			poolModelClass = state.poolModelClass
+		}
+		if state != nil && state.poolID != "" && !poolModelAllowed(model, poolModelClass, state.poolModelAllowlist) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
 		// SPEC-042-R014 (c): a same-ID reconnect of another class is terminal.
@@ -8973,6 +9053,10 @@ type eligibilityCtx struct {
 	// poolModelAllowlist is the selected pool's manifest request-model
 	// allowlist. Empty means no allowlist -> inert.
 	poolModelAllowlist []string
+	// poolModelClass is the original class used for the request-half pool
+	// authorization gate. It can differ from class when SPEC-018 narrows
+	// selection for multi-turn tool history.
+	poolModelClass *config.ModelClassConfig
 	// poolView carries the SPEC-042-R004 external-runtime predicate inputs of
 	// the same snapshot. Zero for global requests.
 	poolView poolRouteView
@@ -9128,7 +9212,11 @@ func (c *eligibilityCtx) PoolAllowsRequestedModel() bool {
 	if c == nil || c.poolID == "" {
 		return true
 	}
-	return poolModelAllowed(c.model, c.class, c.poolModelAllowlist)
+	class := c.poolModelClass
+	if class == nil {
+		class = c.class
+	}
+	return poolModelAllowed(c.model, class, c.poolModelAllowlist)
 }
 
 func poolModelAllowed(model string, class *config.ModelClassConfig, allowlist []string) bool {
