@@ -4456,7 +4456,12 @@
       ],
       "journeys": [],
       "evidence": [
-        "audits/2026-09-30-cb-context-cap/RESULT_studio_r3.md"
+        {
+          "artifact": "commit:275c1cffc17eab0dae3c3f3c6b442fa9af163b5e",
+          "source": "audits/2026-09-30-cb-context-cap/RESULT_studio_r3.md",
+          "captured_at": "2026-09-30",
+          "expires_at": "2026-12-29"
+        }
       ],
       "gap": {
         "verdict": "UNKNOWN",
