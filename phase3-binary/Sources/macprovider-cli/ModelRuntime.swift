@@ -256,12 +256,30 @@ public struct RuntimeContinuousBatchingSchedulerSnapshot: Sendable, Equatable {
     public let slotsFree: Int
 }
 
+public struct RuntimeContinuousBatchingPolicySnapshot: Sendable, Equatable {
+    public let authorizationSource: String
+    public let loadStatus: String
+    public let releaseID: String?
+    public let policyVersion: String?
+    public let signerKeyID: String?
+    public let policySHA256: String?
+    public let expiresAt: String?
+    public let rolloutMode: String
+    public let tupleSHA256: String?
+    public let authorized: Bool
+    public let cachedTurnsAuthorized: Bool
+    public let emergencyOffOverride: Bool
+    public let localProofResult: String
+    public let decisionReason: String
+}
+
 public struct RuntimeContinuousBatchingSnapshot: Sendable, Equatable {
     public let mode: ContinuousBatchingMode
     public let active: Bool
     public let unsupportedReason: String?
     public let pagedKVDecision: String
     public let cacheClass: String
+    public let policy: RuntimeContinuousBatchingPolicySnapshot
     public let scheduler: RuntimeContinuousBatchingSchedulerSnapshot?
 }
 
@@ -1505,6 +1523,12 @@ actor ModelRuntime: ModelRuntimeServing {
     private let continuousBatchingCachedTurns: Bool
     /// SPEC-038 FR-CB10 operator-declared per-tuple acceptance coverage.
     private let continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage
+    /// Verified SPEC-023 signed policy provenance. Coverage remains a separate
+    /// exact-tuple gate so policy authorization cannot replace local proofs.
+    private let continuousBatchingPolicyLoadResult: ContinuousBatchingPolicyLoadResult
+    private let continuousBatchingRunningBuildIdentity: NativeMTPRunningBuildIdentity?
+    private let continuousBatchingModeExplicitlyConfigured: Bool
+    private let continuousBatchingEmergencyOffOverride: Bool
     private let warmSwapEnabled: Bool
     private let swapDrainTimeoutSeconds: Int
     private var providerStatus: ProviderStatus?
@@ -2399,6 +2423,14 @@ actor ModelRuntime: ModelRuntimeServing {
         continuousBatchPrefillTokensPerIteration: Int? = nil,
         continuousBatchingCachedTurns: Bool = false,
         continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage = .empty,
+        continuousBatchingPolicyLoadResult: ContinuousBatchingPolicyLoadResult = ContinuousBatchingPolicyLoadResult(
+            selection: .emptyOff,
+            status: .absentFallback,
+            policySHA256: nil,
+            signerKeyID: nil
+        ),
+        continuousBatchingEmergencyOffOverride: Bool = false,
+        continuousBatchingModeExplicitlyConfigured: Bool? = nil,
         continuousBatchingDurableReplayAuthorityAvailable: Bool = false,
         nativeMTPMode: NativeMTPMode = .off,
         nativeMTPCapability: NativeMTPCapability? = nil,
@@ -2492,6 +2524,16 @@ actor ModelRuntime: ModelRuntimeServing {
         self.continuousBatchPrefillTokensPerIteration = continuousBatchPrefillTokensPerIteration
         self.continuousBatchingCachedTurns = continuousBatchingCachedTurns
         self.continuousBatchingAcceptanceCoverage = continuousBatchingAcceptanceCoverage
+        self.continuousBatchingPolicyLoadResult = continuousBatchingPolicyLoadResult
+        #if DEBUG
+        self.continuousBatchingRunningBuildIdentity = nativeMTPRunningBuildIdentity
+            ?? Self.nativeMTPRunningBuildIdentity()
+        #else
+        self.continuousBatchingRunningBuildIdentity = Self.nativeMTPRunningBuildIdentity()
+        #endif
+        self.continuousBatchingModeExplicitlyConfigured = continuousBatchingModeExplicitlyConfigured
+            ?? (continuousBatchingMode != .off)
+        self.continuousBatchingEmergencyOffOverride = continuousBatchingEmergencyOffOverride
         self.continuousBatchingDurableReplayAuthorityAvailable = false
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
@@ -2800,6 +2842,14 @@ actor ModelRuntime: ModelRuntimeServing {
         // .inMemoryForTests` — coverage is unrestricted unless a test asserts
         // on the FR-CB10 gate itself.
         continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage = .unrestrictedForTests,
+        continuousBatchingPolicyLoadResult: ContinuousBatchingPolicyLoadResult = ContinuousBatchingPolicyLoadResult(
+            selection: .emptyOff,
+            status: .absentFallback,
+            policySHA256: nil,
+            signerKeyID: nil
+        ),
+        continuousBatchingEmergencyOffOverride: Bool = false,
+        continuousBatchingModeExplicitlyConfigured: Bool? = nil,
         continuousBatchingDurableReplayAuthorityAvailable: Bool = false,
         nativeMTPMode: NativeMTPMode = .off,
         nativeMTPCapability: NativeMTPCapability? = nil,
@@ -2977,6 +3027,16 @@ actor ModelRuntime: ModelRuntimeServing {
         self.continuousBatchPrefillTokensPerIteration = continuousBatchPrefillTokensPerIteration
         self.continuousBatchingCachedTurns = continuousBatchingCachedTurns
         self.continuousBatchingAcceptanceCoverage = continuousBatchingAcceptanceCoverage
+        self.continuousBatchingPolicyLoadResult = continuousBatchingPolicyLoadResult
+        #if DEBUG
+        self.continuousBatchingRunningBuildIdentity = nativeMTPRunningBuildIdentity
+            ?? Self.nativeMTPRunningBuildIdentity()
+        #else
+        self.continuousBatchingRunningBuildIdentity = Self.nativeMTPRunningBuildIdentity()
+        #endif
+        self.continuousBatchingModeExplicitlyConfigured = continuousBatchingModeExplicitlyConfigured
+            ?? (continuousBatchingMode != .off)
+        self.continuousBatchingEmergencyOffOverride = continuousBatchingEmergencyOffOverride
         self.continuousBatchingDurableReplayAuthorityAvailable = false
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
@@ -3017,7 +3077,9 @@ actor ModelRuntime: ModelRuntimeServing {
 
     func currentSnapshot() async -> RuntimeSnapshot {
         let capability = continuousBatchingCapability(draftConfigured: currentDraftModelID != nil)
+        let effectiveMode = effectiveContinuousBatchingMode()
         let schedulerMetrics = await continuousBatchScheduler?.metrics()
+        let policySnapshot = continuousBatchingPolicySnapshot()
         let decisionLabel: String
         switch pagedKVAttachDecision {
         case .disabled: decisionLabel = "disabled"
@@ -3040,13 +3102,14 @@ actor ModelRuntime: ModelRuntimeServing {
             templateSupportsPreserveThinking: currentTemplateSupportsPreserveThinking,
             specDecodeGeneration: currentSpecDecodeGeneration,
             continuousBatching: RuntimeContinuousBatchingSnapshot(
-                mode: continuousBatchingMode,
-                active: continuousBatchingMode != .off
+                mode: effectiveMode,
+                active: effectiveMode != .off
                     && capability.unsupportedReason == nil
                     && continuousBatchScheduler != nil,
                 unsupportedReason: capability.unsupportedReason?.rawValue,
                 pagedKVDecision: decisionLabel,
                 cacheClass: pagedKVRuntimeCacheClass,
+                policy: policySnapshot,
                 scheduler: schedulerMetrics.map {
                     RuntimeContinuousBatchingSchedulerSnapshot(
                         activeDecodeRows: $0.activeDecodeRows,
@@ -3059,6 +3122,91 @@ actor ModelRuntime: ModelRuntimeServing {
             ),
             nativeMTPStatus: currentNativeMTPStatusSink.snapshot(),
             nativeMTPTupleOffer: currentNativeMTPTupleOffer
+        )
+    }
+
+    private func continuousBatchingPolicySnapshot() -> RuntimeContinuousBatchingPolicySnapshot {
+        let loadResult = continuousBatchingPolicyLoadResult
+        let selection = loadResult.selection
+        let policyUnexpired = loadResult.status == .liveVerified && Date() < selection.expiresAt
+        let requestedTuple = continuousBatchingRequestedTuple()
+        let tupleMatchingEntry = requestedTuple.flatMap { tuple in
+            selection.entries.first { entry in
+                ContinuousBatchingAcceptanceCoverage(acceptedTuples: [entry.tuple]).covers(tuple)
+            }
+        }
+        let matchingEntry = tupleMatchingEntry.flatMap { entry in
+            continuousBatchingPolicyEntryMatchesRuntime(entry) ? entry : nil
+        }
+        let descriptorAdmitted = requestedTuple.map { tuple in
+            pagedKVAttachDecision.descriptor?.admits(
+                modelID: tuple.modelID,
+                modelSHA256: tuple.modelSHA256,
+                tokenizerSHA256: tuple.tokenizerSHA256,
+                chatTemplateSHA256: tuple.chatTemplateSHA256,
+                cacheClass: tuple.cacheClass,
+                kvDType: tuple.kvDType,
+                requiresMoE: tuple.requiresMoE,
+                hardwareClass: tuple.hardwareClass,
+                metallibSHA256: tuple.metallibSHA256,
+                kernelIdentifier: tuple.kernelIdentifier,
+                parityLabel: tuple.parityLabel,
+                poolEpoch: tuple.poolEpoch
+            ) == true
+        } ?? false
+        let localProofResult: String
+        switch pagedKVAttachDecision {
+        case .attached where descriptorAdmitted:
+            localProofResult = "passed"
+        case .disabled:
+            localProofResult = "not_run"
+        case .fallback, .rejected, .attached:
+            localProofResult = "failed"
+        }
+        let signedPolicyAuthorized = policyUnexpired
+            && matchingEntry != nil
+            && !continuousBatchingEmergencyOffOverride
+        let locallyAuthorized = signedPolicyAuthorized && descriptorAdmitted
+        let decisionReason: String
+        if continuousBatchingEmergencyOffOverride {
+            decisionReason = "emergency_off"
+        } else if loadResult.status != .liveVerified {
+            decisionReason = loadResult.status.rawValue
+        } else if !policyUnexpired {
+            decisionReason = "policy_expired"
+        } else if requestedTuple == nil {
+            decisionReason = "local_identity_unavailable"
+        } else if matchingEntry == nil {
+            decisionReason = tupleMatchingEntry == nil
+                ? "tuple_identity_mismatch"
+                : "runtime_provenance_mismatch"
+        } else if !descriptorAdmitted {
+            decisionReason = "authorized_local_proof_failed"
+        } else {
+            decisionReason = "authorized"
+        }
+        let expiresAt = loadResult.status == .liveVerified
+            ? ISO8601DateFormatter.string(
+                from: selection.expiresAt,
+                timeZone: TimeZone(secondsFromGMT: 0)!,
+                formatOptions: [.withInternetDateTime]
+            )
+            : nil
+        return RuntimeContinuousBatchingPolicySnapshot(
+            authorizationSource: selection.source,
+            loadStatus: loadResult.status.rawValue,
+            releaseID: loadResult.status == .liveVerified ? selection.releaseID : nil,
+            policyVersion: loadResult.status == .liveVerified ? selection.policyVersion : nil,
+            signerKeyID: loadResult.signerKeyID,
+            policySHA256: loadResult.policySHA256,
+            expiresAt: expiresAt,
+            rolloutMode: matchingEntry?.rollout.rawValue ?? ContinuousBatchingMode.off.rawValue,
+            tupleSHA256: matchingEntry?.tupleSHA256,
+            authorized: signedPolicyAuthorized,
+            cachedTurnsAuthorized: locallyAuthorized && matchingEntry?.tuple.cachedTurnsAccepted == true,
+            emergencyOffOverride: continuousBatchingEmergencyOffOverride,
+            localProofResult: localProofResult,
+            decisionReason: decisionReason
         )
     }
 
@@ -3987,6 +4135,7 @@ actor ModelRuntime: ModelRuntimeServing {
         requestStateRepresentable: Bool = true
     ) -> ContinuousBatchingCapability {
         let requestedTuple = continuousBatchingRequestedTuple()
+        let effectiveMode = effectiveContinuousBatchingMode(requestedTuple: requestedTuple)
         let schedulerBackendAvailable = requestedTuple.map {
             continuousBatchScheduler != nil
                 && pagedKVAttachDecision.descriptor?.admits(
@@ -4005,7 +4154,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 ) == true
         } ?? false
         return ContinuousBatchingPolicy.capability(
-            mode: continuousBatchingMode,
+            mode: effectiveMode,
             maxBatch: maxBatch,
             queueLimit: continuousBatchQueueLimit,
             kvBits: kvBitsOverride,
@@ -4017,6 +4166,44 @@ actor ModelRuntime: ModelRuntimeServing {
             pagedKVDecision: pagedKVAttachDecision,
             requestedTuple: requestedTuple,
             acceptanceCoverage: continuousBatchingAcceptanceCoverage
+        )
+    }
+
+    private func effectiveContinuousBatchingMode(
+        requestedTuple: ContinuousBatchingRequestedTuple? = nil
+    ) -> ContinuousBatchingMode {
+        if continuousBatchingEmergencyOffOverride { return .off }
+        if continuousBatchingPolicyLoadResult.status == .liveVerified,
+           Date() >= continuousBatchingPolicyLoadResult.selection.expiresAt {
+            return .off
+        }
+        let tuple = requestedTuple ?? continuousBatchingRequestedTuple()
+        let policyMode = tuple.flatMap { requested in
+            continuousBatchingPolicyLoadResult.selection.entries.first { entry in
+                ContinuousBatchingAcceptanceCoverage(acceptedTuples: [entry.tuple]).covers(requested)
+                    && continuousBatchingPolicyEntryMatchesRuntime(entry)
+            }?.rollout
+        }
+        guard let policyMode else {
+            // An explicit expert/test mode retains the existing strict/canary
+            // diagnostics, but it still cannot pass the signed coverage gate.
+            return continuousBatchingModeExplicitlyConfigured ? continuousBatchingMode : .off
+        }
+        guard continuousBatchingModeExplicitlyConfigured else { return policyMode }
+        switch (continuousBatchingMode, policyMode) {
+        case (.off, _): return .off
+        case (.canary, _), (.on, .canary): return .canary
+        case (.on, .on): return .on
+        case (_, .off): return .off
+        }
+    }
+
+    private func continuousBatchingPolicyEntryMatchesRuntime(
+        _ entry: ContinuousBatchingPolicyEntry
+    ) -> Bool {
+        ContinuousBatchingSignedPolicy.matchesRuntimeProvenance(
+            entry,
+            liveExecutableCDHash: continuousBatchingRunningBuildIdentity?.liveExecutableCDHash
         )
     }
 

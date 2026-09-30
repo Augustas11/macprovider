@@ -64,9 +64,10 @@ var (
 
 // AutotuneFeeds holds the literal signed bytes for SPEC-023 recommendation
 // inputs. Served on the buyer mux at /v1/rate-card(+ .sig),
-// /v1/demand-rank(+ .sig), /v1/autotune-candidates(+ .sig), and — once a
-// release is artifact-bound — /v1/catalog-artifacts(+ .sig), replacing nginx
-// /static/* hosting.
+// /v1/demand-rank(+ .sig), /v1/autotune-candidates(+ .sig),
+// /v1/continuous-batching-policy(+ .sig), and — once a release is
+// artifact-bound — /v1/catalog-artifacts(+ .sig), replacing nginx /static/*
+// hosting.
 type AutotuneFeeds struct {
 	RateCardJSON           []byte
 	RateCardSig            []byte
@@ -82,9 +83,12 @@ type AutotuneFeeds struct {
 	AutotuneCandidatesVerification AutotuneFeedVerification
 	// CatalogArtifacts* are empty for a rate-card-bound (four-feed) release;
 	// the routes then answer 404 (SPEC-023 §3.7.6 rule 6).
-	CatalogArtifactsJSON         []byte
-	CatalogArtifactsSig          []byte
-	CatalogArtifactsVerification AutotuneFeedVerification
+	CatalogArtifactsJSON                 []byte
+	CatalogArtifactsSig                  []byte
+	CatalogArtifactsVerification         AutotuneFeedVerification
+	ContinuousBatchingPolicyJSON         []byte
+	ContinuousBatchingPolicySig          []byte
+	ContinuousBatchingPolicyVerification AutotuneFeedVerification
 	// SourceConfig is the exact feed configuration these feeds were loaded
 	// from (paths, previous-release target, keyring), so a publication that
 	// needs the retained previous releases resolves them from the SAME
@@ -151,6 +155,12 @@ func LoadAutotuneFeeds(cfg config.AutotuneFeedsConfig) (AutotuneFeeds, error) {
 	if err != nil {
 		return AutotuneFeeds{}, err
 	}
+	cbPolicy, err := loadAutotuneFeedPair(
+		cfg.ContinuousBatchingPolicyPath, cfg.ContinuousBatchingPolicySigPath, "continuous_batching_policy", keyring, validateContinuousBatchingPolicyFeed,
+	)
+	if err != nil {
+		return AutotuneFeeds{}, err
+	}
 	enabledCount := 0
 	for _, feed := range []loadedAutotuneFeed{rateCard, demand, candidates} {
 		if feed.enabled() {
@@ -162,6 +172,9 @@ func LoadAutotuneFeeds(cfg config.AutotuneFeedsConfig) (AutotuneFeeds, error) {
 	}
 	if artifacts.enabled() && enabledCount != 3 {
 		return AutotuneFeeds{}, fmt.Errorf("autotune feed set incomplete: catalog_artifacts requires the rate_card, demand_rank, and autotune_candidates feeds of the same release")
+	}
+	if cbPolicy.enabled() && enabledCount != 3 {
+		return AutotuneFeeds{}, fmt.Errorf("autotune feed set incomplete: continuous_batching_policy requires the rate_card, demand_rank, and autotune_candidates feeds of the same release")
 	}
 	if enabledCount == 3 {
 		if demand.verification.Version != candidates.verification.Version {
@@ -205,21 +218,29 @@ func LoadAutotuneFeeds(cfg config.AutotuneFeedsConfig) (AutotuneFeeds, error) {
 			return AutotuneFeeds{}, err
 		}
 	}
+	if cbPolicy.enabled() {
+		if err := bindContinuousBatchingPolicyFeed(cbPolicy, candidates); err != nil {
+			return AutotuneFeeds{}, err
+		}
+	}
 	return AutotuneFeeds{
-		RateCardJSON:                   rateCard.jsonBytes,
-		RateCardSig:                    rateCard.sigBytes,
-		RateCardVerification:           rateCard.verification,
-		DemandRankJSON:                 demand.jsonBytes,
-		DemandRankSig:                  demand.sigBytes,
-		DemandRankVerification:         demand.verification,
-		AutotuneCandidatesJSON:         candidates.jsonBytes,
-		CandidateRowStatuses:           candidateRowStatuses(candidates.jsonBytes),
-		AutotuneCandidatesSig:          candidates.sigBytes,
-		AutotuneCandidatesVerification: candidates.verification,
-		CatalogArtifactsJSON:           artifacts.jsonBytes,
-		CatalogArtifactsSig:            artifacts.sigBytes,
-		CatalogArtifactsVerification:   artifacts.verification,
-		SourceConfig:                   &cfg,
+		RateCardJSON:                         rateCard.jsonBytes,
+		RateCardSig:                          rateCard.sigBytes,
+		RateCardVerification:                 rateCard.verification,
+		DemandRankJSON:                       demand.jsonBytes,
+		DemandRankSig:                        demand.sigBytes,
+		DemandRankVerification:               demand.verification,
+		AutotuneCandidatesJSON:               candidates.jsonBytes,
+		CandidateRowStatuses:                 candidateRowStatuses(candidates.jsonBytes),
+		AutotuneCandidatesSig:                candidates.sigBytes,
+		AutotuneCandidatesVerification:       candidates.verification,
+		CatalogArtifactsJSON:                 artifacts.jsonBytes,
+		CatalogArtifactsSig:                  artifacts.sigBytes,
+		CatalogArtifactsVerification:         artifacts.verification,
+		ContinuousBatchingPolicyJSON:         cbPolicy.jsonBytes,
+		ContinuousBatchingPolicySig:          cbPolicy.sigBytes,
+		ContinuousBatchingPolicyVerification: cbPolicy.verification,
+		SourceConfig:                         &cfg,
 	}, nil
 }
 
@@ -1254,6 +1275,8 @@ func cloneAutotuneFeeds(feeds AutotuneFeeds) AutotuneFeeds {
 	feeds.AutotuneCandidatesSig = append([]byte(nil), feeds.AutotuneCandidatesSig...)
 	feeds.CatalogArtifactsJSON = append([]byte(nil), feeds.CatalogArtifactsJSON...)
 	feeds.CatalogArtifactsSig = append([]byte(nil), feeds.CatalogArtifactsSig...)
+	feeds.ContinuousBatchingPolicyJSON = append([]byte(nil), feeds.ContinuousBatchingPolicyJSON...)
+	feeds.ContinuousBatchingPolicySig = append([]byte(nil), feeds.ContinuousBatchingPolicySig...)
 	if feeds.CandidateRowStatuses != nil {
 		feeds.CandidateRowStatuses = maps.Clone(feeds.CandidateRowStatuses)
 	}
@@ -1293,6 +1316,16 @@ func (s *Server) handleAutotuneCandidatesSig(w http.ResponseWriter, r *http.Requ
 	s.serveAutotuneFeedBytes(w, r, feeds.AutotuneCandidatesSig, feeds.autotuneCandidatesEnabled())
 }
 
+func (s *Server) handleContinuousBatchingPolicy(w http.ResponseWriter, r *http.Request) {
+	feeds := s.autotuneFeedsSnapshot()
+	s.serveAutotuneFeedBytes(w, r, feeds.ContinuousBatchingPolicyJSON, feeds.continuousBatchingPolicyEnabled())
+}
+
+func (s *Server) handleContinuousBatchingPolicySig(w http.ResponseWriter, r *http.Request) {
+	feeds := s.autotuneFeedsSnapshot()
+	s.serveAutotuneFeedBytes(w, r, feeds.ContinuousBatchingPolicySig, feeds.continuousBatchingPolicyEnabled())
+}
+
 func (s *Server) handleAutotuneRelease(w http.ResponseWriter, r *http.Request) {
 	if !s.allowReceiptKeys(r) {
 		w.Header().Set("Retry-After", "1")
@@ -1330,6 +1363,13 @@ func (s *Server) handleAutotuneRelease(w http.ResponseWriter, r *http.Request) {
 			"sha256":        feeds.CatalogArtifactsVerification.SHA256,
 			"signer_key_id": feeds.CatalogArtifactsVerification.KeyID,
 			"verified_at":   feeds.CatalogArtifactsVerification.VerifiedAt.Format(time.RFC3339Nano),
+		}
+	}
+	if feeds.continuousBatchingPolicyEnabled() {
+		feedStatus["continuous_batching_policy"] = map[string]any{
+			"sha256":        feeds.ContinuousBatchingPolicyVerification.SHA256,
+			"signer_key_id": feeds.ContinuousBatchingPolicyVerification.KeyID,
+			"verified_at":   feeds.ContinuousBatchingPolicyVerification.VerifiedAt.Format(time.RFC3339Nano),
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")

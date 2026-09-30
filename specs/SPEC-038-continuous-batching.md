@@ -1,11 +1,18 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.3
+Version: v0.3.4
 Status: draft (normative contract; runtime enablement remains tuple- and campaign-gated)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.4 (2026-09-30, signed CB policy authority):**
+FR-CB10 may obtain production acceptance coverage from the SPEC-023
+`macprovider.continuous-batching-policy.v1` static feed when that feed is
+release-bound, same-signer as the candidate catalog, exact-identity matched,
+unexpired, present in the current signed policy, and locally re-proven at load. The default committed
+policy has no `entries`; packaged Studio acceptance remains required before
+any enabling entry may be authored.
 **Change log v0.3.3 (2026-09-28, operator-tunable prefill token budget):** The per-iteration prefill token budget of FR-CB2 is now an operator config key, `continuous_batch_prefill_tokens_per_iteration` (env `MACPROVIDER_CONTINUOUS_BATCH_PREFILL_TOKENS_PER_ITERATION`, CLI `--continuous-batch-prefill-tokens-per-iteration`). It caps how many prompt tokens a single scheduler iteration prefills across compatible rows. Unset ⇒ the scheduler default (1024, unchanged). A Studio benchmark (1024 vs 2048 vs 8192 at 1.5k-8k prompts) found this per-iteration total budget NON-BINDING: single-stream large-prompt TTFT is compute-bound (~300 tok/s prefill) and the per-row chunk (`prefill_step_size`) governs per-row prefill, so the total budget does not move TTFT or concurrent-8k admission. The key is therefore exposed for operator tuning/observability, not as a TTFT lever, and the default is left unchanged. Serve startup rejects a value outside `1…65536` whatever the batching mode, mirroring the `continuous_batch_queue_wait_timeout_ms` bound. No wire, receipt, or acceptance-coverage change.
 **Change log v0.3.2 (2026-09-28, final-prefill sampling parity):** FR-CB2
 requires every prompt token to be committed during prefill. Non-final chunks
@@ -706,16 +713,36 @@ explicit operator policy and reason-coded telemetry. The activation reason
 MUST reference the local capability and MUST NOT cite a missing upstream pin
 as the path to success.
 
-Acceptance coverage MUST bind the runtime revision the acceptance evidence was
-measured on: the Metal library SHA-256 and the paged-KV kernel identifier, as
-well as model id and SHA, cache class, KV dtype, MoE requirement and hardware
-class. An entry missing any of these fields MUST be rejected at configuration
-load, and an entry recorded on a different runtime revision MUST NOT cover the
-requested tuple. An operator MUST NOT record acceptance for a tuple until that
-exact runtime revision has met the SPEC-039 FR-PKV13 overhead ceiling on the
-packaged build. Acceptance coverage is therefore the per-tuple gate that keeps
-a path over the ceiling from serving real traffic. Derived or per-boot
-descriptor fields (parity label, pool epoch) remain the descriptor's job.
+Production acceptance coverage MUST come from the SPEC-023 signed
+`macprovider.continuous-batching-policy.v1` feed. Legacy explicit accepted
+tuples MAY remain available only for isolated `--no-join` expert/test use and
+MUST NOT authorize a coordinator-joined provider. Coverage MUST bind the runtime revision and
+release evidence the acceptance was measured on: model key, model id, model
+SHA-256, tokenizer SHA-256, chat-template SHA-256, exact hardware class, cache
+class, KV dtype, MoE requirement, `cached_turns_accepted`, Metal library
+SHA-256, paged-KV kernel identifier, rollout mode, feed expiry, tuple digest,
+provider CLI version, live executable cdhash, and immutable package and
+Studio-campaign evidence digests. Under the current runtime descriptor
+contract, the policy tuple's `model_id` is the served/catalog key and MUST
+equal `model_key`; `model_sha256` binds the candidate row. An entry missing
+any of these fields MUST be rejected at configuration or policy load, and an
+entry recorded on a different runtime revision MUST NOT cover the requested
+tuple. An operator
+MUST NOT record acceptance for a tuple until that exact runtime revision has
+met the SPEC-039 FR-PKV13 overhead ceiling on the packaged build. Acceptance
+coverage is therefore the per-tuple gate that keeps a path over the ceiling
+from serving real traffic. Derived or per-boot descriptor fields (parity label,
+pool epoch) remain the descriptor's job.
+
+The signed SPEC-023 policy is distribution authority, not local proof. A
+policy record with `rollout` `canary` or `on` authorizes the exact tuple only
+after its signature, signer equality with the candidate catalog, release
+binding, freshness/expiry, candidate row identity, and tuple identity pass.
+The runtime MUST report this policy authorization separately from local proof,
+and MUST activate batching only after local runtime identity and load-time
+parity/isolation probes also pass. A missing,
+stale, malformed, unsigned, wrong-signer, revoked, catalog-mismatched, or
+identity-mismatched policy is equivalent to no acceptance coverage.
 
 **(v0.2.9)** An accepted-tuple entry MAY carry `cached_turns_accepted`
 (boolean, default false; any non-boolean value MUST be rejected at

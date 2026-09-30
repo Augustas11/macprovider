@@ -83,6 +83,8 @@ grep -q 'sudo -u macprovider test -r /opt/macprovider/autotune/current/autotune-
   fail "deploy smoke must verify macprovider can read autotune feeds"
 grep -q 'sudo -u macprovider test -r /opt/macprovider/autotune/current/rate-card.json' "$DEPLOY_SH" ||
   fail "deploy smoke must verify macprovider can read the signed rate-card feed"
+grep -q 'sudo -u macprovider test -r /opt/macprovider/autotune/current/continuous-batching-policy.json' "$DEPLOY_SH" ||
+  fail "deploy smoke must verify macprovider can read the signed continuous-batching policy feed"
 
 grep -q 'mv -Tf.*current.next.*current' "$DEPLOY_SH" ||
   fail "deploy must atomically activate the verified release"
@@ -535,25 +537,27 @@ grep -q 'O_NOFOLLOW' "$DEPLOY_SH" && grep -q 'dir_fd=' "$DEPLOY_SH" ||
 # the artifact feed and its sidecar are members of the immutable envelope; a
 # bound release whose checkout lacks them aborts before upload, and when bound
 # they are content-addressed, digest-recorded, uploaded, and staged beside the
-# other feeds so verify-directory on Pearl sees the exact five-feed envelope.
+# other feeds so verify-directory on Pearl sees the exact signed-feed envelope.
 grep -q 'AUTOTUNE_ARTIFACT_BOUND="$(python3 - "$AUTOTUNE_RELEASE_MANIFEST"' "$DEPLOY_SH" &&
   grep -q 'release.json binds autotune-artifacts.json but' "$DEPLOY_SH" ||
   fail "deploy must read artifact-feed binding from release.json and abort a bound release without the pair"
-grep -q '("autotune-artifacts.json", pathlib.Path(sys.argv\[10\]))' "$DEPLOY_SH" &&
-  grep -q '("autotune-artifacts.json.sig", pathlib.Path(sys.argv\[11\]))' "$DEPLOY_SH" ||
+grep -q '("autotune-artifacts.json", pathlib.Path(sys.argv\[12\]))' "$DEPLOY_SH" &&
+  grep -q '("autotune-artifacts.json.sig", pathlib.Path(sys.argv\[13\]))' "$DEPLOY_SH" ||
   fail "deploy must content-address the artifact feed pair into the release envelope when bound"
 grep -q '_append_deploy_input_digest "$STATIC_ARTIFACTS_JSON" "autotune-artifacts.json"' "$DEPLOY_SH" &&
   grep -q '_append_deploy_input_digest "$STATIC_ARTIFACTS_SIG" "autotune-artifacts.json.sig"' "$DEPLOY_SH" ||
   fail "deploy must record the artifact feed pair in the deploy input manifest when bound"
 grep -q '$DEPLOY_TMP/autotune-artifacts.json \\$_autotune_stage/autotune-artifacts.json' "$DEPLOY_SH" &&
   grep -q '$DEPLOY_TMP/autotune-artifacts.json.sig \\$_autotune_stage/autotune-artifacts.json.sig' "$DEPLOY_SH" &&
-  grep -q 'rate-card.json.sig$AUTOTUNE_ARTIFACT_INSTALL_LINES' "$DEPLOY_SH" ||
+  grep -q 'continuous-batching-policy.json.sig$AUTOTUNE_ARTIFACT_INSTALL_LINES' "$DEPLOY_SH" ||
   fail "deploy must stage the artifact feed pair into the release envelope beside the other feeds when bound"
 
 grep -q '/v1/demand-rank' "$DEPLOY_SH" ||
   fail "deploy smoke must probe /v1/demand-rank"
 grep -q '/v1/rate-card.sig' "$DEPLOY_SH" ||
   fail "deploy smoke must probe /v1/rate-card.sig"
+grep -q '/v1/continuous-batching-policy.sig' "$DEPLOY_SH" ||
+  fail "deploy smoke must probe /v1/continuous-batching-policy.sig"
 
 grep -q 'chmod o+x /opt/macprovider' "$DEPLOY_SH" &&
   fail "deploy must not chmod o+x /opt/macprovider for legacy nginx static feeds"

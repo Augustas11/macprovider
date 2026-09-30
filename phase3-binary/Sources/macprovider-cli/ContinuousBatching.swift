@@ -168,6 +168,8 @@ struct ContinuousBatchingAcceptanceCoverage: Sendable, Equatable {
     ) -> Bool {
         accepted.modelID == tuple.modelID
             && accepted.modelSHA256 == tuple.modelSHA256
+            && (accepted.tokenizerSHA256 == nil || accepted.tokenizerSHA256 == tuple.tokenizerSHA256)
+            && (accepted.chatTemplateSHA256 == nil || accepted.chatTemplateSHA256 == tuple.chatTemplateSHA256)
             && accepted.cacheClass == tuple.cacheClass
             && accepted.kvDType == tuple.kvDType
             && accepted.requiresMoE == tuple.requiresMoE
@@ -394,7 +396,7 @@ enum ContinuousBatchingPolicy {
         case .tupleNotAdvertised:
             return "continuous batching requested tuple is not advertised by the local SPEC-039 engine"
         case .tupleAcceptanceCoverageUnavailable:
-            return "continuous batching requires recorded acceptance coverage for the requested tuple (SPEC-038 FR-CB10); add it to continuous_batching_accepted_tuples"
+            return "continuous batching requires verified signed policy authorization for the requested tuple (SPEC-038 FR-CB10)"
         case .kvBitsUnsupported:
             return "continuous batching does not support the requested kv_bits tuple"
         case .draftSpecDecodeMutualExclusion:
