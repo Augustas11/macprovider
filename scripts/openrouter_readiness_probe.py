@@ -58,8 +58,8 @@ FILING_MAX_TOKENS_PER_MINUTE_PER_SLOT = 120_000
 GATEWAY_KEEPALIVE_TICK_SECONDS = 15
 BENCHMARK_BATCH_TIMEOUT_SECONDS = 120
 LOCAL_AUTH_HOSTS = {"localhost", "127.0.0.1", "::1"}
-# Canonical OpenRouter identity for every recommendable priced-v1 catalog row
-# (published-2026-09-19-openrouter-priced-v1, 17 rows). The Mac Studio 256GB
+# Canonical OpenRouter identity for every recommendable signed catalog row
+# (published-2026-09-25-artifact-hash-correction-v1, 17 rows). The Mac Studio 256GB
 # promotion (#1612) added the eight upper-RAM rows (gpt-oss-120b, GLM-4.5-Air,
 # Qwen3.5/3.6/3.8 27B + 35B-A3B, Qwen3-30B-Instruct-2507) on top of the nine
 # rows #1618 already pinned. Tuple: catalog_key, served pool id, OpenRouter
