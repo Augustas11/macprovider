@@ -426,6 +426,57 @@ final class ProviderContextTests: XCTestCase {
         XCTAssertEqual(decision, .generated(200_000))
     }
 
+    func testSwitchRecomputeUsesVerifiedWeightSizeAtMatchedCatalogFloor() throws {
+        let geometry = try XCTUnwrap(AutotuneRecommendTests.signedCandidateConfigGeometry["meta-llama/llama-3.1-8b-instruct"])
+        let configData = Data(geometry.json.utf8)
+        let configSHA256 = SHA256.hash(data: configData).map { String(format: "%02x", $0) }.joined()
+
+        let fallback = ModelSwitchContext.recomputedContext(
+            memoryGB: 16,
+            modelID: "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+            catalogMinRAMGB: 12,
+            configJSONData: configData,
+            configSHA256: configSHA256,
+            draftModel: nil,
+            slots: 1
+        )
+        let weighted = ModelSwitchContext.recomputedContext(
+            memoryGB: 16,
+            modelID: "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+            catalogMinRAMGB: 12,
+            configJSONData: configData,
+            configSHA256: configSHA256,
+            draftModel: nil,
+            slots: 1,
+            modelWeightSizeBytes: 5_000_000_000
+        )
+
+        XCTAssertEqual(fallback, AutotuneModelContextCap.minimumServeContext)
+        XCTAssertGreaterThanOrEqual(weighted, 30_000)
+        XCTAssertGreaterThan(weighted, fallback)
+    }
+
+    func testLiveModelFactsUsesRecursiveArtifactByteCountForMemoryEnvelope() throws {
+        let fixture = try Fixture()
+        let artifact = fixture.directory.appendingPathComponent("artifact", isDirectory: true)
+        let nested = artifact.appendingPathComponent("nested", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        let configData = Data(#"{"max_position_embeddings":32768,"num_hidden_layers":1,"hidden_size":128,"num_attention_heads":1,"num_key_value_heads":1}"#.utf8)
+        try configData.write(to: artifact.appendingPathComponent("config.json"))
+        try Data(repeating: 1, count: 11).write(to: artifact.appendingPathComponent("model.safetensors"))
+        try Data(repeating: 2, count: 13).write(to: nested.appendingPathComponent("shard.safetensors"))
+        try Data(repeating: 3, count: 17).write(to: nested.appendingPathComponent("tokenizer.json"))
+
+        let facts = ProviderContextWorkflow.liveModelFacts(artifactPath: artifact.path)
+
+        XCTAssertEqual(facts.declaredMax, 32_768)
+        XCTAssertEqual(facts.weightsBytes, UInt64(11 + 13 + 17 + configData.count))
+
+        XCTAssertEqual(symlink("../model.safetensors", nested.appendingPathComponent("alias.safetensors").path), 0)
+        let tamperedFacts = ProviderContextWorkflow.liveModelFacts(artifactPath: artifact.path)
+        XCTAssertNil(tamperedFacts.weightsBytes)
+    }
+
     func testSwitchRecomputeWithADraftModelStaysUnderTheDraftCap() throws {
         let configData = Data(AutotuneRecommendTests.qwen36TwentySevenBConfigJSON.utf8)
         func recomputed(draftModel: String?) -> Int {

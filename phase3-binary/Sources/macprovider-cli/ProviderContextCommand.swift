@@ -847,13 +847,37 @@ struct ProviderContextWorkflow {
             // Tokenizers without a real limit publish a 1e30 sentinel; it is ignored.
             facts.tokenizerMax = Int(value)
         }
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
-        let weights = names.filter { $0.hasSuffix(".safetensors") }.compactMap { name -> UInt64? in
-            let attributes = try? FileManager.default.attributesOfItem(atPath: directory.appendingPathComponent(name).path)
-            return (attributes?[.size] as? NSNumber)?.uint64Value
-        }
-        facts.weightsBytes = weights.isEmpty ? nil : weights.reduce(0, +)
+        facts.weightsBytes = regularFileByteCount(in: directory)
         return facts
+    }
+
+    private static func regularFileByteCount(in directory: URL) -> UInt64? {
+        guard let enumerator = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: nil, options: []) else {
+            return nil
+        }
+        var total: UInt64 = 0
+        var found = false
+        for case let url as URL in enumerator {
+            var statbuf = stat()
+            guard lstat(url.path, &statbuf) == 0 else {
+                return nil
+            }
+            let fileType = statbuf.st_mode & S_IFMT
+            if fileType == S_IFDIR {
+                continue
+            }
+            guard fileType == S_IFREG else {
+                return nil
+            }
+            let size = UInt64(max(statbuf.st_size, 0))
+            let summed = total.addingReportingOverflow(size)
+            guard !summed.overflow else {
+                return nil
+            }
+            total = summed.partialValue
+            found = true
+        }
+        return found ? total : nil
     }
 
     static func liveListenerPIDs(port: Int) -> [Int] {
@@ -923,7 +947,8 @@ enum ModelSwitchContext: Equatable {
         configJSONData: Data?,
         configSHA256: String?,
         draftModel: String?,
-        slots: Int
+        slots: Int,
+        modelWeightSizeBytes: UInt64? = nil
     ) -> Int {
         recomputedServeKnobs(
             memoryGB: memoryGB,
@@ -932,7 +957,8 @@ enum ModelSwitchContext: Equatable {
             configJSONData: configJSONData,
             configSHA256: configSHA256,
             draftModel: draftModel,
-            slots: slots
+            slots: slots,
+            modelWeightSizeBytes: modelWeightSizeBytes
         ).context
     }
 
@@ -947,8 +973,10 @@ enum ModelSwitchContext: Equatable {
         configJSONData: Data?,
         configSHA256: String?,
         draftModel: String?,
-        slots: Int
+        slots: Int,
+        modelWeightSizeBytes: UInt64? = nil
     ) -> (context: Int, slots: Int) {
+        let verifiedArtifactSizeBytes = intByteCount(modelWeightSizeBytes)
         let context = AutotuneRecommendHardware(
             machine: nil,
             chip: "",
@@ -962,6 +990,7 @@ enum ModelSwitchContext: Equatable {
             modelID: modelID,
             verifiedConfigJSONData: configJSONData,
             verifiedConfigSHA256: configSHA256,
+            verifiedArtifactSizeBytes: verifiedArtifactSizeBytes,
             catalogMinRAMGB: catalogMinRAMGB,
             draftModel: draftModel
         )
@@ -971,7 +1000,8 @@ enum ModelSwitchContext: Equatable {
             verifiedConfigJSONData: configJSONData,
             verifiedConfigSHA256: configSHA256,
             hardwareMemoryGB: memoryGB,
-            catalogMinRAMGB: catalogMinRAMGB
+            catalogMinRAMGB: catalogMinRAMGB,
+            verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
         )
     }
 
@@ -1011,7 +1041,8 @@ enum ModelSwitchContext: Equatable {
         slots: Int,
         memoryGB: Int,
         configJSONData: Data?,
-        catalogMinRAMGB: Int?
+        catalogMinRAMGB: Int?,
+        modelWeightSizeBytes: UInt64? = nil
     ) -> (context: Int, slots: Int)? {
         guard config.maxContextSource == .recommendationApply,
               let configured = config.maxContextOverride,
@@ -1025,9 +1056,17 @@ enum ModelSwitchContext: Equatable {
             verifiedConfigJSONData: configJSONData,
             verifiedConfigSHA256: SHA256.hash(data: configJSONData).map { String(format: "%02x", $0) }.joined(),
             hardwareMemoryGB: memoryGB,
-            catalogMinRAMGB: catalogMinRAMGB
+            catalogMinRAMGB: catalogMinRAMGB,
+            verifiedArtifactSizeBytes: intByteCount(modelWeightSizeBytes)
         )
         return bounded.context < configured || bounded.slots < slots ? bounded : nil
+    }
+
+    private static func intByteCount(_ bytes: UInt64?) -> Int? {
+        guard let bytes, bytes > 0, bytes <= UInt64(Int.max) else {
+            return nil
+        }
+        return Int(bytes)
     }
 
     /// The per-target contexts `serve` applies on a warm switch, keyed by

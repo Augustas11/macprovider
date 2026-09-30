@@ -1292,7 +1292,8 @@ struct AutotuneCommand: AsyncParsableCommand {
                    verifiedConfigSHA256: selectedBenchmarkConfigSHA,
                    hardwareMemoryGB: hardware.memoryGB,
                    catalogMinRAMGB: selectedRow.minRAMGB,
-                   calibrationContextTokens: calibrationContext
+                   calibrationContextTokens: calibrationContext,
+                   verifiedArtifactSizeBytes: selectedBenchmark.modelArtifactSizeBytes
                ) {
                 memoryFitCap = fit
             } else {
@@ -1657,6 +1658,7 @@ struct AutotuneCommand: AsyncParsableCommand {
                     thermalThrottleDetected: false,
                     artifactSHA256: artifact.sha256,
                     modelArtifactPath: servedPath,
+                    modelArtifactSizeBytes: artifact.sizeBytes,
                     modelConfigJSONData: artifact.configJSONData,
                     modelConfigSHA256: artifact.configSHA256,
                     benchmarkID: "installed-only-\(modelKey)",
@@ -1816,6 +1818,7 @@ struct AutotuneCommand: AsyncParsableCommand {
             modelID: selectedRow.modelID,
             verifiedConfigJSONData: selectedBenchmark.modelConfigJSONData,
             verifiedConfigSHA256: selectedBenchmark.modelConfigSHA256,
+            verifiedArtifactSizeBytes: selectedBenchmark.modelArtifactSizeBytes,
             catalogMinRAMGB: selectedRow.minRAMGB,
             draftModel: draftModel
         )
@@ -1834,7 +1837,8 @@ struct AutotuneCommand: AsyncParsableCommand {
             verifiedConfigJSONData: selectedBenchmark.modelConfigJSONData,
             verifiedConfigSHA256: selectedBenchmark.modelConfigSHA256,
             hardwareMemoryGB: hardware.memoryGB,
-            catalogMinRAMGB: selectedRow.minRAMGB
+            catalogMinRAMGB: selectedRow.minRAMGB,
+            verifiedArtifactSizeBytes: selectedBenchmark.modelArtifactSizeBytes
         )
         return RecommendationCore(
             model: selected.model,

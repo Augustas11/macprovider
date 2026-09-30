@@ -2030,7 +2030,8 @@ extension ModelsAdoptRecommendationCommand {
                verifiedConfigSHA256: configSHA256,
                hardwareMemoryGB: hardware.memoryGB,
                catalogMinRAMGB: row.minRAMGB,
-               calibrationContextTokens: knobs.maxContext
+               calibrationContextTokens: knobs.maxContext,
+               verifiedArtifactSizeBytes: artifact.sizeBytes
            ) {
             guard knobs.maxBatch <= fit else {
                 throw ValidationError("recommendation max_concurrency \(knobs.maxBatch) exceeds the memory-fit cap \(fit) at context \(knobs.maxContext)")
@@ -2060,6 +2061,7 @@ extension ModelsAdoptRecommendationCommand {
             modelID: row.modelID,
             verifiedConfigJSONData: artifact.configJSONData,
             verifiedConfigSHA256: artifact.configSHA256,
+            verifiedArtifactSizeBytes: artifact.sizeBytes,
             catalogMinRAMGB: row.minRAMGB,
             draftModel: draftModel
         )
