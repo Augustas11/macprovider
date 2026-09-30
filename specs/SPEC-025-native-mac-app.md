@@ -511,8 +511,10 @@ From reading `phase3-binary/`:
      attach/monitor behavior. No marketing-version equality check substitutes for
      either gate.
      `install.sh` performs the register + autotune (`autotune --recommend`) + model
-     download + **launchd provider-service + watchdog install**; the app only surfaces a progress hint
-     by scraping `ps` for the autotune stage (`:110-149`). A non-zero installer exit
+     download + **launchd provider-service + watchdog install**; the app surfaces
+     onboarding autotune progress both from the bounded `ps` stage probe
+     (`CLIInstallRunner.swift:513-566`) and from `paid-yield` installer log lines
+     that identify the current model and action (`:570-607`). A non-zero installer exit
      throws (installer rollback semantics).
    - **Verify CLI credential custody** (`importCLIConfigAfterInstall` →
      `ProviderConfig.importExistingCLIConfig()`, `:128`) — for an existing YAML bearer,

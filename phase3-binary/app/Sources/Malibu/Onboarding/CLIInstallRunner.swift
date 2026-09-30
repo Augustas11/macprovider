@@ -408,6 +408,12 @@ enum CLIInstallRunner {
                     || (lower.contains("downloading") && (line.contains("%") || lower.contains("model")))
             }) || (cliInstalled && downloadFraction != nil)
 
+            let autotuneRunning = processLines.contains(where: {
+                $0.contains("autotune --recommend") || $0.contains("serve --no-join")
+            })
+            if autotuneRunning, let step = autotuneStepDetail(from: logLines) {
+                return InstallProgress(stage: .autotune, detail: step, downloadFraction: nil)
+            }
             if processLines.contains(where: { $0.contains("autotune --recommend") }) {
                 return InstallProgress(
                     stage: .autotune,
@@ -559,6 +565,45 @@ enum CLIInstallRunner {
                     continuation.resume(returning: String(decoding: data, as: UTF8.self))
                 }
             }
+        }
+
+        /// The CLI prints one `paid-yield: [i/N] <action> <model> …` line per
+        /// catalog model while autotune runs; surface the latest so a
+        /// first-run sweep shows which model it is on instead of a static
+        /// "10–30 minutes" message.
+        static func autotuneStepDetail(from logLines: [String]) -> String? {
+            for line in logLines.reversed() {
+                guard let marker = line.range(of: "paid-yield: [") else { continue }
+                let rest = line[marker.upperBound...]
+                guard let close = rest.firstIndex(of: "]") else { continue }
+                let counts = rest[..<close].split(separator: "/")
+                guard counts.count == 2,
+                      let index = Int(counts[0]), let total = Int(counts[1]),
+                      index >= 1, total >= index else { continue }
+                let words = rest[rest.index(after: close)...].split(separator: " ").map(String.init)
+                guard let action = words.first else { continue }
+                let rawModel: String?
+                switch action {
+                case "reused": rawModel = words.last
+                default: rawModel = words.count > 1 ? words[1] : nil
+                }
+                let model = rawModel.map { shortModelName($0.trimmingCharacters(in: CharacterSet(charactersIn: ":"))) }
+                    ?? "a candidate model"
+                let position = "model \(index) of \(total)"
+                switch action {
+                case "downloading+benchmarking":
+                    return "Testing \(position): \(model) — downloading and benchmarking, a few minutes per model."
+                case "done":
+                    return "Finished \(position): \(model)."
+                case "reused":
+                    return "Already tested \(position): \(model)."
+                case "skipped":
+                    return "Skipped \(position): \(model)."
+                default:
+                    continue
+                }
+            }
+            return nil
         }
 
         private static func extractFlag(_ flag: String, from command: String) -> String? {

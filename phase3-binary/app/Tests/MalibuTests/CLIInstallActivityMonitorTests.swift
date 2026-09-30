@@ -121,4 +121,48 @@ final class CLIInstallActivityMonitorTests: XCTestCase {
         // With no macprovider-cli process running, the log lines drive the stage.
         XCTAssertNotNil(progress.detail)
     }
+
+    // Formats printed by AutotuneRecommend's paid-yield sweep (one line per catalog model).
+    private let autotuneProcess = ["/Users/a/macprovider/macprovider-cli autotune --recommend --apply --port 19080"]
+
+    func testAutotuneShowsWhichCatalogModelIsBeingTested() {
+        let progress = CLIInstallRunner.ActivityMonitor.progress(
+            processLines: autotuneProcess,
+            logLines: [
+                "paid-yield: starting 3 eligible candidate(s); re-runs reuse cached probes",
+                "paid-yield: [1/3] done mlx-community/Meta-Llama-3.1-8B-Instruct-4bit (tps=45.9, ttft=9870ms)",
+                "paid-yield: [2/3] downloading+benchmarking mlx-community/Qwen3-8B-4bit (min_ram 12GB)",
+            ],
+            cliInstalled: true
+        )
+        XCTAssertEqual(progress.stage, .autotune)
+        XCTAssertEqual(progress.detail, "Testing model 2 of 3: Qwen3-8B-4bit — downloading and benchmarking, a few minutes per model.")
+    }
+
+    func testAutotuneStepCoversEveryPerModelOutcome() {
+        let detail = CLIInstallRunner.ActivityMonitor.autotuneStepDetail
+        XCTAssertEqual(detail(["paid-yield: [3/3] done mlx-community/Llama-3.2-3B-Instruct-4bit (tps=69.5, ttft=4650ms)"]),
+                       "Finished model 3 of 3: Llama-3.2-3B-Instruct-4bit.")
+        XCTAssertEqual(detail(["paid-yield: [1/3] reused cached probe for mlx-community/Meta-Llama-3.1-8B-Instruct-4bit"]),
+                       "Already tested model 1 of 3: Meta-Llama-3.1-8B-Instruct-4bit.")
+        XCTAssertEqual(detail(["paid-yield: [3/3] skipped mlx-community/Qwen3-8B-4bit: swap detected under load"]),
+                       "Skipped model 3 of 3: Qwen3-8B-4bit.")
+        XCTAssertNil(detail(["paid-yield: starting 3 eligible candidate(s)"]))
+        XCTAssertNil(detail(["paid-yield: [4/3] done x/y"]), "index beyond total must be ignored")
+    }
+
+    func testAutotuneWithoutStepLinesKeepsGenericMessage() {
+        let progress = CLIInstallRunner.ActivityMonitor.progress(processLines: autotuneProcess, logLines: ["Fetching catalog"])
+        XCTAssertEqual(progress.stage, .autotune)
+        XCTAssertEqual(progress.detail, "Checking which model fits this Mac — often 10–30 minutes on first run.")
+    }
+
+    func testStaleStepLinesDoNotOverrideLaterStages() {
+        let progress = CLIInstallRunner.ActivityMonitor.progress(
+            processLines: [],
+            logLines: ["paid-yield: [3/3] done mlx-community/Llama-3.2-3B-Instruct-4bit (tps=69.5, ttft=4650ms)"],
+            cliInstalled: true
+        )
+        XCTAssertNotEqual(progress.stage, .autotune)
+    }
 }
