@@ -76,6 +76,7 @@ const (
 	settlementPolicyVersionHeader      = "X-MacProvider-Settlement-Policy-Version"
 	settlementPendingUntilHeader       = "X-MacProvider-Settlement-Pending-Deadline-Unix-Ms"
 	coordinatorInternalRequestIDHeader = "X-MacProvider-Internal-Request-ID"
+	effectiveMaxOutputTokensHeader     = "X-MacProvider-Internal-Max-Output-Tokens"
 	wholesaleInternalHeader            = "X-MacProvider-Internal-Wholesale"
 	// settlementNoPriorDispatchHeader mirrors the coordinator constant of the
 	// same name (separate Go module, intentionally duplicated). The coordinator
@@ -682,6 +683,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			// SPEC-022 R-12.8: bearer, account, request id and the
 			// signed-finality capability, set together.
 			s.setCoordinatorChatContext(upReq.Header, r, subject.AccountID)
+			// The request body remains buyer-authored because max_tokens is part
+			// of the receipt prompt hash. Carry the gateway's reserved output
+			// budget as authenticated dispatch metadata instead, so an omitted
+			// max_tokens cannot make the provider compute beyond the quota hold.
+			upReq.Header.Set(effectiveMaxOutputTokensHeader, strconv.FormatInt(maxTokens, 10))
 			if s.isWholesaleAccount(subject.AccountID) {
 				upReq.Header.Set(wholesaleInternalHeader, "1")
 			}

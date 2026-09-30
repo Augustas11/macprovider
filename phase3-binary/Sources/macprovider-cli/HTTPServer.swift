@@ -833,10 +833,15 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 )
             }
             try Self.validateContentEncoding(requestHead?.headers["Content-Encoding"] ?? [])
-            let request = try ChatCompletionRequest.parse(data: data)
+            var request = try ChatCompletionRequest.parse(data: data)
                 .withConversationKey(requestHead?.headers.first(name: "X-MacProvider-Provider-Conversation"))
                 .withRequestID(inboundRequestID)
                 .withIngestProvenance(.directHTTP)  // SPEC-037 FR-KVP11: operator direct-HTTP path
+            if let maxOutputTokens = try Self.maxOutputTokensLimit(
+                from: requestHead?.headers.first(name: Self.maxOutputTokensHeaderName)
+            ) {
+                request = request.withMaxTokensLimit(maxOutputTokens)
+            }
             parsedRequest = request
             if !warmSwapEnabled {
                 try request.validateModelMatches(modelID, aliases: modelIDAliasList(catalogModelIDAlias))
@@ -1617,6 +1622,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
     static let receiptHeaderName = "X-MacProvider-Receipt"
     static let settlementMetadataHeaderName = "X-MacProvider-Settlement-Metadata"
+    static let maxOutputTokensHeaderName = "X-MacProvider-Max-Output-Tokens"
     static let receiptTerminalStateTSHeaderName = "X-MacProvider-Receipt-Terminal-State-TS-Unix-MS"
     static let receiptPendingDeadlineHeaderName = "X-MacProvider-Receipt-Pending-Deadline-Seconds"
     static let lateReceiptSettlementHeaderName = "X-MacProvider-Late-Receipt-Settlement"
@@ -1629,6 +1635,19 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             return nil
         }
         return SettlementReceiptMetadata(wire: object)
+    }
+
+    private static func maxOutputTokensLimit(from raw: String?) throws -> Int? {
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let limit = Int(trimmed), limit >= 0 else {
+            throw APIError(
+                status: 400,
+                message: "X-MacProvider-Max-Output-Tokens must be a non-negative integer",
+                code: "invalid_max_output_tokens"
+            )
+        }
+        return limit
     }
 
     private static func receiptExtraHeaders(

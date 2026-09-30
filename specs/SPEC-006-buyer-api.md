@@ -1,7 +1,19 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.40 (2026-09-30, OpenRouter Qwen3.6-only listing and tool/structured-output descriptors)
+**Version:** 0.9.41 (2026-09-30, reservation-bound provider output)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.41 (2026-09-30, reservation-bound provider output):**
+For each canonical chat request, the gateway forwards its resolved completion
+budget as authenticated `X-MacProvider-Internal-Max-Output-Tokens`. This is the
+explicit accepted `max_tokens`, or `limits.max_tokens_per_request` when omitted
+(the demo cap applies to demo traffic). The request body remains unchanged so
+SPEC-015 prompt hashes and buyer signatures remain stable. Coordinator/provider
+dispatch must apply this ceiling before generation, preventing provider credit
+or compute from exceeding the gateway's reserved completion budget. Deploy the
+provider first, then coordinator, then gateway; roll back in reverse. Older
+coordinators/providers safely ignore the additive authenticated metadata but do
+not enforce it, so the money-path gate is not complete until all three are live.
 
 **Change log v0.9.40 (2026-09-30, OpenRouter Qwen3.6-only listing):**
 - `GET /v1/openrouter/models` publishes the operator-chosen OpenRouter listing set, not every recommendable catalog row. The set is exactly `mlx-community/Qwen3.6-35B-A3B-4bit` (slug `qwen/qwen3.6-35b-a3b`), paid only, with no free alias. This supersedes the v0.9.29 "every live recommendable catalog model" rule. Reason: the operator lists only Qwen3.6-35B-A3B on OpenRouter. Llama 3.2 3B has low demand at its price, and a listed row that cannot serve tool traffic hurts OpenRouter tool routing. Every catalog row stays routable on `POST /v1/chat/completions`.
@@ -2507,6 +2519,13 @@ Minor overshoot up to `max_tokens_per_request` is acceptable only in the event o
 Failed reservations MUST expire and be reclaimed by a reaper job within 24 hours.
 
 For streaming requests (`stream: true`), the gateway MUST reserve `max_tokens` or the configured per-request cap, whichever is smaller, before forwarding.
+
+For both streaming and non-streaming requests, the gateway MUST send that same
+resolved completion budget to the coordinator in the gateway-authenticated
+`X-MacProvider-Internal-Max-Output-Tokens` header. It MUST NOT synthesize
+`max_tokens` in the JSON body: omitted/null remains omitted/null for prompt-hash
+canonicalization. The coordinator and provider apply the out-of-band ceiling
+before inference as specified by SPEC-001 v1.9.27 and SPEC-002 v1.6.4.
 
 On SSE completion after a provider `[DONE]` chunk, settlement MUST adjust the reservation to actual usage as reported by the provider, subject to the symmetric streaming clamp policy below.
 

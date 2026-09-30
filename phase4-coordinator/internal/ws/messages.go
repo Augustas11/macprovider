@@ -410,6 +410,7 @@ type InferenceRequest struct {
 	RequestID         string                     `json:"request_id"`
 	Stream            bool                       `json:"stream"`
 	Body              string                     `json:"body"`
+	MaxOutputTokens   *int                       `json:"max_output_tokens,omitempty"`
 	Settlement        *SettlementReceiptMetadata `json:"settlement,omitempty"`
 	ConversationKey   string                     `json:"conversation_key,omitempty"`
 	BodyEncoding      string                     `json:"body_encoding,omitempty"`

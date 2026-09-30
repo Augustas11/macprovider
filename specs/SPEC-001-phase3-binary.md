@@ -1,6 +1,14 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.26 (2026-09-27, native-MTP local control surface)
+**Version:** 1.9.27 (2026-09-30, authenticated dispatch output limit)
+
+**Change log v1.9.27 (2026-09-30, authenticated dispatch output limit):**
+Adds optional coordinator dispatch metadata `max_output_tokens` to cleartext and
+Tier-2 `inference_request` payloads, plus the equivalent
+`X-MacProvider-Max-Output-Tokens` header on coordinator HTTP forwarding. The
+provider applies the smaller of this non-negative limit and any buyer-authored
+`max_tokens`; omission uses the dispatch limit. The original request body and
+prompt source remain byte-for-byte/hash unchanged for SPEC-015 receipts.
 
 **Change log v1.9.26 (2026-09-27, native-MTP local control surface):**
 Registers the default-off provider-local configuration and status boundary
@@ -2723,6 +2731,7 @@ provider.
   "type": "inference_request",
   "request_id": "req-550e8400-e29b-41d4-a716-446655440000",
   "stream": true,
+  "max_output_tokens": 4096,
   "body": "{\"model\":\"mlx-community/Qwen2.5-7B-Instruct-4bit\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}],\"max_tokens\":100,\"stream\":true}"
 }
 ```
@@ -2732,6 +2741,7 @@ provider.
 | `type` | string | Yes | Always `"inference_request"` |
 | `request_id` | string | Yes | UUID assigned by coordinator. Format: `req-{uuid}`. Used for response correlation and cancellation. |
 | `stream` | boolean | Yes | Whether the buyer requested streaming. Determines whether the provider sends `inference_response_chunk` per token (true) or a single chunk with the full response (false). |
+| `max_output_tokens` | integer | No | Authenticated coordinator dispatch ceiling, >= 0. The provider uses `min(body.max_tokens, max_output_tokens)` when the body is explicit and uses this value when the body omits `max_tokens`. This field is not part of `body` or the SPEC-015 prompt hash. Under SPEC-008 it is inside the authenticated encrypted plaintext. |
 | `body` | string | Yes | The buyer's original request body, JSON-serialized as a string. The provider parses this as if it were a `POST /v1/chat/completions` request body per § 6.2. |
 
 **Why `body` is a string, not an embedded object:** The buyer's
@@ -2740,6 +2750,12 @@ request may contain fields the coordinator does not parse
 sequence, avoiding any JSON round-trip lossy-ness (e.g., floating-point
 precision, key ordering). The provider parses `body` through its
 existing request validation pipeline (§ 6.2).
+
+For HTTP-forwarding, the coordinator carries the same optional limit in
+`X-MacProvider-Max-Output-Tokens`. The provider MUST reject a present malformed
+or negative value and MUST apply a valid value with the same minimum rule. The
+header changes runtime generation only; receipt canonicalization continues to
+use the original body value, including `null`/omitted.
 
 **Size limit:** The coordinator MUST NOT send an `inference_request`
 whose total WS frame size exceeds 16 MB. This accommodates the largest

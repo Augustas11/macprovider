@@ -56,6 +56,8 @@ const (
 	maxAssistantToolCalls              = 128
 	maxSettlementTerminalTimestampSkew = time.Minute
 	settlementMetadataHeaderName       = "X-MacProvider-Settlement-Metadata"
+	effectiveMaxOutputTokensHeader     = "X-MacProvider-Internal-Max-Output-Tokens"
+	providerMaxOutputTokensHeader      = "X-MacProvider-Max-Output-Tokens"
 	receiptTerminalStateTSHeaderName   = "X-MacProvider-Receipt-Terminal-State-TS-Unix-MS"
 )
 
@@ -2433,6 +2435,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, code, msg)
 		return
 	}
+	if _, _, err := effectiveMaxOutputTokens(r.Header); err != nil {
+		rec.logBuyerFailure(http.StatusBadRequest, "Invalid authenticated output limit")
+		writeError(w, http.StatusBadRequest, "invalid_internal_max_output_tokens", "Invalid authenticated output limit")
+		return
+	}
 	rec.setModel(req.Model)
 	rec.setStream(req.Stream)
 	// SPEC-042 R002: honor the authorized pool selection header only when the
@@ -3206,6 +3213,7 @@ func (s *Server) forwardHTTPSequence(
 			}
 			upReq.Header.Set("Content-Type", "application/json")
 			upReq.Header.Set("X-Request-ID", originalRequestID)
+			setProviderMaxOutputTokensHeader(upReq.Header, r.Header)
 			setSettlementMetadataHeader(upReq.Header, settlementMetadata)
 			state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s), state.provider.AssignedID)
 			resp, doErr := providerhttp.Client.Do(upReq)
@@ -3684,6 +3692,9 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 		if state != nil {
 			state.conversationCacheOnly = true
 		}
+	}
+	if limit, ok, _ := effectiveMaxOutputTokens(r.Header); ok {
+		ctx = providerws.ContextWithMaxOutputTokens(ctx, limit)
 	}
 	var relay *providerws.RelayStream
 	var err error
@@ -4638,6 +4649,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	}
 	upReq.Header.Set("Content-Type", "application/json")
 	upReq.Header.Set("X-Request-ID", requestID)
+	setProviderMaxOutputTokensHeader(upReq.Header, r.Header)
 	setSettlementMetadataHeader(upReq.Header, settlementMetadata)
 	markProviderDone := func() {
 		if state != nil {
@@ -8385,6 +8397,28 @@ func hasInternalRoutingHeader(headers http.Header) bool {
 		}
 	}
 	return false
+}
+
+func effectiveMaxOutputTokens(headers http.Header) (int, bool, error) {
+	values := headers.Values(effectiveMaxOutputTokensHeader)
+	if len(values) == 0 {
+		return 0, false, nil
+	}
+	if len(values) != 1 {
+		return 0, false, errors.New("multiple authenticated output limits")
+	}
+	raw := strings.TrimSpace(values[0])
+	limit, err := strconv.ParseInt(raw, 10, strconv.IntSize)
+	if err != nil || limit < 0 {
+		return 0, false, errors.New("invalid authenticated output limit")
+	}
+	return int(limit), true, nil
+}
+
+func setProviderMaxOutputTokensHeader(dst, src http.Header) {
+	if limit, ok, err := effectiveMaxOutputTokens(src); err == nil && ok {
+		dst.Set(providerMaxOutputTokensHeader, strconv.Itoa(limit))
+	}
 }
 
 // internalBearerAuthorized guards the `/internal/routing` and
