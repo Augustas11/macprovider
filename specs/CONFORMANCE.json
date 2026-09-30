@@ -665,7 +665,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.21.3",
+      "version": "v0.21.4",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -3248,7 +3248,7 @@
       ],
       "tests": [
         "scripts/test-catalog-release.sh:continuous-batching-policy.json",
-        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSignedPolicyTests.swift"
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSignedPolicyTests.swift:testValidMixedCachePolicyProducesExactCoverage"
       ],
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
@@ -3258,7 +3258,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1778",
-        "rationale": "SPEC-023 v0.21.3 defines and wires the signed continuous-batching policy feed as a separate same-signer release/static asset bound by release.json, release-ledger.json, and the generated Swift baked snapshot. The separate feed files remain outside the bridge-sensitive provider payload's exact nine-name catalog map. The committed feed is default-empty with no enabling entries because packaged Studio hardware acceptance for the intended tuples is still pending; CLI/runtime consumer promotion remains release-gated."
+        "rationale": "SPEC-023 v0.21.4 defines and wires the signed continuous-batching policy feed as a separate same-signer release/static asset bound by release.json, release-ledger.json, and the generated Swift baked snapshot. The separate feed files remain outside the bridge-sensitive provider payload's exact nine-name catalog map. v0.21.4 admits the measured mixed hybrid-cache identity while retaining the closed cache-class enum. The committed feed is default-empty with no enabling entries because packaged Studio hardware acceptance for the intended tuples is still pending; CLI/runtime consumer promotion remains release-gated."
       }
     },
     {
