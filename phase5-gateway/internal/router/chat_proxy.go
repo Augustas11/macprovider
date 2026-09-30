@@ -76,6 +76,7 @@ const (
 	settlementPolicyVersionHeader      = "X-MacProvider-Settlement-Policy-Version"
 	settlementPendingUntilHeader       = "X-MacProvider-Settlement-Pending-Deadline-Unix-Ms"
 	coordinatorInternalRequestIDHeader = "X-MacProvider-Internal-Request-ID"
+	effectiveMaxOutputTokensHeader     = "X-MacProvider-Internal-Max-Output-Tokens"
 	wholesaleInternalHeader            = "X-MacProvider-Internal-Wholesale"
 	// settlementNoPriorDispatchHeader mirrors the coordinator constant of the
 	// same name (separate Go module, intentionally duplicated). The coordinator
@@ -682,6 +683,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			// SPEC-022 R-12.8: bearer, account, request id and the
 			// signed-finality capability, set together.
 			s.setCoordinatorChatContext(upReq.Header, r, subject.AccountID)
+			// The request body remains buyer-authored because max_tokens is part
+			// of the receipt prompt hash. Carry the gateway's reserved output
+			// budget as authenticated dispatch metadata instead, so an omitted
+			// max_tokens cannot make the provider compute beyond the quota hold.
+			upReq.Header.Set(effectiveMaxOutputTokensHeader, strconv.FormatInt(maxTokens, 10))
 			if s.isWholesaleAccount(subject.AccountID) {
 				upReq.Header.Set(wholesaleInternalHeader, "1")
 			}
@@ -1046,12 +1052,12 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	if resp.StatusCode != http.StatusOK {
-		if coordinatorValidationError(resp.StatusCode, body) {
-			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, window)
+		if isReceiptEligibleProviderErrorResponse(resp, body) {
+			s.passThroughReceiptEligibleProviderError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, maxTokens)
 			return
 		}
-		if isNullUsageProviderError(body) {
-			s.passThroughReceiptEligibleProviderError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, maxTokens)
+		if coordinatorValidationError(resp.StatusCode, body) {
+			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, window)
 			return
 		}
 		completion := completionFromHeaderCapped(resp.Header, maxTokens)
@@ -1193,6 +1199,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			return
 		}
 		body, _ := io.ReadAll(resp.Body)
+		if isReceiptEligibleProviderErrorResponse(resp, body) {
+			s.passThroughReceiptEligibleProviderError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, maxTokens)
+			return
+		}
 		if coordinatorValidationError(resp.StatusCode, body) {
 			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, reservationWindow)
 			return
@@ -1919,6 +1929,15 @@ func readStreamingLineWithIdleTimeout(ctx context.Context, reader *bufio.Reader,
 		_ = body.Close()
 		return nil, errStreamingIdleTimeout
 	}
+	// A complete line already in the buffer cannot block, so it needs
+	// no deadline race. Every SSE event ends in a blank separator line
+	// that arrives with its data line, so this skips the goroutine,
+	// channel and timer for at least half of all reads.
+	if buffered := reader.Buffered(); buffered > 0 {
+		if peek, _ := reader.Peek(buffered); bytes.IndexByte(peek, '\n') >= 0 {
+			return reader.ReadSlice('\n')
+		}
+	}
 	ch := make(chan streamingReadResult, 1)
 	go func() {
 		line, err := reader.ReadSlice('\n')
@@ -2141,6 +2160,27 @@ func isNullUsageProviderError(body []byte) bool {
 	default:
 		return false
 	}
+}
+
+// isReceiptEligibleProviderErrorResponse keeps provider-reached context
+// failures distinct from coordinator preflight rejections. Both use the
+// canonical 413 context_exceeds_capacity envelope, so the error code alone is
+// insufficient. Only the coordinator's provider attribution plus a complete
+// zero-settled finality tuple proves that a provider ran and signed the
+// receipt. Preflight 413s remain on the no-provider path even if an upstream
+// mistakenly attaches a receipt-shaped header.
+func isReceiptEligibleProviderErrorResponse(resp *http.Response, body []byte) bool {
+	if isNullUsageProviderError(body) {
+		return true
+	}
+	if resp == nil || resp.StatusCode != http.StatusRequestEntityTooLarge || openAIErrorCode(body) != "context_exceeds_capacity" {
+		return false
+	}
+	if strings.TrimSpace(resp.Header.Get("X-MacProvider-Provider")) == "" || buyerVisibleReceiptHeader(resp.Header.Get("X-MacProvider-Receipt")) == "" {
+		return false
+	}
+	finality := coordinatorSettlementFinalityFromHeaders(resp.Header)
+	return finality.Action == settlementFinalityRefund && finality.Outcome == "zero_settled"
 }
 
 func contentEncodingSupported(values []string) bool {

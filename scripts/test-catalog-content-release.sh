@@ -337,7 +337,8 @@ fake, ctl = os.environ["CCR_FAKE"], os.environ["CCR_TEST_CTL"]
 opkey = os.environ["CCR_OPKEY"]
 current = os.path.join(fake, "opt/macprovider/autotune/current")
 FEEDS = {"/v1/autotune-candidates": "autotune-candidates.json", "/v1/demand-rank": "demand-rank.json",
-         "/v1/rate-card": "rate-card.json", "/v1/catalog-artifacts": "autotune-artifacts.json"}
+         "/v1/rate-card": "rate-card.json", "/v1/continuous-batching-policy": "continuous-batching-policy.json",
+         "/v1/catalog-artifacts": "autotune-artifacts.json"}
 state = {"hups": 0, "snap": 1}
 lock = threading.Lock()
 sys.path.insert(0, os.environ["CCR_T"])
@@ -1001,7 +1002,7 @@ COORD
   printf 'port: %s\n' "$CANARY_PORT" >"$H/.config/macprovider/config.yaml"
   printf '#!/bin/sh\necho "$*" >> "$CCR_TEST_CTL/canary-cli.log"\n' >"$H/macprovider/macprovider-cli"
   chmod 0755 "$H/macprovider/macprovider-cli"
-  for f in release.json trusted-keys.json tier2-catalog.json rate-card.json rate-card.json.sig autotune-candidates.json autotune-candidates.json.sig demand-rank.json demand-rank.json.sig; do
+  for f in release.json trusted-keys.json tier2-catalog.json rate-card.json rate-card.json.sig autotune-candidates.json autotune-candidates.json.sig demand-rank.json demand-rank.json.sig continuous-batching-policy.json continuous-batching-policy.json.sig; do
     printf 'x\n' >"$H/macprovider/catalog-release/$f"
   done
   python3 - "$H" <<'PY'

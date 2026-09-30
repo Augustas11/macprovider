@@ -2214,6 +2214,61 @@ func TestNullUsageErrorReceiptHeaderForwarded(t *testing.T) {
 	}
 }
 
+func TestContextExceededReceiptRequiresProviderAttributedZeroSettlement(t *testing.T) {
+	const receipt = "context-exceeded-receipt.signature"
+	for _, stream := range []bool{false, true} {
+		for _, providerReached := range []bool{false, true} {
+			name := fmt.Sprintf("stream_%t/provider_reached_%t", stream, providerReached)
+			t.Run(name, func(t *testing.T) {
+				client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					headers := http.Header{}
+					headers.Set("Content-Type", "application/json")
+					headers.Set("X-MacProvider-Receipt", receipt)
+					if providerReached {
+						headers.Set("X-MacProvider-Provider", "provider-context")
+						for key, values := range settlementFinalityTrailerForTest("enforce", settlementPolicyVersion, "zero_settled", "valid", "true", "context_exceeds_capacity") {
+							headers[key] = values
+						}
+					}
+					responseBody := `{"error":{"message":"request exceeds provider context capacity","type":"invalid_request_error","param":null,"code":"context_exceeds_capacity","retryable":false,"inference_ran":true,"settlement_ran":true}}`
+					response := responseWithBody(http.StatusRequestEntityTooLarge, headers, responseBody)
+					return response, nil
+				})}
+				h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+					cfg.Coordinator.BuyerURL = "http://coordinator.test"
+				}, WithHTTPClient(client))
+				accountID := fmt.Sprintf("acct_context_receipt_%t_%t", stream, providerReached)
+				fullKey := createAccountAndKey(t, store, cfg, accountID)
+				body := `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+				if stream {
+					body = `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+				}
+
+				resp := postChat(t, h, fullKey, body, nil)
+
+				if resp.Code != http.StatusRequestEntityTooLarge {
+					t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+				}
+				assertErrorCode(t, resp.Body.String(), "context_exceeds_capacity")
+				wantReceipt := ""
+				if providerReached {
+					wantReceipt = receipt
+				}
+				if got := resp.Header().Get("X-MacProvider-Receipt"); got != wantReceipt {
+					t.Fatalf("receipt header=%q, want %q", got, wantReceipt)
+				}
+				if got := resp.Header().Get("X-MacProvider-Provider"); got != "" {
+					t.Fatalf("internal provider header leaked: %q", got)
+				}
+				state := gatewaySettlementSnapshot(t, dbPath, accountID)
+				if state.usageRows != 0 || state.settledRows != 0 || state.refundedRows != 1 || state.activeRows != 0 {
+					t.Fatalf("settlement snapshot=%+v, want one refund and no usage/settlement/active reservation", state)
+				}
+			})
+		}
+	}
+}
+
 func TestGatewayAuthFailureDoesNotExposeReceiptHeader(t *testing.T) {
 	upstreamCalled := false
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -3695,6 +3750,53 @@ func TestProviderPinningHeadersStripped(t *testing.T) {
 		if got := resp.Header().Get(header); got != "" {
 			t.Fatalf("failure response exposed %s=%q", header, got)
 		}
+	}
+}
+
+func TestChatForwardsEffectiveOutputLimitWithoutRewritingBody(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		wantLimit string
+	}{
+		{
+			name:      "omitted uses configured reservation cap",
+			body:      `{"model":"llama","messages":[{"role":"user","content":"hi"}]}`,
+			wantLimit: "321",
+		},
+		{
+			name:      "explicit uses requested cap",
+			body:      `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`,
+			wantLimit: "20",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var capturedHeader string
+			var capturedBody []byte
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				capturedHeader = r.Header.Get(effectiveMaxOutputTokensHeader)
+				capturedBody, _ = io.ReadAll(r.Body)
+				return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"id":"chatcmpl_1","object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`), nil
+			})}
+			h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = "http://coordinator.test"
+				cfg.Limits.MaxTokensPerRequest = 321
+			}, WithHTTPClient(client))
+			fullKey := createAccountAndKey(t, store, cfg, "acct_output_limit_"+strings.ReplaceAll(tt.name, " ", "_"))
+
+			resp := postChat(t, h, fullKey, tt.body, nil)
+			if resp.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+			}
+			if capturedHeader != tt.wantLimit {
+				t.Fatalf("forwarded output limit=%q want %q", capturedHeader, tt.wantLimit)
+			}
+			if string(capturedBody) != tt.body {
+				t.Fatalf("coordinator body=%s want byte-identical %s", capturedBody, tt.body)
+			}
+		})
 	}
 }
 

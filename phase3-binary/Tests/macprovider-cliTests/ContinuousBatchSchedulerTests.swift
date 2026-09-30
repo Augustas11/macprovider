@@ -1806,12 +1806,6 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 maxOutputTokens: 1,
                 stopTokenSequences: [[2, 3, 4]]
             ),
-            ContinuousBatchSchedulerRequest(
-                id: "context",
-                conversationKey: "",
-                promptTokens: Array(repeating: 1, count: 8),
-                maxOutputTokens: 1
-            ),
         ]
 
         for request in invalidRequests {
@@ -1820,6 +1814,25 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 XCTFail("expected request retention bound rejection for \(request.id)")
             } catch ContinuousBatchSchedulerError.requestFailed("continuous_batching_invalid_request") {
                 // Rejected before admission or replay retention.
+            }
+        }
+        // Over the row cap is a context rejection (413), not a 400 invalid
+        // request: prompt + output past the cap, and output alone past it.
+        for (promptCount, maxOutput) in [(8, 1), (1, 9)] {
+            do {
+                _ = try await scheduler.submit(ContinuousBatchSchedulerRequest(
+                    id: "context",
+                    conversationKey: "",
+                    promptTokens: Array(repeating: 1, count: promptCount),
+                    maxOutputTokens: maxOutput
+                ))
+                XCTFail("expected context rejection for \(promptCount)+\(maxOutput)")
+            } catch let error as ContinuousBatchSchedulerError {
+                XCTAssertEqual(error, .contextLengthExceeded(
+                    promptTokens: promptCount,
+                    maxOutputTokens: maxOutput,
+                    contextTokens: 8
+                ))
             }
         }
         let metrics = await scheduler.metrics()
@@ -2594,6 +2607,126 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             ContinuousBatchSchedulerError.queueWaitTimedOut.asAPIError()?.code,
             ContinuousBatchSchedulerError.backpressure.asAPIError()?.code
         )
+    }
+
+    // A row over the served context is the serial path's 413, so the relay
+    // reports `error_context_exceeded` instead of a retryable provider 502.
+    func testContextLengthExceededMapsToSerialContextError() throws {
+        let apiError = try XCTUnwrap(ContinuousBatchSchedulerError.contextLengthExceeded(
+            promptTokens: 40,
+            maxOutputTokens: 199_960,
+            contextTokens: 131_072
+        ).asAPIError())
+        XCTAssertEqual(apiError.status, 413)
+        XCTAssertEqual(apiError.type, "context_length_exceeded")
+        XCTAssertEqual(apiError.code, "context_length_exceeded")
+        XCTAssertEqual(apiError.param, "max_tokens")
+        XCTAssertFalse(apiError.inferenceRan)
+        XCTAssertFalse(apiError.settlementRan)
+        XCTAssertEqual(
+            ContinuousBatchScheduler.contextRejectedTelemetryLine(
+                promptTokens: 40,
+                maxOutputTokens: 199_960,
+                cap: 131_072
+            ),
+            "event=batching_rejected code=context_length_exceeded prompt_tokens=40 max_output_tokens=199960 cap=131072\n"
+        )
+    }
+
+    // Live 2026-09-30: a 200k-context provider with no buyer max_tokens asked
+    // for 200k minus prompt of output, over the scheduler's 131,072 cap, and
+    // every such request failed. The budget is SPEC-001's remaining context
+    // (no provider-side output constant); an explicit max_tokens is kept up
+    // to that and clamped past it; a prompt with no room for one output token
+    // is the serial 413.
+    func testBatchedOutputBudgetIsRemainingContextAndClampsExplicitMaxTokens() throws {
+        XCTAssertEqual(
+            try ModelRuntime.continuousBatchMaxOutputTokens(requested: nil, promptTokens: 40, maxContextTokens: 200_000),
+            199_960
+        )
+        XCTAssertEqual(
+            try ModelRuntime.continuousBatchMaxOutputTokens(requested: 512, promptTokens: 40, maxContextTokens: 200_000),
+            512
+        )
+        XCTAssertEqual(
+            try ModelRuntime.continuousBatchMaxOutputTokens(requested: 250_000, promptTokens: 40, maxContextTokens: 200_000),
+            199_960
+        )
+        XCTAssertEqual(
+            try ModelRuntime.continuousBatchMaxOutputTokens(requested: nil, promptTokens: 199_999, maxContextTokens: 200_000),
+            1
+        )
+        for requested in [nil, 1, 10] as [Int?] {
+            XCTAssertThrowsError(try ModelRuntime.continuousBatchMaxOutputTokens(
+                requested: requested,
+                promptTokens: 200_000,
+                maxContextTokens: 200_000
+            )) { error in
+                let apiError = error as? APIError
+                XCTAssertEqual(apiError?.status, 413)
+                XCTAssertEqual(apiError?.code, "context_length_exceeded")
+                XCTAssertFalse(apiError?.inferenceRan ?? true)
+            }
+        }
+    }
+
+    // The serve path's configuration (initial load and every rebuild) caps a
+    // row at the served context, not the scheduler's 131,072 default.
+    func testProductionSchedulerConfigurationCapsRowsAtServedContext() {
+        for context in [20_000, 131_072, 200_000] {
+            let configuration = ModelRuntime.productionContinuousBatchSchedulerConfiguration(
+                descriptor: Self.descriptor(),
+                tuple: Self.tuple(),
+                maxBatch: 8,
+                queueLimit: nil,
+                queueWaitTimeoutMS: nil,
+                prefillTokensPerIteration: nil,
+                maxContextTokens: context,
+                modelID: Self.modelID,
+                modelSHA256: Self.modelSHA,
+                weightsGeneration: 1,
+                prefillStepSize: 512,
+                maxDecodeLockstepWindow: 1,
+                nativeMTPRoundByteCapacity: nil,
+                nativeMTPStatusSink: nil
+            )
+            XCTAssertEqual(configuration.maxRequestTokens, context)
+            XCTAssertGreaterThanOrEqual(configuration.maxQueuedTokens, context)
+        }
+    }
+
+    // The production row cap is the served context: a 200k provider batches
+    // a prompt + max_tokens between the old 131,072 default and 200k.
+    // Multi-row reserves prompt + headroom, so the small test pool suffices.
+    func testRequestTokenCapAboveLegacyDefaultAdmitsLongRows() async throws {
+        let backend = ScriptedBackend(scripts: ["long": [7]])
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let scheduler = ContinuousBatchScheduler(
+            configuration: ContinuousBatchSchedulerConfiguration(
+                descriptor: Self.descriptor(),
+                tuple: Self.tuple(),
+                maxActiveRows: 2,
+                decodeHeadroomTokens: 1,
+                maxRequestTokens: 200_000,
+                snapshot: ContinuousBatchSchedulerSnapshot(
+                    modelID: Self.modelID,
+                    modelSHA256: Self.modelSHA,
+                    weightsGeneration: 3
+                )
+            ),
+            allocator: allocator,
+            backend: backend,
+            replayAuthority: TestReplayAuthority()
+        )
+        let result = try await scheduler.submit(ContinuousBatchSchedulerRequest(
+            id: "long",
+            conversationKey: "",
+            promptTokens: [1, 2],
+            maxOutputTokens: 199_960,
+            stopTokenSequences: [[7]],
+            modelStopTokenIDs: [7]
+        ))
+        XCTAssertEqual(result.terminalStatus, .stop)
     }
 
     // `.backpressure` covers only the pre-admission sites — the submit-time

@@ -59,6 +59,31 @@ func TestAutotuneFeedsRejectPartialFeedSet(t *testing.T) {
 	}
 }
 
+func TestAutotuneFeedsRejectPartialContinuousBatchingPolicy(t *testing.T) {
+	cfg := validTestConfig()
+	setSignedAutotuneFeedPathsForTest(&cfg)
+	cfg.AutotuneFeeds.ContinuousBatchingPolicyPath = "/tmp/continuous-batching-policy.json"
+	cfg.AutotuneFeeds.PublicKeys = map[string]string{
+		"streamvc-autotune-static-v4": testAutotunePublicKeyBase64,
+	}
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "continuous_batching_policy_path and continuous_batching_policy_sig_path must both be set") {
+		t.Fatalf("Validate error=%v, want continuous batching policy pair rejection", err)
+	}
+
+	cfg = validTestConfig()
+	cfg.AutotuneFeeds.ContinuousBatchingPolicyPath = "/tmp/continuous-batching-policy.json"
+	cfg.AutotuneFeeds.ContinuousBatchingPolicySigPath = "/tmp/continuous-batching-policy.json.sig"
+	cfg.AutotuneFeeds.PublicKeys = map[string]string{
+		"streamvc-autotune-static-v4": testAutotunePublicKeyBase64,
+	}
+	err = cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "continuous_batching_policy_path requires") {
+		t.Fatalf("Validate error=%v, want continuous batching policy base-feed rejection", err)
+	}
+}
+
 func setSignedAutotuneFeedPathsForTest(cfg *Config) {
 	cfg.AutotuneFeeds.RateCardPath = "/tmp/rate-card.json"
 	cfg.AutotuneFeeds.RateCardSigPath = "/tmp/rate-card.json.sig"
@@ -1369,6 +1394,9 @@ func TestCoordinatorYAMLExampleSignedFeedsIncludePublicKeys(t *testing.T) {
 	}
 	if cfg.AutotuneFeeds.RateCardPath == "" || cfg.AutotuneFeeds.DemandRankPath == "" || cfg.AutotuneFeeds.AutotuneCandidatesPath == "" {
 		t.Fatal("dist coordinator example must show the complete signed feed set")
+	}
+	if cfg.AutotuneFeeds.ContinuousBatchingPolicyPath == "" || cfg.AutotuneFeeds.ContinuousBatchingPolicySigPath == "" {
+		t.Fatal("dist coordinator example must show the signed continuous batching policy feed")
 	}
 	if len(cfg.AutotuneFeeds.PublicKeys) == 0 {
 		t.Fatal("dist coordinator example signed feeds must include autotune.public_keys")

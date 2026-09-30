@@ -29,6 +29,8 @@ CATALOG_FILES = (
     "autotune-candidates.json.sig",
     "demand-rank.json",
     "demand-rank.json.sig",
+    "continuous-batching-policy.json",
+    "continuous-batching-policy.json.sig",
 )
 NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW

@@ -332,6 +332,7 @@ func TestRelayDispatchCarriesConversationKeyFromContext(t *testing.T) {
 	go session.runWriter()
 
 	ctx := ContextWithConversationKey(context.Background(), "conv:relay-cache")
+	ctx = ContextWithMaxOutputTokens(ctx, 4096)
 	if _, err := s.DispatchInference(ctx, *provider, "req-conv", []byte(`{"model":"model-a"}`), false); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -345,6 +346,9 @@ func TestRelayDispatchCarriesConversationKeyFromContext(t *testing.T) {
 	}
 	if req.ConversationKey != "conv:relay-cache" {
 		t.Fatalf("conversation_key=%q want conv:relay-cache", req.ConversationKey)
+	}
+	if req.MaxOutputTokens == nil || *req.MaxOutputTokens != 4096 {
+		t.Fatalf("max_output_tokens=%v want 4096", req.MaxOutputTokens)
 	}
 }
 
@@ -686,6 +690,7 @@ func TestEncryptedRelayDispatchSealsConversationKeyInsideBodyEnvelope(t *testing
 
 	body := []byte(`{"model":"model-a","messages":[{"role":"user","content":"secret prompt"}]}`)
 	ctx := ContextWithConversationKey(context.Background(), "conv:encrypted-cache")
+	ctx = ContextWithMaxOutputTokens(ctx, 32768)
 	if _, err := s.DispatchInference(ctx, *provider, "req-encrypted-cache", body, true); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -719,6 +724,9 @@ func TestEncryptedRelayDispatchSealsConversationKeyInsideBodyEnvelope(t *testing
 	}
 	if plaintext.Type != "inference_request_plaintext" || plaintext.Body != string(body) || plaintext.ConversationKey != "conv:encrypted-cache" {
 		t.Fatalf("encrypted plaintext envelope = %+v, want body + sealed conversation key", plaintext)
+	}
+	if plaintext.MaxOutputTokens == nil || *plaintext.MaxOutputTokens != 32768 {
+		t.Fatalf("encrypted max_output_tokens=%v want 32768", plaintext.MaxOutputTokens)
 	}
 }
 

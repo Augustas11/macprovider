@@ -26,19 +26,23 @@ public struct PagedKVConfig: Equatable, Sendable {
     /// Non-empty means the resolver forced paged mode off. Serve logs these and
     /// continues on the stock contiguous path.
     public var errors: [String]
+    /// True only when a valid max_physical_blocks came from CLI, env, or YAML.
+    public var maxPhysicalBlocksExplicit: Bool
 
     public init(
         enabled: Bool = false,
         blockSizeTokens: Int = PagedKVConfig.defaultBlockSizeTokens,
         maxPhysicalBlocks: Int = PagedKVConfig.defaultMaxPhysicalBlocks,
         fallbackPolicy: PagedKVFallbackPolicy = .permissive,
-        errors: [String] = []
+        errors: [String] = [],
+        maxPhysicalBlocksExplicit: Bool = false
     ) {
         self.enabled = enabled
         self.blockSizeTokens = blockSizeTokens
         self.maxPhysicalBlocks = maxPhysicalBlocks
         self.fallbackPolicy = fallbackPolicy
         self.errors = errors
+        self.maxPhysicalBlocksExplicit = maxPhysicalBlocksExplicit
     }
 
     public static func defaults() -> PagedKVConfig { PagedKVConfig() }
@@ -47,6 +51,22 @@ public struct PagedKVConfig: Equatable, Sendable {
     public var maxResidentTokens: Int {
         let (value, overflow) = blockSizeTokens.multipliedReportingOverflow(by: maxPhysicalBlocks)
         return overflow ? Int.max : value
+    }
+
+    /// The pool is a logical admission cap (KV buffers grow on demand), so an
+    /// unset pool must cover the advertised context or any request above the
+    /// 16k default is rejected at admission. Explicit operator values win.
+    public func sizedToCover(contextTokens: Int) -> PagedKVConfig {
+        guard !maxPhysicalBlocksExplicit, contextTokens > 0 else {
+            return self
+        }
+        let requiredBlocks = contextTokens / blockSizeTokens + (contextTokens % blockSizeTokens == 0 ? 0 : 1)
+        var covered = self
+        covered.maxPhysicalBlocks = Swift.min(
+            Swift.max(maxPhysicalBlocks, requiredBlocks),
+            PagedKVConfig.maximumPhysicalBlocks
+        )
+        return covered
     }
 
     public static let defaultBlockSizeTokens = 16
@@ -82,6 +102,7 @@ public enum PagedKVConfigResolver {
     ) -> PagedKVConfig {
         var config = PagedKVConfig.defaults()
         var errors: [String] = []
+        var explicitMaxBlocksSet = false
 
         func fail(_ key: String, _ raw: String, _ expected: String) {
             errors.append("invalid \(key)=<redacted,len=\(raw.count)>; expected \(expected); paged_kv disabled")
@@ -133,11 +154,15 @@ public enum PagedKVConfigResolver {
         }
 
         if let blocks = cli.maxPhysicalBlocks {
-            if boundedPositive(blocks, maximum: PagedKVConfig.maximumPhysicalBlocks) { config.maxPhysicalBlocks = blocks }
-            else { fail("max_physical_blocks", String(blocks), "1...\(PagedKVConfig.maximumPhysicalBlocks)") }
+            if boundedPositive(blocks, maximum: PagedKVConfig.maximumPhysicalBlocks) {
+                config.maxPhysicalBlocks = blocks
+                explicitMaxBlocksSet = true
+            } else { fail("max_physical_blocks", String(blocks), "1...\(PagedKVConfig.maximumPhysicalBlocks)") }
         } else if let resolved = rawInt("max_physical_blocks", "MACPROVIDER_PAGED_KV_MAX_PHYSICAL_BLOCKS") {
-            if let value = resolved.value, boundedPositive(value, maximum: PagedKVConfig.maximumPhysicalBlocks) { config.maxPhysicalBlocks = value }
-            else { fail("max_physical_blocks", resolved.raw, "1...\(PagedKVConfig.maximumPhysicalBlocks)") }
+            if let value = resolved.value, boundedPositive(value, maximum: PagedKVConfig.maximumPhysicalBlocks) {
+                config.maxPhysicalBlocks = value
+                explicitMaxBlocksSet = true
+            } else { fail("max_physical_blocks", resolved.raw, "1...\(PagedKVConfig.maximumPhysicalBlocks)") }
         }
 
         if let policy = cli.fallbackPolicy {
@@ -159,7 +184,10 @@ public enum PagedKVConfigResolver {
         if !errors.isEmpty {
             config.enabled = false
             config.errors = errors
+            explicitMaxBlocksSet = false
         }
+
+        config.maxPhysicalBlocksExplicit = explicitMaxBlocksSet
         return config
     }
 

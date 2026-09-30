@@ -21,9 +21,21 @@ FEEDS = {
     "demand-rank.json.sig": "/v1/demand-rank.sig",
     "rate-card.json": "/v1/rate-card",
     "rate-card.json.sig": "/v1/rate-card.sig",
+    "continuous-batching-policy.json": "/v1/continuous-batching-policy",
+    "continuous-batching-policy.json.sig": "/v1/continuous-batching-policy.sig",
 }
-PRIMARY_FEEDS = ("autotune-candidates.json", "demand-rank.json", "rate-card.json")
-SIG_FEEDS = ("autotune-candidates.json.sig", "demand-rank.json.sig", "rate-card.json.sig")
+PRIMARY_FEEDS = (
+    "autotune-candidates.json",
+    "demand-rank.json",
+    "rate-card.json",
+    "continuous-batching-policy.json",
+)
+SIG_FEEDS = (
+    "autotune-candidates.json.sig",
+    "demand-rank.json.sig",
+    "rate-card.json.sig",
+    "continuous-batching-policy.json.sig",
+)
 RELEASE_CATALOG_FILES = tuple(FEEDS) + ("trusted-keys.json",)
 # SPEC-023 §3.7 artifact feed (BYOM v0.2, #1453 slice 2b). Bound by a release
 # only once it is artifact-bound, so the gate reads its presence from the
@@ -445,6 +457,38 @@ def main() -> int:
             verify_ed25519(args.openssl, trusted[key_id], bodies[signed_name], signature, name)
             signer_key_ids[signed_name] = key_id
 
+        candidate_key_id = signer_key_ids["autotune-candidates.json"]
+        cb_policy_key_id = signer_key_ids["continuous-batching-policy.json"]
+        if cb_policy_key_id != candidate_key_id:
+            fail(
+                f"continuous-batching-policy.json.sig signer {cb_policy_key_id!r} is not the "
+                f"autotune-candidates.json signer {candidate_key_id!r}"
+            )
+        cb_policy = parsed["continuous-batching-policy.json"]
+        candidate = parsed["autotune-candidates.json"]
+        if not isinstance(cb_policy, dict):
+            fail("continuous-batching-policy.json response is not a JSON object")
+        if not isinstance(candidate, dict):
+            fail("autotune-candidates.json response is not a JSON object")
+        for field in ("generated_at", "policy_version"):
+            if cb_policy.get(field) != candidate.get(field):
+                fail(
+                    f"continuous-batching-policy.json {field} {cb_policy.get(field)!r} "
+                    f"does not match autotune-candidates.json {field} {candidate.get(field)!r}"
+                )
+        if cb_policy.get("release_id") != candidate.get("version"):
+            fail(
+                f"continuous-batching-policy.json release_id {cb_policy.get('release_id')!r} "
+                f"does not match autotune-candidates.json version {candidate.get('version')!r}"
+            )
+        candidate_digest = sha256(bodies["autotune-candidates.json"])
+        if cb_policy.get("candidate_catalog_sha256") != candidate_digest:
+            fail(
+                "continuous-batching-policy.json candidate_catalog_sha256 "
+                f"{cb_policy.get('candidate_catalog_sha256')!r} does not match the served "
+                f"autotune-candidates.json bytes {candidate_digest}"
+            )
+
         artifact_bound = ARTIFACT_FEED in expected_hashes
         if artifact_bound:
             for name, endpoint in ARTIFACT_FEEDS.items():
@@ -464,7 +508,6 @@ def main() -> int:
             if key_id not in trusted:
                 fail(f"{sig_name} key_id {key_id!r} is not in the release trusted keyring")
             verify_ed25519(args.openssl, trusted[key_id], bodies[ARTIFACT_FEED], signature, sig_name)
-            candidate_key_id = signer_key_ids["autotune-candidates.json"]
             if key_id != candidate_key_id:
                 fail(
                     f"{sig_name} signer {key_id!r} is not the autotune-candidates.json signer "
@@ -482,7 +525,6 @@ def main() -> int:
                     )
             if feed.get("release_id") != feed.get("version"):
                 fail(f"{ARTIFACT_FEED} release_id {feed.get('release_id')!r} does not equal its version")
-            candidate_digest = sha256(bodies["autotune-candidates.json"])
             if feed.get("candidate_catalog_sha256") != candidate_digest:
                 fail(
                     f"{ARTIFACT_FEED} candidate_catalog_sha256 {feed.get('candidate_catalog_sha256')!r} "

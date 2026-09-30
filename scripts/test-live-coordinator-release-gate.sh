@@ -95,11 +95,23 @@ write_endpoint("v1_rate-card", {
         }
     },
 })
+candidate_body = (live / "v1_autotune-candidates").read_bytes()
+write_endpoint("v1_continuous-batching-policy", {
+    "schema_version": "macprovider.continuous-batching-policy.v1",
+    "release_id": "fixture-release",
+    "generated_at": generated_at,
+    "policy_version": policy_version,
+    "candidate_catalog_sha256": hashlib.sha256(candidate_body).hexdigest(),
+    "signer_key_id": signer,
+    "expires_at": "2026-12-31T00:00:00Z",
+    "entries": [],
+})
 
 for feed_name, sig_name in (
     ("v1_autotune-candidates", "v1_autotune-candidates.sig"),
     ("v1_demand-rank", "v1_demand-rank.sig"),
     ("v1_rate-card", "v1_rate-card.sig"),
+    ("v1_continuous-batching-policy", "v1_continuous-batching-policy.sig"),
 ):
     signature = subprocess.check_output(
         [
@@ -123,7 +135,6 @@ for feed_name, sig_name in (
 # "served-unbound" = feed served by the coordinator but NOT bound by the release.
 artifact_mode = os.environ.get("FIXTURE_ARTIFACT_FEED", "")
 if artifact_mode:
-    candidate_body = (live / "v1_autotune-candidates").read_bytes()
     write_endpoint("v1_catalog-artifacts", {
         "version": "fixture-release",
         "generated_at": generated_at,
@@ -165,6 +176,8 @@ endpoint_to_asset = {
     "demand-rank.json.sig": "v1_demand-rank.sig",
     "rate-card.json": "v1_rate-card",
     "rate-card.json.sig": "v1_rate-card.sig",
+    "continuous-batching-policy.json": "v1_continuous-batching-policy",
+    "continuous-batching-policy.json.sig": "v1_continuous-batching-policy.sig",
 }
 if artifact_mode == "bound":
     endpoint_to_asset["autotune-artifacts.json"] = "v1_catalog-artifacts"
@@ -482,6 +495,46 @@ if run_guard "$work/missing-sig" >"$work/missing-sig.out" 2>&1; then
   fail "accepted a live coordinator missing rate-card.sig"
 fi
 grep -q 'fixture coordinator response is missing for /v1/rate-card.sig' "$work/missing-sig.out"
+
+make_fixture "$work/missing-cb-policy-sig"
+rm "$work/missing-cb-policy-sig/live/v1_continuous-batching-policy.sig"
+if run_guard "$work/missing-cb-policy-sig" >"$work/missing-cb-policy-sig.out" 2>&1; then
+  fail "accepted a live coordinator missing continuous-batching-policy.sig"
+fi
+grep -q 'fixture coordinator response is missing for /v1/continuous-batching-policy.sig' "$work/missing-cb-policy-sig.out"
+
+make_fixture "$work/cb-policy-candidate-drift"
+python3 - "$work/cb-policy-candidate-drift" <<'PY'
+import base64
+import hashlib
+import json
+import pathlib
+import subprocess
+import sys
+
+directory = pathlib.Path(sys.argv[1])
+live = directory / "live"
+feed_path = live / "v1_continuous-batching-policy"
+sig_path = live / "v1_continuous-batching-policy.sig"
+feed = json.loads(feed_path.read_text(encoding="utf-8"))
+feed["candidate_catalog_sha256"] = "0" * 64
+feed_path.write_text(json.dumps(feed, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+signature = subprocess.check_output(
+    ["openssl", "pkeyutl", "-sign", "-inkey", str(directory / "autotune-test-ed25519.pem"), "-rawin", "-in", str(feed_path)],
+)
+sidecar = json.loads(sig_path.read_text(encoding="utf-8"))
+sidecar["signature"] = base64.b64encode(signature).decode("ascii")
+sig_path.write_text(json.dumps(sidecar, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+metadata_path = directory / "pearl-release.json"
+metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+metadata["catalog"]["files"]["continuous-batching-policy.json"] = hashlib.sha256(feed_path.read_bytes()).hexdigest()
+metadata["catalog"]["files"]["continuous-batching-policy.json.sig"] = hashlib.sha256(sig_path.read_bytes()).hexdigest()
+metadata_path.write_text(json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+PY
+if run_guard "$work/cb-policy-candidate-drift" >"$work/cb-policy-candidate-drift.out" 2>&1; then
+  fail "accepted a continuous-batching policy bound to different candidate-catalog bytes"
+fi
+grep -q 'continuous-batching-policy.json candidate_catalog_sha256 .* does not match the served autotune-candidates.json bytes' "$work/cb-policy-candidate-drift.out"
 
 # Post-publication: the coordinator's own /healthz binary version is an
 # independent Pearl-runtime artifact that shares the vX.Y.Z tag space with the

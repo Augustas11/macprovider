@@ -17,7 +17,16 @@ rm -rf "$out"; mkdir -p "$out"
 cp "$bins/coordinator-linux-amd64" "$bins/coordinator-cli-linux-amd64" "$bins/gateway-linux-amd64" \
    "$bins/stats-inventory-sync-linux-amd64" "$bins/stats-billing-mirror-linux-amd64" "$bins/stats-hardware-verifier-linux-amd64" "$out/"
 for f in release.json trusted-keys.json tier2-catalog.json; do git -C "$E2E_REPO" show "$tag:phase3-binary/catalog/autotune/$f" >"$out/$f"; done
-for f in autotune-candidates.json autotune-candidates.json.sig demand-rank.json demand-rank.json.sig rate-card.json rate-card.json.sig; do
+catalog_static=(autotune-candidates.json autotune-candidates.json.sig demand-rank.json demand-rank.json.sig rate-card.json rate-card.json.sig)
+if python3 - "$out/release.json" <<'PY'
+import json, sys
+feeds = json.load(open(sys.argv[1], encoding="utf-8")).get("feeds", {})
+raise SystemExit(0 if "continuous-batching-policy.json" in feeds else 1)
+PY
+then
+  catalog_static+=(continuous-batching-policy.json continuous-batching-policy.json.sig)
+fi
+for f in "${catalog_static[@]}"; do
   git -C "$E2E_REPO" show "$tag:phase3-binary/dist/static/$f" >"$out/$f"
 done
 python3 - "$out" "$tag" "$commit" <<'PY'
@@ -26,6 +35,9 @@ d, tag, commit = sys.argv[1:]
 h = lambda n: hashlib.sha256(open(os.path.join(d, n), "rb").read()).hexdigest()
 cat = ["release.json", "trusted-keys.json", "tier2-catalog.json", "autotune-candidates.json", "autotune-candidates.json.sig",
        "demand-rank.json", "demand-rank.json.sig", "rate-card.json", "rate-card.json.sig"]
+feeds = json.load(open(os.path.join(d, "release.json"), encoding="utf-8")).get("feeds", {})
+if "continuous-batching-policy.json" in feeds:
+    cat += ["continuous-batching-policy.json", "continuous-batching-policy.json.sig"]
 v = tag[1:]
 meta = {"schema_version": 1, "release_lane": "pearl_runtime_catalog", "repository": "Augustas11/macprovider", "tag": tag,
         "commit": commit, "architecture": "linux-amd64", "release_version": v, "provider_advertised_version": v,

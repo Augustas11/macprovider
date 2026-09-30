@@ -833,10 +833,15 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 )
             }
             try Self.validateContentEncoding(requestHead?.headers["Content-Encoding"] ?? [])
-            let request = try ChatCompletionRequest.parse(data: data)
+            var request = try ChatCompletionRequest.parse(data: data)
                 .withConversationKey(requestHead?.headers.first(name: "X-MacProvider-Provider-Conversation"))
                 .withRequestID(inboundRequestID)
                 .withIngestProvenance(.directHTTP)  // SPEC-037 FR-KVP11: operator direct-HTTP path
+            if let maxOutputTokens = try Self.maxOutputTokensLimit(
+                from: requestHead?.headers.first(name: Self.maxOutputTokensHeaderName)
+            ) {
+                request = request.withMaxTokensLimit(maxOutputTokens)
+            }
             parsedRequest = request
             if !warmSwapEnabled {
                 try request.validateModelMatches(modelID, aliases: modelIDAliasList(catalogModelIDAlias))
@@ -1617,6 +1622,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
     static let receiptHeaderName = "X-MacProvider-Receipt"
     static let settlementMetadataHeaderName = "X-MacProvider-Settlement-Metadata"
+    static let maxOutputTokensHeaderName = "X-MacProvider-Max-Output-Tokens"
     static let receiptTerminalStateTSHeaderName = "X-MacProvider-Receipt-Terminal-State-TS-Unix-MS"
     static let receiptPendingDeadlineHeaderName = "X-MacProvider-Receipt-Pending-Deadline-Seconds"
     static let lateReceiptSettlementHeaderName = "X-MacProvider-Late-Receipt-Settlement"
@@ -1629,6 +1635,19 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             return nil
         }
         return SettlementReceiptMetadata(wire: object)
+    }
+
+    private static func maxOutputTokensLimit(from raw: String?) throws -> Int? {
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let limit = Int(trimmed), limit >= 0 else {
+            throw APIError(
+                status: 400,
+                message: "X-MacProvider-Max-Output-Tokens must be a non-negative integer",
+                code: "invalid_max_output_tokens"
+            )
+        }
+        return limit
     }
 
     private static func receiptExtraHeaders(
@@ -1908,7 +1927,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         modelHashSource: ReceiptModelHashSource,
         runtimeSettlementEligible: Bool
     ) throws -> ErrorReceiptHeaderResult {
-        guard error.code == "model_not_loaded" else {
+        // SPEC-015 §7.6: the null-usage errors a reached provider signs a
+        // zero-token receipt for (`error_model_not_loaded`,
+        // `error_context_exceeded`).
+        guard error.code == "model_not_loaded" || error.code == "context_length_exceeded" else {
             if error.code == "swap_drain_timeout" {
                 return .omitted(.modelSwapViolation)
             }
@@ -2334,12 +2356,29 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         _ snapshot: RuntimeContinuousBatchingSnapshot?
     ) -> [String: Any] {
         let scheduler = snapshot?.scheduler
+        let policy = snapshot?.policy
         return [
             "mode": snapshot?.mode.rawValue ?? ContinuousBatchingMode.off.rawValue,
             "active": snapshot?.active ?? false,
             "unsupported_reason": jsonNullable(snapshot?.unsupportedReason),
             "paged_kv_decision": jsonNullable(snapshot?.pagedKVDecision),
             "cache_class": jsonNullable(snapshot?.cacheClass),
+            "policy": [
+                "authorization_source": policy?.authorizationSource ?? "none",
+                "load_status": policy?.loadStatus ?? ContinuousBatchingPolicyLoadStatus.absentFallback.rawValue,
+                "release_id": jsonNullable(policy?.releaseID),
+                "policy_version": jsonNullable(policy?.policyVersion),
+                "signer_key_id": jsonNullable(policy?.signerKeyID),
+                "policy_sha256": jsonNullable(policy?.policySHA256),
+                "expires_at": jsonNullable(policy?.expiresAt),
+                "rollout_mode": policy?.rolloutMode ?? ContinuousBatchingMode.off.rawValue,
+                "tuple_sha256": jsonNullable(policy?.tupleSHA256),
+                "authorized": policy?.authorized ?? false,
+                "cached_turns_authorized": policy?.cachedTurnsAuthorized ?? false,
+                "emergency_off_override": policy?.emergencyOffOverride ?? false,
+                "local_proof_result": policy?.localProofResult ?? "not_run",
+                "decision_reason": policy?.decisionReason ?? "policy_absent",
+            ],
             "scheduler": [
                 "active_decode_rows": scheduler?.activeDecodeRows ?? 0,
                 "waiting_count": scheduler?.waitingCount ?? 0,

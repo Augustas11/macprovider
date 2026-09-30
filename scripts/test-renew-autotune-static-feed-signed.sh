@@ -335,8 +335,10 @@ if "installing Pearl catalog continuity verifier bundle" not in install_fn:
 publish_fn = lib.split("aa_publish() {", 1)[1].split("\n}", 1)[0]
 if '"$WINDOW_HELPER" "$CONTINUITY_VERIFIER")' not in publish_fn or 'verifier="$8"' not in remote:
     raise SystemExit("the remote publish must receive the shipped continuity verifier path")
-if 'rate-card.json tier2-catalog.json trusted-keys.json; do' not in script:
-    raise SystemExit("pre-lock live snapshot must include tier2-catalog.json and trusted-keys.json")
+if 'rate-card.json continuous-batching-policy.json tier2-catalog.json trusted-keys.json; do' not in script:
+    raise SystemExit("pre-lock live snapshot must include the CB policy, Tier-2 catalog, and trusted keys")
+if 'rate-card.json.sig continuous-batching-policy.json.sig; do' not in script:
+    raise SystemExit("renewal staging must include the signed CB policy sidecar")
 # #1688 B2: renewals keep minting a new release_id, so coverage loss is
 # reported loudly and NEVER blocks or rolls back the renewal.
 import json
@@ -422,8 +424,8 @@ bash -n "$script"
 bash -n "$lib"
 
 # EXECUTABLE renewal-flow regression: restamp -> generate -> sign -> generate ->
-# verify, in both the pre-activation four-feed state and the post-activation
-# five-feed state, against a throwaway catalog and key. Structural greps above
+# verify, in both the CB-policy-bound five-feed state and the artifact-bound
+# six-feed state, against a throwaway catalog and key. Structural greps above
 # cannot tell whether the flow still COMPLETES, and this job runs unattended on a
 # 30-day freshness clock.
 ( cd "$root" && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \

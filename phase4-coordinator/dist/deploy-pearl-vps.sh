@@ -728,6 +728,8 @@ STATIC_AUTOTUNE_JSON="$STATIC_FEEDS_DIR/autotune-candidates.json"
 STATIC_AUTOTUNE_SIG="$STATIC_FEEDS_DIR/autotune-candidates.json.sig"
 STATIC_RATE_CARD_JSON="$STATIC_FEEDS_DIR/rate-card.json"
 STATIC_RATE_CARD_SIG="$STATIC_FEEDS_DIR/rate-card.json.sig"
+STATIC_CB_POLICY_JSON="$STATIC_FEEDS_DIR/continuous-batching-policy.json"
+STATIC_CB_POLICY_SIG="$STATIC_FEEDS_DIR/continuous-batching-policy.json.sig"
 STATIC_ARTIFACTS_JSON="$STATIC_FEEDS_DIR/autotune-artifacts.json"
 STATIC_ARTIFACTS_SIG="$STATIC_FEEDS_DIR/autotune-artifacts.json.sig"
 AUTOTUNE_RELEASE_MANIFEST="$PINNED_AUTOTUNE_DIR/release.json"
@@ -810,6 +812,8 @@ AUTOTUNE_RELEASE_CONTENT_SHA256="$(python3 - \
   "$STATIC_DEMAND_SIG" \
   "$STATIC_RATE_CARD_JSON" \
   "$STATIC_RATE_CARD_SIG" \
+  "$STATIC_CB_POLICY_JSON" \
+  "$STATIC_CB_POLICY_SIG" \
   "$AUTOTUNE_ARTIFACT_CONTENT_JSON" \
   "$AUTOTUNE_ARTIFACT_CONTENT_SIG" <<'PY'
 import hashlib
@@ -826,13 +830,15 @@ assets = (
     ("demand-rank.json.sig", pathlib.Path(sys.argv[7])),
     ("rate-card.json", pathlib.Path(sys.argv[8])),
     ("rate-card.json.sig", pathlib.Path(sys.argv[9])),
+    ("continuous-batching-policy.json", pathlib.Path(sys.argv[10])),
+    ("continuous-batching-policy.json.sig", pathlib.Path(sys.argv[11])),
 )
 # Artifact-bound release (SPEC-023 §3.7.8): the pair is part of the
 # content-addressed envelope; both arguments are empty otherwise.
-if sys.argv[10] or sys.argv[11]:
+if sys.argv[12] or sys.argv[13]:
     assets += (
-        ("autotune-artifacts.json", pathlib.Path(sys.argv[10])),
-        ("autotune-artifacts.json.sig", pathlib.Path(sys.argv[11])),
+        ("autotune-artifacts.json", pathlib.Path(sys.argv[12])),
+        ("autotune-artifacts.json.sig", pathlib.Path(sys.argv[13])),
     )
 digest = hashlib.sha256()
 for name, path in assets:
@@ -925,6 +931,7 @@ for f in "$BINARY" "$CLI_BINARY" "$STATS_INVENTORY_BINARY" "$STATS_BILLING_MIRRO
          "$STATIC_DEMAND_JSON" "$STATIC_DEMAND_SIG" \
          "$STATIC_AUTOTUNE_JSON" "$STATIC_AUTOTUNE_SIG" \
          "$STATIC_RATE_CARD_JSON" "$STATIC_RATE_CARD_SIG" \
+         "$STATIC_CB_POLICY_JSON" "$STATIC_CB_POLICY_SIG" \
          "$AUTOTUNE_RELEASE_MANIFEST" "$AUTOTUNE_TRUSTED_KEYS" "$AUTOTUNE_TIER2_JSON" \
          "$AUTOTUNE_RELEASE_VERIFY" "$AUTOTUNE_TIER2_VERIFIER"; do
   [ -f "$f" ] || { echo "missing required file: $f" >&2; exit 1; }
@@ -3432,6 +3439,8 @@ for _deploy_input in \
   "$STATIC_AUTOTUNE_SIG=autotune-candidates.json.sig" \
   "$STATIC_RATE_CARD_JSON=rate-card.json" \
   "$STATIC_RATE_CARD_SIG=rate-card.json.sig" \
+  "$STATIC_CB_POLICY_JSON=continuous-batching-policy.json" \
+  "$STATIC_CB_POLICY_SIG=continuous-batching-policy.json.sig" \
   "$AUTOTUNE_RELEASE_MANIFEST=release.json" \
   "$AUTOTUNE_RELEASE_LEDGER=release-ledger.json" \
   "$AUTOTUNE_TIER2_CONTENT_INDEX=tier2-content-index.json" \
@@ -3498,6 +3507,8 @@ $SCP "$STATIC_AUTOTUNE_JSON"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/autotune-candida
 $SCP "$STATIC_AUTOTUNE_SIG"    "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/autotune-candidates.json.sig"
 $SCP "$STATIC_RATE_CARD_JSON"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/rate-card.json"
 $SCP "$STATIC_RATE_CARD_SIG"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/rate-card.json.sig"
+$SCP "$STATIC_CB_POLICY_JSON"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/continuous-batching-policy.json"
+$SCP "$STATIC_CB_POLICY_SIG"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/continuous-batching-policy.json.sig"
 AUTOTUNE_ARTIFACT_INSTALL_LINES=""
 if [ "$AUTOTUNE_ARTIFACT_BOUND" = "bound" ]; then
   $SCP "$STATIC_ARTIFACTS_JSON"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/autotune-artifacts.json"
@@ -3537,7 +3548,7 @@ echo "  staged deploy input digests OK"
 # mutation, so a verifier bundle that cannot verify on Pearl aborts early.
 # CATALOG_RELEASE_FILES must name exactly the files staged into
 # \$_autotune_stage below (deploy_catalog_verifier_closure.test.sh pins this).
-CATALOG_RELEASE_FILES="demand-rank.json demand-rank.json.sig autotune-candidates.json autotune-candidates.json.sig rate-card.json rate-card.json.sig tier2-catalog.json release.json trusted-keys.json"
+CATALOG_RELEASE_FILES="demand-rank.json demand-rank.json.sig autotune-candidates.json autotune-candidates.json.sig rate-card.json rate-card.json.sig continuous-batching-policy.json continuous-batching-policy.json.sig tier2-catalog.json release.json trusted-keys.json"
 if [ "$AUTOTUNE_ARTIFACT_BOUND" = "bound" ]; then
   CATALOG_RELEASE_FILES="$CATALOG_RELEASE_FILES autotune-artifacts.json autotune-artifacts.json.sig"
 fi
@@ -3841,7 +3852,9 @@ $SSH "set -e
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/autotune-candidates.json \$_autotune_stage/autotune-candidates.json
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/autotune-candidates.json.sig \$_autotune_stage/autotune-candidates.json.sig
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/rate-card.json \$_autotune_stage/rate-card.json
-  install -o root -g macprovider -m 0640 $DEPLOY_TMP/rate-card.json.sig \$_autotune_stage/rate-card.json.sig$AUTOTUNE_ARTIFACT_INSTALL_LINES
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/rate-card.json.sig \$_autotune_stage/rate-card.json.sig
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/continuous-batching-policy.json \$_autotune_stage/continuous-batching-policy.json
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/continuous-batching-policy.json.sig \$_autotune_stage/continuous-batching-policy.json.sig$AUTOTUNE_ARTIFACT_INSTALL_LINES
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/tier2-catalog.json \$_autotune_stage/tier2-catalog.json
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/release.json \$_autotune_stage/release.json
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/trusted-keys.json \$_autotune_stage/trusted-keys.json
@@ -4310,6 +4323,8 @@ if [ "$CATALOG_VERDICT" = "equivalent" ]; then
   STATIC_AUTOTUNE_SIG="$CATALOG_LIVE_SNAPSHOT/autotune-candidates.json.sig"
   STATIC_RATE_CARD_JSON="$CATALOG_LIVE_SNAPSHOT/rate-card.json"
   STATIC_RATE_CARD_SIG="$CATALOG_LIVE_SNAPSHOT/rate-card.json.sig"
+  STATIC_CB_POLICY_JSON="$CATALOG_LIVE_SNAPSHOT/continuous-batching-policy.json"
+  STATIC_CB_POLICY_SIG="$CATALOG_LIVE_SNAPSHOT/continuous-batching-policy.json.sig"
   AUTOTUNE_RELEASE_MANIFEST="$CATALOG_LIVE_SNAPSHOT/release.json"
   AUTOTUNE_TRUSTED_KEYS="$CATALOG_LIVE_SNAPSHOT/trusted-keys.json"
   AUTOTUNE_TIER2_JSON="$CATALOG_LIVE_SNAPSHOT/tier2-catalog.json"
@@ -4454,6 +4469,7 @@ $SSH "set -e
   sudo -u macprovider test -r /opt/macprovider/autotune/current/autotune-candidates.json
   sudo -u macprovider test -r /opt/macprovider/autotune/current/demand-rank.json
   sudo -u macprovider test -r /opt/macprovider/autotune/current/rate-card.json
+  sudo -u macprovider test -r /opt/macprovider/autotune/current/continuous-batching-policy.json
 " || {
   echo "aborting smoke: macprovider cannot read /opt/macprovider/autotune/*" >&2
   exit 1
@@ -4465,6 +4481,8 @@ STATIC_SMOKE_DIR=$(umask 077 && mktemp -d -t macprovider-autotune-probe.XXXXXXXX
 for STATIC_SPEC in \
     "/v1/rate-card|rate-card.json|$STATIC_RATE_CARD_JSON" \
     "/v1/rate-card.sig|rate-card.json.sig|$STATIC_RATE_CARD_SIG" \
+    "/v1/continuous-batching-policy|continuous-batching-policy.json|$STATIC_CB_POLICY_JSON" \
+    "/v1/continuous-batching-policy.sig|continuous-batching-policy.json.sig|$STATIC_CB_POLICY_SIG" \
     "/v1/demand-rank|demand-rank.json|$STATIC_DEMAND_JSON" \
     "/v1/demand-rank.sig|demand-rank.json.sig|$STATIC_DEMAND_SIG" \
     "/v1/autotune-candidates|autotune-candidates.json|$STATIC_AUTOTUNE_JSON" \
@@ -4490,6 +4508,8 @@ cp "$AUTOTUNE_TRUSTED_KEYS" "$STATIC_SMOKE_DIR/trusted-keys.json"
 cp "$AUTOTUNE_TIER2_JSON" "$STATIC_SMOKE_DIR/tier2-catalog.json"
 cp "$STATIC_RATE_CARD_JSON" "$STATIC_SMOKE_DIR/rate-card.json"
 cp "$STATIC_RATE_CARD_SIG" "$STATIC_SMOKE_DIR/rate-card.json.sig"
+cp "$STATIC_CB_POLICY_JSON" "$STATIC_SMOKE_DIR/continuous-batching-policy.json"
+cp "$STATIC_CB_POLICY_SIG" "$STATIC_SMOKE_DIR/continuous-batching-policy.json.sig"
 python3 "$AUTOTUNE_RELEASE_VERIFY" verify-directory --directory "$STATIC_SMOKE_DIR"
 AUTOTUNE_STATUS_BODY="$STATIC_SMOKE_DIR/autotune-release-status.json"
 STATUS=$(curl -sS -o "$AUTOTUNE_STATUS_BODY" -w '%{http_code}' --max-time 10 --max-filesize 65536 "https://$DOMAIN/v1/autotune-release")
@@ -4502,7 +4522,7 @@ import json, sys
 status = json.load(open(sys.argv[1], encoding="utf-8"))
 if status.get("status") != "live_verified" or status.get("release_id") != sys.argv[2]:
     raise SystemExit("coordinator autotune release metadata does not match activated release")
-for name in ("autotune_candidates", "demand_rank", "rate_card"):
+for name in ("autotune_candidates", "demand_rank", "rate_card", "continuous_batching_policy"):
     feed = status.get("feeds", {}).get(name, {})
     if len(feed.get("sha256", "")) != 64 or not feed.get("signer_key_id"):
         raise SystemExit(f"coordinator autotune release metadata is incomplete for {name}")
@@ -4752,6 +4772,8 @@ try:
         "demand-rank.json.sig",
         "rate-card.json",
         "rate-card.json.sig",
+        "continuous-batching-policy.json",
+        "continuous-batching-policy.json.sig",
         "tier2-catalog.json",
     )
     hashes = {}
@@ -4875,6 +4897,8 @@ if ! python3 - \
   "$STATIC_DEMAND_SIG" \
   "$STATIC_RATE_CARD_JSON" \
   "$STATIC_RATE_CARD_SIG" \
+  "$STATIC_CB_POLICY_JSON" \
+  "$STATIC_CB_POLICY_SIG" \
   "$AUTOTUNE_TIER2_JSON" <<'PY'
 import hashlib, json, pathlib, re, sys
 

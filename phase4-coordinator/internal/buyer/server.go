@@ -56,6 +56,8 @@ const (
 	maxAssistantToolCalls              = 128
 	maxSettlementTerminalTimestampSkew = time.Minute
 	settlementMetadataHeaderName       = "X-MacProvider-Settlement-Metadata"
+	effectiveMaxOutputTokensHeader     = "X-MacProvider-Internal-Max-Output-Tokens"
+	providerMaxOutputTokensHeader      = "X-MacProvider-Max-Output-Tokens"
 	receiptTerminalStateTSHeaderName   = "X-MacProvider-Receipt-Terminal-State-TS-Unix-MS"
 )
 
@@ -104,6 +106,7 @@ var spec018RetryableByCode = map[string]bool{
 	"context_exceeds_capacity":                                false,
 	"unsupported_content_shape":                               false,
 	"invalid_request":                                         false,
+	"invalid_internal_max_output_tokens":                      false,
 	"invalid_json":                                            false,
 	"byte_cap_exceeded":                                       false,
 	"response_byte_cap_exceeded":                              false,
@@ -402,6 +405,11 @@ const (
 	wsForwardUnavailable                   wsForwardResult = "unavailable"
 	wsForwardProviderDisconnected          wsForwardResult = "provider_disconnected"
 	wsForwardProviderDisconnectedCommitted wsForwardResult = "provider_disconnected_committed"
+	// wsForwardContextExceeded is a pre-commit streaming
+	// error_context_exceeded: the request, not the provider, is at fault,
+	// so it renders the non-streaming 413 context_exceeds_capacity and is
+	// neither retried nor breaker-qualifying.
+	wsForwardContextExceeded wsForwardResult = "context_exceeded"
 )
 
 type breakerFault string
@@ -904,6 +912,8 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/v1/demand-rank.sig", s.handleDemandRankSig)
 	r.Get("/v1/autotune-candidates", s.handleAutotuneCandidates)
 	r.Get("/v1/autotune-candidates.sig", s.handleAutotuneCandidatesSig)
+	r.Get("/v1/continuous-batching-policy", s.handleContinuousBatchingPolicy)
+	r.Get("/v1/continuous-batching-policy.sig", s.handleContinuousBatchingPolicySig)
 	r.Get("/v1/catalog-artifacts", s.handleCatalogArtifacts)
 	r.Get("/v1/catalog-artifacts.sig", s.handleCatalogArtifactsSig)
 	r.Get("/v1/autotune-release", s.handleAutotuneRelease)
@@ -2317,6 +2327,10 @@ type chatRequest struct {
 	// class (from the gateway's X-MacProvider-Internal-Engine). "" means no
 	// selection, which keeps selection byte-identical.
 	engineClass string
+	// multiTurnToolHistory records SPEC-018 §3.8 tool history (role:"tool"
+	// or non-empty assistant tool_calls) so class selection can drop
+	// members without a multi-turn prompt profile.
+	multiTurnToolHistory bool
 }
 
 type chatMessage struct {
@@ -2422,6 +2436,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, code, msg)
 		return
 	}
+	if _, _, err := effectiveMaxOutputTokens(r.Header); err != nil {
+		rec.logBuyerFailure(http.StatusBadRequest, "Invalid authenticated output limit")
+		writeError(w, http.StatusBadRequest, "invalid_internal_max_output_tokens", "Invalid authenticated output limit")
+		return
+	}
 	rec.setModel(req.Model)
 	rec.setStream(req.Stream)
 	// SPEC-042 R002: honor the authorized pool selection header only when the
@@ -2489,6 +2508,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.engineClass = engineClass
+	req.multiTurnToolHistory = hasMultiTurnToolData(req.Messages)
+	var poolRuntimeAllowlist []string
+	if req.poolSnapshotSet {
+		poolRuntimeAllowlist = req.poolSnapshot.RuntimeAllowlist
+	}
+	if status, code, msg := unsupportedMultiTurnToolModel(req, tier2.Default().ModelIDs, s.resolveModelClass(req.Model), poolRuntimeAllowlist); status != 0 {
+		rec.logBuyerFailure(status, msg)
+		writeError(w, status, code, msg)
+		return
+	}
 	if idempotencyKey := normalizeIdempotencyKey(r.Header.Get("Idempotency-Key")); idempotencyKey != "" {
 		if s.reqLogStore == nil {
 			rec.logBuyerFailure(http.StatusServiceUnavailable, "Idempotency-Key requires durable request logging")
@@ -3185,6 +3214,7 @@ func (s *Server) forwardHTTPSequence(
 			}
 			upReq.Header.Set("Content-Type", "application/json")
 			upReq.Header.Set("X-Request-ID", originalRequestID)
+			setProviderMaxOutputTokensHeader(upReq.Header, r.Header)
 			setSettlementMetadataHeader(upReq.Header, settlementMetadata)
 			state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s), state.provider.AssignedID)
 			resp, doErr := providerhttp.Client.Do(upReq)
@@ -3367,6 +3397,9 @@ func (s *Server) forwardHTTPSequence(
 				_ = resp.Body.Close()
 				state.phaseTiming.markProviderDone(phaseTimingNow(s))
 				attempt.ErrorCode = nullUsageProviderErrorCode(respBody)
+				if code := httpProviderContextExceededCode(status, respBody); code != "" {
+					attempt.ErrorCode = code
+				}
 				receiptValue := normalizeReceiptHeaderValue(resp.Header.Get("X-MacProvider-Receipt"))
 				terminalState := terminalStateFromAttempt(status, http.StatusText(status), attempt.ErrorCode)
 				terminalTS := time.Now().UTC().UnixMilli()
@@ -3374,6 +3407,35 @@ func (s *Server) forwardHTTPSequence(
 					terminalTS = providerTS
 				}
 				attempt.SettlementOutput = settlementOutputForContentAt("", nil, nil, terminalState, terminalTS)
+				if attempt.ErrorCode == "context_length_exceeded" {
+					if cancelled, ok := s.poolAttemptCancelledDuringDispatch(r, state); ok {
+						cancelAttempt()
+						return cancelled, true
+					}
+					if err := rec.withPendingReceipt(state.provider, receiptValue, func() error {
+						return rec.recordRow(state.provider.AssignedID, state.provider.ProviderID, state.provider.RuntimeSource, status, nil, nil, nil, "Request exceeds provider context capacity", attempt.ErrorCode, state.explicitRetries, nil, billing.FaultNone, attempt.SettlementOutput)
+					}); err != nil {
+						cancelAttempt()
+						writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
+						return dispatchedAttempt{}, false
+					}
+					receiptState, hasReceiptState, err := rec.ingestSettlementReceipt(state.provider, receiptValue)
+					if err != nil {
+						cancelAttempt()
+						writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log settlement receipt")
+						return dispatchedAttempt{}, false
+					}
+					if hasReceiptState {
+						setInternalSettlementOutcomeHeaders(w.Header(), rec, receiptState)
+					}
+					setReceiptHeaderForProvider(w.Header(), receiptValue, state.provider)
+					w.Header().Set("X-MacProvider-Provider", state.provider.ProviderID)
+					w.Header().Set(engineResponseHeader, providerEngineClass(state.provider))
+					w.Header().Set("X-MacProvider-Route", state.provider.AssignedID)
+					writeError(w, http.StatusRequestEntityTooLarge, "context_exceeds_capacity", "Request exceeds provider context capacity")
+					cancelAttempt()
+					return dispatchedAttempt{}, false
+				}
 				if isSpec019ProviderDetailCode(attempt.ErrorCode) {
 					attempt.SettlementOutput = settlementOutputForContentAt("", nil, nil, terminalState, terminalTS)
 					if cancelled, ok := s.poolAttemptCancelledDuringDispatch(r, state); ok {
@@ -3663,6 +3725,9 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 		if state != nil {
 			state.conversationCacheOnly = true
 		}
+	}
+	if limit, ok, _ := effectiveMaxOutputTokens(r.Header); ok {
+		ctx = providerws.ContextWithMaxOutputTokens(ctx, limit)
 	}
 	var relay *providerws.RelayStream
 	var err error
@@ -4213,6 +4278,10 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 					markProviderDone()
 					return wsForwardQueueFull, requestLogAttempt{Status: status, Error: requestLogEndErrorMessage(end), ErrorCode: end.Status}
 				}
+				if end.Status == "error_context_exceeded" {
+					markProviderDone()
+					return wsForwardContextExceeded, requestLogAttempt{Status: status, Error: requestLogEndErrorMessage(end), ErrorCode: end.Status}
+				}
 				markProviderDone()
 				return wsForwardFailed, requestLogAttempt{Status: status, Error: requestLogEndErrorMessage(end), ErrorCode: spec001EndStatus(end.Status)}
 			}
@@ -4418,6 +4487,12 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 				return wsForwardComplete, requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(acct.deliveredBytes())}
 			}
 		case end := <-relay.Done:
+			if end.Status == "error_context_exceeded" {
+				// Nothing of a buffered stream reached the buyer; the
+				// request exceeded the provider's context.
+				markProviderDone()
+				return wsForwardContextExceeded, requestLogAttempt{Status: wsEndHTTPStatus(end.Status), Error: requestLogEndErrorMessage(end), ErrorCode: end.Status}
+			}
 			if end.Status != "complete" {
 				if toolFinal.toolOpened && s.streamingDowngrade != nil {
 					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
@@ -4607,6 +4682,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	}
 	upReq.Header.Set("Content-Type", "application/json")
 	upReq.Header.Set("X-Request-ID", requestID)
+	setProviderMaxOutputTokensHeader(upReq.Header, r.Header)
 	setSettlementMetadataHeader(upReq.Header, settlementMetadata)
 	markProviderDone := func() {
 		if state != nil {
@@ -4648,8 +4724,6 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	streamingMode := s.streamingMode(r, provider)
 	streamingBuyer := s.streamingBuyerKey(r)
 	if resp.StatusCode != http.StatusOK {
-		s.log.Warn().Int("status", resp.StatusCode).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider returned non-200")
-		s.handleProviderFailure(provider, resp.StatusCode)
 		body := io.Reader(resp.Body)
 		if state != nil {
 			body = &firstByteTimingReader{
@@ -4662,6 +4736,23 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		respBody, _ := readLimitedBody(body, maxUpstreamResponseBodyBytes)
 		markProviderDone()
 		attempt := requestLogAttempt{Status: resp.StatusCode, Error: http.StatusText(resp.StatusCode), ErrorCode: spec001StatusFromBody(respBody)}
+		if code := httpProviderContextExceededCode(resp.StatusCode, respBody); code != "" {
+			terminalTS := time.Now().UTC().UnixMilli()
+			if providerTS, ok := trustedProviderTerminalStateTS(resp.Header.Get(receiptTerminalStateTSHeaderName), started, time.Now().UTC()); ok {
+				terminalTS = providerTS
+			}
+			attempt.Error = "Request exceeds provider context capacity"
+			attempt.ErrorCode = code
+			attempt.SettlementReceipt = normalizeReceiptHeaderValue(resp.Header.Get("X-MacProvider-Receipt"))
+			attempt.SettlementOutput = settlementOutputForContentAt("", nil, nil, billing.TerminalStateProviderError, terminalTS)
+			setReceiptHeaderForProvider(w.Header(), attempt.SettlementReceipt, provider)
+			w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
+			w.Header().Set(engineResponseHeader, providerEngineClass(provider))
+			w.Header().Set("X-MacProvider-Route", provider.AssignedID)
+			return wsForwardContextExceeded, resp.StatusCode, attempt
+		}
+		s.log.Warn().Int("status", resp.StatusCode).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider returned non-200")
+		s.handleProviderFailure(provider, resp.StatusCode)
 		if resp.StatusCode == http.StatusGatewayTimeout {
 			return wsForwardTimedOut, resp.StatusCode, attempt
 		}
@@ -6134,6 +6225,8 @@ func statusForForwardResult(result wsForwardResult) int {
 		return http.StatusGatewayTimeout
 	case wsForwardQueueFull, wsForwardUnavailable:
 		return http.StatusServiceUnavailable
+	case wsForwardContextExceeded:
+		return http.StatusRequestEntityTooLarge
 	default:
 		return http.StatusBadGateway
 	}
@@ -6147,6 +6240,8 @@ func writeStreamForwardError(w http.ResponseWriter, result wsForwardResult) {
 		writeError(w, http.StatusServiceUnavailable, "no_provider_available", "Selected provider is not reachable")
 	case wsForwardProviderDisconnected:
 		writeError(w, http.StatusBadGateway, "provider_disconnected", "Selected provider disconnected; buyer should retry")
+	case wsForwardContextExceeded:
+		writeError(w, http.StatusRequestEntityTooLarge, "context_exceeds_capacity", "Request exceeds provider context capacity")
 	case wsForwardCancelled, wsForwardProviderDisconnectedCommitted:
 		return
 	default:
@@ -6799,6 +6894,171 @@ func validateMessages(messages []chatMessage, rawMessages []map[string]json.RawM
 	return normalizedContent, 0, "", ""
 }
 
+// unsupportedMultiTurnToolModel applies SPEC-018 §3.8 before dispatch: a
+// multi-turn tool request (role:"tool" or non-empty assistant-history
+// tool_calls[]) for a modelID with no family prompt profile MUST fail with
+// HTTP 400 unsupported_modelID_for_multi_turn. The native provider already
+// rejects it, but the WS relay collapses provider 4xx codes to error_internal,
+// so buyers saw a 502 and the provider was marked degraded.
+//
+// Routing rewrites the buyer model to the provider's concrete id (catalog
+// aliases via billing.ModelsEquivalent: "-free", OpenRouter slugs, case
+// variants; SPEC-004 FR-SR-7 model-class aliases via class members), and the
+// provider picks its family from that rewritten id. The gate therefore judges
+// the family on the resolved ids:
+//   - a concrete alias resolving to catalogued ids is rejected when none of
+//     them has a profile;
+//   - a model-class alias is rejected when no class member has a profile;
+//     otherwise selection keeps only profiled members (multiTurnToolClass).
+//
+// It applies before dispatch only when the whole route can reach native
+// providers exclusively: global routes (SPEC-042-R014 (b): global is
+// native-only), an explicit native engine selection, and a Trusted Pool route
+// with no active external runtime allowlist. Pool routes with an external
+// allowlist are evaluated per candidate/attempt so unsupported native members
+// are excluded while genuinely reachable external-runtime members remain
+// selectable. Explicit non-native engine selections and models that resolve to
+// no catalog id or class (BYOM) keep provider-side behavior.
+func unsupportedMultiTurnToolModel(req chatRequest, catalogModelIDs func() []string, class *config.ModelClassConfig, poolRuntimeAllowlist []string) (int, string, string) {
+	if !multiTurnToolGateApplies(req, poolRuntimeAllowlist) {
+		return 0, "", ""
+	}
+	resolved := false
+	if catalogModelIDs != nil {
+		for _, id := range catalogModelIDs() {
+			if !billing.ModelsEquivalent(req.Model, id) {
+				continue
+			}
+			if spec018MultiTurnProfileModel(id) {
+				return 0, "", ""
+			}
+			resolved = true
+		}
+	}
+	if !resolved && (class == nil || len(modelClassMembers(multiTurnToolClass(class))) > 0) {
+		return 0, "", ""
+	}
+	return http.StatusBadRequest, "unsupported_modelID_for_multi_turn", "Model does not support multi-turn tool history rendering"
+}
+
+func unsupportedMultiTurnNativeCandidate(req chatRequest, provider pool.Provider, catalogModelIDs func() []string, class *config.ModelClassConfig) bool {
+	if !req.multiTurnToolHistory || providerEngineClass(provider) != engineClassNative {
+		return false
+	}
+	if class != nil {
+		for _, member := range modelClassMembers(class) {
+			if modelIDEqual(provider.ModelID, member) {
+				return !spec018MultiTurnProfileModel(member)
+			}
+		}
+		return false
+	}
+	if catalogModelIDs == nil {
+		return false
+	}
+	for _, id := range catalogModelIDs() {
+		if !billing.ModelsEquivalent(req.Model, id) || !modelIDEqual(provider.ModelID, id) {
+			continue
+		}
+		return !spec018MultiTurnProfileModel(id)
+	}
+	return false
+}
+
+func filterUnsupportedMultiTurnNativeCandidates(req chatRequest, providers []pool.Provider, catalogModelIDs func() []string, class *config.ModelClassConfig) ([]pool.Provider, int) {
+	if !req.multiTurnToolHistory || len(providers) == 0 {
+		return providers, 0
+	}
+	out := providers[:0]
+	dropped := 0
+	for _, provider := range providers {
+		if unsupportedMultiTurnNativeCandidate(req, provider, catalogModelIDs, class) {
+			dropped++
+			continue
+		}
+		out = append(out, provider)
+	}
+	return out, dropped
+}
+
+func anyProviderModelCandidate(providers []pool.Provider, model string, class *config.ModelClassConfig) bool {
+	if class == nil {
+		for _, provider := range providers {
+			if modelIDEqual(provider.ModelID, model) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, provider := range providers {
+		for _, member := range modelClassMembers(class) {
+			if modelIDEqual(provider.ModelID, member) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// multiTurnToolGateApplies reports whether the request carries tool history
+// and its route can only reach native providers. poolRuntimeAllowlist is the
+// pool's effective runtime allowlist (nil on a global route).
+func multiTurnToolGateApplies(req chatRequest, poolRuntimeAllowlist []string) bool {
+	if !req.multiTurnToolHistory {
+		return false
+	}
+	switch req.engineClass {
+	case engineClassNative:
+		return true
+	case "":
+		return req.poolID == "" || len(poolRuntimeAllowlist) == 0
+	default:
+		return false
+	}
+}
+
+// multiTurnToolClass narrows a SPEC-004 model class to the members with a
+// SPEC-018 §3.8 multi-turn profile. Models and Members are both set so the
+// Models-then-Members fallback in modelClassMembers cannot widen it again.
+func multiTurnToolClass(class *config.ModelClassConfig) *config.ModelClassConfig {
+	if class == nil {
+		return nil
+	}
+	eligible := []string{}
+	for _, member := range modelClassMembers(class) {
+		if spec018MultiTurnProfileModel(member) {
+			eligible = append(eligible, member)
+		}
+	}
+	return &config.ModelClassConfig{Objective: class.Objective, Models: eligible, Members: append([]string(nil), eligible...)}
+}
+
+// spec018MultiTurnProfileModel mirrors the SPEC-018 §3.1/§3.8 modelID
+// predicates that have a multi-turn prompt-template profile.
+func spec018MultiTurnProfileModel(model string) bool {
+	lower := strings.ToLower(model)
+	return strings.Contains(lower, "qwen2.5") || strings.Contains(lower, "qwen3") || strings.Contains(lower, "llama-3.3")
+}
+
+// hasMultiTurnToolData runs after validateMessages, which already rejects an
+// empty or malformed assistant tool_calls array as invalid_tools; only a
+// non-empty array counts as tool history here.
+func hasMultiTurnToolData(messages []chatMessage) bool {
+	for _, m := range messages {
+		if m.Role == "tool" {
+			return true
+		}
+		if m.Role != "assistant" {
+			continue
+		}
+		var calls []json.RawMessage
+		if json.Unmarshal(m.ToolCalls, &calls) == nil && len(calls) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func normalizeSystemUserContent(raw json.RawMessage) (json.RawMessage, bool, int, string, string) {
 	if rawStringNonEmpty(raw) {
 		return raw, false, 0, "", ""
@@ -7051,6 +7311,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		return pool.Provider{}, requestCanceledRouteError()
 	}
 	class := classResolution.class
+	poolModelClass := class
 	tier2Cfg := s.tier2Config()
 	// SPEC-042 R005: capture a single consistent membership+generation
 	// snapshot for the selected pool (nil for global). poolActive gates
@@ -7115,6 +7376,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			state.poolGeneration = snap.Generation
 			state.poolMinBinaryVersion = snap.MinBinaryVersion
 			state.poolModelAllowlist = append([]string(nil), snap.ModelAllowlist...)
+			state.poolModelClass = poolModelClass
 			state.poolRequiresSettlementEnforce = poolRequiresSettlementEnforce
 			state.poolManifestVersion = snap.ManifestVersion
 			state.poolManifestCoreDigest = snap.ManifestCoreDigest
@@ -7134,8 +7396,22 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	if routeErr := engineRouteError(engineClass, poolActive, poolRuntimeAllowlist); routeErr != nil {
 		return pool.Provider{}, routeErr
 	}
+	// SPEC-018 §3.8 on every selection attempt, with the pool's effective
+	// runtime allowlist (after any SPEC-022 R-12.8 withholding): drop class
+	// members without a multi-turn profile, and refuse a model that can only
+	// reach a native provider that cannot render the tool history.
+	if multiTurnToolGateApplies(req, poolRuntimeAllowlist) {
+		if status, code, msg := unsupportedMultiTurnToolModel(req, tier2.Default().ModelIDs, class, poolRuntimeAllowlist); status != 0 {
+			return pool.Provider{}, &routeError{status: status, code: code, message: msg}
+		}
+		if class != nil {
+			class = multiTurnToolClass(class)
+		}
+	}
 	if state != nil {
 		state.engineClass = engineClass
+		state.requestedModel = req.Model
+		state.multiTurnToolHistory = req.multiTurnToolHistory
 	}
 	trustedInternalRouting := false
 	if hasInternalRoutingHeader(headers) {
@@ -7161,8 +7437,11 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 					// under-version member — a pin must not bypass the floor.
 					return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_binary_too_old", message: "Pinned session provider is below the pool minimum binary version"}
 				}
-				if poolActive && !poolModelAllowed(req.Model, class, poolModelAllowlist) {
+				if poolActive && !poolModelAllowed(req.Model, poolModelClass, poolModelAllowlist) {
 					return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "pool_model_not_allowed", message: "Requested model is not allowed by the selected pool"}
+				}
+				if poolActive && unsupportedMultiTurnNativeCandidate(req, p, tier2.Default().ModelIDs, poolModelClass) {
+					return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "unsupported_modelID_for_multi_turn", message: "Model does not support multi-turn tool history rendering"}
 				}
 				// SPEC-042-R014 (c): a pin never bypasses the engine filter.
 				if engineClass != "" && providerEngineClass(p) != engineClass {
@@ -7192,8 +7471,11 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				if poolActive && !poolBinaryFloorMet(p.BinaryVersion, poolMin) {
 					return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_binary_too_old", message: "Pinned provider is below the pool minimum binary version"}
 				}
-				if poolActive && !poolModelAllowed(req.Model, class, poolModelAllowlist) {
+				if poolActive && !poolModelAllowed(req.Model, poolModelClass, poolModelAllowlist) {
 					return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "pool_model_not_allowed", message: "Requested model is not allowed by the selected pool"}
+				}
+				if poolActive && unsupportedMultiTurnNativeCandidate(req, p, tier2.Default().ModelIDs, poolModelClass) {
+					return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "unsupported_modelID_for_multi_turn", message: "Model does not support multi-turn tool history rendering"}
 				}
 				// SPEC-042-R014 (c): a pin never bypasses the engine filter.
 				if engineClass != "" && providerEngineClass(p) != engineClass {
@@ -7211,7 +7493,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		}
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "Pinned provider not in pool"}
 	}
-	if poolActive && !poolModelAllowed(req.Model, class, poolModelAllowlist) {
+	if poolActive && !poolModelAllowed(req.Model, poolModelClass, poolModelAllowlist) {
 		return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "pool_model_not_allowed", message: "Requested model is not allowed by the selected pool"}
 	}
 
@@ -7222,6 +7504,13 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		providers = providersForEngine(providers, engineClass)
 		if !s.engineServesModelInScope(providers, req.Model, class, poolActive, poolMembers) {
 			return pool.Provider{}, engineUnavailableRouteError("No provider serves the requested model with the selected engine")
+		}
+	}
+	unsupportedNativeDropped := 0
+	if poolActive {
+		providers, unsupportedNativeDropped = filterUnsupportedMultiTurnNativeCandidates(req, providers, tier2.Default().ModelIDs, poolModelClass)
+		if unsupportedNativeDropped > 0 && !anyProviderModelCandidate(providers, req.Model, poolModelClass) {
+			return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "unsupported_modelID_for_multi_turn", message: "Model does not support multi-turn tool history rendering"}
 		}
 	}
 	exSet := routing.NewExcluded(len(excluded))
@@ -7247,6 +7536,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		checker.poolGeneration = poolGen // local snapshot value; avoids a nil-state deref
 		checker.poolMinBinaryVersion = poolMin
 		checker.poolModelAllowlist = poolModelAllowlist
+		checker.poolModelClass = poolModelClass
 		checker.settlementEnforce = checker.settlementEnforce || poolRequiresSettlementEnforce
 		checker.poolView = poolRouteView{
 			poolID:           req.poolID,
@@ -8157,6 +8447,28 @@ func hasInternalRoutingHeader(headers http.Header) bool {
 	return false
 }
 
+func effectiveMaxOutputTokens(headers http.Header) (int, bool, error) {
+	values := headers.Values(effectiveMaxOutputTokensHeader)
+	if len(values) == 0 {
+		return 0, false, nil
+	}
+	if len(values) != 1 {
+		return 0, false, errors.New("multiple authenticated output limits")
+	}
+	raw := strings.TrimSpace(values[0])
+	limit, err := strconv.ParseInt(raw, 10, strconv.IntSize)
+	if err != nil || limit < 0 {
+		return 0, false, errors.New("invalid authenticated output limit")
+	}
+	return int(limit), true, nil
+}
+
+func setProviderMaxOutputTokensHeader(dst, src http.Header) {
+	if limit, ok, err := effectiveMaxOutputTokens(src); err == nil && ok {
+		dst.Set(providerMaxOutputTokensHeader, strconv.Itoa(limit))
+	}
+}
+
 // internalBearerAuthorized guards the `/internal/routing` and
 // `/internal/sticky` paths the gateway calls upstream. It accepts ONLY
 // the gateway_service_token (M3-2 / SECU-4 / codex PR #73 HIGH-1). The
@@ -8431,7 +8743,22 @@ func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slot
 		if state != nil && state.poolID != "" && !poolBinaryFloorMet(provider.BinaryVersion, state.poolMinBinaryVersion) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
-		if state != nil && state.poolID != "" && !poolModelAllowed(model, class, state.poolModelAllowlist) {
+		poolModelClass := class
+		if state != nil && state.poolModelClass != nil {
+			poolModelClass = state.poolModelClass
+		}
+		if state != nil && state.poolID != "" && !poolModelAllowed(model, poolModelClass, state.poolModelAllowlist) {
+			return pool.Provider{}, queuedProviderTerminal
+		}
+		pollReq := chatRequest{Model: model}
+		if state != nil {
+			pollReq.Model = state.requestedModel
+			if pollReq.Model == "" {
+				pollReq.Model = model
+			}
+			pollReq.multiTurnToolHistory = state.multiTurnToolHistory
+		}
+		if state != nil && state.poolID != "" && unsupportedMultiTurnNativeCandidate(pollReq, provider, tier2.Default().ModelIDs, poolModelClass) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
 		// SPEC-042-R014 (c): a same-ID reconnect of another class is terminal.
@@ -8840,6 +9167,10 @@ type eligibilityCtx struct {
 	// poolModelAllowlist is the selected pool's manifest request-model
 	// allowlist. Empty means no allowlist -> inert.
 	poolModelAllowlist []string
+	// poolModelClass is the original class used for the request-half pool
+	// authorization gate. It can differ from class when SPEC-018 narrows
+	// selection for multi-turn tool history.
+	poolModelClass *config.ModelClassConfig
 	// poolView carries the SPEC-042-R004 external-runtime predicate inputs of
 	// the same snapshot. Zero for global requests.
 	poolView poolRouteView
@@ -8995,7 +9326,11 @@ func (c *eligibilityCtx) PoolAllowsRequestedModel() bool {
 	if c == nil || c.poolID == "" {
 		return true
 	}
-	return poolModelAllowed(c.model, c.class, c.poolModelAllowlist)
+	class := c.poolModelClass
+	if class == nil {
+		class = c.class
+	}
+	return poolModelAllowed(c.model, class, c.poolModelAllowlist)
 }
 
 func poolModelAllowed(model string, class *config.ModelClassConfig, allowlist []string) bool {
@@ -10376,6 +10711,24 @@ func nullUsageProviderErrorCode(body []byte) string {
 		return ""
 	}
 	return spec001EndStatus(envelope.Error.Code)
+}
+
+func httpProviderContextExceededCode(status int, body []byte) string {
+	if status != http.StatusRequestEntityTooLarge {
+		return ""
+	}
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return ""
+	}
+	if strings.TrimSpace(envelope.Error.Code) != "context_length_exceeded" {
+		return ""
+	}
+	return "context_length_exceeded"
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {

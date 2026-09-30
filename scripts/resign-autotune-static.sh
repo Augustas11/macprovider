@@ -154,6 +154,7 @@ guard let publicRaw = env["PUBLIC_B64"].flatMap({ Data(base64Encoded: $0) }),
 candidate_json="$STATIC_DIR/autotune-candidates.json"
 demand_json="$STATIC_DIR/demand-rank.json"
 rate_card_json="$STATIC_DIR/rate-card.json"
+cb_policy_json="$STATIC_DIR/continuous-batching-policy.json"
 # SPEC-023 §3.7.2: the artifact feed is signed by the SAME static-feed key as the
 # candidate catalog for the release, and catalog-release.py checks that equality
 # before binding it in release.json. Present only once a release has been
@@ -162,14 +163,17 @@ artifacts_json="$STATIC_DIR/autotune-artifacts.json"
 candidate_sig="$TMP_DIR/autotune-candidates.json.sig"
 demand_sig="$TMP_DIR/demand-rank.json.sig"
 rate_card_sig="$TMP_DIR/rate-card.json.sig"
+cb_policy_sig="$TMP_DIR/continuous-batching-policy.json.sig"
 artifacts_sig="$TMP_DIR/autotune-artifacts.json.sig"
 
 sign_one "$candidate_json" "$candidate_sig"
 sign_one "$demand_json" "$demand_sig"
 sign_one "$rate_card_json" "$rate_card_sig"
+sign_one "$cb_policy_json" "$cb_policy_sig"
 verify_one "$candidate_json" "$candidate_sig"
 verify_one "$demand_json" "$demand_sig"
 verify_one "$rate_card_json" "$rate_card_sig"
+verify_one "$cb_policy_json" "$cb_policy_sig"
 if [ -f "$artifacts_json" ]; then
   sign_one "$artifacts_json" "$artifacts_sig"
   verify_one "$artifacts_json" "$artifacts_sig"
@@ -179,9 +183,11 @@ fi
 install -m 0644 "$candidate_sig" "$STATIC_DIR/autotune-candidates.json.sig.new"
 install -m 0644 "$demand_sig" "$STATIC_DIR/demand-rank.json.sig.new"
 install -m 0644 "$rate_card_sig" "$STATIC_DIR/rate-card.json.sig.new"
+install -m 0644 "$cb_policy_sig" "$STATIC_DIR/continuous-batching-policy.json.sig.new"
 mv "$STATIC_DIR/autotune-candidates.json.sig.new" "$STATIC_DIR/autotune-candidates.json.sig"
 mv "$STATIC_DIR/demand-rank.json.sig.new" "$STATIC_DIR/demand-rank.json.sig"
 mv "$STATIC_DIR/rate-card.json.sig.new" "$STATIC_DIR/rate-card.json.sig"
+mv "$STATIC_DIR/continuous-batching-policy.json.sig.new" "$STATIC_DIR/continuous-batching-policy.json.sig"
 if [ -f "$artifacts_json" ]; then
   install -m 0644 "$artifacts_sig" "$STATIC_DIR/autotune-artifacts.json.sig.new"
   mv "$STATIC_DIR/autotune-artifacts.json.sig.new" "$STATIC_DIR/autotune-artifacts.json.sig"

@@ -1385,6 +1385,22 @@ final class ProviderStatusTests: XCTestCase {
                 unsupportedReason: nil,
                 pagedKVDecision: "attached",
                 cacheClass: "mixed",
+                policy: RuntimeContinuousBatchingPolicySnapshot(
+                    authorizationSource: "coordinator",
+                    loadStatus: "live_verified",
+                    releaseID: "release-a",
+                    policyVersion: "policy-a",
+                    signerKeyID: "key-a",
+                    policySHA256: String(repeating: "a", count: 64),
+                    expiresAt: "2026-10-01T00:00:00Z",
+                    rolloutMode: "canary",
+                    tupleSHA256: String(repeating: "b", count: 64),
+                    authorized: true,
+                    cachedTurnsAuthorized: false,
+                    emergencyOffOverride: false,
+                    localProofResult: "passed",
+                    decisionReason: "authorized"
+                ),
                 scheduler: RuntimeContinuousBatchingSchedulerSnapshot(
                     activeDecodeRows: 3,
                     waitingCount: 2,
@@ -1408,6 +1424,11 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertTrue(continuousBatching["unsupported_reason"] is NSNull)
         XCTAssertEqual(continuousBatching["paged_kv_decision"] as? String, "attached")
         XCTAssertEqual(continuousBatching["cache_class"] as? String, "mixed")
+        let policy = try XCTUnwrap(continuousBatching["policy"] as? [String: Any])
+        XCTAssertEqual(policy["load_status"] as? String, "live_verified")
+        XCTAssertEqual(policy["authorized"] as? Bool, true)
+        XCTAssertEqual(policy["local_proof_result"] as? String, "passed")
+        XCTAssertEqual(policy["decision_reason"] as? String, "authorized")
 
         let scheduler = try XCTUnwrap(continuousBatching["scheduler"] as? [String: Any])
         XCTAssertEqual(scheduler["active_decode_rows"] as? Int, 3)
