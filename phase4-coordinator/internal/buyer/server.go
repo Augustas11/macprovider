@@ -2496,7 +2496,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	req.engineClass = engineClass
 	req.multiTurnToolHistory = hasMultiTurnToolData(req.Messages)
-	if status, code, msg := unsupportedMultiTurnToolModel(req, tier2.Default().ModelIDs, s.resolveModelClass(req.Model)); status != 0 {
+	var poolRuntimeAllowlist []string
+	if req.poolSnapshotSet {
+		poolRuntimeAllowlist = req.poolSnapshot.RuntimeAllowlist
+	}
+	if status, code, msg := unsupportedMultiTurnToolModel(req, tier2.Default().ModelIDs, s.resolveModelClass(req.Model), poolRuntimeAllowlist); status != 0 {
 		rec.logBuyerFailure(status, msg)
 		writeError(w, status, code, msg)
 		return
@@ -6828,11 +6832,15 @@ func validateMessages(messages []chatMessage, rawMessages []map[string]json.RawM
 //   - a model-class alias is rejected when no class member has a profile;
 //     otherwise selection keeps only profiled members (multiTurnToolClass).
 //
-// It is limited to global native routing; Trusted Pool and explicit
-// non-native engine routes, and models that resolve to no catalog id or
-// class (BYOM), keep provider-side behavior.
-func unsupportedMultiTurnToolModel(req chatRequest, catalogModelIDs func() []string, class *config.ModelClassConfig) (int, string, string) {
-	if !multiTurnToolGateApplies(req) {
+// It applies to every route that can only reach native providers: global
+// routes (SPEC-042-R014 (b): global is native-only), an explicit native
+// engine selection, and a Trusted Pool route with no selection whose active
+// runtime allowlist is empty (SPEC-042 R001: empty means native MLX only).
+// Explicit non-native engine selections, pool routes that may reach an
+// allowlisted external runtime, and models that resolve to no catalog id or
+// class (BYOM) keep provider-side behavior.
+func unsupportedMultiTurnToolModel(req chatRequest, catalogModelIDs func() []string, class *config.ModelClassConfig, poolRuntimeAllowlist []string) (int, string, string) {
+	if !multiTurnToolGateApplies(req, poolRuntimeAllowlist) {
 		return 0, "", ""
 	}
 	resolved := false
@@ -6853,11 +6861,21 @@ func unsupportedMultiTurnToolModel(req chatRequest, catalogModelIDs func() []str
 	return http.StatusBadRequest, "unsupported_modelID_for_multi_turn", "Model does not support multi-turn tool history rendering"
 }
 
-func multiTurnToolGateApplies(req chatRequest) bool {
-	if req.poolID != "" || (req.engineClass != "" && req.engineClass != engineClassNative) {
+// multiTurnToolGateApplies reports whether the request carries tool history
+// and its route can only reach native providers. poolRuntimeAllowlist is the
+// pool's effective runtime allowlist (nil on a global route).
+func multiTurnToolGateApplies(req chatRequest, poolRuntimeAllowlist []string) bool {
+	if !req.multiTurnToolHistory {
 		return false
 	}
-	return req.multiTurnToolHistory
+	switch req.engineClass {
+	case engineClassNative:
+		return true
+	case "":
+		return req.poolID == "" || len(poolRuntimeAllowlist) == 0
+	default:
+		return false
+	}
 }
 
 // multiTurnToolClass narrows a SPEC-004 model class to the members with a
@@ -7154,9 +7172,6 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		return pool.Provider{}, requestCanceledRouteError()
 	}
 	class := classResolution.class
-	if class != nil && multiTurnToolGateApplies(req) {
-		class = multiTurnToolClass(class)
-	}
 	tier2Cfg := s.tier2Config()
 	// SPEC-042 R005: capture a single consistent membership+generation
 	// snapshot for the selected pool (nil for global). poolActive gates
@@ -7239,6 +7254,18 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	}
 	if routeErr := engineRouteError(engineClass, poolActive, poolRuntimeAllowlist); routeErr != nil {
 		return pool.Provider{}, routeErr
+	}
+	// SPEC-018 §3.8 on every selection attempt, with the pool's effective
+	// runtime allowlist (after any SPEC-022 R-12.8 withholding): drop class
+	// members without a multi-turn profile, and refuse a model that can only
+	// reach a native provider that cannot render the tool history.
+	if multiTurnToolGateApplies(req, poolRuntimeAllowlist) {
+		if status, code, msg := unsupportedMultiTurnToolModel(req, tier2.Default().ModelIDs, class, poolRuntimeAllowlist); status != 0 {
+			return pool.Provider{}, &routeError{status: status, code: code, message: msg}
+		}
+		if class != nil {
+			class = multiTurnToolClass(class)
+		}
 	}
 	if state != nil {
 		state.engineClass = engineClass

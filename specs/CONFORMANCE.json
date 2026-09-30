@@ -2263,7 +2263,8 @@
         "phase4-coordinator/internal/buyer/multi_turn_test.go:TestMultiTurnGateRejectsAliasBeforeDispatch",
         "phase4-coordinator/internal/buyer/multi_turn_test.go:TestEmptyAssistantToolCallsRejectedBeforeGate",
         "phase4-coordinator/internal/buyer/multi_turn_test.go:TestMultiTurnToolClassKeepsOnlyProfiledMembers",
-        "phase4-coordinator/internal/buyer/multi_turn_test.go:TestMultiTurnGateModelClassAlias"
+        "phase4-coordinator/internal/buyer/multi_turn_test.go:TestMultiTurnGateModelClassAlias",
+        "phase4-coordinator/internal/buyer/multi_turn_test.go:TestMultiTurnGateNativeTrustedPoolRoute"
       ],
       "journeys": [],
       "evidence": [],
@@ -2271,7 +2272,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "SPEC-018 v0.2.11 clarifies the \u00a73.8 enforcement point: the coordinator rejects multi-turn tool history for catalogued non-family models on global native routing before dispatch, resolving aliases with billing.ModelsEquivalent; SPEC-004 model-class aliases keep only profiled members and 400 when none has a profile. Unit and handler tests land in this change; conformance stays pending until the coordinator deploys on Pearl."
+        "rationale": "SPEC-018 v0.2.11 clarifies the \u00a73.8 enforcement point: the coordinator rejects multi-turn tool history for catalogued non-family models on native-only routes before dispatch, resolving aliases with billing.ModelsEquivalent; SPEC-004 model-class aliases keep only profiled members and 400 when none has a profile. Native-only Trusted Pool routes (empty or withheld runtime allowlist, or explicit native selection) are gated the same way; explicit non-native engines and BYOM models are exempt. Unit and handler tests land in this change; conformance stays pending until the coordinator deploys on Pearl."
       }
     },
     {
