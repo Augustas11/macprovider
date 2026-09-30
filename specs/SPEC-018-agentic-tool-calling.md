@@ -26,8 +26,14 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
   ids with the routing equivalence (`billing.ModelsEquivalent`: `-free`
   aliases, OpenRouter slugs, case variants). It judges the §3.8 family on the
   resolved id, because routing rewrites the request to that id before the
-  provider selects a profile. The coordinator check covers global native
-  routing only. Trusted Pool routes, explicit non-native engine selections and
+  provider selects a profile. A SPEC-004 FR-SR-7 model-class alias resolves
+  to its concrete members, and FR-SR-7a rewrites the request to the selected
+  member. For a request with tool history the coordinator therefore keeps
+  only members that have a §3.8 profile. This is the FR-SR-7 "eligible
+  concrete model IDs" step, so the member is filtered before candidate
+  filtering. A class with no profiled member gets this 400 before dispatch.
+  A class whose profiled members have no available provider keeps the
+  FR-SR-9 503. The coordinator check covers global native routing only. Trusted Pool routes, explicit non-native engine selections and
   models that resolve to no catalog id keep the provider-side check. This is
   not a §10c.1 amendment: the §3.8 MUST, its code and HTTP status are
   unchanged, and there is no wire-shape change. Registers `SPEC-018-R005`.
@@ -402,7 +408,7 @@ Llama-3.3 renderer fixture structure:
 
 If no §3.8 family profile maps for the request `modelID`, a multi-turn request containing assistant-history `tool_calls[]` or `role:"tool"` messages MUST fail before inference with HTTP 400 `unsupported_modelID_for_multi_turn`. It MUST NOT silently render the structured fields as plain text or drop them.
 
-v0.2.11 enforcement point: on global native routing, the coordinator MUST apply this rule before provider dispatch and before idempotency reservation. It resolves the buyer `model` to catalogued ids with the same equivalence routing uses, and applies the family predicate to the resolved id. Source: `phase4-coordinator/internal/buyer/server.go` `unsupportedMultiTurnToolModel`; tests `phase4-coordinator/internal/buyer/multi_turn_test.go`. Registers `SPEC-018-R005`.
+v0.2.11 enforcement point: on global native routing, the coordinator MUST apply this rule before provider dispatch and before idempotency reservation. It resolves the buyer `model` to catalogued ids with the same equivalence routing uses, and applies the family predicate to the resolved id. For a SPEC-004 model-class alias, candidate selection keeps only class members with a §3.8 profile. The request fails with this 400 only when no member has one. Source: `phase4-coordinator/internal/buyer/server.go` `unsupportedMultiTurnToolModel`; tests `phase4-coordinator/internal/buyer/multi_turn_test.go`. Registers `SPEC-018-R005`.
 
 ### 3.7 Adding a new family
 

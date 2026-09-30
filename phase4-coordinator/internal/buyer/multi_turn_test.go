@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -259,6 +260,7 @@ func gateMultiTurnRequest(t *testing.T, model string) chatRequest {
 	if status != 0 {
 		t.Fatalf("validateChatRequest status=%d code=%s msg=%s", status, code, msg)
 	}
+	req.multiTurnToolHistory = hasMultiTurnToolData(req.Messages)
 	return req
 }
 
@@ -297,6 +299,7 @@ func TestUnsupportedMultiTurnToolModelGate(t *testing.T) {
 	}
 	toolResultOnly := gateMultiTurnRequest(t, gateLlama32ID)
 	toolResultOnly.Messages = []chatMessage{{Role: "user"}, {Role: "tool", ToolCallID: "call_0123456789abcdef"}}
+	toolResultOnly.multiTurnToolHistory = hasMultiTurnToolData(toolResultOnly.Messages)
 	nativeRoute := gateMultiTurnRequest(t, gateLlama32ID)
 	nativeRoute.engineClass = engineClassNative
 	poolRoute := gateMultiTurnRequest(t, gateLlama32ID)
@@ -328,7 +331,7 @@ func TestUnsupportedMultiTurnToolModelGate(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			status, code, msg := unsupportedMultiTurnToolModel(tc.req, catalog)
+			status, code, msg := unsupportedMultiTurnToolModel(tc.req, catalog, nil)
 			if tc.wantCode == "" {
 				if status != 0 {
 					t.Fatalf("status=%d code=%s msg=%s, want pass-through", status, code, msg)
@@ -343,11 +346,11 @@ func TestUnsupportedMultiTurnToolModelGate(t *testing.T) {
 			}
 		})
 	}
-	if status, _, _ := unsupportedMultiTurnToolModel(gateMultiTurnRequest(t, gateLlama32ID), nil); status != 0 {
+	if status, _, _ := unsupportedMultiTurnToolModel(gateMultiTurnRequest(t, gateLlama32ID), nil, nil); status != 0 {
 		t.Fatalf("nil catalog must not reject, status=%d", status)
 	}
 	tier2.ResetForTest()
-	if status, _, _ := unsupportedMultiTurnToolModel(gateMultiTurnRequest(t, gateLlama32ID), tier2.Default().ModelIDs); status != 0 {
+	if status, _, _ := unsupportedMultiTurnToolModel(gateMultiTurnRequest(t, gateLlama32ID), tier2.Default().ModelIDs, nil); status != 0 {
 		t.Fatalf("unconfigured catalog must not reject, status=%d", status)
 	}
 }
@@ -367,31 +370,8 @@ func TestEmptyAssistantToolCallsRejectedBeforeGate(t *testing.T) {
 
 func TestMultiTurnGateRejectsAliasBeforeDispatch(t *testing.T) {
 	configureGateCatalog(t)
-	var hits atomic.Int32
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
-	}))
-	t.Cleanup(upstream.Close)
 	registry := pool.NewRegistry(nil)
-	now := time.Now().UTC()
-	registry.Register(&pool.Provider{
-		ProviderID:       "p1",
-		AssignedID:       "session-1",
-		Hostname:         "p1.local",
-		ModelID:          gateLlama32ID,
-		MaxContextTokens: 20000,
-		MaxConcurrency:   1,
-		SlotsFree:        1,
-		SlotsTotal:       1,
-		EndpointURL:      upstream.URL,
-		Tier:             pool.TierPinned,
-		InferencePath:    pool.InferencePathHTTPForwarding,
-		State:            pool.StateReady,
-		LastHeartbeatAt:  now,
-		ConnectedAt:      now,
-	}, nil)
+	hits := registerGateProvider(t, registry, "p1", gateLlama32ID)
 	server := NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
 	for _, model := range []string{gateLlama32ID + "-free", "meta-llama/llama-3.2-3b-instruct"} {
 		body, err := json.Marshal(map[string]any{"model": model, "messages": validMultiTurnMessages()})
@@ -409,4 +389,147 @@ func TestMultiTurnGateRejectsAliasBeforeDispatch(t *testing.T) {
 	if got := hits.Load(); got != 0 {
 		t.Fatalf("provider dispatched %d times, want 0", got)
 	}
+}
+
+type gateUpstream struct {
+	hits   atomic.Int32
+	models sync.Map
+}
+
+func (g *gateUpstream) Load() int32 { return g.hits.Load() }
+
+// registerGateProvider registers one HTTP-forwarding provider serving model
+// and records how often it was dispatched and with which body model.
+func registerGateProvider(t *testing.T, registry *pool.Registry, providerID, model string) *gateUpstream {
+	t.Helper()
+	up := &gateUpstream{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		up.hits.Add(1)
+		var body struct {
+			Model string `json:"model"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		up.models.Store(body.Model, true)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	t.Cleanup(upstream.Close)
+	now := time.Now().UTC()
+	registry.Register(&pool.Provider{
+		ProviderID:       providerID,
+		AssignedID:       providerID + "-session",
+		Hostname:         providerID + ".local",
+		ModelID:          model,
+		MaxContextTokens: 20000,
+		MaxConcurrency:   1,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		EndpointURL:      upstream.URL,
+		Tier:             pool.TierPinned,
+		InferencePath:    pool.InferencePathHTTPForwarding,
+		State:            pool.StateReady,
+		LastHeartbeatAt:  now,
+		ConnectedAt:      now,
+	}, nil)
+	return up
+}
+
+func postGateChat(t *testing.T, server *Server, model string, messages []map[string]any, idempotencyKey string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"model": model, "messages": messages})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	if idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", idempotencyKey)
+	}
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	return rr
+}
+
+func TestMultiTurnToolClassKeepsOnlyProfiledMembers(t *testing.T) {
+	mixed := &config.ModelClassConfig{Objective: "latency", Models: []string{gateLlama32ID, gateQwen36ID}}
+	got := modelClassMembers(multiTurnToolClass(mixed))
+	if len(got) != 1 || got[0] != gateQwen36ID {
+		t.Fatalf("filtered members=%v want [%s]", got, gateQwen36ID)
+	}
+	onlyLlama := &config.ModelClassConfig{Members: []string{gateLlama32ID}}
+	if got := modelClassMembers(multiTurnToolClass(onlyLlama)); len(got) != 0 {
+		t.Fatalf("Members-only class must filter to empty, got %v", got)
+	}
+	req := gateMultiTurnRequest(t, "mlx-fast")
+	if status, code, _ := unsupportedMultiTurnToolModel(req, nil, onlyLlama); status != http.StatusBadRequest || code != "unsupported_modelID_for_multi_turn" {
+		t.Fatalf("class with no profiled member: status=%d code=%s", status, code)
+	}
+	if status, _, _ := unsupportedMultiTurnToolModel(req, nil, mixed); status != 0 {
+		t.Fatalf("class with a profiled member must pass the pre-dispatch gate, status=%d", status)
+	}
+	pooled := req
+	pooled.poolID = "pool-a"
+	if status, _, _ := unsupportedMultiTurnToolModel(pooled, nil, onlyLlama); status != 0 {
+		t.Fatalf("pool route must keep provider-side behavior, status=%d", status)
+	}
+	plain := req
+	plain.multiTurnToolHistory = false
+	if status, _, _ := unsupportedMultiTurnToolModel(plain, nil, onlyLlama); status != 0 {
+		t.Fatalf("class request without tool history must pass, status=%d", status)
+	}
+}
+
+func TestMultiTurnGateModelClassAlias(t *testing.T) {
+	configureGateCatalog(t)
+	plainMessages := []map[string]any{{"role": "user", "content": "hi"}}
+
+	t.Run("mixed_class_routes_tool_history_to_profiled_member_only", func(t *testing.T) {
+		registry := pool.NewRegistry(nil)
+		llama := registerGateProvider(t, registry, "p-llama", gateLlama32ID)
+		qwen := registerGateProvider(t, registry, "p-qwen", gateQwen36ID)
+		server := NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+		server.SetRoutingClasses(map[string]config.ModelClassConfig{"mlx-fast": {Objective: "latency", Models: []string{gateLlama32ID, gateQwen36ID}}})
+		for i := 0; i < 4; i++ {
+			rr := postGateChat(t, server, "mlx-fast", validMultiTurnMessages(), "")
+			if rr.Code != http.StatusOK {
+				t.Fatalf("attempt %d status=%d body=%s", i, rr.Code, rr.Body.String())
+			}
+		}
+		if got := llama.Load(); got != 0 {
+			t.Fatalf("Llama-3.2 provider dispatched %d times with tool history, want 0", got)
+		}
+		if got := qwen.Load(); got != 4 {
+			t.Fatalf("Qwen3.6 provider dispatched %d times, want 4", got)
+		}
+		if _, ok := qwen.models.Load(gateQwen36ID); !ok {
+			t.Fatal("dispatched body model must be rewritten to the concrete Qwen3.6 id (SPEC-004 FR-SR-7a)")
+		}
+	})
+
+	t.Run("class_without_profiled_member_rejects_before_idempotency_and_dispatch", func(t *testing.T) {
+		registry := pool.NewRegistry(nil)
+		llama := registerGateProvider(t, registry, "p-llama", gateLlama32ID)
+		server := NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+		server.SetRoutingClasses(map[string]config.ModelClassConfig{"mlx-fast": {Objective: "latency", Members: []string{gateLlama32ID}}})
+		rr := postGateChat(t, server, "mlx-fast", validMultiTurnMessages(), "gate-class-reject")
+		if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "unsupported_modelID_for_multi_turn") {
+			t.Fatalf("status=%d body=%s, want 400 unsupported_modelID_for_multi_turn (no idempotency reservation)", rr.Code, rr.Body.String())
+		}
+		if got := llama.Load(); got != 0 {
+			t.Fatalf("provider dispatched %d times, want 0", got)
+		}
+	})
+
+	t.Run("class_without_tool_history_is_unaffected", func(t *testing.T) {
+		registry := pool.NewRegistry(nil)
+		llama := registerGateProvider(t, registry, "p-llama", gateLlama32ID)
+		server := NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+		server.SetRoutingClasses(map[string]config.ModelClassConfig{"mlx-fast": {Objective: "latency", Members: []string{gateLlama32ID}}})
+		rr := postGateChat(t, server, "mlx-fast", plainMessages, "")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+		}
+		if got := llama.Load(); got != 1 {
+			t.Fatalf("plain class request dispatched %d times, want 1", got)
+		}
+	})
 }

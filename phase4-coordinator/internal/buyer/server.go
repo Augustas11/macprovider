@@ -2319,6 +2319,10 @@ type chatRequest struct {
 	// class (from the gateway's X-MacProvider-Internal-Engine). "" means no
 	// selection, which keeps selection byte-identical.
 	engineClass string
+	// multiTurnToolHistory records SPEC-018 §3.8 tool history (role:"tool"
+	// or non-empty assistant tool_calls) so class selection can drop
+	// members without a multi-turn prompt profile.
+	multiTurnToolHistory bool
 }
 
 type chatMessage struct {
@@ -2491,7 +2495,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.engineClass = engineClass
-	if status, code, msg := unsupportedMultiTurnToolModel(req, tier2.Default().ModelIDs); status != 0 {
+	req.multiTurnToolHistory = hasMultiTurnToolData(req.Messages)
+	if status, code, msg := unsupportedMultiTurnToolModel(req, tier2.Default().ModelIDs, s.resolveModelClass(req.Model)); status != 0 {
 		rec.logBuyerFailure(status, msg)
 		writeError(w, status, code, msg)
 		return
@@ -6813,34 +6818,62 @@ func validateMessages(messages []chatMessage, rawMessages []map[string]json.RawM
 // rejects it, but the WS relay collapses provider 4xx codes to error_internal,
 // so buyers saw a 502 and the provider was marked degraded.
 //
-// Routing rewrites the buyer model to the provider's catalog id via
-// billing.ModelsEquivalent (aliases such as "-free", OpenRouter slugs and case
-// variants), and the provider picks its family from that rewritten id. The
-// gate therefore resolves the buyer model through the same equivalence to the
-// catalogued ids and judges the family on those. It is limited to global
-// native routing; Trusted Pool and explicit non-native engine routes, and
-// models that resolve to no catalog id (BYOM), keep provider-side behavior.
-func unsupportedMultiTurnToolModel(req chatRequest, catalogModelIDs func() []string) (int, string, string) {
-	if req.poolID != "" || (req.engineClass != "" && req.engineClass != engineClassNative) {
-		return 0, "", ""
-	}
-	if !hasMultiTurnToolData(req.Messages) || catalogModelIDs == nil {
+// Routing rewrites the buyer model to the provider's concrete id (catalog
+// aliases via billing.ModelsEquivalent: "-free", OpenRouter slugs, case
+// variants; SPEC-004 FR-SR-7 model-class aliases via class members), and the
+// provider picks its family from that rewritten id. The gate therefore judges
+// the family on the resolved ids:
+//   - a concrete alias resolving to catalogued ids is rejected when none of
+//     them has a profile;
+//   - a model-class alias is rejected when no class member has a profile;
+//     otherwise selection keeps only profiled members (multiTurnToolClass).
+//
+// It is limited to global native routing; Trusted Pool and explicit
+// non-native engine routes, and models that resolve to no catalog id or
+// class (BYOM), keep provider-side behavior.
+func unsupportedMultiTurnToolModel(req chatRequest, catalogModelIDs func() []string, class *config.ModelClassConfig) (int, string, string) {
+	if !multiTurnToolGateApplies(req) {
 		return 0, "", ""
 	}
 	resolved := false
-	for _, id := range catalogModelIDs() {
-		if !billing.ModelsEquivalent(req.Model, id) {
-			continue
+	if catalogModelIDs != nil {
+		for _, id := range catalogModelIDs() {
+			if !billing.ModelsEquivalent(req.Model, id) {
+				continue
+			}
+			if spec018MultiTurnProfileModel(id) {
+				return 0, "", ""
+			}
+			resolved = true
 		}
-		if spec018MultiTurnProfileModel(id) {
-			return 0, "", ""
-		}
-		resolved = true
 	}
-	if !resolved {
+	if !resolved && (class == nil || len(modelClassMembers(multiTurnToolClass(class))) > 0) {
 		return 0, "", ""
 	}
 	return http.StatusBadRequest, "unsupported_modelID_for_multi_turn", "Model does not support multi-turn tool history rendering"
+}
+
+func multiTurnToolGateApplies(req chatRequest) bool {
+	if req.poolID != "" || (req.engineClass != "" && req.engineClass != engineClassNative) {
+		return false
+	}
+	return req.multiTurnToolHistory
+}
+
+// multiTurnToolClass narrows a SPEC-004 model class to the members with a
+// SPEC-018 §3.8 multi-turn profile. Models and Members are both set so the
+// Models-then-Members fallback in modelClassMembers cannot widen it again.
+func multiTurnToolClass(class *config.ModelClassConfig) *config.ModelClassConfig {
+	if class == nil {
+		return nil
+	}
+	eligible := []string{}
+	for _, member := range modelClassMembers(class) {
+		if spec018MultiTurnProfileModel(member) {
+			eligible = append(eligible, member)
+		}
+	}
+	return &config.ModelClassConfig{Objective: class.Objective, Models: eligible, Members: append([]string(nil), eligible...)}
 }
 
 // spec018MultiTurnProfileModel mirrors the SPEC-018 §3.1/§3.8 modelID
@@ -7121,6 +7154,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		return pool.Provider{}, requestCanceledRouteError()
 	}
 	class := classResolution.class
+	if class != nil && multiTurnToolGateApplies(req) {
+		class = multiTurnToolClass(class)
+	}
 	tier2Cfg := s.tier2Config()
 	// SPEC-042 R005: capture a single consistent membership+generation
 	// snapshot for the selected pool (nil for global). poolActive gates
