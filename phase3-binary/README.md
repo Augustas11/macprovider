@@ -65,7 +65,7 @@ Quick reference for Mac owners running `macprovider-cli`:
   non-recoverable unless a future operator-review exception spec changes that
   rule.
 - **Balance check:** `GET /providers/{id}/earnings` with `Authorization: Bearer <provider_token>`.
-- **Sleep behavior:** the binary holds `caffeinate -dimsu` to prevent idle system sleep; lid-close still drops the WebSocket (binary reconnects automatically on wake).
+- **Sleep behavior:** the binary holds `caffeinate -ims`, allowing display sleep while preventing idle system sleep; lid-close still drops the WebSocket (binary reconnects automatically on wake).
 - **Reaping:** coordinator closes idle WebSocket connections after 90 s of no inbound frames (heartbeat or inference chunk); default `pool.heartbeat_miss_threshold_s = 90`.
 - **Pinning:** promotional tier is operator-discretionary; no automatic promotion path exists today.
 

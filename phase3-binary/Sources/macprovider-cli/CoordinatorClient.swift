@@ -117,6 +117,15 @@ final class CaffeinateSleepAssertion: ProviderSleepAssertion, @unchecked Sendabl
         self.process = process
     }
 
+    /// Keeps the Mac awake and reachable (idle, disk and AC system sleep)
+    /// while connected. Deliberately omits `-d` and `-u`: serving needs
+    /// neither the display on nor a user-activity claim, and on a laptop
+    /// `-u` turns the display back on and keeps it lit for as long as the
+    /// provider is connected, even with no jobs.
+    static func arguments(watchingPID pid: pid_t) -> [String] {
+        ["-ims", "-w", String(pid)]
+    }
+
     static func start() -> CaffeinateSleepAssertion? {
         let path = "/usr/bin/caffeinate"
         guard FileManager.default.isExecutableFile(atPath: path) else {
@@ -124,7 +133,7 @@ final class CaffeinateSleepAssertion: ProviderSleepAssertion, @unchecked Sendabl
         }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = ["-dimsu", "-w", String(getpid())]
+        process.arguments = arguments(watchingPID: getpid())
         do {
             try process.run()
             return CaffeinateSleepAssertion(process: process)
