@@ -1,7 +1,13 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.39 (2026-09-27, auto-prefix cached-token billing)
+**Version:** 0.9.40 (2026-09-30, 32k default per-request output cap)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.40 (2026-09-30 — per-request output cap default):**
+- `limits.max_tokens_per_request` default raises from 4096 to 32768. The cap bounds generated
+  output only; reasoning models (qwen3.6, gpt-oss) exhaust 4096 before the visible answer.
+  Reservation, reject-not-clamp, and demo cap (512) are unchanged. Production Pearl was
+  hot-fixed to 32768 in the installed gateway config on 2026-09-30.
 
 **Change log v0.9.39 (2026-09-27, issue #1768 — auto-prefix cached-token billing):**
 - Authenticated non-demo auto-prefix reuse remains non-sticky and continues to use
@@ -301,7 +307,7 @@
 
 ## Preliminary conformance unit IDs
 
-SPEC-006 v0.9.39 registers `SPEC-006-R001`..`SPEC-006-R017` in
+SPEC-006 v0.9.40 registers `SPEC-006-R001`..`SPEC-006-R017` in
 `specs/CONFORMANCE.json`. R001–R003 remain the paid-path chat, error, and
 quota units. R004–R009 group additional existing obligation areas without
 changing them:
@@ -1676,7 +1682,7 @@ otherwise non-text content parts MUST be rejected with HTTP 400,
 
 Gateway request caps:
 
-- `max_tokens` MUST be capped at `limits.max_tokens_per_request`, default 4096.
+- `max_tokens` MUST be capped at `limits.max_tokens_per_request`, default 32768. The cap bounds generated output tokens only (prompt plus output stays bounded by the provider context window); reasoning models spend part of the budget before the visible answer, so 4096 truncated real work.
 - Demo `max_tokens` SHOULD be further capped by `demo.max_tokens_per_request`, default 512.
 - Requests exceeding configured caps MUST receive `400` or be clamped only if the clamping behavior is documented. v1 SHOULD reject rather than silently clamp authenticated API requests.
 
