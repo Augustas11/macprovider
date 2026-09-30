@@ -426,7 +426,7 @@ func Default() Config {
 			IdlessDedupeWindowSeconds: 60,
 		},
 		Limits: LimitsConfig{
-			MaxTokensPerRequest:          4096,
+			MaxTokensPerRequest:          32768,
 			DemoMaxTokensPerRequest:      512,
 			MaxFeedbackCommentBytes:      2000,
 			MaxFeedbackBodyBytes:         16 * 1024,
