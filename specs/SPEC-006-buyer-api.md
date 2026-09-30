@@ -708,7 +708,7 @@ This section is read-only design input and MUST NOT be treated as a place to pro
 - **Unauthenticated demo quota: 1,000 total tokens per IP per day.** Demo traffic is allowed via specific endpoints (chat playground through front door) and a tiny `X-Demo-Token` header sourced from the Vercel demo's session cookie.
 - **Per-account concurrency cap: 2 concurrent requests** at v1. Adjustable.
 - **Per-IP signup issuance: 3 accounts per IP per day** (Sybil defense).
-- **Per-request `max_tokens` cap: 4,096** at v1. Adjustable.
+- **Per-request `max_tokens` cap: 32,768** at v1. Adjustable.
 
 ### 2.5 Provider transparency
 
@@ -2490,7 +2490,7 @@ Default quotas:
 - Per-account concurrent requests: 4.
 - Per-account request-start rate: 30 requests per second per gateway instance.
 - Per-IP signup issuance per day: 3 accounts.
-- Authenticated max tokens per request: 4,096.
+- Authenticated max tokens per request: 32,768.
 - Demo max tokens per request: 512 unless configured otherwise.
 
 All defaults MUST be configurable in `gateway.yaml`.
