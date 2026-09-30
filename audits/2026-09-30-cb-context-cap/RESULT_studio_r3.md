@@ -5,6 +5,10 @@ Date: 2026-09-30
 Verdict: PASS for the provider-runtime hardware gate at source commit
 `275c1cffc17eab0dae3c3f3c6b442fa9af163b5e`.
 
+Rebase traceability: the source commit's stable patch ID
+`3c23c768b9d67b90f68a631d92c8877df5ce50ce` is byte-for-byte equivalent to
+landing-lineage commit `f08b2386217a8b01b851c92b52f7c9b814f20ae4`.
+
 ## Boundary proof
 
 - Host: `1deMac-Studio.local`, Mac Studio `Mac15,14`, Apple M3 Ultra,
