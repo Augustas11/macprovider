@@ -42,8 +42,8 @@
   2862	            record["servability"] = {"verdict": "error", "reasons": ["scan budget exhausted during the servability probe"]}
   2863	        records.append(record)
   2864	    return records
-  2865	
-  2866	
+  2865
+  2866
   2867	def command_propose(args: argparse.Namespace) -> int:
   2868	    policy = load_json_file(Path(args.policy), "policy")
   2869	    validate_policy(policy)
