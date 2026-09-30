@@ -260,11 +260,6 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     /// 0.6 behind a long prompt, for about 25% slower prefill.
     static let defaultDecodeStepsWhilePrefilling = 8
     static let defaultDecodeHeadroomTokens = 128
-    /// Output budget for a batched row whose request omits `max_tokens`.
-    /// Matches the gateway's `max_tokens_per_request` ceiling (SPEC-006,
-    /// PR #1801), the most a gateway request is billed for, so an omitted
-    /// `max_tokens` cannot claim the whole served context as output.
-    static let defaultImplicitMaxOutputTokens = 32_768
     static let defaultPrefillRowsPerIteration = 4
     // Prefill per-iteration token budget when the operator sets no
     // `continuous_batch_prefill_tokens_per_iteration` (SPEC-038). Kept at 1024:
@@ -1311,9 +1306,10 @@ enum ContinuousBatchSchedulerError: Error, Equatable {
     /// full; this request was queued and never reached a slot in time.
     case queueWaitTimedOut
     /// Prompt plus output budget exceeds the served context
-    /// (`maxRequestTokens`). A property of the request, rejected at submit
-    /// before any inference, so it maps to the serial path's 413
-    /// `context_length_exceeded` and the relay's `error_context_exceeded`.
+    /// (`maxRequestTokens`). A property of the request, rejected before any
+    /// inference, so it maps to the serial path's 413
+    /// `context_length_exceeded` and the relay's `error_context_exceeded`
+    /// (zero settlement; error receipt per SPEC-015 §7.6).
     case contextLengthExceeded(promptTokens: Int, maxOutputTokens: Int, contextTokens: Int)
 }
 

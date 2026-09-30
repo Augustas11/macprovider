@@ -1674,51 +1674,60 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(Array(allDecodeBatches.suffix(1)), [["relay-request-1501"]])
     }
 
-    // The production scheduler's row cap is the served context, not the
-    // scheduler's 131,072 default: prompt + max_tokens over a 64-token
-    // context is the serial 413, rejected before any backend work.
-    func testAttachedServePathCapsRowsAtServedContext() async throws {
+    // A batched row's budget is the served context: an explicit max_tokens
+    // past it is clamped and reports `length`, and a prompt that fills the
+    // context is the serial 413 before any backend work.
+    func testAttachedServePathBoundsRowsByServedContext() async throws {
         guard PagedKVMetallibGate.defaultMetallibExists() else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
 
         let modelID = "mlx-community/Qwen-Test"
-        let modelSHA = String(repeating: "a", count: 64)
-        let proof = Self.sizingProof(modelID: modelID, modelSHA: modelSHA)
-        let backend = RuntimeBridgeScriptedBackend(scripts: [:])
-        let runtime = ModelRuntime(
-            modelID: modelID,
-            modelHash: modelSHA,
-            maxContextTokensOverride: 64,
-            pagedKVConfig: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
-            maxBatch: 2,
-            continuousBatchingMode: .on,
-            continuousBatchingDurableReplayAuthorityAvailable: true,
-            warmSwapEnabled: false,
-            pagedKVObservedRuntimeIdentity: Self.observedIdentity(from: proof),
-            pagedKVHardwareSizingProof: proof,
-            pagedKVRuntimeCacheClass: "KVCacheSimple",
-            pagedKVSchedulerBackendInstalled: true,
-            container: ModelContainer(context: ModelContext(
-                configuration: ModelConfiguration(id: modelID),
-                model: RuntimeBridgeFakeModel(nextTokenByInput: [:]),
-                processor: RuntimeBridgePromptProcessor(tokens: [3]),
-                tokenizer: RuntimeBridgeFakeTokenizer()
-            )),
-            continuousBatchingBackend: backend,
-            loader: { _ in throw PagedKVRuntimeBridgeTestError.notExpected }
-        )
-        let request = try Self.chatRequest(modelID: modelID, maxTokens: 100)
-            .withRequestID("context-cap-1")
+        func runtime(promptTokens: [Int32], backend: RuntimeBridgeScriptedBackend) -> ModelRuntime {
+            let modelSHA = String(repeating: "a", count: 64)
+            let proof = Self.sizingProof(modelID: modelID, modelSHA: modelSHA)
+            return ModelRuntime(
+                modelID: modelID,
+                modelHash: modelSHA,
+                maxContextTokensOverride: 4,
+                pagedKVConfig: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
+                maxBatch: 2,
+                continuousBatchingMode: .on,
+                continuousBatchingDurableReplayAuthorityAvailable: true,
+                warmSwapEnabled: false,
+                pagedKVObservedRuntimeIdentity: Self.observedIdentity(from: proof),
+                pagedKVHardwareSizingProof: proof,
+                pagedKVRuntimeCacheClass: "KVCacheSimple",
+                pagedKVSchedulerBackendInstalled: true,
+                container: ModelContainer(context: ModelContext(
+                    configuration: ModelConfiguration(id: modelID),
+                    model: RuntimeBridgeFakeModel(nextTokenByInput: [:]),
+                    processor: RuntimeBridgePromptProcessor(tokens: promptTokens),
+                    tokenizer: RuntimeBridgeFakeTokenizer()
+                )),
+                continuousBatchingBackend: backend,
+                loader: { _ in throw PagedKVRuntimeBridgeTestError.notExpected }
+            )
+        }
 
+        let clampBackend = RuntimeBridgeScriptedBackend(scripts: [:])
+        let clamped = try await runtime(promptTokens: [3], backend: clampBackend).complete(
+            try Self.chatRequest(modelID: modelID, maxTokens: 100).withRequestID("context-cap-clamp")
+        )
+        XCTAssertEqual(clamped.completionTokens, 3)
+        XCTAssertEqual(clamped.finishReason, "length")
+
+        let fullBackend = RuntimeBridgeScriptedBackend(scripts: [:])
         do {
-            _ = try await runtime.complete(request)
+            _ = try await runtime(promptTokens: [3, 3, 3, 3], backend: fullBackend).complete(
+                try Self.chatRequest(modelID: modelID, maxTokens: 1).withRequestID("context-cap-full")
+            )
             XCTFail("expected a context rejection")
         } catch let error as APIError {
             XCTAssertEqual(error.status, 413)
             XCTAssertEqual(error.code, "context_length_exceeded")
         }
-        let prefillCalls = await backend.prefillCallCount()
+        let prefillCalls = await fullBackend.prefillCallCount()
         XCTAssertEqual(prefillCalls, 0)
     }
 

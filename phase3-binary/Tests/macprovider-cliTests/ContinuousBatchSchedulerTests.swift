@@ -2634,28 +2634,65 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
     }
 
     // Live 2026-09-30: a 200k-context provider with no buyer max_tokens asked
-    // for 200k minus prompt of output, over the scheduler's cap, and every
-    // such request failed. The omitted default fits the context and stops at
-    // the gateway's per-request ceiling; an explicit value is kept as sent.
-    func testOmittedMaxTokensDefaultFitsContextAndGatewayCeiling() {
-        let ceiling = ContinuousBatchSchedulerConfiguration.defaultImplicitMaxOutputTokens
-        XCTAssertEqual(ceiling, 32_768)
+    // for 200k minus prompt of output, over the scheduler's 131,072 cap, and
+    // every such request failed. The budget is SPEC-001's remaining context
+    // (no provider-side output constant); an explicit max_tokens is kept up
+    // to that and clamped past it; a prompt with no room for one output token
+    // is the serial 413.
+    func testBatchedOutputBudgetIsRemainingContextAndClampsExplicitMaxTokens() throws {
         XCTAssertEqual(
-            ModelRuntime.continuousBatchMaxOutputTokens(requested: nil, promptTokens: 40, maxContextTokens: 200_000),
-            ceiling
+            try ModelRuntime.continuousBatchMaxOutputTokens(requested: nil, promptTokens: 40, maxContextTokens: 200_000),
+            199_960
         )
         XCTAssertEqual(
-            ModelRuntime.continuousBatchMaxOutputTokens(requested: nil, promptTokens: 190_000, maxContextTokens: 200_000),
-            10_000
+            try ModelRuntime.continuousBatchMaxOutputTokens(requested: 512, promptTokens: 40, maxContextTokens: 200_000),
+            512
         )
         XCTAssertEqual(
-            ModelRuntime.continuousBatchMaxOutputTokens(requested: nil, promptTokens: 200_000, maxContextTokens: 200_000),
+            try ModelRuntime.continuousBatchMaxOutputTokens(requested: 250_000, promptTokens: 40, maxContextTokens: 200_000),
+            199_960
+        )
+        XCTAssertEqual(
+            try ModelRuntime.continuousBatchMaxOutputTokens(requested: nil, promptTokens: 199_999, maxContextTokens: 200_000),
             1
         )
-        XCTAssertEqual(
-            ModelRuntime.continuousBatchMaxOutputTokens(requested: 140_000, promptTokens: 40, maxContextTokens: 200_000),
-            140_000
-        )
+        for requested in [nil, 1, 10] as [Int?] {
+            XCTAssertThrowsError(try ModelRuntime.continuousBatchMaxOutputTokens(
+                requested: requested,
+                promptTokens: 200_000,
+                maxContextTokens: 200_000
+            )) { error in
+                let apiError = error as? APIError
+                XCTAssertEqual(apiError?.status, 413)
+                XCTAssertEqual(apiError?.code, "context_length_exceeded")
+                XCTAssertFalse(apiError?.inferenceRan ?? true)
+            }
+        }
+    }
+
+    // The serve path's configuration (initial load and every rebuild) caps a
+    // row at the served context, not the scheduler's 131,072 default.
+    func testProductionSchedulerConfigurationCapsRowsAtServedContext() {
+        for context in [20_000, 131_072, 200_000] {
+            let configuration = ModelRuntime.productionContinuousBatchSchedulerConfiguration(
+                descriptor: Self.descriptor(),
+                tuple: Self.tuple(),
+                maxBatch: 8,
+                queueLimit: nil,
+                queueWaitTimeoutMS: nil,
+                prefillTokensPerIteration: nil,
+                maxContextTokens: context,
+                modelID: Self.modelID,
+                modelSHA256: Self.modelSHA,
+                weightsGeneration: 1,
+                prefillStepSize: 512,
+                maxDecodeLockstepWindow: 1,
+                nativeMTPRoundByteCapacity: nil,
+                nativeMTPStatusSink: nil
+            )
+            XCTAssertEqual(configuration.maxRequestTokens, context)
+            XCTAssertGreaterThanOrEqual(configuration.maxQueuedTokens, context)
+        }
     }
 
     // The production row cap is the served context: a 200k provider batches

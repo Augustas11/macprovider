@@ -4359,6 +4359,61 @@ actor ModelRuntime: ModelRuntimeServing {
         )
     }
 
+    /// The serve path's scheduler configuration, shared by initial load and
+    /// every rebuild (warm swap, adoption), so the row cap always tracks the
+    /// served context.
+    nonisolated static func productionContinuousBatchSchedulerConfiguration(
+        descriptor: PagedKVDescriptor,
+        tuple: ContinuousBatchingRequestedTuple,
+        maxBatch: Int,
+        queueLimit: Int?,
+        queueWaitTimeoutMS: Int?,
+        prefillTokensPerIteration: Int?,
+        maxContextTokens: Int,
+        modelID: String,
+        modelSHA256: String,
+        weightsGeneration: Int,
+        prefillStepSize: Int,
+        maxDecodeLockstepWindow: Int,
+        nativeMTPRoundByteCapacity: Int?,
+        nativeMTPStatusSink: NativeMTPStatusSink?
+    ) -> ContinuousBatchSchedulerConfiguration {
+        ContinuousBatchSchedulerConfiguration(
+            descriptor: descriptor,
+            tuple: tuple,
+            moePromotionEvidenceAvailable: ContinuousBatchingPolicy.productionMoEPromotionEvidenceAvailable,
+            maxActiveRows: maxBatch,
+            queueLimit: queueLimit,
+            decodeHeadroomTokens: ContinuousBatchSchedulerConfiguration.defaultDecodeHeadroomTokens,
+            maxPrefillRowsPerIteration: min(
+                maxBatch,
+                ContinuousBatchSchedulerConfiguration.defaultPrefillRowsPerIteration
+            ),
+            maxPrefillTokensPerIteration: prefillTokensPerIteration
+                ?? ContinuousBatchSchedulerConfiguration.defaultPrefillTokensPerIteration,
+            maxPromptChunkTokens: min(
+                max(1, prefillStepSize),
+                ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
+            ),
+            tokenDeliveryBufferLimit: ContinuousBatchSchedulerConfiguration.productionTokenDeliveryBufferLimit,
+            queueWaitTimeoutNanoseconds: Self.queueWaitTimeoutNanoseconds(queueWaitTimeoutMS),
+            // The row cap is the served context, not the scheduler's
+            // 131,072 test default: a 200k-context provider must batch
+            // what its serial path accepts. `maxQueuedTokens` is lifted
+            // to at least this by the configuration.
+            maxRequestTokens: maxContextTokens,
+            snapshot: ContinuousBatchSchedulerSnapshot(
+                modelID: modelID,
+                modelSHA256: modelSHA256,
+                weightsGeneration: weightsGeneration
+            ),
+            maxDecodeLockstepWindow: maxDecodeLockstepWindow,
+            maxDecodeStepsWhilePrefilling: ContinuousBatchSchedulerConfiguration.defaultDecodeStepsWhilePrefilling,
+            nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
+            nativeMTPStatusSink: nativeMTPStatusSink
+        )
+    }
+
     private nonisolated static func makeContinuousBatchScheduler(
         decision: PagedKVAttachDecision,
         tuple: ContinuousBatchingRequestedTuple?,
@@ -4395,37 +4450,19 @@ actor ModelRuntime: ModelRuntimeServing {
             return nil
         }
         return ContinuousBatchScheduler(
-            configuration: ContinuousBatchSchedulerConfiguration(
+            configuration: productionContinuousBatchSchedulerConfiguration(
                 descriptor: descriptor,
                 tuple: tuple,
-                moePromotionEvidenceAvailable: ContinuousBatchingPolicy.productionMoEPromotionEvidenceAvailable,
-                maxActiveRows: maxBatch,
+                maxBatch: maxBatch,
                 queueLimit: queueLimit,
-                decodeHeadroomTokens: ContinuousBatchSchedulerConfiguration.defaultDecodeHeadroomTokens,
-                maxPrefillRowsPerIteration: min(
-                    maxBatch,
-                    ContinuousBatchSchedulerConfiguration.defaultPrefillRowsPerIteration
-                ),
-                maxPrefillTokensPerIteration: prefillTokensPerIteration
-                    ?? ContinuousBatchSchedulerConfiguration.defaultPrefillTokensPerIteration,
-                maxPromptChunkTokens: min(
-                    max(1, prefillStepSize),
-                    ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
-                ),
-                tokenDeliveryBufferLimit: ContinuousBatchSchedulerConfiguration.productionTokenDeliveryBufferLimit,
-                queueWaitTimeoutNanoseconds: Self.queueWaitTimeoutNanoseconds(queueWaitTimeoutMS),
-                // The row cap is the served context, not the scheduler's
-                // 131,072 test default: a 200k-context provider must batch
-                // what its serial path accepts. `maxQueuedTokens` is lifted
-                // to at least this by the configuration.
-                maxRequestTokens: maxContextTokens,
-                snapshot: ContinuousBatchSchedulerSnapshot(
-                    modelID: modelID,
-                    modelSHA256: modelSHA256,
-                    weightsGeneration: weightsGeneration
-                ),
+                queueWaitTimeoutMS: queueWaitTimeoutMS,
+                prefillTokensPerIteration: prefillTokensPerIteration,
+                maxContextTokens: maxContextTokens,
+                modelID: modelID,
+                modelSHA256: modelSHA256,
+                weightsGeneration: weightsGeneration,
+                prefillStepSize: prefillStepSize,
                 maxDecodeLockstepWindow: maxDecodeLockstepWindow,
-                maxDecodeStepsWhilePrefilling: ContinuousBatchSchedulerConfiguration.defaultDecodeStepsWhilePrefilling,
                 nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
                 nativeMTPStatusSink: nativeMTPStatusSink
             ),
@@ -5604,20 +5641,33 @@ actor ModelRuntime: ModelRuntimeServing {
         let schedulerRequest: ContinuousBatchSchedulerRequest
     }
 
-    /// Output budget of a batched row. An explicit `max_tokens` is kept as
-    /// sent (the scheduler rejects it with 413 when prompt + max_tokens
-    /// exceeds the context). An omitted one takes the rest of the context,
-    /// capped at `defaultImplicitMaxOutputTokens`, so it always fits.
+    /// Output budget of a batched row: the context left after the prompt
+    /// (SPEC-001's omitted-`max_tokens` default), and never more than an
+    /// explicit `max_tokens`. A paged row cannot slide its KV window past the
+    /// served context the way the serial rotating cache does, so a larger
+    /// explicit value is clamped here (reaching it reports `length`) rather
+    /// than rejected, and the request stays valid on either path. A prompt
+    /// that leaves no room for one output token is the serial 413.
     static func continuousBatchMaxOutputTokens(
         requested: Int?,
         promptTokens: Int,
         maxContextTokens: Int
-    ) -> Int {
-        if let requested { return requested }
-        return max(1, min(
-            maxContextTokens - promptTokens,
-            ContinuousBatchSchedulerConfiguration.defaultImplicitMaxOutputTokens
-        ))
+    ) throws -> Int {
+        let remaining = maxContextTokens - promptTokens
+        guard remaining >= 1 else {
+            try? FileHandle.standardError.write(contentsOf: Data(ContinuousBatchScheduler.contextRejectedTelemetryLine(
+                promptTokens: promptTokens,
+                maxOutputTokens: 1,
+                cap: maxContextTokens
+            ).utf8))
+            throw ContinuousBatchSchedulerError.contextLengthExceeded(
+                promptTokens: promptTokens,
+                maxOutputTokens: 1,
+                contextTokens: maxContextTokens
+            ).asAPIError()!
+        }
+        guard let requested else { return remaining }
+        return min(requested, remaining)
     }
 
     /// The single relay-request to scheduler-row mapping used by both live
@@ -5743,11 +5793,15 @@ actor ModelRuntime: ModelRuntimeServing {
             stopTokenFilter: stopTokenFilter,
             requestStops: request.stop
         )
-        // Serial reports `length` only for an explicitly supplied max_tokens
-        // reached by the post-model-stop, pre-truncation generation. The
-        // scheduler's implicit context budget is an implementation limit, not
-        // an OpenAI length end.
-        let lengthTerminal = request.maxTokens.map { postModelStopTokenCount >= $0 } == true
+        // `length` when the row ended on an output budget: an explicit
+        // max_tokens reached by the post-model-stop, pre-truncation
+        // generation, or the scheduler's `.length` terminal for the budget
+        // that `continuousBatchMaxOutputTokens` clamped to the served context.
+        // The output was cut, so it is not a natural `stop`.
+        let lengthTerminal = (
+            request.maxTokens.map { postModelStopTokenCount >= $0 } == true
+                || result.terminalStatus == .length
+        )
             && result.stopCause == nil
             && !truncated
         let requestStopTerminal = result.stopCause == .requestStop || filtered.hitStop
@@ -6013,7 +6067,7 @@ actor ModelRuntime: ModelRuntimeServing {
         try drainCancelled.check()
         try Task.checkCancellation()
         if shouldCancel() { throw CancellationError() }
-        let maxOutputTokens = Self.continuousBatchMaxOutputTokens(
+        let maxOutputTokens = try Self.continuousBatchMaxOutputTokens(
             requested: request.maxTokens,
             promptTokens: prepared.promptTokens.count,
             maxContextTokens: maxContextTokens
@@ -6258,7 +6312,7 @@ actor ModelRuntime: ModelRuntimeServing {
             detokenizer: detokenizer,
             stopTokenFilter: stopTokenFilter
         )
-        let maxOutputTokens = Self.continuousBatchMaxOutputTokens(
+        let maxOutputTokens = try Self.continuousBatchMaxOutputTokens(
             requested: request.maxTokens,
             promptTokens: prepared.promptTokens.count,
             maxContextTokens: maxContextTokens

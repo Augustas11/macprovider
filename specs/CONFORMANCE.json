@@ -4429,14 +4429,30 @@
       "requirement_id": "SPEC-038-R001",
       "spec_id": "SPEC-038",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:nonisolated static func productionContinuousBatchSchedulerConfiguration",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func continuousBatchMaxOutputTokens",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:static func contextRejectedTelemetryLine",
+        "phase4-coordinator/internal/buyer/transport_result.go:func classifyStreamResult"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testProductionSchedulerConfigurationCapsRowsAtServedContext",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testBatchedOutputBudgetIsRemainingContextAndClampsExplicitMaxTokens",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testContextLengthExceededMapsToSerialContextError",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testRequestTokenCapAboveLegacyDefaultAdmitsLongRows",
+        "phase3-binary/Tests/macprovider-cliTests/InferenceRelayQueuePressureTests.swift:testBatchedContextRejectionReachesTheCoordinatorAsContextExceeded",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchToolStructuredRowTests.swift:testImplicitContextBudgetReportsLengthForEveryBatchedRowShape",
+        "phase3-binary/Tests/macprovider-cliTests/ReceiptAuditTests.swift:testErrorReceiptResultIssuesForContextLengthExceeded",
+        "phase4-coordinator/internal/buyer/stream_context_exceeded_internal_test.go:TestChatCompletionsStreamingContextExceededDoesNotRetryOrFailover",
+        "phase4-coordinator/internal/buyer/stream_context_exceeded_internal_test.go:TestStreamingPreCommitContextExceededIsNonRetryableNonFaulting"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "SPEC-038 v0.3.4 lifecycle overlay (batched row context budget) is mapped to local provider and coordinator tests; packaged Studio real-serving evidence for the enable gate remains pending."
       }
     },
     {

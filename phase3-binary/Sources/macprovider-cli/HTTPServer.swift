@@ -1908,7 +1908,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         modelHashSource: ReceiptModelHashSource,
         runtimeSettlementEligible: Bool
     ) throws -> ErrorReceiptHeaderResult {
-        guard error.code == "model_not_loaded" else {
+        // SPEC-015 §7.6: the null-usage errors a reached provider signs a
+        // zero-token receipt for (`error_model_not_loaded`,
+        // `error_context_exceeded`).
+        guard error.code == "model_not_loaded" || error.code == "context_length_exceeded" else {
             if error.code == "swap_drain_timeout" {
                 return .omitted(.modelSwapViolation)
             }

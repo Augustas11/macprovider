@@ -402,6 +402,11 @@ const (
 	wsForwardUnavailable                   wsForwardResult = "unavailable"
 	wsForwardProviderDisconnected          wsForwardResult = "provider_disconnected"
 	wsForwardProviderDisconnectedCommitted wsForwardResult = "provider_disconnected_committed"
+	// wsForwardContextExceeded is a pre-commit streaming
+	// error_context_exceeded: the request, not the provider, is at fault,
+	// so it renders the non-streaming 413 context_exceeds_capacity and is
+	// neither retried nor breaker-qualifying.
+	wsForwardContextExceeded wsForwardResult = "context_exceeded"
 )
 
 type breakerFault string
@@ -4229,6 +4234,10 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 					markProviderDone()
 					return wsForwardQueueFull, requestLogAttempt{Status: status, Error: requestLogEndErrorMessage(end), ErrorCode: end.Status}
 				}
+				if end.Status == "error_context_exceeded" {
+					markProviderDone()
+					return wsForwardContextExceeded, requestLogAttempt{Status: status, Error: requestLogEndErrorMessage(end), ErrorCode: end.Status}
+				}
 				markProviderDone()
 				return wsForwardFailed, requestLogAttempt{Status: status, Error: requestLogEndErrorMessage(end), ErrorCode: spec001EndStatus(end.Status)}
 			}
@@ -4434,6 +4443,12 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 				return wsForwardComplete, requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(acct.deliveredBytes())}
 			}
 		case end := <-relay.Done:
+			if end.Status == "error_context_exceeded" {
+				// Nothing of a buffered stream reached the buyer; the
+				// request exceeded the provider's context.
+				markProviderDone()
+				return wsForwardContextExceeded, requestLogAttempt{Status: wsEndHTTPStatus(end.Status), Error: requestLogEndErrorMessage(end), ErrorCode: end.Status}
+			}
 			if end.Status != "complete" {
 				if toolFinal.toolOpened && s.streamingDowngrade != nil {
 					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
@@ -6150,6 +6165,8 @@ func statusForForwardResult(result wsForwardResult) int {
 		return http.StatusGatewayTimeout
 	case wsForwardQueueFull, wsForwardUnavailable:
 		return http.StatusServiceUnavailable
+	case wsForwardContextExceeded:
+		return http.StatusRequestEntityTooLarge
 	default:
 		return http.StatusBadGateway
 	}
@@ -6163,6 +6180,8 @@ func writeStreamForwardError(w http.ResponseWriter, result wsForwardResult) {
 		writeError(w, http.StatusServiceUnavailable, "no_provider_available", "Selected provider is not reachable")
 	case wsForwardProviderDisconnected:
 		writeError(w, http.StatusBadGateway, "provider_disconnected", "Selected provider disconnected; buyer should retry")
+	case wsForwardContextExceeded:
+		writeError(w, http.StatusRequestEntityTooLarge, "context_exceeds_capacity", "Request exceeds provider context capacity")
 	case wsForwardCancelled, wsForwardProviderDisconnectedCommitted:
 		return
 	default:
