@@ -2,6 +2,35 @@ import XCTest
 @testable import macprovider_cli
 
 final class Tier2ProviderSessionTests: XCTestCase {
+    func testEncryptedRequestCarriesAuthenticatedOutputLimit() throws {
+        let session = try Tier2ProviderSession(
+            providerID: "provider-test",
+            assignedID: "assigned-test",
+            selectedAEAD: Tier2ProviderSession.aeadSuite,
+            keyID: "kid-test",
+            c2pKey: Data(repeating: 0x31, count: 32),
+            p2cKey: Data(repeating: 0x42, count: 32),
+            c2pNonceBase: Data([0x01, 0x02, 0x03, 0x04]),
+            p2cNonceBase: Data([0x05, 0x06, 0x07, 0x08])
+        )
+        let request = try Tier2ProviderSession.sealRequestForTest(
+            session: session,
+            requestID: "req-output-limit",
+            stream: false,
+            plaintext: "request-body",
+            maxOutputTokens: 4096
+        )
+
+        let payload = try session.openRequestPayload(
+            message: request,
+            requestID: "req-output-limit",
+            stream: false
+        )
+
+        XCTAssertEqual(payload.body, "request-body")
+        XCTAssertEqual(payload.maxOutputTokens, 4096)
+    }
+
     func testAEADRoundTripTracksDirectionsAndRejectsReplaySequence() throws {
         let session = try Tier2ProviderSession(
             providerID: "provider-test",

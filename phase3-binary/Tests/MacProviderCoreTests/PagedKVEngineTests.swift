@@ -171,6 +171,90 @@ final class PagedKVEngineTests: XCTestCase {
         XCTAssertFalse(defaults.effectiveEnabled)
     }
 
+    func testPagedKVConfigSizedToCoverGrowsDefaultPool() {
+        let config = PagedKVConfig.defaults()
+        XCTAssertFalse(config.maxPhysicalBlocksExplicit)
+        XCTAssertEqual(config.maxPhysicalBlocks, 1024)
+        XCTAssertEqual(config.blockSizeTokens, 16)
+
+        let covered = config.sizedToCover(contextTokens: 200_000)
+        // 200,000 / 16 = 12,500 blocks
+        XCTAssertEqual(covered.maxPhysicalBlocks, 12_500)
+        XCTAssertFalse(covered.maxPhysicalBlocksExplicit)
+        // Original unchanged
+        XCTAssertEqual(config.maxPhysicalBlocks, 1024)
+    }
+
+    func testPagedKVConfigSizedToCoverRespectsExplicit() {
+        var config = PagedKVConfig.defaults()
+        config.maxPhysicalBlocks = 5000
+        config.maxPhysicalBlocksExplicit = true
+
+        let covered = config.sizedToCover(contextTokens: 200_000)
+        // Should NOT grow because explicit
+        XCTAssertEqual(covered.maxPhysicalBlocks, 5000)
+        XCTAssertTrue(covered.maxPhysicalBlocksExplicit)
+    }
+
+    func testPagedKVConfigSizedToCoverSmallContext() {
+        let config = PagedKVConfig.defaults()
+        let covered = config.sizedToCover(contextTokens: 100)
+        // 100 / 16 = 6.25 -> 7 blocks, but max(1024, 7) = 1024
+        XCTAssertEqual(covered.maxPhysicalBlocks, 1024)
+    }
+
+    func testPagedKVConfigSizedToCoverClamped() {
+        let config = PagedKVConfig.defaults()
+        let hugeContext = PagedKVConfig.maximumPhysicalBlocks * PagedKVConfig.maximumBlockSizeTokens * 2
+        let covered = config.sizedToCover(contextTokens: hugeContext)
+        XCTAssertEqual(covered.maxPhysicalBlocks, PagedKVConfig.maximumPhysicalBlocks)
+    }
+
+    func testPagedKVConfigSizedToCoverNonPositive() {
+        let config = PagedKVConfig.defaults()
+        let coveredZero = config.sizedToCover(contextTokens: 0)
+        let coveredNeg = config.sizedToCover(contextTokens: -100)
+        XCTAssertEqual(coveredZero.maxPhysicalBlocks, config.maxPhysicalBlocks)
+        XCTAssertEqual(coveredNeg.maxPhysicalBlocks, config.maxPhysicalBlocks)
+    }
+
+    func testPagedKVConfigResolverSetsExplicitFlag() {
+        // Default: not explicit
+        let defaultConfig = PagedKVConfigResolver.resolve(yaml: nil, environment: [:])
+        XCTAssertFalse(defaultConfig.maxPhysicalBlocksExplicit)
+
+        // CLI override: explicit
+        let cliConfig = PagedKVConfigResolver.resolve(
+            yaml: nil,
+            environment: [:],
+            cli: PagedKVCLIOverrides(maxPhysicalBlocks: 2048)
+        )
+        XCTAssertTrue(cliConfig.maxPhysicalBlocksExplicit)
+        XCTAssertEqual(cliConfig.maxPhysicalBlocks, 2048)
+
+        // Env override: explicit
+        let envConfig = PagedKVConfigResolver.resolve(
+            yaml: nil,
+            environment: ["MACPROVIDER_PAGED_KV_MAX_PHYSICAL_BLOCKS": "4096"],
+            cli: PagedKVCLIOverrides()
+        )
+        XCTAssertTrue(envConfig.maxPhysicalBlocksExplicit)
+        XCTAssertEqual(envConfig.maxPhysicalBlocks, 4096)
+
+        let yamlConfig = PagedKVConfigResolver.resolve(yaml: ["max_physical_blocks": 12_800], environment: [:])
+        XCTAssertTrue(yamlConfig.maxPhysicalBlocksExplicit)
+        XCTAssertEqual(yamlConfig.sizedToCover(contextTokens: 400_000).maxPhysicalBlocks, 12_800)
+
+        // Invalid explicit value: explicit flag false, errors present
+        let invalidConfig = PagedKVConfigResolver.resolve(
+            yaml: ["max_physical_blocks": "0"],
+            environment: [:],
+            cli: PagedKVCLIOverrides()
+        )
+        XCTAssertFalse(invalidConfig.maxPhysicalBlocksExplicit)
+        XCTAssertFalse(invalidConfig.errors.isEmpty)
+    }
+
     func testInvalidPagedKVConfigDisablesFailClosed() {
         let resolved = PagedKVConfigResolver.resolve(
             yaml: ["enabled": true, "block_size_tokens": 0],

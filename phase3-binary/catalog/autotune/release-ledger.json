@@ -332,6 +332,12 @@
           "signer_key_id": "streamvc-autotune-static-v4",
           "version": "published-2026-09-25-artifact-hash-correction-v1"
         },
+        "continuous-batching-policy.json": {
+          "bytes": 391,
+          "sha256": "f5a1cb54c7c3e290d0930477be8ee731bf8b3dff5e2cb336564f0bf1b317fddd",
+          "signer_key_id": "streamvc-autotune-static-v4",
+          "version": "published-2026-09-25-artifact-hash-correction-v1"
+        },
         "demand-rank.json": {
           "bytes": 1995,
           "sha256": "a60273212954fd07108a044d2093dea740ba494a6fd584e0d6b2b105fa664fa3",

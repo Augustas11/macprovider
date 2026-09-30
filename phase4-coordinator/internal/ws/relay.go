@@ -107,6 +107,20 @@ func ConversationKeyFromContext(ctx context.Context) string {
 	return strings.TrimSpace(key)
 }
 
+type maxOutputTokensContextKey struct{}
+
+func ContextWithMaxOutputTokens(ctx context.Context, limit int) context.Context {
+	if limit < 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, maxOutputTokensContextKey{}, limit)
+}
+
+func MaxOutputTokensFromContext(ctx context.Context) (int, bool) {
+	limit, ok := ctx.Value(maxOutputTokensContextKey{}).(int)
+	return limit, ok && limit >= 0
+}
+
 type relayActive struct {
 	requestID           string
 	stream              bool
@@ -266,6 +280,7 @@ type encryptedInferenceRequest struct {
 type encryptedInferencePlaintext struct {
 	Type              string                     `json:"type"`
 	Body              string                     `json:"body"`
+	MaxOutputTokens   *int                       `json:"max_output_tokens,omitempty"`
 	ConversationKey   string                     `json:"conversation_key,omitempty"`
 	BodyEncoding      string                     `json:"body_encoding,omitempty"`
 	RelayBlindContext *RelayBlindDispatchContext `json:"relay_blind_context,omitempty"`
@@ -686,10 +701,10 @@ func (ps *providerSession) hasTier2Session() bool {
 }
 
 func (ps *providerSession) sealInferenceRequest(provider pool.Provider, requestID string, body []byte, stream bool, settlement *SettlementReceiptMetadata, conversationKey string) ([]byte, error) {
-	return ps.sealInferenceRequestWithRelayBlind(provider, requestID, body, stream, settlement, conversationKey, nil)
+	return ps.sealInferenceRequestWithRelayBlind(provider, requestID, body, stream, settlement, conversationKey, nil, nil)
 }
 
-func (ps *providerSession) sealInferenceRequestWithRelayBlind(provider pool.Provider, requestID string, body []byte, stream bool, settlement *SettlementReceiptMetadata, conversationKey string, relayBlind *RelayBlindDispatchContext) ([]byte, error) {
+func (ps *providerSession) sealInferenceRequestWithRelayBlind(provider pool.Provider, requestID string, body []byte, stream bool, settlement *SettlementReceiptMetadata, conversationKey string, maxOutputTokens *int, relayBlind *RelayBlindDispatchContext) ([]byte, error) {
 	ps.tier2Mu.Lock()
 	session := ps.tier2
 	if session == nil {
@@ -699,6 +714,7 @@ func (ps *providerSession) sealInferenceRequestWithRelayBlind(provider pool.Prov
 			RequestID:         requestID,
 			Stream:            stream,
 			Body:              string(body),
+			MaxOutputTokens:   maxOutputTokens,
 			Settlement:        settlement,
 			ConversationKey:   conversationKey,
 			BodyEncoding:      relayBlindBodyEncoding(relayBlind),
@@ -723,6 +739,7 @@ func (ps *providerSession) sealInferenceRequestWithRelayBlind(provider pool.Prov
 	plaintext, err := json.Marshal(encryptedInferencePlaintext{
 		Type:              "inference_request_plaintext",
 		Body:              string(body),
+		MaxOutputTokens:   maxOutputTokens,
 		ConversationKey:   strings.TrimSpace(conversationKey),
 		BodyEncoding:      relayBlindBodyEncoding(relayBlind),
 		RelayBlindContext: relayBlind,
@@ -1492,7 +1509,11 @@ func (s *Server) dispatchInference(ctx context.Context, provider pool.Provider, 
 	}
 	active.relayBlind = relayContext
 	s.extendProviderReadDeadlineForActive(provider)
-	payload, err := session.sealInferenceRequestWithRelayBlind(provider, requestID, body, stream, settlementMetadata, ConversationKeyFromContext(ctx), relayContext)
+	var maxOutputTokens *int
+	if limit, ok := MaxOutputTokensFromContext(ctx); ok {
+		maxOutputTokens = &limit
+	}
+	payload, err := session.sealInferenceRequestWithRelayBlind(provider, requestID, body, stream, settlementMetadata, ConversationKeyFromContext(ctx), maxOutputTokens, relayContext)
 	if err != nil {
 		if errors.Is(err, errTier2C2PCounterExhausted) {
 			s.closeProviderForTier2SessionFailure(session, provider.ProviderID, provider.AssignedID, requestID, "counter_exhausted", ErrRelayAEADFailed)

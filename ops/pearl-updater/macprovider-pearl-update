@@ -119,6 +119,8 @@ CATALOG_ASSETS = (
     "autotune-candidates.json.sig",
     "demand-rank.json",
     "demand-rank.json.sig",
+    "continuous-batching-policy.json",
+    "continuous-batching-policy.json.sig",
 )
 CONTROL_ASSETS = (
     "pearl-release.json",
@@ -1603,7 +1605,13 @@ class Updater:
         if manifest.get("release_id") != catalog.release_id or manifest.get("policy_version") != catalog.policy_version:
             raise UpdateError("catalog metadata/release identity mismatch")
         feeds = manifest.get("feeds")
-        if not isinstance(feeds, dict) or set(feeds) != {"autotune-candidates.json", "demand-rank.json", "rate-card.json", "tier2-catalog.json"}:
+        if not isinstance(feeds, dict) or set(feeds) != {
+            "autotune-candidates.json",
+            "continuous-batching-policy.json",
+            "demand-rank.json",
+            "rate-card.json",
+            "tier2-catalog.json",
+        }:
             raise UpdateError("catalog release manifest feed set is invalid")
         try:
             trusted_keys = json.loads((release.directory / "trusted-keys.json").read_text(encoding="utf-8"))
@@ -1641,6 +1649,38 @@ class Updater:
                 raise UpdateError(f"catalog feed version mismatch for {feed_name}")
             if not isinstance(signature, dict) or signature.get("alg") != "ed25519" or signature.get("key_id") != row.get("signer_key_id"):
                 raise UpdateError(f"catalog signature identity mismatch for {feed_name}")
+        policy_name = "continuous-batching-policy.json"
+        policy_row = feeds[policy_name]
+        policy_path = release.directory / policy_name
+        if (
+            not isinstance(policy_row, dict)
+            or policy_row.get("sha256") != sha256_file(policy_path)
+            or policy_row.get("bytes") != policy_path.stat().st_size
+            or policy_row.get("signer_key_id") not in keys
+        ):
+            raise UpdateError(f"catalog release manifest binding mismatch for {policy_name}")
+        try:
+            policy = json.loads(policy_path.read_text(encoding="utf-8"))
+            policy_signature = json.loads(
+                (release.directory / f"{policy_name}.sig").read_text(encoding="utf-8")
+            )
+        except (ValueError, OSError) as exc:
+            raise UpdateError(f"catalog feed/signature JSON is invalid for {policy_name}") from exc
+        if (
+            not isinstance(policy, dict)
+            or policy.get("release_id") != catalog.release_id
+            or policy.get("policy_version") != catalog.policy_version
+            or policy.get("signer_key_id") != policy_row.get("signer_key_id")
+            or policy.get("candidate_catalog_sha256") != feeds["autotune-candidates.json"].get("sha256")
+            or policy_row.get("version") != catalog.release_id
+        ):
+            raise UpdateError(f"catalog feed version mismatch for {policy_name}")
+        if (
+            not isinstance(policy_signature, dict)
+            or policy_signature.get("alg") != "ed25519"
+            or policy_signature.get("key_id") != policy_row.get("signer_key_id")
+        ):
+            raise UpdateError(f"catalog signature identity mismatch for {policy_name}")
         tier2_row = feeds["tier2-catalog.json"]
         tier2_path = release.directory / "tier2-catalog.json"
         if (

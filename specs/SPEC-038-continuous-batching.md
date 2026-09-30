@@ -1,11 +1,28 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.3
+Version: v0.3.6
 Status: draft (normative contract; runtime enablement remains tuple- and campaign-gated)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.6 (2026-09-30, reservation-bound omitted output):** The
+SPEC-038 v0.3.5 out-of-band dependency is now implemented by SPEC-001 v1.9.27,
+SPEC-002 v1.6.4, and SPEC-006 v0.9.41. Gateway traffic that omits `max_tokens`
+still hashes and forwards an unmodified body, while authenticated dispatch
+metadata caps serial and batched provider generation at the gateway's reserved
+completion budget. Direct coordinator/provider traffic without that metadata
+retains the remaining-context default. An explicit body limit and a dispatch
+limit compose by taking the smaller value.
+**Change log v0.3.5 (2026-09-30, batched row context budget):** A batched row's token cap (prompt + output budget) is the provider's served context (`max_context_tokens`, including `max_context_override`), set by the one serve-path scheduler configuration used at load and every rebuild; a fixed 131,072 cap below a 200k served context made every request that omitted `max_tokens` fail with a retryable relay `error_internal` (buyer 502) on the live Studio. The batched output budget is SPEC-001's `max_tokens` default, the remaining context `max_context_tokens - prompt_tokens`; there is no provider-side output constant. An explicit `max_tokens` is honoured up to that remaining context and clamped above it, because a paged row cannot slide its KV window past the served context the way the serial rotating cache does; request validity is therefore the same on the serial and batched paths (SPEC-001: `max_tokens` > 0, prompt within the context). A batched row that stops on its output budget (explicit or clamped) reports `finish_reason: "length"`, never `stop`. The one batched-only rejection is a prompt that leaves no room for one output token (`prompt_tokens >= max_context_tokens`; serial accepts `prompt_tokens == max_context_tokens` and rotates): it is rejected before admission with the serial HTTP 413 `context_length_exceeded` (relay `error_context_exceeded`; coordinator 413 `context_exceeds_capacity` per SPEC-002 FR-P14.1 on both non-streaming and pre-commit streaming attempts, not retried and not breaker-qualifying), and the provider logs `event=batching_rejected code=context_length_exceeded prompt_tokens=… max_output_tokens=… cap=…`. Settlement is zero credit / zero debit (SPEC-005 X-1); the receipt follows SPEC-015 §7.6: the provider's direct HTTP path signs a zero-token error receipt for a settlement-eligible runtime, serial or batched. The relay `inference_response_end` error frame carries no receipt for any null-usage status (all codes, serial and batched, before this version too); closing that §7.6 gap on the relay is a SPEC-001/015 wire change outside this version. The omitted-`max_tokens` budget is not filled in by the gateway or coordinator: `max_tokens` is a SPEC-015 §4.2 `prompt_hash` field that §4.5 requires to reach the provider unmodified, so a rewrite would invalidate the buyer's receipt. Aligning the gateway's `limits.max_tokens_per_request` reservation (SPEC-006) with the provider's omitted budget needs an out-of-band budget field outside the canonical prompt; that is a SPEC-001/002/006 wire change outside this version.
+
+**Change log v0.3.4 (2026-09-30, signed CB policy authority):**
+FR-CB10 may obtain production acceptance coverage from the SPEC-023
+`macprovider.continuous-batching-policy.v1` static feed when that feed is
+release-bound, same-signer as the candidate catalog, exact-identity matched,
+unexpired, present in the current signed policy, and locally re-proven at load. The default committed
+policy has no `entries`; packaged Studio acceptance remains required before
+any enabling entry may be authored.
 **Change log v0.3.3 (2026-09-28, operator-tunable prefill token budget):** The per-iteration prefill token budget of FR-CB2 is now an operator config key, `continuous_batch_prefill_tokens_per_iteration` (env `MACPROVIDER_CONTINUOUS_BATCH_PREFILL_TOKENS_PER_ITERATION`, CLI `--continuous-batch-prefill-tokens-per-iteration`). It caps how many prompt tokens a single scheduler iteration prefills across compatible rows. Unset ⇒ the scheduler default (1024, unchanged). A Studio benchmark (1024 vs 2048 vs 8192 at 1.5k-8k prompts) found this per-iteration total budget NON-BINDING: single-stream large-prompt TTFT is compute-bound (~300 tok/s prefill) and the per-row chunk (`prefill_step_size`) governs per-row prefill, so the total budget does not move TTFT or concurrent-8k admission. The key is therefore exposed for operator tuning/observability, not as a TTFT lever, and the default is left unchanged. Serve startup rejects a value outside `1…65536` whatever the batching mode, mirroring the `continuous_batch_queue_wait_timeout_ms` bound. No wire, receipt, or acceptance-coverage change.
 **Change log v0.3.2 (2026-09-28, final-prefill sampling parity):** FR-CB2
 requires every prompt token to be committed during prefill. Non-final chunks
@@ -706,16 +723,36 @@ explicit operator policy and reason-coded telemetry. The activation reason
 MUST reference the local capability and MUST NOT cite a missing upstream pin
 as the path to success.
 
-Acceptance coverage MUST bind the runtime revision the acceptance evidence was
-measured on: the Metal library SHA-256 and the paged-KV kernel identifier, as
-well as model id and SHA, cache class, KV dtype, MoE requirement and hardware
-class. An entry missing any of these fields MUST be rejected at configuration
-load, and an entry recorded on a different runtime revision MUST NOT cover the
-requested tuple. An operator MUST NOT record acceptance for a tuple until that
-exact runtime revision has met the SPEC-039 FR-PKV13 overhead ceiling on the
-packaged build. Acceptance coverage is therefore the per-tuple gate that keeps
-a path over the ceiling from serving real traffic. Derived or per-boot
-descriptor fields (parity label, pool epoch) remain the descriptor's job.
+Production acceptance coverage MUST come from the SPEC-023 signed
+`macprovider.continuous-batching-policy.v1` feed. Legacy explicit accepted
+tuples MAY remain available only for isolated `--no-join` expert/test use and
+MUST NOT authorize a coordinator-joined provider. Coverage MUST bind the runtime revision and
+release evidence the acceptance was measured on: model key, model id, model
+SHA-256, tokenizer SHA-256, chat-template SHA-256, exact hardware class, cache
+class, KV dtype, MoE requirement, `cached_turns_accepted`, Metal library
+SHA-256, paged-KV kernel identifier, rollout mode, feed expiry, tuple digest,
+provider CLI version, live executable cdhash, and immutable package and
+Studio-campaign evidence digests. Under the current runtime descriptor
+contract, the policy tuple's `model_id` is the served/catalog key and MUST
+equal `model_key`; `model_sha256` binds the candidate row. An entry missing
+any of these fields MUST be rejected at configuration or policy load, and an
+entry recorded on a different runtime revision MUST NOT cover the requested
+tuple. An operator
+MUST NOT record acceptance for a tuple until that exact runtime revision has
+met the SPEC-039 FR-PKV13 overhead ceiling on the packaged build. Acceptance
+coverage is therefore the per-tuple gate that keeps a path over the ceiling
+from serving real traffic. Derived or per-boot descriptor fields (parity label,
+pool epoch) remain the descriptor's job.
+
+The signed SPEC-023 policy is distribution authority, not local proof. A
+policy record with `rollout` `canary` or `on` authorizes the exact tuple only
+after its signature, signer equality with the candidate catalog, release
+binding, freshness/expiry, candidate row identity, and tuple identity pass.
+The runtime MUST report this policy authorization separately from local proof,
+and MUST activate batching only after local runtime identity and load-time
+parity/isolation probes also pass. A missing,
+stale, malformed, unsigned, wrong-signer, revoked, catalog-mismatched, or
+identity-mismatched policy is equivalent to no acceptance coverage.
 
 **(v0.2.9)** An accepted-tuple entry MAY carry `cached_turns_accepted`
 (boolean, default false; any non-boolean value MUST be rejected at
@@ -1074,6 +1111,7 @@ snapshot-binding requirements to buyer-visible behavior:
 
 | Lifecycle point | Required API-visible behavior | Settlement / receipt rule |
 |---|---|---|
+| Prompt leaves no room for one output token before admission | The batched output budget is the remaining context (`max_context_tokens - prompt_tokens`), an explicit `max_tokens` clamped to it, so prompt + budget never exceeds the served context; when no output token fits the provider rejects with HTTP 413 `context_length_exceeded` (`param: max_tokens`). On the coordinator relay it is `error_context_exceeded` (coordinator 413 `context_exceeds_capacity` on non-streaming and pre-commit streaming attempts; not retried, not failed over, not breaker-qualifying). The provider log line is `event=batching_rejected code=context_length_exceeded` with the prompt, output, and cap token counts. | Zero credit / zero debit (SPEC-005 X-1); receipt per SPEC-015 §7.6. |
 | Queue full before admission | Reject through the existing client-visible backpressure/error surface; include bounded retry guidance (`Retry-After` or equivalent) when the gateway surface supports it. On direct HTTP that is `continuous_batching_stream_backpressure` with `Retry-After`; on the coordinator relay it is SPEC-001 FR-27 `error_queue_full` (re-route, else 503 with the gateway's `Retry-After`). No request state may be retained except non-receipt diagnostics. | Non-settling; no receipt. |
 | Queue wait timeout before admission | Reject as queue timeout, not model failure. The response/log MUST distinguish timeout from scheduler crash and from unsupported tuple. On direct HTTP the code is `continuous_batching_queue_wait_timeout`; on the coordinator relay it is SPEC-001 FR-27 `error_queue_full`, and the provider log keeps the distinct code. | Non-settling; no receipt. |
 | Unsupported tuple before admission | Strict mode fails preflight; explicit permissive/canary mode MAY serial-route with reason-coded telemetry. | Serial route settles only if the serial request succeeds; rejected path emits no receipt. |

@@ -227,7 +227,7 @@ log "signing feed bytes with $KEY_ID (in-memory public-key derivation check; no 
   bash scripts/resign-autotune-static.sh )
 
 # ---------------------------------------------------------------------------
-# 2. Assemble the release directory (9 files; 11 once the release is
+# 2. Assemble the release directory (11 files; 13 once the release is
 #    artifact-bound: + autotune-artifacts.json and its .sig) and gate it with
 #    verify-directory.
 # ---------------------------------------------------------------------------
@@ -237,16 +237,16 @@ RELEASE_DIRNAME="${RELEASE_ID}-${CANDIDATE_SHA:0:16}"
 STAGING="$(mktemp -d -t macprovider-feed-stage.XXXXXXXX)"
 RELEASE_STAGE="$STAGING/$RELEASE_DIRNAME"
 mkdir -p "$RELEASE_STAGE"
-for f in autotune-candidates.json demand-rank.json rate-card.json release.json tier2-catalog.json trusted-keys.json; do
+for f in autotune-candidates.json demand-rank.json rate-card.json continuous-batching-policy.json release.json tier2-catalog.json trusted-keys.json; do
   install -m 0644 "$CAT_DIR/$f" "$RELEASE_STAGE/$f"
 done
-for f in autotune-candidates.json.sig demand-rank.json.sig rate-card.json.sig; do
+for f in autotune-candidates.json.sig demand-rank.json.sig rate-card.json.sig continuous-batching-policy.json.sig; do
   install -m 0644 "$STATIC_DIR/$f" "$RELEASE_STAGE/$f"
 done
 # SPEC-023 §3.7.8 Stage A: the freshly generated release.json is the ONLY
 # authority on whether this release is artifact-bound. Bound → the feed and
 # its sidecar are staged (both required); unbound → neither may exist, or the
-# verify-directory gate below would see a stray fifth feed.
+# verify-directory gate below would see a stray sixth feed.
 staged_artifact_bound="$(python3 - "$CAT_DIR/release.json" <<'PY'
 import json, pathlib, sys
 feeds = json.loads(pathlib.Path(sys.argv[1]).read_text())["feeds"]
@@ -258,7 +258,7 @@ if [ "$staged_artifact_bound" = bound ]; then
     fatal "release.json binds autotune-artifacts.json but the generated feed or its sidecar is missing"
   install -m 0644 "$CAT_DIR/autotune-artifacts.json" "$RELEASE_STAGE/autotune-artifacts.json"
   install -m 0644 "$STATIC_DIR/autotune-artifacts.json.sig" "$RELEASE_STAGE/autotune-artifacts.json.sig"
-  log "staged artifact-bound five-feed release directory"
+  log "staged artifact-bound six-feed release directory"
 else
   for stray in "$CAT_DIR/autotune-artifacts.json" "$STATIC_DIR/autotune-artifacts.json.sig"; do
     [ -e "$stray" ] && fatal "release.json does not bind autotune-artifacts.json but $stray exists"
@@ -332,10 +332,10 @@ aa_refuse_existing_release
 # if models, gates, or rate-card rows differ — a real catalog change must go
 # through a reviewed release, never this freshness cron.
 # The rules live in `catalog-release.py continuity-check` (feed_continuity_drift)
-# so they are unit-tested: candidate/demand/rate-card compared with version +
-# generated_at stripped, and the artifact feed compared by PRESENCE and by
-# content with its release-derived fields stripped. A renewal that would add,
-# drop, or rewrite the artifact feed is a catalog release, not a restamp.
+# so they are unit-tested: candidate/demand/rate-card/policy compared with
+# release-derived fields stripped, and the artifact feed compared by PRESENCE
+# and by content with its release-derived fields stripped. A renewal that would
+# add, drop, or rewrite the artifact feed is a catalog release, not a restamp.
 # tier2-catalog.json must match once its signing envelope is stripped (an
 # expiry re-sign is freshness; a model change is a content release) and
 # trusted-keys.json must be byte-equal: this job copies both from main, so a
@@ -344,7 +344,7 @@ aa_refuse_existing_release
 log "checking content continuity against the live release (freshness-only guard)"
 LIVE_SNAPSHOT="$STAGING/live-current"
 mkdir -p "$LIVE_SNAPSHOT"
-for name in autotune-candidates.json demand-rank.json rate-card.json tier2-catalog.json trusted-keys.json; do
+for name in autotune-candidates.json demand-rank.json rate-card.json continuous-batching-policy.json tier2-catalog.json trusted-keys.json; do
   SSH "cat '$REMOTE_AUTOTUNE_DIR/current/$name'" > "$LIVE_SNAPSHOT/$name" || fatal "cannot read live $name"
 done
 live_artifact_state="$(SSH "if test -f '$REMOTE_AUTOTUNE_DIR/current/autotune-artifacts.json'; then echo present; else echo absent; fi")" \

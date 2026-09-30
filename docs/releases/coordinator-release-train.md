@@ -50,6 +50,11 @@ coordinator release (see "Which lane" below).
   - Only the full deploy script installs the `dist/` assets: systemd units,
     nginx, and the catalog verifier bundle. A binary-only swap leaves those at
     their previous version (see "Open Pearl actions").
+- **A runtime-only updater apply is the narrow lane when only coordinator or
+  gateway binaries changed and catalog activation must remain held.** It must
+  use a signed `pearl_runtime` prerelease and leaves Pearl's live catalog path
+  unchanged. Do not follow it with a full deploy when that would activate a
+  held catalog descendant.
 - **Money-path, auth, gateway router and coordinator changes go through PR
   review** before they can be cut (AGENTS.md).
 
@@ -73,15 +78,15 @@ A coordinator deploy compares the tag's catalog with live (`compare-live`):
 
 ## Live on Pearl
 
-Probed 2026-09-28 about 12:00Z (`/healthz`, the host checks from the #1732 enabling rollout, and one end-to-end buyer request).
+Probed 2026-09-30 (`/healthz`).
 
 | Field | Value |
 |---|---|
-| Coordinator | **v1.8.206** @ `40ed8752`. Applied 2026-09-28 about 11:40Z by the signed updater (installed from the v1.8.206 tag), then the full `deploy-pearl-vps.sh` (`CONFIG_MODE=preserve-live`, `FORCE_RESTART=1` recorded in `last-deploy-bypass.json`, DEPLOY_EXIT 0, catalog `equivalent`, canary mp-26592d… ready). The #1732 enabling rollout is complete: recovery and pricing-close units are wired, and the applied-config record carries `rate_table_sha256`, `signed_rate_card_sha256`, `autotune_release_id` and `billing_snapshot_id` |
-| Gateway | **v1.8.206** (`gateway.db` schema 15 from #1763, migrated by the #1782 fix; `coordinator.require_settlement_trailers: true`). The live `api.malibu.tech` nginx gained the `X-MacProvider-Internal-Conv-Cache` strip on 2026-09-28 (additive; backup `api.malibu.tech.bak-convcache-20260928`). **Never run the gateway `deploy-pearl-vps.sh`**: it would overwrite the live site, which carries certbot TLS and `/ws/provider` routes the repo template lacks. |
-| Release | [Pearl runtime v1.8.206](https://github.com/Augustas11/macprovider/releases/tag/v1.8.206). v1.8.204 and v1.8.205 were signed but rolled back (updater snapshot timeout #1781; gateway schema-15 migration order #1782). |
-| `recommended_binary_version` | 1.8.123 (CLI train owns this) |
-| Includes | Everything on `main` through `ca809589`: #1738 (90-day stats overview), #1741 (#1721: CLI and stats sidecars from the release), #1744 (#1735 catalog), #1719 (#1690 engine-agnostic Trusted Pools), and the 2026-09-25 deploy-tooling fixes: #1746, `c6c32692`, `ee061fc3`, `4936a062`, `ca809589` (see the note below) |
+| Coordinator | **v1.8.209** @ `5245dc9f`. Applied 2026-09-30 at 10:03Z through the signed runtime updater; public `/healthz` reported `v1.8.209`. |
+| Gateway | **v1.8.209** (`gateway.db` schema 15; `coordinator.require_settlement_trailers: true`). The live `api.malibu.tech` nginx carries certbot TLS and `/ws/provider` routes absent from the repo template. **Never run the gateway `deploy-pearl-vps.sh`**; use the signed runtime updater for binary-only releases. |
+| Release | [Pearl runtime v1.8.209](https://github.com/Augustas11/macprovider/releases/tag/v1.8.209), immutable runtime-only prerelease. The apply preserved the live September 25 catalog; no full deploy followed it. |
+| `recommended_binary_version` | 1.8.207 (CLI train owns this) |
+| Includes | Everything on `main` through `5245dc9f`, including #1804's Qwen3.6 OpenRouter capabilities. |
 | nginx | `/v1/stats/routability` route added on Pearl 2026-09-24 10:24Z, additively and verbatim from `phase4-coordinator/dist` (backups `*.bak-routability-20260924T102404Z`). Pearl's nginx still lags the repo on `/v1/catalog-artifacts`, `/v1/portal/session` and `/v1/provider/malibu-reward-audit`, and carries a hand-deployed `/v1/provider/model-admission/` (BYOM) route the repo lacks, so **do not copy the repo site file over it**. |
 
 Signed prerelease `v1.8.189` at `0ac51afa` exists and is immutable, but it was
@@ -107,7 +112,9 @@ The canary Mac mp-26592d… now runs signed CLI candidate v1.8.195, whose payloa
 
 | Tag | Commit | Head PR |
 |---|---|---|
-| v1.8.206 | `40ed8752` | #1779 (#1775 money-writer starvation), #1781 (updater snapshot timeout), #1782 (gateway schema-15 upgrade); also carries #1754, #1763, #1769, #1732, #1658 — **live** |
+| v1.8.209 | `5245dc9f` | #1804 Qwen3.6 OpenRouter capabilities — **live** |
+| v1.8.208 | `bc276ea5` | #1783 (#1752 operator drain) |
+| v1.8.206 | `40ed8752` | #1779 (#1775 money-writer starvation), #1781 (updater snapshot timeout), #1782 (gateway schema-15 upgrade); also carries #1754, #1763, #1769, #1732, #1658 |
 | v1.8.205 | `3ca8e792` | rolled back: gateway schema-15 migration (`no such column: operator_review`) |
 | v1.8.204 | `dfd1586f` | rolled back: updater snapshot integrity_check exceeded 300 s |
 | v1.8.200 | `ca809589` | #1719 (#1690) with the quick_check fix; #1738, #1741, #1744 catalog, #1746 and the deploy fixes |
@@ -128,6 +135,10 @@ The canary Mac mp-26592d… now runs signed CLI candidate v1.8.195, whose payloa
 | v1.8.177 | `025036b2` | #1674 four seats admit four chats after late busy report |
 
 ## Catalog on Pearl
+
+Catalog-content and pricing rollout state is tracked in
+`docs/releases/catalog-release-train.md`. This section records Pearl's currently
+served catalog state and coordinator-train interactions.
 
 | Field | Value |
 |---|---|
@@ -166,16 +177,15 @@ around 2026-10-23. The fix takes effect at the next renewal (Wed 2026-09-30
 16:00 UTC), or earlier with a manual dispatch of
 `renew-autotune-static-feed-signed.yml`.
 
-## Next coordinator release — v1.8.208, net changes vs v1.8.206
+## Next coordinator release — none assigned, net changes vs v1.8.209
 
-Release owner: Augustas11/Codex, 2026-09-29. The signed runtime tag is
-reserved for the current `main` tip and contains the merged #1752 drain code.
-It is not applied to Pearl until the signed workflow and updater provenance
-checks pass.
+`v1.8.209` was applied through the signed runtime-only updater on 2026-09-30.
+The public model document then returned exactly one paid Qwen3.6 row with the
+#1804 feature descriptors, while the live catalog stayed on the September 25
+release. Start a new row when another coordinator/gateway change merges.
 
 | Net change in coordinator / gateway / Pearl assets | Status | PR |
 |---|---|---|
-| #1752 operator drain: gateway `POST /admin/settlement/release-holds` (operator-only, one account per call, required `created_before`, dry-run by default; verified finality settles, refund finality refunds, anything else is released via the reservation-type-correct path, recording a terminal `operator_drain_*` reconcile result). Rollout: in the same gateway restart, set Pearl `settlement.reconcile_interval_s`/`reconcile_batch_limit` back to the repo defaults 30 s / 100 (they are 3600 s / 1 since 2026-09-15). Then dry-run each held account, apply, and report the held count on #1752. | merged 2026-09-28; v1.8.208 cut pending signed workflow/apply | #1783 (#1752) |
 
 ## Open Pearl actions (not new code)
 

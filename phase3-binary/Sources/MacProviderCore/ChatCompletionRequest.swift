@@ -219,6 +219,33 @@ public struct ChatCompletionRequest: Sendable {
         )
     }
 
+    /// Applies a coordinator-authenticated output ceiling without changing
+    /// the buyer-authored prompt source used by receipt canonicalization.
+    public func withMaxTokensLimit(_ limit: Int) -> ChatCompletionRequest {
+        precondition(limit >= 0, "max token limit must be non-negative")
+        return ChatCompletionRequest(
+            model: model,
+            messages: messages,
+            maxTokens: min(maxTokens ?? limit, limit),
+            temperature: temperature,
+            topP: topP,
+            stream: stream,
+            parallelToolCalls: parallelToolCalls,
+            stop: stop,
+            presencePenalty: presencePenalty,
+            frequencyPenalty: frequencyPenalty,
+            seed: seed,
+            responseFormat: responseFormat,
+            promptSource: promptSource,
+            conversationKey: conversationKey,
+            requestID: requestID,
+            topLevelKeys: topLevelKeys,
+            streamOptionKeys: streamOptionKeys,
+            containsNonTextMessageContentPart: containsNonTextMessageContentPart,
+            ingestProvenance: ingestProvenance
+        )
+    }
+
     /// SPEC-037 FR-KVP11: stamp the ingest boundary. Called once at each ingest
     /// site (direct-HTTP header path / relay / Tier-2), parallel to the key.
     public func withIngestProvenance(_ provenance: KVIngestProvenance) -> ChatCompletionRequest {

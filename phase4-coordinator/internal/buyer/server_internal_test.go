@@ -943,7 +943,7 @@ var coordinatorEmittedErrorCodes = []string{
 	"autotune_feed_not_found", "byte_cap_exceeded", "catalog_not_found",
 	"context_exceeds_capacity", "duplicate_tool_call_id", "idempotency_key_body_mismatch",
 	"idempotency_key_replayed", "idempotency_reservation_failed", "idempotency_unavailable",
-	"invalid_json", "invalid_request", "invalid_tool_call_id",
+	"invalid_internal_max_output_tokens", "invalid_json", "invalid_request", "invalid_tool_call_id",
 	"invalid_tools", "json_schema_invalid_const_or_enum_type", "json_schema_invalid_name",
 	"json_schema_missing_name", "json_schema_missing_schema", "json_schema_non_strict_unsupported",
 	"json_schema_strict_requires_additional_properties_false", "json_schema_strict_requires_all_properties_required", "json_schema_too_deep",

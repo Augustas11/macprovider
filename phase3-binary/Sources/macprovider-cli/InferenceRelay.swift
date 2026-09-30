@@ -84,6 +84,7 @@ actor InferenceRelay {
             return
         }
         let body: String
+        let maxOutputTokens: Int?
         let decryptedConversationKey: String?
         let bodyEncoding: String?
         let relayBlindContextObject: [String: Any]?
@@ -95,6 +96,7 @@ actor InferenceRelay {
             do {
                 let payload = try tier2Session.openRequestPayload(message: message, requestID: requestID, stream: stream)
                 body = payload.body
+                maxOutputTokens = payload.maxOutputTokens
                 decryptedConversationKey = payload.conversationKey
                 bodyEncoding = payload.bodyEncoding
                 relayBlindContextObject = payload.relayBlindContext
@@ -105,6 +107,15 @@ actor InferenceRelay {
             }
         } else if let cleartextBody = message["body"] as? String {
             body = cleartextBody
+            if let rawLimit = message["max_output_tokens"] {
+                guard !(rawLimit is Bool), let limit = rawLimit as? Int, limit >= 0 else {
+                    try await sendNAK(inReplyTo: requestID, code: "invalid_max_output_tokens", message: "inference_request max_output_tokens must be a non-negative integer")
+                    return
+                }
+                maxOutputTokens = limit
+            } else {
+                maxOutputTokens = nil
+            }
             decryptedConversationKey = nil
             bodyEncoding = message["body_encoding"] as? String
             relayBlindContextObject = message["relay_blind_context"] as? [String: Any]
@@ -266,6 +277,7 @@ actor InferenceRelay {
                 receiptBuilder: receiptBuilder,
                 receiptProviderID: receiptProviderID,
                 settlementMetadata: settlementMetadata,
+                maxOutputTokens: maxOutputTokens,
                 conversationKey: conversationKey?.isEmpty == false ? conversationKey : nil,
                 startedAt: startedAt,
                 streamInterval: streamInterval,
@@ -415,6 +427,7 @@ actor InferenceRelay {
         receiptBuilder: ReceiptBuilder?,
         receiptProviderID: String?,
         settlementMetadata: SettlementReceiptMetadata?,
+        maxOutputTokens: Int?,
         conversationKey: String?,
         startedAt: Date,
         streamInterval: Int = 1,
@@ -434,7 +447,7 @@ actor InferenceRelay {
             // Tier-2 traffic is ever persisted by the disk tier (only the
             // direct-HTTP operator path is), independent of key shape.
             let ingestProvenance: KVIngestProvenance = tier2Session != nil ? .tier2 : .relay
-            let request: ChatCompletionRequest
+            var request: ChatCompletionRequest
             if let relayBlindOpened {
                 request = relayBlindOpened.request.withRequestID(requestID)
             } else {
@@ -442,6 +455,9 @@ actor InferenceRelay {
                     .withConversationKey(conversationKey)
                     .withRequestID(requestID)
                     .withIngestProvenance(ingestProvenance)
+                if let maxOutputTokens {
+                    request = request.withMaxTokensLimit(maxOutputTokens)
+                }
             }
             telemetryModelID = request.model
             if let opened = relayBlindOpened, let relayBlindRuntime {

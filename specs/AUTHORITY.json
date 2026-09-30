@@ -634,6 +634,7 @@
       "id": "continuous-batching-serving",
       "owner_spec": "SPEC-038",
       "consumers": [
+        "SPEC-023",
         "SPEC-048"
       ],
       "status": "declared",

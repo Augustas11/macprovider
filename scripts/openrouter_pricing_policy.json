@@ -1,5 +1,5 @@
 {
-  "policy_version": "openrouter-market-feeds-v0.13.0",
+  "policy_version": "openrouter-market-feeds-v0.22.0",
   "demand_top_n": 50,
   "undercut_fraction": "0.20",
   "min_endpoint_request_count_30m": 30,
@@ -271,6 +271,12 @@
         "active_params_b": "3",
         "residency_gb": "26.5",
         "projected_tps": "35"
+      },
+      "openrouter_listed": {
+        "prompt_rate_per_mtok": 47500,
+        "completion_rate_per_mtok": 665000,
+        "prompt_cache_hit_rate_per_mtok": 11875,
+        "evidence": "2026-09-30 OpenRouter endpoints: cheapest listing Darkbloom fp4 $0.05/M prompt, $0.70/M completion, $0.025/M cache read; pin is 5% below on each axis"
       }
     },
     {
@@ -331,5 +337,10 @@
       }
     }
   ],
-  "cache_hit_fraction": "0.25"
+  "cache_hit_fraction": "0.25",
+  "openrouter_listing": {
+    "excluded_provider_names": [
+      "Malibu"
+    ]
+  }
 }

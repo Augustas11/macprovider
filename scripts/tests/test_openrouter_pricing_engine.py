@@ -122,8 +122,8 @@ def production_min_provider_targets():
     )
 
 
-def synthetic_production_market_snapshot(*, illiquid_source: str | None = None):
-    policy_document = production_policy()
+def synthetic_production_market_snapshot(*, illiquid_source: str | None = None, endpoint_overrides=None, policy_document=None):
+    policy_document = policy_document or production_policy()
     ranked_sources = [model["source_model_id"] for model in policy_document["models"]]
     ranked_sources.extend(f"unknown/model-{index}" for index in range(1, 51 - len(ranked_sources)))
     rankings = {
@@ -182,7 +182,46 @@ def synthetic_production_market_snapshot(*, illiquid_source: str | None = None):
                 ],
             }
         }
+    # The operator-pinned listed row needs a market its pin clears (rule 5a);
+    # default it to the reviewed 2026-09-30 OpenRouter market.
+    overrides = {QWEN36: qwen36_live_endpoints_2026_09_30()} if QWEN36 != illiquid_source else {}
+    overrides.update(endpoint_overrides or {})
+    for source_id, override in overrides.items():
+        endpoints[source_id]["data"]["endpoints"] = copy.deepcopy(override)
     return engine.build_snapshot(rankings, models, endpoints, policy_document, now=NOW, top_n=50)
+
+
+QWEN36 = "qwen/qwen3.6-35b-a3b"
+
+
+def or_endpoint(provider, prompt, completion, request_count=500):
+    endpoint = {"provider_name": provider, "status": 0, "pricing": {"prompt": prompt, "completion": completion}}
+    if request_count is not None:
+        endpoint["perf_last_30m_by_workload"] = {"text_generation": {"request_count": request_count}}
+    return endpoint
+
+
+def qwen36_live_endpoints_2026_09_30():
+    """OpenRouter qwen/qwen3.6-35b-a3b endpoints as listed on 2026-09-30.
+
+    Darkbloom carries no 30m activity, so it is listed but not liquid: the
+    median ignores it while the rule 5a advisory check still counts it."""
+    return [
+        or_endpoint("Darkbloom", "0.00000005", "0.0000007", request_count=None),
+        or_endpoint("AkashML", "0.0000001", "0.0000009"),
+        or_endpoint("DeepInfra", "0.0000001", "0.00000095"),
+        or_endpoint("Reka", "0.0000001", "0.000001"),
+        or_endpoint("Venice", "0.0000001", "0.000001"),
+        or_endpoint("Parasail", "0.00000015", "0.000001"),
+        or_endpoint("AtlasCloud", "0.000000186", "0.00000111375"),
+        or_endpoint("Phala", "0.0000002", "0.00000127"),
+        or_endpoint("SiliconFlow", "0.00000024", "0.0000018"),
+        or_endpoint("CoreWeave", "0.00000025", "0.00000125"),
+    ]
+
+
+def proposal_row(proposal, model_id):
+    return next(row for bucket in ("added", "changed", "unchanged") for row in proposal[bucket] if row["model_id"] == model_id)
 
 
 class FakeHTTPClient:
@@ -311,6 +350,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         for row in snapshot["rows"]:
             if isinstance(row.get("pricing"), dict):
                 row["pricing"].pop("liquidity_filter", None)
+                row["pricing"].pop("listing_evidence", None)
         snapshot["content_digest"] = engine.sha256_prefixed(engine.snapshot_digest_payload(snapshot))
 
         proposal = engine.build_proposal(snapshot, legacy_policy, reference_rate_card(), now=NOW)
@@ -346,6 +386,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         for row in snapshot["rows"]:
             if isinstance(row.get("pricing"), dict):
                 row["pricing"].pop("liquidity_filter", None)
+                row["pricing"].pop("listing_evidence", None)
         snapshot["content_digest"] = engine.sha256_prefixed(engine.snapshot_digest_payload(snapshot))
 
         with self.assertRaisesRegex(engine.SchemaError, "legacy snapshot requires legacy pricing policy"):
@@ -360,6 +401,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         for row in snapshot["rows"]:
             if isinstance(row.get("pricing"), dict):
                 row["pricing"].pop("liquidity_filter", None)
+                row["pricing"].pop("listing_evidence", None)
         snapshot["content_digest"] = engine.sha256_prefixed(engine.snapshot_digest_payload(snapshot))
         card = reference_rate_card()
         card["rows"]["openai/gpt-oss-20b"]["global_multiplier_ppm"] = 2000000
@@ -1532,6 +1574,197 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         original = json.dumps(card, sort_keys=True)
         engine.build_proposal(self.snapshot(), policy(), card, now=NOW)
         self.assertEqual(json.dumps(card, sort_keys=True), original)
+
+
+QWEN36_PIN = (47500, 665000, 11875)
+
+
+class OpenRouterListingPinTests(unittest.TestCase):
+    """SPEC-023 v0.22.0: own-provider exclusion and the rule 5a operator pin."""
+
+    def compute(self, overrides, policy_document=None):
+        policy_document = policy_document or production_policy()
+        snapshot = synthetic_production_market_snapshot(endpoint_overrides=overrides, policy_document=policy_document)
+        return snapshot, engine.build_proposal(snapshot, policy_document, production_rate_card(), now=NOW)
+
+    def qwen36_outcome(self, snapshot, policy_document=None):
+        """Return ('priced', (prompt, completion, cache)) or ('held', reason)."""
+        proposal = engine.build_proposal(snapshot, policy_document or production_policy(), production_rate_card(), now=NOW)
+        priced = [row for bucket in ("added", "changed", "unchanged") for row in proposal[bucket] if row["model_id"] == QWEN36]
+        if priced:
+            rates = priced[0]["proposed_rates"]
+            return "priced", (rates["prompt_rate_per_mtok"], rates["completion_rate_per_mtok"], rates["prompt_cache_hit_rate_per_mtok"])
+        held = next(row for row in proposal["blocked"] if row["model_id"] == QWEN36)
+        # Row-scoped: every other mapped row is still priced.
+        self.assertIn("qwen3-32b", {row["model_id"] for bucket in ("added", "changed", "unchanged") for row in proposal[bucket]})
+        return "held", held["reasons"][0]
+
+    def qwen36_snapshot(self, endpoints):
+        return synthetic_production_market_snapshot(endpoint_overrides={QWEN36: endpoints})
+
+    def test_live_market_applies_the_operator_pin(self):
+        for darkbloom_activity in (None, 500):
+            with self.subTest(darkbloom_activity=darkbloom_activity):
+                endpoints = qwen36_live_endpoints_2026_09_30()
+                if darkbloom_activity is not None:
+                    endpoints[0]["perf_last_30m_by_workload"] = {"text_generation": {"request_count": darkbloom_activity}}
+                _, proposal = self.compute({QWEN36: endpoints})
+                rates = proposal_row(proposal, QWEN36)["proposed_rates"]
+                self.assertEqual((rates["prompt_rate_per_mtok"], rates["completion_rate_per_mtok"], rates["prompt_cache_hit_rate_per_mtok"]), QWEN36_PIN)
+                self.assertEqual((rates["prompt_usd_per_mtok"], rates["completion_usd_per_mtok"]), ("0.0475", "0.665"))
+                self.assertTrue(any("advisory check passed" in reason for reason in rates["formula_reasons"]))
+                self.assertTrue(any("Darkbloom" in reason for reason in rates["formula_reasons"]))
+
+    def test_pin_not_below_a_listing_holds_whether_the_listing_is_active_or_not(self):
+        for activity in (5000, None):
+            with self.subTest(activity=activity):
+                endpoints = qwen36_live_endpoints_2026_09_30() + [or_endpoint("Cheaper", "0.00000004", "0.0000006", request_count=activity)]
+                status, reason = self.qwen36_outcome(self.qwen36_snapshot(endpoints))
+                self.assertEqual(status, "held")
+                self.assertIn("prompt pin 0.0475/MTok is not strictly below Cheaper 0.04/MTok", reason)
+                self.assertIn("completion pin 0.665/MTok is not strictly below Cheaper 0.6/MTok", reason)
+
+    def test_equal_listing_holds_and_zero_axis_listing_holds(self):
+        status, reason = self.qwen36_outcome(self.qwen36_snapshot(qwen36_live_endpoints_2026_09_30() + [or_endpoint("Equal", "0.0000000475", "0.000001", request_count=None)]))
+        self.assertEqual((status, "prompt pin 0.0475/MTok is not strictly below Equal 0.0475/MTok" in reason), ("held", True))
+        status, reason = self.qwen36_outcome(self.qwen36_snapshot(qwen36_live_endpoints_2026_09_30() + [or_endpoint("ZeroPrompt", "0", "0.0000009", request_count=None)]))
+        self.assertEqual((status, "not strictly below ZeroPrompt 0/MTok" in reason), ("held", True))
+
+    def test_pin_above_the_rule5_mint_holds(self):
+        endpoints = [or_endpoint(name, "0.000000055", "0.00000075") for name in ("A", "B", "C")]
+        status, reason = self.qwen36_outcome(self.qwen36_snapshot(endpoints))
+        self.assertEqual(status, "held")
+        self.assertIn("prompt pin 47500 credits exceeds the rule-5 mint 44000", reason)
+
+    def test_market_manipulation_can_only_hold_never_reprice(self):
+        live = qwen36_live_endpoints_2026_09_30()
+        markets = {
+            "active near-zero dumper": live + [or_endpoint("Dumper", "0.000000001", "0.000000002", request_count=5000)],
+            "inactive calibrated dumper": live + [or_endpoint("Dumper", "0.0000000264", "0.000000264", request_count=None)],
+            "two sybil identities": live + [or_endpoint(name, "0.00000001", "0.0000001", request_count=5000) for name in ("Sybil", "Sybil-2")],
+            "sybil lower median": [or_endpoint(name, "0.000000049", "0.00000069", request_count=5000) for name in ("S1", "S2", "S3")] + live[1:4],
+        }
+        for label, endpoints in markets.items():
+            with self.subTest(market=label):
+                status, value = self.qwen36_outcome(self.qwen36_snapshot(endpoints))
+                self.assertIn(status, {"priced", "held"})
+                if status == "priced":
+                    self.assertEqual(value, QWEN36_PIN)
+
+    def test_coherent_snapshot_tampering_cannot_change_the_priced_value(self):
+        def tampered(mutate):
+            snapshot = self.qwen36_snapshot(qwen36_live_endpoints_2026_09_30() + [or_endpoint("Cheaper", "0.00000004", "0.0000006", request_count=None)])
+            row = next(row for row in snapshot["rows"] if row["source_model_id"] == QWEN36)
+            mutate(row["pricing"]["listing_evidence"]["listings"])
+            snapshot["content_digest"] = engine.sha256_prefixed(engine.snapshot_digest_payload(snapshot))
+            return snapshot
+        def remove_cheapest(listings):
+            listings[:] = [entry for entry in listings if entry["provider_name"] not in {"Cheaper", "Darkbloom"}]
+        removed = tampered(remove_cheapest)
+        # A coherent removal can at most turn a hold into a pass of the already-reviewed pin.
+        self.assertEqual(self.qwen36_outcome(removed), ("priced", QWEN36_PIN))
+        def reprice(listings):
+            for entry in listings:
+                entry["prompt_usd_per_mtok"] = "0.001"
+        status, _ = self.qwen36_outcome(tampered(reprice))
+        self.assertEqual(status, "held")
+
+    def test_own_listing_never_enters_the_median_in_compute(self):
+        competitors = [or_endpoint("X", "0.0000001", "0.000001"), or_endpoint("Y", "0.00000012", "0.0000011")]
+        _, baseline = self.compute({"qwen/qwen3-32b": competitors})
+        expected = proposal_row(baseline, "qwen3-32b")["proposed_rates"]
+        for own_price in (("0.00000001", "0.0000001"), ("0.000001", "0.00001")):
+            with self.subTest(own_price=own_price):
+                _, proposal = self.compute({"qwen/qwen3-32b": competitors + [or_endpoint("Malibu", *own_price, request_count=5000)]})
+                self.assertEqual(proposal_row(proposal, "qwen3-32b")["proposed_rates"], expected)
+        with self.assertRaisesRegex(engine.SchemaError, "no active priced OpenRouter endpoint"):
+            self.compute({"qwen/qwen3-32b": competitors[:1] + [or_endpoint("Malibu", "0.00000001", "0.0000001", request_count=5000)]})
+
+    def test_own_listing_never_enters_the_median_in_propose(self):
+        model_id = "qwen/qwen3-32b"
+        document = {"data": {"id": model_id, "endpoints": [
+            or_endpoint("X", "0.0000001", "0.000001"),
+            or_endpoint("Malibu", "0.00000001", "0.0000001", request_count=5000),
+        ]}}
+        url = engine.ENDPOINTS_URL.format(model_id=model_id)
+        client = FakeHTTPClient({url: [engine.HTTPResponse(200, json.dumps(document).encode(), {})]})
+        records = engine.fetch_catalog_records(
+            [model_id], production_policy(), or_client=client,
+            servability_resolver=lambda model, residency: {"verdict": "servable", "reasons": []},
+            sleeper=lambda seconds: None,
+        )
+        # Without Malibu only one provider remains: below the quorum, so unpriced.
+        self.assertIsNone(records[0]["pricing"])
+
+    def test_decimal_strings_with_extreme_exponents_are_rejected(self):
+        for value in ("1e-1000000", "1e9999999", "1" * 65, "0." + "0" * 50 + "1"):
+            with self.subTest(value=value[:20]):
+                with self.assertRaisesRegex(engine.SchemaError, "decimal"):
+                    engine.parse_decimal(value, "price")
+        self.assertEqual(engine.parse_decimal("0.00000005", "price"), engine.Decimal("0.00000005"))
+        endpoints = qwen36_live_endpoints_2026_09_30() + [or_endpoint("Huge", "1e-1000000", "0.0000009", request_count=None)]
+        with self.assertRaisesRegex(engine.SchemaError, "outside the supported decimal range"):
+            self.qwen36_snapshot(endpoints)
+
+    def test_snapshot_evidence_must_match_the_listing_policy(self):
+        snapshot = self.qwen36_snapshot(qwen36_live_endpoints_2026_09_30())
+        policy_document = production_policy()
+        policy_document["openrouter_listing"]["excluded_provider_names"] = ["Malibu", "Other"]
+        with self.assertRaisesRegex(engine.SchemaError, "re-fetch under the current policy"):
+            engine.build_proposal(snapshot, policy_document, production_rate_card(), now=NOW)
+        for row in snapshot["rows"]:
+            if isinstance(row.get("pricing"), dict):
+                row["pricing"].pop("listing_evidence")
+        snapshot["content_digest"] = engine.sha256_prefixed(engine.snapshot_digest_payload(snapshot))
+        with self.assertRaisesRegex(engine.SchemaError, "predates listing_evidence"):
+            engine.build_proposal(snapshot, production_policy(), production_rate_card(), now=NOW)
+
+    def test_listing_evidence_shape_is_validated(self):
+        def check(mutate, message):
+            snapshot = self.qwen36_snapshot(qwen36_live_endpoints_2026_09_30())
+            row = next(row for row in snapshot["rows"] if row["source_model_id"] == QWEN36)
+            mutate(row["pricing"])
+            snapshot["content_digest"] = engine.sha256_prefixed(engine.snapshot_digest_payload(snapshot))
+            with self.assertRaisesRegex(engine.SchemaError, message):
+                engine.validate_snapshot(snapshot)
+        check(lambda pricing: pricing["listing_evidence"]["listings"].reverse(), "canonical order")
+        check(lambda pricing: pricing["listing_evidence"].update(excluded_provider_names=["Darkbloom"]), "provider_name is invalid")
+        def exclude_liquid_provider(pricing):
+            evidence = pricing["listing_evidence"]
+            evidence["excluded_provider_names"] = ["AkashML"]
+            evidence["listings"] = [entry for entry in evidence["listings"] if entry["provider_name"] != "AkashML"]
+        check(exclude_liquid_provider, "liquid cohort includes an excluded")
+        check(lambda pricing: pricing["listing_evidence"]["listings"][0].update(prompt_usd_per_mtok="1e-1000000"), "outside the supported decimal range")
+        check(lambda pricing: pricing["listing_evidence"].update(extra=1), "invalid fields")
+
+    def test_policy_rejects_invalid_listing_controls(self):
+        def pin(p):
+            return next(m for m in p["models"] if m["source_model_id"] == QWEN36)["openrouter_listed"]
+        def listed(p):
+            return next(m for m in p["models"] if m["source_model_id"] == QWEN36)
+        cases = [
+            (lambda p: listed(p).update(openrouter_listed=True), "operator pin"),
+            (lambda p: pin(p).pop("evidence"), "operator pin"),
+            (lambda p: pin(p).update(evidence=" "), "evidence"),
+            (lambda p: pin(p).update(prompt_rate_per_mtok=0), "positive integer"),
+            (lambda p: pin(p).update(completion_rate_per_mtok="665000"), "positive integer"),
+            (lambda p: pin(p).update(prompt_cache_hit_rate_per_mtok=11876), "cache-hit must be floor"),
+            (lambda p: p["openrouter_listing"].update(excluded_provider_names=["b", "a"]), "sorted unique"),
+            (lambda p: p["openrouter_listing"].update(undercut_fraction="0.05"), "missing or unexpected"),
+            (lambda p: p.pop("openrouter_listing"), "without openrouter_listing"),
+        ]
+        for mutate, message in cases:
+            with self.subTest(message=message):
+                policy_document = production_policy()
+                mutate(policy_document)
+                with self.assertRaisesRegex(engine.SchemaError, message):
+                    engine.validate_policy(policy_document)
+
+    def test_legacy_policy_rejects_openrouter_listed(self):
+        legacy = fixture("legacy-policy-2026-08-10.json")
+        legacy["models"][0]["openrouter_listed"] = {"prompt_rate_per_mtok": 4, "completion_rate_per_mtok": 8, "prompt_cache_hit_rate_per_mtok": 1, "evidence": "x"}
+        with self.assertRaisesRegex(engine.SchemaError, "requires the current"):
+            engine.validate_policy(legacy)
 
 
 if __name__ == "__main__":

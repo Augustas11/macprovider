@@ -21,6 +21,9 @@ extension AutotuneStaticInputs {
 
     static let bakedCatalogSignerKeyID: String? = "streamvc-autotune-static-v4"
 
+    static let bakedContinuousBatchingPolicyBase64: String = "eyJjYW5kaWRhdGVfY2F0YWxvZ19zaGEyNTYiOiJmNDk3N2QxOWEwZTA5ZjQ4OGY5YmI5ZjdmMGYzNGI5MTlhZWU3NmQwNDIxYjlhMmVhNGYyODljZTdjNzUxMGFiIiwiZW50cmllcyI6W10sImV4cGlyZXNfYXQiOiIyMDI2LTEyLTI1VDAwOjAwOjAwWiIsImdlbmVyYXRlZF9hdCI6IjIwMjYtMDktMjVUMDA6NTQ6MDBaIiwicG9saWN5X3ZlcnNpb24iOiJhdXRvdHVuZS1wb2xpY3ktdjEiLCJyZWxlYXNlX2lkIjoicHVibGlzaGVkLTIwMjYtMDktMjUtYXJ0aWZhY3QtaGFzaC1jb3JyZWN0aW9uLXYxIiwic2NoZW1hX3ZlcnNpb24iOiJtYWNwcm92aWRlci5jb250aW51b3VzLWJhdGNoaW5nLXBvbGljeS52MSIsInNpZ25lcl9rZXlfaWQiOiJzdHJlYW12Yy1hdXRvdHVuZS1zdGF0aWMtdjQifQ=="
+    static let bakedContinuousBatchingPolicySignerKeyID: String? = "streamvc-autotune-static-v4"
+
     static let bakedArtifactFeedBase64: String? = nil
     static let bakedArtifactFeedSignerKeyID: String? = nil
 }
