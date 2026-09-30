@@ -270,6 +270,8 @@ autotune:
   demand_rank_sig_path: "/opt/macprovider/autotune/current/demand-rank.json.sig"
   autotune_candidates_path: "/opt/macprovider/autotune/current/autotune-candidates.json"
   autotune_candidates_sig_path: "/opt/macprovider/autotune/current/autotune-candidates.json.sig"
+  continuous_batching_policy_path: "/opt/macprovider/autotune/current/continuous-batching-policy.json"
+  continuous_batching_policy_sig_path: "/opt/macprovider/autotune/current/continuous-batching-policy.json.sig"
 
 rewards:
   global_multiplier: 1.0

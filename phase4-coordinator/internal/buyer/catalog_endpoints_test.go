@@ -329,6 +329,11 @@ func serveCatalogPubkey(server *Server, remoteAddr string) *httptest.ResponseRec
 // base64.RawURLEncoding pubkey.
 func buyerCatalogFixture(t *testing.T, catalogID string, expiresAt time.Time) ([]byte, string) {
 	t.Helper()
+	return buyerCatalogFixtureModels(t, catalogID, expiresAt, "model-a")
+}
+
+func buyerCatalogFixtureModels(t *testing.T, catalogID string, expiresAt time.Time, modelIDs ...string) ([]byte, string) {
+	t.Helper()
 	seed := bytes.Repeat([]byte{7}, ed25519.SeedSize)
 	privateKey := ed25519.NewKeyFromSeed(seed)
 	publicKey := privateKey.Public().(ed25519.PublicKey)
@@ -357,14 +362,16 @@ func buyerCatalogFixture(t *testing.T, catalogID string, expiresAt time.Time) ([
 		CatalogID: catalogID,
 		ExpiresAt: expiresAt.UTC().Format(time.RFC3339),
 		IssuedAt:  issuedAt.Format(time.RFC3339),
-		Models: []catalogModel{{
+		Version:   1,
+	}
+	for _, modelID := range modelIDs {
+		body.Models = append(body.Models, catalogModel{
 			ArtifactKind: "mlx_weight_file",
 			HashScope:    "primary_weight_file",
-			ModelID:      "model-a",
+			ModelID:      modelID,
 			SHA256:       "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 			Source:       "operator-curated",
-		}},
-		Version: 1,
+		})
 	}
 	canonical, err := json.Marshal(body)
 	if err != nil {

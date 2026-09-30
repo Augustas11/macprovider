@@ -133,6 +133,27 @@ final class ReceiptAuditTests: XCTestCase {
         XCTAssertEqual(result, RouterHandler.ErrorReceiptHeaderResult.notReceiptEligible)
     }
 
+    // SPEC-015 §7.6: a reached provider signs a zero-token receipt for
+    // `error_context_exceeded`, serial or batched.
+    func testErrorReceiptResultIssuesForContextLengthExceeded() throws {
+        let result = try RouterHandler.errorReceiptHeaderResult(
+            providerID: "provider-a",
+            receiptBuilder: ReceiptBuilder(keyStore: AuditFixedReceiptKeyStore(key: Curve25519.Signing.PrivateKey())),
+            request: fixtureRequest(),
+            error: ContinuousBatchSchedulerError.contextLengthExceeded(
+                promptTokens: 8,
+                maxOutputTokens: 1,
+                contextTokens: 8
+            ).asAPIError()!,
+            startedAt: Date(),
+            modelHashSource: .warmSwapDisabled,
+            runtimeSettlementEligible: true
+        )
+        guard case .issued = result else {
+            return XCTFail("expected an issued error receipt, got \(result)")
+        }
+    }
+
     func testErrorReceiptResultMapsSwapDrainSuppressionToModelSwapViolation() throws {
         let result = try RouterHandler.errorReceiptHeaderResult(
             providerID: "provider-a",

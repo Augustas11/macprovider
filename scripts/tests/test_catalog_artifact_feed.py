@@ -40,7 +40,7 @@ NOT claimed by this module — owned elsewhere, and this slice ships no code for
 them: AC-CAT-2, AC-CAT-7, AC-CAT-12, AC-CAT-13, AC-CAT-17, AC-CAT-20, AC-CAT-21.
 
 Two harnesses back the assertions. `ReleaseDirectoryTest` stages a complete
-five-feed release directory signed with a throwaway Ed25519 key and runs
+six-feed artifact-bound release directory signed with a throwaway Ed25519 key and runs
 `verify-directory` over it. `HermeticReleaseTest` copies the release inputs into
 a temporary tree with a throwaway keyring and drives the real `generate` / sign /
 `verify` sequence across the pre-activation, activation, and post-activation
@@ -93,6 +93,7 @@ import openrouter_pricing_engine  # noqa: E402
 CANDIDATE_BYTES = (CATALOG / "autotune-candidates.json").read_bytes()
 DEMAND_BYTES = (CATALOG / "demand-rank.json").read_bytes()
 RATE_CARD_BYTES = (CATALOG / "rate-card.json").read_bytes()
+CB_POLICY_BYTES = (CATALOG / "continuous-batching-policy.json").read_bytes()
 RATE_CARD_SOURCE_BYTES = (CATALOG / "rate-card-source.json").read_bytes()
 ARTIFACT_SOURCE_BYTES = (CATALOG / "autotune-artifacts-source.json").read_bytes()
 CANDIDATE_OBJ = catalog_release.validate_candidate(CANDIDATE_BYTES)
@@ -1297,6 +1298,7 @@ class StageActivationTest(unittest.TestCase):
         )
         self.assertEqual(compatibility_set.CATALOG_FILES, expected)
         self.assertNotIn("autotune-artifacts.json", compatibility_set.CATALOG_FILES)
+        self.assertNotIn("continuous-batching-policy.json", compatibility_set.CATALOG_FILES)
         swift = (
             ROOT / "phase3-binary" / "Sources" / "macprovider-cli" / "CompatibilitySetManifest.swift"
         ).read_text()
@@ -1310,6 +1312,11 @@ class StageActivationTest(unittest.TestCase):
     def test_release_json_feeds_check_accepts_both_bound_sets(self):
         self.assertEqual(
             compatibility_set.ARTIFACT_BOUND_RELEASE_FEEDS,
+            compatibility_set.RATE_CARD_BOUND_RELEASE_FEEDS
+            | {"continuous-batching-policy.json", "autotune-artifacts.json"},
+        )
+        self.assertEqual(
+            compatibility_set.LEGACY_ARTIFACT_BOUND_RELEASE_FEEDS,
             compatibility_set.RATE_CARD_BOUND_RELEASE_FEEDS | {"autotune-artifacts.json"},
         )
 
@@ -1395,6 +1402,12 @@ class ReleaseDirectoryTest(unittest.TestCase):
 
         artifacts = catalog_release.build_artifact_feed(artifact_source(), CANDIDATE_BYTES, CANDIDATE_OBJ)
         artifact_obj = catalog_release.validate_artifact_feed(artifacts, CANDIDATE_BYTES, CANDIDATE_OBJ)
+        cb_policy = catalog_release.default_cb_policy(
+            CANDIDATE_BYTES, CANDIDATE_OBJ, signer_key_id="test-static-v1"
+        )
+        cb_policy_obj = catalog_release.validate_cb_policy(
+            cb_policy, CANDIDATE_BYTES, CANDIDATE_OBJ, signer_key_id="test-static-v1"
+        )
         tier2 = self.tier2_catalog()
         (directory / "tier2-catalog.json").write_bytes(tier2)
 
@@ -1402,6 +1415,7 @@ class ReleaseDirectoryTest(unittest.TestCase):
             "autotune-candidates.json": CANDIDATE_BYTES,
             "demand-rank.json": DEMAND_BYTES,
             "rate-card.json": RATE_CARD_BYTES,
+            "continuous-batching-policy.json": cb_policy,
             "autotune-artifacts.json": artifacts,
         }
         for name, body in signed.items():
@@ -1412,9 +1426,10 @@ class ReleaseDirectoryTest(unittest.TestCase):
             (directory / f"{name}.sig").write_bytes(self.sidecar(directory, key, key_id, body))
 
         manifest_bytes = catalog_release.manifest(
-            CANDIDATE_BYTES, DEMAND_BYTES, RATE_CARD_BYTES, CANDIDATE_OBJ,
+            CANDIDATE_BYTES, DEMAND_BYTES, RATE_CARD_BYTES, cb_policy, CANDIDATE_OBJ,
             catalog_release.validate_demand(DEMAND_BYTES),
             catalog_release.validate_rate_card(RATE_CARD_BYTES),
+            cb_policy_obj,
             directory,
             tier2=tier2,
             tier2_obj=catalog_release.validate_tier2_catalog(tier2),
@@ -1555,14 +1570,16 @@ class ArtifactFeedConformanceCorpusTest(unittest.TestCase):
         candidate = CANDIDATE_BYTES
         demand = (CATALOG / "demand-rank.json").read_bytes()
         rate_card = RATE_CARD_BYTES
-        unbound = catalog_release.generated_swift(candidate, demand, rate_card)
+        unbound = catalog_release.generated_swift(candidate, demand, rate_card, CB_POLICY_BYTES)
         self.assertIn("static let bakedArtifactFeedBase64: String? = nil", unbound)
         self.assertIn("static let bakedArtifactFeedSignerKeyID: String? = nil", unbound)
         # Bytes that no Swift string literal could carry verbatim (a triple
         # quote, a backslash escape, a control character) reach the binary
         # exactly, because the bake is base64 of the signed bytes.
         hostile = b'{"models":{"k":"\\"\\"\\" \\\\u0000 \\t"}}'
-        bound = catalog_release.generated_swift(candidate, demand, rate_card, artifacts=hostile)
+        bound = catalog_release.generated_swift(
+            candidate, demand, rate_card, CB_POLICY_BYTES, artifacts=hostile
+        )
         match = re.search(r'static let bakedArtifactFeedBase64: String\? = "([A-Za-z0-9+/=]+)"', bound)
         self.assertIsNotNone(match)
         self.assertEqual(base64.b64decode(match.group(1)), hostile)
@@ -2216,10 +2233,17 @@ class HermeticRelease:
     # what makes "the keyring accepted this signature" and "one operator signed
     # this release" two different statements (SPEC-023 §3.7.2 / AC-CAT-1).
     ALT_KEY_ID = "test-hermetic-v2"
-    SIGNED_FEEDS = ("autotune-candidates.json", "demand-rank.json", "rate-card.json", "autotune-artifacts.json")
+    SIGNED_FEEDS = (
+        "autotune-candidates.json",
+        "demand-rank.json",
+        "rate-card.json",
+        "continuous-batching-policy.json",
+        "autotune-artifacts.json",
+    )
     STAGED_FILES = (
         "release.json", "trusted-keys.json", "tier2-catalog.json",
-        "autotune-candidates.json", "demand-rank.json", "rate-card.json", "autotune-artifacts.json",
+        "autotune-candidates.json", "demand-rank.json", "rate-card.json",
+        "continuous-batching-policy.json", "autotune-artifacts.json",
     )
 
     def __init__(self, root: pathlib.Path, openssl: str):
@@ -2267,6 +2291,8 @@ class HermeticRelease:
         "TIER2_CATALOG_PATH": "catalog/tier2-catalog.json",
         "ARTIFACT_FEED_PATH": "catalog/autotune-artifacts.json",
         "ARTIFACT_SOURCE_PATH": "catalog/autotune-artifacts-source.json",
+        "CB_POLICY_FEED_PATH": "catalog/continuous-batching-policy.json",
+        "CB_POLICY_SOURCE_PATH": "catalog/continuous-batching-policy-source.json",
         "RATE_CARD_SOURCE_PATH": "catalog/rate-card-source.json",
         "MARKET_PEG_BIND_PATH": "catalog/market-peg-bind.json",
         "INTAKE_DECISION_PATH": "catalog/intake-decision.json",
@@ -2293,7 +2319,7 @@ class HermeticRelease:
         original_manifest = self._saved["manifest"]
 
         def patched_manifest(*args, **kwargs):
-            if len(args) < 7 and "sidecar_directory" not in kwargs:
+            if len(args) < 9 and "sidecar_directory" not in kwargs:
                 kwargs["sidecar_directory"] = catalog_release.STATIC_DIR
             return original_manifest(*args, **kwargs)
 
@@ -2403,8 +2429,8 @@ class HermeticReleaseTest(unittest.TestCase):
             with HermeticRelease(pathlib.Path(raw) / "repo", self.openssl) as harness:
                 yield harness
 
-    def test_four_feed_release_is_unaffected_by_the_committed_source(self):
-        """A committed source alone must not implicitly activate the fifth feed:
+    def test_cb_policy_bound_release_is_unaffected_by_the_committed_artifact_source(self):
+        """A committed artifact source alone must not implicitly activate its feed:
         `resign` and scheduled freshness renewal call `generate` unconditionally."""
         with self.harness() as harness:
             self.assertTrue((harness.catalog / "autotune-artifacts-source.json").exists())
@@ -2412,7 +2438,7 @@ class HermeticReleaseTest(unittest.TestCase):
             harness.cut()
             self.assertFalse((harness.catalog / "autotune-artifacts.json").exists())
             self.assertEqual(
-                set(harness.manifest()["feeds"]), catalog_release.RATE_CARD_BOUND_LEDGER_FEEDS
+                set(harness.manifest()["feeds"]), catalog_release.CB_POLICY_BOUND_LEDGER_FEEDS
             )
             self.assertEqual(harness.ledger()["schema_version"], catalog_release.LEDGER_SCHEMA_V2)
 
@@ -2516,7 +2542,7 @@ class HermeticReleaseTest(unittest.TestCase):
             catalog_release.generate(harness.KEY_ID)
             self.assertFalse((harness.catalog / "autotune-artifacts.json").exists())
             self.assertEqual(
-                set(harness.manifest()["feeds"]), catalog_release.RATE_CARD_BOUND_LEDGER_FEEDS
+                set(harness.manifest()["feeds"]), catalog_release.CB_POLICY_BOUND_LEDGER_FEEDS
             )
 
     def test_activation_is_refused_while_a_prerequisite_is_unmet(self):
@@ -2806,10 +2832,10 @@ class HermeticReleaseTest(unittest.TestCase):
             self.assertIn(reverted_id, str(caught.exception))
             self.assertIn("reverts to", str(caught.exception))
 
-    def test_a_candidate_change_still_cuts_a_pre_activation_four_feed_release(self):
+    def test_a_candidate_change_still_cuts_a_pre_artifact_activation_cb_policy_release(self):
         """Code L1: pre-activation, the committed artifact source is unpublished
         and may lag the candidate catalog. A routine identity update must keep
-        producing the four-feed release it has always produced instead of being
+        producing the CB-policy-bound release instead of being
         blocked by drift against a document nothing is serving yet."""
         with self.harness() as harness:
             path = harness.catalog / "autotune-candidates.json"
@@ -2819,7 +2845,7 @@ class HermeticReleaseTest(unittest.TestCase):
             harness.bump("published-2026-09-26-drift-v1", "2026-09-26T00:00:00Z")
             harness.cut()
             row = harness.ledger()["releases"]["published-2026-09-26-drift-v1"]
-            self.assertEqual(set(row["feeds"]), catalog_release.RATE_CARD_BOUND_LEDGER_FEEDS)
+            self.assertEqual(set(row["feeds"]), catalog_release.CB_POLICY_BOUND_LEDGER_FEEDS)
             # The same drift IS an activation-time prerequisite failure.
             unmet = [
                 detail
@@ -3153,7 +3179,7 @@ class RenewalFlowTest(unittest.TestCase):
     renewal that cannot complete strands every provider that restarts after the
     horizon. Its restamp is `catalog-release.py restamp`, and these tests run that
     restamp → generate → sign → generate → verify sequence in both the
-    pre-activation four-feed state and the post-activation five-feed state.
+    CB-policy-bound five-feed state and the artifact-bound six-feed state.
     """
 
     NOW = "2026-10-05T09:15:00Z"
@@ -3188,7 +3214,7 @@ class RenewalFlowTest(unittest.TestCase):
             catalog_release.restamp(release_id, self.NOW)
             harness.cut()
             row = self.assert_atomic_release(harness, release_id, self.NOW)
-            self.assertEqual(set(row["feeds"]), catalog_release.RATE_CARD_BOUND_LEDGER_FEEDS)
+            self.assertEqual(set(row["feeds"]), catalog_release.CB_POLICY_BOUND_LEDGER_FEEDS)
 
     def test_post_activation_renewal_restamps_generates_and_verifies(self):
         with self.harness() as harness:

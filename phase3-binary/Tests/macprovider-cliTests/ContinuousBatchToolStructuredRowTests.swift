@@ -416,7 +416,7 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
         }
     }
 
-    func testImplicitContextLimitUsesSerialFinishReasonForEveryBatchedRowShape() throws {
+    func testImplicitContextBudgetReportsLengthForEveryBatchedRowShape() throws {
         let cases: [(body: [String: Any], pieces: [String])] = [
             ([:], ["plain", " answer"]),
             (["tools": Self.weatherTool], ["plain", " answer"]),
@@ -436,7 +436,7 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
                 implicitRow.completion,
                 request: implicit
             )
-            XCTAssertEqual(implicitCompletion.finishReason, "stop", "\(testCase.body)")
+            XCTAssertEqual(implicitCompletion.finishReason, "length", "\(testCase.body)")
 
             var explicitBody = testCase.body
             explicitBody["max_tokens"] = vocab.ids.count
@@ -768,7 +768,7 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
         XCTAssertEqual(batched.finalized?.truncatedAtSerialStop, true)
     }
 
-    func testStreamingTerminalFinishReasonUsesExplicitLimitForEveryBatchedRowShape() throws {
+    func testStreamingTerminalFinishReasonReportsLengthAtAnyBudgetForEveryBatchedRowShape() throws {
         let cases: [(body: [String: Any], pieces: [String])] = [
             ([:], ["plain", " answer"]),
             (["tools": Self.weatherTool], ["plain", " answer"]),
@@ -782,7 +782,7 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
                 vocab: vocab,
                 status: .length
             )
-            XCTAssertEqual(try implicit.result.get().finishReason, "stop", "\(testCase.body)")
+            XCTAssertEqual(try implicit.result.get().finishReason, "length", "\(testCase.body)")
 
             var explicitBody = testCase.body
             explicitBody["max_tokens"] = vocab.ids.count

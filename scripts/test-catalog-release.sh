@@ -55,6 +55,8 @@ stage_release() {
   cp "$STATIC/demand-rank.json.sig" "$TMP/release/"
   cp "$STATIC/rate-card.json" "$TMP/release/"
   cp "$STATIC/rate-card.json.sig" "$TMP/release/"
+  cp "$STATIC/continuous-batching-policy.json" "$TMP/release/"
+  cp "$STATIC/continuous-batching-policy.json.sig" "$TMP/release/"
   cp "$CANONICAL/tier2-catalog.json" "$TMP/release/"
 }
 
@@ -287,10 +289,21 @@ rejected(
     ),
 )
 two_feed_record = json.loads(json.dumps(record))
+two_feed_record["feeds"].pop("continuous-batching-policy.json")
 two_feed_record["feeds"].pop("tier2-catalog.json")
 two_feed_record["feeds"].pop("rate-card.json")
 tier2_record = json.loads(json.dumps(record))
+tier2_record["feeds"].pop("continuous-batching-policy.json")
 tier2_record["feeds"].pop("rate-card.json")
+rate_card_record = json.loads(json.dumps(record))
+rate_card_record["feeds"].pop("continuous-batching-policy.json")
+rejected(
+    "new release without CB policy membership after R025 became mandatory",
+    lambda: module.require_ledger_evolution(
+        {"releases": {}, "tombstones": {}},
+        {"releases": {release_id: rate_card_record}, "tombstones": {}},
+    ),
+)
 rejected(
     "new release without rate-card membership after B10 became mandatory",
     lambda: module.require_ledger_evolution(
@@ -311,6 +324,10 @@ module.require_ledger_evolution(
 )
 module.require_ledger_evolution(
     {"releases": {release_id: tier2_record}, "tombstones": {}},
+    {"releases": {release_id: rate_card_record}, "tombstones": {}},
+)
+module.require_ledger_evolution(
+    {"releases": {release_id: rate_card_record}, "tombstones": {}},
     {"releases": {release_id: record}, "tombstones": {}},
 )
 changed_enriched_feed = json.loads(json.dumps(record))
@@ -318,7 +335,7 @@ changed_enriched_feed["feeds"]["autotune-candidates.json"]["sha256"] = "f" * 64
 rejected(
     "release enrichment that rebinds an autotune feed",
     lambda: module.require_ledger_evolution(
-        {"releases": {release_id: tier2_record}, "tombstones": {}},
+        {"releases": {release_id: rate_card_record}, "tombstones": {}},
         {"releases": {release_id: changed_enriched_feed}, "tombstones": {}},
     ),
 )
@@ -609,7 +626,51 @@ demand_bytes = (canonical / "demand-rank.json").read_bytes()
 demand_obj = module.validate_demand(demand_bytes)
 rate_card_bytes = (static / "rate-card.json").read_bytes()
 rate_card_obj = module.validate_rate_card(rate_card_bytes)
+cb_policy_bytes = (static / "continuous-batching-policy.json").read_bytes()
+cb_policy_obj = module.validate_cb_policy(cb_policy_bytes, candidate_bytes, candidate_obj)
 qwen_row = candidate_obj["rows"]["qwen3-8b"]
+
+# A curated source is the only path for a Studio-qualified tuple to survive
+# generation. tuple_sha256 is derived from release metadata, never authored.
+original_cb_source_path = module.CB_POLICY_SOURCE_PATH
+with tempfile.TemporaryDirectory() as directory:
+    module.CB_POLICY_SOURCE_PATH = pathlib.Path(directory) / "continuous-batching-policy-source.json"
+    source_entry = {
+        "model_key": "qwen3-8b",
+        "model_id": "qwen3-8b",
+        "model_sha256": qwen_row["model_sha256"],
+        "tokenizer_sha256": "c" * 64,
+        "chat_template_sha256": "d" * 64,
+        "cache_class": "mixed",
+        "kv_dtype": "fp16",
+        "requires_moe": False,
+        "hardware_class": "apple-silicon:m4-max:ram-64gb",
+        "metallib_sha256": "e" * 64,
+        "kernel_identifier": "macprovider_paged_kv_gather_v1",
+        "rollout": "canary",
+        "cached_turns_accepted": False,
+        "provenance": {
+            "source": "packaged_studio_campaign",
+            "status": "qualified",
+            "evidence_id": "studio-cb-qwen3-8b-test",
+            "package_manifest_sha256": "5" * 64,
+            "studio_campaign_sha256": "6" * 64,
+            "provider_cli_version": "1.8.208",
+            "live_executable_cdhash": "7" * 40,
+        },
+    }
+    module.CB_POLICY_SOURCE_PATH.write_text(json.dumps({
+        "schema_version": module.CB_POLICY_SOURCE_SCHEMA,
+        "entries": [source_entry],
+    }))
+    generated_policy = module.default_cb_policy(candidate_bytes, candidate_obj)
+    generated_policy_obj = module.validate_cb_policy(generated_policy, candidate_bytes, candidate_obj)
+    if len(generated_policy_obj["entries"]) != 1:
+        raise SystemExit("curated CB policy source entry was not preserved by generation")
+    generated_entry = generated_policy_obj["entries"][0]
+    if generated_entry["cache_class"] != "mixed" or generated_entry["rollout"] != "canary" or len(generated_entry["tuple_sha256"]) != 64:
+        raise SystemExit("curated CB policy source entry was not canonically completed")
+module.CB_POLICY_SOURCE_PATH = original_cb_source_path
 
 
 def rejected(label, fn):
@@ -746,7 +807,8 @@ key_id_tampered_signer = module.verify_tier2_signature(key_id_tampered_bytes)
 if key_id_tampered_signer != trusted_key_fingerprint:
     raise SystemExit("verify_tier2_signature must ignore the catalog's own claimed key_id")
 key_id_tampered_manifest = module.manifest(
-    candidate_bytes, demand_bytes, rate_card_bytes, candidate_obj, demand_obj, rate_card_obj,
+    candidate_bytes, demand_bytes, rate_card_bytes, cb_policy_bytes,
+    candidate_obj, demand_obj, rate_card_obj, cb_policy_obj,
     tier2=key_id_tampered_bytes, tier2_obj=key_id_tampered_obj, tier2_signer_key_id=key_id_tampered_signer,
 )
 if json.loads(key_id_tampered_manifest)["feeds"]["tier2-catalog.json"]["signer_key_id"] == "forged-id":
@@ -954,11 +1016,12 @@ else:
 # result (a fingerprint of the trusted key), NOT from the catalog's own
 # unauthenticated signature.key_id claim (#608 audit).
 manifest_with_tier2 = module.manifest(
-    candidate_bytes, demand_bytes, rate_card_bytes, candidate_obj, demand_obj, rate_card_obj,
+    candidate_bytes, demand_bytes, rate_card_bytes, cb_policy_bytes,
+    candidate_obj, demand_obj, rate_card_obj, cb_policy_obj,
     tier2=agreeing_tier2, tier2_obj=tier2_obj, tier2_signer_key_id=trusted_key_fingerprint,
 )
 manifest_value = json.loads(manifest_with_tier2)
-if set(manifest_value["feeds"]) != {"autotune-candidates.json", "demand-rank.json", "rate-card.json", "tier2-catalog.json"}:
+if set(manifest_value["feeds"]) != {"autotune-candidates.json", "demand-rank.json", "rate-card.json", "continuous-batching-policy.json", "tier2-catalog.json"}:
     raise SystemExit(f"required feed missing from manifest: {sorted(manifest_value['feeds'])}")
 tier2_feed = manifest_value["feeds"]["tier2-catalog.json"]
 if tier2_feed["sha256"] != module.sha256(agreeing_tier2) or tier2_feed["bytes"] != len(agreeing_tier2):
@@ -974,43 +1037,57 @@ if rate_card_feed["version"] != rate_card_obj["version"]:
 rejected(
     "manifest() with tier2 bytes but no authenticated tier2_signer_key_id",
     lambda: module.manifest(
-        candidate_bytes, demand_bytes, rate_card_bytes, candidate_obj, demand_obj, rate_card_obj,
+        candidate_bytes, demand_bytes, rate_card_bytes, cb_policy_bytes,
+        candidate_obj, demand_obj, rate_card_obj, cb_policy_obj,
         tier2=agreeing_tier2, tier2_obj=tier2_obj,
     ),
 )
 
 manifest_without_tier2 = module.manifest(
-    candidate_bytes, demand_bytes, rate_card_bytes, candidate_obj, demand_obj, rate_card_obj,
+    candidate_bytes, demand_bytes, rate_card_bytes, cb_policy_bytes,
+    candidate_obj, demand_obj, rate_card_obj, cb_policy_obj,
 )
 if "tier2-catalog.json" in json.loads(manifest_without_tier2)["feeds"]:
     raise SystemExit("manifest() must omit tier2-catalog.json when tier2 bytes are not supplied")
 
-# --- release-ledger: historical 2/3-feed rows stay valid; new 4-feed rows are accepted ---
+# --- release-ledger: historical 2/3/4-feed rows stay valid; new rows require CB policy ---
 legacy_manifest_value = json.loads(manifest_without_tier2)
+legacy_manifest_value["feeds"].pop("continuous-batching-policy.json")
 legacy_manifest_value["feeds"].pop("rate-card.json")
 hist_release_id, hist_record = module.release_record(
     json.dumps(legacy_manifest_value, sort_keys=True).encode(),
 )
 
-# A synthetic later release_id proves the rate-card-bound 4-feed shape is
-# accepted for *new* rows without disturbing the real historical 2/3-feed
+# A synthetic later release_id proves the CB-policy-bound 5-feed shape is
+# accepted for *new* rows without disturbing the real historical 2/3/4-feed
 # shapes.
 new_candidate_obj = json.loads(json.dumps(candidate_obj))
 new_candidate_obj["version"] = "published-2026-07-20-rate-card-bound"
+new_candidate_bytes = module.canonical_bytes(new_candidate_obj)
 new_demand_obj = json.loads(json.dumps(demand_obj))
 new_demand_obj["version"] = new_candidate_obj["version"]
+new_demand_bytes = module.canonical_bytes(new_demand_obj)
 new_rate_card_obj = json.loads(json.dumps(rate_card_obj))
+new_cb_policy_bytes = module.default_cb_policy(new_candidate_bytes, new_candidate_obj)
+new_cb_policy_obj = module.validate_cb_policy(new_cb_policy_bytes, new_candidate_bytes, new_candidate_obj)
 new_manifest_with_tier2 = module.manifest(
-    candidate_bytes, demand_bytes, rate_card_bytes, new_candidate_obj, new_demand_obj, new_rate_card_obj,
+    new_candidate_bytes, new_demand_bytes, rate_card_bytes, new_cb_policy_bytes,
+    new_candidate_obj, new_demand_obj, new_rate_card_obj, new_cb_policy_obj,
     tier2=agreeing_tier2, tier2_obj=tier2_obj, tier2_signer_key_id=trusted_key_fingerprint,
 )
 bound_release_id, bound_record = module.release_record(new_manifest_with_tier2)
 if bound_release_id == hist_release_id:
-    raise SystemExit("synthetic rate-card-bound release_id must differ from the real historical release_id")
+    raise SystemExit("synthetic CB-policy-bound release_id must differ from the real historical release_id")
 historical_tier2_value = json.loads(manifest_with_tier2)
+historical_tier2_value["feeds"].pop("continuous-batching-policy.json")
 historical_tier2_value["feeds"].pop("rate-card.json")
 tier2_hist_release_id, tier2_hist_record = module.release_record(
     json.dumps(historical_tier2_value, sort_keys=True).encode(),
+)
+historical_rate_card_value = json.loads(manifest_with_tier2)
+historical_rate_card_value["feeds"].pop("continuous-batching-policy.json")
+rate_card_hist_release_id, rate_card_hist_record = module.release_record(
+    json.dumps(historical_rate_card_value, sort_keys=True).encode(),
 )
 
 legacy_ledger = {
@@ -1034,15 +1111,44 @@ rate_card_bound_ledger = {
     "releases": {
         hist_release_id: hist_record,
         tier2_hist_release_id: tier2_hist_record,
-        bound_release_id: bound_record,
+        rate_card_hist_release_id: rate_card_hist_record,
     },
     "tombstones": {},
 }
 module.validate_release_ledger(json.dumps(rate_card_bound_ledger).encode())
+cb_policy_bound_ledger = {
+    "schema_version": "macprovider.autotune-release-ledger.v2",
+    "releases": {
+        hist_release_id: hist_record,
+        tier2_hist_release_id: tier2_hist_record,
+        rate_card_hist_release_id: rate_card_hist_record,
+        bound_release_id: bound_record,
+    },
+    "tombstones": {},
+}
+module.validate_release_ledger(json.dumps(cb_policy_bound_ledger).encode())
+
+# The one historical four-feed -> empty-CB-feed migration is pinned to exact
+# release/content. It must not become a general immutable-ledger rebinding hole.
+transition_base = json.loads(json.dumps(rate_card_hist_record))
+transition_current = json.loads(json.dumps(transition_base))
+transition_current["feeds"][module.CB_POLICY_FEED_NAME] = dict(module.CB_POLICY_TRANSITION_FEED_RECORD)
+if not module.is_cb_policy_enrichment(
+    module.CB_POLICY_TRANSITION_RELEASE_ID, transition_base, transition_current
+):
+    raise SystemExit("exact CB policy transition enrichment was rejected")
+if module.is_cb_policy_enrichment("published-other-release", transition_base, transition_current):
+    raise SystemExit("CB policy enrichment accepted an unrelated historical release")
+tampered_transition = json.loads(json.dumps(transition_current))
+tampered_transition["feeds"][module.CB_POLICY_FEED_NAME]["sha256"] = "f" * 64
+if module.is_cb_policy_enrichment(
+    module.CB_POLICY_TRANSITION_RELEASE_ID, transition_base, tampered_transition
+):
+    raise SystemExit("CB policy enrichment accepted rebound policy bytes")
 
 # Historical rows must not silently gain/require Tier-2, and rows must not mix
 # an unexpected feed name into either accepted shape.
-hybrid_ledger = json.loads(json.dumps(rate_card_bound_ledger))
+hybrid_ledger = json.loads(json.dumps(cb_policy_bound_ledger))
 hybrid_ledger["releases"][bound_release_id]["feeds"]["mystery.json"] = (
     hybrid_ledger["releases"][bound_release_id]["feeds"].pop("demand-rank.json")
 )
@@ -1050,7 +1156,7 @@ rejected("unexpected feed name set", lambda: module.validate_release_ledger(json
 
 # tier2-catalog.json and rate-card.json use their own content identities, not
 # the autotune release_id — legacy feeds still must match release_id exactly.
-mismatched_autotune_version = json.loads(json.dumps(rate_card_bound_ledger))
+mismatched_autotune_version = json.loads(json.dumps(cb_policy_bound_ledger))
 mismatched_autotune_version["releases"][bound_release_id]["feeds"]["autotune-candidates.json"]["version"] = "wrong"
 rejected(
     "autotune feed version must equal release_id even with tier2 bound",
@@ -1089,7 +1195,7 @@ print("generate() requires an authenticated tier2-catalog.json feed")
 with tempfile.TemporaryDirectory() as directory:
     release = pathlib.Path(directory)
     shutil.copy(canonical / "trusted-keys.json", release / "trusted-keys.json")
-    for name in ("autotune-candidates.json", "demand-rank.json", "rate-card.json"):
+    for name in ("autotune-candidates.json", "demand-rank.json", "rate-card.json", "continuous-batching-policy.json"):
         shutil.copy(static / name, release / name)
         shutil.copy(static / f"{name}.sig", release / f"{name}.sig")
 
@@ -1171,7 +1277,8 @@ with tempfile.TemporaryDirectory() as directory:
     # release.json); verify_directory must re-authenticate independently and
     # reject regardless of what signer_key_id the manifest claims.
     forged_manifest = module.manifest(
-        candidate_bytes, demand_bytes, rate_card_bytes, candidate_obj, demand_obj, rate_card_obj,
+        candidate_bytes, demand_bytes, rate_card_bytes, cb_policy_bytes,
+        candidate_obj, demand_obj, rate_card_obj, cb_policy_obj,
         tier2=wrong_signer_tier2, tier2_obj=module.validate_tier2_catalog(wrong_signer_tier2),
         tier2_signer_key_id="forged-claim-does-not-matter",
     )

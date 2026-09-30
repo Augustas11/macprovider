@@ -189,6 +189,8 @@ autotune:
   demand_rank_sig_path: "/opt/macprovider/autotune/demand-rank.json.sig"
   autotune_candidates_path: "/opt/macprovider/autotune/autotune-candidates.json"
   autotune_candidates_sig_path: "/opt/macprovider/autotune/autotune-candidates.json.sig"
+  continuous_batching_policy_path: "/opt/macprovider/autotune/continuous-batching-policy.json"
+  continuous_batching_policy_sig_path: "/opt/macprovider/autotune/continuous-batching-policy.json.sig"
   # SPEC-023 §3.7 artifact feed (/v1/catalog-artifacts + .sig). OPTIONAL and
   # release-bound: set BOTH only in the deploy that installs an artifact-bound
   # release — a configured path whose file is missing fails startup closed,
