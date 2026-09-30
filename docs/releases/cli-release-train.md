@@ -65,6 +65,8 @@ for the #1804 Pearl runtime and must not be used for a CLI candidate.
 | Net change in CLI / Malibu / installer | Status | PR |
 |---|---|---|
 | Continuous-batch rows stay inside the buyer's authenticated reserved-output budget. Gateway reserved-output metadata now flows through coordinator HTTP, clear WebSocket, and Tier-2 dispatch without rewriting the request body or receipt prompt hash; prompt-at-cap and output-overflow failures return terminal buyer 413 responses with no retry, failover, breaker fault, credit, or debit. Hardware campaign used an isolated `--no-join` Studio provider and did not connect a local build to live Malibu. | merged `9eb1553b` 2026-09-30 | #1806 |
+| Signed-policy hybrid-cache admission accepts the measured `mixed` cache identity. The isolated source-built Studio campaign passed automatic policy activation, local proof, paged-KV attach, batch depth 4, and scheduler-admitted HTTP 200s for Qwen3.5 27B and Qwen3.5 35B-A3B. This evidence is prequalification only: production policy remains empty and the source-built candidate was never connected to live Malibu. | merged `1c7041800` 2026-09-30 | #1808 (#1778) |
+| Recurrent-hybrid isolation verification now mirrors the production full-prompt `TokenIterator` lifecycle. On the designated M3 Ultra Studio, the isolated verifier-only candidate passed exact 48-token, two-row shared-forward parity, unequal-row isolation, peer leave/rejoin, and paged-KV attach eligibility for Qwen3.5 27B, Qwen3.5 35B-A3B, and Qwen3.8 27B. All required CI checks and the adversarial/code/security/architecture audits passed. | merged `6d1810506` 2026-09-30 | #1809 (#1778) |
 
 ## Shipped CLI 1.8.207 — net changes vs 1.8.123
 
@@ -155,7 +157,6 @@ candidate 202 was removed from the accepted set after the 207 cut.
 | #1690 follow-up, provider side: the CLI consumes the SPEC-023 v0.19.1 GGUF `huggingface_revision` + `file_path` artifact tuple (older CLIs reject a feed that carries it); LM Studio (`lmstudio_loopback`) and oMLX (`omlx_loopback`) runtimes and engine-select values; cancelled-stream billing on every external engine (per-chunk logprobs/timings or a tokenizer pinned to the hash-verified snapshot, inside the coordinator's 2 s cancel window; a streamed tool call stays unattested); catalog source gains the Llama-3.2-3B `gguf-q4-k-m` artifact and 17 measured MLX sizes (catalog-lane JSON; activation is a separate signed cut). | merged `8d1880bc` 2026-09-27 | #1754 (#1690) |
 | Compatible-row batched prefill with bounded prompt/decode headroom. Release eligibility remains gated on the isolated Studio campaign. | merged `95a6563d` | #1762 (#1758) |
 | Exact hybrid continuous batching for `qwen/qwen3.5-27b`, `qwen/qwen3.5-35b-a3b`, and `qwen/qwen3.8-27b`: full-prompt commitment with first-token sampling from final-prefill logits, production 512-token prefill partition, one-token hybrid decode lockstep, and a 48-token load-time shared-forward parity gate. Studio campaign passed exact L511/L512/L513 parity, leftovers isolation/replay/drain/usage gates, and rows=8 throughput at 1.807× / 2.471× / 1.817× serial. | merged `38229a8c3` 2026-09-28 | #1776 (#1773) |
-| Signed-policy hybrid-cache admission follow-up: policy generation and runtime verification accept the measured `mixed` cache identity. #1808's isolated source-built Studio campaign passed automatic policy activation, local proof, paged-KV attach, batch depth 4, and scheduler-admitted HTTP 200s for Qwen3.5 27B and 35B-A3B. The #1778 follow-up corrected the isolation verifier to compare the full-prompt lifecycle with production `TokenIterator` references; the verifier-only candidate then passed exact 48-token parity, unequal-row isolation, peer leave/rejoin, and attach eligibility for Qwen3.5 27B, Qwen3.5 35B-A3B, and Qwen3.8 27B on the M3 Ultra. Production policy remains empty. A reviewed signed/notarized packaged candidate, release-asset byte identity, updater proof, and real coordinator/buyer/billing/receipt/settlement/warm-swap campaign remain promotion and issue-closure gates. | #1808 merged; #1778 follow-up in review | #1778 |
 | Page keep-0 sliding-window layers with a windowed mask so mixed RotatingKV (gpt-oss) can use paged KV. Compiled decode stays off for sliding. Production attach and the Qwen hybrid allowlist stay fail-closed until Studio parity. | merged `5c09c5c9a` 2026-09-29 | #1785 (#1780) |
 | Node-operator UX (#1689): honest `status --advanced` (readiness layers, probe-vs-sustained TPS, context source); `provider verify` bound to the live coordinator; `provider context explain | set --apply | rollback --no-restart` with installed-service-aware restart; 4K context fix (declared head_dim / hybrid layers) with context × slots memory bound and draft cap; in-config `max_context_override_provenance`; model-switch recompute; `models verify-artifact | identity | prepare --profile catalog`; CLI holds through coordinator `catalog_material_missing`. Studio lab E2E rounds 1–4 PASS. Operators with a stored 4K recommendation need a fresh `autotune --recommend`. Coordinator side (SPEC-022 R-2.7, `/poolz` gate) ships with the next Pearl runtime ≥ v1.8.193 | merged `57686a84` | #1713 (#1689) |
 | BYOM v0.2 slice 2a: catalog artifact feed generator, class rate rows, ledger v3 (catalog sources only, no Swift changes) | merged | #1461 (#1453) |
@@ -268,9 +269,9 @@ and silently never matching.
 | Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` @ `eb30981c` (BYOM #1576 `cdbb0257` + #1591 + #1590 + #1593); CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag); CLI `v1.8.172` @ `c512d342`; CLI `v1.8.174` @ `0c276ebb`; CLI `v1.8.175` @ `d02798db` |
 | Status | **207 promoted and live.** Pearl `target_id` and `latest_binary_version` are 207; accepted compatibility sets are promoted 207, 117, and 123. Public installer parity, consumer health, mirror byte identity, signed discovery rollout, Studio join, and a bounded real-buyer response are green. |
 | Coordinator tags taken | **v1.8.204**, **v1.8.205** (both applies rolled back), **v1.8.206**, and live **v1.8.208** are Pearl runtime releases; **v1.8.209** is reserved for the #1804 Pearl rollout. |
-| Next candidate | None cut. The next-candidate table above has started with #1806; choose the next unused tag at cut time and do not reuse 207. |
+| Next candidate | None cut. The next-candidate table contains #1806, #1808, and #1809; choose the next unused tag at cut time and do not reuse 207. |
 | Candidate 202 CB-canary confirmation (2026-09-28) | Isolated Studio loopback serve of the **signed** 202 binary (`--no-join`, ephemeral id, :8092, live :8080/201 untouched) confirmed `qwen/qwen3.6-35b-a3b` **paged-KV attach eligible** (runtime parity `established=true`, cross-row MoE isolation `proven=true`) and a keyless **scheduler-admitted batched 200** with a stable `X-Request-ID` (`event=batching_admitted action=scheduler_admitted`), hash `3fed776d…`. Measured throughput (harness, v1.8.201 same source): 2.86× aggregate vs serial at 8 rows, bit-exact parity. On candidate 202 the qwen3.5/qwen3.8 hybrids fail parity and are excluded; #1776 fixes them only in the deferred successor candidate. Buyer `continuous_batching` was already canary in live config; the 201→202 serving swap (operator-tools/swap-202.sh, 2026-09-28) made 202 the live Studio provider — a3b now served BATCHED (scheduler_admitted) at ~2.86x. |
-| Notable merges after candidate 186 | #1707 (`5ada77e1`, CLI); #1714 (`3abf42a8`, CLI + Malibu); #1706 (`2b352720`, catalog-lane file only — binary unchanged); #1713 (`57686a84`, node-operator UX — shipped in `v1.8.192`); #1742 (`03627cda`, shipped in Studio candidate `v1.8.195`); #1757 (`0197f379`, CB qualification closeout); #1745 (`ddaa551b`, China supply path); #1762 (`95a6563d`, batched prefill); #1658 (`3ec784c69`, Build 1 private staging path); #1753 (`9636a125`, signed provider-release discovery, merged after candidate 201); #1771 (`e29ea2976`, Qwen3.6 MoE paged-KV admission, shipped in candidate 202); #1776 (`38229a8c3`, Qwen3.5/Qwen3.8 exact CB parity, merged after candidate 202); #1785 (`5c09c5c9a`, keep-0 sliding-window paged KV, merged after candidate 202). Coordinator/gateway settlement recovery continued separately through #1728, live in Pearl runtime `v1.8.191`. |
+| Notable merges after candidate 186 | #1707 (`5ada77e1`, CLI); #1714 (`3abf42a8`, CLI + Malibu); #1706 (`2b352720`, catalog-lane file only — binary unchanged); #1713 (`57686a84`, node-operator UX — shipped in `v1.8.192`); #1742 (`03627cda`, shipped in Studio candidate `v1.8.195`); #1757 (`0197f379`, CB qualification closeout); #1745 (`ddaa551b`, China supply path); #1762 (`95a6563d`, batched prefill); #1658 (`3ec784c69`, Build 1 private staging path); #1753 (`9636a125`, signed provider-release discovery, merged after candidate 201); #1771 (`e29ea2976`, Qwen3.6 MoE paged-KV admission, shipped in candidate 202); #1776 (`38229a8c3`, Qwen3.5/Qwen3.8 exact CB parity, merged after candidate 202); #1785 (`5c09c5c9a`, keep-0 sliding-window paged KV, merged after candidate 202); #1808 (`1c7041800`, mixed-cache signed-policy admission); #1809 (`6d1810506`, recurrent-hybrid verifier lifecycle). Coordinator/gateway settlement recovery continued separately through #1728, live in Pearl runtime `v1.8.191`. |
 | Why candidate 186 exists | Prove #1700 final-answer rendering, strict-pinned buyer quality, eight-seat routing, and durable settlement on one signed Studio-only build (soak proof; live seats since reduced to one — see Mac Studio serving canary above). |
 
 ## E2E tracks (independent gates)
@@ -460,6 +461,31 @@ mainland-provider installer handoff.
   this live pass. The operator accepts the existing signed-candidate evidence
   for 207 under the bounded post-202 delta recorded above; no expensive
   exact-207 Track F repeat is required.
+
+### Track G — signed-policy hybrid activation (#1778)
+
+- **Candidate floor:** a reviewed provider CLI cut from `main` at or after
+  `6d1810506`, then signed, notarized, stapled, and packaged by the protected
+  acceptance workflow. Source-built and verifier-only binaries cannot satisfy
+  this track.
+- **Prequalification:** **GREEN.** The designated M3 Ultra Studio passed the
+  exact Qwen3.5 27B, Qwen3.5 35B-A3B, and Qwen3.8 27B tuples with 48-token,
+  two-row shared-forward parity and zero row failures or cross-row
+  divergences. The run used an isolated `--no-join` provider; it did not alter
+  the installed live provider or prove Malibu routing, billing, receipts, or
+  settlement. See the
+  [durable Studio evidence](../../audits/2026-09-30-issue-1778-verifier/RESULT_studio.md).
+- **Release gate:** **OPEN.** Repeat the three exact tuples on the packaged
+  signed bytes without lab shims and capture automatic signed-policy
+  activation plus scheduler-admitted HTTP evidence. Prove byte identity
+  between the final Malibu.app and standalone-tarball `macprovider-cli`, and
+  verify update from the previous stable release.
+- **Live gate:** **OPEN and requires explicit authorization.** With the exact
+  reviewed release candidate, prove real Malibu coordinator/gateway/buyer
+  routing, billing, v0.4 receipts and settlement, warm swap, rollback, and a
+  controlled nonempty signed production-policy rollout. Do not connect a
+  locally built or unreleased binary to the live coordinator.
+- **Closure rule:** keep #1778 open until both open gates have durable evidence.
 
 ## Promotion gate (checklist)
 
