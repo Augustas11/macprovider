@@ -1505,8 +1505,8 @@ final class AutotuneRecommendTests: XCTestCase {
     }
 
     /// The auditor's case: signed GLM-4.5-Air on a 256 GB Ultra kept its
-    /// declared 131,072-token context beside the 8-slot tier constant, about
-    /// 200 GB of KV cache. The context stays; the slots come down to what fits.
+    /// declared 131,072-token context beside the 8-slot tier constant. The
+    /// context stays; the slots come down to the verified artifact byte cap.
     func testGLM45AirOn256GBUltraKeepsItsContextAndLowersSlotsToFitMemory() throws {
         let catalog = try AutotuneStaticInputs.decodeCandidateCatalog(Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8))
         let row = try XCTUnwrap(catalog.rows["z-ai/glm-4.5-air"])
@@ -1517,7 +1517,7 @@ final class AutotuneRecommendTests: XCTestCase {
 
         XCTAssertEqual(pair.context, 131_072, "R018 context is unchanged")
         XCTAssertLessThan(pair.slots, 8)
-        XCTAssertEqual(pair.slots, 5)
+        XCTAssertEqual(pair.slots, 6)
 
         let qwen = try XCTUnwrap(catalog.rows["qwen/qwen3.6-27b"])
         let qwenPair = try generatedServePair(catalogKey: "qwen/qwen3.6-27b", row: qwen, hardware: hardware)

@@ -2448,6 +2448,7 @@ final class ModelsSubcommandTests: XCTestCase {
             modelID: modelID,
             verifiedConfigJSONData: inspection.configJSONData,
             verifiedConfigSHA256: inspection.configSHA256,
+            verifiedArtifactSizeBytes: inspection.sizeBytes,
             catalogMinRAMGB: row.minRAMGB,
             draftModel: nil
         )
