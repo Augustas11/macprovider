@@ -177,7 +177,7 @@ func (s *Server) handleOpenRouterModels(w http.ResponseWriter, r *http.Request) 
 			MaxContextTokens:   model.MaxContextTokens,
 		})
 	}
-	doc, err := projectOpenRouterModels(pool, rateCard, s.now())
+	doc, err := projectOpenRouterModels(pool, rateCard, s.cfg.Limits.MaxTokensPerRequest, s.now())
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "api_error", "coordinator_rate_card_error", "Coordinator rate-card error")
 		return
@@ -220,7 +220,7 @@ func (s *Server) fetchOpenRouterRateCard(r *http.Request) (openRouterRateCard, e
 	return card, nil
 }
 
-func projectOpenRouterModels(pool []openRouterPoolSnapshot, rateCard openRouterRateCard, now time.Time) (openRouterModelsDocument, error) {
+func projectOpenRouterModels(pool []openRouterPoolSnapshot, rateCard openRouterRateCard, maxTokensPerRequest int64, now time.Time) (openRouterModelsDocument, error) {
 	byID := make(map[string]openRouterPoolSnapshot, len(pool))
 	for _, model := range pool {
 		byID[model.ID] = model
@@ -245,16 +245,16 @@ func projectOpenRouterModels(pool []openRouterPoolSnapshot, rateCard openRouterR
 		if err != nil {
 			return openRouterModelsDocument{}, err
 		}
-		data = append(data, openRouterModelRow(listing, listing.PoolID, false, ready, contextLength, live, 0, shareCount, paidCost, created))
+		data = append(data, openRouterModelRow(listing, listing.PoolID, false, ready, contextLength, maxTokensPerRequest, live, 0, shareCount, paidCost, created))
 		if shareCount == 2 {
 			freeCost := openRouterTextCostUSD{Prompt: "0", Completion: "0"}
-			data = append(data, openRouterModelRow(listing, listing.FreeID, true, ready, contextLength, live, 1, shareCount, freeCost, created))
+			data = append(data, openRouterModelRow(listing, listing.FreeID, true, ready, contextLength, maxTokensPerRequest, live, 1, shareCount, freeCost, created))
 		}
 	}
 	return openRouterModelsDocument{Data: data}, nil
 }
 
-func openRouterModelRow(listing openRouterListingSpec, id string, isFree, ready bool, contextLength int, live openRouterPoolSnapshot, shareIndex, shareCount int, cost openRouterTextCostUSD, created int64) openRouterModelV24 {
+func openRouterModelRow(listing openRouterListingSpec, id string, isFree, ready bool, contextLength int, maxTokensPerRequest int64, live openRouterPoolSnapshot, shareIndex, shareCount int, cost openRouterTextCostUSD, created int64) openRouterModelV24 {
 	name := listing.Name
 	if isFree {
 		name += " (free)"
@@ -267,8 +267,8 @@ func openRouterModelRow(listing openRouterListingSpec, id string, isFree, ready 
 		quantization = "int4"
 	}
 	maxOutput := contextLength
-	if maxOutput > 4096 {
-		maxOutput = 4096
+	if int64(maxOutput) > maxTokensPerRequest {
+		maxOutput = int(maxTokensPerRequest)
 	}
 	capacity := openRouterCapacityEntries(live, maxOutput, shareIndex, shareCount)
 	return openRouterModelV24{

@@ -13,7 +13,7 @@ import (
 
 func mustProjectOpenRouterModels(t *testing.T, pool []openRouterPoolSnapshot, rateCard openRouterRateCard, now time.Time) openRouterModelsDocument {
 	t.Helper()
-	doc, err := projectOpenRouterModels(pool, rateCard, now)
+	doc, err := projectOpenRouterModels(pool, rateCard, 32768, now)
 	if err != nil {
 		t.Fatalf("projectOpenRouterModels: %v", err)
 	}
@@ -125,7 +125,13 @@ func TestProjectOpenRouterModelsQwen36Row(t *testing.T) {
 	if len(paid.OutputModalities) != 1 || !paid.OutputModalities[0].Streaming {
 		t.Fatalf("output_modalities=%+v", paid.OutputModalities)
 	}
+	if got := paid.OutputModalities[0].MaxLength.Value; got != 32768 {
+		t.Fatalf("max output=%d want configured gateway cap 32768", got)
+	}
 	params := paid.OutputModalities[0].SupportedParameters
+	if got := params["max_tokens"].Max; got == nil || *got != 32768 {
+		t.Fatalf("max_tokens descriptor max=%v want 32768", got)
+	}
 	for _, param := range []string{"max_tokens", "temperature", "top_p", "stop", "stream", "presence_penalty", "frequency_penalty", "seed"} {
 		if _, ok := params[param]; !ok {
 			t.Fatalf("missing supported parameter %q in %+v", param, params)
@@ -414,7 +420,7 @@ func TestProjectOpenRouterModelsFailsClosedOnInvalidPaidRateCard(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := projectOpenRouterModels(pool, tt.card, time.Unix(1, 0).UTC()); err == nil {
+			if _, err := projectOpenRouterModels(pool, tt.card, 32768, time.Unix(1, 0).UTC()); err == nil {
 				t.Fatal("expected invalid paid rate card to fail closed")
 			}
 		})
