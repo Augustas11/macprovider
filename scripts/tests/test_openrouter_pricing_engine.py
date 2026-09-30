@@ -160,9 +160,10 @@ def synthetic_production_market_snapshot(*, illiquid_source: str | None = None, 
         # token-volume floor. 0 fails the default floor of 1; any real
         # activity count clears it.
         request_count = 0 if source_id == illiquid_source else 5_000_000
-        # Two distinct providers with identical prices: meets the distinct-provider
-        # quorum (production policy = 2) without changing the median. When
-        # illiquid (request_count 0) both fall below the floor -> still no price.
+        # Three distinct providers with identical prices: meets the distinct-provider
+        # quorum (production policy = 2) even after rule 5a sets aside the
+        # floor-setting provider, without changing the median. When illiquid
+        # (request_count 0) all fall below the floor -> still no price.
         endpoints[source_id] = {
             "data": {
                 "id": source_id,
@@ -175,6 +176,12 @@ def synthetic_production_market_snapshot(*, illiquid_source: str | None = None, 
                     },
                     {
                         "provider_name": "SyntheticLiquidTwo",
+                        "status": 0,
+                        "perf_last_30m_by_workload": {"text_generation": {"request_count": request_count}},
+                        "pricing": {"prompt": "0.00000010", "completion": "0.00000020"},
+                    },
+                    {
+                        "provider_name": "SyntheticLiquidThree",
                         "status": 0,
                         "perf_last_30m_by_workload": {"text_generation": {"request_count": request_count}},
                         "pricing": {"prompt": "0.00000010", "completion": "0.00000020"},
@@ -1580,14 +1587,31 @@ class OpenRouterListingCapTests(unittest.TestCase):
         snapshot = synthetic_production_market_snapshot(endpoint_overrides={QWEN36: endpoints}, policy_document=policy_document)
         return snapshot, engine.build_proposal(snapshot, policy_document, production_rate_card(), now=NOW)
 
+    def rates(self, endpoints, policy_document=None):
+        _, proposal = self.compute(endpoints, policy_document)
+        rates = proposal_row(proposal, QWEN36)["proposed_rates"]
+        return rates
+
+    def held_reason(self, endpoints, policy_document=None):
+        _, proposal = self.compute(endpoints, policy_document)
+        self.assertFalse(any(row["model_id"] == QWEN36 for bucket in ("added", "changed", "unchanged") for row in proposal[bucket]))
+        held = next(row for row in proposal["blocked"] if row["model_id"] == QWEN36)
+        # Row-scoped: every other mapped row is still priced.
+        self.assertIn("qwen3-32b", {row["model_id"] for bucket in ("added", "changed", "unchanged") for row in proposal[bucket]})
+        return held["reasons"][0]
+
+    def tamper(self, snapshot, mutate):
+        row = next(row for row in snapshot["rows"] if row["source_model_id"] == QWEN36)
+        mutate(row["pricing"]["listing_floor"])
+        snapshot["content_digest"] = engine.sha256_prefixed(engine.snapshot_digest_payload(snapshot))
+        return snapshot
+
     def test_live_market_prices_qwen36_strictly_below_every_listing(self):
         snapshot, proposal = self.compute(qwen36_live_endpoints_2026_09_30())
         listing = next(row for row in snapshot["rows"] if row["source_model_id"] == QWEN36)["pricing"]["listing_floor"]
-        self.assertEqual(listing["prompt_provider"], "Darkbloom")
-        self.assertEqual(listing["completion_provider"], "Darkbloom")
-        self.assertEqual(listing["listed_endpoint_count"], 10)
+        self.assertEqual((listing["prompt_provider"], listing["completion_provider"]), ("Darkbloom", "Darkbloom"))
+        self.assertEqual(len(listing["listings"]), 10)
         rates = proposal_row(proposal, QWEN36)["proposed_rates"]
-        # Liquid median $0.10/$1.00 mints 80000/800000; Darkbloom $0.05/$0.70 less 5% caps both.
         self.assertEqual(rates["prompt_rate_per_mtok"], 47500)
         self.assertEqual(rates["completion_rate_per_mtok"], 665000)
         self.assertEqual(rates["prompt_cache_hit_rate_per_mtok"], 11875)
@@ -1596,26 +1620,79 @@ class OpenRouterListingCapTests(unittest.TestCase):
             self.assertLess(rates["completion_rate_per_mtok"], engine.Decimal(endpoint["pricing"]["completion"]) * 10**12)
         self.assertTrue(any("listing cap (binding)" in reason for reason in rates["formula_reasons"]))
 
+    def test_live_market_with_active_darkbloom_prices_the_same(self):
+        endpoints = qwen36_live_endpoints_2026_09_30()
+        endpoints[0]["perf_last_30m_by_workload"] = {"text_generation": {"request_count": 500}}
+        rates = self.rates(endpoints)
+        self.assertEqual((rates["prompt_rate_per_mtok"], rates["completion_rate_per_mtok"], rates["prompt_cache_hit_rate_per_mtok"]), (47500, 665000, 11875))
+
     def test_cap_does_not_raise_a_cheaper_liquid_mint_or_touch_unlisted_rows(self):
-        _, proposal = self.compute([or_endpoint("A", "0.0000001", "0.0000002"), or_endpoint("B", "0.0000001", "0.0000002")])
+        endpoints = [or_endpoint(name, "0.0000001", "0.0000002") for name in ("A", "B", "C")]
+        _, proposal = self.compute(endpoints)
         rates = proposal_row(proposal, QWEN36)["proposed_rates"]
         self.assertEqual((rates["prompt_rate_per_mtok"], rates["completion_rate_per_mtok"]), (80000, 160000))
         self.assertTrue(any("listing cap (not binding)" in reason for reason in rates["formula_reasons"]))
         unlisted = proposal_row(proposal, "qwen3-32b")["proposed_rates"]
         self.assertFalse(any("listing cap" in reason for reason in unlisted["formula_reasons"]))
 
-    def test_excluded_self_listing_is_not_undercut(self):
-        endpoints = qwen36_live_endpoints_2026_09_30() + [or_endpoint("Malibu", "0.00000001", "0.0000001")]
-        _, proposal = self.compute(endpoints)
-        rates = proposal_row(proposal, QWEN36)["proposed_rates"]
-        self.assertEqual((rates["prompt_rate_per_mtok"], rates["completion_rate_per_mtok"]), (47500, 665000))
+    def test_own_listing_never_enters_the_median_or_the_floor(self):
+        competitors = [
+            or_endpoint("X", "0.0000001", "0.000001"),
+            or_endpoint("Y", "0.00000012", "0.0000011"),
+            or_endpoint("Z", "0.00000014", "0.0000012"),
+        ]
+        without_self = self.rates(competitors)
+        for own_price in (("0.0000000475", "0.000000665"), ("0.00000001", "0.0000001")):
+            with self.subTest(own_price=own_price):
+                with_self = self.rates(competitors + [or_endpoint("Malibu", *own_price, request_count=5000)])
+                self.assertEqual(with_self, without_self)
+        # Median of X/Y/Z is Y ($0.12/$1.10 -> 96000/880000); X less 5% caps prompt only.
+        self.assertEqual((without_self["prompt_rate_per_mtok"], without_self["completion_rate_per_mtok"]), (95000, 880000))
 
-    def test_dumped_listing_below_liquid_floor_fails_the_whole_compute(self):
-        endpoints = qwen36_live_endpoints_2026_09_30() + [or_endpoint("Dumper", "0.00000005", "0.0000001", request_count=None)]
-        with self.assertRaisesRegex(engine.SchemaError, "operator decision required"):
+    def test_own_listing_plus_one_competitor_is_illiquid_not_a_downward_loop(self):
+        endpoints = [or_endpoint("Malibu", "0.0000000475", "0.000000665", request_count=5000), or_endpoint("X", "0.0000001", "0.000001")]
+        with self.assertRaisesRegex(engine.SchemaError, "no active priced OpenRouter endpoint"):
             self.compute(endpoints)
 
-    def test_snapshot_without_listing_floor_cannot_price_a_listed_row(self):
+    def test_inactive_dumped_listing_holds_only_the_listed_row(self):
+        endpoints = qwen36_live_endpoints_2026_09_30() + [or_endpoint("Dumper", "0.00000005", "0.0000001", request_count=None)]
+        self.assertIn("acknowledge Dumper at 0.1/MTok", self.held_reason(endpoints))
+
+    def test_active_dumper_cannot_poison_the_guard(self):
+        honest = [or_endpoint("A", "0.0000001", "0.000001"), or_endpoint("B", "0.00000012", "0.0000011")]
+        dumper = or_endpoint("Dumper", "0.000000001", "0.000000002", request_count=5000)
+        # Three providers: the reference median without the dumper is honest A.
+        self.assertIn("below 0.25 of the reference median", self.held_reason(honest + [dumper]))
+        # Two providers: nothing independent of the dumper is left to bound the price.
+        self.assertIn("fewer than 2 liquid providers besides Dumper", self.held_reason(honest[:1] + [dumper]))
+
+    def test_acknowledged_listing_may_bind_below_the_guard(self):
+        policy_document = production_policy()
+        policy_document["openrouter_listing_undercut"]["acknowledged_listings"] = [
+            {"source_model_id": QWEN36, "axis": "completion", "provider_name": "Dumper", "usd_per_mtok": "0.1"},
+        ]
+        endpoints = qwen36_live_endpoints_2026_09_30() + [or_endpoint("Dumper", "0.00000005", "0.0000001", request_count=None)]
+        rates = self.rates(endpoints, policy_document)
+        self.assertEqual((rates["prompt_rate_per_mtok"], rates["completion_rate_per_mtok"]), (47500, 95000))
+        self.assertTrue(any("operator-acknowledged" in reason for reason in rates["formula_reasons"]))
+
+    def test_zero_price_axis_listing_cannot_be_undercut(self):
+        endpoints = qwen36_live_endpoints_2026_09_30() + [or_endpoint("ZeroPrompt", "0", "0.0000009", request_count=None)]
+        self.assertIn("prompt: ZeroPrompt lists $0/MTok", self.held_reason(endpoints))
+
+    def test_guard_applies_to_the_final_rate_when_the_mint_binds(self):
+        policy_document = production_policy()
+        policy_document["openrouter_listing_undercut"]["min_fraction_of_liquid_price"] = "0.8"
+        endpoints = [
+            or_endpoint("A", "0.000000085", "0.00000085"),
+            or_endpoint("B", "0.0000001", "0.000001"),
+            or_endpoint("C", "0.00000012", "0.0000012"),
+            or_endpoint("D", "0.00000012", "0.0000012"),
+        ]
+        # Median B mints 80000/800000 (below A's cap); reference without A is C: 0.8 x $1.20 = 960000.
+        self.assertIn("final 800000 credits is below 0.8", self.held_reason(endpoints, policy_document))
+
+    def test_snapshot_without_listing_floor_is_not_priced_under_the_listing_policy(self):
         snapshot = synthetic_production_market_snapshot(endpoint_overrides={QWEN36: qwen36_live_endpoints_2026_09_30()})
         for row in snapshot["rows"]:
             if isinstance(row.get("pricing"), dict):
@@ -1624,13 +1701,22 @@ class OpenRouterListingCapTests(unittest.TestCase):
         with self.assertRaisesRegex(engine.SchemaError, "predates listing_floor"):
             engine.build_proposal(snapshot, production_policy(), production_rate_card(), now=NOW)
 
-    def test_listing_floor_above_an_eligible_quote_is_rejected(self):
-        snapshot = synthetic_production_market_snapshot(endpoint_overrides={QWEN36: qwen36_live_endpoints_2026_09_30()})
-        row = next(row for row in snapshot["rows"] if row["source_model_id"] == QWEN36)
-        row["pricing"]["listing_floor"]["completion_usd_per_mtok"] = "0.95"
-        snapshot["content_digest"] = engine.sha256_prefixed(engine.snapshot_digest_payload(snapshot))
-        with self.assertRaisesRegex(engine.SchemaError, "listing_floor exceeds an eligible listing"):
-            engine.validate_snapshot(snapshot)
+    def test_tampered_listing_floor_fails_validation(self):
+        def base():
+            return synthetic_production_market_snapshot(endpoint_overrides={QWEN36: qwen36_live_endpoints_2026_09_30()})
+        cases = [
+            (lambda floor: floor.update(completion_usd_per_mtok="0.3"), "does not equal the cheapest retained listing"),
+            (lambda floor: floor.update(completion_usd_per_mtok="0.85"), "does not equal the cheapest retained listing"),
+            (lambda floor: floor["listings"].remove(next(entry for entry in floor["listings"] if entry["provider_name"] == "Darkbloom")), "does not equal the cheapest retained listing"),
+            (lambda floor: floor["listings"][1].update(completion_usd_per_mtok="0.5"), "do not reproduce the liquid cohort"),
+            (lambda floor: floor["listings"][1].update(request_count_last_30m=None), "do not reproduce the liquid cohort"),
+            (lambda floor: floor["listings"].reverse(), "canonical order"),
+            (lambda floor: floor.update(excluded_provider_names=["Darkbloom"]), "provider_name is invalid"),
+        ]
+        for mutate, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(engine.SchemaError, message):
+                    engine.validate_snapshot(self.tamper(base(), mutate))
 
     def test_snapshot_exclusions_must_match_policy(self):
         snapshot = synthetic_production_market_snapshot(endpoint_overrides={QWEN36: qwen36_live_endpoints_2026_09_30()})
@@ -1640,14 +1726,23 @@ class OpenRouterListingCapTests(unittest.TestCase):
             engine.build_proposal(snapshot, policy_document, production_rate_card(), now=NOW)
 
     def test_policy_rejects_invalid_listing_controls(self):
+        def listed_model(p):
+            return next(m for m in p["models"] if m["source_model_id"] == QWEN36)
+        ack = {"source_model_id": QWEN36, "axis": "completion", "provider_name": "X", "usd_per_mtok": "0.1"}
         cases = [
             (lambda p: p["openrouter_listing_undercut"].update(undercut_fraction="0"), "undercut_fraction"),
             (lambda p: p["openrouter_listing_undercut"].update(undercut_fraction="0.31"), "1%-30%"),
-            (lambda p: p["openrouter_listing_undercut"].update(min_fraction_of_liquid_price="0.05"), "10%-100%"),
+            (lambda p: p["openrouter_listing_undercut"].update(min_fraction_of_liquid_price="0.05"), "10% and"),
+            (lambda p: p["openrouter_listing_undercut"].update(min_fraction_of_liquid_price="0.81"), "10% and"),
             (lambda p: p["openrouter_listing_undercut"].update(excluded_provider_names=["b", "a"]), "sorted unique"),
             (lambda p: p["openrouter_listing_undercut"].update(extra="x"), "missing or unexpected"),
+            (lambda p: p["openrouter_listing_undercut"].pop("acknowledged_listings"), "missing or unexpected"),
+            (lambda p: p["openrouter_listing_undercut"].update(acknowledged_listings=[dict(ack, axis="cache")]), "axis is invalid"),
+            (lambda p: p["openrouter_listing_undercut"].update(acknowledged_listings=[dict(ack, source_model_id="qwen/qwen3-32b")]), "not an openrouter_listed"),
+            (lambda p: p["openrouter_listing_undercut"].update(acknowledged_listings=[dict(ack, provider_name="Malibu")]), "provider_name is invalid"),
+            (lambda p: p["openrouter_listing_undercut"].update(acknowledged_listings=[dict(ack, usd_per_mtok="0")]), "usd_per_mtok"),
             (lambda p: p.pop("openrouter_listing_undercut"), "without openrouter_listing_undercut"),
-            (lambda p: next(m for m in p["models"] if m["source_model_id"] == QWEN36).update(openrouter_listed=False), "must be true"),
+            (lambda p: listed_model(p).update(openrouter_listed=False), "must be true"),
         ]
         for mutate, message in cases:
             with self.subTest(message=message):

@@ -82,7 +82,7 @@ The fetcher uses documented OpenRouter API endpoints:
 
 - demand: `https://openrouter.ai/api/v1/datasets/rankings-daily`;
 - catalog/schema cross-check: `https://openrouter.ai/api/v1/models`;
-- cheapest active provider price:
+- per-provider endpoint prices and 30-minute activity:
   `https://openrouter.ai/api/v1/models/{model-id}/endpoints`.
 
 The documented daily dataset contains each day's top 50 public models by total
@@ -105,12 +105,19 @@ A missing key or failed request publishes nothing.
 Daily ranking records are aggregated by `model_permaslug`, sorted by total-token
 volume, and reduced to the requested number of distinct models. Each selected
 model must appear in the catalog and have a complete endpoints response. The
-normalizer chooses the lowest completion price among active (`status == 0`)
-provider endpoints, breaking ties deterministically by prompt price and
-provider name. Decimal strings—not binary floats—are used for stored money and
-all calculations.
+normalizer drops endpoints of the policy's `excluded_provider_names` (our own
+listings), keeps active (`status == 0`) paid endpoints with at least
+`min_endpoint_request_count_30m` 30-minute text requests, collapses them to one
+quote per provider, and records the UNWEIGHTED lower median of prompt and of
+completion (SPEC-023 §3.3.2 rule 4). The cheapest listing is never the base
+price; it enters only as the rule 5a cap below. Decimal strings—not binary
+floats—are used for stored money and all calculations.
 
-The snapshot schema is version `5`:
+The current snapshot schema is version `6`. It is the version `5` shape below
+plus `fetch_metadata.skipped_free_ranked_models`, `pricing.liquidity_filter`
+(the retained liquid cohort and median provenance), and `pricing.listing_floor`
+(every retained active listing and the per-axis cheapest listing; validation
+re-derives both the liquid cohort and the floor from it). Version `5`:
 
 ```json
 {
@@ -231,20 +238,25 @@ permitted license. Broad-fleet models require active parameters at or below
 
 The policy's target rules are from `RESEARCH_227_RATE_CARD_V3_PROMPT.md`:
 
-- broad-fleet target = cheapest active OpenRouter completion price less the
-  configured 10–30% undercut;
+- target = the rule-4 lower median of liquid OpenRouter prices (prompt and
+  completion separately) less the configured 10–30% `undercut_fraction`
+  (current snapshots; version `5` legacy snapshots used the cheapest active
+  completion price);
 - coding-dense target starts from the configured 10–30% premium over a
   general-purpose baseline, is capped to undercut market by at least 10%, and
   must produce at least $0.10/hour at its documented M-Max TPS.
 
 A mapping flagged `openrouter_listed: true` is also capped by SPEC-023 §3.3.2
 rule 5a: each of prompt and completion is at most the cheapest active paid
-OpenRouter listing on that axis (any 30-minute activity, excluding
-`openrouter_listing_undercut.excluded_provider_names`, our own provider name)
-less `openrouter_listing_undercut.undercut_fraction`. The snapshot records that
-listing as `pricing.listing_floor`. If the cap would fall below
-`min_fraction_of_liquid_price` of the liquid median, compute fails closed and
-the operator decides. When Malibu's OpenRouter provider name is assigned,
+OpenRouter listing on that axis (any 30-minute activity, own providers
+excluded) less `openrouter_listing_undercut.undercut_fraction`. The final rate
+must stay at or above `min_fraction_of_liquid_price` of the liquid median taken
+without the floor-setting provider, with that reduced cohort still meeting
+`min_distinct_providers`. Otherwise, or when a listing is `$0` on an axis, only
+that row is held: the proposal lists it under `blocked` with the listing named,
+every other row is proposed, and the release cannot ship until the operator
+adds the exact listing to `acknowledged_listings` (guard holds only) or removes
+`openrouter_listed`. When Malibu's OpenRouter provider name is assigned,
 confirm it is in `excluded_provider_names` before the next fetch.
 
 The internal proposal rate is a completion-token rate in the existing

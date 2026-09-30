@@ -338,6 +338,7 @@
     "min_fraction_of_liquid_price": "0.25",
     "excluded_provider_names": [
       "Malibu"
-    ]
+    ],
+    "acknowledged_listings": []
   }
 }
