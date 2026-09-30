@@ -694,7 +694,7 @@ final class ModelsSubcommandTests: XCTestCase {
                 fetch: { request in
                     let url = try XCTUnwrap(request.url)
                     let response = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil))
-                    return (Data(#"{"siblings":[{"rfilename":"weights.bin"}]}"#.utf8), response)
+                    return (Data(#"{"siblings":[{"rfilename":"weights.bin","size":5}]}"#.utf8), response)
                 },
                 download: { _ in
                     // Models SIGINT arriving mid-transfer: URLSession unwinds
@@ -2276,7 +2276,7 @@ final class ModelsSubcommandTests: XCTestCase {
                 XCTAssertEqual(url.host, "huggingface.co")
                 XCTAssertTrue(url.path.contains(revision), url.path)
                 let response = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil))
-                return (Data(#"{"siblings":[{"rfilename":"weights.bin"}]}"#.utf8), response)
+                return (Data("{\"siblings\":[{\"rfilename\":\"weights.bin\",\"size\":\(payload.utf8.count)}]}".utf8), response)
             },
             download: { request in
                 counter.increment()

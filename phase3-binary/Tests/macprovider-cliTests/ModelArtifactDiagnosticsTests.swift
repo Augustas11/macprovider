@@ -227,7 +227,7 @@ final class ModelArtifactDiagnosticsTests: XCTestCase {
         let expectedDirectory = try tempDir()
         try writeCompleteSnapshot(at: expectedDirectory)
         let row = makeRow(sha256: try ModelArtifactVerifier.canonicalArtifactHash(directory: expectedDirectory))
-        let (resolver, _) = try makeResolver(downloader: fakeDownloader(serving: expectedDirectory))
+        let (resolver, _) = try makeResolver(downloader: try fakeDownloader(serving: expectedDirectory))
 
         let outcome = await ModelCatalogPreparation.prepare(row: row, resolver: resolver, repairCache: false)
 
@@ -242,7 +242,7 @@ final class ModelArtifactDiagnosticsTests: XCTestCase {
         let served = try tempDir()
         try writeCompleteSnapshot(at: served)
         let row = makeRow(sha256: String(repeating: "1", count: 64))
-        let (resolver, _) = try makeResolver(downloader: fakeDownloader(serving: served))
+        let (resolver, _) = try makeResolver(downloader: try fakeDownloader(serving: served))
 
         let outcome = await ModelCatalogPreparation.prepare(row: row, resolver: resolver, repairCache: false)
 
@@ -330,7 +330,7 @@ final class ModelArtifactDiagnosticsTests: XCTestCase {
         let served = try tempDir()
         try writeCompleteSnapshot(at: served)
         let row = makeRow(sha256: try ModelArtifactVerifier.canonicalArtifactHash(directory: served))
-        let (resolver, _) = try makeResolver(downloader: fakeDownloader(serving: served))
+        let (resolver, _) = try makeResolver(downloader: try fakeDownloader(serving: served))
         let durable = try resolver.durableStore.artifactURL(modelID: row.modelID, revision: revision, sha256: row.sha256)
         try writeCompleteSnapshot(at: durable, truncateWeights: true)
         XCTAssertFalse(FileManager.default.fileExists(
@@ -732,13 +732,20 @@ final class ModelArtifactDiagnosticsTests: XCTestCase {
         return data
     }
 
-    private func fakeDownloader(serving directory: URL) -> HuggingFaceSnapshotDownloader {
+    private func fakeDownloader(serving directory: URL) throws -> HuggingFaceSnapshotDownloader {
         let names = ((try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []).sorted()
-        let siblings = names.map { #"{"rfilename":"\#($0)"}"# }.joined(separator: ",")
+        let siblings = try names.map { name -> [String: Any] in
+            let attributes = try FileManager.default.attributesOfItem(
+                atPath: directory.appendingPathComponent(name).path
+            )
+            let size = try XCTUnwrap(attributes[.size] as? NSNumber)
+            return ["rfilename": name, "size": size]
+        }
+        let listing = try JSONSerialization.data(withJSONObject: ["siblings": siblings])
         return HuggingFaceSnapshotDownloader(
             fetch: { request in
                 let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-                return (Data(#"{"siblings":[\#(siblings)]}"#.utf8), response)
+                return (listing, response)
             },
             download: { request in
                 let name = request.url!.lastPathComponent
