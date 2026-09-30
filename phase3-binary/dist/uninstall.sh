@@ -181,6 +181,18 @@ def command(argv):
     result = subprocess.run(argv, check=False, capture_output=True, text=True)
     return result.stdout.strip() if result.returncode == 0 else ""
 
+def boot_session():
+    value = command(["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"])
+    if value:
+        return value
+    # Distribution tests execute this macOS-only script on Linux. Preserve the
+    # same boot-scoped owner identity there without weakening the macOS path.
+    try:
+        with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
 try:
     home = os.path.realpath(home)
     config_dir = os.path.realpath(os.path.dirname(lock_path))
@@ -216,14 +228,14 @@ try:
         pid, started, boot = record.get("pid"), record.get("process_start"), record.get("boot_session")
         if not (isinstance(pid, int) and isinstance(started, str) and started and isinstance(boot, str) and boot):
             raise RuntimeError("install lock record is malformed")
-        if command(["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"]) == boot \
+        if boot_session() == boot \
                 and command(["ps", "-p", str(pid), "-o", "lstart="]) == started:
             status("busy")
             sys.exit(0)
     record = {
         "pid": owner_pid,
         "process_start": command(["ps", "-p", str(owner_pid), "-o", "lstart="]),
-        "boot_session": command(["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"]),
+        "boot_session": boot_session(),
         "operation": "uninstall",
         "holder_pid": os.getpid(),
     }

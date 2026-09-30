@@ -206,6 +206,11 @@ python3 - "$HOME/.config/macprovider/install.lock" "$owner" <<'RECORD'
 import json, subprocess, sys
 start = subprocess.run(["ps", "-p", sys.argv[2], "-o", "lstart="], capture_output=True, text=True).stdout.strip()
 boot = subprocess.run(["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"], capture_output=True, text=True).stdout.strip()
+if not boot:
+    try:
+        boot = open("/proc/sys/kernel/random/boot_id", encoding="ascii").read().strip()
+    except OSError:
+        pass
 json.dump({"pid": int(sys.argv[2]), "process_start": start, "boot_session": boot}, open(sys.argv[1], "w"))
 RECORD
 if bash "$UNINSTALL_SH" >"$TMP/out" 2>&1; then kill "$owner"; fail "uninstall ran under a live installer owner record"; fi
