@@ -1,22 +1,18 @@
 # Continuous Batching Enable Gate
 
-Continuous batching is **default-off and inert** after the SPEC-038
-implementation merge. Do not enable `continuous_batching: canary` or
-`continuous_batching: on` for buyer traffic from CI, a worktree build, a unit
-test pass, or a local `swift build`.
+Continuous batching is **default-off unless an authentic release-bound signed
+policy authorizes the exact runtime tuple**. In a joined production provider,
+manual `continuous_batching_accepted_tuples` entries are ignored. Do not enable
+buyer traffic from CI, a worktree build, a unit-test pass, or a local
+`swift build`.
 
-> **Stop — 2026-09-24.** Signed 176, candidate 181 and `main` @ `57022da8`
-> (the binaries tested; earlier canary binaries are unverified) produce wrong
-> output on the batched path: compiled
-> decode replays a frozen KV offset (greedy rows loop on the prompt and die at
-> exactly 256 generated tokens), and batched rows ignore the model's end of
-> turn (serial vs batched A/B on the Studio). Do not set `continuous_batching: canary` or `on` on any
-> paged-KV-eligible tuple until a binary containing the fix on
-> `campaign/ac25-m2-api-lifecycle` ships. Live 181 is unaffected only because
-> `qwen/qwen3.6-27b` is not paged-KV eligible; switching the Studio back to
-> Qwen3-Coder with canary on would re-expose buyers. The MSB-02/03/04
-> throughput wins and the "temp-0 index-9 tolerance" decision were measured on
-> the broken path and are invalid. Evidence: #1646.
+> **Current gate — 2026-09-30.** The isolated source-built Studio campaign for
+> #1778 proved automatic signed-policy activation and scheduler-admitted HTTP
+> batching for `qwen/qwen3.5-27b` and `qwen/qwen3.5-35b-a3b`. The same build
+> failed closed twice for `qwen/qwen3.8-27b` at the batched-isolation probe with
+> one cross-row divergence. No nonempty production policy is authorized from
+> that source-built evidence. A signed packaged candidate must pass all target
+> tuples and release-asset verification before publication.
 
 This runbook is the operator gate for enabling one exact
 hardware/model/quantization/KV/runtime tuple. It is intentionally narrower than
@@ -44,12 +40,12 @@ auto-prefix / buyer conversation keys on a cache miss:
 
 The activation predicate has two conjuncts (SPEC-038 FR-CB10). The requested
 tuple must be admitted by the SPEC-039 paged-KV capability descriptor, **and**
-the operator must have declared that tuple in
-`continuous_batching_accepted_tuples`. Before #1672 only the first was
-enforced, and the one acceptance-shaped gate was a global compiled constant
-every Mac inherited. A build containing #1672 fail-closes: an undeclared tuple
-serial-routes with reason `tuple_acceptance_coverage_unavailable`, and strict
-`on` is rejected at startup. `v1.8.176` predates #1672.
+an authentic SPEC-023 signed policy entry must match the catalog, model,
+tokenizer/template, cache, hardware, Metal kernel, provider version, packaged
+campaign, and live executable identities exactly. Missing, stale, malformed,
+tampered, mismatched, or rollout-`off` policy serial-routes. Explicit
+`continuous_batching: off` is the emergency override. An unset mode lets the
+verified signed entry select `canary` or `on` automatically.
 
 A reviewed upstream `mlx-swift-lm` batch revision is historical context only
 and is not an enable path.
@@ -118,7 +114,7 @@ only.
 | Hardware tuple | Mac model, chip, RAM, macOS build, power state, thermal state, swap state, and Entry 110 `max_concurrency_override`. |
 | Model tuple | served model id, model SHA-256, tokenizer/template identity when present, cache class, KV dtype, `kv_bits` absence, MoE requirement, metallib SHA-256, kernel identifier, parity label, and pool epoch. |
 | Local descriptor | SPEC-039 descriptor showing the exact tuple is admitted; unsupported tuples must show fail-closed or reason-coded serial routing. |
-| Acceptance coverage | On a build containing #1672, the tuple is declared in `continuous_batching_accepted_tuples` and the declaration matches the runtime-measured identity exactly. Record the declared entry alongside the measured tuple. An undeclared tuple is the `tuple_acceptance_coverage_unavailable` serial route, not an enable. From SPEC-038 v0.2.5 (#1716), each entry also carries `metallib_sha256` and `kernel_identifier`: the runtime revision the evidence was measured on, printed at serve start on the `[paged-kv] runtime-identity` line. Declare the entry only after that exact packaged build meets the FR-PKV13 overhead ceiling. A new candidate with a different metallib or kernel serial-routes until it is re-measured and re-declared. |
+| Acceptance coverage | The release-bound signed policy entry matches the runtime-measured tuple exactly and `/v1/status` reports `policy.load_status=live_verified`, `policy.authorized=true`, `policy.local_proof_result=passed`, the intended rollout, `paged_kv_decision=attached`, and `active=true`. Record the policy and tuple digests beside the measured identity. Manual accepted tuples are test/backward-compatibility inputs only and do not authorize joined production serving. A new package, CDHash, metallib, kernel, model, tokenizer/template, cache class, or hardware class serial-routes until a newly reviewed policy covers it. |
 | Production serving path | The batched path that will serve real traffic is identified and measured. If gather-feeds-SDPA is used only as parity scaffold, record the actual shared-forward path; if gather-every-step is used, prove it meets the SPEC-039 overhead ceiling. Also record the FR-PKV13 define-and-record obligations for this tuple: the sizing table apportioning the unified-memory envelope across model weights, per-request activation, and the paged block pool; the minimum model/context envelope the paged path serves that the stock contiguous path cannot (null or negligible is an acceptable honest value); and the overhead ceiling itself. A throughput number measured on a worktree build is scaffold evidence — the ceiling check that gates enable must be re-recorded on the packaged RC. |
 | Keyless scheduler 200 | A local loopback and relay-shaped keyless request with stable request ID enters the scheduler path and returns HTTP 200 / terminal success from batching, not serial fallback and not `continuous_batching_prefill_failed`. |
 | Keyed first-turn scheduler 200 | A Pearl-shaped request with a conversation key, stable request ID, and `cached_prompt_tokens = 0` enters the scheduler (no `serial_routed reason=conversation_key_rollout_unavailable`) and returns HTTP 200. Keyless loopback is not a substitute. |
@@ -162,18 +158,11 @@ authorization headers.
 
 ## Canary Enable
 
-No `canary` or `on` buyer traffic is currently enableable from implementation
-presence alone. #1477 landed retained paged-KV consumer code and #1500 is the
-production observation / durable-replay prerequisite. Operators still need a
-packaged release-candidate tuple whose local descriptor admits the
-requested path, whose runtime derives `schedulerBackendAvailable: true` from
-a **measured** identity (not an injected test tuple), and whose durable replay
-authority is wired to stable relay request identity plus usage/receipt
-settlement disposition. That wiring landed in #1500 — the runtime authority is
-file-backed and keyed on the inbound `X-Request-ID`, so the open item is
-packaged settlement disposition across reconnect/replay, not the existence of
-the authority. Until those packaged proofs exist for the exact tuple, strict
-`on` is rejected before provider readiness and `canary` serial-routes.
+No `canary` or `on` buyer traffic is enableable from implementation presence
+alone. Operators need a reviewed signed policy entry for the exact packaged
+release-candidate tuple, plus the complete evidence table above. An absent or
+unmatched entry serial-routes; strict `on` fails closed. Do not add a manual
+tuple to work around signed-policy or local-proof failure.
 
 2026-09-20 Studio 172 attempt: paged-KV attach and MoE isolation passed;
 keyless canary then 503'd `continuous_batching_prefill_failed` after scheduler
@@ -187,12 +176,14 @@ Do not promote `canary` to `on`. Do not canary other Macs.
 Any other tuple must still prove scheduler-path HTTP 200 on a packaged
 candidate and green API lifecycle evidence before canary traffic.
 
-Use `canary` only when every required proof above is present for the exact
-tuple. Leave `continuous_batch_queue_limit` unset unless the evidence bundle
-selects a lower bounded queue for that tuple:
+When every required proof is present, publish the reviewed signed entry and
+leave `continuous_batching` unset so policy selects the rollout. Leave
+`continuous_batch_queue_limit` unset unless the evidence bundle selects a
+lower bounded queue for that tuple. To stop batching immediately, set the
+explicit emergency override:
 
 ```yaml
-continuous_batching: canary
+continuous_batching: off
 ```
 
 If set, `continuous_batch_queue_limit` may be raised only within the measured
