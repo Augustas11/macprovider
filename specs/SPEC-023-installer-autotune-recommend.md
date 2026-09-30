@@ -1,6 +1,6 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.21.3
+version: v0.21.4
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-09-27
@@ -3278,7 +3278,9 @@ studio_campaign_sha256, provider_cli_version, live_executable_cdhash}`.
 with `tuple_sha256` removed, under the domain
 `macprovider.continuous-batching-policy-tuple.v1`. For the current runtime
 descriptor contract, `model_id` MUST equal `model_key`; `model_sha256` binds
-the candidate row. Unknown, missing, stale, unsigned, wrong-signer, malformed,
+the candidate row; and `cache_class` MUST be either `KVCacheSimple` or `mixed`,
+the two cache identities the current paged-KV runtime can measure and admit.
+Unknown, missing, stale, unsigned, wrong-signer, malformed,
 expired, catalog-mismatched, or identity-mismatched policy cannot authorize CB;
 the policy bytes recorded for one release are immutable. V1 remote invalidation
 is bounded by `expires_at`, which the decode path rechecks before admission; a

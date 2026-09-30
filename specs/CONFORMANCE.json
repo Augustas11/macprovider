@@ -3243,10 +3243,12 @@
         "scripts/catalog-release.py:verify_directory",
         "scripts/resign-autotune-static.sh:continuous-batching-policy.json",
         "scripts/compatibility-set-manifest.py:CB_POLICY_BOUND_RELEASE_FEEDS",
-        "phase3-binary/Sources/macprovider-cli/AutotuneCatalog.generated.swift:bakedContinuousBatchingPolicyBase64"
+        "phase3-binary/Sources/macprovider-cli/AutotuneCatalog.generated.swift:bakedContinuousBatchingPolicyBase64",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSignedPolicy.swift:ContinuousBatchingSignedPolicy"
       ],
       "tests": [
-        "scripts/test-catalog-release.sh:continuous-batching-policy.json"
+        "scripts/test-catalog-release.sh:continuous-batching-policy.json",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSignedPolicyTests.swift"
       ],
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"

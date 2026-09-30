@@ -1369,8 +1369,8 @@ def validate_cb_policy(
             fail(f"{entry_label}: runtime_status is not eligible for CB policy distribution")
         for field in ("model_id", "hardware_class", "kernel_identifier"):
             require_short_string(entry[field], f"{entry_label}.{field}")
-        if entry["cache_class"] != "KVCacheSimple":
-            fail(f"{entry_label}: cache_class must be KVCacheSimple")
+        if entry["cache_class"] not in {"KVCacheSimple", "mixed"}:
+            fail(f"{entry_label}: cache_class must be KVCacheSimple or mixed")
         if entry["kv_dtype"] not in {"fp16", "bf16"}:
             fail(f"{entry_label}: kv_dtype must be fp16 or bf16")
         for field in ("model_sha256", "tokenizer_sha256", "chat_template_sha256", "metallib_sha256"):

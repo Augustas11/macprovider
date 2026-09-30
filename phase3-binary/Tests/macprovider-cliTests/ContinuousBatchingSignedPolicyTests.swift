@@ -25,6 +25,21 @@ final class ContinuousBatchingSignedPolicyTests: XCTestCase {
         XCTAssertTrue(selection.acceptanceCoverage.coversCachedTurns(fixture.requestedTuple))
     }
 
+    func testValidMixedCachePolicyProducesExactCoverage() throws {
+        let fixture = try makeFixture(cacheClass: "mixed")
+
+        let selection = try ContinuousBatchingSignedPolicy.verify(
+            policyData: fixture.policyData,
+            signatureData: fixture.signatureData,
+            catalog: fixture.catalog,
+            trustedKeyring: fixture.trustedKeyring,
+            now: fixture.now
+        )
+
+        XCTAssertEqual(selection.entries.first?.tuple.cacheClass, "mixed")
+        XCTAssertTrue(selection.acceptanceCoverage.covers(fixture.requestedTuple))
+    }
+
     func testRolloutOffIsVerifiedButDoesNotAuthorizeCoverage() throws {
         let fixture = try makeFixture(mutate: { entry in
             entry["rollout"] = "off"
@@ -297,6 +312,7 @@ final class ContinuousBatchingSignedPolicyTests: XCTestCase {
         generatedAt: String = "2026-09-30T00:00:00Z",
         catalogGeneratedAt: String? = nil,
         expiresAt: String = "2026-10-30T00:00:00Z",
+        cacheClass: String = "KVCacheSimple",
         recomputeTuple: Bool = true,
         mutate: ((inout [String: Any]) -> Void)? = nil,
         mutateRoot: ((inout [String: Any]) -> Void)? = nil
@@ -346,7 +362,7 @@ final class ContinuousBatchingSignedPolicyTests: XCTestCase {
             "model_sha256": String(repeating: "b", count: 64),
             "tokenizer_sha256": String(repeating: "c", count: 64),
             "chat_template_sha256": String(repeating: "d", count: 64),
-            "cache_class": "KVCacheSimple",
+            "cache_class": cacheClass,
             "kv_dtype": "fp16",
             "requires_moe": false,
             "hardware_class": "apple-silicon:m4-max:ram-64gb",
@@ -403,7 +419,7 @@ final class ContinuousBatchingSignedPolicyTests: XCTestCase {
             modelSHA256: String(repeating: "b", count: 64),
             tokenizerSHA256: String(repeating: "c", count: 64),
             chatTemplateSHA256: String(repeating: "d", count: 64),
-            cacheClass: "KVCacheSimple",
+            cacheClass: cacheClass,
             kvDType: .fp16,
             requiresMoE: false,
             hardwareClass: "apple-silicon:m4-max:ram-64gb",
