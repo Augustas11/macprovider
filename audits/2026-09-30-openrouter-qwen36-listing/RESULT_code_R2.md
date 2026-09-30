@@ -1,5 +1,5 @@
 
-- **HIGH — Model-class aliases bypass the multi-turn tool gate**  
+- **HIGH — Model-class aliases bypass the multi-turn tool gate**
   File: [server.go:6821](/Users/augstar/macprovider-or-features/phase4-coordinator/internal/buyer/server.go:6821)
 
   The gate compares the requested model only against catalog IDs using `billing.ModelsEquivalent`. A native model-class alias such as `small-fast` therefore appears unresolved and passes the gate. Later, class resolution can select a catalogued non-§3.8 model such as Llama 3.2, and dispatch rewrites the alias to that concrete model.

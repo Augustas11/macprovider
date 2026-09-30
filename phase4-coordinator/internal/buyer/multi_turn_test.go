@@ -660,6 +660,30 @@ func TestMultiTurnGateNativeTrustedPoolRoute(t *testing.T) {
 		}
 	})
 
+	t.Run("slot_queue_same_id_external_to_native_reconnect_is_rejected", func(t *testing.T) {
+		configureGateCatalog(t)
+		registry := pool.NewRegistry(nil)
+		nativeReconnect := gatePoolMember("member-reconnect", gateLlama32ID)
+		registry.Register(&nativeReconnect, nil)
+		s := NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+		waiter, ok := s.slotQueue.enter("member-reconnect")
+		if !ok {
+			t.Fatal("enter returned no waiter")
+		}
+		defer s.slotQueue.leave(waiter)
+		state := &forwardState{
+			poolID:               "P",
+			poolMembers:          map[string]bool{"member-reconnect": true},
+			poolRuntimeAllowlist: []string{"llamacpp_loopback"},
+			requestedModel:       gateLlama32ID,
+			multiTurnToolHistory: true,
+		}
+		picked, status := s.pollQueuedProvider(waiter, gateLlama32ID, nil, 100, state)
+		if status != queuedProviderTerminal || picked.ProviderID != "" {
+			t.Fatalf("same-ID native reconnect status=%v provider=%q, want terminal/no dispatch", status, picked.ProviderID)
+		}
+	})
+
 	t.Run("tool_history_pool_class_authorization_uses_original_class", func(t *testing.T) {
 		s, _ := gatePoolServer(t, nil, gatePoolMember("member-qwen", gateQwen36ID))
 		s.SetRoutingClasses(map[string]config.ModelClassConfig{"mlx-fast": {Objective: "latency", Models: []string{gateLlama32ID, gateQwen36ID}}})

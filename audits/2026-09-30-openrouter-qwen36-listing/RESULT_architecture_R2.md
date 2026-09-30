@@ -1,7 +1,7 @@
 codex
 ## Findings
 
-1. **LOW — Accepted carried risk: family predicates remain duplicated**  
+1. **LOW — Accepted carried risk: family predicates remain duplicated**
    [openrouter_models.go:386](/Users/augstar/macprovider-or-features/phase5-gateway/internal/router/openrouter_models.go:386), [server.go:6844](/Users/augstar/macprovider-or-features/phase4-coordinator/internal/buyer/server.go:6844), [openrouter_readiness_probe.py:138](/Users/augstar/macprovider-or-features/scripts/openrouter_readiness_probe.py:138), [ToolPromptRenderer.swift:41](/Users/augstar/macprovider-or-features/phase3-binary/Sources/macprovider-cli/ToolPromptRenderer.swift:41)
 
    Failure scenario: a future family addition updates Swift rendering but misses gateway advertising, coordinator admission, or probe validation, causing false capability advertising or late provider-side failures.

@@ -25,7 +25,7 @@ hook: PostToolUse Completed
 codex
 No actionable findings.
 
-- **INFO — R2 model-class alias bypass is fixed.** [server.go:2497](/Users/augstar/macprovider-or-features/phase4-coordinator/internal/buyer/server.go:2497), [server.go:6832](/Users/augstar/macprovider-or-features/phase4-coordinator/internal/buyer/server.go:6832), [server.go:7155](/Users/augstar/macprovider-or-features/phase4-coordinator/internal/buyer/server.go:7155)  
+- **INFO — R2 model-class alias bypass is fixed.** [server.go:2497](/Users/augstar/macprovider-or-features/phase4-coordinator/internal/buyer/server.go:2497), [server.go:6832](/Users/augstar/macprovider-or-features/phase4-coordinator/internal/buyer/server.go:6832), [server.go:7155](/Users/augstar/macprovider-or-features/phase4-coordinator/internal/buyer/server.go:7155)
   Mixed classes now route tool-history requests only to §3.8-profiled members. Classes without a profiled member return 400 before idempotency reservation or dispatch. Fix: none required.
 
 Validated:

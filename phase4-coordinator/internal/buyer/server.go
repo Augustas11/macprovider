@@ -7331,6 +7331,8 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	}
 	if state != nil {
 		state.engineClass = engineClass
+		state.requestedModel = req.Model
+		state.multiTurnToolHistory = req.multiTurnToolHistory
 	}
 	trustedInternalRouting := false
 	if hasInternalRoutingHeader(headers) {
@@ -8645,6 +8647,17 @@ func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slot
 			poolModelClass = state.poolModelClass
 		}
 		if state != nil && state.poolID != "" && !poolModelAllowed(model, poolModelClass, state.poolModelAllowlist) {
+			return pool.Provider{}, queuedProviderTerminal
+		}
+		pollReq := chatRequest{Model: model}
+		if state != nil {
+			pollReq.Model = state.requestedModel
+			if pollReq.Model == "" {
+				pollReq.Model = model
+			}
+			pollReq.multiTurnToolHistory = state.multiTurnToolHistory
+		}
+		if state != nil && state.poolID != "" && unsupportedMultiTurnNativeCandidate(pollReq, provider, tier2.Default().ModelIDs, poolModelClass) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
 		// SPEC-042-R014 (c): a same-ID reconnect of another class is terminal.
