@@ -171,7 +171,7 @@ Settlement-integrity labels are receipt-bound for covered paid entrypoints while
 ## Quotas and limits
 
 - Free accounts: 100,000 tokens/account/day.
-- Request limit: 4096 tokens/request.
+- Request limit: 32768 tokens/request.
 - Account concurrency: 2 concurrent requests/account.
 - Demo mode: 1000 tokens/IP/day, 512 tokens/request, 10 sessions/IP/hour.
 
