@@ -234,3 +234,78 @@ func cloneMessage(message map[string]any) map[string]any {
 	}
 	return out
 }
+
+func TestUnsupportedMultiTurnToolModelGate(t *testing.T) {
+	catalogued := func(model string) bool { return model != "byom/non-catalog" }
+	multiTurn := func(model string) chatRequest {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{"model": model, "messages": validMultiTurnMessages()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req, status, code, msg := validateChatRequest(body)
+		if status != 0 {
+			t.Fatalf("validateChatRequest status=%d code=%s msg=%s", status, code, msg)
+		}
+		return req
+	}
+	firstTurn := func(model string) chatRequest {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{
+			"model":    model,
+			"messages": []map[string]any{{"role": "user", "content": "weather"}},
+			"tools":    []map[string]any{{"type": "function", "function": map[string]any{"name": "lookup", "parameters": map[string]any{"type": "object"}}}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req, status, code, msg := validateChatRequest(body)
+		if status != 0 {
+			t.Fatalf("validateChatRequest status=%d code=%s msg=%s", status, code, msg)
+		}
+		return req
+	}
+	llama32 := "mlx-community/Llama-3.2-3B-Instruct-4bit"
+	nativeRoute := multiTurn(llama32)
+	nativeRoute.engineClass = engineClassNative
+	poolRoute := multiTurn(llama32)
+	poolRoute.poolID = "pool-a"
+	externalRoute := multiTurn(llama32)
+	externalRoute.engineClass = "llamacpp_loopback"
+
+	cases := []struct {
+		name     string
+		req      chatRequest
+		wantCode string
+	}{
+		{name: "non_family_catalog_multi_turn_rejected", req: multiTurn(llama32), wantCode: "unsupported_modelID_for_multi_turn"},
+		{name: "explicit_native_engine_rejected", req: nativeRoute, wantCode: "unsupported_modelID_for_multi_turn"},
+		{name: "qwen3_family_accepted", req: multiTurn("mlx-community/Qwen3.6-35B-A3B-4bit")},
+		{name: "qwen2.5_family_accepted", req: multiTurn("mlx-community/Qwen2.5-Coder-32B-Instruct-4bit")},
+		{name: "llama33_family_accepted", req: multiTurn("mlx-community/Llama-3.3-70B-Instruct-4bit")},
+		{name: "first_turn_tools_fall_back_per_spec018_3_5", req: firstTurn(llama32)},
+		{name: "non_catalog_model_untouched", req: multiTurn("byom/non-catalog")},
+		{name: "trusted_pool_route_untouched", req: poolRoute},
+		{name: "external_engine_route_untouched", req: externalRoute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, code, msg := unsupportedMultiTurnToolModel(tc.req, catalogued)
+			if tc.wantCode == "" {
+				if status != 0 {
+					t.Fatalf("status=%d code=%s msg=%s, want pass-through", status, code, msg)
+				}
+				return
+			}
+			if status != http.StatusBadRequest || code != tc.wantCode {
+				t.Fatalf("status=%d code=%s msg=%s, want 400 %s", status, code, msg, tc.wantCode)
+			}
+			if spec018RetryableByCode[code] {
+				t.Fatalf("%s must be non-retryable", code)
+			}
+		})
+	}
+	if status, _, _ := unsupportedMultiTurnToolModel(multiTurn(llama32), nil); status != 0 {
+		t.Fatalf("nil catalog must not reject, status=%d", status)
+	}
+}

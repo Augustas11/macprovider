@@ -178,6 +178,25 @@ def with_catalog_paid_rows(doc: dict) -> dict:
     return doc
 
 
+def qwen36_doc():
+    doc = valid_doc()
+    row = doc["data"][0]
+    row["id"] = "mlx-community/Qwen3.6-35B-A3B-4bit"
+    row["hugging_face_id"] = row["id"]
+    row["name"] = "Qwen3.6 35B A3B (4-bit)"
+    row["tokenizer"] = "Qwen"
+    row["openrouter"] = {"slug": "qwen/qwen3.6-35b-a3b"}
+    row["output_modalities"][0]["supported_parameters"].update(
+        {
+            "tools": {"type": "boolean"},
+            "tool_choice": {"type": "enum", "values": ["auto"]},
+            "response_format": {"type": "enum", "values": ["text", "json_object", "json_schema"]},
+            "structured_outputs": {"type": "boolean"},
+        }
+    )
+    return doc
+
+
 def valid_filing_doc():
     doc = with_catalog_paid_rows(valid_doc())
     free = copy.deepcopy(doc["data"][0])
@@ -426,7 +445,7 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
 
     def test_filing_mode_requires_ready_zero_priced_free_alias(self):
         doc = valid_doc()
-        with self.assertRaisesRegex(probe.ProbeError, "missing catalog rows"):
+        with self.assertRaisesRegex(probe.ProbeError, "missing listed rows"):
             probe.check_models_document(doc, "mlx-community/Llama-3.2-3B-Instruct-4bit", True)
         catalog_only = with_catalog_paid_rows(valid_doc())
         with self.assertRaisesRegex(probe.ProbeError, "missing free alias"):
@@ -452,9 +471,9 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
         with self.assertRaisesRegex(probe.ProbeError, "is_ready"):
             probe.check_models_document(doc, "mlx-community/Llama-3.2-3B-Instruct-4bit", True)
 
-    def test_live_models_check_requires_full_catalog(self):
+    def test_live_models_check_requires_listed_rows(self):
         doc = valid_doc()
-        with self.assertRaisesRegex(probe.ProbeError, "missing catalog rows"):
+        with self.assertRaisesRegex(probe.ProbeError, "missing listed rows"):
             probe.check_models_document(doc, "mlx-community/Llama-3.2-3B-Instruct-4bit", require_catalog=True)
         got = probe.check_models_document(
             with_catalog_paid_rows(valid_doc()),
@@ -463,6 +482,55 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
         )
         self.assertEqual(got["catalog_listed_rows"], 17)
         self.assertEqual(got["catalog_unlisted_ids"], [])
+
+    def test_default_model_is_the_single_qwen36_listing(self):
+        self.assertEqual(probe.DEFAULT_MODEL, "mlx-community/Qwen3.6-35B-A3B-4bit")
+        self.assertEqual(probe.OPENROUTER_LISTED_MODEL_IDS, (probe.DEFAULT_MODEL,))
+        self.assertEqual(probe.EXPECTED_OPENROUTER_SLUGS[probe.DEFAULT_MODEL], "qwen/qwen3.6-35b-a3b")
+        self.assertFalse(probe.model_has_free_alias(probe.DEFAULT_MODEL))
+        self.assertFalse(probe.model_has_free_alias("qwen/qwen3.6-35b-a3b"))
+
+    def test_filing_mode_accepts_qwen36_without_free_alias(self):
+        got = probe.check_models_document(qwen36_doc(), "qwen/qwen3.6-35b-a3b", True)
+        self.assertEqual(got["ids"], ["mlx-community/Qwen3.6-35B-A3B-4bit"])
+        self.assertEqual(got["openrouter_missing_listed_ids"], [])
+        not_ready = qwen36_doc()
+        not_ready["data"][0]["is_ready"] = False
+        with self.assertRaisesRegex(probe.ProbeError, "is_ready=true"):
+            probe.check_models_document(not_ready, probe.DEFAULT_MODEL, True)
+
+    def test_filing_capacity_without_free_alias_uses_paid_row_only(self):
+        models = probe.check_models_document(qwen36_doc(), probe.DEFAULT_MODEL, True)
+        got = probe.check_model_capacity_against_pool(models, ready_pool(1), probe.DEFAULT_MODEL)
+        self.assertEqual(got["classification"], "model_capacity_consistent")
+        self.assertEqual(got["expected_free_model"], "")
+        self.assertEqual(got["combined_concurrency"], 1)
+        oversold = qwen36_doc()
+        oversold["data"][0]["capacity"][1]["value"] = 2
+        models = probe.check_models_document(oversold, probe.DEFAULT_MODEL, True)
+        with self.assertRaisesRegex(probe.ProbeError, "exceeds live pool concurrency"):
+            probe.check_model_capacity_against_pool(models, ready_pool(1), probe.DEFAULT_MODEL)
+
+    def test_tool_and_structured_output_descriptors_are_validated_when_declared(self):
+        got = probe.check_models_document(qwen36_doc(), probe.DEFAULT_MODEL)
+        self.assertEqual(got["rows"], 1)
+        cases = (
+            ("tools", {"type": "enum", "values": ["auto"]}, "tools supported parameter must be a boolean"),
+            ("structured_outputs", {"type": "boolean", "min": 0}, "structured_outputs supported parameter must be a boolean"),
+            ("tool_choice", {"type": "enum", "values": []}, "tool_choice supported parameter must be an enum"),
+            ("response_format", {"type": "boolean"}, "response_format supported parameter must be an enum"),
+        )
+        for name, descriptor, message in cases:
+            doc = qwen36_doc()
+            doc["data"][0]["output_modalities"][0]["supported_parameters"][name] = descriptor
+            with self.assertRaisesRegex(probe.ProbeError, message):
+                probe.check_models_document(doc, probe.DEFAULT_MODEL)
+        lone_tools = qwen36_doc()
+        del lone_tools["data"][0]["output_modalities"][0]["supported_parameters"]["tool_choice"]
+        with self.assertRaisesRegex(probe.ProbeError, "declared together"):
+            probe.check_models_document(lone_tools, probe.DEFAULT_MODEL)
+        plain = valid_doc()
+        self.assertEqual(probe.check_models_document(plain)["rows"], 1)
 
     def test_not_ready_catalog_rows_may_advertise_zero_capacity(self):
         doc = valid_doc()
@@ -1877,9 +1945,10 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
                 code = probe.main(argv)
             self.assertEqual(code, 1)
             report = json.loads(output.read_text(encoding="utf-8"))
-            for name in ("chat", "chat_free", "catalog_chat", "benchmark", "load_ladder", "saturation"):
+            for name in ("chat", "catalog_chat", "benchmark", "load_ladder", "saturation"):
                 self.assertFalse(report["checks"][name]["ok"])
                 self.assertIn("API key file is not readable", report["checks"][name]["error"])
+            self.assertNotIn("chat_free", report["checks"], "Qwen3.6 listing has no free alias to chat against")
             self.assertTrue(any("api_key" in error for error in report["errors"]))
             self.assertIn("wholesale_statement", report["checks"])
 

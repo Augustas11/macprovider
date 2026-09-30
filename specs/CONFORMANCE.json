@@ -152,7 +152,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.39",
+      "version": "0.9.40",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -5832,8 +5832,10 @@
         "phase4-coordinator/internal/billing/formula.go:NormalizeModelKey"
       ],
       "tests": [
-        "phase5-gateway/internal/router/openrouter_models_test.go:TestProjectOpenRouterModelsDualLlamaSKU",
-        "phase5-gateway/internal/router/openrouter_models_test.go:TestOpenRouterListingsCoverLiveCatalog",
+        "phase5-gateway/internal/router/openrouter_models_test.go:TestProjectOpenRouterModelsQwen36Row",
+        "phase5-gateway/internal/router/openrouter_models_test.go:TestProjectOpenRouterModelsDualFreeSKU",
+        "phase5-gateway/internal/router/openrouter_models_test.go:TestOpenRouterListingsPublishQwen36Only",
+        "phase5-gateway/internal/router/openrouter_models_test.go:TestOpenRouterSupportedParametersGateToolFeaturesBySpec018Family",
         "phase5-gateway/internal/router/openrouter_models_test.go:TestProjectOpenRouterModelsListsUnservedCatalogRows",
         "phase5-gateway/internal/router/openrouter_models_test.go:TestProjectOpenRouterModelsRowsStaySchema24Native",
         "phase5-gateway/internal/router/openrouter_models_test.go:TestProjectOpenRouterModelsCapacityTracksLiveSlots",
@@ -5851,7 +5853,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "OpenRouter schema-2.4 models document, wholesale partner chat flags including bounded slot-queue smoothing, immediate same-moment reservation-overflow shedding, gateway 429 capacity shedding, and dual SKU alias ids (\u00a72.2, \u00a75.3.2, \u00a77.8, \u00a717.9). Mapped to new gateway/coordinator/probe tests. Not promoted. Signed journey-result still required."
+        "rationale": "OpenRouter schema-2.4 models document (v0.9.40: operator listing set is Qwen3.6-35B-A3B only; tools/tool_choice/response_format/structured_outputs descriptors only for SPEC-018 multi-turn families), wholesale partner chat flags including bounded slot-queue smoothing, immediate same-moment reservation-overflow shedding, gateway 429 capacity shedding, and dual SKU alias ids (\u00a72.2, \u00a75.3.2, \u00a77.8, \u00a717.9). Mapped to new gateway/coordinator/probe tests. Not promoted. Signed journey-result still required."
       }
     },
     {

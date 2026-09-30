@@ -2491,6 +2491,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.engineClass = engineClass
+	if status, code, msg := unsupportedMultiTurnToolModel(req, tier2.Catalogued); status != 0 {
+		rec.logBuyerFailure(status, msg)
+		writeError(w, status, code, msg)
+		return
+	}
 	if idempotencyKey := normalizeIdempotencyKey(r.Header.Get("Idempotency-Key")); idempotencyKey != "" {
 		if s.reqLogStore == nil {
 			rec.logBuyerFailure(http.StatusServiceUnavailable, "Idempotency-Key requires durable request logging")
@@ -6799,6 +6804,47 @@ func validateMessages(messages []chatMessage, rawMessages []map[string]json.RawM
 		}
 	}
 	return normalizedContent, 0, "", ""
+}
+
+// unsupportedMultiTurnToolModel applies SPEC-018 §3.8 before dispatch: a
+// multi-turn tool request (role:"tool" or assistant-history tool_calls[]) for
+// a modelID with no family prompt profile MUST fail with HTTP 400
+// unsupported_modelID_for_multi_turn. The native provider already rejects it,
+// but the WS relay collapses provider 4xx codes to error_internal, so buyers
+// saw a 502 and the provider was marked degraded. The gate is limited to
+// catalogued models on global native routing; Trusted Pool and explicit
+// non-native engine routes keep their existing provider-side behavior.
+func unsupportedMultiTurnToolModel(req chatRequest, catalogued func(string) bool) (int, string, string) {
+	if req.poolID != "" || (req.engineClass != "" && req.engineClass != engineClassNative) {
+		return 0, "", ""
+	}
+	if spec018MultiTurnProfileModel(req.Model) || !hasMultiTurnToolData(req.Messages) {
+		return 0, "", ""
+	}
+	if catalogued == nil || !catalogued(req.Model) {
+		return 0, "", ""
+	}
+	return http.StatusBadRequest, "unsupported_modelID_for_multi_turn", "Model does not support multi-turn tool history rendering"
+}
+
+// spec018MultiTurnProfileModel mirrors the SPEC-018 §3.1/§3.8 modelID
+// predicates that have a multi-turn prompt-template profile.
+func spec018MultiTurnProfileModel(model string) bool {
+	lower := strings.ToLower(model)
+	return strings.Contains(lower, "qwen2.5") || strings.Contains(lower, "qwen3") || strings.Contains(lower, "llama-3.3")
+}
+
+func hasMultiTurnToolData(messages []chatMessage) bool {
+	for _, m := range messages {
+		if m.Role == "tool" {
+			return true
+		}
+		toolCalls := bytes.TrimSpace(m.ToolCalls)
+		if m.Role == "assistant" && len(toolCalls) > 0 && string(toolCalls) != "null" {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeSystemUserContent(raw json.RawMessage) (json.RawMessage, bool, int, string, string) {

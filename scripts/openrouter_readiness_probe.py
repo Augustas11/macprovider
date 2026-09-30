@@ -28,7 +28,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 
-DEFAULT_MODEL = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+DEFAULT_MODEL = "mlx-community/Qwen3.6-35B-A3B-4bit"
 DEFAULT_PROMPT = "OpenRouter provider readiness smoke. Reply with OK."
 # Benchmark/saturation need enough completion tokens that decode time, not the
 # one-token "OK" stop, dominates generated-token throughput. Llama 3B 4bit on
@@ -87,6 +87,11 @@ CATALOG_OPENROUTER_ROWS = (
     ("qwen/qwen3.8-27b", "mlx-community/Qwen3.8-27B-4bit", "qwen/qwen3.8-27b", False),
     ("z-ai/glm-4.5-air", "mlx-community/GLM-4.5-Air-4bit", "z-ai/glm-4.5-air", False),
 )
+# Rows the gateway publishes on /v1/openrouter/models (mirrors
+# openRouterListings in phase5-gateway/internal/router/openrouter_models.go,
+# SPEC-006 §5.3.2). Live checks require these rows; other catalog rows are
+# coverage evidence only.
+OPENROUTER_LISTED_MODEL_IDS = ("mlx-community/Qwen3.6-35B-A3B-4bit",)
 DEFAULT_CATALOG_PATH = Path(__file__).resolve().parents[1] / "phase3-binary/catalog/autotune/autotune-candidates.json"
 
 
@@ -109,6 +114,12 @@ EXPECTED_OPENROUTER_SLUGS = _expected_openrouter_slugs()
 
 def catalog_paid_model_ids() -> tuple[str, ...]:
     return tuple(model_id for _catalog_key, model_id, _slug, _dual_free in CATALOG_OPENROUTER_ROWS)
+
+
+def model_has_free_alias(model: str) -> bool:
+    """True when the paid row's pinned listing declares a dual-free SKU."""
+    paid = resolve_probe_model(model)
+    return any(model_id == paid and dual_free for _catalog_key, model_id, _slug, dual_free in CATALOG_OPENROUTER_ROWS)
 
 
 def resolve_probe_model(model: str) -> str:
@@ -400,6 +411,26 @@ def validate_supported_parameters(params: dict, model_id: str) -> None:
     stream = params.get("stream")
     if not isinstance(stream, dict) or stream.get("type") != "boolean":
         raise ProbeError(f"{model_id} stream supported parameter must be a boolean descriptor")
+    for name in ("tools", "structured_outputs"):
+        if name in params and (not isinstance(params[name], dict) or params[name] != {"type": "boolean"}):
+            raise ProbeError(f"{model_id} {name} supported parameter must be a boolean descriptor")
+    for name in ("tool_choice", "response_format"):
+        if name not in params:
+            continue
+        param = params[name]
+        values = param.get("values") if isinstance(param, dict) else None
+        if (
+            not isinstance(param, dict)
+            or param.get("type") != "enum"
+            or not isinstance(values, list)
+            or not values
+            or not all(isinstance(value, str) and value for value in values)
+        ):
+            raise ProbeError(f"{model_id} {name} supported parameter must be an enum descriptor with string values")
+    if ("tool_choice" in params) != ("tools" in params):
+        raise ProbeError(f"{model_id} tools and tool_choice must be declared together")
+    if ("response_format" in params) != ("structured_outputs" in params):
+        raise ProbeError(f"{model_id} response_format and structured_outputs must be declared together")
 
 
 def find_forbidden_key(value: object, path: str = "$") -> str | None:
@@ -469,6 +500,7 @@ def catalog_coverage(by_id: dict) -> dict:
         "catalog_listed_ids": listed,
         "catalog_unlisted_ids": unlisted,
         "catalog_listed_rows": len(listed),
+        "openrouter_missing_listed_ids": [model_id for model_id in OPENROUTER_LISTED_MODEL_IDS if model_id not in by_id],
     }
 
 
@@ -574,10 +606,10 @@ def check_models_document(
     if require_catalog is None:
         require_catalog = True if require_free_alias else False
     if require_catalog:
-        missing_catalog = coverage.get("catalog_unlisted_ids") or []
-        if missing_catalog:
-            raise ProbeError(f"models document missing catalog rows: {missing_catalog}")
-    if require_free_alias:
+        missing_listed = coverage.get("openrouter_missing_listed_ids") or []
+        if missing_listed:
+            raise ProbeError(f"models document missing listed rows: {missing_listed}")
+    if require_free_alias and model_has_free_alias(expected_model):
         free_id = expected_free_model_id(expected_model)
         free = by_id.get(free_id)
         if free is None:
@@ -604,7 +636,11 @@ def check_model_capacity_against_pool(models_check: dict, pool_check: dict, expe
         raise ProbeError("models check missing normalized capacity evidence")
     free_id = expected_free_model_id(expected_model)
     paid = capacities.get(expected_model)
-    free = capacities.get(free_id)
+    if model_has_free_alias(expected_model):
+        free = capacities.get(free_id)
+    else:
+        free_id = ""
+        free = {"root": {"concurrency": 0, "request": 0}, "input": {"prompt": 0}, "output": {"completion": 0}}
     if not isinstance(paid, dict) or not isinstance(free, dict):
         raise ProbeError("models check missing paid/free capacity evidence")
     slots_total = pool_check.get("matching_slots_total") if isinstance(pool_check, dict) else None
@@ -1740,6 +1776,7 @@ def check_wholesale_statement_once(
             raise ProbeError(f"paid SKU line item {expected_model} must declare is_free=false")
         if expected_paid_line["request_count"] < 1 or expected_paid_line["gross_credits"] < 1 or expected_paid_line["usd_micro"] < 1:
             raise SettlementLagError(f"paid SKU line item {expected_model} must include settled billable usage")
+    if expected_model and require_free_line:
         if expected_free_line is None:
             raise SettlementLagError(f"filing-mode wholesale statement must include expected free SKU line item {expected_free_id}")
         if expected_free_line["is_free"] is not True:
@@ -2015,7 +2052,7 @@ def main(argv: list[str]) -> int:
         ):
             report["checks"]["api_key"] = {"ok": False, "error": token_error}
             report["checks"]["chat"] = {"ok": False, "error": token_error}
-            if args.filing_mode:
+            if args.filing_mode and model_has_free_alias(args.model):
                 report["checks"]["chat_free"] = {"ok": False, "error": token_error}
             if args.catalog_chat:
                 report["checks"]["catalog_chat"] = {"ok": False, "error": token_error}
@@ -2028,7 +2065,7 @@ def main(argv: list[str]) -> int:
                 raise ProbeError(token_error)
         if token:
             record_check("chat", lambda: check_chat(args.base_url, token, args.model, args.max_tokens))
-            if args.filing_mode:
+            if args.filing_mode and model_has_free_alias(args.model):
                 record_check("chat_free", lambda: check_chat(args.base_url, token, expected_free_model_id(args.model), args.max_tokens))
             if args.catalog_chat:
                 record_check(
@@ -2099,7 +2136,7 @@ def main(argv: list[str]) -> int:
             for name in ("chat", "benchmark", "saturation"):
                 if name not in report["checks"]:
                     report["checks"][name] = {"skipped": "missing API key"}
-            if args.filing_mode and "chat_free" not in report["checks"]:
+            if args.filing_mode and model_has_free_alias(args.model) and "chat_free" not in report["checks"]:
                 report["checks"]["chat_free"] = {"skipped": "missing API key"}
             if load_ladder_concurrencies and "load_ladder" not in report["checks"]:
                 report["checks"]["load_ladder"] = {"skipped": "missing API key"}
@@ -2151,7 +2188,7 @@ def main(argv: list[str]) -> int:
                     operator_token,
                     args.statement_account_id,
                     args.statement_period,
-                    args.filing_mode,
+                    args.filing_mode and model_has_free_alias(args.model),
                     args.model if args.filing_mode else "",
                     attempts=max(args.wholesale_statement_attempts, 3 if args.diagnostic_mode else 1),
                     wait_seconds=args.wholesale_statement_wait_seconds,
