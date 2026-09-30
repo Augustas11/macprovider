@@ -41,9 +41,10 @@ binary the Mac runs.
   in-scope change.
 
 Pearl coordinator/gateway release numbering is independent from the provider
-CLI train. Pearl currently reports runtime `v1.8.206`; failed or superseded
-runtime attempts remain consumed tags. Public provider release `v1.8.207` is
-the current fleet recommendation and must not be reused by either train.
+CLI train. Pearl currently reports runtime `v1.8.208`; failed or superseded
+runtime attempts remain consumed tags. Runtime tag `v1.8.209` is reserved for
+the #1804 Pearl rollout. Public provider release `v1.8.207` is the current fleet
+recommendation and none of those tags may be reused by either train.
 
 ## Current promoted stable
 
@@ -54,6 +55,16 @@ the current fleet recommendation and must not be reused by either train.
 | Coordinator `target_id` / `latest_binary_version` | `1.8.207` |
 | Promotion | Immutable release [v1.8.207](https://github.com/Augustas11/macprovider/releases/tag/v1.8.207), promotion run [36526004611](https://github.com/Augustas11/macprovider/actions/runs/36526004611), final rollout verification run [36529821734](https://github.com/Augustas11/macprovider/actions/runs/36529821734) |
 | Public installer / China mirror | `get.malibu.tech/install.sh` matches the released installer at SHA-256 `8a68f82b254023671715dd45f06895b4a552e35430f3afc97ff3d83c69dccde5`; consumer health resolves `v1.8.207`; `download.malibu.tech/releases/latest.json` points to `v1.8.207` and all 24 mirrored assets were byte-compared with GitHub |
+
+## Next CLI candidate — net changes vs 1.8.207
+
+No candidate has been cut from this table yet. Use the next unused tag after
+the coordinator and CLI train reservations at cut time; `v1.8.209` is reserved
+for the #1804 Pearl runtime and must not be used for a CLI candidate.
+
+| Net change in CLI / Malibu / installer | Status | PR |
+|---|---|---|
+| Continuous-batch rows stay inside the buyer's authenticated reserved-output budget. Gateway reserved-output metadata now flows through coordinator HTTP, clear WebSocket, and Tier-2 dispatch without rewriting the request body or receipt prompt hash; prompt-at-cap and output-overflow failures return terminal buyer 413 responses with no retry, failover, breaker fault, credit, or debit. Hardware campaign used an isolated `--no-join` Studio provider and did not connect a local build to live Malibu. | merged `9eb1553b` 2026-09-30 | #1806 |
 
 ## Shipped CLI 1.8.207 — net changes vs 1.8.123
 
@@ -256,8 +267,8 @@ and silently never matching.
 | Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
 | Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` @ `eb30981c` (BYOM #1576 `cdbb0257` + #1591 + #1590 + #1593); CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag); CLI `v1.8.172` @ `c512d342`; CLI `v1.8.174` @ `0c276ebb`; CLI `v1.8.175` @ `d02798db` |
 | Status | **207 promoted and live.** Pearl `target_id` and `latest_binary_version` are 207; accepted compatibility sets are promoted 207, 117, and 123. Public installer parity, consumer health, mirror byte identity, signed discovery rollout, Studio join, and a bounded real-buyer response are green. |
-| Coordinator tags taken | **v1.8.204**, **v1.8.205** (both applies rolled back) and **v1.8.206** are Pearl runtime releases for #1775 (coordinator train); the next CLI candidate after 203 must use v1.8.207 or later. |
-| Next candidate | None assigned. Start a new row only after the next CLI/Malibu/installer change merges; do not reuse 207. |
+| Coordinator tags taken | **v1.8.204**, **v1.8.205** (both applies rolled back), **v1.8.206**, and live **v1.8.208** are Pearl runtime releases; **v1.8.209** is reserved for the #1804 Pearl rollout. |
+| Next candidate | None cut. The next-candidate table above has started with #1806; choose the next unused tag at cut time and do not reuse 207. |
 | Candidate 202 CB-canary confirmation (2026-09-28) | Isolated Studio loopback serve of the **signed** 202 binary (`--no-join`, ephemeral id, :8092, live :8080/201 untouched) confirmed `qwen/qwen3.6-35b-a3b` **paged-KV attach eligible** (runtime parity `established=true`, cross-row MoE isolation `proven=true`) and a keyless **scheduler-admitted batched 200** with a stable `X-Request-ID` (`event=batching_admitted action=scheduler_admitted`), hash `3fed776d…`. Measured throughput (harness, v1.8.201 same source): 2.86× aggregate vs serial at 8 rows, bit-exact parity. On candidate 202 the qwen3.5/qwen3.8 hybrids fail parity and are excluded; #1776 fixes them only in the deferred successor candidate. Buyer `continuous_batching` was already canary in live config; the 201→202 serving swap (operator-tools/swap-202.sh, 2026-09-28) made 202 the live Studio provider — a3b now served BATCHED (scheduler_admitted) at ~2.86x. |
 | Notable merges after candidate 186 | #1707 (`5ada77e1`, CLI); #1714 (`3abf42a8`, CLI + Malibu); #1706 (`2b352720`, catalog-lane file only — binary unchanged); #1713 (`57686a84`, node-operator UX — shipped in `v1.8.192`); #1742 (`03627cda`, shipped in Studio candidate `v1.8.195`); #1757 (`0197f379`, CB qualification closeout); #1745 (`ddaa551b`, China supply path); #1762 (`95a6563d`, batched prefill); #1658 (`3ec784c69`, Build 1 private staging path); #1753 (`9636a125`, signed provider-release discovery, merged after candidate 201); #1771 (`e29ea2976`, Qwen3.6 MoE paged-KV admission, shipped in candidate 202); #1776 (`38229a8c3`, Qwen3.5/Qwen3.8 exact CB parity, merged after candidate 202); #1785 (`5c09c5c9a`, keep-0 sliding-window paged KV, merged after candidate 202). Coordinator/gateway settlement recovery continued separately through #1728, live in Pearl runtime `v1.8.191`. |
 | Why candidate 186 exists | Prove #1700 final-answer rendering, strict-pinned buyer quality, eight-seat routing, and durable settlement on one signed Studio-only build (soak proof; live seats since reduced to one — see Mac Studio serving canary above). |
