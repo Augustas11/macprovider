@@ -504,7 +504,7 @@
     {
       "spec_id": "SPEC-018",
       "title": "Agentic tool calling (provider-side response synthesis)",
-      "version": "0.2.10",
+      "version": "0.2.11",
       "path": "specs/SPEC-018-agentic-tool-calling.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -2246,6 +2246,29 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "SPEC-018 v0.2.9 Amendment 4 stops serial turns after the first complete valid tool when parallel_tool_calls is omitted or false. Unit tests land in this change; production activation requires a Studio loopback Pi json e2e on a locally built CLI, then a signed CLI cut. Conformance stays pending until that lab evidence is recorded."
+      }
+    },
+    {
+      "requirement_id": "SPEC-018-R005",
+      "spec_id": "SPEC-018",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/buyer/server.go:func unsupportedMultiTurnToolModel",
+        "phase4-coordinator/internal/buyer/server.go:func hasMultiTurnToolData",
+        "phase3-binary/Sources/macprovider-cli/ToolPromptRenderer.swift:enum ToolPromptRenderer"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/multi_turn_test.go:TestUnsupportedMultiTurnToolModelGate",
+        "phase4-coordinator/internal/buyer/multi_turn_test.go:TestMultiTurnGateRejectsAliasBeforeDispatch",
+        "phase4-coordinator/internal/buyer/multi_turn_test.go:TestEmptyAssistantToolCallsRejectedBeforeGate"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "SPEC-018 v0.2.11 clarifies the \u00a73.8 enforcement point: the coordinator rejects multi-turn tool history for catalogued non-family models on global native routing before dispatch, resolving aliases with billing.ModelsEquivalent. Unit and handler tests land in this change; conformance stays pending until the coordinator deploys on Pearl."
       }
     },
     {
@@ -5853,7 +5876,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "OpenRouter schema-2.4 models document (v0.9.40: operator listing set is Qwen3.6-35B-A3B only; tools/tool_choice/response_format/structured_outputs descriptors only for SPEC-018 multi-turn families), wholesale partner chat flags including bounded slot-queue smoothing, immediate same-moment reservation-overflow shedding, gateway 429 capacity shedding, and dual SKU alias ids (\u00a72.2, \u00a75.3.2, \u00a77.8, \u00a717.9). Mapped to new gateway/coordinator/probe tests. Not promoted. Signed journey-result still required."
+        "rationale": "OpenRouter schema-2.4 models document (v0.9.40: operator listing set is Qwen3.6-35B-A3B only; tools/tool_choice descriptors only for SPEC-018 \u00a73.8 multi-turn families, response_format object descriptor and structured_outputs only for SPEC-019 \u00a74 families; probe rejects rows outside the listing set), wholesale partner chat flags including bounded slot-queue smoothing, immediate same-moment reservation-overflow shedding, gateway 429 capacity shedding, and dual SKU alias ids (\u00a72.2, \u00a75.3.2, \u00a77.8, \u00a717.9). Mapped to new gateway/coordinator/probe tests. Not promoted. Signed journey-result still required."
       }
     },
     {

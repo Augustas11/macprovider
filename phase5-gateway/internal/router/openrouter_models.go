@@ -112,12 +112,13 @@ type openRouterOutputModality struct {
 }
 
 type openRouterParameterDescriptor struct {
-	Type     string   `json:"type"`
-	Min      *float64 `json:"min,omitempty"`
-	Max      *float64 `json:"max,omitempty"`
-	Values   []string `json:"values,omitempty"`
-	Unit     string   `json:"unit,omitempty"`
-	MaxItems int      `json:"max_items,omitempty"`
+	Type       string                                   `json:"type"`
+	Min        *float64                                 `json:"min,omitempty"`
+	Max        *float64                                 `json:"max,omitempty"`
+	Values     []string                                 `json:"values,omitempty"`
+	Unit       string                                   `json:"unit,omitempty"`
+	MaxItems   int                                      `json:"max_items,omitempty"`
+	Properties map[string]openRouterParameterDescriptor `json:"properties,omitempty"`
 }
 
 type openRouterTextCostUSD struct {
@@ -365,17 +366,36 @@ func openRouterSupportedParameters(modelID string, maxTokens int) map[string]ope
 		// and "none" is rejected by providers, so only "auto" is declared.
 		params["tools"] = openRouterParameterDescriptor{Type: "boolean"}
 		params["tool_choice"] = openRouterParameterDescriptor{Type: "enum", Values: []string{"auto"}}
-		params["response_format"] = openRouterParameterDescriptor{Type: "enum", Values: []string{"text", "json_object", "json_schema"}}
+	}
+	if openRouterStructuredOutputModel(modelID) {
+		// response_format is an object on the wire, so it is an OpenRouter
+		// object descriptor: its "type" member is the closed SPEC-019 enum
+		// and the json_schema body is not machine-described ("unknown").
+		params["response_format"] = openRouterParameterDescriptor{
+			Type: "object",
+			Properties: map[string]openRouterParameterDescriptor{
+				"type":        {Type: "enum", Values: []string{"text", "json_object", "json_schema"}},
+				"json_schema": {Type: "unknown"},
+			},
+		}
 		params["structured_outputs"] = openRouterParameterDescriptor{Type: "boolean"}
 	}
 	return params
 }
 
 // openRouterToolFamilyModel mirrors the SPEC-018 §3.1/§3.8 modelID predicates
-// that have both a tool-call parser and a multi-turn prompt profile (the same
-// families SPEC-019 renders a schema instruction for). gpt-oss parses Harmony
-// tool calls but has no multi-turn profile, so it is not declared.
+// that have both a tool-call parser and a multi-turn prompt profile. gpt-oss
+// parses Harmony tool calls but has no multi-turn profile, so it is excluded.
 func openRouterToolFamilyModel(modelID string) bool {
+	lower := strings.ToLower(modelID)
+	return strings.Contains(lower, "qwen2.5") || strings.Contains(lower, "qwen3") || strings.Contains(lower, "llama-3.3")
+}
+
+// openRouterStructuredOutputModel mirrors the SPEC-019 §4 family-rendering
+// predicate: only these families have a specified structured-output schema
+// instruction. It is kept separate from the SPEC-018 predicate because the two
+// specs govern them independently, even though the families coincide today.
+func openRouterStructuredOutputModel(modelID string) bool {
 	lower := strings.ToLower(modelID)
 	return strings.Contains(lower, "qwen2.5") || strings.Contains(lower, "qwen3") || strings.Contains(lower, "llama-3.3")
 }

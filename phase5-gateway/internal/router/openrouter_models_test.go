@@ -137,8 +137,15 @@ func TestProjectOpenRouterModelsQwen36Row(t *testing.T) {
 	if got := params["tool_choice"]; got.Type != "enum" || strings.Join(got.Values, ",") != "auto" {
 		t.Fatalf("tool_choice descriptor=%+v", got)
 	}
-	if got := params["response_format"]; got.Type != "enum" || strings.Join(got.Values, ",") != "text,json_object,json_schema" {
-		t.Fatalf("response_format descriptor=%+v", got)
+	rf := params["response_format"]
+	if rf.Type != "object" || len(rf.Values) != 0 || len(rf.Properties) != 2 {
+		t.Fatalf("response_format must be an object descriptor: %+v", rf)
+	}
+	if got := rf.Properties["type"]; got.Type != "enum" || strings.Join(got.Values, ",") != "text,json_object,json_schema" {
+		t.Fatalf("response_format.type descriptor=%+v", got)
+	}
+	if got := rf.Properties["json_schema"]; got.Type != "unknown" || len(got.Values) != 0 || len(got.Properties) != 0 {
+		t.Fatalf("response_format.json_schema descriptor=%+v", got)
 	}
 	if paid.HuggingFaceID != openRouterQwen36A3BID || paid.OpenRouter.Slug != openRouterQwen36A3BSlug {
 		t.Fatalf("identity: hf=%q slug=%q", paid.HuggingFaceID, paid.OpenRouter.Slug)
@@ -152,23 +159,35 @@ func TestProjectOpenRouterModelsQwen36Row(t *testing.T) {
 	if !strings.Contains(string(raw), `"tool_choice":{"type":"enum","values":["auto"]}`) {
 		t.Fatalf("enum descriptor must serialize values: %s", raw)
 	}
+	if !strings.Contains(string(raw), `"response_format":{"type":"object","properties":{"json_schema":{"type":"unknown"},"type":{"type":"enum","values":["text","json_object","json_schema"]}}}`) {
+		t.Fatalf("response_format object descriptor wire shape: %s", raw)
+	}
 }
 
 func TestOpenRouterSupportedParametersGateToolFeaturesBySpec018Family(t *testing.T) {
-	featureKeys := []string{"tools", "tool_choice", "response_format", "structured_outputs"}
-	for _, model := range []string{openRouterQwen36A3BID, "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit", "mlx-community/Llama-3.3-70B-Instruct-4bit"} {
+	toolKeys := []string{"tools", "tool_choice"}
+	structuredKeys := []string{"response_format", "structured_outputs"}
+	family := []string{openRouterQwen36A3BID, "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit", "mlx-community/Llama-3.3-70B-Instruct-4bit"}
+	other := []string{"mlx-community/Llama-3.2-3B-Instruct-4bit", "mlx-community/gpt-oss-20b-MXFP4-Q8", "mlx-community/gemma-4-26b-a4b-it-4bit", "mlx-community/GLM-4.5-Air-4bit"}
+	for _, model := range family {
+		if !openRouterToolFamilyModel(model) || !openRouterStructuredOutputModel(model) {
+			t.Fatalf("%s must match both the SPEC-018 §3.8 and SPEC-019 §4 predicates", model)
+		}
 		params := openRouterSupportedParameters(model, 4096)
-		for _, key := range featureKeys {
+		for _, key := range append(append([]string{}, toolKeys...), structuredKeys...) {
 			if _, ok := params[key]; !ok {
 				t.Fatalf("%s must declare %q: %+v", model, key, params)
 			}
 		}
 	}
-	for _, model := range []string{"mlx-community/Llama-3.2-3B-Instruct-4bit", "mlx-community/gpt-oss-20b-MXFP4-Q8", "mlx-community/gemma-4-26b-a4b-it-4bit", "mlx-community/GLM-4.5-Air-4bit"} {
+	for _, model := range other {
+		if openRouterToolFamilyModel(model) || openRouterStructuredOutputModel(model) {
+			t.Fatalf("%s must match neither predicate", model)
+		}
 		params := openRouterSupportedParameters(model, 4096)
-		for _, key := range featureKeys {
+		for _, key := range append(append([]string{}, toolKeys...), structuredKeys...) {
 			if _, ok := params[key]; ok {
-				t.Fatalf("%s is not a SPEC-018 multi-turn family and must not declare %q: %+v", model, key, params)
+				t.Fatalf("%s must not declare %q: %+v", model, key, params)
 			}
 		}
 		if _, ok := params["max_tokens"]; !ok {

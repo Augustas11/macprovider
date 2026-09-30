@@ -30,10 +30,11 @@ The probe validates:
 
 - OpenRouter schema-2.4-native model rows: typed modalities, modality-owned
   prices and capacity, an honest deployment-region descriptor, any declared
-  datacenters, `compliance.zdr=false`, the listed Qwen3.6 paid row, and
-  well-formed `tools` / `tool_choice` / `response_format` /
-  `structured_outputs` descriptors when declared. A free alias row is checked
-  only for a listing that declares one; Qwen3.6 does not
+  datacenters, `compliance.zdr=false`, and exactly the listed Qwen3.6 paid
+  row: any other row fails. The row must carry exactly the SPEC-006 `tools` /
+  `tool_choice` / `response_format` / `structured_outputs` descriptors, and
+  rows outside the SPEC-018/SPEC-019 families must not declare them. A free
+  alias row is checked only for a listing that declares one; Qwen3.6 does not
 - authenticated non-streaming chat completion content plus `usage`
 - authenticated streaming chat completion chunks plus final `usage`; if the
   stream is shorter than the gateway keepalive tick, the artifact records
@@ -62,8 +63,8 @@ Do not submit the OpenRouter form on a failing soak.
 - Model: `mlx-community/Qwen3.6-35B-A3B-4bit`, paid only, no free SKU
 - OpenRouter catalog slug: `qwen/qwen3.6-35b-a3b`
 - Features declared on the row: `tools`, `tool_choice` (`auto` only),
-  `response_format` (`text`, `json_object`, `json_schema`),
-  `structured_outputs`. `json_schema` is strict-only (SPEC-019): a schema
+  `response_format` (object descriptor whose `type` is `text`, `json_object`
+  or `json_schema`), `structured_outputs`. `json_schema` is strict-only (SPEC-019): a schema
   without `additionalProperties:false` on every object returns HTTP 400.
 
 Submit at [openrouter.ai/providers/apply](https://openrouter.ai/providers/apply)

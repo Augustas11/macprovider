@@ -5,7 +5,8 @@
 
 **Change log v0.9.40 (2026-09-30, OpenRouter Qwen3.6-only listing):**
 - `GET /v1/openrouter/models` publishes the operator-chosen OpenRouter listing set, not every recommendable catalog row. The set is exactly `mlx-community/Qwen3.6-35B-A3B-4bit` (slug `qwen/qwen3.6-35b-a3b`), paid only, with no free alias. This supersedes the v0.9.29 "every live recommendable catalog model" rule. Reason: the operator lists only Qwen3.6-35B-A3B on OpenRouter. Llama 3.2 3B has low demand at its price, and a listed row that cannot serve tool traffic hurts OpenRouter tool routing. Every catalog row stays routable on `POST /v1/chat/completions`.
-- A text output modality MUST declare `tools` (`boolean`), `tool_choice` (`enum` `["auto"]`), `response_format` (`enum` `["text","json_object","json_schema"]`) and `structured_outputs` (`boolean`) only for a row whose modelID matches a SPEC-018 §3.1 family that also has a §3.8 multi-turn profile (`qwen2.5`, `qwen3`, `llama-3.3`). Other rows MUST omit all four. `tool_choice` omits `"required"` because the coordinator rewrites it to `"auto"`, and omits `"none"` because providers reject it.
+- Tool descriptors: a text output modality MUST declare `tools` (`boolean`) and `tool_choice` (`enum` `["auto"]`) only for a row whose modelID matches a SPEC-018 §3.1 family that also has a §3.8 multi-turn profile (`qwen2.5`, `qwen3`, `llama-3.3`). Other rows MUST omit both. `tool_choice` omits `"required"` because the coordinator rewrites it to `"auto"`, and omits `"none"` because providers reject it.
+- Structured-output descriptors: a text output modality MUST declare `structured_outputs` (`boolean`) and `response_format` only for a row whose modelID matches the SPEC-019 §4 family-rendering predicate (today the same `qwen2.5` / `qwen3` / `llama-3.3` substrings; the two predicates are kept separate because SPEC-018 and SPEC-019 govern them independently). Other rows MUST omit both. `response_format` is an object on the wire, so it uses the OpenRouter schema-2.4 `object` descriptor: `{"type":"object","properties":{"type":{"type":"enum","values":["text","json_object","json_schema"]},"json_schema":{"type":"unknown"}}}`. The OpenRouter provider guide defines `object` as "Nested object with per-key descriptors" and `unknown` as accepted but not machine-described. The guide's own example declares `tools` and `structured_outputs` as `boolean`.
 - `response_format.json_schema` stays SPEC-019 strict-only. This change does not relax that.
 - The dual paid/free projection rule stays for a listing that declares a free alias. The current set declares none. `SPEC-006-R010` stays pending.
 
@@ -327,7 +328,7 @@ changing them:
   plus the forwarded `max-age=300` (§2.2, v0.9.36; SPEC-005-R013 I3).
 - `SPEC-006-R009` — demo-token traffic isolation from paid quota (§3.6).
 - `SPEC-006-R010` — OpenRouter schema-2.4 models document (operator listing
-  set, SPEC-018-family tool/structured-output descriptors), wholesale
+  set, SPEC-018 tool and SPEC-019 structured-output descriptors), wholesale
   partner chat flags, dual SKU alias ids (§2.2, §5.3.2, §7.8, §17.9).
 - `SPEC-006-R011` — OpenAI-compat tool_call_id rewrite before coordinator
   validation (§5, v0.9.27).
@@ -1588,7 +1589,13 @@ Document shape (schema 2.4):
             "stream": { "type": "boolean" },
             "tools": { "type": "boolean" },
             "tool_choice": { "type": "enum", "values": ["auto"] },
-            "response_format": { "type": "enum", "values": ["text", "json_object", "json_schema"] },
+            "response_format": {
+              "type": "object",
+              "properties": {
+                "type": { "type": "enum", "values": ["text", "json_object", "json_schema"] },
+                "json_schema": { "type": "unknown" }
+              }
+            },
             "structured_outputs": { "type": "boolean" }
           },
           "pricing": [
@@ -1617,7 +1624,7 @@ Normative rules:
 
 - The document publishes exactly the gateway's OpenRouter listing set (v0.9.40: `mlx-community/Qwen3.6-35B-A3B-4bit` only, paid, no free alias). Catalog rows outside the set MUST NOT appear, even when served.
 - A listing that declares a free alias emits dual rows when that pool id has enough ready-slot capacity to split without double-counting: paid id equals the pool `ModelID`; free id is that string plus `-free` with `is_free: true` and `$0` cost. OpenRouter's catalog `:free` suffix is **their** display form, not the wire id.
-- `supported_parameters` MUST declare `tools`, `tool_choice`, `response_format` and `structured_outputs` only for a row whose modelID matches a SPEC-018 §3.1 family with a §3.8 multi-turn profile (`qwen2.5`, `qwen3`, `llama-3.3`), with the shapes in the example above. Other rows MUST omit all four.
+- `supported_parameters` MUST declare `tools` and `tool_choice` only for a row whose modelID matches a SPEC-018 §3.1 family with a §3.8 multi-turn profile (`qwen2.5`, `qwen3`, `llama-3.3`). It MUST declare `response_format` and `structured_outputs` only for a row matching the SPEC-019 §4 family-rendering predicate. The shapes are exactly those in the example above; other rows MUST omit them.
 - `is_ready` MUST be true only when that pool id currently has at least one free slot on a provider in `ready` state.
 - Modality-owned `pricing[].cost_usd` MUST be decimal per-token strings from the live rate card (`credits_per_mtok × usd_per_million_credits / 1e12`). Missing paid catalog keys, non-positive paid rates, and non-positive/non-finite USD conversion inputs MUST fail the document projection instead of emitting a paid `$0` row. Free rows MUST be `"0"`.
 - Root capacity MUST declare conservative request/minute and concurrency limits from live ready slots, and text modalities MUST declare prompt/completion token-per-minute capacity using a conservative generated-token filing cap rather than the maximum output length. Until the gateway carries coordinator per-provider throughput estimates into this projection, that filing cap is 10 generated tokens/second per ready slot. If multiple rows route to the same backing pool, their advertised per-row capacity MUST be split so the rows do not imply independent full-pool capacity.

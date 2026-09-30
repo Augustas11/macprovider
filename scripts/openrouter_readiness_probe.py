@@ -116,6 +116,41 @@ def catalog_paid_model_ids() -> tuple[str, ...]:
     return tuple(model_id for _catalog_key, model_id, _slug, _dual_free in CATALOG_OPENROUTER_ROWS)
 
 
+# SPEC-006 §5.3.2 feature descriptors. Tool descriptors follow the SPEC-018
+# §3.1/§3.8 multi-turn families; structured-output descriptors follow the
+# SPEC-019 §4 family-rendering predicate. Mirrors openrouter_models.go.
+TOOL_FEATURE_DESCRIPTORS = {
+    "tools": {"type": "boolean"},
+    "tool_choice": {"type": "enum", "values": ["auto"]},
+}
+STRUCTURED_OUTPUT_FEATURE_DESCRIPTORS = {
+    "response_format": {
+        "type": "object",
+        "properties": {
+            "type": {"type": "enum", "values": ["text", "json_object", "json_schema"]},
+            "json_schema": {"type": "unknown"},
+        },
+    },
+    "structured_outputs": {"type": "boolean"},
+}
+
+
+def spec018_tool_family_model(model_id: str) -> bool:
+    lower = model_id.lower()
+    return "qwen2.5" in lower or "qwen3" in lower or "llama-3.3" in lower
+
+
+def spec019_structured_output_model(model_id: str) -> bool:
+    lower = model_id.lower()
+    return "qwen2.5" in lower or "qwen3" in lower or "llama-3.3" in lower
+
+
+def allowed_listing_ids() -> set[str]:
+    allowed = set(OPENROUTER_LISTED_MODEL_IDS)
+    allowed.update(expected_free_model_id(model_id) for model_id in OPENROUTER_LISTED_MODEL_IDS if model_has_free_alias(model_id))
+    return allowed
+
+
 def model_has_free_alias(model: str) -> bool:
     """True when the paid row's pinned listing declares a dual-free SKU."""
     paid = resolve_probe_model(model)
@@ -411,26 +446,17 @@ def validate_supported_parameters(params: dict, model_id: str) -> None:
     stream = params.get("stream")
     if not isinstance(stream, dict) or stream.get("type") != "boolean":
         raise ProbeError(f"{model_id} stream supported parameter must be a boolean descriptor")
-    for name in ("tools", "structured_outputs"):
-        if name in params and (not isinstance(params[name], dict) or params[name] != {"type": "boolean"}):
-            raise ProbeError(f"{model_id} {name} supported parameter must be a boolean descriptor")
-    for name in ("tool_choice", "response_format"):
-        if name not in params:
-            continue
-        param = params[name]
-        values = param.get("values") if isinstance(param, dict) else None
-        if (
-            not isinstance(param, dict)
-            or param.get("type") != "enum"
-            or not isinstance(values, list)
-            or not values
-            or not all(isinstance(value, str) and value for value in values)
-        ):
-            raise ProbeError(f"{model_id} {name} supported parameter must be an enum descriptor with string values")
-    if ("tool_choice" in params) != ("tools" in params):
-        raise ProbeError(f"{model_id} tools and tool_choice must be declared together")
-    if ("response_format" in params) != ("structured_outputs" in params):
-        raise ProbeError(f"{model_id} response_format and structured_outputs must be declared together")
+    expected_features = {}
+    if spec018_tool_family_model(model_id):
+        expected_features.update(TOOL_FEATURE_DESCRIPTORS)
+    if spec019_structured_output_model(model_id):
+        expected_features.update(STRUCTURED_OUTPUT_FEATURE_DESCRIPTORS)
+    for name in (*TOOL_FEATURE_DESCRIPTORS, *STRUCTURED_OUTPUT_FEATURE_DESCRIPTORS):
+        if name in expected_features:
+            if params.get(name) != expected_features[name]:
+                raise ProbeError(f"{model_id} {name} supported parameter must be exactly {expected_features[name]!r}, got {params.get(name)!r}")
+        elif name in params:
+            raise ProbeError(f"{model_id} must not declare {name}: model is outside the SPEC-018/SPEC-019 families")
 
 
 def find_forbidden_key(value: object, path: str = "$") -> str | None:
@@ -501,6 +527,7 @@ def catalog_coverage(by_id: dict) -> dict:
         "catalog_unlisted_ids": unlisted,
         "catalog_listed_rows": len(listed),
         "openrouter_missing_listed_ids": [model_id for model_id in OPENROUTER_LISTED_MODEL_IDS if model_id not in by_id],
+        "openrouter_unlisted_row_ids": sorted(model_id for model_id in by_id if model_id not in allowed_listing_ids()),
     }
 
 
@@ -609,6 +636,9 @@ def check_models_document(
         missing_listed = coverage.get("openrouter_missing_listed_ids") or []
         if missing_listed:
             raise ProbeError(f"models document missing listed rows: {missing_listed}")
+        extra_rows = coverage.get("openrouter_unlisted_row_ids") or []
+        if extra_rows:
+            raise ProbeError(f"models document publishes rows outside the OpenRouter listing set: {extra_rows}")
     if require_free_alias and model_has_free_alias(expected_model):
         free_id = expected_free_model_id(expected_model)
         free = by_id.get(free_id)
