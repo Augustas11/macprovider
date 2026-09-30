@@ -17,6 +17,10 @@ another gate.
 | Tier-2 catalog | `macprovider-tier2-model-catalog-2026-09-25-artifact-hash-correction-v1` |
 | Pricing lane | No post-September-25 rows-only pricing correction is recorded as live in this train. |
 
+Pearl runtime `v1.8.209` was applied through the runtime-only updater on
+2026-09-30. The live catalog symlink remained on
+`published-2026-09-25-artifact-hash-correction-v1`; #1805 was not activated.
+
 ## Pending catalog / pricing rollouts
 
 | Change | Status | Gate |

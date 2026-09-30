@@ -82,11 +82,11 @@ Probed 2026-09-30 (`/healthz`).
 
 | Field | Value |
 |---|---|
-| Coordinator | **v1.8.208** @ `bc276ea5`. Pearl `/healthz` reported `v1.8.208` on 2026-09-30. |
-| Gateway | **v1.8.208** (`gateway.db` schema 15; `coordinator.require_settlement_trailers: true`). The live `api.malibu.tech` nginx carries certbot TLS and `/ws/provider` routes absent from the repo template. **Never run the gateway `deploy-pearl-vps.sh`**; use the signed runtime updater for binary-only releases. |
-| Release | [Pearl runtime v1.8.208](https://github.com/Augustas11/macprovider/releases/tag/v1.8.208), immutable runtime-only prerelease. v1.8.204 and v1.8.205 were signed but rolled back (updater snapshot timeout #1781; gateway schema-15 migration order #1782). |
+| Coordinator | **v1.8.209** @ `5245dc9f`. Applied 2026-09-30 at 10:03Z through the signed runtime updater; public `/healthz` reported `v1.8.209`. |
+| Gateway | **v1.8.209** (`gateway.db` schema 15; `coordinator.require_settlement_trailers: true`). The live `api.malibu.tech` nginx carries certbot TLS and `/ws/provider` routes absent from the repo template. **Never run the gateway `deploy-pearl-vps.sh`**; use the signed runtime updater for binary-only releases. |
+| Release | [Pearl runtime v1.8.209](https://github.com/Augustas11/macprovider/releases/tag/v1.8.209), immutable runtime-only prerelease. The apply preserved the live September 25 catalog; no full deploy followed it. |
 | `recommended_binary_version` | 1.8.207 (CLI train owns this) |
-| Includes | Everything on `main` through `bc276ea5`, headed by #1783 (#1752 operator drain). |
+| Includes | Everything on `main` through `5245dc9f`, including #1804's Qwen3.6 OpenRouter capabilities. |
 | nginx | `/v1/stats/routability` route added on Pearl 2026-09-24 10:24Z, additively and verbatim from `phase4-coordinator/dist` (backups `*.bak-routability-20260924T102404Z`). Pearl's nginx still lags the repo on `/v1/catalog-artifacts`, `/v1/portal/session` and `/v1/provider/malibu-reward-audit`, and carries a hand-deployed `/v1/provider/model-admission/` (BYOM) route the repo lacks, so **do not copy the repo site file over it**. |
 
 Signed prerelease `v1.8.189` at `0ac51afa` exists and is immutable, but it was
@@ -112,7 +112,8 @@ The canary Mac mp-26592d… now runs signed CLI candidate v1.8.195, whose payloa
 
 | Tag | Commit | Head PR |
 |---|---|---|
-| v1.8.208 | `bc276ea5` | #1783 (#1752 operator drain) — **live** |
+| v1.8.209 | `5245dc9f` | #1804 Qwen3.6 OpenRouter capabilities — **live** |
+| v1.8.208 | `bc276ea5` | #1783 (#1752 operator drain) |
 | v1.8.206 | `40ed8752` | #1779 (#1775 money-writer starvation), #1781 (updater snapshot timeout), #1782 (gateway schema-15 upgrade); also carries #1754, #1763, #1769, #1732, #1658 |
 | v1.8.205 | `3ca8e792` | rolled back: gateway schema-15 migration (`no such column: operator_review`) |
 | v1.8.204 | `dfd1586f` | rolled back: updater snapshot integrity_check exceeded 300 s |
@@ -176,16 +177,15 @@ around 2026-10-23. The fix takes effect at the next renewal (Wed 2026-09-30
 16:00 UTC), or earlier with a manual dispatch of
 `renew-autotune-static-feed-signed.yml`.
 
-## Next coordinator release — v1.8.209, net changes vs v1.8.208
+## Next coordinator release — none assigned, net changes vs v1.8.209
 
-Release owner: Augustas11/Codex, 2026-09-30. Tag `v1.8.209` is reserved for a
-signed runtime-only cut from current `main`. Apply it with
-`macprovider-pearl-update`; do not run either full deploy script. That keeps the
-#1805 catalog/pricing descendant inactive until #1807 completes.
+`v1.8.209` was applied through the signed runtime-only updater on 2026-09-30.
+The public model document then returned exactly one paid Qwen3.6 row with the
+#1804 feature descriptors, while the live catalog stayed on the September 25
+release. Start a new row when another coordinator/gateway change merges.
 
 | Net change in coordinator / gateway / Pearl assets | Status | PR |
 |---|---|---|
-| Publish Qwen3.6-only OpenRouter model capabilities, including native multi-turn/tool-history routing gates and the public `/v1/openrouter/models` descriptor. | merged `53f888cd` 2026-09-30; `v1.8.209` runtime-only cut/apply pending | #1804 |
 
 ## Open Pearl actions (not new code)
 
