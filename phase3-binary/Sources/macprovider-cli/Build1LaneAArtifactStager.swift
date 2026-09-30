@@ -225,7 +225,13 @@ struct Build1LaneAArtifactStager {
             do {
                 try resolver.ensureSafeCacheRoot()
                 try resolver.validateNoSymlinkCachePath(of: staged, requireComplete: false)
-                try await resolver.downloader.downloadSnapshot(
+                // SPEC-044 headroom is enforced by requireDiskSpace above for
+                // staging and durable roots. Keep the downloader check active
+                // with the same reserve because URLSession may stage a shard on
+                // a third, smaller temporary volume.
+                var downloader = resolver.downloader
+                downloader.freeSpaceReserveBytes = Self.publicationReserveBytes
+                try await downloader.downloadSnapshot(
                     modelID: authority.modelID,
                     revision: authority.revision,
                     expectedSHA256: authority.hash,
@@ -408,6 +414,9 @@ struct Build1LaneAArtifactStager {
         }
         if let staging = error as? Build1LaneAArtifactStagingError {
             return staging
+        }
+        if case let .insufficientDiskSpace(_, required, available)? = error as? AutotuneRecommendError {
+            return .insufficientDiskSpace(requiredBytes: required, availableBytes: available)
         }
         return .transferFailed(String(describing: error))
     }

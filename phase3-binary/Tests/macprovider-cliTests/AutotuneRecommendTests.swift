@@ -3802,7 +3802,7 @@ final class AutotuneRecommendTests: XCTestCase {
                     httpVersion: nil,
                     headerFields: nil
                 ))
-                return (Data(#"{"siblings":[{"rfilename":"weights.bin"}]}"#.utf8), response)
+                return (Data(#"{"siblings":[{"rfilename":"weights.bin","size":11}]}"#.utf8), response)
             },
             download: { _ in
                 let downloaded = FileManager.default.temporaryDirectory
@@ -4023,7 +4023,7 @@ final class AutotuneRecommendTests: XCTestCase {
 
         let downloader = HuggingFaceSnapshotDownloader(
             fetch: { request in
-                let data = Data(#"{"siblings":[{"rfilename":"weights.bin"}]}"#.utf8)
+                let data = Data(#"{"siblings":[{"rfilename":"weights.bin","size":5}]}"#.utf8)
                 let url = try XCTUnwrap(request.url)
                 let response = try XCTUnwrap(
                     HTTPURLResponse(
@@ -4130,6 +4130,127 @@ final class AutotuneRecommendTests: XCTestCase {
         for line in perModel {
             XCTAssertNotNil(pattern.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)), line)
         }
+    }
+
+    // A catalog model too large for the remaining disk must be diagnosed and
+    // skipped like any other unusable candidate, not end the whole sweep
+    // (which fails install.sh before its retry loop).
+    func testBenchmarksDiagnosesRowsSkippedForInsufficientDiskSpace() async throws {
+        var request = try makeRequest()
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        XCTAssertNotNil(request.candidateCatalog.rows[modelKey])
+        request.benchmarks = [:]
+        var downloader = HuggingFaceSnapshotDownloader(
+            fetch: { request in
+                let response = try XCTUnwrap(HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 200, httpVersion: nil, headerFields: nil))
+                return (Data(#"{"siblings":[{"rfilename":"model.safetensors","size":17000000000}]}"#.utf8), response)
+            },
+            download: { _ in throw AutotuneRecommendError.invalidStaticJSON("download must not start") }
+        )
+        downloader.availableDiskBytes = { _ in 2_000_000_000 }
+        let benchmarker = AutotuneRecommendationBenchmarker(
+            artifactResolver: CachedModelArtifactResolver(hubRoot: try tempDir(), downloader: downloader),
+            runnerFactory: { throw AutotuneRecommendError.invalidStaticJSON("runner should not start") }
+        )
+
+        let outcomes = try await benchmarker.benchmarks(
+            request: request,
+            targetContext: 4_000,
+            gateTTFTMS: 3_000,
+            replicates: 1,
+            port: 18080
+        )
+
+        XCTAssertNil(outcomes.benchmarks[modelKey])
+        let diagnostic = try XCTUnwrap(outcomes.diagnostics[modelKey])
+        XCTAssertTrue(diagnostic.contains("not enough free disk space"), diagnostic)
+    }
+
+    func testSnapshotDownloaderRejectsMissingAdvertisedSizeBeforeDownload() async throws {
+        let infoURL = URL(string: "https://huggingface.co/api/models/namespace/model/revision/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?blobs=true")!
+        var downloader = HuggingFaceSnapshotDownloader(
+            fetch: { _ in
+                (
+                    Data(#"{"siblings":[{"rfilename":"weights.bin"}]}"#.utf8),
+                    HTTPURLResponse(url: infoURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                )
+            },
+            download: { _ in
+                XCTFail("download must not start without an advertised size")
+                throw AutotuneRecommendError.invalidArtifact("unexpected download")
+            }
+        )
+        downloader.freeSpaceReserveBytes = 0
+
+        do {
+            try await downloader.downloadSnapshot(
+                modelID: "namespace/model",
+                revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                to: try tempDir().appendingPathComponent("snapshot", isDirectory: true)
+            )
+            XCTFail("missing advertised size must fail closed")
+        } catch {
+            XCTAssertTrue(String(describing: error).contains("missing or invalid advertised size"), "\(error)")
+        }
+    }
+
+    func testSnapshotDownloaderRejectsActualBytesAboveAdvertisedSize() async throws {
+        let infoURL = URL(string: "https://huggingface.co/api/models/namespace/model/revision/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?blobs=true")!
+        var downloader = HuggingFaceSnapshotDownloader(
+            fetch: { _ in
+                (
+                    Data(#"{"siblings":[{"rfilename":"weights.bin","size":4}]}"#.utf8),
+                    HTTPURLResponse(url: infoURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                )
+            },
+            download: { _ in
+                let downloaded = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("underreported-\(UUID().uuidString).bin")
+                try Data("12345".utf8).write(to: downloaded)
+                return (downloaded, URLResponse(url: infoURL, mimeType: nil, expectedContentLength: 5, textEncodingName: nil))
+            }
+        )
+        downloader.freeSpaceReserveBytes = 0
+        downloader.availableDiskBytes = { _ in 1_000_000 }
+
+        do {
+            try await downloader.downloadSnapshot(
+                modelID: "namespace/model",
+                revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                to: try tempDir().appendingPathComponent("snapshot", isDirectory: true)
+            )
+            XCTFail("actual bytes above the advertised bound must fail")
+        } catch {
+            XCTAssertTrue(String(describing: error).contains("exceeds allowed size"), "\(error)")
+        }
+    }
+
+    func testDiskAdmissionChecksTemporaryAndDestinationVolumesIndependently() throws {
+        var downloader = HuggingFaceSnapshotDownloader()
+        let temporary = URL(fileURLWithPath: "/tmp/autotune-urlsession-volume", isDirectory: true)
+        let destination = URL(fileURLWithPath: "/Volumes/model-cache/snapshot", isDirectory: true)
+        downloader.freeSpaceReserveBytes = 100
+        downloader.temporaryDownloadDirectory = { temporary }
+        downloader.availableDiskBytes = { url in
+            url.path == temporary.path ? 149 : 10_000
+        }
+
+        XCTAssertThrowsError(
+            try downloader.requireDiskSpace(bytes: [50], modelID: "namespace/model", destination: destination)
+        ) { error in
+            guard case .insufficientDiskSpace(_, let required, let available) = error as? AutotuneRecommendError else {
+                return XCTFail("unexpected error: \(error)")
+            }
+            XCTAssertEqual(required, 150)
+            XCTAssertEqual(available, 149)
+        }
+
+        downloader.availableDiskBytes = { url in
+            url.path == destination.path ? 149 : 10_000
+        }
+        XCTAssertThrowsError(
+            try downloader.requireDiskSpace(bytes: [50], modelID: "namespace/model", destination: destination)
+        )
     }
 
     func testBenchmarkRecommendContinuesWhenUnrelatedRowHasArtifactMismatch() async throws {
@@ -5475,7 +5596,7 @@ final class AutotuneRecommendTests: XCTestCase {
                     await capturedTimeouts.record(request.timeoutInterval)
                     try await Task.sleep(nanoseconds: 300_000_000)
                     return (
-                        Data(#"{"siblings":[{"rfilename":"weights.bin"}]}"#.utf8),
+                        Data(#"{"siblings":[{"rfilename":"weights.bin","size":7}]}"#.utf8),
                         HTTPURLResponse(
                             url: request.url!,
                             statusCode: 200,
