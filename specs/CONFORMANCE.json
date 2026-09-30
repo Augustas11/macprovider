@@ -4549,14 +4549,28 @@
       "requirement_id": "SPEC-038-R006",
       "spec_id": "SPEC-038",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:runOrdinaryDecodeStep",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func continuousBatchMaxOutputTokens"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testAC17AC24MidDecodeAllocatorExtensionFailureFailsOnlyThatRowAndReleasesBlocks",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchToolStructuredRowTests.swift:testImplicitContextBudgetReportsLengthForEveryBatchedRowShape"
+      ],
       "journeys": [],
-      "evidence": [],
+      "evidence": [
+        {
+          "artifact": "commit:275c1cffc17eab0dae3c3f3c6b442fa9af163b5e",
+          "source": "audits/2026-09-30-cb-context-cap/RESULT_studio_r3.md",
+          "captured_at": "2026-09-30",
+          "expires_at": "2026-12-29"
+        }
+      ],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "The lifecycle overlay has request-local terminal and context-budget coverage plus isolated Studio parity evidence; the full packaged shared-forward isolation enable gate remains pending."
       }
     },
     {
@@ -4591,14 +4605,21 @@
       "requirement_id": "SPEC-038-R009",
       "spec_id": "SPEC-038",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:nonisolated static func productionContinuousBatchSchedulerConfiguration",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func failClosedIfNeeded"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testContextLengthExceededMapsToSerialContextError",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testSerialPrefillFallbackFailureIsRequestLocal"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Default-off configuration and request-local fail-closed behavior are covered; complete packaged serial-parity and scheduler-failure fallback evidence remains pending."
       }
     },
     {
@@ -4647,14 +4668,21 @@
       "requirement_id": "SPEC-038-R013",
       "spec_id": "SPEC-038",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:func drain",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:finishQueued"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testAC20AC10DrainRejectsQueuedWorkAndDuplicateSubmitReturnsSameTerminal",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testAC10DrainTimeoutFailsClosedAndLeavesOldWorkOnItsSnapshot"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Drain, duplicate-submit, and old-snapshot fail-closed behavior are locally covered; packaged warm-swap and receipt/model-hash parity evidence remains pending."
       }
     },
     {
@@ -4675,14 +4703,28 @@
       "requirement_id": "SPEC-038-R015",
       "spec_id": "SPEC-038",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:nonisolated static func productionContinuousBatchSchedulerConfiguration",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func continuousBatchMaxOutputTokens"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testProductionSchedulerConfigurationCapsRowsAtServedContext",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testAttachedServePathBoundsRowsByServedContext"
+      ],
       "journeys": [],
-      "evidence": [],
+      "evidence": [
+        {
+          "artifact": "commit:275c1cffc17eab0dae3c3f3c6b442fa9af163b5e",
+          "source": "audits/2026-09-30-cb-context-cap/RESULT_studio_r3.md",
+          "captured_at": "2026-09-30",
+          "expires_at": "2026-12-29"
+        }
+      ],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Isolated Studio context-budget acceptance passed for the tested source/landing patch; the full packaged real-serving economics, isolation, warm-swap, and promotion gate remains pending."
       }
     },
     {
@@ -4750,15 +4792,22 @@
       "requirement_id": "SPEC-039-R002",
       "spec_id": "SPEC-039",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/MacProviderCore/PagedKVEngine.swift:public actor PagedKVBlockAllocator",
+        "phase3-binary/Sources/macprovider-cli/PagedKVCache.swift:final class PagedKVCache"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVCacheStorageTests.swift:testSingleTokenUpdatesMatchConcatenatedHistoryAcrossBlockAndGrowthBoundaries",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVCacheStorageTests.swift:testRecordAndMaterializeAfterInPlaceUpdatesYieldSamePhysicalBlocks",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testAttachedServePathBoundsRowsByServedContext"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "FR-PKV2 (paged storage and block allocator): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+        "rationale": "FR-PKV2 paged storage and block allocation are implemented and locally covered; complete packaged hardware, allocator-pressure, and promotion evidence remains pending."
       }
     },
     {

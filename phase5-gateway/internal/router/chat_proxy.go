@@ -1052,12 +1052,12 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	if resp.StatusCode != http.StatusOK {
-		if coordinatorValidationError(resp.StatusCode, body) {
-			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, window)
+		if isReceiptEligibleProviderErrorResponse(resp, body) {
+			s.passThroughReceiptEligibleProviderError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, maxTokens)
 			return
 		}
-		if isNullUsageProviderError(body) {
-			s.passThroughReceiptEligibleProviderError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, maxTokens)
+		if coordinatorValidationError(resp.StatusCode, body) {
+			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, window)
 			return
 		}
 		completion := completionFromHeaderCapped(resp.Header, maxTokens)
@@ -1199,6 +1199,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			return
 		}
 		body, _ := io.ReadAll(resp.Body)
+		if isReceiptEligibleProviderErrorResponse(resp, body) {
+			s.passThroughReceiptEligibleProviderError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, maxTokens)
+			return
+		}
 		if coordinatorValidationError(resp.StatusCode, body) {
 			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, reservationWindow)
 			return
@@ -2156,6 +2160,27 @@ func isNullUsageProviderError(body []byte) bool {
 	default:
 		return false
 	}
+}
+
+// isReceiptEligibleProviderErrorResponse keeps provider-reached context
+// failures distinct from coordinator preflight rejections. Both use the
+// canonical 413 context_exceeds_capacity envelope, so the error code alone is
+// insufficient. Only the coordinator's provider attribution plus a complete
+// zero-settled finality tuple proves that a provider ran and signed the
+// receipt. Preflight 413s remain on the no-provider path even if an upstream
+// mistakenly attaches a receipt-shaped header.
+func isReceiptEligibleProviderErrorResponse(resp *http.Response, body []byte) bool {
+	if isNullUsageProviderError(body) {
+		return true
+	}
+	if resp == nil || resp.StatusCode != http.StatusRequestEntityTooLarge || openAIErrorCode(body) != "context_exceeds_capacity" {
+		return false
+	}
+	if strings.TrimSpace(resp.Header.Get("X-MacProvider-Provider")) == "" || buyerVisibleReceiptHeader(resp.Header.Get("X-MacProvider-Receipt")) == "" {
+		return false
+	}
+	finality := coordinatorSettlementFinalityFromHeaders(resp.Header)
+	return finality.Action == settlementFinalityRefund && finality.Outcome == "zero_settled"
 }
 
 func contentEncodingSupported(values []string) bool {
