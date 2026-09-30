@@ -26,7 +26,12 @@ final class AutotuneDownloadDiskSpaceTests: XCTestCase {
         try? FileManager.default.removeItem(at: root)
     }
 
-    private func downloader(listing: String, status: Int = 200, log: DownloadLog) -> HuggingFaceSnapshotDownloader {
+    private func downloader(
+        listing: String,
+        payload: Data = Data("weights".utf8),
+        status: Int = 200,
+        log: DownloadLog
+    ) -> HuggingFaceSnapshotDownloader {
         let tempRoot = root!
         return HuggingFaceSnapshotDownloader(
             fetch: { request in
@@ -35,7 +40,7 @@ final class AutotuneDownloadDiskSpaceTests: XCTestCase {
             },
             download: { request in
                 let file = tempRoot.appendingPathComponent("dl-\(UUID().uuidString).tmp")
-                try Data("weights".utf8).write(to: file)
+                try payload.write(to: file)
                 log.record(file)
                 let response = try XCTUnwrap(HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: status, httpVersion: nil, headerFields: nil))
                 return (file, response)
@@ -80,14 +85,38 @@ final class AutotuneDownloadDiskSpaceTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: snapshot.appendingPathComponent("model.safetensors")), "weights")
     }
 
-    func testListingWithoutSizesKeepsPreviousBehaviour() async throws {
+    func testListingWithoutSizesFailsClosedBeforeDownload() async throws {
         let log = DownloadLog()
         var hf = downloader(listing: #"{"siblings":[{"rfilename":"model.safetensors"}]}"#, log: log)
+        hf.availableDiskBytes = { _ in 100_000_000_000 }
+
+        do {
+            try await hf.downloadSnapshot(modelID: "ns/model", revision: "rev", to: snapshot)
+            XCTFail("missing advertised size must fail closed")
+        } catch let AutotuneRecommendError.invalidArtifact(message) {
+            XCTAssertTrue(message.contains("missing or invalid advertised size"), message)
+        }
+
+        XCTAssertTrue(log.all.isEmpty, "no bytes may be fetched without a size bound")
+    }
+
+    func testZeroByteFileIsAccepted() async throws {
+        let log = DownloadLog()
+        var hf = downloader(
+            listing: #"{"siblings":[{"rfilename":"metadata.json","size":0}]}"#,
+            payload: Data(),
+            log: log
+        )
+        hf.freeSpaceReserveBytes = 0
         hf.availableDiskBytes = { _ in 0 }
 
         try await hf.downloadSnapshot(modelID: "ns/model", revision: "rev", to: snapshot)
 
         XCTAssertEqual(log.all.count, 1)
+        let attributes = try FileManager.default.attributesOfItem(
+            atPath: snapshot.appendingPathComponent("metadata.json").path
+        )
+        XCTAssertEqual(attributes[.size] as? NSNumber, 0)
     }
 
     func testNon2xxDownloadRemovesTemporaryFile() async throws {
@@ -105,8 +134,8 @@ final class AutotuneDownloadDiskSpaceTests: XCTestCase {
 }
 
 /// SPEC-044 `models prepare` enforces its own headroom (2 x size + 1 GiB);
-/// the autotune reserve must not apply there, and a disk failure must keep
-/// its insufficient_disk_space classification.
+/// callers may select a matching reserve, and a disk failure must keep its
+/// insufficient_disk_space classification.
 final class AutotuneDiskSpaceClassificationTests: XCTestCase {
     func testDiskSpaceErrorSkipsOnlyTheCandidate() {
         let disk = AutotuneRecommendError.insufficientDiskSpace(modelID: "ns/m", requiredBytes: 2, availableBytes: 1)

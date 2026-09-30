@@ -225,10 +225,12 @@ struct Build1LaneAArtifactStager {
             do {
                 try resolver.ensureSafeCacheRoot()
                 try resolver.validateNoSymlinkCachePath(of: staged, requireComplete: false)
-                // SPEC-044 headroom is enforced by requireDiskSpace above;
-                // the downloader's autotune reserve does not apply here.
+                // SPEC-044 headroom is enforced by requireDiskSpace above for
+                // staging and durable roots. Keep the downloader check active
+                // with the same reserve because URLSession may stage a shard on
+                // a third, smaller temporary volume.
                 var downloader = resolver.downloader
-                downloader.freeSpaceReserveBytes = nil
+                downloader.freeSpaceReserveBytes = Self.publicationReserveBytes
                 try await downloader.downloadSnapshot(
                     modelID: authority.modelID,
                     revision: authority.revision,
