@@ -51,6 +51,26 @@ LEGACY_POLICY_KEYS = frozenset({
     "policy_version", "demand_top_n", "broad_fleet_undercut_fraction",
     "coding_minimum_undercut_fraction", "coding_premium_fraction", "models",
 })
+# SPEC-023 v0.22.0 rule 5a: optional current-policy block that caps
+# `openrouter_listed` mappings strictly below the cheapest competing listing.
+LISTING_UNDERCUT_POLICY_KEY = "openrouter_listing_undercut"
+LISTING_UNDERCUT_KEYS = frozenset({"undercut_fraction", "min_fraction_of_liquid_price", "excluded_provider_names"})
+LISTING_FLOOR_BASIS = "openrouter_active_paid_endpoints_all_providers"
+LISTING_FLOOR_KEYS = frozenset({
+    "basis", "excluded_provider_names", "listed_endpoint_count",
+    "prompt_usd_per_mtok", "prompt_provider", "completion_usd_per_mtok", "completion_provider",
+})
+
+
+def is_current_policy_keys(keys: set[str] | frozenset[str]) -> bool:
+    return CURRENT_POLICY_KEYS <= keys <= CURRENT_POLICY_KEYS | {LISTING_UNDERCUT_POLICY_KEY}
+
+
+def listing_excluded_provider_names(policy: Mapping[str, Any]) -> list[str]:
+    block = policy.get(LISTING_UNDERCUT_POLICY_KEY)
+    if not isinstance(block, dict):
+        return []
+    return sorted(block["excluded_provider_names"])
 MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._~:-]+/[A-Za-z0-9._~:-]+$")
 # OpenRouter's explicit provider variants (for example `model:free`) are
 # valid snapshot identities even when policy leaves them unmapped/blocked.
@@ -709,7 +729,14 @@ def endpoint_price_median(
     return chosen[value_index], chosen
 
 
-def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, min_request_count_30m: int = 1, min_distinct_providers: int = 1) -> dict[str, Any] | None:
+def cheapest_endpoint_pricing(
+    document: Mapping[str, Any],
+    model_id: str,
+    *,
+    min_request_count_30m: int = 1,
+    min_distinct_providers: int = 1,
+    excluded_listing_providers: Sequence[str] = (),
+) -> dict[str, Any] | None:
     require_allowed_keys(document, frozenset({"data"}), f"endpoints response for {model_id}")
     data = document.get("data")
     if not isinstance(data, dict):
@@ -725,6 +752,10 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, min
     if not endpoints:
         return None
     priced: list[tuple[Decimal, Decimal, str, int, str]] = []
+    # Every active paid listing, independent of 30m activity (SPEC-023 rule 5a):
+    # the listing cap must beat each provider a buyer can see, not only liquid ones.
+    listed: list[tuple[Decimal, Decimal, str]] = []
+    excluded_listing = frozenset(excluded_listing_providers)
     for index, endpoint in enumerate(endpoints):
         if not isinstance(endpoint, dict):
             raise SchemaError(f"endpoints response for {model_id}: endpoints[{index}] must be an object")
@@ -746,6 +777,8 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, min
             endpoint_model_id = model_id
         if not isinstance(endpoint_model_id, str) or not MODEL_ID_RE.fullmatch(endpoint_model_id):
             raise SchemaError(f"endpoints response for {model_id}: endpoints[{index}].model_id is invalid")
+        if status == 0 and prompt > 0 and completion > 0 and provider not in excluded_listing:
+            listed.append((prompt, completion, provider))
         activity = endpoint_request_activity(endpoint, model_id, index)
         if activity is None:
             continue
@@ -782,6 +815,19 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, min
         }
         for item in sorted(reps)
     ]
+    listing_floor: dict[str, Any] | None = None
+    if listed:
+        prompt_listing = min(listed, key=lambda item: (item[0], item[2]))
+        completion_listing = min(listed, key=lambda item: (item[1], item[2]))
+        listing_floor = {
+            "basis": LISTING_FLOOR_BASIS,
+            "excluded_provider_names": sorted(excluded_listing),
+            "listed_endpoint_count": len(listed),
+            "prompt_usd_per_mtok": decimal_string(prompt_listing[0] * Decimal("1000000")),
+            "prompt_provider": prompt_listing[2],
+            "completion_usd_per_mtok": decimal_string(completion_listing[1] * Decimal("1000000")),
+            "completion_provider": completion_listing[2],
+        }
     return {
         "input_per_token": decimal_string(prompt),
         "completion_per_token": decimal_string(completion),
@@ -802,6 +848,7 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, min
             "selected_prompt_request_count_last_30m": prompt_activity,
             "eligible_endpoint_liquidity": liquidity_candidates,
         },
+        "listing_floor": listing_floor,
     }
 
 
@@ -810,6 +857,41 @@ def snapshot_digest_payload(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     payload.pop("content_digest", None)
     payload.pop("fetched_at", None)
     return payload
+
+
+def validate_listing_floor(
+    listing: Any,
+    eligible: Sequence[tuple[Decimal, Decimal, str, int, str]],
+    index: int,
+) -> None:
+    """Check a row's recorded cheapest listing against its own eligible quotes.
+
+    The full endpoint list is not retained, so the floor cannot be re-derived;
+    it can still never exceed a retained, non-excluded eligible quote (the
+    eligible set is a subset of the listed set)."""
+    if listing is None:
+        # Every active paid listing belonged to an excluded (self) provider.
+        return
+    if not isinstance(listing, dict) or set(listing) != LISTING_FLOOR_KEYS or listing["basis"] != LISTING_FLOOR_BASIS:
+        raise SchemaError(f"snapshot.rows[{index}].pricing.listing_floor has invalid fields")
+    excluded = listing["excluded_provider_names"]
+    if not isinstance(excluded, list) or excluded != sorted(set(excluded)) or not all(isinstance(name, str) and name for name in excluded):
+        raise SchemaError(f"snapshot.rows[{index}].pricing.listing_floor.excluded_provider_names is invalid")
+    count = listing["listed_endpoint_count"]
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        raise SchemaError(f"snapshot.rows[{index}].pricing.listing_floor.listed_endpoint_count is invalid")
+    for axis in ("prompt", "completion"):
+        provider = listing[f"{axis}_provider"]
+        if not isinstance(provider, str) or not provider or provider in excluded:
+            raise SchemaError(f"snapshot.rows[{index}].pricing.listing_floor.{axis}_provider is invalid")
+        parse_decimal(listing[f"{axis}_usd_per_mtok"], f"snapshot.rows[{index}].pricing.listing_floor.{axis}_usd_per_mtok", allow_zero=False)
+    prompt_floor = Decimal(listing["prompt_usd_per_mtok"])
+    completion_floor = Decimal(listing["completion_usd_per_mtok"])
+    competing = [item for item in eligible if item[2] not in excluded]
+    if len(competing) > count:
+        raise SchemaError(f"snapshot.rows[{index}].pricing.listing_floor.listed_endpoint_count is below the eligible quotes")
+    if any(prompt_floor > item[1] or completion_floor > item[0] for item in competing):
+        raise SchemaError(f"snapshot.rows[{index}].pricing.listing_floor exceeds an eligible listing")
 
 
 def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
@@ -924,16 +1006,15 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
         if pricing_status in {"no_active_priced_endpoint", "no_provider_endpoints"}:
             if pricing is not None:
                 raise SchemaError(f"snapshot.rows[{index}] unavailable pricing must be null")
-        elif pricing is not None:
-            expected_pricing_keys = {"input_per_token", "completion_per_token", "input_per_mtok", "completion_per_mtok", "currency", "benchmark_provider", "liquidity_filter"}
-            if schema_version == LEGACY_SNAPSHOT_SCHEMA_VERSION:
-                expected_pricing_keys.discard("liquidity_filter")
-            if not isinstance(pricing, dict) or set(pricing) != expected_pricing_keys:
-                raise SchemaError(f"snapshot.rows[{index}] has invalid pricing")
         expected_pricing_keys = {"input_per_token", "completion_per_token", "input_per_mtok", "completion_per_mtok", "currency", "benchmark_provider", "liquidity_filter"}
         if schema_version == LEGACY_SNAPSHOT_SCHEMA_VERSION:
             expected_pricing_keys.discard("liquidity_filter")
-        if pricing_status == "active_priced" and (not isinstance(pricing, dict) or set(pricing) != expected_pricing_keys):
+        # `listing_floor` (SPEC-023 v0.22.0 rule 5a) is additive on schema 6:
+        # snapshots fetched before it lack the key and cannot price a listed row.
+        optional_pricing_keys = set() if schema_version == LEGACY_SNAPSHOT_SCHEMA_VERSION else {"listing_floor"}
+        if pricing is not None and (not isinstance(pricing, dict) or not expected_pricing_keys <= set(pricing) <= expected_pricing_keys | optional_pricing_keys):
+            raise SchemaError(f"snapshot.rows[{index}] has invalid pricing")
+        if pricing_status == "active_priced" and not isinstance(pricing, dict):
             raise SchemaError(f"snapshot.rows[{index}] has invalid pricing")
         if pricing_status == "active_priced" and (pricing["currency"] != "USD" or not isinstance(pricing["benchmark_provider"], str) or not pricing["benchmark_provider"]):
             raise SchemaError(f"snapshot.rows[{index}] has invalid pricing provenance")
@@ -1011,6 +1092,8 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
                 raise SchemaError(f"snapshot.rows[{index}] liquidity-filtered completion endpoint is invalid")
             if liquidity["selected_prompt_provider"] != prompt_endpoint[2] or selected_prompt_activity != prompt_endpoint[3]:
                 raise SchemaError(f"snapshot.rows[{index}] liquidity-filtered prompt endpoint is invalid")
+            if "listing_floor" in pricing:
+                validate_listing_floor(pricing["listing_floor"], weighted_candidates, index)
         if not isinstance(row.get("source_metadata"), dict) or set(row["source_metadata"]) != {"ranking_model_permaslug", "catalog_canonical_slug", "catalog_name", "identity_resolution", "endpoint_set_confirmation"}:
             raise SchemaError(f"snapshot.rows[{index}] has invalid source metadata")
         source_metadata = row["source_metadata"]
@@ -1112,6 +1195,7 @@ def build_snapshot(
             source_model_id,
             min_request_count_30m=min_request_count_30m,
             min_distinct_providers=min_distinct_providers,
+            excluded_listing_providers=listing_excluded_provider_names(policy),
         )
         request_id = (
             demand["ranking_model_permaslug"]
@@ -1219,7 +1303,9 @@ def validate_policy_model(model: Mapping[str, Any], index: int) -> None:
     nonempty_https_url(license_info.get("source_url"), f"policy.models[{index}].license.source_url")
     if not isinstance(license_info.get("verification_note"), str) or not license_info["verification_note"].strip():
         raise SchemaError(f"policy.models[{index}].license.verification_note must be non-empty")
-    expected_keys = {"source_model_id", "canonical_model_id", "serving_path", "license", "profile"}
+    expected_keys = {"source_model_id", "canonical_model_id", "serving_path", "license", "profile", "openrouter_listed"}
+    if "openrouter_listed" in model and model["openrouter_listed"] is not True:
+        raise SchemaError(f"policy.models[{index}].openrouter_listed must be true when present")
     if profile["kind"] == "coding_dense":
         expected_keys.add("coding_specialist")
         expected_keys.add("general_purpose_baseline_per_mtok")
@@ -1251,7 +1337,7 @@ def policy_model_index(policy: Mapping[str, Any]) -> dict[str, Mapping[str, Any]
 
 
 def validate_policy(policy: Mapping[str, Any]) -> None:
-    if set(policy) not in (CURRENT_POLICY_KEYS, LEGACY_POLICY_KEYS):
+    if set(policy) != LEGACY_POLICY_KEYS and not is_current_policy_keys(set(policy)):
         raise SchemaError("policy has missing or unexpected fields")
     if not isinstance(policy.get("policy_version"), str) or not policy["policy_version"]:
         raise SchemaError("policy.policy_version must be non-empty")
@@ -1281,7 +1367,7 @@ def validate_policy(policy: Mapping[str, Any]) -> None:
         parsed_cache_hit_fraction = parse_decimal(cache_hit_fraction, "policy cache_hit_fraction", allow_zero=True)
         if not Decimal("0") <= parsed_cache_hit_fraction <= Decimal("1"):
             raise SchemaError("policy cache_hit_fraction must be within 0-1")
-    elif set(policy) == CURRENT_POLICY_KEYS:
+    elif is_current_policy_keys(set(policy)):
         raise SchemaError("policy cache_hit_fraction is required")
     # Minimum per-endpoint 30-minute request activity for an endpoint to enter
     # the priced cohort. Replaces the removed 30-day token-volume liquidity
@@ -1294,7 +1380,24 @@ def validate_policy(policy: Mapping[str, Any]) -> None:
     min_providers = policy.get("min_distinct_providers")
     if isinstance(min_providers, bool) or not isinstance(min_providers, int) or min_providers < 1:
         raise SchemaError("policy min_distinct_providers must be an integer of at least 1")
-    policy_model_index(policy)
+    models = policy_model_index(policy)
+    listing = policy.get(LISTING_UNDERCUT_POLICY_KEY)
+    if listing is not None:
+        if not isinstance(listing, dict) or set(listing) != LISTING_UNDERCUT_KEYS:
+            raise SchemaError("policy openrouter_listing_undercut has missing or unexpected fields")
+        listing_undercut = parse_decimal(listing["undercut_fraction"], "policy openrouter_listing_undercut.undercut_fraction", allow_zero=False)
+        if not Decimal("0.01") <= listing_undercut <= Decimal("0.30"):
+            raise SchemaError("policy openrouter_listing_undercut.undercut_fraction must be within 1%-30%")
+        # Floor against a dumped or manipulated thin listing: the cap may not
+        # take a row below this fraction of the liquid median (fail closed).
+        floor_fraction = parse_decimal(listing["min_fraction_of_liquid_price"], "policy openrouter_listing_undercut.min_fraction_of_liquid_price", allow_zero=False)
+        if not Decimal("0.10") <= floor_fraction <= Decimal("1"):
+            raise SchemaError("policy openrouter_listing_undercut.min_fraction_of_liquid_price must be within 10%-100%")
+        names = listing["excluded_provider_names"]
+        if not isinstance(names, list) or names != sorted(set(names)) or not all(isinstance(name, str) and name.strip() == name and name for name in names):
+            raise SchemaError("policy openrouter_listing_undercut.excluded_provider_names must be a sorted unique list of provider names")
+    if any(model.get("openrouter_listed") for model in models.values()) and listing is None:
+        raise SchemaError("policy maps an openrouter_listed model without openrouter_listing_undercut")
 
 
 def load_json_file(path: Path, description: str) -> dict[str, Any]:
@@ -1420,7 +1523,7 @@ def validate_policy_matches_snapshot_schema(snapshot: Mapping[str, Any], policy:
     if snapshot.get("schema_version") == LEGACY_SNAPSHOT_SCHEMA_VERSION:
         if policy_keys != LEGACY_POLICY_KEYS:
             raise SchemaError("legacy snapshot requires legacy pricing policy")
-    elif policy_keys != CURRENT_POLICY_KEYS:
+    elif not is_current_policy_keys(policy_keys):
         raise SchemaError("current snapshot requires current pricing policy")
 
 
@@ -1555,11 +1658,70 @@ def validate_market_peg_snapshot_requirements(snapshot: Mapping[str, Any], polic
         recorded_quorum = liquidity.get("min_distinct_providers")
         if recorded_quorum != policy_quorum:
             raise SchemaError(f"snapshot.rows[{index}] priced under distinct-provider quorum {recorded_quorum!r} but policy quorum is {policy_quorum!r}; re-fetch under the current policy")
+        listing = (row.get("pricing") or {}).get("listing_floor")
+        if isinstance(listing, dict) and listing.get("excluded_provider_names") != listing_excluded_provider_names(policy):
+            raise SchemaError(f"snapshot.rows[{index}] listing floor excludes {listing.get('excluded_provider_names')!r} but policy excludes {listing_excluded_provider_names(policy)!r}; re-fetch under the current policy")
     ranking_end_date = coverage["ranking_window_end_date"]
     # ranking_window_end_date is date-typed, so reject at two calendar days
     # old to keep the accepted window within SPEC's 48-hour intent.
     if now.date() - parse_ranking_date(ranking_end_date, "snapshot ranking_window_end_date").date() >= timedelta(days=2):
         raise SchemaError("snapshot ranking window is older than 48 hours; market-pegged compute emits no proposals")
+
+
+def apply_listing_cap(
+    market: Mapping[str, Any],
+    policy: Mapping[str, Any],
+    rate_card: Mapping[str, Any],
+    model_id: str,
+    completion: tuple[Decimal, int, Decimal],
+    prompt: tuple[Decimal, int, Decimal],
+) -> tuple[Decimal, int, Decimal, int, list[str]]:
+    """SPEC-023 rule 5a: price an OpenRouter-listed row strictly below the
+    cheapest competing listing on each axis, never below the liquid floor.
+
+    Each axis tuple is (median-minted USD/MTok, its credits, liquid median USD/MTok).
+    Returns (completion USD, completion credits, prompt USD, prompt credits, reasons)."""
+    if "listing_floor" not in market:
+        raise SchemaError(f"openrouter_listed row {model_id!r}: snapshot predates listing_floor; re-fetch under the current engine")
+    listing = market["listing_floor"]
+    config = policy[LISTING_UNDERCUT_POLICY_KEY]
+    excluded = listing_excluded_provider_names(policy)
+    if listing is None:
+        competitors = [
+            candidate["provider_name"]
+            for candidate in market["liquidity_filter"]["eligible_endpoint_liquidity"]
+            if candidate["provider_name"] not in excluded
+        ]
+        if competitors:
+            raise SchemaError(f"openrouter_listed row {model_id!r}: listing_floor is null but competing listings {competitors!r} exist")
+        return completion[0], completion[1], prompt[0], prompt[1], ["OpenRouter listing cap: no competing listing; liquid-median mint applies"]
+    undercut = parse_decimal(config["undercut_fraction"], "policy openrouter_listing_undercut.undercut_fraction", allow_zero=False)
+    floor_fraction = parse_decimal(config["min_fraction_of_liquid_price"], "policy openrouter_listing_undercut.min_fraction_of_liquid_price", allow_zero=False)
+    results: list[tuple[Decimal, int]] = []
+    reasons: list[str] = []
+    for axis, (minted_usd, minted_credits, liquid_usd) in (("completion", completion), ("prompt", prompt)):
+        listed_usd = parse_decimal(listing[f"{axis}_usd_per_mtok"], f"listing_floor.{axis}_usd_per_mtok", allow_zero=False)
+        cap_usd = listed_usd * (Decimal("1") - undercut)
+        # floor() of a value strictly below the listed price stays strictly below it.
+        cap_credits = internal_rate(cap_usd, rate_card, model_id)
+        floor_credits = internal_rate(liquid_usd * floor_fraction, rate_card, model_id)
+        if cap_credits == 0 or cap_credits < floor_credits:
+            raise SchemaError(
+                f"openrouter_listed row {model_id!r}: {axis} listing cap {cap_credits} credits is below "
+                f"{decimal_string(floor_fraction)} of the liquid median ({floor_credits} credits); operator decision required"
+            )
+        if cap_credits < minted_credits:
+            results.append((cap_usd, cap_credits))
+            binding = "binding"
+        else:
+            results.append((minted_usd, minted_credits))
+            binding = "not binding"
+        reasons.append(
+            f"OpenRouter listing cap ({binding}): {axis} {decimal_string(listed_usd)}/MTok cheapest listing "
+            f"({listing[f'{axis}_provider']}) less {decimal_string(undercut)}"
+        )
+    (completion_usd, completion_credits), (prompt_usd, prompt_credits) = results
+    return completion_usd, completion_credits, prompt_usd, prompt_credits, reasons
 
 
 def proposed_price(
@@ -1584,6 +1746,13 @@ def proposed_price(
     prompt_internal = internal_rate(target_prompt, rate_card, model_id)
     if completion_internal == 0 or prompt_internal == 0:
         raise SchemaError(f"rate card row {model_id!r} market credit rounds to zero")
+    listing_reasons: list[str] = []
+    if model.get("openrouter_listed") is True:
+        target, completion_internal, target_prompt, prompt_internal, listing_reasons = apply_listing_cap(
+            market, policy, rate_card, model_id,
+            (target, completion_internal, market_completion),
+            (target_prompt, prompt_internal, market_prompt),
+        )
     cache_hit_fraction = parse_decimal(policy.get("cache_hit_fraction", "0.25"), "policy cache_hit_fraction", allow_zero=True)
     cache_hit_internal = int((prompt_internal * cache_hit_fraction).to_integral_value(rounding=ROUND_FLOOR))
     if cache_hit_internal == 0 and cache_hit_fraction > 0:
@@ -1597,7 +1766,7 @@ def proposed_price(
             target_prompt,
             prompt_internal,
             cache_hit_internal,
-            [f"undercut fraction {decimal_string(undercut)} on OpenRouter liquidity-filtered prompt and completion prices"],
+            [f"undercut fraction {decimal_string(undercut)} on OpenRouter liquidity-filtered prompt and completion prices", *listing_reasons],
         )
     coding_internal_rate = completion_internal
     tps = parse_decimal(profile["projected_tps"], "coding model projected_tps", allow_zero=False)
@@ -1615,6 +1784,7 @@ def proposed_price(
             f"undercut fraction {decimal_string(undercut)} on OpenRouter liquidity-filtered completion price",
             f"provider net hourly USD {decimal_string(provider_hourly)} using rate-card economics row {basis_id}",
             f"prompt undercut fraction {decimal_string(undercut)} on OpenRouter liquidity-filtered prompt price",
+            *listing_reasons,
         ],
     )
 

@@ -1,5 +1,5 @@
 {
-  "policy_version": "openrouter-market-feeds-v0.13.0",
+  "policy_version": "openrouter-market-feeds-v0.22.0",
   "demand_top_n": 50,
   "undercut_fraction": "0.20",
   "min_endpoint_request_count_30m": 30,
@@ -271,7 +271,8 @@
         "active_params_b": "3",
         "residency_gb": "26.5",
         "projected_tps": "35"
-      }
+      },
+      "openrouter_listed": true
     },
     {
       "source_model_id": "qwen/qwen3.5-35b-a3b",
@@ -331,5 +332,12 @@
       }
     }
   ],
-  "cache_hit_fraction": "0.25"
+  "cache_hit_fraction": "0.25",
+  "openrouter_listing_undercut": {
+    "undercut_fraction": "0.05",
+    "min_fraction_of_liquid_price": "0.25",
+    "excluded_provider_names": [
+      "Malibu"
+    ]
+  }
 }

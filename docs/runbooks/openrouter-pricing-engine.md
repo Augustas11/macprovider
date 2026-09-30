@@ -237,6 +237,16 @@ The policy's target rules are from `RESEARCH_227_RATE_CARD_V3_PROMPT.md`:
   general-purpose baseline, is capped to undercut market by at least 10%, and
   must produce at least $0.10/hour at its documented M-Max TPS.
 
+A mapping flagged `openrouter_listed: true` is also capped by SPEC-023 §3.3.2
+rule 5a: each of prompt and completion is at most the cheapest active paid
+OpenRouter listing on that axis (any 30-minute activity, excluding
+`openrouter_listing_undercut.excluded_provider_names`, our own provider name)
+less `openrouter_listing_undercut.undercut_fraction`. The snapshot records that
+listing as `pricing.listing_floor`. If the cap would fall below
+`min_fraction_of_liquid_price` of the liquid median, compute fails closed and
+the operator decides. When Malibu's OpenRouter provider name is assigned,
+confirm it is in `excluded_provider_names` before the next fetch.
+
 The internal proposal rate is a completion-token rate in the existing
 rate-card's integer `completion_rate_per_mtok` encoding. It is derived from
 the reference row's `global_multiplier_ppm`, `provider_share_bps`, and the
