@@ -8,6 +8,12 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
+- **v0.21.4 (2026-09-30)** — Signed continuous-batching policy admits measured
+  mixed cache identities (#1778). The closed `cache_class` enum for
+  `continuous-batching-policy.json` now permits exactly `KVCacheSimple` and
+  `mixed`, matching the current paged-KV runtime identities without weakening
+  tuple digest, signer, provenance, or local-proof gates.
+
 - **v0.21.3 (2026-09-30)** — Signed continuous-batching policy feed (#1778).
   Registers `SPEC-023-R025`: catalog releases now bind
   `continuous-batching-policy.json` (`macprovider.continuous-batching-policy.v1`)
