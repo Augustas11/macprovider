@@ -75,7 +75,7 @@ grep -q 'cwo_override_remote_command' "$TMP/append-helper.sh" || fail "could not
 # --- Fake Pearl --------------------------------------------------------------
 BASE_FILES="demand-rank.json demand-rank.json.sig autotune-candidates.json autotune-candidates.json.sig rate-card.json rate-card.json.sig continuous-batching-policy.json continuous-batching-policy.json.sig tier2-catalog.json release.json trusted-keys.json"
 BOUND_FILES="$BASE_FILES autotune-artifacts.json autotune-artifacts.json.sig"
-COMMITTED_ID="published-2026-09-25-artifact-hash-correction-v1"
+COMMITTED_ID="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["release_id"])' "$REPO_ROOT/phase3-binary/catalog/autotune/release.json")"
 BOUND_ID="published-2026-09-30-artifact-bound-v1"
 # BOUND=1 switches every fixture to the artifact-bound (thirteen-file) release.
 BOUND=0
@@ -90,7 +90,19 @@ assemble() {
       *) cp "$REPO_ROOT/phase3-binary/dist/static/$name" "$1/$name" ;;
     esac
   done
+  unbind_release "$1"
   [ "$BOUND" = 0 ] || bind_release "$1"
+}
+# The committed release is the artifact-feed activation release. The unbound
+# fixture is that release without its artifact pair: its other feeds still
+# reverse to the preceding (unbound) ledger row and keep their real signatures.
+unbind_release() {
+  python3 - "$1/release.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+if m["feeds"].pop("autotune-artifacts.json", None) is not None:
+    open(sys.argv[1], "w").write(json.dumps(m, indent=2, sort_keys=True) + "\n")
+PY
 }
 # The committed release re-cut as artifact-bound release $BOUND_ID: an (empty)
 # artifact feed plus its release.json binding. Unsigned, so the harness stubs
@@ -359,13 +371,13 @@ grep -q '^VERDICT=regression$' "$TMP/out" || fail "override must still report th
 log="$VAR/catalog-window-overrides.jsonl"
 [ -f "$log" ] || fail "override must append to catalog-window-overrides.jsonl"
 [ "$(stat -c %a "$log" 2>/dev/null || stat -f %Lp "$log")" = "600" ] || fail "override log must be 0600"
-python3 - "$log" "$reason" "$INCOMING_DIR" <<'PY' || fail "override record is wrong"
+python3 - "$log" "$reason" "$INCOMING_DIR" "$COMMITTED_ID" <<'PY' || fail "override record is wrong"
 import json, sys
 lines = open(sys.argv[1]).read().splitlines()
 assert len(lines) == 1, lines
 r = json.loads(lines[0])
 assert r["reason"] == sys.argv[2] and r["incoming"] == sys.argv[3], r
-assert r["live"] == {"target": "releases/newer-live", "release_id": "published-2026-09-25-artifact-hash-correction-v1"}, r
+assert r["live"] == {"target": "releases/newer-live", "release_id": sys.argv[4]}, r
 assert r["tag"] == "v9.9.9" and r["commit"].startswith("0123"), r
 assert set(r) == {"ts", "reason", "incoming", "live", "tag", "commit"}, r
 PY

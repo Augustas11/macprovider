@@ -1,26 +1,32 @@
 {
   "feeds": {
+    "autotune-artifacts.json": {
+      "bytes": 12399,
+      "sha256": "da7d292da13e1c413efb64ee77cb2e65afe6aec2fef5151c36fed656b169da8a",
+      "signer_key_id": "streamvc-autotune-static-v4",
+      "version": "published-2026-10-01-artifact-feed-activation-v1"
+    },
     "autotune-candidates.json": {
       "bytes": 15744,
-      "sha256": "f4977d19a0e09f488f9bb9f7f0f34b919aee76d0421b9a2ea4f289ce7c7510ab",
+      "sha256": "559a058f65093b70e1115a152eac4466a4c40eb5854055f61849aea395b0e666",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-09-25-artifact-hash-correction-v1"
+      "version": "published-2026-10-01-artifact-feed-activation-v1"
     },
     "continuous-batching-policy.json": {
       "bytes": 391,
-      "sha256": "f5a1cb54c7c3e290d0930477be8ee731bf8b3dff5e2cb336564f0bf1b317fddd",
+      "sha256": "e676a11c90437690abcce19b8af10ef54041080039c1f50f8a304c5a941dfaa3",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-09-25-artifact-hash-correction-v1"
+      "version": "published-2026-10-01-artifact-feed-activation-v1"
     },
     "demand-rank.json": {
       "bytes": 1995,
-      "sha256": "a60273212954fd07108a044d2093dea740ba494a6fd584e0d6b2b105fa664fa3",
+      "sha256": "f1c2f89c3512fd746a3a2841b6e346eb8f31b0b18faf87aab865abc240bc97ba",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-09-25-artifact-hash-correction-v1"
+      "version": "published-2026-10-01-artifact-feed-activation-v1"
     },
     "rate-card.json": {
       "bytes": 3690,
-      "sha256": "20d62a3d8c934560566ca94a861a6c7a203472e38c7f7d9db85959ae5d661173",
+      "sha256": "fba7c05f73990c9f9ff703092b204c649b8cf9c9354f6190c5799bacfdfd323a",
       "signer_key_id": "streamvc-autotune-static-v4",
       "version": "bab7acfb9d1b40b7bbfc3da90bb40689ab8e7c7f6c53065c07143c1e5ed32bd4"
     },
@@ -31,8 +37,8 @@
       "version": "macprovider-tier2-model-catalog-2026-09-25-artifact-hash-correction-v1"
     }
   },
-  "generated_at": "2026-09-25T00:54:00Z",
+  "generated_at": "2026-10-01T04:20:42Z",
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-09-25-artifact-hash-correction-v1",
+  "release_id": "published-2026-10-01-artifact-feed-activation-v1",
   "schema_version": "macprovider.autotune-release.v1"
 }
