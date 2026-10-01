@@ -574,6 +574,33 @@ func trustPoolAdminSignManifest(args []string, stdout io.Writer) error {
 	return writeTrustPoolEvent(*outPath, e, stdout)
 }
 
+// trustPoolAdminPolicyTermsDigest prints the SPEC-043-R006 policy-terms
+// digest of a manifest_accepted event's core: the value a provider owner signs
+// into a new ProviderPoolDelegationV1 grant as manifest_terms_digest, which
+// stays bound across window/version/chain-only rotation.
+func trustPoolAdminPolicyTermsDigest(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("trust-pool-admin policy-terms-digest", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	manifestPath := fs.String("manifest", "", "manifest_accepted event JSON (sign-manifest --out)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || strings.TrimSpace(*manifestPath) == "" {
+		return fmt.Errorf("policy-terms-digest needs --manifest and no positional arguments")
+	}
+	e, err := readTrustPoolEvent(*manifestPath)
+	if err != nil {
+		return err
+	}
+	terms, err := trustpool.ManifestPolicyTermsDigest(e)
+	if err != nil {
+		return fmt.Errorf("--manifest: %w", err)
+	}
+	_, err = fmt.Fprintf(stdout, "pool_id=%s\nmanifest_version=%d\nmanifest_core_digest=%s\nmanifest_terms_digest=%s\n",
+		e.PoolID, e.ManifestVersion, e.ManifestCoreDigest, terms)
+	return err
+}
+
 func trustPoolCustodyDisclosureHash(path, wantClass string) (string, error) {
 	if !trustPoolCustodyClasses[wantClass] {
 		return "", fmt.Errorf("--custody-class must be one of software, hsm, mpc, other")

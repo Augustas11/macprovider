@@ -237,16 +237,35 @@ restarts `serve` so its session re-evaluates it. Re-submitting the identical
 offer is idempotent: it answers the candidate's current status (and
 re-evaluates the pool binding), not `409 replay_conflict`.
 
-**Delegated (non-creator) members need a delegation for the active core.**
-A `ProviderPoolDelegationV1` grant is bound to the core digest it names
-(SPEC-043-R006), so a delegated member, which every R016 attested member
-is, stops being a pool member when any later core activates: its binding
-stops routing and it never binds under the new core. Once the new core is
-active, the provider owner revokes the old grant (`delegation_revoked`) and
-signs a new grant for the new core's `manifest_core_digest`, then the
-operator appends `member_admitted` with the new `delegation_id`. The
-binding sweep then binds the live offer within seconds; no new offer is
-needed. The coordinator binds the
+**Delegated (non-creator) members re-delegate only on substantive changes.**
+A new `ProviderPoolDelegationV1` grant binds to the core's policy-terms
+digest (`manifest_terms_digest`, SPEC-043-R006). That digest covers every
+core field except `manifest_version`, `prev_manifest_core_hash`,
+`not_before_unix`, and `expires_at_unix`. Get it from the signed manifest
+event with
+`coordinator-cli trust-pool-admin policy-terms-digest --manifest manifest-vN.json`.
+
+- A rotation that only moves the window, the version, and the chain keeps
+  the terms digest. A delegated member stays bound and paid across it with
+  no owner action. This is the normal window-keeper case.
+- Any other change is substantive: a model entry or its price, an R016
+  attestation, the model or runtime allowlist, the settlement mode, any
+  predicate, retention, the split fields, or the signer set version.
+  Under it the member stops routing when the new core activates and never
+  binds under that core, so the owner must re-delegate. Every R016-attested
+  member is a delegated member.
+- To re-delegate, wait until the new core is active. The provider owner
+  revokes the old grant (`delegation_revoked`, naming the old grant's
+  binding) and signs a new grant for the new core's `manifest_terms_digest`.
+  The operator then appends `member_admitted` with the new `delegation_id`.
+  The binding sweep binds the live offer within seconds; no new offer is
+  needed.
+- A legacy grant that names a full `manifest_core_digest` keeps working
+  exactly as before: it binds only that exact core and needs a
+  re-delegation after every rotation, window-only included. Re-delegate it
+  with a terms-bound grant at the next rotation.
+
+The coordinator binds the
 offer from `offer_submitted`, or from the synthetic-probe states it reaches
 first (`sandbox_probe_only`, `network_visible_unpriced`,
 `network_admitted_unsettled`). The binding is pool-scoped `catalog_priced`

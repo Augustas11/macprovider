@@ -6,9 +6,13 @@
 #   b  a future-dated (pre-accepted) core that changes the entry price:
 #      traffic before it activates bills the CURRENT price (never zero);
 #      after it activates (rebind) traffic bills the new price
-#   c  R016 attestation of the non-creator member e2e-prov-5: it binds and is
-#      paid pool_operator_attested; then the attestation is removed by a later
-#      core while its requests are in flight: zero credit; new requests refused
+#   c  R016 attestation of the non-creator member e2e-prov-5: the attestation
+#      changes a policy term, so its S3 grant (bound to the policy-terms digest,
+#      SPEC-043-R006) stops binding until its owner re-delegates; then it binds
+#      and is paid pool_operator_attested; a window-only rotation keeps it bound
+#      and paid with no re-delegation; then the attestation is removed by a
+#      later core while its requests are in flight: zero credit; new requests
+#      refused
 #   d  member revocation in flight (e2e-prov-7, a second creator-owned member): zero credit
 #   e  entry removal in flight (QN): in-flight attempts settle at their
 #      snapshot's rates; new requests refused; binding revoked
@@ -84,8 +88,14 @@ G_RATES=$G_RATES2
 e0="$(max_event)"
 $PM stage Q --attest "$MEMBER_ACCT=llamacpp_loopback" >/dev/null
 v="$(sign_change Q attest)"; wait_window Q "$v"; sleep 5
-# SPEC-043-R006: the delegation is bound to a core digest; the owner
-# re-delegates for the attesting core once it is active (runbook section 4).
+# SPEC-043-R006: the grant binds the policy-terms digest. The attestation (and
+# the S5b price) changed a term, so e2e-prov-5 is not bound under the
+# attesting core until its owner re-delegates (runbook section 4).
+reoffer_5 offer-5-attested-undelegated
+events_since e2e-prov-5 "$e0" >"$EV/attest-undelegated-events.txt"
+grep -q '|catalog_priced|pool_manifest_\(re\)\?bound|pool|' "$EV/attest-undelegated-events.txt" \
+  && result S5-term-change-drops-delegation FAIL "e2e-prov-5 bound under changed terms without re-delegation: $(tail -1 "$EV/attest-undelegated-events.txt")" \
+  || result S5-term-change-drops-delegation PASS "e2e-prov-5 unbound after a term change until re-delegation"
 $PM delegate Q --provider e2e-prov-5 --owner-key $K/owner-prov-5.pem >"$EV/redelegate-5.txt" 2>&1 \
   || result S5-attested-member-redelegate FAIL "$(head -c 300 "$EV/redelegate-5.txt")"
 reoffer_5 offer-5-attested
@@ -98,6 +108,17 @@ run="$(run_id s5att)"
 pool_traffic "$run" Q "$MG" llamacpp "ns=2,st=2" 1
 pool_check S5-attested-member-paid "$run" --expect ns=settled,st=settled --min-settled 4 --pool-model-id "$MG" --rates $G_RATES \
   --usage-source pool_operator_attested --token-source pool_operator_attested --provider e2e-prov-5
+# A window-only rotation (nothing staged changed) keeps the policy terms, so
+# e2e-prov-5 stays bound and paid with no delegation event.
+deleg_events() { csql "SELECT COUNT(*) FROM trustpool_events WHERE pool_id='$Q' AND event_type IN ('delegation_granted','delegation_revoked')"; }
+d0="$(deleg_events)"
+v="$(sign_change Q window)"; wait_window Q "$v"; sleep 5
+run="$(run_id s5win)"
+pool_traffic "$run" Q "$MG" llamacpp "ns=2,st=2" 1
+pool_check S5-window-rotation-keeps-delegated-member "$run" --expect ns=settled,st=settled --min-settled 4 --pool-model-id "$MG" --rates $G_RATES \
+  --usage-source pool_operator_attested --token-source pool_operator_attested --provider e2e-prov-5
+[ "$(deleg_events)" = "$d0" ] && result S5-window-rotation-no-redelegation PASS "v$v activated with no delegation event for e2e-prov-5" \
+  || result S5-window-rotation-no-redelegation FAIL "delegation events changed across a window-only rotation ($d0 -> $(deleg_events))"
 restart_member 5 "$(gargs 5 1000)"       # 20 chunks x 1 s: streams span the boundary
 $PM stage Q --unattest "$MEMBER_ACCT" >/dev/null
 v="$(sign_change Q unattest)"

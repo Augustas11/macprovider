@@ -260,7 +260,7 @@ func setUpPoolModelJourneyPool(t *testing.T, s *scenario, keysDir, poolID, provi
 	if member.genesisWindow > 0 {
 		expiresAt = time.Now().UTC().Add(member.genesisWindow).Truncate(time.Second)
 	}
-	// The next core chains to this file (signNextPoolModelManifest).
+	// The next core chains to this file (signNextR016Core).
 	manifestEvent := filepath.Join(keysDir, "manifest-1.json")
 	runTrustPoolCLI(t, nil, "sign-manifest", "--identity", filepath.Join(keysDir, "pool-identity.json"),
 		"--root-issuer-key", filepath.Join(keysDir, "root-issuer-key.pem"), "--root-issuer-key-id", "journey-root-1",
@@ -274,14 +274,7 @@ func setUpPoolModelJourneyPool(t *testing.T, s *scenario, keysDir, poolID, provi
 		"--out", manifestEvent)
 	runTrustPoolCLI(t, env, "submit-policy", "--operation-id", "journey-manifest-1", "--input", manifestEvent)
 	if member.ownerKey != nil {
-		var manifest struct {
-			ManifestCoreDigest string `json:"manifest_core_digest"`
-		}
-		raw, err := os.ReadFile(manifestEvent)
-		if err != nil || json.Unmarshal(raw, &manifest) != nil {
-			t.Fatalf("read signed manifest: %v", err)
-		}
-		admitDelegatedPoolMember(t, env, member.ownerKey, poolID, creator, providerID, manifest.ManifestCoreDigest)
+		admitDelegatedPoolMember(t, env, member.ownerKey, poolID, creator, providerID, policyTermsDigest(t, manifestEvent))
 	} else {
 		runTrustPoolCLI(t, env, "admit-provider", "--operation-id", "journey-admit-1", "--pool-id", poolID, "--provider-id", providerID)
 	}

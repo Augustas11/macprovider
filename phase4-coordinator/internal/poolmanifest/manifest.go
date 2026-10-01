@@ -30,6 +30,9 @@ const (
 	// policyCoreTagV2 prefixes the SPEC-042-R001 v2 preimage (0.0.32, #1690):
 	// the v1 field list, then runtime_allowlist, then extensions.
 	policyCoreTagV2 = "macprovider/spec042/policy-core/v2"
+	// policyTermsTag prefixes the SPEC-043-R006 policy-terms preimage, the
+	// rotation-invariant digest a provider delegation grant binds to.
+	policyTermsTag = "macprovider/spec043/policy-terms/v1"
 )
 
 // Policy-core encodings (SPEC-042-R001). The zero value is v1, so every core
@@ -294,7 +297,34 @@ func (pc PolicyCore) ValidateAcceptance() error {
 }
 
 // CanonicalBytes returns the SPEC-042-R001 versioned policy-core preimage.
-func (pc PolicyCore) CanonicalBytes() ([]byte, error) {
+func (pc PolicyCore) CanonicalBytes() ([]byte, error) { return pc.encode(false) }
+
+// PolicyTermsBytes returns the SPEC-043-R006 policy-terms preimage: the
+// policy-terms domain tag, the length-prefixed policy-core domain tag of the
+// core's encoding, then the policy-core field list in its order with exactly
+// manifest_version, prev_manifest_core_hash, not_before_unix, and
+// expires_at_unix left out. Every other byte of the core, including every
+// predicate, the signer_set_version, the runtime_allowlist, and each extension
+// body, stays in, so only a window/version/chain rotation keeps the digest.
+func (pc PolicyCore) PolicyTermsBytes() ([]byte, error) { return pc.encode(true) }
+
+// PolicyTermsDigest returns SHA256(PolicyTermsBytes) — the digest a
+// ProviderPoolDelegationV1 grant binds to (SPEC-043-R006), 32 bytes. It is
+// never equal to a manifest_core_digest because the preimages carry
+// different domain tags.
+func (pc PolicyCore) PolicyTermsDigest() ([]byte, error) {
+	b, err := pc.PolicyTermsBytes()
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(b)
+	return sum[:], nil
+}
+
+// encode emits the policy-core preimage, or with terms the policy-terms
+// preimage. Both validate the full core, so a core without a canonical
+// preimage has no terms digest either.
+func (pc PolicyCore) encode(terms bool) ([]byte, error) {
 	if len(pc.PrevManifestCoreHash) != manifestCoreHashLen {
 		return nil, errPrevHashLen
 	}
@@ -317,10 +347,17 @@ func (pc PolicyCore) CanonicalBytes() ([]byte, error) {
 		return nil, errPolicyEncoding
 	}
 	e := &encoder{}
-	e.tag(tag)
+	if terms {
+		e.tag(policyTermsTag)
+		e.str(tag)
+	} else {
+		e.tag(tag)
+	}
 	e.str(pc.PoolID)
-	e.u64(pc.ManifestVersion)
-	e.bytesf(pc.PrevManifestCoreHash)
+	if !terms {
+		e.u64(pc.ManifestVersion)
+		e.bytesf(pc.PrevManifestCoreHash)
+	}
 	e.u64(pc.SignerSetVersion)
 	// list(model_allowlist): count then each element length-prefixed, set-ordered.
 	if uint64(len(allow)) > uint64(^uint32(0)) {
@@ -347,8 +384,10 @@ func (pc PolicyCore) CanonicalBytes() ([]byte, error) {
 	e.str(pc.MetadataVisible)
 	e.str(pc.DowngradePolicy)
 	e.boolean(pc.StickyRoutingAllowed)
-	e.u64(pc.NotBeforeUnix)
-	e.u64(pc.ExpiresAtUnix)
+	if !terms {
+		e.u64(pc.NotBeforeUnix)
+		e.u64(pc.ExpiresAtUnix)
+	}
 	if pc.IsV2() {
 		// runtime_allowlist then extensions, in this order (SPEC-042-R001).
 		e.u32count(len(pc.RuntimeAllowlist))

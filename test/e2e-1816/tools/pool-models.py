@@ -290,20 +290,31 @@ def cmd_delegate(a):
     pid = pool_id(a.name)
     cfg = json.loads((d / "config.json").read_text())
     version = versions(d)[-1]
-    digest = json.loads((d / ("manifest-v%d.json" % version)).read_text())["manifest_core_digest"]
+    # SPEC-043-R006: a new grant binds to the policy-terms digest, which a
+    # window/version/chain-only rotation keeps; coordinator-cli computes it.
+    terms = cli("policy-terms-digest", "--manifest", str(d / ("manifest-v%d.json" % version)))
+    digest = dict(l.split("=", 1) for l in terms.splitlines() if "=" in l)["manifest_terms_digest"]
     pub = subprocess.run(["openssl", "pkey", "-in", a.owner_key, "-pubout", "-outform", "DER"], check=True, capture_output=True).stdout[-32:]
     issued = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(minutes=1)
     env = "candidate"
-    # SPEC-043-R006: a delegation is bound to one core digest, so a member
-    # stays a member under a later core only after its owner revokes the old
-    # grant and delegates for the new core (run once that core is active).
+    # A member stays bound across rotations that keep the policy terms; a
+    # change to any term (entries, prices, attestations, allowlists,
+    # settlement mode, predicates, signer set) drops it until its owner
+    # revokes the old grant and delegates for the new terms (run once that
+    # core is active). A grant for the current terms is already live.
     prior_path = d / ("delegation-%s.json" % a.provider)
     if prior_path.exists():
         prior = json.loads(prior_path.read_text())
+        # Pre-terms state files recorded a core-bound grant.
+        prior_field = prior.get("binding", "manifest_core_digest")
+        prior_digest = prior.get("digest", prior.get("manifest_core_digest"))
+        if prior_field == "manifest_terms_digest" and prior_digest == digest:
+            print("delegation %s for member %s already binds the current policy terms (v%d)" % (prior["delegation_id"], a.provider, version))
+            return
         rfields = {"schema_version": "provider-pool-delegation-revocation-v1", "creator_account_id": CREATOR, "pool_id": pid,
                    "provider_identity": a.provider, "delegation_id": prior["delegation_id"],
                    "operation_id": "e2e-deleg-revoke-op-%s-%s" % (cfg["run_id"], prior["delegation_id"]),
-                   "manifest_core_digest": prior["manifest_core_digest"], "environment_network_id": env,
+                   prior_field: prior_digest, "environment_network_id": env,
                    "coordinator_audience": "macprovider/spec043/coordinator-audience/v1/" + env, "provider_owner_key_id": "e2e-owner-key-1",
                    "provider_owner_key_version": "1", "revoked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                    "revocation_semantics": "owner_revocable"}
@@ -315,14 +326,14 @@ def cmd_delegate(a):
             "operation_id": "e2e-deleg-revoke-%s-%s" % (cfg["run_id"], prior["delegation_id"]), "timestamp_utc": now_iso(),
             "event_type": "delegation_revoked", "pool_id": pid, "creator_account_id": CREATOR, "provider_id": a.provider,
             "delegation_id": prior["delegation_id"], "delegation_operation_id": rfields["operation_id"],
-            "manifest_core_digest": prior["manifest_core_digest"], "environment_network_id": env,
+            prior_field: prior_digest, "environment_network_id": env,
             "coordinator_audience": rfields["coordinator_audience"], "provider_owner_key_id": rfields["provider_owner_key_id"],
             "provider_owner_key_version": rfields["provider_owner_key_version"], "delegation_revoked_at": rfields["revoked_at"],
             "provider_pool_delegation_revocation_signature": base64.b64encode(rsig).decode()})
     fields = {"schema_version": "provider-pool-delegation-v1", "creator_account_id": CREATOR, "pool_id": pid, "provider_identity": a.provider,
               "delegation_id": "e2e-deleg-%s-%s-v%d" % (cfg["run_id"], a.provider, version),
               "operation_id": "e2e-deleg-op-%s-%s-v%d" % (cfg["run_id"], a.provider, version),
-              "manifest_core_digest": digest, "environment_network_id": env,
+              "manifest_terms_digest": digest, "environment_network_id": env,
               "coordinator_audience": "macprovider/spec043/coordinator-audience/v1/" + env, "provider_owner_key_id": "e2e-owner-key-1",
               "provider_owner_key_version": "1", "provider_owner_public_key": base64.b64encode(pub).decode(),
               "issued_at": issued.strftime("%Y-%m-%dT%H:%M:%SZ"), "expires_at": (issued + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -334,7 +345,7 @@ def cmd_delegate(a):
     must("POST", "/admin/trust-pools/events", {
         "operation_id": "e2e-deleg-grant-%s-%s-v%d" % (cfg["run_id"], a.provider, version), "timestamp_utc": now_iso(), "event_type": "delegation_granted",
         "pool_id": pid, "creator_account_id": CREATOR, "provider_id": a.provider, "delegation_id": fields["delegation_id"],
-        "delegation_operation_id": fields["operation_id"], "manifest_core_digest": digest, "environment_network_id": env,
+        "delegation_operation_id": fields["operation_id"], "manifest_terms_digest": digest, "environment_network_id": env,
         "coordinator_audience": fields["coordinator_audience"], "provider_owner_key_id": fields["provider_owner_key_id"],
         "provider_owner_key_version": fields["provider_owner_key_version"], "provider_owner_public_key": fields["provider_owner_public_key"],
         "delegation_issued_at": fields["issued_at"], "delegation_expires_at": fields["expires_at"],
@@ -342,7 +353,7 @@ def cmd_delegate(a):
     must("POST", "/admin/trust-pools/events", {"operation_id": "e2e-deleg-admit-%s-%s-v%d" % (cfg["run_id"], a.provider, version), "timestamp_utc": now_iso(),
                                                "event_type": "member_admitted", "pool_id": pid, "provider_id": a.provider,
                                                "delegation_id": fields["delegation_id"]})
-    prior_path.write_text(json.dumps({"delegation_id": fields["delegation_id"], "manifest_core_digest": digest}))
+    prior_path.write_text(json.dumps({"delegation_id": fields["delegation_id"], "binding": "manifest_terms_digest", "digest": digest}))
     print("delegated member %s admitted under v%d" % (a.provider, version))
 
 

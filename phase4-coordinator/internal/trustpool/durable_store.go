@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -170,6 +171,11 @@ type DurableEvent struct {
 	CoordinatorAudience                       string `json:"coordinator_audience,omitempty"`
 	ProviderPoolDelegationSignature           string `json:"provider_pool_delegation_signature,omitempty"`
 	ProviderPoolDelegationRevocationSignature string `json:"provider_pool_delegation_revocation_signature,omitempty"`
+	// ManifestTermsDigest is the SPEC-043-R006 policy-terms digest a
+	// delegation grant (and its revocation) binds to instead of
+	// ManifestCoreDigest. A delegation event carries exactly one of the two:
+	// a legacy grant names the full core digest and stays bound to that core.
+	ManifestTermsDigest string `json:"manifest_terms_digest,omitempty"`
 }
 
 // Store persists DurableEvent rows in the coordinator SQLite DB.
@@ -2900,14 +2906,17 @@ type frozenLineageKey struct {
 }
 
 type ReconstructedPoolState struct {
-	PoolID                     string
-	CreatorAccountID           string
-	ApprovalRecordID           string
-	Lifecycle                  string
-	LifecycleReason            string
-	MinBinaryVersion           string
-	ManifestVersion            uint64
-	ManifestCoreDigest         string
+	PoolID             string
+	CreatorAccountID   string
+	ApprovalRecordID   string
+	Lifecycle          string
+	LifecycleReason    string
+	MinBinaryVersion   string
+	ManifestVersion    uint64
+	ManifestCoreDigest string
+	// ManifestTermsDigest is the newest accepted core's SPEC-043-R006
+	// policy-terms digest, the value a terms-bound delegation grant names.
+	ManifestTermsDigest        string
 	ManifestSnapshot           string
 	ManifestMinEligibleMembers uint64
 	ManifestMinBinaryVersion   string
@@ -3139,8 +3148,13 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 		if err != nil {
 			return nil, fmt.Errorf("%w: event %d pool_attested_members invalid for pool %q: %v", ErrMalformedDurableEvent, index, e.PoolID, err)
 		}
+		termsDigest, err := core.PolicyTermsDigest()
+		if err != nil {
+			return nil, fmt.Errorf("%w: event %d policy terms digest for pool %q: %v", ErrMalformedDurableEvent, index, e.PoolID, err)
+		}
 		p.ManifestVersion = e.ManifestVersion
 		p.ManifestCoreDigest = e.ManifestCoreDigest
+		p.ManifestTermsDigest = hex.EncodeToString(termsDigest)
 		p.ManifestSnapshot = e.ManifestSnapshot
 		p.ManifestMinEligibleMembers = core.MinEligibleMembers
 		p.ManifestMinBinaryVersion = core.MinBinaryVersion
@@ -3155,6 +3169,7 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 		p.ManifestPolicies = append(p.ManifestPolicies, manifestPolicyWindow{
 			Version:              e.ManifestVersion,
 			CoreDigest:           e.ManifestCoreDigest,
+			TermsDigest:          p.ManifestTermsDigest,
 			NotBeforeUnix:        core.NotBeforeUnix,
 			ExpiresAtUnix:        core.ExpiresAtUnix,
 			MinEligibleMembers:   core.MinEligibleMembers,
@@ -3196,7 +3211,7 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 			if !e.TimestampUTC.Before(rec.ExpiresAt) {
 				return nil, fmt.Errorf("%w: event %d member_admitted delegation expired for pool %q", ErrProviderDelegation, index, e.PoolID)
 			}
-			if rec.ManifestCoreDigest != p.ManifestCoreDigest {
+			if !rec.boundToManifest(p) {
 				return nil, fmt.Errorf("%w: event %d member_admitted delegation manifest mismatch for pool %q", ErrProviderDelegation, index, e.PoolID)
 			}
 			if p.MemberDelegationIDs == nil {
@@ -3677,6 +3692,7 @@ func hasSignedControlProof(e DurableEvent) bool {
 type manifestPolicyWindow struct {
 	Version              uint64
 	CoreDigest           string
+	TermsDigest          string
 	NotBeforeUnix        uint64
 	ExpiresAtUnix        uint64
 	MinEligibleMembers   uint64
@@ -3712,6 +3728,7 @@ func (p *ReconstructedPoolState) activePolicyView(at time.Time) (*ReconstructedP
 		view := *p
 		view.ManifestVersion = w.Version
 		view.ManifestCoreDigest = w.CoreDigest
+		view.ManifestTermsDigest = w.TermsDigest
 		view.ManifestMinEligibleMembers = w.MinEligibleMembers
 		view.ManifestMinBinaryVersion = w.MinBinaryVersion
 		view.ManifestModelAllowlist = w.ModelAllowlist
@@ -3991,7 +4008,7 @@ func validateEvent(e DurableEvent) error {
 		if err := providerid.Validate(e.ProviderID); err != nil {
 			return err
 		}
-		if e.CreatorAccountID == "" || e.ManifestCoreDigest == "" || e.ProviderOwnerKeyID == "" ||
+		if e.CreatorAccountID == "" || !delegationNamesOneManifestBinding(e) || e.ProviderOwnerKeyID == "" ||
 			e.ProviderOwnerKeyVersion == "" || e.ProviderOwnerPublicKey == "" || e.DelegationIssuedAt == "" ||
 			e.DelegationExpiresAt == "" || e.EnvironmentNetworkID == "" || e.CoordinatorAudience == "" ||
 			e.ProviderPoolDelegationSignature == "" {
@@ -4004,7 +4021,7 @@ func validateEvent(e DurableEvent) error {
 		if err := providerid.Validate(e.ProviderID); err != nil {
 			return err
 		}
-		if e.CreatorAccountID == "" || e.ManifestCoreDigest == "" || e.ProviderOwnerKeyID == "" ||
+		if e.CreatorAccountID == "" || !delegationNamesOneManifestBinding(e) || e.ProviderOwnerKeyID == "" ||
 			e.ProviderOwnerKeyVersion == "" || e.DelegationRevokedAt == "" || e.EnvironmentNetworkID == "" ||
 			e.CoordinatorAudience == "" || e.ProviderPoolDelegationRevocationSignature == "" {
 			return fmt.Errorf("delegation_revoked requires signed revocation fields")

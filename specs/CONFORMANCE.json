@@ -1239,7 +1239,7 @@
     {
       "spec_id": "SPEC-042",
       "title": "Pool Control Plane and Trusted-Pool Manifest",
-      "version": "0.0.40",
+      "version": "0.0.41",
       "path": "specs/SPEC-042-pool-control-plane.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1281,7 +1281,7 @@
     {
       "spec_id": "SPEC-043",
       "title": "Trusted Pool Creator Onboarding MVP",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "path": "specs/SPEC-043-trusted-pool-creator-onboarding.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -8292,12 +8292,24 @@
         "phase4-coordinator/internal/trustpool/registry.go:func (r *Registry) Revoke",
         "phase4-coordinator/internal/trustpool/durable_store.go:EventMemberAdmitted",
         "phase4-coordinator/internal/trustpool/durable_store.go:EventMemberRevoked",
-        "phase4-coordinator/internal/trustpool/durable_store.go:func ReconstructEvents"
+        "phase4-coordinator/internal/trustpool/durable_store.go:func ReconstructEvents",
+        "phase4-coordinator/internal/poolmanifest/manifest.go:func (pc PolicyCore) PolicyTermsDigest",
+        "phase4-coordinator/internal/trustpool/provider_delegation.go:func validateDelegationGrantEvent",
+        "phase4-coordinator/internal/trustpool/provider_delegation.go:func (rec delegationRecord) boundToManifest",
+        "phase4-coordinator/internal/trustpool/provider_delegation.go:func ManifestPolicyTermsDigest",
+        "phase4-coordinator/cmd/coordinator-cli/trust_pool_sign.go:func trustPoolAdminPolicyTermsDigest"
       ],
       "tests": [
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_ReconstructsRouteableRegistryAcrossRestart",
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_PausedPoolReplaysButFailsClosedForRouting",
-        "phase4-coordinator/internal/trustpool/spec043_creator_mvp_journey_test.go:TestJourneyTrustedPoolCreatorMVPCandidate"
+        "phase4-coordinator/internal/trustpool/spec043_creator_mvp_journey_test.go:TestJourneyTrustedPoolCreatorMVPCandidate",
+        "phase4-coordinator/internal/poolmanifest/policy_terms_test.go:TestPolicyTermsGoldenVectors",
+        "phase4-coordinator/internal/poolmanifest/policy_terms_test.go:TestPolicyTermsDigestExclusions",
+        "phase4-coordinator/internal/trustpool/provider_delegation_terms_test.go:TestProviderPoolDelegationTermsSurviveWindowOnlyRotation",
+        "phase4-coordinator/internal/trustpool/provider_delegation_terms_test.go:TestProviderPoolDelegationTermsDropOnSubstantiveChange",
+        "phase4-coordinator/internal/trustpool/provider_delegation_terms_test.go:TestProviderPoolDelegationLegacyCoreGrantUnchanged",
+        "phase4-coordinator/cmd/coordinator-cli/trust_pool_sign_test.go:TestTrustPoolSignRoundTripThroughDurableStore",
+        "test/integration/trusted_pool_model_r016_journey_test.go:TestTrustedPoolModelR016WindowOnlyRotationKeepsMember"
       ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
@@ -10389,7 +10401,9 @@
         "phase4-coordinator/internal/buyer/spec1816_pool_model_route_test.go:TestSPEC1816PoolModelFailClosed",
         "phase4-coordinator/internal/trustpool/pool_route_fence_test.go:TestPoolRouteFenceIgnoresFutureDatedAttestationRemoval",
         "phase4-coordinator/internal/billing/spec1816_freeze_r1_settlement_test.go:TestFreezeR1NativePoolAttemptWithDisputedLabelQuarantines",
-        "test/integration/trusted_pool_model_r016_journey_test.go:TestTrustedPoolModelR016NonCreatorMember"
+        "test/integration/trusted_pool_model_r016_journey_test.go:TestTrustedPoolModelR016NonCreatorMember",
+        "test/integration/trusted_pool_model_r016_journey_test.go:TestTrustedPoolModelR016AttestationInLaterCore",
+        "test/integration/trusted_pool_model_r016_journey_test.go:TestTrustedPoolModelR016WindowOnlyRotationKeepsMember"
       ],
       "journeys": [],
       "evidence": [],
