@@ -1987,3 +1987,38 @@ func TestTrustedPoolsProductionActivationAcceptsUnmappedCustodyHash(t *testing.T
 		t.Fatalf("Validate err=%v, want a partially migrated production config to start", err)
 	}
 }
+
+// SPEC-005-R015 / SPEC-042-R016 (#1816): pool-model pricing bounds and the
+// recorded provider owner-account map validate closed.
+func TestTrustedPoolsPoolModelConfigValidation(t *testing.T) {
+	valid := func() Config {
+		cfg := validTestConfig()
+		cfg.TrustedPools.Enabled = true
+		cfg.TrustedPools.RefreshIntervalS = 5
+		cfg.TrustedPools.PoolModelPricingBounds = &TrustedPoolsPoolModelPricingBounds{
+			MinPromptRatePerMtok: 1, MaxPromptRatePerMtok: 10,
+			MaxPromptCacheHitRatePerMtok: 10, MinCompletionRatePerMtok: 1, MaxCompletionRatePerMtok: 10,
+		}
+		cfg.TrustedPools.ProviderOwnerAccountIDs = map[string][]string{"acct-a": {"provider-a"}}
+		return cfg
+	}
+	cfg := valid()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid pool model config: %v", err)
+	}
+	for name, mutate := range map[string]func(*Config){
+		"pools disabled":      func(c *Config) { c.TrustedPools.Enabled = false },
+		"inverted bounds":     func(c *Config) { c.TrustedPools.PoolModelPricingBounds.MinCompletionRatePerMtok = 11 },
+		"negative floor":      func(c *Config) { c.TrustedPools.PoolModelPricingBounds.MinPromptRatePerMtok = -1 },
+		"provider twice":      func(c *Config) { c.TrustedPools.ProviderOwnerAccountIDs["acct-b"] = []string{"provider-a"} },
+		"bad provider id":     func(c *Config) { c.TrustedPools.ProviderOwnerAccountIDs["acct-a"] = []string{"bad provider"} },
+		"non-canonical acct":  func(c *Config) { c.TrustedPools.ProviderOwnerAccountIDs[" acct-c"] = []string{"provider-c"} },
+		"slash in account id": func(c *Config) { c.TrustedPools.ProviderOwnerAccountIDs["acct/c"] = []string{"provider-c"} },
+	} {
+		bad := valid()
+		mutate(&bad)
+		if err := bad.Validate(); err == nil {
+			t.Errorf("%s: invalid pool model config validated", name)
+		}
+	}
+}

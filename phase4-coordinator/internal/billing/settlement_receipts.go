@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/computeintegrity"
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 )
 
@@ -395,7 +396,7 @@ func syncVerifiedReceiptLedgerCreditForAttemptTx(ctx context.Context, db settlem
 	var accountScopeHash string
 	var faultFlag, ledgerUsageSource string
 	var model string
-	var usageJSON string
+	var usageJSON, routeSnapshotJSON string
 	err := db.QueryRowContext(ctx, `
 SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
        lrc.prompt_tokens, lrc.completion_tokens, lrc.estimated_completion_tokens,
@@ -413,7 +414,7 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
          ORDER BY lpis.id DESC
             LIMIT 1
        ) AS config_snapshot_id,
-       sao.usage_canonical_json
+       sao.usage_canonical_json, srs.route_snapshot_json
   FROM ledger_request_credits lrc
   JOIN settlement_receipt_verdicts srv
     ON srv.account_scope_hash = lrc.settlement_account_scope_hash
@@ -450,7 +451,7 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
 		requestID,
 		attemptN,
 		providerID,
-	).Scan(&requestCreditID, &model, &cachedPromptTokens, &ledgerPrompt, &ledgerCompletion, &ledgerEstimate, &promptRate, &completionRate, &multiplier, &share, &ledgerGross, &ledgerProvider, &accountScopeHash, &ledgerUsageSource, &faultFlag, &configSnapshotID, &usageJSON)
+	).Scan(&requestCreditID, &model, &cachedPromptTokens, &ledgerPrompt, &ledgerCompletion, &ledgerEstimate, &promptRate, &completionRate, &multiplier, &share, &ledgerGross, &ledgerProvider, &accountScopeHash, &ledgerUsageSource, &faultFlag, &configSnapshotID, &usageJSON, &routeSnapshotJSON)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return "", nil
@@ -505,6 +506,11 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
 			return reason, nil
 		}
 		rateEntry = RateFor(rewards.RateCard, model)
+		// SPEC-005-R015: a pool-model attempt's cache-hit rate is its route
+		// snapshot's signed entry rate, never a rate-card lookup.
+		if poolmanifest.IsPoolModelID(model) {
+			rateEntry = poolModelRateEntryFromRouteJSON(routeSnapshotJSON)
+		}
 		if rateEntry.PromptCreditsPerMtok != promptRate ||
 			rateEntry.CompletionCreditsPerMtok != completionRate ||
 			snapshotMultiplier != multiplier ||
@@ -945,6 +951,15 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 		ArtifactHashAlgorithm          string `json:"artifact_hash_algorithm"`
 		ArtifactFeedSignerKeyID        string `json:"artifact_feed_signer_key_id"`
 		ArtifactCandidateCatalogSHA256 string `json:"artifact_candidate_catalog_sha256"`
+		// SPEC-022-R013: the pool-manifest source members are json-carried
+		// too and recovered before the recompute; a catalog row has none.
+		ExpectedModelHashSource            string `json:"expected_model_hash_source"`
+		PoolModelID                        string `json:"pool_model_id"`
+		PoolModelPromptRatePerMtok         int64  `json:"pool_model_prompt_rate_per_mtok"`
+		PoolModelPromptCacheHitRatePerMtok int64  `json:"pool_model_prompt_cache_hit_rate_per_mtok"`
+		PoolModelCompletionRatePerMtok     int64  `json:"pool_model_completion_rate_per_mtok"`
+		PoolModelPricingBoundsSHA256       string `json:"pool_model_pricing_bounds_sha256"`
+		PoolMemberAccountID                string `json:"pool_member_account_id"`
 	}
 	if err := json.Unmarshal([]byte(routeSnapshotJSON), &recovered); err != nil {
 		return RouteSnapshot{}, "", fmt.Errorf("settlement route snapshot identity metadata invalid: %w", err)
@@ -969,6 +984,13 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 	r.ArtifactHashAlgorithm = recovered.ArtifactHashAlgorithm
 	r.ArtifactFeedSignerKeyID = recovered.ArtifactFeedSignerKeyID
 	r.ArtifactCandidateCatalogSHA256 = recovered.ArtifactCandidateCatalogSHA256
+	r.ExpectedModelHashSource = recovered.ExpectedModelHashSource
+	r.PoolModelID = recovered.PoolModelID
+	r.PoolModelPromptRatePerMtok = recovered.PoolModelPromptRatePerMtok
+	r.PoolModelPromptCacheHitRatePerMtok = recovered.PoolModelPromptCacheHitRatePerMtok
+	r.PoolModelCompletionRatePerMtok = recovered.PoolModelCompletionRatePerMtok
+	r.PoolModelPricingBoundsSHA256 = recovered.PoolModelPricingBoundsSHA256
+	r.PoolMemberAccountID = recovered.PoolMemberAccountID
 	r.ComputeIntegrityCaptureRequired = computeIntegrityCaptureRequired == 1
 	r.ComputeIntegritySamplingCovered = computeIntegritySamplingCovered == 1
 	if computeIntegrityHardwareDigest.Valid {
@@ -1669,4 +1691,18 @@ func derefString(value *string) string {
 
 func redactedAccountScopeHash(accountScope string) string {
 	return SettlementAccountScopeHash(accountScope)
+}
+
+// poolModelRateEntryFromRouteJSON is the trusted SPEC-005-R015 price a
+// pool_manifest route snapshot recorded. Any other or unreadable snapshot
+// yields a negative sentinel rate that can never match a ledger row, so the
+// caller's rate-contract check fails closed.
+func poolModelRateEntryFromRouteJSON(raw string) RateCardEntry {
+	var route RouteSnapshot
+	if err := json.Unmarshal([]byte(raw), &route); err == nil {
+		if entry, ok := route.PoolModelRateEntry(); ok {
+			return entry
+		}
+	}
+	return RateCardEntry{PromptCreditsPerMtok: -1, CompletionCreditsPerMtok: -1}
 }

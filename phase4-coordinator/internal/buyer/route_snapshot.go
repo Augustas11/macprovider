@@ -102,6 +102,15 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 		}
 		return nil, nil
 	}
+	// SPEC-042-R015 / SPEC-022-R013: a pool-model attempt records its own
+	// pool_manifest snapshot (enforce only); no catalog row is consulted.
+	if b.state != nil && b.state.poolRouteView().poolModelCandidate(provider) {
+		pendingDeadline := settlementCfg.PendingDeadlineSeconds
+		if pendingDeadline <= 0 {
+			pendingDeadline = config.Default().Settlement.PendingDeadlineSeconds
+		}
+		return b.recordPoolModelRouteSnapshot(ctx, providerBody, provider, attemptN, store, routeMode, pendingDeadline)
+	}
 	if len(provider.ReceiptPubkey) == 0 {
 		return skipOrEnforceError("missing provider receipt key")
 	}
@@ -229,6 +238,13 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 		snapshot.RuntimeSource = provider.RuntimeSource
 		snapshot.PoolGeneration = b.state.poolGeneration
 		snapshot.PoolOperatorAccountID = poolView.creatorAccountID
+		// SPEC-042-R016: a non-creator member serving under the creator's
+		// attestation binds its recorded owner account for replay.
+		if !poolView.creatorOwned[provider.ProviderID] {
+			if account, ok := poolView.attestedMemberAccount(provider); ok {
+				snapshot.PoolMemberAccountID = account
+			}
+		}
 	}
 	applyBYOMRouteSnapshotBinding(&snapshot, byomBinding)
 	computeIntegrityRequired, computeIntegrityCovered, computeIntegrityHardwareDigest, err := computeIntegrityRouteBinding(provider, routeMode)

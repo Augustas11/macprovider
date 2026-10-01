@@ -1285,6 +1285,27 @@ type TrustedPoolsConfig struct {
 	CreatorAdminProviderDelegatedIDs map[string][]string                        `yaml:"creator_admin_provider_delegated_ids"`
 	CreatorAdminBuyerAccountIDs      map[string][]string                        `yaml:"creator_admin_buyer_account_ids"`
 	ProviderOwnerPublicKeys          map[string]string                          `yaml:"provider_owner_public_keys"`
+	// PoolModelPricingBounds are the inclusive per-rate floors and ceilings
+	// every SPEC-042-R015 pool model entry price must sit inside
+	// (SPEC-005-R015). Unset fails every pool model entry closed at manifest
+	// acceptance and route reservation.
+	PoolModelPricingBounds *TrustedPoolsPoolModelPricingBounds `yaml:"pool_model_pricing_bounds"`
+	// ProviderOwnerAccountIDs records the SPEC-003 owner account of each
+	// provider id (account -> provider ids). It is the only input the
+	// SPEC-042-R016 creator member attestation is matched against; a
+	// provider listed under two accounts is rejected.
+	ProviderOwnerAccountIDs map[string][]string `yaml:"provider_owner_account_ids"`
+}
+
+// TrustedPoolsPoolModelPricingBounds is the closed SPEC-005-R015 pool-model
+// pricing bounds object, in SPEC-005 credits per million tokens.
+type TrustedPoolsPoolModelPricingBounds struct {
+	MinPromptRatePerMtok         int64 `yaml:"min_prompt_rate_per_mtok"`
+	MaxPromptRatePerMtok         int64 `yaml:"max_prompt_rate_per_mtok"`
+	MinPromptCacheHitRatePerMtok int64 `yaml:"min_prompt_cache_hit_rate_per_mtok"`
+	MaxPromptCacheHitRatePerMtok int64 `yaml:"max_prompt_cache_hit_rate_per_mtok"`
+	MinCompletionRatePerMtok     int64 `yaml:"min_completion_rate_per_mtok"`
+	MaxCompletionRatePerMtok     int64 `yaml:"max_completion_rate_per_mtok"`
 }
 
 // RejectionTimingFloor returns the active pool-rejection timing floor.
@@ -2527,6 +2548,9 @@ func (c Config) Validate() error {
 	if err := validateTrustedPoolsProviderOwnerPublicKeys(c.TrustedPools); err != nil {
 		return err
 	}
+	if err := validateTrustedPoolsPoolModelConfig(c.TrustedPools); err != nil {
+		return err
+	}
 	if err := c.validateCompatibilitySet(); err != nil {
 		return err
 	}
@@ -3274,6 +3298,49 @@ func validateTrustedPoolsCreatorAdminProviderDelegatedIDs(c TrustedPoolsConfig) 
 				return fmt.Errorf("trusted_pools.creator_admin_provider_delegated_ids.%s must contain unique provider ids", creatorID)
 			}
 			seen[providerID] = true
+		}
+	}
+	return nil
+}
+
+// validateTrustedPoolsPoolModelConfig checks the SPEC-005-R015 bounds (each
+// floor non-negative and at most its ceiling) and the SPEC-042-R016 owner
+// account map (canonical account and provider ids, a provider under one
+// account only).
+func validateTrustedPoolsPoolModelConfig(c TrustedPoolsConfig) error {
+	if (c.PoolModelPricingBounds != nil || len(c.ProviderOwnerAccountIDs) > 0) && !c.Enabled {
+		return fmt.Errorf("trusted_pools.pool_model_pricing_bounds and provider_owner_account_ids require trusted_pools.enabled=true")
+	}
+	if b := c.PoolModelPricingBounds; b != nil {
+		for _, pair := range []struct {
+			name     string
+			min, max int64
+		}{
+			{"prompt_rate_per_mtok", b.MinPromptRatePerMtok, b.MaxPromptRatePerMtok},
+			{"prompt_cache_hit_rate_per_mtok", b.MinPromptCacheHitRatePerMtok, b.MaxPromptCacheHitRatePerMtok},
+			{"completion_rate_per_mtok", b.MinCompletionRatePerMtok, b.MaxCompletionRatePerMtok},
+		} {
+			if pair.min < 0 || pair.min > pair.max {
+				return fmt.Errorf("trusted_pools.pool_model_pricing_bounds %s needs 0 <= min <= max", pair.name)
+			}
+		}
+	}
+	owner := make(map[string]string)
+	for account, providerIDs := range c.ProviderOwnerAccountIDs {
+		if account == "" || strings.TrimSpace(account) != account || strings.Contains(account, "/") {
+			return fmt.Errorf("trusted_pools.provider_owner_account_ids contains invalid account id %q", account)
+		}
+		for _, providerID := range providerIDs {
+			if strings.TrimSpace(providerID) != providerID {
+				return fmt.Errorf("trusted_pools.provider_owner_account_ids.%s contains non-canonical provider_id %q", account, providerID)
+			}
+			if err := ValidateProviderID(providerID); err != nil {
+				return fmt.Errorf("trusted_pools.provider_owner_account_ids.%s contains invalid provider_id %q", account, providerID)
+			}
+			if prior, ok := owner[providerID]; ok {
+				return fmt.Errorf("trusted_pools.provider_owner_account_ids lists provider_id %q under %q and %q", providerID, prior, account)
+			}
+			owner[providerID] = account
 		}
 	}
 	return nil

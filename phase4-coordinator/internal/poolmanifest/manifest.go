@@ -122,8 +122,9 @@ type PolicyCore struct {
 	// RuntimeAllowlist is the signed set of external runtime_source values a
 	// v2 core authorizes to serve the pool. Empty means native MLX only.
 	RuntimeAllowlist []string
-	// Extensions is the reserved, versioned v2 extension field. No
-	// extension_id is implemented yet, so an accepted core carries none.
+	// Extensions is the reserved, versioned v2 extension field. The only
+	// implemented ids are pool_model_entries/v1 and pool_attested_members/v1
+	// (SPEC-042-R015/R016); every other id is rejected at acceptance.
 	Extensions []PolicyExtension
 }
 
@@ -265,7 +266,9 @@ func (pc PolicyCore) validateV2Grammar() error {
 // ValidateAcceptance applies the SPEC-042-R001 0.0.32 acceptance rules on top
 // of the grammar: the runtime_allowlist vocabulary is closed, a non-empty
 // allowlist requires settlement mode enforce, and a coordinator rejects every
-// extension_id it does not implement (0.0.32 implements none). Signature
+// extension_id it does not implement. The implemented ids are the SPEC-042
+// R015/R016 pool_model_entries/v1 and pool_attested_members/v1 (#1816), whose
+// bodies must be canonical and pass their closed rules. Signature
 // verification runs it, so no core that fails it is ever accepted or replayed.
 func (pc PolicyCore) ValidateAcceptance() error {
 	if _, err := pc.CanonicalBytes(); err != nil {
@@ -282,10 +285,12 @@ func (pc PolicyCore) ValidateAcceptance() error {
 	if len(pc.RuntimeAllowlist) > 0 && pc.SettlementMode != "enforce" {
 		return errRuntimeAllowlistObserve
 	}
-	if len(pc.Extensions) > 0 {
-		return errExtensionUnknown
+	for _, ext := range pc.Extensions {
+		if ext.ID != ExtensionPoolModelEntriesV1 && ext.ID != ExtensionPoolAttestedMembersV1 {
+			return errExtensionUnknown
+		}
 	}
-	return nil
+	return pc.validatePoolExtensions()
 }
 
 // CanonicalBytes returns the SPEC-042-R001 versioned policy-core preimage.

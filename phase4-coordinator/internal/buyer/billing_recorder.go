@@ -517,6 +517,16 @@ func (b *billingRecorder) recordRow(
 		accountScope := accountScopeForSettlement(b.accountID)
 		settlementMode, settlementVersion := b.settlementPolicyForLedger()
 		poolAttested, poolFence := b.poolOperatorAttestation(ctx, billingStore, stableProviderID, providerRuntimeSource, promptTok, cachedPromptTok, completionTok)
+		// SPEC-005-R015 / SPEC-022-R013: a pool-model attempt is priced from
+		// its recorded snapshot's signed entry rates (never the rate card)
+		// and is billable only behind a verified, fenced pool_manifest route.
+		poolManifestRoute, poolManifestVerified, poolManifestFence := b.poolManifestVerification(ctx, billingStore, stableProviderID, poolAttested, poolFence)
+		if poolManifestRoute != nil {
+			if entry, ok := poolManifestRoute.PoolModelRateEntry(); ok {
+				economics.rateEntry = entry
+			}
+			poolFence = poolManifestFence
+		}
 		billingInput := billing.HotPathInput{
 			RequestID:                    row.RequestID,
 			AttemptN:                     attemptN,
@@ -524,6 +534,8 @@ func (b *billingRecorder) recordRow(
 			ProviderRuntimeSource:        providerRuntimeSource,
 			PoolOperatorAttested:         poolAttested,
 			PoolAttestationFence:         poolFence,
+			PoolManifestRoute:            poolManifestRoute != nil,
+			PoolManifestVerified:         poolManifestVerified,
 			ProviderID:                   stableProviderID,
 			Model:                        row.Model,
 			Status:                       status,
@@ -932,7 +944,11 @@ func (b *billingRecorder) recordSettlementAttemptOutput(ctx context.Context, sto
 		observedInput = *promptObserved
 		observedOutput = *completionObserved
 		usageSource = billing.UsageSourcePoolOperatorAttested
-	} else if !loopback && promptObserved != nil && completionObserved != nil {
+	} else if !loopback && promptObserved != nil && completionObserved != nil &&
+		(!in.PoolManifestRoute || (in.PoolManifestVerified && store.PoolAttestedCreditRecorded(ctx, in.RequestID, in.AttemptN, in.ProviderID))) {
+		// A native pool-model attempt is coordinator_observed only while its
+		// verified pool_manifest credit held at commit; otherwise it is
+		// byte_estimated and never reaches buyer-final debit (SPEC-005-R015).
 		observedInput = *promptObserved
 		observedOutput = *completionObserved
 		usageSource = billing.UsageSourceCoordinatorObserved

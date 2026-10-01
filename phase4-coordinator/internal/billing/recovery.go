@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 )
 
@@ -386,6 +387,28 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 		if err != nil {
 			return recoveryStats{}, err
 		}
+		// SPEC-005-R015 / SPEC-022-R013: a pool-model attempt is priced only
+		// from its route snapshot's signed entry rates (never RateFor or the
+		// default row) and is billable only behind the pre-read pool_manifest
+		// decision whose fence still holds in this transaction.
+		attemptID := SettlementReceiptIdentity{
+			AccountScope: AccountScopeForSettlement(accountID.String),
+			RequestID:    requestID,
+			AttemptN:     int64(attemptN),
+			ProviderID:   providerID,
+		}
+		rateEntry := RateFor(rewards.RateCard, model)
+		poolManifestBillable := true
+		if poolRoute, poolRouteHash, isPoolRoute := recoveredPoolManifestRouteTx(ctx, tx, attemptID); isPoolRoute || poolmanifest.IsPoolModelID(model) {
+			poolManifestBillable = false
+			rateEntry = RateCardEntry{}
+			if isPoolRoute {
+				rateEntry, _ = poolRoute.PoolModelRateEntry()
+				if verified, ok := poolAttested[attemptID]; ok && verified.routeHash == poolRouteHash && verified.poolManifest {
+					poolManifestBillable = s.poolAttestationFenceHolds(ctx, tx, &verified.fence)
+				}
+			}
+		}
 		input := HotPathInput{
 			RequestID:                    requestID,
 			AttemptN:                     attemptN,
@@ -403,7 +426,7 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 			ErrorCode:                    errorCode.String,
 			FaultFlag:                    FaultNone,
 			ConfigSnapshotID:             snapshotID,
-			RateEntry:                    RateFor(rewards.RateCard, model),
+			RateEntry:                    rateEntry,
 			RateCard:                     rewards.RateCard,
 			MultiplierPPM:                multiplier,
 			ProviderShareBps:             share,
@@ -438,6 +461,13 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 		}
 		if ambiguousAttempt {
 			if err := insertQuarantineTx(ctx, tx, requestID, attemptN, providerID, assignedID, ts, model, status, stream == 1, pp, cp, ep, errorCode.String, in.Source, "ambiguous_attempt_n", now); err != nil {
+				return recoveryStats{}, err
+			}
+			quarantined++
+			continue
+		}
+		if !poolManifestBillable {
+			if _, err := insertRequestCreditTx(ctx, tx, input, zeroCredits(result), in.Source, now, true, PoolManifestRouteNotSettlementEligible); err != nil {
 				return recoveryStats{}, err
 			}
 			quarantined++
@@ -554,6 +584,20 @@ func (s *Store) recoveredLoopbackAttemptBillable(ctx context.Context, tx *sql.Tx
 type recoveryPoolAttestation struct {
 	routeHash string
 	fence     PoolAttestationFence
+	// poolManifest is set when the route is a verified SPEC-022-R013
+	// pool_manifest route (native, or loopback and attested).
+	poolManifest bool
+}
+
+// recoveredPoolManifestRouteTx loads an attempt's route snapshot through tx
+// and reports whether it is a pool_manifest route. A missing or unreadable
+// snapshot is not one (the pool/ model-id rule still fails it closed).
+func recoveredPoolManifestRouteTx(ctx context.Context, tx *sql.Tx, id SettlementReceiptIdentity) (RouteSnapshot, string, bool) {
+	route, routeHash, err := loadSettlementRouteSnapshotConn(ctx, tx, id)
+	if err != nil || !route.PoolManifestSourced() {
+		return RouteSnapshot{}, "", false
+	}
+	return route, routeHash, true
 }
 
 // recoveryPoolAttestedRoutes finds, outside any transaction, the loopback
@@ -633,9 +677,85 @@ SELECT DISTINCT COALESCE(rl.account_id, ''), lpis.request_id, lpis.attempt_n, lp
 		if !PoolOperatorAttestedLabelVerified(route, routeHash, s.settlementPoolLabels(route.PoolID, routeHash)) {
 			continue
 		}
-		verified[c.id] = recoveryPoolAttestation{routeHash: routeHash, fence: *fence}
+		verified[c.id] = recoveryPoolAttestation{routeHash: routeHash, fence: *fence, poolManifest: route.PoolManifestSourced()}
+	}
+	if err := s.recoveryNativePoolManifestRoutes(ctx, in, verified); err != nil {
+		return nil, err
 	}
 	return verified, nil
+}
+
+// recoveryNativePoolManifestRoutes pre-reads, outside any transaction, the
+// natively served (mlx_cache) pool attempts in the window that have no
+// ledger row and verifies each SPEC-022-R013 pool_manifest route against the
+// durable pool records and the settlement-time label. Unverified attempts
+// are left out and recovery zero-bills them.
+func (s *Store) recoveryNativePoolManifestRoutes(ctx context.Context, in RecoverInput, verified map[SettlementReceiptIdentity]recoveryPoolAttestation) error {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT DISTINCT srs.account_scope, srs.request_id, srs.attempt_n, srs.provider_id
+  FROM settlement_route_snapshots srs
+  JOIN ledger_provider_identity_snapshots lpis
+    ON lpis.request_id = srs.request_id
+   AND lpis.attempt_n = srs.attempt_n
+   AND lpis.provider_id = srs.provider_id
+  JOIN request_log rl
+    ON rl.request_id = lpis.request_id
+   AND rl.provider_assigned_id = lpis.provider_assigned_id
+ WHERE `+sqliteTimeRange("rl.ts_utc")+`
+   AND srs.pool_id IS NOT NULL
+   AND COALESCE(lpis.runtime_source, '') IN ('', 'mlx_cache')
+   AND NOT EXISTS (
+       SELECT 1 FROM ledger_request_credits lrc
+        WHERE lrc.request_id = srs.request_id
+          AND lrc.attempt_n = srs.attempt_n
+          AND lrc.provider_id = srs.provider_id
+   )`,
+		sqliteTimeText(in.ScanFrom),
+		sqliteTimeText(in.ScanTo),
+	)
+	if err != nil {
+		return err
+	}
+	var candidates []SettlementReceiptIdentity
+	for rows.Next() {
+		var id SettlementReceiptIdentity
+		if err := rows.Scan(&id.AccountScope, &id.RequestID, &id.AttemptN, &id.ProviderID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		candidates = append(candidates, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	_ = rows.Close()
+	for _, id := range candidates {
+		var route RouteSnapshot
+		var routeHash string
+		if err := sqliteutil.TransactObserved(ctx, s.db, "ledger_recovery", s.sqliteMetric, func(ctx context.Context, conn *sql.Conn) error {
+			var err error
+			route, routeHash, err = loadSettlementRouteSnapshotConn(ctx, conn, id)
+			return err
+		}); err != nil {
+			continue
+		}
+		if !route.PoolManifestSourced() || route.RuntimeSource != "" {
+			continue
+		}
+		fence, ok := s.PoolAttestationFenceFor(ctx, route.PoolID)
+		if !ok || !PoolAttestationFenceMatchesRoute(fence, route) {
+			continue
+		}
+		if err := s.PoolManifestRouteEligible(ctx, route); err != nil {
+			continue
+		}
+		if !PoolOperatorAttestedLabelVerified(route, routeHash, s.settlementPoolLabels(route.PoolID, routeHash)) {
+			continue
+		}
+		verified[id] = recoveryPoolAttestation{routeHash: routeHash, fence: *fence, poolManifest: true}
+	}
+	return nil
 }
 
 func (s *Store) StartStartupScan(ctx context.Context, cfg SettlementConfig, now time.Time) error {

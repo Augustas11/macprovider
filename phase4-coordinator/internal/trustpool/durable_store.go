@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	"github.com/augstar/macprovider-coordinator/internal/providerid"
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
@@ -175,6 +176,10 @@ type Store struct {
 	db                       *sql.DB
 	productionActivationGate productionActivationGate
 	providerOwnerPublicKeys  map[string][]byte
+	// poolModelAcceptance supplies the coordinator state SPEC-042-R015
+	// entries are checked against at online manifest acceptance (pricing
+	// bounds, catalog shadow/overlap). Nil fails every entry closed.
+	poolModelAcceptance func() poolmanifest.PoolModelAcceptanceContext
 }
 
 type productionActivationGate struct {
@@ -226,6 +231,66 @@ func WithProviderOwnerPublicKeys(keys map[string][]byte) StoreOption {
 			s.providerOwnerPublicKeys[providerID] = append([]byte(nil), key...)
 		}
 		return nil
+	}
+}
+
+// WithPoolModelAcceptance installs the SPEC-042-R015 / SPEC-005-R015 online
+// acceptance context source for pool_model_entries.
+func WithPoolModelAcceptance(source func() poolmanifest.PoolModelAcceptanceContext) StoreOption {
+	return func(s *Store) error {
+		s.poolModelAcceptance = source
+		return nil
+	}
+}
+
+// Pool-model acceptance rejection codes (SPEC-042-R015, SPEC-005-R015).
+const (
+	PoolModelRejectPricingBounds  = "pool_model_pricing_out_of_bounds"
+	PoolModelRejectCatalogShadow  = "pool_model_id_shadows_catalog"
+	PoolModelRejectCatalogOverlap = "pool_model_entry_catalog_overlap"
+	PoolModelRejectCreatorMember  = "pool_attested_member_is_creator"
+	PoolModelRejectInvalid        = "pool_model_entry_invalid"
+)
+
+// ErrPoolModelEntryRejected rejects a manifest whose pool_model_entries fail
+// the context-dependent acceptance rules.
+var ErrPoolModelEntryRejected = errors.New("trustpool: pool model entry rejected")
+
+// verifyPoolModelAcceptance applies the context-dependent R015 rules to a NEW
+// manifest_accepted append. Replay never re-runs it: a bounds or catalog
+// change later only affects routing, never an accepted history.
+func (s *Store) verifyPoolModelAcceptance(e DurableEvent, creatorAccountID string) error {
+	core, err := acceptedPolicyCoreFromManifestSnapshot(e)
+	if err != nil {
+		return err
+	}
+	// SPEC-042-R016: an attestation naming the creator account itself is
+	// redundant and invalidates the core.
+	members, err := core.PoolAttestedMembers()
+	if err != nil {
+		return fmt.Errorf("%w: %s: %v", ErrPoolModelEntryRejected, PoolModelRejectInvalid, err)
+	}
+	for _, member := range members {
+		if member.ProviderAccountID == creatorAccountID {
+			return fmt.Errorf("%w: %s", ErrPoolModelEntryRejected, PoolModelRejectCreatorMember)
+		}
+	}
+	var ctx poolmanifest.PoolModelAcceptanceContext
+	if s != nil && s.poolModelAcceptance != nil {
+		ctx = s.poolModelAcceptance()
+	}
+	err = core.ValidatePoolModelAcceptance(ctx)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, poolmanifest.ErrPoolModelPricingBounds):
+		return fmt.Errorf("%w: %s", ErrPoolModelEntryRejected, PoolModelRejectPricingBounds)
+	case errors.Is(err, poolmanifest.ErrPoolModelShadowsCatalog):
+		return fmt.Errorf("%w: %s", ErrPoolModelEntryRejected, PoolModelRejectCatalogShadow)
+	case errors.Is(err, poolmanifest.ErrPoolModelCatalogOverlap):
+		return fmt.Errorf("%w: %s", ErrPoolModelEntryRejected, PoolModelRejectCatalogOverlap)
+	default:
+		return fmt.Errorf("%w: %s: %v", ErrPoolModelEntryRejected, PoolModelRejectInvalid, err)
 	}
 }
 
@@ -1869,6 +1934,13 @@ func (s *Store) appendValidatedEvent(ctx context.Context, e DurableEvent, allowS
 			if err := verifyManifestAcceptanceOnline(e); err != nil {
 				return fmt.Errorf("%w: manifest policy not acceptable now: %v", errCreatorInvalidEvent, err)
 			}
+			creatorAccountID := ""
+			if pool := preState.Pools[e.PoolID]; pool != nil {
+				creatorAccountID = pool.CreatorAccountID
+			}
+			if err := s.verifyPoolModelAcceptance(e, creatorAccountID); err != nil {
+				return fmt.Errorf("%w: %w", errCreatorInvalidEvent, err)
+			}
 		}
 		if e.EventType == EventRootIssuerRegistered {
 			if err := consumeRootRegistrationNonce(ctx, conn, e, time.Now().UTC()); err != nil {
@@ -2726,8 +2798,13 @@ type ReconstructedPoolState struct {
 	// ManifestPolicyCoreV2 and ManifestRuntimeAllowlist project the accepted
 	// core's SPEC-042-R001 encoding and signed runtime_allowlist. A v1 core or
 	// an empty list is native MLX only.
-	ManifestPolicyCoreV2         bool
-	ManifestRuntimeAllowlist     []string
+	ManifestPolicyCoreV2     bool
+	ManifestRuntimeAllowlist []string
+	// ManifestModelEntries and ManifestAttestedMembers project the accepted
+	// core's SPEC-042-R015/R016 pool extensions (pool_model_entries/v1,
+	// pool_attested_members/v1); empty when the core carries neither.
+	ManifestModelEntries         []poolmanifest.PoolModelEntry
+	ManifestAttestedMembers      []poolmanifest.AttestedMember
 	ManifestRetentionPolicyID    string
 	ManifestSplitExecutionStatus string
 	// ManifestPolicies is every accepted policy core's routing projection with
@@ -2936,6 +3013,14 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 				return nil, fmt.Errorf("%w: event %d lowers min binary version from %q to %q for pool %q", ErrMalformedDurableEvent, index, currentFloor, core.MinBinaryVersion, e.PoolID)
 			}
 		}
+		modelEntries, err := core.PoolModelEntries()
+		if err != nil {
+			return nil, fmt.Errorf("%w: event %d pool_model_entries invalid for pool %q: %v", ErrMalformedDurableEvent, index, e.PoolID, err)
+		}
+		attestedMembers, err := core.PoolAttestedMembers()
+		if err != nil {
+			return nil, fmt.Errorf("%w: event %d pool_attested_members invalid for pool %q: %v", ErrMalformedDurableEvent, index, e.PoolID, err)
+		}
 		p.ManifestVersion = e.ManifestVersion
 		p.ManifestCoreDigest = e.ManifestCoreDigest
 		p.ManifestSnapshot = e.ManifestSnapshot
@@ -2945,6 +3030,8 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 		p.ManifestSettlementMode = canonicalPoolSettlementMode(core.SettlementMode)
 		p.ManifestPolicyCoreV2 = core.IsV2()
 		p.ManifestRuntimeAllowlist = append([]string(nil), core.RuntimeAllowlist...)
+		p.ManifestModelEntries = modelEntries
+		p.ManifestAttestedMembers = attestedMembers
 		p.ManifestRetentionPolicyID = core.RetentionPolicyID
 		p.ManifestSplitExecutionStatus = core.SplitExecutionStatus
 		p.ManifestPolicies = append(p.ManifestPolicies, manifestPolicyWindow{
@@ -2958,6 +3045,8 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 			SettlementMode:       canonicalPoolSettlementMode(core.SettlementMode),
 			PolicyCoreV2:         core.IsV2(),
 			RuntimeAllowlist:     append([]string(nil), core.RuntimeAllowlist...),
+			ModelEntries:         poolmanifest.ClonePoolModelEntries(modelEntries),
+			AttestedMembers:      poolmanifest.CloneAttestedMembers(attestedMembers),
 			RetentionPolicyID:    core.RetentionPolicyID,
 			SplitExecutionStatus: core.SplitExecutionStatus,
 		})
@@ -3478,6 +3567,8 @@ type manifestPolicyWindow struct {
 	SettlementMode       string
 	PolicyCoreV2         bool
 	RuntimeAllowlist     []string
+	ModelEntries         []poolmanifest.PoolModelEntry
+	AttestedMembers      []poolmanifest.AttestedMember
 	RetentionPolicyID    string
 	SplitExecutionStatus string
 }
@@ -3509,6 +3600,8 @@ func (p *ReconstructedPoolState) activePolicyView(at time.Time) (*ReconstructedP
 		view.ManifestSettlementMode = w.SettlementMode
 		view.ManifestPolicyCoreV2 = w.PolicyCoreV2
 		view.ManifestRuntimeAllowlist = w.RuntimeAllowlist
+		view.ManifestModelEntries = w.ModelEntries
+		view.ManifestAttestedMembers = w.AttestedMembers
 		view.ManifestRetentionPolicyID = w.RetentionPolicyID
 		view.ManifestSplitExecutionStatus = w.SplitExecutionStatus
 		var until time.Time
@@ -3592,6 +3685,8 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 			MinBinaryVersion:          policyMinBinaryVersion(p),
 			ModelAllowlist:            append([]string(nil), p.ManifestModelAllowlist...),
 			RuntimeAllowlist:          policyRuntimeAllowlist(p),
+			ModelEntries:              policyModelEntries(p),
+			AttestedMembers:           policyAttestedMembers(p),
 			DelegatedMembers:          delegatedMembers,
 			SettlementMode:            routeablePoolSettlementMode(p.ManifestSettlementMode),
 			Routeable:                 routeable,
