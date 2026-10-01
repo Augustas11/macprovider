@@ -49,9 +49,10 @@ SPEC-023 owns candidate-catalog `bench_gate` provenance, including
 
 **Change log v1.16 (issue #1816 round-1 audit fixes):**
 - R007(j): the pool entry is the SPEC-042-R015 `pool_model_entries/v1`
-  extension of a v2 core. A pair that resolves to any catalog identity, in any
-  tier, cannot be a pool entry; a later catalog addition revokes the pool
-  binding and the catalog path applies. A snapshot-manifest entry may be
+  extension of a v2 core. A pair that is catalog-priceable (a `recommendable`
+  row with a member usable by the runtime) or `blocked` cannot be a pool
+  entry; a `candidate` or `listed` match is allowed and keeps earning on the
+  pool, and promotion to `recommendable` supersedes the pool binding. A snapshot-manifest entry may be
   served natively (`mlx_cache`) on that pool's routes only; uncatalogued
   native MLX stays closed everywhere else.
 
@@ -1334,10 +1335,12 @@ algorithm.
   MUST NOT equal or normalize onto one, and is not inserted into the global
   R007 identity set or artifact-feed uniqueness domain. A pool-manifest pair
   MUST NOT satisfy catalog matching, global routing, catalog pricing, or
-  `settlement_capable`, and a pair that resolves to any catalog identity in
-  any tier is never a valid pool entry (SPEC-042-R015 catalog overlap); if a
-  later release catalogs it, the pool binding is revoked and the catalog path
-  applies. Uncatalogued native MLX outside such a pool route stays closed
+  `settlement_capable`, and a pair that is catalog-priceable for a runtime (a
+  `recommendable` row with a usable member) or `blocked` is never a valid pool
+  entry (SPEC-042-R015 catalog overlap and precedence). A `candidate` or
+  `listed` match does not displace the pool binding; when a later release
+  promotes the row to `recommendable`, the binding for each runtime the row
+  can serve is superseded and the catalog path applies. Uncatalogued native MLX outside such a pool route stays closed
   (SPEC-032). The route snapshot records source `pool_manifest`, the
   exact pair, `pool_id`, `pool_model_id`, `manifest_version`, and
   `manifest_core_digest` (SPEC-022-R013, which keeps every existing route's

@@ -7,7 +7,9 @@ as applicable. A native `mlx_cache` hello for an uncatalogued model whose
 snapshot-manifest pair matches a current SPEC-042-R015 entry listing
 `mlx_cache`, in a pool the provider currently belongs to, is admitted
 `admission_sandboxed` instead of hard-closed and is selectable only on that
-pool's routes. Every other uncatalogued native hello stays hard-closed.
+pool's routes. Every other uncatalogued native hello stays hard-closed. A pool entry
+whose pair is only a `candidate` or `listed` catalog row stays servable under case (b)
+until promotion to `recommendable` supersedes it.
 **Amendment (v0.3.5, #1816):** SPEC-032-R004 permits a sandboxed pool
 member whose exact served artifact pair matches a current signed SPEC-042-R015
 entry to serve that pool's routes only. Global sandbox behavior is unchanged;
@@ -459,8 +461,10 @@ request or any other pool's request, and changes no hello-time close reason. FR-
 preserved globally: a pool route requires either (a) a SPEC-010 artifact member whose
 row is `recommendable` for paid catalog routing, or (b) an exact algorithm/hash match
 to a current SPEC-042-R015 entry, bound as pool-scoped `catalog_priced` under
-SPEC-047-R011. A merely `listed` row never satisfies paid routing; this corrects the
-prior listed-vs-recommendable inconsistency. Case (b) is creator-attested and may serve
+SPEC-047-R011. A merely `listed` row never satisfies paid routing under case (a); this corrects the
+prior listed-vs-recommendable inconsistency. Case (b) remains available for a pair that
+resolves only to a `candidate` or `listed` row, until promotion to `recommendable`
+supersedes it (SPEC-042-R015). Case (b) is creator-attested and may serve
 only the matching pool; it does not clear `admission_sandboxed`, enter global
 `/v1/models`, or become `settlement_capable`.
 **Native pool-entry exemption (v0.3.6, #1816).** A hello whose `runtime_source` is

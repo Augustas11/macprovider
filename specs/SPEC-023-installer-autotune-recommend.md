@@ -15,7 +15,8 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
   `model-admission-pool-proven.json`, and re-derived under §16.8 rule 9, with
   an explicit suppressed representation. Pool-proven admission to `listed`
   now also requires a current passing SPEC-047-R011 known-answer evidence
-  record. §16.2 lists four signals and §16.3 names the pool-proven term.
+  record. Listing keeps the pool bindings; only promotion to `recommendable`
+  supersedes them. §16.2 lists four signals and §16.3 names the pool-proven term.
 
 - **v0.22.3 (2026-10-01)** — Pool-proven catalog intake (#1816). Registers
   `SPEC-023-R026`: unmatched supported artifact pairs receive deterministic
@@ -3756,7 +3757,7 @@ The first eight fields are the R012 row verbatim, including its nullability: whe
 - `probe_evidence_digest` is non-null, so a current passing SPEC-047-R011 known-answer record exists for the exact pair; and
 - the explicit operator decision recorded in the intake decision below.
 
-An operator MAY publish an out-of-band release that adds only pool-proven keys as `listed`, plus the necessary signed artifact/feed/ledger records; this is the sole addition exception to §16.5. It MUST NOT promote a row, change a rate, or make a row recommendable. Safety blocking remains allowed in the same release. **Consequence the operator must weigh:** once the pair is a catalog identity, SPEC-042-R015 revokes every pool binding to it and the catalog path applies, and a `listed` row pays nothing (§3.2), so pool earning for that pair stops until the row is promoted to `recommendable`.
+An operator MAY publish an out-of-band release that adds only pool-proven keys as `listed`, plus the necessary signed artifact/feed/ledger records; this is the sole addition exception to §16.5. It MUST NOT promote a row, change a rate, or make a row recommendable. Safety blocking remains allowed in the same release. **Pool earning through graduation.** Admitting the pair as `listed` (or authoring a `candidate` row for it) does not end its pool bindings: those tiers pay nothing (§3.2), so SPEC-042-R015 keeps the pool binding as the pair's paid path. Only promotion to `recommendable`, with a verified member usable by a bound runtime class, supersedes the binding for that class (SPEC-047-R011 `pool_manifest_catalog_superseded`) and hands the pair to the catalog path, so earnings move from pool price to catalog price without a gap. A `recommendable` pair can no longer be a pool entry.
 
 **Intake decision v2.** A release that selects the pool-proven clause MUST use `macprovider.intake-decision.v2`. Relative to v1, each `admit_listed` decision adds nullable `pool_proven_evidence` with exactly the closed value above, and `admission_clause` gains `pool_proven`; the field is non-null exactly when the clause is `pool_proven`, and null for every other clause and every `promote_recommendable` decision. The `thresholds` object adds `intake_pool_paid_request_floor`. Version 1 remains valid for releases that do not select the clause. A generator or verifier MUST reject an unknown field, a v1 record selecting `pool_proven`, a `pool_proven` decision with a missing, suppressed, or null-probe value, a value whose `source_sha256` names no retained file, or a non-pool decision carrying the value.
 

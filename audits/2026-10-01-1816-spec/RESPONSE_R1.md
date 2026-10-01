@@ -48,6 +48,33 @@ and SPEC-047 0.2.5.
 | A7 | MED | **Fixed.** Pool-proven `listed` admission requires a current passing R011 evidence record, the SPEC-023 signals, and an operator decision. The record is carried in `macprovider.intake-decision.v2`. | `specs/SPEC-023-installer-autotune-recommend.md:3752`; `specs/SPEC-047-network-model-admission.md:200` |
 | A8 | LOW | **Fixed.** Same fix as C6. | `specs/SPEC-047-network-model-admission.md:188` |
 
+## Addendum: catalog-overlap precedence (coordinator design change)
+
+C11 is narrowed after the first fix. Revoking a pool binding when the pair
+becomes a `candidate` or `listed` row would drop earnings to zero during
+graduation, because those tiers pay nothing. Overlap now applies only to a
+**catalog-priceable** pair: a `recommendable` row with a verified member usable
+by the runtime class.
+
+- **Acceptance.** `pool_model_entry_catalog_overlap` rejects an entry that is
+  catalog-priceable for any runtime it lists. It also rejects a `blocked` pair,
+  so a pool can never unblock a safety-blocked model.
+- **`candidate` and `listed` matches.** These bind, and the match is recorded
+  in `pool_binding.observed_catalog_model_key`.
+- **Promotion to `recommendable`.** This revokes the bindings for the runtime
+  classes the row can serve, with the new closed reason
+  `pool_manifest_catalog_superseded`. The pair then follows the catalog path.
+
+Where:
+
+- `specs/SPEC-042-pool-control-plane.md` R015 "Catalog overlap and precedence"
+- `specs/SPEC-047-network-model-admission.md` R001 reason set, R011
+- `specs/SPEC-010-model-catalog.md` R007(j)
+- `specs/SPEC-032-proof-of-weights-hello-gate.md` R004 case (b)
+- `specs/SPEC-023-installer-autotune-recommend.md` §16.9
+- `specs/SPEC-043-trusted-pool-creator-onboarding.md` R014
+- `specs/CONFORMANCE.json` gaps
+
 ## Totals
 
 22 findings: 22 fixed (3 by an alternative mechanism: C1, A2, A4), 0 rejected.

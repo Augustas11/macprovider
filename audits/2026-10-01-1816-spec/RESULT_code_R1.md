@@ -22,5 +22,5 @@
 
 12. **LOW** — `specs/SPEC-023-installer-autotune-recommend.md:3469`, `specs/SPEC-023-installer-autotune-recommend.md:3737` — §16.2 still says there are three intake signals after adding `pool_proven_evidence` as a fourth. **Fix:** update the section introduction and associated signal enumeration to four.
 
-VERDICT: 0 CRITICAL / 2 HIGH / 9 MEDIUM / 1 LOW / 0 INFO  
+VERDICT: 0 CRITICAL / 2 HIGH / 9 MEDIUM / 1 LOW / 0 INFO
 TOTALS: C=0 H=2 M=9 L=1 I=0
