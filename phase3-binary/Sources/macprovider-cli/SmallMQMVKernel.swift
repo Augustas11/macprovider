@@ -398,10 +398,12 @@ enum SmallMQMV {
         var stageX: Int = 1
         /// vb only: lanes sharing one weight row.
         var lanesPerRow: Int = 8
+        /// vb only: activation rows per weight pass.
+        var rowsPerPass: Int = 8
 
         var description: String {
             if variant == .vb {
-                return "vb-r\(rows)-l\(lanesPerRow)" + (kSplit > 0 ? "-ks\(kSplit)" : "") + (stageX == 0 ? "-xs0" : "")
+                return "vb-r\(rows)-l\(lanesPerRow)" + (rowsPerPass != 8 ? "-p\(rowsPerPass)" : "") + (kSplit > 0 ? "-ks\(kSplit)" : "") + (stageX == 0 ? "-xs0" : "")
                     + (minRows > 1 ? "-min\(minRows)" : "")
             }
             return variant == .rb ? "rb-r\(rows)" : "\(variant.rawValue)-nt\(rows)-ks\(kSplit)" + (fragAct ? "-act" : "")
@@ -423,6 +425,7 @@ enum SmallMQMV {
                 if part == "act" { config.fragAct = true }
                 if part == "xs0" { config.stageX = 0 }
                 if part.hasPrefix("l"), let v = Int(part.dropFirst(1)) { config.lanesPerRow = v }
+                if part.hasPrefix("p"), let v = Int(part.dropFirst(1)) { config.rowsPerPass = v }
                 if part == "xs1" { config.stageX = 1 }
                 if part.hasPrefix("min"), let v = Int(part.dropFirst(3)) { config.minRows = v }
             }
@@ -473,6 +476,7 @@ enum SmallMQMV {
             let tiling = MoESmallM.denseTiling(
                 n: n, k: k, r: config.rows, lpr: config.lanesPerRow, xs: config.stageX,
                 ks: config.kSplit > 0 ? config.kSplit : nil)!
+            MoESmallM.denseRowsPerPass = config.rowsPerPass
             return MoESmallM.dense(x, w: w, scales: scales, biases: biases, tiling: tiling)
         case .rb:
             let groups = n / (2 * config.rows)

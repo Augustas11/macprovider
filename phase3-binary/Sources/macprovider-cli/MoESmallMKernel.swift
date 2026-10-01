@@ -181,16 +181,22 @@ enum MoESmallM {
             sr[r] = scales + row * KG;
             brr[r] = biases + row * KG;
           }
-          const device T* xr[MM];
-          for (int m = 0; m < MM; m++) {
-            xr[m] = x + m * K;
-          }
-          const int cnt = MM;
+          // MROWS activation rows in passes of MM rows (weights re-read per
+          // pass, from cache); the pass size never changes reduction order.
+          for (int m0 = 0; m0 < MROWS; m0 += MM) {
+            const int cnt = min(MM, MROWS - m0);
+            const device T* xr[MM];
+            for (int m = 0; m < MM; m++) {
+              xr[m] = x + (m0 + min(m, cnt - 1)) * K;
+            }
         \(inner)
-          if (sgk == 0 && kl == 0) {
-            for (int r = 0; r < R; r++) {
-              for (int m = 0; m < MM; m++) {
-                y[m * N + rowBase + r * RPS + lr] = static_cast<T>(acc[r][m]);
+            if (sgk == 0 && kl == 0) {
+              for (int r = 0; r < R; r++) {
+                for (int m = 0; m < MM; m++) {
+                  if (m < cnt) {
+                    y[(m0 + m) * N + rowBase + r * RPS + lr] = static_cast<T>(acc[r][m]);
+                  }
+                }
               }
             }
           }
@@ -355,19 +361,13 @@ enum MoESmallM {
         return t.threadgroupBytes <= 32768 ? t : nil
     }
 
-    /// x: [M, K] row-contiguous (M <= 8 per launch; larger M is split into
-    /// 8-row launches, which keeps rows batch invariant); w: [N, K/8] uint32;
+    /// x: [M, K] row-contiguous, M rows in passes of denseRowsPerPass (the
+    /// pass size never changes reduction order); w: [N, K/8] uint32;
     /// scales/biases: [N, K/64].
     static func dense(
         _ x: MLXArray, w: MLXArray, scales: MLXArray, biases: MLXArray, tiling: Tiling
     ) -> MLXArray {
         let m = x.dim(0)
-        if m > 8 {
-            return concatenated(
-                stride(from: 0, to: m, by: 8).map { s in
-                    dense(x[s ..< min(m, s + 8)], w: w, scales: scales, biases: biases, tiling: tiling)
-                }, axis: 0)
-        }
         let k = x.dim(1)
         let n = w.dim(0)
         let dtype = x.dtype
@@ -377,7 +377,8 @@ enum MoESmallM {
         return denseKernel(
             [x, w, scales.asType(dtype), biases.asType(dtype)],
             template: [
-                ("T", dtype), ("MM", m), ("R", tiling.r), ("KS", tiling.ks), ("NT", tiling.nt),
+                ("T", dtype), ("MROWS", m), ("MM", min(m, denseRowsPerPass)), ("R", tiling.r), ("KS", tiling.ks),
+                ("NT", tiling.nt),
                 ("LPR", tiling.lpr), ("XS", tiling.xs), ("K", k), ("N", n),
             ],
             grid: (groups * threads, 1, 1),
@@ -386,6 +387,9 @@ enum MoESmallM {
             outputDTypes: [dtype]
         )[0]
     }
+
+    /// Dense activation rows per weight pass (lab knob).
+    nonisolated(unsafe) static var denseRowsPerPass = 8
 
     struct QWeight {
         let w: MLXArray
