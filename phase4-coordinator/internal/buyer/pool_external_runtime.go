@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 )
@@ -25,6 +26,13 @@ type poolRouteView struct {
 	runtimeAllowlist []string
 	creatorAccountID string
 	creatorOwned     map[string]bool
+	// SPEC-042-R015/R016 (#1816): attestations, recorded owner accounts, the
+	// active core labels, and the requested pool model entry.
+	attestedMembers     []poolmanifest.AttestedMember
+	memberOwnerAccounts map[string]string
+	manifestVersion     uint64
+	manifestCoreDigest  string
+	poolModel           *poolmanifest.PoolModelEntry
 }
 
 func (st *forwardState) poolRouteView() poolRouteView {
@@ -37,6 +45,12 @@ func (st *forwardState) poolRouteView() poolRouteView {
 		runtimeAllowlist: st.poolRuntimeAllowlist,
 		creatorAccountID: st.poolCreatorAccountID,
 		creatorOwned:     st.poolCreatorOwnedMembers,
+
+		attestedMembers:     st.poolAttestedMembers,
+		memberOwnerAccounts: st.poolMemberOwnerAccounts,
+		manifestVersion:     st.poolManifestVersion,
+		manifestCoreDigest:  st.poolManifestCoreDigest,
+		poolModel:           st.poolModelEntry,
 	}
 }
 
@@ -60,8 +74,16 @@ func (v poolRouteView) externalRuntimeCandidate(p pool.Provider) bool {
 		providerws.IsBYOMLoopbackRuntimeSource(p.RuntimeSource) &&
 		v.members[p.ProviderID] &&
 		v.creatorAccountID != "" &&
-		v.creatorOwned[p.ProviderID] &&
+		(v.creatorOwned[p.ProviderID] || v.attestedMemberEligible(p)) &&
 		v.allowsRuntime(p.RuntimeSource)
+}
+
+// attestedMemberEligible is SPEC-042-R016: a non-creator member named, by
+// its recorded owner account, in the active core's attestation for the
+// session's runtime class.
+func (v poolRouteView) attestedMemberEligible(p pool.Provider) bool {
+	_, ok := v.attestedMemberAccount(p)
+	return ok
 }
 
 // poolHasExternalRuntimeMember reports whether any session in scope is a
@@ -81,7 +103,7 @@ func poolHasExternalRuntimeMember(providers []pool.Provider, members map[string]
 // session. Every caller also applies byomPaidRoutingEligibilityForRoute, so
 // the sandbox term is only ever skipped together with the full predicate.
 func routingEligibleForRoute(p pool.Provider, view poolRouteView) bool {
-	if view.externalRuntimeCandidate(p) {
+	if view.externalRuntimeCandidate(p) || view.poolModelCandidate(p) {
 		return p.PoolExternalRuntimeRoutingEligible()
 	}
 	return p.RoutingEligible()
@@ -94,7 +116,7 @@ func routingEligibleForRoute(p pool.Provider, view poolRouteView) bool {
 // do. Every other provider and every global route is returned unchanged, and
 // the paid-routing predicate (binding half) is still applied by the caller.
 func providerForRoute(p pool.Provider, view poolRouteView) pool.Provider {
-	if view.externalRuntimeCandidate(p) {
+	if view.externalRuntimeCandidate(p) || view.poolModelCandidate(p) {
 		p.AdmissionSandboxed = false
 	}
 	return p

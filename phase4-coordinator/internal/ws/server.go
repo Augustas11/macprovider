@@ -3605,7 +3605,7 @@ func (s *Server) checkAutotuneHelloGateWithCatalog(conn net.Conn, hello Hello, c
 	// other uncatalogued native hello stays closed below.
 	if requireGate && modelAdmissionRuntimeClass(hello.RuntimeSource) == modelAdmissionRuntimeSourceMLXCache {
 		if _, _, catalogued := catalog.HighestClaimedTier(hello.ModelID); !catalogued {
-			if poolID, ok := s.nativePoolEntryForHello(hello.ProviderID, hello.ModelHashAlgorithm, hello.ModelHash); ok {
+			if poolID, ok := s.poolEntryForSession(hello.ProviderID, hello.RuntimeSource, hello.ModelHashAlgorithm, hello.ModelHash); ok {
 				s.log.Info().
 					Str("provider_id", hello.ProviderID).
 					Str("event", "autotune_pool_entry_native_sandboxed").
@@ -3724,10 +3724,23 @@ func (s *Server) catalogAdmissionWithCatalog(hello Hello, catalog *autotune.Cata
 			present++
 		}
 	}
+	// SPEC-032-R004 / SPEC-042-R015 (#1816): a session whose exact pair and
+	// runtime class are a current pool entry of a pool it is a member of is
+	// admitted in the pool_entry mode, whatever catalog row its model id
+	// lacks; it can serve only that pool's routes.
+	poolEntry := false
+	if _, ok := s.poolEntryForSession(hello.ProviderID, hello.RuntimeSource, hello.ModelHashAlgorithm, hello.ModelHash); ok {
+		if _, _, catalogued := catalog.HighestClaimedTier(hello.ModelID); !catalogued {
+			poolEntry = true
+		}
+	}
 	// Bridge window: pre-catalog-handshake binaries are admitted through the
 	// existing signed-catalog model/evidence gates. Once a client sends any
 	// catalog metadata it must send and match the complete release envelope.
 	if present == 0 {
+		if poolEntry {
+			return catalogAdmissionPoolEntry, true
+		}
 		if s.autotuneCatalogBridgeActive() {
 			return "legacy_bridge", true
 		}
@@ -3760,6 +3773,9 @@ func (s *Server) catalogAdmissionWithCatalog(hello Hello, catalog *autotune.Cata
 	}
 	key, _, ok := providerCatalog.HighestClaimedTier(hello.ModelID)
 	if !ok {
+		if poolEntry {
+			return catalogAdmissionPoolEntry, true
+		}
 		return "", false
 	}
 	providerRowIdentity, ok := providerCatalog.RowIdentity(key)

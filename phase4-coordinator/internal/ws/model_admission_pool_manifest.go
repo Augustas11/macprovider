@@ -629,18 +629,26 @@ func modelAdmissionPoolBindingObject(event ModelAdmissionEvent) map[string]any {
 	}
 }
 
-// nativePoolEntryForHello reports the pool whose current SPEC-042-R015 entry
-// lists mlx_cache for this exact snapshot-manifest pair, when the provider is
-// a member of exactly that enforce-mode pool and the pair is neither
-// catalog-priceable for native serving nor blocked (SPEC-032-R004).
-func (s *Server) nativePoolEntryForHello(providerID, algorithm, hash string) (string, bool) {
+// catalogAdmissionPoolEntry is the hello catalog-admission mode of a session
+// serving a current SPEC-042-R015 pool entry (SPEC-032-R004): not a catalog
+// envelope mode (no row re-check), never legacy (routable on its pool only).
+const catalogAdmissionPoolEntry = "pool_entry"
+
+// poolEntryForSession reports the single pool whose current SPEC-042-R015
+// entry lists this runtime class for this exact pair, when the provider is a
+// member there (for a loopback class: allowlisted and creator-owned or
+// attested) and the pair is neither catalog-priceable for the class nor
+// blocked (SPEC-032-R004).
+func (s *Server) poolEntryForSession(providerID, runtimeSource, algorithm, hash string) (string, bool) {
 	wiring := s.poolModels.Load()
 	hash = strings.ToLower(strings.TrimSpace(hash))
-	if wiring == nil || wiring.source == nil || algorithm != modelidentity.SnapshotManifestV1 || !validModelAdmissionSHA256Hex(hash) {
+	runtime := modelAdmissionRuntimeClass(runtimeSource)
+	format, ok := poolmanifest.RuntimeSourceFormat(runtime)
+	if wiring == nil || wiring.source == nil || !ok || algorithm != format || !validModelAdmissionSHA256Hex(hash) {
 		return "", false
 	}
 	status := s.classifyCatalogPair(algorithm, hash)
-	if status.blocked || status.priceableFor(modelAdmissionRuntimeSourceMLXCache) {
+	if status.blocked || status.priceableFor(runtime) {
 		return "", false
 	}
 	matched := ""
@@ -649,10 +657,10 @@ func (s *Server) nativePoolEntryForHello(providerID, algorithm, hash string) (st
 		if !view.Routeable {
 			continue
 		}
-		if _, member := poolMemberAccount(view, providerID, modelAdmissionRuntimeSourceMLXCache); !member {
+		if _, member := poolMemberAccount(view, providerID, runtime); !member {
 			continue
 		}
-		if _, ok := poolEntryForPair(view, algorithm, hash, modelAdmissionRuntimeSourceMLXCache); !ok {
+		if _, ok := poolEntryForPair(view, algorithm, hash, runtime); !ok {
 			continue
 		}
 		if matched != "" {

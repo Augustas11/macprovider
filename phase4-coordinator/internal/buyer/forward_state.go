@@ -7,6 +7,7 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 )
 
 // forwardState collects the per-request state that the three transport
@@ -83,6 +84,13 @@ type forwardState struct {
 	poolRuntimeAllowlist    []string
 	poolCreatorAccountID    string
 	poolCreatorOwnedMembers map[string]bool
+	// SPEC-042-R015/R016 inputs of the same snapshot: the requested pool
+	// model entry (nil unless the request names a pool/ id of this pool),
+	// the creator's member attestations, and the members' recorded owner
+	// accounts.
+	poolModelEntry          *poolmanifest.PoolModelEntry
+	poolAttestedMembers     []poolmanifest.AttestedMember
+	poolMemberOwnerAccounts map[string]string
 	// settlementTrailersNegotiated mirrors the recorder: the gateway
 	// advertised signed settlement finality under the service token. A pool
 	// route selects an external-runtime member only when it is set

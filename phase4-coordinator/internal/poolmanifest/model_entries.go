@@ -10,6 +10,8 @@ package poolmanifest
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"math"
 	"regexp"
@@ -155,6 +157,24 @@ func (b PoolModelPricingBounds) Validate() error {
 		return ErrPoolModelPricingBounds
 	}
 	return nil
+}
+
+// poolModelPricingBoundsTag domain-separates the bounds digest a pool route
+// snapshot records (SPEC-005-R015).
+const poolModelPricingBoundsTag = "macprovider/spec005/pool-model-pricing-bounds/v1"
+
+// SHA256Hex is the lowercase-hex digest of the bounds' canonical encoding
+// (the domain tag, then the six signed 64-bit values big-endian in field
+// order), recorded on every pool_manifest route snapshot.
+func (b PoolModelPricingBounds) SHA256Hex() string {
+	e := &encoder{}
+	e.tag(poolModelPricingBoundsTag)
+	for _, v := range []int64{b.MinPromptRatePerMtok, b.MaxPromptRatePerMtok, b.MinPromptCacheHitRatePerMtok,
+		b.MaxPromptCacheHitRatePerMtok, b.MinCompletionRatePerMtok, b.MaxCompletionRatePerMtok} {
+		e.u64(uint64(v))
+	}
+	sum := sha256.Sum256(e.buf)
+	return hex.EncodeToString(sum[:])
 }
 
 // Contains reports whether every entry rate sits inside the inclusive bounds.

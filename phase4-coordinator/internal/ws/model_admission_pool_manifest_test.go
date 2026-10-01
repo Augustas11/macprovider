@@ -400,7 +400,7 @@ func TestNativePoolEntryHelloExemption(t *testing.T) {
 	poolHash := strings.Repeat("7", 64)
 	source := wirePoolSource(f)
 	source.set(poolSnapshot(testPoolA, 1, poolDigestV1, nativePoolEntry(poolHash), ggufPoolEntry()))
-	if pool, ok := f.server.nativePoolEntryForHello(poolProvider, modelidentity.SnapshotManifestV1, poolHash); !ok || pool != testPoolA {
+	if pool, ok := f.server.poolEntryForSession(poolProvider, "mlx_cache", modelidentity.SnapshotManifestV1, poolHash); !ok || pool != testPoolA {
 		t.Fatalf("member native entry not exempted: %q %v", pool, ok)
 	}
 	for name, args := range map[string][3]string{
@@ -409,7 +409,7 @@ func TestNativePoolEntryHelloExemption(t *testing.T) {
 		"unknown hash":   {poolProvider, modelidentity.SnapshotManifestV1, strings.Repeat("e", 64)},
 		"catalog priced": {poolProvider, modelidentity.SnapshotManifestV1, bindingOtherHash},
 	} {
-		if _, ok := f.server.nativePoolEntryForHello(args[0], args[1], args[2]); ok {
+		if _, ok := f.server.poolEntryForSession(args[0], "", args[1], args[2]); ok {
 			t.Errorf("%s: exempted", name)
 		}
 	}
