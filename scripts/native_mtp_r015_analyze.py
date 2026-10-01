@@ -87,21 +87,156 @@ def _optional_ratio(numerator: float, denominator: float) -> float | None:
     return numerator / denominator if denominator > 0 else None
 
 
+# Every field a hard gate or gated hypothesis reads. A missing, null,
+# non-finite, negative, or wrongly typed value fails the record closed; it is
+# never defaulted, because a defaulted zero reads as a perfect measurement.
+_REQUIRED_NUMBER_FIELDS = (
+    "aggregate_committed_tps",
+    "ttft_p50_seconds",
+    "ttft_p95_seconds",
+    "inter_token_gap_p50_seconds",
+    "inter_token_gap_p95_seconds",
+    "wall_seconds",
+    "min_available_memory_fraction",
+)
+_REQUIRED_COUNT_FIELDS = (
+    "requests",
+    "committed_completion_tokens",
+    "capacity_rejections",
+    "fallbacks",
+    "errors",
+    "non_native_admissions",
+    "native_admissions",
+    "native_requests",
+    "peak_phys_footprint_bytes",
+)
+_REQUIRED_STRING_FIELDS = ("thermal_state_start", "thermal_state_end")
+
+
+def _is_number(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value >= 0
+    )
+
+
+def _is_count(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _invalid_run_fields(run: dict) -> list[str]:
+    invalid = [field for field in _REQUIRED_NUMBER_FIELDS if not _is_number(run.get(field))]
+    invalid += [field for field in _REQUIRED_COUNT_FIELDS if not _is_count(run.get(field))]
+    invalid += [
+        field
+        for field in _REQUIRED_STRING_FIELDS
+        if not isinstance(run.get(field), str) or not run.get(field)
+    ]
+    if not isinstance(run.get("parity_mismatch"), bool):
+        invalid.append("parity_mismatch")
+    if _is_count(run.get("requests")) and run["requests"] < 1:
+        invalid.append("requests")
+    if _is_number(run.get("min_available_memory_fraction")) and run["min_available_memory_fraction"] > 1:
+        invalid.append("min_available_memory_fraction")
+    per_request = run.get("per_request_tps")
+    if not isinstance(per_request, list) or not per_request or not all(_is_number(v) for v in per_request):
+        invalid.append("per_request_tps")
+    return sorted(set(invalid))
+
+
 def _metric(pair: tuple[dict, dict], name: str) -> float:
+    """Gated paired-block statistic. Callers validate both records first."""
     ordinary, native = pair
     if name == "throughput":
-        return _safe_ratio(float(native.get("aggregate_committed_tps", 0.0)), float(ordinary.get("aggregate_committed_tps", 0.0))) - 1.0
+        return _safe_ratio(float(native["aggregate_committed_tps"]), float(ordinary["aggregate_committed_tps"])) - 1.0
     if name == "ttft":
-        return _safe_ratio(float(native.get("ttft_p95_seconds", 0.0)), float(ordinary.get("ttft_p95_seconds", 0.0))) - 1.0
+        return _safe_ratio(float(native["ttft_p95_seconds"]), float(ordinary["ttft_p95_seconds"])) - 1.0
     if name == "itl":
-        return _safe_ratio(float(native.get("inter_token_gap_p95_seconds", 0.0)), float(ordinary.get("inter_token_gap_p95_seconds", 0.0))) - 1.0
+        return _safe_ratio(float(native["inter_token_gap_p95_seconds"]), float(ordinary["inter_token_gap_p95_seconds"])) - 1.0
     if name == "rejection":
-        ordinary_requests = max(1.0, float(ordinary.get("requests", 0)))
-        native_requests = max(1.0, float(native.get("requests", 0)))
-        ordinary_rate = float(ordinary.get("capacity_rejections", 0)) / ordinary_requests
-        native_rate = float(native.get("capacity_rejections", 0)) / native_requests
+        ordinary_rate = float(ordinary["capacity_rejections"]) / float(ordinary["requests"])
+        native_rate = float(native["capacity_rejections"]) / float(native["requests"])
         return (native_rate - ordinary_rate) * 100.0
     raise AssertionError(name)
+
+
+# R015 reporting family: every metric the campaign must report with a median
+# and corrected confidence interval, per path, from the same paired blocks.
+def _reported_values(run: dict) -> dict[str, float | None]:
+    requests = float(run["requests"])
+    proposed = run.get("mtp_proposed_tokens")
+    accepted = run.get("mtp_accepted_tokens")
+    return {
+        "aggregate_committed_tps": float(run["aggregate_committed_tps"]),
+        "per_request_tps": statistics.median(float(v) for v in run["per_request_tps"]),
+        "ttft_p50_seconds": float(run["ttft_p50_seconds"]),
+        "ttft_p95_seconds": float(run["ttft_p95_seconds"]),
+        "inter_token_gap_p50_seconds": float(run["inter_token_gap_p50_seconds"]),
+        "inter_token_gap_p95_seconds": float(run["inter_token_gap_p95_seconds"]),
+        "mtp_proposed_tokens": float(proposed) if _is_number(proposed) else None,
+        "mtp_accepted_tokens": float(accepted) if _is_number(accepted) else None,
+        "mtp_acceptance_rate": (
+            _optional_ratio(float(accepted), float(proposed))
+            if _is_number(accepted) and _is_number(proposed)
+            else None
+        ),
+        "target_forwards_per_committed_token": (
+            float(run["target_forwards_per_committed_token"])
+            if _is_number(run.get("target_forwards_per_committed_token"))
+            else None
+        ),
+        "peak_phys_footprint_bytes": float(run["peak_phys_footprint_bytes"]),
+        "capacity_rejection_rate": float(run["capacity_rejections"]) / requests,
+        "fallback_error_rate": (float(run["fallbacks"]) + float(run["errors"])) / requests,
+    }
+
+
+def _report_metrics(pairs: list[tuple[dict, dict]], draws: int, alpha: float, seed: int) -> dict:
+    """Median and Bonferroni-corrected two-sided percentile bootstrap CI over
+    whole paired blocks for every reported metric and path."""
+    per_block = [
+        {"ordinary": _reported_values(ordinary), "native_mtp": _reported_values(native)}
+        for ordinary, native in pairs
+    ]
+    series: dict[tuple[str, str], list[float]] = {}
+    for path in ("ordinary", "native_mtp"):
+        for name in per_block[0][path] if per_block else []:
+            values = [block[path][name] for block in per_block]
+            if all(value is not None for value in values):
+                series[(path, name)] = values  # type: ignore[assignment]
+    if not series:
+        return {}
+    level = alpha / len(series)
+    rng = random.Random(seed)
+    n = len(per_block)
+    boot: dict[tuple[str, str], list[float]] = {key: [] for key in series}
+    for _ in range(draws):
+        indices = [rng.randrange(n) for _ in range(n)]
+        for key, values in series.items():
+            boot[key].append(statistics.median(values[i] for i in indices))
+    report: dict[str, dict] = {"ordinary": {}, "native_mtp": {}}
+    for (path, name), values in series.items():
+        report[path][name] = {
+            "median": statistics.median(values),
+            "ci_lower": _percentile(boot[(path, name)], level / 2),
+            "ci_upper": _percentile(boot[(path, name)], 1.0 - level / 2),
+            "confidence_level": 1.0 - level,
+        }
+    return report
+
+
+def _holm_adjusted(p_values: list[float]) -> list[float]:
+    """Holm step-down adjusted p-values, in the input order."""
+    m = len(p_values)
+    order = sorted(range(m), key=lambda i: p_values[i])
+    adjusted = [1.0] * m
+    running = 0.0
+    for rank, index in enumerate(order):
+        running = max(running, min(1.0, (m - rank) * p_values[index]))
+        adjusted[index] = running
+    return adjusted
 
 
 def _bootstrap(pairs: list[tuple[dict, dict]], metric_name: str, draws: int, seed: int) -> list[float]:
@@ -256,14 +391,25 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
             if run.get("cell_id") == cell_id and run.get("sustained") is True and run.get("warmup") is not True
         ]
         hard_gate_runs = [run for pair in pairs for run in pair] + sustained_runs
-        parity_mismatches = sum(int(r.get("parity_mismatch", False)) for r in hard_gate_runs)
-        non_native_admissions = sum(int(r.get("non_native_admissions", 0)) for r in hard_gate_runs)
+        invalid_records = [
+            f"invalid_run_record:{run.get('path')}:{run.get('block_index')}:{','.join(fields)}"
+            for run in hard_gate_runs
+            if (fields := _invalid_run_fields(run))
+        ]
+        hard_failures.extend(invalid_records)
+        # Only fully valid records feed any statistic; an invalid record has
+        # already failed the cell above.
+        pairs = [pair for pair in pairs if not _invalid_run_fields(pair[0]) and not _invalid_run_fields(pair[1])]
+        sustained_runs = [run for run in sustained_runs if not _invalid_run_fields(run)]
+        hard_gate_runs = [run for pair in pairs for run in pair] + sustained_runs
+        parity_mismatches = sum(int(r["parity_mismatch"]) for r in hard_gate_runs)
+        non_native_admissions = sum(r["non_native_admissions"] for r in hard_gate_runs)
         missing_native_admissions = sum(
-            max(0, int(r.get("native_requests", 0)) - int(r.get("native_admissions", 0)))
+            max(0, r["native_requests"] - r["native_admissions"])
             for r in hard_gate_runs
             if r.get("path") == "native_mtp"
         )
-        fallback_errors = sum(int(r.get("fallbacks", 0)) + int(r.get("errors", 0)) for r in hard_gate_runs)
+        fallback_errors = sum(r["fallbacks"] + r["errors"] for r in hard_gate_runs)
         native_runs = [r for r in hard_gate_runs if r.get("path") == "native_mtp"]
         if parity_mismatches:
             hard_failures.append("parity_mismatch")
@@ -319,12 +465,6 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
             )
         if ram_bytes <= 0:
             hard_failures.append("machine_ram_missing")
-        if any(r.get("peak_phys_footprint_bytes") is None for r in hard_gate_runs):
-            hard_failures.append("peak_phys_footprint_missing")
-        if any(r.get("min_available_memory_fraction") is None for r in hard_gate_runs):
-            hard_failures.append("available_memory_missing")
-        if any(r.get("min_available_memory_fraction") is None for r in sustained_runs):
-            hard_failures.append("sustained_available_memory_missing")
 
         metrics = {}
         usable_pairs = pairs if pairs else []
@@ -350,10 +490,11 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
                 for _, r in pairs
                 if (value := _optional_ratio(float(r.get("target_forwards", 0)), float(r.get("committed_completion_tokens", 0)))) is not None
             ]),
-            "peak_phys_footprint_bytes": max([int(r.get("peak_phys_footprint_bytes") or 0) for r in hard_gate_runs] or [0]),
-            "min_available_memory_fraction": min([float(r.get("min_available_memory_fraction") or 0) for r in hard_gate_runs] or [0]),
+            "reported_metrics": _report_metrics(pairs, draws, alpha, base_seed + cell_index * 17 + 101),
+            "peak_phys_footprint_bytes": max([r["peak_phys_footprint_bytes"] for r in hard_gate_runs] or [0]),
+            "min_available_memory_fraction": min([float(r["min_available_memory_fraction"]) for r in hard_gate_runs] or [0]),
             "sustained_duration_seconds": sustained_duration_seconds,
-            "sustained_min_available_memory_fraction": min([float(r.get("min_available_memory_fraction") or 0) for r in sustained_runs] or [0]),
+            "sustained_min_available_memory_fraction": min([float(r["min_available_memory_fraction"]) for r in sustained_runs] or [0]),
             "thermal_start_states": sorted({str(r.get("thermal_state_start")) for r in hard_gate_runs}),
             "thermal_end_states": sorted({str(r.get("thermal_state_end")) for r in hard_gate_runs}),
         }
@@ -362,38 +503,46 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
             draws_for_metric = metric["draws"]
             if metric_name == "throughput":
                 threshold = float(thresholds["throughput_lower_bound_min"])
-                p_value = sum(1 for x in draws_for_metric if x < threshold) / max(1, len(draws_for_metric))
+                failing_side = sum(1 for x in draws_for_metric if x <= threshold)
             elif metric_name == "ttft":
                 threshold = float(thresholds["ttft_p95_upper_bound_max"])
-                p_value = sum(1 for x in draws_for_metric if x > threshold) / max(1, len(draws_for_metric))
+                failing_side = sum(1 for x in draws_for_metric if x >= threshold)
             elif metric_name == "itl":
                 threshold = float(thresholds["itl_p95_upper_bound_max"])
-                p_value = sum(1 for x in draws_for_metric if x > threshold) / max(1, len(draws_for_metric))
+                failing_side = sum(1 for x in draws_for_metric if x >= threshold)
             else:
                 threshold = float(thresholds["rejection_increase_max_pp"])
-                p_value = sum(1 for x in draws_for_metric if x > threshold) / max(1, len(draws_for_metric))
+                failing_side = sum(1 for x in draws_for_metric if x >= threshold)
+            # One-sided p-value for H0 "the gate is not met", by inverting the
+            # paired percentile bootstrap: the smallest alpha at which the
+            # one-sided bound clears the threshold. The +1 correction keeps a
+            # finite number of draws from ever reporting p = 0; no draws means
+            # no evidence (p = 1).
+            p_value = (failing_side + 1) / (len(draws_for_metric) + 1) if draws_for_metric else 1.0
             hypotheses.append((p_value, cell, metric_name, threshold))
 
-    hypotheses.sort(key=lambda item: item[0])
+    # Holm step-down across every gated hypothesis in every cell: once the
+    # k-th smallest p-value misses alpha/(m-k+1), it and every later
+    # hypothesis fail, whatever their own bounds say.
+    adjusted = _holm_adjusted([item[0] for item in hypotheses])
+    order = sorted(range(len(hypotheses)), key=lambda i: hypotheses[i][0])
     m = len(hypotheses)
-    for rank, (p_value, cell, metric_name, threshold) in enumerate(hypotheses):
+    for rank, index in enumerate(order):
+        p_value, cell, metric_name, threshold = hypotheses[index]
         adjusted_alpha = alpha / max(1, m - rank)
         metric = cell["metrics"][metric_name]
         draws_for_metric = metric.pop("draws")
         if metric_name == "throughput":
-            bound = _percentile(draws_for_metric, adjusted_alpha)
-            passed = bound is not None and bound >= threshold
-            metric["corrected_lower_bound"] = bound
+            metric["corrected_lower_bound"] = _percentile(draws_for_metric, adjusted_alpha)
         else:
-            bound = _percentile(draws_for_metric, 1.0 - adjusted_alpha)
-            passed = bound is not None and bound <= threshold
-            metric["corrected_upper_bound"] = bound
+            metric["corrected_upper_bound"] = _percentile(draws_for_metric, 1.0 - adjusted_alpha)
         metric["holm_rank"] = rank + 1
         metric["holm_alpha"] = adjusted_alpha
         metric["confidence_level"] = 1.0 - adjusted_alpha
         metric["p_value"] = p_value
+        metric["holm_adjusted_p_value"] = adjusted[index]
         metric["threshold"] = threshold
-        metric["status"] = "PASS" if passed else "FAIL"
+        metric["status"] = "PASS" if adjusted[index] <= alpha else "FAIL"
 
     min_available = float(thresholds["min_available_memory_fraction"])
     for cell in cell_results:

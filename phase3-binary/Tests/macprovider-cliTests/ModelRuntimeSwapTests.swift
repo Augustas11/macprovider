@@ -238,6 +238,65 @@ final class ModelRuntimeSwapTests: XCTestCase {
         ))
     }
 
+    func testNativeMTPBaseRepresentationIsRecomputedNotTrusted() throws {
+        func observation(
+            format: NativeMTPObservedArtifactFormat = .unquantized(dtype: "bf16"),
+            unquantized: [String] = []
+        ) -> NativeMTPArtifactPairObservation {
+            NativeMTPArtifactPairObservation(
+                target: NativeMTPArtifactObservation(
+                    format: format,
+                    mtpPredictionLayerCount: 2,
+                    tensorPairs: [],
+                    unquantizedModules: unquantized
+                ),
+                mtp: NativeMTPArtifactObservation(format: format, mtpPredictionLayerCount: 2, tensorPairs: [])
+            )
+        }
+        func capability(
+            target: String = "bf16",
+            digest: String?,
+            unquantized: [String] = [],
+            perLayer: [String] = []
+        ) -> NativeMTPAdmissionCapability {
+            makeNativeMTPAdmissionCapability(
+                predictionLayerCount: 2,
+                maxProposalDepth: 2,
+                quantization: NativeMTPAdmissionSidecar.Quantization(
+                    target: target,
+                    mtp: target,
+                    blockSizeElements: nil,
+                    representationManifestSHA256: digest,
+                    unquantizedExceptions: unquantized,
+                    perLayerExceptions: perLayer
+                )
+            )
+        }
+        let base = try NativeMTPArtifactObserver.baseRepresentation(for: observation())
+        XCTAssertEqual(
+            String(decoding: base.manifestBytes, as: UTF8.self),
+            #"{"mtp":{"dtype":"bfloat16"},"schema":"macprovider.native-mtp-representation.v1","target":{"dtype":"bfloat16"}}"#
+        )
+        func matches(_ observed: NativeMTPArtifactPairObservation, _ admitted: NativeMTPAdmissionCapability) -> Bool {
+            ModelRuntime.nativeMTPArtifactObservationMatchesAdmissionForTest(observed, admissionCapability: admitted)
+        }
+        XCTAssertTrue(matches(observation(), capability(digest: base.manifestSHA256)))
+        // A signed digest that is not the recomputed base manifest.
+        XCTAssertFalse(matches(observation(), capability(digest: String(repeating: "7", count: 64))))
+        XCTAssertFalse(matches(observation(), capability(digest: nil)))
+        // Signed exceptions the observed base artifacts do not carry.
+        XCTAssertFalse(matches(observation(), capability(digest: base.manifestSHA256, unquantized: ["target/model.norm"])))
+        XCTAssertFalse(matches(observation(), capability(digest: base.manifestSHA256, perLayer: ["mtp/fc"])))
+        // Observed config exceptions on a base artifact.
+        XCTAssertFalse(matches(observation(unquantized: ["model.norm"]), capability(digest: base.manifestSHA256)))
+        // fp16 is not base, and a kind the observer cannot recompute never admits.
+        XCTAssertFalse(matches(observation(format: .unquantized(dtype: "fp16")), capability(target: "fp16", digest: base.manifestSHA256)))
+        XCTAssertFalse(matches(
+            observation(format: .mlxMXFP8(bits: 8, groupSize: 32)),
+            capability(target: "mlx_mxfp8", digest: base.manifestSHA256)
+        ))
+    }
+
     func testNativeMTPServePathRejectionLogIsSingleStructuredPathFreeLine() throws {
         let line = ModelRuntime.nativeMTPServePathRejectionLogLine(
             reasonCode: "artifact_quantization_unsupported",

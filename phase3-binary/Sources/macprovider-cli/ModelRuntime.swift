@@ -9167,17 +9167,29 @@ actor ModelRuntime: ModelRuntimeServing {
         else {
             return false
         }
-        guard admissionCapability.quantization.target == "mlx_affine_4bit",
-              admissionCapability.quantization.mtp == "mlx_affine_4bit" else {
-            return true
-        }
-        guard let representation = try? NativeMTPArtifactObserver.affineRepresentation(for: observation) else {
+        // Every signed quantization field is recomputed from the observed
+        // artifacts; a kind the observer cannot recompute never admits.
+        let quantization = admissionCapability.quantization
+        switch (quantization.target, quantization.mtp) {
+        case ("mlx_affine_4bit", "mlx_affine_4bit"):
+            guard let representation = try? NativeMTPArtifactObserver.affineRepresentation(for: observation) else {
+                return false
+            }
+            return representation.groupSize == quantization.blockSizeElements
+                && representation.manifestSHA256 == quantization.representationManifestSHA256
+                && representation.perLayerExceptions == quantization.perLayerExceptions
+                && representation.unquantizedExceptions == quantization.unquantizedExceptions
+        case ("bf16", "bf16"):
+            guard let representation = try? NativeMTPArtifactObserver.baseRepresentation(for: observation) else {
+                return false
+            }
+            return quantization.blockSizeElements == nil
+                && representation.manifestSHA256 == quantization.representationManifestSHA256
+                && quantization.perLayerExceptions.isEmpty
+                && quantization.unquantizedExceptions.isEmpty
+        default:
             return false
         }
-        return representation.groupSize == admissionCapability.quantization.blockSizeElements
-            && representation.manifestSHA256 == admissionCapability.quantization.representationManifestSHA256
-            && representation.perLayerExceptions == admissionCapability.quantization.perLayerExceptions
-            && representation.unquantizedExceptions == admissionCapability.quantization.unquantizedExceptions
     }
 
     static func nativeMTPArtifactObservationMatchesAdmissionForTest(

@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.11
+**Version:** 0.1.12
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -236,29 +236,60 @@ the captured target directory used by the target tokenizer loader. An
 independent or merely descriptive manifest, tokenizer from another directory,
 or path alias MUST fail closed.
 
-For MLX affine 4-bit artifacts, the observer MUST treat config
-`"quantization": {"mode":"affine","bits":4,"group_size":G}` as
-`mlx_affine_4bit`, with `G` limited to `32`, `64`, or `128`, and MUST record
-the per-tensor observed `bits_per_value` and `group_size`. The observer MUST
-preserve per-module config overrides and `false` unquantized config entries so
-SPEC-023's `representation_manifest_sha256`, `per_layer_exceptions`, and
-`unquantized_exceptions` can be recomputed from the observed target/MTP pair.
-Overrides are admitted only for `4` or `8` bits and group sizes `32`, `64`, or
-`128`. The observed affine representation MUST match the signed SPEC-023
-quantization object exactly before native MTP is admitted.
+The observer MUST accept exactly the configuration and tensor grammar the
+pinned loader consumes and reject everything else. Quantization metadata is
+read only from the top-level config `quantization` object
+(`BaseConfiguration`); the `quantization_config` copy mlx-lm also writes is
+never read, and a config carrying only that copy fails closed. `mode` is a
+case-sensitive MLX `QuantizationMode` raw value; an absent `mode` is affine,
+as in the loader, and `quant_method`, `quantization_mode`, and `linear_class`
+carry no meaning. Global `bits` and `group_size` use exactly those keys. A
+quantized module is the module whose `<path>.scales` tensor exists, with zero
+points in `<path>.biases`; no other scale or bias spelling is read.
 
-MLX never quantizes rank-1 floating tensors, rank-3 `*.conv1d.weight` tensors,
-or `vision_tower.*` / `model.visual.*` tensors that the pinned Qwen35 text
-loader discards. A vision-language-origin target remains admissible for v0.1
-text-only serving under §8 when the signed target artifact and processor
-contract prove no image-input buyer path is admitted. A rank-2 language-model
-weight without a scale pair still fails closed unless the config explicitly
-declares that module unquantized.
+For MLX affine 4-bit artifacts, the observer MUST treat config
+`"quantization": {"mode":"affine","bits":4,"group_size":G}` (or the same
+object without `mode`) as `mlx_affine_4bit`, with `G` limited to `32`, `64`,
+or `128`, and MUST record the per-tensor observed `bits_per_value` and
+`group_size`. The observer MUST preserve per-module config overrides and
+`false` unquantized config entries so SPEC-023's
+`representation_manifest_sha256`, `per_layer_exceptions`, and
+`unquantized_exceptions` can be recomputed from the observed target/MTP pair.
+Override and `false` keys are matched only against the exact post-sanitize
+module path the loader's quantize pass looks up: for qwen3_5 / qwen3_5_moe
+targets, `model.language_model` becomes `language_model.model` and any other
+key lacking `language_model.` gains that prefix; for standalone drafters,
+every key not already under `mtp.` gains that prefix. A key the loader would
+not apply (for example a bare drafter `fc` override, which the loader ignores
+in favour of the global width) fails closed as unmatched, as does a `false`
+entry that names no consumed floating module or names a module that has
+packed weights. Overrides are admitted only for `4` or `8` bits, group sizes
+`32`, `64`, or `128`, and an absent or exactly `affine` mode. The observed
+affine representation MUST match the signed SPEC-023 quantization object
+exactly before native MTP is admitted. A SPEC-023 `base` admission likewise
+requires both artifacts observed as unquantized bfloat16 with no overrides or
+`false` entries and the signed digest recomputed from them; any other kind
+the observer cannot recompute never admits.
+
+MLX never quantizes rank-1 floating tensors or rank-3 `*.conv1d.weight`
+tensors. The pinned Qwen35 loader discards every target key with the prefix
+`vision_tower` or `model.visual`; the observer drops exactly the dotted
+`vision_tower.*` / `model.visual.*` namespaces the same way and fails closed
+on any other name that discard predicate would silently swallow (for example
+`vision_tower_evil.weight`). A vision-language-origin target remains
+admissible for v0.1 text-only serving under §8 when the signed target artifact
+and processor contract prove no image-input buyer path is admitted. A rank-2
+language-model weight without a scale pair still fails closed unless the
+config explicitly declares that module unquantized. No tensor is excluded by
+name (optimizer, moment, or otherwise): the loader keeps every remaining key
+and verifies it against the model, so the observer inspects them all, and a
+target key whose loader path is not under `language_model.model.` or
+`language_model.lm_head.` fails closed.
 
 For standalone drafter artifacts, the accepted tensor namespace is exactly
 `fc|layers|norm|pre_fc_norm_embedding|pre_fc_norm_hidden`, optionally under an
-`mtp.` prefix, matching the pinned fork's `qwenMTPSanitizeWeights`
-`standaloneCheckpoint` path. Qwen3.6 target configs with `model_type`
+`mtp.` prefix, matched case-sensitively, matching the pinned fork's
+`qwenMTPSanitizeWeights` `standaloneCheckpoint` path. Qwen3.6 target configs with `model_type`
 `qwen3_5` or `qwen3_5_moe` use the same `qwen3_5_mtp_v1` adapter and
 `separate_artifact` layout with the matching
 `mlx-community/Qwen3.6-*-MTP-4bit` drafter artifacts.
@@ -997,6 +1028,17 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.12 (2026-10-01)** — Closes observer/loader divergences found in
+  the campaign round-1 audit (#1770). The MTP-2 observer now accepts exactly
+  the pinned loader grammar: only the top-level `quantization` object, the
+  case-sensitive `mode` (absent means affine), `group_size`, and
+  `.scales`/`.biases` tensors; overrides and `false` entries match the exact
+  post-sanitize loader module path (a bare standalone-drafter `fc` override
+  the loader ignores now fails closed); no tensor is excluded by name; the
+  drafter namespace is case-sensitive; and only the dotted vision-tower
+  namespaces are dropped, with any other name the loader's discard predicate
+  would swallow rejected. `base` admissions now recompute their
+  representation digest instead of trusting it.
 - **0.1.11 (2026-09-29)** — Admits SPEC-023-R024 `mlx_affine`
   native-MTP artifacts for issue #1770 by binding observed MLX affine 4-bit
   target/MTP representation manifests, per-module overrides, and unquantized

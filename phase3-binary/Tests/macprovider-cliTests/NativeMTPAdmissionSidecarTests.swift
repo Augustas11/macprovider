@@ -1118,6 +1118,82 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         )
     }
 
+    func testBaseAndMXFP8ExceptionArraysAreFailClosed() throws {
+        func quantization(kind: String, unquantized: [String], perLayer: [String]) -> [String: Any] {
+            let isBase = kind == "base"
+            return [
+                "kind": kind,
+                "packed_data_dtype": isBase ? "none" : "uint8",
+                "packed_layout": isBase ? "none" : "mlx_array_native_v1",
+                "scale_dtype": isBase ? "none" : "float16",
+                "scale_layout": isBase ? "none" : "per_block",
+                "block_size_elements": isBase ? NSNull() : 32,
+                "alignment_bytes": isBase ? NSNull() : 16,
+                "padding_rule": isBase ? "none" : "zero_pad_to_alignment",
+                "unquantized_exceptions": unquantized,
+                "per_layer_exceptions": perLayer,
+                "representation_manifest_sha256": String(repeating: "a", count: 64),
+            ]
+        }
+        let cases: [([String: Any], NativeMTPAdmissionSidecarError)] = [
+            // `base` admits no exceptions at all, even well-formed ones.
+            (quantization(kind: "base", unquantized: ["target/model.norm"], perLayer: []), .invalidValue("$.entries[0].quantization")),
+            (quantization(kind: "base", unquantized: [], perLayer: ["mtp/fc"]), .invalidValue("$.entries[0].quantization")),
+            // R024 prefix grammar applies to every kind, not only mlx_affine.
+            (quantization(kind: "base", unquantized: ["model.norm"], perLayer: []), .invalidValue("$.entries[0].quantization.unquantized_exceptions")),
+            (quantization(kind: "mlx_mxfp8", unquantized: [], perLayer: ["model.layers.0.mlp.gate"]), .invalidValue("$.entries[0].quantization.per_layer_exceptions")),
+            (quantization(kind: "mlx_mxfp8", unquantized: ["target/a/b"], perLayer: []), .invalidValue("$.entries[0].quantization.unquantized_exceptions")),
+        ]
+        for (value, expected) in cases {
+            let fixture = try makeReleaseEnvelopeFixture(entryEdit: { $0["quantization"] = value })
+            defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+            XCTAssertEqual(try rejectedReleaseEnvelopeError(fixture), expected)
+        }
+    }
+
+    func testReleaseEnvelopeBindsSignedTokenizerDigestToProjection() throws {
+        let fixture = try makeReleaseEnvelopeFixture(entryEdit: { entry in
+            entry["tokenizer_sha256"] = String(repeating: "e", count: 64)
+        })
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+
+        XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(fixture),
+            .artifactDigestMismatch("$.entries.tokenizer_sha256")
+        )
+    }
+
+    func testReleaseEnvelopeEnforcesSignedCacheStateClasses() throws {
+        let cases: [[String]] = [
+            // The admitted state class is absent from the signed classes.
+            ["hybrid_stageable_rewindable"],
+            // A class the runtime cannot stage and rewind.
+            ["kv_quantized", "stageable_rewindable"],
+        ]
+        for classes in cases {
+            let fixture = try makeReleaseEnvelopeFixture(entryEdit: { $0["cache_state_classes"] = classes })
+            defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+            XCTAssertEqual(
+                try rejectedReleaseEnvelopeError(fixture),
+                .invalidValue("$.entries[0].cache_state_classes"),
+                "\(classes)"
+            )
+        }
+
+        let fixture = try makeReleaseEnvelopeFixture(entryEdit: {
+            $0["cache_state_classes"] = ["hybrid_stageable_rewindable", "stageable_rewindable"]
+        })
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+        XCTAssertNoThrow(try NativeMTPAdmissionSidecar.load(
+            sidecarData: fixture.sidecarData,
+            signatureData: fixture.signatureData,
+            snapshotRoot: fixture.base.snapshot,
+            context: fixture.context,
+            trustedKeyring: fixture.base.trustedKeyring,
+            resolvedArtifactAuthority: fixture.authority
+        ))
+    }
+
     func testReleaseEnvelopeRejectsTargetRootAndHashMismatch() throws {
         let fixture = try makeReleaseEnvelopeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.base.root) }

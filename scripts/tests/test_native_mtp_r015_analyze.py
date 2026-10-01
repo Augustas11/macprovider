@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.native_mtp_r015_analyze import analyze
+from scripts.native_mtp_r015_analyze import _holm_adjusted, analyze
 
 
 class NativeMTPR015AnalyzeTests(unittest.TestCase):
@@ -90,9 +90,104 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         result = self._run_case(exploratory_policy=True, blocks_written=3, header_exploratory=False)
         self.assertEqual(result["overall_status"], "FAIL")
 
+    def test_missing_native_p95_ttft_fails_closed(self):
+        # A missing native p95 TTFT must never read as a 0s (perfect) TTFT.
+        result = self._run_case(native_overrides={"ttft_p95_seconds": None})
+        self.assertEqual(result["overall_status"], "FAIL")
+        self.assertTrue(any(
+            item.startswith("invalid_run_record:native_mtp:") and "ttft_p95_seconds" in item
+            for item in result["cells"][0]["hard_failures"]
+        ))
+
+    def test_missing_required_fields_fail_closed(self):
+        for field in (
+            "inter_token_gap_p95_seconds",
+            "aggregate_committed_tps",
+            "requests",
+            "capacity_rejections",
+            "fallbacks",
+            "errors",
+            "native_requests",
+            "parity_mismatch",
+            "peak_phys_footprint_bytes",
+            "min_available_memory_fraction",
+            "per_request_tps",
+            "thermal_state_end",
+        ):
+            with self.subTest(field=field):
+                result = self._run_case(native_overrides={field: self._DELETE})
+                self.assertEqual(result["overall_status"], "FAIL")
+                self.assertTrue(any(
+                    item.startswith("invalid_run_record:native_mtp:") and field in item
+                    for item in result["cells"][0]["hard_failures"]
+                ), result["cells"][0]["hard_failures"])
+
+    def test_wrong_typed_or_non_finite_fields_fail_closed(self):
+        for field, value in (
+            ("ttft_p95_seconds", "0.1"),
+            ("inter_token_gap_p95_seconds", float("nan")),
+            ("aggregate_committed_tps", -1.0),
+            ("requests", 0),
+            ("errors", 1.5),
+            ("parity_mismatch", 0),
+            ("min_available_memory_fraction", 1.5),
+        ):
+            with self.subTest(field=field):
+                result = self._run_case(native_overrides={field: value})
+                self.assertEqual(result["overall_status"], "FAIL")
+                self.assertTrue(any(
+                    field in item for item in result["cells"][0]["hard_failures"]
+                ))
+
+    def test_holm_is_step_down(self):
+        # Sorted p: 0.01 -> 0.03, 0.03 -> 0.06, 0.04 -> max(0.06, 0.04).
+        adjusted = _holm_adjusted([0.01, 0.04, 0.03])
+        self.assertAlmostEqual(adjusted[0], 0.03)
+        self.assertAlmostEqual(adjusted[1], 0.06)
+        self.assertAlmostEqual(adjusted[2], 0.06)
+        # An independent per-rank rule would pass 0.04 at alpha/1 = 0.05;
+        # step-down fails it because the preceding rank already failed.
+        self.assertGreater(adjusted[1], 0.05)
+
+    def test_failing_early_rank_fails_later_hypotheses(self):
+        # TTFT regresses past its gate in every block; Holm then must not let
+        # any hypothesis with a larger p-value pass on its own bound.
+        result = self._run_case(native_ttft=0.13)
+        metrics = result["cells"][0]["metrics"]
+        self.assertEqual(metrics["ttft"]["status"], "FAIL")
+        for name, metric in metrics.items():
+            if metric["holm_rank"] > metrics["ttft"]["holm_rank"]:
+                self.assertEqual(metric["status"], "FAIL", name)
+            self.assertEqual(metric["status"] == "PASS", metric["holm_adjusted_p_value"] <= 0.05, name)
+
+    def test_reports_every_r015_metric_with_corrected_interval(self):
+        result = self._run_case()
+        reported = result["cells"][0]["reported_metrics"]
+        for path in ("ordinary", "native_mtp"):
+            for name in (
+                "aggregate_committed_tps",
+                "per_request_tps",
+                "ttft_p50_seconds",
+                "ttft_p95_seconds",
+                "inter_token_gap_p50_seconds",
+                "inter_token_gap_p95_seconds",
+                "peak_phys_footprint_bytes",
+                "capacity_rejection_rate",
+                "fallback_error_rate",
+            ):
+                entry = reported[path][name]
+                self.assertLessEqual(entry["ci_lower"], entry["median"])
+                self.assertGreaterEqual(entry["ci_upper"], entry["median"])
+                self.assertGreater(entry["confidence_level"], 0.95)
+        for name in ("mtp_acceptance_rate", "target_forwards_per_committed_token", "mtp_proposed_tokens"):
+            self.assertIn(name, reported["native_mtp"])
+
+    _DELETE = object()
+
     def _run_case(
         self,
         *,
+        native_overrides=None,
         native_tps=130.0,
         native_ttft=0.105,
         native_itl=0.009,
@@ -174,7 +269,13 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
                 records.append(ordinary)
                 if duplicate_matrix_path and block == 0:
                     records.append(dict(ordinary))
-                records.append(self._run_record("native_mtp", block, native_tps, native_ttft, native_itl, parity_mismatch, policy_sha=run_policy_sha or policy_sha, native_admissions=native_admissions, peak_phys_footprint_bytes=peak_phys_footprint_bytes))
+                native_record = self._run_record("native_mtp", block, native_tps, native_ttft, native_itl, parity_mismatch, policy_sha=run_policy_sha or policy_sha, native_admissions=native_admissions, peak_phys_footprint_bytes=peak_phys_footprint_bytes)
+                for field, value in (native_overrides or {}).items():
+                    if value is self._DELETE:
+                        native_record.pop(field, None)
+                    else:
+                        native_record[field] = value
+                records.append(native_record)
             if blocks_written >= 10:
                 records.append(self._run_record("ordinary", 100, 100.0, 0.100, 0.010, False, sustained=True, policy_sha=run_policy_sha or policy_sha, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=sustained_min_available_memory_fraction, wall_seconds=sustained_wall_seconds))
                 records.append(self._run_record("native_mtp", 100, native_tps, native_ttft, native_itl, parity_mismatch, sustained=True, policy_sha=run_policy_sha or policy_sha, native_admissions=native_admissions, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=sustained_min_available_memory_fraction, wall_seconds=sustained_wall_seconds))
@@ -208,7 +309,10 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
             "wall_seconds": wall_seconds,
             "requests": 1,
             "aggregate_committed_tps": tps,
+            "per_request_tps": [tps],
+            "ttft_p50_seconds": ttft * 0.9,
             "ttft_p95_seconds": ttft,
+            "inter_token_gap_p50_seconds": itl * 0.9,
             "inter_token_gap_p95_seconds": itl,
             "capacity_rejections": 0,
             "fallbacks": 0,

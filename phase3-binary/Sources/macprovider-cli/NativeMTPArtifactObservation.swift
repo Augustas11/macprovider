@@ -135,8 +135,8 @@ enum NativeMTPArtifactObserver {
         let config = try loadConfig(directory: directory)
         let layerCount = try mtpPredictionLayerCount(in: config)
         let headers = try loadSafetensorsHeaders(directory: directory, fileManager: fileManager)
-        try validateTensorNames(headers, policy: tensorNamePolicy)
-        let format = try observeFormat(config: config, headers: headers)
+        let tensors = try loaderConsumedTensors(headers, policy: tensorNamePolicy)
+        let format = try observeFormat(config: config, tensors: tensors, policy: tensorNamePolicy)
         return NativeMTPArtifactObservation(
             format: format.format,
             mtpPredictionLayerCount: layerCount,
@@ -212,6 +212,35 @@ enum NativeMTPArtifactObserver {
         )
     }
 
+    /// SPEC-023-R024 `base` representation: both artifacts are observed as
+    /// unquantized bfloat16 with no config overrides or `false` entries, and
+    /// the signed digest covers that exact canonical manifest.
+    static func baseRepresentation(
+        for observation: NativeMTPArtifactPairObservation
+    ) throws -> NativeMTPAffineRepresentation {
+        for artifact in [observation.target, observation.mtp] {
+            guard artifact.format == .unquantized(dtype: "bf16"),
+                  artifact.affineModuleOverrides.isEmpty,
+                  artifact.unquantizedModules.isEmpty else {
+                throw NativeMTPArtifactObservationError.unsupportedQuantization("base representation requires unquantized bf16 target and mtp")
+            }
+        }
+        let dtype = RFC8785JCS.Value.object(["dtype": .rawString("bfloat16")])
+        let canonical = try RFC8785JCS.canonicalStringRawStrings(.object([
+            "schema": .rawString("macprovider.native-mtp-representation.v1"),
+            "target": dtype,
+            "mtp": dtype,
+        ]))
+        let bytes = Data(canonical.utf8)
+        return NativeMTPAffineRepresentation(
+            manifestBytes: bytes,
+            manifestSHA256: SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined(),
+            perLayerExceptions: [],
+            unquantizedExceptions: [],
+            groupSize: 0
+        )
+    }
+
     private static func affineManifestValue(
         for observation: NativeMTPArtifactObservation
     ) throws -> RFC8785JCS.Value {
@@ -265,22 +294,24 @@ enum NativeMTPArtifactObserver {
 
     private static func observeFormat(
         config: [String: Any],
-        headers: [SafetensorsHeader]
+        tensors: [SafetensorsTensor],
+        policy: TensorNamePolicy
     ) throws -> (
         format: NativeMTPObservedArtifactFormat,
         tensorPairs: [NativeMTPObservedTensorPair],
         moduleOverrides: [String: NativeMTPAffineModuleOverride],
         unquantizedModules: [String]
     ) {
-        if let quantization = quantizationMetadata(in: config) {
+        if let quantization = try quantizationMetadata(in: config) {
             return try observeQuantizedFormat(
                 quantization: quantization,
-                representation: representationManifest(in: config),
-                headers: headers
+                representation: representationManifest(quantization: quantization, config: config),
+                tensors: tensors,
+                policy: policy
             )
         }
         let dtype = try explicitUnquantizedDType(in: config)
-        try validateUnquantizedHeaders(dtype: dtype, headers: headers)
+        try validateUnquantizedHeaders(dtype: dtype, tensors: tensors)
         return (.unquantized(dtype: dtype), [], [:], [])
     }
 
@@ -304,7 +335,8 @@ enum NativeMTPArtifactObserver {
     private static func observeQuantizedFormat(
         quantization: [String: Any],
         representation: RepresentationManifest,
-        headers: [SafetensorsHeader]
+        tensors: [SafetensorsTensor],
+        policy: TensorNamePolicy
     ) throws -> (
         format: NativeMTPObservedArtifactFormat,
         tensorPairs: [NativeMTPObservedTensorPair],
@@ -317,12 +349,12 @@ enum NativeMTPArtifactObserver {
         guard let bits = intValue(quantization["bits"]) else {
             throw NativeMTPArtifactObservationError.missingQuantizationMetadata("bits")
         }
-        guard let groupSize = intValue(quantization["group_size"]) ?? intValue(quantization["groupSize"]) else {
+        guard let groupSize = intValue(quantization["group_size"]) else {
             throw NativeMTPArtifactObservationError.missingQuantizationMetadata("group_size")
         }
 
         switch mode {
-        case "mlx_affine_4bit":
+        case "affine":
             guard bits == 4 else {
                 throw NativeMTPArtifactObservationError.unsupportedQuantization("mlx affine requires bits=4")
             }
@@ -337,7 +369,8 @@ enum NativeMTPArtifactObserver {
             }
             let moduleOverrides = try affineModuleOverrides(in: quantization)
             let pairs = try validatePackedHeaders(
-                headers,
+                tensors,
+                policy: policy,
                 quantizationName: "mlx_affine_4bit",
                 groupSize: groupSize,
                 bitsPerValue: bits,
@@ -354,23 +387,19 @@ enum NativeMTPArtifactObserver {
                 representation.configUnquantizedModules.sorted()
             )
 
-        case "mlx_mxfp8":
+        case "mxfp8":
             guard bits == 8, groupSize == 32 else {
                 throw NativeMTPArtifactObservationError.unsupportedQuantization("mxfp8 requires bits=8 group_size=32")
             }
             throw NativeMTPArtifactObservationError.unsupportedQuantization("mlx_mxfp8 scale dtype unverified")
-
-        case "fp8", "float8", "int8", "uint8":
-            throw NativeMTPArtifactObservationError.unsupportedQuantization(mode)
 
         default:
             throw NativeMTPArtifactObservationError.unsupportedQuantization(mode)
         }
     }
 
-    private static func validateUnquantizedHeaders(dtype: String, headers: [SafetensorsHeader]) throws {
+    private static func validateUnquantizedHeaders(dtype: String, tensors observed: [SafetensorsTensor]) throws {
         let expected: Set<String> = dtype == "bf16" ? ["BF16"] : ["F16"]
-        let observed = selectedWeightTensors(headers)
         guard !observed.isEmpty else {
             throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("no selected tensors")
         }
@@ -380,7 +409,8 @@ enum NativeMTPArtifactObserver {
     }
 
     private static func validatePackedHeaders(
-        _ headers: [SafetensorsHeader],
+        _ tensors: [SafetensorsTensor],
+        policy: TensorNamePolicy,
         quantizationName: String,
         groupSize: Int,
         bitsPerValue: Int,
@@ -398,7 +428,6 @@ enum NativeMTPArtifactObserver {
             throw NativeMTPArtifactObservationError.unsupportedQuantization("\(quantizationName) invalid packing density")
         }
         var consumedOverrides: Set<String> = []
-        let tensors = selectedWeightTensors(headers)
         guard !tensors.isEmpty else {
             throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("no selected tensors")
         }
@@ -428,9 +457,23 @@ enum NativeMTPArtifactObserver {
         }
         var pairs: [NativeMTPObservedTensorPair] = []
         var pairedBiases: Set<String> = []
+        var consumedUnquantized: Set<String> = []
         for tensor in packed.sorted(by: { $0.name < $1.name }) {
+            let declaredUnquantized = representation.unquantizedExceptions(
+                matching: loaderPath(tensor.name, policy: policy)
+            )
+            if !declaredUnquantized.isEmpty {
+                // A `false` entry makes the loader skip quantizing the module;
+                // a packed weight or scale pair under it would then be an
+                // unused key and fail `verify: [.all]` at load.
+                guard isFloatingWeightDType(tensor.dtype),
+                      expectedScaleName(for: tensor.name, available: scaleTensors) == nil else {
+                    throw NativeMTPArtifactObservationError.unsupportedQuantization("\(quantizationName) unquantized module has packed weights")
+                }
+                consumedUnquantized.formUnion(declaredUnquantized)
+            }
             if isFloatingWeightDType(tensor.dtype),
-               representation.allowsUnquantizedTensor(tensor.name)
+               !declaredUnquantized.isEmpty
                 || (isNeverQuantizedFloatingTensor(tensor) && expectedScaleName(for: tensor.name, available: scaleTensors) == nil) {
                 guard let expectedByteCount = checkedMultiply(tensor.elementCount, bytesPerElement(tensor.dtype)),
                       tensor.byteCount == expectedByteCount else {
@@ -450,11 +493,15 @@ enum NativeMTPArtifactObserver {
             var tensorBits = bitsPerValue
             var tensorGroupSize = groupSize
             var tensorValuesPerPackedElement = valuesPerPackedElement
-            let tensorModule = tensor.name.hasSuffix(".weight")
-                ? String(tensor.name.dropLast(".weight".count))
+            // The pinned loader quantizes the module at its post-sanitize path
+            // and looks overrides up by that exact path (BaseConfiguration
+            // PerLayerQuantization.quantization(layer:)); no other spelling applies.
+            let loaderTensorPath = loaderPath(tensor.name, policy: policy)
+            let tensorModule = loaderTensorPath.hasSuffix(".weight")
+                ? String(loaderTensorPath.dropLast(".weight".count))
                 : nil
             let overrideMatch = tensorModule.flatMap { module in
-                matchingModuleOverride(module, overrides: moduleOverrides)
+                moduleOverrides[module].map { (module, $0) }
             }
             if let (overrideKey, override) = overrideMatch {
                 tensorBits = override.bits
@@ -537,6 +584,9 @@ enum NativeMTPArtifactObserver {
         guard consumedOverrides == Set(moduleOverrides.keys) else {
             throw NativeMTPArtifactObservationError.unsupportedQuantization("\(quantizationName) unmatched module override")
         }
+        guard consumedUnquantized == representation.permittedUnquantizedModules else {
+            throw NativeMTPArtifactObservationError.unsupportedQuantization("\(quantizationName) unmatched unquantized module")
+        }
         return pairs
     }
 
@@ -554,7 +604,7 @@ enum NativeMTPArtifactObserver {
             guard Set(object.keys).isSubset(of: allowedKeys) else {
                 throw NativeMTPArtifactObservationError.unsupportedQuantization("mlx affine module override unknown key")
             }
-            if object["mode"] != nil, stringValue(object["mode"])?.lowercased(with: nil) != "affine" {
+            if object["mode"] != nil, object["mode"] as? String != "affine" {
                 throw NativeMTPArtifactObservationError.unsupportedQuantization("mlx affine module override mode")
             }
             guard let bits = intValue(object["bits"]), [4, 8].contains(bits) else {
@@ -572,20 +622,26 @@ enum NativeMTPArtifactObserver {
         "group_size", "bits", "mode", "quant_method", "linear_class", "quantization_mode",
     ]
 
-    private static func matchingModuleOverride(
-        _ tensorModule: String,
-        overrides: [String: NativeMTPAffineModuleOverride]
-    ) -> (String, NativeMTPAffineModuleOverride)? {
-        if let exact = overrides[tensorModule] {
-            return (tensorModule, exact)
-        }
-        if tensorModule.hasPrefix("mtp.") {
-            let unprefixed = String(tensorModule.dropFirst("mtp.".count))
-            if let value = overrides[unprefixed] {
-                return (unprefixed, value)
+    /// The key the pinned loader assigns a checkpoint tensor after the family
+    /// sanitizer runs, which is also the module path its quantize pass and
+    /// per-layer quantization lookup use.
+    /// - target: `Qwen35Model.sanitize` (qwen3_5 / qwen3_5_moe) rewrites
+    ///   `model.language_model` to `language_model.model` and prefixes any
+    ///   other key lacking `language_model.`.
+    /// - mtp: `qwenMTPSanitizeWeights(standaloneCheckpoint: true)` keeps
+    ///   `mtp.` keys and prefixes every other key with `mtp.`.
+    private static func loaderPath(_ name: String, policy: TensorNamePolicy) -> String {
+        switch policy {
+        case .permissive:
+            return name
+        case .target:
+            if name.hasPrefix("model.language_model") {
+                return name.replacingOccurrences(of: "model.language_model", with: "language_model.model")
             }
+            return name.hasPrefix("language_model.") ? name : "language_model." + name
+        case .mtp:
+            return name.hasPrefix("mtp.") ? name : "mtp." + name
         }
-        return nil
     }
 
     private static func mtpPredictionLayerCount(in config: [String: Any]) throws -> Int {
@@ -601,22 +657,31 @@ enum NativeMTPArtifactObserver {
         return count
     }
 
-    private static func quantizationMetadata(in config: [String: Any]) -> [String: Any]? {
-        for key in ["quantization", "quantization_config", "quantizationConfig"] {
-            if let object = config[key] as? [String: Any] {
-                return object
+    /// The pinned loader decodes only the top-level `quantization` object
+    /// (`BaseConfiguration.CodingKeys.quantizationContainer`). mlx-lm also
+    /// writes a `quantization_config` copy the loader never reads, so it is
+    /// never an alternative source of truth here.
+    private static func quantizationMetadata(in config: [String: Any]) throws -> [String: Any]? {
+        guard let value = config["quantization"] else {
+            if config["quantization_config"] != nil || config["quantizationConfig"] != nil {
+                throw NativeMTPArtifactObservationError.missingQuantizationMetadata("quantization")
             }
+            return nil
         }
-        return nil
+        guard let object = value as? [String: Any] else {
+            throw NativeMTPArtifactObservationError.malformedConfig("quantization must be an object")
+        }
+        return object
     }
 
-    private static func representationManifest(in config: [String: Any]) -> RepresentationManifest {
+    private static func representationManifest(
+        quantization: [String: Any],
+        config: [String: Any]
+    ) -> RepresentationManifest {
         var unquantizedLayerExceptions: Set<String> = []
-        if let quantization = quantizationMetadata(in: config) {
-            for (key, value) in quantization where !quantizationGlobalKeys.contains(key) {
-                if let bool = value as? Bool, bool == false {
-                    unquantizedLayerExceptions.insert(key)
-                }
+        for (key, value) in quantization where !quantizationGlobalKeys.contains(key) {
+            if let bool = value as? Bool, bool == false {
+                unquantizedLayerExceptions.insert(key)
             }
         }
         guard let object = config["native_mtp_representation"] as? [String: Any] else {
@@ -635,35 +700,47 @@ enum NativeMTPArtifactObserver {
         )
     }
 
+    /// Mirrors `BaseConfiguration.Quantization`: only the exact `mode` key is
+    /// decoded, as a case-sensitive `QuantizationMode` raw value, and an absent
+    /// mode means affine. `quant_method`, `quantization_mode`, and
+    /// `linear_class` are skipped by the loader and therefore carry no meaning.
+    /// The global bits=4 guard in observeQuantizedFormat still rejects any
+    /// other affine width.
     private static func quantizationMode(_ object: [String: Any]) -> String? {
-        let raw = stringValue(object["mode"])
-            ?? stringValue(object["quantization_mode"])
-            ?? stringValue(object["quant_method"])
-            ?? stringValue(object["quantization"])
-        guard let raw else { return nil }
-        let lower = raw.lowercased(with: nil)
-        switch lower {
-        // mlx-lm writes `"mode": "affine"`; the global bits=4 guard in
-        // observeQuantizedFormat still rejects any other affine width.
-        case "mlx_affine_4bit", "mlx-affine-4bit", "mlx_affine4", "affine4", "affine":
-            return "mlx_affine_4bit"
-        case "mxfp8", "mlx_mxfp8", "mlx-mxfp8":
-            return "mlx_mxfp8"
-        case "fp8", "float8", "int8", "uint8":
-            return lower
-        default:
-            return lower
+        guard let value = object["mode"] else {
+            return "affine"
         }
+        return value as? String
     }
 
-    private static func selectedWeightTensors(_ headers: [SafetensorsHeader]) -> [SafetensorsTensor] {
-        headers.flatMap(\.tensors).filter { tensor in
-            let name = tensor.name.lowercased(with: nil)
-            return !name.hasPrefix("__")
-                && !name.contains("optimizer")
-                && !name.contains("adam")
-                && !name.contains("moment")
+    /// Every tensor the pinned loader reads and keeps. Nothing is filtered by
+    /// name: the loader updates the model with `verify: [.all]`, so an extra
+    /// tensor is a load failure the observer must see first. The only tensors
+    /// the target loader discards are the `vision_tower` / `model.visual`
+    /// prefixes (`Qwen35Model.sanitize`); the dotted vision-tower namespaces
+    /// are the documented VL-origin case and are dropped here exactly as the
+    /// loader drops them, and any other name the discard predicate would
+    /// swallow fails closed.
+    private static func loaderConsumedTensors(
+        _ headers: [SafetensorsHeader],
+        policy: TensorNamePolicy
+    ) throws -> [SafetensorsTensor] {
+        var consumed: [SafetensorsTensor] = []
+        for tensor in headers.flatMap(\.tensors) {
+            if policy != .mtp, isTargetLoaderDiscarded(tensor.name) {
+                guard tensor.name.hasPrefix("vision_tower.") || tensor.name.hasPrefix("model.visual.") else {
+                    throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("target tensor namespace \(tensor.name)")
+                }
+                continue
+            }
+            try validateTensorName(tensor.name, policy: policy)
+            consumed.append(tensor)
         }
+        return consumed
+    }
+
+    private static func isTargetLoaderDiscarded(_ name: String) -> Bool {
+        name.hasPrefix("vision_tower") || name.hasPrefix("model.visual")
     }
 
     private enum TensorNamePolicy: Equatable {
@@ -672,27 +749,27 @@ enum NativeMTPArtifactObserver {
         case mtp
     }
 
-    private static func validateTensorNames(_ headers: [SafetensorsHeader], policy: TensorNamePolicy) throws {
-        guard policy != .permissive else { return }
-        let tensors = headers.flatMap(\.tensors)
-        for tensor in tensors {
-            let lower = tensor.name.lowercased(with: nil)
-            switch policy {
-            case .permissive:
-                continue
-            case .target:
-                if lower.contains("mtp.") {
-                    throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("target tensor namespace \(tensor.name)")
-                }
-            case .mtp:
-                // The pinned standalone-drafter loader (`qwenMTPSanitizeWeights`,
-                // standaloneCheckpoint) prefixes every key with `mtp.`; only the
-                // drafter module roots below exist under that prefix.
-                let unprefixed = lower.hasPrefix("mtp.") ? String(lower.dropFirst("mtp.".count)) : lower
-                let root = unprefixed.split(separator: ".", maxSplits: 1).first.map(String.init) ?? ""
-                guard Self.standaloneDrafterModuleRoots.contains(root), unprefixed.contains(".") else {
-                    throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("mtp tensor namespace \(tensor.name)")
-                }
+    private static func validateTensorName(_ name: String, policy: TensorNamePolicy) throws {
+        switch policy {
+        case .permissive:
+            return
+        case .target:
+            // The text loader drops every key containing `mtp.`; any casing of
+            // that namespace is never a target weight.
+            let path = loaderPath(name, policy: .target)
+            guard !name.lowercased(with: nil).contains("mtp."),
+                  path.hasPrefix("language_model.model.") || path.hasPrefix("language_model.lm_head.") else {
+                throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("target tensor namespace \(name)")
+            }
+        case .mtp:
+            // The pinned standalone-drafter loader (`qwenMTPSanitizeWeights`,
+            // standaloneCheckpoint) matches the exact, case-sensitive `mtp.`
+            // prefix and prefixes every other key with `mtp.`; only the drafter
+            // module roots below exist under that prefix.
+            let unprefixed = name.hasPrefix("mtp.") ? String(name.dropFirst("mtp.".count)) : name
+            let root = unprefixed.split(separator: ".", maxSplits: 1).first.map(String.init) ?? ""
+            guard Self.standaloneDrafterModuleRoots.contains(root), unprefixed.contains(".") else {
+                throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("mtp tensor namespace \(name)")
             }
         }
     }
@@ -702,26 +779,24 @@ enum NativeMTPArtifactObserver {
     ]
 
     /// Floating tensors MLX never quantizes: rank-1 parameters (norms, biases,
-    /// `A_log`, `dt_bias`), rank-3 depthwise conv kernels, and the vision tower
-    /// the text loader discards before load (`Qwen35` sanitize). A rank-2
+    /// `A_log`, `dt_bias`) and rank-3 depthwise conv kernels. The discarded
+    /// vision tower never reaches this check (loaderConsumedTensors). A rank-2
     /// language-model weight without a scale pair still fails closed unless the
     /// config declares it unquantized.
     private static func isNeverQuantizedFloatingTensor(_ tensor: SafetensorsTensor) -> Bool {
         guard isFloatingWeightDType(tensor.dtype) else { return false }
         if tensor.shape.count == 1 { return true }
-        if tensor.shape.count == 3, tensor.name.hasSuffix(".conv1d.weight") { return true }
-        return tensor.name.hasPrefix("vision_tower.") || tensor.name.hasPrefix("model.visual.")
+        return tensor.shape.count == 3 && tensor.name.hasSuffix(".conv1d.weight")
     }
 
+    /// The loader quantizes a module only when `<path>.scales` exists and
+    /// loads its zero points from `<path>.biases`; no other spelling is read.
     private static func isScaleTensorName(_ name: String) -> Bool {
-        let lower = name.lowercased(with: nil)
-        return lower.hasSuffix(".scales")
-            || lower.hasSuffix(".scale")
-            || lower.hasSuffix(".weight_scale")
+        name.hasSuffix(".scales")
     }
 
     private static func isBiasTensorName(_ name: String) -> Bool {
-        name.lowercased(with: nil).hasSuffix(".biases")
+        name.hasSuffix(".biases")
     }
 
     private static func isFloatingWeightDType(_ dtype: String) -> Bool {
@@ -732,22 +807,10 @@ enum NativeMTPArtifactObserver {
         for weightName: String,
         available: [String: SafetensorsTensor]
     ) -> String? {
-        let candidates: [String]
-        if weightName.hasSuffix(".weight") {
-            let base = String(weightName.dropLast(".weight".count))
-            candidates = [
-                "\(base).scales",
-                "\(base).scale",
-                "\(base).weight_scale",
-            ]
-        } else {
-            candidates = [
-                "\(weightName).scales",
-                "\(weightName).scale",
-                "\(weightName).weight_scale",
-            ]
-        }
-        return candidates.first { available[$0] != nil }
+        let candidate = weightName.hasSuffix(".weight")
+            ? "\(weightName.dropLast(".weight".count)).scales"
+            : "\(weightName).scales"
+        return available[candidate] == nil ? nil : candidate
     }
 
     private static func expectedBiasName(
@@ -1016,15 +1079,12 @@ enum NativeMTPArtifactObserver {
         let configUnquantizedModules: Set<String>
         let permittedUnquantizedModules: Set<String>
 
-        func allowsUnquantizedTensor(_ name: String) -> Bool {
-            permittedUnquantizedModules.contains(where: { exception in
-                name == exception
-                    || name.hasPrefix(exception + ".")
-                    || (name.hasPrefix("mtp.") && (
-                        String(name.dropFirst("mtp.".count)) == exception
-                            || String(name.dropFirst("mtp.".count)).hasPrefix(exception + ".")
-                    ))
-            })
+        /// `loaderPath` is the post-sanitize tensor key; a `false` config
+        /// entry names the exact loader module path, as with overrides.
+        func unquantizedExceptions(matching loaderPath: String) -> Set<String> {
+            permittedUnquantizedModules.filter { exception in
+                loaderPath.hasPrefix(exception + ".")
+            }
         }
     }
 

@@ -1228,6 +1228,12 @@ enum NativeMTPAdmissionSidecar {
             expectedSHA256: selected.entry.artifactManifestSHA256,
             authority: resolvedArtifactAuthority
         )
+        // The signed entry's tokenizer digest is the authority; the projection
+        // only locates the bytes. A disagreement means the loader would use a
+        // tokenizer the admission never named.
+        guard artifacts["tokenizer"]?.sha256 == selected.entry.tokenizerSHA256 else {
+            throw NativeMTPAdmissionSidecarError.artifactDigestMismatch("$.entries.tokenizer_sha256")
+        }
         return Parsed(
             tupleSHA256: tupleSHA256,
             sidecarSHA256: sidecarSHA256,
@@ -1370,6 +1376,14 @@ enum NativeMTPAdmissionSidecar {
         guard cacheStateClasses == cacheStateClasses.sorted(), Set(cacheStateClasses).count == cacheStateClasses.count else {
             throw NativeMTPAdmissionSidecarError.invalidValue("\(path).cache_state_classes")
         }
+        let mtpStateClass = try requireString(object, "mtp_state_class", path: path, allowed: Self.releaseStateClasses)
+        // The runtime admits only `mtp_state_class` (checked against the live
+        // model at load); every signed cache/state class must be one it can
+        // stage and rewind, and the admitted class must be among them.
+        guard cacheStateClasses.allSatisfy(Self.releaseStateClasses.contains),
+              cacheStateClasses.contains(mtpStateClass) else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("\(path).cache_state_classes")
+        }
         let decreaseThreshold = try requireInt(object, "decrease_threshold_ppm", path: path, range: 0...1_000_000)
         let increaseThreshold = try requireInt(object, "increase_threshold_ppm", path: path, range: 0...1_000_000)
         guard decreaseThreshold < increaseThreshold else {
@@ -1400,7 +1414,7 @@ enum NativeMTPAdmissionSidecar {
             decodePath: decodePath,
             mtpManifestSHA256: try requireSHA256(object, "mtp_manifest_sha256", path: path),
             familyAdapter: try requireNonEmptyString(object, "mtp_family_adapter", path: path),
-            mtpStateClass: try requireString(object, "mtp_state_class", path: path, allowed: ["stageable_rewindable", "hybrid_stageable_rewindable"]),
+            mtpStateClass: mtpStateClass,
             mtpHeadCount: try requireInt(object, "mtp_head_count", path: path, range: 1...16),
             proposalDepth: proposalDepth,
             completeWindowBytesByDepth: completeWindowBytesByDepth,
@@ -1424,6 +1438,8 @@ enum NativeMTPAdmissionSidecar {
             quantization: quantization
         )
     }
+
+    private static let releaseStateClasses: Set<String> = ["stageable_rewindable", "hybrid_stageable_rewindable"]
 
     private static func parseReleaseQuantization(
         _ object: [String: NativeMTPSidecarJSON],
@@ -1451,6 +1467,9 @@ enum NativeMTPAdmissionSidecar {
         let unquantizedExceptions = try requirePatternArray(object, "unquantized_exceptions", path: path)
         let perLayerExceptions = try requirePatternArray(object, "per_layer_exceptions", path: path)
         let representationManifestSHA256 = try requireSHA256(object, "representation_manifest_sha256", path: path)
+        // R024 exception-array grammar applies to every kind, not only affine.
+        try validateQuantizationExceptionArray(unquantizedExceptions, key: "unquantized_exceptions", path: path)
+        try validateQuantizationExceptionArray(perLayerExceptions, key: "per_layer_exceptions", path: path)
         switch kind {
         case "base":
             guard packedDataDType == "none",
@@ -1459,7 +1478,9 @@ enum NativeMTPAdmissionSidecar {
                   scaleLayout == "none",
                   blockSize == nil,
                   alignmentBytes == nil,
-                  paddingRule == "none" else {
+                  paddingRule == "none",
+                  unquantizedExceptions.isEmpty,
+                  perLayerExceptions.isEmpty else {
                 throw NativeMTPAdmissionSidecarError.invalidValue(path)
             }
             return Quantization(
@@ -1471,16 +1492,6 @@ enum NativeMTPAdmissionSidecar {
                 perLayerExceptions: perLayerExceptions
             )
         case "mlx_affine":
-            try validateQuantizationExceptionArray(
-                unquantizedExceptions,
-                key: "unquantized_exceptions",
-                path: path
-            )
-            try validateQuantizationExceptionArray(
-                perLayerExceptions,
-                key: "per_layer_exceptions",
-                path: path
-            )
             guard packedDataDType == "uint32",
                   packedLayout == "mlx_array_native_v1",
                   scaleDType == "bfloat16",

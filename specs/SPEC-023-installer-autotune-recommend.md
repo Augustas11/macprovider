@@ -12,7 +12,14 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
   (#1770). SPEC-023-R024 now admits the closed `mlx_affine` quantization
   representation used by mlx-community 4-bit Qwen target and MTP artifacts,
   including the canonical representation manifest digest and sorted
-  per-layer/unquantized exception arrays consumed by SPEC-048.
+  per-layer/unquantized exception arrays consumed by SPEC-048. Every signed
+  R024 field is now enforced or recomputed: `hash_algorithm` states the
+  `macprovider.snapshot-manifest.v1` value consumers already required (the
+  table previously said `"sha256"`), `tokenizer_sha256` must equal the
+  projected tokenizer digest, `cache_state_classes` is closed to the
+  `mtp_state_class` values and must contain the admitted class, the
+  exception-array grammar applies to every kind, and `base` binds a defined
+  canonical representation digest.
 
 - **v0.22.2 (2026-10-01)** — Default context memory residency now uses the
   verified artifact byte footprint when it is available (#1794). Catalog
@@ -3094,8 +3101,8 @@ unsigned JSON integers and never floats.
 | Field | Type / closed rule |
 |---|---|
 | `model_key`, `artifact_id` | existing SPEC-023 grammars |
-| `hash_algorithm` | `"sha256"` |
-| `artifact_hash`, `artifact_manifest_sha256`, `tokenizer_sha256` | `sha256` |
+| `hash_algorithm` | exactly `"macprovider.snapshot-manifest.v1"`, the §3.7.4 `mlx_safetensors` algorithm of the bound artifact-feed member; `artifact_hash` is that member's `hash` |
+| `artifact_hash`, `artifact_manifest_sha256`, `tokenizer_sha256` | `sha256`; `tokenizer_sha256` MUST equal the tokenizer digest in the signed artifact projection manifest, or the entry fails closed |
 | `decode_path` | exactly `"native_mtp"` |
 | `mtp_manifest_sha256` | `sha256` |
 | `mtp_family_adapter`, `mtp_state_class` | `short_string` |
@@ -3105,7 +3112,7 @@ unsigned JSON integers and never floats.
 | `source_commit` | full lowercase Git object id for the source repository's object format, exactly 40 or 64 hex characters |
 | `reproducible_build_sha256` | `sha256` |
 | `live_executable_cdhash` | exact lowercase 40-hex Mach-O CodeDirectory CDHash of the live signed executable admitted to consume this tuple |
-| `cache_state_classes` | sorted unique array `1..16` of `short_string` |
+| `cache_state_classes` | sorted unique array `1..16`; every element is an `mtp_state_class` value (`stageable_rewindable` or `hybrid_stageable_rewindable`) and the array MUST contain the entry's `mtp_state_class`, which the runtime matches against the loaded model |
 | `hardware_class` | lowercase ASCII matching `^[a-z0-9][a-z0-9._-]{0,63}$` |
 | `ram_bytes` | exact physical RAM integer `> 0`, not a minimum |
 | `qualified_slots` | integer `2..8`, exact admitted slot count |
@@ -3132,8 +3139,11 @@ or a power of two `1..4096`; `padding_rule` is
 
 Each exceptions field is sorted bytewise, unique, and contains at most 256
 entries. Every entry is exactly `target/<module>` or `mtp/<module>` and the
-full prefixed entry is 1..128 printable ASCII bytes; `<module>` is the config
-module key and contains no slash. The
+full prefixed entry is 1..128 printable ASCII bytes; `<module>` is the exact
+config module key, which SPEC-048-R002 requires to be the pinned loader's
+post-sanitize module path (a standalone drafter key therefore carries its
+`mtp.` prefix), and contains no slash. This grammar applies to every
+quantization kind. The
 `per_layer_exceptions` array names every per-module quantization override in
 the target and MTP configs; override widths are `4` or `8` bits and group sizes
 are `32`, `64`, or `128`. The `unquantized_exceptions` array names every
@@ -3142,8 +3152,11 @@ the array bound, on unsorted or duplicate arrays, on an invalid prefix, or when
 the arrays do not match the observed target/MTP artifacts.
 
 `base` requires the three layout/dtype values `none`, numeric fields null,
-`padding_rule=none`, empty exception arrays, and a manifest describing the
-loaded base representation. `mlx_mxfp8` requires `uint8`,
+`padding_rule=none`, empty exception arrays, and a
+`representation_manifest_sha256` equal to SHA-256 of the canonical bytes
+`{"mtp":{"dtype":"bfloat16"},"schema":"macprovider.native-mtp-representation.v1","target":{"dtype":"bfloat16"}}`,
+recomputed by the consumer from target and MTP artifacts observed as
+unquantized bfloat16 with no config overrides or `false` entries. `mlx_mxfp8` requires `uint8`,
 `mlx_array_native_v1`, non-`none` scale fields, non-null numeric fields, and
 passes the SPEC-048-R012 `1.01x` perplexity, one-point task, 5% fit-error, and
 10% system-headroom bounds. `mlx_affine` requires `packed_data_dtype=uint32`,

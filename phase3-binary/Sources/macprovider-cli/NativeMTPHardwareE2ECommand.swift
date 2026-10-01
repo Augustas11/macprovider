@@ -45,12 +45,6 @@ struct NativeMTPHardwareE2ECommand: AsyncParsableCommand {
     @Option(name: .customLong("sizing-output-tokens"), help: "Output-token budget used to size paged-KV blocks. Default 8.")
     var sizingOutputTokens: Int = 8
 
-    @Flag(
-        name: .customLong("allow-non-studio"),
-        help: "Debug escape hatch for development only; lab acceptance must not set this."
-    )
-    var allowNonStudio: Bool = false
-
     func run() async throws {
         #if DEBUG || MACPROVIDER_LAB_HARNESS
         let environment = ProcessInfo.processInfo.environment
@@ -60,9 +54,8 @@ struct NativeMTPHardwareE2ECommand: AsyncParsableCommand {
             ))
             throw ExitCode(2)
         }
-        if !allowNonStudio {
-            try NativeMTPHardwareE2ERunner.requireStudioHost()
-        }
+        // Unconditional: a pass line from any other host is not lab evidence.
+        try NativeMTPHardwareE2ERunner.requireStudioHost()
         let rootPath = root ?? environment["MACPROVIDER_NATIVE_MTP_E2E_ROOT"]
         guard let rootPath, !rootPath.isEmpty else {
             FileHandle.standardError.write(Data(
@@ -264,7 +257,7 @@ final class NativeMTPHardwareE2ERunner {
         try require(maxDepth >= 2, "batch depth below 2: \(maxDepth)")
         let totalAdmissions = admissionRecorder.snapshot().count
         let json = """
-        {"schema":"macprovider.native-mtp-hardware-e2e-result.v1","status":"pass","model_id":"\(modelID)","target_sha256":"\(targetIdentity.digest)","mtp_sha256":"\(mtpIdentity.digest)","admissions":\(totalAdmissions),"max_observed_batch_depth":\(maxDepth),"serve_path_verified":\(verifyServePath)}
+        {"schema":"macprovider.native-mtp-hardware-e2e-result.v1","status":"pass","evidence_class":"correctness_only","model_id":"\(modelID)","target_sha256":"\(targetIdentity.digest)","mtp_sha256":"\(mtpIdentity.digest)","admissions":\(totalAdmissions),"max_observed_batch_depth":\(maxDepth),"serve_path_verified":\(verifyServePath)}
         """
         return NativeMTPHardwareE2EReport(
             targetSHA256: targetIdentity.digest,
