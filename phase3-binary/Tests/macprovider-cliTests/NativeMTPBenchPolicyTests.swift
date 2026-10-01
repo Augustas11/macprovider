@@ -75,6 +75,22 @@ final class NativeMTPBenchPolicyTests: XCTestCase {
         XCTAssertEqual(policy.maxNativeActiveRows(for: NativeMTPBenchCell(slots: 8, promptTokens: 1536, maxTokens: 128)), 4)
     }
 
+    func testTemplateFreezesBoundOneAndGatedNonInferiorityMargins() throws {
+        let policy = try load(template())
+        XCTAssertEqual(policy.maxNativeActiveRows, 1)
+        XCTAssertEqual((policy.thresholds["gated_throughput_lower_bound_min"] as? NSNumber)?.doubleValue, -0.05)
+        var unfrozen = try template()
+        var thresholds = try XCTUnwrap(unfrozen["thresholds"] as? [String: Any])
+        thresholds.removeValue(forKey: "gated_ttft_p95_upper_bound_max")
+        unfrozen["thresholds"] = thresholds
+        XCTAssertThrowsError(try load(unfrozen))
+        var relaxed = try template()
+        thresholds = try XCTUnwrap(relaxed["thresholds"] as? [String: Any])
+        thresholds["gated_throughput_lower_bound_min"] = -0.2
+        relaxed["thresholds"] = thresholds
+        XCTAssertThrowsError(try load(relaxed))
+    }
+
     func testExploratoryPolicyMayUseAReducedMatrix() throws {
         var object = try template()
         object["schema"] = "macprovider.native-mtp-exploratory-policy.v1"

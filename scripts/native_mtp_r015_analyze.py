@@ -84,6 +84,47 @@ def _matrix_violations(policy: dict) -> list[str]:
     return violations
 
 
+GATED_THRESHOLD_KEYS = (
+    "gated_throughput_lower_bound_min",
+    "gated_ttft_p95_upper_bound_max",
+    "gated_itl_p95_upper_bound_max",
+)
+_CELL_SLOTS = re.compile(r"^s(\d+)-")
+
+
+def _native_bound(policy: dict) -> int | None:
+    bound = policy.get("max_native_active_rows")
+    return bound if _is_int(bound) and bound >= 1 else None
+
+
+def _is_gated_cell(cell_id: str, bound: int | None) -> bool:
+    """SPEC-048-R015: a cell above the R007 bound measures the load gate."""
+    match = _CELL_SLOTS.match(cell_id)
+    return bound is not None and match is not None and int(match.group(1)) > bound
+
+
+def _admission_bound_failures(native_runs: list[dict], bound: int) -> list[str]:
+    """Prove each gated-cell admission honored the bound it was taken under:
+    native only while the other in-flight rows were below it, downgraded only
+    at or above it."""
+    failures: set[str] = set()
+    for run in native_runs:
+        paths = run.get("effective_paths")
+        if not isinstance(paths, list) or len(paths) != run["native_requests"]:
+            failures.add("admission_active_rows_missing")
+            continue
+        for entry in paths:
+            other = entry.get("other_active_rows") if isinstance(entry, dict) else None
+            if not _is_int(other) or other < 0:
+                failures.add("admission_active_rows_missing")
+                continue
+            if entry.get("effective_path") == "native_mtp" and other >= bound:
+                failures.add("native_admission_above_bound")
+            if entry.get("selector_reason") == "capacity_above_native_bound" and other < bound:
+                failures.add("load_gate_downgrade_below_bound")
+    return sorted(failures)
+
+
 def _load_jsonl(path: Path) -> tuple[dict, list[dict]]:
     header = None
     runs: list[dict] = []
@@ -516,6 +557,19 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
         }
 
     thresholds = policy["thresholds"]
+    bound = _native_bound(policy)
+    if any(_is_gated_cell(cell_id, bound) for cell_id in _observed_cells(policy)) and any(
+        not isinstance(thresholds.get(key), (int, float))
+        or isinstance(thresholds.get(key), bool)
+        or not math.isfinite(thresholds[key])
+        for key in GATED_THRESHOLD_KEYS
+    ):
+        return {
+            "schema": "macprovider.native-mtp-r015-analysis.v1",
+            "overall_status": "FAIL",
+            "reason": "gated_thresholds_missing",
+            "cells": [],
+        }
     draws = int(thresholds["bootstrap_draws"])
     alpha = float(thresholds["alpha"])
     required_blocks = int(policy["blocks"])
@@ -528,6 +582,7 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
     cell_results = []
     hypotheses = []
     for cell_index, cell_id in enumerate(_observed_cells(policy)):
+        gated = _is_gated_cell(cell_id, bound)
         pairs, issues = _pair_runs(runs, cell_id)
         hard_failures = list(issues)
         if len(pairs) < required_blocks:
@@ -583,6 +638,24 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
             if r["native_admissions"] > 0
             or not (_is_count(r.get("load_gate_downgrades")) and r["load_gate_downgrades"] > 0)
         ]
+        # A gated cell (slots above the R007 bound) runs with the in-flight
+        # gate engaged, which holds admitted native rows at depth zero inside
+        # the ordinary forward: their counters must be recorded, but positive
+        # proposals cannot be demanded. The cell instead proves every
+        # admission honored the bound and that native is non-inferior.
+        counter_runs = ungated_native_runs
+        proof_runs = [] if gated else ungated_native_runs
+        if gated and bound is not None:
+            hard_failures.extend(_admission_bound_failures(native_runs, bound))
+        elif load_gate_downgrades:
+            hard_failures.append("load_gate_downgrade_in_native_eligible_cell")
+        if any(
+            _is_count(r.get("mtp_accepted_tokens"))
+            and _is_count(r.get("mtp_proposed_tokens"))
+            and r["mtp_accepted_tokens"] > r["mtp_proposed_tokens"]
+            for r in counter_runs
+        ):
+            hard_failures.append("native_mtp_counters_inconsistent")
         if parity_mismatches:
             hard_failures.append("parity_mismatch")
         if non_native_admissions:
@@ -604,16 +677,16 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
             field
             for field in native_counter_fields
             if field not in unavailable_metrics
-            and any(run.get(field) is None for run in ungated_native_runs)
+            and any(run.get(field) is None for run in counter_runs)
         ]
         if missing_counter_fields:
             hard_failures.append("native_mtp_counters_missing:" + ",".join(missing_counter_fields))
         if "mtp_proposed_tokens" not in unavailable_metrics and any(
-            int(run.get("mtp_proposed_tokens") or 0) <= 0 for run in ungated_native_runs
+            int(run.get("mtp_proposed_tokens") or 0) <= 0 for run in proof_runs
         ):
             hard_failures.append("native_mtp_proposals_missing")
         if "target_forwards" not in unavailable_metrics and any(
-            int(run.get("target_forwards") or 0) <= 0 for run in ungated_native_runs
+            int(run.get("target_forwards") or 0) <= 0 for run in proof_runs
         ):
             hard_failures.append("native_mtp_target_forwards_missing")
         if cell_id == policy.get("sustained_cell_id") and not sustained_runs and not (
@@ -667,6 +740,7 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
 
         cell = {
             "cell_id": cell_id,
+            "cell_class": "gated" if gated else "native_eligible",
             "paired_blocks": len(pairs),
             "required_blocks": required_blocks,
             "load_gate_downgrades": load_gate_downgrades,
@@ -695,14 +769,17 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
         cell_results.append(cell)
         for metric_name, metric in metrics.items():
             draws_for_metric = metric["draws"]
+            # Gated cells gate non-inferiority to ordinary; eligible cells
+            # gate the native improvement.
+            prefix = "gated_" if cell["cell_class"] == "gated" else ""
             if metric_name == "throughput":
-                threshold = float(thresholds["throughput_lower_bound_min"])
+                threshold = float(thresholds[prefix + "throughput_lower_bound_min"])
                 failing_side = sum(1 for x in draws_for_metric if x <= threshold)
             elif metric_name == "ttft":
-                threshold = float(thresholds["ttft_p95_upper_bound_max"])
+                threshold = float(thresholds[prefix + "ttft_p95_upper_bound_max"])
                 failing_side = sum(1 for x in draws_for_metric if x >= threshold)
             elif metric_name == "itl":
-                threshold = float(thresholds["itl_p95_upper_bound_max"])
+                threshold = float(thresholds[prefix + "itl_p95_upper_bound_max"])
                 failing_side = sum(1 for x in draws_for_metric if x >= threshold)
             else:
                 threshold = float(thresholds["rejection_increase_max_pp"])

@@ -582,8 +582,8 @@ final class NativeMTPHardwareE2ERunner {
             testNativeMTPAdmissionObserver: { admission in
                 admissionRecorder?.append(admission)
             },
-            testNativeMTPAdmissionRequestObserver: { requestID, admission in
-                admissionRecorder?.append(requestID: requestID, admission: admission)
+            testNativeMTPAdmissionRequestObserver: { requestID, admission, otherActiveRows in
+                admissionRecorder?.append(requestID: requestID, admission: admission, otherActiveRows: otherActiveRows)
             },
             warmSwapEnabled: false,
             pagedKVObservedRuntimeIdentity: observed,
@@ -990,6 +990,9 @@ final class NativeMTPHardwareAdmissionRecorder: @unchecked Sendable {
     struct RequestAdmission: Sendable {
         let requestID: String?
         let admission: NativeMTPRuntimeAdmission
+        /// Other in-flight requests the runtime counted against the R007
+        /// bound when it admitted this one.
+        let otherActiveRows: Int
     }
 
     private let lock = NSLock()
@@ -1008,9 +1011,13 @@ final class NativeMTPHardwareAdmissionRecorder: @unchecked Sendable {
         return admissions
     }
 
-    func append(requestID: String?, admission: NativeMTPRuntimeAdmission) {
+    func append(requestID: String?, admission: NativeMTPRuntimeAdmission, otherActiveRows: Int) {
         lock.lock()
-        requestAdmissions.append(RequestAdmission(requestID: requestID, admission: admission))
+        requestAdmissions.append(RequestAdmission(
+            requestID: requestID,
+            admission: admission,
+            otherActiveRows: otherActiveRows
+        ))
         lock.unlock()
     }
 

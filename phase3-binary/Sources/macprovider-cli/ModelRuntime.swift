@@ -1249,6 +1249,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let schedulerSupportsNativeMTP = currentNativeMTPDrafterContainer != nil
             && continuousBatchScheduler != nil
             || nativeMTPSchedulerSupported
+        let otherActiveRows = inFlightCancellations.count - 1
         let admission = Self.nativeMTPRuntimeAdmission(
             for: request,
             draftConfigured: snapshot.hasTargetCompatibleDraft || currentDraftModelID != nil,
@@ -1268,10 +1269,10 @@ actor ModelRuntime: ModelRuntimeServing {
         // request is a row this one would share the target forward with.
         // Check and registration are both actor-isolated, so a burst of
         // concurrent arrivals cannot all observe an empty runtime.
-        .resolvingActiveRows(otherActiveRows: inFlightCancellations.count - 1)
+        .resolvingActiveRows(otherActiveRows: otherActiveRows)
         recordNativeMTPAdmissionStatus(admission)
         testNativeMTPAdmissionObserver?(admission)
-        testNativeMTPAdmissionRequestObserver?(request.requestID, admission)
+        testNativeMTPAdmissionRequestObserver?(request.requestID, admission, otherActiveRows)
         return admission
     }
 
@@ -1496,7 +1497,7 @@ actor ModelRuntime: ModelRuntimeServing {
     private let nativeMTPCapability: NativeMTPCapability?
     private let nativeMTPSchedulerSupported: Bool
     private let testNativeMTPAdmissionObserver: (@Sendable (NativeMTPRuntimeAdmission) -> Void)?
-    private let testNativeMTPAdmissionRequestObserver: (@Sendable (String?, NativeMTPRuntimeAdmission) -> Void)?
+    private let testNativeMTPAdmissionRequestObserver: (@Sendable (String?, NativeMTPRuntimeAdmission, Int) -> Void)?
     /// Injectable seam over the on-device SPEC-039 parity/MoE self-measurement probes.
     /// Production uses `.live`; tests inject a stub so unit coverage of the
     /// measurement→attach pipeline needs no MLX/metallib. Mirrors
@@ -2468,7 +2469,7 @@ actor ModelRuntime: ModelRuntimeServing {
         nativeMTPResolvedArtifactAuthority: NativeMTPResolvedArtifactAuthority? = nil,
         nativeMTPSelfTestRunner: NativeMTPSelfTestRunner = .unavailable,
         testNativeMTPAdmissionObserver: (@Sendable (NativeMTPRuntimeAdmission) -> Void)? = nil,
-        testNativeMTPAdmissionRequestObserver: (@Sendable (String?, NativeMTPRuntimeAdmission) -> Void)? = nil,
+        testNativeMTPAdmissionRequestObserver: (@Sendable (String?, NativeMTPRuntimeAdmission, Int) -> Void)? = nil,
         warmSwapEnabled: Bool = false,
         swapDrainTimeoutSeconds: Int = 30,
         catalogModelIDAlias: String? = nil,
@@ -2916,7 +2917,7 @@ actor ModelRuntime: ModelRuntimeServing {
         labNativeMTPAdmissionCapability: NativeMTPAdmissionCapability? = nil,
         nativeMTPSelfTestRunner: NativeMTPSelfTestRunner = .unavailable,
         testNativeMTPAdmissionObserver: (@Sendable (NativeMTPRuntimeAdmission) -> Void)? = nil,
-        testNativeMTPAdmissionRequestObserver: (@Sendable (String?, NativeMTPRuntimeAdmission) -> Void)? = nil,
+        testNativeMTPAdmissionRequestObserver: (@Sendable (String?, NativeMTPRuntimeAdmission, Int) -> Void)? = nil,
         warmSwapEnabled: Bool,
         swapDrainTimeoutSeconds: Int = 30,
         providerStatus: ProviderStatus? = nil,

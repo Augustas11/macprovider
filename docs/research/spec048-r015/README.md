@@ -26,6 +26,11 @@ An admission policy must name the tuple's `qualified_slots` and
 `qualified_slots`, prompt strata 1536/4096/8192, and output budgets 128/512
 (SPEC-048 MTP-15). The bench refuses, and the analyzer fails closed on, a
 policy missing any mandatory cell; only exploratory pilots may run less.
+Cells at or below `max_native_active_rows` are native-eligible and gate the
+native improvement; cells above it are gated and must prove every admission
+honored the bound (`effective_paths[].other_active_rows`, header
+`run_metrics_version` 3) and stay non-inferior to ordinary at the frozen
+`gated_*` thresholds.
 
 Do not edit or regenerate the policy after measurement begins. Any change,
 including whitespace, creates a different preregistration and requires a new

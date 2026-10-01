@@ -377,7 +377,8 @@ private final class NativeMTPBenchRunner {
                     "request_id": $0.requestID ?? "",
                     "effective_path": $0.admission.effectivePath.rawValue,
                     "selector_reason": $0.admission.selection.nativeMTPReason?.rawValue ?? "",
-                ]
+                    "other_active_rows": $0.otherActiveRows,
+                ] as [String: Any]
             },
             statusDelta: statusDelta,
             targetForwardsPerCommittedToken: path == .nativeMTP && committed > 0
@@ -468,7 +469,8 @@ private final class NativeMTPBenchRunner {
             "temperature": policy.temperature,
             "arrival_interval_ms": policy.arrivalIntervalMS,
             // 2: run records carry decode-only throughput (SPEC-048-R015).
-            "run_metrics_version": 2,
+            // 3: effective_paths carry each admission's other_active_rows.
+            "run_metrics_version": 3,
         ]
     }
 
@@ -663,7 +665,7 @@ private struct NativeMTPBenchRunResult {
     var nonNativeAdmissions: Int
     let loadGateDowngrades: Int
     let missingNativeAdmissions: Int
-    let effectivePaths: [[String: String]]
+    let effectivePaths: [[String: Any]]
     let statusDelta: NativeMTPStatusDelta
     let targetForwardsPerCommittedToken: Double?
     let peakPhysFootprintBytes: UInt64?
@@ -1124,6 +1126,11 @@ struct NativeMTPBenchPolicy {
             "min_available_memory_fraction": 0.10,
             "bootstrap_draws": 10000,
             "alpha": 0.05,
+            // SPEC-048-R015 gated cells (slots above max_native_active_rows):
+            // non-inferiority to ordinary at the mixed-load margins.
+            "gated_throughput_lower_bound_min": -0.05,
+            "gated_ttft_p95_upper_bound_max": 0.05,
+            "gated_itl_p95_upper_bound_max": 0.05,
         ]
         guard Set(thresholds.keys) == Set(expected.keys) else {
             throw NativeMTPBenchError.invalidPolicy("threshold keys mismatch")

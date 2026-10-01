@@ -114,46 +114,105 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         self.assertEqual(result["overall_status"], "FAIL")
         self.assertIn("missing_native_admissions", result["cells"][0]["hard_failures"])
 
-    def test_load_gate_downgraded_run_needs_no_proposals(self):
+    def test_gated_cell_passes_with_zero_native_work_when_non_inferior(self):
+        downgrade = {"request_id": "r1", "effective_path": "ordinary", "selector_reason": "capacity_above_native_bound", "other_active_rows": 1}
+        held = {"request_id": "r0", "effective_path": "native_mtp", "selector_reason": "", "other_active_rows": 0}
         result = self._run_case(
-            native_overrides={
-                "load_gate_downgrades": 1,
-                "native_admissions": 0,
-                "mtp_proposed_tokens": 0,
-                "mtp_accepted_tokens": 0,
-                "target_forwards": 0,
-            }
-        )
-        cell = result["cells"][0]
-        self.assertNotIn("native_mtp_proposals_missing", cell["hard_failures"])
-        self.assertNotIn("native_mtp_target_forwards_missing", cell["hard_failures"])
-        self.assertNotIn("missing_native_admissions", cell["hard_failures"])
-        self.assertEqual(cell["load_gate_downgrades"], 10)
-
-    def test_mixed_admitted_and_downgraded_run_still_needs_native_work(self):
-        result = self._run_case(
-            native_overrides={
+            gated_native_overrides={
                 "native_requests": 2,
                 "native_admissions": 1,
                 "load_gate_downgrades": 1,
                 "mtp_proposed_tokens": 0,
                 "mtp_accepted_tokens": 0,
+                "mtp_accepted_by_position": [0],
                 "target_forwards": 0,
+                "target_forwards_per_committed_token": 0.0,
+                "effective_paths": [held, downgrade],
+                "aggregate_decode_tps": 99.0,
+                "per_request_decode_tps": [99.0],
+            }
+        )
+        gated = [cell for cell in result["cells"] if cell["cell_class"] == "gated"]
+        self.assertTrue(gated)
+        for cell in gated:
+            self.assertEqual(cell["hard_failures"], [], cell["cell_id"])
+            self.assertEqual(cell["status"], "PASS", cell["cell_id"])
+            self.assertEqual(cell["metrics"]["throughput"]["threshold"], -0.05)
+        self.assertEqual(result["overall_status"], "PASS")
+
+    def test_fully_downgraded_gated_run_needs_no_proposals(self):
+        result = self._run_case(
+            gated_native_overrides={
+                "load_gate_downgrades": 1,
+                "native_admissions": 0,
+                "mtp_proposed_tokens": 0,
+                "mtp_accepted_tokens": 0,
+                "target_forwards": 0,
+                "effective_paths": [{"request_id": "r0", "effective_path": "ordinary", "selector_reason": "capacity_above_native_bound", "other_active_rows": 1}],
+            }
+        )
+        self.assertEqual(result["overall_status"], "PASS")
+
+    def test_gated_cell_fails_on_regression_against_ordinary(self):
+        result = self._run_case(
+            gated_native_overrides={"aggregate_decode_tps": 90.0, "per_request_decode_tps": [90.0]}
+        )
+        self.assertEqual(result["overall_status"], "FAIL")
+        for cell in result["cells"]:
+            if cell["cell_class"] == "gated":
+                self.assertIn("throughput", cell["metric_failures"])
+            else:
+                self.assertEqual(cell["status"], "PASS")
+
+    def test_eligible_cell_still_needs_the_native_improvement(self):
+        # A 1% loss is non-inferior in a gated cell but fails an eligible one.
+        result = self._run_case(native_decode_tps=99.0)
+        for cell in result["cells"]:
+            if cell["cell_class"] == "gated":
+                self.assertNotIn("throughput", cell["metric_failures"])
+            else:
+                self.assertIn("throughput", cell["metric_failures"])
+
+    def test_gated_native_admission_above_bound_fails(self):
+        result = self._run_case(
+            gated_native_overrides={
+                "effective_paths": [{"request_id": "r0", "effective_path": "native_mtp", "selector_reason": "", "other_active_rows": 1}]
             }
         )
         self.assertEqual(result["overall_status"], "FAIL")
-        cell = result["cells"][0]
-        self.assertIn("native_mtp_proposals_missing", cell["hard_failures"])
-        self.assertIn("native_mtp_target_forwards_missing", cell["hard_failures"])
-        self.assertNotIn("missing_native_admissions", cell["hard_failures"])
+        gated = [cell for cell in result["cells"] if cell["cell_class"] == "gated"]
+        self.assertTrue(all("native_admission_above_bound" in cell["hard_failures"] for cell in gated))
 
-    def test_mixed_admitted_and_downgraded_run_with_native_work_passes(self):
+    def test_gated_downgrade_below_bound_or_missing_rows_fails(self):
+        below = self._run_case(
+            gated_native_overrides={
+                "native_admissions": 0,
+                "load_gate_downgrades": 1,
+                "effective_paths": [{"request_id": "r0", "effective_path": "ordinary", "selector_reason": "capacity_above_native_bound", "other_active_rows": 0}],
+            }
+        )
+        self.assertIn("load_gate_downgrade_below_bound", [f for c in below["cells"] for f in c["hard_failures"]])
+        missing = self._run_case(gated_native_overrides={"effective_paths": [{"request_id": "r0", "effective_path": "native_mtp"}]})
+        self.assertIn("admission_active_rows_missing", [f for c in missing["cells"] for f in c["hard_failures"]])
+
+    def test_load_gate_downgrade_in_eligible_cell_fails(self):
         result = self._run_case(
             native_overrides={"native_requests": 2, "native_admissions": 1, "load_gate_downgrades": 1}
         )
-        cell = result["cells"][0]
-        self.assertEqual(cell["hard_failures"], [])
-        self.assertEqual(cell["load_gate_downgrades"], 10)
+        eligible = [cell for cell in result["cells"] if cell["cell_class"] == "native_eligible"]
+        self.assertTrue(all("load_gate_downgrade_in_native_eligible_cell" in cell["hard_failures"] for cell in eligible))
+
+    def test_gated_cells_need_frozen_non_inferiority_margins(self):
+        result = self._run_case(policy_overrides={"thresholds": {
+            "throughput_lower_bound_min": 0.15,
+            "ttft_p95_upper_bound_max": 0.10,
+            "itl_p95_upper_bound_max": 0.0,
+            "rejection_increase_max_pp": 1.0,
+            "min_available_memory_fraction": 0.10,
+            "bootstrap_draws": 1000,
+            "alpha": 0.05,
+        }})
+        self.assertEqual(result["reason"], "gated_thresholds_missing")
 
     def test_downgrades_beyond_requests_fail_accounting(self):
         result = self._run_case(
@@ -333,6 +392,8 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
 
     _DELETE = object()
     SLOTS = (1, 2)
+    # s1 cells are native-eligible; s2 cells are gated (SPEC-048-R015).
+    BOUND = 1
     PROMPTS = (1536, 4096, 8192)
     OUTPUTS = (128, 512)
 
@@ -351,7 +412,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         legacy=False,
         legacy_multi=False,
         arrival_interval_ms=0,
-        native_ttft=0.105,
+        native_ttft=0.102,
         native_itl=0.009,
         parity_mismatch=False,
         blocks_written=10,
@@ -367,6 +428,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         exploratory_policy=False,
         header_exploratory=None,
         policy_overrides=None,
+        gated_native_overrides=None,
     ):
         policy_path = root / "policy.json"
         jsonl_path = root / "runs.jsonl"
@@ -375,7 +437,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
             if exploratory_policy
             else "macprovider.native-mtp-r015-policy.v1",
             "qualified_slots": 2,
-            "max_native_active_rows": 2,
+            "max_native_active_rows": self.BOUND,
             "slots": list(self.SLOTS),
             "prompt_tokens": list(self.PROMPTS),
             "max_tokens": list(self.OUTPUTS),
@@ -401,6 +463,9 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
                 "min_available_memory_fraction": 0.10,
                 "bootstrap_draws": 1000,
                 "alpha": 0.05,
+                "gated_throughput_lower_bound_min": -0.05,
+                "gated_ttft_p95_upper_bound_max": 0.05,
+                "gated_itl_p95_upper_bound_max": 0.05,
             },
         }
         if exploratory_policy:
@@ -448,7 +513,10 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
                 if duplicate_matrix_path and block == 0:
                     records.append(dict(ordinary))
                 native_record = self._run_record("native_mtp", block, native_tps, native_ttft, native_itl, parity_mismatch, policy_sha=run_policy_sha or policy_sha, native_admissions=native_admissions, peak_phys_footprint_bytes=peak_phys_footprint_bytes, decode_tps=native_decode_tps, cell_id=cell_id, **record_options)
-                for field, value in (native_overrides or {}).items():
+                overrides = dict(native_overrides or {})
+                if int(cell_id.split("-")[0][1:]) > self.BOUND:
+                    overrides.update(gated_native_overrides or {})
+                for field, value in overrides.items():
                     if value is self._DELETE:
                         native_record.pop(field, None)
                     else:
@@ -503,6 +571,11 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
             "non_native_admissions": 0,
             "native_admissions": native_admissions if path == "native_mtp" else 0,
             "native_requests": 1 if path == "native_mtp" else 0,
+            "effective_paths": [
+                {"request_id": "r0", "effective_path": "native_mtp", "selector_reason": "", "other_active_rows": 0}
+            ]
+            if path == "native_mtp"
+            else [],
             "mtp_accepted_tokens": 100 if path == "native_mtp" else 0,
             "mtp_proposed_tokens": 100 if path == "native_mtp" else 0,
             "mtp_accepted_by_position": [100] if path == "native_mtp" else [],

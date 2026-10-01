@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.17
+**Version:** 0.1.18
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -953,6 +953,28 @@ allowed; a slot count above `qualified_slots` is not. The bench refuses, and
 the analyzer fails closed on, a policy missing any mandatory cell, so a
 reduced matrix cannot pass. Exploratory pilot policies are exempt and never
 yield an admission verdict.
+
+**Cell classes.** The frozen `max_native_active_rows` splits the matrix. A
+cell whose slot count is at or below it is *native-eligible*: it carries the
+throughput, TTFT, inter-token, and rejection gates above, admits every row
+native (a load-gate downgrade there fails the cell), and every native run
+must show proposals and target forwards. A cell above it is *gated*: it
+measures the R007 load gate, so admitted native rows may legitimately spend
+the whole run at depth zero inside the ordinary forward and need recorded,
+consistent counters but not positive proposals. A gated cell MUST instead
+prove the gate worked and cost nothing: every admission records the other
+in-flight rows it was counted against, a native admission only while that
+count was below the bound and a `capacity_above_native_bound` downgrade only
+at or above it; admissions plus downgrades account for every request; parity
+holds and fallback/error is zero; and native is non-inferior to ordinary at
+the mixed-load margins of this section — the Holm-corrected lower bound of
+the decode-throughput change at least -5%, the corrected upper bounds of p95
+TTFT and p95 inter-token regression at most 5%, and capacity rejection up by
+at most one percentage point. These margins are frozen in the policy
+thresholds (`gated_throughput_lower_bound_min` -0.05,
+`gated_ttft_p95_upper_bound_max` 0.05, `gated_itl_p95_upper_bound_max` 0.05)
+and join the same Holm family. A tuple whose bound is 1 therefore passes R015
+with a native gain at one slot and non-inferiority everywhere above it.
 The campaign MUST report median and corrected confidence interval for
 aggregate and per-request decode throughput, aggregate committed tokens/s and
 per-request tokens/s end to end, p50/p95 TTFT and
@@ -1153,6 +1175,15 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.18 (2026-10-01)** — MTP-15 splits the R015 matrix at the frozen
+  `max_native_active_rows` (#1770). Native-eligible cells keep the
+  improvement gates and native-work proofs and may not downgrade; gated cells
+  above the bound prove each admission honored the bound (recorded
+  other-active-row counts), keep parity and zero errors, and gate
+  non-inferiority to ordinary at the section's mixed-load margins (decode
+  throughput LB >= -5%, p95 TTFT and inter-token UB <= 5%), frozen in the
+  policy. Without this a correctly gated tuple (bound 1 on an 8-slot tuple)
+  could never pass R015.
 - **0.1.17 (2026-10-01)** — MTP-15 makes the R015 matrix explicit (#1770):
   an admission policy names `qualified_slots` and `max_native_active_rows` and
   covers every slot count from 1 to `qualified_slots`, prompt strata 1536,
