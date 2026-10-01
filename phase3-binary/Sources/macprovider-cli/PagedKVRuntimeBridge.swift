@@ -575,7 +575,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     private let blockSizeTokens: Int
     private let maxPhysicalBlocks: Int
     private let poolEpoch: Int
-    private let cacheKinds: [CacheKind]
+    let cacheKinds: [CacheKind]
     private let contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)?
     /// When true, lockstep decode reuses a compiled `[B, 1]` graph over batched
     /// contiguous KV. Tests keep the default off so fake models are not traced.

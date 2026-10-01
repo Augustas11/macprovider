@@ -4594,6 +4594,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 modelSHA256: modelSHA256,
                 weightsGeneration: weightsGeneration,
                 prefillStepSize: prefillStepSize,
+                maxDecodeLockstepWindow: decodeLockstepWindow(backendOverride: backendOverride),
                 nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
                 nativeMTPStatusSink: nativeMTPStatusSink,
                 replayAuthority: replayAuthority
@@ -4611,12 +4612,7 @@ actor ModelRuntime: ModelRuntimeServing {
         // serial-format materialize at terminal instead.
         let isHybrid = cacheKinds.contains(.recurrentMamba)
         let contiguousCacheBridge = isHybrid && !cachedTurns ? nil : PagedKVRuntimeContiguousCacheBridge()
-        // Hybrid recurrent state is split/repacked only at decode window
-        // boundaries. Keep production windows to one token until the Qwen35/38
-        // shared-state path proves exact beyond the 512-token prompt boundary.
-        let maxDecodeLockstepWindow = isHybrid
-            ? 1
-            : ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow
+        let maxDecodeLockstepWindow = servePathDecodeLockstepWindow(cacheKinds: cacheKinds)
         return makeContinuousBatchScheduler(
             decision: decision,
             tuple: tuple,
@@ -4653,6 +4649,30 @@ actor ModelRuntime: ModelRuntimeServing {
             replayAuthority: replayAuthority,
             contiguousCacheBridge: contiguousCacheBridge
         )
+    }
+
+    /// Hybrid recurrent state is split/repacked only at decode window
+    /// boundaries. Keep production windows to one token until the Qwen35/38
+    /// shared-state path proves exact beyond the 512-token prompt boundary.
+    nonisolated static func servePathDecodeLockstepWindow(
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
+    ) -> Int {
+        cacheKinds.contains(.recurrentMamba)
+            ? 1
+            : ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow
+    }
+
+    /// An injected real paged-KV backend (native-MTP bench / hardware E2E)
+    /// must decode in the serve path's windows, or its stream cadence and
+    /// throughput are not production's. Scripted test backends keep the
+    /// default window.
+    nonisolated static func decodeLockstepWindow(
+        backendOverride: any ContinuousBatchSchedulerBackend
+    ) -> Int {
+        guard let paged = backendOverride as? PagedKVSharedForwardBackend else {
+            return ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow
+        }
+        return servePathDecodeLockstepWindow(cacheKinds: paged.cacheKinds)
     }
 
     private static func pagedKVCacheKinds(

@@ -7,6 +7,44 @@ import MLXNN
 import XCTest
 
 final class PagedKVRuntimeMixedCacheTests: XCTestCase {
+    /// The native-MTP bench and hardware E2E inject a real paged-KV backend.
+    /// That path must use the serve path's decode window: a hybrid (Qwen3.6)
+    /// row decodes one token per hop and streams per token, so a 16-step
+    /// window there made the bench's ordinary path deliver 16-token bursts
+    /// production never emits.
+    func testInjectedPagedBackendUsesServePathDecodeWindow() {
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: "mlx-community/Qwen3.6-Test"),
+            model: MixedCacheFakeModel(recorder: MixedCacheRecorder(), nextTokenByInput: [:], attentionDType: .float16),
+            processor: MixedCacheUserInputProcessor(),
+            tokenizer: MixedCacheTokenizer()
+        ))
+        let hybrid = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 16,
+            poolEpoch: 1,
+            layerCount: 2,
+            cacheKinds: [.recurrentMamba, .pagedAttention]
+        )
+        let pagedOnly = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 16,
+            poolEpoch: 1,
+            layerCount: 2
+        )
+        XCTAssertEqual(ModelRuntime.decodeLockstepWindow(backendOverride: hybrid), 1)
+        XCTAssertEqual(
+            ModelRuntime.decodeLockstepWindow(backendOverride: hybrid),
+            ModelRuntime.servePathDecodeLockstepWindow(cacheKinds: [.recurrentMamba, .pagedAttention])
+        )
+        XCTAssertEqual(
+            ModelRuntime.decodeLockstepWindow(backendOverride: pagedOnly),
+            ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow
+        )
+    }
+
     func testMixedCacheIsolationProbeCoversLockstepWindowBeforePeerRejoin() async throws {
         guard PagedKVMetallibGate.defaultMetallibExists() else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
