@@ -298,6 +298,8 @@ extension MLXSmallMProbeCommand {
                     logits = context.model(LMInput.Text(tokens: next.reshaped([rows, 1])), cache: cache, state: nil).logits
                 }
                 let genArr = MLXArray(gen.flatMap { $0 }, [rows, steps])
+                // Per-width argmaxes ([stock, lab]) for the cross-width check.
+                var byWidth: [Int: [[Int32]]] = [:]
                 for w in widthList {
                     var argmaxes: [[Int32]] = []
                     var allLogits: [MLXArray] = []
@@ -320,6 +322,7 @@ extension MLXSmallMProbeCommand {
                         argmaxes.append(concatenated(am, axis: 1).asArray(Int32.self))
                         allLogits.append(concatenated(lg, axis: 1))
                     }
+                    byWidth[w] = argmaxes
                     let flips = zip(argmaxes[0], argmaxes[1]).filter { $0 != $1 }.count
                     let delta = abs(allLogits[0] - allLogits[1]).max().item(Float.self)
                     let scale = abs(allLogits[0]).max().item(Float.self)
@@ -336,6 +339,21 @@ extension MLXSmallMProbeCommand {
                     ]
                     let data = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys])
                     out.append(String(decoding: data, as: UTF8.self))
+                }
+                // Same tokens and positions, [B, 1] vs [B, w] verify-shaped
+                // forwards: the drift MLX itself shows across batch shapes.
+                if let one = byWidth[1] {
+                    for (w, other) in byWidth where w != 1 && one[0].count == other[0].count {
+                        let record: [String: Any] = [
+                            "schema": "macprovider.mlx-smallm-probe.moe-flips-width.v1",
+                            "rows": rows, "width_a": 1, "width_b": w, "positions": one[0].count,
+                            "smallm_qmv": dense, "moe": "grouped",
+                            "stock_w1_vs_wb_flips": zip(one[0], other[0]).filter { $0 != $1 }.count,
+                            "lab_w1_vs_wb_flips": zip(one[1], other[1]).filter { $0 != $1 }.count,
+                        ]
+                        let data = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys])
+                        out.append(String(decoding: data, as: UTF8.self))
+                    }
                 }
             }
             setLab(false)
