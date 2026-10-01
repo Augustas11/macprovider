@@ -700,7 +700,7 @@ SPEC-023 sidecar before any native-MTP tuple can advertise capability.
 
 ### MTP-13 — signed admission and immutable evidence (SPEC-048-R013)
 
-Catalog/autotune admission MUST be based on the SPEC-023 v0.21.3
+Catalog/autotune admission MUST be based on the SPEC-023 v0.22.3
 `macprovider.native-mtp-admission.v1` signed sidecar bound to one immutable SPEC-023
 `release_id` and SPEC-010 model/artifact member, never provider self-report.
 The sidecar MUST bind the exact decode path, model/artifact/tokenizer digests,
