@@ -592,3 +592,42 @@ func TestPoolScopedStatusEarningReevaluatesCurrentPredicate(t *testing.T) {
 		})
 	}
 }
+
+// Freeze audit R1 (#1816) SECURITY H4: a GGUF (non-primary) artifact of a
+// blocked row is kept as a deny pair, so a pool binding to it is revoked when
+// the row becomes blocked, acceptance rejects it, and the hello exemption
+// refuses it, even when the feed is too stale to authorize identities.
+func TestPoolManifestBlockedArtifactFeedPairDenies(t *testing.T) {
+	for name, feedAge := range map[string]time.Duration{"fresh feed": 0, "stale feed": 30 * 24 * time.Hour} {
+		t.Run(name, func(t *testing.T) {
+			f := newBindingFixture(t)
+			source := wirePoolSource(f)
+			source.set(poolSnapshot(testPoolA, 1, poolDigestV1, ggufPoolEntry()))
+			f.registerPoolSession(t, poolProvider, "llamacpp_loopback", modelidentity.GGUFFileV1, poolGGUFHash)
+			offer := f.offer(t, poolProvider, "blk", "llamacpp_loopback", map[string]string{modelidentity.GGUFFileV1: poolGGUFHash})
+			f.reevaluate(poolProvider)
+			if head := f.latest(t, poolProvider, offer.CandidateID); head.State != "catalog_priced" || !head.PoolScoped() {
+				t.Fatalf("uncatalogued GGUF bind = %+v", head)
+			}
+			blocked := bindingCatalog(t, "release-blocked", "blocked", strings.Repeat("6", 64))
+			index, err := artifactidentity.NewWithBlocked(artifactidentity.Provenance{
+				FeedSHA256: strings.Repeat("a", 64), SignerKeyID: "k1", ReleaseID: blocked.Version, CandidateCatalogSHA256: blocked.SHA256,
+				FeedGeneratedAt: f.now.Add(-time.Hour - feedAge),
+			}, nil, []artifactidentity.Member{{ModelKey: "small", ArtifactID: "gguf-q4", HashAlgorithm: modelidentity.GGUFFileV1, Hash: poolGGUFHash}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.publish(blocked, map[string]*artifactidentity.Index{blocked.SHA256: index})
+			if !f.server.ArtifactPairInCatalog(modelidentity.GGUFFileV1, poolGGUFHash, []string{"llamacpp_loopback"}) {
+				t.Fatal("acceptance does not reject a blocked artifact-feed pair")
+			}
+			if _, ok := f.server.poolEntryForSession(poolProvider, "llamacpp_loopback", modelidentity.GGUFFileV1, poolGGUFHash); ok {
+				t.Fatal("hello exemption granted to a blocked artifact-feed pair")
+			}
+			f.reevaluate(poolProvider)
+			if head := f.latest(t, poolProvider, offer.CandidateID); head.State != modelAdmissionRevoked || head.ReasonCode != ModelAdmissionRevokePoolEntryRevoked {
+				t.Fatalf("blocked artifact-feed pair binding = %+v, want revoked %s", head, ModelAdmissionRevokePoolEntryRevoked)
+			}
+		})
+	}
+}

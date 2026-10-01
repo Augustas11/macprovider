@@ -88,15 +88,28 @@ func (s *Server) classifyCatalogPair(algorithm, hash string) poolCatalogPairStat
 	}
 	s.withReleaseRead(func() {
 		current, _ := s.autotuneCatalogSnapshot()
-		status = classifyCatalogPairLocked(current, s.usableIdentitySetLocked(current), algorithm, hash)
+		status = classifyCatalogPairLocked(current, s.usableIdentitySetLocked(current), s.denyIdentitySetLocked(current), algorithm, hash)
 	})
 	return status
 }
 
-func classifyCatalogPairLocked(current *autotune.Catalog, set *artifactidentity.Index, algorithm, hash string) poolCatalogPairStatus {
+// denyIdentitySetLocked is the current release's feed index regardless of
+// freshness: its blocked pairs deny even when the feed is too stale to
+// authorize any identity.
+func (s *Server) denyIdentitySetLocked(current *autotune.Catalog) *artifactidentity.Index {
+	if current == nil {
+		return nil
+	}
+	return s.artifactIdentitySetFor(current.SHA256)
+}
+
+func classifyCatalogPairLocked(current *autotune.Catalog, set, deny *artifactidentity.Index, algorithm, hash string) poolCatalogPairStatus {
 	status := poolCatalogPairStatus{priceable: map[string]bool{}}
 	if current == nil {
 		return status
+	}
+	if deny.Blocked(algorithm, hash) {
+		status.blocked = true
 	}
 	runtimes := []string{modelAdmissionRuntimeSourceMLXCache, poolmanifest.RuntimeSourceLlamacppLoopback, poolmanifest.RuntimeSourceLMStudioLoopback,
 		poolmanifest.RuntimeSourceMLXLMLoopback, poolmanifest.RuntimeSourceOllamaLoopback, poolmanifest.RuntimeSourceOMLXLoopback}

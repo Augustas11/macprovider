@@ -359,7 +359,7 @@ func (s *Server) modelAdmissionBindingFor(candidate ModelAdmissionEvent) pool.Mo
 		binding.PoolModelID = candidate.PoolModelID
 		s.withReleaseRead(func() {
 			current, _ := s.autotuneCatalogSnapshot()
-			status := classifyCatalogPairLocked(current, s.usableIdentitySetLocked(current), candidate.ExpectedCatalogModelHashAlgorithm, candidate.ExpectedCatalogModelHash)
+			status := classifyCatalogPairLocked(current, s.usableIdentitySetLocked(current), s.denyIdentitySetLocked(current), candidate.ExpectedCatalogModelHashAlgorithm, candidate.ExpectedCatalogModelHash)
 			if !status.blocked && !status.priceableFor(modelAdmissionRuntimeClass(candidate.RuntimeSource)) {
 				binding.ValidatedReleaseGeneration = s.artifactIdentitySets.generationLocked()
 			}
