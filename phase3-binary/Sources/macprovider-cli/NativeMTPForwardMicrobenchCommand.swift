@@ -50,11 +50,15 @@ struct NativeMTPForwardMicrobenchCommand: AsyncParsableCommand {
     @Option(name: .customLong("gate-up-tiling"), help: "Lab: grouped gate/up tiling r-lpr-ks-nt-xs.")
     var gateUpTiling: String?
 
+    @Option(name: .customLong("moe-mm"), help: "Lab: grouped max tokens per expert per weight pass.")
+    var moeMM: Int?
+
     @Option(name: .customLong("down-tiling"), help: "Lab: grouped down tiling r-lpr-ks-nt-xs.")
     var downTiling: String?
 
     func run() async throws {
         try MoESmallM.applyTilingOverrides(gateUp: gateUpTiling, down: downTiling)
+        if let moeMM { MoESmallM.maxTokensPerPass = moeMM }
         let batchSizes = batches.split(separator: ",").compactMap { Int($0) }
         let widthValues = widths.split(separator: ",").compactMap { Int($0) }
         let variantValues = variants.split(separator: ",").map(String.init)
@@ -91,7 +95,7 @@ struct NativeMTPForwardMicrobenchCommand: AsyncParsableCommand {
                         )
                     }
                     print(line.dropLast() + ",\"smallm_qmv\":\"\(smallmLabel)\",\"smallm_routed_layers\":\(routed)"
-                        + ",\"moe_smallm\":\"\(moeLabel)\",\"moe_tiling\":\"\(MoESmallM.gateUpTiling)/\(MoESmallM.downTiling)\",\"ablate\":\"\(ablateLabel)\",\"moe_notes\":\"\(moeNotes)\"}")
+                        + ",\"moe_smallm\":\"\(moeLabel)\",\"moe_tiling\":\"\(MoESmallM.gateUpTiling)/\(MoESmallM.downTiling)/mm\(MoESmallM.maxTokensPerPass)\",\"ablate\":\"\(ablateLabel)\",\"moe_notes\":\"\(moeNotes)\"}")
                     fflush(stdout)
                 }
             }

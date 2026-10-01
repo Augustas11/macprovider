@@ -417,6 +417,9 @@ enum MoESmallM {
 
     /// Grouped-kernel tiling, fixed per projection (never per token count).
     /// gate/up: R = 2 (gate row + up row). down: R = 1.
+    /// Tokens per expert handled per weight pass (MM); more tokens on one
+    /// expert take further passes. Does not change any reduction order.
+    nonisolated(unsafe) static var maxTokensPerPass = 2
     nonisolated(unsafe) static var gateUpTiling = Tiling(r: 2, lpr: 8, ks: 1, nt: 4, xs: 0)
     nonisolated(unsafe) static var downTiling = Tiling(r: 1, lpr: 4, ks: 1, nt: 4, xs: 0)
 
@@ -449,7 +452,7 @@ enum MoESmallM {
         let dtype = x.dtype
         let b = bucket(inds, experts: gate.experts)
         if stages == 1 { return b.counts }
-        let mm = t >= 8 ? 8 : (t >= 4 ? 4 : (t >= 2 ? 2 : 1))
+        let mm = min(maxTokensPerPass, t >= 8 ? 8 : (t >= 4 ? 4 : (t >= 2 ? 2 : 1)))
         let hidden = gate.outDims
         func launch(_ inputs: [MLXArray], mode: Int, tl: Tiling, kIn: Int, nOut: Int) -> MLXArray {
             let rowsPerSG = (32 / tl.lpr) * (mode == 1 ? 1 : tl.r)

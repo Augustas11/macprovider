@@ -68,6 +68,9 @@ struct MLXSmallMProbeCommand: AsyncParsableCommand {
     @Option(name: .customLong("gate-up-tiling"), help: "gbench/greal/micro: grouped gate/up tiling r-lpr-ks-nt-xs, e.g. 2-8-1-4-1.")
     var gateUpTiling: String?
 
+    @Option(name: .customLong("moe-mm"), help: "Grouped: max tokens per expert per weight pass (1, 2, 4, 8).")
+    var moeMM: Int?
+
     @Option(name: .customLong("down-tiling"), help: "grouped down tiling r-lpr-ks-nt-xs, e.g. 1-8-1-4-1.")
     var downTiling: String?
 
@@ -82,6 +85,7 @@ struct MLXSmallMProbeCommand: AsyncParsableCommand {
 
     func run() async throws {
         try MoESmallM.applyTilingOverrides(gateUp: gateUpTiling, down: downTiling)
+        if let moeMM { MoESmallM.maxTokensPerPass = moeMM }
         switch mode {
         case "qmm":
             try runQMM()

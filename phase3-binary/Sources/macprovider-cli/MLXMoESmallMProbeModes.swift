@@ -437,7 +437,7 @@ extension MLXSmallMProbeCommand {
                 try Self.emit([
                     "schema": "macprovider.mlx-smallm-probe.moe-gbench.v1",
                     "tokens": t, "pairs": t * topk, "distinct": d, "copies": copies, "serial": serial,
-                    "gateup_tiling": MoESmallM.gateUpTiling.description, "down_tiling": MoESmallM.downTiling.description,
+                    "gateup_tiling": MoESmallM.gateUpTiling.description, "down_tiling": MoESmallM.downTiling.description, "mm": MoESmallM.maxTokensPerPass,
                     "us_mlx": st.0, "us_min_mlx": st.1, "us_grouped": gr.0, "us_min_grouped": gr.1,
                     "speedup": st.0 / gr.0,
                     "us_grouped_bucket_only": gr1.0, "us_grouped_bucket_gateup": gr2.0,
