@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.20
+**Version:** 0.1.21
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.20",
+  "version": "0.1.21",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -422,7 +422,7 @@ seeds from the scheduler request identity, not the buyer `seed`). Legacy complet
 explicitly admitted above routes ordinary. A nonempty `conversation_key` also
 routes ordinary. Prompt length is bounded only by the signed request
 profile's maximum prompt tokens: a prompt longer than one prefill chunk is
-prefilled in chunks with per-chunk drafter seeding (MTP-6), and the prefill
+prefilled in chunks with deferred drafter seeding (MTP-6), and the prefill
 chunk size is not an eligibility bound. The request additionally requires an admitted
 capability, a supported cache/state class, and enough capacity for the next
 complete verification round. Streaming and non-streaming are eligible only
@@ -536,20 +536,37 @@ byte encoding. Depth-zero rows retain only committed target state; when depth
 increases, proposal state is recomputed from the current committed target
 hidden state rather than reused from a stale speculative tail.
 
-Proposal state for the prompt is seeded during prefill, one chunk at a time.
-For prompt chunk `[c, c+n)` the target emits hidden states `c ..< c+n` and the
-MTP adapter advances the row's proposal state over `embed(prompt[c+1 ..< c+n+1])`
-paired with those hidden states at position `c`. For a non-final chunk the
-tail token `prompt[c+n]` is the next prompt token; only the final chunk uses
-the sampled first token as its tail and yields the row's first proposal. A
-prompt that fits one chunk is the single-pass case of the same rule. A
-non-initial chunk MUST find the previous chunk's proposal state at exactly
-position `c`, or the row fails before output; no chunk is replayed to
-synthesize hidden states.
+Proposal state for the prompt is seeded after the first token (deferred
+seeding), so native prefill costs the target exactly one ordinary prefill plus
+emitting its hidden states, and the first token is emitted as soon as the
+target's prefill completes. For prompt chunk `[c, c+n)` the target emits
+hidden states `c ..< c+n`; the provider buffers, in order, the columns
+`embed(prompt[c+1 ..< c+n+1])` paired with those hidden states at position
+`c`, without running the MTP adapter. For a non-final chunk the tail token
+`prompt[c+n]` is the next prompt token; the final chunk's tail is the sampled
+first token. A prompt that fits one chunk is the single-pass case of the same
+rule. A non-initial chunk MUST find the row's proposal state and buffered
+columns covering exactly `[0, c)`, or the row fails before output; no chunk is
+replayed to synthesize hidden states. Buffered hidden states are bounded by
+prompt length times hidden size times dtype width (8192 tokens are 32 MiB at
+hidden size 2048 and 80 MiB at 5120 in bf16) and are released as they are
+consumed or when the row ends.
 
-A row held at depth zero by the MTP-7 load gate does not run a one-column
-native verification. It shares the ordinary lockstep decode forward, and the
-provider keeps, in order, each token that forward commits for the row with the
+After its first token, a row whose buffered prompt exceeds one prefill chunk
+rides the ordinary lockstep decode forward at depth zero, like a load-gated
+row below, and each decode round advances its proposal state over at most one
+prefill chunk of buffered columns in one packed step, so catch-up never stalls
+the batch for more than one chunk of MTP adapter work per round. Once no more
+than one chunk remains, the row returns to native rounds and its next proposal
+first consumes the rest. Advancing over the buffered columns in any partition
+leaves the same proposal state as single-pass seeding of the same committed
+prefix, up to the adapter's kernel rounding; tokens are the target's
+throughout.
+
+A row held at depth zero by the MTP-7 load gate, or catching up on deferred
+prompt seeding, does not run a one-column native verification. It shares the
+ordinary lockstep decode forward, and the provider keeps, in order, after any
+buffered prompt columns, each token that forward commits for the row with the
 target hidden state that produced it. These are exactly the columns per-round
 depth-zero finalizes would have fed the MTP adapter. Before the row's next
 native proposal (or once it holds 64 such columns) they advance its proposal
@@ -1205,6 +1222,17 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.21 (2026-10-01)** — MTP-6 defers prompt seeding off the TTFT path
+  (#1770). Studio runs measured native TTFT 4-6% above ordinary at one slot on
+  A3B (0.96 to 1.00 s at 1536 prompt tokens, 4.93 to 5.23 s at 8192) and the
+  gated 8-slot TTFT upper bound at +7.8% against the 5% margin, because every
+  native prefill chunk ran a packed drafter advance before the first token and
+  delayed other rows' prefills. Prefill now only buffers each chunk's (next
+  token, target hidden) columns; the first token is emitted when the target
+  prefill completes. A row with more than one chunk buffered rides the ordinary
+  forward at depth zero and catches up at most one chunk of columns per decode
+  round; the rest is consumed before its first proposal. Proposal state equals
+  single-pass seeding; output is unchanged.
 - **0.1.20 (2026-10-01)** — MTP-15 preregisters the run order (#1770): per
   cell, a seeded Fisher-Yates permutation runs half the blocks (rounded up)
   native first; the sustained window alternates. The analyzer recomputes it

@@ -1474,7 +1474,7 @@
     {
       "spec_id": "SPEC-048",
       "title": "Native Multi-Token Prediction Serving",
-      "version": "0.1.20",
+      "version": "0.1.21",
       "path": "specs/SPEC-048-native-mtp-serving.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -10095,12 +10095,19 @@
       "implementation": [
         "phase3-binary/Sources/MacProviderCore/PagedKVEngine.swift:public func checkpointNativeMTPTransaction",
         "phase3-binary/Sources/MacProviderCore/PagedKVEngine.swift:public func commitNativeMTPTransaction",
-        "phase3-binary/Sources/MacProviderCore/PagedKVEngine.swift:public func abortNativeMTPTransaction"
+        "phase3-binary/Sources/MacProviderCore/PagedKVEngine.swift:public func abortNativeMTPTransaction",
+        "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:private func deferNativeMTPDrafterPromptChunk",
+        "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:private func flushingNativeMTPDrafterColumns"
       ],
       "tests": [
         "phase3-binary/Tests/MacProviderCoreTests/PagedKVEngineTests.swift:testNativeMTPAbortRestoresCheckpointAndReleasesStagedBlocks",
         "phase3-binary/Tests/MacProviderCoreTests/PagedKVEngineTests.swift:testNativeMTPRaggedRowsCommitIndependently",
-        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testNativeMTPDisableDuringFinalizeFailsOnlyStaleRowAndHealthyPeerCommits"
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testNativeMTPDisableDuringFinalizeFailsOnlyStaleRowAndHealthyPeerCommits",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testNativeMTPPromptPrefillDefersDrafterSeedingPastTheFirstToken",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testDeferredPromptSeedingMatchesSinglePassSeeding",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testDeferredSeedingCatchesUpBoundedPerRoundThenProposesLikeSinglePass",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testLoadGateEngagingDuringDeferredSeedingKeepsParityAndDrafterState",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testCancellationDuringDeferredSeedingReleasesTheRowAndKeepsPeersExact"
       ],
       "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
       "evidence": [],
@@ -10108,7 +10115,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "Row-local transactional paged-KV and hybrid-state staging, accepted-prefix commit, discard, and rewind are implemented; a row that goes stale after the backend publishes its round fails alone without rolling back healthy peers. Branch-local on campaign/native-mtp-r015 at the reviewed fork pin ef4ff8568c38c640bc90a8176dc3acfe943a288d, default-off; stays pending until the frozen diff completes CI, Mac Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
+        "rationale": "Row-local transactional paged-KV and hybrid-state staging, accepted-prefix commit, discard, and rewind are implemented; a row that goes stale after the backend publishes its round fails alone without rolling back healthy peers. Prompt drafter seeding is deferred past the first token and caught up at most one prefill chunk per decode round. Branch-local on campaign/native-mtp-r015 at the reviewed fork pin ef4ff8568c38c640bc90a8176dc3acfe943a288d, default-off; stays pending until the frozen diff completes CI, Mac Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
       }
     },
     {
