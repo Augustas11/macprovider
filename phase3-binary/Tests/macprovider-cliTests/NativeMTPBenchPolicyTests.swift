@@ -105,6 +105,22 @@ final class NativeMTPBenchPolicyTests: XCTestCase {
         XCTAssertNoThrow(try load(ungated))
     }
 
+    /// Golden vectors shared with scripts/tests/test_native_mtp_r015_analyze.py:
+    /// the analyzer recomputes this order and rejects any other.
+    func testPreregisteredRunOrderMatchesAnalyzerGoldenVectors() {
+        XCTAssertEqual(
+            NativeMTPBenchPolicy.nativeFirstOrder(seed: 48015, cell: NativeMTPBenchCell(slots: 8, promptTokens: 4096, maxTokens: 512), blocks: 10),
+            [true, false, false, false, true, false, true, true, true, false]
+        )
+        XCTAssertEqual(
+            NativeMTPBenchPolicy.nativeFirstOrder(seed: 1234, cell: NativeMTPBenchCell(slots: 1, promptTokens: 1536, maxTokens: 128), blocks: 10),
+            [false, true, true, false, true, false, true, false, false, true]
+        )
+        let odd = NativeMTPBenchPolicy.nativeFirstOrder(seed: 0, cell: NativeMTPBenchCell(slots: 2, promptTokens: 8192, maxTokens: 128), blocks: 11)
+        XCTAssertEqual(odd, [false, false, true, false, true, true, true, true, false, false, true])
+        XCTAssertEqual(odd.filter { $0 }.count, 6)
+    }
+
     func testExploratoryPolicyMayUseAReducedMatrix() throws {
         var object = try template()
         object["schema"] = "macprovider.native-mtp-exploratory-policy.v1"

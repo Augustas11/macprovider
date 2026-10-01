@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.native_mtp_r015_analyze import _holm_adjusted, analyze, main
+from scripts.native_mtp_r015_analyze import _holm_adjusted, _native_first_order, analyze, main
 
 
 class NativeMTPR015AnalyzeTests(unittest.TestCase):
@@ -93,6 +93,50 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         result = self._run_case(parity_mismatch=True)
         self.assertEqual(result["overall_status"], "FAIL")
         self.assertIn("parity_mismatch", result["cells"][0]["hard_failures"])
+
+    def test_preregistered_order_matches_bench_golden_vectors(self):
+        # Same vectors as NativeMTPBenchPolicyTests (Swift bench).
+        self.assertEqual(_native_first_order(48015, 8, 4096, 512, 10), [True, False, False, False, True, False, True, True, True, False])
+        self.assertEqual(_native_first_order(1234, 1, 1536, 128, 10), [False, True, True, False, True, False, True, False, False, True])
+        self.assertEqual(_native_first_order(0, 2, 8192, 128, 11), [False, False, True, False, True, True, True, True, False, False, True])
+
+    def test_correct_counterbalanced_order_passes(self):
+        result = self._run_case()
+        self.assertEqual(result["overall_status"], "PASS")
+        self.assertTrue(all(cell["paired_blocks"] == 10 for cell in result["cells"]))
+
+    def test_blocks_below_ten_fails_closed(self):
+        result = self._run_case(policy_overrides={"blocks": 9}, blocks_written=9)
+        self.assertEqual(result["reason"], "policy_matrix_incomplete")
+        self.assertIn("blocks_below_ten", result["matrix_violations"])
+
+    def test_ordinary_always_first_fails(self):
+        result = self._run_case(order_override=[False] * 10)
+        self.assertEqual(result["overall_status"], "FAIL")
+        failures = result["cells"][0]["hard_failures"]
+        self.assertTrue(any("differs from the preregistered order" in f for f in failures), failures)
+        self.assertIn("run order not counterbalanced", failures)
+
+    def test_order_that_is_counterbalanced_but_not_preregistered_fails(self):
+        result = self._run_case(order_override=[index % 2 == 0 for index in range(10)])
+        failures = [f for cell in result["cells"] for f in cell["hard_failures"]]
+        self.assertTrue(any("differs from the preregistered order" in f for f in failures), failures)
+
+    def test_bad_order_positions_fail(self):
+        result = self._run_case(native_overrides={"order_position": 2})
+        failures = result["cells"][0]["hard_failures"]
+        self.assertTrue(any("order_position not exactly one of each" in f for f in failures), failures)
+        result = self._run_case(native_overrides={"order_position": None})
+        failures = result["cells"][0]["hard_failures"]
+        self.assertTrue(any("order_position not exactly one of each" in f for f in failures), failures)
+
+    def test_duplicate_or_missing_pair_fails(self):
+        duplicate = self._run_case(duplicate_matrix_path=True)
+        self.assertEqual(duplicate["overall_status"], "FAIL")
+        self.assertEqual(duplicate["reason"], "duplicate_run_record")
+        missing = self._run_case(native_overrides={"path": "other"})
+        self.assertTrue(any("missing paired path" in f for f in missing["cells"][0]["hard_failures"]))
+        self.assertEqual(missing["overall_status"], "FAIL")
 
     def test_incomplete_cell(self):
         result = self._run_case(blocks_written=3)
@@ -472,6 +516,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         header_exploratory=None,
         policy_overrides=None,
         gated_native_overrides=None,
+        order_override=None,
     ):
         policy_path = root / "policy.json"
         jsonl_path = root / "runs.jsonl"
@@ -551,8 +596,11 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
             for output in policy.get("max_tokens", [])
         ]
         for cell_id in cell_ids:
+            slots, prompt, output = (int(part[1:]) for part in cell_id.split("-"))
+            native_first = order_override or _native_first_order(policy["seed"], slots, prompt, output, max(blocks_written, policy["blocks"]))
             for block in range(blocks_written):
                 ordinary = self._run_record("ordinary", block, 100.0, 0.100, 0.010, False, policy_sha=run_policy_sha or policy_sha, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=matrix_min_available_memory_fraction, cell_id=cell_id, **record_options)
+                ordinary["order_position"] = 1 if native_first[block] else 0
                 records.append(ordinary)
                 if duplicate_matrix_path and block == 0:
                     records.append(dict(ordinary))
@@ -565,10 +613,12 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
                         native_record.pop(field, None)
                     else:
                         native_record[field] = value
+                native_record.setdefault("order_position", 0 if native_first[block] else 1)
                 records.append(native_record)
             if blocks_written >= 10 and cell_id == policy.get("sustained_cell_id"):
-                records.append(self._run_record("ordinary", 100, 100.0, 0.100, 0.010, False, sustained=True, policy_sha=run_policy_sha or policy_sha, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=sustained_min_available_memory_fraction, wall_seconds=sustained_wall_seconds, cell_id=cell_id, **record_options))
-                records.append(self._run_record("native_mtp", 100, native_tps, native_ttft, native_itl, parity_mismatch, sustained=True, policy_sha=run_policy_sha or policy_sha, native_admissions=native_admissions, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=sustained_min_available_memory_fraction, wall_seconds=sustained_wall_seconds, decode_tps=native_decode_tps, cell_id=cell_id, **record_options))
+                # Sustained block 100 is even: native runs first.
+                records.append(self._run_record("ordinary", 100, 100.0, 0.100, 0.010, False, sustained=True, order_position=1, policy_sha=run_policy_sha or policy_sha, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=sustained_min_available_memory_fraction, wall_seconds=sustained_wall_seconds, cell_id=cell_id, **record_options))
+                records.append(self._run_record("native_mtp", 100, native_tps, native_ttft, native_itl, parity_mismatch, sustained=True, order_position=0, policy_sha=run_policy_sha or policy_sha, native_admissions=native_admissions, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=sustained_min_available_memory_fraction, wall_seconds=sustained_wall_seconds, decode_tps=native_decode_tps, cell_id=cell_id, **record_options))
         jsonl_path.write_text("\n".join(json.dumps(r, sort_keys=True) for r in records) + "\n", encoding="utf-8")
         return jsonl_path, policy_path
 
@@ -584,6 +634,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         *,
         policy_sha,
         cell_id="s1-p1536-o128",
+        order_position=None,
         native_admissions=1,
         peak_phys_footprint_bytes=1000,
         min_available_memory_fraction=0.5,
@@ -598,6 +649,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
             "policy_sha256": policy_sha,
             "cell_id": cell_id,
             "block_index": block,
+            **({} if order_position is None else {"order_position": order_position}),
             "path": path,
             "sustained": sustained,
             "wall_seconds": wall_seconds,

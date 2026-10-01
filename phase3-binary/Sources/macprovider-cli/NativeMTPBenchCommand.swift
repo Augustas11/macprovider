@@ -172,11 +172,11 @@ private final class NativeMTPBenchRunner {
             _ = try await runPath(.ordinary, cell: cell, block: block, order: 0, prompts: prompts, runtime: fixture.runtimes.ordinary, fixture: fixture, writer: writer, warmup: true)
             _ = try await runPath(.nativeMTP, cell: cell, block: block, order: 1, prompts: prompts, runtime: fixture.runtimes.native, fixture: fixture, writer: writer, warmup: true)
         }
+        let nativeFirstByBlock = NativeMTPBenchPolicy.nativeFirstOrder(seed: policy.seed, cell: cell, blocks: policy.blocks)
         for block in 0..<policy.blocks {
             guard !completedBlocks.contains(block) else { continue }
             let prompts = try await makePrompts(container: fixture.runtimes.targetContainer, cell: cell, block: block)
-            var rng = SeededRandom(seed: stableBlockSeed(cell: cell, block: block))
-            let nativeFirst = rng.nextBool()
+            let nativeFirst = nativeFirstByBlock[block]
             var ordinaryResult: NativeMTPBenchRunResult?
             var nativeResult: NativeMTPBenchRunResult?
             for order in 0..<2 {
@@ -440,14 +440,6 @@ private final class NativeMTPBenchRunner {
             if lhs.completion.completionTokens != rhs.completion.completionTokens { return true }
         }
         return false
-    }
-
-    private func stableBlockSeed(cell: NativeMTPBenchCell, block: Int) -> UInt64 {
-        var value = UInt64(truncatingIfNeeded: policy.seed)
-        for component in [cell.slots, cell.promptTokens, cell.maxTokens, block] {
-            value ^= UInt64(truncatingIfNeeded: component) &+ 0x9e3779b97f4a7c15 &+ (value << 6) &+ (value >> 2)
-        }
-        return value
     }
 
     private func baseHeader(
@@ -1052,6 +1044,26 @@ struct NativeMTPBenchPolicy {
         return policy
     }
 
+    /// SPEC-048-R015 preregistered, counterbalanced run order: per cell, half
+    /// the blocks (rounded up) run native first, shuffled by a Fisher-Yates
+    /// permutation seeded from the frozen policy seed and the cell. The
+    /// analyzer recomputes this exactly (scripts/native_mtp_r015_analyze.py
+    /// `_native_first_order`) and rejects any block run in another order.
+    static func nativeFirstOrder(seed: Int, cell: NativeMTPBenchCell, blocks: Int) -> [Bool] {
+        guard blocks > 0 else { return [] }
+        var order = (0..<blocks).map { $0 < (blocks + 1) / 2 }
+        var value = UInt64(truncatingIfNeeded: seed)
+        for component in [cell.slots, cell.promptTokens, cell.maxTokens] {
+            value ^= UInt64(truncatingIfNeeded: component) &+ 0x9e3779b97f4a7c15 &+ (value << 6) &+ (value >> 2)
+        }
+        var rng = SeededRandom(seed: value)
+        for index in stride(from: blocks - 1, to: 0, by: -1) {
+            let swapIndex = Int(rng.next() % UInt64(index + 1))
+            order.swapAt(index, swapIndex)
+        }
+        return order
+    }
+
     func qualifiedSlots(for cell: NativeMTPBenchCell) -> Int {
         max(2, cell.slots)
     }
@@ -1364,12 +1376,13 @@ extension Optional: OptionalProtocol {
 private struct SeededRandom {
     private var state: UInt64
     init(seed: UInt64) { self.state = seed == 0 ? 0x9e3779b97f4a7c15 : seed }
-    mutating func nextBool() -> Bool {
+    /// SplitMix64.
+    mutating func next() -> UInt64 {
         state &+= 0x9e3779b97f4a7c15
         var z = state
         z = (z ^ (z >> 30)) &* 0xbf58476d1ce4e5b9
         z = (z ^ (z >> 27)) &* 0x94d049bb133111eb
-        return ((z ^ (z >> 31)) & 1) == 1
+        return z ^ (z >> 31)
     }
 }
 

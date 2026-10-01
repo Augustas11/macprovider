@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.19
+**Version:** 0.1.20
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.19",
+  "version": "0.1.20",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -945,6 +945,17 @@ advertised `(hardware, artifact, slots, prompt/output stratum)` cell; no pooled
 pass may hide a failing cell. Holm correction at family-wise alpha 0.05 covers
 the throughput, TTFT, inter-token, and rejection hypotheses across all cells.
 
+**Run order.** The order is preregistered by the frozen policy seed: in each
+cell, half the measured blocks (rounded up) run native first, placed by a
+SplitMix64-seeded Fisher-Yates permutation of the cell's blocks keyed by the
+policy seed and the cell's slots, prompt, and output budget; the sustained
+window alternates, native first on even blocks. Every measured block MUST
+hold exactly one ordinary and one native record at order positions 0 and 1.
+The analyzer recomputes the order and fails a cell on a missing or duplicate
+record, an order that differs from the preregistered one, or a cell whose
+blocks are not counterbalanced, and it fails an admission policy with fewer
+than ten blocks, independent of the bench's own checks.
+
 **Mandatory matrix.** The frozen admission policy MUST name the tuple's
 advertised `qualified_slots` (2...8) and its `max_native_active_rows`
 (`1..qualified_slots`), and MUST contain a cell at every slot count from 1 up
@@ -1194,6 +1205,12 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.20 (2026-10-01)** — MTP-15 preregisters the run order (#1770): per
+  cell, a seeded Fisher-Yates permutation runs half the blocks (rounded up)
+  native first; the sustained window alternates. The analyzer recomputes it
+  and independently enforces one ordinary and one native record per block at
+  positions 0 and 1, the preregistered order, counterbalancing, and at least
+  ten blocks for an admission policy.
 - **0.1.19 (2026-10-01)** — MTP-15 gated cells must prove the R007 in-flight
   hold on hardware (#1770): a frozen staggered arrival profile, a native
   admission below the bound and a downgrade at it, depth-zero held rounds

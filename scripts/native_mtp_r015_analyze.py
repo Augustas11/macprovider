@@ -53,6 +53,9 @@ def _matrix_violations(policy: dict) -> list[str]:
     if _is_exploratory(policy):
         return []
     violations: list[str] = []
+    blocks = policy.get("blocks")
+    if not _is_int(blocks) or blocks < 10:
+        violations.append("blocks_below_ten")
     qualified = policy.get("qualified_slots")
     if not _is_int(qualified) or not 2 <= qualified <= 8:
         return ["qualified_slots_missing_or_out_of_range"]
@@ -174,6 +177,33 @@ def _gated_hold_failures(native_runs: list[dict], bound: int) -> list[str]:
     if held_rounds <= 0:
         failures.add("gated_depth_zero_hold_missing")
     return sorted(failures)
+
+
+_U64 = (1 << 64) - 1
+_GOLDEN = 0x9E3779B97F4A7C15
+
+
+def _native_first_order(seed: int, slots: int, prompt_tokens: int, max_tokens: int, blocks: int) -> list[bool]:
+    """SPEC-048-R015 preregistered, counterbalanced order: per cell, half the
+    blocks (rounded up) run native first, shuffled by a Fisher-Yates
+    permutation seeded from the frozen policy seed and the cell. Mirrors
+    NativeMTPBenchPolicy.nativeFirstOrder bit for bit (UInt64 wrapping)."""
+    if blocks <= 0:
+        return []
+    order = [index < (blocks + 1) // 2 for index in range(blocks)]
+    value = seed & _U64
+    for component in (slots, prompt_tokens, max_tokens):
+        value ^= ((component & _U64) + _GOLDEN + ((value << 6) & _U64) + (value >> 2)) & _U64
+    state = value if value else _GOLDEN
+    for index in range(blocks - 1, 0, -1):
+        state = (state + _GOLDEN) & _U64
+        z = state
+        z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & _U64
+        z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & _U64
+        z ^= z >> 31
+        swap = z % (index + 1)
+        order[index], order[swap] = order[swap], order[index]
+    return order
 
 
 def _load_jsonl(path: Path) -> tuple[dict, list[dict]]:
@@ -486,7 +516,34 @@ def _observed_cells(policy: dict) -> list[str]:
     return cells
 
 
-def _pair_runs(runs: list[dict], cell_id: str) -> tuple[list[tuple[dict, dict]], list[str]]:
+_CELL_ID = re.compile(r"^s(\d+)-p(\d+)-o(\d+)$")
+
+
+def _expected_native_first(policy: dict, cell_id: str) -> list[bool] | None:
+    match = _CELL_ID.match(cell_id)
+    seed, blocks = policy.get("seed"), policy.get("blocks")
+    if match is None or not _is_int(seed) or not _is_int(blocks):
+        return None
+    slots, prompt, output = (int(group) for group in match.groups())
+    return _native_first_order(seed, slots, prompt, output, blocks)
+
+
+def _order_issue(label: str, item: dict[str, dict], native_first: bool | None) -> str | None:
+    """One ordinary and one native record at order positions {0, 1}, in the
+    preregistered order when one is given."""
+    positions = {path: item[path].get("order_position") for path in ("ordinary", "native_mtp")}
+    if not all(_is_int(value) for value in positions.values()) or set(positions.values()) != {0, 1}:
+        return f"{label} order_position not exactly one of each of 0 and 1"
+    if native_first is not None and (positions["native_mtp"] == 0) != native_first:
+        return f"{label} run order differs from the preregistered order"
+    return None
+
+
+def _pair_runs(
+    runs: list[dict], cell_id: str, expected_native_first: list[bool] | None = None
+) -> tuple[list[tuple[dict, dict]], list[str]]:
+    """SPEC-048-R015 paired blocks: exactly one ordinary and one native record
+    per measured block, run in the preregistered counterbalanced order."""
     by_block: dict[int, dict[str, dict]] = defaultdict(dict)
     issues: list[str] = []
     for run in runs:
@@ -500,13 +557,42 @@ def _pair_runs(runs: list[dict], cell_id: str) -> tuple[list[tuple[dict, dict]],
                 continue
             by_block[block][path] = run
     pairs = []
+    native_first_seen: set[bool] = set()
     for block in sorted(by_block):
         item = by_block[block]
         if "ordinary" not in item or "native_mtp" not in item:
             issues.append(f"block {block} missing paired path")
             continue
+        if expected_native_first is not None and not 0 <= block < len(expected_native_first):
+            issues.append(f"block {block} outside the preregistered blocks")
+            continue
+        expected = expected_native_first[block] if expected_native_first is not None else None
+        issue = _order_issue(f"block {block}", item, expected)
+        if issue:
+            issues.append(issue)
+            continue
+        native_first_seen.add(item["native_mtp"]["order_position"] == 0)
         pairs.append((item["ordinary"], item["native_mtp"]))
+    if len(pairs) >= 2 and len(native_first_seen) < 2:
+        issues.append("run order not counterbalanced")
     return pairs, issues
+
+
+def _sustained_order_issues(sustained_runs: list[dict]) -> list[str]:
+    """The sustained window alternates: native first on even blocks."""
+    by_block: dict[int, dict[str, dict]] = defaultdict(dict)
+    for run in sustained_runs:
+        by_block[int(run.get("block_index", -1))][run.get("path")] = run
+    issues = []
+    for block in sorted(by_block):
+        item = by_block[block]
+        if "ordinary" not in item or "native_mtp" not in item:
+            issues.append(f"sustained block {block} missing paired path")
+            continue
+        issue = _order_issue(f"sustained block {block}", item, block % 2 == 0)
+        if issue:
+            issues.append(issue)
+    return issues
 
 
 def analyze(jsonl_path: Path, policy_path: Path) -> dict:
@@ -634,7 +720,7 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
     hypotheses = []
     for cell_index, cell_id in enumerate(_observed_cells(policy)):
         gated = _is_gated_cell(cell_id, bound)
-        pairs, issues = _pair_runs(runs, cell_id)
+        pairs, issues = _pair_runs(runs, cell_id, _expected_native_first(policy, cell_id))
         hard_failures = list(issues)
         if len(pairs) < required_blocks:
             hard_failures.append(f"incomplete: {len(pairs)}/{required_blocks} paired blocks")
@@ -642,6 +728,7 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
             run for run in runs
             if run.get("cell_id") == cell_id and run.get("sustained") is True and run.get("warmup") is not True
         ]
+        hard_failures.extend(_sustained_order_issues(sustained_runs))
         hard_gate_runs = [run for pair in pairs for run in pair] + sustained_runs
         invalid_records = [
             f"invalid_run_record:{run.get('path')}:{run.get('block_index')}:{','.join(fields)}"
