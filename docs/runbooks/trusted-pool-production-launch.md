@@ -426,7 +426,26 @@ settled, so traffic stops and holds drain first:
    | `p1816` | the #1816 merge | also the `pool_attested_members/v1` and `pool_model_entries/v1` extensions |
 
    Decide the tier with `git merge-base --is-ancestor 747557cc <target>` and
-   the same check against the #1754 and #1816 merge commits. When step 4b says STOP,
+   the same check against the #1754 and #1816 merge commits.
+
+   **Carried risk: whole-database rollback (pre-existing, #1816 freeze audit
+   R1 S-M5).** Trust-pool events, their projections, and the manifest
+   acceptance high-water rows live in `coordinator.db`, so restoring an older
+   copy of that file restores an older, internally consistent history: a
+   member, delegation, attestation, or pool model entry revoked after the
+   copy was taken is routable and payable again, and verification cannot tell.
+   SPEC-042 lists tamper-evident full rollback protection as a launch
+   blocker. A high-water mark kept beside the database is not a fix: the
+   Pearl updater's own rollback restores its pre-update `coordinator.db`
+   snapshot by design, so such a mark would refuse every legitimate rollback,
+   and anyone able to restore the database can restore a file next to it. An
+   independent witness (WORM or transparency storage) is the real fix and is
+   not built. Until it is: after ANY restore of `coordinator.db` (an updater
+   rollback included), list every `member_revoked`, delegation revocation,
+   lifecycle change, and `manifest_accepted` the operator or creators made
+   after the restored copy's timestamp (the admin audit log and the updater
+   transaction record both carry times) and re-apply them before resuming
+   buyer traffic. When step 4b says STOP,
    roll the coordinator forward instead: there is no supported way to drop
    an accepted manifest from history.
 4a. Feed check before the coordinator rollback. A coordinator older than
