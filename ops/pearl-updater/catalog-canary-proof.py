@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """Emit a no-follow proof for one live catalog-aware macprovider installation.
 
+The proof binds the live provider process (LaunchAgent PID, running text vnode,
+status-port owner) and reports its local status, including the catalog
+state/source the caller must require (live_verified from the coordinator). It
+does not read the CLI-installed catalog-release/ files: only a signed CLI
+payload writes them, the running process keeps the live fetched catalog in
+memory, and comparing them failed every catalog-only release.
+
 This program is streamed over an already host-key-pinned SSH connection by the
 Pearl updater. It intentionally accepts no credentials and performs only local,
 read-only inspection on the selected canary Mac.
@@ -8,7 +15,6 @@ read-only inspection on the selected canary Mac.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import plistlib
@@ -19,19 +25,6 @@ import sys
 import urllib.request
 
 
-CATALOG_FILES = (
-    "release.json",
-    "trusted-keys.json",
-    "tier2-catalog.json",
-    "rate-card.json",
-    "rate-card.json.sig",
-    "autotune-candidates.json",
-    "autotune-candidates.json.sig",
-    "demand-rank.json",
-    "demand-rank.json.sig",
-    "continuous-batching-policy.json",
-    "continuous-batching-policy.json.sig",
-)
 NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW
 
@@ -145,7 +138,6 @@ def main() -> int:
         fail("this Mac cannot perform no-follow catalog proof")
     catalog_path, provider_id, release_id, policy_version, digest, signer = sys.argv[1:]
     home = os.path.expanduser("~")
-    catalog_fd = open_dir(catalog_path)
     install_path = os.path.dirname(os.path.normpath(catalog_path)) or "."
     install_fd = open_dir(install_path)
     config_fd = provider_config_fd = binary_fd = None
@@ -253,10 +245,6 @@ def main() -> int:
         ):
             fail("live canary status does not match the expected provider and catalog")
 
-        hashes = {
-            name: hashlib.sha256(read_regular_at(catalog_fd, name, 2 * 1024 * 1024)).hexdigest()
-            for name in CATALOG_FILES
-        }
         print(json.dumps({
             "provider_id": installed_provider_id,
             "assigned_id": assigned_id,
@@ -265,11 +253,10 @@ def main() -> int:
             "launchd_pid": pid,
             "executable_path": process_path,
             "local_status": local_status,
-            "files": hashes,
         }, sort_keys=True))
         return 0
     finally:
-        for descriptor in (config_fd, provider_config_fd, binary_fd, install_fd, catalog_fd):
+        for descriptor in (config_fd, provider_config_fd, binary_fd, install_fd):
             if descriptor is not None:
                 os.close(descriptor)
 

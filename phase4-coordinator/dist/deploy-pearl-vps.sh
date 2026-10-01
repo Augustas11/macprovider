@@ -49,9 +49,11 @@
 #   CATALOG_CANARY_SSH_TARGET required for production deploys. SSH target for
 #                    the operator-controlled canary Mac (for example user@host).
 #   CATALOG_CANARY_SSH_KEY default: ~/.ssh/macprovider_canary_ed25519
-#                    Key used only to read exact installed catalog bytes.
+#                    Key used only for the read-only live-process catalog proof.
 #   CATALOG_CANARY_INSTALL_DIR default: macprovider/catalog-release
-#                    Catalog path relative to the canary user's home.
+#                    Catalog path relative to the canary user's home; its
+#                    parent is the installation root whose macprovider-cli the
+#                    LaunchAgent must run. Its files are not compared.
 #   --dry-run-local  developer-only: run the old local-config C2 check using
 #                    GATEWAY_CONFIG and exit before any SSH mutation.
 #   GATEWAY_CONFIG   used only with --dry-run-local. Production deploys validate
@@ -4536,12 +4538,26 @@ echo "  SPEC-023 autotune feeds exact-byte and signature verification OK"
 CANARY_POOL_BODY="$STATIC_SMOKE_DIR/catalog-canary-pool.json"
 CANARY_CURL_CONFIG="$STATIC_SMOKE_DIR/catalog-canary-curl.conf"
 
-# Provider hello fields are authenticated self-report, so they are not exact
-# installation proof. Read the release bundle from the operator-controlled
-# canary Mac over host-key-checked SSH and compare every shipped catalog file
-# with the locally verified release. This makes the deployment commit depend on
-# independent canary-host custody of the exact bytes, not on replayable public
-# catalog identifiers in a provider hello.
+# Provider hello fields are authenticated self-report, so they are not
+# independent proof of what the provider loaded. Read the live process's own
+# local status from the operator-controlled canary Mac over host-key-checked
+# SSH, bound to the LaunchAgent PID, its running text vnode, and the PID that
+# owns the status port. That status must report the NEW release's
+# release_id/policy/digest/signer, a catalog row identity, and
+# state=live_verified with source=coordinator: the process selected the
+# coordinator's live, signature-verified candidate feed (loadSignedStatic), not
+# its baked fallback. The deployment commit therefore depends on independent
+# canary-host custody of the live process's catalog selection, not on
+# replayable public catalog identifiers in a provider hello.
+#
+# The CLI-installed catalog-release/ directory is deliberately NOT compared.
+# Only a signed CLI payload writes it; running providers load the catalog live
+# from the coordinator and keep the fetched bytes in memory only (no on-disk
+# cache exists to compare). Requiring that directory to byte-match made every
+# catalog-only release fail this canary and roll back (v1.8.194, 2026-09-25).
+# The other feeds' exact bytes were proved above against the public endpoint.
+# CATALOG_CANARY_INSTALL_DIR is still used: its parent is the installation root
+# whose macprovider-cli the LaunchAgent must run.
 CANARY_INSTALLED_BODY="$STATIC_SMOKE_DIR/catalog-canary-installed.json"
 CANARY_SSH=(
   ssh
@@ -4563,7 +4579,7 @@ run_catalog_canary_mac_proof() {
   "$AUTOTUNE_POLICY_VERSION" \
   "$AUTOTUNE_CANDIDATE_SHA256" \
   "$AUTOTUNE_CANDIDATE_SIGNER_KEY_ID" <<'PY'
-import hashlib, json, os, plistlib, re, stat, subprocess, sys, urllib.request
+import json, os, plistlib, re, stat, subprocess, sys, urllib.request
 
 (
     catalog_path,
@@ -4667,7 +4683,6 @@ def running_text_vnode_path(pid, binary_info, expected_binary, runner=subprocess
             return normalized_text_path
     return None
 
-catalog_fd = open_dir(catalog_path)
 install_path = os.path.dirname(os.path.normpath(catalog_path)) or "."
 install_fd = open_dir(install_path)
 config_fd = provider_config_fd = binary_fd = None
@@ -4762,34 +4777,18 @@ try:
         or re.fullmatch(r"[0-9a-f]{64}", str(catalog.get("row_identity", "")).lower()) is None
     ):
         raise SystemExit("live canary provider status does not match the expected identity and catalog")
+    if catalog.get("state") != "live_verified" or catalog.get("source") != "coordinator":
+        raise SystemExit("live canary provider did not load the coordinator's live signed catalog (baked fallback or unverified)")
 
-    names = (
-        "release.json",
-        "trusted-keys.json",
-        "autotune-candidates.json",
-        "autotune-candidates.json.sig",
-        "demand-rank.json",
-        "demand-rank.json.sig",
-        "rate-card.json",
-        "rate-card.json.sig",
-        "continuous-batching-policy.json",
-        "continuous-batching-policy.json.sig",
-        "tier2-catalog.json",
-    )
-    hashes = {}
-    for name in names:
-        payload, _ = read_regular_at(catalog_fd, name, 2 * 1024 * 1024)
-        hashes[name] = hashlib.sha256(payload).hexdigest()
     print(json.dumps({
         "provider_id": provider_id,
         "assigned_id": assigned_id,
         "launchd_pid": pid,
         "executable_path": process_path,
         "local_status": local_status,
-        "files": hashes,
     }, sort_keys=True))
 finally:
-    for fd in (config_fd, provider_config_fd, binary_fd, install_fd, catalog_fd):
+    for fd in (config_fd, provider_config_fd, binary_fd, install_fd):
         if fd is not None:
             os.close(fd)
 PY
@@ -4888,19 +4887,8 @@ fi
 if ! python3 - \
   "$CANARY_INSTALLED_BODY" \
   "$CANARY_POOL_BODY" \
-  "$CATALOG_CANARY_PROVIDER_ID" \
-  "$AUTOTUNE_RELEASE_MANIFEST" \
-  "$AUTOTUNE_TRUSTED_KEYS" \
-  "$STATIC_AUTOTUNE_JSON" \
-  "$STATIC_AUTOTUNE_SIG" \
-  "$STATIC_DEMAND_JSON" \
-  "$STATIC_DEMAND_SIG" \
-  "$STATIC_RATE_CARD_JSON" \
-  "$STATIC_RATE_CARD_SIG" \
-  "$STATIC_CB_POLICY_JSON" \
-  "$STATIC_CB_POLICY_SIG" \
-  "$AUTOTUNE_TIER2_JSON" <<'PY'
-import hashlib, json, pathlib, re, sys
+  "$CATALOG_CANARY_PROVIDER_ID" <<'PY'
+import json, pathlib, re, sys
 
 proof = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 pool = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
@@ -4916,6 +4904,8 @@ if (
     or local_status.get("network_state") != "buyer_serving"
     or local_coordinator.get("connected") is not True
     or local_coordinator.get("session") != proof.get("assigned_id")
+    or local_catalog.get("state") != "live_verified"
+    or local_catalog.get("source") != "coordinator"
     or re.fullmatch(r"[0-9a-f]{64}", pool_row) is None
     or local_catalog.get("release_id") != pool.get("catalog_release_id")
     or local_catalog.get("policy_version") != pool.get("catalog_policy_version")
@@ -4924,24 +4914,12 @@ if (
     or str(local_catalog.get("row_identity", "")).lower() != pool_row
 ):
     raise SystemExit("canary local catalog proof is not bound to the coordinator-admitted envelope")
-actual = proof.get("files")
-if not isinstance(actual, dict):
-    raise SystemExit("canary proof is missing installed file hashes")
-expected = {}
-for raw_path in sys.argv[4:]:
-    path = pathlib.Path(raw_path)
-    expected[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
-if actual != expected:
-    missing = sorted(set(expected) - set(actual))
-    extra = sorted(set(actual) - set(expected))
-    changed = sorted(name for name in set(actual) & set(expected) if actual[name] != expected[name])
-    raise SystemExit(f"canary catalog byte mismatch: missing={missing} extra={extra} changed={changed}")
 PY
 then
-  echo "SPEC-023 canary failed: installed catalog bytes do not match the verified deployment release" >&2
+  echo "SPEC-023 canary failed: the live canary process is not bound to the coordinator-admitted live catalog of the verified release" >&2
   exit 1
 fi
-echo "  SPEC-023 exact-byte canary OK: selected provider's live process uses the verified catalog release"
+echo "  SPEC-023 live-catalog canary OK: selected provider's live process loaded the verified release from the coordinator"
 
 # R3+R4+R5 stats smoke check on STATS_DOMAIN.
 #
