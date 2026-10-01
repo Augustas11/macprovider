@@ -288,11 +288,24 @@ private final class NativeMTPBenchRunner {
         let started = Date()
         let thermalStart = ProcessInfo.processInfo.thermalState.label
         let modelID = self.modelID
+        let temperature = policy.temperature
+        let arrivalIntervalNanoseconds = UInt64(policy.arrivalIntervalMS) * 1_000_000
         let results = try await withThrowingTaskGroup(of: NativeMTPBenchRequestResult.self) { group in
             for (index, prompt) in prompts.enumerated() {
                 group.addTask {
-                    let requestID = "\(cell.id)-b\(block)-\(path.rawValue)-r\(index)"
-                    let request = try Self.makeRequest(modelID: modelID, requestID: requestID, prompt: prompt, maxTokens: cell.maxTokens)
+                    if arrivalIntervalNanoseconds > 0, index > 0 {
+                        try await Task.sleep(nanoseconds: UInt64(index) * arrivalIntervalNanoseconds)
+                    }
+                    // Both paths use the same request ID (separate runtimes),
+                    // so a sampled row draws the same seeded stream on each.
+                    let requestID = "\(cell.id)-b\(block)-r\(index)"
+                    let request = try Self.makeRequest(
+                        modelID: modelID,
+                        requestID: requestID,
+                        prompt: prompt,
+                        maxTokens: cell.maxTokens,
+                        temperature: temperature
+                    )
                     return try await Self.runStreamingRequest(request, runtime: runtime)
                 }
             }
@@ -438,15 +451,23 @@ private final class NativeMTPBenchRunner {
             "policy_sha256": policySHA256,
             "exploratory": policy.exploratory,
             "max_native_active_rows": policy.maxNativeActiveRows.map { $0 as Any } ?? NSNull(),
+            "temperature": policy.temperature,
+            "arrival_interval_ms": policy.arrivalIntervalMS,
         ]
     }
 
-    private static func makeRequest(modelID: String, requestID: String, prompt: String, maxTokens: Int) throws -> ChatCompletionRequest {
+    private static func makeRequest(
+        modelID: String,
+        requestID: String,
+        prompt: String,
+        maxTokens: Int,
+        temperature: Double
+    ) throws -> ChatCompletionRequest {
         let object: [String: Any] = [
             "model": modelID,
             "messages": [["role": "user", "content": prompt]],
             "max_tokens": maxTokens,
-            "temperature": 0,
+            "temperature": temperature,
             "top_p": 1.0,
             "stream": true,
         ]
@@ -840,6 +861,14 @@ private struct NativeMTPBenchPolicy {
     /// Optional SPEC-048-R007 bound signed into the bench sidecar; absent
     /// means the bound equals the qualified slot count (gate never engages).
     let maxNativeActiveRows: Int?
+    /// Request temperature for every row of both paths (default greedy). A
+    /// sampled row's seed derives from its request ID, which both paths
+    /// share, so seeded parity is still a token-identity comparison.
+    let temperature: Double
+    /// Staggered arrival: row `i` of a block starts `i *` this many
+    /// milliseconds after the block, so load crosses the native active-row
+    /// bound mid-flight. Zero submits every row at once.
+    let arrivalIntervalMS: Int
     /// Exploratory policies relax the R015 minimums for pilots; every record is
     /// stamped `exploratory` and the analyzer refuses an admission verdict.
     let exploratory: Bool
@@ -856,7 +885,7 @@ private struct NativeMTPBenchPolicy {
             "hw_model", "chip", "ram_gb", "os_build", "xcode_build_version", "swift_version",
             "provider_commit", "mlx_fork_revision", "quantization", "cache_mode", "proposal_depth",
             "run_order", "prompt_corpus", "exclusion_rules", "confidence_method",
-            "max_native_active_rows",
+            "max_native_active_rows", "temperature", "arrival_interval_ms",
         ]
         let unknown = Set(object.keys).subtracting(allowed)
         guard unknown.isEmpty else { throw NativeMTPBenchError.invalidPolicy("unknown keys: \(unknown.sorted())") }
@@ -897,6 +926,10 @@ private struct NativeMTPBenchPolicy {
             maxNativeActiveRows: object["max_native_active_rows"] == nil
                 ? nil
                 : try intAtLeast(object, "max_native_active_rows", 1),
+            temperature: try samplingTemperature(object, "temperature"),
+            arrivalIntervalMS: object["arrival_interval_ms"] == nil
+                ? 0
+                : try nonnegativeInt(object, "arrival_interval_ms"),
             exploratory: exploratory
         )
         if let bound = policy.maxNativeActiveRows {
@@ -1222,6 +1255,15 @@ private func dictionary(_ object: [String: Any], _ key: String) throws -> [Strin
         throw NativeMTPBenchError.invalidPolicy("missing dictionary \(key)")
     }
     return value
+}
+
+private func samplingTemperature(_ object: [String: Any], _ key: String) throws -> Double {
+    guard let raw = object[key] else { return 0 }
+    guard let number = raw as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+          number.doubleValue.isFinite, (0.0 ... 2.0).contains(number.doubleValue) else {
+        throw NativeMTPBenchError.invalidPolicy("\(key) must be a number in 0...2")
+    }
+    return number.doubleValue
 }
 
 private func positiveIntArray(_ object: [String: Any], _ key: String) throws -> [Int] {
