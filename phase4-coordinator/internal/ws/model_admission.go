@@ -2695,6 +2695,15 @@ func (s *Server) modelAdmissionStatusResponseFromEvent(event ModelAdmissionEvent
 	if binding := modelAdmissionPoolBindingObject(event); binding != nil {
 		response["pool_binding"] = binding
 	}
+	// SPEC-047-R002/R010: pool_attested_earning is claimed only while the
+	// current pool predicate holds; a binding the sweep has not yet revoked
+	// (or cannot revoke) reports the non-earning value instead.
+	if event.PoolScoped() && event.State == "catalog_priced" &&
+		!poolBindingEarningNow(s.poolModels.Load(), event.ProviderID, event, s.classifyCatalogPair, s.now()) {
+		guidance := response["provider_guidance"].(map[string]any)
+		guidance["next_action"] = "wait_for_coordinator"
+		guidance["earning_path_class"] = modelAdmissionNonSettlementEarningPath("")
+	}
 	return response
 }
 

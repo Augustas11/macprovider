@@ -73,11 +73,11 @@ func runR016PoolModelJourney(t *testing.T, attested bool) {
 				"refresh_interval_s": 1,
 				"pool_model_pricing_bounds": map[string]any{
 					"min_prompt_rate_per_mtok":           1,
-					"max_prompt_rate_per_mtok":           100000000,
+					"max_prompt_rate_per_mtok":           8000000,
 					"min_prompt_cache_hit_rate_per_mtok": 0,
-					"max_prompt_cache_hit_rate_per_mtok": 100000000,
+					"max_prompt_cache_hit_rate_per_mtok": 8000000,
 					"min_completion_rate_per_mtok":       1,
-					"max_completion_rate_per_mtok":       100000000,
+					"max_completion_rate_per_mtok":       8000000,
 				},
 				// The member's provider-owner key verifies its delegation, and
 				// its SPEC-003 owner account is the R016 match input.

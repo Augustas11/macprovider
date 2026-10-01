@@ -10,7 +10,10 @@ memory, and comparing them failed every catalog-only release.
 
 This program is streamed over an already host-key-pinned SSH connection by the
 Pearl updater. It intentionally accepts no credentials and performs only local,
-read-only inspection on the selected canary Mac.
+read-only inspection on the selected canary Mac. Its output is only as
+trustworthy as the canary account: it is a functional check, not an integrity
+control (ops/runbooks/608-pearl-tier2-single-authority.md, "Trust model of the
+catalog canary").
 """
 
 from __future__ import annotations

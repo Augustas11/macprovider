@@ -410,18 +410,42 @@ settled, so traffic stops and holds drain first:
 
    **Rollback precondition (#1690 M9 review M2).** The coordinator rollback
    target MUST be at or above the build that introduced every runtime class
-   ever accepted in any pool's manifest history, and it MUST read
-   `manifest-snapshot/v2` if any v2 policy core was ever accepted. The
-   builds, from the target's source commit:
+   ever accepted in any pool's manifest history, it MUST read
+   `manifest-snapshot/v2` if any v2 policy core was ever accepted, and it
+   MUST implement every policy-core extension (SPEC-042 0.0.38,
+   `pool_attested_members/v1` and `pool_model_entries/v1`, #1816) ever
+   accepted: an older build rejects an unknown `extension_id` while
+   replaying history and disables every pool. The builds, from the
+   target's source commit:
 
    | Target tier | Target contains | Replays |
    |---|---|---|
    | `v1-only` | not `747557cc` (#1719) | v1 policy cores only |
    | `m8` | `747557cc`, not the #1754 merge | v2 cores listing `llamacpp_loopback`, `mlxlm_loopback`, `ollama_loopback` |
-   | `m9` | the #1754 merge | also `lmstudio_loopback` and `omlx_loopback` |
+   | `m9` | the #1754 merge, not the #1816 merge | also `lmstudio_loopback` and `omlx_loopback`; no extensions |
+   | `p1816` | the #1816 merge | also the `pool_attested_members/v1` and `pool_model_entries/v1` extensions |
 
    Decide the tier with `git merge-base --is-ancestor 747557cc <target>` and
-   the same check against the #1754 merge commit. When step 4b says STOP,
+   the same check against the #1754 and #1816 merge commits.
+
+   **Carried risk: whole-database rollback (pre-existing, #1816 freeze audit
+   R1 S-M5).** Trust-pool events, their projections, and the manifest
+   acceptance high-water rows live in `coordinator.db`, so restoring an older
+   copy of that file restores an older, internally consistent history: a
+   member, delegation, attestation, or pool model entry revoked after the
+   copy was taken is routable and payable again, and verification cannot tell.
+   SPEC-042 lists tamper-evident full rollback protection as a launch
+   blocker. A high-water mark kept beside the database is not a fix: the
+   Pearl updater's own rollback restores its pre-update `coordinator.db`
+   snapshot by design, so such a mark would refuse every legitimate rollback,
+   and anyone able to restore the database can restore a file next to it. An
+   independent witness (WORM or transparency storage) is the real fix and is
+   not built. Until it is: after ANY restore of `coordinator.db` (an updater
+   rollback included), list every `member_revoked`, delegation revocation,
+   lifecycle change, and `manifest_accepted` the operator or creators made
+   after the restored copy's timestamp (the admin audit log and the updater
+   transaction record both carry times) and re-apply them before resuming
+   buyer traffic. When step 4b says STOP,
    roll the coordinator forward instead: there is no supported way to drop
    an accepted manifest from history.
 4a. Feed check before the coordinator rollback. A coordinator older than
@@ -521,12 +545,16 @@ settled, so traffic stops and holds drain first:
 4b. Manifest-history check before the coordinator rollback (read-only). It
    reads every `manifest_accepted` event in the coordinator database
    (`storage.db_path`, as in step 0), decodes each manifest snapshot, and
-   lists the policy-core encoding and every `runtime_allowlist` string it
-   carries (a strict decode of the snapshot, not a search for known names);
+   lists the policy-core encoding, every `runtime_allowlist` string, and
+   every extension id it carries (a strict decode of the snapshot, not a
+   search for known names);
    each snapshot holds its pool's whole accepted policy history. It fails
-   closed: a target tier other than the three in the table, an unreadable
-   database, an undecodable snapshot, a runtime class outside `CLASSES`
-   (no known build replays it), or no `VERDICT` line means STOP.
+   closed: a target tier other than the four in the table, an unreadable
+   database, an undecodable snapshot, a runtime class outside `CLASSES` or
+   an extension outside `EXTENSIONS` (no known build replays it), an
+   extension the target tier lacks, or no `VERDICT` line means STOP. Once
+   any core with a #1816 extension is accepted, only a `p1816` target
+   replays the history; for an older target, roll forward.
    The `m9` target tier is the build that carries SPEC-042 0.0.36's
    `omlx_loopback` manifest vocabulary and SPEC-023 v0.20.0's corresponding
    artifact-feed runtime source. The manifest history is the only coordinator state an older build
@@ -541,19 +569,24 @@ settled, so traffic stops and holds drain first:
    import base64, json, os, sqlite3, sys
    CLASSES = ["llamacpp_loopback", "lmstudio_loopback", "mlxlm_loopback",
               "ollama_loopback", "omlx_loopback", "openai_compatible_loopback"]
+   EXTENSIONS = ["pool_attested_members/v1", "pool_model_entries/v1"]
    ACCEPTS = {
        "v1-only": None,
        "m8": {"llamacpp_loopback", "mlxlm_loopback", "ollama_loopback"},
        "m9": {"llamacpp_loopback", "lmstudio_loopback", "mlxlm_loopback",
               "ollama_loopback", "omlx_loopback"},
+       "p1816": {"llamacpp_loopback", "lmstudio_loopback", "mlxlm_loopback",
+                 "ollama_loopback", "omlx_loopback"},
    }
+   ACCEPTS_EXTENSIONS = {"v1-only": set(), "m8": set(), "m9": set(),
+                         "p1816": set(EXTENSIONS)}
    V1 = b"macprovider/spec042/manifest-snapshot/v1"
    V2 = b"macprovider/spec042/manifest-snapshot/v2"
 
    def allowlists(snap, tagged, event_id):
        # Strict decode of the snapshot (phase4-coordinator/internal/
-       # poolmanifest/persist.go): every runtime_allowlist string of every
-       # accepted v2 policy core.
+       # poolmanifest/persist.go): every runtime_allowlist string and every
+       # extension id of every accepted v2 policy core.
        pos = len(V2 if tagged else V1)
        def take(n):
            nonlocal pos
@@ -570,7 +603,7 @@ settled, so traffic stops and holds drain first:
        def signatures():
            for _ in range(u32()):
                blob(); blob()
-       found = set()
+       found, extensions = set(), set()
        blob(); blob(); blob(); blob()                 # identity core, root issuer key
        for _ in range(u32()):                         # authority log
            blob(); u64(); blob()
@@ -592,12 +625,12 @@ settled, so traffic stops and holds drain first:
            if encoding == 2:
                for _ in range(u32()):
                    found.add(blob().decode("utf-8"))
-               for _ in range(u32()):
-                   blob(); blob()
+               for _ in range(u32()):                 # extensions: id, body
+                   extensions.add(blob().decode("utf-8")); blob()
            signatures(); u64()
        if pos != len(snap):
            raise ValueError(f"event {event_id}: trailing bytes in manifest snapshot")
-       return found
+       return found, extensions
    try:
        db, tier = sys.argv[1], sys.argv[2]
        if tier not in ACCEPTS:
@@ -621,23 +654,27 @@ settled, so traffic stops and holds drain first:
            sys.exit(0)
        rows = con.execute("SELECT id, pool_id, payload_json FROM trustpool_events "
                           "WHERE event_type = 'manifest_accepted' ORDER BY id").fetchall()
-       v2, seen = 0, set()
+       v2, seen, exts = 0, set(), set()
        for event_id, pool_id, payload in rows:
            snap = base64.b64decode(json.loads(payload)["manifest_snapshot"], validate=True)
            if snap.startswith(V2):
                v2 += 1
            elif not snap.startswith(V1):
                raise ValueError(f"event {event_id}: unknown manifest snapshot format")
-           seen |= allowlists(snap, snap.startswith(V2), event_id)
-       unknown = sorted(seen - set(CLASSES))
+           classes, extensions = allowlists(snap, snap.startswith(V2), event_id)
+           seen |= classes
+           exts |= extensions
+       unknown = sorted((seen - set(CLASSES)) | (exts - set(EXTENSIONS)))
        accepts = ACCEPTS[tier]
        blockers = sorted(seen) if accepts is None else sorted(seen - accepts)
+       blockers += sorted(f"extension {e}" for e in exts - ACCEPTS_EXTENSIONS[tier])
        if accepts is None and v2:
            blockers.insert(0, "policy-core v2 snapshots")
        print(f"manifests: {len(rows)} (v2 snapshots: {v2})")
        print(f"runtime classes in history: {', '.join(sorted(seen)) or 'none'}")
+       print(f"extensions in history: {', '.join(sorted(exts)) or 'none'}")
        if unknown:
-           print(f"unknown runtime classes (no known build replays them): {', '.join(unknown)}")
+           print(f"unknown runtime classes or extensions (no known build replays them): {', '.join(unknown)}")
        print(f"target tier: {tier}; cannot replay: {', '.join(blockers) or 'nothing'}")
        print("VERDICT: " + ("replayable" if not blockers else "STOP"))
        sys.exit(0 if not blockers else 1)

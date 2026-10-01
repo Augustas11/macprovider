@@ -1308,6 +1308,74 @@ type TrustedPoolsPoolModelPricingBounds struct {
 	MaxCompletionRatePerMtok     int64 `yaml:"max_completion_rate_per_mtok"`
 }
 
+// UnmarshalYAML decodes the bounds as a closed object: every one of the six
+// keys exactly once, each an integer, and no other key (SPEC-005-R015). A
+// misspelled or missing key would otherwise decode to zero and silently widen
+// a floor.
+func (b *TrustedPoolsPoolModelPricingBounds) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.MappingNode {
+		return fmt.Errorf("trusted_pools.pool_model_pricing_bounds must be a mapping")
+	}
+	var decoded TrustedPoolsPoolModelPricingBounds
+	fields := map[string]*int64{
+		"min_prompt_rate_per_mtok":           &decoded.MinPromptRatePerMtok,
+		"max_prompt_rate_per_mtok":           &decoded.MaxPromptRatePerMtok,
+		"min_prompt_cache_hit_rate_per_mtok": &decoded.MinPromptCacheHitRatePerMtok,
+		"max_prompt_cache_hit_rate_per_mtok": &decoded.MaxPromptCacheHitRatePerMtok,
+		"min_completion_rate_per_mtok":       &decoded.MinCompletionRatePerMtok,
+		"max_completion_rate_per_mtok":       &decoded.MaxCompletionRatePerMtok,
+	}
+	seen := make(map[string]bool, len(fields))
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		key, val := value.Content[i].Value, value.Content[i+1]
+		dst, ok := fields[key]
+		if !ok {
+			return fmt.Errorf("trusted_pools.pool_model_pricing_bounds has unknown key %q", key)
+		}
+		if seen[key] {
+			return fmt.Errorf("trusted_pools.pool_model_pricing_bounds has duplicate key %q", key)
+		}
+		seen[key] = true
+		if val.Kind != yaml.ScalarNode || val.ShortTag() != "!!int" {
+			return fmt.Errorf("trusted_pools.pool_model_pricing_bounds.%s must be an integer", key)
+		}
+		if err := val.Decode(dst); err != nil {
+			return fmt.Errorf("trusted_pools.pool_model_pricing_bounds.%s: %w", key, err)
+		}
+	}
+	for key := range fields {
+		if !seen[key] {
+			return fmt.Errorf("trusted_pools.pool_model_pricing_bounds is missing key %q", key)
+		}
+	}
+	*b = decoded
+	return nil
+}
+
+// poolModelMaxBillableTokens is the largest SPEC-042-R015
+// max_context_tokens (poolmanifest.MaxPoolModelContext, 2^20): no pool-model
+// request legitimately carries more prompt or completion tokens.
+const poolModelMaxBillableTokens = int64(1 << 20)
+
+// poolModelPricingBoundsFitFormula reports whether each maximum rate bills
+// without int64 overflow at the pool-model context ceiling and the
+// configured multiplier
+// in ppm (billing.ParseMultiplierPPM): rate * ceiling * ppm must fit, per
+// SPEC-005-R015. The provider-share step divides by 10^12 first, so it cannot
+// overflow when this product fits.
+func poolModelPricingBoundsFitFormula(b *TrustedPoolsPoolModelPricingBounds, globalMultiplier float64) bool {
+	ppm := math.Round(globalMultiplier * 1_000_000)
+	if !(ppm < float64(math.MaxInt64)/float64(poolModelMaxBillableTokens)) {
+		return false
+	}
+	multiplierPPM := int64(ppm)
+	if multiplierPPM < 1 {
+		multiplierPPM = 1
+	}
+	limit := int64(math.MaxInt64) / multiplierPPM / poolModelMaxBillableTokens
+	return b.MaxPromptRatePerMtok <= limit && b.MaxPromptCacheHitRatePerMtok <= limit && b.MaxCompletionRatePerMtok <= limit
+}
+
 // RejectionTimingFloor returns the active pool-rejection timing floor.
 // Unconfigured (0) defaults to 50 ms. Positive sub-50 values clamp to 50 ms.
 func (t TrustedPoolsConfig) RejectionTimingFloor() time.Duration {
@@ -2548,7 +2616,7 @@ func (c Config) Validate() error {
 	if err := validateTrustedPoolsProviderOwnerPublicKeys(c.TrustedPools); err != nil {
 		return err
 	}
-	if err := validateTrustedPoolsPoolModelConfig(c.TrustedPools); err != nil {
+	if err := validateTrustedPoolsPoolModelConfig(c.TrustedPools, c.Rewards.GlobalMultiplier); err != nil {
 		return err
 	}
 	if err := c.validateCompatibilitySet(); err != nil {
@@ -3304,10 +3372,10 @@ func validateTrustedPoolsCreatorAdminProviderDelegatedIDs(c TrustedPoolsConfig) 
 }
 
 // validateTrustedPoolsPoolModelConfig checks the SPEC-005-R015 bounds (each
-// floor non-negative and at most its ceiling) and the SPEC-042-R016 owner
-// account map (canonical account and provider ids, a provider under one
-// account only).
-func validateTrustedPoolsPoolModelConfig(c TrustedPoolsConfig) error {
+// floor non-negative and at most its ceiling, and no ceiling that overflows
+// the formula at globalMultiplier) and the SPEC-042-R016 owner account map
+// (canonical account and provider ids, a provider under one account only).
+func validateTrustedPoolsPoolModelConfig(c TrustedPoolsConfig, globalMultiplier float64) error {
 	if (c.PoolModelPricingBounds != nil || len(c.ProviderOwnerAccountIDs) > 0) && !c.Enabled {
 		return fmt.Errorf("trusted_pools.pool_model_pricing_bounds and provider_owner_account_ids require trusted_pools.enabled=true")
 	}
@@ -3323,6 +3391,9 @@ func validateTrustedPoolsPoolModelConfig(c TrustedPoolsConfig) error {
 			if pair.min < 0 || pair.min > pair.max {
 				return fmt.Errorf("trusted_pools.pool_model_pricing_bounds %s needs 0 <= min <= max", pair.name)
 			}
+		}
+		if !poolModelPricingBoundsFitFormula(b, globalMultiplier) {
+			return fmt.Errorf("trusted_pools.pool_model_pricing_bounds has a maximum that overflows the SPEC-005 formula at %d tokens and rewards.global_multiplier", poolModelMaxBillableTokens)
 		}
 	}
 	owner := make(map[string]string)

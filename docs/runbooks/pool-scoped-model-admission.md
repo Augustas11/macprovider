@@ -68,7 +68,19 @@ trusted_pools:
 
 Recompute these from the rate card in force when you apply them. The key
 shape (without values) is a comment in `phase4-coordinator/dist/coordinator.yaml`.
-Each minimum must be at most its maximum. An entry also needs cache-hit ≤ prompt.
+The object is closed: all six keys, integers only, no other key. Each minimum
+must be at most its maximum, and each maximum times 1,048,576 tokens times
+`rewards.global_multiplier` in ppm must fit in a signed 64-bit integer (at
+multiplier 1.0, a maximum of at most 8,796,093). Anything else fails config
+load: the coordinator does not start, or a SIGHUP reload is rejected and the
+prior config stays in force. An entry also needs cache-hit ≤ prompt.
+
+A SIGHUP that changes the bounds or `provider_owner_account_ids` /
+`provider_owner_public_keys` applies them everywhere at once: manifest
+acceptance, binding, routing, the pool `/v1/models` view, and provider status.
+Existing route snapshots keep their recorded prices. A binding whose rates
+fall outside tightened bounds stops routing (and its status stops claiming
+`pool_attested_earning`) until the creator publishes conforming rates.
 
 **Owner accounts for attested members (SPEC-042-R016).** A loopback session
 of a member the creator does not own binds only when the core's
@@ -330,3 +342,15 @@ In order of speed:
 
 After rollback, re-run §6's queries with a fresh request: expect a refusal
 and zero new snapshots for the `pool_model_id`.
+
+## 8. Global catalog graduation (not built)
+
+SPEC-023 §16.9 specifies a pool-proven path from a pool model to a global
+`listed` row. It is not executable yet: the coordinator's
+`/admin/model-admission/pool-proven` aggregate, the known-answer probe-evidence
+record, and the generator's `macprovider.intake-decision.v2` do not exist, and
+`scripts/catalog-release.py` rejects a v2 decision. Do not author one. Until
+they land, a pool model joins the global catalog only through the ordinary
+intake (`macprovider.intake-decision.v1` with that intake's own evidence). Its
+pool binding keeps earning meanwhile; promotion to `recommendable` later
+supersedes it (`pool_manifest_catalog_superseded`).

@@ -528,3 +528,106 @@ func TestPoolManifestSweepKickedAtActivation(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// Freeze audit R1 (#1816) CODE M4 / ARCHITECTURE M4: status claims
+// pool_attested_earning only while the current pool predicate holds. Every
+// invalidation below is applied without running the sweep, so the head is
+// still the pool-scoped catalog_priced event.
+func TestPoolScopedStatusEarningReevaluatesCurrentPredicate(t *testing.T) {
+	earning := func(f *bindingFixture, head ModelAdmissionEvent) string {
+		status := f.server.modelAdmissionStatusResponseFromEvent(head, false)
+		return status["provider_guidance"].(map[string]any)["earning_path_class"].(string)
+	}
+	for name, invalidate := range map[string]func(*fakePoolModelSource, *bindingFixture){
+		"entry removed": func(s *fakePoolModelSource, _ *bindingFixture) { s.set(poolSnapshot(testPoolA, 2, poolDigestV2)) },
+		"pool not routeable": func(s *fakePoolModelSource, _ *bindingFixture) {
+			v := poolSnapshot(testPoolA, 1, poolDigestV1, ggufPoolEntry())
+			v.Routeable = false
+			s.set(v)
+		},
+		"member removed": func(s *fakePoolModelSource, _ *bindingFixture) {
+			v := poolSnapshot(testPoolA, 1, poolDigestV1, ggufPoolEntry())
+			v.Members = map[string]bool{}
+			s.set(v)
+		},
+		"no longer creator-owned, unattested": func(s *fakePoolModelSource, _ *bindingFixture) {
+			v := poolSnapshot(testPoolA, 1, poolDigestV1, ggufPoolEntry())
+			v.CreatorOwnedMembers = map[string]bool{}
+			v.MemberOwnerAccounts = map[string]string{poolProvider: "acct-member"}
+			s.set(v)
+		},
+		"runtime off allowlist": func(s *fakePoolModelSource, _ *bindingFixture) {
+			v := poolSnapshot(testPoolA, 1, poolDigestV1, ggufPoolEntry())
+			v.RuntimeAllowlist = nil
+			s.set(v)
+		},
+		"bounds removed": func(s *fakePoolModelSource, f *bindingFixture) {
+			f.server.SetPoolModelSource(s, func() *poolmanifest.PoolModelPricingBounds { return nil })
+		},
+		"bounds tightened below the entry": func(s *fakePoolModelSource, f *bindingFixture) {
+			f.server.SetPoolModelSource(s, func() *poolmanifest.PoolModelPricingBounds {
+				return &poolmanifest.PoolModelPricingBounds{MaxPromptRatePerMtok: 1, MaxPromptCacheHitRatePerMtok: 1, MaxCompletionRatePerMtok: 1}
+			})
+		},
+		"pool wiring off": func(_ *fakePoolModelSource, f *bindingFixture) { f.server.SetPoolModelSource(nil, nil) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newBindingFixture(t)
+			source := wirePoolSource(f)
+			source.set(poolSnapshot(testPoolA, 1, poolDigestV1, ggufPoolEntry()))
+			f.registerPoolSession(t, poolProvider, "llamacpp_loopback", modelidentity.GGUFFileV1, poolGGUFHash)
+			offer := f.offer(t, poolProvider, "q", "llamacpp_loopback", map[string]string{modelidentity.GGUFFileV1: poolGGUFHash})
+			f.reevaluate(poolProvider)
+			bound := f.latest(t, poolProvider, offer.CandidateID)
+			if bound.State != "catalog_priced" || !bound.PoolScoped() {
+				t.Fatalf("bind = %+v", bound)
+			}
+			if got := earning(f, bound); got != "pool_attested_earning" {
+				t.Fatalf("current binding earning_path_class = %q", got)
+			}
+			invalidate(source, f)
+			if got := earning(f, bound); got == "pool_attested_earning" {
+				t.Fatalf("stale binding still reports pool_attested_earning")
+			}
+		})
+	}
+}
+
+// Freeze audit R1 (#1816) SECURITY H4: a GGUF (non-primary) artifact of a
+// blocked row is kept as a deny pair, so a pool binding to it is revoked when
+// the row becomes blocked, acceptance rejects it, and the hello exemption
+// refuses it, even when the feed is too stale to authorize identities.
+func TestPoolManifestBlockedArtifactFeedPairDenies(t *testing.T) {
+	for name, feedAge := range map[string]time.Duration{"fresh feed": 0, "stale feed": 30 * 24 * time.Hour} {
+		t.Run(name, func(t *testing.T) {
+			f := newBindingFixture(t)
+			source := wirePoolSource(f)
+			source.set(poolSnapshot(testPoolA, 1, poolDigestV1, ggufPoolEntry()))
+			f.registerPoolSession(t, poolProvider, "llamacpp_loopback", modelidentity.GGUFFileV1, poolGGUFHash)
+			offer := f.offer(t, poolProvider, "blk", "llamacpp_loopback", map[string]string{modelidentity.GGUFFileV1: poolGGUFHash})
+			f.reevaluate(poolProvider)
+			if head := f.latest(t, poolProvider, offer.CandidateID); head.State != "catalog_priced" || !head.PoolScoped() {
+				t.Fatalf("uncatalogued GGUF bind = %+v", head)
+			}
+			blocked := bindingCatalog(t, "release-blocked", "blocked", strings.Repeat("6", 64))
+			index, err := artifactidentity.NewWithBlocked(artifactidentity.Provenance{
+				FeedSHA256: strings.Repeat("a", 64), SignerKeyID: "k1", ReleaseID: blocked.Version, CandidateCatalogSHA256: blocked.SHA256,
+				FeedGeneratedAt: f.now.Add(-time.Hour - feedAge),
+			}, nil, []artifactidentity.Member{{ModelKey: "small", ArtifactID: "gguf-q4", HashAlgorithm: modelidentity.GGUFFileV1, Hash: poolGGUFHash}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.publish(blocked, map[string]*artifactidentity.Index{blocked.SHA256: index})
+			if !f.server.ArtifactPairInCatalog(modelidentity.GGUFFileV1, poolGGUFHash, []string{"llamacpp_loopback"}) {
+				t.Fatal("acceptance does not reject a blocked artifact-feed pair")
+			}
+			if _, ok := f.server.poolEntryForSession(poolProvider, "llamacpp_loopback", modelidentity.GGUFFileV1, poolGGUFHash); ok {
+				t.Fatal("hello exemption granted to a blocked artifact-feed pair")
+			}
+			f.reevaluate(poolProvider)
+			if head := f.latest(t, poolProvider, offer.CandidateID); head.State != modelAdmissionRevoked || head.ReasonCode != ModelAdmissionRevokePoolEntryRevoked {
+				t.Fatalf("blocked artifact-feed pair binding = %+v, want revoked %s", head, ModelAdmissionRevokePoolEntryRevoked)
+			}
+		})
+	}
+}
