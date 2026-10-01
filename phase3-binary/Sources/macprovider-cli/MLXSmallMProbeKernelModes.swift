@@ -133,19 +133,40 @@ extension MLXSmallMProbeCommand {
                     .map { config in
                         (config.description, { w, s, b in SmallMQMV.matmul(x, w: w, scales: s, biases: b, config: config) })
                     }
+                let chainCandidates: [String: (MLXArray, MLXArray, MLXArray, MLXArray) -> MLXArray] =
+                    Dictionary(uniqueKeysWithValues:
+                        [("mlx", { xi, w, s, b in
+                            quantizedMM(xi, w, scales: s, biases: b, transpose: true, groupSize: 64, bits: 4)
+                        })]
+                        + configs.filter { SmallMQMV.supports(m: m, n: n, k: k, config: $0, dtype: .bfloat16) }
+                        .map { config in
+                            (config.description, { xi, w, s, b in
+                                SmallMQMV.matmul(xi, w: w, scales: s, biases: b, config: config)
+                            })
+                        })
                 for (label, fn) in candidates {
+                    let fn2 = chainCandidates[label]!
                     var samples: [Double] = []
                     if serial {
-                        // One matmul per eval: per-kernel latency incl. tail
-                        // effects, as in a model forward (dependent matmuls).
+                        // Dependent chain, as in a model forward: each matmul's
+                        // input waits on the previous output (x + 0 * rowsum(y)),
+                        // so kernels cannot overlap and tail/occupancy effects
+                        // show. The chain glue is identical for every candidate.
                         for iteration in 0 ..< (warmup + iters) {
+                            var xi = x
+                            var outs: [MLXArray] = []
                             for (w, s, b) in weights {
-                                let out = fn(w, s, b)
-                                let t0 = DispatchTime.now().uptimeNanoseconds
-                                eval(out)
-                                Stream().synchronize()
-                                let t1 = DispatchTime.now().uptimeNanoseconds
-                                if iteration >= warmup { samples.append(Double(t1 - t0) / 1e3) }
+                                let y = fn2(xi, w, s, b)
+                                outs.append(y)
+                                xi = x + 0 * y.sum(axis: 1, keepDims: true).asType(x.dtype)
+                            }
+                            Stream().synchronize()
+                            let t0 = DispatchTime.now().uptimeNanoseconds
+                            eval(outs)
+                            Stream().synchronize()
+                            let t1 = DispatchTime.now().uptimeNanoseconds
+                            if iteration >= warmup {
+                                samples.append(Double(t1 - t0) / 1e3 / Double(copies))
                             }
                         }
                         let sorted = samples.sorted()

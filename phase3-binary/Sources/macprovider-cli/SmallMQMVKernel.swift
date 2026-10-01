@@ -411,8 +411,17 @@ enum SmallMQMV {
             return config
         }
 
-        /// Default choice used by the forward routing flag ("auto").
-        static let auto = Config(variant: .mma, rows: 2, kSplit: 2)
+        /// Default choice used by the forward routing flag ("auto"), from the
+        /// 2026-10-01 Studio sweeps: M <= 4 stays on MLX (qmv / qmv_wide is
+        /// cheaper than the MMA floor), 5...8 use 2 tiles x 4-way K split, and
+        /// 9...16 use 4 tiles x 2-way K split.
+        static func auto(m: Int) -> Config {
+            var config = m <= 8
+                ? Config(variant: .mma, rows: 2, kSplit: 4) : Config(variant: .mma, rows: 4, kSplit: 2)
+            config.fragAct = true
+            config.minRows = 5
+            return config
+        }
     }
 
     /// Whether the kernel supports this problem; callers fall back to
@@ -483,7 +492,7 @@ final class SmallMQuantizedLinear: QuantizedLinear {
         let k = x.dim(-1)
         let rows = x.size / k
         let n = weight.dim(0)
-        var config = Self.fixedConfig ?? SmallMQMV.Config.auto
+        var config = Self.fixedConfig ?? SmallMQMV.Config.auto(m: rows)
         // Narrow outputs give too few threadgroups; split K wider, and leave
         // the tiny projections (linear-attention in_proj_a/b, N <= 64) to MLX.
         if config.variant != .rb, n < 4096 {

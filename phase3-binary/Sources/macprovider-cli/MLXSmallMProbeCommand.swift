@@ -59,7 +59,7 @@ struct MLXSmallMProbeCommand: AsyncParsableCommand {
     @Option(help: "Comma-separated M values for kcheck/kbench/kreal (default 1...max-m).")
     var ms: String?
 
-    @Flag(help: "kbench: time one matmul per eval (sequential latency) instead of a batch.")
+    @Flag(help: "kbench: time a dependent chain of matmuls (sequential latency) instead of independent ones.")
     var serial = false
 
     @Option(name: .customLong("smallm-qmv"), help: "greedy: route QuantizedLinear M>=2 through SmallMQMV (off, auto, or a config).")
