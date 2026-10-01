@@ -1435,7 +1435,7 @@ struct MalibuBYOMAdmissionStatusDocument: Decodable, Equatable, Sendable {
                   ].contains(admissionState)
                   : ["local_only", "not_offered", "offerable"].contains(admissionState),
               admissionStateSource == "coordinator" || allowedNextStates.isEmpty,
-              admissionStateSource == "local_default" || Set(allowedNextStates).isSubset(of: Self.allowedNextStates(for: admissionState)),
+              admissionStateSource == "local_default" || Set(allowedNextStates).isSubset(of: Self.allowedNextStates(for: admissionState, poolScoped: poolBinding != nil)),
               ["offer_rejected", "withdrawn", "revoked"].contains(admissionState)
                   ? providerGuidance.transitionReasonCode != nil
                   : true,
@@ -1445,7 +1445,13 @@ struct MalibuBYOMAdmissionStatusDocument: Decodable, Equatable, Sendable {
         }
     }
 
-    private static func allowedNextStates(for state: String) -> Set<String> {
+    /// SPEC-047-R001/R011: a pool-scoped `catalog_priced` head narrows to the
+    /// signed-manifest rebind, withdrawal, and revocation edges, and only a
+    /// status carrying `pool_binding` may use that narrowing.
+    private static func allowedNextStates(for state: String, poolScoped: Bool) -> Set<String> {
+        if poolScoped && state == "catalog_priced" {
+            return ["catalog_priced", "withdrawn", "revoked"]
+        }
         switch state {
         case "not_offered", "withdrawn", "revoked":
             return ["offer_submitted"]

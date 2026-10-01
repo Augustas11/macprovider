@@ -1095,7 +1095,7 @@ extension BYOMAdmissionStatusWire {
         guard coordinatorStates.contains(status.admissionState) else {
             throw BYOMModelAdmissionError.invalidStatusSchema
         }
-        let allowed = Set(Self.allowedNextStates(for: status.admissionState))
+        let allowed = Set(Self.allowedNextStates(for: status.admissionState, poolScoped: status.poolBinding != nil))
         guard status.allowedNextStates.allSatisfy({ allowed.contains($0) }) else {
             throw BYOMModelAdmissionError.invalidStatusSchema
         }
@@ -1108,7 +1108,14 @@ extension BYOMAdmissionStatusWire {
         }
     }
 
-    private static func allowedNextStates(for state: String) -> [String] {
+    /// SPEC-047-R001/R011: a pool-scoped `catalog_priced` head has exactly the
+    /// signed-manifest rebind, withdrawal, and revocation edges (never
+    /// `settlement_capable`); that narrowing applies only when the status
+    /// carries `pool_binding`, and every other status uses the global table.
+    private static func allowedNextStates(for state: String, poolScoped: Bool) -> [String] {
+        if poolScoped && state == "catalog_priced" {
+            return ["catalog_priced", "withdrawn", "revoked"]
+        }
         switch state {
         case "not_offered", "withdrawn", "revoked":
             return ["offer_submitted"]

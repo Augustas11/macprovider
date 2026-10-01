@@ -2549,6 +2549,38 @@ extension ModelManagementTests {
         try JSONDecoder().decode(MalibuBYOMAdmissionStatusDocument.self, from: Data(json.utf8))
     }
 
+    /// #1816 F1: the coordinator-generated SPEC-047-R011 statuses (shared with
+    /// the CLI decoder tests) validate here too, including the pool-scoped
+    /// `catalog_priced` next states, which a global status never may claim.
+    func testSharedCoordinatorPoolStatusFixtureValidates() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let raw = try Data(contentsOf: repoRoot.appendingPathComponent("testdata/spec047/pool_scoped_status_v1.json"))
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: raw) as? [String: Any])
+        let statuses = try XCTUnwrap(root["statuses"] as? [String: [String: Any]])
+        for (name, object) in statuses {
+            let candidateID = try XCTUnwrap(object["candidate_id"] as? String)
+            let document = try JSONDecoder().decode(MalibuBYOMAdmissionStatusDocument.self, from: JSONSerialization.data(withJSONObject: object))
+            XCTAssertNoThrow(try document.validated(expectedCandidateID: candidateID), name)
+        }
+        var pooled = try XCTUnwrap(statuses["pool_scoped_catalog_priced"])
+        let pooledDocument = try JSONDecoder().decode(MalibuBYOMAdmissionStatusDocument.self, from: JSONSerialization.data(withJSONObject: pooled))
+        XCTAssertEqual(pooledDocument.allowedNextStates, ["catalog_priced", "withdrawn", "revoked"])
+        XCTAssertNotNil(pooledDocument.validPoolBinding)
+        pooled["allowed_next_states"] = ["catalog_priced", "settlement_capable"]
+        let widened = try JSONDecoder().decode(MalibuBYOMAdmissionStatusDocument.self, from: JSONSerialization.data(withJSONObject: pooled))
+        let candidateID = try XCTUnwrap(pooled["candidate_id"] as? String)
+        XCTAssertThrowsError(try widened.validated(expectedCandidateID: candidateID))
+
+        let global = Self.poolStatusJSON(catalogModelKey: #""qwen3-8b""#, earningPath: "not_earning_yet_catalog_or_receipt_path_exists", binding: nil)
+            .replacingOccurrences(of: #""allowed_next_states":["withdrawn","revoked"]"#, with: #""allowed_next_states":["catalog_priced","withdrawn","revoked"]"#)
+        XCTAssertThrowsError(try decodeStatus(global).validated(expectedCandidateID: Self.poolCandidateID))
+    }
+
     func testPoolScopedStatusDecodesAndFailsClosed() throws {
         let status = try decodeStatus(Self.poolStatusJSON())
         XCTAssertNoThrow(try status.validated(expectedCandidateID: Self.poolCandidateID))
