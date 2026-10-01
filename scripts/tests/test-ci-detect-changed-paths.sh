@@ -12,6 +12,24 @@ SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 DETECT="$SCRIPT_DIR/ci-detect-changed-paths.sh"
 fail=0
 
+cleanup_repo() {
+  local repo="$1" trash
+  [ -n "$repo" ] || return 0
+  [ -e "$repo" ] || return 0
+  trash="${repo}.delete.$$"
+  chmod -R u+w "$repo" 2>/dev/null || true
+  if mv "$repo" "$trash" 2>/dev/null; then
+    repo="$trash"
+  fi
+  for _attempt in 1 2 3; do
+    if rm -rf "$repo" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  printf 'WARN | could not remove temporary repo %s\n' "$repo" >&2
+}
+
 # Run the detector against a base..head pair inside a throwaway repo built by
 # the caller-supplied setup function, and assert on its swift=/code= output.
 assert_detect() {
@@ -37,7 +55,7 @@ assert_detect() {
       "$desc" "$got_swift" "$got_code" "$want_swift" "$want_code"
     fail=1
   fi
-  rm -rf "$repo"
+  cleanup_repo "$repo"
 }
 
 commit_all() { git add -A && git commit -q -m "$1"; }
@@ -175,7 +193,7 @@ if [ "$_rc" -eq 0 ] && \
 else
   echo "FAIL | fail-open on unknown base rc=$_rc -> $_out"; fail=1
 fi
-rm -rf "$_repo"
+cleanup_repo "$_repo"
 
 if [ "$fail" -ne 0 ]; then
   echo "ci-detect-changed-paths regression: FAILURES present" >&2

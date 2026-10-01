@@ -262,7 +262,7 @@ func TestJourneyTrustedPoolCreatorMVPCandidate(t *testing.T) {
 		buyer.WithRoutingConfig(config.RoutingConfig{MaxRetries: 0}),
 	)
 
-	chatBody := []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":-0.25,"frequency_penalty":0.125}`)
+	chatBody := []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":0,"frequency_penalty":0}`)
 	unauthorized := postCreatorMVPChat(t, server, chatBody, creatorMVPHeaders("acct-other", root.poolID))
 	if unauthorized.Code != http.StatusNotFound && unauthorized.Code != http.StatusServiceUnavailable {
 		t.Fatalf("unauthorized pool status=%d body=%s", unauthorized.Code, unauthorized.Body.String())
