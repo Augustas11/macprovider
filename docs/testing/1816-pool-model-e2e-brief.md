@@ -80,31 +80,40 @@ core and starts when the current one ends. Wait for that boundary
 ## 3. Case G: GGUF, non-catalog (the paid path)
 
 1. Serve G: `LAB_SERVE_GGUF_FILE=qwen2.5-0.5b-instruct-q8_0.gguf ENGINE=llamacpp scripts/lab/1690-m6/rig.sh server-start`.
-2. **Propose (provider).** Run the CLI propose step against the served file.
-   Use the lab CLI through `cli.sh`, and take the command from
-   `models --help`. Use `pool_model_id` `pool/<Q pool_id>/qwen25-05b-q8`,
-   `allowed_runtime_sources: ["llamacpp_loopback"]`, `license: Apache-2.0`,
-   and in-bounds pricing such as
-   `{"prompt_rate_per_mtok":20000,"prompt_cache_hit_rate_per_mtok":5000,"completion_rate_per_mtok":40000}`,
-   with `max_context_tokens` ≤ the llama-server `-c`. Save the bundle as
-   `$LAB/proposal-g.json`. Check that its `artifact_hash` equals your
-   `shasum` of the file.
-3. **Sign (creator).** Stage the entry, then sign and submit the next
-   manifest:
+2. **Propose (provider).** Run the CLI propose step against the served file
+   through the lab CLI (`cli.sh`), with the llama.cpp origin flags from
+   `rig.sh`:
+   `models propose llamacpp:qwen2.5-0.5b-instruct-q8_0 --pool <Q pool_id>
+   --slug qwen25-05b-q8 --json`. Save the `pool_model_proposal.v1` output
+   as `$LAB/proposal-g.json`. Check that `model_entry.pool_model_id` is
+   `pool/<Q pool_id>/qwen25-05b-q8`, `model_entry.allowed_runtime_sources`
+   is `["llamacpp_loopback"]`, and `model_entry.artifact_hash` equals your
+   `shasum` of the file. `license` and `paid_serving_attested` are `null`;
+   the creator supplies them in step 3.
+3. **Sign (creator).** Stage the entry with the creator fields, then sign
+   and submit the next manifest. `max_context_tokens` must be ≤ the
+   llama-server `-c` (16384); pass `--max-context-tokens` when the bundle
+   has none or a larger value:
 
    ```bash
-   $PS entry Q --proposal $LAB/proposal-g.json
+   $PS entry Q --proposal $LAB/proposal-g.json --license Apache-2.0 --paid-serving-attested \
+     --prompt-rate 20000 --cache-hit-rate 5000 --completion-rate 40000 --max-context-tokens 16384
    $PS manifest Q --signer coordinator-cli --encoding 2 --runtime-allowlist llamacpp_loopback --window-seconds 300
    ```
 
-   Expect `manifest_accepted` → 202, and a `--model-entries` argument in the
-   signer call. `get-pool` for Q lists the entry with
+   `entry` writes `$LAB/pools/Q/pool-models.json`, the closed
+   `{"model_entries": [...], "attested_members": [...]}` input of
+   `coordinator-cli trust-pool-admin sign-manifest`. Expect
+   `manifest_accepted` → 202, and a `--pool-models` argument in the signer
+   call. `get-pool` for Q lists the entry with
    `disclosure_class: pool_attested_unverified`.
 4. **Bind.** After the new window starts, restart `serve` and offer the
    served model (`models offer llamacpp:qwen2.5-0.5b-instruct-q8_0 --yes
    --json` with the llama.cpp origin flags from `rig.sh`). Expect a
    pool-scoped `catalog_priced` binding under the signed-manifest actor, and
-   no global admission.
+   no global admission. `models admission status <candidate> --json` shows a
+   `pool_binding` object with `binding_scope: pool` and the Q
+   `manifest_core_digest`, and `catalog_model_key: null`.
 5. **Paid request**, non-streaming and streaming:
 
    ```bash
@@ -130,7 +139,7 @@ core and starts when the current one ends. Wait for that boundary
 |---|---|---|
 | R1 global | `buyer.py --engine llamacpp --model "$M"` (no `--pool`) | refused (503 `engine_unavailable`, or the coordinator's unknown-model refusal); `$M` absent from global `/v1/models` |
 | R2 cross-pool | `buyer.py --pool A --engine llamacpp --model "$M"` (A is authorized for the buyer and has the same member) | refused; the `pool/<Q>/…` id is not authority on A's routes |
-| R3 out-of-bounds price | a second proposal with a fresh slug and `completion_rate_per_mtok: 2160001` (or `prompt_rate_per_mtok: 13499`), `entry` + `manifest` | `manifest_accepted` refused with the pricing-bounds error; `get-pool` unchanged. `$PS entry Q --remove <id>` before continuing |
+| R3 out-of-bounds price | the same proposal with a fresh `--slug`, staged with `--completion-rate 2160001` (or `--prompt-rate 13499`), `entry` + `manifest` | `manifest_accepted` refused with the pricing-bounds error; `get-pool` unchanged. `$PS entry Q --remove <id>` before continuing |
 | R4 catalog overlap (case C) | a proposal for the Q4_K_M file (sha256 `74a4da8c…`), `entry` + `manifest` | manifest refused (`ErrPoolModelCatalogOverlap`). Serving Q4_K_M on pool A still settles through the catalog path (`expected_model_hash_source=catalog`) |
 | R5 revocation | `$PS entry Q --remove "$M"`, then `manifest` (the extension is omitted); after the window boundary, `buyer.py --pool Q --engine llamacpp --model "$M"` | the binding is `revoked` with `pool_manifest_entry_revoked`; the request is refused; no new snapshot for `$M` |
 
@@ -150,8 +159,11 @@ $PS create QN --signer coordinator-cli --encoding 2 --window-seconds 300
 1. Serve N natively with the lab native CLI (`rig.sh build-native`). Use the
    provider `model` set to the N snapshot and no catalog key; the exact
    native non-catalog serve config comes from the CLI lane's #1816 notes.
-2. Propose with `artifact_hash_algorithm: macprovider.snapshot-manifest.v1`
-   and `allowed_runtime_sources: ["mlx_cache"]`. Sign it into QN.
+2. Propose with `models propose <candidate> --pool <QN pool_id> --slug
+   qwen25-05b-mlx8 --json`; the bundle's `model_entry` must carry
+   `artifact_hash_algorithm: macprovider.snapshot-manifest.v1` and
+   `allowed_runtime_sources: ["mlx_cache"]`. Stage it with `$PS entry QN`
+   and the same creator flags as §3 step 3, then sign it into QN.
 3. Send requests with `--pool QN --model pool/<QN>/qwen25-05b-mlx8` and no
    engine selector. Expect `200`, `runtime_source=mlx_cache`, and
    settlement as in §3 step 5.

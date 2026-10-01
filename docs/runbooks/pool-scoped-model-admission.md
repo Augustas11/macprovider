@@ -30,7 +30,7 @@ Pool creation, keys and the base manifest flow:
 | Trusted pools enabled (M1 plan P6) | `trusted_pools.enabled: true`, gateway `features.trusted_pools.enabled: true` |
 | Pricing bounds configured (§1) | `trusted_pools.pool_model_pricing_bounds` present in the live coordinator config |
 | Pool is `enforce` with the runtime in its allowlist | `get-pool` shows `settlement_mode: enforce` and the engine in `runtime_allowlist` (not needed for native `mlx_cache`) |
-| Provider is a member, and its owner account is the creator or an R016 attested member | `get-pool` `members`; the account in the core's `pool_attested_members/v1` |
+| Provider is a member, and its owner account is the creator or an R016 attested member | `get-pool` `members`; for a non-creator member, the account in the core's `pool_attested_members/v1` and the provider under that account in `trusted_pools.provider_owner_account_ids` (§1) |
 
 ## 1. Pricing bounds (coordinator config)
 
@@ -69,26 +69,52 @@ Recompute these from the rate card in force when you apply them. The key
 shape (without values) is a comment in `phase4-coordinator/dist/coordinator.yaml`.
 Each minimum must be at most its maximum. An entry also needs cache-hit ≤ prompt.
 
+**Owner accounts for attested members (SPEC-042-R016).** A loopback session
+of a member the creator does not own binds only when the core's
+`pool_attested_members/v1` extension names that member's owner account. The
+coordinator matches that account only against
+`trusted_pools.provider_owner_account_ids` (owner account → provider ids; a
+provider may be listed under one account only):
+
+```yaml
+trusted_pools:
+  provider_owner_account_ids:
+    acct-example-member: ["provider-example-1"]
+```
+
+Creator-owned members and native `mlx_cache` sessions need no entry here.
+
 ## 2. Provider: propose
 
 On the member Mac, with the model served by the intended engine (for example
 `llama-server` for a GGUF file, or native MLX for a snapshot):
 
-1. Run the CLI's pool-model propose step. It writes a
-   `pool_model_proposal.v1` bundle (`schema_version` plus the R015 entry
-   fields), with the hash computed by the CLI from the exact file
-   (`macprovider.gguf-file.v1`) or snapshot (`macprovider.snapshot-manifest.v1`).
-   Take the exact command from `macprovider-cli models --help` on the
-   #1816 build.
-2. Fields the provider fills, and the creator must check:
+1. Run the CLI's propose step against the served model:
+
+   ```bash
+   macprovider-cli models propose <candidate> --pool "$POOL_ID" [--slug <slug>] \
+     [--prompt-rate-per-mtok N --prompt-cache-hit-rate-per-mtok N --completion-rate-per-mtok N] --json
+   ```
+
+   It writes the closed `pool_model_proposal.v1` bundle (`schema`,
+   `pool_id`, `candidate_id`, `served_model_ref`, `runtime_source`, and so
+   on, with the R015 entry fields under `model_entry`). The hash is computed
+   by the CLI from the exact file (`macprovider.gguf-file.v1`) or snapshot
+   (`macprovider.snapshot-manifest.v1`). For a llama.cpp file add the
+   `--llamacpp-origin` and `--llamacpp-model-path` flags the server uses.
+2. `model_entry` fields, which the creator must check:
    - `pool_model_id`: `pool/<pool_id>/<slug>`, where the middle segment is
      the pool id and `slug` matches `[a-z0-9][a-z0-9-]{0,62}`;
    - `allowed_runtime_sources`: GGUF → `llamacpp_loopback`,
      `lmstudio_loopback`, `ollama_loopback`; snapshot → `mlx_cache` (native),
      `mlxlm_loopback`, `omlx_loopback`. Every loopback value must also be in
      the core's `runtime_allowlist`;
-   - `license`, `paid_serving_attested: true`, the three `pricing` rates,
-     `disclosure_class: pool_attested_unverified`, `max_context_tokens`.
+   - `disclosure_class: pool_attested_unverified`;
+   - `pricing` (the three rates) and `max_context_tokens` are the
+     provider's suggestion, or `null` when it gave none;
+   - `license` and `paid_serving_attested` are always `null`: they are the
+     creator's fields (§3). `creator_requirements` lists what the creator
+     must still supply.
 3. Send the bundle to the creator out of band. It contains hashes and
    metadata only; it has no keys and no tokens.
 
@@ -119,11 +145,28 @@ attestation (SPEC-042-R004):
   started with (`llama-server -c`).
 
 Sign the next manifest with the entry, using `coordinator-cli trust-pool-admin
-sign-manifest` (the M1 plan §4.3 step 6 flags, plus `--prev <current
-manifest event>` and the entries input file). Never hand-encode a core. The
-entries file is a JSON array of entries, strictly ascending by
-`pool_model_id`. Pass it as `--model-entries <file>` (confirm the flag name
-against the #1816 `coordinator-cli` build). Then submit it:
+sign-manifest --encoding 2` (the M1 plan §4.3 step 6 flags, plus `--prev
+<current manifest event>` and `--pool-models <file>`). Never hand-encode a
+core. The `--pool-models` file is one closed JSON object:
+
+```json
+{"model_entries": [{"pool_model_id": "pool/<pool_id>/<slug>",
+   "artifact_hash_algorithm": "macprovider.gguf-file.v1", "artifact_hash": "<64 hex>",
+   "allowed_runtime_sources": ["llamacpp_loopback"], "license": "Apache-2.0",
+   "paid_serving_attested": true,
+   "pricing": {"prompt_rate_per_mtok": 20000, "prompt_cache_hit_rate_per_mtok": 5000,
+               "completion_rate_per_mtok": 40000},
+   "disclosure_class": "pool_attested_unverified", "max_context_tokens": 16384}],
+ "attested_members": [{"provider_account_id": "acct-example-member",
+                       "runtime_classes": ["llamacpp_loopback"]}]}
+```
+
+Each `model_entries[]` item is the bundle's `model_entry` with the creator's
+`license`, `paid_serving_attested: true`, and final `pricing` and
+`max_context_tokens` filled in; unknown fields are refused. The signer sorts
+both lists into canonical order. `attested_members` may be `[]`. Every
+manifest must carry the full current lists: an entry or member left out is
+removed. Then submit it:
 
 ```bash
 coordinator-cli trust-pool-admin submit-policy --admin-url http://127.0.0.1:8444 --input manifest-vN.json
@@ -142,9 +185,18 @@ that adds entries often should use short windows.
 
 ## 4. Admission and status
 
-After the new window is active, restart the member's `serve` so its session
-re-evaluates the offer. The binding is pool-scoped `catalog_priced` under
-the signed-manifest actor (SPEC-047-R011).
+After the new window is active, the member submits (or keeps) its offer for
+the candidate (`macprovider-cli models offer <candidate> --json`) and
+restarts `serve` so its session re-evaluates it. The coordinator binds the
+offer from `offer_submitted`, or from the synthetic-probe states it reaches
+first (`sandbox_probe_only`, `network_visible_unpriced`,
+`network_admitted_unsettled`). The binding is pool-scoped `catalog_priced`
+under the signed-manifest actor (SPEC-047-R011). The provider reads it back
+with `macprovider-cli models admission status <candidate> --json`: the
+status carries a `pool_binding` object (`binding_scope: pool`, `pool_id`,
+`pool_model_id`, `manifest_version`, `manifest_core_digest`, the three
+rates, `provider_account_id`, and nullable `observed_catalog_model_key` and
+`probe_evidence_digest`), and `catalog_model_key` stays `null`.
 
 ```bash
 coordinator-cli trust-pool-admin get-pool --admin-url http://127.0.0.1:8444 --pool-id "$POOL_ID"
@@ -174,8 +226,10 @@ refused or absent.
 
 ## 6. Verification SQL (read-only)
 
-New route-snapshot keys are named by SPEC-022-R013. Confirm the JSON keys
-against the deployed build before relying on a zero-row result.
+New route-snapshot keys are named by SPEC-022-R013 and are the JSON keys of
+the coordinator's `RouteSnapshot` (`expected_model_hash_source`,
+`pool_model_id`, `manifest_version`, `manifest_core_digest`,
+`runtime_source`, `pool_id`, and the `pool_model_*_rate_per_mtok` rates).
 
 ```bash
 C="sqlite3 -readonly -header /var/lib/macprovider/coordinator.db"
@@ -183,7 +237,8 @@ G="sqlite3 -readonly -header /var/lib/macprovider/gateway.db"
 RID=<X-Request-ID>
 IDS=$($C -noheader "SELECT group_concat(quote(request_id)) FROM request_log WHERE external_request_id='$RID';")
 # admission: the offer bound under the signed-manifest actor
-$C "SELECT provider_id, served_model_ref, state, actor, reason_code, expected_catalog_model_hash_algorithm,
+$C "SELECT provider_id, served_model_ref, state, actor, reason_code, binding_scope, pool_id, pool_model_id,
+           pool_manifest_version, pool_manifest_core_digest, expected_catalog_model_hash_algorithm,
            expected_catalog_model_hash, created_at_utc
     FROM model_admission_events WHERE provider_id='$PROVIDER_ID' ORDER BY id DESC LIMIT 5;"
 # route snapshot: pool-manifest identity source, exact entry and core digest
@@ -191,7 +246,8 @@ $C "SELECT request_id, json_extract(route_snapshot_json,'\$.expected_model_hash_
            json_extract(route_snapshot_json,'\$.pool_model_id') pmid,
            json_extract(route_snapshot_json,'\$.manifest_version') mv,
            json_extract(route_snapshot_json,'\$.manifest_core_digest') core,
-           json_extract(route_snapshot_json,'\$.runtime_source') rt, route_snapshot_mode
+           json_extract(route_snapshot_json,'\$.runtime_source') rt,
+           json_extract(route_snapshot_json,'\$.pool_model_completion_rate_per_mtok') completion_rate, route_snapshot_mode
     FROM settlement_route_snapshots WHERE request_id IN ($IDS);"
 $C "SELECT request_id, usage_source, terminal_state FROM settlement_attempt_outputs WHERE request_id IN ($IDS);"
 $C "SELECT request_id, receipt_result, settlement_outcome, reason, pool_label_status, closed
@@ -206,8 +262,11 @@ $C "SELECT count(*) FROM settlement_route_snapshots
       AND coalesce(json_extract(route_snapshot_json,'\$.pool_id'),'')='';"
 ```
 
-Pass: `src=pool_manifest`, `pmid` and `core` equal to the active entry and
-digest, `usage_source=pool_operator_attested`, `settlement_outcome=verified`,
+Pass: the newest admission event is `catalog_priced` with
+`binding_scope=pool`, `reason_code` `pool_manifest_bound` (or
+`pool_manifest_rebound`) and `actor` `pool_manifest:<pool_id>:<version>:<digest>`;
+`src=pool_manifest`, `pmid` and `core` equal to the active entry and
+digest, `completion_rate` equal to the entry's rate, `usage_source=pool_operator_attested`, `settlement_outcome=verified`,
 `pool_label_status=verified`, one payable ledger row with
 `provider_credits>0`, a settled reservation, and `token_source=pool_operator_attested`.
 The last query must return 0.
