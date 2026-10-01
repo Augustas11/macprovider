@@ -136,6 +136,7 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     /// detect that a row changed outside it (for example a bridge trim).
     private(set) var mutationCount = 0
     var offset: Int
+    let attentionWindowTokens: Int?
 
     /// Number of times the paged Metal gather kernel actually executed. Proof, for the
     /// parity fixtures, that logical K/V was reconstructed through the real gather rather
@@ -161,7 +162,8 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         binding: PagedKVStorageBinding,
         gatherKernel: PagedKVGatherKernel = PagedKVGatherKernel(),
         initialOffset: Int? = nil,
-        reconstructViaGather: Bool = true
+        reconstructViaGather: Bool = true,
+        attentionWindowTokens: Int? = nil
     ) {
         self.blockSizeTokens = blockSizeTokens
         self.maxPhysicalBlocks = maxPhysicalBlocks
@@ -170,6 +172,7 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         self.gatherKernel = gatherKernel
         self.reconstructViaGather = reconstructViaGather
         self.offset = initialOffset ?? binding.currentTable.logicalTokenCount
+        self.attentionWindowTokens = attentionWindowTokens
     }
 
     /// Descriptor-sourced convenience initializer. Kept for existing production and test
@@ -179,7 +182,8 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         descriptor: PagedKVDescriptor,
         binding: PagedKVStorageBinding,
         gatherKernel: PagedKVGatherKernel = PagedKVGatherKernel(),
-        initialOffset: Int? = nil
+        initialOffset: Int? = nil,
+        attentionWindowTokens: Int? = nil
     ) {
         self.init(
             blockSizeTokens: descriptor.blockSizeTokens,
@@ -188,7 +192,8 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
             binding: binding,
             gatherKernel: gatherKernel,
             initialOffset: initialOffset,
-            reconstructViaGather: true
+            reconstructViaGather: true,
+            attentionWindowTokens: attentionWindowTokens
         )
     }
 
@@ -226,7 +231,12 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         let mergedKeys = Self.prefix(nextKeys, end)
         let mergedValues = Self.prefix(nextValues, end)
         guard reconstructViaGather else {
-            return (mergedKeys, mergedValues)
+            return presentation(
+                keys: mergedKeys,
+                values: mergedValues,
+                priorTokens: start,
+                incomingTokens: incomingTokens
+            )
         }
         // Reconstruct the logical K/V through the REAL Metal gather over a non-identity
         // (reversed) physical block order. The gather is a lossless permutation round-trip,
@@ -234,7 +244,12 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         // — the parity fixtures gate exactly that (token-for-token argmax equality).
         let gatheredKeys = pagedGather(mergedKeys)
         let gatheredValues = pagedGather(mergedValues)
-        return (gatheredKeys, gatheredValues)
+        return presentation(
+            keys: gatheredKeys,
+            values: gatheredValues,
+            priorTokens: start,
+            incomingTokens: incomingTokens
+        )
     }
 
     /// Split a contiguous logical `[1, H, S, D]` tensor into fixed-size blocks placed in
@@ -391,7 +406,8 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
             poolEpoch: poolEpoch,
             binding: binding,
             gatherKernel: gatherKernel,
-            reconstructViaGather: reconstructViaGather
+            reconstructViaGather: reconstructViaGather,
+            attentionWindowTokens: attentionWindowTokens
         )
         copied.state = state
         return copied
@@ -487,10 +503,29 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         windowSize: Int?,
         returnArray: Bool
     ) -> MLXFast.ScaledDotProductAttentionMaskMode {
-        // makeMask runs before update(), so `offset + n` is the post-update
-        // key count. A sliding window excludes keys once that length exceeds
-        // the window, including single-token decode — `.none` would let the
-        // query attend the whole paged history.
+        // When this cache presents a windowed suffix, the mask must use that
+        // same window even if a caller supplied a stale explicit window.
+        let effectiveWindow = attentionWindowTokens ?? windowSize
+        if let effectiveWindow, effectiveWindow > 0 {
+            let cappedOffset = Self.slidingWindowPresentationPrefix(
+                priorTokens: storedTokens,
+                windowSize: effectiveWindow
+            )
+            if n == 1, cappedOffset + n <= effectiveWindow, !returnArray {
+                return .none
+            }
+            if returnArray || cappedOffset + n > effectiveWindow {
+                return .array(createCausalMask(
+                    n: n,
+                    offset: cappedOffset,
+                    windowSize: effectiveWindow
+                ))
+            }
+            return .causal
+        }
+        // Fallback for callers that request a window mask without constructing
+        // a cache with windowed presentation. In that full-history surface,
+        // `.none` would let the query attend keys outside the model window.
         let needsWindow = Self.slidingWindowRequiresMask(n: n, offset: offset, windowSize: windowSize)
         if n == 1 && !needsWindow {
             return .none
@@ -506,6 +541,33 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         let (postUpdate, overflow) = offset.addingReportingOverflow(n)
         if overflow { return true }
         return postUpdate > windowSize
+    }
+
+    static func slidingWindowPresentationPrefix(priorTokens: Int, windowSize: Int?) -> Int {
+        guard let windowSize, windowSize > 0 else { return max(priorTokens, 0) }
+        return min(max(priorTokens, 0), max(windowSize - 1, 0))
+    }
+
+    private func presentation(
+        keys: MLXArray,
+        values: MLXArray,
+        priorTokens: Int,
+        incomingTokens: Int
+    ) -> (MLXArray, MLXArray) {
+        guard let attentionWindowTokens, attentionWindowTokens > 0 else {
+            return (keys, values)
+        }
+        let keepPrior = Self.slidingWindowPresentationPrefix(
+            priorTokens: priorTokens,
+            windowSize: attentionWindowTokens
+        )
+        let end = priorTokens + incomingTokens
+        let start = max(0, end - keepPrior - incomingTokens)
+        guard start > 0 else { return (keys, values) }
+        return (
+            keys[.ellipsis, start..., 0...],
+            values[.ellipsis, start..., 0...]
+        )
     }
 
     var debugDescription: String {

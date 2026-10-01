@@ -498,8 +498,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     enum CacheKind: Equatable, Sendable {
         case pagedAttention
         case recurrentMamba
-        /// keep=0 sliding-window attention. Stored as full paged history with a
-        /// windowed causal mask — not a ring buffer, and not sink-token keep>0.
+        /// keep=0 sliding-window attention. Stored as full paged history, then
+        /// presented to attention as the rotating-equivalent suffix — not a
+        /// ring buffer, and not sink-token keep>0.
         case slidingWindow(windowTokens: Int)
 
         var usesPagedKVCache: Bool {
@@ -1277,7 +1278,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         return RowState(
             caches: cacheKinds.map { kind in
                 switch kind {
-                case .pagedAttention, .slidingWindow:
+                case .pagedAttention:
                     PagedKVCache(
                         blockSizeTokens: blockSizeTokens,
                         maxPhysicalBlocks: maxPhysicalBlocks,
@@ -1285,6 +1286,16 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         binding: binding,
                         initialOffset: initialOffset,
                         reconstructViaGather: false
+                    )
+                case .slidingWindow(let windowTokens):
+                    PagedKVCache(
+                        blockSizeTokens: blockSizeTokens,
+                        maxPhysicalBlocks: maxPhysicalBlocks,
+                        poolEpoch: poolEpoch,
+                        binding: binding,
+                        initialOffset: initialOffset,
+                        reconstructViaGather: false,
+                        attentionWindowTokens: windowTokens
                     )
                 case .recurrentMamba:
                     MambaCache()
@@ -2318,16 +2329,22 @@ private final class PagedKVBatchLayerCache: MTPPackedVerificationCache, @uncheck
            length == offset
         {
             let start = length
+            let incomingTokenCount = incomingKeys.dim(2)
             let newKeys = Self.write(incomingKeys, into: existingKeys, rowStarts: nil, stored: start, maxTokens: maxSize, blockSizeTokens: blockSizeTokens)
                 ?? concatenated([Self.prefix(existingKeys, start), incomingKeys], axis: 2)
             let newValues = Self.write(incomingValues, into: existingValues, rowStarts: nil, stored: start, maxTokens: maxSize, blockSizeTokens: blockSizeTokens)
                 ?? concatenated([Self.prefix(existingValues, start), incomingValues], axis: 2)
             keys = newKeys
             values = newValues
-            length = start + incomingKeys.dim(2)
+            length = start + incomingTokenCount
             rowMutationCounts = nil
-            batchedOffset = (batchedOffset ?? offset) + incomingKeys.dim(2)
-            return (Self.prefix(newKeys, length), Self.prefix(newValues, length))
+            batchedOffset = (batchedOffset ?? offset) + incomingTokenCount
+            return presentation(
+                keys: Self.prefix(newKeys, length),
+                values: Self.prefix(newValues, length),
+                priorTokens: start,
+                incomingTokens: incomingTokenCount
+            )
         }
         if allowsLockstepConcat, keys == nil, values == nil {
             keys = Self.prefix(incomingKeys, incomingKeys.dim(2))
@@ -2335,7 +2352,12 @@ private final class PagedKVBatchLayerCache: MTPPackedVerificationCache, @uncheck
             length = incomingKeys.dim(2)
             rowMutationCounts = nil
             batchedOffset = incomingKeys.dim(2)
-            return (incomingKeys, incomingValues)
+            return presentation(
+                keys: incomingKeys,
+                values: incomingValues,
+                priorTokens: 0,
+                incomingTokens: incomingKeys.dim(2)
+            )
         }
         if let updated = updateRaggedInPlace(keys: incomingKeys, values: incomingValues) {
             batchedOffset = nil
@@ -2452,6 +2474,7 @@ private final class PagedKVBatchLayerCache: MTPPackedVerificationCache, @uncheck
         else {
             return nil
         }
+        guard presentationWindowTokens == nil else { return nil }
         let starts = rowCaches.map(\.storedTokens)
         guard starts.max() == length else { return nil }
         let n = incomingKeys.dim(2)
@@ -2565,12 +2588,18 @@ private final class PagedKVBatchLayerCache: MTPPackedVerificationCache, @uncheck
         // Equal-length rows have no cross-row padding post-update, so a single query
         // token correctly attends every key (including itself) with no mask — unless
         // a sliding window excludes older keys from that shared history.
-        let postUpdateLengths = preUpdateOffsets.map { offset -> Int in
+        // Prefer the row cache presentation window so mask width matches the
+        // K/V suffix returned from update().
+        let effectiveWindow = presentationWindowTokens ?? windowSize
+        let presentedOffsets = preUpdateOffsets.map {
+            PagedKVCache.slidingWindowPresentationPrefix(priorTokens: $0, windowSize: effectiveWindow)
+        }
+        let presentedPostUpdateLengths = presentedOffsets.map { offset -> Int in
             let (postUpdate, overflow) = offset.addingReportingOverflow(n)
             return overflow ? Int.max : postUpdate
         }
-        let needsWindow = windowSize.map { window in postUpdateLengths.contains { $0 > window } } ?? false
-        if n == 1, Set(preUpdateOffsets).count <= 1, !needsWindow { return .none }
+        let needsWindow = effectiveWindow.map { window in presentedPostUpdateLengths.contains { $0 > window } } ?? false
+        if n == 1, Set(presentedOffsets).count <= 1, !needsWindow { return .none }
         // Fail-safe: the single shared causal `offset` (max) below is only correct when
         // every row advances by the same `n` from a comparable base. Today `decode(rows:)`
         // — the sole batched caller — is always n==1, so this is unreachable; a future
@@ -2593,9 +2622,9 @@ private final class PagedKVBatchLayerCache: MTPPackedVerificationCache, @uncheck
         // `lengths` gate then restricts correctly.
         return .array(createCausalMask(
             n: n,
-            offset: preUpdateOffsets.max() ?? offset,
-            windowSize: windowSize,
-            lengths: MLXArray(postUpdateLengths.map(Int32.init))
+            offset: presentedOffsets.max() ?? offset,
+            windowSize: effectiveWindow,
+            lengths: MLXArray(presentedPostUpdateLengths.map(Int32.init))
         ))
     }
 
@@ -2691,6 +2720,35 @@ private final class PagedKVBatchLayerCache: MTPPackedVerificationCache, @uncheck
     private var allowsLockstepConcat: Bool {
         rowCaches.allSatisfy { !$0.reconstructViaGather }
             && Set(preUpdateOffsets).count <= 1
+    }
+
+    private var presentationWindowTokens: Int? {
+        let values = rowCaches.map(\.attentionWindowTokens)
+        guard values.allSatisfy({ $0 != nil }) else { return nil }
+        let windows = Set(values.compactMap { $0 })
+        return windows.count == 1 ? windows.first : nil
+    }
+
+    private func presentation(
+        keys: MLXArray,
+        values: MLXArray,
+        priorTokens: Int,
+        incomingTokens: Int
+    ) -> (MLXArray, MLXArray) {
+        guard let window = presentationWindowTokens, window > 0 else {
+            return (keys, values)
+        }
+        let keepPrior = PagedKVCache.slidingWindowPresentationPrefix(
+            priorTokens: priorTokens,
+            windowSize: window
+        )
+        let end = priorTokens + incomingTokens
+        let start = max(0, end - keepPrior - incomingTokens)
+        guard start > 0 else { return (keys, values) }
+        return (
+            keys[.ellipsis, start..., 0...],
+            values[.ellipsis, start..., 0...]
+        )
     }
 
     private func packFromRows() {
