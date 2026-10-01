@@ -60,7 +60,8 @@ PASS_ID=$PASS_ID bash $E2E_H/vm/s6-rollback.sh
 # ---- 4. the old coordinator and the extension cores ----------------------------------------------
 journal_since macprovider-coordinator "$since" "$EV/coordinator-after-rollback.log"
 if [ "$(cat /root/e2e/coordinator.side)" = old ]; then
-  ext="$(grep -ci 'extension\|unknown extension\|reconstruct\|trusted pool.*disabl\|registry.*disabl' "$EV/coordinator-after-rollback.log")"
+  ext="$(grep -ci 'extension\|reconstruct\|trust.pool.*disabl\|registry.*disabl' "$EV/coordinator-after-rollback.log")"
   curl_bearer "$(opkey)" -s http://127.0.0.1:8444/admin/trust-pools/pools/$Q >"$EV/old-get-pool-q.json"
-  result S6-old-coordinator-extension-cores INFO "old coordinator on the store with pool-model cores: $ext log lines naming extensions/reconstruct/disable ($(grep -i 'extension\|reconstruct\|disabl' "$EV/coordinator-after-rollback.log" | head -2 | tr '\n' ' ' | head -c 400)); get-pool Q: $(head -c 200 "$EV/old-get-pool-q.json")"
+  curl_bearer "$(opkey)" -s http://127.0.0.1:8444/poolz >"$EV/old-poolz.json"
+  result S6-old-coordinator-extension-cores INFO "old coordinator on the store with pool-model cores: $ext log lines naming extensions/reconstruct/disable ($(grep -i 'extension\|reconstruct\|trust.pool.*disabl\|registry.*disabl' "$EV/coordinator-after-rollback.log" | head -2 | tr '\n' ' ' | head -c 400)); get-pool Q: $(head -c 200 "$EV/old-get-pool-q.json")"
 fi
