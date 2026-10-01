@@ -1661,19 +1661,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             var prompts: [[Int]] = []
             prompts.reserveCapacity(count)
             for index in 0..<count {
-                let text = Self.buildPromptText(index: index, targetTokens: tokens)
-                var encoded = context.tokenizer.encode(text: text, addSpecialTokens: true)
-                // Extend deterministically if the corpus text under-shot the target.
-                var salt = 0
-                while encoded.count < tokens {
-                    let more = context.tokenizer.encode(
-                        text: " \(index)-\(salt) " + Self.corpus[(index + salt) % Self.corpus.count],
-                        addSpecialTokens: false
-                    )
-                    encoded.append(contentsOf: more)
-                    salt += 1
-                }
-                prompts.append(Array(encoded.prefix(tokens)))
+                prompts.append(Self.buildPromptTokens(context: context, index: index, tokens: tokens))
             }
             return prompts
         }
@@ -1684,21 +1672,31 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             var prompts: [[Int]] = []
             prompts.reserveCapacity(lengths.count)
             for (index, tokens) in lengths.enumerated() {
-                let text = Self.buildPromptText(index: index, targetTokens: tokens)
-                var encoded = context.tokenizer.encode(text: text, addSpecialTokens: true)
-                var salt = 0
-                while encoded.count < tokens {
-                    let more = context.tokenizer.encode(
-                        text: " \(index)-\(salt) " + Self.corpus[(index + salt) % Self.corpus.count],
-                        addSpecialTokens: false
-                    )
-                    encoded.append(contentsOf: more)
-                    salt += 1
-                }
-                prompts.append(Array(encoded.prefix(tokens)))
+                prompts.append(Self.buildPromptTokens(context: context, index: index, tokens: tokens))
             }
             return prompts
         }
+    }
+
+    static func buildPromptTokens(context: ModelContext, index: Int, tokens: Int) -> [Int] {
+        let text = Self.buildPromptText(index: index, targetTokens: tokens)
+        var encoded = context.tokenizer.encode(text: text, addSpecialTokens: true)
+        var salt = 0
+        let tail = context.tokenizer.encode(
+            text: " Continue document \(index) with one more concrete detail:",
+            addSpecialTokens: false
+        )
+        let boundedTail = tail.count < tokens ? tail : Array(tail.suffix(tokens))
+        let headCount = max(tokens - boundedTail.count, 0)
+        while encoded.count < headCount {
+            let more = context.tokenizer.encode(
+                text: " \(index)-\(salt) " + Self.corpus[(index + salt) % Self.corpus.count],
+                addSpecialTokens: false
+            )
+            encoded.append(contentsOf: more)
+            salt += 1
+        }
+        return Array(encoded.prefix(headCount)) + boundedTail
     }
 
     /// A distinct, topically-varied prompt string seeded by `index`, long enough

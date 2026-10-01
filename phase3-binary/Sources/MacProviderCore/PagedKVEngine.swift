@@ -348,8 +348,9 @@ public enum PagedKVAttachGate {
     public static let allowedCacheClasses = ["KVCacheSimple"]
     public static let recognizedModelFamilies = ["gpt_oss", "llama", "qwen"]
 
-    /// The Qwen3.6 text decoder is a measured hybrid: its linear layers retain
-    /// row-local Mamba state while only its attention layers use paged KV.
+    /// Some mixed cache layouts are measured per identity: Qwen hybrid decoders
+    /// retain row-local recurrent state while paging only attention KV, and the
+    /// gpt-oss 120b tuple mixes sliding-window and full-attention paged KV.
     public static func supportsCacheClass(
         _ runtimeCacheClass: String,
         hybridDecoderArchitectureVerified: Bool = false

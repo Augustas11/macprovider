@@ -1,7 +1,10 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.13
-Status: draft (normative design). v0.1.13 clarifies that keep=0
+Version: v0.1.14
+Status: draft (normative design). v0.1.14 admits the measured
+`openai/gpt-oss-120b` sliding-window/full-attention identity to FR-PKV12 after
+Studio packaged-runtime 1024-token prefill / 48-token parity plus isolation,
+replay, and drain evidence. v0.1.13 clarifies that keep=0
 `RotatingKVCache` support preserves full paged storage but feeds attention a
 rotating-equivalent presentation: at most `window - 1` prior tokens plus the
 incoming chunk, with masks sized to that presentation. v0.1.12 clarifies that SPEC-023's signed
@@ -14,8 +17,9 @@ block_size_tokens))`, clamped to the resolver maximum. The 16,384-token default
 had rejected every request above 16k at admission while the provider advertised
 200k. An explicit operator value is never changed. v0.1.10 teaches the paged engine a keep=0
 sliding-window cache kind (full-history paged KV plus a windowed causal mask)
-so isolated harnesses can measure gpt-oss-class models. No sliding-window
-identity is admitted to FR-PKV12. v0.1.9 adds the individually measured
+so isolated harnesses can measure gpt-oss-class models. Only the later
+v0.1.14 `openai/gpt-oss-120b` identity is admitted to FR-PKV12; no
+family-wide sliding-window grant is added. v0.1.9 adds the individually measured
 `qwen/qwen3.5-27b`, `qwen/qwen3.5-35b-a3b`, and `qwen/qwen3.8-27b` hybrids to
 the FR-PKV12 per-identity allowlist after exact serial/shared-forward parity,
 row-isolation, lifecycle-leftovers, and rows=8 throughput evidence on the
@@ -45,19 +49,32 @@ is `RotatingKVCache` only because the serve path caps KV for memory attaches to
 paged mode (the block pool bounds memory), while a genuine sliding-window model
 stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
+Change log v0.1.14 (2026-10-01): FR-PKV12 admits the exact
+`openai/gpt-oss-120b` identity with `GptOssForCausalLM` in the artifact's
+`config.json` architectures. Evidence is recorded in
+`audits/2026-10-01-1780-gpt-oss-120b-evidence.md`: Mac Studio (`Mac15,14`),
+isolated lab binary, 1024-token prefill, 48-token parity,
+`standalone=[true,true]`, `batched=[true,true]`, isolation pass, replay pass,
+drain pass. stdout SHA-256:
+`ca05b28d8cbbb55fd1db530109a0c8e1c7de782149bb127a89607036f2013f0e`;
+stderr SHA-256:
+`648b75892ed8b47023fe253cf3874dacd0c25582e82c6ecb7d1ed32942d58b87`.
+This does not admit `gpt-oss-20b`, path-only aliases, or the `gpt_oss` family.
 Change log v0.1.13 (2026-10-01): keep=0 `RotatingKVCache` measurement support
 now mirrors upstream rotating-cache presentation instead of relying on a
 full-history attention surface. The paged store MAY retain full history for
 materialization/accounting, but attention MUST see only the rotating-equivalent
 suffix (`window - 1` prior tokens plus the incoming chunk). Masks are computed
-against that presentation. No sliding-window identity is admitted to FR-PKV12.
+against that presentation. This revision alone was measurement support, not a
+serving-identity admission.
 Change log v0.1.10 (2026-09-29): the paged shared-forward backend recognizes
 keep=0 `RotatingKVCache` layers as a third cache kind and pages them as full
 history with a windowed causal mask, including single-token decode. `keep>0`
 sink-token rotating caches stay unrecognized. Isolated `msb-throughput` may
-drive the layout. Production attach remains fail-closed: no sliding-window
-identity is added to FR-PKV12. `gpt_oss` family recognition is not cache-class
-admission. Refines SPEC-039-R012; does not broaden the allowlist.
+drive the layout. Production attach remains fail-closed unless a later
+revision admits an exact measured sliding-window identity. `gpt_oss` family
+recognition is not cache-class admission. Refines SPEC-039-R012; does not
+broaden the allowlist.
 Change log v0.1.12 (2026-09-30): FR-PKV13/FR-PKV12 references to SPEC-038
 acceptance now include the SPEC-023 signed CB policy feed as a distribution
 surface for exact FR-CB10 coverage. Descriptor membership and attach probes
@@ -391,11 +408,12 @@ The parity fixture set MUST include at least:
 
 Any newly admitted model family beyond Llama/Qwen MUST add its own
 environment-gated real-model fixture before the family is added to the
-attach-time admission allowlist. For v0.1.2, the only additional admitted
-family is `gpt_oss`, with a fixture over `gpt-oss-20b-MXFP4-Q8`; that 20b
-fixture does not prove `gpt-oss-120b`. `gemma4`, `glm4_moe`, `nemotron_h`, and
-other catalog families remain outside the allowlist until they have equivalent
-FR-PKV4 evidence.
+attach-time admission allowlist. For v0.1.2, the first additional admitted
+family was `gpt_oss`, with a fixture over `gpt-oss-20b-MXFP4-Q8`; that 20b
+fixture did not prove `gpt-oss-120b`. For v0.1.14,
+`openai/gpt-oss-120b` adds its own exact-identity packaged-runtime evidence.
+`gemma4`, `glm4_moe`, `nemotron_h`, and other catalog families remain outside
+the allowlist until they have equivalent FR-PKV4 evidence.
 
 The implementation MUST fail closed if parity is not established for a model
 or cache class selected for paged mode. Tolerance-based tensor comparison MAY
@@ -619,6 +637,9 @@ be individually measured before it is added. The v1 allowlist is:
   MUST additionally pass cross-row MoE expert-dispatch isolation);
 - `qwen/qwen3.8-27b` with `Qwen3_5ForConditionalGeneration` in the artifact's
   `config.json` architectures (dense hybrid decoder).
+- `openai/gpt-oss-120b` with `GptOssForCausalLM` in the artifact's
+  `config.json` architectures (MoE sliding-window/full-attention decoder; the
+  paged path MUST additionally pass cross-row shared-forward isolation).
 
 Membership is per identity and evidence-gated, never per architecture. A
 same-architecture identity is admitted only after it individually passes the
@@ -628,12 +649,14 @@ the attach-time proof MUST compare at least 48 exact greedy tokens after a
 production serving; a shorter, differently partitioned, or non-exact proof
 fails closed.
 
-Each allowlisted identity requires a runtime cache topology measured as
-`MambaCache` on recurrent layers and `KVCacheSimple` on full-attention layers.
-The engine MUST preserve each row's Mamba convolution and delta state
-independently, page only attention KV, and pass token-parity and multi-step
+Each allowlisted identity requires the exact runtime cache topology measured
+for that identity: Qwen hybrid rows use `MambaCache` on recurrent layers and
+`KVCacheSimple` on full-attention layers, while `openai/gpt-oss-120b` uses
+keep=0 `RotatingKVCache` on sliding-window layers and `KVCacheSimple` on
+full-attention layers. The engine MUST preserve each row's recurrent state
+where present, page only attention KV, and pass token-parity and multi-step
 batched row-isolation gates, including row leave and join, before advertising
-the exact tuple. Adding a further hybrid identity to this allowlist is a
+the exact tuple. Adding a further mixed identity to this allowlist is a
 reviewed SPEC change plus the matching per-identity code entry, gated on that
 tuple passing the same measured parity and isolation proof. This exception covers first-turn/cache-miss requests only;
 retained or positive-cache-credit hybrid requests MUST stay on the serial path
@@ -646,11 +669,12 @@ paged storage plus a rotating-equivalent attention presentation for isolated
 harness and future measured attach. The attention presentation MUST contain at
 most `window - 1` prior tokens plus the incoming chunk, with the model's
 sliding-window causal mask computed over that presented suffix. That
-representation is **not** an admission grant: no sliding-window serving
-identity is on the FR-PKV12 allowlist in this revision. keep>0 sink-token
+representation is **not** a family admission grant: only exact identities named
+above are on the FR-PKV12 allowlist in this revision. keep>0 sink-token
 rotation MUST remain unrecognized. A mixed
 rotating+simple layout (gpt-oss) MUST NOT ride the Qwen Mamba+attention
-hybrid exception.
+hybrid exception or the 120b grant unless its exact identity/config pair is
+listed above and its runtime probes pass.
 
 A model whose runtime cache class is **not** on the allowlist — enumerated
 non-allowlisted classes include unverified `mixed` sliding-window layouts,
@@ -667,7 +691,7 @@ correct**. The engine MUST therefore present only the rotating-equivalent
 suffix to attention once history exceeds the window. Single-token decode over
 that already-windowed presentation may use the no-mask fast path; multi-token
 prefill that crosses the window MUST use a mask sized to the presented suffix.
-That engine path does **not** admit any sliding-window identity: keep=0
+That engine path does **not** admit sliding-window identities by family: keep=0
 `RotatingKVCache` layers MAY be represented this way so an isolated harness can
 measure a candidate, and `keep>0` sink-token rotating caches remain
 unrecognized. Production attach MUST still fail closed with
@@ -675,7 +699,8 @@ unrecognized. Production attach MUST still fail closed with
 allowlist after packaged-runtime parity past the model's window, isolation, and
 leftovers proof. Recognizing `gpt_oss` as a model family (v0.1.2) is
 identity-family only; gpt-oss alternating sliding/full layers remain an
-unallowlisted `mixed` class.
+unallowlisted `mixed` class except for the exact `openai/gpt-oss-120b`
+identity/config pair named above.
 
 **Serve-time memory cap vs. model attention type (v0.1.1 clarification).** The
 runtime `newCache()` class conflates two independent reasons a model presents a
@@ -837,11 +862,11 @@ The implementation PR for this SPEC MUST include fixtures that prove:
   (`gpt-oss-20b-MXFP4-Q8`) proving the same FR-PKV4 exact gather parity. Since
   `gpt_oss` is MoE-shaped, the fixture set MUST also include the SPEC-038
   batched shared-forward input-isolation probe for that resident model before
-  paged attach may open. `gpt-oss-120b` remains separately unproven until the
-  packaged runtime passes parity past the model window plus row
-  isolation/replay/drain evidence for that exact identity. Other parsed family
-  labels (`gemma4`, `glm4_moe`, `nemotron_h`, etc.) are explicitly non-admitted
-  and fail closed until this
+  paged attach may open. The `openai/gpt-oss-120b` identity has its own
+  packaged-runtime 1024-token prefill / 48-token parity plus row
+  isolation/replay/drain evidence and is admitted only by exact identity/config
+  pair. Other parsed family labels (`gemma4`, `glm4_moe`, `nemotron_h`, etc.)
+  are explicitly non-admitted and fail closed until this
   acceptance criterion is repeated for each family.
 - **AC-4 allocator/block-table correctness:** allocation, free-list reuse,
   eviction/reclaim, out-of-range block IDs, duplicate writable blocks,
@@ -961,14 +986,17 @@ The implementation PR for this SPEC MUST include fixtures that prove:
   `mlx-swift-lm` fork.
 - Paged quantized KV remains a future numerical surface if the provider later
   enables `kvBits` in production.
-- Sliding-window **admission** remains future work: v0.1.13 gives the engine a
-  keep=0 rotating layout (full-history paged storage plus rotating-equivalent
-  attention presentation and masks) for isolated measurement, but FR-PKV12
-  still admits no sliding-window identity.
+- Broader sliding-window **admission** remains future work: v0.1.13 gives the
+  engine a keep=0 rotating layout (full-history paged storage plus
+  rotating-equivalent attention presentation and masks) for isolated
+  measurement, and v0.1.14 admits only the exact measured
+  `openai/gpt-oss-120b` identity/config pair.
   `keep>0` sink-token rotating caches, and Gemma-4 shared-KV layouts that emit
   fewer caches than layers, stay unrecognized. The existing uncapped attach
   probe prevents false rejection of full-context models capped for memory.
-  Qwen3.x first-turn exceptions remain the only measured mixed-layout grant.
+  Qwen3.x first-turn exceptions and the exact `openai/gpt-oss-120b`
+  sliding-window/full-attention tuple remain the only measured mixed-layout
+  grants.
 - KV offload and LRU/priority eviction policy remain future work. v0.1 owns a
   bounded resident pool and sequence-scoped reclaim mechanism, not an
   offloaded or globally shared cache manager.

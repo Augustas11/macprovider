@@ -75,6 +75,66 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         ).hybridDecoderArchitectureVerified)
     }
 
+    func testGPTOSS120BMixedArchitectureRequiresExactAllowlistedIdentityAndConfigMetadata() {
+        let gptOSS = Data(#"{"model_type":"gpt_oss","architectures":["GptOssForCausalLM"],"num_experts":128}"#.utf8)
+        let unrelated = Data(#"{"model_type":"gpt_oss","architectures":["AnotherDecoder"]}"#.utf8)
+
+        let admitted = ModelRuntime.pagedKVModelCapabilities(
+            modelID: "openai/gpt-oss-120b",
+            configJSONData: gptOSS
+        )
+        XCTAssertEqual(admitted.modelFamily, "gpt_oss")
+        XCTAssertTrue(admitted.requiresMoEDispatch)
+        XCTAssertTrue(admitted.hybridDecoderArchitectureVerified)
+        XCTAssertTrue(PagedKVAttachGate.supportsCacheClass(
+            "mixed",
+            hybridDecoderArchitectureVerified: admitted.hybridDecoderArchitectureVerified
+        ))
+
+        XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
+            modelID: "openai/gpt-oss-20b",
+            configJSONData: gptOSS
+        ).hybridDecoderArchitectureVerified)
+        XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
+            modelID: "openai/gpt-oss-120b",
+            configJSONData: unrelated
+        ).hybridDecoderArchitectureVerified)
+        XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
+            modelID: "mlx-community/gpt-oss-120b-4bit",
+            configJSONData: gptOSS
+        ).hybridDecoderArchitectureVerified)
+    }
+
+    func testMeasuredMixedPagedKVTopologyIsFamilySpecific() {
+        let qwenVerified = PagedKVRuntimeModelCapabilities(
+            modelFamily: "qwen",
+            requiresMoEDispatch: false,
+            hybridDecoderArchitectureVerified: true
+        )
+        let gptOSSVerified = PagedKVRuntimeModelCapabilities(
+            modelFamily: "gpt_oss",
+            requiresMoEDispatch: true,
+            hybridDecoderArchitectureVerified: true
+        )
+
+        XCTAssertTrue(ModelRuntime.measuredMixedPagedKVTopology(
+            [.recurrentMamba, .pagedAttention],
+            modelCapabilities: qwenVerified
+        ))
+        XCTAssertFalse(ModelRuntime.measuredMixedPagedKVTopology(
+            [.recurrentMamba, .pagedAttention],
+            modelCapabilities: gptOSSVerified
+        ))
+        XCTAssertTrue(ModelRuntime.measuredMixedPagedKVTopology(
+            [.slidingWindow(windowTokens: 128), .pagedAttention],
+            modelCapabilities: gptOSSVerified
+        ))
+        XCTAssertFalse(ModelRuntime.measuredMixedPagedKVTopology(
+            [.slidingWindow(windowTokens: 128), .pagedAttention],
+            modelCapabilities: qwenVerified
+        ))
+    }
+
     func testQwen35HybridArchitectureRequiresExactTupleAndConfigMetadata() {
         let supported = Self.qwen35HybridConfig()
         let wrongLayers = Self.qwen35HybridConfig(
