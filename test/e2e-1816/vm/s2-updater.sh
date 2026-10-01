@@ -112,6 +112,12 @@ rm -f "$GWDB-wal" "$GWDB-shm"
 for f in "$GWDB" "$GWDB-wal" "$GWDB-shm"; do if [ -f "$f.e2e-pre-gwfirst" ]; then mv "$f.e2e-pre-gwfirst" "$f"; fi; done
 gw_restart
 
+# Runbook (catalog-artifact-feed-release.md): BEFORE the activation release goes
+# live, add the two catalog-artifacts blocks to Pearl's vhost by hand. The old
+# coordinator answers 404 on the route until the config pair is set.
+c0="$(curl -s -o /dev/null -w '%{http_code}' https://coordinator.malibu.tech/v1/catalog-artifacts)"
+nginx_add_catalog_artifacts $WTN/phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf >"$EV/nginx-additive.txt" 2>&1
+d0="$(curl -s -o /dev/null -w '%{http_code}' https://coordinator.malibu.tech/v1/catalog-artifacts)"
 pre_state >"$EV/state-0-before.txt"
 
 # ---- 2. plan ------------------------------------------------------------------------
@@ -190,16 +196,13 @@ python3 $E2E_H16/tools/apply-window.py "$EV/apply-unit-timeline.txt" "$E2E_EVIDE
   || result S2-updater-order FAIL "$(tr '\n' ';' <"$EV/apply-window.txt" | head -c 700)"
 DRAIN_MAX=300 settle_and_check S2-updater-window-traffic "$prun"
 
-# ---- 5. /v1/catalog-artifacts via nginx (runbook manual additive step) --------------------
-c0="$(curl -s -o /dev/null -w '%{http_code}' https://coordinator.malibu.tech/v1/catalog-artifacts)"
-d0="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8443/v1/catalog-artifacts)"
-nginx_add_catalog_artifacts $WTN/phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf >"$EV/nginx-additive.txt" 2>&1
+# ---- 5. /v1/catalog-artifacts via nginx (the manual step ran before the apply) ------------
 curl -s -o "$EV/catalog-artifacts.json" -w '%{http_code}' https://coordinator.malibu.tech/v1/catalog-artifacts >"$EV/ca.code"
 curl -s -o "$EV/catalog-artifacts.json.sig" -w '%{http_code}' https://coordinator.malibu.tech/v1/catalog-artifacts.sig >"$EV/ca-sig.code"
 if [ "$(cat "$EV/ca.code")/$(cat "$EV/ca-sig.code")" = 200/200 ] && cmp -s "$EV/catalog-artifacts.json" $RELDIR/$NEW_TAG/autotune-artifacts.json \
    && cmp -s "$EV/catalog-artifacts.json.sig" $RELDIR/$NEW_TAG/autotune-artifacts.json.sig; then
-  result S2-nginx-catalog-artifacts PASS "before the step: nginx=$c0 coordinator=$d0; after: 200/200 and byte-identical to the signed release feed + sig"
-else result S2-nginx-catalog-artifacts FAIL "before: nginx=$c0 coordinator=$d0; after: $(cat "$EV/ca.code")/$(cat "$EV/ca-sig.code") $(tail -1 "$EV/nginx-additive.txt")"; fi
+  result S2-nginx-catalog-artifacts PASS "manual step before the apply: nginx $c0 -> $d0 (old coordinator, no pair); after the apply: 200/200 and byte-identical to the signed release feed + sig"
+else result S2-nginx-catalog-artifacts FAIL "before the step $c0, after the step $d0; after the apply: $(cat "$EV/ca.code")/$(cat "$EV/ca-sig.code") $(tail -1 "$EV/nginx-additive.txt")"; fi
 
 # The canary's live proof by hand, with the same transport the updater uses.
 proof_args="macprovider/catalog-release $CANARY_ID $(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(d["release_id"],d["policy_version"])' $RELDIR/$NEW_TAG/release.json) $(sha $RELDIR/$NEW_TAG/autotune-candidates.json) $(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["key_id"])' $RELDIR/$NEW_TAG/autotune-candidates.json.sig)"
