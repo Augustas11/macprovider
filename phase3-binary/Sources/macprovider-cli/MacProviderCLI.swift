@@ -38,7 +38,7 @@ enum AdmissionIdentityStartupTopology: Equatable {
 struct MacProviderCLI: AsyncParsableCommand {
     private static var nativeMTPBenchSubcommands: [ParsableCommand.Type] {
 #if DEBUG || MACPROVIDER_LAB_HARNESS
-        [NativeMTPBenchCommand.self, NativeMTPForwardMicrobenchCommand.self]
+        [NativeMTPBenchCommand.self, NativeMTPForwardMicrobenchCommand.self, MLXSmallMProbeCommand.self]
 #else
         []
 #endif
