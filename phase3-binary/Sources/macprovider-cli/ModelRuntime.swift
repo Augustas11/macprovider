@@ -1271,6 +1271,11 @@ actor ModelRuntime: ModelRuntimeServing {
                 targetGeneration: $0.targetGeneration
             )
         })
+        // The caller's own handle is registered, so every other in-flight
+        // request is a row this one would share the target forward with.
+        // Check and registration are both actor-isolated, so a burst of
+        // concurrent arrivals cannot all observe an empty runtime.
+        .resolvingActiveRows(otherActiveRows: inFlightCancellations.count - 1)
         recordNativeMTPAdmissionStatus(admission)
         testNativeMTPAdmissionObserver?(admission)
         testNativeMTPAdmissionRequestObserver?(request.requestID, admission)
@@ -1305,6 +1310,8 @@ actor ModelRuntime: ModelRuntimeServing {
             return .unsupportedCacheState
         case .insufficientVerificationCapacity:
             return .capacityUnavailable
+        case .capacityAboveNativeBound:
+            return .capacityAboveNativeBound
         default:
             return .requestIneligible
         }
@@ -5813,6 +5820,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 decodePath: nativeMTPAdmission?.effectivePath ?? .ordinary,
                 nativeMTPMaximumProposalDepth: nativeMTPAdmission?.initialProposalDepth ?? 0,
                 nativeMTPCompleteWindowBytesByDepth: nativeMTPAdmission?.completeWindowBytesByDepth ?? [],
+                nativeMTPMaximumActiveRows: nativeMTPAdmission?.maximumNativeActiveRows ?? 0,
                 nativeMTPTupleFence: nativeMTPAdmission?.tupleFence
             )
         )
@@ -8754,7 +8762,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 maximumCompletionTokens: admissionCapability.maxCompletionTokens,
                 completeWindowBytesByDepth: admissionCapability.completeWindowBytesByDepth,
                 family: admissionCapability.familyAdapter,
-                throughputDeltaPPM: admissionCapability.throughputDeltaPPM
+                throughputDeltaPPM: admissionCapability.throughputDeltaPPM,
+                maximumNativeActiveRows: admissionCapability.maxNativeActiveRows
             )
             let runtimeTuple = NativeMTPPublishedRuntimeTuple(
                 modelID: selfTestRuntimeTuple.modelID,

@@ -1762,7 +1762,8 @@ final class ModelRuntimeSwapTests: XCTestCase {
         ),
         spec023SourceCommit: String = String(repeating: "a", count: 40),
         spec023BuildDigestSHA256: String = String(repeating: "b", count: 64),
-        spec023LiveExecutableCDHash: String = String(repeating: "1", count: 40)
+        spec023LiveExecutableCDHash: String = String(repeating: "1", count: 40),
+        maxNativeActiveRows: Int = 2
     ) -> NativeMTPAdmissionCapability {
         NativeMTPAdmissionCapability(
             tupleSHA256: String(repeating: "1", count: 64),
@@ -1787,6 +1788,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
             providerRevision: providerRevision,
             upstreamMLXSwiftLMRevision: upstreamRevision,
             qualifiedSlots: 2,
+            maxNativeActiveRows: maxNativeActiveRows,
             spec023ReleaseID: "native-mtp-test",
             spec023SourceCommit: spec023SourceCommit,
             spec023BuildDigestSHA256: spec023BuildDigestSHA256,

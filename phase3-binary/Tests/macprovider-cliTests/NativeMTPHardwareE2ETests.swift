@@ -421,6 +421,7 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
             "hardware_class": NativeMTPAdmissionSidecar.canonicalHardwareClass(machine.chip),
             "ram_bytes": machine.ramGB * 1_073_741_824,
             "qualified_slots": 2,
+            "max_native_active_rows": 2,
             "request_feature_profile": "native_mtp_greedy_text_v1",
             "decrease_threshold_ppm": 1,
             "increase_threshold_ppm": 2,

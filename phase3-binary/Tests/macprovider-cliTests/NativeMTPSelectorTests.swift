@@ -490,13 +490,92 @@ final class NativeMTPSelectorTests: XCTestCase {
         XCTAssertFalse(admission.allowsConversationCacheLease)
     }
 
+    func testNativeMTPRuntimeAdmissionDowngradesAtSignedActiveRowBound() throws {
+        let admission = ModelRuntime.nativeMTPRuntimeAdmission(
+            for: try makeRequest(),
+            draftConfigured: false,
+            draftLoaded: false,
+            numDraftTokens: nil,
+            nativeMTPMode: .auto,
+            nativeMTPCapability: admittedCapability(maximumNativeActiveRows: 2),
+            schedulerSupportsNativeMTP: true
+        )
+        XCTAssertEqual(admission.maximumNativeActiveRows, 2)
+
+        for otherRows in [-1, 0, 1] {
+            let kept = admission.resolvingActiveRows(otherActiveRows: otherRows)
+            XCTAssertEqual(kept, admission, "other rows \(otherRows)")
+        }
+        for otherRows in [2, 7] {
+            let downgraded = admission.resolvingActiveRows(otherActiveRows: otherRows)
+            XCTAssertEqual(downgraded.selection.path, .ordinary)
+            XCTAssertEqual(downgraded.selection.nativeMTPReason, .capacityAboveNativeBound)
+            XCTAssertEqual(downgraded.effectivePath, .ordinary)
+            XCTAssertEqual(downgraded.initialProposalDepth, 0)
+            XCTAssertEqual(downgraded.completeWindowBytesByDepth, [])
+            XCTAssertNil(downgraded.tupleFence)
+            XCTAssertFalse(downgraded.usesNativeMTP)
+        }
+        XCTAssertEqual(NativeMTPSelectorReason.capacityAboveNativeBound.rawValue, "capacity_above_native_bound")
+        XCTAssertEqual(NativeMTPStatusReason.capacityAboveNativeBound.rawValue, "capacity_above_native_bound")
+    }
+
+    func testOrdinaryAdmissionIsNotTouchedByActiveRowBound() throws {
+        let ordinary = ModelRuntime.nativeMTPRuntimeAdmission(
+            for: try makeRequest().withConversationKey("conv:ordinary"),
+            draftConfigured: false,
+            draftLoaded: false,
+            numDraftTokens: nil,
+            nativeMTPMode: .auto,
+            nativeMTPCapability: admittedCapability(maximumNativeActiveRows: 1),
+            schedulerSupportsNativeMTP: true
+        )
+        XCTAssertEqual(ordinary.resolvingActiveRows(otherActiveRows: 5), ordinary)
+        XCTAssertEqual(ordinary.selection.nativeMTPReason, .conversationKey)
+    }
+
+    func testRuntimeAdmissionCountsOtherInFlightRowsAgainstSignedBound() async throws {
+        let recorder = NativeMTPAdmissionRecorder()
+        let runtime = ModelRuntime(
+            modelID: "target",
+            modelHash: Self.modelHash,
+            nativeMTPMode: .auto,
+            nativeMTPCapability: admittedCapability(maximumProposalDepth: 2, maximumNativeActiveRows: 1),
+            nativeMTPSchedulerSupported: true,
+            testNativeMTPAdmissionObserver: { admission in
+                recorder.append(admission)
+            },
+            warmSwapEnabled: true,
+            loader: { _ in throw CancellationError() },
+            testCompletion: { _, _ in Self.completion() }
+        )
+
+        _ = try await runtime.completeWithServedSnapshot(try makeRequest())
+        XCTAssertEqual(recorder.last()?.effectivePath, .nativeMTP)
+
+        // A second in-flight row (native or ordinary) fills the bound of one.
+        let holder = try await runtime.acquireRequestHandle(try makeRequest())
+        _ = try await runtime.completeWithServedSnapshot(try makeRequest())
+        let downgraded = try XCTUnwrap(recorder.last())
+        XCTAssertEqual(downgraded.effectivePath, .ordinary)
+        XCTAssertEqual(downgraded.selection.nativeMTPReason, .capacityAboveNativeBound)
+        let gatedStatus = await runtime.currentSnapshot().nativeMTPStatus
+        XCTAssertEqual(gatedStatus.lastReason, .capacityAboveNativeBound)
+        XCTAssertEqual(gatedStatus.preoutputFallbacks, 0)
+
+        await runtime.unregisterInFlight(holder.registrationID)
+        _ = try await runtime.completeWithServedSnapshot(try makeRequest())
+        XCTAssertEqual(recorder.last()?.effectivePath, .nativeMTP)
+    }
+
     private func admittedCapability(
         supportsStreaming: Bool = true,
         supportsNonStreaming: Bool = true,
         supportsStopSequences: Bool = false,
         maximumProposalDepth: Int = 2,
         maximumPromptTokens: Int = 32768,
-        maximumCompletionTokens: Int = 4096
+        maximumCompletionTokens: Int = 4096,
+        maximumNativeActiveRows: Int = Int.max
     ) -> NativeMTPCapability {
         NativeMTPCapability(
             admitted: true,
@@ -510,7 +589,8 @@ final class NativeMTPSelectorTests: XCTestCase {
             hasQualifiedRowMappedTransactions: true,
             maximumProposalDepth: maximumProposalDepth,
             maximumPromptTokens: maximumPromptTokens,
-            maximumCompletionTokens: maximumCompletionTokens
+            maximumCompletionTokens: maximumCompletionTokens,
+            maximumNativeActiveRows: maximumNativeActiveRows
         )
     }
 

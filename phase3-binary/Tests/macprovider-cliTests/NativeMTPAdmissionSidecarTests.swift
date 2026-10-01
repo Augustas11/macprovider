@@ -28,6 +28,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         XCTAssertEqual(capability.providerRevision, Self.providerRevision)
         XCTAssertEqual(capability.upstreamMLXSwiftLMRevision, Self.upstreamRevision)
         XCTAssertEqual(capability.qualifiedSlots, 8)
+        XCTAssertEqual(capability.maxNativeActiveRows, 8)
         XCTAssertEqual(capability.sourceLayout, "separate_artifact")
         XCTAssertEqual(capability.predictionLayerCount, 4)
         XCTAssertEqual(capability.completeWindowBytesByDepth, [1024, 2048, 4096, 8192, 16384])
@@ -1009,6 +1010,59 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         )
     }
 
+    func testReleaseEnvelopeBindsNativeActiveRowBoundIntoTupleIdentity() throws {
+        let gated = try makeReleaseEnvelopeFixture(entryEdit: { $0["max_native_active_rows"] = 1 })
+        defer { try? FileManager.default.removeItem(at: gated.base.root) }
+        let ungated = try makeReleaseEnvelopeFixture()
+        defer { try? FileManager.default.removeItem(at: ungated.base.root) }
+
+        let gatedCapability = try NativeMTPAdmissionSidecar.load(
+            sidecarData: gated.sidecarData,
+            signatureData: gated.signatureData,
+            snapshotRoot: gated.base.snapshot,
+            context: gated.context,
+            trustedKeyring: gated.base.trustedKeyring,
+            resolvedArtifactAuthority: gated.authority
+        )
+        let ungatedCapability = try NativeMTPAdmissionSidecar.load(
+            sidecarData: ungated.sidecarData,
+            signatureData: ungated.signatureData,
+            snapshotRoot: ungated.base.snapshot,
+            context: ungated.context,
+            trustedKeyring: ungated.base.trustedKeyring,
+            resolvedArtifactAuthority: ungated.authority
+        )
+
+        XCTAssertEqual(gatedCapability.maxNativeActiveRows, 1)
+        XCTAssertEqual(ungatedCapability.maxNativeActiveRows, 8)
+        XCTAssertNotEqual(gatedCapability.tupleSHA256, ungatedCapability.tupleSHA256)
+    }
+
+    func testReleaseEnvelopeRejectsNativeActiveRowBoundOutsideQualifiedSlots() throws {
+        let cases: [(String, (inout [String: Any]) -> Void, NativeMTPAdmissionSidecarError)] = [
+            ("missing", { $0.removeValue(forKey: "max_native_active_rows") },
+             .missingField("$.entries[0].max_native_active_rows")),
+            ("zero", { $0["max_native_active_rows"] = 0 },
+             .invalidValue("$.entries[0].max_native_active_rows")),
+            ("above schema maximum", { $0["max_native_active_rows"] = 9 },
+             .invalidValue("$.entries[0].max_native_active_rows")),
+            ("string", { $0["max_native_active_rows"] = "1" },
+             .wrongType("$.entries[0].max_native_active_rows")),
+            ("above qualified slots", { entry in
+                entry["qualified_slots"] = 4
+                var baseline = entry["ordinary_baseline"] as! [String: Any]
+                baseline["qualified_slots"] = 4
+                entry["ordinary_baseline"] = baseline
+                entry["max_native_active_rows"] = 5
+            }, .invalidValue("$.entries[0].max_native_active_rows")),
+        ]
+        for (name, edit, expected) in cases {
+            let fixture = try makeReleaseEnvelopeFixture(entryEdit: edit)
+            defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+            XCTAssertEqual(try rejectedReleaseEnvelopeError(fixture), expected, name)
+        }
+    }
+
     func testReleaseEnvelopeRejectsLegacySHA256HashAlgorithm() throws {
         let fixture = try makeReleaseEnvelopeFixture(entryEdit: { entry in
             entry["hash_algorithm"] = "sha256"
@@ -1786,6 +1840,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             "hardware_class": "m2-ultra",
             "ram_bytes": 256 * 1_073_741_824,
             "qualified_slots": 8,
+            "max_native_active_rows": 8,
             "request_feature_profile": "native_mtp_greedy_text_v1",
             "decrease_threshold_ppm": 1,
             "increase_threshold_ppm": 2,

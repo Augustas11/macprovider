@@ -5101,6 +5101,107 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(committedProposalTokenCount, 0)
     }
 
+    func testNativeMTPLoadGateHoldsDepthZeroAboveBoundAndRestoresWithHysteresis() async throws {
+        let backend = ScriptedBackend(
+            scripts: ["gated": Array(100..<160), "ordinary": [31, 32, 33, 34]],
+            prefillTokens: ["gated": 99]
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 2,
+            maxPrefillRowsPerIteration: 2,
+            backend: backend
+        )
+
+        let native = Task {
+            try await scheduler.submit(Self.nativeRequest(
+                id: "gated",
+                promptTokens: [10],
+                maxOutputTokens: 30,
+                proposals: [],
+                maximumDepth: 1,
+                maximumActiveRows: 1
+            ))
+        }
+        let ordinary = Task {
+            try await scheduler.submit(.init(
+                id: "ordinary",
+                conversationKey: "",
+                promptTokens: [30],
+                maxOutputTokens: 4,
+                temperature: 0.0,
+                topP: 1.0
+            ))
+        }
+        let ordinaryResult = try await ordinary.value
+        let nativeResult = try await native.value
+
+        XCTAssertEqual(ordinaryResult.outputTokens, [31, 32, 33, 34])
+        XCTAssertEqual(nativeResult.outputTokens.count, 30)
+        // Mixed batch: the ordinary row never entered native verification.
+        let verifyBatches = await backend.nativeVerifyBatches()
+        XCTAssertFalse(verifyBatches.contains { $0.contains("ordinary") })
+        let ordinaryDecodeRows = await backend.decodeBatches().flatMap { $0 }
+        XCTAssertTrue(ordinaryDecodeRows.contains("ordinary"))
+
+        let depths = await backend.nativeProposalBatches().flatMap { batch in
+            batch.filter { $0.requestID == "gated" }.map(\.maximumProposalDepth)
+        }
+        // Shape 1* 0+ 1+ (plus the final no-capacity round): the gate engages
+        // once, holds through the overloaded rounds plus the whole calm
+        // window, and restores without flapping.
+        let body = Array(depths.dropLast())
+        let zeroStart = try XCTUnwrap(body.firstIndex(of: 0), "gate never engaged: \(depths)")
+        let zeroEnd = try XCTUnwrap(body[zeroStart...].firstIndex(of: 1), "depth never restored: \(depths)")
+        XCTAssertTrue(body[..<zeroStart].allSatisfy { $0 == 1 }, "\(depths)")
+        XCTAssertTrue(body[zeroEnd...].allSatisfy { $0 == 1 }, "\(depths)")
+        XCTAssertGreaterThanOrEqual(
+            zeroEnd - zeroStart,
+            ContinuousBatchScheduler.nativeMTPLoadGateReleaseRounds + 1,
+            "\(depths)"
+        )
+    }
+
+    func testNativeMTPLoadGateLeavesMixedBatchWithinBoundAtFullDepth() async throws {
+        let backend = ScriptedBackend(
+            scripts: ["within": Array(100..<120), "ordinary": [31, 32, 33, 34]],
+            prefillTokens: ["within": 99]
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 2,
+            maxPrefillRowsPerIteration: 2,
+            backend: backend
+        )
+
+        let native = Task {
+            try await scheduler.submit(Self.nativeRequest(
+                id: "within",
+                promptTokens: [10],
+                maxOutputTokens: 8,
+                proposals: [],
+                maximumDepth: 1,
+                maximumActiveRows: 2
+            ))
+        }
+        let ordinary = Task {
+            try await scheduler.submit(.init(
+                id: "ordinary",
+                conversationKey: "",
+                promptTokens: [30],
+                maxOutputTokens: 4,
+                temperature: 0.0,
+                topP: 1.0
+            ))
+        }
+        _ = try await ordinary.value
+        let nativeResult = try await native.value
+
+        XCTAssertEqual(nativeResult.outputTokens.count, 8)
+        let depths = await backend.nativeProposalBatches().flatMap { batch in
+            batch.filter { $0.requestID == "within" }.map(\.maximumProposalDepth)
+        }
+        XCTAssertTrue(depths.dropLast().allSatisfy { $0 == 1 }, "\(depths)")
+    }
+
     func testNativeMTPProposalIsNotCalledBeforeCompleteRoundReservation() async throws {
         let proposalGate = AsyncGate()
         let backend = ScriptedBackend(
@@ -5698,7 +5799,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         completeWindowBytes: Int = 16,
         completeWindowBytesByDepth: [Int]? = nil,
         directive: NativeMTPAdaptationDirective? = nil,
-        nativeMTPTupleFence: NativeMTPTupleFence? = nil
+        nativeMTPTupleFence: NativeMTPTupleFence? = nil,
+        maximumActiveRows: Int = Int.max
     ) -> ContinuousBatchSchedulerRequest {
         let bytesByDepth = completeWindowBytesByDepth
             ?? Array(repeating: completeWindowBytes, count: maximumDepth + 1)
@@ -5713,6 +5815,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             decodePath: .nativeMTP,
             nativeMTPMaximumProposalDepth: maximumDepth,
             nativeMTPCompleteWindowBytesByDepth: bytesByDepth,
+            nativeMTPMaximumActiveRows: maximumActiveRows,
             nativeMTPTupleFence: nativeMTPTupleFence,
             nativeMTPProposalTokens: proposals,
             nativeMTPAdaptationDirective: directive

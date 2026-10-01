@@ -1,12 +1,19 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.3
+version: v0.22.4
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-01
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.22.4 (2026-10-01)** — Native-MTP active-row bound (#1770).
+  SPEC-023-R024 entries gain the required `max_native_active_rows` integer
+  `1..8`, no larger than the entry's `qualified_slots`, consumed by the
+  SPEC-048-R007 load gate. It is part of the complete entry and therefore of
+  `native_mtp_admission_tuple_sha256`; a missing, zero, non-integer, or
+  larger-than-slots value fails the entry closed.
 
 - **v0.22.3 (2026-10-01)** — Native-MTP MLX affine 4-bit admission
   (#1770). SPEC-023-R024 now admits the closed `mlx_affine` quantization
@@ -3116,6 +3123,7 @@ unsigned JSON integers and never floats.
 | `hardware_class` | lowercase ASCII matching `^[a-z0-9][a-z0-9._-]{0,63}$` |
 | `ram_bytes` | exact physical RAM integer `> 0`, not a minimum |
 | `qualified_slots` | integer `2..8`, exact admitted slot count |
+| `max_native_active_rows` | integer `1..8`, no larger than `qualified_slots`; the SPEC-048-R007 load bound above which the tuple serves ordinary decode |
 | `request_feature_profile` | exactly `"native_mtp_greedy_text_v1"` |
 | `decrease_threshold_ppm`, `increase_threshold_ppm` | integers `0..1000000`, strictly increasing |
 | `max_verification_positions_per_committed_milli` | integer `1000..4000` |
@@ -3215,7 +3223,8 @@ profile because they do not say which identity layer they bind.
    presenting a value that differs from the live signed executable's CDHash
    MUST fail closed. `reproducible_build_sha256` remains the installed artifact
    byte digest and MUST NOT be substituted for the live CodeDirectory CDHash.
-   The `entry.complete_window_bytes_by_depth` array is likewise part of the
+   The `entry.complete_window_bytes_by_depth` array and the
+   `entry.max_native_active_rows` integer are likewise part of the
    canonical object; every indexed value MUST be encoded deterministically, with
    no defaulting from `proposal_depth` or runtime heuristics.
    This is the stable identity used by admission, evidence, revocation, and

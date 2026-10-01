@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.13
+**Version:** 0.1.14
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -153,7 +153,8 @@ If this spec and an owner spec conflict, the owner spec governs its domain and
 | Committed state | The exact prefix of staged state corresponding to tokens the ordinary-decode oracle retains at the same boundary. |
 | NativeMTPCapability | Immutable load-time description binding model identity, MTP tensors, family adapter, depth, cache/state support, request-feature support, quantization, and runtime revision. |
 | Path sticky | After the first native proposal/target-state mutation (and therefore before any possible buyer-visible output), execution cannot switch between native MTP and ordinary decode. |
-| Qualified tuple | Exact hardware, OS/toolchain, provider release, MLX runtime, model/artifact, quantization, cache mode, MTP depth, and slot-count combination covered by evidence. |
+| Qualified tuple | Exact hardware, OS/toolchain, provider release, MLX runtime, model/artifact, quantization, cache mode, MTP depth, slot-count, and native active-row bound combination covered by evidence. |
+| Native active-row bound | Signed per-tuple `max_native_active_rows`, `1 <= bound <= qualified_slots`: the largest number of concurrently active decode rows, native and ordinary together, at which the tuple's evidence shows native MTP beating ordinary decode. |
 
 The request path state machine is closed:
 
@@ -415,13 +416,16 @@ after their respective acceptance fixtures pass.
 
 The provider MUST make decode-path selection before output and record exactly
 one closed selector reason. `eligible` selects `native_mtp` only after every
-request, tuple, sidecar, revocation, state, and capacity gate passes; each other
-reason selects ordinary:
+request, tuple, sidecar, revocation, state, capacity, and load gate passes; each
+other reason selects ordinary:
 `eligible|mode_off|classic_draft_configured|sampling|multiple_completions|tools|
 structured_output|logprobs|logit_controls|reasoning_or_template|unknown_request_field|
 conversation_key|multimodal|unsupported_processor|unsupported_state_cache|
-insufficient_verification_capacity|capability_mismatch|tuple_not_admitted|
-tuple_revoked|revocation_state_unavailable`.
+insufficient_verification_capacity|capacity_above_native_bound|capability_mismatch|
+tuple_not_admitted|tuple_revoked|revocation_state_unavailable`.
+`capacity_above_native_bound` is the R007 load gate: an otherwise eligible
+request selects ordinary when the served runtime already holds at least
+`max_native_active_rows` other in-flight requests.
 Reason strings are local diagnostics, at most 48 ASCII bytes, and do not enter
 buyer, receipt, or coordinator wire surfaces.
 
@@ -544,6 +548,39 @@ integer overflow, or tuple-digest mismatch. Total scheduler capacity for the
 qualified tuple is the checked product of the max-depth value and
 `qualified_slots`; overflow is an admission failure.
 
+**Load gate.** Native MTP verifies `B * (1 + depth)` packed target positions
+per round, and small-M quantized matmul cost grows with M, so its throughput
+advantage over ordinary continuous batching shrinks as concurrent rows rise
+and inverts at a tuple-specific row count. The signed SPEC-023 sidecar MUST
+therefore carry `max_native_active_rows`, an integer
+`1 <= max_native_active_rows <= qualified_slots`; consumers MUST fail closed on
+a missing, non-integer, zero, or larger value, and the value is part of the
+canonical admission tuple identity. An active row is any in-flight request on
+the served runtime, native or ordinary, including queued and prefilling rows.
+Admission and in-flight behavior are:
+
+- **Admission.** The selection of a new request counts the other in-flight
+  requests atomically with registering it. If that count is
+  `>= max_native_active_rows`, the request selects ordinary with reason
+  `capacity_above_native_bound` before any native state exists. This is a
+  selection, not a pre-output fallback, and does not increment
+  `preoutput_fallbacks`.
+- **In flight.** Native rows never switch path. While the scheduler's admitted
+  rows (prefilling plus decoding) exceed the smallest bound among native rows,
+  every native row of that tuple verifies at proposal depth zero, the existing
+  in-path degraded state. The gate releases only after 8 consecutive decode
+  rounds at or below the bound (or when no native row remains); this round-count
+  hysteresis is an integer counter, never wall time. Depth then returns to the
+  row's adaptation or directive depth, recomputing proposal state from the
+  committed target state as for every depth increase.
+- Integrity probes (R016 self-test and coordinator canary) run in isolation and
+  are exempt from the in-flight depth gate.
+
+A bound equal to `qualified_slots` never engages for a runtime that admits at
+most that many rows. The bound is chosen from R015 cells measured at each slot
+count from one up to `qualified_slots`: it is the largest row count whose cell
+passes the R015 throughput gate.
+
 Native MTP MUST use SPEC-038 FCFS admission and shared-iteration fairness; it
 MUST NOT create a second priority queue or skip an older ready ordinary row for
 an MTP-only forward. When a packing limit prevents all ready rows from sharing
@@ -644,7 +681,10 @@ in proposal/verification bookkeeping since reset), and
 `throughput_delta_ppm` (signed integer loaded from the admitted sidecar's frozen
 R015 result, not a live estimate); `reset_generation` (nonnegative 64-bit
 integer incremented at each reset); and `last_reason` from the closed set
-`active|disabled_by_default|tuple_not_admitted|tuple_revoked|revocation_state_unavailable|request_ineligible|unsupported_cache_state|capacity_unavailable|low_acceptance_depth_zero|runtime_failure|warm_swap`.
+`active|disabled_by_default|tuple_not_admitted|tuple_revoked|revocation_state_unavailable|request_ineligible|unsupported_cache_state|capacity_unavailable|capacity_above_native_bound|low_acceptance_depth_zero|runtime_failure|warm_swap`.
+`capacity_above_native_bound` records an R007 load-gate admission downgrade or
+in-flight depth-zero engagement; a gated snapshot with native rows reads
+`mode=degraded_depth_zero`.
 No other `native_mtp` field is valid in v0.1.
 
 Every nonnegative 64-bit counter, including each position counter and
@@ -738,13 +778,14 @@ SPEC-023 sidecar before any native-MTP tuple can advertise capability.
 
 ### MTP-13 — signed admission and immutable evidence (SPEC-048-R013)
 
-Catalog/autotune admission MUST be based on the SPEC-023 v0.22.3
+Catalog/autotune admission MUST be based on the SPEC-023 v0.22.4
 `macprovider.native-mtp-admission.v1` signed sidecar bound to one immutable SPEC-023
 `release_id` and SPEC-010 model/artifact member, never provider self-report.
 The sidecar MUST bind the exact decode path, model/artifact/tokenizer digests,
 MTP manifest and family adapter, proposal depth, quantization representation,
 runtime/provider revisions, cache/state classes, exact hardware/RAM,
-qualified slot count, request-feature profile, benchmark policy digest, source
+qualified slot count, native active-row bound (`max_native_active_rows`),
+request-feature profile, benchmark policy digest, source
 commit, reproducible-build digest, the exact lowercase 40-hex
 `spec023.live_executable_cdhash` CodeDirectory identity for the live signed
 executable, `mtp.complete_window_bytes_by_depth`, and evidence artifact
@@ -1035,6 +1076,18 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.14 (2026-10-01)** — Adds the R007 native active-row load gate (#1770).
+  Studio evidence showed native MTP's advantage shrink with concurrency (A3B
+  +13.5%/+4.2%/-0.3% at 2/4/8 slots; 27B dense -1.0%/-2.2% at 2/4) because
+  verification of `B * (1 + depth)` rows runs MLX small-M quantized matmul whose
+  cost grows with M. The signed SPEC-023-R024 sidecar now carries
+  `max_native_active_rows` (`1..qualified_slots`, inside the admission tuple
+  identity); admission selects ordinary with the new closed reason
+  `capacity_above_native_bound` when the runtime already holds that many other
+  rows, and in-flight native rows drop to depth zero while scheduler rows exceed
+  the bound, restoring after 8 calm rounds. R004 and R010 gain the reason value;
+  R013 binds the field; the R015 bench may measure one-slot cells on a
+  two-slot qualified runtime.
 - **0.1.13 (2026-10-01)** — Moves the reviewed fork exception pin from
   `c4bc3461673e9f035c5f11bf41dda120d4baee1d` to
   `ef4ff8568c38c640bc90a8176dc3acfe943a288d` (#1770 round overhead). The

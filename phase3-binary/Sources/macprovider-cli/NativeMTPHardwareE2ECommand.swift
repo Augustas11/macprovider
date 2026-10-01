@@ -136,6 +136,7 @@ final class NativeMTPHardwareE2ERunner {
     private let root: URL
     private let modelID: String
     private let maxBatch: Int
+    private let maxNativeActiveRows: Int
     private let maxPhysicalBlocks: Int
     private let verifyServePath: Bool
 
@@ -152,6 +153,7 @@ final class NativeMTPHardwareE2ERunner {
         rootPath: String,
         modelID: String = NativeMTPHardwareE2ERunner.defaultModelID,
         maxBatch: Int = 2,
+        maxNativeActiveRows: Int? = nil,
         maxPhysicalBlocks: Int = 512,
         verifyServePath: Bool = false
     ) {
@@ -159,6 +161,7 @@ final class NativeMTPHardwareE2ERunner {
             .standardizedFileURL
         self.modelID = modelID
         self.maxBatch = maxBatch
+        self.maxNativeActiveRows = maxNativeActiveRows ?? maxBatch
         self.maxPhysicalBlocks = maxPhysicalBlocks
         self.verifyServePath = verifyServePath
     }
@@ -309,7 +312,8 @@ final class NativeMTPHardwareE2ERunner {
             maximumCompletionTokens: admission.maxCompletionTokens,
             completeWindowBytesByDepth: admission.completeWindowBytesByDepth,
             family: admission.familyAdapter,
-            throughputDeltaPPM: admission.throughputDeltaPPM
+            throughputDeltaPPM: admission.throughputDeltaPPM,
+            maximumNativeActiveRows: admission.maxNativeActiveRows
         )
         let servePathLoad: ModelRuntime.NativeMTPHardwareE2EServePathLoad?
         if verifyServePath {
@@ -827,6 +831,7 @@ final class NativeMTPHardwareE2ERunner {
             "hardware_class": NativeMTPAdmissionSidecar.canonicalHardwareClass(machine.chip),
             "ram_bytes": machine.ramGB * 1_073_741_824,
             "qualified_slots": maxBatch,
+            "max_native_active_rows": maxNativeActiveRows,
             "request_feature_profile": "native_mtp_greedy_text_v1",
             "decrease_threshold_ppm": 1,
             "increase_threshold_ppm": 2,

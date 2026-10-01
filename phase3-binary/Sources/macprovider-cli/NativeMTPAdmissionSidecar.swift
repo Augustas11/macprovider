@@ -25,6 +25,9 @@ struct NativeMTPAdmissionCapability: Equatable, Sendable {
     let providerRevision: String
     let upstreamMLXSwiftLMRevision: String
     let qualifiedSlots: Int
+    /// SPEC-048-R007 load gate: native MTP serves a row only while at most
+    /// this many decode rows are active; signed, `1...qualifiedSlots`.
+    let maxNativeActiveRows: Int
     let spec023ReleaseID: String
     let spec023SourceCommit: String
     let spec023BuildDigestSHA256: String
@@ -593,6 +596,7 @@ enum NativeMTPAdmissionSidecar {
         let osVersion: String
         let qualifiedSlots: Int
         let maxSlots: Int
+        let maxNativeActiveRows: Int
         let requestProfile: RequestProfile
         let spec023: Spec023
         let challengeBankSignerKeyID: String
@@ -628,6 +632,7 @@ enum NativeMTPAdmissionSidecar {
                 osVersion: osVersion,
                 qualifiedSlots: qualifiedSlots,
                 maxSlots: maxSlots,
+                maxNativeActiveRows: maxNativeActiveRows,
                 requestProfile: requestProfile,
                 spec023: spec023,
                 challengeBankSignerKeyID: challengeBankSignerKeyID,
@@ -661,6 +666,7 @@ enum NativeMTPAdmissionSidecar {
         let hardwareClass: String
         let ramBytes: Int
         let qualifiedSlots: Int
+        let maxNativeActiveRows: Int
         let requestFeatureProfile: String
         let decreaseThresholdPPM: Int
         let increaseThresholdPPM: Int
@@ -924,6 +930,7 @@ enum NativeMTPAdmissionSidecar {
             providerRevision: parsed.providerRevision,
             upstreamMLXSwiftLMRevision: parsed.upstreamMLXSwiftLMRevision,
             qualifiedSlots: parsed.qualifiedSlots,
+            maxNativeActiveRows: parsed.maxNativeActiveRows,
             spec023ReleaseID: parsed.spec023.releaseID,
             spec023SourceCommit: parsed.spec023.sourceCommit,
             spec023BuildDigestSHA256: parsed.spec023.reproducibleBuildSHA256,
@@ -1130,6 +1137,9 @@ enum NativeMTPAdmissionSidecar {
             osVersion: try requireNonEmptyString(hardware, "os_version", path: "$.hardware"),
             qualifiedSlots: try requireInt(hardware, "qualified_slots", path: "$.hardware", range: 1...1024),
             maxSlots: try requireInt(hardware, "max_slots", path: "$.hardware", range: 1...1024),
+            // The debug-only legacy object predates the R007 load gate; it
+            // never reaches a release consumer, so it gates at the slot count.
+            maxNativeActiveRows: try requireInt(hardware, "qualified_slots", path: "$.hardware", range: 1...1024),
             requestProfile: requestProfile,
             spec023: spec023,
             challengeBankSignerKeyID: selfTest.signerKeyID,
@@ -1261,6 +1271,7 @@ enum NativeMTPAdmissionSidecar {
             osVersion: context.osVersion,
             qualifiedSlots: selected.entry.qualifiedSlots,
             maxSlots: selected.entry.qualifiedSlots,
+            maxNativeActiveRows: selected.entry.maxNativeActiveRows,
             requestProfile: RequestProfile(
                 textOnly: true,
                 streaming: true,
@@ -1352,7 +1363,7 @@ enum NativeMTPAdmissionSidecar {
             "runtime_revision", "provider_revision", "source_commit",
             "reproducible_build_sha256", "live_executable_cdhash",
             "cache_state_classes", "hardware_class", "ram_bytes",
-            "qualified_slots", "request_feature_profile", "decrease_threshold_ppm",
+            "qualified_slots", "max_native_active_rows", "request_feature_profile", "decrease_threshold_ppm",
             "increase_threshold_ppm", "max_verification_positions_per_committed_milli",
             "throughput_delta_ppm", "benchmark_policy_sha256", "challenge_bank_sha256",
             "quantization", "ordinary_baseline",
@@ -1384,6 +1395,11 @@ enum NativeMTPAdmissionSidecar {
               cacheStateClasses.contains(mtpStateClass) else {
             throw NativeMTPAdmissionSidecarError.invalidValue("\(path).cache_state_classes")
         }
+        let qualifiedSlots = try requireInt(object, "qualified_slots", path: path, range: 2...8)
+        let maxNativeActiveRows = try requireInt(object, "max_native_active_rows", path: path, range: 1...8)
+        guard maxNativeActiveRows <= qualifiedSlots else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("\(path).max_native_active_rows")
+        }
         let decreaseThreshold = try requireInt(object, "decrease_threshold_ppm", path: path, range: 0...1_000_000)
         let increaseThreshold = try requireInt(object, "increase_threshold_ppm", path: path, range: 0...1_000_000)
         guard decreaseThreshold < increaseThreshold else {
@@ -1396,7 +1412,7 @@ enum NativeMTPAdmissionSidecar {
         try parseOrdinaryBaseline(
             try requireObject(object, "ordinary_baseline", path: path),
             path: "\(path).ordinary_baseline",
-            entrySlots: try requireInt(object, "qualified_slots", path: path, range: 2...8),
+            entrySlots: qualifiedSlots,
             artifactHash: try requireSHA256(object, "artifact_hash", path: path),
             runtimeRevision: try requireShortString(object, "runtime_revision", path: path),
             providerRevision: try requireShortString(object, "provider_revision", path: path)
@@ -1426,7 +1442,8 @@ enum NativeMTPAdmissionSidecar {
             cacheStateClasses: cacheStateClasses,
             hardwareClass: try requireHardwareClass(object, "hardware_class", path: path),
             ramBytes: try requireInt(object, "ram_bytes", path: path, range: 1...Int.max),
-            qualifiedSlots: try requireInt(object, "qualified_slots", path: path, range: 2...8),
+            qualifiedSlots: qualifiedSlots,
+            maxNativeActiveRows: maxNativeActiveRows,
             requestFeatureProfile: requestFeatureProfile,
             decreaseThresholdPPM: decreaseThreshold,
             increaseThresholdPPM: increaseThreshold,

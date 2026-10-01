@@ -339,6 +339,9 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     /// from the idempotency fingerprint like other runtime-only native-MTP
     /// selection metadata.
     let nativeMTPCompleteWindowBytesByDepth: [Int]
+    /// Runtime-only signed SPEC-048-R007 load bound: while more rows than
+    /// this are active, native rows of this tuple verify at depth zero.
+    let nativeMTPMaximumActiveRows: Int
     let nativeMTPTupleFence: NativeMTPTupleFence?
     let nativeMTPIntegrityProbe: Bool
     /// Test-only/request-fixture proposal source. Production native MTP rows
@@ -368,6 +371,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         decodePath: DecodePath = .ordinary,
         nativeMTPMaximumProposalDepth: Int = 0,
         nativeMTPCompleteWindowBytesByDepth: [Int] = [],
+        nativeMTPMaximumActiveRows: Int = Int.max,
         nativeMTPTupleFence: NativeMTPTupleFence? = nil,
         nativeMTPIntegrityProbe: Bool = false,
         nativeMTPProposalTokens: [Int] = [],
@@ -393,6 +397,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         self.decodePath = decodePath
         self.nativeMTPMaximumProposalDepth = max(0, nativeMTPMaximumProposalDepth)
         self.nativeMTPCompleteWindowBytesByDepth = nativeMTPCompleteWindowBytesByDepth
+        self.nativeMTPMaximumActiveRows = max(1, nativeMTPMaximumActiveRows)
         self.nativeMTPTupleFence = decodePath == .nativeMTP ? nativeMTPTupleFence : nil
         self.nativeMTPIntegrityProbe = decodePath == .nativeMTP && nativeMTPIntegrityProbe
         self.nativeMTPProposalTokens = nativeMTPProposalTokens
@@ -1598,6 +1603,13 @@ actor ContinuousBatchScheduler {
     private var disabledNativeMTPTupleFences: Set<NativeMTPTupleFence> = []
     private var nativeMTPRowsWithStagedMutation: Set<String> = []
     private var nativeMTPIntegrityProbeInFlight = false
+    /// SPEC-048-R007 in-flight load gate. Engages as soon as active rows exceed
+    /// the smallest signed bound among native rows; releases only after
+    /// `nativeMTPLoadGateReleaseRounds` consecutive decode rounds at or below
+    /// it, so a row finishing and another arriving cannot flap the depth.
+    private var nativeMTPLoadGateEngaged = false
+    private var nativeMTPLoadGateCalmRounds = 0
+    static let nativeMTPLoadGateReleaseRounds = 8
     private var pendingTerminalDeliveries: [String: PendingTerminalDelivery] = [:]
     private var stoppingWaiterIDs: Set<UUID> = []
     private var stoppingActiveWaiters: [UUID: StoppingActiveWaiter] = [:]
@@ -2527,6 +2539,9 @@ actor ContinuousBatchScheduler {
     private func nativeMTPMaximumProposalDepth(for row: Row) -> Int {
         let remainingOutputTokens = max(0, row.request.maxOutputTokens - row.generatedTokens.count)
         let remainingProposalCapacity = max(0, remainingOutputTokens - 1)
+        if nativeMTPLoadGateEngaged, !row.request.nativeMTPIntegrityProbe {
+            return 0
+        }
         let requestedDepth = row.nativeMTPDirective?.forcedDepth
             ?? row.nativeMTPAdaptation?.currentDepth
             ?? row.request.nativeMTPMaximumProposalDepth
@@ -3551,6 +3566,30 @@ actor ContinuousBatchScheduler {
         }
     }
 
+    private func updateNativeMTPLoadGate(nativeRows: [Row]) {
+        let bound = nativeRows.map(\.request.nativeMTPMaximumActiveRows).min() ?? Int.max
+        let activeRows = activeDecode.count + activePrompt.count
+        if activeRows > bound {
+            if !nativeMTPLoadGateEngaged {
+                configuration.nativeMTPStatusSink?.recordReason(.capacityAboveNativeBound)
+                try? FileHandle.standardError.write(contentsOf: Data(
+                    "event=native_mtp_load_gate action=depth_zero active_rows=\(activeRows) bound=\(bound)\n".utf8
+                ))
+            }
+            nativeMTPLoadGateEngaged = true
+            nativeMTPLoadGateCalmRounds = 0
+        } else if nativeMTPLoadGateEngaged {
+            nativeMTPLoadGateCalmRounds += 1
+            if nativeMTPLoadGateCalmRounds >= Self.nativeMTPLoadGateReleaseRounds || nativeRows.isEmpty {
+                nativeMTPLoadGateEngaged = false
+                nativeMTPLoadGateCalmRounds = 0
+                try? FileHandle.standardError.write(contentsOf: Data(
+                    "event=native_mtp_load_gate action=restore active_rows=\(activeRows) bound=\(bound)\n".utf8
+                ))
+            }
+        }
+    }
+
     private func runDecodeStep() async {
         await fenceDisabledActiveNativeMTPRows()
         guard !cleanupFailedClosed else { return }
@@ -3558,6 +3597,7 @@ actor ContinuousBatchScheduler {
             admissionPrecedes($0.request.id, $1.request.id)
         }
         let nativeRows = rows.filter(\.usesNativeMTP)
+        updateNativeMTPLoadGate(nativeRows: nativeRows)
         guard !nativeRows.isEmpty else {
             await runOrdinaryDecodeStep(rows: rows)
             return
