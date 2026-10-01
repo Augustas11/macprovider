@@ -29,6 +29,8 @@ enum SmallMQMV {
         case rb
         case mma
         case mmas
+        /// MoESmallM SIMT broadcast-x kernel (rows = R per lane, kSplit 0 = auto).
+        case vb
     }
 
     static let header = """
@@ -392,20 +394,36 @@ enum SmallMQMV {
         /// Routing only: smallest row count sent to the kernel (below it, MLX
         /// qmv / qmv_wide is already close to the M=1 cost).
         var minRows: Int = 4
+        /// vb only: stage activations through threadgroup memory (1) or not (0).
+        var stageX: Int = 1
+        /// vb only: lanes sharing one weight row.
+        var lanesPerRow: Int = 8
 
         var description: String {
-            variant == .rb ? "rb-r\(rows)" : "\(variant.rawValue)-nt\(rows)-ks\(kSplit)" + (fragAct ? "-act" : "")
+            if variant == .vb {
+                return "vb-r\(rows)-l\(lanesPerRow)" + (kSplit > 0 ? "-ks\(kSplit)" : "") + (stageX == 0 ? "-xs0" : "")
+                    + (minRows > 1 ? "-min\(minRows)" : "")
+            }
+            return variant == .rb ? "rb-r\(rows)" : "\(variant.rawValue)-nt\(rows)-ks\(kSplit)" + (fragAct ? "-act" : "")
         }
 
         static func parse(_ text: String) -> Config? {
             let parts = text.split(separator: "-").map(String.init)
             guard let first = parts.first, let variant = Variant(rawValue: first) else { return nil }
             var config = Config(variant: variant, rows: variant == .rb ? 4 : 1, kSplit: 4)
+            if variant == .vb {
+                config.rows = 2
+                config.kSplit = 0
+                config.minRows = 1
+            }
             for part in parts.dropFirst() {
                 if part.hasPrefix("nt"), let v = Int(part.dropFirst(2)) { config.rows = v }
                 if part.hasPrefix("r"), let v = Int(part.dropFirst(1)) { config.rows = v }
                 if part.hasPrefix("ks"), let v = Int(part.dropFirst(2)) { config.kSplit = v }
                 if part == "act" { config.fragAct = true }
+                if part == "xs0" { config.stageX = 0 }
+                if part.hasPrefix("l"), let v = Int(part.dropFirst(1)) { config.lanesPerRow = v }
+                if part == "xs1" { config.stageX = 1 }
                 if part.hasPrefix("min"), let v = Int(part.dropFirst(3)) { config.minRows = v }
             }
             return config
@@ -435,6 +453,10 @@ enum SmallMQMV {
             return k % 128 == 0 && n % (8 * config.rows) == 0
         case .mmas:
             return k % 64 == 0 && n % (8 * config.rows) == 0
+        case .vb:
+            return MoESmallM.denseTiling(
+                n: n, k: k, r: config.rows, lpr: config.lanesPerRow, xs: config.stageX,
+                ks: config.kSplit > 0 ? config.kSplit : nil) != nil
         }
     }
 
@@ -447,6 +469,11 @@ enum SmallMQMV {
         let n = w.dim(0)
         let dtype = x.dtype
         switch config.variant {
+        case .vb:
+            let tiling = MoESmallM.denseTiling(
+                n: n, k: k, r: config.rows, lpr: config.lanesPerRow, xs: config.stageX,
+                ks: config.kSplit > 0 ? config.kSplit : nil)!
+            return MoESmallM.dense(x, w: w, scales: scales, biases: biases, tiling: tiling)
         case .rb:
             let groups = n / (2 * config.rows)
             return rbKernel(
@@ -480,6 +507,8 @@ enum SmallMQMV {
 /// 2 <= rows <= 16 through `SmallMQMV`; everything else keeps `quantizedMM`.
 final class SmallMQuantizedLinear: QuantizedLinear {
     nonisolated(unsafe) static var fixedConfig: SmallMQMV.Config?
+    /// Lab toggle so one loaded model can be compared routed vs not routed.
+    nonisolated(unsafe) static var enabled = true
 
     init(_ other: QuantizedLinear) {
         super.init(
@@ -495,10 +524,10 @@ final class SmallMQuantizedLinear: QuantizedLinear {
         var config = Self.fixedConfig ?? SmallMQMV.Config.auto(m: rows)
         // Narrow outputs give too few threadgroups; split K wider, and leave
         // the tiny projections (linear-attention in_proj_a/b, N <= 64) to MLX.
-        if config.variant != .rb, n < 4096 {
+        if config.variant != .rb, config.variant != .vb, n < 4096 {
             config.kSplit = max(config.kSplit, 8)
         }
-        guard rows >= config.minRows, n >= 512, bits == 4, groupSize == 64, mode == .affine, let biases,
+        guard Self.enabled, rows >= config.minRows, n >= 512, bits == 4, groupSize == 64, mode == .affine, let biases,
               weight.ndim == 2,
               SmallMQMV.supports(m: rows, n: n, k: k, config: config, dtype: x.dtype)
         else {

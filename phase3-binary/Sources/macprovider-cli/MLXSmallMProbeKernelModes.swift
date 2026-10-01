@@ -94,6 +94,13 @@ extension MLXSmallMProbeCommand {
                     let ours = SmallMQMV.matmul(x, w: q.wq, scales: q.scales, biases: q.biases!, config: config)
                     eval(ours)
                     var record = Self.errorRecord(ours: ours, exact: ref.exact, perRow: ref.perRow, batched: ref.batched)
+                    if SmallMQMV.supports(m: 1, n: n, k: k, config: config, dtype: .bfloat16) {
+                        // Batch invariance: each row computed alone (M = 1) vs inside the M-row call.
+                        let alone = concatenated((0 ..< m).map { i in
+                            SmallMQMV.matmul(x[i ..< i + 1], w: q.wq, scales: q.scales, biases: q.biases!, config: config)
+                        }, axis: 0)
+                        record["ours_vs_ours_m1_rows_mismatch_frac"] = (ours .!= alone).asType(.float32).mean().item(Float.self)
+                    }
                     record["schema"] = "macprovider.mlx-smallm-probe.kcheck.v1"
                     record["n"] = n
                     record["k"] = k

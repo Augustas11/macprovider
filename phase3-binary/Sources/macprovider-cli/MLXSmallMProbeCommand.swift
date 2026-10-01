@@ -26,7 +26,7 @@ struct MLXSmallMProbeCommand: AsyncParsableCommand {
         shouldDisplay: false
     )
 
-    @Option(help: "qmm, kernel-name, greedy, kcheck, kbench, or kreal.")
+    @Option(help: "qmm, kernel-name, greedy, kcheck, kbench, kreal, overlap, greal, gbench, or flips.")
     var mode: String = "qmm"
 
     @Option(help: "Comma-separated NxK weight shapes (out x in).")
@@ -59,6 +59,21 @@ struct MLXSmallMProbeCommand: AsyncParsableCommand {
     @Option(help: "Comma-separated M values for kcheck/kbench/kreal (default 1...max-m).")
     var ms: String?
 
+    @Option(help: "gbench: comma-separated tokens:distinct pairs, e.g. 8:50,16:90.")
+    var distinct: String?
+
+    @Option(name: .customLong("copies"), help: "gbench: layer copies to cycle (DRAM streaming).")
+    var copiesOverride: Int?
+
+    @Option(name: .customLong("gate-up-tiling"), help: "gbench/greal/micro: grouped gate/up tiling r-lpr-ks-nt-xs, e.g. 2-8-1-4-1.")
+    var gateUpTiling: String?
+
+    @Option(name: .customLong("down-tiling"), help: "grouped down tiling r-lpr-ks-nt-xs, e.g. 1-8-1-4-1.")
+    var downTiling: String?
+
+    @Option(help: "greal/flips: comma-separated tokens per row (verify width 1 + k).")
+    var widths: String?
+
     @Flag(help: "kbench: time a dependent chain of matmuls (sequential latency) instead of independent ones.")
     var serial = false
 
@@ -66,6 +81,7 @@ struct MLXSmallMProbeCommand: AsyncParsableCommand {
     var smallmQMV: String = "off"
 
     func run() async throws {
+        try MoESmallM.applyTilingOverrides(gateUp: gateUpTiling, down: downTiling)
         switch mode {
         case "qmm":
             try runQMM()
@@ -79,6 +95,14 @@ struct MLXSmallMProbeCommand: AsyncParsableCommand {
             try runKernelBench()
         case "kreal":
             try await runKernelReal()
+        case "overlap":
+            try await runOverlap()
+        case "greal":
+            try await runGroupedReal()
+        case "flips":
+            try await runFlips()
+        case "gbench":
+            try runGroupedBench()
         default:
             throw ValidationError("unknown mode \(mode)")
         }

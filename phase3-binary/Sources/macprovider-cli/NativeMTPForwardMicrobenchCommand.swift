@@ -41,7 +41,20 @@ struct NativeMTPForwardMicrobenchCommand: AsyncParsableCommand {
     @Option(name: .customLong("smallm-qmv"), help: "Lab: route QuantizedLinear M>=2 through SmallMQMV (off, auto, or a config).")
     var smallmQMV: String = "off"
 
+    @Option(name: .customLong("moe-smallm"), help: "Lab: A3B MoE block path (off, stock, grouped).")
+    var moeSmallM: String = "off"
+
+    @Option(name: .customLong("ablate"), help: "Lab cost split: comma list of attnproj, router, routed, shared, lmhead.")
+    var ablate: String = "none"
+
+    @Option(name: .customLong("gate-up-tiling"), help: "Lab: grouped gate/up tiling r-lpr-ks-nt-xs.")
+    var gateUpTiling: String?
+
+    @Option(name: .customLong("down-tiling"), help: "Lab: grouped down tiling r-lpr-ks-nt-xs.")
+    var downTiling: String?
+
     func run() async throws {
+        try MoESmallM.applyTilingOverrides(gateUp: gateUpTiling, down: downTiling)
         let batchSizes = batches.split(separator: ",").compactMap { Int($0) }
         let widthValues = widths.split(separator: ",").compactMap { Int($0) }
         let variantValues = variants.split(separator: ",").map(String.init)
@@ -53,8 +66,11 @@ struct NativeMTPForwardMicrobenchCommand: AsyncParsableCommand {
             from: URL(fileURLWithPath: modelDir, isDirectory: true),
             using: #huggingFaceTokenizerLoader()
         )
+        let moeNotes = try await MLXSmallMProbeCommand.installMoELab(moe: moeSmallM, ablate: ablate, container: container)
         let routed = try await MLXSmallMProbeCommand.installSmallMRouting(smallmQMV, container: container)
         let smallmLabel = smallmQMV
+        let moeLabel = moeSmallM
+        let ablateLabel = ablate
         let promptTokens = self.promptTokens
         let warmup = self.warmup
         let iters = self.iters
@@ -74,7 +90,8 @@ struct NativeMTPForwardMicrobenchCommand: AsyncParsableCommand {
                             iters: iters
                         )
                     }
-                    print(line.dropLast() + ",\"smallm_qmv\":\"\(smallmLabel)\",\"smallm_routed_layers\":\(routed)}")
+                    print(line.dropLast() + ",\"smallm_qmv\":\"\(smallmLabel)\",\"smallm_routed_layers\":\(routed)"
+                        + ",\"moe_smallm\":\"\(moeLabel)\",\"moe_tiling\":\"\(MoESmallM.gateUpTiling)/\(MoESmallM.downTiling)\",\"ablate\":\"\(ablateLabel)\",\"moe_notes\":\"\(moeNotes)\"}")
                     fflush(stdout)
                 }
             }
