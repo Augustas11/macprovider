@@ -3179,6 +3179,7 @@ class PearlUpdaterTests(unittest.TestCase):
     def test_exact_catalog_admission_uses_the_local_buyer_listener(self):
         release = self.verify()
         self.updater.catalog_admission_ready = mock.Mock(return_value=True)
+        self.updater.public_catalog_artifact_feed_ready = mock.Mock(return_value=True)
         self.updater.wait_for = lambda _description, _timeout, check: self.assertTrue(check())
         self.updater.audit = mock.Mock()
 
@@ -3191,6 +3192,48 @@ class PearlUpdaterTests(unittest.TestCase):
                 mock.call(release, "https://coordinator.malibu.tech/v1/autotune-release"),
             ],
         )
+
+    def test_public_artifact_feed_must_serve_the_bound_bytes_through_nginx(self):
+        # #1816 freeze audit R1 A-M3: the updater reads /v1/catalog-artifacts
+        # and its .sig through the public host and requires the release's
+        # exact bytes for a bound release, nothing for an unbound one.
+        release = self.verify()
+        feed = (release.directory / "autotune-artifacts.json").read_bytes()
+        sig = (release.directory / "autotune-artifacts.json.sig").read_bytes()
+        served = {
+            "https://coordinator.malibu.tech/v1/catalog-artifacts": (200, feed),
+            "https://coordinator.malibu.tech/v1/catalog-artifacts.sig": (200, sig),
+        }
+        self.updater.get_public_bytes = mock.Mock(side_effect=lambda url: served[url])
+        self.assertTrue(self.updater.public_catalog_artifact_feed_ready(release))
+        # nginx without the manual location blocks answers 404.
+        served["https://coordinator.malibu.tech/v1/catalog-artifacts"] = (404, b"")
+        self.assertFalse(self.updater.public_catalog_artifact_feed_ready(release))
+        served["https://coordinator.malibu.tech/v1/catalog-artifacts"] = (200, feed + b" ")
+        self.assertFalse(self.updater.public_catalog_artifact_feed_ready(release))
+        served["https://coordinator.malibu.tech/v1/catalog-artifacts"] = (200, feed)
+        served["https://coordinator.malibu.tech/v1/catalog-artifacts.sig"] = (404, b"")
+        self.assertFalse(self.updater.public_catalog_artifact_feed_ready(release))
+
+        # The rollout fails (and so rolls back) with the actionable nginx step.
+        self.updater.catalog_admission_ready = mock.Mock(return_value=True)
+        self.updater.audit = mock.Mock()
+        self.updater.sleep = mock.Mock()
+        self.updater.config = updater_module.dataclasses.replace(self.updater.config, service_health_timeout_s=1)
+        with self.assertRaisesRegex(updater_module.UpdateError, "nginx `location = /v1/catalog-artifacts`"):
+            self.updater.verify_exact_catalog_admission(release)
+
+    def test_public_artifact_feed_absent_for_an_unbound_release(self):
+        self.make_bundle(artifact_feed=False)
+        release = self.verify()
+        served = {
+            "https://coordinator.malibu.tech/v1/catalog-artifacts": (404, b""),
+            "https://coordinator.malibu.tech/v1/catalog-artifacts.sig": (404, b""),
+        }
+        self.updater.get_public_bytes = mock.Mock(side_effect=lambda url: served[url])
+        self.assertTrue(self.updater.public_catalog_artifact_feed_ready(release))
+        served["https://coordinator.malibu.tech/v1/catalog-artifacts"] = (200, b"{}")
+        self.assertFalse(self.updater.public_catalog_artifact_feed_ready(release))
 
     def test_exact_provider_canary_matches_pool_envelope_to_independent_mac_row(self):
         release = self.verify()

@@ -84,6 +84,15 @@ Pearl's vhost, before its `location /v1/ { return 404; }`, then run
 `nginx -t && systemctl reload nginx`. Never copy the whole repo site file over
 Pearl's.
 
+The Pearl updater checks this inside its rollback-armed rollout, right after
+the public exact catalog admission check: it fetches
+`https://coordinator.malibu.tech/v1/catalog-artifacts` and `.sig` and requires
+the release's exact bound bytes (or neither, for an unbound release). If the
+blocks are missing it fails with an error naming this step and rolls the
+release back; that is the same blast radius as any other admission check
+failure at that point, and the previous release keeps serving. Add the blocks
+and re-run the update.
+
 `scripts/verify-live-coordinator-release-gate.py` reads whether the release
 binds `autotune-artifacts.json` (+ `.sig`) from `pearl-release.json`
 `catalog.files`. Bound: the live feed must match the bound digest, verify under
