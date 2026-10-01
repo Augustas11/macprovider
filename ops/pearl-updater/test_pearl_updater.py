@@ -236,6 +236,7 @@ class PearlUpdaterTests(unittest.TestCase):
         channel: str | None = None,
         runtime_only: bool = False,
         stats_sidecars: bool = False,
+        artifact_feed: bool = True,
         ):
         tag = "v" + version
         advertised_version = advertised_version or version
@@ -252,10 +253,11 @@ class PearlUpdaterTests(unittest.TestCase):
             sidecar.unlink(missing_ok=True)
             if stats_sidecars:
                 sidecar.write_bytes(fake_elf(sidecar.name))
-        for name in updater_module.CATALOG_ASSETS:
+        for name in updater_module.ARTIFACT_BOUND_CATALOG_ASSETS:
             (self.bundle / name).unlink(missing_ok=True)
         catalog_metadata = None
         catalog_assets = []
+        self.catalog_assets = ()
         release_lane = updater_module.RELEASE_LANE_RUNTIME
         if not runtime_only:
             catalog_sources = {
@@ -274,13 +276,26 @@ class PearlUpdaterTests(unittest.TestCase):
             for name, source in catalog_sources.items():
                 shutil.copyfile(source, self.bundle / name)
             catalog_manifest = json.loads((self.bundle / "release.json").read_text(encoding="utf-8"))
-            catalog_assets = [self.bundle / name for name in updater_module.CATALOG_ASSETS]
+            feed = updater_module.CATALOG_ARTIFACT_FEED
+            if feed in catalog_manifest["feeds"] and not artifact_feed:
+                # The unbound manifest verify-directory expects beside the base files.
+                del catalog_manifest["feeds"][feed]
+                (self.bundle / "release.json").write_text(
+                    json.dumps(catalog_manifest, indent=2, sort_keys=True) + "\n"
+                )
+            if feed in catalog_manifest["feeds"]:
+                for name in updater_module.CATALOG_ARTIFACT_FEED_ASSETS:
+                    shutil.copyfile(REPO_ROOT / "phase3-binary/dist/static" / name, self.bundle / name)
+                self.catalog_assets = updater_module.ARTIFACT_BOUND_CATALOG_ASSETS
+            else:
+                self.catalog_assets = updater_module.CATALOG_ASSETS
+            catalog_assets = [self.bundle / name for name in self.catalog_assets]
             catalog_metadata = {
                 "release_id": catalog_manifest["release_id"],
                 "policy_version": catalog_manifest["policy_version"],
                 "files": {
                     name: updater_module.sha256_file(self.bundle / name)
-                    for name in updater_module.CATALOG_ASSETS
+                    for name in self.catalog_assets
                 },
             }
             release_lane = updater_module.RELEASE_LANE_RUNTIME_WITH_CATALOG
@@ -388,7 +403,7 @@ class PearlUpdaterTests(unittest.TestCase):
         catalog_release.mkdir(parents=True, mode=0o750, exist_ok=True)
         (install / "autotune").chmod(0o750)
         (install / "autotune" / "releases").chmod(0o750)
-        for name in updater_module.CATALOG_ASSETS:
+        for name in release.catalog.assets:
             shutil.copy2(release.directory / name, catalog_release / name)
             (catalog_release / name).chmod(0o640)
         (install / "autotune" / "current").unlink(missing_ok=True)
@@ -477,7 +492,7 @@ class PearlUpdaterTests(unittest.TestCase):
 
         self.assertEqual(release.release_lane, updater_module.RELEASE_LANE_RUNTIME)
         self.assertIsNone(release.catalog)
-        for name in updater_module.CATALOG_ASSETS:
+        for name in updater_module.ARTIFACT_BOUND_CATALOG_ASSETS:
             self.assertFalse((release.directory / name).exists(), name)
 
     def test_runtime_only_release_requires_explicit_tag_for_remote_acquire(self):
@@ -629,7 +644,7 @@ class PearlUpdaterTests(unittest.TestCase):
             self.bundle / updater_module.COORDINATOR_ASSET,
             self.bundle / updater_module.COORDINATOR_CLI_ASSET,
             self.bundle / updater_module.GATEWAY_ASSET,
-            *(self.bundle / name for name in updater_module.CATALOG_ASSETS),
+            *(self.bundle / name for name in self.catalog_assets),
         ]
         checksums = self.bundle / "checksums.txt"
         checksums.write_text(
@@ -656,7 +671,7 @@ class PearlUpdaterTests(unittest.TestCase):
             self.bundle / updater_module.COORDINATOR_ASSET,
             self.bundle / updater_module.COORDINATOR_CLI_ASSET,
             self.bundle / updater_module.GATEWAY_ASSET,
-            *(self.bundle / name for name in updater_module.CATALOG_ASSETS),
+            *(self.bundle / name for name in self.catalog_assets),
         ]
         checksums = self.bundle / "checksums.txt"
         checksums.write_text(
@@ -697,7 +712,7 @@ class PearlUpdaterTests(unittest.TestCase):
             f"releases/{catalog_directory_name}",
         )
         self.assertEqual(previous.read_text(), "releases/old-catalog\nreleases/older-catalog\n")
-        for name in updater_module.CATALOG_ASSETS:
+        for name in release.catalog.assets:
             self.assertEqual(
                 updater_module.sha256_file(releases / catalog_directory_name / name),
                 release.catalog.files[name],
@@ -738,6 +753,191 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual(legacy_tier2.stat().st_uid, legacy_stat.st_uid)
         self.assertEqual(legacy_tier2.stat().st_gid, legacy_stat.st_gid)
         self.assertEqual(stat.S_IMODE(legacy_tier2.stat().st_mode), 0o600)
+
+    def _artifact_feed_config_fixture(self, extra_autotune: str = ""):
+        install = self.updater.install_root
+        install.mkdir(parents=True, exist_ok=True)
+        for name in ("coordinator", "gateway"):
+            (install / name).write_bytes(fake_elf("installed-" + name))
+            (install / name).chmod(0o750)
+        (install / "gateway.yaml").write_text("gateway: {}\n")
+        (install / "gateway.yaml").chmod(0o600)
+        base = install / "coordinator.yaml"
+        base.write_text(
+            'coordinator_advertised_version:\n  latest_binary_version: "1.8.26"\n'
+            "autotune:\n"
+            "  enforce_provider_admission: false\n"
+            f"{extra_autotune}"
+            "tier2:\n"
+            f"  catalog_path: {install}/autotune/current/tier2-catalog.json\n"
+            "  require_hash_verified: false\n"
+        )
+        base.chmod(0o600)
+        self.updater.coordinator_runtime = mock.Mock(
+            return_value=updater_module.CoordinatorRuntime(base, None, {})
+        )
+        self.updater.previous_versions = {"coordinator": "1.8.26", "gateway": "1.8.26"}
+        return base
+
+    def test_artifact_bound_release_verifies_stages_installs_and_configures_feed(self):
+        release = self.stage(self.verify())
+        feed, sidecar = updater_module.CATALOG_ARTIFACT_FEED_ASSETS
+
+        self.assertEqual(release.catalog.assets, updater_module.ARTIFACT_BOUND_CATALOG_ASSETS)
+        for name in (feed, sidecar):
+            self.assertEqual(updater_module.sha256_file(release.directory / name), release.catalog.files[name])
+        self.updater.verify_catalog_release(release)
+        base = self._artifact_feed_config_fixture()
+        update = self.updater.prepare_config_update(release)
+        staged = update.staged.read_text()
+        current = self.updater.install_root / "autotune" / "current"
+        self.assertIn(f"  catalog_artifacts_path: {current / feed}\n", staged)
+        self.assertIn(f"  catalog_artifacts_sig_path: {current / sidecar}\n", staged)
+        self.assertNotIn("catalog_artifacts", base.read_text())
+
+        self._catalog_install_fixture("releases/catalog-b", "")
+        self.updater.install_catalog(release)
+        installed = current.resolve()
+        for name in (feed, sidecar):
+            self.assertEqual(updater_module.sha256_file(installed / name), release.catalog.files[name])
+            self.assertEqual(stat.S_IMODE((installed / name).stat().st_mode), 0o640)
+        self.assertTrue(self.updater.installed_catalog_is_coherent(release))
+        (installed / feed).chmod(0o600)
+        self.assertFalse(self.updater.installed_catalog_is_coherent(release))
+
+    def test_artifact_feed_paths_in_a_non_target_config_are_refused(self):
+        release = self.stage(self.verify())
+        base = self._artifact_feed_config_fixture()
+        overlay = self.updater.install_root / "overlay.yaml"
+        overlay.write_text("autotune:\n  catalog_artifacts_path: /elsewhere/autotune-artifacts.json\n")
+        overlay.chmod(0o600)
+        self.updater.coordinator_runtime = mock.Mock(
+            return_value=updater_module.CoordinatorRuntime(base, overlay, {})
+        )
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "autotune.catalog_artifacts_path must live"):
+            self.updater.prepare_config_update(release)
+
+    def test_artifact_bound_manifest_without_signed_metadata_binding_is_refused(self):
+        def drop_feed(metadata):
+            for name in updater_module.CATALOG_ARTIFACT_FEED_ASSETS:
+                del metadata["catalog"]["files"][name]
+
+        self.resign_bundle(drop_feed)
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "catalog release manifest feed set is invalid"):
+            self.verify()
+
+    def test_artifact_bound_metadata_requires_the_signed_feed_asset(self):
+        def drop_checksum(rows):
+            del rows[updater_module.CATALOG_ARTIFACT_FEED]
+
+        self.resign_bundle(checksum_mutator=drop_checksum)
+
+        with self.assertRaisesRegex(
+            updater_module.UpdateError,
+            "signed checksums omit required catalog/feed asset: autotune-artifacts.json",
+        ):
+            self.verify()
+
+    def test_artifact_feed_metadata_must_be_both_files(self):
+        def drop_sidecar(metadata):
+            del metadata["catalog"]["files"]["autotune-artifacts.json.sig"]
+
+        self.resign_bundle(drop_sidecar)
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "release metadata catalog identity/files are invalid"):
+            self.verify()
+
+    def test_artifact_feed_bad_signature_is_refused_by_the_inner_verifier(self):
+        sidecar = self.bundle / "autotune-artifacts.json.sig"
+        signature = json.loads(sidecar.read_text(encoding="utf-8"))
+        signature["signature"] = "A" * len(signature["signature"])
+        sidecar.write_text(json.dumps(signature, sort_keys=True, separators=(",", ":")) + "\n")
+
+        def rebind(metadata):
+            metadata["catalog"]["files"][sidecar.name] = updater_module.sha256_file(sidecar)
+
+        self.resign_bundle(rebind)
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "inner Ed25519 verification failed"):
+            self.verify()
+
+    def test_artifact_feed_signer_identity_mismatch_is_refused(self):
+        sidecar = self.bundle / "autotune-artifacts.json.sig"
+        signature = json.loads(sidecar.read_text(encoding="utf-8"))
+        signature["key_id"] = "streamvc-autotune-static-v5"
+        sidecar.write_text(json.dumps(signature, sort_keys=True, separators=(",", ":")) + "\n")
+
+        def rebind(metadata):
+            metadata["catalog"]["files"][sidecar.name] = updater_module.sha256_file(sidecar)
+
+        self.resign_bundle(rebind)
+
+        with self.assertRaisesRegex(
+            updater_module.UpdateError, "catalog signature identity mismatch for autotune-artifacts.json"
+        ):
+            self.verify()
+
+    def test_unbound_release_keeps_base_asset_set_and_clears_feed_paths(self):
+        self.make_bundle(artifact_feed=False)
+        release = self.stage(self.verify())
+
+        self.assertEqual(release.catalog.assets, updater_module.CATALOG_ASSETS)
+        self.updater.verify_catalog_release(release)
+        for name in updater_module.CATALOG_ARTIFACT_FEED_ASSETS:
+            self.assertFalse((release.directory / name).exists(), name)
+        digest = hashlib.sha256()
+        for name in updater_module.CATALOG_ASSETS:
+            digest.update(f"{name}\0{release.catalog.files[name]}\n".encode("ascii"))
+        self.assertEqual(
+            self.updater._catalog_release_directory_name(release),
+            f"{release.catalog.release_id}-{digest.hexdigest()[:16]}",
+        )
+        current = self.updater.install_root / "autotune" / "current"
+        base = self._artifact_feed_config_fixture(
+            f"  catalog_artifacts_path: {current}/autotune-artifacts.json\n"
+            f"  catalog_artifacts_sig_path: {current}/autotune-artifacts.json.sig\n"
+        )
+        update = self.updater.prepare_config_update(release)
+        self.assertNotIn("catalog_artifacts", update.staged.read_text())
+        self.assertIn("catalog_artifacts_path", base.read_text())
+
+        self._catalog_install_fixture("releases/catalog-b", "")
+        self.updater.install_catalog(release)
+        installed = current.resolve()
+        self.assertEqual(sorted(path.name for path in installed.iterdir()), sorted(updater_module.CATALOG_ASSETS))
+        self.assertTrue(self.updater.installed_catalog_is_coherent(release))
+
+    def test_artifact_bound_rollback_restores_unbound_catalog_and_config(self):
+        self.make_bundle(artifact_feed=False)
+        unbound = self.stage(self.verify())
+        base = self._artifact_feed_config_fixture()
+        self._catalog_install_fixture("releases/catalog-b", "")
+        self.updater.install_catalog(unbound)
+        unbound_target = f"releases/{self.updater._catalog_release_directory_name(unbound)}"
+        original_config = base.read_bytes()
+
+        self.make_bundle()
+        bound = self.stage(self.verify())
+        update = self.updater.prepare_config_update(bound)
+        tx = self.updater.snapshot(bound)
+        self.updater.install_catalog(bound)
+        shutil.copyfile(update.staged, base)
+        current = self.updater.install_root / "autotune" / "current"
+        bound_target = f"releases/{self.updater._catalog_release_directory_name(bound)}"
+        self.assertEqual(os.readlink(current), bound_target)
+        self.assertTrue((current / updater_module.CATALOG_ARTIFACT_FEED).is_file())
+        self.assertIn("catalog_artifacts_path", base.read_text())
+
+        self.updater._restore_catalog(tx)
+        self.updater._restore_configurations(tx)
+
+        self.assertEqual(os.readlink(current), unbound_target)
+        self.assertFalse((current / updater_module.CATALOG_ARTIFACT_FEED).exists())
+        self.assertFalse((self.updater.install_root / "autotune" / bound_target).exists())
+        self.assertEqual(base.read_bytes(), original_config)
+        self.assertTrue(self.updater.installed_catalog_is_coherent(unbound))
 
     def _catalog_install_fixture(self, current_target: str, window: str):
         install = self.updater.install_root
@@ -1110,7 +1310,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertFalse((install / "autotune" / ".previous-target").exists())
         for call in fchown.call_args_list:
             self.assertEqual(call.args[2], service_gid)
-        for name in updater_module.CATALOG_ASSETS:
+        for name in release.catalog.assets:
             installed = destination / name
             self.assertEqual(installed.stat().st_gid, service_gid)
             self.assertEqual(stat.S_IMODE(installed.stat().st_mode), 0o640)
@@ -1324,7 +1524,7 @@ class PearlUpdaterTests(unittest.TestCase):
         (install / "autotune").chmod(0o700)
         releases.chmod(0o700)
         destination.chmod(0o700)
-        for name in updater_module.CATALOG_ASSETS:
+        for name in release.catalog.assets:
             installed = destination / name
             shutil.copyfile(release.directory / name, installed)
             installed.chmod(0o600)
@@ -1337,7 +1537,7 @@ class PearlUpdaterTests(unittest.TestCase):
         for directory in (install / "autotune", releases, destination):
             self.assertEqual(directory.stat().st_gid, service_gid)
             self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o750)
-        for name in updater_module.CATALOG_ASSETS:
+        for name in release.catalog.assets:
             installed = destination / name
             self.assertEqual(installed.stat().st_gid, service_gid)
             self.assertEqual(stat.S_IMODE(installed.stat().st_mode), 0o640)
@@ -1354,14 +1554,14 @@ class PearlUpdaterTests(unittest.TestCase):
         (self.updater.install_root / "autotune").chmod(0o700)
         destination.parent.chmod(0o700)
         destination.chmod(0o700)
-        for name in updater_module.CATALOG_ASSETS:
+        for name in release.catalog.assets:
             installed = destination / name
             shutil.copyfile(release.directory / name, installed)
             installed.chmod(0o600)
         (destination / updater_module.CATALOG_ASSETS[-1]).write_text("tampered\n")
         before = {
             path: stat.S_IMODE(path.stat().st_mode)
-            for path in (destination, *(destination / name for name in updater_module.CATALOG_ASSETS))
+            for path in (destination, *(destination / name for name in release.catalog.assets))
         }
 
         with self.assertRaisesRegex(updater_module.UpdateError, "already exists with different bytes"):
@@ -2934,12 +3134,46 @@ class PearlUpdaterTests(unittest.TestCase):
                     "sha256": manifest["feeds"]["rate-card.json"]["sha256"],
                     "signer_key_id": manifest["feeds"]["rate-card.json"]["signer_key_id"],
                 },
+                "catalog_artifacts": {
+                    "sha256": manifest["feeds"]["autotune-artifacts.json"]["sha256"],
+                    "signer_key_id": manifest["feeds"]["autotune-artifacts.json"]["signer_key_id"],
+                },
             },
         }
         self.updater.get_json = mock.Mock(return_value=response)
 
         self.assertTrue(self.updater.catalog_admission_ready(release, "https://example.invalid/v1/autotune-release"))
+        artifacts = response["feeds"].pop("catalog_artifacts")
+        self.assertFalse(self.updater.catalog_admission_ready(release, "https://example.invalid/v1/autotune-release"))
+        response["feeds"]["catalog_artifacts"] = artifacts
         response["policy_version"] = "wrong-policy"
+        self.assertFalse(self.updater.catalog_admission_ready(release, "https://example.invalid/v1/autotune-release"))
+
+    def test_unbound_catalog_admission_refuses_a_served_artifact_feed(self):
+        self.make_bundle(artifact_feed=False)
+        release = self.verify()
+        manifest = json.loads((release.directory / "release.json").read_text(encoding="utf-8"))
+        feeds = {
+            endpoint: {
+                "sha256": manifest["feeds"][asset]["sha256"],
+                "signer_key_id": manifest["feeds"][asset]["signer_key_id"],
+            }
+            for endpoint, asset in (
+                ("autotune_candidates", "autotune-candidates.json"),
+                ("demand_rank", "demand-rank.json"),
+                ("rate_card", "rate-card.json"),
+            )
+        }
+        response = {
+            "status": "live_verified",
+            "release_id": release.catalog.release_id,
+            "policy_version": release.catalog.policy_version,
+            "feeds": feeds,
+        }
+        self.updater.get_json = mock.Mock(return_value=response)
+
+        self.assertTrue(self.updater.catalog_admission_ready(release, "https://example.invalid/v1/autotune-release"))
+        feeds["catalog_artifacts"] = dict(feeds["autotune_candidates"])
         self.assertFalse(self.updater.catalog_admission_ready(release, "https://example.invalid/v1/autotune-release"))
 
     def test_exact_catalog_admission_uses_the_local_buyer_listener(self):
@@ -6898,14 +7132,14 @@ class PearlUpdaterTests(unittest.TestCase):
                 "autotune-policy-v1",
                 {
                     name: updater_module.sha256_file(self.bundle / name)
-                    for name in updater_module.CATALOG_ASSETS
+                    for name in self.catalog_assets
                 },
             ),
             updater_module.ProviderAdmissionRollout("bridge_required", False, 86400),
             work,
             updater_module.RELEASE_LANE_RUNTIME_WITH_CATALOG,
         )
-        for name in updater_module.CATALOG_ASSETS:
+        for name in self.catalog_assets:
             shutil.copyfile(self.bundle / name, work / name)
         runner = updater_module.Updater(
             self.config,

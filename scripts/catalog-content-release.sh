@@ -1309,6 +1309,47 @@ print("OK %s %s" % (cfg, ov or "-"))
   record config_applied 1 "on-disk coordinator.yaml/overlay equal the coordinator's applied-config record ($CONFIG_DISK_SHA/${OVERLAY_DISK_SHA:--})"
 }
 
+# SPEC-023 §3.7.8: the coordinator serves /v1/catalog-artifacts only when its
+# effective config names the feed pair, and a named pair whose file is missing
+# fails the SIGHUP reload closed. This lane flips `current` and SIGHUPs but
+# never edits the pair, so the live config must already follow the release's
+# binding; a binding change goes through the Pearl updater, which rewrites the
+# pair together with the release.
+pf_artifact_feed_config() {
+  local out want_json="" want_sig=""
+  if [ "$REL_BOUND" = bound ]; then
+    want_json="$REMOTE_AUTOTUNE_DIR/current/autotune-artifacts.json"
+    want_sig="$REMOTE_AUTOTUNE_DIR/current/autotune-artifacts.json.sig"
+  fi
+  if ! out="$(SSH python3 - "$COORD_CONFIG" "$COORD_OVERLAY" <<'PY'
+import os, re, sys
+values = {}
+field = re.compile(r"  (catalog_artifacts(?:_sig)?_path): *(?:\"([^\"]*)\"|'([^']*)'|([^#\s]*)) *(?:#.*)?")
+for path in sys.argv[1:]:
+    if not os.path.exists(path):
+        continue
+    section = None
+    for line in open(path, encoding="utf-8"):
+        line = line.rstrip("\n")
+        if line and not line.startswith((" ", "#")):
+            section = line.split(":", 1)[0].strip()
+            continue
+        match = field.fullmatch(line)
+        if section == "autotune" and match:
+            values[match.group(1)] = next((g for g in match.groups()[1:] if g is not None), "")
+print("ARTIFACTS=%s|%s" % (values.get("catalog_artifacts_path", ""), values.get("catalog_artifacts_sig_path", "")))
+PY
+)"; then
+    record artifact_feed_config 0 "cannot read the coordinator artifact-feed config"; return 1
+  fi
+  out="$(printf '%s\n' "$out" | sed -n 's/^ARTIFACTS=//p')"
+  if [ "$out" != "$want_json|$want_sig" ]; then
+    record artifact_feed_config 0 "live autotune.catalog_artifacts_path/_sig_path '$out' do not follow the $REL_BOUND release (want '$want_json|$want_sig'); change the binding through the Pearl updater"
+    return 1
+  fi
+  record artifact_feed_config 1 "live artifact-feed config follows the $REL_BOUND release"
+}
+
 # The canary bearer must be the coordinator operator key (digest compare only).
 pf_operator_key() {
   local sha
@@ -1340,6 +1381,7 @@ run_preflight() {
   if check_ok release_assembled; then
     if pf_pearl; then
       pf_config_applied || true
+      pf_artifact_feed_config || true
       if pf_live; then
         pf_content_gate || true
         pf_buyer_serving_e2e || true
@@ -1364,7 +1406,7 @@ run_preflight() {
   local name
   local required="commit tooling_matches_commit release_assembled canary_config pearl_reachable pearl_locks_free
       pricing_txn_absent rollback_preconditions content_gate buyer_serving_e2e coordinator_dry_load
-      window_coverage config_applied canary_token_operator_key canary_reachable"
+      window_coverage config_applied artifact_feed_config canary_token_operator_key canary_reachable"
   [ "$PRICING" != 1 ] || required="$required pricing_release pricing_host_state pricing_effective_diff pricing_gate"
   for name in $required; do
     grep -q "^$name	" "$CHECKS" || record "$name" 0 "not run: an earlier check failed"
@@ -1954,6 +1996,7 @@ aa_lease_sh "[ ! -f '$PRICING_HELPER' ] || python3 -I '$PRICING_HELPER' cleanup-
 # this release with the proposed window over that same config, and coverage.
 : >"$CHECKS"
 pf_config_applied || fatal "config identity under the lease: $(cut -f3 "$CHECKS")"
+pf_artifact_feed_config || fatal "artifact-feed config under the lease: $(cut -f3 "$CHECKS" | tail -n 1)"
 if [ "$PRICING" = 1 ]; then
   # L3: re-run L2 under the full lock set; refuse if any digest moved.
   pf_pricing_host || fatal "pricing host state under the lease: $(cut -f3 "$CHECKS" | tail -n 1)"

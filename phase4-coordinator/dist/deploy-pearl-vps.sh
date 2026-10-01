@@ -1185,6 +1185,26 @@ assert_stats_required_matches_effective_config() {
   fi
 }
 
+# SPEC-023 §3.7.8: the coordinator serves /v1/catalog-artifacts only when the
+# effective config names the pair, and a named pair whose file is missing
+# fails startup closed. The pair must therefore follow the release binding
+# exactly (the Pearl updater rewrites it with each catalog release); a bound
+# release under a config that omits it would install a feed nothing serves.
+assert_artifact_feed_config_matches_release() {
+  local want_json="" want_sig="" got_json got_sig
+  if [ "$AUTOTUNE_ARTIFACT_BOUND" = "bound" ]; then
+    want_json="/opt/macprovider/autotune/current/autotune-artifacts.json"
+    want_sig="/opt/macprovider/autotune/current/autotune-artifacts.json.sig"
+  fi
+  got_json="$(yaml_file_block_value "$DEPLOY_CONFIG" autotune catalog_artifacts_path)"
+  got_sig="$(yaml_file_block_value "$DEPLOY_CONFIG" autotune catalog_artifacts_sig_path)"
+  if [ "$got_json" != "$want_json" ] || [ "$got_sig" != "$want_sig" ]; then
+    echo "aborting deploy: effective autotune.catalog_artifacts_path/_sig_path ('$got_json'/'$got_sig') do not match the $AUTOTUNE_ARTIFACT_BOUND release (want '$want_json'/'$want_sig')." >&2
+    echo "  See docs/runbooks/catalog-artifact-feed-release.md (Serving the feed)." >&2
+    exit 5
+  fi
+}
+
 # Issue #582 (MEDIUM #6) — stats-inventory-sync restore-on-failure state.
 # The old 2-column sidecar is quiesced (stop+disable) BEFORE migration 019
 # widens hardware_verification_trust's PRIMARY KEY, so an abort that happens
@@ -1689,6 +1709,7 @@ else
     echo "  no Pearl coordinator overlay found at $COORDINATOR_REMOTE_OVERLAY; validating base coordinator config"
   fi
   assert_stats_required_matches_effective_config
+  assert_artifact_feed_config_matches_release
   if [ "${SKIP_C2_CHECK:-0}" = "1" ]; then
     echo "aborting deploy: SKIP_C2_CHECK=1 is no longer supported; fix C2/C2b config instead" >&2
     exit 5

@@ -293,6 +293,13 @@ autotune:
   autotune_candidates_sig_path: "/opt/macprovider/autotune/current/autotune-candidates.json.sig"
   continuous_batching_policy_path: "/opt/macprovider/autotune/current/continuous-batching-policy.json"
   continuous_batching_policy_sig_path: "/opt/macprovider/autotune/current/continuous-batching-policy.json.sig"
+  # SPEC-023 §3.7 artifact feed (/v1/catalog-artifacts + .sig). Release-bound:
+  # set exactly when the installed release.json binds autotune-artifacts.json.
+  # A configured path whose file is missing fails startup closed. The Pearl
+  # updater sets or removes this pair with each catalog release; deploy-pearl-vps.sh
+  # refuses an effective config that disagrees with the release binding.
+  catalog_artifacts_path: "/opt/macprovider/autotune/current/autotune-artifacts.json"
+  catalog_artifacts_sig_path: "/opt/macprovider/autotune/current/autotune-artifacts.json.sig"
 
 rewards:
   global_multiplier: 1.0

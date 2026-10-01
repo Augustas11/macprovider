@@ -559,4 +559,34 @@ grep -q 'set -euo pipefail' "$CATALOG_RUNBOOK" &&
   grep -q 'test "$(wc -l <"$EVIDENCE")" -ge 31' "$CATALOG_RUNBOOK" ||
   fail "catalog runbook must provide fail-fast continuous zero-bridge evidence"
 
+# SPEC-023 §3.7.8: the effective artifact-feed config pair must follow the
+# release binding before any upload.
+grep -q '^  assert_artifact_feed_config_matches_release$' "$DEPLOY_SH" ||
+  fail "deploy must check the artifact-feed config pair against the release binding"
+artifact_guard_dir="$(mktemp -d)"
+trap 'rm -f "$token_validator_tmp" "$token_loader_tmp" "$canary_operator_guard_tmp" "$deadline_alarm_tmp" "$deadline_parser_tmp"; rm -rf "$token_file_dir" "$security_mock_dir" "$artifact_guard_dir"' EXIT
+{
+  sed -n '/^yaml_file_block_value() {$/,/^}$/p' "$DEPLOY_SH"
+  sed -n '/^assert_artifact_feed_config_matches_release() {$/,/^}$/p' "$DEPLOY_SH"
+} >"$artifact_guard_dir/guard.sh"
+cat >"$artifact_guard_dir/bound.yaml" <<'YAML'
+autotune:
+  enforce_provider_admission: true
+  catalog_artifacts_path: "/opt/macprovider/autotune/current/autotune-artifacts.json"
+  catalog_artifacts_sig_path: "/opt/macprovider/autotune/current/autotune-artifacts.json.sig"
+tier2:
+  catalog_path: /opt/macprovider/autotune/current/tier2-catalog.json
+YAML
+grep -v catalog_artifacts "$artifact_guard_dir/bound.yaml" >"$artifact_guard_dir/unbound.yaml"
+artifact_guard() { # <bound|unbound> <config>
+  (AUTOTUNE_ARTIFACT_BOUND="$1" DEPLOY_CONFIG="$2"
+    # shellcheck disable=SC1091
+    . "$artifact_guard_dir/guard.sh"
+    assert_artifact_feed_config_matches_release) >/dev/null 2>&1
+}
+artifact_guard bound "$artifact_guard_dir/bound.yaml" || fail "bound release with the pair must pass"
+artifact_guard unbound "$artifact_guard_dir/unbound.yaml" || fail "unbound release without the pair must pass"
+! artifact_guard bound "$artifact_guard_dir/unbound.yaml" || fail "bound release without the pair must abort"
+! artifact_guard unbound "$artifact_guard_dir/bound.yaml" || fail "unbound release with the pair must abort"
+
 echo "PASS: deploy autotune feed access guards present"
