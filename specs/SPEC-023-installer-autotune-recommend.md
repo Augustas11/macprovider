@@ -1,12 +1,19 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.4
+version: v0.22.5
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-01
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.22.5 (2026-10-01)** — #1816 freeze audit R1 (A-M7): §16.9 states that
+  the pool-proven graduation path is specified but not executable. Until the
+  SPEC-047-R012 aggregate, the SPEC-047-R011 probe-evidence record, and the
+  generator's `macprovider.intake-decision.v2` exist, no key is pool-proven, the
+  generator rejects every v2 decision, and an operator MUST NOT author one. No
+  rule changes; CONFORMANCE keeps `SPEC-023-R026` and `SPEC-047-R012` pending.
 
 - **v0.22.4 (2026-10-01)** — #1816 round-1 audit fixes to `SPEC-023-R026`.
   Hash-derived intake keys and the opt-in v2 offer-count frame move to their
@@ -3725,6 +3732,8 @@ The manifest is a **closed schema at every level**. An unknown key, a missing ke
 **Reconstructibility.** With this manifest, its ledger-recorded digest, and the release's signed feeds, an auditor can re-evaluate the §16.3 rule for every key the release changed and reach the same verdict without trusting the generator that produced the release — the same standard §3.7.8 sets for the cross-release `artifact_id` rebinding check. That is where the reconstructibility claim of §16 lives; §16.4's release-notes rule alone does not carry it (AC-CAT-21).
 
 ### 16.9 Pool-proven intake and graduation (SPEC-023-R026)
+
+**Implementation status [v0.22.5].** This section is specified, not built. The SPEC-047-R012 `GET /admin/model-admission/pool-proven` aggregate, the SPEC-047-R011 `model_admission_probe_evidence.v1` record (every pool binding's `probe_evidence_digest` is `null`), and the generator's `macprovider.intake-decision.v2` schema do not exist; `scripts/catalog-release.py` accepts only `macprovider.intake-decision.v1` and rejects a v2 decision. Until all three land, no key is pool-proven and an operator MUST NOT author a pool-proven decision. A pool model reaches the global catalog only through the existing §16.1-§16.5 intake, with v1 decisions and that intake's own evidence; its pool earning is unaffected meanwhile (SPEC-042-R015). CONFORMANCE keeps `SPEC-023-R026` and `SPEC-047-R012` pending until the pieces and their tests exist.
 
 **Ownership.** SPEC-047 owns the producers: the offer-time hash-derived `intake_model_key` (`artifact/<artifact_hash_algorithm>/<artifact_hash>`) and the opt-in `model_admission_intake_offer_counts.v2` frame (SPEC-047-R009), the pool-proven aggregate `model_admission_pool_proven.v1` (SPEC-047-R012), and the known-answer evidence record `model_admission_probe_evidence.v1` (SPEC-047-R011). This section owns only how the release generator consumes them and the catalog decision. A generator that reads the v2 offer-count frame MUST treat a hash-derived key only as an exact artifact pair, never as a catalog identity, and MUST reject an unknown schema. A v1 frame stays valid for releases that do not use hash-derived keys.
 
