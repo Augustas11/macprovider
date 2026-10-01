@@ -653,7 +653,13 @@ final class NativeMTPHardwareE2ERunner {
         let manifestSHA = try sha256(of: root.appendingPathComponent("mtp/config.json"))
         let signer = Curve25519.Signing.PrivateKey()
         let keyID = "native-mtp-hardware-e2e"
-        let selfTestBankData = Data(#"{"schema":"native_mtp_selftest_bank.v1","release_id":"native-mtp-hardware-e2e-selftest","prompts":[[1,2,3]]}"#.utf8)
+        let selfTestBankData = try selfTestChallengeBankData(
+            targetSHA: targetIdentity.digest,
+            mtpSHA: mtpIdentity.digest,
+            tokenizerSHA: tokenizerSHA,
+            manifestSHA: manifestSHA,
+            signerKeyID: keyID
+        )
         try selfTestBankData.write(to: root.appendingPathComponent("native-mtp-selftest-bank.json"), options: [.atomic])
         let selfTestSignature = try signer.signature(for: selfTestBankData).base64EncodedString()
         let selfTestSignatureData = Data("""
@@ -731,6 +737,44 @@ final class NativeMTPHardwareE2ERunner {
             trustedKeyring: trustedKeyring,
             resolvedArtifactAuthority: authority
         )
+    }
+
+    /// A schema-valid, release-bound challenge bank with exactly one entry for
+    /// this fixture's tuple, as the production serve-path loader requires
+    /// (SPEC-048 §4 `native_mtp_selftest_v1`). This e2e does not execute the
+    /// self-test, so the expected-output fields are declared placeholders; the
+    /// identity fields are the real fixture digests the loader matches on.
+    func selfTestChallengeBankData(
+        targetSHA: String,
+        mtpSHA: String,
+        tokenizerSHA: String,
+        manifestSHA: String,
+        signerKeyID: String
+    ) throws -> Data {
+        let expectedTokenIDs: [Int] = []
+        return try jsonData([
+            "schema_version": NativeMTPSelfTestChallenge.bankSchemaVersion,
+            "release_id": Self.releaseID,
+            "issued_at": iso8601Seconds(Date().addingTimeInterval(-3600)),
+            "expires_at": iso8601Seconds(Date().addingTimeInterval(3600)),
+            "signer_key_id": signerKeyID,
+            "entries": [[
+                "challenge_id": "native-mtp-hardware-e2e-0001",
+                "model_id": modelID,
+                "model_hash": targetSHA,
+                "tokenizer_sha256": tokenizerSHA,
+                "artifact_sha256": mtpSHA,
+                "mtp_manifest_sha256": manifestSHA,
+                "prompt_token_ids": [1, 2, 3],
+                "max_completion_tokens": 8,
+                "fixed_proposal_depth": 1,
+                "expected_token_ids": expectedTokenIDs,
+                "expected_token_id_sha256": NativeMTPSelfTest.tokenDigest(expectedTokenIDs),
+                "expected_terminal_reason": "length",
+                "expected_counters": ["accepted": 0, "rejected": 0, "bonus": 0, "committed": 0],
+                "expected_committed_state_sha256": String(repeating: "4", count: 64),
+            ]],
+        ])
     }
 
     private func artifactProjectionData(

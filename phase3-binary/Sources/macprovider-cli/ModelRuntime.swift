@@ -8827,6 +8827,15 @@ actor ModelRuntime: ModelRuntimeServing {
         if error is ModelRuntimeLoadError {
             return ("artifact_load_failed", "pair")
         }
+        if error is NativeMTPSelfTestError {
+            return ("selftest_challenge_bank_rejected", "challenge_bank")
+        }
+        if error is ModelFactoryError {
+            return ("model_factory_load_failed", "pair")
+        }
+        if error is CocoaError {
+            return ("artifact_io_failed", "pair")
+        }
         return ("serve_path_admission_failed", "runtime")
     }
 

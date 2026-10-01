@@ -317,6 +317,44 @@ final class ModelRuntimeSwapTests: XCTestCase {
         ])
     }
 
+    /// Regression for the serve-path hardware e2e that always rejected with
+    /// the catch-all reason: its challenge bank was not a production bank.
+    func testNativeMTPHardwareE2EChallengeBankSatisfiesProductionParser() throws {
+        let legacyPlaceholder = Data(#"{"schema":"native_mtp_selftest_bank.v1","release_id":"native-mtp-hardware-e2e-selftest","prompts":[[1,2,3]]}"#.utf8)
+        XCTAssertThrowsError(try NativeMTPSelfTest.parseChallengeBank(legacyPlaceholder)) { error in
+            XCTAssertEqual(
+                ModelRuntime.nativeMTPServePathRejection(for: error).reasonCode,
+                "selftest_challenge_bank_rejected"
+            )
+        }
+
+        let modelID = "mlx-community/Qwen3.6-35B-A3B-4bit"
+        let targetSHA = String(repeating: "a", count: 64)
+        let mtpSHA = String(repeating: "b", count: 64)
+        let tokenizerSHA = String(repeating: "c", count: 64)
+        let manifestSHA = String(repeating: "d", count: 64)
+        let runner = NativeMTPHardwareE2ERunner(rootPath: NSTemporaryDirectory(), modelID: modelID)
+        let data = try runner.selfTestChallengeBankData(
+            targetSHA: targetSHA,
+            mtpSHA: mtpSHA,
+            tokenizerSHA: tokenizerSHA,
+            manifestSHA: manifestSHA,
+            signerKeyID: "native-mtp-hardware-e2e"
+        )
+        let bank = try NativeMTPSelfTest.parseChallengeBank(data)
+        XCTAssertEqual(bank.releaseID, "native-mtp-hardware-e2e")
+        XCTAssertEqual(bank.signerKeyID, "native-mtp-hardware-e2e")
+        XCTAssertEqual(bank.entries.count, 1)
+        let entry = try XCTUnwrap(bank.entries.first)
+        XCTAssertEqual(entry.modelID, modelID)
+        XCTAssertEqual(entry.modelHash, targetSHA)
+        XCTAssertEqual(entry.tokenizerSHA256, tokenizerSHA)
+        XCTAssertEqual(entry.artifactSHA256, mtpSHA)
+        XCTAssertEqual(entry.mtpManifestSHA256, manifestSHA)
+        XCTAssertEqual(entry.fixedProposalDepth, 1)
+        XCTAssertEqual(try NativeMTPSelfTest.selectChallenge(bank, challengeID: entry.challengeID), entry)
+    }
+
     func testNativeMTPServePathRejectionReasonNeverEchoesErrorPayload() {
         let secretPath = "/Users/someone/models/target/model.safetensors"
         let cases: [(Error, String, String)] = [
@@ -327,7 +365,13 @@ final class ModelRuntimeSwapTests: XCTestCase {
             (NativeMTPArtifactObservationError.observationDrift(secretPath), "artifact_observation_drift", "pair"),
             (NativeMTPArtifactObservationError.malformedConfig(secretPath), "artifact_observation_invalid", "pair"),
             (ModelRuntimeLoadError(target: secretPath), "artifact_load_failed", "pair"),
-            (CocoaError(.fileReadNoSuchFile), "serve_path_admission_failed", "runtime"),
+            (NativeMTPSelfTestError.unknownField(secretPath), "selftest_challenge_bank_rejected", "challenge_bank"),
+            (NativeMTPSelfTestError.missingOrInvalidField(secretPath), "selftest_challenge_bank_rejected", "challenge_bank"),
+            (NativeMTPSelfTestError.challengeBankMismatch, "selftest_challenge_bank_rejected", "challenge_bank"),
+            (ModelFactoryError.unsupportedModelType(secretPath), "model_factory_load_failed", "pair"),
+            (ModelFactoryError.invalidConfiguration(secretPath), "model_factory_load_failed", "pair"),
+            (CocoaError(.fileReadNoSuchFile, userInfo: [NSFilePathErrorKey: secretPath]), "artifact_io_failed", "pair"),
+            (URLError(.badURL), "serve_path_admission_failed", "runtime"),
         ]
         for (error, reasonCode, artifactRole) in cases {
             let rejection = ModelRuntime.nativeMTPServePathRejection(for: error)
