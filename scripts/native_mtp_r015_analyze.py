@@ -38,6 +38,52 @@ def _is_exploratory(policy: dict) -> bool:
     return policy.get("schema") == EXPLORATORY_POLICY_SCHEMA
 
 
+# SPEC-048-R015 mandatory strata; R007 additionally requires a cell at every
+# slot count from one up to the advertised qualified_slots.
+MANDATORY_PROMPT_TOKENS = (1536, 4096, 8192)
+MANDATORY_MAX_TOKENS = (128, 512)
+
+
+def _is_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _matrix_violations(policy: dict) -> list[str]:
+    """Mandatory-matrix violations of an admission (non-exploratory) policy."""
+    if _is_exploratory(policy):
+        return []
+    violations: list[str] = []
+    qualified = policy.get("qualified_slots")
+    if not _is_int(qualified) or not 2 <= qualified <= 8:
+        return ["qualified_slots_missing_or_out_of_range"]
+    bound = policy.get("max_native_active_rows")
+    if not _is_int(bound) or not 1 <= bound <= qualified:
+        violations.append("max_native_active_rows_missing_or_out_of_range")
+    slots = policy.get("slots")
+    prompts = policy.get("prompt_tokens")
+    outputs = policy.get("max_tokens")
+    for key, value in (("slots", slots), ("prompt_tokens", prompts), ("max_tokens", outputs)):
+        if not isinstance(value, list) or not all(_is_int(v) for v in value):
+            violations.append(f"{key}_malformed")
+    if violations:
+        return violations
+    missing_slots = sorted(set(range(1, qualified + 1)) - set(slots))
+    if missing_slots:
+        violations.append("slots_missing:" + ",".join(map(str, missing_slots)))
+    over_slots = sorted(v for v in set(slots) if v > qualified or v < 1)
+    if over_slots:
+        violations.append("slots_outside_qualified:" + ",".join(map(str, over_slots)))
+    missing_prompts = sorted(set(MANDATORY_PROMPT_TOKENS) - set(prompts))
+    if missing_prompts:
+        violations.append("prompt_tokens_missing:" + ",".join(map(str, missing_prompts)))
+    missing_outputs = sorted(set(MANDATORY_MAX_TOKENS) - set(outputs))
+    if missing_outputs:
+        violations.append("max_tokens_missing:" + ",".join(map(str, missing_outputs)))
+    if policy.get("sustained_cell_id") not in _observed_cells(policy):
+        violations.append("sustained_cell_not_in_matrix")
+    return violations
+
+
 def _load_jsonl(path: Path) -> tuple[dict, list[dict]]:
     header = None
     runs: list[dict] = []
@@ -376,6 +422,15 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
     policy_sha = _sha256(policy_path)
     header, runs = _load_jsonl(jsonl_path)
     runs = [_with_decode_metrics(run, header) for run in runs]
+    matrix_violations = _matrix_violations(policy)
+    if matrix_violations:
+        return {
+            "schema": "macprovider.native-mtp-r015-analysis.v1",
+            "overall_status": "FAIL",
+            "reason": "policy_matrix_incomplete",
+            "matrix_violations": matrix_violations,
+            "cells": [],
+        }
     if header.get("policy_sha256") != policy_sha:
         return {
             "schema": "macprovider.native-mtp-r015-analysis.v1",

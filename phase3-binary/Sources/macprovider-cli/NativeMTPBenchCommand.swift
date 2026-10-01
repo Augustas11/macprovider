@@ -261,7 +261,7 @@ private final class NativeMTPBenchRunner {
             rootPath: root.path,
             modelID: modelID,
             maxBatch: qualifiedSlots,
-            maxNativeActiveRows: policy.maxNativeActiveRows,
+            maxNativeActiveRows: policy.maxNativeActiveRows(for: cell),
             maxPhysicalBlocks: maxBlocks
         )
         return try await runner.loadRuntimeFixture(
@@ -467,6 +467,7 @@ private final class NativeMTPBenchRunner {
             "policy_sha256": policySHA256,
             "exploratory": policy.exploratory,
             "max_native_active_rows": policy.maxNativeActiveRows.map { $0 as Any } ?? NSNull(),
+            "qualified_slots": policy.qualifiedSlots.map { $0 as Any } ?? NSNull(),
             "temperature": policy.temperature,
             "arrival_interval_ms": policy.arrivalIntervalMS,
             // 2: run records carry decode-only throughput (SPEC-048-R015).
@@ -557,7 +558,7 @@ private final class NativeMTPBenchRunner {
     }
 }
 
-private struct NativeMTPBenchEnvironment {
+struct NativeMTPBenchEnvironment {
     let hwModel: String
     let chip: String
     let ramGB: Int
@@ -619,7 +620,7 @@ private enum NativeMTPBenchPath: String {
     case nativeMTP = "native_mtp"
 }
 
-private struct NativeMTPBenchCell: Sendable {
+struct NativeMTPBenchCell: Sendable {
     let slots: Int
     let promptTokens: Int
     let maxTokens: Int
@@ -901,7 +902,12 @@ private final class NativeMTPMemorySampler: @unchecked Sendable {
     }
 }
 
-private struct NativeMTPBenchPolicy {
+struct NativeMTPBenchPolicy {
+    /// SPEC-048-R015 mandatory prompt strata (tokens, realized within ±2%).
+    static let mandatoryPromptTokens: Set<Int> = [1536, 4096, 8192]
+    /// SPEC-048-R015 mandatory fixed short and long output budgets.
+    static let mandatoryMaxTokens: Set<Int> = [128, 512]
+
     let slots: [Int]
     let promptTokens: [Int]
     let maxTokens: [Int]
@@ -924,8 +930,13 @@ private struct NativeMTPBenchPolicy {
     let swiftVersion: String
     let providerCommit: String
     let mlxForkRevision: String
-    /// Optional SPEC-048-R007 bound signed into the bench sidecar; absent
-    /// means the bound equals the qualified slot count (gate never engages).
+    /// The tuple's advertised `qualified_slots` (SPEC-023-R024, 2...8).
+    /// Required for an admission policy, whose matrix must cover every slot
+    /// count from one up to it.
+    let qualifiedSlots: Int?
+    /// SPEC-048-R007 bound signed into the bench sidecar. Required for an
+    /// admission policy; absent in a pilot means the bound equals each cell's
+    /// qualified slot count (gate never engages).
     let maxNativeActiveRows: Int?
     /// Request temperature for every row of both paths (default greedy). A
     /// sampled row's seed derives from its request ID, which both paths
@@ -951,7 +962,7 @@ private struct NativeMTPBenchPolicy {
             "hw_model", "chip", "ram_gb", "os_build", "xcode_build_version", "swift_version",
             "provider_commit", "mlx_fork_revision", "quantization", "cache_mode", "proposal_depth",
             "run_order", "prompt_corpus", "exclusion_rules", "confidence_method",
-            "max_native_active_rows", "temperature", "arrival_interval_ms",
+            "max_native_active_rows", "qualified_slots", "temperature", "arrival_interval_ms",
         ]
         let unknown = Set(object.keys).subtracting(allowed)
         guard unknown.isEmpty else { throw NativeMTPBenchError.invalidPolicy("unknown keys: \(unknown.sorted())") }
@@ -989,6 +1000,9 @@ private struct NativeMTPBenchPolicy {
             swiftVersion: try string(object, "swift_version"),
             providerCommit: try hex40(object, "provider_commit"),
             mlxForkRevision: try hex40(object, "mlx_fork_revision"),
+            qualifiedSlots: object["qualified_slots"] == nil
+                ? nil
+                : try intAtLeast(object, "qualified_slots", 2),
             maxNativeActiveRows: object["max_native_active_rows"] == nil
                 ? nil
                 : try intAtLeast(object, "max_native_active_rows", 1),
@@ -998,13 +1012,7 @@ private struct NativeMTPBenchPolicy {
                 : try nonnegativeInt(object, "arrival_interval_ms"),
             exploratory: exploratory
         )
-        if let bound = policy.maxNativeActiveRows {
-            for slots in policy.slots where bound > max(2, slots) {
-                throw NativeMTPBenchError.invalidPolicy(
-                    "max_native_active_rows \(bound) exceeds qualified slots for s\(slots)"
-                )
-            }
-        }
+        try policy.validateMatrix()
         let fixedMethodology: [String: AnyHashable] = [
             "quantization": "4bit",
             "cache_mode": "paged_kv_mixed",
@@ -1027,6 +1035,52 @@ private struct NativeMTPBenchPolicy {
 
     func qualifiedSlots(for cell: NativeMTPBenchCell) -> Int {
         max(2, cell.slots)
+    }
+
+    /// The runtime bound for one cell. A cell's runtime is qualified at its
+    /// own slot count, and a signed bound may not exceed that; a cell at or
+    /// below the policy bound never engages the gate either way.
+    func maxNativeActiveRows(for cell: NativeMTPBenchCell) -> Int? {
+        maxNativeActiveRows.map { min($0, qualifiedSlots(for: cell)) }
+    }
+
+    /// SPEC-048-R015 / R007: an admission policy must measure every slot
+    /// count from one up to the advertised `qualified_slots` (the load-gate
+    /// bound is chosen from those cells), every mandatory prompt stratum, and
+    /// both output budgets. Omitting a mandatory cell fails closed here, before
+    /// any measurement, instead of letting a reduced matrix pass.
+    func validateMatrix() throws {
+        if let qualifiedSlots, qualifiedSlots > 8 {
+            throw NativeMTPBenchError.invalidPolicy("qualified_slots must be within 2...8")
+        }
+        let maximumSlots = qualifiedSlots ?? max(2, slots.max() ?? 2)
+        if let qualifiedSlots, let over = slots.first(where: { $0 > qualifiedSlots }) {
+            throw NativeMTPBenchError.invalidPolicy("slots entry \(over) exceeds qualified_slots \(qualifiedSlots)")
+        }
+        if let bound = maxNativeActiveRows, bound > maximumSlots {
+            throw NativeMTPBenchError.invalidPolicy(
+                "max_native_active_rows \(bound) exceeds qualified slots \(maximumSlots)"
+            )
+        }
+        guard !exploratory else { return }
+        guard let qualifiedSlots else {
+            throw NativeMTPBenchError.invalidPolicy("qualified_slots is required")
+        }
+        guard maxNativeActiveRows != nil else {
+            throw NativeMTPBenchError.invalidPolicy("max_native_active_rows is required")
+        }
+        let missingSlots = Set(1...qualifiedSlots).subtracting(slots).sorted()
+        guard missingSlots.isEmpty else {
+            throw NativeMTPBenchError.invalidPolicy("slots missing mandatory counts \(missingSlots)")
+        }
+        let missingPrompts = Self.mandatoryPromptTokens.subtracting(promptTokens).sorted()
+        guard missingPrompts.isEmpty else {
+            throw NativeMTPBenchError.invalidPolicy("prompt_tokens missing mandatory strata \(missingPrompts)")
+        }
+        let missingOutputs = Self.mandatoryMaxTokens.subtracting(maxTokens).sorted()
+        guard missingOutputs.isEmpty else {
+            throw NativeMTPBenchError.invalidPolicy("max_tokens missing mandatory budgets \(missingOutputs)")
+        }
     }
 
     func validateObserved(modelID observedModelID: String, targetSHA256 observedTarget: String, mtpSHA256 observedMTP: String, tokenizerSHA256 observedTokenizer: String) throws {
@@ -1385,7 +1439,7 @@ private func intAtLeast(_ object: [String: Any], _ key: String, _ minimum: Int) 
     return value
 }
 
-private enum NativeMTPBenchError: Error, CustomStringConvertible {
+enum NativeMTPBenchError: Error, CustomStringConvertible {
     case missingDirectory(String)
     case invalidPolicy(String)
     case assertionFailed(String)

@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.16
+**Version:** 0.1.17
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -941,6 +941,18 @@ resamples whole blocks with 10,000 draws. Gates apply separately to every
 advertised `(hardware, artifact, slots, prompt/output stratum)` cell; no pooled
 pass may hide a failing cell. Holm correction at family-wise alpha 0.05 covers
 the throughput, TTFT, inter-token, and rejection hypotheses across all cells.
+
+**Mandatory matrix.** The frozen admission policy MUST name the tuple's
+advertised `qualified_slots` (2...8) and its `max_native_active_rows`
+(`1..qualified_slots`), and MUST contain a cell at every slot count from 1 up
+to `qualified_slots` (R007 chooses the load-gate bound from these cells), at
+every prompt stratum 1536, 4096, and 8192 tokens (each realized within ±2%),
+and at both fixed output budgets 128 (short) and 512 (long) tokens. The
+sustained window runs on one of those cells. Extra prompt or output strata are
+allowed; a slot count above `qualified_slots` is not. The bench refuses, and
+the analyzer fails closed on, a policy missing any mandatory cell, so a
+reduced matrix cannot pass. Exploratory pilot policies are exempt and never
+yield an admission verdict.
 The campaign MUST report median and corrected confidence interval for
 aggregate and per-request decode throughput, aggregate committed tokens/s and
 per-request tokens/s end to end, p50/p95 TTFT and
@@ -1141,6 +1153,12 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.17 (2026-10-01)** — MTP-15 makes the R015 matrix explicit (#1770):
+  an admission policy names `qualified_slots` and `max_native_active_rows` and
+  covers every slot count from 1 to `qualified_slots`, prompt strata 1536,
+  4096, and 8192, and output budgets 128 and 512. The bench and analyzer fail
+  closed on a policy missing a mandatory cell; previously a policy could omit
+  the one-slot cell and the analyzer judged only the listed cells.
 - **0.1.16 (2026-10-01)** — MTP-15 defines the R015 throughput gate as
   decode throughput (completion tokens after the first, over the decode
   interval; for a run, earliest first token to latest completion). End-to-end

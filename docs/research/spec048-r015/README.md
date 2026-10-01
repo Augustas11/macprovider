@@ -21,6 +21,12 @@ shasum -a 256 /path/to/frozen-policy.json
 chmod a-w /path/to/frozen-policy.json
 ```
 
+An admission policy must name the tuple's `qualified_slots` and
+`max_native_active_rows` and cover every slot count from 1 to
+`qualified_slots`, prompt strata 1536/4096/8192, and output budgets 128/512
+(SPEC-048 MTP-15). The bench refuses, and the analyzer fails closed on, a
+policy missing any mandatory cell; only exploratory pilots may run less.
+
 Do not edit or regenerate the policy after measurement begins. Any change,
 including whitespace, creates a different preregistration and requires a new
 output file and a fresh run.

@@ -167,6 +167,33 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         self.assertEqual(result["overall_status"], "FAIL")
         self.assertIn("native_mtp_proposals_missing", result["cells"][0]["hard_failures"])
 
+    def test_matrix_without_one_slot_cell_fails_closed(self):
+        result = self._run_case(policy_overrides={"slots": [2], "sustained_cell_id": "s2-p1536-o128"})
+        self.assertEqual(result["overall_status"], "FAIL")
+        self.assertEqual(result["reason"], "policy_matrix_incomplete")
+        self.assertIn("slots_missing:1", result["matrix_violations"])
+
+    def test_matrix_missing_prompt_or_output_stratum_fails_closed(self):
+        result = self._run_case(policy_overrides={"prompt_tokens": [1536, 4096], "max_tokens": [128]})
+        self.assertEqual(result["overall_status"], "FAIL")
+        self.assertEqual(result["reason"], "policy_matrix_incomplete")
+        self.assertIn("prompt_tokens_missing:8192", result["matrix_violations"])
+        self.assertIn("max_tokens_missing:512", result["matrix_violations"])
+
+    def test_matrix_requires_qualified_slots_and_bound(self):
+        missing_qualified = self._run_case(policy_overrides={"qualified_slots": self._DELETE})
+        self.assertEqual(missing_qualified["reason"], "policy_matrix_incomplete")
+        bound_above = self._run_case(policy_overrides={"max_native_active_rows": 3})
+        self.assertEqual(bound_above["reason"], "policy_matrix_incomplete")
+        self.assertIn("max_native_active_rows_missing_or_out_of_range", bound_above["matrix_violations"])
+
+    def test_exploratory_policy_may_use_reduced_matrix(self):
+        result = self._run_case(
+            exploratory_policy=True,
+            policy_overrides={"slots": [2], "qualified_slots": self._DELETE, "sustained_cell_id": "s2-p1536-o128"},
+        )
+        self.assertEqual(result["overall_status"], "EXPLORATORY_NO_VERDICT")
+
     def test_memory_margin_fail(self):
         result = self._run_case(peak_phys_footprint_bytes=256 * 1_073_741_824)
         self.assertEqual(result["overall_status"], "FAIL")
@@ -305,6 +332,9 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
             self.assertIn(name, reported["native_mtp"])
 
     _DELETE = object()
+    SLOTS = (1, 2)
+    PROMPTS = (1536, 4096, 8192)
+    OUTPUTS = (128, 512)
 
     def _run_case(self, **kwargs):
         with tempfile.TemporaryDirectory() as tmp:
@@ -336,6 +366,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         header_ram_gb=256,
         exploratory_policy=False,
         header_exploratory=None,
+        policy_overrides=None,
     ):
         policy_path = root / "policy.json"
         jsonl_path = root / "runs.jsonl"
@@ -343,9 +374,11 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
             "schema": "macprovider.native-mtp-exploratory-policy.v1"
             if exploratory_policy
             else "macprovider.native-mtp-r015-policy.v1",
-            "slots": [1],
-            "prompt_tokens": [1536],
-            "max_tokens": [128],
+            "qualified_slots": 2,
+            "max_native_active_rows": 2,
+            "slots": list(self.SLOTS),
+            "prompt_tokens": list(self.PROMPTS),
+            "max_tokens": list(self.OUTPUTS),
             "warmup_runs": 0,
             "blocks": 10,
             "seed": 1234,
@@ -373,6 +406,10 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         if exploratory_policy:
             policy["blocks"] = 3
             policy["sustained_seconds"] = 0
+        policy.update(policy_overrides or {})
+        for key, value in list(policy.items()):
+            if value is self._DELETE:
+                del policy[key]
         policy_path.write_text(json.dumps(policy, sort_keys=True), encoding="utf-8")
         policy_sha = hashlib.sha256(policy_path.read_bytes()).hexdigest()
         records = [
@@ -398,21 +435,28 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         if not legacy:
             records[0]["run_metrics_version"] = 2
         record_options = {"legacy": legacy, "legacy_multi": legacy_multi}
-        for block in range(blocks_written):
-            ordinary = self._run_record("ordinary", block, 100.0, 0.100, 0.010, False, policy_sha=run_policy_sha or policy_sha, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=matrix_min_available_memory_fraction, **record_options)
-            records.append(ordinary)
-            if duplicate_matrix_path and block == 0:
-                records.append(dict(ordinary))
-            native_record = self._run_record("native_mtp", block, native_tps, native_ttft, native_itl, parity_mismatch, policy_sha=run_policy_sha or policy_sha, native_admissions=native_admissions, peak_phys_footprint_bytes=peak_phys_footprint_bytes, decode_tps=native_decode_tps, **record_options)
-            for field, value in (native_overrides or {}).items():
-                if value is self._DELETE:
-                    native_record.pop(field, None)
-                else:
-                    native_record[field] = value
-            records.append(native_record)
-        if blocks_written >= 10:
-            records.append(self._run_record("ordinary", 100, 100.0, 0.100, 0.010, False, sustained=True, policy_sha=run_policy_sha or policy_sha, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=sustained_min_available_memory_fraction, wall_seconds=sustained_wall_seconds, **record_options))
-            records.append(self._run_record("native_mtp", 100, native_tps, native_ttft, native_itl, parity_mismatch, sustained=True, policy_sha=run_policy_sha or policy_sha, native_admissions=native_admissions, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=sustained_min_available_memory_fraction, wall_seconds=sustained_wall_seconds, decode_tps=native_decode_tps, **record_options))
+        cell_ids = [
+            f"s{slots}-p{prompt}-o{output}"
+            for slots in policy.get("slots", [])
+            for prompt in policy.get("prompt_tokens", [])
+            for output in policy.get("max_tokens", [])
+        ]
+        for cell_id in cell_ids:
+            for block in range(blocks_written):
+                ordinary = self._run_record("ordinary", block, 100.0, 0.100, 0.010, False, policy_sha=run_policy_sha or policy_sha, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=matrix_min_available_memory_fraction, cell_id=cell_id, **record_options)
+                records.append(ordinary)
+                if duplicate_matrix_path and block == 0:
+                    records.append(dict(ordinary))
+                native_record = self._run_record("native_mtp", block, native_tps, native_ttft, native_itl, parity_mismatch, policy_sha=run_policy_sha or policy_sha, native_admissions=native_admissions, peak_phys_footprint_bytes=peak_phys_footprint_bytes, decode_tps=native_decode_tps, cell_id=cell_id, **record_options)
+                for field, value in (native_overrides or {}).items():
+                    if value is self._DELETE:
+                        native_record.pop(field, None)
+                    else:
+                        native_record[field] = value
+                records.append(native_record)
+            if blocks_written >= 10 and cell_id == policy.get("sustained_cell_id"):
+                records.append(self._run_record("ordinary", 100, 100.0, 0.100, 0.010, False, sustained=True, policy_sha=run_policy_sha or policy_sha, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=sustained_min_available_memory_fraction, wall_seconds=sustained_wall_seconds, cell_id=cell_id, **record_options))
+                records.append(self._run_record("native_mtp", 100, native_tps, native_ttft, native_itl, parity_mismatch, sustained=True, policy_sha=run_policy_sha or policy_sha, native_admissions=native_admissions, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=sustained_min_available_memory_fraction, wall_seconds=sustained_wall_seconds, decode_tps=native_decode_tps, cell_id=cell_id, **record_options))
         jsonl_path.write_text("\n".join(json.dumps(r, sort_keys=True) for r in records) + "\n", encoding="utf-8")
         return jsonl_path, policy_path
 
@@ -427,6 +471,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         sustained=False,
         *,
         policy_sha,
+        cell_id="s1-p1536-o128",
         native_admissions=1,
         peak_phys_footprint_bytes=1000,
         min_available_memory_fraction=0.5,
@@ -439,7 +484,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
             "schema": "macprovider.native-mtp-r015-run.v1",
             "record_type": "run",
             "policy_sha256": policy_sha,
-            "cell_id": "s1-p1536-o128",
+            "cell_id": cell_id,
             "block_index": block,
             "path": path,
             "sustained": sustained,
