@@ -7,15 +7,18 @@ import MLXLMCommon
 import MLXLLM
 import Tokenizers
 
+// Lab-only: compiled out of plain release builds, command type and
+// registration included, so a production binary carries no lab surface.
+#if DEBUG || MACPROVIDER_LAB_HARNESS
 let nativeMTPHardwareDefaultModelID = "mlx-community/Qwen3.5-9B-4bit"
 
 /// Hidden Mac Studio lab harness for the real Qwen3.5 native-MTP path.
 ///
 /// This intentionally mirrors `NativeMTPHardwareE2ETests` without XCTest so
 /// the designated lab box can run the hardware acceptance even when the host
-/// only has CommandLineTools installed. The runtime admission/drafter injection
-/// it depends on is compiled out of plain release builds by `ModelRuntime`;
-/// use a debug build or the explicit lab-harness release compile condition.
+/// only has CommandLineTools installed. The command and the runtime
+/// admission/drafter injection it depends on are compiled out of plain release
+/// builds; use a debug build or the explicit lab-harness compile condition.
 /// With `MACPROVIDER_NATIVE_MTP_E2E_SERVE_PATH=1`, the target and drafter
 /// containers come from the production serve-path admission loader (signed
 /// sidecar, captured artifacts, observer, drafter admission) instead of a
@@ -46,7 +49,6 @@ struct NativeMTPHardwareE2ECommand: AsyncParsableCommand {
     var sizingOutputTokens: Int = 8
 
     func run() async throws {
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         let environment = ProcessInfo.processInfo.environment
         guard environment["MACPROVIDER_NATIVE_MTP_E2E"] == "1" else {
             FileHandle.standardError.write(Data(
@@ -80,16 +82,9 @@ struct NativeMTPHardwareE2ECommand: AsyncParsableCommand {
         ).run()
         FileHandle.standardOutput.write(Data(report.jsonLine.utf8))
         FileHandle.standardOutput.write(Data("\n".utf8))
-        #else
-        FileHandle.standardError.write(Data(
-            "native-mtp-hardware-e2e: unavailable without DEBUG or MACPROVIDER_LAB_HARNESS\n".utf8
-        ))
-        throw ExitCode(2)
-        #endif
     }
 }
 
-#if DEBUG || MACPROVIDER_LAB_HARNESS
 struct NativeMTPHardwareE2EReport: Sendable {
     let targetSHA256: String
     let mtpSHA256: String

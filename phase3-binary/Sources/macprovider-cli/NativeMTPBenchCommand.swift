@@ -5,6 +5,9 @@ import Foundation
 import MacProviderCore
 import MLXLMCommon
 
+// Lab-only: compiled out of plain release builds, command type and
+// registration included, so a production binary carries no lab surface.
+#if DEBUG || MACPROVIDER_LAB_HARNESS
 struct NativeMTPBenchCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "native-mtp-bench",
@@ -31,7 +34,6 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
     var providerCommit: String
 
     func run() async throws {
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         let environment = ProcessInfo.processInfo.environment
         guard environment["MACPROVIDER_NATIVE_MTP_E2E"] == "1" else {
             FileHandle.standardError.write(Data("native-mtp-bench: set MACPROVIDER_NATIVE_MTP_E2E=1 on the Mac Studio\n".utf8))
@@ -50,14 +52,9 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
             providerCommit: providerCommit
         )
         try await bench.run()
-        #else
-        FileHandle.standardError.write(Data("native-mtp-bench: unavailable without DEBUG or MACPROVIDER_LAB_HARNESS\n".utf8))
-        throw ExitCode(2)
-        #endif
     }
 }
 
-#if DEBUG || MACPROVIDER_LAB_HARNESS
 private final class NativeMTPBenchRunner {
     private let root: URL
     private let modelID: String
