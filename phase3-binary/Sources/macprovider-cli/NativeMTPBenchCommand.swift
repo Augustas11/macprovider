@@ -248,15 +248,20 @@ private final class NativeMTPBenchRunner {
     }
 
     private func fixture(for cell: NativeMTPBenchCell) async throws -> NativeMTPHardwareRuntimeFixture {
+        // SPEC-023-R024 qualifies 2...8 slots, so a one-slot cell runs one
+        // concurrent request against the smallest qualified two-slot runtime;
+        // the ordinary and native runtimes share that shape.
+        let qualifiedSlots = policy.qualifiedSlots(for: cell)
         let maxBlocks = NativeMTPHardwareE2ERunner.sizedMaxPhysicalBlocks(
-            slots: cell.slots,
+            slots: qualifiedSlots,
             promptTokens: cell.promptTokens,
             outputTokens: cell.maxTokens
         )
         let runner = NativeMTPHardwareE2ERunner(
             rootPath: root.path,
             modelID: modelID,
-            maxBatch: cell.slots,
+            maxBatch: qualifiedSlots,
+            maxNativeActiveRows: policy.maxNativeActiveRows,
             maxPhysicalBlocks: maxBlocks
         )
         return try await runner.loadRuntimeFixture(
@@ -311,6 +316,12 @@ private final class NativeMTPBenchRunner {
                 item.requestID.map { Set(results.map(\.requestID)).contains($0) } ?? false
             } ?? []
             : []
+        // A SPEC-048-R007 load-gate downgrade is the policy working, not a
+        // fallback; every other non-native admission still fails the run.
+        let loadGateDowngrades = admissions.filter {
+            $0.admission.effectivePath != .nativeMTP
+                && $0.admission.selection.nativeMTPReason == .capacityAboveNativeBound
+        }.count
         var run = NativeMTPBenchRunResult(
             cell: cell,
             blockIndex: block,
@@ -332,9 +343,16 @@ private final class NativeMTPBenchRunner {
             errors: 0,
             nativeAdmissions: admissions.filter { $0.admission.effectivePath == .nativeMTP }.count,
             nativeRequests: path == .nativeMTP ? results.count : 0,
-            nonNativeAdmissions: admissions.filter { $0.admission.effectivePath != .nativeMTP }.count,
+            nonNativeAdmissions: admissions.filter { $0.admission.effectivePath != .nativeMTP }.count - loadGateDowngrades,
+            loadGateDowngrades: loadGateDowngrades,
             missingNativeAdmissions: path == .nativeMTP ? max(0, results.count - admissions.count) : 0,
-            effectivePaths: admissions.map { ["request_id": $0.requestID ?? "", "effective_path": $0.admission.effectivePath.rawValue] },
+            effectivePaths: admissions.map {
+                [
+                    "request_id": $0.requestID ?? "",
+                    "effective_path": $0.admission.effectivePath.rawValue,
+                    "selector_reason": $0.admission.selection.nativeMTPReason?.rawValue ?? "",
+                ]
+            },
             statusDelta: statusDelta,
             targetForwardsPerCommittedToken: path == .nativeMTP && committed > 0
                 ? Double(statusDelta.targetForwards) / Double(committed)
@@ -419,6 +437,7 @@ private final class NativeMTPBenchRunner {
             "tokenizer_sha256": tokenizerSHA256,
             "policy_sha256": policySHA256,
             "exploratory": policy.exploratory,
+            "max_native_active_rows": policy.maxNativeActiveRows.map { $0 as Any } ?? NSNull(),
         ]
     }
 
@@ -601,6 +620,7 @@ private struct NativeMTPBenchRunResult {
     let nativeAdmissions: Int
     let nativeRequests: Int
     var nonNativeAdmissions: Int
+    let loadGateDowngrades: Int
     let missingNativeAdmissions: Int
     let effectivePaths: [[String: String]]
     let statusDelta: NativeMTPStatusDelta
@@ -663,6 +683,7 @@ private struct NativeMTPBenchRunResult {
             "native_admissions": nativeAdmissions,
             "native_requests": nativeRequests,
             "non_native_admissions": nonNativeAdmissions,
+            "load_gate_downgrades": loadGateDowngrades,
             "missing_native_admissions": missingNativeAdmissions,
             "effective_paths": effectivePaths,
             "mtp_proposed_tokens": statusDelta.proposedTokens,
@@ -816,6 +837,9 @@ private struct NativeMTPBenchPolicy {
     let swiftVersion: String
     let providerCommit: String
     let mlxForkRevision: String
+    /// Optional SPEC-048-R007 bound signed into the bench sidecar; absent
+    /// means the bound equals the qualified slot count (gate never engages).
+    let maxNativeActiveRows: Int?
     /// Exploratory policies relax the R015 minimums for pilots; every record is
     /// stamped `exploratory` and the analyzer refuses an admission verdict.
     let exploratory: Bool
@@ -832,6 +856,7 @@ private struct NativeMTPBenchPolicy {
             "hw_model", "chip", "ram_gb", "os_build", "xcode_build_version", "swift_version",
             "provider_commit", "mlx_fork_revision", "quantization", "cache_mode", "proposal_depth",
             "run_order", "prompt_corpus", "exclusion_rules", "confidence_method",
+            "max_native_active_rows",
         ]
         let unknown = Set(object.keys).subtracting(allowed)
         guard unknown.isEmpty else { throw NativeMTPBenchError.invalidPolicy("unknown keys: \(unknown.sorted())") }
@@ -847,7 +872,6 @@ private struct NativeMTPBenchPolicy {
         let thresholds = try dictionary(object, "thresholds")
         try requireThresholds(thresholds)
         let policy = NativeMTPBenchPolicy(
-            // SPEC-023-R024 admits native-MTP tuples at qualified_slots 2...8 only.
             slots: try slotCounts(object, "slots"),
             promptTokens: try positiveIntArray(object, "prompt_tokens"),
             maxTokens: try positiveIntArray(object, "max_tokens"),
@@ -870,8 +894,18 @@ private struct NativeMTPBenchPolicy {
             swiftVersion: try string(object, "swift_version"),
             providerCommit: try hex40(object, "provider_commit"),
             mlxForkRevision: try hex40(object, "mlx_fork_revision"),
+            maxNativeActiveRows: object["max_native_active_rows"] == nil
+                ? nil
+                : try intAtLeast(object, "max_native_active_rows", 1),
             exploratory: exploratory
         )
+        if let bound = policy.maxNativeActiveRows {
+            for slots in policy.slots where bound > max(2, slots) {
+                throw NativeMTPBenchError.invalidPolicy(
+                    "max_native_active_rows \(bound) exceeds qualified slots for s\(slots)"
+                )
+            }
+        }
         let fixedMethodology: [String: AnyHashable] = [
             "quantization": "4bit",
             "cache_mode": "paged_kv_mixed",
@@ -890,6 +924,10 @@ private struct NativeMTPBenchPolicy {
             throw NativeMTPBenchError.invalidPolicy("sustained_cell_id must match a matrix cell")
         }
         return policy
+    }
+
+    func qualifiedSlots(for cell: NativeMTPBenchCell) -> Int {
+        max(2, cell.slots)
     }
 
     func validateObserved(modelID observedModelID: String, targetSHA256 observedTarget: String, mtpSHA256 observedMTP: String, tokenizerSHA256 observedTokenizer: String) throws {
@@ -1223,8 +1261,10 @@ private func exactInt(_ number: NSNumber, key: String) throws -> Int {
 
 private func slotCounts(_ object: [String: Any], _ key: String) throws -> [Int] {
     let values = try positiveIntArray(object, key)
-    guard values.allSatisfy({ (2...8).contains($0) }) else {
-        throw NativeMTPBenchError.invalidPolicy("\(key) must be within 2...8 (SPEC-023-R024 qualified_slots)")
+    // One concurrent request is measured on a two-slot qualified runtime
+    // (SPEC-023-R024 admits qualified_slots 2...8 only).
+    guard values.allSatisfy({ (1...8).contains($0) }) else {
+        throw NativeMTPBenchError.invalidPolicy("\(key) must be within 1...8")
     }
     return values
 }

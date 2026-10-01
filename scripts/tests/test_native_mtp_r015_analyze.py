@@ -47,6 +47,26 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         self.assertEqual(result["overall_status"], "FAIL")
         self.assertIn("missing_native_admissions", result["cells"][0]["hard_failures"])
 
+    def test_load_gate_downgraded_run_needs_no_proposals(self):
+        result = self._run_case(
+            native_overrides={
+                "load_gate_downgrades": 1,
+                "native_admissions": 0,
+                "mtp_proposed_tokens": 0,
+                "mtp_accepted_tokens": 0,
+                "target_forwards": 0,
+            }
+        )
+        cell = result["cells"][0]
+        self.assertNotIn("native_mtp_proposals_missing", cell["hard_failures"])
+        self.assertNotIn("native_mtp_target_forwards_missing", cell["hard_failures"])
+        self.assertEqual(cell["load_gate_downgrades"], 10)
+
+    def test_ungated_run_without_proposals_still_fails(self):
+        result = self._run_case(native_overrides={"mtp_proposed_tokens": 0})
+        self.assertEqual(result["overall_status"], "FAIL")
+        self.assertIn("native_mtp_proposals_missing", result["cells"][0]["hard_failures"])
+
     def test_memory_margin_fail(self):
         result = self._run_case(peak_phys_footprint_bytes=256 * 1_073_741_824)
         self.assertEqual(result["overall_status"], "FAIL")

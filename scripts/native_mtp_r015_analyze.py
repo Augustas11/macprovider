@@ -411,6 +411,13 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
         )
         fallback_errors = sum(r["fallbacks"] + r["errors"] for r in hard_gate_runs)
         native_runs = [r for r in hard_gate_runs if r.get("path") == "native_mtp"]
+        load_gate_downgrades = sum(
+            r["load_gate_downgrades"] for r in native_runs if _is_count(r.get("load_gate_downgrades"))
+        )
+        # SPEC-048-R007: a run whose rows the load gate kept off native MTP (or
+        # held at depth zero) legitimately has no proposals; every other
+        # native run must still prove it proposed and verified.
+        ungated_native_runs = [r for r in native_runs if not r.get("load_gate_downgrades")]
         if parity_mismatches:
             hard_failures.append("parity_mismatch")
         if non_native_admissions:
@@ -430,16 +437,16 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
             field
             for field in native_counter_fields
             if field not in unavailable_metrics
-            and any(run.get(field) is None for run in native_runs)
+            and any(run.get(field) is None for run in ungated_native_runs)
         ]
         if missing_counter_fields:
             hard_failures.append("native_mtp_counters_missing:" + ",".join(missing_counter_fields))
         if "mtp_proposed_tokens" not in unavailable_metrics and any(
-            int(run.get("mtp_proposed_tokens") or 0) <= 0 for run in native_runs
+            int(run.get("mtp_proposed_tokens") or 0) <= 0 for run in ungated_native_runs
         ):
             hard_failures.append("native_mtp_proposals_missing")
         if "target_forwards" not in unavailable_metrics and any(
-            int(run.get("target_forwards") or 0) <= 0 for run in native_runs
+            int(run.get("target_forwards") or 0) <= 0 for run in ungated_native_runs
         ):
             hard_failures.append("native_mtp_target_forwards_missing")
         if cell_id == policy.get("sustained_cell_id") and not sustained_runs and not (
@@ -478,6 +485,7 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
             "cell_id": cell_id,
             "paired_blocks": len(pairs),
             "required_blocks": required_blocks,
+            "load_gate_downgrades": load_gate_downgrades,
             "hard_failures": hard_failures,
             "metrics": metrics,
             "acceptance_rate": _median([
