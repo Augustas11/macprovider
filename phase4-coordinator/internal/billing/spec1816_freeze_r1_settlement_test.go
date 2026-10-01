@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
+	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 )
 
 // #1816 freeze R1 regression tests for final receipt settlement: the durable
@@ -201,5 +203,45 @@ func TestFreezeR1ReceiptCompletionNeverExceedsByteCeiling(t *testing.T) {
 	}
 	if gross != 1 || usageSource != UsageByteEstimated || estimate != 1 {
 		t.Fatalf("receipt-synced gross=%d usage_source=%s estimate=%d, want the clamped 1 credit as byte_estimated", gross, usageSource, estimate)
+	}
+}
+
+// CODE H1: a loopback pool-model attempt is both pool_operator_attested and
+// pool_manifest; the ledger writer transaction reads its fence once.
+func TestFreezeR1HotPathReadsThePoolFenceOncePerAttempt(t *testing.T) {
+	cfg := testRewards()
+	reqStore, store := newRequestAndBillingStores(t)
+	authority := &fakePoolManifestAuthority{fencedPoolAuthority: fencedPoolAuthority{results: []error{nil}}}
+	store.SetPoolOperatorAttestationAuthority(authority)
+	store.SetSettlementPoolLabelSource(poolManifestLabels)
+	snapshotID, err := store.InsertConfigSnapshot(context.Background(), cfg, time.Unix(100, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := poolManifestSnapshot(testRouteSnapshot())
+	route.RuntimeSource, route.PoolOperatorAccountID = "llamacpp_loopback", "creator-a"
+	fence, ok := store.PoolAttestationFenceFor(context.Background(), route)
+	if !ok {
+		t.Fatal("no fence")
+	}
+	entry, _ := route.PoolModelRateEntry()
+	prompt, completion := int64(1000), int64(2000)
+	row := requestlog.Row{TSUtc: time.Unix(200, 0).UTC(), RequestID: "pool-hot-once", Model: route.PoolModelID, ProviderAssignedID: "assigned-a",
+		PromptTokens: &prompt, CompletionTokens: &completion, Status: 200, BuyerIP: "127.0.0.1"}
+	readsBefore := authority.reads
+	if err := store.WriteHotPath(context.Background(), reqStore, row, HotPathInput{
+		RequestID: row.RequestID, ProviderAssignedID: row.ProviderAssignedID, ProviderID: "provider-a", Model: route.PoolModelID,
+		Status: 200, TSUtc: row.TSUtc, PromptTokens: &prompt, CompletionTokens: &completion,
+		ConfigSnapshotID: snapshotID, RateEntry: entry, MultiplierPPM: ParseMultiplierPPM(cfg.GlobalMultiplier),
+		ProviderShareBps: ParseShareBps(cfg.ProviderShare), ProviderRuntimeSource: "llamacpp_loopback",
+		PoolOperatorAttested: true, PoolManifestRoute: true, PoolManifestVerified: true, PoolAttestationFence: fence,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := authority.reads - readsBefore; got != 1 {
+		t.Fatalf("ledger writer read the pool fence %d times, want 1", got)
+	}
+	if gross := scalar(t, store.db, `SELECT gross_credits FROM ledger_request_credits WHERE request_id = ?`, row.RequestID); gross != 1700 {
+		t.Fatalf("gross=%d want 1700 priced from the entry", gross)
 	}
 }
