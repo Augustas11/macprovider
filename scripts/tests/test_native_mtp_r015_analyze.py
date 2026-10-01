@@ -130,6 +130,38 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         self.assertNotIn("missing_native_admissions", cell["hard_failures"])
         self.assertEqual(cell["load_gate_downgrades"], 10)
 
+    def test_mixed_admitted_and_downgraded_run_still_needs_native_work(self):
+        result = self._run_case(
+            native_overrides={
+                "native_requests": 2,
+                "native_admissions": 1,
+                "load_gate_downgrades": 1,
+                "mtp_proposed_tokens": 0,
+                "mtp_accepted_tokens": 0,
+                "target_forwards": 0,
+            }
+        )
+        self.assertEqual(result["overall_status"], "FAIL")
+        cell = result["cells"][0]
+        self.assertIn("native_mtp_proposals_missing", cell["hard_failures"])
+        self.assertIn("native_mtp_target_forwards_missing", cell["hard_failures"])
+        self.assertNotIn("missing_native_admissions", cell["hard_failures"])
+
+    def test_mixed_admitted_and_downgraded_run_with_native_work_passes(self):
+        result = self._run_case(
+            native_overrides={"native_requests": 2, "native_admissions": 1, "load_gate_downgrades": 1}
+        )
+        cell = result["cells"][0]
+        self.assertEqual(cell["hard_failures"], [])
+        self.assertEqual(cell["load_gate_downgrades"], 10)
+
+    def test_downgrades_beyond_requests_fail_accounting(self):
+        result = self._run_case(
+            native_overrides={"native_requests": 1, "native_admissions": 1, "load_gate_downgrades": 1}
+        )
+        self.assertEqual(result["overall_status"], "FAIL")
+        self.assertIn("native_admission_accounting_inconsistent", result["cells"][0]["hard_failures"])
+
     def test_ungated_run_without_proposals_still_fails(self):
         result = self._run_case(native_overrides={"mtp_proposed_tokens": 0})
         self.assertEqual(result["overall_status"], "FAIL")

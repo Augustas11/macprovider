@@ -512,16 +512,30 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
         load_gate_downgrades = sum(
             r["load_gate_downgrades"] for r in native_runs if _is_count(r.get("load_gate_downgrades"))
         )
-        # SPEC-048-R007: a run whose rows the load gate kept off native MTP (or
-        # held at depth zero) legitimately has no proposals; every other
-        # native run must still prove it proposed and verified.
-        ungated_native_runs = [r for r in native_runs if not r.get("load_gate_downgrades")]
+        # A downgrade can never cover more requests than the run issued.
+        over_accounted_runs = [
+            r for r in native_runs
+            if r["native_admissions"]
+            + (r["load_gate_downgrades"] if _is_count(r.get("load_gate_downgrades")) else 0)
+            > r["native_requests"]
+        ]
+        # SPEC-048-R007: only a run whose every request the admission load
+        # gate sent to ordinary decode legitimately has no native work. Any run
+        # with a native admission must still prove it proposed and verified,
+        # however many of its other requests were downgraded.
+        ungated_native_runs = [
+            r for r in native_runs
+            if r["native_admissions"] > 0
+            or not (_is_count(r.get("load_gate_downgrades")) and r["load_gate_downgrades"] > 0)
+        ]
         if parity_mismatches:
             hard_failures.append("parity_mismatch")
         if non_native_admissions:
             hard_failures.append("non_native_admissions")
         if missing_native_admissions:
             hard_failures.append("missing_native_admissions")
+        if over_accounted_runs:
+            hard_failures.append("native_admission_accounting_inconsistent")
         if fallback_errors:
             hard_failures.append("fallback_or_error")
         native_counter_fields = (
