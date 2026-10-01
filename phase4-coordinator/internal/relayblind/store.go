@@ -711,7 +711,7 @@ func (s *Store) PersistEvidence(ctx context.Context, providerID, assignedSession
 		}
 		_, err = tx.ExecContext(ctx, `UPDATE relay_blind_reservations SET state='terminal',completion_tokens=?,effective_privacy_outcome='relay_blind_satisfied',terminal_code=?,terminal_at_unix=? WHERE provider_binding=? AND state='dispatched' AND validated_at_unix IS NOT NULL`, evidence.CompletionTokens, nullString(terminalCode), now.Unix(), r.ProviderBinding)
 	case "rejected":
-		if r.ValidatedInputTokens.Valid || evidence.InputTokens != 0 || (evidence.ErrorCode != "relay_blind_ciphertext_invalid" && evidence.ErrorCode != "relay_blind_decrypt_failed") {
+		if r.ValidatedInputTokens.Valid || evidence.InputTokens != 0 || (evidence.ErrorCode != "relay_blind_ciphertext_invalid" && evidence.ErrorCode != "relay_blind_decrypt_failed" && evidence.ErrorCode != "unsupported_sampling_penalty") {
 			return Reservation{}, ErrEvidenceMismatch
 		}
 		_, err = tx.ExecContext(ctx, `UPDATE relay_blind_reservations SET state='rejected',effective_privacy_outcome='relay_blind_unavailable',terminal_code=?,terminal_at_unix=? WHERE provider_binding=? AND state='dispatched' AND validated_at_unix IS NULL`, evidence.ErrorCode, now.Unix(), r.ProviderBinding)

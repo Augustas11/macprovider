@@ -90,7 +90,7 @@ func TestRouteSnapshotsPersistBeforeDispatchAndRetryAttempts(t *testing.T) {
 		}),
 	)
 
-	rr := postChat(t, server, []byte(`{"model":"mlx-fast","messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":-0.25,"frequency_penalty":0.125}`), http.Header{
+	rr := postChat(t, server, []byte(`{"model":"mlx-fast","messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":0,"frequency_penalty":0}`), http.Header{
 		"Authorization":         {"Bearer operator-key"},
 		"X-MacProvider-Account": {"acct_gateway"},
 		"X-MacProvider-Retry":   {"1"},
@@ -381,7 +381,7 @@ func TestSettlementOutputDoesNotUseV04ReceiptTerminalTimestamp(t *testing.T) {
 		buyer.WithBillingSnapshotID(snapshotID),
 	)
 
-	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":-0.25,"frequency_penalty":0.125}`), nil)
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":0,"frequency_penalty":0}`), nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
@@ -411,7 +411,7 @@ func TestSettlementOutputDoesNotUseV04ReceiptTerminalTimestamp(t *testing.T) {
 	internalHeaders := http.Header{}
 	internalHeaders.Set("Authorization", "Bearer operator-key")
 	internalHeaders.Set("X-MacProvider-Account", "acct_gateway")
-	internalRR := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":-0.25,"frequency_penalty":0.125}`), internalHeaders)
+	internalRR := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":0,"frequency_penalty":0}`), internalHeaders)
 	if internalRR.Code != http.StatusOK {
 		t.Fatalf("internal status=%d body=%s", internalRR.Code, internalRR.Body.String())
 	}
@@ -476,7 +476,7 @@ func TestWSTunneledNonStreamingEmitsInternalSettlementHeaders(t *testing.T) {
 		}, time.Second),
 	)
 
-	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":-0.25,"frequency_penalty":0.125}`), http.Header{
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":0,"frequency_penalty":0}`), http.Header{
 		"Authorization":         {"Bearer operator-key"},
 		"X-MacProvider-Account": {"acct_gateway"},
 	})
@@ -553,7 +553,7 @@ func TestSettlementOutputUsesBoundedTerminalTimestampHeader(t *testing.T) {
 		buyer.WithBillingSnapshotID(snapshotID),
 	)
 
-	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":-0.25,"frequency_penalty":0.125}`), nil)
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":0,"frequency_penalty":0}`), nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
@@ -2515,8 +2515,8 @@ func expectedRouteSnapshotPromptHash(t *testing.T, model string) string {
 		"seed":              nil,
 		"response_format":   nil,
 		"tool_choice":       nil,
-		"presence_penalty":  json.Number("-0.25"),
-		"frequency_penalty": json.Number("0.125"),
+		"presence_penalty":  json.Number("0"),
+		"frequency_penalty": json.Number("0"),
 		"logit_bias":        nil,
 		"logprobs":          nil,
 		"top_logprobs":      nil,

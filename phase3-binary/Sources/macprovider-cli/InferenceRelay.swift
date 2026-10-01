@@ -464,6 +464,8 @@ actor InferenceRelay {
                 let prepared: RelayBlindPreparedRequest
                 do {
                     prepared = try await modelRuntime.relayBlindPrepare(request)
+                } catch let error as APIError where error.code == "unsupported_sampling_penalty" {
+                    throw RelayBlindProviderError.unsupportedSamplingPenalty
                 } catch {
                     throw RelayBlindProviderError.providerUnsupported
                 }

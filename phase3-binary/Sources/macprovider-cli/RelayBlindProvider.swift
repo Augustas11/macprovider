@@ -12,6 +12,7 @@ enum RelayBlindProviderError: Error, Equatable, CustomStringConvertible {
     case executionAlreadyClaimed
     case journalUnavailable
     case providerUnsupported
+    case unsupportedSamplingPenalty
     case committedFailed
 
     var code: String {
@@ -23,6 +24,7 @@ enum RelayBlindProviderError: Error, Equatable, CustomStringConvertible {
         case .decryptFailed: return "relay_blind_decrypt_failed"
         case .executionAlreadyClaimed: return "relay_blind_replay"
         case .journalUnavailable: return "relay_blind_committed_failed"
+        case .unsupportedSamplingPenalty: return "unsupported_sampling_penalty"
         case .committedFailed: return "relay_blind_committed_failed"
         }
     }

@@ -4675,12 +4675,31 @@ actor ModelRuntime: ModelRuntimeServing {
         if isActiveJSONValue(request.promptSource.topLogprobs) { return false }
         // SPEC-038 AC-6b: each batched row samples with the serial path's own
         // sampler for its temperature/top_p and a row-local seed
-        // (`ContinuousBatchRowSampler`). The serial path ignores presence and
-        // frequency penalties, so they do not change what a row can represent.
+        // (`ContinuousBatchRowSampler`). Native runtime admission rejects
+        // non-default buyer penalties before a request reaches this gate.
         return ContinuousBatchRowSampler.supports(
             temperature: request.temperature,
             topP: request.topP
         )
+    }
+
+    nonisolated static func validateNativeSamplingPenalties(_ request: ChatCompletionRequest) throws {
+        if request.presencePenalty != 0.0 {
+            throw APIError(
+                status: 400,
+                message: "presence_penalty is not supported by the native MLX provider runtime; omit it or set it to 0",
+                code: "unsupported_sampling_penalty",
+                param: "presence_penalty"
+            )
+        }
+        if request.frequencyPenalty != 0.0 {
+            throw APIError(
+                status: 400,
+                message: "frequency_penalty is not supported by the native MLX provider runtime; omit it or set it to 0",
+                code: "unsupported_sampling_penalty",
+                param: "frequency_penalty"
+            )
+        }
     }
 
     nonisolated static func requestHasStableRequestID(_ request: ChatCompletionRequest) -> Bool {
@@ -5080,6 +5099,7 @@ actor ModelRuntime: ModelRuntimeServing {
             : []
         try request.validateModelMatches(snapshot.modelID, aliases: aliases)
         try Self.validateToolChoiceScope(request)
+        try Self.validateNativeSamplingPenalties(request)
         let drainCancelled = DrainCancelToken()
         let registrationID = registerInFlight { drainCancelled.fire() }
         return RequestHandle(

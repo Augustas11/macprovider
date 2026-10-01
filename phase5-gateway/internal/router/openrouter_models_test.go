@@ -132,9 +132,14 @@ func TestProjectOpenRouterModelsQwen36Row(t *testing.T) {
 	if got := params["max_tokens"].Max; got == nil || *got != 32768 {
 		t.Fatalf("max_tokens descriptor max=%v want 32768", got)
 	}
-	for _, param := range []string{"max_tokens", "temperature", "top_p", "stop", "stream", "presence_penalty", "frequency_penalty", "seed"} {
+	for _, param := range []string{"max_tokens", "temperature", "top_p", "stop", "stream", "seed"} {
 		if _, ok := params[param]; !ok {
 			t.Fatalf("missing supported parameter %q in %+v", param, params)
+		}
+	}
+	for _, param := range []string{"presence_penalty", "frequency_penalty"} {
+		if _, ok := params[param]; ok {
+			t.Fatalf("unsupported sampling penalty %q advertised in %+v", param, params)
 		}
 	}
 	if params["tools"].Type != "boolean" || params["structured_outputs"].Type != "boolean" {

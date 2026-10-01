@@ -4324,15 +4324,20 @@ actor ContinuousBatchScheduler {
 
     private func prefillEnd(for row: Row, maxChunkTokens: Int) -> Int {
         let promptTokenCount = row.request.promptTokens.count
-        var end = min(promptTokenCount, row.prefillCursor + max(1, maxChunkTokens))
+        var spanEnd = promptTokenCount
         // Hybrid recurrent state may only be snapshotted on its declared
         // boundary, so compatible groups split before crossing one.
         if let checkpoint = pendingRecurrentCheckpointPositions(for: row).first(where: {
             $0 > row.prefillCursor
         }) {
-            end = min(end, checkpoint)
+            spanEnd = min(spanEnd, checkpoint)
         }
-        return end
+        let remaining = spanEnd - row.prefillCursor
+        guard remaining > 0 else { return row.prefillCursor }
+        let chunkLimit = max(1, maxChunkTokens)
+        let chunksRemaining = (remaining + chunkLimit - 1) / chunkLimit
+        let balancedChunkSize = (remaining + chunksRemaining - 1) / chunksRemaining
+        return min(spanEnd, row.prefillCursor + balancedChunkSize)
     }
 
     private func transitionPrefilledRow(_ row: Row, sampledToken: Int? = nil) async {

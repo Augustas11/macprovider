@@ -187,6 +187,33 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(samplerSteps, ["exact": [1]])
     }
 
+    func testLongPrefillChunksAreBalancedInsteadOfLeavingTinyTail() async throws {
+        let backend = ScriptedBackend(scripts: ["long": [101]])
+        let descriptor = Self.descriptor(blockSizeTokens: 32, maxPhysicalBlocks: 128)
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 32, maxPhysicalBlocks: 128)
+        let scheduler = try await makeScheduler(
+            descriptor: descriptor,
+            tuple: Self.tuple(),
+            maxActiveRows: 1,
+            maxPromptChunkTokens: 1024,
+            backend: backend,
+            allocator: allocator
+        )
+
+        let result = try await scheduler.submit(.init(
+            id: "long",
+            conversationKey: "",
+            promptTokens: Array(1...2189),
+            maxOutputTokens: 1,
+            temperature: 0.0,
+            topP: 1.0
+        ))
+
+        let prefillTokenCounts = await backend.prefillTokenCountsByCall()
+        XCTAssertEqual(result.outputTokens, [101])
+        XCTAssertEqual(prefillTokenCounts, [730, 730, 729])
+    }
+
     func testCanonicalSerialToolStopBoundaryIsRetainedForTerminalReplay() async throws {
         let backend = ScriptedBackend(scripts: ["tool-stop": [10, 11, 12, 13]])
         let scheduler = try await makeScheduler(maxActiveRows: 1, backend: backend)
@@ -233,8 +260,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
 
         let events = await backend.events().filter { !$0.hasPrefix("decode:") }
         XCTAssertEqual(events, [
-            "prefill:hybrid:4",
-            "prefill:hybrid:1",
+            "prefill:hybrid:3",
+            "prefill:hybrid:2",
             "snapshot:hybrid:5",
             "prefill:hybrid:4",
             "snapshot:hybrid:9",

@@ -483,6 +483,30 @@ final class RelayBlindProviderTests: XCTestCase {
         let rejectedCompletionCount = await modelRuntime.completionCount()
         XCTAssertEqual(rejectedCompletionCount, 1)
 
+        await frames.removeAll()
+        let unsupportedPenalty = try makeInferenceMessage(
+            keys: keys,
+            model: model,
+            session: session,
+            requestID: "relay-unsupported-penalty",
+            inputCap: 5,
+            outputCap: 4,
+            extra: ["presence_penalty": 0.25]
+        )
+        try await relay.handleInferenceRequest(unsupportedPenalty)
+        let unsupportedBecameIdle = await relay.waitUntilIdle(timeoutSeconds: 5)
+        XCTAssertTrue(unsupportedBecameIdle)
+        let unsupported = await frames.values
+        XCTAssertEqual(unsupported.first?["type"] as? String, "inference_response_validation")
+        let unsupportedEvidence = try XCTUnwrap(unsupported.first?["relay_blind_validation"] as? [String: Any])
+        XCTAssertEqual(unsupportedEvidence["state"] as? String, "rejected")
+        XCTAssertEqual(unsupportedEvidence["input_tokens"] as? Int, 0)
+        XCTAssertEqual(unsupportedEvidence["error_code"] as? String, RelayBlindProviderError.unsupportedSamplingPenalty.code)
+        XCTAssertFalse(unsupported.contains { $0["type"] as? String == "inference_response_chunk" })
+        XCTAssertEqual(unsupported.last?["status"] as? String, RelayBlindProviderError.unsupportedSamplingPenalty.code)
+        let unsupportedCompletionCount = await modelRuntime.completionCount()
+        XCTAssertEqual(unsupportedCompletionCount, 1)
+
         try await relay.handleInferenceRequest(valid)
         let replay = await frames.values.last
         XCTAssertEqual(replay?["status"] as? String, RelayBlindProviderError.executionAlreadyClaimed.code)
@@ -639,7 +663,8 @@ final class RelayBlindProviderTests: XCTestCase {
         session: String,
         requestID: String,
         inputCap: UInt64,
-        outputCap: UInt64
+        outputCap: UInt64,
+        extra: [String: Any] = [:]
     ) throws -> [String: Any] {
         let record = try keys.currentRecord()
         let buyer = Curve25519.KeyAgreement.PrivateKey()
@@ -681,12 +706,15 @@ final class RelayBlindProviderTests: XCTestCase {
             sharedInfo: Data("macprovider/spec041/request/aead-nonce/v1".utf8),
             outputByteCount: 12
         )
-        let inner: [String: Any] = [
+        var inner: [String: Any] = [
             "model": model,
             "messages": [["role": "user", "content": "secret prompt"]],
             "max_tokens": outputCap,
             "stream": false,
         ]
+        for (key, value) in extra {
+            inner[key] = value
+        }
         let plaintext = try JSONSerialization.data(withJSONObject: inner, options: [.sortedKeys])
         let sealed = try AES.GCM.seal(
             plaintext,
@@ -824,7 +852,8 @@ private actor RelayBlindTestRuntime: ModelRuntimeServing {
         return (try await complete(request, shouldCancel: shouldCancel), handle.snapshot)
     }
     func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle {
-        RequestHandle(
+        try ModelRuntime.validateNativeSamplingPenalties(request)
+        return RequestHandle(
             snapshot: RuntimeSnapshot(state: .ready, container: nil, modelID: model, modelHash: nil),
             registrationID: 1,
             drainCancelled: DrainCancelToken()

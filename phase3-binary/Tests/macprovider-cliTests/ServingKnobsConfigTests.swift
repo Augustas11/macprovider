@@ -1356,8 +1356,8 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest([
             "temperature": 0.7, "top_p": 0.9
         ])))
-        // The serial path ignores presence/frequency penalties, so they do not
-        // change what a batched row must represent.
+        // Native runtime admission rejects non-default buyer penalties before a
+        // row reaches this representability gate.
         XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest([
             "temperature": 0.7, "presence_penalty": 0.5, "frequency_penalty": 0.5
         ])))
@@ -2208,6 +2208,58 @@ final class ServingKnobsConfigTests: XCTestCase {
         }
     }
 
+    func testRuntimeRejectsNonDefaultPresencePenaltyBeforeCompletionRuns() async throws {
+        let runtime = ModelRuntime(
+            modelID: "fixture-model",
+            warmSwapEnabled: false,
+            loader: { _ in throw TestRuntimeError.notExpected },
+            testCompletion: { _, _ in
+                XCTFail("unsupported penalty rejection must happen before inference")
+                return CompletionResult(content: "unexpected", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
+            }
+        )
+        let request = try Self.request(model: "fixture-model", extra: ["presence_penalty": 0.25])
+
+        do {
+            _ = try await runtime.complete(request)
+            XCTFail("expected unsupported sampling penalty rejection")
+        } catch let error as APIError {
+            XCTAssertEqual(error.status, 400)
+            XCTAssertEqual(error.code, "unsupported_sampling_penalty")
+            XCTAssertEqual(error.param, "presence_penalty")
+            XCTAssertFalse(error.inferenceRan)
+            XCTAssertFalse(error.settlementRan)
+        }
+    }
+
+    func testRuntimeRejectsNonDefaultFrequencyPenaltyDuringStreamingAdmission() async throws {
+        let runtime = ModelRuntime(
+            modelID: "fixture-model",
+            warmSwapEnabled: false,
+            loader: { _ in throw TestRuntimeError.notExpected },
+            testCompletion: { _, _ in
+                XCTFail("unsupported penalty rejection must happen before inference")
+                return CompletionResult(content: "unexpected", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
+            }
+        )
+        let request = try Self.request(
+            model: "fixture-model",
+            stream: true,
+            extra: ["frequency_penalty": -0.25]
+        )
+
+        do {
+            _ = try await runtime.acquireRequestHandle(request)
+            XCTFail("expected unsupported sampling penalty rejection")
+        } catch let error as APIError {
+            XCTAssertEqual(error.status, 400)
+            XCTAssertEqual(error.code, "unsupported_sampling_penalty")
+            XCTAssertEqual(error.param, "frequency_penalty")
+            XCTAssertFalse(error.inferenceRan)
+            XCTAssertFalse(error.settlementRan)
+        }
+    }
+
     func testRuntimeStrictPagedKVRejectsDuringStreamingPreflight() async throws {
         let runtime = ModelRuntime(
             modelID: "fixture-model",
@@ -2550,14 +2602,18 @@ final class ServingKnobsConfigTests: XCTestCase {
     private static func request(
         model: String,
         stream: Bool = false,
-        conversationKey: String? = nil
+        conversationKey: String? = nil,
+        extra: [String: Any] = [:]
     ) throws -> ChatCompletionRequest {
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": model,
             "messages": [["role": "user", "content": "Say hi"]],
             "max_tokens": 1,
             "stream": stream,
         ]
+        for (key, value) in extra {
+            body[key] = value
+        }
         let parsed = try ChatCompletionRequest.parse(data: try JSONSerialization.data(withJSONObject: body))
         return parsed.withConversationKey(conversationKey)
     }
