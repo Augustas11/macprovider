@@ -36,6 +36,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/onboarding"
 	"github.com/augstar/macprovider-coordinator/internal/payout"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	"github.com/augstar/macprovider-coordinator/internal/pow"
 	"github.com/augstar/macprovider-coordinator/internal/providerevents"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
@@ -1126,7 +1127,8 @@ func main() {
 	var trustPoolRegistry *trustpool.Registry
 	if cfg.TrustedPools.Enabled {
 		var trustPoolsReady bool
-		trustPoolStore, trustPoolRegistry, trustPoolsReady, err = loadTrustedPools(context.Background(), reqLogStore.DB(), cfg.TrustedPools, logger)
+		poolModelAcceptance := trustPoolModelAcceptance(cfg.TrustedPools.PoolModelPricingBounds, wsServer)
+		trustPoolStore, trustPoolRegistry, trustPoolsReady, err = loadTrustedPools(context.Background(), reqLogStore.DB(), cfg.TrustedPools, poolModelAcceptance, logger)
 		if err != nil {
 			logger.Fatal().Err(err).Msg("trusted pools durable store open failed")
 		}
@@ -1141,12 +1143,19 @@ func main() {
 				snap := registry.Snapshot(poolID)
 				return snap.ManifestVersion, snap.ManifestCoreDigest, snap.Exists
 			})
+			poolModelBounds := poolModelPricingBounds(cfg.TrustedPools.PoolModelPricingBounds)
+			poolModelBoundsSource := func() *poolmanifest.PoolModelPricingBounds { return poolModelBounds }
 			buyerOpts = append(
 				buyerOpts,
 				buyer.WithPoolMembership(trustPoolRegistry),
 				buyer.WithTrustPoolStatusStore(trustPoolStore),
 				buyer.WithPoolRejectionTimingFloor(cfg.TrustedPools.RejectionTimingFloor()),
+				buyer.WithPoolModelPricingBounds(poolModelBoundsSource),
 			)
+			// SPEC-047-R011: pool-manifest admission binding and its sweep
+			// (manifest acceptance, membership, and release changes).
+			wsServer.SetPoolModelSource(trustPoolRegistry, poolModelBoundsSource)
+			go wsServer.RunPoolManifestBindingSweep(shutdownCtx)
 			trustpool.StartRefreshLoop(
 				shutdownCtx,
 				trustPoolStore,
@@ -3419,7 +3428,38 @@ func creatorProviderServingCapable(registry *pool.Registry, providerID string) b
 	return false
 }
 
-func loadTrustedPools(ctx context.Context, db *sql.DB, cfg config.TrustedPoolsConfig, logger zerolog.Logger) (*trustpool.Store, *trustpool.Registry, bool, error) {
+// trustPoolModelAcceptance is the SPEC-042-R015 / SPEC-005-R015 acceptance
+// context: the configured pool-model pricing bounds (nil fails every entry
+// closed) and the live catalog shadow/overlap probes.
+func trustPoolModelAcceptance(bounds *config.TrustedPoolsPoolModelPricingBounds, catalog interface {
+	IsCatalogModelID(string) bool
+	ArtifactPairInCatalog(string, string, []string) bool
+}) func() poolmanifest.PoolModelAcceptanceContext {
+	return func() poolmanifest.PoolModelAcceptanceContext {
+		ctx := poolmanifest.PoolModelAcceptanceContext{PricingBounds: poolModelPricingBounds(bounds)}
+		if catalog != nil {
+			ctx.IsCatalogModelID = catalog.IsCatalogModelID
+			ctx.ArtifactInCatalog = catalog.ArtifactPairInCatalog
+		}
+		return ctx
+	}
+}
+
+func poolModelPricingBounds(b *config.TrustedPoolsPoolModelPricingBounds) *poolmanifest.PoolModelPricingBounds {
+	if b == nil {
+		return nil
+	}
+	return &poolmanifest.PoolModelPricingBounds{
+		MinPromptRatePerMtok:         b.MinPromptRatePerMtok,
+		MaxPromptRatePerMtok:         b.MaxPromptRatePerMtok,
+		MinPromptCacheHitRatePerMtok: b.MinPromptCacheHitRatePerMtok,
+		MaxPromptCacheHitRatePerMtok: b.MaxPromptCacheHitRatePerMtok,
+		MinCompletionRatePerMtok:     b.MinCompletionRatePerMtok,
+		MaxCompletionRatePerMtok:     b.MaxCompletionRatePerMtok,
+	}
+}
+
+func loadTrustedPools(ctx context.Context, db *sql.DB, cfg config.TrustedPoolsConfig, poolModelAcceptance func() poolmanifest.PoolModelAcceptanceContext, logger zerolog.Logger) (*trustpool.Store, *trustpool.Registry, bool, error) {
 	providerOwnerKeys, err := trustpool.ParseProviderOwnerPublicKeys(cfg.ProviderOwnerPublicKeys)
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("trusted pools provider owner public keys: %w", err)
@@ -3434,6 +3474,9 @@ func loadTrustedPools(ctx context.Context, db *sql.DB, cfg config.TrustedPoolsCo
 	}
 	if len(providerOwnerKeys) > 0 {
 		storeOpts = append(storeOpts, trustpool.WithProviderOwnerPublicKeys(providerOwnerKeys))
+	}
+	if poolModelAcceptance != nil {
+		storeOpts = append(storeOpts, trustpool.WithPoolModelAcceptance(poolModelAcceptance))
 	}
 	store, err := trustpool.NewStore(db, storeOpts...)
 	if err != nil {
@@ -3458,6 +3501,8 @@ func loadTrustedPools(ctx context.Context, db *sql.DB, cfg config.TrustedPoolsCo
 		// whose root launch_environment is candidate.
 		registry.RejectCandidateLaunchEnvironment()
 	}
+	// SPEC-042-R016: the recorded owner account each attestation matches.
+	registry.SetProviderOwnerAccounts(cfg.ProviderOwnerAccountIDs)
 	logger.Info().
 		Int("pool_count", len(reconstructed.Pools)).
 		Msg("trusted pools durable state reconstructed and routing enabled")

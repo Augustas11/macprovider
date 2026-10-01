@@ -165,6 +165,26 @@ trusted_pools:
     allowed_launch_environments: []
     evidence_sha256: ""
     root_custody_hashes: []
+  # SPEC-005-R015 / SPEC-042-R015 (#1816): inclusive per-rate floors and
+  # ceilings (credits per Mtok, int64, min <= max) for creator-signed
+  # pool_model_entries/v1 prices. An entry priced outside them, or any entry
+  # while the bounds are absent, is refused at manifest acceptance. These
+  # bounds are coordinator config, not a rate-card field (the signed rate card
+  # is a closed schema). Example values = min/max of the current rate-card rows
+  # (excluding `default`); see docs/runbooks/pool-scoped-model-admission.md.
+  # pool_model_pricing_bounds:
+  #   min_prompt_rate_per_mtok: 13500
+  #   max_prompt_rate_per_mtok: 425000
+  #   min_prompt_cache_hit_rate_per_mtok: 3375
+  #   max_prompt_cache_hit_rate_per_mtok: 106250
+  #   min_completion_rate_per_mtok: 27000
+  #   max_completion_rate_per_mtok: 2160000
+  # SPEC-042-R016 (#1816): owner account -> provider ids, the only input a
+  # creator's pool_attested_members/v1 attestation is matched against. Only
+  # needed for a non-creator member; a provider may be listed under one
+  # account only.
+  # provider_owner_account_ids:
+  #   acct-example-member: ["provider-example-1"]
 
 logging:
   level: "info"
