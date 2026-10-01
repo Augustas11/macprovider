@@ -9998,15 +9998,23 @@
       "requirement_id": "SPEC-048-R002",
       "spec_id": "SPEC-048",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/NativeMTP.swift:struct NativeMTPCapability",
+        "phase3-binary/Sources/macprovider-cli/NativeMTPArtifactObservation.swift:enum NativeMTPArtifactObserver"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift:testNativeMTPCapabilityRejectsSignedFieldMismatches",
+        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift:testNativeMTPArtifactObservationMustMatchSignedCapability",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPArtifactObservationTests.swift:testAffineFourRejectsUnpairedMismatchedAndPaddedHeaders",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPArtifactObservationTests.swift:testUnquantizedObservationRejectsMissingFloat32AndGarbageDType"
+      ],
       "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "No immutable native-MTP capability, manifest binding, or negative artifact fixtures exist."
+        "rationale": "The immutable NativeMTPCapability, the artifact observer that must match the pinned MLX loader and the signed capability (including the mlx_affine representation manifest digest), and negative artifact fixtures are implemented. Exact immutable production Qwen tuple hashes and signed artifact evidence are still missing. Branch-local on campaign/native-mtp-r015 at the reviewed fork pin ef4ff8568c38c640bc90a8176dc3acfe943a288d, default-off; stays pending until the frozen diff completes CI, Mac Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
       }
     },
     {
@@ -10161,15 +10169,23 @@
       "requirement_id": "SPEC-048-R010",
       "spec_id": "SPEC-048",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/NativeMTPStatus.swift:public struct NativeMTPStatusSnapshot",
+        "phase3-binary/Sources/macprovider-cli/NativeMTPStatus.swift:final class NativeMTPStatusSink"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPStatusTests.swift:testStatusObjectUsesClosedR010FieldSetAndDerivedCounters",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPStatusTests.swift:testMetricsSamplesUseOnlyBoundedLabels",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPStatusTests.swift:testCounterSaturationDisablesNativeTupleUntilNewSinkGeneration",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPStatusTests.swift:testLocalStatusPublishesCapabilityAndExactlyOneNativeMTPObject"
+      ],
       "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "Native-MTP local observability, warm-swap reset, and wire-schema omission gates are not implemented."
+        "rationale": "Local native-MTP status with the closed R010 field set, derived counters, bounded metric labels, counter saturation, and a fresh sink generation per runtime publication are implemented and unit-tested. Dedicated warm-swap reset and wire-schema omission evidence is not mapped here yet. Branch-local on campaign/native-mtp-r015 at the reviewed fork pin ef4ff8568c38c640bc90a8176dc3acfe943a288d, default-off; stays pending until the frozen diff completes CI, Mac Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
       }
     },
     {
@@ -10206,15 +10222,22 @@
       "requirement_id": "SPEC-048-R013",
       "spec_id": "SPEC-048",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/NativeMTPRevocationFeed.swift:struct NativeMTPRevocationFeed",
+        "phase3-binary/Sources/macprovider-cli/NativeMTPAdmissionSidecar.swift:struct NativeMTPResolvedArtifactAuthority"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testProductionLoaderRejectsLegacyObjectSchema",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPRevocationFeedTests.swift:testAcceptsSignedFeedAndPersistsRecoverableAnchor",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPRevocationFeedTests.swift:testRejectsRollbackReplayAndRevokedSetRegression"
+      ],
       "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "Signed immutable native-MTP catalog/autotune admission and evidence binding do not exist."
+        "rationale": "The strict consumer side of signed admission is implemented: the SPEC-023-R024 sidecar parser and resolved artifact authority (mapped under SPEC-023-R024) and the signed tuple revocation feed with rollback/replay protection. The signed catalog/autotune admission generator, release-ledger binding, and immutable evidence records do not exist yet. Branch-local on campaign/native-mtp-r015 at the reviewed fork pin ef4ff8568c38c640bc90a8176dc3acfe943a288d, default-off; stays pending until the frozen diff completes CI, Mac Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
       }
     },
     {
