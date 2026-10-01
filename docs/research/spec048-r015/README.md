@@ -65,8 +65,19 @@ Analyze:
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/native_mtp_r015_analyze.py \
   /path/to/native-mtp-r015.jsonl \
-  /path/to/frozen-policy.json
+  /path/to/frozen-policy.json > analysis.json
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/native_mtp_r015_analyze.py \
+  /path/to/native-mtp-r015.jsonl \
+  /path/to/frozen-policy.json --format markdown > analysis.md
 ```
+
+The default output is one JSON document. The throughput gate reads decode
+throughput (`aggregate_decode_tps`: tokens after each request's first, over
+the run's earliest first token to latest completion); TTFT is gated
+separately, and prefill-inclusive throughput is reported under
+`informational_metrics.end_to_end_throughput`. Records from benches before
+header `run_metrics_version` 2 have decode throughput derived from
+per-request throughput, TTFT, and tokens (`decode_tps_sources`).
 
 Plain release builds must not include `MACPROVIDER_LAB_HARNESS`, and release,
 signing, and CI scripts must not pass that flag.

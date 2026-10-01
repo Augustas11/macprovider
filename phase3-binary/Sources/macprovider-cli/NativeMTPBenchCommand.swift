@@ -321,6 +321,14 @@ private final class NativeMTPBenchRunner {
         let statusDelta = NativeMTPStatusDelta(before: statusBefore, after: statusAfter)
         let wall = max(ended.timeIntervalSince(started), 0.000_001)
         let committed = results.reduce(0) { $0 + $1.completion.completionTokens }
+        let decodeTimings = results.map { result in
+            let startOffset = result.startedAt.timeIntervalSince(started)
+            return NativeMTPBenchDecodeTiming(
+                completionTokens: result.completion.completionTokens,
+                firstTokenOffset: result.ttftSeconds.map { startOffset + $0 },
+                endOffset: startOffset + result.wallSeconds
+            )
+        }
         let ttfts = results.compactMap(\.ttftSeconds)
         let allGaps = results.flatMap(\.interTokenGaps)
         let peakFootprint = memorySampler.peakPhysFootprintBytes
@@ -345,6 +353,14 @@ private final class NativeMTPBenchRunner {
             committedCompletionTokens: committed,
             aggregateTPS: Double(committed) / wall,
             perRequestTPS: results.map { Double($0.completion.completionTokens) / max($0.wallSeconds, 0.000_001) },
+            aggregateDecodeTPS: NativeMTPBenchDecodeThroughput.aggregate(decodeTimings),
+            perRequestDecodeTPS: results.map {
+                NativeMTPBenchDecodeThroughput.perRequest(
+                    completionTokens: $0.completion.completionTokens,
+                    ttftSeconds: $0.ttftSeconds,
+                    wallSeconds: $0.wallSeconds
+                )
+            },
             ttftP50: percentile(ttfts, 0.50),
             ttftP95: percentile(ttfts, 0.95),
             interTokenGapP50: percentile(allGaps, 0.50),
@@ -453,6 +469,8 @@ private final class NativeMTPBenchRunner {
             "max_native_active_rows": policy.maxNativeActiveRows.map { $0 as Any } ?? NSNull(),
             "temperature": policy.temperature,
             "arrival_interval_ms": policy.arrivalIntervalMS,
+            // 2: run records carry decode-only throughput (SPEC-048-R015).
+            "run_metrics_version": 2,
         ]
     }
 
@@ -499,6 +517,7 @@ private final class NativeMTPBenchRunner {
         let gaps = zip(chunkTimes.dropFirst(), chunkTimes).map { $0.timeIntervalSince($1) }
         return NativeMTPBenchRequestResult(
             requestID: requestID,
+            startedAt: start,
             completion: completion,
             wallSeconds: end.timeIntervalSince(start),
             ttftSeconds: chunkTimes.first?.timeIntervalSince(start),
@@ -609,6 +628,7 @@ private struct NativeMTPBenchCell: Sendable {
 
 private struct NativeMTPBenchRequestResult: Sendable {
     let requestID: String
+    let startedAt: Date
     let completion: CompletionResult
     let wallSeconds: TimeInterval
     let ttftSeconds: TimeInterval?
@@ -629,6 +649,8 @@ private struct NativeMTPBenchRunResult {
     let committedCompletionTokens: Int
     let aggregateTPS: Double
     let perRequestTPS: [Double]
+    let aggregateDecodeTPS: Double?
+    let perRequestDecodeTPS: [Double?]
     let ttftP50: Double?
     let ttftP95: Double?
     let interTokenGapP50: Double?
@@ -678,15 +700,19 @@ private struct NativeMTPBenchRunResult {
             "committed_completion_tokens": committedCompletionTokens,
             "aggregate_committed_tps": aggregateTPS,
             "per_request_tps": perRequestTPS,
+            "aggregate_decode_tps": aggregateDecodeTPS.map { $0 as Any } ?? NSNull(),
+            "per_request_decode_tps": perRequestDecodeTPS.map { $0.map { $0 as Any } ?? NSNull() },
             "per_request_ttft_seconds": requests.map { request in
                 request.ttftSeconds.map { $0 as Any } ?? NSNull()
             },
-            "request_metrics": zip(requests, perRequestTPS).map { request, tps in
-                [
+            "request_metrics": requests.indices.map { index in
+                let request = requests[index]
+                return [
                     "request_id": request.requestID,
                     "content_sha256": request.contentSHA256,
                     "completion_tokens": request.completion.completionTokens,
-                    "committed_tps": tps,
+                    "committed_tps": perRequestTPS[index],
+                    "decode_tps": perRequestDecodeTPS[index].map { $0 as Any } ?? NSNull(),
                     "ttft_seconds": request.ttftSeconds.map { $0 as Any } ?? NSNull(),
                     "inter_token_gaps_seconds": request.interTokenGaps,
                     "finish_reason": request.completion.finishReason,
@@ -721,6 +747,46 @@ private struct NativeMTPBenchRunResult {
             "thermal_state_end": thermalEnd,
             "parity_mismatch": parityMismatch,
         ]
+    }
+}
+
+/// One request's decode timing, with offsets from the start of its run.
+struct NativeMTPBenchDecodeTiming: Sendable, Equatable {
+    let completionTokens: Int
+    let firstTokenOffset: TimeInterval?
+    let endOffset: TimeInterval
+}
+
+/// SPEC-048-R015 decode-only throughput. Prefill (time to first token) is the
+/// same work on both paths, so it is excluded here and gated separately as
+/// TTFT; end-to-end throughput stays reported as `aggregate_committed_tps`.
+/// Every undefined case returns nil so the analyzer fails the record closed
+/// instead of reading a defaulted value.
+enum NativeMTPBenchDecodeThroughput {
+    /// (completion tokens - 1) / (request wall - TTFT).
+    static func perRequest(completionTokens: Int, ttftSeconds: TimeInterval?, wallSeconds: TimeInterval) -> Double? {
+        guard let ttftSeconds, completionTokens >= 2 else { return nil }
+        let window = wallSeconds - ttftSeconds
+        guard window > 0, window.isFinite else { return nil }
+        return Double(completionTokens - 1) / window
+    }
+
+    /// Sum of every request's tokens after its first, over the run's decode
+    /// window: earliest first token to latest completion. With concurrent or
+    /// staggered rows this window also covers other rows' prefills, which is
+    /// the same overlap on both paths. One slot reduces to `perRequest`.
+    static func aggregate(_ timings: [NativeMTPBenchDecodeTiming]) -> Double? {
+        guard !timings.isEmpty else { return nil }
+        var firstToken = TimeInterval.infinity
+        var decodeTokens = 0
+        for timing in timings {
+            guard let offset = timing.firstTokenOffset, timing.completionTokens >= 1 else { return nil }
+            firstToken = min(firstToken, offset)
+            decodeTokens += timing.completionTokens - 1
+        }
+        let window = (timings.map(\.endOffset).max() ?? 0) - firstToken
+        guard decodeTokens > 0, window > 0, window.isFinite else { return nil }
+        return Double(decodeTokens) / window
     }
 }
 

@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.15
+**Version:** 0.1.16
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -942,14 +942,26 @@ advertised `(hardware, artifact, slots, prompt/output stratum)` cell; no pooled
 pass may hide a failing cell. Holm correction at family-wise alpha 0.05 covers
 the throughput, TTFT, inter-token, and rejection hypotheses across all cells.
 The campaign MUST report median and corrected confidence interval for
-aggregate committed tokens/s, per-request tokens/s, p50/p95 TTFT and
+aggregate and per-request decode throughput, aggregate committed tokens/s and
+per-request tokens/s end to end, p50/p95 TTFT and
 inter-token latency, proposed/accepted/per-position/mean acceptance, target
 forwards per committed token, peak/resident memory, capacity rejection,
 fallback/error rate, terminal parity, and thermal stability.
 
 Correctness, state integrity, and zero unexplained fallback/error are hard
-gates. Using the paired-bootstrap corrected 95% confidence interval, the lower bound for
-aggregate committed throughput improvement over the best ordinary baseline
+gates. R015 throughput is decode throughput: a request's completion tokens
+after its first, divided by the interval from its first token to its
+completion. A run's aggregate decode throughput is the sum of every request's
+tokens after its first, divided by the interval from the run's earliest first
+token to its latest completion. Prefill is excluded because it is the same
+work on both paths and is gated separately as TTFT below; prefill-inclusive
+(end-to-end) committed throughput MUST still be reported but is not a gate.
+A missing or non-positive decode throughput fails the run closed; evidence
+recorded before the bench emitted it may derive it from recorded per-request
+end-to-end throughput, TTFT, completion tokens, and nominal arrival offsets,
+and fails closed when any of those is missing. Using the paired-bootstrap
+corrected 95% confidence interval, the lower bound for aggregate decode
+throughput improvement over the best ordinary baseline
 MUST be at least 15% in each cell at the intended advertised slot count; both
 paths use that same slot count, and the baseline is the best ordinary
 production-qualified configuration at that count. The corrected upper bound
@@ -1129,6 +1141,14 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.16 (2026-10-01)** — MTP-15 defines the R015 throughput gate as
+  decode throughput (completion tokens after the first, over the decode
+  interval; for a run, earliest first token to latest completion). End-to-end
+  committed throughput dilutes the native/ordinary ratio by prompt length
+  because both paths run the same prefill; it stays reported, not gated, and
+  TTFT keeps its own gate. Missing decode throughput fails closed; pre-0.1.16
+  bench records may derive it from recorded per-request throughput, TTFT, and
+  tokens (#1770).
 - **0.1.15 (2026-10-01)** — Chunked-prefill seeding, load-gate fusion, and
   seeded sampling (#1770). MTP-6 seeds proposal state chunk by chunk over
   each prefill chunk's own target hidden states (tail = next prompt token;

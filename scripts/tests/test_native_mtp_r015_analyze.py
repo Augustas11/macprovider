@@ -1,10 +1,12 @@
+import contextlib
 import hashlib
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.native_mtp_r015_analyze import _holm_adjusted, analyze
+from scripts.native_mtp_r015_analyze import _holm_adjusted, analyze, main
 
 
 class NativeMTPR015AnalyzeTests(unittest.TestCase):
@@ -16,6 +18,71 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         result = self._run_case(native_tps=112.0)
         self.assertEqual(result["overall_status"], "FAIL")
         self.assertIn("throughput", result["cells"][0]["metric_failures"])
+
+    def test_throughput_gate_uses_decode_not_end_to_end(self):
+        # Prefill dilutes end-to-end speedup; the gate reads decode only.
+        result = self._run_case(native_tps=105.0, native_decode_tps=135.0)
+        cell = result["cells"][0]
+        self.assertEqual(result["overall_status"], "PASS")
+        self.assertAlmostEqual(cell["metrics"]["throughput"]["median"], 0.35)
+        info = cell["informational_metrics"]["end_to_end_throughput"]
+        self.assertAlmostEqual(info["median"], 0.05)
+        self.assertFalse(info["gated"])
+        self.assertEqual(cell["decode_tps_sources"], ["recorded"])
+        result = self._run_case(native_tps=135.0, native_decode_tps=105.0)
+        self.assertIn("throughput", result["cells"][0]["metric_failures"])
+
+    def test_missing_decode_on_versioned_schema_fails_closed(self):
+        for field in ("aggregate_decode_tps", "per_request_decode_tps"):
+            with self.subTest(field=field):
+                result = self._run_case(native_overrides={field: self._DELETE})
+                self.assertEqual(result["overall_status"], "FAIL")
+                self.assertTrue(any(
+                    item.startswith("invalid_run_record:native_mtp:") and field in item
+                    for item in result["cells"][0]["hard_failures"]
+                ), result["cells"][0]["hard_failures"])
+        for value in (None, 0.0):
+            with self.subTest(value=value):
+                result = self._run_case(native_overrides={"aggregate_decode_tps": value})
+                self.assertEqual(result["overall_status"], "FAIL")
+
+    def test_legacy_records_derive_decode_throughput(self):
+        # 129 tokens at 100 tok/s end-to-end = 1.29s wall; 0.29s TTFT leaves
+        # 128 decode tokens over 1.0s.
+        result = self._run_case(legacy=True)
+        cell = result["cells"][0]
+        self.assertEqual(cell["decode_tps_sources"], ["derived_legacy"])
+        ordinary = cell["reported_metrics"]["ordinary"]["aggregate_decode_tps"]["median"]
+        self.assertAlmostEqual(ordinary, 128.0)
+        self.assertEqual(result["overall_status"], "PASS")
+
+    def test_legacy_multi_request_uses_arrival_offsets(self):
+        # r0: 0s start, TTFT 0.5, wall 2.0; r1: 1s start, TTFT 0.5, wall 2.0.
+        # Decode window 0.5 -> 3.0 = 2.5s for 2 * 200 decode tokens.
+        result = self._run_case(legacy=True, legacy_multi=True, arrival_interval_ms=1000)
+        ordinary = result["cells"][0]["reported_metrics"]["ordinary"]["aggregate_decode_tps"]["median"]
+        self.assertAlmostEqual(ordinary, 160.0)
+
+    def test_legacy_records_without_ttft_fail_closed(self):
+        result = self._run_case(legacy=True, native_overrides={"per_request_ttft_seconds": [None]})
+        self.assertEqual(result["overall_status"], "FAIL")
+        self.assertTrue(any(
+            "aggregate_decode_tps" in item for item in result["cells"][0]["hard_failures"]
+        ))
+
+    def test_json_output_is_a_single_document(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jsonl_path, policy_path = self._write_case(Path(tmp))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = main([str(jsonl_path), str(policy_path)])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(out.getvalue())["overall_status"], "PASS")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                main([str(jsonl_path), str(policy_path), "--format", "markdown"])
+            self.assertTrue(out.getvalue().startswith("| Cell | Status |"))
+            self.assertIn("Decode LB", out.getvalue())
 
     def test_ttft_fail(self):
         result = self._run_case(native_ttft=0.13)
@@ -188,6 +255,8 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
             for name in (
                 "aggregate_committed_tps",
                 "per_request_tps",
+                "aggregate_decode_tps",
+                "per_request_decode_tps",
                 "ttft_p50_seconds",
                 "ttft_p95_seconds",
                 "inter_token_gap_p50_seconds",
@@ -205,11 +274,21 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
 
     _DELETE = object()
 
-    def _run_case(
+    def _run_case(self, **kwargs):
+        with tempfile.TemporaryDirectory() as tmp:
+            jsonl_path, policy_path = self._write_case(Path(tmp), **kwargs)
+            return analyze(jsonl_path, policy_path)
+
+    def _write_case(
         self,
+        root,
         *,
         native_overrides=None,
         native_tps=130.0,
+        native_decode_tps=None,
+        legacy=False,
+        legacy_multi=False,
+        arrival_interval_ms=0,
         native_ttft=0.105,
         native_itl=0.009,
         parity_mismatch=False,
@@ -226,82 +305,84 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         exploratory_policy=False,
         header_exploratory=None,
     ):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            policy_path = root / "policy.json"
-            jsonl_path = root / "runs.jsonl"
-            policy = {
-                "schema": "macprovider.native-mtp-exploratory-policy.v1"
-                if exploratory_policy
-                else "macprovider.native-mtp-r015-policy.v1",
-                "slots": [1],
-                "prompt_tokens": [1536],
-                "max_tokens": [128],
-                "warmup_runs": 0,
-                "blocks": 10,
-                "seed": 1234,
-                "sustained_seconds": 1800,
-                "sustained_cell_id": "s1-p1536-o128",
-                "memory_safety_margin_bytes": 1024,
-                "hw_model": "Mac15,14",
-                "chip": "Apple M3 Ultra",
-                "ram_gb": 256,
-                "os_build": "25A1",
+        policy_path = root / "policy.json"
+        jsonl_path = root / "runs.jsonl"
+        policy = {
+            "schema": "macprovider.native-mtp-exploratory-policy.v1"
+            if exploratory_policy
+            else "macprovider.native-mtp-r015-policy.v1",
+            "slots": [1],
+            "prompt_tokens": [1536],
+            "max_tokens": [128],
+            "warmup_runs": 0,
+            "blocks": 10,
+            "seed": 1234,
+            "sustained_seconds": 1800,
+            "sustained_cell_id": "s1-p1536-o128",
+            "memory_safety_margin_bytes": 1024,
+            "hw_model": "Mac15,14",
+            "chip": "Apple M3 Ultra",
+            "ram_gb": 256,
+            "os_build": "25A1",
+            "xcode_build_version": "17A1",
+            "swift_version": "Apple Swift version 6.2",
+            "provider_commit": "a" * 40,
+            "mlx_fork_revision": "b" * 40,
+            "thresholds": {
+                "throughput_lower_bound_min": 0.15,
+                "ttft_p95_upper_bound_max": 0.10,
+                "itl_p95_upper_bound_max": 0.0,
+                "rejection_increase_max_pp": 1.0,
+                "min_available_memory_fraction": 0.10,
+                "bootstrap_draws": 1000,
+                "alpha": 0.05,
+            },
+        }
+        if exploratory_policy:
+            policy["blocks"] = 3
+            policy["sustained_seconds"] = 0
+        policy_path.write_text(json.dumps(policy, sort_keys=True), encoding="utf-8")
+        policy_sha = hashlib.sha256(policy_path.read_bytes()).hexdigest()
+        records = [
+            {
+                "schema": "macprovider.native-mtp-r015-run.v1",
+                "record_type": "header",
+                "policy_sha256": header_policy_sha or policy_sha,
+                "provider_commit": "a" * 40,
+                "machine": {
+                    "hw_model": "Mac15,14",
+                    "chip": "Apple M3 Ultra",
+                    "ram_gb": header_ram_gb,
+                    "os_build": "25A1",
+                },
                 "xcode_build_version": "17A1",
                 "swift_version": "Apple Swift version 6.2",
-                "provider_commit": "a" * 40,
+                "unavailable_metrics": [],
                 "mlx_fork_revision": "b" * 40,
-                "thresholds": {
-                    "throughput_lower_bound_min": 0.15,
-                    "ttft_p95_upper_bound_max": 0.10,
-                    "itl_p95_upper_bound_max": 0.0,
-                    "rejection_increase_max_pp": 1.0,
-                    "min_available_memory_fraction": 0.10,
-                    "bootstrap_draws": 1000,
-                    "alpha": 0.05,
-                },
+                "exploratory": exploratory_policy if header_exploratory is None else header_exploratory,
+                "arrival_interval_ms": arrival_interval_ms,
             }
-            if exploratory_policy:
-                policy["blocks"] = 3
-                policy["sustained_seconds"] = 0
-            policy_path.write_text(json.dumps(policy, sort_keys=True), encoding="utf-8")
-            policy_sha = hashlib.sha256(policy_path.read_bytes()).hexdigest()
-            records = [
-                {
-                    "schema": "macprovider.native-mtp-r015-run.v1",
-                    "record_type": "header",
-                    "policy_sha256": header_policy_sha or policy_sha,
-                    "provider_commit": "a" * 40,
-                    "machine": {
-                        "hw_model": "Mac15,14",
-                        "chip": "Apple M3 Ultra",
-                        "ram_gb": header_ram_gb,
-                        "os_build": "25A1",
-                    },
-                    "xcode_build_version": "17A1",
-                    "swift_version": "Apple Swift version 6.2",
-                    "unavailable_metrics": [],
-                    "mlx_fork_revision": "b" * 40,
-                    "exploratory": exploratory_policy if header_exploratory is None else header_exploratory,
-                }
-            ]
-            for block in range(blocks_written):
-                ordinary = self._run_record("ordinary", block, 100.0, 0.100, 0.010, False, policy_sha=run_policy_sha or policy_sha, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=matrix_min_available_memory_fraction)
-                records.append(ordinary)
-                if duplicate_matrix_path and block == 0:
-                    records.append(dict(ordinary))
-                native_record = self._run_record("native_mtp", block, native_tps, native_ttft, native_itl, parity_mismatch, policy_sha=run_policy_sha or policy_sha, native_admissions=native_admissions, peak_phys_footprint_bytes=peak_phys_footprint_bytes)
-                for field, value in (native_overrides or {}).items():
-                    if value is self._DELETE:
-                        native_record.pop(field, None)
-                    else:
-                        native_record[field] = value
-                records.append(native_record)
-            if blocks_written >= 10:
-                records.append(self._run_record("ordinary", 100, 100.0, 0.100, 0.010, False, sustained=True, policy_sha=run_policy_sha or policy_sha, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=sustained_min_available_memory_fraction, wall_seconds=sustained_wall_seconds))
-                records.append(self._run_record("native_mtp", 100, native_tps, native_ttft, native_itl, parity_mismatch, sustained=True, policy_sha=run_policy_sha or policy_sha, native_admissions=native_admissions, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=sustained_min_available_memory_fraction, wall_seconds=sustained_wall_seconds))
-            jsonl_path.write_text("\n".join(json.dumps(r, sort_keys=True) for r in records) + "\n", encoding="utf-8")
-            return analyze(jsonl_path, policy_path)
+        ]
+        if not legacy:
+            records[0]["run_metrics_version"] = 2
+        record_options = {"legacy": legacy, "legacy_multi": legacy_multi}
+        for block in range(blocks_written):
+            ordinary = self._run_record("ordinary", block, 100.0, 0.100, 0.010, False, policy_sha=run_policy_sha or policy_sha, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=matrix_min_available_memory_fraction, **record_options)
+            records.append(ordinary)
+            if duplicate_matrix_path and block == 0:
+                records.append(dict(ordinary))
+            native_record = self._run_record("native_mtp", block, native_tps, native_ttft, native_itl, parity_mismatch, policy_sha=run_policy_sha or policy_sha, native_admissions=native_admissions, peak_phys_footprint_bytes=peak_phys_footprint_bytes, decode_tps=native_decode_tps, **record_options)
+            for field, value in (native_overrides or {}).items():
+                if value is self._DELETE:
+                    native_record.pop(field, None)
+                else:
+                    native_record[field] = value
+            records.append(native_record)
+        if blocks_written >= 10:
+            records.append(self._run_record("ordinary", 100, 100.0, 0.100, 0.010, False, sustained=True, policy_sha=run_policy_sha or policy_sha, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=sustained_min_available_memory_fraction, wall_seconds=sustained_wall_seconds, **record_options))
+            records.append(self._run_record("native_mtp", 100, native_tps, native_ttft, native_itl, parity_mismatch, sustained=True, policy_sha=run_policy_sha or policy_sha, native_admissions=native_admissions, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=sustained_min_available_memory_fraction, wall_seconds=sustained_wall_seconds, decode_tps=native_decode_tps, **record_options))
+        jsonl_path.write_text("\n".join(json.dumps(r, sort_keys=True) for r in records) + "\n", encoding="utf-8")
+        return jsonl_path, policy_path
 
     def _run_record(
         self,
@@ -318,8 +399,11 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         peak_phys_footprint_bytes=1000,
         min_available_memory_fraction=0.5,
         wall_seconds=1.0,
+        decode_tps=None,
+        legacy=False,
+        legacy_multi=False,
     ):
-        return {
+        record = {
             "schema": "macprovider.native-mtp-r015-run.v1",
             "record_type": "run",
             "policy_sha256": policy_sha,
@@ -353,6 +437,25 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
             "thermal_state_start": "nominal",
             "thermal_state_end": "nominal",
         }
+        if not legacy:
+            decode = tps if decode_tps is None else decode_tps
+            record["aggregate_decode_tps"] = decode
+            record["per_request_decode_tps"] = [decode]
+        elif legacy_multi:
+            # Two requests, 201 tokens each, 2.0s wall, 0.5s TTFT.
+            record["requests"] = 2
+            record["per_request_tps"] = [100.5, 100.5]
+            record["per_request_ttft_seconds"] = [0.5, 0.5]
+            record["request_metrics"] = [
+                {"request_id": "c-b0-r0", "completion_tokens": 201},
+                {"request_id": "c-b0-r1", "completion_tokens": 201},
+            ]
+        else:
+            # 129 tokens; wall = 129 / tps; TTFT = 29 / tps, so decode runs
+            # 128 tokens over 100 / tps seconds (128 tok/s at tps=100).
+            record["per_request_ttft_seconds"] = [29.0 / tps]
+            record["request_metrics"] = [{"request_id": "c-b0-r0", "completion_tokens": 129}]
+        return record
 
 
 if __name__ == "__main__":

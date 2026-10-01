@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import random
+import re
 import statistics
 import sys
 from collections import defaultdict
@@ -92,6 +93,7 @@ def _optional_ratio(numerator: float, denominator: float) -> float | None:
 # never defaulted, because a defaulted zero reads as a perfect measurement.
 _REQUIRED_NUMBER_FIELDS = (
     "aggregate_committed_tps",
+    "aggregate_decode_tps",
     "ttft_p50_seconds",
     "ttft_p95_seconds",
     "inter_token_gap_p50_seconds",
@@ -143,13 +145,99 @@ def _invalid_run_fields(run: dict) -> list[str]:
     per_request = run.get("per_request_tps")
     if not isinstance(per_request, list) or not per_request or not all(_is_number(v) for v in per_request):
         invalid.append("per_request_tps")
+    # The throughput gate divides by decode throughput; zero would read as an
+    # infinite native speedup.
+    if _is_number(run.get("aggregate_decode_tps")) and run["aggregate_decode_tps"] <= 0:
+        invalid.append("aggregate_decode_tps")
+    per_request_decode = run.get("per_request_decode_tps")
+    if (
+        not isinstance(per_request_decode, list)
+        or not per_request_decode
+        or not all(_is_number(v) and v > 0 for v in per_request_decode)
+    ):
+        invalid.append("per_request_decode_tps")
     return sorted(set(invalid))
+
+
+# Header run_metrics_version 2 and later: every run record carries decode
+# throughput, and a missing value fails the record closed.
+DECODE_METRICS_VERSION = 2
+_REQUEST_INDEX = re.compile(r"-r(\d+)$")
+
+
+def _legacy_decode_metrics(run: dict, arrival_interval_seconds: float) -> tuple[float, list[float]] | None:
+    """Recover decode throughput from a pre-version-2 record.
+
+    Request wall = completion tokens / per_request_tps; per-request decode
+    throughput = (tokens - 1) / (wall - TTFT). The aggregate uses the bench's
+    definition (tokens after each request's first, over earliest first token
+    to latest completion) with each request's nominal arrival offset
+    (index * arrival interval). Anything missing or degenerate returns None so
+    the record fails closed.
+    """
+    tps = run.get("per_request_tps")
+    ttfts = run.get("per_request_ttft_seconds")
+    metrics = run.get("request_metrics")
+    if not (isinstance(tps, list) and isinstance(ttfts, list) and isinstance(metrics, list)):
+        return None
+    if not tps or not (len(tps) == len(ttfts) == len(metrics)):
+        return None
+    per_request: list[float] = []
+    decode_tokens = 0
+    first_token = math.inf
+    last_end = -math.inf
+    for rate, ttft, item in zip(tps, ttfts, metrics):
+        if not isinstance(item, dict):
+            return None
+        tokens = item.get("completion_tokens")
+        match = _REQUEST_INDEX.search(str(item.get("request_id", "")))
+        if not (_is_number(rate) and rate > 0 and _is_number(ttft) and _is_count(tokens) and tokens >= 2 and match):
+            return None
+        wall = tokens / rate
+        if wall - ttft <= 0:
+            return None
+        per_request.append((tokens - 1) / (wall - ttft))
+        offset = int(match.group(1)) * arrival_interval_seconds
+        first_token = min(first_token, offset + ttft)
+        last_end = max(last_end, offset + wall)
+        decode_tokens += tokens - 1
+    window = last_end - first_token
+    if window <= 0:
+        return None
+    return decode_tokens / window, per_request
+
+
+def _with_decode_metrics(run: dict, header: dict) -> dict:
+    """Return the run with decode throughput present, recorded or derived."""
+    if run.get("record_type") != "run":
+        return run
+    if "aggregate_decode_tps" in run:
+        return {**run, "decode_tps_source": "recorded"}
+    version = header.get("run_metrics_version")
+    if _is_count(version) and version >= DECODE_METRICS_VERSION:
+        return run
+    interval_ms = header.get("arrival_interval_ms", 0)
+    if not _is_number(interval_ms):
+        return run
+    derived = _legacy_decode_metrics(run, float(interval_ms) / 1000.0)
+    if derived is None:
+        return run
+    aggregate, per_request = derived
+    return {
+        **run,
+        "aggregate_decode_tps": aggregate,
+        "per_request_decode_tps": per_request,
+        "decode_tps_source": "derived_legacy",
+    }
 
 
 def _metric(pair: tuple[dict, dict], name: str) -> float:
     """Gated paired-block statistic. Callers validate both records first."""
     ordinary, native = pair
     if name == "throughput":
+        # SPEC-048-R015: the gate is decode throughput; prefill is TTFT.
+        return _safe_ratio(float(native["aggregate_decode_tps"]), float(ordinary["aggregate_decode_tps"])) - 1.0
+    if name == "end_to_end_throughput":
         return _safe_ratio(float(native["aggregate_committed_tps"]), float(ordinary["aggregate_committed_tps"])) - 1.0
     if name == "ttft":
         return _safe_ratio(float(native["ttft_p95_seconds"]), float(ordinary["ttft_p95_seconds"])) - 1.0
@@ -171,6 +259,8 @@ def _reported_values(run: dict) -> dict[str, float | None]:
     return {
         "aggregate_committed_tps": float(run["aggregate_committed_tps"]),
         "per_request_tps": statistics.median(float(v) for v in run["per_request_tps"]),
+        "aggregate_decode_tps": float(run["aggregate_decode_tps"]),
+        "per_request_decode_tps": statistics.median(float(v) for v in run["per_request_decode_tps"]),
         "ttft_p50_seconds": float(run["ttft_p50_seconds"]),
         "ttft_p95_seconds": float(run["ttft_p95_seconds"]),
         "inter_token_gap_p50_seconds": float(run["inter_token_gap_p50_seconds"]),
@@ -285,6 +375,7 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
     policy = _load_policy(policy_path)
     policy_sha = _sha256(policy_path)
     header, runs = _load_jsonl(jsonl_path)
+    runs = [_with_decode_metrics(run, header) for run in runs]
     if header.get("policy_sha256") != policy_sha:
         return {
             "schema": "macprovider.native-mtp-r015-analysis.v1",
@@ -487,6 +578,23 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
             median = _median(observed)
             boot = _bootstrap(usable_pairs, metric_name, draws, base_seed + cell_index * 17 + len(metric_name)) if usable_pairs else []
             metrics[metric_name] = {"median": median, "draws": boot}
+        # Prefill-inclusive throughput: reported, never gated (prefill is the
+        # same work on both paths and is gated as TTFT).
+        end_to_end = [_metric(pair, "end_to_end_throughput") for pair in usable_pairs]
+        end_to_end_draws = (
+            _bootstrap(usable_pairs, "end_to_end_throughput", draws, base_seed + cell_index * 17 + 211)
+            if usable_pairs
+            else []
+        )
+        informational = {
+            "end_to_end_throughput": {
+                "median": _median(end_to_end),
+                "ci_lower": _percentile(end_to_end_draws, alpha / 2),
+                "ci_upper": _percentile(end_to_end_draws, 1.0 - alpha / 2),
+                "confidence_level": 1.0 - alpha,
+                "gated": False,
+            }
+        }
 
         cell = {
             "cell_id": cell_id,
@@ -495,6 +603,8 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
             "load_gate_downgrades": load_gate_downgrades,
             "hard_failures": hard_failures,
             "metrics": metrics,
+            "informational_metrics": informational,
+            "decode_tps_sources": sorted({str(r.get("decode_tps_source")) for r in hard_gate_runs}),
             "acceptance_rate": _median([
                 value
                 for _, r in pairs
@@ -592,19 +702,21 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
 
 def markdown_table(result: dict) -> str:
     lines = [
-        "| Cell | Status | Blocks | Throughput LB | TTFT UB | ITL UB | Rejection UB | Hard failures |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| Cell | Status | Blocks | Decode ratio | Decode LB | TTFT UB | ITL UB | Rejection UB | E2E ratio (info) | Hard failures |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for cell in result.get("cells", []):
         metrics = cell["metrics"]
         hard = ",".join(cell["hard_failures"]) if cell["hard_failures"] else "-"
         lines.append(
-            "| {cell} | {status} | {blocks}/{required} | {thr} | {ttft} | {itl} | {rej} | {hard} |".format(
+            "| {cell} | {status} | {blocks}/{required} | {ratio} | {thr} | {ttft} | {itl} | {rej} | {e2e} | {hard} |".format(
                 cell=cell["cell_id"],
                 status=cell["status"],
                 blocks=cell["paired_blocks"],
                 required=cell["required_blocks"],
+                ratio=_fmt_ratio(metrics["throughput"].get("median")),
                 thr=_fmt(metrics["throughput"].get("corrected_lower_bound")),
+                e2e=_fmt_ratio(cell["informational_metrics"]["end_to_end_throughput"]["median"]),
                 ttft=_fmt(metrics["ttft"].get("corrected_upper_bound")),
                 itl=_fmt(metrics["itl"].get("corrected_upper_bound")),
                 rej=_fmt(metrics["rejection"].get("corrected_upper_bound")),
@@ -618,15 +730,27 @@ def _fmt(value: float | None) -> str:
     return "null" if value is None else f"{value:.6g}"
 
 
+def _fmt_ratio(delta: float | None) -> str:
+    """Native/ordinary ratio from a ratio-minus-one statistic."""
+    return "null" if delta is None else f"{delta + 1.0:.4g}"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("jsonl", type=Path)
     parser.add_argument("policy", type=Path)
+    parser.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="json",
+        help="json (default) prints one parseable JSON document; markdown prints the summary table.",
+    )
     args = parser.parse_args(argv)
     result = analyze(args.jsonl, args.policy)
-    print(json.dumps(result, indent=2, sort_keys=True))
-    print()
-    print(markdown_table(result))
+    if args.format == "json":
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(markdown_table(result))
     return 0 if result["overall_status"] == "PASS" else 1
 
 
