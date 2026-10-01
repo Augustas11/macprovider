@@ -51,8 +51,18 @@ ADMISSION_SIGNED_SOURCE = (
 )
 STALE_SELECTOR_PROMOTED_REQUIREMENT_IDS = frozenset({
     "SPEC-046-R001",
+    # #1816 pool-scoped model changes moved these mapped selectors.
+    "SPEC-046-R003",
+    "SPEC-046-R004",
+    "SPEC-046-R005",
+    "SPEC-046-R006",
+    "SPEC-046-R007",
     "SPEC-046-R008",
+    "SPEC-047-R001",
+    "SPEC-047-R002",
     "SPEC-047-R003",
+    "SPEC-047-R004",
+    "SPEC-047-R006",
 })
 
 

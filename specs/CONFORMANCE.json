@@ -9347,7 +9347,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1816",
-        "rationale": "Demoted from conformant on the #1816 campaign branch: the #1816 coordinator and CLI lanes changed the mapped implementation/test fragments, so the 2026-09 commit and signed-journey evidence no longer covers the current code (check_spec_governance fragment check). The mapped unit tests pass on the merged tree; re-promote after a fresh signed journey run against the landed #1816 commit."
+        "rationale": "#1816 pool-scoped model changes (coordinator and CLI lanes) updated mapped implementation and test selectors. Local regression checks pass, but the historical signed journey binds earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
       }
     },
     {
@@ -9387,7 +9387,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1816",
-        "rationale": "Demoted from conformant on the #1816 campaign branch: the #1816 coordinator and CLI lanes changed the mapped implementation/test fragments, so the 2026-09 commit and signed-journey evidence no longer covers the current code (check_spec_governance fragment check). The mapped unit tests pass on the merged tree; re-promote after a fresh signed journey run against the landed #1816 commit."
+        "rationale": "#1816 pool-scoped model changes (coordinator and CLI lanes) updated mapped implementation and test selectors. Local regression checks pass, but the historical signed journey binds earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
       }
     },
     {
@@ -9429,7 +9429,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1816",
-        "rationale": "Demoted from conformant on the #1816 campaign branch: the #1816 coordinator and CLI lanes changed the mapped implementation/test fragments, so the 2026-09 commit and signed-journey evidence no longer covers the current code (check_spec_governance fragment check). The mapped unit tests pass on the merged tree; re-promote after a fresh signed journey run against the landed #1816 commit."
+        "rationale": "#1816 pool-scoped model changes (coordinator and CLI lanes) updated mapped implementation and test selectors. Local regression checks pass, but the historical signed journey binds earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
       }
     },
     {
@@ -9470,7 +9470,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1816",
-        "rationale": "Demoted from conformant on the #1816 campaign branch: the #1816 coordinator and CLI lanes changed the mapped implementation/test fragments, so the 2026-09 commit and signed-journey evidence no longer covers the current code (check_spec_governance fragment check). The mapped unit tests pass on the merged tree; re-promote after a fresh signed journey run against the landed #1816 commit."
+        "rationale": "#1816 pool-scoped model changes (coordinator and CLI lanes) updated mapped implementation and test selectors. Local regression checks pass, but the historical signed journey binds earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
       }
     },
     {
@@ -9512,7 +9512,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1816",
-        "rationale": "Demoted from conformant on the #1816 campaign branch: the #1816 coordinator and CLI lanes changed the mapped implementation/test fragments, so the 2026-09 commit and signed-journey evidence no longer covers the current code (check_spec_governance fragment check). The mapped unit tests pass on the merged tree; re-promote after a fresh signed journey run against the landed #1816 commit."
+        "rationale": "#1816 pool-scoped model changes (coordinator and CLI lanes) updated mapped implementation and test selectors. Local regression checks pass, but the historical signed journey binds earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
       }
     },
     {
@@ -9638,7 +9638,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1816",
-        "rationale": "Demoted from conformant on the #1816 campaign branch: the #1816 coordinator and CLI lanes changed the mapped implementation/test fragments, so the 2026-09 commit and signed-journey evidence no longer covers the current code (check_spec_governance fragment check). The mapped unit tests pass on the merged tree; re-promote after a fresh signed journey run against the landed #1816 commit."
+        "rationale": "#1816 pool-scoped model changes (coordinator and CLI lanes) updated mapped implementation and test selectors. Local regression checks pass, but the historical signed journey binds earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
       }
     },
     {
@@ -9681,7 +9681,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1816",
-        "rationale": "Demoted from conformant on the #1816 campaign branch: the #1816 coordinator and CLI lanes changed the mapped implementation/test fragments, so the 2026-09 commit and signed-journey evidence no longer covers the current code (check_spec_governance fragment check). The mapped unit tests pass on the merged tree; re-promote after a fresh signed journey run against the landed #1816 commit."
+        "rationale": "#1816 pool-scoped model changes (coordinator and CLI lanes) updated mapped implementation and test selectors. Local regression checks pass, but the historical signed journey binds earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
       }
     },
     {
@@ -9791,7 +9791,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1816",
-        "rationale": "Demoted from conformant on the #1816 campaign branch: the #1816 coordinator and CLI lanes changed the mapped implementation/test fragments, so the 2026-09 commit and signed-journey evidence no longer covers the current code (check_spec_governance fragment check). The mapped unit tests pass on the merged tree; re-promote after a fresh signed journey run against the landed #1816 commit."
+        "rationale": "#1816 pool-scoped model changes (coordinator and CLI lanes) updated mapped implementation and test selectors. Local regression checks pass, but the historical signed journey binds earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
       }
     },
     {
@@ -9877,7 +9877,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1816",
-        "rationale": "Demoted from conformant on the #1816 campaign branch: the #1816 coordinator and CLI lanes changed the mapped implementation/test fragments, so the 2026-09 commit and signed-journey evidence no longer covers the current code (check_spec_governance fragment check). The mapped unit tests pass on the merged tree; re-promote after a fresh signed journey run against the landed #1816 commit."
+        "rationale": "#1816 pool-scoped model changes (coordinator and CLI lanes) updated mapped implementation and test selectors. Local regression checks pass, but the historical signed journey binds earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
       }
     },
     {
