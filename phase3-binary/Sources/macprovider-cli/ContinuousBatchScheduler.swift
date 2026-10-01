@@ -743,6 +743,11 @@ struct ContinuousBatchDecodeInput: Sendable, Equatable {
     /// parameters, and the row logits; hidden cross-row sampler state is
     /// forbidden.
     let samplerStep: Int
+    /// A native-MTP row riding the ordinary forward at load-gate depth zero.
+    /// The backend keeps each sampled token and the target hidden state that
+    /// produced it, and advances the row's drafter over them before the
+    /// row's next native proposal (SPEC-048-R006/R007).
+    var captureNativeMTPDrafterColumns: Bool = false
 }
 
 struct ContinuousBatchNativeMTPVerifyInput: Sendable, Equatable {
@@ -3602,14 +3607,23 @@ actor ContinuousBatchScheduler {
         let rows = activeDecode.values.sorted {
             admissionPrecedes($0.request.id, $1.request.id)
         }
-        let nativeRows = rows.filter(\.usesNativeMTP)
-        updateNativeMTPLoadGate(nativeRows: nativeRows)
+        let allNativeRows = rows.filter(\.usesNativeMTP)
+        updateNativeMTPLoadGate(nativeRows: allNativeRows)
+        // While the load gate holds native rows at depth zero, a native verify
+        // of one column is the ordinary decode step with extra transaction
+        // cost, so those rows ride the ordinary lockstep forward instead and
+        // the backend keeps their drafter columns for when depth returns.
+        // Integrity probes are exempt from the gate and keep verifying.
+        let fusedIDs: Set<String> = nativeMTPLoadGateEngaged
+            ? Set(allNativeRows.filter { !$0.request.nativeMTPIntegrityProbe }.map(\.request.id))
+            : []
+        let nativeRows = allNativeRows.filter { !fusedIDs.contains($0.request.id) }
         guard !nativeRows.isEmpty else {
             await runOrdinaryDecodeStep(rows: rows)
             return
         }
-        let ordinaryRows = rows.filter { !$0.usesNativeMTP }
-        if rows.first?.usesNativeMTP == true {
+        let ordinaryRows = rows.filter { !$0.usesNativeMTP || fusedIDs.contains($0.request.id) }
+        if rows.first.map({ $0.usesNativeMTP && !fusedIDs.contains($0.request.id) }) == true {
             await runNativeMTPDecodeStep(rows: nativeRows)
             guard !cleanupFailedClosed else { return }
             let remainingOrdinary = ordinaryRows.compactMap { activeDecode[$0.request.id] }
@@ -3680,7 +3694,8 @@ actor ContinuousBatchScheduler {
                     blockTable: binding.currentTable,
                     committedKVTokenCount: committedKVTokenCount,
                     targetKVTokenCount: targetKVTokenCount,
-                    samplerStep: row.generatedTokens.count
+                    samplerStep: row.generatedTokens.count,
+                    captureNativeMTPDrafterColumns: row.usesNativeMTP
                 )))
             } catch {
                 if beganDecode {

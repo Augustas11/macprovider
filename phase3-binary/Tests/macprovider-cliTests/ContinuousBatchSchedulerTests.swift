@@ -5134,21 +5134,33 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let ordinaryDecodeRows = await backend.decodeBatches().flatMap { $0 }
         XCTAssertTrue(ordinaryDecodeRows.contains("ordinary"))
 
+        // While gated the native row never verifies at depth zero: it rides
+        // the ordinary lockstep forward with drafter-column capture, so every
+        // native proposal it makes is at full depth.
         let depths = await backend.nativeProposalBatches().flatMap { batch in
             batch.filter { $0.requestID == "gated" }.map(\.maximumProposalDepth)
         }
-        // Shape 1* 0+ 1+ (plus the final no-capacity round): the gate engages
-        // once, holds through the overloaded rounds plus the whole calm
-        // window, and restores without flapping.
-        let body = Array(depths.dropLast())
-        let zeroStart = try XCTUnwrap(body.firstIndex(of: 0), "gate never engaged: \(depths)")
-        let zeroEnd = try XCTUnwrap(body[zeroStart...].firstIndex(of: 1), "depth never restored: \(depths)")
-        XCTAssertTrue(body[..<zeroStart].allSatisfy { $0 == 1 }, "\(depths)")
-        XCTAssertTrue(body[zeroEnd...].allSatisfy { $0 == 1 }, "\(depths)")
+        XCTAssertTrue(depths.dropLast().allSatisfy { $0 == 1 }, "\(depths)")
+        let captures = await backend.decodeCaptureFlags()
+        let gatedRounds = captures.filter { $0["gated"] != nil }
+        XCTAssertTrue(gatedRounds.allSatisfy { $0["gated"] == true }, "\(captures)")
+        XCTAssertTrue(captures.allSatisfy { $0["ordinary"] != true }, "\(captures)")
+        // Shape native* fused+ native+: the gate engages once, holds through
+        // the overloaded rounds plus the whole calm window, and restores
+        // without flapping back to the ordinary forward.
+        let events = await backend.events().filter {
+            $0 == "decode:gated" || $0.hasPrefix("native_propose:") && $0.contains("gated")
+        }
+        let fusedStart = try XCTUnwrap(events.firstIndex(of: "decode:gated"), "gate never engaged: \(events)")
+        let fusedEnd = try XCTUnwrap(
+            events[fusedStart...].firstIndex { $0 != "decode:gated" },
+            "depth never restored: \(events)"
+        )
+        XCTAssertFalse(events[fusedEnd...].contains("decode:gated"), "\(events)")
         XCTAssertGreaterThanOrEqual(
-            zeroEnd - zeroStart,
+            fusedEnd - fusedStart,
             ContinuousBatchScheduler.nativeMTPLoadGateReleaseRounds + 1,
-            "\(depths)"
+            "\(events)"
         )
     }
 
@@ -6290,6 +6302,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     private var prefillRowsLog: [[String]] = []
     private var prefillInputLog: [ContinuousBatchPrefillInput] = []
     private var decodeRowsLog: [[String]] = []
+    private var decodeCaptureLog: [[String: Bool]] = []
     private var currentTokenLog: [[String: Int]] = []
     private var prefillCommittedLog: [[String: Int]] = []
     private var prefillTargetLog: [[String: Int]] = []
@@ -6445,6 +6458,9 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
             throw BackendFailure()
         }
         decodeRowsLog.append(rows.map(\.requestID))
+        decodeCaptureLog.append(Dictionary(uniqueKeysWithValues: rows.map {
+            ($0.requestID, $0.captureNativeMTPDrafterColumns)
+        }))
         currentTokenLog.append(Dictionary(uniqueKeysWithValues: rows.map { ($0.requestID, $0.currentToken) }))
         decodeCommittedLog.append(Dictionary(uniqueKeysWithValues: rows.map {
             ($0.requestID, $0.committedKVTokenCount)
@@ -6602,6 +6618,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     func prefillCallCount() -> Int { prefillRowsLog.count }
     func decodeCallCount() -> Int { decodeCalls }
     func decodeBatches() -> [[String]] { decodeRowsLog }
+    func decodeCaptureFlags() -> [[String: Bool]] { decodeCaptureLog }
     func prefillInputs() -> [ContinuousBatchPrefillInput] { prefillInputLog }
     func prefillOrder() -> [[String]] { prefillRowsLog }
     func observedSamplerSeeds() -> [String: [Int]] { samplerSeedLog }

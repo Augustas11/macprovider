@@ -860,10 +860,15 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
 
         let decoded: [ContinuousBatchDecodeOutcome] = try await container.perform(nonSendable: supportedInputs) { context, supportedInputs in
-            try self.performDecode(
+            let decoded = try self.performDecode(
                 model: context.model,
                 supportedInputs: supportedInputs,
                 steps: 1
+            )
+            return await self.flushingNativeMTPDrafterColumns(
+                targetModel: context.model,
+                inputs: supportedInputs,
+                decoded: decoded
             )
         }
         for outcome in decoded {
@@ -902,10 +907,15 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             return inputs.map { .rowFailure(requestID: $0.requestID) }
         }
         let decoded: [ContinuousBatchDecodeOutcome] = try await container.perform(nonSendable: supportedInputs) { context, supportedInputs in
-            try self.performDecode(
+            let decoded = try self.performDecode(
                 model: context.model,
                 supportedInputs: supportedInputs,
                 steps: steps
+            )
+            return await self.flushingNativeMTPDrafterColumns(
+                targetModel: context.model,
+                inputs: supportedInputs,
+                decoded: decoded
             )
         }
         for outcome in decoded {
@@ -941,6 +951,21 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_drafter_required")
             }
             return context.model.maximumBlockSize
+        }
+        // A row returning from load-gate depth zero first catches its drafter
+        // up on the columns it committed through the ordinary forward, so
+        // its proposal follows the same committed prefix as the target. This
+        // runs for every proposing row, depth zero included, because a
+        // depth-zero finalize also advances the drafter from its state.
+        let pendingIDs = inputs.map(\.requestID).filter { hasPendingNativeMTPDrafterColumns(for: $0) }
+        if !pendingIDs.isEmpty {
+            try await container.perform { context in
+                try await self.flushNativeMTPDrafterColumns(
+                    targetModel: context.model,
+                    requestIDs: pendingIDs,
+                    minimumColumns: 1
+                )
+            }
         }
         var proposals: [String: [Int]] = [:]
         for input in inputs {
@@ -1260,6 +1285,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             nativeMTPPendingTransactions.removeAll()
             nativeMTPDrafterStates.removeAll()
             nativeMTPDrafterSeedTokens.removeAll()
+            nativeMTPPendingDrafterColumns.removeAll()
             if activeOperations == 0 {
                 lock.unlock()
                 handlesToDiscard.forEach { contiguousCacheBridge?.discardContiguousCache(handle: $0) }
@@ -1390,6 +1416,16 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         if supportedInputs.count > 1 && rowStates.contains(where: { $0.state != nil }) {
             return supportedInputs.map { ContinuousBatchDecodeOutcome.rowFailure(requestID: $0.requestID) }
         }
+        // Native rows riding this forward need the target hidden state of
+        // every step for their drafter. Capture asks the target to emit it;
+        // that output state is diagnostic only and never becomes row state.
+        let captureIndices = drafterContainer == nil
+            ? []
+            : supportedInputs.indices.filter { supportedInputs[$0].captureNativeMTPDrafterColumns }
+        if !captureIndices.isEmpty && rowStates.contains(where: { $0.state != nil }) {
+            return supportedInputs.map { ContinuousBatchDecodeOutcome.rowFailure(requestID: $0.requestID) }
+        }
+        var capturedColumns: [Int: [(token: Int, hidden: MLXArray)]] = [:]
 
         let requestIDs = supportedInputs.map(\.requestID)
         var session = copyDecodeSession()
@@ -1408,6 +1444,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
         let cachesAsKV = batchedCaches.map(\.cache)
         let canCompile = compiledDecode
+            && captureIndices.isEmpty
             && cacheKinds.allSatisfy({ $0 == .pagedAttention })
             && rowStates.allSatisfy({ $0.state == nil })
             && cachesAsKV.allSatisfy { !$0.innerState().isEmpty }
@@ -1473,8 +1510,16 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             for stepIndex in 0 ..< decodeSteps {
                 let tokenInput = MLXArray(currentTokens.map(Int32.init)).reshaped([supportedInputs.count, 1])
                 let text = LMInput.Text(tokens: tokenInput)
+                let stepState: LMOutput.State?
+                if captureIndices.isEmpty {
+                    stepState = supportedInputs.count == 1 ? rowStates[0].state : nil
+                } else {
+                    var emit = LMOutput.State()
+                    emit[mtpEmitFlagKey] = true
+                    stepState = emit
+                }
                 let output = withPreparedCache(cachesAsKV, lengths: text.sequenceLengths) {
-                    model(text, cache: cachesAsKV, state: supportedInputs.count == 1 ? rowStates[0].state : nil)
+                    model(text, cache: cachesAsKV, state: stepState)
                 }
                 try batchedCaches.forEach { try $0.validateBatchState() }
                 let stepSampled = ContinuousBatchRowSampler.sample(
@@ -1483,6 +1528,26 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 ).asArray(Int.self)
                 guard stepSampled.count == supportedInputs.count else {
                     throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_logits_shape")
+                }
+                if !captureIndices.isEmpty {
+                    guard let hidden = output.state?[mtpLastHiddenStatesKey],
+                          hidden.ndim == 3,
+                          hidden.dim(0) == supportedInputs.count,
+                          hidden.dim(1) >= 1
+                    else {
+                        throw ContinuousBatchSchedulerError.unsupported("native_mtp_missing_decode_hidden_state")
+                    }
+                    for index in captureIndices {
+                        capturedColumns[index, default: []].append((
+                            token: stepSampled[index],
+                            hidden: hidden[index ..< index + 1, (-1)..., 0...]
+                        ))
+                    }
+                    for index in supportedInputs.indices {
+                        collected[index].append(stepSampled[index])
+                    }
+                    currentTokens = stepSampled
+                    continue
                 }
                 if supportedInputs.count == 1 {
                     rowStates[0].state = output.state
@@ -1511,6 +1576,15 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         storeDecodeSession(cacheKinds.contains(.recurrentMamba) ? nil : session)
         for (index, input) in supportedInputs.enumerated() {
             try self.setRowState(rowStates[index], for: input.requestID, binding: input.binding)
+        }
+        if !capturedColumns.isEmpty {
+            eval(capturedColumns.values.flatMap { $0.map(\.hidden) })
+            lock.lock()
+            for (index, columns) in capturedColumns {
+                nativeMTPPendingDrafterColumns[supportedInputs[index].requestID, default: []]
+                    .append(contentsOf: columns)
+            }
+            lock.unlock()
         }
         return zip(supportedInputs, sampledByRow).map { input, tokens in
             ContinuousBatchDecodeOutcome.output(ContinuousBatchDecodeOutput(
@@ -1746,6 +1820,133 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         )
     }
 
+    /// Bounds a gated row's buffered columns: once a row holds the flush
+    /// threshold, its drafter catches up now. A row whose drafter cannot
+    /// advance fails alone; its batch peers keep their decoded tokens.
+    private func flushingNativeMTPDrafterColumns(
+        targetModel: any LanguageModel,
+        inputs: [ContinuousBatchDecodeInput],
+        decoded: [ContinuousBatchDecodeOutcome]
+    ) async -> [ContinuousBatchDecodeOutcome] {
+        let captureIDs = inputs.filter(\.captureNativeMTPDrafterColumns).map(\.requestID)
+        guard !captureIDs.isEmpty else { return decoded }
+        do {
+            try await flushNativeMTPDrafterColumns(
+                targetModel: targetModel,
+                requestIDs: captureIDs,
+                minimumColumns: Self.nativeMTPDrafterColumnFlushThreshold
+            )
+            return decoded
+        } catch {
+            ContinuousBatchingPolicy.logForwardFailed(error)
+            let failed = Set(captureIDs.filter {
+                (pendingNativeMTPDrafterColumnCount(for: $0) ?? 0) >= Self.nativeMTPDrafterColumnFlushThreshold
+            })
+            return decoded.map { failed.contains($0.requestID) ? .rowFailure(requestID: $0.requestID) : $0 }
+        }
+    }
+
+    private func pendingNativeMTPDrafterColumnCount(for requestID: String) -> Int? {
+        lock.lock()
+        defer { lock.unlock() }
+        return nativeMTPPendingDrafterColumns[requestID]?.count
+    }
+
+    private func hasPendingNativeMTPDrafterColumns(for requestID: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !(nativeMTPPendingDrafterColumns[requestID]?.isEmpty ?? true)
+    }
+
+    /// Feeds each listed row's buffered depth-zero columns to its drafter
+    /// with one packed advance for all rows holding at least
+    /// `minimumColumns`: the columns are the row's committed tokens paired
+    /// with the target hidden states that produced them, so the drafter ends
+    /// where per-round depth-zero finalizes would have left it, and its seed
+    /// is the proposal for the row's next token. Buffers clear only after the
+    /// advanced states are stored.
+    private func flushNativeMTPDrafterColumns(
+        targetModel: any LanguageModel,
+        requestIDs: [String],
+        minimumColumns: Int
+    ) async throws {
+        guard let drafterContainer, !requestIDs.isEmpty else { return }
+        let (flushIDs, advanceRows) = try pendingNativeMTPDrafterAdvanceRows(
+            requestIDs: requestIDs,
+            minimumColumns: minimumColumns
+        )
+        guard !advanceRows.isEmpty else { return }
+        let advanced = try await drafterContainer.perform(
+            nonSendable: (advanceRows, targetModel)
+        ) { drafterContext, values in
+            let (advanceRows, targetModel) = values
+            guard let drafter = drafterContext.model as? any MTPPackedStatefulDrafterModel else {
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_drafter_required")
+            }
+            let result = try drafter.advanceAndProposePacked(
+                target: targetModel,
+                rows: advanceRows,
+                sampler: GenerateParameters(temperature: 0).sampler()
+            )
+            eval(result.states.flatMap { $0.cache.flatMap(\.state) } + [result.proposals])
+            return (
+                states: result.states,
+                seeds: result.proposals.asType(.int32).asArray(Int32.self).map(Int.init)
+            )
+        }
+        guard advanced.states.count == flushIDs.count, advanced.seeds.count == flushIDs.count else {
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_missing_drafter_state")
+        }
+        storeFlushedNativeMTPDrafterColumns(
+            requestIDs: flushIDs,
+            states: advanced.states,
+            seedTokens: advanced.seeds
+        )
+    }
+
+    private func pendingNativeMTPDrafterAdvanceRows(
+        requestIDs: [String],
+        minimumColumns: Int
+    ) throws -> ([String], [MTPPackedDrafterAdvanceRow]) {
+        lock.lock()
+        defer { lock.unlock() }
+        var flushIDs: [String] = []
+        var advanceRows: [MTPPackedDrafterAdvanceRow] = []
+        for requestID in requestIDs {
+            guard let columns = nativeMTPPendingDrafterColumns[requestID],
+                  columns.count >= max(1, minimumColumns)
+            else { continue }
+            guard let state = nativeMTPDrafterStates[requestID], let last = columns.last else {
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_missing_drafter_state")
+            }
+            flushIDs.append(requestID)
+            advanceRows.append(MTPPackedDrafterAdvanceRow(
+                targetHidden: columns.count == 1
+                    ? columns[0].hidden
+                    : concatenated(columns.map(\.hidden), axis: 1),
+                acceptedTokens: columns.dropLast().map(\.token),
+                finalToken: last.token,
+                positionDeltas: nil,
+                state: state
+            ))
+        }
+        return (flushIDs, advanceRows)
+    }
+
+    private func storeFlushedNativeMTPDrafterColumns(
+        requestIDs: [String],
+        states: [MTPDrafterState],
+        seedTokens: [Int]
+    ) {
+        lock.lock()
+        for (index, requestID) in requestIDs.enumerated() {
+            nativeMTPDrafterStates[requestID] = states[index]
+            nativeMTPDrafterSeedTokens[requestID] = seedTokens[index]
+            nativeMTPPendingDrafterColumns.removeValue(forKey: requestID)
+        }
+        lock.unlock()
+    }
+
     /// One packed drafter forward for every committing row. Returns `nil`
     /// when this backend has no drafter. Fails closed, before any state is
     /// staged, when a committing row has no drafter state.
@@ -1755,7 +1956,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     ) async throws -> MTPPackedDrafterAdvanceResult? {
         guard let drafterContainer, !rows.isEmpty else { return nil }
         let advanceRows = try rows.map { input, transaction -> MTPPackedDrafterAdvanceRow in
-            guard let state = nativeMTPDrafterState(for: input.requestID) else {
+            guard let state = nativeMTPDrafterState(for: input.requestID),
+                  !hasPendingNativeMTPDrafterColumns(for: input.requestID)
+            else {
                 throw ContinuousBatchSchedulerError.unsupported("native_mtp_missing_drafter_state")
             }
             guard let finalTokenID = input.acceptedTokenIDs.last else {
@@ -1873,6 +2076,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         lock.lock()
         nativeMTPDrafterStates.removeValue(forKey: requestID)
         nativeMTPDrafterSeedTokens.removeValue(forKey: requestID)
+        nativeMTPPendingDrafterColumns.removeValue(forKey: requestID)
         lock.unlock()
     }
 
