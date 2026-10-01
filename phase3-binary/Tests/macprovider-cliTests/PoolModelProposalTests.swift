@@ -95,6 +95,33 @@ final class PoolModelProposalTests: XCTestCase {
         XCTAssertEqual(object["warnings"] as? [String], ["offer_not_submitted"])
     }
 
+    /// #1816: the lab creator tool (`scripts/lab/1690-m6/pool_setup.py entry`)
+    /// and the coordinator-cli signer test both consume a fixture of this
+    /// bundle; it must stay exactly the CLI's closed shape.
+    func testLabProposalFixtureMatchesTheBundleShape() throws {
+        let fixtureURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("scripts/lab/1690-m6/testdata/pool_model_proposal.v1.json")
+        let fixture = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: fixtureURL)) as? [String: Any])
+        let object = try Self.object(try PoolModelProposalBuilder.makeBundle(
+            poolID: Self.poolID, slug: nil, providerID: "provider-a", candidate: Self.candidate(),
+            artifactHashes: [ModelArtifactIdentity.ggufFileV1: Self.hash],
+            pricing: nil, evaluationDigestSHA256: nil, offerStatus: nil
+        ))
+        XCTAssertEqual(Set(fixture.keys), Set(object.keys))
+        XCTAssertEqual(fixture["schema"] as? String, PoolModelProposalWire.schemaID)
+        let fixtureEntry = try XCTUnwrap(fixture["model_entry"] as? [String: Any])
+        let entry = try XCTUnwrap(object["model_entry"] as? [String: Any])
+        XCTAssertEqual(Set(fixtureEntry.keys), Set(entry.keys))
+        XCTAssertTrue(fixtureEntry["license"] is NSNull && entry["license"] is NSNull)
+        XCTAssertTrue(fixtureEntry["paid_serving_attested"] is NSNull && entry["paid_serving_attested"] is NSNull)
+        let fixtureEvidence = try XCTUnwrap(fixture["evidence"] as? [String: Any])
+        let evidence = try XCTUnwrap(object["evidence"] as? [String: Any])
+        XCTAssertEqual(Set(fixtureEvidence.keys), Set(evidence.keys))
+        let codes = Set(PoolModelProposalWire.Requirement.allCases.map(\.rawValue))
+        XCTAssertTrue(Set(try XCTUnwrap(fixture["creator_requirements"] as? [String])).isSubset(of: codes))
+    }
+
     func testRuntimeAlgorithmPairsAndFailClosedInputs() throws {
         // Native MLX and the MLX loopbacks name snapshot-manifest entries.
         for runtime in ["mlx_cache", "mlxlm_loopback", "omlx_loopback"] {

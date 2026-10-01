@@ -7,10 +7,16 @@
   pool_setup.py manifest NAME --encoding 1|2 [--runtime-allowlist csv] [--window-seconds N]
       (appends the next manifest version, starting when the current one ends)
   pool_setup.py event NAME EVENT_TYPE [--provider-id ID]   (member_revoked etc.)
-  pool_setup.py entry NAME --proposal BUNDLE.json | --remove POOL_MODEL_ID
-      (#1816: edits LAB/pools/NAME/model-entries.json; the next `manifest`
-      signs it as the pool_model_entries/v1 extension, or omits the extension
-      once the list is empty, which revokes every entry)
+  pool_setup.py entry NAME --proposal BUNDLE.json --license SPDX --paid-serving-attested
+                    [--prompt-rate N --cache-hit-rate N --completion-rate N]
+                    [--max-context-tokens N]
+  pool_setup.py entry NAME --remove POOL_MODEL_ID
+  pool_setup.py entry NAME --attest ACCOUNT=RUNTIME[,RUNTIME] | --unattest ACCOUNT
+      (#1816: edits LAB/pools/NAME/pool-models.json, the closed
+      `sign-manifest --pool-models` input {"model_entries": [...],
+      "attested_members": [...]}; the next `manifest` signs it as the
+      pool_model_entries/v1 and pool_attested_members/v1 extensions, or omits
+      them once both lists are empty, which revokes every entry)
 
 create/manifest take --signer labtool|coordinator-cli. labtool (default) is
 the #1690 lab signer. coordinator-cli signs with the reviewed
@@ -108,11 +114,20 @@ CLI_AUTHORITY_KEY_ID = "lab-manifest-authority-1"
 CLI_POLICY_KEY_ID = "lab-policy-signer-1"
 CLI_ROOT_KEY_ID = "lab-root-issuer-1"
 PROPOSAL_SCHEMA = "pool_model_proposal.v1"
-# SPEC-042-R015 entry fields, as the CLI's pool_model_proposal.v1 bundle
-# carries them (pricing in the SPEC-005 three-rate form).
+# The CLI's closed pool_model_proposal.v1 bundle (`models propose --json`).
+PROPOSAL_FIELDS = ("schema", "generated_at", "cli_version", "pool_id", "provider_id", "candidate_id",
+                   "served_model_ref", "runtime_source", "display_name", "catalog_model_key", "model_entry",
+                   "creator_requirements", "evidence", "offer_status", "warnings")
+# SPEC-042-R015 entry fields: the bundle's model_entry and coordinator-cli's
+# --pool-models model_entries[] item use the same names (pricing in the
+# SPEC-005 three-rate form).
 ENTRY_FIELDS = ("pool_model_id", "artifact_hash_algorithm", "artifact_hash", "allowed_runtime_sources", "license",
                 "paid_serving_attested", "pricing", "disclosure_class", "max_context_tokens")
 PRICING_FIELDS = ("prompt_rate_per_mtok", "prompt_cache_hit_rate_per_mtok", "completion_rate_per_mtok")
+# coordinator-cli --pool-models top level and attested_members[] item.
+POOL_MODELS_FIELDS = ("model_entries", "attested_members")
+ATTESTED_MEMBER_FIELDS = ("provider_account_id", "runtime_classes")
+POOL_MODELS_FILE = "pool-models.json"
 POOL_MODEL_ID = re.compile(r"^pool/([A-Za-z0-9_-]{22})/([a-z0-9][a-z0-9-]{0,62})$")
 
 
@@ -145,8 +160,9 @@ def rfc3339(unix):
 
 
 def cli_manifest(name, args, prev, op):
-    """Sign the next manifest with coordinator-cli; model-entries.json, when it
-    lists entries, rides in as the pool_model_entries/v1 extension."""
+    """Sign the next manifest with coordinator-cli; pool-models.json, when it
+    lists entries or attested members, rides in through --pool-models as the
+    pool_model_entries/v1 and pool_attested_members/v1 extensions."""
     d = pool_dir(name)
     keys = d / "cli-keys"
     prev_version = json.loads(prev.read_text())["manifest_version"] if prev else None
@@ -165,9 +181,9 @@ def cli_manifest(name, args, prev, op):
         cmd += ["--prev", str(prev)]
     else:
         cmd += ["--manifest-authority-key", str(keys / "manifest-authority-key.pem")]
-    entries = d / "model-entries.json"
-    if entries.exists() and json.loads(entries.read_text()):
-        cmd += ["--model-entries", str(entries)]
+    models = load_pool_models(d)
+    if models["model_entries"] or models["attested_members"]:
+        cmd += ["--pool-models", str(d / POOL_MODELS_FILE)]
     coordinator_cli(*cmd)
     event = json.loads(out.read_text())
     windows[str(event["manifest_version"])] = [not_before, expires_at]
@@ -175,23 +191,57 @@ def cli_manifest(name, args, prev, op):
     return event
 
 
-def entry_from_proposal(bundle, pool_id):
-    """Project a CLI pool_model_proposal.v1 bundle onto one R015 entry. Only
-    the closed shape and the pool binding are checked here; the coordinator
-    is the authority for every other R015 rule and the pricing bounds."""
-    if bundle.get("schema_version") != PROPOSAL_SCHEMA:
-        sys.exit(f"proposal schema_version must be {PROPOSAL_SCHEMA}")
-    extra = sorted(set(bundle) - set(ENTRY_FIELDS) - {"schema_version"})
-    missing = sorted(set(ENTRY_FIELDS) - set(bundle))
+def entry_from_proposal(bundle, pool_id, creator):
+    """Project a CLI pool_model_proposal.v1 bundle plus the creator-owned
+    fields onto one R015 entry in coordinator-cli's --pool-models shape. The
+    bundle's model_entry leaves license and paid_serving_attested null (and
+    pricing/max_context_tokens null when the provider suggested none); the
+    creator supplies them here. Only the closed shape and the pool binding are
+    checked; the coordinator is the authority for every other R015 rule and
+    the pricing bounds."""
+    if bundle.get("schema") != PROPOSAL_SCHEMA:
+        sys.exit(f"proposal schema must be {PROPOSAL_SCHEMA}")
+    extra = sorted(set(bundle) - set(PROPOSAL_FIELDS))
+    missing = sorted(set(PROPOSAL_FIELDS) - set(bundle))
     if extra or missing:
-        sys.exit(f"proposal is not the closed R015 shape: missing={missing} extra={extra}")
-    pricing = bundle["pricing"]
-    if not isinstance(pricing, dict) or sorted(pricing) != sorted(PRICING_FIELDS):
-        sys.exit(f"proposal pricing must be exactly {list(PRICING_FIELDS)}")
-    m = POOL_MODEL_ID.match(str(bundle["pool_model_id"]))
+        sys.exit(f"proposal is not the closed {PROPOSAL_SCHEMA} shape: missing={missing} extra={extra}")
+    if bundle["pool_id"] != pool_id:
+        sys.exit(f"proposal is for pool {bundle['pool_id']}, not {pool_id}")
+    proposed = bundle["model_entry"]
+    if not isinstance(proposed, dict) or sorted(proposed) != sorted(ENTRY_FIELDS):
+        sys.exit(f"proposal model_entry must be exactly {list(ENTRY_FIELDS)}")
+    m = POOL_MODEL_ID.match(str(proposed["pool_model_id"]))
     if m is None or m.group(1) != pool_id:
         sys.exit(f"proposal pool_model_id must be pool/{pool_id}/<slug>")
-    return {k: bundle[k] for k in ENTRY_FIELDS}
+    entry = {k: proposed[k] for k in ENTRY_FIELDS}
+    if not creator.get("license"):
+        sys.exit("--license is required: the creator names the licence it reviewed")
+    if not creator.get("paid_serving_attested"):
+        sys.exit("--paid-serving-attested is required: the creator attests paid serving")
+    entry["license"] = creator["license"]
+    entry["paid_serving_attested"] = True
+    rates = [creator.get(k) for k in PRICING_FIELDS]
+    if any(r is not None for r in rates):
+        if any(r is None for r in rates):
+            sys.exit("give all three of --prompt-rate, --cache-hit-rate, --completion-rate, or none")
+        entry["pricing"] = dict(zip(PRICING_FIELDS, rates))
+    pricing = entry["pricing"]
+    if not isinstance(pricing, dict) or sorted(pricing) != sorted(PRICING_FIELDS):
+        sys.exit(f"pricing must be exactly {list(PRICING_FIELDS)} (the proposal had none; pass the creator rates)")
+    if creator.get("max_context_tokens") is not None:
+        entry["max_context_tokens"] = creator["max_context_tokens"]
+    if not isinstance(entry["max_context_tokens"], int):
+        sys.exit("max_context_tokens is required (the proposal had none; pass --max-context-tokens)")
+    return entry
+
+
+def load_pool_models(d):
+    """The staged --pool-models input, always both closed lists."""
+    path = d / POOL_MODELS_FILE
+    doc = json.loads(path.read_text()) if path.exists() else {k: [] for k in POOL_MODELS_FIELDS}
+    if sorted(doc) != sorted(POOL_MODELS_FIELDS):
+        sys.exit(f"{path} must be exactly {list(POOL_MODELS_FIELDS)}")
+    return doc
 
 
 def manifest_args(name, args, prev, op=None):
@@ -317,28 +367,52 @@ def manifest(args):
 
 
 def entry(args):
-    """Add (from a proposal bundle) or remove one pool model entry in
-    model-entries.json, kept strictly ascending by pool_model_id. Nothing is
-    signed or submitted until the next `manifest`."""
+    """Add (from a proposal bundle) or remove one pool model entry, or add or
+    remove one R016 attested member, in pool-models.json. Entries stay
+    strictly ascending by pool_model_id and members by provider_account_id.
+    Nothing is signed or submitted until the next `manifest`."""
     d = pool_dir(args.name)
     if pool_signer(d, args) != "coordinator-cli":
         sys.exit("model entries need a pool created with --signer coordinator-cli")
     pool_id = (d / "pool_id").read_text().strip()
-    path = d / "model-entries.json"
-    entries = json.loads(path.read_text()) if path.exists() else []
-    if args.remove:
+    models = load_pool_models(d)
+    entries, members = models["model_entries"], models["attested_members"]
+    if getattr(args, "attest", None):
+        account, _, classes = args.attest.partition("=")
+        runtimes = sorted(c for c in classes.split(",") if c)
+        if not account or not runtimes:
+            sys.exit("--attest needs ACCOUNT=RUNTIME[,RUNTIME]")
+        if any(m["provider_account_id"] == account for m in members):
+            sys.exit(f"member {account} already attested; --unattest it first")
+        members.append({"provider_account_id": account, "runtime_classes": runtimes})
+    elif getattr(args, "unattest", None):
+        kept = [m for m in members if m["provider_account_id"] != args.unattest]
+        if len(kept) == len(members):
+            sys.exit(f"no attested member {args.unattest}")
+        members = kept
+    elif args.remove:
         kept = [e for e in entries if e["pool_model_id"] != args.remove]
         if len(kept) == len(entries):
             sys.exit(f"no entry {args.remove}")
         entries = kept
     else:
-        new = entry_from_proposal(json.loads(pathlib.Path(args.proposal).read_text()), pool_id)
+        creator = {
+            "license": getattr(args, "license", None),
+            "paid_serving_attested": getattr(args, "paid_serving_attested", False),
+            "prompt_rate_per_mtok": getattr(args, "prompt_rate", None),
+            "prompt_cache_hit_rate_per_mtok": getattr(args, "cache_hit_rate", None),
+            "completion_rate_per_mtok": getattr(args, "completion_rate", None),
+            "max_context_tokens": getattr(args, "max_context_tokens", None),
+        }
+        new = entry_from_proposal(json.loads(pathlib.Path(args.proposal).read_text()), pool_id, creator)
         if any(e["pool_model_id"] == new["pool_model_id"] for e in entries):
             sys.exit(f"entry {new['pool_model_id']} already present; --remove it first")
         entries.append(new)
     entries.sort(key=lambda e: e["pool_model_id"])
-    path.write_text(json.dumps(entries, indent=2) + "\n")
-    print(f"{len(entries)} model entr{'y' if len(entries) == 1 else 'ies'} staged for the next manifest")
+    members.sort(key=lambda m: m["provider_account_id"])
+    (d / POOL_MODELS_FILE).write_text(json.dumps({"model_entries": entries, "attested_members": members}, indent=2) + "\n")
+    print(f"{len(entries)} model entr{'y' if len(entries) == 1 else 'ies'} and {len(members)} attested "
+          f"member{'' if len(members) == 1 else 's'} staged for the next manifest")
 
 
 def event(args):
@@ -365,8 +439,16 @@ def main():
     m.add_argument("name")
     m.add_argument("--signer", default="coordinator-cli", help=argparse.SUPPRESS)
     which = m.add_mutually_exclusive_group(required=True)
-    which.add_argument("--proposal")
-    which.add_argument("--remove")
+    which.add_argument("--proposal", help="a CLI pool_model_proposal.v1 bundle")
+    which.add_argument("--remove", help="a pool_model_id to drop")
+    which.add_argument("--attest", help="ACCOUNT=RUNTIME[,RUNTIME]: an R016 attested member")
+    which.add_argument("--unattest", help="an attested provider_account_id to drop")
+    m.add_argument("--license", help="creator: pinned SPDX id or LicenseRef-*")
+    m.add_argument("--paid-serving-attested", action="store_true", help="creator: the licence permits paid serving")
+    m.add_argument("--prompt-rate", type=int)
+    m.add_argument("--cache-hit-rate", type=int)
+    m.add_argument("--completion-rate", type=int)
+    m.add_argument("--max-context-tokens", type=int)
     e = sub.add_parser("event")
     e.add_argument("name")
     e.add_argument("event_type")

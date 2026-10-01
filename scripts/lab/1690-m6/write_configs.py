@@ -135,6 +135,10 @@ def main():
     # only when set so a pre-#1816 coordinator never sees the key.
     if os.environ.get("LAB_POOL_MODEL_PRICING_BOUNDS"):
         coord["trusted_pools"]["pool_model_pricing_bounds"] = json.loads(os.environ["LAB_POOL_MODEL_PRICING_BOUNDS"])
+    # SPEC-042-R016: owner account -> provider ids, the only input an attested
+    # member (pool_setup.py entry --attest) is matched against. A JSON object.
+    if os.environ.get("LAB_PROVIDER_OWNER_ACCOUNT_IDS"):
+        coord["trusted_pools"]["provider_owner_account_ids"] = json.loads(os.environ["LAB_PROVIDER_OWNER_ACCOUNT_IDS"])
     (LAB / "run" / "coordinator.yaml").write_text(json.dumps(coord, indent=2))
     (LAB / "run" / "gateway.yaml").write_text(json.dumps(gateway, indent=2))
     for p in ("coordinator.yaml", "gateway.yaml"):

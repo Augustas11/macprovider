@@ -263,6 +263,11 @@ storage:
 #     max_prompt_cache_hit_rate_per_mtok: <int>
 #     min_completion_rate_per_mtok: <int>
 #     max_completion_rate_per_mtok: <int>
+#   # SPEC-042-R016: owner account -> provider ids. Only needed for a
+#   # non-creator member named in a pool_attested_members/v1 extension; a
+#   # provider may be listed under one account only.
+#   provider_owner_account_ids:
+#     <owner-account-id>: [<provider-id>]
 
 logging:
   level: "info"

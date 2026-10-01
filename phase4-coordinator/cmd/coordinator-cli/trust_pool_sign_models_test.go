@@ -188,3 +188,54 @@ func TestTrustPoolSignManifestPoolModelsRejectsBadInput(t *testing.T) {
 		t.Fatalf("--pool-models on encoding 1: err=%v", err)
 	}
 }
+
+// TestTrustPoolSignManifestLabPoolModelsFixture closes the #1816 tooling
+// chain: scripts/lab/1690-m6/pool_setup.py turns the CLI-shaped
+// pool_model_proposal.v1 fixture into testdata/pool-models.expected.json
+// (its unit test asserts that), and this signer accepts exactly that file
+// and the coordinator projects its entry under the runbook's bounds.
+func TestTrustPoolSignManifestLabPoolModelsFixture(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "scripts", "lab", "1690-m6", "testdata", "pool-models.expected.json"))
+	if err != nil {
+		t.Fatalf("read lab fixture: %v", err)
+	}
+	f := newSignFixture(t)
+	path := filepath.Join(f.dir, "lab-pool-models.json")
+	if err := os.WriteFile(path, bytes.ReplaceAll(raw, []byte("AbCdEfGhIjKlMnOpQrStUv"), []byte(f.poolID)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	notBefore := f.now.Add(-time.Minute).Truncate(time.Second)
+	manifestOut := filepath.Join(f.dir, "manifest-lab-models.json")
+	args := append(f.manifestArgs("lab-models-manifest-1", manifestOut, notBefore, notBefore.Add(time.Hour)), "--pool-models", path)
+	var out bytes.Buffer
+	if err := trustPoolAdmin(args, os.Getenv, nil, &out); err != nil {
+		t.Fatalf("sign-manifest --pool-models <lab fixture>: %v", err)
+	}
+	store := openSignModelsStore(t, &poolmanifest.PoolModelPricingBounds{
+		MinPromptRatePerMtok: 13500, MaxPromptRatePerMtok: 425000,
+		MinPromptCacheHitRatePerMtok: 3375, MaxPromptCacheHitRatePerMtok: 106250,
+		MinCompletionRatePerMtok: 27000, MaxCompletionRatePerMtok: 2160000,
+	})
+	registerSignModelsPool(t, store, f)
+	ctx := context.Background()
+	if _, _, _, err := store.AppendValidatedEvent(ctx, readSignedEvent(t, manifestOut)); err != nil {
+		t.Fatalf("append lab-fixture manifest: %v", err)
+	}
+	state, err := store.Reconstruct(ctx)
+	if err != nil {
+		t.Fatalf("Reconstruct: %v", err)
+	}
+	pool := state.Pools[f.poolID]
+	if pool == nil || len(pool.ManifestModelEntries) != 1 || len(pool.ManifestAttestedMembers) != 1 {
+		t.Fatalf("lab pool models not projected: %+v", pool)
+	}
+	entry := pool.ManifestModelEntries[0]
+	if entry.PoolModelID != "pool/"+f.poolID+"/qwen25-05b-q8" || entry.License != "Apache-2.0" || !entry.PaidServingAttested ||
+		entry.MaxContextTokens != 16384 ||
+		entry.Pricing != (poolmanifest.PoolModelPricing{PromptRatePerMtok: 20000, PromptCacheHitRatePerMtok: 5000, CompletionRatePerMtok: 40000}) {
+		t.Fatalf("projected lab entry = %+v", entry)
+	}
+	if member := pool.ManifestAttestedMembers[0]; member.ProviderAccountID != "acct-lab-1690-member" {
+		t.Fatalf("projected lab member = %+v", member)
+	}
+}
