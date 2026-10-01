@@ -26,7 +26,7 @@ struct MLXSmallMProbeCommand: AsyncParsableCommand {
         shouldDisplay: false
     )
 
-    @Option(help: "qmm, kernel-name, or greedy.")
+    @Option(help: "qmm, kernel-name, greedy, kcheck, kbench, or kreal.")
     var mode: String = "qmm"
 
     @Option(help: "Comma-separated NxK weight shapes (out x in).")
@@ -53,6 +53,15 @@ struct MLXSmallMProbeCommand: AsyncParsableCommand {
     @Option(name: .customLong("iters"))
     var iters: Int = 10
 
+    @Option(help: "Comma-separated SmallMQMV configs (kcheck/kbench/kreal), e.g. rb-r4,mma-nt1-ks4.")
+    var configs: String = "rb-r4,mma-nt1-ks4"
+
+    @Option(help: "Comma-separated M values for kcheck/kbench/kreal (default 1...max-m).")
+    var ms: String?
+
+    @Option(name: .customLong("smallm-qmv"), help: "greedy: route QuantizedLinear M>=2 through SmallMQMV (off, auto, or a config).")
+    var smallmQMV: String = "off"
+
     func run() async throws {
         switch mode {
         case "qmm":
@@ -61,12 +70,18 @@ struct MLXSmallMProbeCommand: AsyncParsableCommand {
             try runKernelName()
         case "greedy":
             try await runGreedy()
+        case "kcheck":
+            try runKernelCheck()
+        case "kbench":
+            try runKernelBench()
+        case "kreal":
+            try await runKernelReal()
         default:
             throw ValidationError("unknown mode \(mode)")
         }
     }
 
-    private func parsedShapes() throws -> [(n: Int, k: Int)] {
+    func parsedShapes() throws -> [(n: Int, k: Int)] {
         try shapes.split(separator: ",").map { item in
             let parts = item.split(separator: "x").compactMap { Int($0) }
             guard parts.count == 2 else { throw ValidationError("bad shape \(item)") }
@@ -74,7 +89,7 @@ struct MLXSmallMProbeCommand: AsyncParsableCommand {
         }
     }
 
-    private static func emit(_ record: [String: Any]) throws {
+    static func emit(_ record: [String: Any]) throws {
         let data = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys])
         print(String(decoding: data, as: UTF8.self))
         fflush(stdout)
@@ -150,6 +165,8 @@ struct MLXSmallMProbeCommand: AsyncParsableCommand {
             from: URL(fileURLWithPath: modelDir, isDirectory: true),
             using: #huggingFaceTokenizerLoader()
         )
+        let routed = try await Self.installSmallMRouting(smallmQMV, container: container)
+        let smallmLabel = smallmQMV
         let texts = [
             "Explain how a heat pump moves heat from a cold place to a warm place, step by step.",
             "Write a short Python function that returns the n-th Fibonacci number iteratively.",
@@ -180,6 +197,7 @@ struct MLXSmallMProbeCommand: AsyncParsableCommand {
                 let record: [String: Any] = [
                     "schema": "macprovider.mlx-smallm-probe.greedy.v1",
                     "model": modelName, "rows": rows, "prompt_tokens": length,
+                    "smallm_qmv": smallmLabel, "smallm_routed_layers": routed,
                     "tokens": generated,
                 ]
                 let data = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys])

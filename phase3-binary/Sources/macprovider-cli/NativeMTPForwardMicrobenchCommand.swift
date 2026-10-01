@@ -38,6 +38,9 @@ struct NativeMTPForwardMicrobenchCommand: AsyncParsableCommand {
     @Option(name: .customLong("iters"))
     var iters: Int = 30
 
+    @Option(name: .customLong("smallm-qmv"), help: "Lab: route QuantizedLinear M>=2 through SmallMQMV (off, auto, or a config).")
+    var smallmQMV: String = "off"
+
     func run() async throws {
         let batchSizes = batches.split(separator: ",").compactMap { Int($0) }
         let widthValues = widths.split(separator: ",").compactMap { Int($0) }
@@ -50,6 +53,8 @@ struct NativeMTPForwardMicrobenchCommand: AsyncParsableCommand {
             from: URL(fileURLWithPath: modelDir, isDirectory: true),
             using: #huggingFaceTokenizerLoader()
         )
+        let routed = try await MLXSmallMProbeCommand.installSmallMRouting(smallmQMV, container: container)
+        let smallmLabel = smallmQMV
         let promptTokens = self.promptTokens
         let warmup = self.warmup
         let iters = self.iters
@@ -69,7 +74,7 @@ struct NativeMTPForwardMicrobenchCommand: AsyncParsableCommand {
                             iters: iters
                         )
                     }
-                    print(line)
+                    print(line.dropLast() + ",\"smallm_qmv\":\"\(smallmLabel)\",\"smallm_routed_layers\":\(routed)}")
                     fflush(stdout)
                 }
             }
