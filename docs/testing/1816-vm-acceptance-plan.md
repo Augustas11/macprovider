@@ -185,9 +185,13 @@ or each failure filed as a finding with a repro in the Findings section.
   an older `--tag` is refused as a downgrade). "Rollback through the updater"
   is therefore its own transaction rollback, forced before the real apply by
   keeping the canary down; the post-apply rollback is the runbook's (S6).
-- D4 the blocked artifact-feed identity (catalog overlap) is not exercised:
-  the signed activation release has no blocked row. It needs a lab-signed
-  release.
+- D4 the blocked artifact-feed identity (catalog overlap): the signed
+  activation release has no blocked row, so S4 installs a lab-signed copy of
+  the live release (`tools/make-lab-blocked-release.py`, lab key, through the
+  Pearl overlay and SIGHUP, never the updater) whose blocked row carries a
+  GGUF artifact, expects an entry for it refused, and restores the overlay.
+  Revocation of an existing binding by a later block is covered by
+  `test/integration` (`TestTrustedPoolModelBlockedArtifactIdentity`).
 - D5 pools are `launch_environment: candidate`, windows 120 s (production
   uses long windows); runbook sections on production activation evidence are
   out of scope, as in #1690 H3.

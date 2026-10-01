@@ -8,8 +8,8 @@
 #   catalog overlap     (a) the activation release's GGUF artifact-feed identity
 #                       (recommendable row, llamacpp_loopback); (b) a
 #                       recommendable catalog MLX snapshot (mlx_cache);
-#                       (c) a BLOCKED artifact-feed identity: GAP, the signed
-#                       release has no blocked row
+#                       (c) a BLOCKED artifact-feed identity, from a lab-signed
+#                       copy of the live release (tools/make-lab-blocked-release.py)
 #   unset bounds        coordinator restarted without pool_model_pricing_bounds:
 #                       a manifest with entries refused, pool-model traffic refused
 #   non-attested non-creator member: e2e-prov-5 (delegated, owner account not
@@ -81,7 +81,54 @@ stage_variant Q "$EV/overlap-gguf.json" cat-gguf macprovider.gguf-file.v1 $H_CAT
 refused_manifest S4-catalog-overlap-gguf Q pool_model_entry_catalog_overlap "$EV/overlap-gguf.json"
 stage_variant QN "$EV/overlap-mlx.json" cat-mlx macprovider.snapshot-manifest.v1 $H_CAT_MLX mlx_cache $N_RATES
 refused_manifest S4-catalog-overlap-mlx QN pool_model_entry_catalog_overlap "$EV/overlap-mlx.json"
-result S4-catalog-overlap-blocked GAP "the signed activation release has no blocked (runtime_status=blocked / not-buyer-serving) row, so the blocked artifact-feed identity case needs a lab-signed release (see plan)"
+# (c) blocked artifact-feed identity (GAP D4): a LAB-signed copy of the live
+# release blocks a catalog row carrying H_BLK (tools/make-lab-blocked-release.py),
+# installed by pointing the effective autotune paths at it (Pearl overlay) and
+# SIGHUP; an entry for H_BLK must be refused; then the live config is restored.
+H_BLK=$(printf 'e2e-1816 lab blocked gguf' | sha256sum | cut -c1-64)
+OVL=/etc/macprovider/coordinator.pearl-overlays.yaml
+LAB=/root/e2e/lab-blocked-release
+[ -f /root/e2e/keys/lab-catalog.pem ] || openssl genpkey -algorithm ed25519 -out /root/e2e/keys/lab-catalog.pem
+cp -p "$OVL" "$EV/overlay.pre-lab"
+feeds_dir="$(python3 - "$OVL" <<'PY'
+import os, sys, yaml
+eff = {}
+for p in ("/opt/macprovider/coordinator.yaml", sys.argv[1]):
+    eff.update((yaml.safe_load(open(p)) or {}).get("autotune") or {})
+print(os.path.dirname(eff["autotune_candidates_path"]))
+PY
+)"
+lab_pub="$(python3 $E2E_H16/tools/make-lab-blocked-release.py --feeds "$feeds_dir" --key /root/e2e/keys/lab-catalog.pem \
+  --key-id e2e-lab-catalog-v1 --blocked-hash "$H_BLK" --out "$LAB" 2>"$EV/lab-release.err")"
+if [ -n "$lab_pub" ] && python3 - "$OVL" "$LAB" "$lab_pub" <<'PY'
+import sys, yaml
+ovl, lab, pub = sys.argv[1:4]
+base = (yaml.safe_load(open("/opt/macprovider/coordinator.yaml")) or {}).get("autotune") or {}
+o = yaml.safe_load(open(ovl)) or {}
+auto = dict(base); auto.update(o.get("autotune") or {})
+for key, name in (("rate_card", "rate-card.json"), ("demand_rank", "demand-rank.json"), ("autotune_candidates", "autotune-candidates.json"),
+                  ("catalog_artifacts", "autotune-artifacts.json"), ("continuous_batching_policy", "continuous-batching-policy.json")):
+    if auto.get(key + "_path"):
+        auto[key + "_path"], auto[key + "_sig_path"] = "%s/%s" % (lab, name), "%s/%s.sig" % (lab, name)
+keys = dict(auto.get("public_keys") or {}); keys["e2e-lab-catalog-v1"] = pub; auto["public_keys"] = keys
+o["autotune"] = auto
+open(ovl, "w").write(yaml.safe_dump(o, sort_keys=False))
+PY
+then
+  since="$(mark)"
+  kill -HUP "$(systemctl show -p MainPID --value macprovider-coordinator)"; sleep 5
+  journal_since macprovider-coordinator "$since" "$EV/lab-hup.log"
+  if grep -q 'autotune feed reload rejected' "$EV/lab-hup.log"; then
+    result S4-catalog-overlap-blocked FAIL "lab-signed blocked release not loaded: $(grep 'reload rejected' "$EV/lab-hup.log" | head -1 | head -c 300)"
+  else
+    stage_variant Q "$EV/overlap-blocked.json" blk-gguf macprovider.gguf-file.v1 $H_BLK llamacpp_loopback $G_RATES
+    refused_manifest S4-catalog-overlap-blocked Q pool_model_entry_catalog_overlap "$EV/overlap-blocked.json"
+  fi
+else
+  result S4-catalog-overlap-blocked FAIL "lab release not built: $(head -c 300 "$EV/lab-release.err")"
+fi
+cp -p "$EV/overlay.pre-lab" "$OVL"
+kill -HUP "$(systemctl show -p MainPID --value macprovider-coordinator)"; sleep 5
 stage_variant Q "$EV/rt-not-allowed.json" gguf-lmstudio macprovider.gguf-file.v1 $H_GGUF2 lmstudio_loopback $G_RATES
 refused_manifest S4-runtime-not-allowlisted Q pool_model_entry_runtime_not_allowed "$EV/rt-not-allowed.json" "allowed by the core"
 stage_variant Q "$EV/rt-pairing.json" gguf-mlxcache macprovider.gguf-file.v1 $H_GGUF2 mlx_cache $G_RATES
