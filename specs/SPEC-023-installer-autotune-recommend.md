@@ -1,12 +1,20 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.4
+version: v0.22.5
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-01
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.22.5 (2026-10-01)** — Native-MTP sampled request profile (#1770).
+  SPEC-023-R024 `request_feature_profile` is now the closed set
+  `native_mtp_greedy_text_v1` | `native_mtp_sampled_text_v1`. The sampled
+  profile admits SPEC-048-R004 sampled rows verified by SPEC-048-R005
+  target-sample exact match; the greedy profile keeps them ordinary. The
+  value is part of the complete entry and therefore of
+  `native_mtp_admission_tuple_sha256`; any other value fails the entry closed.
 
 - **v0.22.4 (2026-10-01)** — Native-MTP active-row bound (#1770).
   SPEC-023-R024 entries gain the required `max_native_active_rows` integer
@@ -3124,7 +3132,7 @@ unsigned JSON integers and never floats.
 | `ram_bytes` | exact physical RAM integer `> 0`, not a minimum |
 | `qualified_slots` | integer `2..8`, exact admitted slot count |
 | `max_native_active_rows` | integer `1..8`, no larger than `qualified_slots`; the SPEC-048-R007 load bound above which the tuple serves ordinary decode |
-| `request_feature_profile` | exactly `"native_mtp_greedy_text_v1"` |
+| `request_feature_profile` | exactly `"native_mtp_greedy_text_v1"` (greedy rows only) or `"native_mtp_sampled_text_v1"` (greedy rows plus SPEC-048-R004 sampled rows verified by SPEC-048-R005 target-sample exact match) |
 | `decrease_threshold_ppm`, `increase_threshold_ppm` | integers `0..1000000`, strictly increasing |
 | `max_verification_positions_per_committed_milli` | integer `1000..4000` |
 | `throughput_delta_ppm` | signed integer result from the frozen R015 cell for this exact tuple |

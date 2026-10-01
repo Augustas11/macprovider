@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.14
+**Version:** 0.1.15
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -48,8 +48,9 @@ represented by, or counted through SPEC-028's `draft_model`,
 `num_draft_tokens`, `spec_decode_*`, single-slot flag, or external-draft
 artifact contract.
 
-The v0.1 production outcome is not a serial demonstration. It is a greedy,
-text-only, multi-row path that preserves isolated ordinary-decode semantics
+The v0.1 production outcome is not a serial demonstration. It is a
+text-only, multi-row path for greedy rows and, on tuples signed for it, seeded
+sampled rows (MTP-4/MTP-5), that preserves isolated ordinary-decode semantics
 while different rows propose and accept different token counts in one
 continuous-batching round. The serial path is a required correctness oracle
 and diagnostic milestone, not issue completion or production enablement.
@@ -68,7 +69,8 @@ Accepted journey id: `JOURNEY-NATIVE-MTP-SERVING`.
 - immutable native-MTP capability and artifact binding;
 - an upstream MLX Swift MTP dependency with stable row-mapped transaction
   primitives;
-- exact greedy token and terminal parity against ordinary decode;
+- exact greedy, and seeded sampled, token and terminal parity against
+  ordinary decode;
 - per-row proposal, verification, prefix commit, discard, and rewind;
 - mixed ordinary/native-MTP continuous batches with bounded memory and fair
   scheduling;
@@ -86,7 +88,8 @@ Accepted journey id: `JOURNEY-NATIVE-MTP-SERVING`.
 - enabling, weakening, or treating as fixed SPEC-028 classic speculation or
   upstream `mlx-swift-lm#424`;
 - training or converting an MTP head;
-- stochastic speculative acceptance or sampling-mode parity;
+- probabilistic (rejection-sampling) speculative acceptance; sampled rows are
+  verified only by target-sample exact match (MTP-5);
 - tools, structured output, logprobs, penalties, conversation-cache reuse, or
   disk-cache reuse on the v0.1 native-MTP path;
 - vision or image inputs, even when an admitted artifact originated from a
@@ -395,10 +398,17 @@ parity gates, admit MXFP8, or enable production serving.
 ### MTP-4 — v0.1 request eligibility and fallback boundary (SPEC-048-R004)
 
 Native MTP v0.1 accepts only the chat-completions request profile below. Values
-are tested after ordinary request parsing/default resolution; an absent
-`temperature` is ineligible unless the parser demonstrably resolves it to
-exactly zero. The generation-affecting allowlist is: `temperature == 0`,
-`top_p == 1`, absent/default `top_k`, absent/zero `min_p`, zero frequency and
+are tested after ordinary request parsing/default resolution (an absent
+`temperature` resolves to the ordinary default `1.0` and is therefore a
+sampled request). Sampling is eligible in one of two forms. A greedy row has
+`temperature == 0` and `top_p == 1`; every admitted tuple accepts it. A
+sampled row has any other `temperature`/`top_p` pair that the ordinary
+continuous-batching row sampler supports (`0 <= temperature <= 2`,
+`0 <= top_p <= 1`, finite); it is eligible only when the selected signed
+SPEC-023-R024 entry carries `request_feature_profile =
+"native_mtp_sampled_text_v1"`, and on a `native_mtp_greedy_text_v1` tuple it
+selects ordinary with reason `sampling`. The remaining generation-affecting
+allowlist is: absent/default `top_k`, absent/zero `min_p`, zero frequency and
 presence penalties, absent/default-one repetition penalty, `n == 1`, no logit
 bias, no `logprobs` or `top_logprobs`, no reasoning/thinking toggle or chat
 template kwargs, no tools/tool choice/tool-call history, plain-text response
@@ -406,10 +416,14 @@ format, no Harmony protocol, and text-only messages. The allowed transport or
 limit keys are `model`, `messages`, `max_tokens`, `max_completion_tokens`,
 `stream`, `stream_options` containing only `include_usage`, `stop`, and `user`;
 they retain ordinary validation. A `seed` is eligible only where the ordinary
-greedy path treats it as a documented no-op. Legacy completions, `echo`,
+path treats it as a documented no-op (the continuous-batching row sampler
+seeds from the scheduler request identity, not the buyer `seed`). Legacy completions, `echo`,
 `suffix`, an unknown top-level key, or any generation-affecting key/value not
 explicitly admitted above routes ordinary. A nonempty `conversation_key` also
-routes ordinary. The request additionally requires an admitted
+routes ordinary. Prompt length is bounded only by the signed request
+profile's maximum prompt tokens: a prompt longer than one prefill chunk is
+prefilled in chunks with per-chunk drafter seeding (MTP-6), and the prefill
+chunk size is not an eligibility bound. The request additionally requires an admitted
 capability, a supported cache/state class, and enough capacity for the next
 complete verification round. Streaming and non-streaming are eligible only
 after their respective acceptance fixtures pass.
@@ -459,10 +473,25 @@ after the first rejected position may be emitted or committed. The algorithm
 MAY add at most one target-selected bonus token under one documented convention
 bound to the qualified runtime revision.
 
+For a sampled row the target-selected token at verification position `i` is
+the draw the row's own ordinary sampler makes at sampler step `s + i` from the
+target logits at that position, where `s` is the row's committed generated
+token count. The ordinary continuous-batching row sampler is a pure function
+of the request seed, the step, the sampling parameters, and the row logits
+(no carried RNG state), so a draw at a position after the first mismatch is
+discarded without affecting any later draw. A proposal is accepted iff it
+equals the target-selected token at its position; at the first mismatch that
+token is emitted, and after a fully accepted prefix the bonus position's
+draw is emitted. Greedy rows are the same rule with the argmax as the draw.
+Probabilistic `min(1, p/q)` acceptance is not used: it preserves the output
+distribution but not seeded token identity. The drafter stays greedy; it only
+proposes and never selects an emitted token.
+
 For the serial deterministic acceptance corpus, native MTP MUST produce the
 exact token-ID sequence, ordering, decoded bytes, completion-token count, and
-terminal reason produced by isolated ordinary greedy decode on the same model
-snapshot and request. The preregistered corpus MUST contain at least 200
+terminal reason produced by isolated ordinary decode with the same sampling
+parameters and request seed on the same model snapshot and request (greedy
+decode for a greedy row). The preregistered corpus MUST contain at least 200
 prompts, at least 20 per short/1.5k/4k/8k/near-boundary stratum, and at least
 6,400 compared generated positions, including all/none/partial acceptance,
 stop/EOS/max-token terminals, and deliberately near-tied logits. No prompt is
@@ -471,7 +500,8 @@ excluded by observed margin: any token-ID divergence is a hard tuple failure.
 The numerical oracle for both serial and multi-row tests is teacher-forced:
 for every emitted prefix, run that row's ordinary path on the same served
 snapshot and prefix, cast both target-logit vectors to float32, and compare the
-next-token result before advancing. Top-1 token ID MUST be exact. Maximum
+next-token result before advancing. Top-1 token ID MUST be exact; for a
+sampled row the seeded draw at that step MUST also be exact. Maximum
 absolute target-logit difference MUST be `<= 0.05`, and the ordinary top-1
 versus runner-up gap is recorded for every position. On any token divergence,
 comparison stops for that row, the tuple fails, and later positions are not
@@ -505,6 +535,27 @@ digest specifies component order, dtype, shape, logical length, and canonical
 byte encoding. Depth-zero rows retain only committed target state; when depth
 increases, proposal state is recomputed from the current committed target
 hidden state rather than reused from a stale speculative tail.
+
+Proposal state for the prompt is seeded during prefill, one chunk at a time.
+For prompt chunk `[c, c+n)` the target emits hidden states `c ..< c+n` and the
+MTP adapter advances the row's proposal state over `embed(prompt[c+1 ..< c+n+1])`
+paired with those hidden states at position `c`. For a non-final chunk the
+tail token `prompt[c+n]` is the next prompt token; only the final chunk uses
+the sampled first token as its tail and yields the row's first proposal. A
+prompt that fits one chunk is the single-pass case of the same rule. A
+non-initial chunk MUST find the previous chunk's proposal state at exactly
+position `c`, or the row fails before output; no chunk is replayed to
+synthesize hidden states.
+
+A row held at depth zero by the MTP-7 load gate does not run a one-column
+native verification. It shares the ordinary lockstep decode forward, and the
+provider keeps, in order, each token that forward commits for the row with the
+target hidden state that produced it. These are exactly the columns per-round
+depth-zero finalizes would have fed the MTP adapter. Before the row's next
+native proposal (or once it holds 64 such columns) they advance its proposal
+state in one packed step, so a restored row proposes from the same committed
+prefix as one that was never gated. The emitted tokens are ordinary decode's
+by construction.
 
 Transactions MUST preserve row identity across proposal, packed verification,
 commit, discard, cancellation, and release. State or metrics from one row MUST
@@ -567,8 +618,11 @@ Admission and in-flight behavior are:
   `preoutput_fallbacks`.
 - **In flight.** Native rows never switch path. While the scheduler's admitted
   rows (prefilling plus decoding) exceed the smallest bound among native rows,
-  every native row of that tuple verifies at proposal depth zero, the existing
-  in-path degraded state. The gate releases only after 8 consecutive decode
+  every native row of that tuple is held at proposal depth zero, the existing
+  in-path degraded state, and rides the ordinary lockstep decode forward with
+  the other rows instead of a separate one-column native verification forward
+  (MTP-6 drafter catch-up). Its selection, reason, and accounting stay
+  `native_mtp`. The gate releases only after 8 consecutive decode
   rounds at or below the bound (or when no native row remains); this round-count
   hysteresis is an integer counter, never wall time. Depth then returns to the
   row's adaptation or directive depth, recomputing proposal state from the
@@ -1037,7 +1091,6 @@ the journey must include its independent and combined evidence.
 | First Qwen-family MTP artifact | `UNKNOWN` | `@Augustas11` | `#1770` | Legally/provenance-clean immutable model, tokenizer, MTP manifest, and exact hashes. |
 | Upstream MLX Swift release | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | A reviewed fork exception is pinned for this campaign; replacement by an upstream tag remains required by the re-review/removal trigger. |
 | First MLX-native MXFP8 artifact | `UNKNOWN` | `@Augustas11` | `#1770` | SPEC-023/SPEC-010 format, fit, quality, license, provenance, and hardware evidence. |
-| Prompt-length eligibility | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | The implementation routes native MTP only when the whole prompt fits one prefill chunk (`ModelRuntime.nativeMTPFullPromptPrefillTokenLimit`, 512 tokens); longer prompts silently select ordinary. R004 does not state this bound. Either specify it in R004 with its own selector reason or capture drafter hidden state across chunked prefill. |
 | Batched-verify numerical parity | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | On the Mac Studio M3 Ultra, MLX `get_qmv_batch_limit` switches quantized matmul from qmv to qmm once the packed verify reaches 12 tokens for K/N above 4096. Qwen3.5-9B stayed bit-exact at 5 slots (10 packed tokens) and drifted by one bf16 step from 6 slots, flipping near-tied argmaxes. R005 as written forbids any such divergence, so multi-row verification at >=12 packed tokens cannot pass it. Decide between a bounded drift allowance and kernel-matched verification. |
 | Depth-1 throughput value | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | 2026-09-29 Studio pilot, Qwen3.6-35B-A3B, 384-token greedy prompts: native MTP 0.66x/0.61x/0.57x ordinary continuous batching at 2/4/8 slots with 87-90% acceptance. Profiling projects about 1.3x at 2 slots and break-even at 8 after overhead fixes. Evidence and parked work: branch `park/native-mtp-perf-2026-09-29`. |
 
@@ -1076,6 +1129,22 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.15 (2026-10-01)** — Chunked-prefill seeding, load-gate fusion, and
+  seeded sampling (#1770). MTP-6 seeds proposal state chunk by chunk over
+  each prefill chunk's own target hidden states (tail = next prompt token;
+  final chunk = sampled first token), so R004 drops the one-prefill-chunk
+  prompt bound (the open "Prompt-length eligibility" gap closes) and prompts
+  are bounded only by the signed request profile. MTP-7's in-flight load gate
+  now runs depth-zero native rows inside the ordinary lockstep forward rather
+  than a separate one-column verify forward; MTP-6 buffers their committed
+  (token, target hidden) columns and advances the drafter over them before the
+  next native proposal. MTP-4 admits sampled rows (temperature/top_p the
+  ordinary row sampler supports) on tuples whose SPEC-023-R024 entry carries
+  the new `native_mtp_sampled_text_v1` profile; MTP-5 defines target-sample
+  exact-match verification with the row's own seeded sampler at each verify
+  position, which keeps seeded sampled native output token-identical to
+  seeded ordinary output. Top-k, min-p, penalties, logit bias, and logprobs
+  stay ineligible.
 - **0.1.14 (2026-10-01)** — Adds the R007 native active-row load gate (#1770).
   Studio evidence showed native MTP's advantage shrink with concurrency (A3B
   +13.5%/+4.2%/-0.3% at 2/4/8 slots; 27B dense -1.0%/-2.2% at 2/4) because
