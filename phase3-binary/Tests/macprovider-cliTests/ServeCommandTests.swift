@@ -1103,6 +1103,59 @@ final class ServeCommandTests: XCTestCase {
         }
     }
 
+    /// #1816: a native model served as a signed pool entry has no catalog
+    /// row. The join keeps the artifact hash gate and skips only the catalog
+    /// preflight; the coordinator alone matches the hash to the pool entry.
+    func testCoordinatorJoinServesASignedPoolEntryWithoutACatalogRow() async throws {
+        let snapshot = try makeSnapshot()
+        let expected = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
+        var config = AppConfig.defaults()
+        config.model = "test-public-model"
+        config.modelArtifactPath = snapshot.path
+        config.modelArtifactSHA256 = expected
+        config.poolModelID = "pool/AbCdEfGhIjKlMnOpQrStUv/test-model"
+        let fetched = LoopbackFetchCounter()
+        let inputs = AutotuneStaticInputs(fetch: { _ in
+            fetched.increment()
+            throw AutotuneRecommendError.invalidStaticJSON("offline")
+        })
+        let outcome = try await ServeCommand.runModelArtifactPreflightOutcome(
+            &config, joiningCoordinator: true, staticInputs: inputs
+        )
+        XCTAssertNil(outcome.catalogTrust, "a pool entry never mints catalog trust")
+        XCTAssertEqual(outcome.runtimeBinding?.authoritySHA256, expected)
+        XCTAssertEqual(fetched.value, 0, "no catalog feed is consulted")
+
+        var mismatched = config
+        mismatched.modelArtifactSHA256 = String(repeating: "0", count: 64)
+        do {
+            _ = try await ServeCommand.runModelArtifactPreflightOutcome(&mismatched, joiningCoordinator: true, staticInputs: inputs)
+            XCTFail("the served artifact hash must still verify")
+        } catch {
+            // expected
+        }
+        var withoutHash = config
+        withoutHash.modelArtifactSHA256 = nil
+        withoutHash.modelArtifactPath = nil
+        do {
+            _ = try await ServeCommand.runModelArtifactPreflightOutcome(&withoutHash, joiningCoordinator: true, staticInputs: inputs)
+            XCTFail("a pool entry join still requires a verified artifact hash")
+        } catch {
+            // expected
+        }
+        for (poolModelID, catalogKey) in [("pool/short/test-model", nil), ("pool/AbCdEfGhIjKlMnOpQrStUv/test-model", "qwen3-8b")] {
+            var invalid = config
+            invalid.poolModelID = poolModelID
+            invalid.modelCatalogKey = catalogKey
+            do {
+                _ = try await ServeCommand.runModelArtifactPreflightOutcome(&invalid, joiningCoordinator: false, staticInputs: inputs)
+                XCTFail("\(poolModelID) with catalog key \(catalogKey ?? "nil") must be refused")
+            } catch {
+                XCTAssertEqual(error as? ExitCode, ExitCode(2))
+            }
+        }
+    }
+
     func testCoordinatorJoinRequiresVerifiedModelArtifactMetadata() async throws {
         var config = AppConfig.defaults()
         config.model = "test-public-model"
