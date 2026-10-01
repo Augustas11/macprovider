@@ -23,9 +23,10 @@ H_MLX2=$(printf 'e2e-1816 non-catalog mlx snapshot N2' | sha256sum | cut -c1-64)
 # meta-llama/llama-3.2-3b-instruct GGUF q4_k_m (artifact feed) and its MLX snapshot.
 H_CAT_GGUF=6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff
 H_CAT_MLX=e7e5bff4248768b4db7a53afb3b514ba5867b800f63d1abd0330eaf08e54aa90
-# Entry prices (credits per Mtok) inside the runbook section 1 bounds.
-G_RATES="20000,5000,40000"
-N_RATES="30000,7500,60000"
+# Entry prices (credits per Mtok) inside the runbook section 1 bounds, high
+# enough that a price change moves the rounded credits of an 8+20 token request.
+G_RATES="400000,100000,2000000"
+N_RATES="300000,75000,1500000"
 BOUNDS_JSON='{"min_prompt_rate_per_mtok":13500,"max_prompt_rate_per_mtok":425000,"min_prompt_cache_hit_rate_per_mtok":3375,"max_prompt_cache_hit_rate_per_mtok":106250,"min_completion_rate_per_mtok":27000,"max_completion_rate_per_mtok":2160000}'
 
 sides() { echo "$(cat /root/e2e/coordinator.side)/$(cat /root/e2e/gateway.side)"; }

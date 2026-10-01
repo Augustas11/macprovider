@@ -22,7 +22,7 @@ EV=$E2E_EVIDENCE/p$PASS_ID-s5; mkdir -p "$EV"
 Q=$(pool_id Q); QN=$(pool_id QN); MG=$(pmid Q gguf-g); MN=$(pmid QN mlx-n)
 QH=(--header "X-MacProvider-Pool-Select:$Q" --header "X-MacProvider-Engine-Select:llamacpp")
 QNH=(--header "X-MacProvider-Pool-Select:$QN")
-G_RATES2="22000,5500,44000"
+G_RATES2="425000,106250,2160000"
 common="-omit-catalog -stream-chunks 20 -nonstream-delay-ms 1500"
 gargs() { echo "$common -chunk-delay-ms ${2:-100} -model-id gguf-g-model -model-hash $H_GGUF -model-hash-algorithm macprovider.gguf-file.v1 -runtime-source llamacpp_loopback -admission-key-file /root/e2e/admission-key-$1"; }
 nargs() { echo "$common -chunk-delay-ms ${1:-100} -trusted-pool -model-id e2e-mlx-n -model-hash $H_MLX -model-hash-algorithm macprovider.snapshot-manifest.v1 -admission-key-file /root/e2e/admission-key-4"; }
