@@ -287,6 +287,23 @@ allowlists):
    `X-MacProvider-Internal-Settlement-Trailers`, so the new coordinator answers
    it in the pre-#1690 order: non-streaming attempts are recorded before the
    write and their finality travels in headers, which that gateway reads.
+   **#1816 pool models in this window.** A pool-model attempt (a
+   `pool/<pool_id>/<slug>` id) and an attempt served by an R016 attested
+   member are pinned to `spec022-route-snapshot-v2`, which a pre-#1816
+   gateway cannot settle. The #1816 coordinator serves them only to a
+   gateway that advertises
+   `X-MacProvider-Internal-Settlement-Route-Snapshot-V2`: until the step 2
+   gateway is live, a pool-model request answers
+   `503 pool_model_requires_gateway_upgrade` before dispatch (no debit, no
+   provider credit), and an R016 attested member is not selectable (its pool
+   requests route to creator-owned members or fail closed). Catalog and other
+   pool traffic is unaffected. Deploy the gateway right after the
+   coordinator; the Pearl updater already does (it starts the new coordinator
+   with the gateway stopped). A hold an earlier coordinator build left with
+   `invalid_settlement_policy_version` is re-checked when the #1816 gateway
+   starts (its startup catch-up ignores the reconcile backoff) and again once
+   its hold deadline passes, and settles or refunds from the coordinator's
+   finality.
 2. Deploy the gateway (schema v14: accepts `pool_operator_attested` finality,
    advertises settlement trailers, verifies the finality MAC). From here the
    coordinator records non-streaming successes only after the buyer write and

@@ -38,6 +38,11 @@ const (
 	// namespace, so a buyer-port request carrying it without the gateway
 	// service token is refused (hasInternalRoutingHeader).
 	settlementTrailersCapabilityHeader = "X-MacProvider-Internal-Settlement-Trailers"
+	// routeSnapshotV2CapabilityHeader: the gateway settles finality pinned to
+	// billing.RouteSnapshotPolicyVersionV2. A pre-#1816 gateway holds such a
+	// 200 with invalid_settlement_policy_version while the provider credit is
+	// payable (#1816 VM A-1), so a v2 route needs it (poolRouteNeedsGatewayV2).
+	routeSnapshotV2CapabilityHeader = "X-MacProvider-Internal-Settlement-Route-Snapshot-V2"
 	// settlementFinalityMACHeader carries the hex HMAC-SHA256 over the
 	// request binding and the finality tuple (settlementFinalityMAC).
 	settlementFinalityMACHeader = "X-MacProvider-Settlement-Finality-Mac"
@@ -65,6 +70,14 @@ const (
 func (s *Server) gatewayNegotiatedSettlementTrailers(h http.Header) bool {
 	return strings.TrimSpace(h.Get(settlementTrailersCapabilityHeader)) == "1" &&
 		auth.GatewayInternalBearerMatches(h, s.gatewayServiceToken) != auth.BearerKindNone
+}
+
+// gatewayNegotiatedRouteSnapshotV2 reports whether the gateway, holding the
+// service token and negotiating signed finality, advertised that it settles
+// route_snapshot_v2 finality.
+func (s *Server) gatewayNegotiatedRouteSnapshotV2(h http.Header) bool {
+	return strings.TrimSpace(h.Get(routeSnapshotV2CapabilityHeader)) == "1" &&
+		s.gatewayNegotiatedSettlementTrailers(h)
 }
 
 func negotiatedSettlementFinality(rec *billingRecorder) bool {

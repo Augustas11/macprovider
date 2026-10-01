@@ -2404,6 +2404,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	rec := s.newBillingRecorder(r, state, startedAt, originalRequestID, externalRequestID, accountID, authenticatedAccount, hasAuthenticatedAccount)
 	rec.settlementTrailersNegotiated = s.gatewayNegotiatedSettlementTrailers(r.Header) && rec.accountID != ""
 	state.settlementTrailersNegotiated = rec.settlementTrailersNegotiated
+	state.routeSnapshotV2Negotiated = rec.settlementTrailersNegotiated && s.gatewayNegotiatedRouteSnapshotV2(r.Header)
 	// Runs before net/http sends the trailers (settlement_trailers.go).
 	defer finalizeNegotiatedSettlementFinality(w.Header(), rec)
 	// #766 single-terminal-wins arbiter (observe-only). Deferred here so the
@@ -7407,10 +7408,24 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		poolCreatorAccountID = snap.CreatorAccountID
 		poolCreatorOwned = snap.CreatorOwnedMembers
 		poolSnap = snap
+		// #1816 VM A-1: a pool-model attempt and an R016 attested member's
+		// attempt are pinned to route_snapshot_v2. A gateway that did not
+		// negotiate v2 cannot settle that finality: it would deliver the
+		// 200, hold the buyer forever and leave the provider credit
+		// payable. Attestations are withheld for such a request (no R016
+		// member is selectable) and a pool-model request is refused below,
+		// before dispatch.
+		gatewayV2 := state != nil && state.routeSnapshotV2Negotiated
+		if !gatewayV2 {
+			snap.AttestedMembers = nil
+		}
 		// SPEC-042-R015: a pool/ model id of this pool's active core is
 		// authorized by the signed entry itself (it is part of the pool's
 		// model set), and selects only sessions bound to that entry.
 		if entry, ok := requestedPoolModelEntry(req.Model, req.poolID, snap); ok {
+			if !gatewayV2 {
+				return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_model_requires_gateway_upgrade", message: "Pool models are served only through a gateway that settles route_snapshot_v2 finality"}
+			}
 			poolModelEntry = &entry
 			poolModelAllowlist = append(append([]string(nil), snap.ModelAllowlist...), entry.PoolModelID)
 		} else if poolmanifest.IsPoolModelID(req.Model) {

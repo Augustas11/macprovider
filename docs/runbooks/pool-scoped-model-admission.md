@@ -26,11 +26,26 @@ Pool creation, keys and the base manifest flow:
 
 | Check | Pass |
 |---|---|
-| Coordinator, gateway, and member CLI contain the #1816 build | the deployed commit contains the #1816 merge |
+| Coordinator, gateway, and member CLI contain the #1816 build, deployed coordinator first, then gateway, then CLI | the deployed commit contains the #1816 merge |
 | Trusted pools enabled (M1 plan P6) | `trusted_pools.enabled: true`, gateway `features.trusted_pools.enabled: true` |
 | Pricing bounds configured (§1) | `trusted_pools.pool_model_pricing_bounds` present in the live coordinator config |
 | Pool is `enforce` with the runtime in its allowlist | `get-pool` shows `settlement_mode: enforce` and the engine in `runtime_allowlist` (not needed for native `mlx_cache`) |
 | Provider is a member, and its owner account is the creator or an R016 attested member | `get-pool` `members`; for a non-creator member, the account in the core's `pool_attested_members/v1` and the provider under that account in `trusted_pools.provider_owner_account_ids` (§1) |
+
+**Deploy order and the mixed window.** Deploy the coordinator, then the
+gateway at once (the order of
+[trusted-pool-production-launch.md](trusted-pool-production-launch.md) §9;
+the Pearl updater does both in one run with the gateway stopped). A pool-model
+attempt, and one served by an R016 attested member, settles under
+`spec022-route-snapshot-v2`, which only a #1816 gateway reads; it advertises
+that with `X-MacProvider-Internal-Settlement-Route-Snapshot-V2`. While the
+#1816 coordinator runs behind an older gateway, a pool-model request answers
+`503 pool_model_requires_gateway_upgrade` before dispatch (no buyer debit,
+no provider credit) and R016 attested members are not selected; catalog
+traffic is unaffected. A gateway-only rollback has the same effect for new
+requests. A v2 hold the older gateway keeps (`invalid_settlement_policy_version`)
+settles or refunds once the #1816 gateway is back: its startup catch-up
+re-checks every hold, ignoring the reconcile backoff.
 
 ## 1. Pricing bounds (coordinator config)
 

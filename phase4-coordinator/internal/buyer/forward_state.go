@@ -100,6 +100,10 @@ type forwardState struct {
 	// route selects an external-runtime member only when it is set
 	// (SPEC-022 R-12.8, E2E-F10).
 	settlementTrailersNegotiated bool
+	// routeSnapshotV2Negotiated: the gateway also settles route_snapshot_v2
+	// finality. A pool-model route and an R016 attested member are pinned
+	// to v2 and need it (#1816 VM A-1).
+	routeSnapshotV2Negotiated bool
 	// engineClass is the SPEC-042-R014 buyer engine selection, captured at
 	// selection so the slot-queue poll re-applies it. "" means none.
 	engineClass string

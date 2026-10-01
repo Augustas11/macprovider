@@ -337,10 +337,12 @@ var externalRuntimeBody = []byte(`{"model":"model-a","messages":[{"role":"user",
 
 // externalRuntimePoolHeaders are a pool route's headers from a gateway that
 // negotiated signed settlement finality, which an external-runtime member
-// requires (SPEC-022 R-12.8, E2E-F10).
+// requires (SPEC-022 R-12.8, E2E-F10), and route_snapshot_v2 settlement,
+// which a pool-model or R016 route requires (#1816 VM A-1).
 func externalRuntimePoolHeaders(poolID string) http.Header {
 	h := trustedPoolLayer2Headers(externalRuntimePoolAccount, poolID)
 	h.Set(settlementTrailersCapabilityHeader, "1")
+	h.Set(routeSnapshotV2CapabilityHeader, "1")
 	return h
 }
 

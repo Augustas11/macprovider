@@ -9,7 +9,8 @@ Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011
 
 ### v0.2.8
 
-#1816 freeze-audit R1 fixes. R-13.2 names option B: #1816 provenance rides
+#1816 freeze-audit R1 fixes, and the #1816 VM acceptance A-1 fix: v2 is
+negotiated with the gateway (R-13.2). R-13.2 names option B: #1816 provenance rides
 only in the SPEC-015 §N.2 `route_snapshot_v2` preimage, pinned by
 `route_snapshot_policy_version = spec022-route-snapshot-v2`; every other
 route keeps the byte-identical v1 preimage, and the standalone verifier
@@ -1397,7 +1398,16 @@ v0.4.12): `expected_model_hash_source`, `pool_model_id`, the entry rates,
 the bounds digest, the SPEC-005-R015 dispatch-frozen multiplier, provider
 share, and config snapshot generation, `pool_generation` for a native route,
 and `pool_member_account_id` (the value of `serving_provider_account_id`).
-A snapshot carries them if and only if it is pinned to v2. Option (B) additionally requires a SPEC-015 §N.2 amendment that lists
+A snapshot carries them if and only if it is pinned to v2. A gateway that
+predates v2 holds v2 finality as `invalid_settlement_policy_version` while
+the provider credit is payable, so v2 is negotiated like the signed
+trailers: the coordinator routes a v2-pinned attempt only for a caller that
+advertised `X-MacProvider-Internal-Settlement-Route-Snapshot-V2: 1` together
+with the negotiated `X-MacProvider-Internal-Settlement-Trailers: 1` under the
+gateway service token. For any other caller a pool-model request fails closed
+before dispatch with 503 `pool_model_requires_gateway_upgrade` (no debit, no
+credit), and the core's R016 attestations are withheld for the request, so no
+attested member is selectable. Option (B) additionally requires a SPEC-015 §N.2 amendment that lists
 the v2 members before any v2 digest is issued; option (A) needs none, because
 the v1 preimage is unchanged. Under either option settlement verifies the
 provenance members as strictly as digested members: a missing, mixed-source,
