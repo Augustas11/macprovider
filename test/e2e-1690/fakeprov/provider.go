@@ -68,13 +68,23 @@ func (p *fakeProvider) identity() catalogIdentity {
 	return p.id
 }
 
-func (p *fakeProvider) enableSettlementReceipts() error {
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return fmt.Errorf("generate fake settlement receipt key: %w", err)
+func (p *fakeProvider) enableSettlementReceipts(keyFile string) error {
+	var priv ed25519.PrivateKey
+	if keyFile != "" {
+		k, err := loadOrCreateAdmissionKey(keyFile)
+		if err != nil {
+			return fmt.Errorf("settlement receipt key: %w", err)
+		}
+		priv = k
+	} else {
+		_, k, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			return fmt.Errorf("generate fake settlement receipt key: %w", err)
+		}
+		priv = k
 	}
 	p.settlementEnabled = true
-	p.receiptPubkey = pub
+	p.receiptPubkey = priv.Public().(ed25519.PublicKey)
 	p.receiptPrivkey = priv
 	return nil
 }

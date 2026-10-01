@@ -69,9 +69,9 @@ PY
 
 # ---- members: fake CLIs (no catalog envelope), signed offers ------------------------
 common="-omit-catalog -stream-chunks 20 -chunk-delay-ms 100 -nonstream-delay-ms 1500"
-fakeprov_args 3 "$common -model-id gguf-g-model -model-hash $H_GGUF -model-hash-algorithm macprovider.gguf-file.v1 -runtime-source llamacpp_loopback -admission-key-file /root/e2e/admission-key-3"
-fakeprov_args 5 "$common -model-id gguf-g-model -model-hash $H_GGUF -model-hash-algorithm macprovider.gguf-file.v1 -runtime-source llamacpp_loopback -admission-key-file /root/e2e/admission-key-5"
-fakeprov_args 4 "$common -trusted-pool -model-id e2e-mlx-n -model-hash $H_MLX -model-hash-algorithm macprovider.snapshot-manifest.v1 -admission-key-file /root/e2e/admission-key-4"
+fakeprov_args 3 "$common -model-id gguf-g-model -model-hash $H_GGUF -model-hash-algorithm macprovider.gguf-file.v1 -runtime-source llamacpp_loopback -admission-key-file /root/e2e/admission-key-3 -receipt-key-file /root/e2e/receipt-key-3"
+fakeprov_args 5 "$common -model-id gguf-g-model -model-hash $H_GGUF -model-hash-algorithm macprovider.gguf-file.v1 -runtime-source llamacpp_loopback -admission-key-file /root/e2e/admission-key-5 -receipt-key-file /root/e2e/receipt-key-5"
+fakeprov_args 4 "$common -trusted-pool -model-id e2e-mlx-n -model-hash $H_MLX -model-hash-algorithm macprovider.snapshot-manifest.v1 -admission-key-file /root/e2e/admission-key-4 -receipt-key-file /root/e2e/receipt-key-4"
 systemctl enable e2e-fakeprov@3 e2e-fakeprov@4 e2e-fakeprov@5 >/dev/null 2>&1
 systemctl restart e2e-fakeprov@3 e2e-fakeprov@4 e2e-fakeprov@5
 wait_providers 5 || result S3-members-connected FAIL "not every member is ready: $(coord_healthz | head -c 300)"

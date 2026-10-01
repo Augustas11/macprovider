@@ -86,6 +86,7 @@ type options struct {
 	admissionKeyFile string
 	omitCatalog      bool
 	trustedPool      bool
+	receiptKeyFile   string
 	explicit         map[string]bool
 }
 
@@ -176,6 +177,7 @@ func parseFlags(args []string) (options, error) {
 	fs.StringVar(&o.modelHashAlg, "model-hash-algorithm", "", "#1690: model_hash_algorithm (default macprovider.snapshot-manifest.v1)")
 	fs.StringVar(&o.admissionKeyFile, "admission-key-file", "", "#1690: provider admission key seed file; enrolls it via the v2 identity signature")
 	fs.BoolVar(&o.omitCatalog, "omit-catalog", false, "#1816: send no catalog_* envelope and skip -catalog-from-coordinator (an uncatalogued pool-model member)")
+	fs.StringVar(&o.receiptKeyFile, "receipt-key-file", "", "#1816: persist the settlement receipt key (Ed25519 seed file) across restarts, as the real CLI does; without it every start rotates the key")
 	fs.BoolVar(&o.trustedPool, "trusted-pool", false, "#1816: advertise tier2_capabilities.trusted_pool_v1 without a runtime_source (a native mlx_cache pool member)")
 	if err := fs.Parse(args); err != nil {
 		return o, err
@@ -342,7 +344,7 @@ func run(o options) error {
 		p.admissionKey = k
 	}
 	if o.settlement {
-		if err := p.enableSettlementReceipts(); err != nil {
+		if err := p.enableSettlementReceipts(o.receiptKeyFile); err != nil {
 			return err
 		}
 	}

@@ -40,6 +40,7 @@ ap.add_argument("--provider", help="expected credited provider id (comma list al
 ap.add_argument("--zero-credit", action="store_true")
 ap.add_argument("--refused", action="store_true")
 ap.add_argument("--min-settled", type=int, default=0, help="at least this many settled requests")
+ap.add_argument("--min-routed", type=int, default=0, help="at least this many requests reached a member (have a route snapshot); keeps the revocation checks from passing on requests that were never in flight")
 a = ap.parse_args()
 
 GW, CO = "/var/lib/macprovider/gateway.db", "/var/lib/macprovider/request-log.sqlite"
@@ -84,7 +85,7 @@ co.row_factory = sqlite3.Row
 gw = sqlite3.connect("file:%s?mode=ro" % GW, uri=True, timeout=10)
 gw.row_factory = sqlite3.Row
 providers = set(a.provider.split(",")) if a.provider else None
-settled = 0
+settled = routed = 0
 for row in report["rows"]:
     rid, cids = row["rid"], row["coord_ids"]
     q = ",".join("?" * len(cids)) or "''"
@@ -94,6 +95,7 @@ for row in report["rows"]:
     verdicts = [dict(r) for r in co.execute("SELECT * FROM settlement_receipt_verdicts WHERE request_id IN (%s)" % q, cids)]
     use = [dict(r) for r in gw.execute("SELECT * FROM usage_events WHERE request_id = ?", (rid,))]
     payable = [c for c in credits if c["is_payable"] and (c["provider_credits"] or 0) > 0]
+    routed += 1 if snaps else 0
     row["pool"] = {"credits": [{k: c.get(k) for k in ("provider_id", "attempt_n", "gross_credits", "provider_credits", "prompt_rate_per_mtok",
                                                      "completion_rate_per_mtok", "charged_prompt_tokens", "completion_tokens", "usage_source",
                                                      "quarantined", "quarantine_reason", "is_payable")} for c in credits],
@@ -149,12 +151,14 @@ for row in report["rows"]:
         fail("P10", rid, "no verified verdict with pool_label_status verified: %s" % [(v["settlement_outcome"], v["pool_label_status"]) for v in verdicts])
     if c["usage_source"] not in ("provider_reported", "byte_estimated"):
         fail("P12", rid, "ledger usage_source %s (contract: provider_reported)" % c["usage_source"])
+if routed < a.min_routed:
+    fail("P0", a.prefix, "only %d requests reached a member (route snapshot), want >= %d: the case was never in flight" % (routed, a.min_routed))
 if settled < a.min_settled:
     fail("P0", a.prefix, "only %d settled pool requests, want >= %d" % (settled, a.min_settled))
 report["pool_failures"] = fails
 report["expected"] = {"gross": exp_gross, "provider": exp_prov, "P": P, "C": C, "rates": rates, "mult_ppm": mult_ppm, "share_bps": share_bps}
 json.dump(report, open(a.out, "w"), indent=1, sort_keys=True, default=str)
-print(json.dumps({"prefix": a.prefix, "sent": report["sent"], "summary": report["summary"], "settled": settled,
+print(json.dumps({"prefix": a.prefix, "sent": report["sent"], "summary": report["summary"], "settled": settled, "routed": routed,
                   "expected_gross_provider": [exp_gross, exp_prov], "ok": not fails}, sort_keys=True))
 for f in fails[:30]:
     print("  %s %s %s" % (f["inv"], f["rid"], f["msg"][:400]))

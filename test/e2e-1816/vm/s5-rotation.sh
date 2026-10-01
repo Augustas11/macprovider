@@ -24,8 +24,8 @@ QH=(--header "X-MacProvider-Pool-Select:$Q" --header "X-MacProvider-Engine-Selec
 QNH=(--header "X-MacProvider-Pool-Select:$QN")
 G_RATES2="425000,106250,2160000"
 common="-omit-catalog -stream-chunks 20 -nonstream-delay-ms 1500"
-gargs() { echo "$common -chunk-delay-ms ${2:-100} -model-id gguf-g-model -model-hash $H_GGUF -model-hash-algorithm macprovider.gguf-file.v1 -runtime-source llamacpp_loopback -admission-key-file /root/e2e/admission-key-$1"; }
-nargs() { echo "$common -chunk-delay-ms ${1:-100} -trusted-pool -model-id e2e-mlx-n -model-hash $H_MLX -model-hash-algorithm macprovider.snapshot-manifest.v1 -admission-key-file /root/e2e/admission-key-4"; }
+gargs() { echo "$common -chunk-delay-ms ${2:-100} -model-id gguf-g-model -model-hash $H_GGUF -model-hash-algorithm macprovider.gguf-file.v1 -runtime-source llamacpp_loopback -admission-key-file /root/e2e/admission-key-$1 -receipt-key-file /root/e2e/receipt-key-$1"; }
+nargs() { echo "$common -chunk-delay-ms ${1:-100} -trusted-pool -model-id e2e-mlx-n -model-hash $H_MLX -model-hash-algorithm macprovider.snapshot-manifest.v1 -admission-key-file /root/e2e/admission-key-4 -receipt-key-file /root/e2e/receipt-key-4"; }
 restart_member() { fakeprov_args "$1" "$2"; systemctl restart e2e-fakeprov@$1; sleep 6; }
 events_since() { csql "SELECT id, provider_id, state, reason_code, binding_scope, pool_manifest_version FROM model_admission_events WHERE provider_id='$1' AND id > $2 ORDER BY id"; }
 max_event() { csql "SELECT COALESCE(MAX(id),0) FROM model_admission_events"; }
@@ -101,7 +101,7 @@ nb="$(at_boundary Q "$v" 8)"
 run="$(run_id s5unatt)"
 pool_traffic "$run" Q "$MG" llamacpp "st=2" 2 &
 bg=$!; sleep 25; wait $bg
-pool_check S5-attestation-removed-inflight "$run" --zero-credit
+pool_check S5-attestation-removed-inflight "$run" --zero-credit --min-routed 2
 run="$(run_id s5unattnew)"
 pool_traffic "$run" Q "$MG" llamacpp "ns=1,st=1" 1
 pool_check S5-attestation-removed-new-refused "$run" --refused
@@ -116,7 +116,7 @@ bg=$!; sleep 5
 $PM event Q member_revoked --provider-id e2e-prov-5 >"$EV/member-revoked.txt" 2>&1
 wait $bg
 result S5-member-revoked-event INFO "$(head -c 200 "$EV/member-revoked.txt")"
-pool_check S5-member-revoked-inflight "$run" --zero-credit
+pool_check S5-member-revoked-inflight "$run" --zero-credit --min-routed 2
 run="$(run_id s5revnew)"
 pool_traffic "$run" Q "$MG" llamacpp "ns=1,st=1" 1
 pool_check S5-member-revoked-new-refused "$run" --refused

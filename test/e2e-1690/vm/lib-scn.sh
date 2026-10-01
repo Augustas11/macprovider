@@ -54,7 +54,8 @@ settle_and_check() {
 }
 # journal_since <unit> <since> <out>
 journal_since() { journalctl -u "$1" --since "$2" --no-pager -o cat >"$3" 2>/dev/null || true; }
-mark() { date -u '+%Y-%m-%d %H:%M:%S'; }
+# UTC suffix: journalctl --since reads a bare time in the host's local zone.
+mark() { date -u '+%Y-%m-%d %H:%M:%S UTC'; }
 
 # probe_finality <label> [stream]: one chat straight at the coordinator the way
 # the gateway sends it (service token, account, request id, capability) and

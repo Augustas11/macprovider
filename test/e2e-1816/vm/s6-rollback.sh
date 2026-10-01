@@ -21,7 +21,7 @@ Q=$(pool_id Q); QN=$(pool_id QN); MG=$(pmid Q gguf-g)
 GR="$(python3 -c 'import json,sys;m=json.load(open(sys.argv[1]));e=[x for x in m["model_entries"] if x["pool_model_id"].endswith("/gguf-g")][0]["pricing"];print("%d,%d,%d"%(e["prompt_rate_per_mtok"],e["prompt_cache_hit_rate_per_mtok"],e["completion_rate_per_mtok"]))' /root/e2e/pools16/Q/pool-models.json)"
 
 # ---- 1. pause Q with one attempt in flight ----------------------------------------------------
-fakeprov_args 3 "-omit-catalog -stream-chunks 20 -chunk-delay-ms 500 -nonstream-delay-ms 1500 -model-id gguf-g-model -model-hash $H_GGUF -model-hash-algorithm macprovider.gguf-file.v1 -runtime-source llamacpp_loopback -admission-key-file /root/e2e/admission-key-3"
+fakeprov_args 3 "-omit-catalog -stream-chunks 20 -chunk-delay-ms 500 -nonstream-delay-ms 1500 -model-id gguf-g-model -model-hash $H_GGUF -model-hash-algorithm macprovider.gguf-file.v1 -runtime-source llamacpp_loopback -admission-key-file /root/e2e/admission-key-3 -receipt-key-file /root/e2e/receipt-key-3"
 systemctl restart e2e-fakeprov@3; sleep 8
 run="$(run_id s6pause)"
 pool_traffic "$run" Q "$MG" llamacpp "st=1" 1 &
