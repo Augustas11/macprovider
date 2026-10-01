@@ -12,6 +12,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -175,7 +176,9 @@ type DurableEvent struct {
 type Store struct {
 	db                       *sql.DB
 	productionActivationGate productionActivationGate
-	providerOwnerPublicKeys  map[string][]byte
+	// providerOwnerPublicKeys is the operator-configured provider -> owner
+	// key map; SetProviderOwnerPublicKeys swaps it on a config reload.
+	providerOwnerPublicKeys atomic.Pointer[map[string][]byte]
 	// poolModelAcceptance supplies the coordinator state SPEC-042-R015
 	// entries are checked against at online manifest acceptance (pricing
 	// bounds, catalog shadow/overlap). Nil fails every entry closed.
@@ -219,19 +222,46 @@ func WithProductionActivationGate(g ProductionActivationGate) StoreOption {
 
 func WithProviderOwnerPublicKeys(keys map[string][]byte) StoreOption {
 	return func(s *Store) error {
-		if len(keys) == 0 {
-			s.providerOwnerPublicKeys = nil
-			return nil
-		}
-		s.providerOwnerPublicKeys = make(map[string][]byte, len(keys))
-		for providerID, key := range keys {
-			if providerID == "" || len(key) != ed25519.PublicKeySize {
-				return fmt.Errorf("trustpool: invalid provider owner public key for %q", providerID)
-			}
-			s.providerOwnerPublicKeys[providerID] = append([]byte(nil), key...)
-		}
+		return s.SetProviderOwnerPublicKeys(keys)
+	}
+}
+
+// SetProviderOwnerPublicKeys atomically replaces the provider owner key map
+// (a SIGHUP reload of trusted_pools.provider_owner_public_keys). Delegation
+// grants and revocations appended afterwards are checked against the new
+// keys; durable history is never re-validated. An invalid key leaves the
+// current map in force.
+func (s *Store) SetProviderOwnerPublicKeys(keys map[string][]byte) error {
+	if len(keys) == 0 {
+		s.providerOwnerPublicKeys.Store(nil)
 		return nil
 	}
+	next := make(map[string][]byte, len(keys))
+	for providerID, key := range keys {
+		if providerID == "" || len(key) != ed25519.PublicKeySize {
+			return fmt.Errorf("trustpool: invalid provider owner public key for %q", providerID)
+		}
+		next[providerID] = append([]byte(nil), key...)
+	}
+	s.providerOwnerPublicKeys.Store(&next)
+	return nil
+}
+
+// ProviderOwnerPublicKey returns the current owner key of providerID, for
+// the admin handler's delegation checks (AdminDeps).
+func (s *Store) ProviderOwnerPublicKey(providerID string) ([]byte, bool) {
+	if s == nil {
+		return nil, false
+	}
+	keys := s.providerOwnerPublicKeys.Load()
+	if keys == nil {
+		return nil, false
+	}
+	key, ok := (*keys)[providerID]
+	if !ok || len(key) != ed25519.PublicKeySize {
+		return nil, false
+	}
+	return append([]byte(nil), key...), true
 }
 
 // WithPoolModelAcceptance installs the SPEC-042-R015 / SPEC-005-R015 online
@@ -326,11 +356,8 @@ func (s *Store) verifyPoolModelAcceptance(e DurableEvent, creatorAccountID strin
 }
 
 func (s *Store) validateProviderOwnerPublicKeyBinding(state *ReconstructedState, e DurableEvent) error {
-	if s == nil || len(s.providerOwnerPublicKeys) == 0 {
-		return ErrProviderDelegation
-	}
-	registered, ok := s.providerOwnerPublicKeys[e.ProviderID]
-	if !ok || len(registered) != ed25519.PublicKeySize {
+	registered, ok := s.ProviderOwnerPublicKey(e.ProviderID)
+	if !ok {
 		return ErrProviderDelegation
 	}
 	switch e.EventType {

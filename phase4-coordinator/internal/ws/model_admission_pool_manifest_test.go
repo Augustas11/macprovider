@@ -528,3 +528,67 @@ func TestPoolManifestSweepKickedAtActivation(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// Freeze audit R1 (#1816) CODE M4 / ARCHITECTURE M4: status claims
+// pool_attested_earning only while the current pool predicate holds. Every
+// invalidation below is applied without running the sweep, so the head is
+// still the pool-scoped catalog_priced event.
+func TestPoolScopedStatusEarningReevaluatesCurrentPredicate(t *testing.T) {
+	earning := func(f *bindingFixture, head ModelAdmissionEvent) string {
+		status := f.server.modelAdmissionStatusResponseFromEvent(head, false)
+		return status["provider_guidance"].(map[string]any)["earning_path_class"].(string)
+	}
+	for name, invalidate := range map[string]func(*fakePoolModelSource, *bindingFixture){
+		"entry removed": func(s *fakePoolModelSource, _ *bindingFixture) { s.set(poolSnapshot(testPoolA, 2, poolDigestV2)) },
+		"pool not routeable": func(s *fakePoolModelSource, _ *bindingFixture) {
+			v := poolSnapshot(testPoolA, 1, poolDigestV1, ggufPoolEntry())
+			v.Routeable = false
+			s.set(v)
+		},
+		"member removed": func(s *fakePoolModelSource, _ *bindingFixture) {
+			v := poolSnapshot(testPoolA, 1, poolDigestV1, ggufPoolEntry())
+			v.Members = map[string]bool{}
+			s.set(v)
+		},
+		"no longer creator-owned, unattested": func(s *fakePoolModelSource, _ *bindingFixture) {
+			v := poolSnapshot(testPoolA, 1, poolDigestV1, ggufPoolEntry())
+			v.CreatorOwnedMembers = map[string]bool{}
+			v.MemberOwnerAccounts = map[string]string{poolProvider: "acct-member"}
+			s.set(v)
+		},
+		"runtime off allowlist": func(s *fakePoolModelSource, _ *bindingFixture) {
+			v := poolSnapshot(testPoolA, 1, poolDigestV1, ggufPoolEntry())
+			v.RuntimeAllowlist = nil
+			s.set(v)
+		},
+		"bounds removed": func(s *fakePoolModelSource, f *bindingFixture) {
+			f.server.SetPoolModelSource(s, func() *poolmanifest.PoolModelPricingBounds { return nil })
+		},
+		"bounds tightened below the entry": func(s *fakePoolModelSource, f *bindingFixture) {
+			f.server.SetPoolModelSource(s, func() *poolmanifest.PoolModelPricingBounds {
+				return &poolmanifest.PoolModelPricingBounds{MaxPromptRatePerMtok: 1, MaxPromptCacheHitRatePerMtok: 1, MaxCompletionRatePerMtok: 1}
+			})
+		},
+		"pool wiring off": func(_ *fakePoolModelSource, f *bindingFixture) { f.server.SetPoolModelSource(nil, nil) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newBindingFixture(t)
+			source := wirePoolSource(f)
+			source.set(poolSnapshot(testPoolA, 1, poolDigestV1, ggufPoolEntry()))
+			f.registerPoolSession(t, poolProvider, "llamacpp_loopback", modelidentity.GGUFFileV1, poolGGUFHash)
+			offer := f.offer(t, poolProvider, "q", "llamacpp_loopback", map[string]string{modelidentity.GGUFFileV1: poolGGUFHash})
+			f.reevaluate(poolProvider)
+			bound := f.latest(t, poolProvider, offer.CandidateID)
+			if bound.State != "catalog_priced" || !bound.PoolScoped() {
+				t.Fatalf("bind = %+v", bound)
+			}
+			if got := earning(f, bound); got != "pool_attested_earning" {
+				t.Fatalf("current binding earning_path_class = %q", got)
+			}
+			invalidate(source, f)
+			if got := earning(f, bound); got == "pool_attested_earning" {
+				t.Fatalf("stale binding still reports pool_attested_earning")
+			}
+		})
+	}
+}

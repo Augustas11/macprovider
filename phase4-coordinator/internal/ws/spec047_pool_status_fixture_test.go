@@ -29,6 +29,9 @@ func TestSPEC047PoolScopedStatusSharedFixture(t *testing.T) {
 	if bound.State != "catalog_priced" || !bound.PoolScoped() {
 		t.Fatalf("bind = %+v", bound)
 	}
+	// Encoded while the binding is current: pool_attested_earning is claimed
+	// only while the pool predicate holds (freeze audit R1 M4).
+	boundStatus := f.server.modelAdmissionStatusResponseFromEvent(bound, false)
 	// Entry removal at the next generation revokes the pool binding; the
 	// revoked status still carries pool_binding.
 	source.set(poolSnapshot(testPoolA, 2, poolDigestV2))
@@ -38,7 +41,7 @@ func TestSPEC047PoolScopedStatusSharedFixture(t *testing.T) {
 		t.Fatalf("revoke = %+v", revoked)
 	}
 	statuses := map[string]any{
-		"pool_scoped_catalog_priced": f.server.modelAdmissionStatusResponseFromEvent(bound, false),
+		"pool_scoped_catalog_priced": boundStatus,
 		"pool_scoped_revoked":        f.server.modelAdmissionStatusResponseFromEvent(revoked, false),
 		"global_offer_submitted":     f.server.modelAdmissionStatusResponseFromEvent(offer, false),
 	}

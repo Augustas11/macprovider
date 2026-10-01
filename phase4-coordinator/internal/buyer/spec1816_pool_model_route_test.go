@@ -465,3 +465,43 @@ func TestSPEC1816PoolModelUnverifiedRouteZeroBills(t *testing.T) {
 		t.Fatalf("unverified pool-model ledger = %+v", ledger)
 	}
 }
+
+// Freeze audit R1 (#1816) CODE M5 / ARCHITECTURE M5: the pool view's
+// provider_count and total_slots come from the routing predicate, so a
+// session routing rejects (no bounds, a stale binding generation, a delegated
+// member without its R016 attestation) is not listed as capacity.
+func TestSPEC1816PoolModelListingMatchesRoutePredicate(t *testing.T) {
+	for name, fx := range map[string]poolModelFixture{
+		"no pricing bounds":           {noBounds: true},
+		"binding at an older version": {staleEvent: true},
+		"delegated, no attestation":   {runtime: "llamacpp_loopback", delegated: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newPoolModelHarness(t, fx)
+			req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+			for k, values := range trustedPoolLayer2Headers(externalRuntimePoolAccount, h.poolID) {
+				for _, v := range values {
+					req.Header.Add(k, v)
+				}
+			}
+			rr := httptest.NewRecorder()
+			h.server.Handler().ServeHTTP(rr, req)
+			var body map[string]any
+			if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil || rr.Code != http.StatusOK {
+				t.Fatalf("pool view status=%d body=%s", rr.Code, rr.Body.String())
+			}
+			var listed map[string]any
+			for _, m := range body["data"].([]any) {
+				if m.(map[string]any)["id"] == h.modelID {
+					listed = m.(map[string]any)
+				}
+			}
+			if listed == nil || listed["provider_count"] != float64(0) || listed["total_slots"] != float64(0) {
+				t.Fatalf("pool view lists capacity routing rejects: %v", listed)
+			}
+			if rec := postChat(t, h.server, h.body(), externalRuntimePoolHeaders(h.poolID)); rec.Code == http.StatusOK {
+				t.Fatalf("route served a session the listing excluded: %s", rec.Body.String())
+			}
+		})
+	}
+}

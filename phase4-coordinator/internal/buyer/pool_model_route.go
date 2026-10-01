@@ -444,17 +444,38 @@ type poolModelListPrice struct {
 	GlobalMultiplierPPM       int64 `json:"global_multiplier_ppm"`
 }
 
+// poolModelListingView is the route view a pool/ request for entry would
+// carry: the same snapshot fields the router installs, so listing and
+// routing evaluate one predicate.
+func poolModelListingView(snap trustpool.Snapshot, entry poolmanifest.PoolModelEntry) poolRouteView {
+	view := poolRouteView{
+		poolID:              snap.PoolID,
+		members:             snap.Members,
+		runtimeAllowlist:    snap.RuntimeAllowlist,
+		creatorAccountID:    snap.CreatorAccountID,
+		creatorOwned:        snap.CreatorOwnedMembers,
+		attestedMembers:     snap.AttestedMembers,
+		memberOwnerAccounts: snap.MemberOwnerAccounts,
+		manifestVersion:     snap.ManifestVersion,
+		manifestCoreDigest:  snap.ManifestCoreDigest,
+		poolModel:           &entry,
+	}
+	view.priorManifestVersion, view.priorManifestCoreDigest = poolModelPriorGeneration(snap, &entry)
+	return view
+}
+
 // poolModelListedMember reports whether a live session counts toward a pool
-// model's listed capacity: a current member of the pool, bound to exactly
-// this entry, serving its exact pair under a runtime class the entry lists,
-// and ready or busy. A pool-entry session stays admission_sandboxed for every
-// global purpose, so the global capacity predicate does not apply; route time
-// still re-checks every pool predicate.
-func poolModelListedMember(p pool.Provider, snap trustpool.Snapshot, entry poolmanifest.PoolModelEntry) bool {
-	return snap.Members[p.ProviderID] && (p.State == pool.StateReady || p.State == pool.StateBusy) &&
-		p.ModelAdmissionPoolID == snap.PoolID && p.ModelAdmissionPoolModelID == entry.PoolModelID &&
-		entry.AllowsRuntimeSource(providerRuntimeClass(p)) &&
-		p.ModelHashAlgorithm == entry.ArtifactHashAlgorithm && strings.ToLower(strings.TrimSpace(p.ModelHash)) == entry.ArtifactHash
+// model's listed capacity (SPEC-006-R018 provider_count is eligible
+// providers): ready or busy, and passing the same current R011 route
+// predicate selection uses (binding head, generation, rates, bounds,
+// creator/R016 authority, enforce mode, receipt key, release generation).
+// A store error counts the session as ineligible.
+func (s *Server) poolModelListedMember(ctx context.Context, p pool.Provider, view poolRouteView) bool {
+	if p.State != pool.StateReady && p.State != pool.StateBusy {
+		return false
+	}
+	_, eligible, err := s.poolModelRouteBinding(ctx, p, view)
+	return err == nil && eligible
 }
 
 // errPoolModelViewUnauthorized means a pool view was requested without an
@@ -484,8 +505,9 @@ func (s *Server) poolModelListEntries(r *http.Request) ([]modelEntry, error) {
 		// #1816 F6: capacity is the pool's live members bound to this exact
 		// entry; the context bound is the entry's signed max_context_tokens.
 		providerCount, totalSlots := 0, 0
+		view := poolModelListingView(snap, entry)
 		for _, p := range providers {
-			if poolModelListedMember(p, snap, entry) {
+			if poolBinaryFloorMet(p.BinaryVersion, snap.MinBinaryVersion) && s.poolModelListedMember(r.Context(), p, view) {
 				providerCount++
 				totalSlots += p.SlotsTotal
 			}
