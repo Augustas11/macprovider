@@ -1038,6 +1038,46 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         XCTAssertNotEqual(gatedCapability.tupleSHA256, ungatedCapability.tupleSHA256)
     }
 
+    func testReleaseEnvelopeSampledRequestProfileAdmitsSamplingInsideTupleIdentity() throws {
+        let sampled = try makeReleaseEnvelopeFixture(entryEdit: {
+            $0["request_feature_profile"] = "native_mtp_sampled_text_v1"
+        })
+        defer { try? FileManager.default.removeItem(at: sampled.base.root) }
+        let greedy = try makeReleaseEnvelopeFixture()
+        defer { try? FileManager.default.removeItem(at: greedy.base.root) }
+
+        let sampledCapability = try NativeMTPAdmissionSidecar.load(
+            sidecarData: sampled.sidecarData,
+            signatureData: sampled.signatureData,
+            snapshotRoot: sampled.base.snapshot,
+            context: sampled.context,
+            trustedKeyring: sampled.base.trustedKeyring,
+            resolvedArtifactAuthority: sampled.authority
+        )
+        let greedyCapability = try NativeMTPAdmissionSidecar.load(
+            sidecarData: greedy.sidecarData,
+            signatureData: greedy.signatureData,
+            snapshotRoot: greedy.base.snapshot,
+            context: greedy.context,
+            trustedKeyring: greedy.base.trustedKeyring,
+            resolvedArtifactAuthority: greedy.authority
+        )
+
+        XCTAssertTrue(sampledCapability.supportsSampling)
+        XCTAssertFalse(greedyCapability.supportsSampling)
+        XCTAssertNotEqual(sampledCapability.tupleSHA256, greedyCapability.tupleSHA256)
+
+        for profile in ["native_mtp_sampled_text_v2", "native_mtp_greedy_text", ""] {
+            let fixture = try makeReleaseEnvelopeFixture(entryEdit: { $0["request_feature_profile"] = profile })
+            defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+            XCTAssertEqual(
+                try rejectedReleaseEnvelopeError(fixture),
+                .invalidValue("$.entries[0].request_feature_profile"),
+                profile
+            )
+        }
+    }
+
     func testReleaseEnvelopeRejectsNativeActiveRowBoundOutsideQualifiedSlots() throws {
         let cases: [(String, (inout [String: Any]) -> Void, NativeMTPAdmissionSidecarError)] = [
             ("missing", { $0.removeValue(forKey: "max_native_active_rows") },

@@ -73,6 +73,55 @@ final class NativeMTPSelectorTests: XCTestCase {
         XCTAssertEqual(selection.nativeMTPReason, .eligible)
     }
 
+    func testSupportedSamplingParametersSelectNativeMTP() throws {
+        let cases: [(String, [String: Any])] = [
+            ("temperature", ["temperature": 0.7]),
+            ("top_p", ["top_p": 0.9]),
+            ("temperature_and_top_p", ["temperature": 1.3, "top_p": 0.8]),
+        ]
+        for (name, extra) in cases {
+            let sampled = ModelRuntime.decodePath(
+                for: try makeRequest(extra: extra),
+                draftConfigured: false,
+                draftLoaded: false,
+                numDraftTokens: nil,
+                nativeMTPMode: .auto,
+                nativeMTPCapability: admittedCapability(supportsSampling: true)
+            )
+            XCTAssertEqual(sampled.path, .nativeMTP, name)
+            XCTAssertEqual(sampled.nativeMTPReason, .eligible, name)
+
+            // A greedy-only signed tuple keeps sampled requests ordinary.
+            let greedyOnly = ModelRuntime.decodePath(
+                for: try makeRequest(extra: extra),
+                draftConfigured: false,
+                draftLoaded: false,
+                numDraftTokens: nil,
+                nativeMTPMode: .auto,
+                nativeMTPCapability: admittedCapability()
+            )
+            XCTAssertEqual(greedyOnly.path, .ordinary, name)
+            XCTAssertEqual(greedyOnly.nativeMTPReason, .sampling, name)
+        }
+
+        // Sampling support does not admit logit controls or penalties.
+        for (name, extra, reason) in [
+            ("top_k", ["temperature": 0.7, "top_k": 10] as [String: Any], NativeMTPSelectorReason.logitControls),
+            ("presence", ["temperature": 0.7, "presence_penalty": 0.5], .logitControls),
+        ] {
+            let selection = ModelRuntime.decodePath(
+                for: try makeRequest(extra: extra),
+                draftConfigured: false,
+                draftLoaded: false,
+                numDraftTokens: nil,
+                nativeMTPMode: .auto,
+                nativeMTPCapability: admittedCapability(supportsSampling: true)
+            )
+            XCTAssertEqual(selection.path, .ordinary, name)
+            XCTAssertEqual(selection.nativeMTPReason, reason, name)
+        }
+    }
+
     func testQualifiedCapabilityAdmitsMaxCompletionTokensAlias() throws {
         let request = try makeRequest(extra: ["max_completion_tokens": 64])
         let selection = ModelRuntime.decodePath(
@@ -575,7 +624,8 @@ final class NativeMTPSelectorTests: XCTestCase {
         maximumProposalDepth: Int = 2,
         maximumPromptTokens: Int = 32768,
         maximumCompletionTokens: Int = 4096,
-        maximumNativeActiveRows: Int = Int.max
+        maximumNativeActiveRows: Int = Int.max,
+        supportsSampling: Bool = false
     ) -> NativeMTPCapability {
         NativeMTPCapability(
             admitted: true,
@@ -590,7 +640,8 @@ final class NativeMTPSelectorTests: XCTestCase {
             maximumProposalDepth: maximumProposalDepth,
             maximumPromptTokens: maximumPromptTokens,
             maximumCompletionTokens: maximumCompletionTokens,
-            maximumNativeActiveRows: maximumNativeActiveRows
+            maximumNativeActiveRows: maximumNativeActiveRows,
+            supportsSampling: supportsSampling
         )
     }
 

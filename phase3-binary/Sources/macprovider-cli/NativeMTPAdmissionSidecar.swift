@@ -37,6 +37,9 @@ struct NativeMTPAdmissionCapability: Equatable, Sendable {
     let revocationSignerKeyID: String
     let selfTestChallengeBank: NativeMTPSelfTestChallengeBank
     let capturedArtifacts: NativeMTPAdmissionCapturedArtifacts?
+    /// SPEC-023-R024 `request_feature_profile` is the sampled profile: the
+    /// tuple qualified target-sample exact-match verification (SPEC-048-R004).
+    var supportsSampling: Bool = false
 }
 
 struct NativeMTPSelfTestChallengeBank: Equatable, Sendable {
@@ -473,6 +476,14 @@ enum NativeMTPAdmissionSidecarError: Error, Equatable, CustomStringConvertible {
 
 enum NativeMTPAdmissionSidecar {
     static let schemaVersion = "macprovider.native-mtp-admission.v1"
+    static let greedyRequestFeatureProfile = "native_mtp_greedy_text_v1"
+    /// Adds sampled rows (temperature/top_p) verified by target-sample exact
+    /// match to the greedy profile (SPEC-023-R024, SPEC-048-R004).
+    static let sampledRequestFeatureProfile = "native_mtp_sampled_text_v1"
+    static let requestFeatureProfiles: Set<String> = [
+        greedyRequestFeatureProfile,
+        sampledRequestFeatureProfile,
+    ]
     static let maxSidecarBytes = 1 * 1024 * 1024
     static let maxSignatureBytes = 16 * 1024
     static let maxSelfTestChallengeBankBytes = 256 * 1024
@@ -708,6 +719,7 @@ enum NativeMTPAdmissionSidecar {
         let diskCache: Bool
         let maxPromptTokens: Int
         let maxCompletionTokens: Int
+        var sampling: Bool = false
     }
 
     private struct Spec023: Equatable {
@@ -939,7 +951,8 @@ enum NativeMTPAdmissionSidecar {
             challengeBankSignerKeyID: parsed.challengeBankSignerKeyID,
             revocationSignerKeyID: parsed.revocationSignerKeyID,
             selfTestChallengeBank: parsed.selfTest,
-            capturedArtifacts: capturedArtifacts
+            capturedArtifacts: capturedArtifacts,
+            supportsSampling: parsed.requestProfile.sampling
         )
     }
 
@@ -1282,7 +1295,8 @@ enum NativeMTPAdmissionSidecar {
                 conversationCache: false,
                 diskCache: false,
                 maxPromptTokens: 1_048_576,
-                maxCompletionTokens: 1_048_576
+                maxCompletionTokens: 1_048_576,
+                sampling: selected.entry.requestFeatureProfile == Self.sampledRequestFeatureProfile
             ),
             spec023: Spec023(
                 releaseID: releaseID,
@@ -1375,7 +1389,10 @@ enum NativeMTPAdmissionSidecar {
             equals: NativeMTPResolvedArtifactAuthority.nativeMTPHashAlgorithm
         )
         let decodePath = try requireString(object, "decode_path", path: path, allowed: ["native_mtp"])
-        let requestFeatureProfile = try requireString(object, "request_feature_profile", path: path, equals: "native_mtp_greedy_text_v1")
+        let requestFeatureProfile = try requireNonEmptyString(object, "request_feature_profile", path: path)
+        guard requestFeatureProfiles.contains(requestFeatureProfile) else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("\(path).request_feature_profile")
+        }
         let proposalDepth = try requireInt(object, "proposal_depth", path: path, range: 1...16)
         let completeWindowBytesByDepth = try requireCompleteWindowBytesByDepth(
             object,

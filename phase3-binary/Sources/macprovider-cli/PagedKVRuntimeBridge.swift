@@ -992,10 +992,19 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             for (index, input) in inputs.enumerated() {
                 try self.setRowState(rowStates[index], for: input.requestID, binding: input.binding)
             }
-            // One argmax and one host transfer for the whole packed round
+            // One selection and one host transfer for the whole packed round
             // instead of two blocking GPU round trips per row.
-            let topTokenIDsByRow = Self.packedTopTokenIDs(
-                rows: output.rows.map { ($0.proposalLogits, $0.bonusLogits) }
+            let topTokenIDsByRow = Self.packedTargetTokenIDs(
+                rows: output.rows.map { ($0.proposalLogits, $0.bonusLogits) },
+                samplers: output.rows.map { row in
+                    let input = inputs[row.map.rowIndex]
+                    return ContinuousBatchRowSampler.Row(
+                        temperature: input.temperature,
+                        topP: input.topP,
+                        samplerSeed: input.samplerSeed,
+                        samplerStep: input.samplerStep
+                    )
+                }
             )
             return zip(output.rows, topTokenIDsByRow).map { row, targetTopTokenIDs in
                 let input = inputs[row.map.rowIndex]
@@ -1503,6 +1512,55 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
         guard !logits.isEmpty else { return rows.map { _ in [] } }
         let flat = argMax(concatenated(logits, axis: 0), axis: -1).asType(.int32).asArray(Int32.self)
+        var result: [[Int]] = []
+        result.reserveCapacity(rows.count)
+        var start = 0
+        for count in counts {
+            result.append(flat[start ..< start + count].map(Int.init))
+            start += count
+        }
+        return result
+    }
+
+    /// Per-row target-selected IDs at every verified position. Greedy rows
+    /// take the argmax; a sampled row samples position `i` with its own
+    /// sampler at step `samplerStep + i`, exactly the draw ordinary decode
+    /// makes for the token at that step. The row sampler is a pure function
+    /// of (seed, step, logits), so draws at rejected positions consume no
+    /// state that a later emitted token depends on.
+    static func packedTargetTokenIDs(
+        rows: [(proposalLogits: MLXArray, bonusLogits: MLXArray)],
+        samplers: [ContinuousBatchRowSampler.Row]
+    ) -> [[Int]] {
+        guard samplers.count == rows.count,
+              samplers.contains(where: { $0.temperature != 0 }) else {
+            return packedTopTokenIDs(rows: rows)
+        }
+        var logits: [MLXArray] = []
+        var positionSamplers: [ContinuousBatchRowSampler.Row] = []
+        var counts: [Int] = []
+        for (row, sampler) in zip(rows, samplers) {
+            var count = 0
+            if row.proposalLogits.ndim == 2, row.proposalLogits.dim(0) > 0 {
+                logits.append(row.proposalLogits)
+                count += row.proposalLogits.dim(0)
+            }
+            logits.append(row.bonusLogits)
+            count += row.bonusLogits.dim(0)
+            for position in 0 ..< count {
+                positionSamplers.append(ContinuousBatchRowSampler.Row(
+                    temperature: sampler.temperature,
+                    topP: sampler.topP,
+                    samplerSeed: sampler.samplerSeed,
+                    samplerStep: sampler.samplerStep + position
+                ))
+            }
+            counts.append(count)
+        }
+        let flat = ContinuousBatchRowSampler.sample(
+            logits: concatenated(logits, axis: 0),
+            rows: positionSamplers
+        ).asType(.int32).asArray(Int32.self)
         var result: [[Int]] = []
         result.reserveCapacity(rows.count)
         var start = 0

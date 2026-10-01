@@ -8763,7 +8763,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 completeWindowBytesByDepth: admissionCapability.completeWindowBytesByDepth,
                 family: admissionCapability.familyAdapter,
                 throughputDeltaPPM: admissionCapability.throughputDeltaPPM,
-                maximumNativeActiveRows: admissionCapability.maxNativeActiveRows
+                maximumNativeActiveRows: admissionCapability.maxNativeActiveRows,
+                supportsSampling: admissionCapability.supportsSampling
             )
             let runtimeTuple = NativeMTPPublishedRuntimeTuple(
                 modelID: selfTestRuntimeTuple.modelID,

@@ -753,6 +753,10 @@ struct ContinuousBatchNativeMTPVerifyInput: Sendable, Equatable {
     let targetKVTokenCount: Int
     let packedRowIndex: Int
     let samplerStep: Int
+    /// Row sampling parameters. Verification position `i` selects the target
+    /// token exactly as ordinary decode would at step `samplerStep + i`.
+    var temperature: Double = 0
+    var topP: Double = 1
 }
 
 struct ContinuousBatchNativeMTPProposalInput: Sendable, Equatable {
@@ -3085,7 +3089,9 @@ actor ContinuousBatchScheduler {
                     verifiedInputTokenCount: reservation.inputTokenCount,
                     targetKVTokenCount: reservation.targetKVTokenCount,
                     packedRowIndex: packedRowIndex,
-                    samplerStep: row.generatedTokens.count
+                    samplerStep: row.generatedTokens.count,
+                    temperature: row.request.temperature,
+                    topP: row.request.topP
                 )
                 let rowMap = NativeMTPPackedRowMap(
                     schedulerRowID: row.request.id,

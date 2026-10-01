@@ -313,7 +313,8 @@ final class NativeMTPHardwareE2ERunner {
             completeWindowBytesByDepth: admission.completeWindowBytesByDepth,
             family: admission.familyAdapter,
             throughputDeltaPPM: admission.throughputDeltaPPM,
-            maximumNativeActiveRows: admission.maxNativeActiveRows
+            maximumNativeActiveRows: admission.maxNativeActiveRows,
+            supportsSampling: admission.supportsSampling
         )
         let servePathLoad: ModelRuntime.NativeMTPHardwareE2EServePathLoad?
         if verifyServePath {
@@ -832,7 +833,9 @@ final class NativeMTPHardwareE2ERunner {
             "ram_bytes": machine.ramGB * 1_073_741_824,
             "qualified_slots": maxBatch,
             "max_native_active_rows": maxNativeActiveRows,
-            "request_feature_profile": "native_mtp_greedy_text_v1",
+            // The lab tuple qualifies sampled rows too (target-sample exact
+            // match), so temperature cells measure the native path.
+            "request_feature_profile": NativeMTPAdmissionSidecar.sampledRequestFeatureProfile,
             "decrease_threshold_ppm": 1,
             "increase_threshold_ppm": 2,
             "max_verification_positions_per_committed_milli": 1000,

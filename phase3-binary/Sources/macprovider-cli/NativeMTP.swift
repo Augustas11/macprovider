@@ -42,6 +42,9 @@ struct NativeMTPCapability: Sendable, Equatable {
     /// SPEC-048-R007 signed load bound. `Int.max` is only for capabilities
     /// that never came from a signed sidecar (unit fixtures).
     let maximumNativeActiveRows: Int
+    /// The signed tuple qualified sampled rows (SPEC-023-R024
+    /// `native_mtp_sampled_text_v1`); greedy-only tuples route them ordinary.
+    let supportsSampling: Bool
 
     init(
         admitted: Bool,
@@ -59,7 +62,8 @@ struct NativeMTPCapability: Sendable, Equatable {
         completeWindowBytesByDepth: [Int] = [],
         family: String? = nil,
         throughputDeltaPPM: Int = 0,
-        maximumNativeActiveRows: Int = Int.max
+        maximumNativeActiveRows: Int = Int.max,
+        supportsSampling: Bool = false
     ) {
         self.admitted = admitted
         self.revoked = revoked
@@ -77,6 +81,7 @@ struct NativeMTPCapability: Sendable, Equatable {
         self.family = family
         self.throughputDeltaPPM = throughputDeltaPPM
         self.maximumNativeActiveRows = max(1, maximumNativeActiveRows)
+        self.supportsSampling = supportsSampling
     }
 
     static let unavailable = NativeMTPCapability(
@@ -232,8 +237,18 @@ struct NativeMTPSelector: Sendable {
               request.streamOptionKeys.isSubset(of: admittedStreamOptionKeys) else {
             return .unknownRequestField
         }
-        guard request.temperature == 0.0, request.topP == 1.0 else {
-            return .sampling
+        // Sampled rows verify by target-sample exact match with the row's own
+        // sampler, so a tuple qualified for sampling admits any temperature/
+        // top_p pair the ordinary row sampler supports; anything else, and
+        // every sampled request on a greedy-only tuple, stays ordinary.
+        if request.temperature != 0.0 || request.topP != 1.0 {
+            guard nativeCapability.supportsSampling,
+                  ContinuousBatchRowSampler.supports(
+                      temperature: request.temperature,
+                      topP: request.topP
+                  ) else {
+                return .sampling
+            }
         }
         guard jsonInt(request.promptSource.n) ?? 1 == 1 else {
             return .multipleCompletions
