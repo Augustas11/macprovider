@@ -1073,6 +1073,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         NativeMTPRoundProfileCollector.synchronizeMLXBoundary()
 #endif
         let verified: [NativeMTPVerifiedRow] = try await container.perform(nonSendable: inputs) { context, inputs in
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+            let profiler = NativeMTPRoundProfileCollector.shared
+            var lapStarted = NativeMTPRoundProfileCollector.start()
+#endif
             let rowStates = inputs.map {
                 self.rowState(
                     for: $0.requestID,
@@ -1098,6 +1102,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     proposalCount: $0.proposalTokens.count
                 )
             }
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+            profiler.lap(.verifyPrepare, &lapStarted)
+#endif
             let output = try verifyMTPPackedTargets(
                 model: context.model,
                 tokens: tokens,
@@ -1105,6 +1112,29 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 cache: batchedCaches.map(\.cache),
                 requireContinuationState: true
             )
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+            profiler.lap(.verifyGraphBuild, &lapStarted)
+            if NativeMTPRoundProfileCollector.enabled {
+                var forwardArrays: [MLXArray] = []
+                for row in output.rows {
+                    forwardArrays.append(row.proposalLogits)
+                    forwardArrays.append(row.bonusLogits)
+                    if let state = row.continuationState {
+                        forwardArrays.append(state.lastHidden)
+                        for pair in state.sharedKV.values {
+                            forwardArrays.append(pair.0)
+                            forwardArrays.append(pair.1)
+                        }
+                    }
+                }
+                for batch in batchedCaches {
+                    forwardArrays.append(contentsOf: batch.cache.state)
+                }
+                NativeMTPRoundProfileCollector.evalForProfile(forwardArrays)
+                profiler.countHostSyncs(1)
+            }
+            profiler.lap(.verifyForwardEval, &lapStarted)
+#endif
             let pendingByRequestID = try Dictionary(
                 uniqueKeysWithValues: self.pendingNativeMTPTransactions(
                     from: batchedCaches,
@@ -1123,10 +1153,14 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 requestIDs: inputs.map(\.requestID),
                 transactions: pendingByRequestID.mapValues { $0 }
             )
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+            profiler.lap(.verifyCheckpointTransactions, &lapStarted)
+#endif
             for (index, input) in inputs.enumerated() {
                 try self.setRowState(rowStates[index], for: input.requestID, binding: input.binding)
             }
 #if DEBUG || MACPROVIDER_LAB_HARNESS
+            profiler.lap(.verifyStateStore, &lapStarted)
             let parityPackedRoundID = NativeMTPParityTraceCollector.shared.allocatePackedRoundID()
 #endif
             return output.rows.map { row in
@@ -1136,6 +1170,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     bonusLogits: row.bonusLogits
                 )
 #if DEBUG || MACPROVIDER_LAB_HARNESS
+                profiler.countHostSyncs(row.map.proposalCount > 0 ? 2 : 1)
+                profiler.lap(.verifyTopTokens, &lapStarted)
                 var traceLogits: [MLXArray] = []
                 traceLogits.reserveCapacity(row.map.proposalCount + 1)
                 for index in 0 ..< row.map.proposalCount {
@@ -1149,6 +1185,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     targetLogits: traceLogits,
                     targetArgmaxes: targetTopTokenIDs
                 )
+                profiler.countHostSyncs(1)
+                profiler.lap(.verifyParityTrace, &lapStarted)
 #endif
                 return NativeMTPVerifiedRow(
                     schedulerRowID: input.requestID,
@@ -1475,6 +1513,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
 #if DEBUG || MACPROVIDER_LAB_HARNESS
         NativeMTPRoundProfileCollector.synchronizeMLXBoundary()
 #endif
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+        let profiler = NativeMTPRoundProfileCollector.shared
+        var lapStarted = NativeMTPRoundProfileCollector.start()
+#endif
         let decodeSteps = max(1, steps)
         var rowStates = supportedInputs.map {
             self.rowState(
@@ -1508,6 +1550,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             && rowStates.allSatisfy({ $0.state == nil })
             && cachesAsKV.allSatisfy { !$0.innerState().isEmpty }
 
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+        profiler.lap(.ordinaryPrepare, &lapStarted)
+#endif
         let sampledByRow: [[Int]]
         if canCompile {
             var compiledCaches: [KVCache]
@@ -1540,12 +1585,22 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             var collected: [[Int]] = supportedInputs.map { _ in [] }
             for stepIndex in 0 ..< decodeSteps {
                 let logits = step.step(current)
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+                profiler.countCompiledOrdinaryStep()
+                profiler.lap(.ordinaryGraphBuild, &lapStarted)
+                NativeMTPRoundProfileCollector.evalForProfile([logits])
+                profiler.lap(.ordinaryForwardEval, &lapStarted)
+                profiler.countHostSyncs(2)
+#endif
                 current = ContinuousBatchRowSampler.sample(
                     logits: logits[0..., -1, 0...],
                     rows: Self.samplerRows(supportedInputs, step: stepIndex)
                 ).reshaped([supportedInputs.count, 1])
                 eval(current)
                 let stepTokens = current.asArray(Int.self)
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+                profiler.lap(.ordinarySample, &lapStarted)
+#endif
                 guard stepTokens.count == supportedInputs.count else {
                     throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_logits_shape")
                 }
@@ -1572,11 +1627,25 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 let output = withPreparedCache(cachesAsKV, lengths: text.sequenceLengths) {
                     model(text, cache: cachesAsKV, state: supportedInputs.count == 1 ? rowStates[0].state : nil)
                 }
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+                profiler.lap(.ordinaryGraphBuild, &lapStarted)
+                if NativeMTPRoundProfileCollector.enabled {
+                    NativeMTPRoundProfileCollector.evalForProfile(
+                        [output.logits] + cachesAsKV.flatMap(\.state)
+                    )
+                    profiler.countHostSyncs(1)
+                }
+                profiler.lap(.ordinaryForwardEval, &lapStarted)
+#endif
                 try batchedCaches.forEach { try $0.validateBatchState() }
                 let stepSampled = ContinuousBatchRowSampler.sample(
                     logits: output.logits[0..., -1, 0...],
                     rows: Self.samplerRows(supportedInputs, step: stepIndex)
                 ).asArray(Int.self)
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+                profiler.countHostSyncs(1)
+                profiler.lap(.ordinarySample, &lapStarted)
+#endif
                 guard stepSampled.count == supportedInputs.count else {
                     throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_logits_shape")
                 }
@@ -1608,6 +1677,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         for (index, input) in supportedInputs.enumerated() {
             try self.setRowState(rowStates[index], for: input.requestID, binding: input.binding)
         }
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+        profiler.lap(.ordinaryWriteback, &lapStarted)
+#endif
         let outcomes = zip(supportedInputs, sampledByRow).map { input, tokens in
             ContinuousBatchDecodeOutcome.output(ContinuousBatchDecodeOutput(
                 requestID: input.requestID,
@@ -1852,7 +1924,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
 #endif
             }
 #if !MACPROVIDER_MLX_PACKED_DRAFTER
-            dirtyArrays.append(contentsOf: states.values.flatMap(\.cache))
+            dirtyArrays.append(contentsOf: states.values.flatMap { $0.cache.flatMap { $0.innerState() } })
 #endif
             if !dirtyArrays.isEmpty {
                 eval(dirtyArrays)

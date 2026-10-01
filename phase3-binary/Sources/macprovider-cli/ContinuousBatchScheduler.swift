@@ -3009,6 +3009,17 @@ actor ContinuousBatchScheduler {
                 inputTokenCount = 1
                 target = committedKVTokenCount.addingReportingOverflow(inputTokenCount)
             }
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+            // Lab control C2: verify only the committed token per row through
+            // the packed MTP path, isolating path overhead from per-position cost.
+            if ProcessInfo.processInfo.environment["MACPROVIDER_NATIVE_MTP_LAB_FORCE_DEPTH0"] == "1",
+               !proposals.isEmpty {
+                proposals = []
+                consumedFixtureProposals = false
+                inputTokenCount = 1
+                target = committedKVTokenCount.addingReportingOverflow(inputTokenCount)
+            }
+#endif
             guard !target.overflow else {
                 if let removed = activeDecode.removeValue(forKey: row.request.id) {
                     let released = await release(removed.handle)
