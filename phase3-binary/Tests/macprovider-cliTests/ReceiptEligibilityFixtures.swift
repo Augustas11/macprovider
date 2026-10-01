@@ -19,7 +19,8 @@ enum ReceiptEligibilityFixtures {
     /// loopback upstream, so its snapshot carries a genuine GGUF digest.
     static func makeOllamaLoopbackRuntime(
         testCase: XCTestCase,
-        content: String = "ok"
+        content: String = "ok",
+        catalogModelIDAlias: String? = nil
     ) throws -> LoopbackRuntime {
         let blob = Data("GGUF".utf8) + Data(repeating: 0xab, count: 4096)
         let digest = Data(SHA256.hash(data: blob)).map { String(format: "%02x", $0) }.joined()
@@ -41,6 +42,7 @@ enum ReceiptEligibilityFixtures {
         let runtime = try OpenAICompatibleLoopbackRuntime(
             servedModelRef: ollamaServedRef,
             origin: "http://127.0.0.1:11434",
+            catalogModelIDAlias: catalogModelIDAlias,
             httpClient: ReceiptEligibilityStubLoopbackClient(responseBody: upstream),
             digestResolver: BYOMArtifactDigestResolver(
                 store: BYOMOllamaModelStore(root: root),

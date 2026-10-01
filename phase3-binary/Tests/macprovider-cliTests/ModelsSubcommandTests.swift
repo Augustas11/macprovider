@@ -116,6 +116,7 @@ final class ModelsSubcommandTests: XCTestCase {
 
     func testModelsCatalogEconomicsRequiresJSON() async throws {
         let command = try ModelsCatalogEconomicsCommand.parse([
+            "--offline-artifact-feed",
             "--skip-coordinator-status",
             "--skip-ollama",
             "--skip-lmstudio",
@@ -131,6 +132,7 @@ final class ModelsSubcommandTests: XCTestCase {
 
     func testModelsCatalogEconomicsRemainsV1UntilPreparationTransactionsLand() async throws {
         let command = try ModelsCatalogEconomicsCommand.parse([
+            "--offline-artifact-feed",
             "--json",
             "--skip-coordinator-status",
             "--skip-ollama",
@@ -189,6 +191,7 @@ final class ModelsSubcommandTests: XCTestCase {
             if let previous { setenv("MACPROVIDER_MODEL_ARTIFACT_ROOT", previous, 1) } else { unsetenv("MACPROVIDER_MODEL_ARTIFACT_ROOT") }
         }
         let command = try ModelsCatalogEconomicsCommand.parse([
+            "--offline-artifact-feed",
             "--json",
             "--skip-coordinator-status",
             "--skip-ollama",

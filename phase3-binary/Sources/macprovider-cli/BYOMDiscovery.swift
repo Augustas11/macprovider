@@ -673,6 +673,67 @@ struct BYOMAdmissionStatusWire: Codable, Equatable, Sendable {
     let providerGuidance: BYOMDiscoveryWire.Guidance
     let allowedNextStates: [String]
     let warnings: [String]
+    /// SPEC-047-R011 (#1816): the closed `binding_scope` enum (`global | pool`).
+    /// Absent on every pre-#1816 envelope, which means `global`. It is encoded
+    /// only when present, so a global document stays byte-identical to v1.
+    var bindingScope: String? = nil
+    /// SPEC-047-R011: the coordinator's authoritative pool-manifest binding,
+    /// present exactly when `binding_scope` is `pool`.
+    var poolBinding: PoolBinding? = nil
+
+    /// SPEC-047-R011 binding fields, named as the SPEC-042-R015 entry fields
+    /// they were bound from. A closed object: `decodeStrictStatus` requires
+    /// the exact key set.
+    struct PoolBinding: Codable, Equatable, Sendable {
+        /// The pool entry's creator-signed rates in the rate-card units:
+        /// int64 >= 0 each, cache-hit rate never above the prompt rate.
+        struct Pricing: Codable, Equatable, Sendable {
+            let promptRatePerMtok: Int64
+            let promptCacheHitRatePerMtok: Int64
+            let completionRatePerMtok: Int64
+
+            enum CodingKeys: String, CodingKey, CaseIterable {
+                case promptRatePerMtok = "prompt_rate_per_mtok"
+                case promptCacheHitRatePerMtok = "prompt_cache_hit_rate_per_mtok"
+                case completionRatePerMtok = "completion_rate_per_mtok"
+            }
+
+            var isValid: Bool {
+                promptRatePerMtok >= 0 && completionRatePerMtok >= 0 &&
+                    promptCacheHitRatePerMtok >= 0 && promptCacheHitRatePerMtok <= promptRatePerMtok
+            }
+        }
+
+        let poolID: String
+        let poolModelID: String
+        let manifestVersion: UInt64
+        let coreDigest: String
+        let artifactHashAlgorithm: String
+        let artifactHash: String
+        let runtimeSource: String
+        let pricing: Pricing
+        let disclosureClass: String
+        let maxContextTokens: Int
+
+        enum CodingKeys: String, CodingKey, CaseIterable {
+            case poolID = "pool_id"
+            case poolModelID = "pool_model_id"
+            case manifestVersion = "manifest_version"
+            case coreDigest = "core_digest"
+            case artifactHashAlgorithm = "artifact_hash_algorithm"
+            case artifactHash = "artifact_hash"
+            case runtimeSource = "runtime_source"
+            case pricing
+            case disclosureClass = "disclosure_class"
+            case maxContextTokens = "max_context_tokens"
+        }
+
+        static let keys = Set(CodingKeys.allCases.map(\.stringValue))
+        static let pricingKeys = Set(Pricing.CodingKeys.allCases.map(\.stringValue))
+    }
+
+    /// True only for a document carrying a pool-scoped binding.
+    var isPoolScoped: Bool { bindingScope == "pool" && poolBinding != nil }
 
     enum CodingKeys: String, CodingKey {
         case schema
@@ -689,6 +750,8 @@ struct BYOMAdmissionStatusWire: Codable, Equatable, Sendable {
         case providerGuidance = "provider_guidance"
         case allowedNextStates = "allowed_next_states"
         case warnings
+        case bindingScope = "binding_scope"
+        case poolBinding = "pool_binding"
     }
 
     /// SPEC-047-R002 makes this a closed envelope: `catalog_model_key`,
@@ -712,6 +775,8 @@ struct BYOMAdmissionStatusWire: Codable, Equatable, Sendable {
         try container.encode(providerGuidance, forKey: .providerGuidance)
         try container.encode(allowedNextStates, forKey: .allowedNextStates)
         try container.encode(warnings, forKey: .warnings)
+        try container.encodeIfPresent(bindingScope, forKey: .bindingScope)
+        try container.encodeIfPresent(poolBinding, forKey: .poolBinding)
     }
 
     private func encodeNullableString(
@@ -890,6 +955,19 @@ extension BYOMAdmissionStatusWire {
         "not_earning_yet_catalog_or_receipt_path_exists",
         "no_earning_path_in_v0_1",
         "settlement_capable",
+        "pool_attested_earning",
+    ]
+    /// SPEC-047-R011 (#1816): optional keys a coordinator adds only for a
+    /// binding it scopes; an envelope without them is a v1 global binding.
+    private static let bindingScopeKeys: Set<String> = ["binding_scope", "pool_binding"]
+    /// SPEC-042-R015 field 1.
+    static let poolModelIDPattern = #"^pool/[A-Za-z0-9_-]{22}/[a-z0-9][a-z0-9-]{0,62}$"#
+    static let poolIDPattern = #"^[A-Za-z0-9_-]{22}$"#
+    /// SPEC-042-R015 field 4: the runtimes each artifact algorithm may name.
+    /// A snapshot-manifest entry may also name native `mlx_cache` (#1816).
+    static let poolEntryRuntimeSources: [String: Set<String>] = [
+        ModelArtifactIdentity.ggufFileV1: ["llamacpp_loopback", "lmstudio_loopback", "ollama_loopback"],
+        ModelArtifactIdentity.snapshotManifestV1: ["mlx_cache", "mlxlm_loopback", "omlx_loopback"],
     ]
     private static let reasonRequiredStates: Set<String> = [
         "offer_rejected",
@@ -903,14 +981,70 @@ extension BYOMAdmissionStatusWire {
         expectedCandidateID: String? = nil
     ) throws -> BYOMAdmissionStatusWire {
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              Set(object.keys) == topLevelKeys,
+              Set(object.keys).subtracting(bindingScopeKeys) == topLevelKeys,
               let guidance = object["provider_guidance"] as? [String: Any],
               Set(guidance.keys) == guidanceKeys else {
             throw BYOMModelAdmissionError.invalidStatusSchema
         }
+        // A present scope key is never null; a pool binding is a closed object.
+        if object.keys.contains("binding_scope"), !(object["binding_scope"] is String) {
+            throw BYOMModelAdmissionError.invalidStatusSchema
+        }
+        if object.keys.contains("pool_binding") {
+            guard let binding = object["pool_binding"] as? [String: Any],
+                  Set(binding.keys) == PoolBinding.keys,
+                  let pricing = binding["pricing"] as? [String: Any],
+                  Set(pricing.keys) == PoolBinding.pricingKeys else {
+                throw BYOMModelAdmissionError.invalidStatusSchema
+            }
+        }
         let status = try JSONDecoder().decode(BYOMAdmissionStatusWire.self, from: data)
         try validate(status, expectedProviderID: expectedProviderID, expectedCandidateID: expectedCandidateID)
         return status
+    }
+
+    /// SPEC-047-R011: `global` (or absent) carries no pool binding and can
+    /// never claim `pool_attested_earning`; `pool` carries exactly one valid
+    /// binding, never a catalog identity, and never `settlement_capable`.
+    private static func validateBindingScope(_ status: BYOMAdmissionStatusWire) throws {
+        switch status.bindingScope {
+        case nil, "global":
+            guard status.poolBinding == nil,
+                  status.providerGuidance.earningPathClass != "pool_attested_earning" else {
+                throw BYOMModelAdmissionError.invalidStatusSchema
+            }
+        case "pool":
+            guard status.admissionStateSource == "coordinator",
+                  status.admissionState != "settlement_capable",
+                  status.catalogModelKey == nil,
+                  let binding = status.poolBinding,
+                  Self.poolBindingIsValid(binding) else {
+                throw BYOMModelAdmissionError.invalidStatusSchema
+            }
+        default:
+            throw BYOMModelAdmissionError.invalidStatusSchema
+        }
+    }
+
+    static func poolBindingIsValid(_ binding: PoolBinding) -> Bool {
+        guard binding.poolID.range(of: poolIDPattern, options: .regularExpression) != nil,
+              binding.poolModelID.utf8.count <= 91,
+              binding.poolModelID.range(of: poolModelIDPattern, options: .regularExpression) != nil,
+              binding.poolModelID.split(separator: "/", omittingEmptySubsequences: false).dropFirst().first.map(String.init) == binding.poolID,
+              binding.manifestVersion >= 1,
+              isLowercaseHex64(binding.coreDigest),
+              isLowercaseHex64(binding.artifactHash),
+              poolEntryRuntimeSources[binding.artifactHashAlgorithm]?.contains(binding.runtimeSource) == true,
+              binding.pricing.isValid,
+              binding.disclosureClass == "pool_attested_unverified",
+              (1...1_048_576).contains(binding.maxContextTokens) else {
+            return false
+        }
+        return true
+    }
+
+    private static func isLowercaseHex64(_ value: String) -> Bool {
+        value.utf8.count == 64 && value.utf8.allSatisfy { (0x30...0x39).contains($0) || (0x61...0x66).contains($0) }
     }
 
     private static func validate(
@@ -930,6 +1064,7 @@ extension BYOMAdmissionStatusWire {
         if let expectedCandidateID, status.candidateID != expectedCandidateID {
             throw BYOMModelAdmissionError.invalidStatusSchema
         }
+        try validateBindingScope(status)
         if status.admissionStateSource == "local_default" {
             guard localDefaultStates.contains(status.admissionState),
                   status.allowedNextStates.isEmpty else {
@@ -997,6 +1132,14 @@ extension BYOMAdmissionStatusWire {
             // whether a catalog_model_key is present.
             return guidance.nextAction == "withdraw" &&
                 guidance.earningPathClass == Self.nonSettlementEarningPathClass(catalogModelKey: status.catalogModelKey)
+        case "catalog_priced" where status.isPoolScoped:
+            // SPEC-047-R011: pool-manifest priced, never a catalog identity.
+            // `pool_attested_earning` holds only while every current pool
+            // predicate holds; otherwise the coordinator discloses no earning
+            // path for the same binding.
+            return (guidance.nextAction == "withdraw" || guidance.nextAction == "maintain_runtime") &&
+                (guidance.earningPathClass == "pool_attested_earning" ||
+                 guidance.earningPathClass == "no_earning_path_in_v0_1")
         case "catalog_priced":
             // catalog_priced requires a catalog binding, so it always carries the
             // catalog/receipt earning-path disclosure.
@@ -1782,13 +1925,91 @@ struct BYOMModelAdmissionRuntime: Sendable {
         servedArtifactPath: String? = nil,
         servedModelID: String? = nil
     ) async throws -> BYOMAdmissionStatusWire {
+        try await submitOfferDetailed(
+            providerID: providerID,
+            target: target,
+            evaluationDigestSHA256: evaluationDigestSHA256,
+            requestedDisclosureClass: requestedDisclosureClass,
+            servedArtifactPath: servedArtifactPath,
+            servedModelID: servedModelID
+        ).status
+    }
+
+    /// `submitOffer`, also returning the candidate and the exact artifact
+    /// hashes the signed offer carried (#1816 `models propose` binds its
+    /// bundle to them).
+    func submitOfferDetailed(
+        providerID: String,
+        target: String,
+        evaluationDigestSHA256: String?,
+        requestedDisclosureClass: String,
+        servedArtifactPath: String? = nil,
+        servedModelID: String? = nil
+    ) async throws -> (status: BYOMAdmissionStatusWire, candidate: BYOMDiscoveryWire.Candidate, artifactHashes: [String: String]) {
         guard let client else {
             throw BYOMModelAdmissionError.missingCoordinatorURL
         }
-        // Submitting an offer is a deliberate mutating command: the coordinator
-        // records the admission event keyed by candidate_id, so the id must be
-        // stable. Provision the local identity salt first (idempotent, local CLI
-        // state only), matching `models evaluate`; discovery itself stays read-only.
+        let candidate = try await resolveOfferCandidate(target)
+        guard let bearer = try credentialStore.load(providerID: providerID) else {
+            throw BYOMModelAdmissionError.missingBearer(providerID: providerID)
+        }
+        guard let identity = try identityStore.loadAdmissionIdentity(providerId: providerID) else {
+            throw BYOMModelAdmissionError.missingAdmissionIdentity(providerID: providerID)
+        }
+        let artifact = try await offerArtifact(
+            for: candidate,
+            servedArtifactPath: servedArtifactPath,
+            servedModelID: servedModelID
+        )
+        let hashes = artifact.hashes
+        // SPEC-010-R007(a) for the mlx_cache leg: recompute the served artifact's
+        // canonical hash and fail closed if the durable directory changed since it
+        // was attested. This runs BEFORE the package is signed so the signature
+        // timestamp stays fresh (the coordinator enforces a signed-payload skew
+        // window); the only work between this check and submit is the in-memory
+        // package build, which touches no artifact bytes. A recompute failure
+        // becomes nil and fails closed (nil != attested).
+        if let mlxAttestedArtifactPath = artifact.mlxAttestedArtifactPath,
+           let attested = hashes[ModelArtifactIdentity.snapshotManifestV1] {
+            let current = try? ModelArtifactVerifier.canonicalArtifactHash(
+                directory: URL(fileURLWithPath: mlxAttestedArtifactPath),
+                deadline: Date().addingTimeInterval(Self.artifactHashBudgetSeconds)
+            )
+            guard current == attested else {
+                throw BYOMModelAdmissionError.artifactIdentityChanged
+            }
+        }
+        let package = try BYOMOfferSubmissionBuilder.makePackage(
+            providerID: providerID,
+            candidate: candidate,
+            admissionIdentity: identity,
+            evaluationDigestSHA256: evaluationDigestSHA256,
+            requestedDisclosureClass: requestedDisclosureClass,
+            artifactHashes: hashes
+        )
+        // SPEC-010-R007(a): the binding must survive through the report. The
+        // name is re-resolved and the file identity re-checked immediately
+        // before the signed package leaves the machine.
+        if let evidence = artifact.evidence {
+            // Re-probe: the runtime must still be serving the very file the
+            // digest was bound to when the package leaves.
+            let servedPathNow = await environment.runtimeArtifactPath(for: candidate, httpClient: httpClient)
+            do {
+                try environment.artifactDigests.validateCurrent(evidence, runtimeSource: candidate.runtimeSource, servedModelRef: candidate.servedModelRef, runtimeArtifactPath: servedPathNow)
+            } catch {
+                throw BYOMModelAdmissionError.artifactIdentityChanged
+            }
+        }
+        let status = try await client.submitOffer(package, bearerToken: bearer)
+        return (status, candidate, hashes)
+    }
+
+    /// The candidate an offer targets. Submitting is a deliberate mutating
+    /// command: the coordinator records the admission event keyed by
+    /// candidate_id, so the id must be stable. Provision the local identity
+    /// salt first (idempotent, local CLI state only), matching `models
+    /// evaluate`; discovery itself stays read-only.
+    func resolveOfferCandidate(_ target: String) async throws -> BYOMDiscoveryWire.Candidate {
         BYOMDiscoveryNamespaceStore().provisionNamespaceIfMissing(at: environment.namespaceURL)
         let discovery = await BYOMDiscoveryRunner(
             environment: environment,
@@ -1797,12 +2018,17 @@ struct BYOMModelAdmissionRuntime: Sendable {
         guard let candidate = Self.selectCandidate(target: target, candidates: discovery.candidates) else {
             throw BYOMModelAdmissionError.candidateNotFound
         }
-        guard let bearer = try credentialStore.load(providerID: providerID) else {
-            throw BYOMModelAdmissionError.missingBearer(providerID: providerID)
-        }
-        guard let identity = try identityStore.loadAdmissionIdentity(providerId: providerID) else {
-            throw BYOMModelAdmissionError.missingAdmissionIdentity(providerID: providerID)
-        }
+        return candidate
+    }
+
+    /// The artifact hashes an offer for `candidate` carries, computed from
+    /// the file bytes exactly as the offer computes them (#1816: `models
+    /// propose` reuses this without submitting).
+    func offerArtifact(
+        for candidate: BYOMDiscoveryWire.Candidate,
+        servedArtifactPath: String?,
+        servedModelID: String?
+    ) async throws -> (hashes: [String: String], evidence: BYOMArtifactEvidence?, mlxAttestedArtifactPath: String?) {
         let evidence = try await Self.artifactEvidence(for: candidate, environment: environment, httpClient: httpClient, deadline: Date().addingTimeInterval(Self.artifactHashBudgetSeconds))
         var hashes = evidence?.hashes ?? [:]
         // SPEC-047 primary-row catalog match binds an mlx_cache candidate's
@@ -1865,44 +2091,7 @@ struct BYOMModelAdmissionRuntime: Sendable {
                 // won't catalog-match, exactly as today.
             }
         }
-        // SPEC-010-R007(a) for the mlx_cache leg: recompute the served artifact's
-        // canonical hash and fail closed if the durable directory changed since it
-        // was attested. This runs BEFORE the package is signed so the signature
-        // timestamp stays fresh (the coordinator enforces a signed-payload skew
-        // window); the only work between this check and submit is the in-memory
-        // package build, which touches no artifact bytes. A recompute failure
-        // becomes nil and fails closed (nil != attested).
-        if let mlxAttestedArtifactPath, let attested = hashes[ModelArtifactIdentity.snapshotManifestV1] {
-            let current = try? ModelArtifactVerifier.canonicalArtifactHash(
-                directory: URL(fileURLWithPath: mlxAttestedArtifactPath),
-                deadline: Date().addingTimeInterval(Self.artifactHashBudgetSeconds)
-            )
-            guard current == attested else {
-                throw BYOMModelAdmissionError.artifactIdentityChanged
-            }
-        }
-        let package = try BYOMOfferSubmissionBuilder.makePackage(
-            providerID: providerID,
-            candidate: candidate,
-            admissionIdentity: identity,
-            evaluationDigestSHA256: evaluationDigestSHA256,
-            requestedDisclosureClass: requestedDisclosureClass,
-            artifactHashes: hashes
-        )
-        // SPEC-010-R007(a): the binding must survive through the report. The
-        // name is re-resolved and the file identity re-checked immediately
-        // before the signed package leaves the machine.
-        if let evidence {
-            // Re-probe: the runtime must still be serving the very file the
-            // digest was bound to when the package leaves.
-            let servedPathNow = await environment.runtimeArtifactPath(for: candidate, httpClient: httpClient)
-            do {
-                try environment.artifactDigests.validateCurrent(evidence, runtimeSource: candidate.runtimeSource, servedModelRef: candidate.servedModelRef, runtimeArtifactPath: servedPathNow)
-            } catch {
-                throw BYOMModelAdmissionError.artifactIdentityChanged
-            }
-        }
-        return try await client.submitOffer(package, bearerToken: bearer)
+        return (hashes, evidence, mlxAttestedArtifactPath)
     }
 
     /// SPEC-010 v1.7 R007(a): an offer is a report that binds identity, so the
@@ -2183,6 +2372,11 @@ struct BYOMDiscoveryEnvironment: Sendable {
     let omlxOrigin: String?
     let omlxModelPath: URL?
     let artifactDigestCacheURL: URL
+    /// #1816: the catalog matcher every adapter of one command shares. Nil
+    /// keeps the offline compiled-in selection (`BYOMCatalogMatcher()`); the
+    /// commands set it from `BYOMLiveCatalogMatcher` so a CLI with no baked
+    /// artifact feed still matches what the coordinator's signed feed binds.
+    var catalogMatcher: BYOMCatalogMatcher?
 
     /// The configured MLX-snapshot loopback adapters, in a fixed order.
     var mlxSnapshotLoopbacks: [(kind: MLXSnapshotLoopbackKind, origin: String, directory: URL)] {
@@ -2451,7 +2645,7 @@ struct BYOMDiscoveryRunner {
     func discover() async -> BYOMDiscoveryWire {
         let namespace = BYOMDiscoveryNamespaceStore(fileManager: fileManager)
             .readNamespace(at: environment.namespaceURL)
-        let catalog = BYOMCatalogMatcher()
+        let catalog = environment.catalogMatcher ?? BYOMCatalogMatcher()
         var adapters: [BYOMDiscoveryWire.Adapter] = []
         var candidates: [BYOMDiscoveryWire.Candidate] = []
         var warnings = Set(namespace.warnings.map(\.rawValue))

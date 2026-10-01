@@ -13,6 +13,7 @@ final class BYOMAdmissionTests: XCTestCase {
 
     func testOfferCommandRequiresExplicitYesForCoordinatorMutation() async throws {
         let command = try ModelsOfferCommand.parse([
+            "--offline-artifact-feed",
             "ollama:tiny-offer-1b-q4",
             "--json",
             "--skip-ollama",
@@ -339,6 +340,7 @@ final class BYOMAdmissionTests: XCTestCase {
 
     func testWithdrawCommandRequiresExplicitYesForCoordinatorMutation() async throws {
         let command = try ModelsAdmissionWithdrawCommand.parse([
+            "--offline-artifact-feed",
             "ollama:tiny-offer-1b-q4",
             "--json",
             "--skip-ollama",

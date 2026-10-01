@@ -31,6 +31,7 @@ final class BYOMEvaluationTests: XCTestCase {
         )
 
         let command = try ModelsEvaluateCommand.parse([
+            "--offline-artifact-feed",
             "--skip-lmstudio",
             "--skip-llamacpp",
             "ollama:Tiny-Ollama-1B-Q4",
@@ -89,6 +90,7 @@ final class BYOMEvaluationTests: XCTestCase {
         )
 
         let command = try ModelsEvaluateCommand.parse([
+            "--offline-artifact-feed",
             "openai_compatible:opaque-mini-1b",
             "--json",
             "--local-discovery-namespace-path", namespace.path,
@@ -159,6 +161,7 @@ final class BYOMEvaluationTests: XCTestCase {
             chatBody: #"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"completion_tokens":2}}"#
         )
         let command = try ModelsEvaluateCommand.parse([
+            "--offline-artifact-feed",
             "--skip-lmstudio",
             "--skip-llamacpp",
             "ollama:Tiny-Ollama-1B-Q4", "--json",

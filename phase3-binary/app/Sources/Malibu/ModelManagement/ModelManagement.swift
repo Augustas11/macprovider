@@ -851,6 +851,7 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
             "not_earning_yet_catalog_or_receipt_path_exists",
             "no_earning_path_in_v0_1",
             "local_inventory_only",
+            "pool_attested_earning",
         ]
         let expectedStateLabelPrefix = admission.source == "local_default"
             ? "byom.local."
@@ -892,6 +893,16 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
                 guidance.earningPathClass == "settlement_capable"
                 && admission.settlementCapable == false
             )
+            // SPEC-047-R011: pool earning is never catalog economics or
+            // global settlement, and holds only for a coordinator
+            // catalog_priced (pool-manifest priced) binding.
+            && !(
+                guidance.earningPathClass == "pool_attested_earning"
+                && (admission.source != "coordinator"
+                    || admission.state != "catalog_priced"
+                    || admission.catalogEconomicsPermitted
+                    || admission.settlementCapable)
+            )
     }
 
     private static func isLocalizationKey(_ value: String) -> Bool {
@@ -899,7 +910,7 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
     }
 
     static func guidanceIsValid(_ guidance: ProviderGuidance) -> Bool {
-        ["local_inventory_only", "not_earning_yet_catalog_or_receipt_path_exists", "no_earning_path_in_v0_1", "settlement_capable"]
+        ["local_inventory_only", "not_earning_yet_catalog_or_receipt_path_exists", "no_earning_path_in_v0_1", "settlement_capable", "pool_attested_earning"]
             .contains(guidance.earningPathClass)
             && isLocalizationKey(guidance.stateLabelKey)
             && isLocalizationKey(guidance.stateMeaningKey)
@@ -1074,6 +1085,18 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         "coordinator_state_unavailable",
         "no_trusted_catalog_match",
         "catalog_binding_unverified",
+        // SPEC-047 withdrawal reasons (a withdrawn status carries one).
+        "provider_requested",
+        "wrong_model",
+        "runtime_unavailable",
+        "identity_mismatch",
+        "policy_uncertain",
+        "other_operator_reason",
+        // SPEC-047-R011 pool binding revocations (#1816).
+        "pool_manifest_binding_drift",
+        "pool_manifest_entry_revoked",
+        "pool_membership_revoked",
+        "pool_manifest_history_invalid",
     ]
 }
 
@@ -1340,6 +1363,9 @@ struct MalibuBYOMAdmissionStatusDocument: Decodable, Equatable, Sendable {
     let providerGuidance: MalibuModelCatalogEconomicsDocument.ProviderGuidance
     let allowedNextStates: [String]
     let warnings: [String]
+    /// SPEC-047-R011 (#1816): absent means a global binding.
+    let bindingScope: String?
+    let poolBinding: MalibuBYOMPoolBinding?
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case schema
@@ -1356,6 +1382,8 @@ struct MalibuBYOMAdmissionStatusDocument: Decodable, Equatable, Sendable {
         case providerGuidance = "provider_guidance"
         case allowedNextStates = "allowed_next_states"
         case warnings
+        case bindingScope = "binding_scope"
+        case poolBinding = "pool_binding"
     }
 
     init(from decoder: Decoder) throws {
@@ -1375,9 +1403,36 @@ struct MalibuBYOMAdmissionStatusDocument: Decodable, Equatable, Sendable {
         providerGuidance = try container.decode(MalibuModelCatalogEconomicsDocument.ProviderGuidance.self, forKey: .providerGuidance)
         allowedNextStates = try container.decode([String].self, forKey: .allowedNextStates)
         warnings = try container.decode([String].self, forKey: .warnings)
+        bindingScope = try container.decodeIfPresent(String.self, forKey: .bindingScope)
+        poolBinding = try container.decodeIfPresent(MalibuBYOMPoolBinding.self, forKey: .poolBinding)
+    }
+
+    /// The validated pool binding, nil for a global one.
+    var validPoolBinding: MalibuBYOMPoolBinding? {
+        bindingScope == "pool" ? poolBinding : nil
     }
 
     func validated(expectedCandidateID: String) throws {
+        // SPEC-047-R011: a pool binding is never a catalog identity, never
+        // settlement_capable, and the only binding that may claim
+        // pool_attested_earning (and only while catalog_priced).
+        switch bindingScope {
+        case nil, "global":
+            guard poolBinding == nil,
+                  providerGuidance.earningPathClass != "pool_attested_earning" else {
+                throw ModelManagementError.invalidCatalog
+            }
+        case "pool":
+            guard admissionStateSource == "coordinator",
+                  admissionState != "settlement_capable",
+                  catalogModelKey == nil,
+                  poolBinding?.isValid == true,
+                  providerGuidance.earningPathClass != "pool_attested_earning" || admissionState == "catalog_priced" else {
+                throw ModelManagementError.invalidCatalog
+            }
+        default:
+            throw ModelManagementError.invalidCatalog
+        }
         guard schema == "model_admission_status.v1",
               candidateID == expectedCandidateID,
               ["local_default", "coordinator"].contains(admissionStateSource),
@@ -2048,6 +2103,12 @@ final class ModelManagementStore: ObservableObject {
     @Published private(set) var previousModelID: String?
     @Published private(set) var history: [ModelActivityEntry] = []
     @Published private(set) var backgroundRecommendationsEnabled: Bool
+    /// #1816: local runtime adapter settings passed to BYOM CLI commands.
+    @Published private(set) var byomAdapterSettings: MalibuBYOMAdapterSettings
+    /// #1816: the last `models propose` bundle, for copy and export.
+    @Published private(set) var poolProposal: MalibuPoolProposalResult?
+    /// #1816: coordinator pool bindings read back by candidate id.
+    @Published private(set) var poolBindings: [String: MalibuBYOMPoolBinding] = [:]
 
     private let cli: any MalibuModelCLIRunning
     private let paths: ProviderPaths
@@ -2090,6 +2151,23 @@ final class ModelManagementStore: ObservableObject {
             recommendationSchedule = persisted.recommendationSchedule ?? MalibuRecommendationSchedule()
         } else {
             backgroundRecommendationsEnabled = true
+        }
+        if let data = defaults.data(forKey: MalibuBYOMAdapterSettings.defaultsKey),
+           let persisted = try? JSONDecoder().decode(MalibuBYOMAdapterSettings.self, from: data),
+           let valid = try? persisted.validated() {
+            byomAdapterSettings = valid
+        } else {
+            byomAdapterSettings = MalibuBYOMAdapterSettings()
+        }
+    }
+
+    /// Validates and persists the BYOM adapter settings; an invalid value is
+    /// rejected and nothing is saved.
+    func setBYOMAdapterSettings(_ settings: MalibuBYOMAdapterSettings) throws {
+        let valid = try settings.validated()
+        byomAdapterSettings = valid
+        if let data = try? JSONEncoder().encode(valid) {
+            defaults.set(data, forKey: MalibuBYOMAdapterSettings.defaultsKey)
         }
     }
 
@@ -2375,7 +2453,7 @@ final class ModelManagementStore: ObservableObject {
                     "models", "catalog-economics", "--json",
                     "--config", paths.configFile.path,
                     "--ctl-socket-path", paths.controlSocket.path,
-                ],
+                ] + byomAdapterSettings.cliArguments,
                 peer: peerEvidence,
                 onLine: { _ in }
             )
@@ -2393,8 +2471,9 @@ final class ModelManagementStore: ObservableObject {
             self.currentModelID = configuredModel ?? rows.first(where: { $0.category == .current })?.id
             self.listState = rows.contains(where: { $0.action != .none }) ? .ready : .viewOnly
             self.operation = .idle
+            await refreshPoolBindings()
             if rows.isEmpty {
-                self.statusLine = String(localized: "Network catalog has no admitted economics rows yet. Local BYOM discovery remains CLI-only in this release.", comment: "Catalog economics empty")
+                self.statusLine = String(localized: "No network catalog rows or locally discovered models yet. Configure local runtimes in Settings to discover them here.", comment: "Catalog economics empty")
             } else if rows.contains(where: { $0.providerCompletionPayoutUSDPerMillionTokens != nil }) {
                 self.statusLine = String(localized: "Network catalog rates loaded from the provider CLI projection.", comment: "Catalog economics loaded")
             } else {
@@ -2518,10 +2597,11 @@ final class ModelManagementStore: ObservableObject {
         do {
             let evaluation = try await runBYOMCommand(
                 ["models", "evaluate", row.id, "--json", "--config", paths.configFile.path]
+                    + byomAdapterSettings.cliArguments
             )
             let dryRun = try await runBYOMCommand([
                 "models", "offer", row.id, "--dry-run", "--json", "--config", paths.configFile.path,
-            ])
+            ] + byomAdapterSettings.cliArguments)
             guard let wouldSubmit = try? Self.decodeBYOMActivationResults(
                 evaluation: evaluation,
                 dryRun: dryRun,
@@ -2538,13 +2618,13 @@ final class ModelManagementStore: ObservableObject {
             statusLine = String(localized: "Submitting the coordinator offer…", comment: "BYOM offer submission status")
             let offerArguments = [
                 "models", "offer", row.id, "--yes", "--json", "--config", paths.configFile.path,
-            ]
+            ] + byomAdapterSettings.cliArguments
             let offer = try await runBYOMCommand(offerArguments)
             try Self.validateBYOMAdmissionStatus(offer.stdout, expectedCandidateID: row.id)
             statusLine = String(localized: "Reading the resulting admission status…", comment: "BYOM status refresh status")
             let admissionStatus = try await runBYOMCommand([
                 "models", "admission", "status", row.id, "--json", "--config", paths.configFile.path,
-            ])
+            ] + byomAdapterSettings.cliArguments)
             try Self.validateBYOMAdmissionStatus(admissionStatus.stdout, expectedCandidateID: row.id)
             statusLine = String(localized: "Offer submitted. Refreshing admission status…", comment: "BYOM offer submitted status")
             operation = .idle
@@ -2595,6 +2675,115 @@ final class ModelManagementStore: ObservableObject {
         } catch {
             throw ModelManagementError.invalidCatalog
         }
+    }
+
+    /// #1816: withdraw a coordinator-backed BYOM offer
+    /// (`models admission withdraw --yes`), then refresh.
+    func withdraw(_ row: MalibuModelRow) async {
+        guard row.canWithdraw, canPerformBYOMAction else { return }
+        operation = .loadingList
+        statusLine = String(localized: "Withdrawing the coordinator offer…", comment: "BYOM withdraw status")
+        do {
+            let result = try await runBYOMCommand([
+                "models", "admission", "withdraw", row.id, "--yes", "--json", "--config", paths.configFile.path,
+            ] + byomAdapterSettings.cliArguments)
+            let withdrawal = try Self.decodeStrict(MalibuBYOMWithdrawDocument.self, from: result.stdout)
+            try withdrawal.validated(expectedCandidateID: row.id)
+            poolBindings[row.id] = nil
+            statusLine = String(localized: "Offer withdrawn. This model no longer earns anywhere until it is offered again.", comment: "BYOM withdraw done")
+            operation = .idle
+            await refresh(currentModelID: currentModelID, peer: peerEvidence)
+        } catch {
+            recordFailure(operation: "withdraw", from: currentModelID, to: row.id, reason: safeOperationError(error))
+        }
+    }
+
+    /// #1816: propose a locally served, uncatalogued model to a Trusted Pool
+    /// (`models propose --pool <id> --yes`): the CLI hashes the served
+    /// artifact, submits the normal offer, and prints the bundle the pool
+    /// creator signs into the pool manifest.
+    func propose(_ row: MalibuModelRow, poolID rawPoolID: String) async {
+        let poolID = rawPoolID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard row.canProposeToPool, canPerformBYOMAction else { return }
+        guard poolID.range(of: MalibuBYOMPoolBinding.poolIDPattern, options: .regularExpression) != nil else {
+            statusLine = String(localized: "Enter the 22-character Trusted Pool id from the pool creator.", comment: "BYOM propose invalid pool id")
+            return
+        }
+        operation = .loadingList
+        poolProposal = nil
+        statusLine = String(localized: "Hashing the served model and submitting the pool offer…", comment: "BYOM propose status")
+        do {
+            let result = try await cli.run(
+                arguments: [
+                    "models", "propose", row.id, "--pool", poolID, "--yes", "--json", "--config", paths.configFile.path,
+                ] + byomAdapterSettings.proposeArguments,
+                peer: peerEvidence,
+                priority: .interactive,
+                onLine: { _ in }
+            )
+            guard result.exitCode == 0 else {
+                let reason = Self.safeCLIReason(result.stderr)
+                    ?? String(localized: "The provider CLI could not build a pool proposal for this model.", comment: "BYOM propose failed")
+                recordFailure(operation: "propose", from: currentModelID, to: row.id, reason: reason)
+                return
+            }
+            let bundle = try Self.decodeStrict(MalibuPoolModelProposalDocument.self, from: result.stdout)
+            try bundle.validated(expectedCandidateID: row.id, expectedPoolID: poolID)
+            poolProposal = MalibuPoolProposalResult(
+                candidateID: row.id,
+                poolID: poolID,
+                poolModelID: bundle.modelEntry.poolModelID,
+                bundleJSON: result.stdout
+            )
+            statusLine = String(localized: "Proposal ready for pool \(poolID). Send it to the pool creator; the model earns only after the creator signs it into the pool, and only on that pool.", comment: "BYOM propose done")
+            operation = .idle
+            await refresh(currentModelID: currentModelID, peer: peerEvidence)
+        } catch {
+            recordFailure(operation: "propose", from: currentModelID, to: row.id, reason: safeOperationError(error))
+        }
+    }
+
+    func dismissPoolProposal() {
+        poolProposal = nil
+    }
+
+    /// BYOM admission actions need a fresh provider observation and no other
+    /// model action in flight, but not warm swap.
+    var canPerformBYOMAction: Bool {
+        peerObservationFresh && peerEvidence.isFresh() && operation == .idle
+    }
+
+    /// Reads the coordinator's pool binding for rows that disclose pool
+    /// earning, so Malibu can name the pool. Read-only; a failed read just
+    /// leaves the pool unnamed.
+    private func refreshPoolBindings() async {
+        var bindings: [String: MalibuBYOMPoolBinding] = [:]
+        for row in rows where row.earningPathClass == "pool_attested_earning" || row.poolScopeCandidate {
+            guard let result = try? await cli.run(
+                arguments: [
+                    "models", "admission", "status", row.id, "--json", "--config", paths.configFile.path,
+                ] + byomAdapterSettings.cliArguments,
+                peer: peerEvidence,
+                priority: .interactive,
+                onLine: { _ in }
+            ), result.exitCode == 0,
+                let status = try? Self.decodeStrict(MalibuBYOMAdmissionStatusDocument.self, from: result.stdout),
+                (try? status.validated(expectedCandidateID: row.id)) != nil,
+                let binding = status.validPoolBinding else { continue }
+            bindings[row.id] = binding
+        }
+        poolBindings = bindings
+    }
+
+    /// The first stderr line of a failed BYOM CLI command, bounded and free of
+    /// control characters, or nil.
+    nonisolated static func safeCLIReason(_ stderr: String) -> String? {
+        guard let line = stderr.split(whereSeparator: \.isNewline).first(where: { !$0.allSatisfy(\.isWhitespace) }) else {
+            return nil
+        }
+        let cleaned = String(line.unicodeScalars.filter { $0.value >= 0x20 && $0.value != 0x7f && !(0x80...0x9f).contains($0.value) })
+            .trimmingCharacters(in: .whitespaces)
+        return cleaned.isEmpty ? nil : String(cleaned.prefix(240))
     }
 
     func revert() async {
@@ -3183,6 +3372,7 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
     let estimatedGB: Double?
     let economicsState: String?
     let admissionState: String?
+    let admissionSource: String?
     let earningPathClass: String?
     let guidanceNextAction: String?
     let admissionStateLabel: String?
@@ -3206,6 +3396,7 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         estimatedGB = row.estimatedGB
         economicsState = nil
         admissionState = nil
+        admissionSource = nil
         earningPathClass = nil
         guidanceNextAction = nil
         admissionStateLabel = nil
@@ -3258,6 +3449,7 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         estimatedGB = row.estimatedGB
         economicsState = row.economicsState
         admissionState = row.admission.state
+        admissionSource = row.admission.source
         earningPathClass = row.providerGuidance.earningPathClass
         guidanceNextAction = row.providerGuidance.nextAction
         admissionStateLabel = Self.admissionStateLabel(
@@ -3345,6 +3537,7 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         estimatedGB = row.estimatedGB
         economicsState = "blocked"
         admissionState = row.admission.state
+        admissionSource = nil
         earningPathClass = nil
         guidanceNextAction = nil
         admissionStateLabel = nil
@@ -3385,9 +3578,45 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
             return String(localized: "Can't earn in this release", comment: "BYOM no earning path verdict")
         case "local_inventory_only":
             return String(localized: "Local only — not offered to the network", comment: "BYOM local inventory verdict")
+        case "pool_attested_earning":
+            return String(localized: "Earns in its Trusted Pool — pool-attested, not network-verified", comment: "BYOM pool earning verdict")
         default:
             return nil
         }
+    }
+
+    /// #1816: a coordinator-backed offer the provider can withdraw.
+    var canWithdraw: Bool {
+        guard admissionSource == "coordinator", let admissionState else { return false }
+        return [
+            "offer_submitted", "sandbox_probe_only", "network_visible_unpriced",
+            "network_admitted_unsettled", "catalog_priced", "settlement_capable",
+        ].contains(admissionState)
+    }
+
+    /// #1816: a locally discovered candidate with no global earning path,
+    /// which a Trusted Pool creator can sign into a pool. The provider CLI
+    /// refuses runtimes no pool entry can name.
+    var canProposeToPool: Bool {
+        guard admissionSource != nil, catalogVerifiedModelKey == nil else { return false }
+        return earningPathClass != "settlement_capable" && earningPathClass != "pool_attested_earning"
+    }
+
+    /// A coordinator catalog_priced row with no catalog identity that does
+    /// not claim pool earning right now: its pool binding is read back so
+    /// Malibu can say which pool it belongs to and that it is not earning.
+    var poolScopeCandidate: Bool {
+        admissionSource == "coordinator"
+            && admissionState == "catalog_priced"
+            && catalogVerifiedModelKey == nil
+            && earningPathClass == "no_earning_path_in_v0_1"
+    }
+
+    /// SPEC-043-R014 wording for a coordinator pool binding.
+    func poolBindingLine(_ binding: MalibuBYOMPoolBinding) -> String {
+        earningPathClass == "pool_attested_earning"
+            ? String(localized: "Earns in pool \(binding.poolID) as \(binding.poolModelID), pool-attested, not network-verified.", comment: "BYOM pool binding earning line")
+            : String(localized: "Bound to pool \(binding.poolID) as \(binding.poolModelID), but not earning right now; pool-attested, not network-verified.", comment: "BYOM pool binding idle line")
     }
 
     private var nextActionLabel: String? {
@@ -3413,6 +3642,8 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
             return String(localized: "This candidate can't earn in this release. It's shown so its state is honest, not hidden.", comment: "BYOM no earning path disclosure")
         case "local_inventory_only":
             return String(localized: "Local only — not offered to the network, so it isn't earning.", comment: "BYOM local inventory disclosure")
+        case "pool_attested_earning":
+            return String(localized: "Earns only on its Trusted Pool's routes. It is not a network catalog model and never earns globally.", comment: "BYOM pool earning disclosure")
         default:
             return nil
         }
@@ -3561,6 +3792,9 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
     }
 
     private static func rowReason(_ row: MalibuModelCatalogEconomicsDocument.Row) -> String? {
+        if row.providerGuidance.earningPathClass == "pool_attested_earning" {
+            return String(localized: "Pool-priced by its Trusted Pool creator; no network catalog rate applies.", comment: "Catalog row pool binding")
+        }
         if row.warningCodes.contains("feed_stale") {
             return String(localized: "Network catalog rate unavailable because the signed rate feed is stale.", comment: "Catalog row stale")
         }
@@ -3586,7 +3820,7 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         guard let reason else { return nil }
         switch reason {
         case "local_inventory_only":
-            return String(localized: "Local BYOM inventory remains CLI-only in this release.", comment: "Catalog row local inventory")
+            return String(localized: "Local only. Offer it to the network or propose it to a Trusted Pool.", comment: "Catalog row local inventory")
         case "model_not_local":
             return String(localized: "Model needs preparation before local use.", comment: "Catalog row preparation")
         case "model_not_supported":

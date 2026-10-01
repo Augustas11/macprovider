@@ -338,6 +338,14 @@ public struct AppConfig: Equatable, Sendable {
     // wins for Ollama). Loopback-validated when the runtime is constructed.
     public var loopbackOrigin: String? = nil
 
+    // #1816 SPEC-042-R015: the `pool/<pool_id>/<slug>` id a Trusted Pool
+    // creator signed for the model this provider serves, accepted as a
+    // request alias on that pool's routes. yaml key `pool_model_id`, env
+    // `MACPROVIDER_POOL_MODEL_ID`. Never a catalog identity: it is not
+    // advertised as the hello model id, and the coordinator binds the pool
+    // entry only by the served artifact hash.
+    public var poolModelID: String? = nil
+
     public static let defaultConfigPath = "~/.config/macprovider/config.yaml"
 
     public static func defaults(configPath: String = defaultConfigPath) -> AppConfig {
@@ -703,6 +711,7 @@ public enum ConfigLoader {
         try assign(&config.modelCatalogHash, from: dict, key: "model_catalog_hash", expected: "string")
         try assign(&config.modelArtifactRoot, from: dict, key: "model_artifact_root", expected: "string")
         try assign(&config.loopbackOrigin, from: dict, key: "loopback_origin", expected: "string")
+        try assign(&config.poolModelID, from: dict, key: "pool_model_id", expected: "string")
         try assign(&config.coordinatorURL, from: dict, key: "coordinator_url", expected: "string")
         try assign(&config.providerID, from: dict, key: "provider_id", expected: "string")
         try assign(&config.endpointURL, from: dict, key: "endpoint_url", expected: "string")
@@ -936,6 +945,7 @@ public enum ConfigLoader {
         try assign(&config.autoUpdateAcceptProvisional, from: environment, env: "MACPROVIDER_AUTO_UPDATE_ACCEPT_PROVISIONAL", expected: "boolean")
         try assign(&config.modelArtifactRoot, from: environment, env: "MACPROVIDER_MODEL_ARTIFACT_ROOT", expected: "string")
         try assign(&config.loopbackOrigin, from: environment, env: "MACPROVIDER_LOOPBACK_ORIGIN", expected: "string")
+        try assign(&config.poolModelID, from: environment, env: "MACPROVIDER_POOL_MODEL_ID", expected: "string")
         try assign(&config.logLevel, from: environment, env: "MACPROVIDER_LOG_LEVEL", expected: "valid log level")
         try assign(&config.logFormat, from: environment, env: "MACPROVIDER_LOG_FORMAT", expected: "json or text")
         try assign(&config.logFile, from: environment, env: "MACPROVIDER_LOG_FILE", expected: "string")
@@ -1026,6 +1036,11 @@ public enum ConfigLoader {
             let previousModel = config.model
             let previousArtifact = config.modelArtifactPath
             config.model = model
+            // #1816: a pool_model_id names the configured model's pool entry;
+            // a different CLI model must not inherit it.
+            if let previousModel, previousModel != model {
+                config.poolModelID = nil
+            }
             if let previousArtifact {
                 let modelPath = Self.standardizedPathIfFilesystem(model)
                 let artifactPath = Self.standardizedPathIfFilesystem(previousArtifact)
