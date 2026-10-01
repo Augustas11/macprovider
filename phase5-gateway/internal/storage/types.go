@@ -132,6 +132,79 @@ type UsageEvent struct {
 	RelayBlind       *RelayBlindMetadata
 }
 
+type DemandEvent struct {
+	RequestID              string
+	BuyerHash              string
+	TrafficClass           string
+	RequestedModel         string
+	RoutedModel            string
+	ProviderID             string
+	PoolID                 string
+	EngineClass            string
+	Stream                 bool
+	StructuredOutput       bool
+	ToolsRequested         bool
+	MaxOutputTokens        int64
+	RequestedPromptTokens  int64
+	RequestedOutputTokens  int64
+	RequestedTotalTokens   int64
+	PromptTokens           int64
+	CachedPromptTokens     int64
+	CompletionTokens       int64
+	ReasoningTokens        int64
+	TotalTokens            int64
+	TerminalResult         string
+	FailureReason          string
+	EligibleProviderExists bool
+	Substituted            bool
+	QueueLatencyMs         int64
+	TimeToFirstTokenMs     int64
+	ProviderPrefillMs      int64
+	ProviderDecodeMs       int64
+	OutputTPSMilliTokens   int64
+	TotalLatencyMs         int64
+	CreatedAt              time.Time
+}
+
+type DemandSummaryQuery struct {
+	Since        time.Time
+	Until        time.Time
+	Model        string
+	TrafficClass string
+}
+
+type DemandSummaryRow struct {
+	RequestedModel              string
+	TrafficClass                string
+	RequestedRequests           int64
+	ServedRequests              int64
+	UnmetRequests               int64
+	CapacityConstrainedRequests int64
+	SubstitutedRequests         int64
+	RequestedTokens             int64
+	ServedTokens                int64
+	ReasoningTokens             int64
+	AvgQueueLatencyMs           int64
+	AvgTimeToFirstTokenMs       int64
+	AvgTotalLatencyMs           int64
+	AvgOutputTPSMilliTokens     int64
+	DistinctBuyers              int64
+	RepeatBuyers                int64
+}
+
+type DemandRouteSummaryRow struct {
+	RequestedModel     string
+	RoutedModel        string
+	TrafficClass       string
+	TerminalResult     string
+	FailureReason      string
+	Requests           int64
+	PromptTokens       int64
+	CachedPromptTokens int64
+	CompletionTokens   int64
+	ReasoningTokens    int64
+}
+
 type ReservationRequest struct {
 	AccountID       string
 	RequestID       string

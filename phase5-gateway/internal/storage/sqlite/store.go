@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/augstar/macprovider-gateway/internal/storage"
@@ -17,19 +18,27 @@ import (
 )
 
 type Store struct {
-	db *sql.DB
+	db            *sql.DB
+	demandPruneMu sync.Mutex
 }
 
+const (
+	demandPruneBatchLimit = 1000
+	demandUnknownModelID  = "unknown_model_id"
+	demandInvalidModelID  = "invalid_model_id"
+)
+
 var (
-	_ storage.AuthStore          = (*Store)(nil)
-	_ storage.AccountStore       = (*Store)(nil)
-	_ storage.KeyStore           = (*Store)(nil)
-	_ storage.UsageStore         = (*Store)(nil)
-	_ storage.WalletSessionStore = (*Store)(nil)
-	_ storage.RelayBlindStore    = (*Store)(nil)
-	_ storage.FeedbackStore      = (*Store)(nil)
-	_ storage.AuditStore         = (*Store)(nil)
-	_ storage.CapacityStore      = (*Store)(nil)
+	_ storage.AuthStore            = (*Store)(nil)
+	_ storage.AccountStore         = (*Store)(nil)
+	_ storage.KeyStore             = (*Store)(nil)
+	_ storage.UsageStore           = (*Store)(nil)
+	_ storage.WalletSessionStore   = (*Store)(nil)
+	_ storage.RelayBlindStore      = (*Store)(nil)
+	_ storage.FeedbackStore        = (*Store)(nil)
+	_ storage.AuditStore           = (*Store)(nil)
+	_ storage.CapacityStore        = (*Store)(nil)
+	_ storage.DemandTelemetryStore = (*Store)(nil)
 )
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -42,7 +51,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	if _, err := db.ExecContext(ctx, "PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;"); err != nil {
+	if _, err := db.ExecContext(ctx, "PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA secure_delete = ON;"); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -115,6 +124,10 @@ func (s *Store) Ping(ctx context.Context) error {
 //	     rows from coordinator finality for SPEC-042 Trusted Pool attempts.
 //	v15 — SPEC-022 long-held settlement backlog state: due/backoff,
 //	     first-not-found, and operator-review metadata for attempts.
+//	v16 — issue #1807: append-only demand telemetry for attempted, served,
+//	     unmet, capacity-constrained, and substituted model demand.
+//	v17 — issue #1807: demand rows persist reasoning-token and phase-timing
+//	     fields needed for allocation reporting.
 //
 // At Open time the store reads the current applied version; if it
 // exceeds this constant the binary is older than the DB and refuses
@@ -125,7 +138,7 @@ func (s *Store) Ping(ctx context.Context) error {
 // Operators rolling back the gateway binary on a DB at a higher
 // version must restore /var/lib/macprovider/gateway.db from the
 // pre-deploy snapshot (deploy-pearl-vps.sh step 5b writes one).
-const maxKnownSchemaVersion = 15
+const maxKnownSchemaVersion = 17
 
 func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.checkSchemaVersionGate(ctx); err != nil {
@@ -155,6 +168,15 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, demoUsageEventsAuxiliaryDDL); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, demandEventsDDL); err != nil {
+		return err
+	}
+	if err := s.ensureDemandEventsObservationColumns(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureDemandEventsPrivacyBuckets(ctx); err != nil {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, walletSessionDDL); err != nil {
@@ -264,7 +286,128 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(15, ?)", now); err != nil {
 		return err
 	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(16, ?)", now); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(17, ?)", now); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (s *Store) ensureDemandEventsObservationColumns(ctx context.Context) error {
+	columns := []struct {
+		name string
+		ddl  string
+	}{
+		{"reasoning_tokens", "INTEGER NOT NULL DEFAULT 0 CHECK (reasoning_tokens >= 0)"},
+		{"requested_prompt_tokens", "INTEGER NOT NULL DEFAULT 0 CHECK (requested_prompt_tokens >= 0)"},
+		{"requested_output_tokens", "INTEGER NOT NULL DEFAULT 0 CHECK (requested_output_tokens >= 0)"},
+		{"requested_total_tokens", "INTEGER NOT NULL DEFAULT 0 CHECK (requested_total_tokens >= 0)"},
+		{"queue_latency_ms", "INTEGER NOT NULL DEFAULT 0 CHECK (queue_latency_ms >= 0)"},
+		{"time_to_first_token_ms", "INTEGER NOT NULL DEFAULT 0 CHECK (time_to_first_token_ms >= 0)"},
+		{"provider_prefill_ms", "INTEGER NOT NULL DEFAULT 0 CHECK (provider_prefill_ms >= 0)"},
+		{"provider_decode_ms", "INTEGER NOT NULL DEFAULT 0 CHECK (provider_decode_ms >= 0)"},
+		{"output_tps_millitokens", "INTEGER NOT NULL DEFAULT 0 CHECK (output_tps_millitokens >= 0)"},
+	}
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(demand_events)`)
+	if err != nil {
+		return err
+	}
+	existing := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		existing[name] = true
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, column := range columns {
+		if existing[column.name] {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, "ALTER TABLE demand_events ADD COLUMN "+column.name+" "+column.ddl); err != nil {
+			return fmt.Errorf("add demand_events.%s: %w", column.name, err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) ensureDemandEventsPrivacyBuckets(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT event_id, requested_model, routed_model, provider_id, failure_reason FROM demand_events`)
+	if err != nil {
+		return err
+	}
+	type scrub struct {
+		eventID        int64
+		requestedModel string
+		routedModel    string
+		providerID     string
+		failureReason  string
+	}
+	var updates []scrub
+	for rows.Next() {
+		var eventID int64
+		var requestedModel, routedModel, providerID, failureReason string
+		if err := rows.Scan(&eventID, &requestedModel, &routedModel, &providerID, &failureReason); err != nil {
+			rows.Close()
+			return err
+		}
+		cleanRequested := sanitizeStoredDemandModelID(requestedModel, true)
+		cleanRouted := sanitizeStoredDemandModelID(routedModel, false)
+		cleanProvider := strings.TrimSpace(providerID)
+		if cleanProvider != "" && !validDemandProviderID(cleanProvider) {
+			cleanProvider = ""
+		}
+		cleanFailure := strings.TrimSpace(failureReason)
+		if !validDemandFailureReason(cleanFailure) {
+			cleanFailure = "upstream_provider_failure"
+		}
+		if cleanRequested != requestedModel || cleanRouted != routedModel || cleanProvider != providerID || cleanFailure != failureReason {
+			updates = append(updates, scrub{
+				eventID:        eventID,
+				requestedModel: cleanRequested,
+				routedModel:    cleanRouted,
+				providerID:     cleanProvider,
+				failureReason:  cleanFailure,
+			})
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if len(updates) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DROP TRIGGER IF EXISTS demand_events_no_update`); err != nil {
+		return fmt.Errorf("drop demand_events update trigger for privacy scrub: %w", err)
+	}
+	for _, update := range updates {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE demand_events
+			SET requested_model = ?, routed_model = ?, provider_id = ?, failure_reason = ?
+			WHERE event_id = ?`,
+			update.requestedModel, update.routedModel, update.providerID, update.failureReason, update.eventID); err != nil {
+			return fmt.Errorf("scrub legacy demand_events row %d: %w", update.eventID, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, demandEventsUpdateTriggerDDL); err != nil {
+		return fmt.Errorf("recreate demand_events update trigger after privacy scrub: %w", err)
+	}
+	return tx.Commit()
 }
 
 // ensureUsageEventsPoolOperatorAttestedSource rebuilds a v13 usage_events
@@ -3403,6 +3546,376 @@ func (s *Store) EnsureDemoUsageEvent(ctx context.Context, event storage.DemoUsag
 		VALUES(?, ?, ?, ?, ?, ?)`,
 		event.RequestID, event.ClientIP, event.DemoTokenHash, event.WindowDate, event.TotalTokens, encodeTime(event.CreatedAt))
 	return err
+}
+
+func (s *Store) InsertDemandEvent(ctx context.Context, event storage.DemandEvent) error {
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	}
+	if event.TotalTokens == 0 {
+		event.TotalTokens = event.PromptTokens + event.CompletionTokens
+	}
+	if event.RequestedTotalTokens == 0 {
+		event.RequestedTotalTokens = event.RequestedPromptTokens + event.RequestedOutputTokens
+	}
+	if event.RequestID == "" {
+		return fmt.Errorf("demand request_id is required")
+	}
+	if event.RequestedModel == "" {
+		return fmt.Errorf("demand requested_model is required")
+	}
+	if !validDemandModelID(event.RequestedModel) || (event.RoutedModel != "" && !validDemandModelID(event.RoutedModel)) {
+		return fmt.Errorf("demand model id is not recognized")
+	}
+	if event.ProviderID != "" && !validDemandProviderID(event.ProviderID) {
+		return fmt.Errorf("demand provider_id is not recognized")
+	}
+	if event.RequestedPromptTokens < 0 || event.RequestedOutputTokens < 0 || event.RequestedTotalTokens < 0 ||
+		event.PromptTokens < 0 || event.CachedPromptTokens < 0 || event.CompletionTokens < 0 || event.ReasoningTokens < 0 || event.TotalTokens < 0 {
+		return fmt.Errorf("demand token counts must be non-negative")
+	}
+	if event.RequestedPromptTokens > math.MaxInt64-event.RequestedOutputTokens {
+		return fmt.Errorf("demand requested token total overflows int64")
+	}
+	if event.RequestedTotalTokens != event.RequestedPromptTokens+event.RequestedOutputTokens {
+		return fmt.Errorf("demand requested_total_tokens does not match requested prompt plus output tokens")
+	}
+	if event.PromptTokens > math.MaxInt64-event.CompletionTokens {
+		return fmt.Errorf("demand token total overflows int64")
+	}
+	if event.TotalTokens != event.PromptTokens+event.CompletionTokens {
+		return fmt.Errorf("demand total_tokens does not match prompt_tokens plus completion_tokens")
+	}
+	if event.CachedPromptTokens > event.PromptTokens {
+		return fmt.Errorf("demand cached_prompt_tokens exceeds prompt_tokens")
+	}
+	if event.ReasoningTokens > event.CompletionTokens {
+		return fmt.Errorf("demand reasoning_tokens exceeds completion_tokens")
+	}
+	if event.MaxOutputTokens < 0 || event.QueueLatencyMs < 0 || event.TimeToFirstTokenMs < 0 ||
+		event.ProviderPrefillMs < 0 || event.ProviderDecodeMs < 0 ||
+		event.OutputTPSMilliTokens < 0 || event.TotalLatencyMs < 0 {
+		return fmt.Errorf("demand numeric fields must be non-negative")
+	}
+	if event.TrafficClass == "" {
+		event.TrafficClass = "unknown"
+	}
+	if event.TerminalResult == "" {
+		event.TerminalResult = "failure"
+	}
+	if !validDemandTerminalResult(event.TerminalResult) {
+		return fmt.Errorf("demand terminal_result is not recognized")
+	}
+	if !validDemandFailureReason(event.FailureReason) {
+		return fmt.Errorf("demand failure_reason is not recognized")
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO demand_events(
+			request_id, buyer_hash, traffic_class, requested_model, routed_model, provider_id,
+			pool_id, engine_class, stream, structured_output, tools_requested, max_output_tokens,
+			requested_prompt_tokens, requested_output_tokens, requested_total_tokens,
+			prompt_tokens, cached_prompt_tokens, completion_tokens, reasoning_tokens, total_tokens,
+			terminal_result, failure_reason, eligible_provider_exists, substituted,
+			queue_latency_ms, time_to_first_token_ms, provider_prefill_ms, provider_decode_ms,
+			output_tps_millitokens, total_latency_ms, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		event.RequestID, event.BuyerHash, event.TrafficClass, event.RequestedModel, event.RoutedModel, event.ProviderID,
+		event.PoolID, event.EngineClass, boolInt(event.Stream), boolInt(event.StructuredOutput), boolInt(event.ToolsRequested), event.MaxOutputTokens,
+		event.RequestedPromptTokens, event.RequestedOutputTokens, event.RequestedTotalTokens,
+		event.PromptTokens, event.CachedPromptTokens, event.CompletionTokens, event.ReasoningTokens, event.TotalTokens,
+		event.TerminalResult, event.FailureReason, boolInt(event.EligibleProviderExists), boolInt(event.Substituted),
+		event.QueueLatencyMs, event.TimeToFirstTokenMs, event.ProviderPrefillMs, event.ProviderDecodeMs,
+		event.OutputTPSMilliTokens, event.TotalLatencyMs, encodeTime(event.CreatedAt))
+	return err
+}
+
+func (s *Store) PruneDemandEvents(ctx context.Context, before time.Time) (int64, error) {
+	if before.IsZero() {
+		return 0, fmt.Errorf("demand prune cutoff is required")
+	}
+	s.demandPruneMu.Lock()
+	defer s.demandPruneMu.Unlock()
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM demand_events
+		WHERE event_id IN (
+			SELECT event_id
+			FROM demand_events
+			WHERE created_at < ?
+			ORDER BY event_id
+			LIMIT ?
+		)`, encodeTime(before.UTC()), demandPruneBatchLimit)
+	if err != nil {
+		return 0, err
+	}
+	deleted, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := s.checkpointDemandPruneWALPassive(ctx); err != nil {
+		return deleted, fmt.Errorf("checkpoint demand_events prune: %w", err)
+	}
+	return deleted, nil
+}
+
+func (s *Store) checkpointDemandPruneWALPassive(ctx context.Context) error {
+	var busy, logFrames, checkpointedFrames int64
+	if err := s.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(PASSIVE)`).Scan(&busy, &logFrames, &checkpointedFrames); err != nil {
+		return err
+	}
+	_ = busy
+	_ = logFrames
+	_ = checkpointedFrames
+	return nil
+}
+
+func (s *Store) DemandSummary(ctx context.Context, query storage.DemandSummaryQuery) ([]storage.DemandSummaryRow, error) {
+	clauses := []string{"1=1"}
+	dClauses := []string{"1=1"}
+	args := []any{}
+	if !query.Since.IsZero() {
+		clauses = append(clauses, "created_at >= ?")
+		dClauses = append(dClauses, "d.created_at >= ?")
+		args = append(args, encodeTime(query.Since.UTC()))
+	}
+	if !query.Until.IsZero() {
+		clauses = append(clauses, "created_at < ?")
+		dClauses = append(dClauses, "d.created_at < ?")
+		args = append(args, encodeTime(query.Until.UTC()))
+	}
+	if query.Model != "" {
+		clauses = append(clauses, "requested_model = ?")
+		dClauses = append(dClauses, "d.requested_model = ?")
+		args = append(args, query.Model)
+	}
+	if query.TrafficClass != "" {
+		clauses = append(clauses, "traffic_class = ?")
+		dClauses = append(dClauses, "d.traffic_class = ?")
+		args = append(args, query.TrafficClass)
+	}
+	sqlText := `
+		WITH buyer_counts AS (
+			SELECT requested_model, traffic_class, buyer_hash, COUNT(*) AS n
+			FROM demand_events
+			WHERE ` + strings.Join(clauses, " AND ") + ` AND buyer_hash <> ''
+			GROUP BY requested_model, traffic_class, buyer_hash
+		),
+		repeat_counts AS (
+			SELECT requested_model, traffic_class,
+				COUNT(*) AS distinct_buyers,
+				SUM(CASE WHEN n > 1 THEN 1 ELSE 0 END) AS repeat_buyers
+			FROM buyer_counts
+			GROUP BY requested_model, traffic_class
+		)
+		SELECT d.requested_model, d.traffic_class,
+			COUNT(*) AS requested_requests,
+			SUM(CASE WHEN d.terminal_result = 'success' THEN 1 ELSE 0 END) AS served_requests,
+			SUM(CASE WHEN d.failure_reason = 'no_provider' THEN 1 ELSE 0 END) AS unmet_requests,
+			SUM(CASE WHEN d.failure_reason = 'all_providers_busy' THEN 1 ELSE 0 END) AS capacity_constrained_requests,
+			SUM(CASE WHEN d.substituted = 1 THEN 1 ELSE 0 END) AS substituted_requests,
+			SUM(d.requested_total_tokens) AS requested_tokens,
+			SUM(CASE WHEN d.terminal_result = 'success' THEN d.prompt_tokens + d.completion_tokens ELSE 0 END) AS served_tokens,
+			SUM(d.reasoning_tokens) AS reasoning_tokens,
+			COALESCE(CAST(AVG(NULLIF(d.queue_latency_ms, 0)) AS INTEGER), 0) AS avg_queue_latency_ms,
+			COALESCE(CAST(AVG(NULLIF(d.time_to_first_token_ms, 0)) AS INTEGER), 0) AS avg_time_to_first_token_ms,
+			COALESCE(CAST(AVG(NULLIF(d.total_latency_ms, 0)) AS INTEGER), 0) AS avg_total_latency_ms,
+			COALESCE(CAST(AVG(NULLIF(d.output_tps_millitokens, 0)) AS INTEGER), 0) AS avg_output_tps_millitokens,
+			COALESCE(r.distinct_buyers, 0) AS distinct_buyers,
+			COALESCE(r.repeat_buyers, 0) AS repeat_buyers
+		FROM demand_events d
+		LEFT JOIN repeat_counts r
+			ON r.requested_model = d.requested_model
+			AND r.traffic_class = d.traffic_class
+		WHERE ` + strings.Join(dClauses, " AND ") + `
+		GROUP BY d.requested_model, d.traffic_class
+		ORDER BY requested_requests DESC, d.requested_model, d.traffic_class`
+	allArgs := append(append([]any{}, args...), args...)
+	rows, err := s.db.QueryContext(ctx, sqlText, allArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []storage.DemandSummaryRow
+	for rows.Next() {
+		var row storage.DemandSummaryRow
+		if err := rows.Scan(&row.RequestedModel, &row.TrafficClass,
+			&row.RequestedRequests, &row.ServedRequests, &row.UnmetRequests, &row.CapacityConstrainedRequests,
+			&row.SubstitutedRequests, &row.RequestedTokens, &row.ServedTokens, &row.ReasoningTokens,
+			&row.AvgQueueLatencyMs, &row.AvgTimeToFirstTokenMs, &row.AvgTotalLatencyMs, &row.AvgOutputTPSMilliTokens, &row.DistinctBuyers,
+			&row.RepeatBuyers); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DemandRouteSummary(ctx context.Context, query storage.DemandSummaryQuery) ([]storage.DemandRouteSummaryRow, error) {
+	clauses := []string{"1=1"}
+	args := []any{}
+	if !query.Since.IsZero() {
+		clauses = append(clauses, "created_at >= ?")
+		args = append(args, encodeTime(query.Since.UTC()))
+	}
+	if !query.Until.IsZero() {
+		clauses = append(clauses, "created_at < ?")
+		args = append(args, encodeTime(query.Until.UTC()))
+	}
+	if query.Model != "" {
+		clauses = append(clauses, "requested_model = ?")
+		args = append(args, query.Model)
+	}
+	if query.TrafficClass != "" {
+		clauses = append(clauses, "traffic_class = ?")
+		args = append(args, query.TrafficClass)
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT requested_model, routed_model, traffic_class, terminal_result, failure_reason,
+			COUNT(*) AS requests,
+			SUM(prompt_tokens) AS prompt_tokens,
+			SUM(cached_prompt_tokens) AS cached_prompt_tokens,
+			SUM(completion_tokens) AS completion_tokens,
+			SUM(reasoning_tokens) AS reasoning_tokens
+		FROM demand_events
+		WHERE `+strings.Join(clauses, " AND ")+`
+		GROUP BY requested_model, routed_model, traffic_class, terminal_result, failure_reason
+		ORDER BY requests DESC, requested_model, routed_model, traffic_class, terminal_result, failure_reason`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []storage.DemandRouteSummaryRow
+	for rows.Next() {
+		var row storage.DemandRouteSummaryRow
+		if err := rows.Scan(&row.RequestedModel, &row.RoutedModel, &row.TrafficClass, &row.TerminalResult, &row.FailureReason,
+			&row.Requests, &row.PromptTokens, &row.CachedPromptTokens, &row.CompletionTokens, &row.ReasoningTokens); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func validDemandTerminalResult(result string) bool {
+	switch result {
+	case "success", "failure", "cancellation", "timeout":
+		return true
+	default:
+		return false
+	}
+}
+
+func validDemandModelID(model string) bool {
+	model = strings.TrimSpace(model)
+	switch model {
+	case demandUnknownModelID, demandInvalidModelID,
+		"llama", "qwen", "test-model", "model-a", "model-b", "model-c",
+		"openai/gpt-oss-20b",
+		"google/gemma-4-26b-a4b-it", "google-gemma-4-26b-a4b-it",
+		"nvidia/nemotron-3-nano-30b-a3b",
+		"qwen/qwen2.5-coder-32b-instruct", "qwen2.5-coder-32b-instruct",
+		"meta-llama/llama-3.2-3b-instruct",
+		"meta-llama/llama-3.1-8b-instruct",
+		"qwen/qwen3-8b", "qwen3-8b",
+		"openai/gpt-oss-120b",
+		"qwen/qwen3-32b", "qwen3-32b",
+		"qwen/qwen3-coder-30b-a3b-instruct", "qwen3-coder-30b-a3b-instruct",
+		"qwen/qwen3.8-27b",
+		"qwen/qwen3.5-27b",
+		"qwen/qwen3.6-27b",
+		"qwen/qwen3.6-35b-a3b",
+		"qwen/qwen3.5-35b-a3b",
+		"qwen/qwen3-30b-a3b-instruct-2507",
+		"z-ai/glm-4.5-air",
+		"mlx-community/gpt-oss-20b-MXFP4-Q4",
+		"mlx-community/gpt-oss-20b-MXFP4-Q8",
+		"mlx-community/gpt-oss-120b-4bit",
+		"mlx-community/gemma-4-26b-a4b-it-4bit",
+		"mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit",
+		"mlx-community/Qwen2.5-7B-Instruct-4bit",
+		"mlx-community/Qwen2.5-Coder-32B-Instruct-4bit",
+		"mlx-community/Llama-3.2-3B-Instruct-4bit",
+		"mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+		"mlx-community/Qwen3-8B-4bit",
+		"mlx-community/Qwen3-32B-4bit",
+		"mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+		"mlx-community/Qwen3.8-27B-4bit",
+		"mlx-community/Qwen3.5-27B-4bit",
+		"mlx-community/Qwen3.5-9B-4bit",
+		"mlx-community/Qwen3.6-27B-4bit",
+		"mlx-community/Qwen3.6-35B-A3B-4bit",
+		"mlx-community/Qwen3.5-35B-A3B-4bit",
+		"mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
+		"mlx-community/Ministral-3-3B-Instruct-2512-4bit",
+		"Ministral-3-3B-Instruct-2512-4bit",
+		"Qwen3.5-9B-4bit",
+		"mlx-community/GLM-4.5-Air-4bit":
+		return true
+	default:
+		return false
+	}
+}
+
+func sanitizeStoredDemandModelID(model string, required bool) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		if required {
+			return demandInvalidModelID
+		}
+		return ""
+	}
+	if !demandModelIDLooksPublic(model) {
+		return demandInvalidModelID
+	}
+	if !validDemandModelID(model) {
+		return demandUnknownModelID
+	}
+	return model
+}
+
+func demandModelIDLooksPublic(model string) bool {
+	if len(model) > 128 {
+		return false
+	}
+	for _, r := range model {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '.' || r == '-' || r == '_' || r == '/':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func validDemandProviderID(providerID string) bool {
+	providerID = strings.TrimSpace(providerID)
+	if providerID == "" || len(providerID) > 64 {
+		return false
+	}
+	for _, r := range providerID {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '.' || r == '-' || r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func validDemandFailureReason(reason string) bool {
+	switch reason {
+	case "", "no_provider", "all_providers_busy", "quota_exhausted", "tenant_concurrency_limited",
+		"gateway_rejection", "unsupported_context", "unsupported_tools", "trust_routing_rejection",
+		"upstream_provider_failure", "buyer_cancelled":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Store) insertUsageEventExec(ctx context.Context, event storage.UsageEvent, idempotent bool) (sql.Result, error) {

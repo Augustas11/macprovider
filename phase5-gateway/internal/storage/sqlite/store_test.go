@@ -165,11 +165,352 @@ func TestAppendOnlyEventTablesRejectMutation(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("InsertCapacitySignalEvent: %v", err)
 	}
+	if err := store.InsertDemandEvent(ctx, storage.DemandEvent{
+		RequestID: "req_demand", BuyerHash: "buyer_hash", TrafficClass: "paid",
+		RequestedModel: "llama", TerminalResult: "failure", FailureReason: "no_provider", CreatedAt: fixedTime(),
+	}); err != nil {
+		t.Fatalf("InsertDemandEvent: %v", err)
+	}
 
 	assertSQLFails(t, store, `UPDATE usage_events SET total_tokens = 99 WHERE request_id = 'req_usage'`)
 	assertSQLFails(t, store, `DELETE FROM feedback_events WHERE event_id = 'fb_1'`)
 	assertSQLFails(t, store, `UPDATE audit_events SET payload_json = '{"bad":true}' WHERE event_id = 'audit_1'`)
 	assertSQLFails(t, store, `DELETE FROM capacity_signal_events WHERE event_id = 'cap_1'`)
+	assertSQLFails(t, store, `UPDATE demand_events SET terminal_result = 'success' WHERE request_id = 'req_demand'`)
+}
+
+func TestDemandSummarySeparatesServedUnmetCapacityAndRepeatBuyers(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	base := fixedTime()
+	events := []storage.DemandEvent{
+		{RequestID: "req_served_1", BuyerHash: "buyer_a", TrafficClass: "paid", RequestedModel: "llama", RoutedModel: "llama", TerminalResult: "success", EligibleProviderExists: true, RequestedPromptTokens: 10, RequestedOutputTokens: 20, PromptTokens: 10, CompletionTokens: 5, ReasoningTokens: 2, QueueLatencyMs: 4, TimeToFirstTokenMs: 20, OutputTPSMilliTokens: 10_000, TotalLatencyMs: 100, CreatedAt: base},
+		{RequestID: "req_served_2", BuyerHash: "buyer_a", TrafficClass: "paid", RequestedModel: "llama", RoutedModel: "llama", TerminalResult: "success", EligibleProviderExists: true, RequestedPromptTokens: 8, RequestedOutputTokens: 20, PromptTokens: 8, CachedPromptTokens: 3, CompletionTokens: 2, ReasoningTokens: 1, QueueLatencyMs: 6, TimeToFirstTokenMs: 30, OutputTPSMilliTokens: 20_000, TotalLatencyMs: 200, CreatedAt: base.Add(time.Minute)},
+		{RequestID: "req_unmet", BuyerHash: "buyer_b", TrafficClass: "paid", RequestedModel: "llama", TerminalResult: "failure", FailureReason: "no_provider", RequestedPromptTokens: 7, RequestedOutputTokens: 20, CreatedAt: base.Add(2 * time.Minute)},
+		{RequestID: "req_busy", BuyerHash: "buyer_c", TrafficClass: "paid", RequestedModel: "llama", TerminalResult: "failure", FailureReason: "all_providers_busy", RequestedPromptTokens: 6, RequestedOutputTokens: 20, CreatedAt: base.Add(3 * time.Minute)},
+		{RequestID: "req_sub", BuyerHash: "buyer_d", TrafficClass: "paid", RequestedModel: "llama", RoutedModel: "qwen", TerminalResult: "success", EligibleProviderExists: true, Substituted: true, RequestedPromptTokens: 4, RequestedOutputTokens: 20, PromptTokens: 4, CompletionTokens: 4, CreatedAt: base.Add(4 * time.Minute)},
+	}
+	for _, event := range events {
+		if err := store.InsertDemandEvent(ctx, event); err != nil {
+			t.Fatalf("InsertDemandEvent(%s): %v", event.RequestID, err)
+		}
+	}
+
+	rows, err := store.DemandSummary(ctx, storage.DemandSummaryQuery{Since: base.Add(-time.Second), Until: base.Add(time.Hour), Model: "llama", TrafficClass: "paid"})
+	if err != nil {
+		t.Fatalf("DemandSummary: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("DemandSummary rows=%d want 1: %+v", len(rows), rows)
+	}
+	row := rows[0]
+	if row.RequestedRequests != 5 || row.ServedRequests != 3 || row.UnmetRequests != 1 || row.CapacityConstrainedRequests != 1 || row.SubstitutedRequests != 1 {
+		t.Fatalf("summary counts = %+v", row)
+	}
+	if row.RequestedTokens != 135 || row.ServedTokens != 33 {
+		t.Fatalf("summary tokens = requested %d served %d, want 135/33", row.RequestedTokens, row.ServedTokens)
+	}
+	if row.ReasoningTokens != 3 || row.AvgQueueLatencyMs != 5 || row.AvgTimeToFirstTokenMs != 25 || row.AvgTotalLatencyMs != 150 || row.AvgOutputTPSMilliTokens != 15_000 {
+		t.Fatalf("summary timing/reasoning = %+v, want reasoning=3 average queue/ttft/latency/tps=5/25/150/15000", row)
+	}
+	if row.DistinctBuyers != 4 || row.RepeatBuyers != 1 {
+		t.Fatalf("buyer counts = distinct %d repeat %d, want 4/1", row.DistinctBuyers, row.RepeatBuyers)
+	}
+
+	routeRows, err := store.DemandRouteSummary(ctx, storage.DemandSummaryQuery{Since: base.Add(-time.Second), Until: base.Add(time.Hour), Model: "llama", TrafficClass: "paid"})
+	if err != nil {
+		t.Fatalf("DemandRouteSummary: %v", err)
+	}
+	var sawSubstitution, sawCached bool
+	for _, route := range routeRows {
+		if route.RequestedModel == "llama" && route.RoutedModel == "qwen" && route.TerminalResult == "success" && route.Requests == 1 {
+			sawSubstitution = true
+		}
+		if route.RoutedModel == "llama" && route.CachedPromptTokens == 3 {
+			sawCached = true
+			if route.ReasoningTokens != 3 {
+				t.Fatalf("route reasoning tokens = %d, want 3", route.ReasoningTokens)
+			}
+		}
+	}
+	if !sawSubstitution || !sawCached {
+		t.Fatalf("route summary missing substitution/cached-token dimensions: %+v", routeRows)
+	}
+}
+
+func TestDemandSummaryPreservesIssue1807CandidateModels(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	base := fixedTime()
+	candidates := []string{
+		"mlx-community/Qwen3.5-9B-4bit",
+		"mlx-community/Ministral-3-3B-Instruct-2512-4bit",
+	}
+	for i, model := range candidates {
+		if err := store.InsertDemandEvent(ctx, storage.DemandEvent{
+			RequestID:      fmt.Sprintf("req_candidate_%d", i),
+			BuyerHash:      fmt.Sprintf("buyer_candidate_%d", i),
+			TrafficClass:   "paid",
+			RequestedModel: model,
+			TerminalResult: "failure",
+			FailureReason:  "no_provider",
+			CreatedAt:      base.Add(time.Duration(i) * time.Minute),
+		}); err != nil {
+			t.Fatalf("InsertDemandEvent(%s): %v", model, err)
+		}
+	}
+
+	rows, err := store.DemandSummary(ctx, storage.DemandSummaryQuery{Since: base.Add(-time.Second), Until: base.Add(time.Hour), TrafficClass: "paid"})
+	if err != nil {
+		t.Fatalf("DemandSummary: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, row := range rows {
+		seen[row.RequestedModel] = true
+		if row.RequestedModel == "unknown_model_id" {
+			t.Fatalf("candidate demand collapsed into unknown_model_id: %+v", rows)
+		}
+	}
+	for _, model := range candidates {
+		if !seen[model] {
+			t.Fatalf("DemandSummary missing candidate %q: %+v", model, rows)
+		}
+	}
+}
+
+func TestInsertDemandEventRejectsRawFailureReasonAndInvalidReasoning(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	base := storage.DemandEvent{
+		RequestID: "req_bad_reason", BuyerHash: "buyer_a", TrafficClass: "paid",
+		RequestedModel: "llama", TerminalResult: "failure", FailureReason: "provider_private_stack_code",
+		CreatedAt: fixedTime(),
+	}
+	if err := store.InsertDemandEvent(ctx, base); err == nil {
+		t.Fatal("InsertDemandEvent accepted raw failure_reason")
+	}
+	base.RequestID = "req_bad_reasoning"
+	base.FailureReason = ""
+	base.TerminalResult = "success"
+	base.CompletionTokens = 2
+	base.ReasoningTokens = 3
+	base.TotalTokens = 2
+	if err := store.InsertDemandEvent(ctx, base); err == nil {
+		t.Fatal("InsertDemandEvent accepted reasoning_tokens above completion_tokens")
+	}
+	base.RequestID = "req_bad_model"
+	base.CompletionTokens = 0
+	base.ReasoningTokens = 0
+	base.TotalTokens = 0
+	base.RoutedModel = "qwen leaked content"
+	if err := store.InsertDemandEvent(ctx, base); err == nil {
+		t.Fatal("InsertDemandEvent accepted invalid routed_model")
+	}
+	base.RequestID = "req_unknown_raw_model"
+	base.RequestedModel = "sk-live-secret-model"
+	base.RoutedModel = ""
+	if err := store.InsertDemandEvent(ctx, base); err == nil {
+		t.Fatal("InsertDemandEvent accepted raw unknown requested_model")
+	}
+	base.RequestID = "req_bad_provider"
+	base.RequestedModel = "llama"
+	base.ProviderID = "provider_id=p1 raw_prompt=secret"
+	if err := store.InsertDemandEvent(ctx, base); err == nil {
+		t.Fatal("InsertDemandEvent accepted invalid provider_id")
+	}
+	base.RequestID = "req_bad_cached"
+	base.ProviderID = ""
+	base.RoutedModel = ""
+	base.PromptTokens = 1
+	base.CachedPromptTokens = 2
+	base.TotalTokens = 1
+	if err := store.InsertDemandEvent(ctx, base); err == nil {
+		t.Fatal("InsertDemandEvent accepted cached_prompt_tokens above prompt_tokens")
+	}
+}
+
+func TestDemandEventsPrivacySchemaAndRetentionPrune(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	forbidden := map[string]bool{
+		"account_id":         true,
+		"prompt":             true,
+		"completion":         true,
+		"prompt_content":     true,
+		"completion_content": true,
+		"request_body":       true,
+		"response_body":      true,
+		"message":            true,
+		"messages":           true,
+		"content":            true,
+	}
+	columns := demandEventColumns(t, store)
+	for name := range columns {
+		if forbidden[name] {
+			t.Fatalf("demand_events contains forbidden privacy column %q", name)
+		}
+	}
+	for _, required := range []string{"request_id", "buyer_hash", "requested_model", "routed_model", "terminal_result", "failure_reason", "cached_prompt_tokens", "requested_prompt_tokens", "requested_output_tokens", "requested_total_tokens", "reasoning_tokens", "queue_latency_ms", "time_to_first_token_ms", "provider_prefill_ms", "provider_decode_ms", "output_tps_millitokens"} {
+		if !columns[required] {
+			t.Fatalf("demand_events missing required metadata column %q", required)
+		}
+	}
+	var secureDelete int
+	if err := store.db.QueryRowContext(ctx, `PRAGMA secure_delete`).Scan(&secureDelete); err != nil {
+		t.Fatalf("PRAGMA secure_delete: %v", err)
+	}
+	if secureDelete != 1 {
+		t.Fatalf("secure_delete=%d want 1", secureDelete)
+	}
+
+	old := fixedTime().Add(-48 * time.Hour)
+	keep := fixedTime()
+	if err := store.InsertDemandEvent(ctx, storage.DemandEvent{RequestID: "old", BuyerHash: "buyer_old", TrafficClass: "paid", RequestedModel: "llama", TerminalResult: "success", CreatedAt: old}); err != nil {
+		t.Fatalf("InsertDemandEvent old: %v", err)
+	}
+	if err := store.InsertDemandEvent(ctx, storage.DemandEvent{RequestID: "keep", BuyerHash: "buyer_keep", TrafficClass: "paid", RequestedModel: "llama", TerminalResult: "success", CreatedAt: keep}); err != nil {
+		t.Fatalf("InsertDemandEvent keep: %v", err)
+	}
+	deleted, err := store.PruneDemandEvents(ctx, fixedTime().Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("PruneDemandEvents: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("PruneDemandEvents deleted=%d want 1", deleted)
+	}
+	var remaining int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM demand_events`).Scan(&remaining); err != nil {
+		t.Fatalf("count demand_events: %v", err)
+	}
+	if remaining != 1 {
+		t.Fatalf("remaining demand_events=%d want 1", remaining)
+	}
+}
+
+func TestPruneDemandEventsIsBatchBounded(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	old := fixedTime().Add(-48 * time.Hour)
+	for i := 0; i < demandPruneBatchLimit+1; i++ {
+		if err := store.InsertDemandEvent(ctx, storage.DemandEvent{
+			RequestID:      fmt.Sprintf("old_%d", i),
+			BuyerHash:      fmt.Sprintf("buyer_old_%d", i),
+			TrafficClass:   "paid",
+			RequestedModel: "llama",
+			TerminalResult: "success",
+			CreatedAt:      old,
+		}); err != nil {
+			t.Fatalf("InsertDemandEvent old_%d: %v", i, err)
+		}
+	}
+	deleted, err := store.PruneDemandEvents(ctx, fixedTime().Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("PruneDemandEvents: %v", err)
+	}
+	if deleted != demandPruneBatchLimit {
+		t.Fatalf("PruneDemandEvents deleted=%d want %d", deleted, demandPruneBatchLimit)
+	}
+	var remaining int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM demand_events`).Scan(&remaining); err != nil {
+		t.Fatalf("count demand_events: %v", err)
+	}
+	if remaining != 1 {
+		t.Fatalf("remaining demand_events=%d want 1", remaining)
+	}
+}
+
+func TestDemandEventsV16MigrationAddsObservationColumns(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "gateway.db")
+	rawDB, err := sql.Open("sqlite", sqliteDSN(path))
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := rawDB.ExecContext(ctx, `
+		CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+		INSERT INTO schema_migrations(version, applied_at) VALUES(16, '2026-10-01T00:00:00Z');
+		CREATE TABLE demand_events (
+			event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+			request_id TEXT NOT NULL,
+			buyer_hash TEXT NOT NULL DEFAULT '',
+			traffic_class TEXT NOT NULL CHECK (traffic_class IN ('paid', 'free', 'promotional', 'test', 'unknown')),
+			requested_model TEXT NOT NULL,
+			routed_model TEXT NOT NULL DEFAULT '',
+			provider_id TEXT NOT NULL DEFAULT '',
+			pool_id TEXT NOT NULL DEFAULT '',
+			engine_class TEXT NOT NULL DEFAULT '',
+			stream INTEGER NOT NULL CHECK (stream IN (0, 1)),
+			structured_output INTEGER NOT NULL CHECK (structured_output IN (0, 1)),
+			tools_requested INTEGER NOT NULL CHECK (tools_requested IN (0, 1)),
+			max_output_tokens INTEGER NOT NULL DEFAULT 0 CHECK (max_output_tokens >= 0),
+			prompt_tokens INTEGER NOT NULL DEFAULT 0 CHECK (prompt_tokens >= 0),
+			cached_prompt_tokens INTEGER NOT NULL DEFAULT 0 CHECK (cached_prompt_tokens >= 0),
+			completion_tokens INTEGER NOT NULL DEFAULT 0 CHECK (completion_tokens >= 0),
+			total_tokens INTEGER NOT NULL DEFAULT 0 CHECK (total_tokens >= 0),
+			terminal_result TEXT NOT NULL CHECK (terminal_result IN ('success', 'failure', 'cancellation', 'timeout')),
+			failure_reason TEXT NOT NULL DEFAULT '',
+			eligible_provider_exists INTEGER NOT NULL CHECK (eligible_provider_exists IN (0, 1)),
+			substituted INTEGER NOT NULL CHECK (substituted IN (0, 1)),
+			total_latency_ms INTEGER NOT NULL DEFAULT 0 CHECK (total_latency_ms >= 0),
+			created_at TEXT NOT NULL
+		);
+		INSERT INTO demand_events(request_id, buyer_hash, traffic_class, requested_model, routed_model, provider_id, stream, structured_output, tools_requested, terminal_result, failure_reason, eligible_provider_exists, substituted, created_at)
+		VALUES('legacy_req', 'buyer', 'paid', 'sk-live-secret-model', 'qwen leaked content', 'provider_id=p1 raw_prompt=secret', 0, 0, 0, 'failure', 'provider_private_stack_code raw_prompt=secret', 0, 0, '2026-10-01T00:00:00Z');
+	`); err != nil {
+		t.Fatalf("seed v16 demand_events: %v", err)
+	}
+	if err := rawDB.Close(); err != nil {
+		t.Fatalf("close raw DB: %v", err)
+	}
+
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open migrated v16 DB: %v", err)
+	}
+	defer store.Close()
+
+	columns := demandEventColumns(t, store)
+	for _, required := range []string{"requested_prompt_tokens", "requested_output_tokens", "requested_total_tokens", "reasoning_tokens", "queue_latency_ms", "time_to_first_token_ms", "provider_prefill_ms", "provider_decode_ms", "output_tps_millitokens"} {
+		if !columns[required] {
+			t.Fatalf("migrated demand_events missing %s", required)
+		}
+	}
+	var version int
+	if err := store.db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != maxKnownSchemaVersion {
+		t.Fatalf("schema version=%d err=%v, want %d", version, err, maxKnownSchemaVersion)
+	}
+	var requestedModel, routedModel, providerID, failureReason string
+	if err := store.db.QueryRowContext(ctx, `SELECT requested_model, routed_model, provider_id, failure_reason FROM demand_events WHERE request_id = 'legacy_req'`).Scan(&requestedModel, &routedModel, &providerID, &failureReason); err != nil {
+		t.Fatalf("read migrated demand row: %v", err)
+	}
+	if requestedModel != demandUnknownModelID || routedModel != demandInvalidModelID || providerID != "" || failureReason != "upstream_provider_failure" {
+		t.Fatalf("legacy demand scrub = requested %q routed %q provider %q failure %q, want unknown/invalid/empty/upstream", requestedModel, routedModel, providerID, failureReason)
+	}
+	assertSQLFails(t, store, `UPDATE demand_events SET requested_model = 'llama' WHERE request_id = 'legacy_req'`)
+}
+
+func demandEventColumns(t *testing.T, store *Store) map[string]bool {
+	t.Helper()
+	rows, err := store.db.QueryContext(context.Background(), `PRAGMA table_info(demand_events)`)
+	if err != nil {
+		t.Fatalf("PRAGMA table_info(demand_events): %v", err)
+	}
+	defer rows.Close()
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			t.Fatalf("scan demand_events schema: %v", err)
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("schema rows: %v", err)
+	}
+	return columns
 }
 
 func TestDefaultValuesAndNotFoundErrors(t *testing.T) {

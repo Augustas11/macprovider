@@ -71,6 +71,49 @@ func TestGatewayPhaseTimingTrailersMergeTerminalFields(t *testing.T) {
 	}
 }
 
+func TestGatewayPhaseTimingDemandSnapshotDerivesAllocationMetrics(t *testing.T) {
+	start := time.Unix(1_700_000_000, 0)
+	timing := newGatewayPhaseTiming(start)
+	timing.markCoordinatorStart(start.Add(15 * time.Millisecond))
+	headers := http.Header{}
+	headers.Set(phaseTimingCoordRoutingHeader, "10")
+	headers.Set(phaseTimingCoordAdmissionHeader, "25")
+	headers.Set(phaseTimingProviderDispatchHeader, "7")
+	headers.Set(phaseTimingProviderPrefillHeader, "100")
+	headers.Set(phaseTimingProviderDecodeHeader, "40")
+	timing.observeCoordinatorResponse(headers, start.Add(150*time.Millisecond))
+
+	snapshot := timing.demandSnapshot(4)
+	if snapshot.queueLatencyMS != 25 {
+		t.Fatalf("queue_latency_ms=%d want coordinator admission 25", snapshot.queueLatencyMS)
+	}
+	if snapshot.timeToFirstTokenMS != 142 {
+		t.Fatalf("time_to_first_token_ms=%d want 142", snapshot.timeToFirstTokenMS)
+	}
+	if snapshot.providerPrefillMS != 100 || snapshot.providerDecodeMS != 40 {
+		t.Fatalf("prefill/decode=%d/%d want 100/40", snapshot.providerPrefillMS, snapshot.providerDecodeMS)
+	}
+	if snapshot.outputTokensPerSecondMilliTokens != 100_000 {
+		t.Fatalf("output tps millitokens=%d want 100000", snapshot.outputTokensPerSecondMilliTokens)
+	}
+}
+
+func TestGatewayPhaseTimingDemandSnapshotPrefersObservedFirstToken(t *testing.T) {
+	start := time.Unix(1_700_000_000, 0)
+	timing := newGatewayPhaseTiming(start)
+	timing.markCoordinatorStart(start.Add(15 * time.Millisecond))
+	headers := http.Header{}
+	headers.Set(phaseTimingProviderPrefillHeader, "100")
+	timing.observeCoordinatorResponse(headers, start.Add(150*time.Millisecond))
+	timing.markFirstToken(start.Add(90 * time.Millisecond))
+	timing.markFirstToken(start.Add(200 * time.Millisecond))
+
+	snapshot := timing.demandSnapshot(0)
+	if snapshot.timeToFirstTokenMS != 90 {
+		t.Fatalf("time_to_first_token_ms=%d want observed first-token 90", snapshot.timeToFirstTokenMS)
+	}
+}
+
 func TestGatewayStreamingCompletionLogConsumesTimingTrailers(t *testing.T) {
 	logs := captureRetryLogs(t)
 	headers := http.Header{}
