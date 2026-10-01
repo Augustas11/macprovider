@@ -84,6 +84,8 @@ type options struct {
 	runtimeSource    string
 	modelHashAlg     string
 	admissionKeyFile string
+	omitCatalog      bool
+	trustedPool      bool
 	explicit         map[string]bool
 }
 
@@ -173,6 +175,8 @@ func parseFlags(args []string) (options, error) {
 	fs.StringVar(&o.runtimeSource, "runtime-source", "", "#1690: claimed loopback runtime_source (e.g. llamacpp_loopback)")
 	fs.StringVar(&o.modelHashAlg, "model-hash-algorithm", "", "#1690: model_hash_algorithm (default macprovider.snapshot-manifest.v1)")
 	fs.StringVar(&o.admissionKeyFile, "admission-key-file", "", "#1690: provider admission key seed file; enrolls it via the v2 identity signature")
+	fs.BoolVar(&o.omitCatalog, "omit-catalog", false, "#1816: send no catalog_* envelope and skip -catalog-from-coordinator (an uncatalogued pool-model member)")
+	fs.BoolVar(&o.trustedPool, "trusted-pool", false, "#1816: advertise tier2_capabilities.trusted_pool_v1 without a runtime_source (a native mlx_cache pool member)")
 	if err := fs.Parse(args); err != nil {
 		return o, err
 	}
@@ -312,6 +316,11 @@ func run(o options) error {
 		chunkDelay:      time.Duration(o.chunkDelayMS) * time.Millisecond,
 		nonStreamDelay:  time.Duration(o.nonStreamDelayMS) * time.Millisecond,
 	}
+	if o.omitCatalog {
+		o.catalogCoord = ""
+		p.omitCatalog = true
+	}
+	p.trustedPool = o.trustedPool
 	if o.catalogCoord != "" {
 		p.refreshCatalog = func(ctx context.Context) (catalogIdentity, error) {
 			derived, err := fetchCatalogFromCoordinator(ctx, o.catalogCoord, o.catalogKey)

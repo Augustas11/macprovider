@@ -13,6 +13,11 @@ autotune_install() {
   for f in rate-card.json rate-card.json.sig demand-rank.json demand-rank.json.sig autotune-candidates.json autotune-candidates.json.sig; do
     install -o root -g macprovider -m 0640 "$wt/phase3-binary/dist/static/$f" "$dir/$f"
   done
+  # Later trees sign the continuous-batching policy feed too (the Pearl updater
+  # treats it as a catalog member).
+  for f in continuous-batching-policy.json continuous-batching-policy.json.sig; do
+    if [ -f "$wt/phase3-binary/dist/static/$f" ]; then install -o root -g macprovider -m 0640 "$wt/phase3-binary/dist/static/$f" "$dir/$f"; fi
+  done
   for f in tier2-catalog.json release.json trusted-keys.json; do
     install -o root -g macprovider -m 0640 "$wt/phase3-binary/catalog/autotune/$f" "$dir/$f"
   done

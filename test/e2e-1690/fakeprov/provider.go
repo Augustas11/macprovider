@@ -41,6 +41,10 @@ type fakeProvider struct {
 	// #1690 loopback pool member (loopback.go)
 	runtimeSource string
 	admissionKey  ed25519.PrivateKey
+	// #1816 pool-model member: no catalog envelope; trusted_pool_v1 without
+	// a runtime_source (native mlx_cache).
+	omitCatalog bool
+	trustedPool bool
 	// refreshCatalog, when set, re-derives the catalog identity before every
 	// WS connect (-catalog-from-coordinator).
 	refreshCatalog func(context.Context) (catalogIdentity, error)
@@ -365,6 +369,7 @@ func (p *fakeProvider) statusHandler() http.Handler {
 				"catalog_key":    p.catalogKey,
 				"model_id":       id.ModelID,
 				"source":         "coordinator",
+				"state":          "live_verified",
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -546,7 +551,12 @@ func (p *fakeProvider) handshakeV2(conn net.Conn, id catalogIdentity) (string, e
 		"tier2_capabilities":          map[string]any{"encrypted_leg": true, "attestation": false, "aead_suites": []string{"A256GCM"}},
 	}
 	addCanonicalModelIdentity(initial, id.ModelHash)
-	addCatalogIdentity(initial, id)
+	if !p.omitCatalog {
+		addCatalogIdentity(initial, id)
+	}
+	if p.trustedPool {
+		initial["tier2_capabilities"].(map[string]any)["trusted_pool_v1"] = true
+	}
 	if p.runtimeSource != "" {
 		initial["runtime_source"] = p.runtimeSource
 		// SPEC-042-R010 provider half: a pool member advertises pool support.
@@ -644,7 +654,9 @@ func (p *fakeProvider) handshakeV1(conn net.Conn, id catalogIdentity) (string, e
 		"attestation":             nil,
 		"endpoint_url":            p.endpointURL,
 	}
-	addCatalogIdentity(hello, id)
+	if !p.omitCatalog {
+		addCatalogIdentity(hello, id)
+	}
 	if err := writeJSONFrame(conn, hello); err != nil {
 		return "", fmt.Errorf("hello write: %w", err)
 	}
