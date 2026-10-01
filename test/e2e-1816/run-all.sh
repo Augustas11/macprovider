@@ -11,9 +11,10 @@ passes="${1:-2}"; steps="${2:-B1 B2 S1 S2 S3 S4 S5 S6}"
 bash "$E2E_HARNESS/00-setup-vm.sh" || e2e_die "VM setup failed"
 bash "$E2E_HARNESS/01-sources.sh" || e2e_die "sources failed"
 bash "$E2E_HARNESS/02-push-harness.sh" || e2e_die "harness push failed"
-vm "systemctl reset-failed e2e-1816-passes 2>/dev/null; systemd-run --unit=e2e-1816-passes --collect -E HOME=/root -p WorkingDirectory=/root/e2e bash -c 'bash h16/vm/run-passes.sh $passes \"$steps\" >/root/e2e/run-passes-1816.out 2>&1'"
+vm "rm -f /root/e2e/run-passes-1816.out; systemctl reset-failed e2e-1816-passes 2>/dev/null; systemd-run --unit=e2e-1816-passes --collect -E HOME=/root -p WorkingDirectory=/root/e2e bash -c 'bash h16/vm/run-passes.sh $passes \"$steps\" >/root/e2e/run-passes-1816.out 2>&1'"
 e2e_log "started in-VM run-passes ($passes passes: $steps); log /root/e2e/run-passes-1816.out"
 while ! vm "grep -q 'ALL-PASSES-DONE\|FATAL' /root/e2e/run-passes-1816.out" 2>/dev/null; do sleep 30; done
+e2e_log "in-VM run finished: $(vm "tail -1 /root/e2e/run-passes-1816.out")"
 vm "tar -C /root/e2e -czf - evidence logs" >"$E2E_WORK/evidence.tgz"
 vm "cat /root/e2e/evidence/results.jsonl" >"$E2E_WORK/results.jsonl"
 python3 - "$E2E_WORK/results.jsonl" <<'PY'
