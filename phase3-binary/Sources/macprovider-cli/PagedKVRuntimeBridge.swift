@@ -1163,15 +1163,16 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             profiler.lap(.verifyStateStore, &lapStarted)
             let parityPackedRoundID = NativeMTPParityTraceCollector.shared.allocatePackedRoundID()
 #endif
-            return output.rows.map { row in
-                let input = inputs[row.map.rowIndex]
-                let targetTopTokenIDs = Self.topTokenIDs(
-                    proposalLogits: row.proposalLogits,
-                    bonusLogits: row.bonusLogits
-                )
+            // One argmax and one host transfer for the whole packed round
+            // instead of two blocking GPU round trips per row.
+            let topTokenIDsByRow = Self.packedTopTokenIDs(rows: output.rows)
 #if DEBUG || MACPROVIDER_LAB_HARNESS
-                profiler.countHostSyncs(row.map.proposalCount > 0 ? 2 : 1)
-                profiler.lap(.verifyTopTokens, &lapStarted)
+            profiler.countHostSyncs(1)
+            profiler.lap(.verifyTopTokens, &lapStarted)
+#endif
+            return zip(output.rows, topTokenIDsByRow).map { row, targetTopTokenIDs in
+                let input = inputs[row.map.rowIndex]
+#if DEBUG || MACPROVIDER_LAB_HARNESS
                 var traceLogits: [MLXArray] = []
                 traceLogits.reserveCapacity(row.map.proposalCount + 1)
                 for index in 0 ..< row.map.proposalCount {
@@ -1698,13 +1699,29 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         return decodeSession
     }
 
-    private static func topTokenIDs(proposalLogits: MLXArray, bonusLogits: MLXArray) -> [Int] {
-        var ids: [Int] = []
-        if proposalLogits.ndim == 2, proposalLogits.dim(0) > 0 {
-            ids.append(contentsOf: argMax(proposalLogits, axis: -1).asArray(Int.self))
+    private static func packedTopTokenIDs(rows: [MTPPackedVerificationRowOutput]) -> [[Int]] {
+        var logits: [MLXArray] = []
+        var counts: [Int] = []
+        for row in rows {
+            var count = 0
+            if row.proposalLogits.ndim == 2, row.proposalLogits.dim(0) > 0 {
+                logits.append(row.proposalLogits)
+                count += row.proposalLogits.dim(0)
+            }
+            logits.append(row.bonusLogits)
+            count += row.bonusLogits.dim(0)
+            counts.append(count)
         }
-        ids.append(contentsOf: argMax(bonusLogits, axis: -1).asArray(Int.self))
-        return ids
+        guard !logits.isEmpty else { return rows.map { _ in [] } }
+        let flat = argMax(concatenated(logits, axis: 0), axis: -1).asArray(Int.self)
+        var result: [[Int]] = []
+        result.reserveCapacity(rows.count)
+        var start = 0
+        for count in counts {
+            result.append(Array(flat[start ..< start + count]))
+            start += count
+        }
+        return result
     }
 
     private func nativeMTPTargetState(for requestID: String) -> MTPPackedVerificationRowState? {

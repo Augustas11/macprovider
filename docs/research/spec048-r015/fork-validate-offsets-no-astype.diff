@@ -1,0 +1,22 @@
+diff --git a/Libraries/MLXLMCommon/MTPPackedTargetVerification.swift b/Libraries/MLXLMCommon/MTPPackedTargetVerification.swift
+index 9e9ee9b..ca0da22 100644
+--- a/Libraries/MLXLMCommon/MTPPackedTargetVerification.swift
++++ b/Libraries/MLXLMCommon/MTPPackedTargetVerification.swift
+@@ -586,7 +586,7 @@ private func extractMTPPackedContinuationStates(
+                 expectedCount: batchSize,
+                 actualShape: offsets.shape)
+         }
+-        let values = offsets.asArray(Int.self)
++        let values = offsets.asArray(Int32.self).map { Int($0) }
+         for (packedRow, map) in rowMaps.enumerated() {
+             let (expected, overflow) = map.queryOffset.addingReportingOverflow(map.inputCount)
+             guard !overflow else {
+@@ -693,7 +693,7 @@ private func validateMTPPackedCacheOffsets(
+                 expectedCount: queryOffsets.count,
+                 actualShape: offsets.shape)
+         }
+-        let actual = offsets.asArray(Int.self)
++        let actual = offsets.asArray(Int32.self).map { Int($0) }
+         guard actual == queryOffsets else {
+             throw MTPPackedVerificationError.cacheOffsetMismatch(
+                 cacheIndex: cacheIndex,
