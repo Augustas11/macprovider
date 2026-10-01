@@ -2378,7 +2378,8 @@ struct ServeCommand: AsyncParsableCommand {
                     configSHA256: artifact.configSHA256,
                     draftModel: ProviderCapacity.servedDraftModel(configured: resolved.draftModel),
                     // The slot count this serve runs (`maxBatch` below).
-                    slots: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride)
+                    slots: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride),
+                    modelWeightSizeBytes: artifact.sizeBytes > 0 ? UInt64(artifact.sizeBytes) : nil
                 )
                 switchTargets.append((ids, knobs.context, knobs.slots))
             }
@@ -2402,7 +2403,10 @@ struct ServeCommand: AsyncParsableCommand {
                     .lazy
                     .compactMap { ModelArtifactSignedRowResolver.lookup($0, in: catalog)?.1.minRAMGB }
                     .first
-            }
+            },
+            modelWeightSizeBytes: ProviderContextWorkflow.liveModelFacts(
+                artifactPath: resolved.modelArtifactPath
+            ).weightsBytes
         )
         let switchMaxContextByTarget = ModelSwitchContext.serveContextsByTarget(
             config: resolved,

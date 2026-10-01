@@ -196,6 +196,7 @@ extension AutotuneRecommendHardware {
         modelID: String,
         verifiedConfigJSONData: Data?,
         verifiedConfigSHA256: String?,
+        verifiedArtifactSizeBytes: Int? = nil,
         catalogMinRAMGB: Int,
         draftModel: String?
     ) -> Int {
@@ -205,7 +206,8 @@ extension AutotuneRecommendHardware {
             catalogMinRAMGB: catalogMinRAMGB,
             modelID: modelID,
             verifiedConfigJSONData: verifiedConfigJSONData,
-            verifiedConfigSHA256: verifiedConfigSHA256
+            verifiedConfigSHA256: verifiedConfigSHA256,
+            verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
         )
         // Without the draft term, a provider with `draft_model` configured
         // would refuse to start on the value an apply writes.
@@ -276,7 +278,8 @@ enum AutotuneModelContextCap {
         catalogMinRAMGB: Int,
         modelID: String,
         verifiedConfigJSONData: Data?,
-        verifiedConfigSHA256: String?
+        verifiedConfigSHA256: String?,
+        verifiedArtifactSizeBytes: Int? = nil
     ) -> Int {
         // An unknown bound leaves the caller's RAM-tier default in charge, the
         // same cap `serve` uses without an override. Falling to the 4,000-token
@@ -291,7 +294,8 @@ enum AutotuneModelContextCap {
               let memoryCap = memorySafeContextTokens(
                 configData: verifiedConfigJSONData,
                 hardwareMemoryGB: hardwareMemoryGB,
-                catalogMinRAMGB: catalogMinRAMGB
+                catalogMinRAMGB: catalogMinRAMGB,
+                verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
               )
         else {
             return architecturalCap
@@ -312,7 +316,12 @@ enum AutotuneModelContextCap {
         return nil
     }
 
-    static func memorySafeContextTokens(configData: Data, hardwareMemoryGB: Int, catalogMinRAMGB: Int) -> Int? {
+    static func memorySafeContextTokens(
+        configData: Data,
+        hardwareMemoryGB: Int,
+        catalogMinRAMGB: Int,
+        verifiedArtifactSizeBytes: Int? = nil
+    ) -> Int? {
         // Zero per-token KV bytes (no full-attention layer) bind nothing: the
         // memory term drops out like an unknown one.
         guard let root = strictConfigRoot(configData),
@@ -322,10 +331,11 @@ enum AutotuneModelContextCap {
             return nil
         }
 
-        let reservedGB = max(catalogMinRAMGB, 1) + AutotuneRecommendEngine.safetyMarginGB
-        let spareGB = max(0, hardwareMemoryGB - reservedGB)
-        let usableKVBytes = UInt64(spareGB) * bytesPerGB * UInt64(memorySafetyFractionNumerator)
-            / UInt64(memorySafetyFractionDenominator)
+        let usableKVBytes = usableKVBytes(
+            hardwareMemoryGB: hardwareMemoryGB,
+            catalogMinRAMGB: catalogMinRAMGB,
+            verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
+        )
         let additionalTokens = Int(min(
             UInt64(maximumAcceptedContext - minimumServeContext),
             usableKVBytes / UInt64(bytesPerToken)
@@ -349,7 +359,8 @@ enum AutotuneModelContextCap {
         verifiedConfigSHA256: String,
         hardwareMemoryGB: Int,
         catalogMinRAMGB: Int,
-        calibrationContextTokens: Int
+        calibrationContextTokens: Int,
+        verifiedArtifactSizeBytes: Int? = nil
     ) -> Int? {
         guard calibrationContextTokens >= 1,
               Data(SHA256.hash(data: configData)).hexLower == verifiedConfigSHA256,
@@ -358,10 +369,11 @@ enum AutotuneModelContextCap {
         else {
             return nil
         }
-        let reservedGB = max(catalogMinRAMGB, 1) + AutotuneRecommendEngine.safetyMarginGB
-        let spareGB = max(0, hardwareMemoryGB - reservedGB)
-        let usableKVBytes = UInt64(spareGB) * bytesPerGB * UInt64(memorySafetyFractionNumerator)
-            / UInt64(memorySafetyFractionDenominator)
+        let usableKVBytes = usableKVBytes(
+            hardwareMemoryGB: hardwareMemoryGB,
+            catalogMinRAMGB: catalogMinRAMGB,
+            verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
+        )
         // One slot holds a full-context KV cache; guard the product against
         // overflow before dividing.
         guard let perSlotKVBytes = checkedProduct([UInt64(bytesPerToken), UInt64(calibrationContextTokens)]),
@@ -384,7 +396,8 @@ enum AutotuneModelContextCap {
         verifiedConfigJSONData: Data?,
         verifiedConfigSHA256: String?,
         hardwareMemoryGB: Int,
-        catalogMinRAMGB: Int
+        catalogMinRAMGB: Int,
+        verifiedArtifactSizeBytes: Int? = nil
     ) -> Int {
         guard let verifiedConfigJSONData, let verifiedConfigSHA256,
               let fit = memoryFitBatchDepth(
@@ -392,7 +405,8 @@ enum AutotuneModelContextCap {
                   verifiedConfigSHA256: verifiedConfigSHA256,
                   hardwareMemoryGB: hardwareMemoryGB,
                   catalogMinRAMGB: catalogMinRAMGB,
-                  calibrationContextTokens: context
+                  calibrationContextTokens: context,
+                  verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
               )
         else {
             return slots
@@ -412,7 +426,8 @@ enum AutotuneModelContextCap {
         verifiedConfigJSONData: Data?,
         verifiedConfigSHA256: String?,
         hardwareMemoryGB: Int,
-        catalogMinRAMGB: Int
+        catalogMinRAMGB: Int,
+        verifiedArtifactSizeBytes: Int? = nil
     ) -> Int? {
         func fits(_ candidate: Int) -> Bool {
             memoryBoundedSlots(
@@ -421,7 +436,8 @@ enum AutotuneModelContextCap {
                 verifiedConfigJSONData: verifiedConfigJSONData,
                 verifiedConfigSHA256: verifiedConfigSHA256,
                 hardwareMemoryGB: hardwareMemoryGB,
-                catalogMinRAMGB: catalogMinRAMGB
+                catalogMinRAMGB: catalogMinRAMGB,
+                verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
             ) >= slots
         }
         guard slots > 1, !fits(context) else {
@@ -455,7 +471,8 @@ enum AutotuneModelContextCap {
         verifiedConfigJSONData: Data?,
         verifiedConfigSHA256: String?,
         hardwareMemoryGB: Int,
-        catalogMinRAMGB: Int
+        catalogMinRAMGB: Int,
+        verifiedArtifactSizeBytes: Int? = nil
     ) -> (context: Int, slots: Int) {
         if let bounded = memoryBoundedContext(
             context,
@@ -463,7 +480,8 @@ enum AutotuneModelContextCap {
             verifiedConfigJSONData: verifiedConfigJSONData,
             verifiedConfigSHA256: verifiedConfigSHA256,
             hardwareMemoryGB: hardwareMemoryGB,
-            catalogMinRAMGB: catalogMinRAMGB
+            catalogMinRAMGB: catalogMinRAMGB,
+            verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
         ) {
             return (bounded, slots)
         }
@@ -474,8 +492,65 @@ enum AutotuneModelContextCap {
             verifiedConfigJSONData: verifiedConfigJSONData,
             verifiedConfigSHA256: verifiedConfigSHA256,
             hardwareMemoryGB: hardwareMemoryGB,
-            catalogMinRAMGB: catalogMinRAMGB
+            catalogMinRAMGB: catalogMinRAMGB,
+            verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
         ))
+    }
+
+    private static func usableKVBytes(
+        hardwareMemoryGB: Int,
+        catalogMinRAMGB: Int,
+        verifiedArtifactSizeBytes: Int?
+    ) -> UInt64 {
+        guard let hardwareBytes = checkedProduct([UInt64(max(hardwareMemoryGB, 0)), bytesPerGB]),
+              let safetyBytes = checkedProduct([UInt64(AutotuneRecommendEngine.safetyMarginGB), bytesPerGB])
+        else {
+            return 0
+        }
+        let occupiedBytes: UInt64
+        if let verifiedArtifactSizeBytes, verifiedArtifactSizeBytes > 0 {
+            let artifactBytes = UInt64(verifiedArtifactSizeBytes)
+            let sum = artifactBytes.addingReportingOverflow(safetyBytes)
+            guard !sum.overflow else {
+                return 0
+            }
+            occupiedBytes = sum.partialValue
+        } else {
+            let fallbackRAMGB = UInt64(max(catalogMinRAMGB, 1))
+            let fallbackSum = fallbackRAMGB.addingReportingOverflow(UInt64(AutotuneRecommendEngine.safetyMarginGB))
+            guard !fallbackSum.overflow else {
+                return 0
+            }
+            guard let fallbackOccupiedBytes = checkedProduct([
+                fallbackSum.partialValue,
+                bytesPerGB
+            ]) else {
+                return 0
+            }
+            occupiedBytes = fallbackOccupiedBytes
+        }
+        guard hardwareBytes > occupiedBytes else {
+            return 0
+        }
+        let spareBytes = hardwareBytes - occupiedBytes
+        let numerator = UInt64(memorySafetyFractionNumerator)
+        let denominator = UInt64(memorySafetyFractionDenominator)
+        guard denominator > 0 else {
+            return 0
+        }
+        let quotient = spareBytes / denominator
+        let remainder = spareBytes % denominator
+        let scaledQuotient = quotient.multipliedReportingOverflow(by: numerator)
+        let scaledRemainder = remainder.multipliedReportingOverflow(by: numerator)
+        guard !scaledQuotient.overflow, !scaledRemainder.overflow else {
+            return UInt64.max
+        }
+        let scaledRemainderQuotient = scaledRemainder.partialValue / denominator
+        let total = scaledQuotient.partialValue.addingReportingOverflow(scaledRemainderQuotient)
+        guard !total.overflow else {
+            return UInt64.max
+        }
+        return total.partialValue
     }
 
     private static func strictConfigRoot(_ configData: Data) -> [String: Any]? {
@@ -2209,6 +2284,7 @@ struct CandidateBenchmark: Equatable {
     var thermalThrottleDetected: Bool
     var artifactSHA256: String
     var modelArtifactPath: String
+    var modelArtifactSizeBytes: Int? = nil
     var modelConfigJSONData: Data? = nil
     var modelConfigSHA256: String? = nil
     var benchmarkID: String?
@@ -3472,6 +3548,7 @@ struct RecommendationFreshnessChecker {
 struct VerifiedModelArtifact {
     var modelArgument: String
     var sha256: String
+    var sizeBytes: Int = 0
     var configJSONData: Data?
     var configSHA256: String?
 }
@@ -4877,6 +4954,7 @@ struct CachedModelArtifactResolver {
             return VerifiedModelArtifact(
                 modelArgument: directory.standardizedFileURL.path,
                 sha256: inspection.sha256,
+                sizeBytes: inspection.sizeBytes,
                 configJSONData: inspection.configJSONData,
                 configSHA256: inspection.configSHA256
             )
@@ -4949,6 +5027,7 @@ struct CachedModelArtifactResolver {
             return VerifiedModelArtifact(
                 modelArgument: URL(fileURLWithPath: snapshot.path).standardizedFileURL.path,
                 sha256: inspection.sha256,
+                sizeBytes: inspection.sizeBytes,
                 configJSONData: inspection.configJSONData,
                 configSHA256: inspection.configSHA256
             )
@@ -4964,6 +5043,7 @@ struct CachedModelArtifactResolver {
         return VerifiedModelArtifact(
             modelArgument: durable.path,
             sha256: durableInspection.sha256,
+            sizeBytes: durableInspection.sizeBytes,
             configJSONData: durableInspection.configJSONData,
             configSHA256: durableInspection.configSHA256
         )
@@ -4995,6 +5075,7 @@ struct CachedModelArtifactResolver {
         return VerifiedModelArtifact(
             modelArgument: URL(fileURLWithPath: snapshot.path).standardizedFileURL.path,
             sha256: inspection.sha256,
+            sizeBytes: inspection.sizeBytes,
             configJSONData: inspection.configJSONData,
             configSHA256: inspection.configSHA256
         )
@@ -5394,6 +5475,7 @@ struct AutotuneRecommendationBenchmarker {
                         thermalThrottleDetected: safety.thermalThrottleDetected,
                         artifactSHA256: artifact.sha256,
                         modelArtifactPath: artifact.modelArgument,
+                        modelArtifactSizeBytes: artifact.sizeBytes,
                         modelConfigJSONData: artifact.configJSONData,
                         modelConfigSHA256: artifact.configSHA256,
                         benchmarkID: "spec-023-\(modelKey)-\(Int(generatedAt.timeIntervalSince1970))",
@@ -5474,6 +5556,7 @@ struct AutotuneRecommendationBenchmarker {
         }
         var reused = cached
         reused.modelArtifactPath = artifact.modelArgument
+        reused.modelArtifactSizeBytes = artifact.sizeBytes
         reused.modelConfigJSONData = artifact.configJSONData
         reused.modelConfigSHA256 = artifact.configSHA256
         return reused
@@ -5578,6 +5661,7 @@ enum ModelArtifactVerifier {
     struct CanonicalArtifactInspection {
         var sha256: String
         var scopedSHA256: String?
+        var sizeBytes: Int
         var configJSONData: Data?
         var configSHA256: String?
     }
@@ -5610,6 +5694,7 @@ enum ModelArtifactVerifier {
         }
         let basePath = directory.resolvingSymlinksInPath().path
         var entries: [(path: String, size: UInt64, sha: String)] = []
+        var totalSize: UInt64 = 0
         var configJSONData: Data?
         var configSHA256: String?
         for case let url as URL in enumerator {
@@ -5641,7 +5726,15 @@ enum ModelArtifactVerifier {
                 configJSONData = fileHash.capturedData
                 configSHA256 = fileHash.sha256
             }
+            let summed = totalSize.addingReportingOverflow(fileHash.size)
+            guard !summed.overflow else {
+                throw AutotuneRecommendError.invalidArtifact("artifact size exceeds supported range")
+            }
+            totalSize = summed.partialValue
             entries.append((rel, fileHash.size, fileHash.sha256))
+        }
+        guard totalSize <= UInt64(Int.max) else {
+            throw AutotuneRecommendError.invalidArtifact("artifact size exceeds supported range")
         }
         let manifest = entries.sorted { $0.path < $1.path }
             .map { "\($0.path)\n\($0.size)\n\($0.sha)\n" }
@@ -5660,6 +5753,7 @@ enum ModelArtifactVerifier {
         return CanonicalArtifactInspection(
             sha256: Data(SHA256.hash(data: Data(manifest.utf8))).hexLower,
             scopedSHA256: scopedSHA256,
+            sizeBytes: Int(totalSize),
             configJSONData: configJSONData,
             configSHA256: configSHA256
         )

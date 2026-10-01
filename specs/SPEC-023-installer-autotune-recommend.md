@@ -1,12 +1,17 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.1
+version: v0.22.2
 status: LOCKED
 owner: operator (a11)
-last-locked: 2026-09-30
+last-locked: 2026-10-01
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.22.2 (2026-10-01)** — Default context memory residency now uses the
+  verified artifact byte footprint when it is available (#1794). Catalog
+  `min_ram_gb` remains the §5 eligibility gate and the conservative fallback
+  when the verified artifact byte footprint is unavailable or unusable.
 
 - **v0.22.1 (2026-09-30)** — Signed continuous-batching policy admits measured
   mixed cache identities (#1778). The closed `cache_class` enum for
@@ -2394,10 +2399,15 @@ model maximum, memory-safe context, draft cap)`, where:
    model id.
 3. The memory-safe context is `4000 + floor(usable_kv_bytes /
    kv_bytes_per_token)`, capped at 1,000,000, where `usable_kv_bytes` is three
-   quarters of the RAM left after the catalog `min_ram_gb` and the §5 safety
-   margin, and `kv_bytes_per_token = layers × kv_heads × head_dim × 2 × 2`.
-   It is computed only from `config.json` bytes whose SHA-256 matches the
-   verified artifact.
+   quarters of the RAM left after the verified artifact byte footprint and the
+   §5 safety margin, and `kv_bytes_per_token = layers × kv_heads × head_dim ×
+   2 × 2`. The verified artifact byte footprint is the byte total of the
+   verified snapshot manifest / canonical artifact inspection; when that byte
+   footprint is unavailable or unusable, the conservative fallback footprint is
+   `catalog min_ram_gb` GiB. Catalog `min_ram_gb` remains the §5
+   `hardware_fits` eligibility gate and is not the residency source once the
+   verified artifact footprint is known. The memory-safe context is computed
+   only from `config.json` bytes whose SHA-256 matches the verified artifact.
 4. A declared `head_dim` MUST be used as declared; only a `head_dim` derived as
    `hidden_size / num_attention_heads` must divide exactly.
 5. When the config declares `layer_types` for every layer, `layers` counts only
@@ -2587,7 +2597,7 @@ AC-44 (`SPEC-023-R009`, opt-in and byte-shape preservation): The same recommenda
 
 AC-45 (`SPEC-023-R011`, Ultra ≥256 GB default 8): `AutotuneRecommendHardware` for an Ultra chip with 256 GB or more returns `recommendedMaxBatch = 8`. The same Ultra chip with 128 GB or 192 GB still returns 4. The served hard cap remains 8. A `--calibrate-concurrency` run MAY still emit a lower value.
 
-AC-47 (`SPEC-023-R018`, default serve context): On a 256 GB M3 Ultra with the pinned Qwen3.6-27B artifact (`head_dim` 256 declared over 24 heads and `hidden_size` 5120, a `layer_types` stack with 16 `full_attention` layers, declared maximum 262,144), `autotune --recommend --apply` without calibration writes `max_context_override: 200000` (the RAM-tier default, the smallest term), never 4,000, and records `recommendation_apply` provenance as the config's `max_context_override_provenance` key. `kv_bytes_per_token` for that config counts 16 layers × 4 KV heads × 256 × 2 × 2. With no declared maximum and unprovable memory fit on a high-memory Mac the value is the RAM-tier default; with a known model bound below it, that bound. The 4,000-token value appears only when the memory-safe term is exactly 4,000 (no spare KV memory after weights and the safety margin). With a `draft_model` configured on the same Mac the apply writes `max_context_override: 120000` (the SPEC-028 draft cap) and `max_concurrency_override: 1`, and serve's spec-decode preflight accepts the written config. For every signed row of `autotune-candidates.json` on 256, 128, and 64 GB Macs (rows whose `min_ram_gb` plus the safety margin fit), the generated pair satisfies `kv_bytes_per_token × context × slots + (min_ram_gb + safety margin) GB ≤ physical memory` and, above one slot, `slots ≤ memoryFitBatchDepth(context)`; signed GLM-4.5-Air on a 256 GB Ultra emits 131,072 tokens × 5 slots (tier constant 8) and the pinned Qwen3.6-27B still emits 200,000 × 8. `models adopt-recommendation` refuses GLM-4.5-Air at 131,072 × 6 on that Mac, and a warm switch to it with 8 configured slots serves the largest context that fits 8 slots.
+AC-47 (`SPEC-023-R018`, default serve context): On a 256 GB M3 Ultra with the pinned Qwen3.6-27B artifact (`head_dim` 256 declared over 24 heads and `hidden_size` 5120, a `layer_types` stack with 16 `full_attention` layers, declared maximum 262,144), `autotune --recommend --apply` without calibration writes `max_context_override: 200000` (the RAM-tier default, the smallest term), never 4,000, and records `recommendation_apply` provenance as the config's `max_context_override_provenance` key. `kv_bytes_per_token` for that config counts 16 layers × 4 KV heads × 256 × 2 × 2. With no declared maximum and unprovable memory fit on a high-memory Mac the value is the RAM-tier default; with a known model bound below it, that bound. The 4,000-token value appears only when the memory-safe term is exactly 4,000 (no spare KV memory after the verified artifact byte footprint and the safety margin; when the footprint is unavailable, after the fallback `min_ram_gb` footprint and the safety margin). With a `draft_model` configured on the same Mac the apply writes `max_context_override: 120000` (the SPEC-028 draft cap) and `max_concurrency_override: 1`, and serve's spec-decode preflight accepts the written config. For every signed row of `autotune-candidates.json` on 256, 128, and 64 GB Macs whose eligibility gate passes, the generated pair satisfies `kv_bytes_per_token × context × slots + verified_artifact_bytes + safety_margin_bytes ≤ physical_memory_bytes` when verified artifact bytes are known, else `kv_bytes_per_token × context × slots + (min_ram_gb + safety margin) GB ≤ physical memory`; above one slot, `slots ≤ memoryFitBatchDepth(context)`. For matched-floor hosts, Llama 3.1 8B on a 16 GB Mac and Llama 3.2 3B on an 8 GB Mac MUST use the verified artifact byte footprint rather than double-counting catalog headroom as residency, so they MUST NOT collapse to the 4,000-token floor when the verified artifact leaves spare KV memory. Signed GLM-4.5-Air on a 256 GB Ultra emits 131,072 tokens × 5 slots (tier constant 8) and the pinned Qwen3.6-27B still emits 200,000 × 8. `models adopt-recommendation` refuses GLM-4.5-Air at 131,072 × 6 on that Mac, and a warm switch to it with 8 configured slots serves the largest context that fits 8 slots.
 
 AC-48 (`SPEC-023-R022`, exclusive model residency): Plain benchmarking
 `autotune --recommend` stops a detected launchd-managed or foreground provider

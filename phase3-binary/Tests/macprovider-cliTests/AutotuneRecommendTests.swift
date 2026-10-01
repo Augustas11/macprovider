@@ -772,6 +772,95 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(serveConfig["max_context_override"] as? Int, AutotuneModelContextCap.minimumServeContext)
     }
 
+    func testMatchedFloorSmallDenseRowsUseVerifiedArtifactSizeInsteadOfCatalogMinRAMAsResidency() throws {
+        let artifactSizes = try Self.signedCandidateArtifactSizeBytes()
+        try assertMatchedFloorUsesVerifiedArtifactSize(
+            modelKey: Self.eightBKey,
+            memoryGB: 16,
+            artifactSizeBytes: try XCTUnwrap(artifactSizes[Self.eightBKey]),
+            minimumExpectedContext: 30_000
+        )
+        try assertMatchedFloorUsesVerifiedArtifactSize(
+            modelKey: Self.threeBKey,
+            memoryGB: 8,
+            artifactSizeBytes: try XCTUnwrap(artifactSizes[Self.threeBKey]),
+            minimumExpectedContext: 12_000
+        )
+    }
+
+    private func assertMatchedFloorUsesVerifiedArtifactSize(
+        modelKey: String,
+        memoryGB: Int,
+        artifactSizeBytes: Int,
+        minimumExpectedContext: Int,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        var request = try makeRequest(modelKey: modelKey)
+        request.hardware = Self.hardware(chip: "Apple M5", memoryGB: memoryGB, bandwidthTier: .c)
+        let result = AutotuneRecommendEngine().recommend(request)
+        let selected = try XCTUnwrap(result.selectedCandidate, file: file, line: line)
+        XCTAssertEqual(selected.catalogKey, modelKey, file: file, line: line)
+        var benchmark = try XCTUnwrap(request.benchmarks[selected.catalogKey], file: file, line: line)
+        let row = try XCTUnwrap(request.candidateCatalog.rows[selected.catalogKey], file: file, line: line)
+        let geometry = try XCTUnwrap(Self.signedCandidateConfigGeometry[modelKey], file: file, line: line)
+        XCTAssertEqual(geometry.revision, row.modelRevision, file: file, line: line)
+        Self.bindContextConfig(geometry.json, to: &benchmark)
+        benchmark.modelArtifactSizeBytes = artifactSizeBytes
+        let configData = try XCTUnwrap(benchmark.modelConfigJSONData, file: file, line: line)
+        let configSHA = try XCTUnwrap(benchmark.modelConfigSHA256, file: file, line: line)
+
+        XCTAssertEqual(
+            AutotuneModelContextCap.memorySafeContextTokens(
+                configData: configData,
+                hardwareMemoryGB: memoryGB,
+                catalogMinRAMGB: row.minRAMGB
+            ),
+            AutotuneModelContextCap.minimumServeContext,
+            "catalog min_ram_gb remains an eligibility/fallback floor at the matched boundary",
+            file: file,
+            line: line
+        )
+        let artifactSizedMemoryCap = try XCTUnwrap(
+            AutotuneModelContextCap.memorySafeContextTokens(
+                configData: configData,
+                hardwareMemoryGB: memoryGB,
+                catalogMinRAMGB: row.minRAMGB,
+                verifiedArtifactSizeBytes: artifactSizeBytes
+            ),
+            file: file,
+            line: line
+        )
+        XCTAssertGreaterThan(artifactSizedMemoryCap, minimumExpectedContext, file: file, line: line)
+        XCTAssertGreaterThan(
+            try XCTUnwrap(AutotuneModelContextCap.memoryFitBatchDepth(
+                configData: configData,
+                verifiedConfigSHA256: configSHA,
+                hardwareMemoryGB: memoryGB,
+                catalogMinRAMGB: row.minRAMGB,
+                calibrationContextTokens: AutotuneModelContextCap.minimumServeContext,
+                verifiedArtifactSizeBytes: artifactSizeBytes
+            ), file: file, line: line),
+            1,
+            "slot fit should be based on verified bytes, not the zero-spare catalog boundary",
+            file: file,
+            line: line
+        )
+
+        let core = AutotuneCommand.recommendationCoreForConfig(
+            selected: selected,
+            selectedBenchmark: benchmark,
+            selectedRow: row,
+            catalogVersion: request.candidateCatalog.version,
+            catalogHash: request.candidateCatalogSHA256,
+            hardware: request.hardware,
+            draftModel: nil
+        )
+
+        XCTAssertGreaterThan(core.knobs.maxContext, AutotuneModelContextCap.minimumServeContext, file: file, line: line)
+        XCTAssertGreaterThanOrEqual(core.knobs.maxContext, minimumExpectedContext, file: file, line: line)
+    }
+
     func testRecommendApplyServeConfigRaisesQwenEightBContextOnThirtyTwoGBMac() throws {
         var request = try makeRequest(modelKey: "qwen3-8b")
         request.hardware = Self.hardware(chip: "Apple M5", memoryGB: 32, bandwidthTier: .c)
@@ -1330,7 +1419,8 @@ final class AutotuneRecommendTests: XCTestCase {
         catalogKey: String,
         row: CandidateCatalog.Row,
         hardware: AutotuneRecommendHardware,
-        draftModel: String? = nil
+        draftModel: String? = nil,
+        artifactSizeBytes: Int? = nil
     ) throws -> (context: Int, slots: Int, configData: Data) {
         var request = try makeRequest()
         request.hardware = hardware
@@ -1339,6 +1429,10 @@ final class AutotuneRecommendTests: XCTestCase {
         let geometry = try XCTUnwrap(Self.signedCandidateConfigGeometry[catalogKey], "no pinned config geometry for \(catalogKey)")
         XCTAssertEqual(geometry.revision, row.modelRevision, "\(catalogKey): geometry fixture is for another revision")
         Self.bindContextConfig(geometry.json, to: &benchmark)
+        benchmark.modelArtifactSizeBytes = try XCTUnwrap(
+            artifactSizeBytes ?? Self.signedCandidateArtifactSizeBytes()[catalogKey],
+            "no pinned artifact size for \(catalogKey)"
+        )
         let core = AutotuneCommand.recommendationCoreForConfig(
             selected: selected,
             selectedBenchmark: benchmark,
@@ -1365,7 +1459,10 @@ final class AutotuneRecommendTests: XCTestCase {
             .appendingPathComponent("catalog/autotune/autotune-candidates.json")
         let catalog = try AutotuneStaticInputs.decodeCandidateCatalog(Data(contentsOf: catalogURL))
         XCTAssertEqual(Set(catalog.rows.keys), Set(Self.signedCandidateConfigGeometry.keys), "every signed row needs a pinned geometry fixture")
+        let artifactSizes = try Self.signedCandidateArtifactSizeBytes()
+        XCTAssertEqual(Set(catalog.rows.keys), Set(artifactSizes.keys), "every signed row needs a measured primary artifact-size fixture")
         let gib: UInt64 = 1 << 30
+        let safetyBytes = UInt64(AutotuneRecommendEngine.safetyMarginGB) * gib
         let machines = [
             Self.hardware(chip: "Apple M3 Ultra", memoryGB: 256, bandwidthTier: .s),
             Self.hardware(chip: "Apple M3 Ultra", memoryGB: 128, bandwidthTier: .s),
@@ -1374,13 +1471,20 @@ final class AutotuneRecommendTests: XCTestCase {
         var checked = 0
         for hardware in machines {
             for (key, row) in catalog.rows.sorted(by: { $0.key < $1.key }) {
-                let reservedGB = row.minRAMGB + AutotuneRecommendEngine.safetyMarginGB
-                guard reservedGB < hardware.memoryGB else { continue }
-                let pair = try generatedServePair(catalogKey: key, row: row, hardware: hardware)
+                let artifactSizeBytes = try XCTUnwrap(artifactSizes[key], "missing artifact size for \(key)")
+                let occupiedBytes = UInt64(artifactSizeBytes) + safetyBytes
+                let physicalBytes = UInt64(hardware.memoryGB) * gib
+                guard occupiedBytes < physicalBytes else { continue }
+                let pair = try generatedServePair(
+                    catalogKey: key,
+                    row: row,
+                    hardware: hardware,
+                    artifactSizeBytes: artifactSizeBytes
+                )
                 let label = "\(key) on \(hardware.memoryGB) GB: context \(pair.context) x \(pair.slots) slots"
                 let bytesPerToken = try XCTUnwrap(AutotuneModelContextCap.kvCacheBytesPerToken(configData: pair.configData), label)
                 let kvBytes = UInt64(bytesPerToken) * UInt64(pair.context) * UInt64(pair.slots)
-                XCTAssertLessThanOrEqual(kvBytes + UInt64(reservedGB) * gib, UInt64(hardware.memoryGB) * gib, label)
+                XCTAssertLessThanOrEqual(kvBytes + occupiedBytes, physicalBytes, label)
                 XCTAssertGreaterThanOrEqual(pair.slots, 1, label)
                 XCTAssertLessThanOrEqual(pair.slots, hardware.recommendedMaxBatch, label)
                 if pair.slots > 1 {
@@ -1389,7 +1493,8 @@ final class AutotuneRecommendTests: XCTestCase {
                         verifiedConfigSHA256: Self.sha256Hex(pair.configData),
                         hardwareMemoryGB: hardware.memoryGB,
                         catalogMinRAMGB: row.minRAMGB,
-                        calibrationContextTokens: pair.context
+                        calibrationContextTokens: pair.context,
+                        verifiedArtifactSizeBytes: artifactSizeBytes
                     ), label)
                     XCTAssertLessThanOrEqual(pair.slots, fit, label)
                 }
@@ -1400,8 +1505,8 @@ final class AutotuneRecommendTests: XCTestCase {
     }
 
     /// The auditor's case: signed GLM-4.5-Air on a 256 GB Ultra kept its
-    /// declared 131,072-token context beside the 8-slot tier constant, about
-    /// 200 GB of KV cache. The context stays; the slots come down to what fits.
+    /// declared 131,072-token context beside the 8-slot tier constant. The
+    /// context stays; the slots come down to the verified artifact byte cap.
     func testGLM45AirOn256GBUltraKeepsItsContextAndLowersSlotsToFitMemory() throws {
         let catalog = try AutotuneStaticInputs.decodeCandidateCatalog(Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8))
         let row = try XCTUnwrap(catalog.rows["z-ai/glm-4.5-air"])
@@ -1412,7 +1517,7 @@ final class AutotuneRecommendTests: XCTestCase {
 
         XCTAssertEqual(pair.context, 131_072, "R018 context is unchanged")
         XCTAssertLessThan(pair.slots, 8)
-        XCTAssertEqual(pair.slots, 5)
+        XCTAssertEqual(pair.slots, 6)
 
         let qwen = try XCTUnwrap(catalog.rows["qwen/qwen3.6-27b"])
         let qwenPair = try generatedServePair(catalogKey: "qwen/qwen3.6-27b", row: qwen, hardware: hardware)
@@ -3572,10 +3677,14 @@ final class AutotuneRecommendTests: XCTestCase {
         try Data("b".utf8).write(to: second.appendingPathComponent("b.bin"))
         try Data("a".utf8).write(to: second.appendingPathComponent("a.bin"))
 
+        let firstInspection = try ModelArtifactVerifier.inspectCanonicalArtifact(directory: first)
+        let secondInspection = try ModelArtifactVerifier.inspectCanonicalArtifact(directory: second)
         XCTAssertEqual(
-            try ModelArtifactVerifier.canonicalArtifactHash(directory: first),
-            try ModelArtifactVerifier.canonicalArtifactHash(directory: second)
+            firstInspection.sha256,
+            secondInspection.sha256
         )
+        XCTAssertEqual(firstInspection.sizeBytes, 2)
+        XCTAssertEqual(secondInspection.sizeBytes, 2)
     }
 
     func testModelArtifactHashIncludesHiddenFiles() throws {
@@ -6240,6 +6349,33 @@ final class AutotuneRecommendTests: XCTestCase {
         let data = Data(json.utf8)
         benchmark.modelConfigJSONData = data
         benchmark.modelConfigSHA256 = sha256Hex(data)
+    }
+
+    private static func signedCandidateArtifactSizeBytes() throws -> [String: Int] {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("catalog/autotune/autotune-artifacts-source.json")
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: sourceURL)) as? [String: Any])
+        let models = try XCTUnwrap(root["models"] as? [String: Any])
+        var sizes: [String: Int] = [:]
+        for (key, rawModel) in models {
+            let model = try XCTUnwrap(rawModel as? [String: Any], "bad artifact source model \(key)")
+            let artifacts = try XCTUnwrap(model["artifacts"] as? [String: Any], "missing artifacts for \(key)")
+            let primary = try XCTUnwrap(
+                artifacts.sorted { lhs, rhs in
+                    let lhsIsMLX = lhs.key.hasPrefix("mlx")
+                    let rhsIsMLX = rhs.key.hasPrefix("mlx")
+                    if lhsIsMLX != rhsIsMLX { return lhsIsMLX }
+                    return lhs.key < rhs.key
+                }.first?.value as? [String: Any],
+                "missing primary artifact for \(key)"
+            )
+            let size = try XCTUnwrap(primary["size_bytes"] as? Int, "missing size_bytes for \(key)")
+            sizes[key] = size
+        }
+        return sizes
     }
 
     private static func sha256Hex(_ data: Data) -> String {
