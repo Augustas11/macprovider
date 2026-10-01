@@ -21,8 +21,14 @@ BLOCKER_KEYS = (
     "mlx_swift_lm_545_qwen38_mtp",
     "mlx_swift_lm_581_resumable_qwen_mtp",
     "mlx_swift_lm_584_rotating_cache_trim",
+    "mlx_swift_lm_598_mtp_norm_double_shift",
+    "mlx_swift_lm_620_cache_clear_first_token",
     "mlx_swift_lm_622_exact_rotating_cache_rewinds",
+    "mlx_swift_lm_631_gdn_reload_leak",
+    "mlx_swift_lm_633_qwen_gdn_epsilon",
     "mlx_swift_lm_645_public_mtp_transactions",
+    "mlx_swift_lm_514_max_kv_size_hybrid",
+    "mlx_swift_lm_335_modelcontainer_api_break",
 )
 RELEASE_PIN_KEYS = {
     "mlx_swift_lm_latest": "mlx_swift_lm",

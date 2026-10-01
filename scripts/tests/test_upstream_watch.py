@@ -21,8 +21,14 @@ WATCH_BLOCKERS = (
     "mlx_swift_lm_545_qwen38_mtp",
     "mlx_swift_lm_581_resumable_qwen_mtp",
     "mlx_swift_lm_584_rotating_cache_trim",
+    "mlx_swift_lm_598_mtp_norm_double_shift",
+    "mlx_swift_lm_620_cache_clear_first_token",
     "mlx_swift_lm_622_exact_rotating_cache_rewinds",
+    "mlx_swift_lm_631_gdn_reload_leak",
+    "mlx_swift_lm_633_qwen_gdn_epsilon",
     "mlx_swift_lm_645_public_mtp_transactions",
+    "mlx_swift_lm_514_max_kv_size_hybrid",
+    "mlx_swift_lm_335_modelcontainer_api_break",
 )
 
 
@@ -111,6 +117,29 @@ class SwiftPMPinParsingTests(unittest.TestCase):
 
 
 class UpstreamWatchComparisonTests(unittest.TestCase):
+    def test_checked_in_watch_baseline_is_valid_and_complete(self):
+        watch_path = (
+            Path(__file__).parents[2]
+            / "beta"
+            / "throughput-engineering"
+            / "UPSTREAM_WATCH.json"
+        )
+        baseline = json.loads(watch_path.read_text())
+
+        self.assertEqual(baseline["schema_version"], 3)
+        for key in WATCH_BLOCKERS:
+            self.assertIn(key, baseline["blockers"])
+        required_mtp_merges = baseline["implementation_signals"][
+            "native_mtp_required_merges"
+        ]
+        self.assertIn("mlx_swift_lm_598_mtp_norm_double_shift", required_mtp_merges)
+        self.assertEqual(
+            baseline["implementation_signals"][
+                "native_mtp_required_merges_in_latest_release"
+            ],
+            all(row["in_latest_release"] for row in required_mtp_merges.values()),
+        )
+
     @staticmethod
     def _baseline():
         return {
@@ -129,8 +158,14 @@ class UpstreamWatchComparisonTests(unittest.TestCase):
                 "mlx_swift_lm_545_qwen38_mtp": {"state": "OPEN"},
                 "mlx_swift_lm_581_resumable_qwen_mtp": {"state": "OPEN"},
                 "mlx_swift_lm_584_rotating_cache_trim": {"state": "MERGED", "merged_at": "x"},
+                "mlx_swift_lm_598_mtp_norm_double_shift": {"state": "MERGED", "merged_at": "x"},
+                "mlx_swift_lm_620_cache_clear_first_token": {"state": "MERGED", "merged_at": "x"},
                 "mlx_swift_lm_622_exact_rotating_cache_rewinds": {"state": "OPEN"},
+                "mlx_swift_lm_631_gdn_reload_leak": {"state": "OPEN"},
+                "mlx_swift_lm_633_qwen_gdn_epsilon": {"state": "OPEN"},
                 "mlx_swift_lm_645_public_mtp_transactions": {"state": "OPEN"},
+                "mlx_swift_lm_514_max_kv_size_hybrid": {"state": "MERGED", "merged_at": "x"},
+                "mlx_swift_lm_335_modelcontainer_api_break": {"state": "OPEN"},
             },
             "releases": {
                 "mlx_swift_latest": {"tag": "0.31.6"},
@@ -162,8 +197,14 @@ class UpstreamWatchComparisonTests(unittest.TestCase):
                 "mlx_swift_lm_545_qwen38_mtp": {"state": "OPEN"},
                 "mlx_swift_lm_581_resumable_qwen_mtp": {"state": "OPEN"},
                 "mlx_swift_lm_584_rotating_cache_trim": {"state": "MERGED", "merged_at": "x"},
+                "mlx_swift_lm_598_mtp_norm_double_shift": {"state": "MERGED", "merged_at": "x"},
+                "mlx_swift_lm_620_cache_clear_first_token": {"state": "MERGED", "merged_at": "x"},
                 "mlx_swift_lm_622_exact_rotating_cache_rewinds": {"state": "OPEN"},
+                "mlx_swift_lm_631_gdn_reload_leak": {"state": "OPEN"},
+                "mlx_swift_lm_633_qwen_gdn_epsilon": {"state": "OPEN"},
                 "mlx_swift_lm_645_public_mtp_transactions": {"state": "OPEN"},
+                "mlx_swift_lm_514_max_kv_size_hybrid": {"state": "MERGED", "merged_at": "x"},
+                "mlx_swift_lm_335_modelcontainer_api_break": {"state": "OPEN"},
             },
             "releases": {
                 "mlx_swift_latest": {"tag": "0.31.6"},
@@ -196,8 +237,14 @@ class UpstreamWatchComparisonTests(unittest.TestCase):
                 "mlx_swift_lm_545_qwen38_mtp": {"state": "OPEN"},
                 "mlx_swift_lm_581_resumable_qwen_mtp": {"state": "OPEN"},
                 "mlx_swift_lm_584_rotating_cache_trim": {"state": "MERGED", "merged_at": "x"},
+                "mlx_swift_lm_598_mtp_norm_double_shift": {"state": "MERGED", "merged_at": "x"},
+                "mlx_swift_lm_620_cache_clear_first_token": {"state": "MERGED", "merged_at": "x"},
                 "mlx_swift_lm_622_exact_rotating_cache_rewinds": {"state": "OPEN"},
+                "mlx_swift_lm_631_gdn_reload_leak": {"state": "OPEN"},
+                "mlx_swift_lm_633_qwen_gdn_epsilon": {"state": "OPEN"},
                 "mlx_swift_lm_645_public_mtp_transactions": {"state": "OPEN"},
+                "mlx_swift_lm_514_max_kv_size_hybrid": {"state": "MERGED", "merged_at": "x"},
+                "mlx_swift_lm_335_modelcontainer_api_break": {"state": "OPEN"},
             },
             "releases": {
                 "mlx_swift_latest": {"tag": "0.31.6"},
@@ -367,6 +414,31 @@ class UpstreamWatchComparisonTests(unittest.TestCase):
             "ready_for_implementation",
         )
         self.assertEqual(material_changes(old, merged), (False, "unchanged"))
+
+    def test_live_automation_status_does_not_overwrite_reviewed_status(self):
+        old = self._baseline()
+        old["blockers"]["mlx_swift_lm_631_gdn_reload_leak"] = {
+            "state": "OPEN",
+            "status": "human_reviewed_hold",
+        }
+        live = self._baseline()
+        live["blockers"]["mlx_swift_lm_631_gdn_reload_leak"] = {
+            "state": "OPEN",
+            "automation_status": "blocked_upstream_open_or_disable_MLX_QWEN_FOUR_GDN",
+        }
+
+        merged = merge_snapshot(old, live)
+
+        self.assertEqual(
+            merged["blockers"]["mlx_swift_lm_631_gdn_reload_leak"]["status"],
+            "human_reviewed_hold",
+        )
+        self.assertEqual(
+            merged["blockers"]["mlx_swift_lm_631_gdn_reload_leak"][
+                "automation_status"
+            ],
+            "blocked_upstream_open_or_disable_MLX_QWEN_FOUR_GDN",
+        )
 
     def test_new_watch_blocker_key_is_material_not_a_compare_error(self):
         old = self._baseline()
