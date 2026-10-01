@@ -141,6 +141,10 @@ while i < len(lines):
 open(p, "w").write("\n".join(out))
 PY
   nginx -t 2>&1 | tail -1 && systemctl reload nginx
+  # reload is asynchronous: wait until the new workers answer 503
+  local i; for i in $(seq 1 20); do
+    [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST https://api.malibu.tech/v1/chat/completions)" = 503 ] && break; sleep 0.5
+  done
 }
 nginx_unblock_buyers() {
   mv /etc/nginx/sites-available/api.malibu.tech.e2e-pre503 /etc/nginx/sites-available/api.malibu.tech && nginx -t 2>&1 | tail -1 && systemctl reload nginx
