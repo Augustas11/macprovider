@@ -240,7 +240,7 @@ Per scenario after the fixes (shakedown ref):
 | scenario | harness | product signal (provisional, re-checked on the acceptance ref) |
 |---|---|---|
 | S1 baseline | OK | P-1 disconnect holds outlive the drain |
-| S2 updater rollout | OK: plan, rollback rehearsal (exact restore), apply, artifact paths, live release, dead-man, pricing floor, order, canary proof PASS | P-1; P-2 nginx step; P-3 404 during apply; gateway-first catalog shape (P-4) |
+| S2 updater rollout | OK: plan, rollback rehearsal (exact restore), apply, artifact paths, live release, dead-man, pricing floor, order, canary proof PASS | P-1; P-3 404 during apply; gateway-first catalog shape (P-4) |
 | S3 pool models | OK: config, pools, delegation, bind (loopback + native), events, pool `/v1/models`, disclosure, never-global, entry-price oracle PASS | P-1 on pool `st_dc`; P-5 native streams refunded; P-6 `/poolz` hash_status; P-4 coordinator-first catalog |
 | S4 refusals | OK | none (blocked identity GAP, D4) |
 | S5 rotation/revocation | OK after the receipt-key fix | P-7 SIGHUP of bounds/owner accounts silently ignored |
@@ -263,9 +263,6 @@ gateway (S2 gateway-first, S2 new pair, S3 pool routes) they were still
 active after 15-22 min. Repro: S1/S2/S3 `st_dc` rows
 (`p1As2new.oracle.json`, request `c1d344b6-…`, verdict deadline 11:24 UTC,
 still held 11:41).
-
-**P-2 (runbook, nginx).** Covered by the shakedown fix above; recheck that the
-runbook's manual step reaches 200 with the live vhost's leftover comment.
 
 **P-3 (buyer-visible during the updater apply).** Right after the new gateway
 starts, before providers reconnect, a buyer request answers
