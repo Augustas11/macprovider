@@ -2515,21 +2515,21 @@ extension ModelManagementTests {
         """
     }
 
-    private static func poolBindingJSON(poolModelID: String = "pool/\(poolID)/my-model") -> String {
+    // Exactly the coordinator's modelAdmissionPoolBindingObject key set.
+    private static func poolBindingJSON(poolModelID: String = "pool/\(poolID)/my-model", scope: String = "pool") -> String {
         """
-        {"pool_id":"\(poolID)","pool_model_id":"\(poolModelID)","manifest_version":3,"core_digest":"\(String(repeating: "c", count: 64))","artifact_hash_algorithm":"macprovider.gguf-file.v1","artifact_hash":"\(String(repeating: "d", count: 64))","runtime_source":"llamacpp_loopback","pricing":{"prompt_rate_per_mtok":100,"prompt_cache_hit_rate_per_mtok":10,"completion_rate_per_mtok":400},"disclosure_class":"pool_attested_unverified","max_context_tokens":32768}
+        {"binding_scope":"\(scope)","pool_id":"\(poolID)","pool_model_id":"\(poolModelID)","manifest_version":3,"manifest_core_digest":"\(String(repeating: "c", count: 64))","artifact_hash_algorithm":"macprovider.gguf-file.v1","artifact_hash":"\(String(repeating: "d", count: 64))","runtime_source":"llamacpp_loopback","prompt_rate_per_mtok":100,"prompt_cache_hit_rate_per_mtok":10,"completion_rate_per_mtok":400,"disclosure_class":"pool_attested_unverified","max_context_tokens":32768,"provider_account_id":"acct-creator","observed_catalog_model_key":null,"probe_evidence_digest":null}
         """
     }
 
     private static func poolStatusJSON(
         catalogModelKey: String = "null",
         earningPath: String = "pool_attested_earning",
-        scope: String? = #""binding_scope":"pool","#,
         binding: String? = poolBindingJSON()
     ) -> String {
         let bindingField = binding.map { #","pool_binding":"# + $0 } ?? ""
         return """
-        {"schema":"model_admission_status.v1",\(scope ?? "")"generated_at":"2026-10-01T00:00:00Z","cli_version":"1.8.208","provider_id":"provider-1","candidate_id":"\(poolCandidateID)","served_model_ref":"llamacpp:my-model","catalog_model_key":\(catalogModelKey),"admission_state":"catalog_priced","admission_state_source":"coordinator","coordinator_event_id":"event-1","state_observed_at":"2026-10-01T00:00:00Z","provider_guidance":{"state_label_key":"byom.admission.catalog_priced","state_meaning_key":"byom.admission.not_earning","next_action":"withdraw","transition_reason_code":null,"earning_path_class":"\(earningPath)"},"allowed_next_states":["withdrawn","revoked"],"warnings":[]\(bindingField)}
+        {"schema":"model_admission_status.v1","generated_at":"2026-10-01T00:00:00Z","cli_version":"1.8.208","provider_id":"provider-1","candidate_id":"\(poolCandidateID)","served_model_ref":"llamacpp:my-model","catalog_model_key":\(catalogModelKey),"admission_state":"catalog_priced","admission_state_source":"coordinator","coordinator_event_id":"event-1","state_observed_at":"2026-10-01T00:00:00Z","provider_guidance":{"state_label_key":"byom.admission.catalog_priced","state_meaning_key":"byom.admission.not_earning","next_action":"withdraw","transition_reason_code":null,"earning_path_class":"\(earningPath)"},"allowed_next_states":["withdrawn","revoked"],"warnings":[]\(bindingField)}
         """
     }
 
@@ -2553,11 +2553,13 @@ extension ModelManagementTests {
         let status = try decodeStatus(Self.poolStatusJSON())
         XCTAssertNoThrow(try status.validated(expectedCandidateID: Self.poolCandidateID))
         XCTAssertEqual(status.validPoolBinding?.poolID, Self.poolID)
+        XCTAssertEqual(status.validPoolBinding?.manifestCoreDigest, String(repeating: "c", count: 64))
+        XCTAssertEqual(status.validPoolBinding?.completionRatePerMtok, 400)
         let rejected = [
-            Self.poolStatusJSON(scope: nil, binding: nil),
-            Self.poolStatusJSON(catalogModelKey: #""qwen3-8b""#),
             Self.poolStatusJSON(binding: nil),
+            Self.poolStatusJSON(catalogModelKey: #""qwen3-8b""#),
             Self.poolStatusJSON(binding: Self.poolBindingJSON(poolModelID: "pool/ZZCdEfGhIjKlMnOpQrStUv/my-model")),
+            Self.poolStatusJSON(binding: Self.poolBindingJSON(scope: "global")),
         ]
         for json in rejected {
             let document = try decodeStatus(json)
@@ -2565,6 +2567,12 @@ extension ModelManagementTests {
         }
         let extraKey = Self.poolStatusJSON(binding: Self.poolBindingJSON().replacingOccurrences(of: "}", with: #","extra":1}"#))
         XCTAssertThrowsError(try decodeStatus(extraKey))
+        let legacyDigestName = Self.poolStatusJSON(binding: Self.poolBindingJSON().replacingOccurrences(of: "manifest_core_digest", with: "core_digest"))
+        XCTAssertThrowsError(try decodeStatus(legacyDigestName))
+        let missingNullable = Self.poolStatusJSON(binding: Self.poolBindingJSON().replacingOccurrences(of: #","probe_evidence_digest":null"#, with: ""))
+        XCTAssertThrowsError(try decodeStatus(missingNullable))
+        let topLevelScope = Self.poolStatusJSON().replacingOccurrences(of: #""schema":"#, with: #""binding_scope":"pool","schema":"#)
+        XCTAssertThrowsError(try decodeStatus(topLevelScope))
     }
 
     func testPoolEarningRowUsesPoolCopyAndOnlyForCoordinatorCatalogPriced() throws {

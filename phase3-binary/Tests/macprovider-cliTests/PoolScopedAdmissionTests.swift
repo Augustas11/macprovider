@@ -11,21 +11,24 @@ final class PoolScopedAdmissionTests: XCTestCase {
     static let candidateID = "byom_" + String(repeating: "a", count: 52)
 
     static func poolBindingObject() -> [String: Any] {
+        // Exactly the coordinator's modelAdmissionPoolBindingObject key set.
         [
+            "binding_scope": "pool",
             "pool_id": poolID,
             "pool_model_id": poolModelID,
             "manifest_version": 3,
-            "core_digest": String(repeating: "c", count: 64),
+            "manifest_core_digest": String(repeating: "c", count: 64),
             "artifact_hash_algorithm": "macprovider.gguf-file.v1",
             "artifact_hash": String(repeating: "d", count: 64),
             "runtime_source": "llamacpp_loopback",
-            "pricing": [
-                "prompt_rate_per_mtok": 100,
-                "prompt_cache_hit_rate_per_mtok": 10,
-                "completion_rate_per_mtok": 400,
-            ],
+            "prompt_rate_per_mtok": 100,
+            "prompt_cache_hit_rate_per_mtok": 10,
+            "completion_rate_per_mtok": 400,
             "disclosure_class": "pool_attested_unverified",
             "max_context_tokens": 32768,
+            "provider_account_id": "acct-creator",
+            "observed_catalog_model_key": NSNull(),
+            "probe_evidence_digest": NSNull(),
         ]
     }
 
@@ -34,7 +37,7 @@ final class PoolScopedAdmissionTests: XCTestCase {
         catalogModelKey: Any = NSNull(),
         nextAction: String = "withdraw",
         earningPath: String = "pool_attested_earning",
-        scope: Any? = "pool",
+        topLevelScope: Any? = nil,
         binding: Any? = poolBindingObject()
     ) -> [String: Any] {
         var object: [String: Any] = [
@@ -59,7 +62,7 @@ final class PoolScopedAdmissionTests: XCTestCase {
             "allowed_next_states": ["withdrawn", "revoked"],
             "warnings": [],
         ]
-        if let scope { object["binding_scope"] = scope }
+        if let topLevelScope { object["binding_scope"] = topLevelScope }
         if let binding { object["pool_binding"] = binding }
         return object
     }
@@ -77,7 +80,10 @@ final class PoolScopedAdmissionTests: XCTestCase {
         XCTAssertTrue(status.isPoolScoped)
         XCTAssertNil(status.catalogModelKey)
         XCTAssertEqual(status.poolBinding?.poolModelID, Self.poolModelID)
-        XCTAssertEqual(status.poolBinding?.pricing.completionRatePerMtok, 400)
+        XCTAssertEqual(status.poolBinding?.completionRatePerMtok, 400)
+        XCTAssertEqual(status.poolBinding?.manifestCoreDigest, String(repeating: "c", count: 64))
+        XCTAssertEqual(status.poolBinding?.providerAccountID, "acct-creator")
+        XCTAssertNil(status.poolBinding?.observedCatalogModelKey)
         XCTAssertEqual(status.providerGuidance.earningPathClass, "pool_attested_earning")
         let encoded = Data(try ModelSwitchingWireCodec.encode(status).utf8)
         XCTAssertEqual(try BYOMAdmissionStatusWire.decodeStrictStatus(from: encoded), status)
@@ -90,6 +96,23 @@ final class PoolScopedAdmissionTests: XCTestCase {
         mlx["artifact_hash_algorithm"] = "macprovider.snapshot-manifest.v1"
         mlx["runtime_source"] = "mlx_cache"
         XCTAssertNoThrow(try decode(Self.statusObject(binding: mlx)))
+        // The nullable audit fields round-trip when set, and stay present as
+        // explicit nulls when not.
+        var audited = Self.poolBindingObject()
+        audited["observed_catalog_model_key"] = "qwen3-8b"
+        audited["probe_evidence_digest"] = String(repeating: "e", count: 64)
+        let auditedStatus = try decode(Self.statusObject(binding: audited))
+        XCTAssertEqual(auditedStatus.poolBinding?.observedCatalogModelKey, "qwen3-8b")
+        XCTAssertEqual(try BYOMAdmissionStatusWire.decodeStrictStatus(
+            from: Data(try ModelSwitchingWireCodec.encode(auditedStatus).utf8)
+        ), auditedStatus)
+        let reencoded = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(try ModelSwitchingWireCodec.encode(status).utf8)
+        ) as? [String: Any])
+        let reencodedBinding = try XCTUnwrap(reencoded["pool_binding"] as? [String: Any])
+        XCTAssertEqual(Set(reencodedBinding.keys), BYOMAdmissionStatusWire.PoolBinding.keys)
+        XCTAssertTrue(reencodedBinding["probe_evidence_digest"] is NSNull)
+        XCTAssertNil(reencoded["binding_scope"])
     }
 
     func testStatusReadbackWordingIsPoolScopedAndHonest() throws {
@@ -101,7 +124,6 @@ final class PoolScopedAdmissionTests: XCTestCase {
         XCTAssertNil(poolBindingNote(try decode(Self.statusObject(
             catalogModelKey: "qwen3-8b",
             earningPath: "not_earning_yet_catalog_or_receipt_path_exists",
-            scope: nil,
             binding: nil
         ))))
     }
@@ -110,7 +132,6 @@ final class PoolScopedAdmissionTests: XCTestCase {
         var object = Self.statusObject(
             catalogModelKey: "qwen3-8b",
             earningPath: "not_earning_yet_catalog_or_receipt_path_exists",
-            scope: nil,
             binding: nil
         )
         let status = try decode(object)
@@ -120,33 +141,41 @@ final class PoolScopedAdmissionTests: XCTestCase {
         ) as? [String: Any])
         XCTAssertNil(reencoded["binding_scope"])
         XCTAssertNil(reencoded["pool_binding"])
-        // An explicit global scope is accepted too.
+        // The closed v1 envelope has no top-level binding_scope: the
+        // coordinator emits the scope only inside pool_binding.
         object["binding_scope"] = "global"
-        XCTAssertNoThrow(try decode(object))
+        XCTAssertThrowsError(try decode(object))
     }
 
     func testPoolScopeFailsClosed() {
         var badPricing = Self.poolBindingObject()
-        badPricing["pricing"] = ["prompt_rate_per_mtok": 10, "prompt_cache_hit_rate_per_mtok": 11, "completion_rate_per_mtok": 1]
+        badPricing["prompt_rate_per_mtok"] = 10
+        badPricing["prompt_cache_hit_rate_per_mtok"] = 11
         var otherPool = Self.poolBindingObject()
         otherPool["pool_model_id"] = "pool/ZZCdEfGhIjKlMnOpQrStUv/my-model"
         var mismatchedRuntime = Self.poolBindingObject()
         mismatchedRuntime["runtime_source"] = "mlxlm_loopback"
         var extraKey = Self.poolBindingObject()
         extraKey["catalog_model_key"] = "qwen3-8b"
-        var legacyPricing = Self.poolBindingObject()
-        legacyPricing["pricing"] = ["input_credits_per_million": 1, "output_credits_per_million": 2]
+        var nestedPricing = Self.poolBindingObject()
+        nestedPricing["pricing"] = ["prompt_rate_per_mtok": 100, "prompt_cache_hit_rate_per_mtok": 10, "completion_rate_per_mtok": 400]
+        var legacyDigestName = Self.poolBindingObject()
+        legacyDigestName["core_digest"] = legacyDigestName.removeValue(forKey: "manifest_core_digest")
+        var globalScope = Self.poolBindingObject()
+        globalScope["binding_scope"] = "global"
+        var missingNullable = Self.poolBindingObject()
+        missingNullable.removeValue(forKey: "probe_evidence_digest")
+        var badProbeDigest = Self.poolBindingObject()
+        badProbeDigest["probe_evidence_digest"] = "not-hex"
         var badDisclosure = Self.poolBindingObject()
         badDisclosure["disclosure_class"] = "network_verified"
         var badContext = Self.poolBindingObject()
         badContext["max_context_tokens"] = 0
         let rejected: [(String, [String: Any])] = [
-            ("pool earning on a global binding", Self.statusObject(scope: nil, binding: nil)),
-            ("pool earning on an explicit global binding", Self.statusObject(scope: "global", binding: nil)),
-            ("pool scope without binding", Self.statusObject(binding: nil)),
-            ("binding without pool scope", Self.statusObject(earningPath: "no_earning_path_in_v0_1", scope: nil)),
-            ("unknown scope", Self.statusObject(scope: "network")),
-            ("null scope", Self.statusObject(scope: NSNull())),
+            ("pool earning on a global binding", Self.statusObject(binding: nil)),
+            ("top-level scope beside the binding", Self.statusObject(topLevelScope: "pool")),
+            ("binding scoped global", Self.statusObject(earningPath: "no_earning_path_in_v0_1", binding: globalScope)),
+            ("null binding", Self.statusObject(binding: NSNull())),
             ("pool binding laundered into a catalog key", Self.statusObject(catalogModelKey: "qwen3-8b")),
             ("pool binding never settlement_capable", Self.statusObject(state: "settlement_capable", nextAction: "maintain_runtime", earningPath: "settlement_capable")),
             ("pool earning outside catalog_priced", Self.statusObject(state: "network_admitted_unsettled")),
@@ -154,7 +183,10 @@ final class PoolScopedAdmissionTests: XCTestCase {
             ("pool id segment differs", Self.statusObject(binding: otherPool)),
             ("gguf entry on an MLX runtime", Self.statusObject(binding: mismatchedRuntime)),
             ("extra binding key", Self.statusObject(binding: extraKey)),
-            ("superseded pricing names", Self.statusObject(binding: legacyPricing)),
+            ("nested pricing object", Self.statusObject(binding: nestedPricing)),
+            ("core_digest instead of manifest_core_digest", Self.statusObject(binding: legacyDigestName)),
+            ("nullable key omitted", Self.statusObject(binding: missingNullable)),
+            ("probe digest grammar", Self.statusObject(binding: badProbeDigest)),
             ("disclosure class", Self.statusObject(binding: badDisclosure)),
             ("max context bound", Self.statusObject(binding: badContext)),
         ]

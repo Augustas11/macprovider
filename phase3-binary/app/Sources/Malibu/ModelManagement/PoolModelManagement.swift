@@ -5,65 +5,72 @@ import Foundation
 // the provider CLI's BYOM commands.
 
 /// SPEC-047-R011 pool-manifest binding as `models admission status --json`
-/// reports it. A closed object; every value is checked before Malibu shows it.
+/// reports it: exactly the coordinator's closed `pool_binding` object, flat
+/// rates and both nullable keys present. Every value is checked before Malibu
+/// shows it.
 struct MalibuBYOMPoolBinding: Decodable, Equatable, Sendable {
-    struct Pricing: Decodable, Equatable, Sendable {
-        let promptRatePerMtok: Int64
-        let promptCacheHitRatePerMtok: Int64
-        let completionRatePerMtok: Int64
-
-        enum CodingKeys: String, CodingKey, CaseIterable {
-            case promptRatePerMtok = "prompt_rate_per_mtok"
-            case promptCacheHitRatePerMtok = "prompt_cache_hit_rate_per_mtok"
-            case completionRatePerMtok = "completion_rate_per_mtok"
-        }
-
-        init(from decoder: Decoder) throws {
-            try poolRejectUnknownKeys(decoder, allowed: CodingKeys.allCases.map(\.stringValue))
-            let container = try decoder.container(keyedBy: CodingKeys.self)
-            promptRatePerMtok = try container.decode(Int64.self, forKey: .promptRatePerMtok)
-            promptCacheHitRatePerMtok = try container.decode(Int64.self, forKey: .promptCacheHitRatePerMtok)
-            completionRatePerMtok = try container.decode(Int64.self, forKey: .completionRatePerMtok)
-        }
-    }
-
+    let bindingScope: String
     let poolID: String
     let poolModelID: String
     let manifestVersion: UInt64
-    let coreDigest: String
+    let manifestCoreDigest: String
     let artifactHashAlgorithm: String
     let artifactHash: String
     let runtimeSource: String
-    let pricing: Pricing
+    let promptRatePerMtok: Int64
+    let promptCacheHitRatePerMtok: Int64
+    let completionRatePerMtok: Int64
     let disclosureClass: String
     let maxContextTokens: Int
+    let providerAccountID: String
+    let observedCatalogModelKey: String?
+    let probeEvidenceDigest: String?
 
     enum CodingKeys: String, CodingKey, CaseIterable {
+        case bindingScope = "binding_scope"
         case poolID = "pool_id"
         case poolModelID = "pool_model_id"
         case manifestVersion = "manifest_version"
-        case coreDigest = "core_digest"
+        case manifestCoreDigest = "manifest_core_digest"
         case artifactHashAlgorithm = "artifact_hash_algorithm"
         case artifactHash = "artifact_hash"
         case runtimeSource = "runtime_source"
-        case pricing
+        case promptRatePerMtok = "prompt_rate_per_mtok"
+        case promptCacheHitRatePerMtok = "prompt_cache_hit_rate_per_mtok"
+        case completionRatePerMtok = "completion_rate_per_mtok"
         case disclosureClass = "disclosure_class"
         case maxContextTokens = "max_context_tokens"
+        case providerAccountID = "provider_account_id"
+        case observedCatalogModelKey = "observed_catalog_model_key"
+        case probeEvidenceDigest = "probe_evidence_digest"
     }
 
     init(from decoder: Decoder) throws {
         try poolRejectUnknownKeys(decoder, allowed: CodingKeys.allCases.map(\.stringValue))
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        // Nullable keys are required keys, not optional ones.
+        for key in [CodingKeys.observedCatalogModelKey, .probeEvidenceDigest] where !container.contains(key) {
+            throw DecodingError.keyNotFound(key, DecodingError.Context(
+                codingPath: container.codingPath,
+                debugDescription: "required nullable field missing"
+            ))
+        }
+        bindingScope = try container.decode(String.self, forKey: .bindingScope)
         poolID = try container.decode(String.self, forKey: .poolID)
         poolModelID = try container.decode(String.self, forKey: .poolModelID)
         manifestVersion = try container.decode(UInt64.self, forKey: .manifestVersion)
-        coreDigest = try container.decode(String.self, forKey: .coreDigest)
+        manifestCoreDigest = try container.decode(String.self, forKey: .manifestCoreDigest)
         artifactHashAlgorithm = try container.decode(String.self, forKey: .artifactHashAlgorithm)
         artifactHash = try container.decode(String.self, forKey: .artifactHash)
         runtimeSource = try container.decode(String.self, forKey: .runtimeSource)
-        pricing = try container.decode(Pricing.self, forKey: .pricing)
+        promptRatePerMtok = try container.decode(Int64.self, forKey: .promptRatePerMtok)
+        promptCacheHitRatePerMtok = try container.decode(Int64.self, forKey: .promptCacheHitRatePerMtok)
+        completionRatePerMtok = try container.decode(Int64.self, forKey: .completionRatePerMtok)
         disclosureClass = try container.decode(String.self, forKey: .disclosureClass)
         maxContextTokens = try container.decode(Int.self, forKey: .maxContextTokens)
+        providerAccountID = try container.decode(String.self, forKey: .providerAccountID)
+        observedCatalogModelKey = try container.decodeIfPresent(String.self, forKey: .observedCatalogModelKey)
+        probeEvidenceDigest = try container.decodeIfPresent(String.self, forKey: .probeEvidenceDigest)
     }
 
     static let poolIDPattern = "^[A-Za-z0-9_-]{22}$"
@@ -74,18 +81,22 @@ struct MalibuBYOMPoolBinding: Decodable, Equatable, Sendable {
     ]
 
     var isValid: Bool {
-        poolID.range(of: Self.poolIDPattern, options: .regularExpression) != nil
+        bindingScope == "pool"
+            && poolID.range(of: Self.poolIDPattern, options: .regularExpression) != nil
             && poolModelID.utf8.count <= 91
             && poolModelID.range(of: Self.poolModelIDPattern, options: .regularExpression) != nil
             && poolModelID.split(separator: "/", omittingEmptySubsequences: false).dropFirst().first.map(String.init) == poolID
             && manifestVersion >= 1
-            && Self.isLowercaseHex64(coreDigest)
+            && Self.isLowercaseHex64(manifestCoreDigest)
             && Self.isLowercaseHex64(artifactHash)
             && Self.runtimesByAlgorithm[artifactHashAlgorithm]?.contains(runtimeSource) == true
-            && pricing.promptRatePerMtok >= 0
-            && pricing.completionRatePerMtok >= 0
-            && pricing.promptCacheHitRatePerMtok >= 0
-            && pricing.promptCacheHitRatePerMtok <= pricing.promptRatePerMtok
+            && promptRatePerMtok >= 0
+            && completionRatePerMtok >= 0
+            && promptCacheHitRatePerMtok >= 0
+            && promptCacheHitRatePerMtok <= promptRatePerMtok
+            && providerAccountID.utf8.count <= 256
+            && (observedCatalogModelKey.map { !$0.isEmpty && $0.utf8.count <= 128 } ?? true)
+            && (probeEvidenceDigest.map(Self.isLowercaseHex64) ?? true)
             && disclosureClass == "pool_attested_unverified"
             && (1...1_048_576).contains(maxContextTokens)
     }

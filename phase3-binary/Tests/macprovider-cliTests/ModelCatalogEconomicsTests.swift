@@ -968,7 +968,6 @@ final class ModelCatalogEconomicsTests: XCTestCase {
             ),
             allowedNextStates: [],
             warnings: [],
-            bindingScope: "pool",
             poolBinding: try JSONDecoder().decode(
                 BYOMAdmissionStatusWire.PoolBinding.self,
                 from: JSONSerialization.data(withJSONObject: PoolScopedAdmissionTests.poolBindingObject())

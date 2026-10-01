@@ -673,67 +673,95 @@ struct BYOMAdmissionStatusWire: Codable, Equatable, Sendable {
     let providerGuidance: BYOMDiscoveryWire.Guidance
     let allowedNextStates: [String]
     let warnings: [String]
-    /// SPEC-047-R011 (#1816): the closed `binding_scope` enum (`global | pool`).
-    /// Absent on every pre-#1816 envelope, which means `global`. It is encoded
-    /// only when present, so a global document stays byte-identical to v1.
-    var bindingScope: String? = nil
-    /// SPEC-047-R011: the coordinator's authoritative pool-manifest binding,
-    /// present exactly when `binding_scope` is `pool`.
+    /// SPEC-047-R011 (#1816): the coordinator's authoritative pool-manifest
+    /// binding. Absent on every global status, so a global document stays
+    /// byte-identical to v1; the closed `binding_scope` enum (`global | pool`)
+    /// rides inside this object, never at the top level.
     var poolBinding: PoolBinding? = nil
 
-    /// SPEC-047-R011 binding fields, named as the SPEC-042-R015 entry fields
-    /// they were bound from. A closed object: `decodeStrictStatus` requires
-    /// the exact key set.
+    /// The closed SPEC-047-R011 `pool_binding` object, exactly as the
+    /// coordinator emits it (`modelAdmissionPoolBindingObject`):
+    /// `decodeStrictStatus` requires this exact key set, and the two nullable
+    /// keys are always present.
     struct PoolBinding: Codable, Equatable, Sendable {
-        /// The pool entry's creator-signed rates in the rate-card units:
-        /// int64 >= 0 each, cache-hit rate never above the prompt rate.
-        struct Pricing: Codable, Equatable, Sendable {
-            let promptRatePerMtok: Int64
-            let promptCacheHitRatePerMtok: Int64
-            let completionRatePerMtok: Int64
-
-            enum CodingKeys: String, CodingKey, CaseIterable {
-                case promptRatePerMtok = "prompt_rate_per_mtok"
-                case promptCacheHitRatePerMtok = "prompt_cache_hit_rate_per_mtok"
-                case completionRatePerMtok = "completion_rate_per_mtok"
-            }
-
-            var isValid: Bool {
-                promptRatePerMtok >= 0 && completionRatePerMtok >= 0 &&
-                    promptCacheHitRatePerMtok >= 0 && promptCacheHitRatePerMtok <= promptRatePerMtok
-            }
-        }
-
+        let bindingScope: String
         let poolID: String
         let poolModelID: String
         let manifestVersion: UInt64
-        let coreDigest: String
+        let manifestCoreDigest: String
         let artifactHashAlgorithm: String
         let artifactHash: String
         let runtimeSource: String
-        let pricing: Pricing
+        /// The pool entry's creator-signed rates in the rate-card units:
+        /// int64 >= 0 each, cache-hit rate never above the prompt rate.
+        let promptRatePerMtok: Int64
+        let promptCacheHitRatePerMtok: Int64
+        let completionRatePerMtok: Int64
         let disclosureClass: String
         let maxContextTokens: Int
+        let providerAccountID: String
+        /// Audit only: the `candidate`/`listed` catalog row the pair resolved
+        /// to at bind time. Never a catalog identity.
+        let observedCatalogModelKey: String?
+        let probeEvidenceDigest: String?
 
         enum CodingKeys: String, CodingKey, CaseIterable {
+            case bindingScope = "binding_scope"
             case poolID = "pool_id"
             case poolModelID = "pool_model_id"
             case manifestVersion = "manifest_version"
-            case coreDigest = "core_digest"
+            case manifestCoreDigest = "manifest_core_digest"
             case artifactHashAlgorithm = "artifact_hash_algorithm"
             case artifactHash = "artifact_hash"
             case runtimeSource = "runtime_source"
-            case pricing
+            case promptRatePerMtok = "prompt_rate_per_mtok"
+            case promptCacheHitRatePerMtok = "prompt_cache_hit_rate_per_mtok"
+            case completionRatePerMtok = "completion_rate_per_mtok"
             case disclosureClass = "disclosure_class"
             case maxContextTokens = "max_context_tokens"
+            case providerAccountID = "provider_account_id"
+            case observedCatalogModelKey = "observed_catalog_model_key"
+            case probeEvidenceDigest = "probe_evidence_digest"
         }
 
         static let keys = Set(CodingKeys.allCases.map(\.stringValue))
-        static let pricingKeys = Set(Pricing.CodingKeys.allCases.map(\.stringValue))
+
+        var pricingIsValid: Bool {
+            promptRatePerMtok >= 0 && completionRatePerMtok >= 0 &&
+                promptCacheHitRatePerMtok >= 0 && promptCacheHitRatePerMtok <= promptRatePerMtok
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(bindingScope, forKey: .bindingScope)
+            try container.encode(poolID, forKey: .poolID)
+            try container.encode(poolModelID, forKey: .poolModelID)
+            try container.encode(manifestVersion, forKey: .manifestVersion)
+            try container.encode(manifestCoreDigest, forKey: .manifestCoreDigest)
+            try container.encode(artifactHashAlgorithm, forKey: .artifactHashAlgorithm)
+            try container.encode(artifactHash, forKey: .artifactHash)
+            try container.encode(runtimeSource, forKey: .runtimeSource)
+            try container.encode(promptRatePerMtok, forKey: .promptRatePerMtok)
+            try container.encode(promptCacheHitRatePerMtok, forKey: .promptCacheHitRatePerMtok)
+            try container.encode(completionRatePerMtok, forKey: .completionRatePerMtok)
+            try container.encode(disclosureClass, forKey: .disclosureClass)
+            try container.encode(maxContextTokens, forKey: .maxContextTokens)
+            try container.encode(providerAccountID, forKey: .providerAccountID)
+            if let observedCatalogModelKey {
+                try container.encode(observedCatalogModelKey, forKey: .observedCatalogModelKey)
+            } else {
+                try container.encodeNil(forKey: .observedCatalogModelKey)
+            }
+            if let probeEvidenceDigest {
+                try container.encode(probeEvidenceDigest, forKey: .probeEvidenceDigest)
+            } else {
+                try container.encodeNil(forKey: .probeEvidenceDigest)
+            }
+        }
     }
 
     /// True only for a document carrying a pool-scoped binding.
-    var isPoolScoped: Bool { bindingScope == "pool" && poolBinding != nil }
+    var isPoolScoped: Bool { poolBinding?.bindingScope == "pool" }
 
     enum CodingKeys: String, CodingKey {
         case schema
@@ -750,7 +778,6 @@ struct BYOMAdmissionStatusWire: Codable, Equatable, Sendable {
         case providerGuidance = "provider_guidance"
         case allowedNextStates = "allowed_next_states"
         case warnings
-        case bindingScope = "binding_scope"
         case poolBinding = "pool_binding"
     }
 
@@ -775,7 +802,6 @@ struct BYOMAdmissionStatusWire: Codable, Equatable, Sendable {
         try container.encode(providerGuidance, forKey: .providerGuidance)
         try container.encode(allowedNextStates, forKey: .allowedNextStates)
         try container.encode(warnings, forKey: .warnings)
-        try container.encodeIfPresent(bindingScope, forKey: .bindingScope)
         try container.encodeIfPresent(poolBinding, forKey: .poolBinding)
     }
 
@@ -957,9 +983,9 @@ extension BYOMAdmissionStatusWire {
         "settlement_capable",
         "pool_attested_earning",
     ]
-    /// SPEC-047-R011 (#1816): optional keys a coordinator adds only for a
-    /// binding it scopes; an envelope without them is a v1 global binding.
-    private static let bindingScopeKeys: Set<String> = ["binding_scope", "pool_binding"]
+    /// SPEC-047-R011 (#1816): the one optional key a coordinator adds only for
+    /// a pool-scoped binding; an envelope without it is a v1 global binding.
+    private static let poolBindingKeys: Set<String> = ["pool_binding"]
     /// SPEC-042-R015 field 1.
     static let poolModelIDPattern = #"^pool/[A-Za-z0-9_-]{22}/[a-z0-9][a-z0-9-]{0,62}$"#
     static let poolIDPattern = #"^[A-Za-z0-9_-]{22}$"#
@@ -981,20 +1007,15 @@ extension BYOMAdmissionStatusWire {
         expectedCandidateID: String? = nil
     ) throws -> BYOMAdmissionStatusWire {
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              Set(object.keys).subtracting(bindingScopeKeys) == topLevelKeys,
+              Set(object.keys).subtracting(poolBindingKeys) == topLevelKeys,
               let guidance = object["provider_guidance"] as? [String: Any],
               Set(guidance.keys) == guidanceKeys else {
             throw BYOMModelAdmissionError.invalidStatusSchema
         }
-        // A present scope key is never null; a pool binding is a closed object.
-        if object.keys.contains("binding_scope"), !(object["binding_scope"] is String) {
-            throw BYOMModelAdmissionError.invalidStatusSchema
-        }
+        // A present pool binding is a closed object with every key present.
         if object.keys.contains("pool_binding") {
             guard let binding = object["pool_binding"] as? [String: Any],
-                  Set(binding.keys) == PoolBinding.keys,
-                  let pricing = binding["pricing"] as? [String: Any],
-                  Set(pricing.keys) == PoolBinding.pricingKeys else {
+                  Set(binding.keys) == PoolBinding.keys else {
                 throw BYOMModelAdmissionError.invalidStatusSchema
             }
         }
@@ -1003,39 +1024,38 @@ extension BYOMAdmissionStatusWire {
         return status
     }
 
-    /// SPEC-047-R011: `global` (or absent) carries no pool binding and can
-    /// never claim `pool_attested_earning`; `pool` carries exactly one valid
-    /// binding, never a catalog identity, and never `settlement_capable`.
+    /// SPEC-047-R011: a status without `pool_binding` is global and can never
+    /// claim `pool_attested_earning`; a `pool_binding` is scoped `pool`, valid,
+    /// never a catalog identity, and never `settlement_capable`.
     private static func validateBindingScope(_ status: BYOMAdmissionStatusWire) throws {
-        switch status.bindingScope {
-        case nil, "global":
-            guard status.poolBinding == nil,
-                  status.providerGuidance.earningPathClass != "pool_attested_earning" else {
+        guard let binding = status.poolBinding else {
+            guard status.providerGuidance.earningPathClass != "pool_attested_earning" else {
                 throw BYOMModelAdmissionError.invalidStatusSchema
             }
-        case "pool":
-            guard status.admissionStateSource == "coordinator",
-                  status.admissionState != "settlement_capable",
-                  status.catalogModelKey == nil,
-                  let binding = status.poolBinding,
-                  Self.poolBindingIsValid(binding) else {
-                throw BYOMModelAdmissionError.invalidStatusSchema
-            }
-        default:
+            return
+        }
+        guard status.admissionStateSource == "coordinator",
+              status.admissionState != "settlement_capable",
+              status.catalogModelKey == nil,
+              Self.poolBindingIsValid(binding) else {
             throw BYOMModelAdmissionError.invalidStatusSchema
         }
     }
 
     static func poolBindingIsValid(_ binding: PoolBinding) -> Bool {
-        guard binding.poolID.range(of: poolIDPattern, options: .regularExpression) != nil,
+        guard binding.bindingScope == "pool",
+              binding.poolID.range(of: poolIDPattern, options: .regularExpression) != nil,
               binding.poolModelID.utf8.count <= 91,
               binding.poolModelID.range(of: poolModelIDPattern, options: .regularExpression) != nil,
               binding.poolModelID.split(separator: "/", omittingEmptySubsequences: false).dropFirst().first.map(String.init) == binding.poolID,
               binding.manifestVersion >= 1,
-              isLowercaseHex64(binding.coreDigest),
+              isLowercaseHex64(binding.manifestCoreDigest),
               isLowercaseHex64(binding.artifactHash),
               poolEntryRuntimeSources[binding.artifactHashAlgorithm]?.contains(binding.runtimeSource) == true,
-              binding.pricing.isValid,
+              binding.pricingIsValid,
+              binding.providerAccountID.utf8.count <= 256,
+              binding.observedCatalogModelKey.map({ !$0.isEmpty && $0.utf8.count <= 128 }) ?? true,
+              binding.probeEvidenceDigest.map(isLowercaseHex64) ?? true,
               binding.disclosureClass == "pool_attested_unverified",
               (1...1_048_576).contains(binding.maxContextTokens) else {
             return false

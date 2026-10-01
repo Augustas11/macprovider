@@ -1363,8 +1363,8 @@ struct MalibuBYOMAdmissionStatusDocument: Decodable, Equatable, Sendable {
     let providerGuidance: MalibuModelCatalogEconomicsDocument.ProviderGuidance
     let allowedNextStates: [String]
     let warnings: [String]
-    /// SPEC-047-R011 (#1816): absent means a global binding.
-    let bindingScope: String?
+    /// SPEC-047-R011 (#1816): absent means a global binding; the closed
+    /// `binding_scope` rides inside the object, never at the top level.
     let poolBinding: MalibuBYOMPoolBinding?
 
     enum CodingKeys: String, CodingKey, CaseIterable {
@@ -1382,7 +1382,6 @@ struct MalibuBYOMAdmissionStatusDocument: Decodable, Equatable, Sendable {
         case providerGuidance = "provider_guidance"
         case allowedNextStates = "allowed_next_states"
         case warnings
-        case bindingScope = "binding_scope"
         case poolBinding = "pool_binding"
     }
 
@@ -1403,34 +1402,27 @@ struct MalibuBYOMAdmissionStatusDocument: Decodable, Equatable, Sendable {
         providerGuidance = try container.decode(MalibuModelCatalogEconomicsDocument.ProviderGuidance.self, forKey: .providerGuidance)
         allowedNextStates = try container.decode([String].self, forKey: .allowedNextStates)
         warnings = try container.decode([String].self, forKey: .warnings)
-        bindingScope = try container.decodeIfPresent(String.self, forKey: .bindingScope)
         poolBinding = try container.decodeIfPresent(MalibuBYOMPoolBinding.self, forKey: .poolBinding)
     }
 
     /// The validated pool binding, nil for a global one.
     var validPoolBinding: MalibuBYOMPoolBinding? {
-        bindingScope == "pool" ? poolBinding : nil
+        poolBinding?.bindingScope == "pool" ? poolBinding : nil
     }
 
     func validated(expectedCandidateID: String) throws {
         // SPEC-047-R011: a pool binding is never a catalog identity, never
         // settlement_capable, and the only binding that may claim
         // pool_attested_earning (and only while catalog_priced).
-        switch bindingScope {
-        case nil, "global":
-            guard poolBinding == nil,
-                  providerGuidance.earningPathClass != "pool_attested_earning" else {
-                throw ModelManagementError.invalidCatalog
-            }
-        case "pool":
+        if let poolBinding {
             guard admissionStateSource == "coordinator",
                   admissionState != "settlement_capable",
                   catalogModelKey == nil,
-                  poolBinding?.isValid == true,
+                  poolBinding.isValid,
                   providerGuidance.earningPathClass != "pool_attested_earning" || admissionState == "catalog_priced" else {
                 throw ModelManagementError.invalidCatalog
             }
-        default:
+        } else if providerGuidance.earningPathClass == "pool_attested_earning" {
             throw ModelManagementError.invalidCatalog
         }
         guard schema == "model_admission_status.v1",
