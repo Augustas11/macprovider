@@ -123,7 +123,7 @@ extension MLXSmallMProbeCommand {
                 eval(x)
                 var record: [String: Any] = [
                     "schema": "macprovider.mlx-smallm-probe.kbench.v1",
-                    "n": n, "k": k, "m": m, "copies": copies,
+                    "n": n, "k": k, "m": m, "copies": copies, "serial": serial,
                 ]
                 let candidates: [(String, (MLXArray, MLXArray, MLXArray) -> MLXArray)] =
                     [("mlx", { w, s, b in
@@ -135,6 +135,24 @@ extension MLXSmallMProbeCommand {
                     }
                 for (label, fn) in candidates {
                     var samples: [Double] = []
+                    if serial {
+                        // One matmul per eval: per-kernel latency incl. tail
+                        // effects, as in a model forward (dependent matmuls).
+                        for iteration in 0 ..< (warmup + iters) {
+                            for (w, s, b) in weights {
+                                let out = fn(w, s, b)
+                                let t0 = DispatchTime.now().uptimeNanoseconds
+                                eval(out)
+                                Stream().synchronize()
+                                let t1 = DispatchTime.now().uptimeNanoseconds
+                                if iteration >= warmup { samples.append(Double(t1 - t0) / 1e3) }
+                            }
+                        }
+                        let sorted = samples.sorted()
+                        record["us_\(label)"] = sorted[sorted.count / 2]
+                        record["us_min_\(label)"] = sorted.first ?? 0
+                        continue
+                    }
                     for iteration in 0 ..< (warmup + iters) {
                         let outs = weights.map { w, s, b in fn(w, s, b) }
                         Stream().synchronize()
