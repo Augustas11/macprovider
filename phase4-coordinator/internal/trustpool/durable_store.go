@@ -247,7 +247,8 @@ func WithPoolModelAcceptance(source func() poolmanifest.PoolModelAcceptanceConte
 const (
 	PoolModelRejectPricingBounds  = "pool_model_pricing_out_of_bounds"
 	PoolModelRejectCatalogShadow  = "pool_model_id_shadows_catalog"
-	PoolModelRejectCatalogOverlap = "pool_model_artifact_in_catalog"
+	PoolModelRejectCatalogOverlap = "pool_model_entry_catalog_overlap"
+	PoolModelRejectCreatorMember  = "pool_attested_member_is_creator"
 	PoolModelRejectInvalid        = "pool_model_entry_invalid"
 )
 
@@ -258,10 +259,21 @@ var ErrPoolModelEntryRejected = errors.New("trustpool: pool model entry rejected
 // verifyPoolModelAcceptance applies the context-dependent R015 rules to a NEW
 // manifest_accepted append. Replay never re-runs it: a bounds or catalog
 // change later only affects routing, never an accepted history.
-func (s *Store) verifyPoolModelAcceptance(e DurableEvent) error {
+func (s *Store) verifyPoolModelAcceptance(e DurableEvent, creatorAccountID string) error {
 	core, err := acceptedPolicyCoreFromManifestSnapshot(e)
 	if err != nil {
 		return err
+	}
+	// SPEC-042-R016: an attestation naming the creator account itself is
+	// redundant and invalidates the core.
+	members, err := core.PoolAttestedMembers()
+	if err != nil {
+		return fmt.Errorf("%w: %s: %v", ErrPoolModelEntryRejected, PoolModelRejectInvalid, err)
+	}
+	for _, member := range members {
+		if member.ProviderAccountID == creatorAccountID {
+			return fmt.Errorf("%w: %s", ErrPoolModelEntryRejected, PoolModelRejectCreatorMember)
+		}
 	}
 	var ctx poolmanifest.PoolModelAcceptanceContext
 	if s != nil && s.poolModelAcceptance != nil {
@@ -1922,7 +1934,11 @@ func (s *Store) appendValidatedEvent(ctx context.Context, e DurableEvent, allowS
 			if err := verifyManifestAcceptanceOnline(e); err != nil {
 				return fmt.Errorf("%w: manifest policy not acceptable now: %v", errCreatorInvalidEvent, err)
 			}
-			if err := s.verifyPoolModelAcceptance(e); err != nil {
+			creatorAccountID := ""
+			if pool := preState.Pools[e.PoolID]; pool != nil {
+				creatorAccountID = pool.CreatorAccountID
+			}
+			if err := s.verifyPoolModelAcceptance(e, creatorAccountID); err != nil {
 				return fmt.Errorf("%w: %w", errCreatorInvalidEvent, err)
 			}
 		}

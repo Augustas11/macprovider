@@ -181,24 +181,27 @@ func TestPoolModelEntriesOnlineAcceptance(t *testing.T) {
 	for name, tc := range map[string]struct {
 		acceptance func() poolmanifest.PoolModelAcceptanceContext
 		wantCode   string
+		members    []poolmanifest.AttestedMember
 	}{
+		"creator attested as a member": {acceptAllPoolModels, trustpool.PoolModelRejectCreatorMember,
+			[]poolmanifest.AttestedMember{{ProviderAccountID: "creator-a", RuntimeClasses: []string{poolmanifest.RuntimeSourceLlamacppLoopback}}}},
 		"accepted": {func() poolmanifest.PoolModelAcceptanceContext {
 			return poolmanifest.PoolModelAcceptanceContext{PricingBounds: bounds, IsCatalogModelID: func(string) bool { return false }, ArtifactInCatalog: func(string, string) bool { return false }}
-		}, ""},
-		"no bounds configured": {nil, trustpool.PoolModelRejectPricingBounds},
+		}, "", nil},
+		"no bounds configured": {nil, trustpool.PoolModelRejectPricingBounds, nil},
 		"price above ceiling": {func() poolmanifest.PoolModelAcceptanceContext {
 			tight := *bounds
 			tight.MaxCompletionRatePerMtok = 200
 			return poolmanifest.PoolModelAcceptanceContext{PricingBounds: &tight, IsCatalogModelID: func(string) bool { return false }, ArtifactInCatalog: func(string, string) bool { return false }}
-		}, trustpool.PoolModelRejectPricingBounds},
+		}, trustpool.PoolModelRejectPricingBounds, nil},
 		"artifact already catalogued": {func() poolmanifest.PoolModelAcceptanceContext {
 			return poolmanifest.PoolModelAcceptanceContext{PricingBounds: bounds, IsCatalogModelID: func(string) bool { return false },
 				ArtifactInCatalog: func(_, hash string) bool { return hash == poolEntryGGUFHash }}
-		}, trustpool.PoolModelRejectCatalogOverlap},
+		}, trustpool.PoolModelRejectCatalogOverlap, nil},
 		"slug shadows catalog id": {func() poolmanifest.PoolModelAcceptanceContext {
 			return poolmanifest.PoolModelAcceptanceContext{PricingBounds: bounds, IsCatalogModelID: func(id string) bool { return id == "creator-mlx" },
 				ArtifactInCatalog: func(string, string) bool { return false }}
-		}, trustpool.PoolModelRejectCatalogShadow},
+		}, trustpool.PoolModelRejectCatalogShadow, nil},
 	} {
 		db := openTrustPoolDB(t)
 		var opts []trustpool.StoreOption
@@ -221,7 +224,7 @@ func TestPoolModelEntriesOnlineAcceptance(t *testing.T) {
 		manifest := signedManifestWithPolicyCoreMutation(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root, func(core *poolmanifest.PolicyCore) {
 			core.SettlementMode = "enforce"
 			core.Encoding = poolmanifest.PolicyCoreEncodingV2
-			withPoolModels(root.poolID, nil)(core)
+			withPoolModels(root.poolID, tc.members)(core)
 		})
 		_, _, _, err = store.AppendValidatedEvent(ctx, manifest)
 		switch {

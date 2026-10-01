@@ -3,8 +3,10 @@ package ws
 import (
 	"strings"
 
+	"github.com/augstar/macprovider-coordinator/internal/artifactidentity"
 	"github.com/augstar/macprovider-coordinator/internal/autotune"
 	"github.com/augstar/macprovider-coordinator/internal/billing"
+	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 )
 
@@ -46,11 +48,13 @@ func catalogShadowsModelID(current *autotune.Catalog, id string) bool {
 	return false
 }
 
-// ArtifactPairInCatalog reports whether an exact artifact pair already
-// resolves to a global catalog identity: a catalog row's snapshot hash or a
-// member of the release-bound artifact identity set. When it does, the
-// catalog path wins and a pool entry for the same pair is rejected at
-// manifest acceptance and is never routed (#1816 design rule).
+// ArtifactPairInCatalog reports whether an exact artifact pair resolves to a
+// `recommendable` global catalog identity: a recommendable row's own snapshot
+// hash, or a release-bound artifact-feed member of a recommendable row. Only
+// then does the catalog path win: such a pool entry is rejected at manifest
+// acceptance (`pool_model_entry_catalog_overlap`) and an existing pool binding
+// is revoked as `pool_manifest_catalog_superseded`. A `candidate` or `listed`
+// match leaves the pool entry valid (#1816 design rule).
 func (s *Server) ArtifactPairInCatalog(algorithm, hash string) bool {
 	hash = strings.ToLower(strings.TrimSpace(hash))
 	if algorithm == "" || hash == "" {
@@ -59,22 +63,29 @@ func (s *Server) ArtifactPairInCatalog(algorithm, hash string) bool {
 	resolved := false
 	s.withReleaseRead(func() {
 		current, _ := s.autotuneCatalogSnapshot()
-		set := s.usableIdentitySetLocked(current)
-		resolved = intakeModelKeyForOffer(current, set, map[string]string{algorithm: hash}) != "" ||
-			catalogRowsCarryHash(current, hash)
+		resolved = artifactPairRecommendableLocked(current, s.usableIdentitySetLocked(current), algorithm, hash)
 	})
 	return resolved
 }
 
-// catalogRowsCarryHash reports whether any catalog row (even an ambiguous
-// pair of rows, which intake resolution refuses to name) carries hash.
-func catalogRowsCarryHash(current *autotune.Catalog, hash string) bool {
+// artifactPairRecommendableLocked is ArtifactPairInCatalog against one
+// captured release (caller holds the release read lock).
+func artifactPairRecommendableLocked(current *autotune.Catalog, set *artifactidentity.Index, algorithm, hash string) bool {
 	if current == nil {
 		return false
 	}
-	for _, key := range current.Keys() {
-		if row, _ := current.Row(key); strings.TrimSpace(row.ModelSHA256) == hash {
-			return true
+	if algorithm == modelidentity.SnapshotManifestV1 {
+		for _, key := range current.Keys() {
+			if row, _ := current.Row(key); row.RuntimeStatus == "recommendable" && strings.TrimSpace(row.ModelSHA256) == hash {
+				return true
+			}
+		}
+	}
+	if set != nil {
+		if binding, ok := set.Resolve(algorithm, hash); ok {
+			if row, ok := current.Row(binding.Member.ModelKey); ok && row.RuntimeStatus == "recommendable" {
+				return true
+			}
 		}
 	}
 	return false
