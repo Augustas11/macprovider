@@ -16,6 +16,8 @@
 //   MACPROVIDER_RUN_PAGED_PARITY=1      → AC-1 (Llama-3.2-3B), AC-2 (Qwen2.5-7B)
 //   MACPROVIDER_RUN_PAGED_PARITY_MOE=1  → AC-3 (Qwen3-Coder-30B-A3B MoE, ~17GB)
 //   MACPROVIDER_RUN_PAGED_PARITY_GPT_OSS=1  → AC-18 (gpt-oss-20b MoE, ~13GB)
+// The gpt-oss-20b fixture is not family-wide evidence for gpt-oss-120b.
+// 120b needs its own packaged-runtime parity/isolation proof past the window.
 //
 // Models load ONLY from `~/.cache/huggingface/hub` (no download).
 
@@ -217,7 +219,8 @@ final class PagedKVParityTests: XCTestCase {
         try await assertParity("Qwen3-Coder-30B-A3B-Instruct-4bit", "AC-3")
     }
 
-    // MARK: - AC-18 admitted gpt-oss MoE (~13GB — separately gated)
+    // MARK: - AC-18 admitted gpt-oss 20b MoE (~13GB — separately gated)
+    // This fixture intentionally does not admit gpt-oss-120b.
 
     func testAC18_MoEGPTOSS20B_ParityWithRealGather() async throws {
         try XCTSkipUnless(

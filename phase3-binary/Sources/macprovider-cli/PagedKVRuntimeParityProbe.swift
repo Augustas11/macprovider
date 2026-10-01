@@ -182,11 +182,18 @@ enum PagedKVRuntimeParityProbe {
                 let paged = try Self.greedyGenerate(model: model, promptTokens: promptTokens, nNew: nNew) {
                     zip(stockLayout, kinds).map { _, kind in
                         if case .recurrentMamba = kind { return MambaCache() as KVCache }
+                        let window: Int?
+                        if case .slidingWindow(let windowTokens) = kind {
+                            window = windowTokens
+                        } else {
+                            window = nil
+                        }
                         return PagedKVCache(
                             blockSizeTokens: blockSizeTokens,
                             maxPhysicalBlocks: maxPhysicalBlocks,
                             poolEpoch: 1,
-                            binding: binding
+                            binding: binding,
+                            attentionWindowTokens: window
                         )
                     }
                 }

@@ -21,7 +21,7 @@ final class PagedKVSlidingWindowTests: XCTestCase {
         )
         XCTAssertNil(
             PagedKVSharedForwardBackend.CacheKind.recognized(from: RotatingKVCache(maxSize: 128, keep: 4)),
-            "keep>0 sink-token rotation is not equivalent to a windowed full-history mask"
+            "keep>0 sink-token rotation is not equivalent to keep=0 rotating-window presentation"
         )
         XCTAssertNil(PagedKVSharedForwardBackend.CacheKind.recognized(from: RotatingKVCache(maxSize: 0, keep: 0)))
     }
@@ -66,7 +66,7 @@ final class PagedKVSlidingWindowTests: XCTestCase {
         ))
     }
 
-    func testShortPrefillOnLongHistoryStillWindows() {
+    func testLegacyFullHistoryMaskPredicateStillWindows() {
         XCTAssertFalse(PagedKVCache.slidingWindowRequiresMask(n: 5, offset: 0, windowSize: 8))
         XCTAssertFalse(PagedKVCache.slidingWindowRequiresMask(n: 1, offset: 7, windowSize: 8))
         XCTAssertTrue(PagedKVCache.slidingWindowRequiresMask(n: 1, offset: 8, windowSize: 8))
@@ -74,46 +74,79 @@ final class PagedKVSlidingWindowTests: XCTestCase {
         XCTAssertFalse(PagedKVCache.slidingWindowRequiresMask(n: 1, offset: 100, windowSize: nil))
     }
 
-    func testPagedMaskAppliesWindowOnSingleTokenDecodePastTheWindow() throws {
+    func testPagedSingleTokenDecodePastWindowPresentsOnlyWindow() throws {
         try requireMetal()
         Device.withDefaultDevice(.cpu) {
-            switch makeCache(offset: 3).makeMask(n: 1, windowSize: 8, returnArray: false) {
+            let short = makeCache(offset: 0, windowTokens: 8)
+            _ = short.update(
+                keys: MLXArray.zeros([1, 1, 3, 1], dtype: .float32),
+                values: MLXArray.zeros([1, 1, 3, 1], dtype: .float32)
+            )
+            switch short.makeMask(n: 1, windowSize: 8, returnArray: false) {
             case .none:
                 break
             default:
                 XCTFail("history shorter than the window must keep the no-mask decode fast path")
             }
 
-            let cache = makeCache(offset: 9)
-            let mask: MLXArray
+            let cache = makeCache(offset: 0, windowTokens: 8)
+            _ = cache.update(
+                keys: MLXArray.zeros([1, 1, 10, 1], dtype: .float32),
+                values: MLXArray.zeros([1, 1, 10, 1], dtype: .float32)
+            )
             switch cache.makeMask(n: 1, windowSize: 8, returnArray: false) {
-            case .array(let array):
-                mask = array
+            case .none:
+                break
             default:
-                return XCTFail("single-token decode past the window must return a windowed array mask")
+                XCTFail("single-token decode over an already-windowed presentation needs no array mask")
             }
-            eval(mask)
-            let values = mask.asArray(Bool.self)
-            XCTAssertEqual(values.filter { $0 }.count, 8, "query must see exactly the last window tokens")
-            XCTAssertEqual(Array(values.prefix(2)), [false, false], "keys older than the window must be masked")
-            XCTAssertEqual(Array(values.suffix(8)), Array(repeating: true, count: 8))
+            let presented = cache.update(
+                keys: MLXArray.zeros([1, 1, 1, 1], dtype: .float32),
+                values: MLXArray.zeros([1, 1, 1, 1], dtype: .float32)
+            )
+            XCTAssertEqual(presented.0.dim(2), 8)
+            XCTAssertEqual(cache.state[0].dim(2), 11, "paged storage keeps full history for materialization")
         }
     }
 
-    func testBatchedEqualLengthDecodePastWindowKeepsWindowMask() throws {
+    func testPagedMultiTokenPrefillPastWindowMatchesRotatingPresentation() throws {
         try requireMetal()
         Device.withDefaultDevice(.cpu) {
-            switch PagedKVSharedForwardBackend.batchLayerMaskForTest(
-                rowCaches: [makeCache(offset: 10), makeCache(offset: 10)],
-                n: 1,
-                windowSize: 8
-            ) {
+            let cache = makeCache(offset: 0, windowTokens: 8)
+            _ = cache.update(
+                keys: MLXArray.zeros([1, 1, 10, 1], dtype: .float32),
+                values: MLXArray.zeros([1, 1, 10, 1], dtype: .float32)
+            )
+            switch cache.makeMask(n: 5, windowSize: 8, returnArray: false) {
             case .array(let mask):
                 eval(mask)
-                XCTAssertFalse(mask.asArray(Bool.self).allSatisfy { $0 })
+                XCTAssertEqual(mask.dim(0), 5)
+                XCTAssertEqual(mask.dim(1), 12)
             default:
-                XCTFail("equal-length batched decode past the window must not return .none")
+                XCTFail("multi-token prefill crossing the window needs a capped-offset array mask")
             }
+            let presented = cache.update(
+                keys: MLXArray.zeros([1, 1, 5, 1], dtype: .float32),
+                values: MLXArray.zeros([1, 1, 5, 1], dtype: .float32)
+            )
+            XCTAssertEqual(presented.0.dim(2), 12)
+            XCTAssertEqual(cache.state[0].dim(2), 15)
+        }
+    }
+
+    func testBatchedEqualLengthDecodePastWindowUsesPresentedWindow() throws {
+        switch PagedKVSharedForwardBackend.batchLayerMaskForTest(
+            rowCaches: [
+                makeCache(offset: 10, windowTokens: 8),
+                makeCache(offset: 10, windowTokens: 8),
+            ],
+            n: 1,
+            windowSize: 8
+        ) {
+        case .none:
+            break
+        default:
+            XCTFail("equal-length batched decode over windowed presentations needs no array mask")
         }
     }
 
@@ -123,7 +156,7 @@ final class PagedKVSlidingWindowTests: XCTestCase {
         }
     }
 
-    private func makeCache(offset: Int) -> PagedKVCache {
+    private func makeCache(offset: Int, windowTokens: Int? = nil) -> PagedKVCache {
         let handle = PagedKVBlockTableHandle(id: UUID(), conversationKey: "sliding-window-test", poolEpoch: 1)
         return PagedKVCache(
             blockSizeTokens: 4,
@@ -144,7 +177,8 @@ final class PagedKVSlidingWindowTests: XCTestCase {
                 poolEpoch: 1
             ),
             initialOffset: offset,
-            reconstructViaGather: false
+            reconstructViaGather: false,
+            attentionWindowTokens: windowTokens
         )
     }
 }

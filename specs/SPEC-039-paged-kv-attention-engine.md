@@ -1,7 +1,10 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.12
-Status: draft (normative design). v0.1.12 clarifies that SPEC-023's signed
+Version: v0.1.13
+Status: draft (normative design). v0.1.13 clarifies that keep=0
+`RotatingKVCache` support preserves full paged storage but feeds attention a
+rotating-equivalent presentation: at most `window - 1` prior tokens plus the
+incoming chunk, with masks sized to that presentation. v0.1.12 clarifies that SPEC-023's signed
 continuous-batching policy may distribute FR-CB10 acceptance, while this SPEC
 continues to own only provider-local descriptor/attach/probe correctness; the
 policy feed is never descriptor self-certification. v0.1.11 sizes an unset pool
@@ -42,6 +45,12 @@ is `RotatingKVCache` only because the serve path caps KV for memory attaches to
 paged mode (the block pool bounds memory), while a genuine sliding-window model
 stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
+Change log v0.1.13 (2026-10-01): keep=0 `RotatingKVCache` measurement support
+now mirrors upstream rotating-cache presentation instead of relying on a
+full-history attention surface. The paged store MAY retain full history for
+materialization/accounting, but attention MUST see only the rotating-equivalent
+suffix (`window - 1` prior tokens plus the incoming chunk). Masks are computed
+against that presentation. No sliding-window identity is admitted to FR-PKV12.
 Change log v0.1.10 (2026-09-29): the paged shared-forward backend recognizes
 keep=0 `RotatingKVCache` layers as a third cache kind and pages them as full
 history with a windowed causal mask, including single-token decode. `keep>0`
@@ -383,9 +392,10 @@ The parity fixture set MUST include at least:
 Any newly admitted model family beyond Llama/Qwen MUST add its own
 environment-gated real-model fixture before the family is added to the
 attach-time admission allowlist. For v0.1.2, the only additional admitted
-family is `gpt_oss`, with a fixture over `gpt-oss-20b-MXFP4-Q8`; `gemma4`,
-`glm4_moe`, `nemotron_h`, and other catalog families remain outside the
-allowlist until they have equivalent FR-PKV4 evidence.
+family is `gpt_oss`, with a fixture over `gpt-oss-20b-MXFP4-Q8`; that 20b
+fixture does not prove `gpt-oss-120b`. `gemma4`, `glm4_moe`, `nemotron_h`, and
+other catalog families remain outside the allowlist until they have equivalent
+FR-PKV4 evidence.
 
 The implementation MUST fail closed if parity is not established for a model
 or cache class selected for paged mode. Tolerance-based tensor comparison MAY
@@ -631,11 +641,14 @@ unless the SPEC-038 FR-CB10 accepted tuple covering the requested runtime tuple
 records `cached_turns_accepted: true`. That grant is the recurrent-state
 handoff's reviewed proof: the SPEC-038 AC-26 packaged proof, including a
 checkpoint-resumed turn, on that exact tuple and runtime revision.
-The engine MAY represent keep=0 `RotatingKVCache` layers as paged full-history
-KV plus the model's sliding-window causal mask for isolated harness and
-future measured attach. That representation is **not** an admission grant:
-no sliding-window serving identity is on the FR-PKV12 allowlist in this
-revision. keep>0 sink-token rotation MUST remain unrecognized. A mixed
+The engine MAY represent keep=0 `RotatingKVCache` layers with full-history
+paged storage plus a rotating-equivalent attention presentation for isolated
+harness and future measured attach. The attention presentation MUST contain at
+most `window - 1` prior tokens plus the incoming chunk, with the model's
+sliding-window causal mask computed over that presented suffix. That
+representation is **not** an admission grant: no sliding-window serving
+identity is on the FR-PKV12 allowlist in this revision. keep>0 sink-token
+rotation MUST remain unrecognized. A mixed
 rotating+simple layout (gpt-oss) MUST NOT ride the Qwen Mamba+attention
 hybrid exception.
 
@@ -648,20 +661,21 @@ FR-PKV7), logged **once at attach**. Paged mode MUST NOT be advertised in the
 FR-PKV11 descriptor for a non-allowlisted class.
 
 This gate is correctness-load-bearing, not merely an optimization guard. A
-sliding-window layer paged through a full-context mask (including the
-single-token `.none` shortcut) would attend keys outside the model's window
-and produce **wrong tokens billed as correct**. The engine MUST therefore
-apply the windowed causal mask whenever post-update key count exceeds the
-window, including single-token decode and equal-length batched rows. That
-engine path does **not** admit any sliding-window identity: keep=0
-`RotatingKVCache` layers MAY be represented as paged full-history KV plus
-that mask so an isolated harness can measure a candidate, and `keep>0`
-sink-token rotating caches remain unrecognized. Production attach MUST still
-fail closed with `paged_fallback_cache_class` until the exact identity is
-added to the FR-PKV12 allowlist after packaged-runtime parity past the
-model's window, isolation, and leftovers proof. Recognizing `gpt_oss` as a
-model family (v0.1.2) is identity-family only; gpt-oss alternating
-sliding/full layers remain an unallowlisted `mixed` class.
+sliding-window layer paged through a full-context attention surface would
+attend keys outside the model's window and produce **wrong tokens billed as
+correct**. The engine MUST therefore present only the rotating-equivalent
+suffix to attention once history exceeds the window. Single-token decode over
+that already-windowed presentation may use the no-mask fast path; multi-token
+prefill that crosses the window MUST use a mask sized to the presented suffix.
+That engine path does **not** admit any sliding-window identity: keep=0
+`RotatingKVCache` layers MAY be represented this way so an isolated harness can
+measure a candidate, and `keep>0` sink-token rotating caches remain
+unrecognized. Production attach MUST still fail closed with
+`paged_fallback_cache_class` until the exact identity is added to the FR-PKV12
+allowlist after packaged-runtime parity past the model's window, isolation, and
+leftovers proof. Recognizing `gpt_oss` as a model family (v0.1.2) is
+identity-family only; gpt-oss alternating sliding/full layers remain an
+unallowlisted `mixed` class.
 
 **Serve-time memory cap vs. model attention type (v0.1.1 clarification).** The
 runtime `newCache()` class conflates two independent reasons a model presents a
@@ -823,8 +837,11 @@ The implementation PR for this SPEC MUST include fixtures that prove:
   (`gpt-oss-20b-MXFP4-Q8`) proving the same FR-PKV4 exact gather parity. Since
   `gpt_oss` is MoE-shaped, the fixture set MUST also include the SPEC-038
   batched shared-forward input-isolation probe for that resident model before
-  paged attach may open. Other parsed family labels (`gemma4`, `glm4_moe`,
-  `nemotron_h`, etc.) are explicitly non-admitted and fail closed until this
+  paged attach may open. `gpt-oss-120b` remains separately unproven until the
+  packaged runtime passes parity past the model window plus row
+  isolation/replay/drain evidence for that exact identity. Other parsed family
+  labels (`gemma4`, `glm4_moe`, `nemotron_h`, etc.) are explicitly non-admitted
+  and fail closed until this
   acceptance criterion is repeated for each family.
 - **AC-4 allocator/block-table correctness:** allocation, free-list reuse,
   eviction/reclaim, out-of-range block IDs, duplicate writable blocks,
@@ -944,9 +961,10 @@ The implementation PR for this SPEC MUST include fixtures that prove:
   `mlx-swift-lm` fork.
 - Paged quantized KV remains a future numerical surface if the provider later
   enables `kvBits` in production.
-- Sliding-window **admission** remains future work: v0.1.10 gives the engine a
-  keep=0 rotating layout (full-history paged KV plus windowed mask) for
-  isolated measurement, but FR-PKV12 still admits no sliding-window identity.
+- Sliding-window **admission** remains future work: v0.1.13 gives the engine a
+  keep=0 rotating layout (full-history paged storage plus rotating-equivalent
+  attention presentation and masks) for isolated measurement, but FR-PKV12
+  still admits no sliding-window identity.
   `keep>0` sink-token rotating caches, and Gemma-4 shared-KV layouts that emit
   fewer caches than layers, stay unrecognized. The existing uncapped attach
   probe prevents false rejection of full-context models capped for memory.
