@@ -1241,13 +1241,6 @@ actor ModelRuntime: ModelRuntimeServing {
         )
     }
 
-    static func nativeMTPFullPromptPrefillTokenLimit(prefillStepSize: Int) -> Int {
-        min(
-            max(1, prefillStepSize),
-            ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
-        )
-    }
-
     private func nativeMTPRuntimeAdmission(
         for request: ChatCompletionRequest,
         snapshot: RuntimeSnapshot
@@ -6183,10 +6176,7 @@ actor ModelRuntime: ModelRuntimeServing {
         )
         let nativeMTPAdmission = nativeMTPAdmission.resolvingTokenBounds(
             promptTokenCount: prepared.promptTokens.count,
-            maxOutputTokens: maxOutputTokens,
-            runtimeMaximumPromptTokens: Self.nativeMTPFullPromptPrefillTokenLimit(
-                prefillStepSize: prefillStepSize
-            )
+            maxOutputTokens: maxOutputTokens
         )
         let preparedPromptTokenIDs = prepared.promptTokens.map(Int32.init)
         let batchKVBits = Self.effectiveKVBits(
@@ -6431,10 +6421,7 @@ actor ModelRuntime: ModelRuntimeServing {
         )
         let nativeMTPAdmission = nativeMTPAdmission.resolvingTokenBounds(
             promptTokenCount: prepared.promptTokens.count,
-            maxOutputTokens: maxOutputTokens,
-            runtimeMaximumPromptTokens: Self.nativeMTPFullPromptPrefillTokenLimit(
-                prefillStepSize: prefillStepSize
-            )
+            maxOutputTokens: maxOutputTokens
         )
         let preparedPromptTokenIDs = prepared.promptTokens.map(Int32.init)
         let batchKVBits = Self.effectiveKVBits(

@@ -171,27 +171,32 @@ final class NativeMTPSelectorTests: XCTestCase {
         XCTAssertTrue(admission.allowsConversationCacheLease)
     }
 
-    func testNativeMTPRuntimeAdmissionDowngradesAfterTokenizedPromptExceedsRuntimePrefillBound() throws {
-        let admission = ModelRuntime.nativeMTPRuntimeAdmission(
-            for: try makeRequest(extra: ["max_completion_tokens": 8]),
-            draftConfigured: false,
-            draftLoaded: false,
-            numDraftTokens: nil,
-            nativeMTPMode: .auto,
-            nativeMTPCapability: admittedCapability(maximumPromptTokens: 4096, maximumCompletionTokens: 8),
-            schedulerSupportsNativeMTP: true
-        ).resolvingTokenBounds(
-            promptTokenCount: 513,
-            maxOutputTokens: 8,
-            runtimeMaximumPromptTokens: ModelRuntime.nativeMTPFullPromptPrefillTokenLimit(prefillStepSize: 512)
-        )
+    func testNativeMTPRuntimeAdmissionKeepsMultiChunkPromptsUpToTheSignedBound() throws {
+        func admission(promptTokenCount: Int) throws -> NativeMTPRuntimeAdmission {
+            ModelRuntime.nativeMTPRuntimeAdmission(
+                for: try makeRequest(extra: ["max_completion_tokens": 8]),
+                draftConfigured: false,
+                draftLoaded: false,
+                numDraftTokens: nil,
+                nativeMTPMode: .auto,
+                nativeMTPCapability: admittedCapability(maximumPromptTokens: 8192, maximumCompletionTokens: 8),
+                schedulerSupportsNativeMTP: true
+            ).resolvingTokenBounds(promptTokenCount: promptTokenCount, maxOutputTokens: 8)
+        }
 
-        XCTAssertEqual(ModelRuntime.nativeMTPFullPromptPrefillTokenLimit(prefillStepSize: 512), 512)
-        XCTAssertEqual(admission.selection.path, .ordinary)
-        XCTAssertEqual(admission.selection.nativeMTPReason, .capabilityMismatch)
-        XCTAssertEqual(admission.effectivePath, .ordinary)
-        XCTAssertEqual(admission.initialProposalDepth, 0)
-        XCTAssertTrue(admission.allowsConversationCacheLease)
+        // Chunked prefill seeds the drafter chunk by chunk, so the prefill
+        // chunk size no longer bounds native prompts; the signed sidecar does.
+        for promptTokenCount in [513, 1536, 4096, 8192] {
+            let native = try admission(promptTokenCount: promptTokenCount)
+            XCTAssertEqual(native.selection.path, .nativeMTP, "\(promptTokenCount)")
+            XCTAssertEqual(native.effectivePath, .nativeMTP, "\(promptTokenCount)")
+        }
+        let oversized = try admission(promptTokenCount: 8193)
+        XCTAssertEqual(oversized.selection.path, .ordinary)
+        XCTAssertEqual(oversized.selection.nativeMTPReason, .capabilityMismatch)
+        XCTAssertEqual(oversized.effectivePath, .ordinary)
+        XCTAssertEqual(oversized.initialProposalDepth, 0)
+        XCTAssertTrue(oversized.allowsConversationCacheLease)
     }
 
     func testNativeMTPRuntimeAdmissionDowngradesAfterDefaultCompletionExceedsSignedProfile() throws {

@@ -431,16 +431,10 @@ struct NativeMTPRuntimeAdmission: Sendable, Equatable {
 
     func resolvingTokenBounds(
         promptTokenCount: Int,
-        maxOutputTokens: Int,
-        runtimeMaximumPromptTokens: Int? = nil
+        maxOutputTokens: Int
     ) -> NativeMTPRuntimeAdmission {
         guard usesNativeMTP else { return self }
-        let effectiveMaximumPromptTokens: Int
-        if let runtimeMaximumPromptTokens {
-            effectiveMaximumPromptTokens = min(maximumPromptTokens, runtimeMaximumPromptTokens)
-        } else {
-            effectiveMaximumPromptTokens = maximumPromptTokens
-        }
+        let effectiveMaximumPromptTokens = maximumPromptTokens
         let reason: NativeMTPSelectorReason?
         if promptTokenCount < 0
             || effectiveMaximumPromptTokens <= 0

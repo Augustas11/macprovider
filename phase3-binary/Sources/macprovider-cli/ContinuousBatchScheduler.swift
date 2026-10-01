@@ -665,9 +665,15 @@ struct ContinuousBatchPrefillInput: Sendable, Equatable {
     let topP: Double
     let samplerStep: Int
     /// Native MTP drafters such as Qwen require target hidden states for the
-    /// complete prompt. This flag is set only for bounded full-prompt final
-    /// chunks; the backend must not replay a larger prompt to synthesize it.
+    /// complete prompt. Every prefill chunk of a native row sets this flag so
+    /// the backend advances the row's drafter over the chunk's own hidden
+    /// states; it never replays earlier chunks to synthesize them.
     let nativeMTPPromptPrefill: Bool
+    /// For a native non-final chunk `[c, c+n)`, the prompt token at `c+n`:
+    /// the drafter pairs hidden state `c+n-1` with the next token, which for
+    /// a non-final chunk is still a prompt token. `nil` on the final chunk,
+    /// whose last pair uses the sampled first token.
+    let nativeMTPNextPromptToken: Int?
 
     init(
         requestID: String,
@@ -682,7 +688,8 @@ struct ContinuousBatchPrefillInput: Sendable, Equatable {
         temperature: Double = 0,
         topP: Double = 1,
         samplerStep: Int = 0,
-        nativeMTPPromptPrefill: Bool = false
+        nativeMTPPromptPrefill: Bool = false,
+        nativeMTPNextPromptToken: Int? = nil
     ) {
         self.requestID = requestID
         self.promptTokens = promptTokens
@@ -697,6 +704,7 @@ struct ContinuousBatchPrefillInput: Sendable, Equatable {
         self.topP = topP
         self.samplerStep = samplerStep
         self.nativeMTPPromptPrefill = nativeMTPPromptPrefill
+        self.nativeMTPNextPromptToken = nativeMTPNextPromptToken
     }
 }
 
@@ -1486,7 +1494,6 @@ extension ContinuousBatchSchedulerError {
         "continuous_batching_duplicate_prefill_row": 503,
         "continuous_batching_prefill_row_mismatch": 503,
         "continuous_batching_reservation_overflow": 503,
-        "continuous_batching_native_mtp_prompt_prefill_exceeds_limit": 400,
     ]
 
     private static func carriedCodeStatus(_ code: String) -> Int {
@@ -1739,13 +1746,6 @@ actor ContinuousBatchScheduler {
               retainedTokenCost <= configuration.maxRequestTokens else {
             await discardUnacceptedRetainedCache(for: request)
             throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_invalid_request")
-        }
-        if request.decodePath == .nativeMTP,
-           request.promptTokens.count > configuration.maxPromptChunkTokens {
-            await discardUnacceptedRetainedCache(for: request)
-            throw ContinuousBatchSchedulerError.requestFailed(
-                "continuous_batching_native_mtp_prompt_prefill_exceeds_limit"
-            )
         }
         if let fence = request.nativeMTPTupleFence,
            disabledNativeMTPTupleFences.contains(fence) {
@@ -4273,9 +4273,10 @@ actor ContinuousBatchScheduler {
                         temperature: row.request.temperature,
                         topP: row.request.topP,
                         samplerStep: row.generatedTokens.count,
-                        nativeMTPPromptPrefill: row.usesNativeMTP
-                            && row.prefillCursor == 0
-                            && end == promptTokenCount
+                        nativeMTPPromptPrefill: row.usesNativeMTP,
+                        nativeMTPNextPromptToken: row.usesNativeMTP && end < promptTokenCount
+                            ? row.request.promptTokens[end]
+                            : nil
                     ),
                     chunk.count
                 ))

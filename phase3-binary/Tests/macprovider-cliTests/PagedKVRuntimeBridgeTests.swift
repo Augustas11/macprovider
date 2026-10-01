@@ -1175,6 +1175,304 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(backend.base.retainedRowCountForTest(), 0)
     }
 
+    private struct TinyQwen35Native {
+        let target: Qwen35TextModel
+        let drafter: Qwen35MTPDraftModel
+        let backend: RuntimeBridgeRecordingNativeMTPBackend
+    }
+
+    /// A tiny random-weight hybrid Qwen3.5 target and its real MTP drafter
+    /// behind the production paged backend. The same seed gives the same
+    /// weights, so separate instances are independent replicas.
+    private static func tinyQwen35Native(maxPhysicalBlocks: Int = 64) throws -> TinyQwen35Native {
+        let configuration = try JSONDecoder().decode(
+            Qwen35TextConfiguration.self,
+            from: Data(Self.tinyQwen35HybridConfiguration.utf8)
+        )
+        MLXRandom.seed(1770)
+        let target = Qwen35TextModel(configuration)
+        let drafter = Qwen35MTPDraftModel(configuration)
+        eval(target, drafter)
+        let descriptor = Self.bridgeDescriptor(maxPhysicalBlocks: maxPhysicalBlocks)
+        let backend = RuntimeBridgeRecordingNativeMTPBackend(PagedKVSharedForwardBackend(
+            container: ModelContainer(context: ModelContext(
+                configuration: ModelConfiguration(id: descriptor.modelID),
+                model: target,
+                processor: StandInUserInputProcessor(),
+                tokenizer: RuntimeBridgeFakeTokenizer()
+            )),
+            descriptor: descriptor,
+            layerCount: 2,
+            cacheKinds: [.recurrentMamba, .pagedAttention],
+            drafterContainer: MTPDrafterContainer(context: MTPDrafterContext(
+                configuration: ModelConfiguration(id: "mtp"),
+                model: drafter
+            ))
+        ))
+        return TinyQwen35Native(target: target, drafter: drafter, backend: backend)
+    }
+
+    private static func tinyNativeRequest(
+        _ id: String,
+        _ prompt: [Int],
+        _ maxTokens: Int,
+        decodePath: DecodePath = .nativeMTP,
+        temperature: Double = 0,
+        topP: Double = 1,
+        maximumActiveRows: Int = Int.max
+    ) -> ContinuousBatchSchedulerRequest {
+        ContinuousBatchSchedulerRequest(
+            id: id,
+            conversationKey: "",
+            promptTokens: prompt,
+            maxOutputTokens: maxTokens,
+            samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: id),
+            temperature: temperature,
+            topP: topP,
+            decodePath: decodePath,
+            nativeMTPMaximumProposalDepth: decodePath == .nativeMTP ? 1 : 0,
+            nativeMTPCompleteWindowBytesByDepth: decodePath == .nativeMTP ? [16, 16] : [],
+            nativeMTPMaximumActiveRows: maximumActiveRows,
+            nativeMTPTupleFence: decodePath == .nativeMTP ? Self.nativeMTPFence() : nil
+        )
+    }
+
+    /// Deterministic pseudo-random prompt over the tiny vocabulary.
+    private static func tinyPrompt(length: Int, salt: Int) -> [Int] {
+        var state = UInt64(truncatingIfNeeded: 0x9E37_79B9 &+ salt)
+        return (0 ..< length).map { _ in
+            state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            return Int((state >> 33) % 8)
+        }
+    }
+
+    /// The drafter's next proposal by definition: single-pass seeding over the
+    /// whole committed sequence, with target hidden states from one serial
+    /// forward. It never ran a native round, so it never went to depth zero.
+    private static func definitionalDrafterSeed(
+        target: Qwen35TextModel,
+        drafter: Qwen35MTPDraftModel,
+        prompt: [Int],
+        generated: [Int]
+    ) throws -> Int {
+        let bonus = try XCTUnwrap(generated.last, "no committed token")
+        let committed = prompt + generated.dropLast()
+        var emit = LMOutput.State()
+        emit[mtpEmitFlagKey] = true
+        let output = target(
+            LMInput.Text(tokens: MLXArray(committed.map(Int32.init)).reshaped(1, committed.count)),
+            cache: target.newCache(parameters: nil),
+            state: emit
+        )
+        var state = drafter.makeState(parameters: nil)
+        drafter.prepareDrafterState(
+            target: target,
+            promptTokens: MLXArray(committed.map(Int32.init)).reshaped(1, committed.count),
+            targetHidden: try XCTUnwrap(output.state?[mtpLastHiddenStatesKey], "target emitted no hidden"),
+            firstBonus: MLXArray([Int32(bonus)]),
+            positionDeltas: nil,
+            state: &state,
+            sampler: GenerateParameters(temperature: 0).sampler()
+        )
+        return try XCTUnwrap(state.seedToken, "drafter produced no seed").item(Int.self)
+    }
+
+    /// SPEC-048 chunked-prefill seeding: advancing the drafter chunk by chunk
+    /// over each chunk's own hidden states (tail = next prompt token, final
+    /// tail = sampled token) leaves the same drafter state and proposal as
+    /// single-pass seeding of the same prompt. A later chunk with no prior
+    /// drafter state at its offset fails closed.
+    func testChunkedPromptPrefillSeedsTheDrafterLikeSinglePassPrefill() async throws {
+        try requireMetal()
+        let tiny = try Self.tinyQwen35Native()
+        let backend = tiny.backend.base
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 64)
+        let prompt = Self.tinyPrompt(length: 13, salt: 1)
+
+        func prefill(_ id: String, chunks: [Int]) async throws -> [ContinuousBatchPrefillOutput] {
+            let handle = try await allocator.allocate(conversationKey: id, maxTokens: 32)
+            var outputs: [ContinuousBatchPrefillOutput] = []
+            var offset = 0
+            for size in chunks {
+                let end = offset + size
+                _ = try await allocator.extend(handle, by: size)
+                outputs += try await backend.prefill(rows: [ContinuousBatchPrefillInput(
+                    requestID: id,
+                    promptTokens: Array(prompt[offset ..< end]),
+                    binding: try await allocator.binding(for: handle),
+                    promptTokenOffset: offset,
+                    committedKVTokenCount: offset,
+                    targetKVTokenCount: end,
+                    isFinalChunk: end == prompt.count,
+                    nativeMTPPromptPrefill: true,
+                    nativeMTPNextPromptToken: end < prompt.count ? prompt[end] : nil
+                )])
+                offset = end
+            }
+            return outputs
+        }
+
+        let single = try await prefill("single", chunks: [13])
+        let chunked = try await prefill("chunked", chunks: [5, 5, 3])
+        XCTAssertEqual(single.last?.sampledToken, chunked.last?.sampledToken)
+        XCTAssertNotNil(single.last?.sampledToken)
+
+        let reference = backend.nativeMTPDrafterSnapshotForTest(requestID: "single")
+        let candidate = backend.nativeMTPDrafterSnapshotForTest(requestID: "chunked")
+        let referenceState = try XCTUnwrap(reference.state)
+        let candidateState = try XCTUnwrap(candidate.state)
+        XCTAssertEqual(candidateState.nextPosition, prompt.count)
+        XCTAssertEqual(candidateState.nextPosition, referenceState.nextPosition)
+        XCTAssertEqual(candidate.seedToken, reference.seedToken)
+        XCTAssertNotNil(candidate.seedToken)
+        XCTAssertEqual(candidate.pendingColumns, 0)
+        XCTAssertEqual(candidateState.cache.count, referenceState.cache.count)
+        for (lhs, rhs) in zip(candidateState.cache, referenceState.cache) {
+            XCTAssertEqual(lhs.offset, rhs.offset)
+            for (a, b) in zip(lhs.state, rhs.state) {
+                XCTAssertEqual(a.shape, b.shape)
+                // Documented tolerance: the chunked advance runs the packed
+                // drafter kernels (array mask, per-row RoPE offsets) instead
+                // of single-pass causal attention; values agree to float32
+                // accumulation order.
+                let maxDifference = abs(a.asType(.float32) - b.asType(.float32)).max().item(Float.self)
+                XCTAssertLessThanOrEqual(maxDifference, 1e-4)
+            }
+        }
+
+        // A non-initial chunk without the previous chunk's drafter state is
+        // refused rather than seeded from a partial prompt.
+        let orphan = try await allocator.allocate(conversationKey: "orphan", maxTokens: 32)
+        _ = try await allocator.extend(orphan, by: 10)
+        let refused = try await backend.prefill(rows: [ContinuousBatchPrefillInput(
+            requestID: "orphan",
+            promptTokens: Array(prompt[5 ..< 10]),
+            binding: try await allocator.binding(for: orphan),
+            promptTokenOffset: 5,
+            committedKVTokenCount: 5,
+            targetKVTokenCount: 10,
+            isFinalChunk: false,
+            nativeMTPPromptPrefill: true,
+            nativeMTPNextPromptToken: prompt[10]
+        )])
+        XCTAssertEqual(refused.first?.failureCode, "continuous_batching_prefill_failed")
+    }
+
+    /// Native prompts longer than one prefill chunk are served natively and
+    /// emit exactly the ordinary path's greedy tokens at 1.5k, 4k, and 8k.
+    func testChunkedNativePromptsKeepGreedyParityWithOrdinaryAtLongLengths() async throws {
+        try requireMetal()
+        let tiny = try Self.tinyQwen35Native(maxPhysicalBlocks: 8192)
+        let scheduler = try Self.makeScheduler(
+            maxActiveRows: 6,
+            backend: tiny.backend,
+            maxPhysicalBlocks: 8192,
+            maxPromptChunkTokens: 512
+        )
+        let lengths = [1536, 4096, 8192]
+        var tasks: [String: Task<ContinuousBatchSchedulerResult, any Error>] = [:]
+        for length in lengths {
+            let prompt = Self.tinyPrompt(length: length, salt: length)
+            tasks["native-\(length)"] = Task {
+                try await scheduler.submit(Self.tinyNativeRequest("native-\(length)", prompt, 12))
+            }
+            tasks["ordinary-\(length)"] = Task {
+                try await scheduler.submit(Self.tinyNativeRequest(
+                    "ordinary-\(length)", prompt, 12, decodePath: .ordinary
+                ))
+            }
+        }
+        var results: [String: ContinuousBatchSchedulerResult] = [:]
+        for (id, task) in tasks {
+            results[id] = try await task.value
+        }
+        let committed = tiny.backend.finalizedRounds().flatMap { $0 }.filter(\.shouldCommit)
+        for length in lengths {
+            let native = try XCTUnwrap(results["native-\(length)"])
+            let ordinary = try XCTUnwrap(results["ordinary-\(length)"])
+            XCTAssertEqual(native.terminalStatus, .length, "\(length)")
+            XCTAssertEqual(native.generatedTokens.count, 12, "\(length)")
+            XCTAssertEqual(native.generatedTokens, ordinary.generatedTokens, "native \(length) diverged from ordinary")
+            XCTAssertTrue(
+                committed.contains { $0.requestID == "native-\(length)" && $0.proposalTokenCount == 1 },
+                "native-\(length) never verified a drafter proposal"
+            )
+        }
+        XCTAssertEqual(tiny.backend.base.retainedRowCountForTest(), 0)
+    }
+
+    /// SPEC-048 target-sample exact match: seeded sampled native rows (and a
+    /// greedy native row beside them) emit exactly the tokens the same seeded
+    /// rows emit on the ordinary path, because each verify position samples
+    /// with the row's own sampler at the step ordinary decode would use.
+    func testSeededSampledNativeRowsMatchSeededOrdinaryRows() async throws {
+        try requireMetal()
+        let rows: [(id: String, temperature: Double, topP: Double)] = [
+            ("cool", 0.3, 1.0),
+            ("warm", 0.7, 0.9),
+            ("hot", 1.0, 1.0),
+            ("greedy", 0, 1.0),
+        ]
+        func run(_ path: DecodePath) async throws -> (
+            results: [String: ContinuousBatchSchedulerResult],
+            finalized: [ContinuousBatchNativeMTPFinalizeInput]
+        ) {
+            let tiny = try Self.tinyQwen35Native()
+            let scheduler = try Self.makeScheduler(maxActiveRows: 5, backend: tiny.backend, maxPhysicalBlocks: 64)
+            var tasks: [String: Task<ContinuousBatchSchedulerResult, any Error>] = [:]
+            for (index, row) in rows.enumerated() {
+                let prompt = Self.tinyPrompt(length: 6 + index, salt: 30 + index)
+                tasks[row.id] = Task {
+                    try await scheduler.submit(Self.tinyNativeRequest(
+                        row.id, prompt, 24,
+                        decodePath: path,
+                        temperature: row.temperature,
+                        topP: row.topP
+                    ))
+                }
+            }
+            // A sampled ordinary row shares the batch in both runs.
+            tasks["ordinary-sampled"] = Task {
+                try await scheduler.submit(Self.tinyNativeRequest(
+                    "ordinary-sampled", Self.tinyPrompt(length: 5, salt: 99), 24,
+                    decodePath: .ordinary,
+                    temperature: 0.8
+                ))
+            }
+            var results: [String: ContinuousBatchSchedulerResult] = [:]
+            for (id, task) in tasks {
+                results[id] = try await task.value
+            }
+            return (results, tiny.backend.finalizedRounds().flatMap { $0 })
+        }
+
+        let ordinary = try await run(.ordinary)
+        let native = try await run(.nativeMTP)
+        for id in rows.map(\.id) + ["ordinary-sampled"] {
+            let expected = try XCTUnwrap(ordinary.results[id])
+            let actual = try XCTUnwrap(native.results[id])
+            XCTAssertEqual(actual.terminalStatus, .length, id)
+            XCTAssertEqual(actual.generatedTokens, expected.generatedTokens, "\(id) native diverged from seeded ordinary")
+        }
+        XCTAssertTrue(ordinary.finalized.isEmpty)
+        let sampledCommits = native.finalized.filter {
+            $0.shouldCommit && ["cool", "warm", "hot"].contains($0.requestID) && $0.proposalTokenCount == 1
+        }
+        XCTAssertTrue(sampledCommits.contains { $0.committedProposalTokenCount == 1 }, "no sampled acceptance exercised")
+        XCTAssertTrue(sampledCommits.contains { $0.committedProposalTokenCount == 0 }, "no sampled rejection exercised")
+        // Sampling differs from greedy on these rows, so the test is not
+        // vacuously comparing argmax streams.
+        let sampledHot = try XCTUnwrap(native.results["hot"]).generatedTokens
+        let greedyHot = try await {
+            let tiny = try Self.tinyQwen35Native()
+            let scheduler = try Self.makeScheduler(maxActiveRows: 1, backend: tiny.backend, maxPhysicalBlocks: 64)
+            return try await scheduler.submit(Self.tinyNativeRequest(
+                "hot", Self.tinyPrompt(length: 8, salt: 32), 24, decodePath: .ordinary
+            )).generatedTokens
+        }()
+        XCTAssertNotEqual(sampledHot, greedyHot)
+    }
+
     func testNativeMTPIntegrityProbeBlocksBuyerAdmissionAndReleasesAfterCompletion() async throws {
         let prefillGate = RuntimeBridgeTestGate()
         let backend = RuntimeBridgeScriptedBackend(
@@ -2467,7 +2765,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     private static func makeScheduler(
         maxActiveRows: Int,
         backend: any ContinuousBatchSchedulerBackend,
-        maxPhysicalBlocks: Int = 16
+        maxPhysicalBlocks: Int = 16,
+        maxPromptChunkTokens: Int = 256
     ) throws -> ContinuousBatchScheduler {
         let descriptor = PagedKVDescriptor(
             blockSizeTokens: 4,
@@ -2503,6 +2802,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
                 tuple: tuple,
                 maxActiveRows: maxActiveRows,
                 decodeHeadroomTokens: 4,
+                maxPromptChunkTokens: maxPromptChunkTokens,
                 snapshot: ContinuousBatchSchedulerSnapshot(
                     modelID: descriptor.modelID,
                     modelSHA256: descriptor.modelSHA256,

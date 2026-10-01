@@ -4959,11 +4959,11 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         )
     }
 
-    func testNativeMTPRejectsPromptExceedingBoundedPrefillChunkBeforeBackendWork() async throws {
+    func testNativeMTPPromptLongerThanOneChunkPrefillsEveryChunkWithItsNextPromptToken() async throws {
         let backend = ScriptedBackend(
             scripts: [:],
-            prefillTokens: ["too-long": 4],
-            nativeTargetTopTokens: ["too-long": [5]]
+            prefillTokens: ["chunked": 4],
+            nativeTargetTopTokens: ["chunked": [5]]
         )
         let scheduler = try await makeScheduler(
             maxActiveRows: 1,
@@ -4971,31 +4971,22 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             backend: backend
         )
 
-        do {
-            _ = try await scheduler.submit(Self.nativeRequest(
-                id: "too-long",
-                promptTokens: [1, 2, 3],
-                maxOutputTokens: 2,
-                proposals: [5],
-                maximumDepth: 1
-            ))
-            XCTFail("oversized native MTP prompt should fail before admission")
-        } catch let error as ContinuousBatchSchedulerError {
-            XCTAssertEqual(
-                error,
-                .requestFailed("continuous_batching_native_mtp_prompt_prefill_exceeds_limit")
-            )
-        }
+        let result = try await scheduler.submit(Self.nativeRequest(
+            id: "chunked",
+            promptTokens: [1, 2, 3, 6, 7],
+            maxOutputTokens: 2,
+            proposals: [5],
+            maximumDepth: 1
+        ))
 
-        let metrics = await scheduler.metrics()
-        XCTAssertEqual(metrics.activePromptRows, 0)
-        XCTAssertEqual(metrics.activeDecodeRows, 0)
-        let prefillCallCount = await backend.prefillCallCount()
+        XCTAssertEqual(result.outputTokens.count, 2)
+        let prefills = await backend.prefillInputs()
+        XCTAssertEqual(prefills.map(\.promptTokens), [[1, 2], [3, 6], [7]])
+        XCTAssertTrue(prefills.allSatisfy(\.nativeMTPPromptPrefill))
+        XCTAssertEqual(prefills.map(\.nativeMTPNextPromptToken), [3, 7, nil])
+        XCTAssertEqual(prefills.map(\.isFinalChunk), [false, false, true])
         let nativeVerifyBatches = await backend.nativeVerifyBatches()
-        let nativeFinalizations = await backend.nativeFinalizations()
-        XCTAssertEqual(prefillCallCount, 0)
-        XCTAssertEqual(nativeVerifyBatches, [])
-        XCTAssertEqual(nativeFinalizations, [])
+        XCTAssertFalse(nativeVerifyBatches.isEmpty)
     }
 
     func testNativeMTPAppliesTerminalFilterBeforeBonusCandidate() async throws {
@@ -6297,6 +6288,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     private var serialMaterializeLog: [String: [Int]] = [:]
     private var retainedInstallAttemptLog: [String: Int] = [:]
     private var prefillRowsLog: [[String]] = []
+    private var prefillInputLog: [ContinuousBatchPrefillInput] = []
     private var decodeRowsLog: [[String]] = []
     private var currentTokenLog: [[String: Int]] = []
     private var prefillCommittedLog: [[String: Int]] = []
@@ -6379,6 +6371,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     }
 
     func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
+        prefillInputLog.append(contentsOf: rows)
         prefillRowsLog.append(rows.map(\.requestID))
         prefillCommittedLog.append(Dictionary(uniqueKeysWithValues: rows.map {
             ($0.requestID, $0.committedKVTokenCount)
@@ -6609,6 +6602,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     func prefillCallCount() -> Int { prefillRowsLog.count }
     func decodeCallCount() -> Int { decodeCalls }
     func decodeBatches() -> [[String]] { decodeRowsLog }
+    func prefillInputs() -> [ContinuousBatchPrefillInput] { prefillInputLog }
     func prefillOrder() -> [[String]] { prefillRowsLog }
     func observedSamplerSeeds() -> [String: [Int]] { samplerSeedLog }
     func observedSamplerSteps() -> [String: [Int]] { samplerStepLog }
