@@ -1,6 +1,10 @@
 # SPEC-032 — Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary
 
-**Status:** v0.3.4-draft
+**Status:** v0.3.5-draft
+**Amendment (v0.3.5, #1816):** SPEC-032-R004 permits a sandboxed pool
+member whose exact served artifact pair matches a current signed SPEC-042-R015
+entry to serve that pool's routes only. Global sandbox behavior is unchanged;
+`listed` is not a paid-routing tier.
 **Amendment (v0.3.4, #1690 M9):** FR-HG8 lists `omlx_loopback`
 (oMLX, SPEC-046 v0.5.0). Its hello is sandboxed like the other loopback adapters.
 **Amendment (v0.3.3, Gate A5 source-review boundary):** Gate A5 is limited to
@@ -443,9 +447,13 @@ every condition of the SPEC-042-R004 runtime-allowlist predicate and of the
 SPEC-047-R003(iv) pool route-time clause holds at that selection attempt. That selection
 does not clear `admission_sandboxed`, does not make the session eligible for any global
 request or any other pool's request, and changes no hello-time close reason. FR-HG7 is
-preserved: the pool path requires a SPEC-010-R007 GGUF member of a `listed` or
-`recommendable` catalog row, bound through a `catalog_priced` candidate, so an
-uncatalogued served model is never selected. The FR-HG3/FR-HG7 hardware capacity
+preserved globally: a pool route requires either (a) a SPEC-010 artifact member whose
+row is `recommendable` for paid catalog routing, or (b) an exact algorithm/hash match
+to a current SPEC-042-R015 entry, bound as pool-scoped `catalog_priced` under
+SPEC-047-R011. A merely `listed` row never satisfies paid routing; this corrects the
+prior listed-vs-recommendable inconsistency. Case (b) is creator-attested and may serve
+only the matching pool; it does not clear `admission_sandboxed`, enter global
+`/v1/models`, or become `settlement_capable`. The FR-HG3/FR-HG7 hardware capacity
 ceiling for catalog MLX models is not evaluated for the external runtime; slot and
 capacity accounting follow SPEC-002 as for any selected provider. Current state: routing
 excludes every `admission_sandboxed` session (`Provider.RoutingEligible`,

@@ -1,7 +1,8 @@
 # SPEC-010 — Provider Model Catalog
 
-**Version:** 1.14
-**Status:** v1.14 MLX-snapshot identity leg for `omlx_loopback` (R009(f),
+**Version:** 1.15
+**Status:** v1.15 pool-scoped identity boundary (R007(j), #1816,
+2026-10-01) over v1.14 MLX-snapshot identity leg for `omlx_loopback` (R009(f),
 #1690 M9, 2026-09-25) over v1.13 serving-time GGUF binding for
 `lmstudio_loopback` (R007(i), #1690 M9, 2026-09-25) over v1.12 MLX-snapshot identity leg for
 `mlxlm_loopback` (R009, #1690 M8, 2026-09-24) over v1.11 GGUF `huggingface_revision` source and pool-scoped
@@ -45,6 +46,15 @@ SPEC-023 owns candidate-catalog `bench_gate` provenance, including
   artifact-derived identity across a scheduled catalog re-stamp by resolving
   in its own release's set (slice-4 implementation). Bounded
   `model-catalog-identity` amendment.
+
+**Change log v1.15 (issue #1816 — pool-scoped identity source):**
+- R007(j) recognizes the exact artifact pair in a signed SPEC-042 v3 pool
+  entry as a route-snapshot identity source only for that pool. It does not
+  create or shadow a canonical catalog id, does not enter the global artifact
+  set, and cannot authorize global routing or `settlement_capable`.
+- SPEC-022-R013 records `expected_model_hash_source: pool_manifest` and the
+  exact pool core digest so replay stays hash-exact. The trust claim remains
+  creator-attested and unverified by the network.
 
 **Change log v1.14 (issue #1690 M9 — oMLX serving):**
 - R009 now covers two external MLX runtimes. New R009(f): oMLX
@@ -1304,6 +1314,22 @@ algorithm.
   are administrative trust (SPEC-042-R004), exactly as for every loopback
   runtime. LM Studio MLX-format models have no leg: no `mlx_safetensors`
   member is ever valid for `lmstudio_loopback` ((h), SPEC-023 §3.7.4).
+  (j) **Pool-manifest identity source (v1.15, #1816).** A signed
+  SPEC-042-R015 v3 entry is an explicitly scoped exception to catalog-owned
+  identity: on an authorized route to that same pool, its exact
+  `(artifact_hash_algorithm, artifact_hash)` pair MAY be the expected model
+  identity under SPEC-047-R011 and SPEC-022-R013. The CLI still computes the
+  pair from the complete local bytes under (a) for GGUF or R009(a) for a
+  snapshot manifest; provider claims and runtime-reported names remain
+  insufficient. The entry's `pool_model_id` is never a canonical catalog id,
+  MUST NOT equal or normalize onto one, and is not inserted into the global
+  R007 identity set or artifact-feed uniqueness domain. A pool-manifest pair
+  MUST NOT satisfy catalog matching, global routing, catalog pricing, or
+  `settlement_capable`. The route snapshot records source `pool_manifest`, the
+  exact pair, `pool_id`, `pool_model_id`, `manifest_version`, and
+  `manifest_core_digest`; settlement replays those bytes and never repairs
+  them from a current manifest. This clause makes no model-honesty or
+  network-verification claim beyond SPEC-042-R006.
 
 - **SPEC-010-R009 — MLX-snapshot identity leg for `mlxlm_loopback` (v1.12,
   #1690 M8) and `omlx_loopback` ((f), v1.14, #1690 M9).** An `mlx_lm.server` process served through the SPEC-046-R009

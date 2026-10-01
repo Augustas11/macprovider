@@ -1,12 +1,12 @@
 # SPEC-043 - Trusted Pool Creator Onboarding MVP
 
-**Version:** 0.2.0
+**Version:** 0.2.1
 
 ```json
 {
   "spec_id": "SPEC-043",
   "title": "Trusted Pool Creator Onboarding MVP",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "path": "specs/SPEC-043-trusted-pool-creator-onboarding.md",
   "status": "normative",
   "owner": "@Augustas11",
@@ -54,7 +54,7 @@ The launchable MVP is intentionally narrow:
 - the creator brings the pool's provider supply, using already-admitted SPEC-003 provider identities;
 - the creator distributes or resells access to its own buyers outside MacProvider's creator-billing product;
 - MacProvider provides manifest acceptance, durable pool state, fail-closed routing isolation, pool-scoped buyer authorization, promise surfaces, and labeled settlement records;
-- MacProvider does not execute creator revenue split, does not admit arbitrary third-party provider supply into the creator's pool, and does not market the pool as cryptographic privacy.
+- MacProvider does not execute creator revenue split, does not admit arbitrary third-party provider supply into the creator's pool except named accounts explicitly delegated under R006 and creator-attested under SPEC-042-R016, and does not market the pool as cryptographic privacy.
 
 This spec is required because SPEC-042 defines the pool control plane and manifest machinery, but does not itself define the external creator onboarding, approval, root-key registration, administration, or production enablement path needed to safely make Trusted Pools live for parties outside MacProvider.
 
@@ -64,7 +64,7 @@ Commercial terms between the creator and MacProvider are governed by a separate 
 
 SPEC-043 does not define open self-service public pool creation. Creation is approved-only until abuse, compliance, support, and sanctions workflows exist.
 
-SPEC-043 does not define a Bittensor-style open subnet market. Multi-party pools, third-party provider opt-in, provider revenue share, creator payout accounting, sanctions appeals, and cross-pool provider reuse governance are Layer 2 V1/V2 work.
+SPEC-043 does not define a Bittensor-style open subnet market. Open third-party provider opt-in, provider revenue share, creator payout accounting, sanctions appeals, and cross-pool provider reuse governance are Layer 2 V1/V2 work. The bounded exception is a creator-selected account that already holds an R006 delegation and is named in the current SPEC-042-R016 signed member attestation; this is not open enrollment, and the creator remains accountable.
 
 SPEC-043 does not define Privacy Pools. Coordinator-blind content, unlinkable routing, anonymous membership, nullifiers, ZK membership proofs, and unlinkable settlement are Layer 3 work owned by SPEC-041 and future specs. Buyer-facing copy MUST use "Trusted Pool" and MUST NOT use "Privacy Pool" for this MVP.
 
@@ -122,10 +122,14 @@ The coordinator MUST reconstruct and validate the routeable snapshot before atom
 
 - The creator policy (`pool_policy.json`) and `pool_status.json` MUST list every allowed `runtime_source` and state in plain language that those external runtimes serve under administrative trust: the pool operator attests which process executes, the weights it loaded, and its token counts, and MacProvider does not verify them. The allowlist constrains the runtime identity the operator declares and the coordinator records (SPEC-042-R004), not the executing process. A pool whose core is v1, or v2 with an empty list, MUST be disclosed as native MLX only.
 - The reviewed creator distribution artifact and every public announcement MUST name every allowed runtime and carry the same statement. A distribution artifact or public-announcement approval whose disclosed runtime set differs from the active core's allowlist MUST fail production activation and public-announcement approval (R008). Because a loosened allowlist mints a new `manifest_core_digest`, it requires a fresh review of both.
-- The creator MUST be told, in the creator-admin surface and the Creator Agreement, that only providers owned by the creator account earn through an allowed external runtime. A delegated provider (R006) that serves through one is never selected for the pool (SPEC-042-R004(e)).
+- The creator MUST be told, in the creator-admin surface and the Creator Agreement, that an external-runtime provider earns only when its owner account is the creator or is both delegated under R006 and named with that runtime class in the current creator-signed SPEC-042-R016 attestation. The creator is accountable for each named member; removing its attestation revokes new selection at the next accepted manifest generation.
 - The launch checklist (`docs/runbooks/trusted-pool-production-launch.md`) MUST include a step that compares the published policy, the reviewed distribution artifact, and the announcement against the active core's allowlist before promotion.
 
 Disclosure does not change SPEC-008 `attestation_tier` and MUST NOT describe an external runtime as attested, verified, or confidential.
+
+**SPEC-043-R014 - Pool-model buyer disclosure (v0.2.1, #1816).** Every buyer model-listing and route disclosure for a SPEC-042-R015 entry MUST identify the model as **pool-attested, not network-verified**. An authorized pool-scoped `/v1/models` response MAY include the entry only in that pool's view and MUST expose `pool_model_id`, `pool_id`, `disclosure_class: "pool_attested_unverified"`, the coordinator-recorded engine/runtime source, artifact hash algorithm, artifact hash, max context, and a statement that the creator signed the identity and price. It MUST NOT expose the entry in the default global model list, alias it to a SPEC-010 canonical id, call it catalog-verified, or imply global availability.
+
+The route quote and served-response disclosure MUST repeat the pool-attested status and engine, and MUST bind the exact pool manifest core digest used for the route. Human-readable copy MUST say **Pool-attested, not network-verified** or a localization with the same meaning. The creator policy, status document, reviewed distribution artifact, and public announcement MUST enumerate every active pool model with the same identity, artifact, engine set, and disclosure class; a mismatch with the active v3 core fails R008 activation/public-announcement approval. Artifact disclosure is exact identity provenance, not proof that the external process loaded those bytes, and the administrative-trust language of R013 remains required.
 
 ## 4. Implementation, tests, and journeys
 
@@ -148,6 +152,7 @@ The first journey id is `JOURNEY-TRUSTED-POOL-CREATOR-MVP`. Slices should be com
 |---|---|---|---|---|
 | `SPEC-043-R001..R012` | `DECISION_REQUIRED` | `@Augustas11` | `#1053` | Product approval for the single-operator MVP contract and signed journey evidence after implementation. |
 | `SPEC-043-R013` | `DECISION_REQUIRED` | `@Augustas11` | `#1690` | Policy/status/distribution-artifact disclosure of the runtime allowlist, activation and announcement failing on a mismatch, and the launch-checklist step exercised in the SPEC-042-R013 pool journey. |
+| `SPEC-043-R014` | `DECISION_REQUIRED` | `@Augustas11` | `#1816` | Pool-scoped `/v1/models`, quote/route, policy/status, reviewed-artifact and announcement disclosures, with exact engine/artifact provenance and global-list exclusion. |
 | Creator-admin surface shape | `DECISION_REQUIRED` | `@Augustas11` | `#1053` | CLI-first operator-mediated candidate administration and a bounded bearer-token creator API exist for candidate operations; signer-set rotation, production ownership of reviewed artifacts/public announcements, signed creator-MVP journey evidence, and compatibility notice/release-note process remain pending before production launch. |
 | Creator approval policy | `DECISION_REQUIRED` | `@Augustas11` | `#1053` | Product/legal approval of the R001 criteria and Creator Agreement template. |
 | Per-key buyer scopes | `DECISION_REQUIRED` | `@Augustas11` | `#1053` | Implement per-key scopes or use dedicated pool-only buyer accounts for MVP. |
@@ -218,6 +223,7 @@ The launch gate is intentionally stricter than the current SPEC-042 code state. 
 
 ## 8. Changelog and history
 
+- 0.2.1 - Pool model and named-member disclosure (#1816). Adds R014 buyer `/v1/models` and route copy: pool-attested, not network-verified, with exact engine and artifact provenance and no global listing. Narrows the prior third-party-supply non-goal to allow only creator-selected, delegated, creator-attested member accounts under SPEC-042-R016; open enrollment, revenue sharing, and creator payout remain out of scope.
 - 0.1.0 - Initial SPEC-042A enablement profile. Defines approved external creator onboarding for single-operator Trusted Pools, with explicit non-goals for open self-service, third-party provider marketplace supply, creator split payout, Privacy Pools, and regulated-vertical claims.
 - 0.1.0 evidence update - Records the PR-C implementation slice: durable creator approvals, approval-gated nonce issuance and positive pool mutations, suspension/expiry-driven routeability closure, approval-revision generation fences, route-time grace expiry, rejected direct reactivation, and nonce invalidation on suspension. Normative version unchanged.
 - 0.1.0 evidence update - Records the PR-D routeability-refresh slice: same-revision background refresh for time-derived gate closures, bounded `trusted_pools.refresh_interval_s`, routeability-deadline scheduling, advanced generation for active pools closed by time gates, and operator gate-status fields. Normative version unchanged.

@@ -1,7 +1,11 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.6.10 (2026-09-27, auto-prefix cache-hit billing)
+**Version:** 0.6.11 (2026-10-01, pool-manifest trusted pricing)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.6, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.39, SPEC-024 v0.2.7 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.18.0 / SPEC-005-R011 / SPEC-005-R013 (SPEC-023-R019) is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
+
+**Change log v0.6.11 (2026-10-01, issue #1816 — pool-manifest trusted pricing):**
+- Registers `SPEC-005-R015`. A current signed SPEC-042 v3 `model_entries[].pricing` is a trusted price source only for the same pool's R011 routes. The buyer quote and reservation use it after inclusive network floor/ceiling validation; the existing units, formula, platform fee/provider share, usage bounds, finality, and no-repricing history rules are unchanged.
+- The signed network rate card gains closed pool-model floor/ceiling bounds. Missing or out-of-bounds pricing fails manifest acceptance and route reservation closed. No provider proposal, global route, or different pool may consume the price.
 
 **Change log v0.6.10 (2026-09-27, issue #1768 — auto-prefix cache-hit billing):**
 - §5.3.1 accepts a valid first-attempt provider `cached_prompt_tokens` report on an authenticated conversation-cache-only auto-prefix request as creditable reuse. The row keeps the cached count, applies the configured cache-hit rate, and exposes the same count in the flat buyer field. This supersedes v0.6.8's full-prompt-rate carve-out for that request class without enabling sticky routing.
@@ -49,7 +53,7 @@
 
 ## Preliminary conformance unit IDs
 
-SPEC-005 v0.6.10 registers `SPEC-005-R001`..`SPEC-005-R014` in
+SPEC-005 v0.6.11 registers `SPEC-005-R001`..`SPEC-005-R015` in
 `specs/CONFORMANCE.json`. R001–R003 remain the paid-path formula, hot-path,
 and crash-recovery units. R004–R009 group additional existing obligation
 areas without changing them. R010 is the D1a wholesale statement unit.
@@ -86,8 +90,11 @@ invariant unit:
 - `SPEC-005-R014` — authenticated conversation-cache-only auto-prefix hits keep
   valid first-attempt cached tokens and earn the configured cache-hit rate without
   enabling sticky routing (§5.3.1 gate 4).
+- `SPEC-005-R015` — creator-signed pool-manifest pricing as a trusted source for
+  the same pool's routes only, bounded by the signed network rate card and used by
+  quote, reservation, immutable rate snapshot, and the unchanged formula (§5.7).
 
-`requirement_id_migration` is `complete`. R004–R014 are not promoted from
+`requirement_id_migration` is `complete`. R004–R015 are not promoted from
 this close. Signed journey-result evidence is still required before any of
 those rows can become conformant.
 
@@ -1498,6 +1505,16 @@ Lookup **order** (§5.5) is unchanged. Ledger snapshots still freeze resolved ra
 8. **I5 — History.** A price change MUST NOT re-price earlier requests. `ledger_request_credits` rates and credits are frozen at record time (§4.3; the §7.5/§7.5b exceptions are unchanged), recovery prices from the historical snapshot (§4.7, §13.2), and wholesale statements price each row at its own generation (§11.7).
 
 Invariant check: every `ledger_config_snapshots` row inserted by a pricing reload equals a reviewed table (the candidate or the prior), and every provider-bound request row links to a snapshot id whose table was published when the row was priced.
+
+## 5.7 Pool-manifest trusted price source
+
+**SPEC-005-R015.** A verified current SPEC-042 v3 `model_entries[].pricing` object is a trusted price source only for a SPEC-047-R011 binding and buyer route carrying the same `pool_id`, `manifest_version`, and `manifest_core_digest`. It is creator-signed policy, not a provider-proposed price and not a global catalog rate. Global/poolless routes, other pools, catalog lookup, `RateFor`, and the `default` fallback MUST ignore it.
+
+The signed network rate card MUST carry one closed `pool_model_pricing_bounds` object with exactly four unsigned 64-bit SPEC-005-unit fields: `min_input_credits_per_million`, `max_input_credits_per_million`, `min_output_credits_per_million`, and `max_output_credits_per_million`. Each minimum MUST be less than or equal to its maximum. A v3 manifest entry is acceptable only when both of its rates fall within the inclusive bound for the matching axis. Missing, unverified, stale, malformed, or internally inverted bounds, integer overflow, or an out-of-bounds entry fails manifest acceptance closed. Changing bounds affects only manifests accepted or re-evaluated under the new rate-card generation; it MUST NOT re-price an existing immutable route snapshot or ledger row.
+
+For an authorized pool route, the buyer quote and quota reservation MUST resolve the R011 binding before dispatch and use its `input_credits_per_million` and `output_credits_per_million`. The route snapshot/config snapshot MUST durably record those rates, the active bounds' signed rate-card digest/generation, `pool_id`, `manifest_version`, `manifest_core_digest`, and `pool_model_id`. The existing closed-form token arithmetic, rounding, cache rule, completion clamp, `global_multiplier_ppm`, platform fee/provider-share formula, buyer finality, provider credit, reconciliation, and historical no-repricing rules apply unchanged. The price source changes; the formula and platform fee do not.
+
+A quote/reservation produced from one manifest or rate-card generation MUST NOT be silently refreshed to another after dispatch. A mismatch before dispatch fails closed and may retry only from a newly quoted reservation; a mismatch after dispatch follows the immutable snapshot and SPEC-042-R006/SPEC-022-R013 dispute rules. A `label_disputed` or non-verifiable pool attempt receives no buyer-final debit or positive provider credit. No `model_entries[].pricing` value may be exposed as network-verified, globally available, or usable outside the signing pool.
 
 ## 6. Credit calculation: D8 mapping
 

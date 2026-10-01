@@ -1,12 +1,21 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.2
+version: v0.22.3
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-01
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.22.3 (2026-10-01)** — Pool-proven catalog intake (#1816). Registers
+  `SPEC-023-R026`: unmatched supported artifact pairs receive deterministic
+  hash-derived intake keys; aggregate paid pool volume, distinct providers,
+  and licence-on-file status become a bounded intake signal; an operator may
+  add a proven model as `listed` in an out-of-band release. Promotion to
+  `recommendable` remains an explicit operator decision under all existing
+  gates, and permissionless global earning remains out of scope pending
+  SPEC-036 compute integrity.
 
 - **v0.22.2 (2026-10-01)** — Default context memory residency now uses the
   verified artifact byte footprint when it is available (#1794). Catalog
@@ -3444,7 +3453,7 @@ This will not create demand where none exists. SPEC-023 answers "which model sho
 
 §16 defines how a model key gets INTO the catalog, on what evidence, and on what cadence. Before this revision the answer was "the operator adds a row when the operator decides to," and each addition was a full signed release cut. The mechanism below does not automate that decision — it makes the inputs to it explicit, bounded, and auditable, and it gives the operator a cheap tier (`listed`) that admits identity without committing to price.
 
-**Non-goal, restated.** This is not an open marketplace. Providers do not set prices, do not admit models, and do not gain an earning path by supplying a signal. Non-catalog models remain non-earning exactly as SPEC-047 §1 and SPEC-047-R004 require: a genuinely novel non-catalog model has no earning path in v0.1, and only a later billing-owner pricing-conversion spec can change that. §16 widens *which models the operator can cheaply admit as catalog identities*; it does not widen *who decides*.
+**Non-goal, restated.** This is not an open marketplace. Providers do not set global prices, do not admit models globally, and do not gain a global earning path by supplying a signal. A genuinely novel non-catalog model has no global earning path in v0.1; SPEC-042/SPEC-047 may authorize creator-attested earning on one pool's routes, but that does not make the model a catalog identity. §16 widens *which models the operator can cheaply admit as catalog identities*; it does not widen *who decides*. Permissionless global earning remains out of scope until SPEC-036 compute integrity can support it.
 
 ### 16.1 Intake preconditions
 
@@ -3700,3 +3709,87 @@ The manifest is a **closed schema at every level**. An unknown key, a missing ke
 9. **[v0.10.4] Source responses are retained privately and re-derived.** A digest alone proves which bytes were read, not what they said, so every coordinator source the manifest cites is retained byte-exact — but NOT in the repository: `/v1/stats/intake` is private to allow-listed keys and `/admin/model-admission/intake` to operator credentials, and this repository is public, so committing either response would republish what those credentials protect. The sources live in the operator's **private intake audit store**, a directory outside the repository (`$MACPROVIDER_INTAKE_AUDIT_DIR/<release_id>/`, default `~/.config/macprovider/intake-audit/<release_id>/`, mode `0700`): `stats-intake.json` (the one `macprovider.stats-intake.v1` response) and `model-admission-intake.json` (the one `model_admission_intake_offer_counts.v1` response); the demand-rank source is the release-bound signed `demand-rank.json` itself. The manifest and its digests are the public record; the retained bytes are the operator's attestation of what the coordinator served. **Retention lifecycle.** Each source file is fetched with `Accept-Encoding: identity` (a non-identity `Content-Encoding` is rejected) and written byte-exact, as the unmodified body octets, into `<release_id>/` BEFORE the manifest is authored — the manifest's digests are computed from the retained file, never from a transient buffer — and the store is append-only: a retained file is never modified. **Permissions and retention.** Every file is mode `0600` under a `0700` directory (the generator refuses a retained file readable by group or others); each release's files are kept for at least 24 months after the release's ledger row is written and for as long as any later release still lists the key it admitted, whichever is longer, and are deleted no later than 36 months after the last release that lists that key — the store holds private coordinator data (partner-private demand aggregates, operator-private supply aggregates) and is not retained indefinitely; the store is included in the operator's encrypted backup so a single disk loss does not destroy reconstructibility. Deleting or altering a retained file does not change the public record but breaks reconstructibility for that release; an auditor detects it because a manifest `*_source_sha256` no longer matches any retained source file, and the operator MUST record such a loss in the release notes of the next release. The generator reads the store through `--intake-audit-dir` and MUST verify that each recorded `*_source_sha256` equals the SHA-256 of the committed file, MUST parse each file under its closed schema (rejecting an unknown key), and MUST re-derive every recorded signal value, suppression flag, absent reason, and window from those bytes — the §16.2(a) window selection, the bucket lower bound, the §16.2(b) row, the §16.2(c) class-floor fraction — failing the release closed on any disagreement. A digest that names no retained file, a retained file the manifest does not cite, or a missing audit store when any decision cites a coordinator source, fails closed. This record is an OPERATOR ATTESTATION: bearer authentication proves the caller to the coordinator, not the response's origin to a later auditor, so an auditor with access to the store re-evaluates what the operator retained, and coordinator-origin provenance (a signed response envelope) is a later revision's concern, recorded in §13 Q17.
 
 **Reconstructibility.** With this manifest, its ledger-recorded digest, and the release's signed feeds, an auditor can re-evaluate the §16.3 rule for every key the release changed and reach the same verdict without trusting the generator that produced the release — the same standard §3.7.8 sets for the cross-release `artifact_id` rebinding check. That is where the reconstructibility claim of §16 lives; §16.4's release-notes rule alone does not carry it (AC-CAT-21).
+
+### 16.9 Pool-proven intake and graduation (SPEC-023-R026)
+
+**Hash-derived intake key.** When a SPEC-047 offer does not resolve to any
+catalog key, but contains exactly one format-compatible supported artifact
+pair for the candidate's signed runtime source, the coordinator MUST set
+`intake_model_key` to
+`artifact/<artifact_hash_algorithm>/<artifact_hash>`. The algorithm is the
+exact SPEC-010 identifier and the hash is lowercase 64-hex, so the resulting
+ASCII key matches `[a-z0-9._/-]{1,128}`. Zero compatible pairs, more than one
+distinct compatible pair, a duplicate/conflicting pair, or a malformed hash
+produces no key and no supply count; the provider's model name and asserted
+catalog key are never used. Once the same pair resolves to a catalog key, new
+offers use that catalog key while the immutable prior hash-key evidence remains
+auditable and is joined by exact pair, never by display name.
+
+The private intake response gains schema
+`model_admission_intake_offer_counts.v2`. Its row key is named
+`intake_model_key` and accepts either a SPEC-010 canonical key or the
+hash-derived form above; all other v1 row fields and suppression rules are
+unchanged. A v1 response remains valid for catalog-only rows, but MUST NOT
+represent or count an unmatched artifact. Consumers MUST reject an
+unrecognized schema version rather than interpreting an artifact key as a
+catalog identity.
+
+**Pool-proven signal.** Section 16.2 gains a fourth signal,
+`pool_proven_evidence`, aggregated by exact artifact pair over one complete
+trailing-30-day window from immutable SPEC-022-R013 pool-manifest route
+snapshots and final settled rows. Its closed value is exactly:
+
+```json
+{
+  "artifact_hash_algorithm": "macprovider.gguf-file.v1",
+  "artifact_hash": "<64 lowercase hex>",
+  "paid_request_count": 0,
+  "distinct_provider_count": 0,
+  "license_on_file": true,
+  "window_start": "RFC3339 UTC",
+  "window_end": "RFC3339 UTC",
+  "source_sha256": "<64 lowercase hex>"
+}
+```
+
+Only successful, buyer-final, positively provider-credited attempts with
+`expected_model_hash_source: pool_manifest`, `pool_label_status: verified`,
+and no dispute or reversal count toward `paid_request_count`. Providers are
+distinct SPEC-003 owner accounts, not sessions or provider ids; the count is
+suppressed below `INTAKE_K_ANONYMITY_MIN` and a suppressed value satisfies no
+floor. `license_on_file` is true only when every pool entry contributing to
+the signal names the same SPDX/`LicenseRef-*` identifier, attests paid serving,
+and the operator's private intake audit store contains the reviewed licence
+record. The aggregate MUST carry no pool, provider, creator, buyer, request,
+or wallet identity. Its exact source bytes are retained and re-derived under
+§16.8 rule 9.
+
+**Admission and cadence.** A model is *pool-proven* when P1-P4 hold,
+`paid_request_count >= INTAKE_POOL_PAID_REQUEST_FLOOR` (default `100`),
+`distinct_provider_count >= INTAKE_OFFER_FLOOR`, and `license_on_file` is true.
+This is a new §16.2 supply term and the §16.8 `admission_clause` enum gains
+`pool_proven`. An operator MAY publish an out-of-band release that adds only
+pool-proven models as `listed`, plus necessary signed artifact/feed/ledger
+records; this is the sole addition exception to §16.5. The release MUST NOT
+promote a row, change a rate, or make it recommendable, and its intake decision
+record MUST carry the pool-proven value/digest and the ordinary P1-P4 and fit
+evidence. Safety blocking remains allowed in the same release.
+
+An out-of-band pool-proven release MUST use
+`macprovider.intake-decision.v2`. Relative to v1, each `admit_listed` decision
+adds nullable `pool_proven_evidence` with exactly the closed object above and
+adds `pool_proven` to `admission_clause`; the field is null for all other
+clauses and for every `promote_recommendable` decision. Its `thresholds`
+object also adds `intake_pool_paid_request_floor`. Version 1 remains valid for
+releases that do not select the pool-proven clause. A generator or verifier
+MUST reject an unknown field, a v1 record selecting `pool_proven`, a v2
+pool-proven decision without the value and authenticated source digest, or a
+non-pool decision carrying the value.
+
+Promotion from `listed` to `recommendable` still requires every §16.3
+condition, the minimum listed duration, a published rate row, bench provenance,
+demand-rank eligibility, and an explicit operator decision. Neither pool paid
+volume nor provider count auto-promotes a model. Pool earning is creator-scoped
+evidence, not permissionless global earning; the latter remains out of scope
+until SPEC-036 compute-integrity requirements are normatively adopted and
+implemented.

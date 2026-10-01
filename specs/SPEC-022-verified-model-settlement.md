@@ -1,11 +1,20 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.2.4
+Version: v0.2.5
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.2.5
+
+Pool-manifest expected identity (#1816). Adds SPEC-022-R013: a route snapshot
+names whether its expected artifact pair comes from the global catalog or the
+route's signed pool manifest, and pool-manifest snapshots bind the exact core
+digest. Equality and replay remain hash-exact; the new source makes no trust
+claim beyond SPEC-042-R006 and does not make a pool model globally
+`settlement_capable`.
 
 ### v0.2.4
 
@@ -561,8 +570,8 @@ state and terminal-state timestamp.
 
 ## Normative requirements
 
-Requirement IDs `SPEC-022-R001`..`SPEC-022-R012` are the conformance units and
-map one-to-one to the top-level requirement groups R-1..R-12 below; the `R-N.M`
+Requirement IDs `SPEC-022-R001`..`SPEC-022-R013` are the conformance units and
+map one-to-one to the top-level requirement groups R-1..R-13 below; the `R-N.M`
 sub-clauses are the normative obligations within each group. The IDs are
 registered in `specs/CONFORMANCE.json`.
 
@@ -1304,6 +1313,45 @@ the pool attempts recorded before a downgrade.
   not an eligibility verdict. Receipt ingestion returns a retryable error and
   keeps the receipt's first-observed arrival time for the retry; only a
   decided rejection leaves an attempt un-cross-checked.
+
+### R-13. Expected model-hash source and replay (SPEC-022-R013)
+
+R-13.1. Every newly written route snapshot MUST carry
+`expected_model_hash_source`, a closed enum `catalog | pool_manifest`. The
+existing lowercase-64-hex `expected_catalog_model_hash` storage member is
+retained for migration compatibility but, when this source is present, is the
+generic expected artifact hash; implementations and public schemas SHOULD name
+the semantic value `expected_model_hash`. Renaming or migrating the storage
+column MUST preserve its lowercase-hex CHECK and byte-exact history.
+
+R-13.2. `catalog` preserves all current behavior: the expected algorithm/hash
+and catalog or artifact-feed evidence come from SPEC-010/SPEC-047, and no pool
+manifest may replace or repair them. `pool_manifest` is valid only for a
+SPEC-047-R011 binding and route to the same non-empty `pool_id`. The snapshot
+MUST carry the exact `pool_model_id`, artifact algorithm/hash,
+`manifest_version`, and 64-lowercase-hex `manifest_core_digest` of the accepted
+SPEC-042 v3 core containing that entry. Those values, the source enum, and the
+existing pool/runtime/member labels enter the canonical route-snapshot digest.
+A missing, mixed-source, cross-pool, or mismatched field fails closed before
+dispatch.
+
+R-13.3. Settlement equality is source-independent and exact:
+`receipt.model_hash == route_snapshot.provider_reported_model_hash ==
+route_snapshot.expected_model_hash`, and the receipt/session algorithm MUST
+equal the snapshot's expected algorithm. For `pool_manifest`, settlement MUST
+also replay the accepted immutable core named by the snapshot and verify that
+the exact entry existed there; it MUST NOT consult a current manifest to repair
+missing evidence or re-price the attempt. A later entry removal does not alter
+the immutable snapshot, but SPEC-042-R006's label-dispute and revocation rules
+may still force zero billable usage.
+
+R-13.4. This field proves provenance and replayability only. It does not call a
+pool artifact network-verified, does not weaken SPEC-042-R006, does not turn a
+pool binding into `settlement_capable`, and does not authorize global or
+cross-pool routing. Migration MUST cover inserts, reads, digest recomputation,
+recovery/backfill, receipt verification, and historical rows; a historical row
+without the source is interpreted as `catalog` only when its complete existing
+catalog evidence validates, never by defaulting a pool-labeled row.
 
 ## Acceptance criteria
 
