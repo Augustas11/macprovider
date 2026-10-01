@@ -944,7 +944,11 @@ func (b *billingRecorder) recordSettlementAttemptOutput(ctx context.Context, sto
 		observedInput = *promptObserved
 		observedOutput = *completionObserved
 		usageSource = billing.UsageSourcePoolOperatorAttested
-	} else if !loopback && promptObserved != nil && completionObserved != nil {
+	} else if !loopback && promptObserved != nil && completionObserved != nil &&
+		(!in.PoolManifestRoute || (in.PoolManifestVerified && store.PoolAttestedCreditRecorded(ctx, in.RequestID, in.AttemptN, in.ProviderID))) {
+		// A native pool-model attempt is coordinator_observed only while its
+		// verified pool_manifest credit held at commit; otherwise it is
+		// byte_estimated and never reaches buyer-final debit (SPEC-005-R015).
 		observedInput = *promptObserved
 		observedOutput = *completionObserved
 		usageSource = billing.UsageSourceCoordinatorObserved

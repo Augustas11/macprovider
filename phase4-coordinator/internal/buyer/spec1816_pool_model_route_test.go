@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -44,6 +45,7 @@ type poolModelFixture struct {
 	attested   bool   // the delegated member's owner account is attested
 	noBounds   bool   // no configured pricing bounds
 	staleEvent bool   // the binding is for an older manifest version
+	routeErr   error  // the durable pool_manifest verdict (nil = supported)
 }
 
 type poolModelHarness struct {
@@ -63,6 +65,7 @@ type poolModelAuthority struct {
 	attested    []billing.PoolOperatorAttestationClaim
 	manifest    []billing.PoolOperatorAttestationClaim
 	attestedErr error
+	routeErr    error
 }
 
 func (a *poolModelAuthority) PoolEventHighWater(context.Context, billing.PoolFenceQueryer, string) (int64, error) {
@@ -80,7 +83,7 @@ func (a *poolModelAuthority) VerifyPoolManifestRoute(_ context.Context, claim bi
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.manifest = append(a.manifest, claim)
-	return nil
+	return a.routeErr
 }
 
 func newPoolModelHarness(t *testing.T, fx poolModelFixture) *poolModelHarness {
@@ -188,7 +191,7 @@ func newPoolModelHarness(t *testing.T, fx poolModelFixture) *poolModelHarness {
 		t.Fatal(err)
 	}
 	setSettlementModeForTest(billingStore, billing.RouteSnapshotModeEnforce)
-	authority := &poolModelAuthority{}
+	authority := &poolModelAuthority{routeErr: fx.routeErr}
 	billingStore.SetPoolOperatorAttestationAuthority(authority)
 	rewards := config.Default().Rewards
 	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), rewards, time.Unix(1716768000, 0).UTC())
@@ -424,5 +427,20 @@ func TestSPEC1816PoolModelListing(t *testing.T) {
 	}
 	if code, _ := get(trustedPoolLayer2Headers("acct_unauthorized", h.poolID)); code == http.StatusOK {
 		t.Fatalf("unauthorized pool view answered %d", code)
+	}
+}
+
+// A native pool-model attempt whose durable pool_manifest re-verification
+// fails is served but zero-billed and byte_estimated (no buyer-final debit,
+// no provider credit).
+func TestSPEC1816PoolModelUnverifiedRouteZeroBills(t *testing.T) {
+	h := newPoolModelHarness(t, poolModelFixture{routeErr: fmt.Errorf("%w: entry removed", billing.ErrPoolOperatorAttestationRejected)})
+	if rec := postChat(t, h.server, h.body(), externalRuntimePoolHeaders(h.poolID)); rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	ledger := queryPoolModelLedger(t, h.dbPath)
+	if ledger.gross != 0 || ledger.provider != 0 || ledger.quarantined != 1 || ledger.reason != billing.PoolManifestRouteNotSettlementEligible ||
+		ledger.usageSource != billing.UsageSourceByteEstimated {
+		t.Fatalf("unverified pool-model ledger = %+v", ledger)
 	}
 }
