@@ -748,6 +748,10 @@ struct ContinuousBatchDecodeInput: Sendable, Equatable {
     /// produced it, and advances the row's drafter over them before the
     /// row's next native proposal (SPEC-048-R006/R007).
     var captureNativeMTPDrafterColumns: Bool = false
+    /// Nonzero while a capturing native row's drafter catches up on its
+    /// deferred prompt columns (SPEC-048-R006): the backend flushes at most
+    /// this many buffered columns into the drafter this round.
+    var nativeMTPDrafterCatchUpColumns: Int = 0
 }
 
 struct ContinuousBatchNativeMTPVerifyInput: Sendable, Equatable {
@@ -815,6 +819,10 @@ struct ContinuousBatchDecodeOutput: Sendable, Equatable {
     /// scheduler can apply stop/stream/receipt sequentially without dropping
     /// intermediates.
     let tokens: [Int]
+    /// For a row decoded with `nativeMTPDrafterCatchUpColumns`: whether more
+    /// than that many columns remain unconsumed by its drafter after this
+    /// round, so the row keeps riding the ordinary forward.
+    var nativeMTPDrafterSeeding = false
 
     init(requestID: String, token: Int) {
         self.requestID = requestID
@@ -1550,6 +1558,10 @@ actor ContinuousBatchScheduler {
         var nativeMTPTupleFence: NativeMTPTupleFence?
         var nativeMTPCounters: NativeMTPSelfTestCounters?
         var nativeMTPFixtureProposalsConsumed = false
+        /// SPEC-048-R006 deferred seeding: the row rides the ordinary forward
+        /// at depth zero while its drafter catches up on more than one
+        /// prompt chunk of buffered columns.
+        var nativeMTPDrafterSeeding = false
 
         var retainedLogicalTokenCount: Int {
             request.promptTokens.count + generatedTokens.count
@@ -3616,13 +3628,16 @@ actor ContinuousBatchScheduler {
         // cost, so those rows ride the ordinary lockstep forward instead and
         // the backend keeps their drafter columns for when depth returns.
         // Integrity probes are exempt from the gate and keep verifying.
-        let fusedIDs: Set<String> = nativeMTPLoadGateEngaged
+        let gateHeldIDs: Set<String> = nativeMTPLoadGateEngaged
             ? Set(allNativeRows.filter { !$0.request.nativeMTPIntegrityProbe }.map(\.request.id))
             : []
+        // SPEC-048-R006 deferred seeding: a row whose drafter is still
+        // catching up on its prompt rides the same forward at depth zero.
+        let fusedIDs = gateHeldIDs.union(allNativeRows.filter(\.nativeMTPDrafterSeeding).map(\.request.id))
         let nativeRows = allNativeRows.filter { !fusedIDs.contains($0.request.id) }
         #if DEBUG || MACPROVIDER_LAB_HARNESS
-        if !fusedIDs.isEmpty {
-            labNativeMTPLoadGateRecorder?.recordHeldRound(requestIDs: fusedIDs)
+        if !gateHeldIDs.isEmpty {
+            labNativeMTPLoadGateRecorder?.recordHeldRound(requestIDs: gateHeldIDs)
         }
         #endif
         guard !nativeRows.isEmpty else {
@@ -3702,7 +3717,10 @@ actor ContinuousBatchScheduler {
                     committedKVTokenCount: committedKVTokenCount,
                     targetKVTokenCount: targetKVTokenCount,
                     samplerStep: row.generatedTokens.count,
-                    captureNativeMTPDrafterColumns: row.usesNativeMTP
+                    captureNativeMTPDrafterColumns: row.usesNativeMTP,
+                    nativeMTPDrafterCatchUpColumns: row.usesNativeMTP && row.nativeMTPDrafterSeeding
+                        ? configuration.maxPromptChunkTokens
+                        : 0
                 )))
             } catch {
                 if beganDecode {
@@ -3824,6 +3842,10 @@ actor ContinuousBatchScheduler {
                 )
                 if !released { return }
             }
+        }
+        for item in prepared where item.input.nativeMTPDrafterCatchUpColumns > 0 {
+            guard let output = outputs.first(where: { $0.requestID == item.row.request.id }) else { continue }
+            activeDecode[item.row.request.id]?.nativeMTPDrafterSeeding = output.nativeMTPDrafterSeeding
         }
         let stillActive = Set(activeDecode.keys)
         await applyDecodeOutputs(outputs.filter {
@@ -4440,6 +4462,13 @@ actor ContinuousBatchScheduler {
         if row.request.maxOutputTokens == 0 {
             await finishTerminal(row, status: .length)
         } else if let sampledToken {
+            var row = row
+            // SPEC-048-R006: prefill left the drafter unseeded. A prompt
+            // within one chunk is caught up by the row's first proposal; a
+            // longer one rides the ordinary forward until the drafter is
+            // within one chunk of the committed prefix.
+            row.nativeMTPDrafterSeeding = row.usesNativeMTP
+                && row.request.promptTokens.count > configuration.maxPromptChunkTokens
             activeDecode[row.request.id] = row
             CBTrace.log(row.request.id, "sch_active")
             record(.joinedDecode)

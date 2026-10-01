@@ -950,7 +950,10 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(Self.tokens(from: lone), ["lone": 4])
     }
 
-    func testNativeMTPPromptPrefillUsesBoundedFinalPrefillHiddenWithoutReplay() async throws {
+    /// SPEC-048-R006 deferred seeding: native prompt prefill is one target
+    /// forward with no drafter work before the first token; the prompt's
+    /// columns wait in the row's catch-up buffer.
+    func testNativeMTPPromptPrefillDefersDrafterSeedingPastTheFirstToken() async throws {
         try requireMetal()
 
         let descriptor = Self.bridgeDescriptor()
@@ -998,8 +1001,11 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
 
         XCTAssertEqual(output, [ContinuousBatchPrefillOutput(requestID: "native", sampledToken: 13)])
         XCTAssertEqual(model.forwardCallCount(), 1)
-        XCTAssertEqual(drafter.preparedPromptWidths(), [3])
-        XCTAssertEqual(drafter.preparedHiddenWidths(), [3])
+        XCTAssertEqual(drafter.preparedPromptWidths(), [])
+        let snapshot = backend.nativeMTPDrafterSnapshotForTest(requestID: "native")
+        XCTAssertEqual(snapshot.state?.nextPosition, 0)
+        XCTAssertNil(snapshot.seedToken)
+        XCTAssertEqual(snapshot.pendingColumns, 3)
     }
 
     /// End to end through the scheduler with a real (tiny, random-weight)
@@ -1277,17 +1283,18 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         return try XCTUnwrap(state.seedToken, "drafter produced no seed").item(Int.self)
     }
 
-    /// SPEC-048 chunked-prefill seeding: advancing the drafter chunk by chunk
-    /// over each chunk's own hidden states (tail = next prompt token, final
-    /// tail = sampled token) leaves the same drafter state and proposal as
-    /// single-pass seeding of the same prompt. A later chunk with no prior
-    /// drafter state at its offset fails closed.
-    func testChunkedPromptPrefillSeedsTheDrafterLikeSinglePassPrefill() async throws {
+    /// SPEC-048-R006 deferred seeding: prefill, single-pass or chunked, only
+    /// buffers each chunk's columns (tail = next prompt token, final tail =
+    /// sampled token). Flushing the buffer after the first token, all at once
+    /// or one bounded slice per round, leaves the same drafter state and
+    /// proposal as single-pass seeding of the same prompt. A later chunk with
+    /// no prior drafter state at its offset fails closed.
+    func testDeferredPromptSeedingMatchesSinglePassSeeding() async throws {
         try requireMetal()
         let tiny = try Self.tinyQwen35Native()
         let backend = tiny.backend.base
         let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 64)
-        let prompt = Self.tinyPrompt(length: 13, salt: 1)
+        let prompt = Self.tinyPrompt(length: 14, salt: 1)
 
         func prefill(_ id: String, chunks: [Int]) async throws -> [ContinuousBatchPrefillOutput] {
             let handle = try await allocator.allocate(conversationKey: id, maxTokens: 32)
@@ -1312,35 +1319,88 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             return outputs
         }
 
-        let single = try await prefill("single", chunks: [13])
-        let chunked = try await prefill("chunked", chunks: [5, 5, 3])
-        XCTAssertEqual(single.last?.sampledToken, chunked.last?.sampledToken)
-        XCTAssertNotNil(single.last?.sampledToken)
+        let single = try await prefill("single", chunks: [14])
+        let chunked = try await prefill("chunked", chunks: [5, 5, 4])
+        let sliced = try await prefill("sliced", chunks: [5, 5, 4])
+        let first = try XCTUnwrap(single.last?.sampledToken)
+        XCTAssertEqual(chunked.last?.sampledToken, first)
+        XCTAssertEqual(sliced.last?.sampledToken, first)
+        for id in ["single", "chunked", "sliced"] {
+            // Prefill did no drafter work: the drafter is still empty.
+            let deferred = backend.nativeMTPDrafterSnapshotForTest(requestID: id)
+            XCTAssertEqual(deferred.state?.nextPosition, 0, id)
+            XCTAssertNil(deferred.seedToken, id)
+            XCTAssertEqual(deferred.pendingColumns, prompt.count, id)
+        }
 
-        let reference = backend.nativeMTPDrafterSnapshotForTest(requestID: "single")
-        let candidate = backend.nativeMTPDrafterSnapshotForTest(requestID: "chunked")
-        let referenceState = try XCTUnwrap(reference.state)
-        let candidateState = try XCTUnwrap(candidate.state)
-        XCTAssertEqual(candidateState.nextPosition, prompt.count)
-        XCTAssertEqual(candidateState.nextPosition, referenceState.nextPosition)
-        XCTAssertEqual(candidate.seedToken, reference.seedToken)
-        XCTAssertNotNil(candidate.seedToken)
-        XCTAssertEqual(candidate.pendingColumns, 0)
-        XCTAssertEqual(candidateState.cache.count, referenceState.cache.count)
-        for (lhs, rhs) in zip(candidateState.cache, referenceState.cache) {
-            XCTAssertEqual(lhs.offset, rhs.offset)
-            for (a, b) in zip(lhs.state, rhs.state) {
-                XCTAssertEqual(a.shape, b.shape)
-                // Documented tolerance: the chunked advance runs the packed
-                // drafter kernels (array mask, per-row RoPE offsets) instead
-                // of single-pass causal attention; values agree to float32
-                // accumulation order.
-                let maxDifference = abs(a.asType(.float32) - b.asType(.float32)).max().item(Float.self)
-                XCTAssertLessThanOrEqual(maxDifference, 1e-4)
+        // Definition: single-pass seeding over the prompt's own hidden states.
+        var emit = LMOutput.State()
+        emit[mtpEmitFlagKey] = true
+        let promptArray = MLXArray(prompt.map(Int32.init)).reshaped(1, prompt.count)
+        let targetOutput = tiny.target(
+            LMInput.Text(tokens: promptArray),
+            cache: tiny.target.newCache(parameters: nil),
+            state: emit
+        )
+        var referenceState = tiny.drafter.makeState(parameters: nil)
+        tiny.drafter.prepareDrafterState(
+            target: tiny.target,
+            promptTokens: promptArray,
+            targetHidden: try XCTUnwrap(targetOutput.state?[mtpLastHiddenStatesKey]),
+            firstBonus: MLXArray([Int32(first)]),
+            positionDeltas: nil,
+            state: &referenceState,
+            sampler: GenerateParameters(temperature: 0).sampler()
+        )
+        let referenceSeed = try XCTUnwrap(referenceState.seedToken).item(Int.self)
+
+        // "single" and "chunked" catch up in one flush before their proposal.
+        let proposals = try await backend.proposeNativeMTPPackedRound(rows: ["single", "chunked"].map {
+            ContinuousBatchNativeMTPProposalInput(
+                requestID: $0,
+                currentToken: first,
+                generatedTokens: [first],
+                samplerSeed: 0,
+                maximumProposalDepth: 1,
+                samplerStep: 1
+            )
+        })
+        XCTAssertEqual(proposals?["single"], [referenceSeed])
+        XCTAssertEqual(proposals?["chunked"], [referenceSeed])
+        // "sliced" catches up 4 columns per round, crossing chunk boundaries
+        // (4 | 1+3 | 2+2 | 2). No slice is one column wide: a width-one
+        // drafter forward takes the vector kernels, which round differently.
+        for remaining in [10, 6, 2, 0] {
+            try await backend.flushNativeMTPDrafterColumnsForTest(requestID: "sliced", maximumColumns: 4)
+            let partial = backend.nativeMTPDrafterSnapshotForTest(requestID: "sliced")
+            XCTAssertEqual(partial.pendingColumns, remaining)
+            XCTAssertEqual(partial.state?.nextPosition, prompt.count - remaining)
+            if remaining > 0 { XCTAssertNil(partial.seedToken) }
+        }
+
+        for id in ["single", "chunked", "sliced"] {
+            let candidate = backend.nativeMTPDrafterSnapshotForTest(requestID: id)
+            let candidateState = try XCTUnwrap(candidate.state, id)
+            XCTAssertEqual(candidateState.nextPosition, prompt.count, id)
+            XCTAssertEqual(candidateState.nextPosition, referenceState.nextPosition, id)
+            XCTAssertEqual(candidate.seedToken, referenceSeed, id)
+            XCTAssertEqual(candidate.pendingColumns, 0, id)
+            XCTAssertEqual(candidateState.cache.count, referenceState.cache.count, id)
+            for (lhs, rhs) in zip(candidateState.cache, referenceState.cache) {
+                XCTAssertEqual(lhs.offset, rhs.offset, id)
+                for (a, b) in zip(lhs.state, rhs.state) {
+                    XCTAssertEqual(a.shape, b.shape, id)
+                    // Documented tolerance: the deferred flush runs the packed
+                    // drafter kernels (array mask, per-row RoPE offsets)
+                    // instead of single-pass causal attention; values agree to
+                    // float32 accumulation order.
+                    let maxDifference = abs(a.asType(.float32) - b.asType(.float32)).max().item(Float.self)
+                    XCTAssertLessThanOrEqual(maxDifference, 1e-4, id)
+                }
             }
         }
 
-        // A non-initial chunk without the previous chunk's drafter state is
+        // A non-initial chunk without the previous chunks' drafter state is
         // refused rather than seeded from a partial prompt.
         let orphan = try await allocator.allocate(conversationKey: "orphan", maxTokens: 32)
         _ = try await allocator.extend(orphan, by: 10)
@@ -1356,6 +1416,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             nativeMTPNextPromptToken: prompt[10]
         )])
         XCTAssertEqual(refused.first?.failureCode, "continuous_batching_prefill_failed")
+        XCTAssertEqual(backend.nativeMTPDrafterSnapshotForTest(requestID: "orphan").pendingColumns, 0)
     }
 
     /// Native prompts longer than one prefill chunk are served natively and
@@ -1373,12 +1434,14 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         var tasks: [String: Task<ContinuousBatchSchedulerResult, any Error>] = [:]
         for length in lengths {
             let prompt = Self.tinyPrompt(length: length, salt: length)
+            // Enough output for an 8k prompt's deferred seeding (one 512
+            // column chunk per round) to finish and native rounds to follow.
             tasks["native-\(length)"] = Task {
-                try await scheduler.submit(Self.tinyNativeRequest("native-\(length)", prompt, 12))
+                try await scheduler.submit(Self.tinyNativeRequest("native-\(length)", prompt, 24))
             }
             tasks["ordinary-\(length)"] = Task {
                 try await scheduler.submit(Self.tinyNativeRequest(
-                    "ordinary-\(length)", prompt, 12, decodePath: .ordinary
+                    "ordinary-\(length)", prompt, 24, decodePath: .ordinary
                 ))
             }
         }
@@ -1391,13 +1454,176 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             let native = try XCTUnwrap(results["native-\(length)"])
             let ordinary = try XCTUnwrap(results["ordinary-\(length)"])
             XCTAssertEqual(native.terminalStatus, .length, "\(length)")
-            XCTAssertEqual(native.generatedTokens.count, 12, "\(length)")
+            XCTAssertEqual(native.generatedTokens.count, 24, "\(length)")
+            // SPEC-048-R006: the first token left the drafter untouched, and
+            // the prompt was caught up one bounded chunk per round.
+            let atFirstToken = try XCTUnwrap(tiny.backend.drafterAtFirstToken()["native-\(length)"])
+            XCTAssertEqual(atFirstToken.nextPosition, 0, "\(length)")
+            XCTAssertNil(atFirstToken.seedToken, "\(length)")
+            XCTAssertEqual(atFirstToken.pendingColumns, length, "\(length)")
+            XCTAssertGreaterThanOrEqual(
+                tiny.backend.catchUpDecodeStepsByRow()["native-\(length)"]?.count ?? 0,
+                length / 512 - 1,
+                "\(length)"
+            )
             XCTAssertEqual(native.generatedTokens, ordinary.generatedTokens, "native \(length) diverged from ordinary")
             XCTAssertTrue(
                 committed.contains { $0.requestID == "native-\(length)" && $0.proposalTokenCount == 1 },
                 "native-\(length) never verified a drafter proposal"
             )
         }
+        XCTAssertEqual(tiny.backend.base.retainedRowCountForTest(), 0)
+    }
+
+    /// SPEC-048-R006 deferred seeding through the scheduler: a native row
+    /// whose prompt spans several chunks emits its first token with the
+    /// drafter untouched, rides the ordinary forward while it catches up at
+    /// most one chunk of columns per round, and then proposes exactly what
+    /// single-pass seeding of the committed prefix proposes. Its tokens are
+    /// the ordinary path's.
+    func testDeferredSeedingCatchesUpBoundedPerRoundThenProposesLikeSinglePass() async throws {
+        try requireMetal()
+        let prompt = Self.tinyPrompt(length: 13, salt: 11)
+        let budget = 30
+        let tiny = try Self.tinyQwen35Native()
+        let scheduler = try Self.makeScheduler(
+            maxActiveRows: 2, backend: tiny.backend, maxPhysicalBlocks: 64, maxPromptChunkTokens: 4
+        )
+        let result = try await scheduler.submit(Self.tinyNativeRequest("a", prompt, budget, temperature: 0.8))
+        let ordinary = try Self.tinyQwen35Native()
+        let ordinaryResult = try await Self.makeScheduler(
+            maxActiveRows: 2, backend: ordinary.backend, maxPhysicalBlocks: 64, maxPromptChunkTokens: 4
+        ).submit(Self.tinyNativeRequest("a", prompt, budget, decodePath: .ordinary, temperature: 0.8))
+
+        XCTAssertEqual(result.terminalStatus, .length, result.errorCode ?? "")
+        XCTAssertEqual(result.generatedTokens, ordinaryResult.generatedTokens)
+        let atFirstToken = try XCTUnwrap(tiny.backend.drafterAtFirstToken()["a"])
+        XCTAssertEqual(atFirstToken.nextPosition, 0)
+        XCTAssertNil(atFirstToken.seedToken)
+        XCTAssertEqual(atFirstToken.pendingColumns, prompt.count)
+        // 13 prompt columns plus one per round, 4 flushed per round: the row
+        // catches up for 3 rounds, until no more than one chunk remains.
+        let catchUp = tiny.backend.catchUpDecodeStepsByRow()["a"] ?? []
+        XCTAssertEqual(catchUp.count, 3, "\(catchUp)")
+        XCTAssertEqual(tiny.backend.capturedDecodeStepsByRow()["a"], catchUp)
+        let proposals = tiny.backend.proposalsByStep()["a"] ?? [:]
+        XCTAssertGreaterThanOrEqual(proposals.count, 5, "native proposals never started: \(proposals)")
+        XCTAssertTrue(proposals.keys.allSatisfy { $0 > (catchUp.max() ?? 0) })
+        let tokens = result.generatedTokens
+        for (step, proposal) in proposals.sorted(by: { $0.key < $1.key }) {
+            XCTAssertEqual(
+                proposal,
+                [try Self.definitionalDrafterSeed(
+                    target: tiny.target,
+                    drafter: tiny.drafter,
+                    prompt: prompt,
+                    generated: Array(tokens.prefix(step))
+                )],
+                "proposal at step \(step)"
+            )
+        }
+        XCTAssertEqual(tiny.backend.base.retainedRowCountForTest(), 0)
+    }
+
+    /// The load gate engages while a native row is still catching up on its
+    /// deferred prompt columns: the row keeps riding the ordinary forward
+    /// through both holds, emits the ordinary tokens, and every proposal it
+    /// makes after both end equals single-pass seeding of its prefix.
+    func testLoadGateEngagingDuringDeferredSeedingKeepsParityAndDrafterState() async throws {
+        try requireMetal()
+        let prompt = Self.tinyPrompt(length: 13, salt: 13)
+        let budget = 40
+        let gated = try Self.tinyQwen35Native()
+        let scheduler = try Self.makeScheduler(
+            maxActiveRows: 2, backend: gated.backend, maxPhysicalBlocks: 64, maxPromptChunkTokens: 4
+        )
+        let peerPrompt = Self.tinyPrompt(length: 6, salt: 17)
+        let peer = RuntimeBridgeTaskBox()
+        // The peer arrives during the first catch-up round, so the gate
+        // engages while the row is still seeding.
+        gated.backend.onCatchUpDecode = { requestIDs in
+            guard requestIDs.contains("a"), !peer.isStarted else { return }
+            peer.start {
+                try await scheduler.submit(Self.tinyNativeRequest("peer", peerPrompt, 6, decodePath: .ordinary))
+            }
+        }
+        let gatedResult = try await scheduler.submit(
+            Self.tinyNativeRequest("a", prompt, budget, temperature: 0.8, maximumActiveRows: 1)
+        )
+        let peerResult = try await peer.value()
+        let ordinary = try Self.tinyQwen35Native()
+        let ordinaryResult = try await Self.makeScheduler(
+            maxActiveRows: 2, backend: ordinary.backend, maxPhysicalBlocks: 64, maxPromptChunkTokens: 4
+        ).submit(Self.tinyNativeRequest("a", prompt, budget, decodePath: .ordinary, temperature: 0.8))
+
+        XCTAssertEqual(gatedResult.terminalStatus, .length, gatedResult.errorCode ?? "")
+        XCTAssertEqual(peerResult.terminalStatus, .length, peerResult.errorCode ?? "")
+        XCTAssertEqual(gatedResult.generatedTokens, ordinaryResult.generatedTokens)
+        let catchUp = gated.backend.catchUpDecodeStepsByRow()["a"] ?? []
+        let fused = gated.backend.capturedDecodeStepsByRow()["a"] ?? []
+        XCTAssertFalse(catchUp.isEmpty)
+        XCTAssertGreaterThan(fused.count, catchUp.count, "gate never held the row beyond its catch-up")
+        let proposals = gated.backend.proposalsByStep()["a"] ?? [:]
+        XCTAssertGreaterThanOrEqual(proposals.count, 3, "native proposals did not resume: \(proposals)")
+        let tokens = gatedResult.generatedTokens
+        for (step, proposal) in proposals.sorted(by: { $0.key < $1.key }) {
+            XCTAssertGreaterThan(step, fused.max() ?? 0)
+            XCTAssertEqual(
+                proposal,
+                [try Self.definitionalDrafterSeed(
+                    target: gated.target,
+                    drafter: gated.drafter,
+                    prompt: prompt,
+                    generated: Array(tokens.prefix(step))
+                )],
+                "proposal at step \(step)"
+            )
+        }
+        XCTAssertEqual(gated.backend.base.retainedRowCountForTest(), 0)
+    }
+
+    /// Cancelling a native row while its drafter is still catching up on
+    /// deferred prompt columns ends that row cleanly, drops its buffered
+    /// columns and drafter state, and leaves a native peer's tokens exact.
+    func testCancellationDuringDeferredSeedingReleasesTheRowAndKeepsPeersExact() async throws {
+        try requireMetal()
+        let prompt = Self.tinyPrompt(length: 13, salt: 19)
+        let peerPrompt = Self.tinyPrompt(length: 3, salt: 23)
+        let tiny = try Self.tinyQwen35Native()
+        let scheduler = try Self.makeScheduler(
+            maxActiveRows: 2, backend: tiny.backend, maxPhysicalBlocks: 64, maxPromptChunkTokens: 4
+        )
+        let cancelFired = RuntimeBridgeFlag()
+        tiny.backend.onCatchUpDecode = { requestIDs in
+            guard requestIDs.contains("a"), cancelFired.setIfUnset() else { return }
+            await scheduler.cancel(requestID: "a")
+        }
+        let peerTask = Task { try await scheduler.submit(Self.tinyNativeRequest("peer", peerPrompt, 16)) }
+        let cancelled = try await scheduler.submit(Self.tinyNativeRequest("a", prompt, 30))
+        let peerResult = try await peerTask.value
+
+        XCTAssertTrue(cancelFired.isSet)
+        XCTAssertEqual(cancelled.terminalStatus, .cancelled)
+        XCTAssertLessThan(cancelled.generatedTokens.count, 30)
+        XCTAssertTrue((tiny.backend.proposalsByStep()["a"] ?? [:]).isEmpty, "cancelled row proposed while seeding")
+        let dropped = tiny.backend.base.nativeMTPDrafterSnapshotForTest(requestID: "a")
+        XCTAssertNil(dropped.state)
+        XCTAssertNil(dropped.seedToken)
+        XCTAssertEqual(dropped.pendingColumns, 0)
+
+        let ordinary = try Self.tinyQwen35Native()
+        let ordinaryScheduler = try Self.makeScheduler(
+            maxActiveRows: 2, backend: ordinary.backend, maxPhysicalBlocks: 64, maxPromptChunkTokens: 4
+        )
+        let ordinaryA = try await ordinaryScheduler.submit(
+            Self.tinyNativeRequest("a", prompt, 30, decodePath: .ordinary)
+        )
+        let ordinaryPeer = try await ordinaryScheduler.submit(
+            Self.tinyNativeRequest("peer", peerPrompt, 16, decodePath: .ordinary)
+        )
+        XCTAssertEqual(cancelled.generatedTokens, Array(ordinaryA.generatedTokens.prefix(cancelled.generatedTokens.count)))
+        XCTAssertEqual(peerResult.terminalStatus, .length, peerResult.errorCode ?? "")
+        XCTAssertEqual(peerResult.generatedTokens, ordinaryPeer.generatedTokens)
         XCTAssertEqual(tiny.backend.base.retainedRowCountForTest(), 0)
     }
 
@@ -3318,7 +3544,24 @@ private final class RuntimeBridgeRecordingNativeMTPBackend: ContinuousBatchSched
     private var finalized: [[ContinuousBatchNativeMTPFinalizeInput]] = []
     private var proposals: [String: [Int: [Int]]] = [:]
     private var capturedDecodeSteps: [String: [Int]] = [:]
+    private var catchUpDecodeSteps: [String: [Int]] = [:]
+    private var firstTokenDrafter: [String: (nextPosition: Int?, seedToken: Int?, pendingColumns: Int)] = [:]
     private var verifyHook: (@Sendable ([String]) async -> Void)?
+    private var catchUpHook: (@Sendable ([String]) async -> Void)?
+
+    /// Runs before each decode window with its catching-up request IDs.
+    var onCatchUpDecode: (@Sendable ([String]) async -> Void)? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return catchUpHook
+        }
+        set {
+            lock.lock()
+            catchUpHook = newValue
+            lock.unlock()
+        }
+    }
 
     /// Runs before each packed verify with the round's request IDs.
     var onVerify: (@Sendable ([String]) async -> Void)? {
@@ -3358,8 +3601,33 @@ private final class RuntimeBridgeRecordingNativeMTPBackend: ContinuousBatchSched
         return capturedDecodeSteps
     }
 
+    /// Sampler steps at which a native row flushed deferred prompt columns.
+    func catchUpDecodeStepsByRow() -> [String: [Int]] {
+        lock.lock()
+        defer { lock.unlock() }
+        return catchUpDecodeSteps
+    }
+
+    /// Each native row's drafter as prefill returned its first token.
+    func drafterAtFirstToken() -> [String: (nextPosition: Int?, seedToken: Int?, pendingColumns: Int)] {
+        lock.lock()
+        defer { lock.unlock() }
+        return firstTokenDrafter
+    }
+
     func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
-        try await base.prefill(rows: rows)
+        let outputs = try await base.prefill(rows: rows)
+        lock.lock()
+        for (input, output) in zip(rows, outputs) where input.nativeMTPPromptPrefill && output.sampledToken != nil {
+            let snapshot = base.nativeMTPDrafterSnapshotForTest(requestID: input.requestID)
+            firstTokenDrafter[input.requestID] = (
+                snapshot.state?.nextPosition,
+                snapshot.seedToken,
+                snapshot.pendingColumns
+            )
+        }
+        lock.unlock()
+        return outputs
     }
 
     func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
@@ -3373,8 +3641,16 @@ private final class RuntimeBridgeRecordingNativeMTPBackend: ContinuousBatchSched
         lock.lock()
         for row in rows where row.captureNativeMTPDrafterColumns {
             capturedDecodeSteps[row.requestID, default: []].append(row.samplerStep)
+            if row.nativeMTPDrafterCatchUpColumns > 0 {
+                catchUpDecodeSteps[row.requestID, default: []].append(row.samplerStep)
+            }
         }
+        let catchUpIDs = rows.filter { $0.nativeMTPDrafterCatchUpColumns > 0 }.map(\.requestID)
+        let hook = catchUpHook
         lock.unlock()
+        if !catchUpIDs.isEmpty {
+            await hook?(catchUpIDs)
+        }
         return try await base.decodeLockstepWindow(rows: rows, steps: steps)
     }
 
