@@ -5099,8 +5099,11 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             scripts: ["gated": Array(100..<160), "ordinary": [31, 32, 33, 34]],
             prefillTokens: ["gated": 99]
         )
+        // The buffer covers every token so a starved drain task under
+        // parallel CI load cannot surface as delivery backpressure.
         let scheduler = try await makeScheduler(
             maxActiveRows: 2,
+            tokenDeliveryBufferLimit: 64,
             maxPrefillRowsPerIteration: 2,
             backend: backend
         )
@@ -5175,7 +5178,9 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             scripts: ["gated": Array(100..<160), "ordinary": [31, 32, 33, 34]],
             prefillTokens: ["gated": 99]
         )
-        let scheduler = try await makeScheduler(maxActiveRows: 2, maxPrefillRowsPerIteration: 2, backend: backend)
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 2, tokenDeliveryBufferLimit: 64, maxPrefillRowsPerIteration: 2, backend: backend
+        )
         let recorder = NativeMTPLoadGateRecorder()
         await scheduler.installLabNativeMTPLoadGateRecorder(recorder)
 
@@ -5210,7 +5215,9 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             scripts: ["gated": Array(100..<160), "ordinary": Array(31..<61)],
             prefillTokens: ["gated": 99]
         )
-        let scheduler = try await makeScheduler(maxActiveRows: 2, maxPrefillRowsPerIteration: 2, backend: backend)
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 2, tokenDeliveryBufferLimit: 64, maxPrefillRowsPerIteration: 2, backend: backend
+        )
         let recorder = NativeMTPLoadGateRecorder()
         await scheduler.installLabNativeMTPLoadGateRecorder(recorder)
 
