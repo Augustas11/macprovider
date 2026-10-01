@@ -443,6 +443,9 @@ struct RecurrentStateSlotLayout: Equatable, Sendable {
 
 struct PagedKVMTPPackedCacheExerciseResult: Equatable {
     let batchOffsetsBeforeUpdate: [Int]
+    let hostBatchOffsetsBeforeUpdate: [Int]?
+    let batchOffsetsAfterUpdate: [Int]
+    let hostBatchOffsetsAfterUpdate: [Int]?
     let returnedKeyShape: [Int]
     let rowOffsetsAfterUpdate: [Int]
     let rowStoredTokensAfterUpdate: [Int]
@@ -1021,16 +1024,18 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             for (index, input) in inputs.enumerated() {
                 try self.setRowState(rowStates[index], for: input.requestID, binding: input.binding)
             }
-            return output.rows.map { row in
+            // One argmax and one host transfer for the whole packed round
+            // instead of two blocking GPU round trips per row.
+            let topTokenIDsByRow = Self.packedTopTokenIDs(
+                rows: output.rows.map { ($0.proposalLogits, $0.bonusLogits) }
+            )
+            return zip(output.rows, topTokenIDsByRow).map { row, targetTopTokenIDs in
                 let input = inputs[row.map.rowIndex]
                 return NativeMTPVerifiedRow(
                     schedulerRowID: input.requestID,
                     packedRowIndex: input.packedRowIndex,
                     proposedTokenIDs: input.proposalTokens,
-                    targetTopTokenIDs: Self.topTokenIDs(
-                        proposalLogits: row.proposalLogits,
-                        bonusLogits: row.bonusLogits
-                    )
+                    targetTopTokenIDs: targetTopTokenIDs
                 )
             }
         }
@@ -1495,13 +1500,33 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         return decodeSession
     }
 
-    private static func topTokenIDs(proposalLogits: MLXArray, bonusLogits: MLXArray) -> [Int] {
-        var ids: [Int] = []
-        if proposalLogits.ndim == 2, proposalLogits.dim(0) > 0 {
-            ids.append(contentsOf: argMax(proposalLogits, axis: -1).asArray(Int.self))
+    /// Per-row target top-1 IDs (`proposalCount` proposal positions, then the
+    /// bonus position) from one argmax and one host transfer per packed round.
+    static func packedTopTokenIDs(rows: [(proposalLogits: MLXArray, bonusLogits: MLXArray)]) -> [[Int]] {
+        var logits: [MLXArray] = []
+        var counts: [Int] = []
+        logits.reserveCapacity(rows.count * 2)
+        counts.reserveCapacity(rows.count)
+        for row in rows {
+            var count = 0
+            if row.proposalLogits.ndim == 2, row.proposalLogits.dim(0) > 0 {
+                logits.append(row.proposalLogits)
+                count += row.proposalLogits.dim(0)
+            }
+            logits.append(row.bonusLogits)
+            count += row.bonusLogits.dim(0)
+            counts.append(count)
         }
-        ids.append(contentsOf: argMax(bonusLogits, axis: -1).asArray(Int.self))
-        return ids
+        guard !logits.isEmpty else { return rows.map { _ in [] } }
+        let flat = argMax(concatenated(logits, axis: 0), axis: -1).asType(.int32).asArray(Int32.self)
+        var result: [[Int]] = []
+        result.reserveCapacity(rows.count)
+        var start = 0
+        for count in counts {
+            result.append(flat[start ..< start + count].map(Int.init))
+            start += count
+        }
+        return result
     }
 
     private func nativeMTPTargetState(for requestID: String) -> MTPPackedVerificationRowState? {
@@ -1861,7 +1886,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             }
             let keys = MLXArray.zeros([rowCaches.count, 1, width, 1], dtype: .float32, stream: .cpu)
             let values = MLXArray.zeros([rowCaches.count, 1, width, 1], dtype: .float32, stream: .cpu)
+            let hostOffsetsBeforeUpdate = cache.mtpPackedHostBatchOffsets
             let updated = cache.update(keys: keys, values: values)
+            let batchOffsetsAfterUpdate = cache.batchOffset.asArray(Int.self)
+            let hostOffsetsAfterUpdate = cache.mtpPackedHostBatchOffsets
             let beforeFinalize = cache.innerState().first?.dim(2) ?? 0
             let rowStateCounts = rowCaches.map { row -> Int in
                 let state = row.state
@@ -1875,6 +1903,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             }
             return PagedKVMTPPackedCacheExerciseResult(
                 batchOffsetsBeforeUpdate: batchOffsets,
+                hostBatchOffsetsBeforeUpdate: hostOffsetsBeforeUpdate,
+                batchOffsetsAfterUpdate: batchOffsetsAfterUpdate,
+                hostBatchOffsetsAfterUpdate: hostOffsetsAfterUpdate,
                 returnedKeyShape: updated.0.shape,
                 rowOffsetsAfterUpdate: rowCaches.map(\.offset),
                 rowStoredTokensAfterUpdate: rowCaches.map(\.storedTokens),
@@ -2249,13 +2280,21 @@ private final class PagedKVBatchLayerCache: MTPPackedVerificationCache, @uncheck
     }
 
     var batchOffset: MLXArray {
-        let offsets: [Int]
+        MLXArray(hostBatchOffsets.map(Int32.init))
+    }
+
+    /// Host integers `batchOffset` is built from. The packed-verify facade
+    /// validates row positions against these instead of a per-layer device
+    /// readback.
+    var mtpPackedHostBatchOffsets: [Int]? {
+        hostBatchOffsets
+    }
+
+    private var hostBatchOffsets: [Int] {
         if mtpPackedForwardDidUpdate, let rowMaps = preparedMTPPackedRowMaps {
-            offsets = rowMaps.map { $0.queryOffset + $0.inputCount }
-        } else {
-            offsets = preUpdateOffsets
+            return rowMaps.map { $0.queryOffset + $0.inputCount }
         }
-        return MLXArray(offsets.map(Int32.init))
+        return preUpdateOffsets
     }
 
     var maxSize: Int? {

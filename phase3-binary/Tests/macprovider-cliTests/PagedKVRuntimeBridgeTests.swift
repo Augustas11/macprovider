@@ -1258,6 +1258,11 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         )
 
         XCTAssertEqual(result.batchOffsetsBeforeUpdate, [2, 0])
+        // The host mirror the packed-verify facade validates against must
+        // equal the device offsets before and after the packed write.
+        XCTAssertEqual(result.hostBatchOffsetsBeforeUpdate, [2, 0])
+        XCTAssertEqual(result.batchOffsetsAfterUpdate, [4, 1])
+        XCTAssertEqual(result.hostBatchOffsetsAfterUpdate, [4, 1])
         XCTAssertEqual(result.rowOffsetsAfterUpdate, [2, 0])
         XCTAssertEqual(result.rowStoredTokensAfterUpdate, [0, 0])
         XCTAssertEqual(result.rowStateTokenCountsAfterFinalize, [0, 0])
@@ -1268,6 +1273,29 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             true, false, false, false,
             false, false, false, false,
         ])
+    }
+
+    func testPackedTopTokenIDsMatchPerRowArgmaxInPackedOrder() throws {
+        try requireMetal()
+
+        // Row 0 has one proposal, row 1 none, row 2 one: the packed argmax must
+        // return each row's proposal IDs then its bonus ID, row by row.
+        let rows: [(proposalLogits: MLXArray, bonusLogits: MLXArray)] = [
+            (MLXArray([Float(0), 5, 1, 0], [1, 4]), MLXArray([Float(9), 0, 0, 0], [1, 4])),
+            (MLXArray.zeros([0, 4]), MLXArray([Float(0), 0, 0, 7], [1, 4])),
+            (MLXArray([Float(0), 0, 3, 0], [1, 4]), MLXArray([Float(0), 2, 0, 0], [1, 4])),
+        ]
+        let packed = PagedKVSharedForwardBackend.packedTopTokenIDs(rows: rows)
+        let perRow = rows.map { row -> [Int] in
+            var ids: [Int] = []
+            if row.proposalLogits.dim(0) > 0 {
+                ids += argMax(row.proposalLogits, axis: -1).asArray(Int.self)
+            }
+            return ids + argMax(row.bonusLogits, axis: -1).asArray(Int.self)
+        }
+        XCTAssertEqual(packed, [[1, 0], [3], [2, 1]])
+        XCTAssertEqual(packed, perRow)
+        XCTAssertEqual(PagedKVSharedForwardBackend.packedTopTokenIDs(rows: []), [])
     }
 
     func testMTPPackedCacheResolutionCommitsBaseColumnAndAcceptedPrefixOnly() async throws {
