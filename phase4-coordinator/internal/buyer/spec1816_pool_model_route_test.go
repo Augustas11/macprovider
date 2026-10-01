@@ -427,11 +427,16 @@ func TestSPEC1816PoolModelListing(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("pool view status=%d", code)
 	}
-	var found map[string]any
+	var found, listed map[string]any
 	for _, m := range view["data"].([]any) {
 		if m.(map[string]any)["id"] == h.modelID {
-			found = m.(map[string]any)["macprovider_pool_model"].(map[string]any)
+			listed = m.(map[string]any)
+			found = listed["macprovider_pool_model"].(map[string]any)
 		}
+	}
+	// #1816 F6: capacity from the bound member, context from the entry.
+	if listed == nil || listed["provider_count"] != float64(1) || listed["total_slots"] == float64(0) || listed["max_context_tokens"] != float64(32768) {
+		t.Fatalf("pool view capacity = %v", listed)
 	}
 	if found == nil || found["disclosure_class"] != "pool_attested_unverified" || found["disclosure_text"] != "Pool-attested, not network-verified" ||
 		found["price_source"] != "pool_creator_signed" || found["artifact_hash"] != poolModelSnapshotHash || found["manifest_core_digest"] != poolModelDigest || len(found) != 12 {

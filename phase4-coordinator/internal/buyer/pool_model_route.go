@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 
@@ -443,6 +444,19 @@ type poolModelListPrice struct {
 	GlobalMultiplierPPM       int64 `json:"global_multiplier_ppm"`
 }
 
+// poolModelListedMember reports whether a live session counts toward a pool
+// model's listed capacity: a current member of the pool, bound to exactly
+// this entry, serving its exact pair under a runtime class the entry lists,
+// and ready or busy. A pool-entry session stays admission_sandboxed for every
+// global purpose, so the global capacity predicate does not apply; route time
+// still re-checks every pool predicate.
+func poolModelListedMember(p pool.Provider, snap trustpool.Snapshot, entry poolmanifest.PoolModelEntry) bool {
+	return snap.Members[p.ProviderID] && (p.State == pool.StateReady || p.State == pool.StateBusy) &&
+		p.ModelAdmissionPoolID == snap.PoolID && p.ModelAdmissionPoolModelID == entry.PoolModelID &&
+		entry.AllowsRuntimeSource(providerRuntimeClass(p)) &&
+		p.ModelHashAlgorithm == entry.ArtifactHashAlgorithm && strings.ToLower(strings.TrimSpace(p.ModelHash)) == entry.ArtifactHash
+}
+
 // errPoolModelViewUnauthorized means a pool view was requested without an
 // authorized pool selection.
 var errPoolModelViewUnauthorized = errors.New("pool view requires an authorized pool selection")
@@ -464,13 +478,30 @@ func (s *Server) poolModelListEntries(r *http.Request) ([]modelEntry, error) {
 		return nil, errPoolModelViewUnauthorized
 	}
 	economics := s.economicsSnapshotForModel("default")
+	providers := s.pool.Snapshot()
 	out := make([]modelEntry, 0, len(snap.ModelEntries))
 	for _, entry := range snap.ModelEntries {
+		// #1816 F6: capacity is the pool's live members bound to this exact
+		// entry; the context bound is the entry's signed max_context_tokens.
+		providerCount, totalSlots := 0, 0
+		for _, p := range providers {
+			if poolModelListedMember(p, snap, entry) {
+				providerCount++
+				totalSlots += p.SlotsTotal
+			}
+		}
+		maxContext := 0
+		if entry.MaxContextTokens <= uint64(math.MaxInt32) {
+			maxContext = int(entry.MaxContextTokens)
+		}
 		out = append(out, modelEntry{
 			ID:               entry.PoolModelID,
 			Object:           "model",
 			Created:          s.createdAt,
 			OwnedBy:          "macprovider",
+			ProviderCount:    providerCount,
+			MaxContextTokens: maxContext,
+			TotalSlots:       totalSlots,
 			ComputeIntegrity: unavailableModelComputeIntegrityStatus(),
 			PoolModel: &poolModelListEntry{
 				PoolID:                snap.PoolID,
