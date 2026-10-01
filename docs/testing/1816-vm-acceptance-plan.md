@@ -193,19 +193,120 @@ or each failure filed as a finding with a repro in the Findings section.
   out of scope, as in #1690 H3.
 - D6 the S5 SIGHUP check edits the live config in place and restores it with
   a restart.
+- D7 the updater's `catalog-release.py verify-directory` call has a hardcoded
+  30 s timeout and the unchanged verifier takes ~36 s under qemu TCG. The
+  harness runs the real verifier first without a timeout and the python3
+  shim on the updater's PATH replays that exact output only when every
+  catalog file, the Tier-2 config and the verifier are byte-identical
+  (`tools/verify-cache.py`); a miss runs the real verifier.
+- D8 runtime allowlist and runtime/format pairing errors are refused offline
+  by `coordinator-cli sign-manifest` (the runbook's only signer) before
+  anything is sent, so the coordinator's own `pool_model_entry_runtime_*`
+  codes are not reached (that would need a hand-encoded core).
+- D9 `test_pearl_updater.py` has one test that reads a pinned commit with
+  `git show`; the VM trees are `git archive` copies, so that test is a GAP.
+- D10 the catalog canary is a real provider of the catalog model and serves
+  catalog traffic too (3 completion tokens per response, so some catalog
+  debits are 11 tokens; the shape oracle compares outcomes, not amounts).
 
 ## Results
 
-Pending: the acceptance run against the fixer branches. See "Shakedown".
+Acceptance: `a1e059632` (`feat/1816-pool-scoped-models`, fixers A and B),
+two full passes, baseline `origin/main` `65ee6791`. Pending (running).
 
-### Shakedown (harness debug, `e7964a233`)
+### Shakedown (harness debug, `e7964a233`, baseline `65ee6791`)
 
-Pending.
+One chain, run in pieces while the harness was fixed (S2 twice). Evidence on
+the host: `$E2E_WORK/evidence-shakedown-e7964a233.tgz`,
+`$E2E_WORK/results-shakedown-e7964a233.jsonl`. Harness faults found and fixed
+during the shakedown (none of them is a product finding):
+
+| fault | fix |
+|---|---|
+| the coordinator vhost includes stats snippets and a cache dir the coordinator deploy installs | `21-bootstrap-1816.sh` installs them as the deploy does |
+| the updater's catalog verifier call has a hardcoded 30 s timeout; the unchanged verifier takes ~36 s under qemu TCG | D7: `tools/verify-cache.py` + `lib/python3-shim` replay the REAL verifier's output for the exact verified bytes |
+| `gateway.yaml` was macprovider-owned; the updater requires the trusted (root) owner | shared lib: root:macprovider 0640 |
+| a global hold count made every later drain wait for another run's hold | shared `drain` waits for the run's own reservations |
+| the manual nginx step looked for the route text, which a comment kept | match the `location =` block |
+| `journalctl --since` read the harness's UTC marks in the VM's local zone | `mark` emits `UTC` |
+| a restarted fake member rotated its receipt key and was refused re-registration (`receipt_rotation_grace_active`), so S5's in-flight cases never had a request in flight | `fakeprov -receipt-key-file`; revocation checks require `--min-routed` |
+| an attested member binds only after it re-offers (runbook section 4) | S5 re-offers after the attestation activates |
+| the offline `sign-manifest` refuses runtime allowlist/pairing errors before submit | accepted as the refusal (D8) |
+| entry rates so low that a price change did not move the rounded credits | rates raised inside the bounds |
+| the nginx reload is asynchronous; the 503 check raced it | wait for the 503 |
+
+Per scenario after the fixes (shakedown ref):
+
+| scenario | harness | product signal (provisional, re-checked on the acceptance ref) |
+|---|---|---|
+| S1 baseline | OK | P-1 disconnect holds outlive the drain |
+| S2 updater rollout | OK: plan, rollback rehearsal (exact restore), apply, artifact paths, live release, dead-man, pricing floor, order, canary proof PASS | P-1; P-2 nginx step; P-3 404 during apply; gateway-first catalog shape (P-4) |
+| S3 pool models | OK: config, pools, delegation, bind (loopback + native), events, pool `/v1/models`, disclosure, never-global, entry-price oracle PASS | P-1 on pool `st_dc`; P-5 native streams refunded; P-6 `/poolz` hash_status; P-4 coordinator-first catalog |
+| S4 refusals | OK | none (blocked identity GAP, D4) |
+| S5 rotation/revocation | OK after the receipt-key fix | P-7 SIGHUP of bounds/owner accounts silently ignored |
+| S6 rollback | OK | P-8 preflight does not refuse; the old coordinator disables all pools |
 
 ## Findings
 
-Provisional (from the shakedown against `e7964a233`; two fixers are changing
-settlement and config code, so product failures here are re-checked on the
-acceptance ref before they are filed).
+Provisional, from the shakedown against `e7964a233`. Two fixers were
+changing settlement and config code while it ran; each is re-checked on the
+acceptance ref before it is filed. Repro: the named step of
+`run-all.sh 1 "B1 B2 S1 S2 ..."`; evidence file names are in the result line.
 
-Pending.
+**P-1 (settlement holds, likely pre-existing).** A streaming request whose
+buyer disconnects mid-stream (`st_dc`) leaves the gateway reservation
+`active` with `settlement_hold=1` long past the 300 s receipt deadline: the
+coordinator verdict stays `pending/missing_receipt` with `closed=0` (only the
+pool expiry sweep closes verdicts, #1690 F-7), so the reconciler keeps
+answering `held`. On old/old the S1 holds cleared after 8-11 min; with the new
+gateway (S2 gateway-first, S2 new pair, S3 pool routes) they were still
+active after 15-22 min. Repro: S1/S2/S3 `st_dc` rows
+(`p1As2new.oracle.json`, request `c1d344b6-…`, verdict deadline 11:24 UTC,
+still held 11:41).
+
+**P-2 (runbook, nginx).** Covered by the shakedown fix above; recheck that the
+runbook's manual step reaches 200 with the live vhost's leftover comment.
+
+**P-3 (buyer-visible during the updater apply).** Right after the new gateway
+starts, before providers reconnect, a buyer request answers
+`404 model_not_found` ("No provider has advertised the requested model")
+instead of a retryable 503 (`p1As2window.load.jsonl`). The window itself is
+safe: the updater stops the gateway before the coordinator and starts the
+coordinator first, so no request is served by a mixed pair (502 from nginx in
+the window, 3.5 s).
+
+**P-4 (mixed pairs, catalog).** Old coordinator + new gateway, and new
+coordinator + old gateway: a non-streaming buyer disconnect (`ns_dc`) is
+sometimes settled (prompt-only debit) instead of refunded, and once with buyer
+debit 8 != provider payable 11 (I3, `p1As3cfcat`). A 502 `ns_over` is debited
+(#1690 F-3, pre-existing). Outcome shape therefore differs from S1.
+
+**P-5 (native pool route, streaming).** On the native `mlx_cache` route, 2 of 4
+completed streams (`st`, read to `[DONE]`) were refunded: delivered and
+unbilled (`p1As3n`, EXPECT).
+
+**P-6 (runbook vs `/poolz`).** Runbook section 4 says a bound pool member's
+`/poolz` row shows `hash_status: hash_verified`; the coordinator reports
+`uncatalogued` for both members (`p1A-s3/poolz.check`).
+
+**P-7 (config reload).** SIGHUP after tightening
+`pool_model_pricing_bounds.max_completion_rate_per_mtok` to 50,000: a core with
+an entry at 60,000 was accepted (`p1A-s5/hup-manifest.txt`, v22), and a change
+to `provider_owner_account_ids` produced no log line. Neither applied nor
+refused (fixer B targets this).
+
+**P-8 (rollback preflight, HIGH for operators).** With pool-model extension
+cores in the durable store, `coordinator pool-rollback-preflight` exits 0
+(`rollback_blocked:false`, `p1A-s6-pool/preflight.txt`), and the runbook's
+coordinator rollback to the baseline binary then logs "trusted pools durable
+reconstruction failed; pool support disabled" (`replay event 3: invalid
+manifest snapshot`): every pool, not only pool-model ones, stops routing after
+the rollback (fixer B targets the preflight).
+
+**Deploy order (fixer A, route_snapshot_v2).** Recorded by
+`S2-updater-order` and `S3-order-coordinator-first-*`: the updater never
+serves a new-coordinator/old-gateway pair (gateway stopped first, coordinator
+started first, nginx 502 in between). The manual runbook order (coordinator,
+then gateway) does: on the shakedown ref pool-model traffic settled there (no
+`invalid_settlement_policy_version`); the acceptance ref (v2 snapshots) is the
+real test.
