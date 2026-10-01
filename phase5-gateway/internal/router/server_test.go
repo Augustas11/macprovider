@@ -479,7 +479,7 @@ func TestSanitizeModelsResponseNormalizesNestedPublicMetadata(t *testing.T) {
 		}},
 	}
 
-	sanitizeModelsResponse(body)
+	sanitizeModelsResponse(body, "")
 
 	data := body["data"].([]any)
 	entry := data[0].(map[string]any)
@@ -543,7 +543,7 @@ func TestSanitizeModelsResponseRejectsHostileStringValues(t *testing.T) {
 		},
 	}
 
-	sanitizeModelsResponse(body)
+	sanitizeModelsResponse(body, "")
 
 	data := body["data"].([]any)
 	entry := data[0].(map[string]any)
