@@ -41,6 +41,9 @@ type Registry struct {
 	// (trusted_pools.production_activation configured): a pool whose root
 	// launch_environment is candidate is never routeable there.
 	rejectCandidateLaunch bool
+	// providerOwnerAccounts is the operator-configured SPEC-003 owner
+	// account per provider id (SPEC-042-R016 match input only).
+	providerOwnerAccounts map[string]string
 }
 
 type poolState struct {
@@ -71,6 +74,10 @@ type poolState struct {
 	// runtimeAllowlist is the accepted v2 core's signed runtime_allowlist
 	// (SPEC-042-R001). Empty (or a v1 core) means native MLX only.
 	runtimeAllowlist []string
+	// modelEntries and attestedMembers are the active core's SPEC-042-R015
+	// pool_model_entries and R016 pool_attested_members.
+	modelEntries    []poolmanifest.PoolModelEntry
+	attestedMembers []poolmanifest.AttestedMember
 	// delegatedMembers are members admitted through a ProviderPoolDelegationV1
 	// grant; they are never creator-owned (SPEC-042-R006 condition 4).
 	delegatedMembers map[string]struct{}
@@ -109,6 +116,15 @@ type Snapshot struct {
 	// RuntimeAllowlist is the accepted core's signed runtime_allowlist,
 	// read from the same consistent snapshot as Members (SPEC-042-R004).
 	RuntimeAllowlist []string
+	// ModelEntries are the active core's SPEC-042-R015 pool model entries and
+	// AttestedMembers its R016 member-account attestations, read from the
+	// same consistent snapshot as Members.
+	ModelEntries    []poolmanifest.PoolModelEntry
+	AttestedMembers []poolmanifest.AttestedMember
+	// MemberOwnerAccounts maps a route member to its coordinator-recorded
+	// SPEC-003 owner account (operator-configured), used only to match R016
+	// attestations. A member absent here has no recorded owner account.
+	MemberOwnerAccounts map[string]string
 	// CreatorAccountID is the pool creator's account from the durable
 	// pool-creation record.
 	CreatorAccountID string
@@ -142,6 +158,8 @@ type RouteableSnapshot struct {
 	MinBinaryVersion          string
 	ModelAllowlist            []string
 	RuntimeAllowlist          []string
+	ModelEntries              []poolmanifest.PoolModelEntry
+	AttestedMembers           []poolmanifest.AttestedMember
 	DelegatedMembers          []string
 	SettlementMode            string
 	Routeable                 bool
@@ -451,6 +469,8 @@ func (r *Registry) LoadRouteableSnapshot(s RouteableSnapshot) error {
 		minBinaryVersion:   s.MinBinaryVersion,
 		modelAllowlist:     modelAllowlist,
 		runtimeAllowlist:   runtimeAllowlist,
+		modelEntries:       poolmanifest.ClonePoolModelEntries(s.ModelEntries),
+		attestedMembers:    poolmanifest.CloneAttestedMembers(s.AttestedMembers),
 		delegatedMembers:   stringSet(s.DelegatedMembers),
 		settlementMode:     canonicalPoolSettlementMode(s.SettlementMode),
 		generation:         s.Generation,
@@ -766,6 +786,8 @@ func buildRouteablePoolStates(snapshots []RouteableSnapshot) (map[string]*poolSt
 			minBinaryVersion:        s.MinBinaryVersion,
 			modelAllowlist:          modelAllowlist,
 			runtimeAllowlist:        runtimeAllowlist,
+			modelEntries:            poolmanifest.ClonePoolModelEntries(s.ModelEntries),
+			attestedMembers:         poolmanifest.CloneAttestedMembers(s.AttestedMembers),
 			delegatedMembers:        stringSet(s.DelegatedMembers),
 			settlementMode:          canonicalPoolSettlementMode(s.SettlementMode),
 			generation:              s.Generation,
@@ -1050,6 +1072,8 @@ func (r *Registry) RouteableSnapshots() []RouteableSnapshot {
 			MinBinaryVersion:   ps.minBinaryVersion,
 			ModelAllowlist:     cloneStringSlice(ps.modelAllowlist),
 			RuntimeAllowlist:   cloneStringSlice(ps.runtimeAllowlist),
+			ModelEntries:       poolmanifest.ClonePoolModelEntries(ps.modelEntries),
+			AttestedMembers:    poolmanifest.CloneAttestedMembers(ps.attestedMembers),
 			DelegatedMembers:   sortedSetKeys(ps.delegatedMembers),
 			SettlementMode:     routeablePoolSettlementMode(ps.settlementMode),
 			Routeable:          ps.routeable,
@@ -1110,6 +1134,9 @@ func (r *Registry) Snapshot(poolID string) Snapshot {
 		MinBinaryVersion:    ps.minBinaryVersion,
 		ModelAllowlist:      cloneStringSlice(ps.modelAllowlist),
 		RuntimeAllowlist:    cloneStringSlice(ps.runtimeAllowlist),
+		ModelEntries:        poolmanifest.ClonePoolModelEntries(ps.modelEntries),
+		AttestedMembers:     poolmanifest.CloneAttestedMembers(ps.attestedMembers),
+		MemberOwnerAccounts: r.memberOwnerAccountsLocked(members),
 		CreatorAccountID:    ps.creatorAccountID,
 		CreatorOwnedMembers: r.creatorOwnedMembersLocked(ps, members),
 		SettlementMode:      routeablePoolSettlementMode(ps.settlementMode),
@@ -1155,6 +1182,9 @@ func (r *Registry) authorizeAndSnapshotLocked(poolID, buyerAccountID string) (Sn
 		MinBinaryVersion:    ps.minBinaryVersion,
 		ModelAllowlist:      cloneStringSlice(ps.modelAllowlist),
 		RuntimeAllowlist:    cloneStringSlice(ps.runtimeAllowlist),
+		ModelEntries:        poolmanifest.ClonePoolModelEntries(ps.modelEntries),
+		AttestedMembers:     poolmanifest.CloneAttestedMembers(ps.attestedMembers),
+		MemberOwnerAccounts: r.memberOwnerAccountsLocked(members),
 		CreatorAccountID:    ps.creatorAccountID,
 		CreatorOwnedMembers: r.creatorOwnedMembersLocked(ps, members),
 		SettlementMode:      routeablePoolSettlementMode(ps.settlementMode),
@@ -1299,6 +1329,69 @@ func (r *Registry) routeMembersLocked(ps *poolState, now time.Time) (map[string]
 		members[id] = true
 	}
 	return members, delegationExpired
+}
+
+// SetProviderOwnerAccounts installs the operator-configured SPEC-003 owner
+// account of each provider (account -> provider ids). It is the only source
+// the SPEC-042-R016 attestation match reads; a provider listed under two
+// accounts is ambiguous and gets no owner account. Changing the map advances
+// the routing generation so no attempt keeps a stale owner match.
+func (r *Registry) SetProviderOwnerAccounts(accountProviders map[string][]string) {
+	owners := make(map[string]string)
+	ambiguous := make(map[string]bool)
+	for account, providers := range accountProviders {
+		account = strings.TrimSpace(account)
+		if account == "" {
+			continue
+		}
+		for _, providerID := range providers {
+			providerID = strings.TrimSpace(providerID)
+			if providerID == "" {
+				continue
+			}
+			if prior, ok := owners[providerID]; ok && prior != account {
+				ambiguous[providerID] = true
+			}
+			owners[providerID] = account
+		}
+	}
+	for providerID := range ambiguous {
+		delete(owners, providerID)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if stringMapsEqual(r.providerOwnerAccounts, owners) {
+		return
+	}
+	r.providerOwnerAccounts = owners
+	r.ceilingGeneration++
+}
+
+func stringMapsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
+}
+
+// memberOwnerAccountsLocked returns the recorded owner account of each route
+// member that has one.
+func (r *Registry) memberOwnerAccountsLocked(members map[string]bool) map[string]string {
+	out := make(map[string]string)
+	for id, ok := range members {
+		if !ok {
+			continue
+		}
+		if account := r.providerOwnerAccounts[id]; account != "" {
+			out[id] = account
+		}
+	}
+	return out
 }
 
 // creatorOwnedMembersLocked returns the route members the creator account
