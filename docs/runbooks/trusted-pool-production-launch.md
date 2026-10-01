@@ -772,15 +772,26 @@ has run on the new coordinator:
    sudo bash -c 'set -a; . /etc/macprovider/coordinator.env; set +a
      /opt/macprovider/coordinator pool-rollback-preflight \
        --config /opt/macprovider/coordinator.yaml \
-       --config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml'
+       --config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml \
+       --target-tier m9'
    echo "exit: $?"
    ```
+
+   `--target-tier` is the rollback target's tier from the step 4b table
+   (`v1-only`, `m8`, `m9`, `p1816`; default `v1-only`, the oldest). The gate
+   also strictly decodes the pool manifest history, as step 4b does: when the
+   target cannot replay an accepted core (an extension or runtime class it
+   lacks, or any v2 core for `v1-only`) it prints `STOP: ... cannot replay the
+   pool manifest history (...)`, sets `rollback_blocked: true` and
+   `manifest_history.cannot_replay`, and exits 3; waiting never clears it,
+   roll forward. An undecodable snapshot prints `STOP` and exits 1.
 
    These are the paths the `macprovider-coordinator` unit runs with (live
    config, Pearl overlay, env file for the `env:` credentials the config
    names); `/etc/macprovider/coordinator.yaml` does not exist on Pearl.
 
-   Exit 0 means every pool route snapshot has a closed verdict or is past its
+   Exit 0 means the target tier replays the manifest history and every pool
+   route snapshot has a closed verdict or is past its
    pending deadline with no verdict. Exit 3 means a pool attempt can still
    reach receipt ingestion or a verdict update; the JSON line shows
    `open_pool_verdicts`, `in_window_pool_attempts_without_verdict`, and, when

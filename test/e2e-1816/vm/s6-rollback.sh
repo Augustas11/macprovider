@@ -44,13 +44,14 @@ result S6-pool-retire INFO "QN paused then retired: rc=$rrc $(head -c 300 "$EV/r
 keeper_off
 
 # ---- 2. coordinator rollback preflight with extension cores present ----------------------------
-cores="$(csql "SELECT COUNT(*) FROM trust_pool_events WHERE event_type='manifest_accepted' AND (payload_json LIKE '%pool_model_entries%' OR payload_json LIKE '%pool_attested_members%')" 2>/dev/null || echo '?')"
+# the snapshot is base64 in payload_json, so this counts accepted manifests, not extension cores
+cores="$(csql "SELECT COUNT(*) FROM trustpool_events WHERE event_type='manifest_accepted'" 2>/dev/null || echo '?')"
 with_coordinator_env /opt/macprovider/coordinator pool-rollback-preflight --config /opt/macprovider/coordinator.yaml \
-  --config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml >"$EV/preflight.txt" 2>&1; prc=$?
+  --config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml --target-tier m9 >"$EV/preflight.txt" 2>&1; prc=$?
 if [ $prc != 0 ] && grep -qi 'extension\|pool_model_entries\|replay' "$EV/preflight.txt"; then
   result S6-preflight-extension-cores PASS "pool-rollback-preflight refuses (rc=$prc) with pool-model extension cores present: $(head -c 300 "$EV/preflight.txt")"
 else
-  result S6-preflight-extension-cores FAIL "pool-rollback-preflight rc=$prc does not refuse a rollback target that cannot replay pool_model_entries/v1 cores (extension cores in the store: $cores): $(tr '\n' ' ' <"$EV/preflight.txt" | head -c 300)"
+  result S6-preflight-extension-cores FAIL "pool-rollback-preflight rc=$prc does not refuse a rollback target that cannot replay pool_model_entries/v1 cores (accepted manifests in the store: $cores): $(tr '\n' ' ' <"$EV/preflight.txt" | head -c 300)"
 fi
 
 # ---- 3. the full trusted-pool rollback (runbook s9), shared with #1690 -------------------------
