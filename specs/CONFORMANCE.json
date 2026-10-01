@@ -1432,7 +1432,7 @@
     {
       "spec_id": "SPEC-047",
       "title": "Network Model Admission",
-      "version": "0.2.5",
+      "version": "0.2.6",
       "path": "specs/SPEC-047-network-model-admission.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -2116,7 +2116,7 @@
         "phase3-binary/Sources/macprovider-cli/MLXLMLoopback.swift:enum MLXLMLoopbackServeModel",
         "phase3-binary/Sources/macprovider-cli/OpenAICompatibleLoopbackRuntime.swift:static func mlxLM",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMMLXLMDiscovery",
-        "phase3-binary/Sources/macprovider-cli/MLXLMLoopback.swift:func submitMLXLMOffer",
+        "phase3-binary/Sources/macprovider-cli/MLXLMLoopback.swift:func submitMLXLMOffer(",
         "phase3-binary/Sources/macprovider-cli/MLXLMLoopback.swift:func mlxlmCandidate",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:func discoverIncludingMLXLM",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:func evaluateIncludingMLXLM",
@@ -9312,7 +9312,7 @@
     {
       "requirement_id": "SPEC-046-R003",
       "spec_id": "SPEC-046",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMDiscoveryWire",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMCandidateIdentity",
@@ -9343,12 +9343,17 @@
           "expires_at": "2026-10-18"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "Demoted from conformant on the #1816 campaign branch: the #1816 coordinator and CLI lanes changed the mapped implementation/test fragments, so the 2026-09 commit and signed-journey evidence no longer covers the current code (check_spec_governance fragment check). The mapped unit tests pass on the merged tree; re-promote after a fresh signed journey run against the landed #1816 commit."
+      }
     },
     {
       "requirement_id": "SPEC-046-R004",
       "spec_id": "SPEC-046",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMDiscoveryWire",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMMLXCacheDiscovery",
@@ -9378,12 +9383,17 @@
           "expires_at": "2026-10-18"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "Demoted from conformant on the #1816 campaign branch: the #1816 coordinator and CLI lanes changed the mapped implementation/test fragments, so the 2026-09 commit and signed-journey evidence no longer covers the current code (check_spec_governance fragment check). The mapped unit tests pass on the merged tree; re-promote after a fresh signed journey run against the landed #1816 commit."
+      }
     },
     {
       "requirement_id": "SPEC-046-R005",
       "spec_id": "SPEC-046",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMEvaluationLimits",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMEvaluationRunner",
@@ -9415,12 +9425,17 @@
           "expires_at": "2026-10-18"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "Demoted from conformant on the #1816 campaign branch: the #1816 coordinator and CLI lanes changed the mapped implementation/test fragments, so the 2026-09 commit and signed-journey evidence no longer covers the current code (check_spec_governance fragment check). The mapped unit tests pass on the merged tree; re-promote after a fresh signed journey run against the landed #1816 commit."
+      }
     },
     {
       "requirement_id": "SPEC-046-R006",
       "spec_id": "SPEC-046",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMDiscoveryRunner",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMMLXCacheDiscovery",
@@ -9451,12 +9466,17 @@
           "expires_at": "2026-10-18"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "Demoted from conformant on the #1816 campaign branch: the #1816 coordinator and CLI lanes changed the mapped implementation/test fragments, so the 2026-09 commit and signed-journey evidence no longer covers the current code (check_spec_governance fragment check). The mapped unit tests pass on the merged tree; re-promote after a fresh signed journey run against the landed #1816 commit."
+      }
     },
     {
       "requirement_id": "SPEC-046-R007",
       "spec_id": "SPEC-046",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMDiscoveryPrivacy",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMOllamaDiscovery",
@@ -9488,7 +9508,12 @@
           "expires_at": "2026-10-18"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "Demoted from conformant on the #1816 campaign branch: the #1816 coordinator and CLI lanes changed the mapped implementation/test fragments, so the 2026-09 commit and signed-journey evidence no longer covers the current code (check_spec_governance fragment check). The mapped unit tests pass on the merged tree; re-promote after a fresh signed journey run against the landed #1816 commit."
+      }
     },
     {
       "requirement_id": "SPEC-046-R008",
@@ -9558,7 +9583,7 @@
     {
       "requirement_id": "SPEC-047-R001",
       "spec_id": "SPEC-047",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/ws/model_admission.go:type ModelAdmissionStore",
         "phase4-coordinator/internal/ws/model_admission.go:func (s *memoryModelAdmissionStore) AppendModelAdmissionOffer",
@@ -9609,12 +9634,17 @@
           "expires_at": "2026-10-16"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "Demoted from conformant on the #1816 campaign branch: the #1816 coordinator and CLI lanes changed the mapped implementation/test fragments, so the 2026-09 commit and signed-journey evidence no longer covers the current code (check_spec_governance fragment check). The mapped unit tests pass on the merged tree; re-promote after a fresh signed journey run against the landed #1816 commit."
+      }
     },
     {
       "requirement_id": "SPEC-047-R002",
       "spec_id": "SPEC-047",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMOfferSubmissionBuilder",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMWithdrawalBuilder",
@@ -9647,7 +9677,12 @@
           "expires_at": "2026-10-16"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "Demoted from conformant on the #1816 campaign branch: the #1816 coordinator and CLI lanes changed the mapped implementation/test fragments, so the 2026-09 commit and signed-journey evidence no longer covers the current code (check_spec_governance fragment check). The mapped unit tests pass on the merged tree; re-promote after a fresh signed journey run against the landed #1816 commit."
+      }
     },
     {
       "requirement_id": "SPEC-047-R003",
@@ -9719,7 +9754,7 @@
     {
       "requirement_id": "SPEC-047-R004",
       "spec_id": "SPEC-047",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ModelCatalogEconomics.swift:struct ModelCatalogEconomicsBuilder",
         "phase3-binary/Sources/macprovider-cli/ModelCatalogEconomics.swift:economicsFields",
@@ -9752,7 +9787,12 @@
           "expires_at": "2026-10-16"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "Demoted from conformant on the #1816 campaign branch: the #1816 coordinator and CLI lanes changed the mapped implementation/test fragments, so the 2026-09 commit and signed-journey evidence no longer covers the current code (check_spec_governance fragment check). The mapped unit tests pass on the merged tree; re-promote after a fresh signed journey run against the landed #1816 commit."
+      }
     },
     {
       "requirement_id": "SPEC-047-R005",
@@ -9793,7 +9833,7 @@
     {
       "requirement_id": "SPEC-047-R006",
       "spec_id": "SPEC-047",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMWithdrawalBuilder",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMModelAdmissionRuntime",
@@ -9833,7 +9873,12 @@
           "expires_at": "2026-10-16"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "Demoted from conformant on the #1816 campaign branch: the #1816 coordinator and CLI lanes changed the mapped implementation/test fragments, so the 2026-09 commit and signed-journey evidence no longer covers the current code (check_spec_governance fragment check). The mapped unit tests pass on the merged tree; re-promote after a fresh signed journey run against the landed #1816 commit."
+      }
     },
     {
       "requirement_id": "SPEC-047-R007",
