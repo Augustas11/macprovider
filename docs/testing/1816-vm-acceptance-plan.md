@@ -212,7 +212,25 @@ or each failure filed as a finding with a repro in the Findings section.
 ## Results
 
 Acceptance: `a1e059632` (`feat/1816-pool-scoped-models`, fixers A and B),
-two full passes, baseline `origin/main` `65ee6791`. Pending (running).
+baseline `origin/main` `65ee6791`. Pass 1 ran the full chain; the harness was
+then corrected in two places it got wrong (the updater's durable state
+survived the bootstrap wipe, so pass 1's S2 ran as a same-version
+`repair_pair`, not an `upgrade`; and the member-revocation case depended on
+the non-creator member binding, see A-5), and passes 2 and 3 run the full
+chain consecutively on the final harness (results below when they finish).
+Evidence: `$E2E_WORK/evidence-a1e059632-pass1.tgz`,
+`$E2E_WORK/results-a1e059632-pass1.jsonl`.
+
+Pass 1 (`a1e059632`):
+
+| scenario | result |
+|---|---|
+| S1 baseline (old/old) | FAIL only on P-1 (`st_dc` hold outlives 660 s on origin/main too: pre-existing) |
+| S2 updater | PASS: plan, rollback rehearsal (exact restore), apply, artifact paths, live release, dead-man, pricing floor, restart order, nginx step (before the apply) and byte-identical feed, real canary proof; guards PASS (one history-dependent updater test GAP, D9). FAIL: catalog traffic on the gateway-first pair and the new pair only on P-1 holds and the resulting shape difference |
+| S3 pool models | PASS: config, pools, delegation, binding (loopback + native), events, pool `/v1/models`, disclosure, never-global, entry-price credits (43/39 and 32/29 credits, exact). FAIL: P-1 `st_dc` holds; `/poolz` hash_status (A-6); **coordinator-first order (A-1)** |
+| S4 refusals | PASS every case (blocked identity GAP, D4) |
+| S5 rotation/revocation | PASS: rotation without a gap (0 non-200, all settle, rebound), entry removal in flight (settles at the snapshot price, then refused, `pool_manifest_entry_revoked`), SIGHUP bounds now apply. FAIL: A-4 label, A-5 attestation binding (and so both in-flight cases had nothing in flight), A-7 owner-account reload silent |
+| S6 rollback | PASS: pause (in-flight settles, new refused, catalog untouched), retire, s9 rollback steps, no rows lost. FAIL: **A-2 preflight** (and the old coordinator disables every pool); P-1 after the rollback |
 
 ### Shakedown (harness debug, `e7964a233`, baseline `65ee6791`)
 
@@ -247,6 +265,67 @@ Per scenario after the fixes (shakedown ref):
 | S6 rollback | OK | P-8 preflight does not refuse; the old coordinator disables all pools |
 
 ## Findings
+
+### Acceptance ref `a1e059632`
+
+Each is a bug until shown otherwise. Repro: `E2E_NEW_REF=a1e059632 bash
+test/e2e-1816/run-all.sh 1` (or the named steps); evidence names are in the
+result lines of `results-a1e059632-pass1.jsonl`.
+
+**A-1 HIGH (money, deploy order).** New coordinator + old gateway (the manual
+runbook order of trusted-pool-production-launch s9: coordinator first, then
+gateway): every pool-model request is delivered (200) and the provider credit
+is payable (28 tokens), but the gateway holds the reservation with
+`invalid_settlement_policy_version` (34 log lines for 4 requests; the old
+gateway does not know `spec022-route-snapshot-v2`). Worse, the holds do
+**not** settle after the new gateway is back: `p1As3cfpool` is still
+`active, debit=0, pay=28` for all 4 requests after the new gateway's
+reconciler ran (`S3-order-coordinator-first-pool-after-new-gw`). The Pearl
+updater is safe: it stops the gateway before the coordinator and starts the
+new coordinator first with the gateway down (`S2-updater-order`: nginx 502
+for 3.5 s, no request served by the mixed pair), so the risk is the manual
+deploy order and any hold created by it. Repro: S3, block "deploy order,
+coordinator first".
+
+**A-2 HIGH (operator safety, rollback).** With pool-model extension cores in
+the durable store, `coordinator pool-rollback-preflight --config
+/opt/macprovider/coordinator.yaml --config-overlay
+/etc/macprovider/coordinator.pearl-overlays.yaml` still exits 0
+(`rollback_blocked:false`), and the runbook's coordinator rollback to the
+baseline then logs `trusted pools durable reconstruction failed; pool support
+disabled` (`replay event 3: trustpool: invalid manifest snapshot`): every pool
+stops routing, not only the pool-model ones. Repro: S6 (`S6-preflight-extension-cores`,
+`S6-old-coordinator-extension-cores`).
+
+**A-3 (P-1, pre-existing).** Disconnect holds outlive the receipt deadline
+(see P-1); seen on old/old in S1, so not #1816.
+
+**A-4 MEDIUM (labels).** While a pre-accepted future core exists (and after
+it activates), pool-model attempts settle `verified` with the right price but
+`settlement_receipt_verdicts.pool_label_status` is NULL instead of `verified`
+(`p1As5pre`, `p1As5post`, P10). The rotation run just before (no future core
+queued beyond the keeper's next window) has `verified` labels.
+
+**A-5 MEDIUM (R016 binding).** A non-creator member whose owner account is
+attested by a LATER core never binds: its offer head stays
+`offer_submitted`, the binding sweep does not bind it when the attesting
+core activates, a re-submitted offer answers `409 replay_conflict`, and
+restarting `serve` does not re-evaluate it (runbook section 4 says "submits
+(or keeps) its offer and restarts serve"). Pool requests with that member as
+the only server answer 503. Repro: S5 c (`S5-attested-member-binds`,
+`p1A-s5/offer-5-attested.txt`). The integration test covers only the case
+where the attestation exists before the offer.
+
+**A-6 LOW (runbook vs `/poolz`).** P-6 holds on the acceptance ref:
+`hash_status: uncatalogued` for bound pool-model members; runbook section 4
+says `hash_verified`.
+
+**A-7 LOW (config reload).** SIGHUP now applies tightened
+`pool_model_pricing_bounds` (fixed since the shakedown), but a change to
+`provider_owner_account_ids` logs nothing (applied or refused); an operator
+cannot tell whether an owner remap took effect without a restart.
+
+### Shakedown ref `e7964a233`
 
 Provisional, from the shakedown against `e7964a233`. Two fixers were
 changing settlement and config code while it ran; each is re-checked on the
