@@ -5335,6 +5335,11 @@ class Updater:
         *,
         deadline: float | None = None,
     ) -> CatalogCanaryEvidence:
+        # Proves the live canary process loaded this release's catalog from the
+        # coordinator (state=live_verified, source=coordinator). The canary's
+        # CLI-installed catalog-release/ bytes are not compared: only a signed
+        # CLI payload writes them, so a coordinator-side catalog change could
+        # never satisfy that comparison (v1.8.194 rollback, 2026-09-25).
         proof_program = _read_trusted_text(
             self.catalog_canary_proof,
             "catalog canary proof program",
@@ -5399,7 +5404,6 @@ class Updater:
             local_status = proof["local_status"]
             local_catalog = local_status["catalog"]
             local_coordinator = local_status["coordinator"]
-            files = proof["files"]
         except (ValueError, KeyError, TypeError) as exc:
             raise UpdateError("trusted catalog canary Mac proof is invalid") from exc
         row_identity = local_catalog.get("row_identity") if isinstance(local_catalog, dict) else None
@@ -5422,6 +5426,8 @@ class Updater:
             or not isinstance(assigned_id, str)
             or not assigned_id
             or not isinstance(local_catalog, dict)
+            or local_catalog.get("state") != "live_verified"
+            or local_catalog.get("source") != "coordinator"
             or local_catalog.get("release_id") != release.catalog.release_id
             or local_catalog.get("policy_version") != release.catalog.policy_version
             or local_catalog.get("digest") != candidate_digest
@@ -5438,7 +5444,6 @@ class Updater:
             or model_id.strip() != model_id
             or local_catalog.get("catalog_key") != catalog_key
             or local_catalog.get("model_id") != model_id
-            or files != release.catalog.files
         ):
             raise UpdateError("trusted catalog canary Mac proof does not match the candidate release")
         return CatalogCanaryEvidence(

@@ -420,8 +420,9 @@ CANARY_SSH=(ssh -i "$CATALOG_CANARY_SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=
   -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 "$CATALOG_CANARY_SSH_TARGET")
 
 # canary_proof <prefix-of-identity> <out>: exact live process + local status
-# proof for the selected provider. The installed-byte comparison deploy does
-# is intentionally not applied (a content release does not reinstall the app).
+# proof for the selected provider. Evidence (c) additionally requires
+# source=coordinator; no caller compares CLI-installed catalog-release/ bytes
+# (only a signed CLI payload writes them).
 canary_proof() {
   local id policy digest signer
   eval "id=\$${1}_ID policy=\$${1}_POLICY digest=\$${1}_CAND_SHA signer=\$${1}_SIGNER"

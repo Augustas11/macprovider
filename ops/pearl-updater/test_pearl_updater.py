@@ -3011,7 +3011,7 @@ class PearlUpdaterTests(unittest.TestCase):
             "session-canary",
         ))
 
-    def test_exact_provider_canary_mac_proof_is_pinned_and_matches_catalog_files(self):
+    def test_exact_provider_canary_mac_proof_is_pinned_and_requires_live_coordinator_catalog(self):
         release = self.verify()
         digest, signer = self.updater.catalog_candidate_identity(release)
         row_identity = "b" * 64
@@ -3028,6 +3028,8 @@ class PearlUpdaterTests(unittest.TestCase):
                 "model_loaded": True,
                 "coordinator": {"connected": True, "session": "session-canary"},
                 "catalog": {
+                    "state": "live_verified",
+                    "source": "coordinator",
                     "release_id": release.catalog.release_id,
                     "policy_version": release.catalog.policy_version,
                     "digest": digest,
@@ -3037,7 +3039,6 @@ class PearlUpdaterTests(unittest.TestCase):
                     "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
                 },
             },
-            "files": dict(release.catalog.files),
         }
         self.updater.config = updater_module.dataclasses.replace(
             self.updater.config,
@@ -3083,22 +3084,13 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertIn("running_text_vnode", kwargs["input_text"])
         self.assertIn('local_status.get("model_loaded") is not True', kwargs["input_text"])
         self.assertIn("catalog_key != model_id", kwargs["input_text"])
+        self.assertNotIn("catalog_fd", kwargs["input_text"])
         self.assertEqual(kwargs["timeout"], 25.0)
 
-        proof["files"]["release.json"] = "0" * 64
-        self.updater.run_command.return_value = subprocess.CompletedProcess(
-            ["ssh"], 0, stdout=json.dumps(proof), stderr=""
-        )
-        with self.assertRaisesRegex(
-            updater_module.UpdateError,
-            "does not match the candidate release",
-        ):
-            self.updater.prove_catalog_canary_mac(
-                release, "catalog-canary", digest, signer
-            )
-
-        proof["files"] = dict(release.catalog.files)
         invalid_model_proofs = {
+            "baked catalog fallback": {"local_status.catalog.source": "baked"},
+            "offline fallback state": {"local_status.catalog.state": "safe_offline_fallback"},
+            "previous catalog release": {"local_status.catalog.release_id": "previous-release"},
             "runtime model missing": {"local_status.model": None},
             "runtime model not loaded": {"local_status.model_loaded": False},
             "catalog key mismatch": {"local_status.catalog.catalog_key": "different-key"},

@@ -264,6 +264,15 @@ ledgered).
 `components.catalog.files` stays the exact nine-name set in every one of these
 (Stage A, below).
 
+**The activation deploy does not need a new CLI on the canary.** Since #1816 the
+`deploy-pearl-vps.sh` and Pearl updater canaries prove that the canary's live
+process loaded the new release from the coordinator (`state: live_verified`,
+`source: coordinator`, release/policy/digest/signer/row bound to the
+coordinator-admitted envelope). They no longer byte-compare the CLI-installed
+`catalog-release/` directory, which only a signed CLI payload writes. A CLI
+that bakes the release is still needed for features that resolve against the
+compiled-in feed (BYOM identity, slice 2c), not for the deploy.
+
 ## Current state
 
 **The activation release is cut but not deployed.**

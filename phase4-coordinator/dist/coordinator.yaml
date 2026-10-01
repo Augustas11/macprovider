@@ -248,6 +248,22 @@ storage:
   request_log_prune_on_startup: true
   audit_log_prune_on_startup: true
 
+# trusted_pools is not configured here (pools stay disabled). SPEC-005-R015 /
+# SPEC-042-R015 (#1816): a pool that admits pool_model_entries/v1 needs
+# inclusive per-rate bounds (credits per Mtok, int64, min <= max) in the live
+# config; entries outside them, or any entry while they are absent, are
+# refused. They are coordinator config, not a rate-card field. Proposed values:
+# docs/runbooks/pool-scoped-model-admission.md section 1 (rate values stay out
+# of this file outside rewards.rate_card).
+# trusted_pools:
+#   pool_model_pricing_bounds:
+#     min_prompt_rate_per_mtok: <int>
+#     max_prompt_rate_per_mtok: <int>
+#     min_prompt_cache_hit_rate_per_mtok: <int>
+#     max_prompt_cache_hit_rate_per_mtok: <int>
+#     min_completion_rate_per_mtok: <int>
+#     max_completion_rate_per_mtok: <int>
+
 logging:
   level: "info"
   format: "json"
