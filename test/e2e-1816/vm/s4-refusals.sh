@@ -38,15 +38,17 @@ for l in open(sys.argv[1]):
     r=json.loads(l); print(r.get("kind"), r.get("status"), (r.get("body") or "")[:160])' "$E2E_EVIDENCE/$run.load.jsonl" | sort | uniq -c >"$EV/$run.statuses.txt"
   result "$label-codes" INFO "$(tr '\n' ';' <"$EV/$run.statuses.txt" | head -c 500)"
 }
-# refused_manifest <label> <pool> <expected-code> <models-file>
+# refused_manifest <label> <pool> <expected-code> <models-file> [offline-reason]:
+# the coordinator's closed code, or (rc 4) the reviewed offline signer's
+# refusal, which validates the same acceptance rules before anything is sent.
 refused_manifest() {
-  local label="$1" pool="$2" code="$3" mf="$4" d0 d1 out rc
+  local label="$1" pool="$2" code="$3" mf="$4" offline="${5:-}" d0 d1 out rc
   d0="$($PM get "$pool" | python3 -c 'import json,sys;d=json.load(sys.stdin);p=d.get("pool") or d;print(p.get("manifest_core_digest"), p.get("manifest_version"))')"
   out="$($PM manifest "$pool" --models-file "$mf" 2>&1)"; rc=$?
   echo "$out" >"$EV/$label.manifest.txt"
   d1="$($PM get "$pool" | python3 -c 'import json,sys;d=json.load(sys.stdin);p=d.get("pool") or d;print(p.get("manifest_core_digest"), p.get("manifest_version"))')"
-  if [ $rc != 0 ] && echo "$out" | grep -q "$code" && [ "$d0" = "$d1" ]; then
-    result "$label" PASS "refused with $code ($([ $rc = 4 ] && echo 'offline by coordinator-cli sign-manifest' || echo 'by the coordinator')); active core unchanged ($d1)"
+  if [ $rc != 0 ] && { echo "$out" | grep -q "$code" || { [ $rc = 4 ] && [ -n "$offline" ] && echo "$out" | grep -q "$offline"; }; } && [ "$d0" = "$d1" ]; then
+    result "$label" PASS "refused ($([ $rc = 4 ] && echo "offline by coordinator-cli sign-manifest: $(echo "$out" | tail -1 | head -c 160)" || echo "by the coordinator: $code")); active core unchanged ($d1)"
   else
     result "$label" FAIL "rc=$rc want $code: $(echo "$out" | tail -1 | head -c 400); core before/after: $d0 / $d1"
   fi
@@ -81,9 +83,9 @@ stage_variant QN "$EV/overlap-mlx.json" cat-mlx macprovider.snapshot-manifest.v1
 refused_manifest S4-catalog-overlap-mlx QN pool_model_entry_catalog_overlap "$EV/overlap-mlx.json"
 result S4-catalog-overlap-blocked GAP "the signed activation release has no blocked (runtime_status=blocked / not-buyer-serving) row, so the blocked artifact-feed identity case needs a lab-signed release (see plan)"
 stage_variant Q "$EV/rt-not-allowed.json" gguf-lmstudio macprovider.gguf-file.v1 $H_GGUF2 lmstudio_loopback $G_RATES
-refused_manifest S4-runtime-not-allowlisted Q pool_model_entry_runtime_not_allowed "$EV/rt-not-allowed.json"
+refused_manifest S4-runtime-not-allowlisted Q pool_model_entry_runtime_not_allowed "$EV/rt-not-allowed.json" "allowed by the core"
 stage_variant Q "$EV/rt-pairing.json" gguf-mlxcache macprovider.gguf-file.v1 $H_GGUF2 mlx_cache $G_RATES
-refused_manifest S4-runtime-pairing Q pool_model_entry_runtime_pairing "$EV/rt-pairing.json"
+refused_manifest S4-runtime-pairing Q pool_model_entry_runtime_pairing "$EV/rt-pairing.json" "incompatible artifact format"
 
 # ---- non-attested non-creator member ------------------------------------------------
 st5="$(python3 -c 'import json,sys;s=json.load(open(sys.argv[1]));print(s.get("admission_state"), bool(s.get("pool_binding")))' $E2E_EVIDENCE/p$PASS_ID-s3/offer-5.json 2>&1)"
