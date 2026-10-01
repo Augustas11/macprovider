@@ -266,21 +266,28 @@ ledgered).
 
 ## Current state
 
-The source is committed and seeded with all ten catalog rows — each with its
-primary MLX artifact copied from the signed candidate row, `verification_status:
-"verified"`, and its §3.3.1 `rate_class`. **No release has been cut with it yet.**
-Two operator gaps are deliberate and fail closed at generation:
+**The activation release is cut but not deployed.**
+`published-2026-10-01-artifact-feed-activation-v1` (#1816 step 1, #1690 M1) is
+the first artifact-bound release:
 
-1. **`size_bytes` is `null` on every seeded artifact.** Publishing a fabricated
-   byte count into a signed feed is not acceptable, so the generator refuses to
-   build a feed while any `size_bytes` is `null`
-   (`size_bytes must be measured before the release is generated`). Measure the
-   snapshot and fill the integer.
-2. **No GGUF artifacts are seeded.** Real GGUF digests require pulling and
-   hashing the blob; see below.
+- Its feeds are signed with `streamvc-autotune-static-v4`.
+- The release ledger is v3.
+- The artifact feed covers 17 model keys with 18 artifacts: every MLX
+  primary, with `size_bytes` measured, plus one verified GGUF secondary,
+  `meta-llama/llama-3.2-3b-instruct` / `gguf-q4-k-m`. That GGUF is a
+  `huggingface_revision` + `file_path` source, `llamacpp_loopback` only.
+- The provider CLI snapshot bakes the feed.
+- Its rate card is unchanged from the preceding release.
 
-`verified_at` on the seeded primaries is `2026-09-02`, the date the candidate
-release published those digests as operator-verified identities.
+Nothing serves the feed yet. Going live needs one activation deploy that does
+all of the following:
+
+- installs a provider CLI cut from the commit that carries this release;
+- sets `autotune.catalog_artifacts_path` / `_sig_path` on Pearl;
+- adds the `/v1/catalog-artifacts` (+ `.sig`) nginx locations.
+
+The repository is now `post-activation`. Every later cut passes
+`--previous-release-dir`, and `--activate-artifact-feed` is refused.
 
 ## Adding an artifact
 
