@@ -73,7 +73,7 @@ class SwiftPMPinParsingTests(unittest.TestCase):
         payload = json.loads(fixture.read_text())
         payload["pins"][1]["location"] = "https://github.com/Augustas11/mlx-swift-lm.git"
         payload["pins"][1]["state"] = {
-            "revision": "c4bc3461673e9f035c5f11bf41dda120d4baee1d"
+            "revision": "ef4ff8568c38c640bc90a8176dc3acfe943a288d"
         }
         with tempfile.TemporaryDirectory() as temporary:
             resolved = Path(temporary) / "Package.resolved"
@@ -83,11 +83,11 @@ class SwiftPMPinParsingTests(unittest.TestCase):
 
         self.assertEqual(
             pins["mlx_swift_lm"],
-            "c4bc3461673e9f035c5f11bf41dda120d4baee1d",
+            "ef4ff8568c38c640bc90a8176dc3acfe943a288d",
         )
         self.assertEqual(
             pins["mlx_swift_lm_revision"],
-            "c4bc3461673e9f035c5f11bf41dda120d4baee1d",
+            "ef4ff8568c38c640bc90a8176dc3acfe943a288d",
         )
 
     def test_fails_closed_when_spec048_fork_uses_unreviewed_revision(self):
@@ -107,7 +107,7 @@ class SwiftPMPinParsingTests(unittest.TestCase):
         fixture = Path(__file__).with_name("fixtures") / "package-resolved-v2.json"
         payload = json.loads(fixture.read_text())
         payload["pins"][1]["state"] = {
-            "revision": "c4bc3461673e9f035c5f11bf41dda120d4baee1d"
+            "revision": "ef4ff8568c38c640bc90a8176dc3acfe943a288d"
         }
         with tempfile.TemporaryDirectory() as temporary:
             resolved = Path(temporary) / "Package.resolved"
@@ -297,7 +297,7 @@ class UpstreamWatchComparisonTests(unittest.TestCase):
         new = json.loads(json.dumps(old))
         new["native_mtp_immutable_dependency_exception"]["mlx_swift_lm"][
             "revision"
-        ] = "c4bc3461673e9f035c5f11bf41dda120d4baee1d"
+        ] = "ef4ff8568c38c640bc90a8176dc3acfe943a288d"
 
         changed, reason = material_changes(old, new)
 
@@ -345,7 +345,7 @@ class UpstreamWatchComparisonTests(unittest.TestCase):
         live["native_mtp_immutable_dependency_exception"] = {
             "mlx_swift_lm": {
                 "location": "https://github.com/Augustas11/mlx-swift-lm.git",
-                "revision": "c4bc3461673e9f035c5f11bf41dda120d4baee1d",
+                "revision": "ef4ff8568c38c640bc90a8176dc3acfe943a288d",
             }
         }
 
@@ -367,7 +367,7 @@ class UpstreamWatchComparisonTests(unittest.TestCase):
             merged["native_mtp_immutable_dependency_exception"]["mlx_swift_lm"][
                 "revision"
             ],
-            "c4bc3461673e9f035c5f11bf41dda120d4baee1d",
+            "ef4ff8568c38c640bc90a8176dc3acfe943a288d",
         )
 
     def test_native_mtp_required_merges_release_flip_is_material(self):

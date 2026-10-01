@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.12
+**Version:** 0.1.13
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -348,7 +348,7 @@ tagged release is the default production requirement.
 The first such exception is closed and exact:
 
 - repository: `https://github.com/Augustas11/mlx-swift-lm.git`;
-- revision: `c4bc3461673e9f035c5f11bf41dda120d4baee1d`;
+- revision: `ef4ff8568c38c640bc90a8176dc3acfe943a288d`;
 - upstream base: `ml-explore/mlx-swift-lm@bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57`
   (`3.31.4`);
 - reviewed surface: `MTPKVCacheStorage`, `MTPKVCacheTransaction`,
@@ -361,9 +361,16 @@ The first such exception is closed and exact:
   plus `MTPDrafterContainer.perform(nonSendable:_:)` for serialized movement
   of caller-owned drafter state without model-global mutation or unsafe
   `Sendable` capture; plus standalone Qwen 3.5 MTP checkpoint normalization,
-  `MTPPackedMambaBatchCache`, `MTPPackedMambaRowTransaction`, and the
+  `MTPPackedMambaBatchCache`, `MTPPackedMambaRowTransaction` (including the
+  deferred-evaluation `stageCommit(retaining:)`), and the
   `mtpPackedCheckpointIndex` contract needed for row-isolated commit across
-  hybrid attention/Mamba verification;
+  hybrid attention/Mamba verification; plus the
+  `mtpPackedHostBatchOffsets` host offset mirror the packed facade validates
+  instead of reading `batchOffset` back from the device; plus
+  `MTPPackedStatefulDrafterModel`, `MTPPackedDrafterAdvanceRow`,
+  `MTPPackedDrafterAdvanceResult`, `MTPPackedDrafterError`, and the Qwen 3.5
+  `advanceAndProposePacked` implementation that advances every native row's
+  drafter state and proposes its next token in one drafter forward;
 - review date and owner: `2026-09-28`, `@Augustas11`;
 - mandatory exception re-review date: `2026-12-27`;
 - review gate: upstream-focused build-tests, MacProvider qualification and
@@ -1028,6 +1035,22 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.13 (2026-10-01)** — Moves the reviewed fork exception pin from
+  `c4bc3461673e9f035c5f11bf41dda120d4baee1d` to
+  `ef4ff8568c38c640bc90a8176dc3acfe943a288d` (#1770 round overhead). The
+  delta, three commits on `perf/mtp-verify-sync-free`, removes per-round host
+  synchronization and per-row drafter forwards without changing what is
+  committed: packed-verify offset validation reads a host mirror instead of
+  one blocking device readback per cache layer; recurrent row commits can
+  defer evaluation so a round resolves every row and layer with one `eval`;
+  and a packed stateful-drafter API advances all native rows and proposes
+  their next tokens in one drafter forward. Packed drafter state equals the
+  per-row commit bit for bit when the matmul shapes match and otherwise
+  differs only by kernel accumulation order; drafter state never selects an
+  emitted token (MTP-5), so this does not touch the R005 oracle. Proposal
+  no longer mutates drafter state, so an aborted round keeps the row's
+  pre-round drafter state (MTP-6). The delta is in scope for the campaign
+  freeze audit.
 - **0.1.12 (2026-10-01)** — Closes observer/loader divergences found in
   the campaign round-1 audit (#1770). The MTP-2 observer now accepts exactly
   the pinned loader grammar: only the top-level `quantization` object, the

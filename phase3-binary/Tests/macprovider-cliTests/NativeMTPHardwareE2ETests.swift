@@ -18,7 +18,7 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
     private static let enabledVariable = "MACPROVIDER_NATIVE_MTP_E2E"
     private static let rootVariable = "MACPROVIDER_NATIVE_MTP_E2E_ROOT"
     private static let modelID = "mlx-community/Qwen3.5-9B-4bit"
-    private static let upstreamRevision = "c4bc3461673e9f035c5f11bf41dda120d4baee1d"
+    private static let upstreamRevision = "ef4ff8568c38c640bc90a8176dc3acfe943a288d"
     private static let providerRevision = "0123456789abcdef0123456789abcdef01234567"
     private static let liveExecutableCDHash = "456789abcdef0123456789abcdef0123456789ab"
     private static let releaseID = "native-mtp-hardware-e2e"
