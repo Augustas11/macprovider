@@ -268,7 +268,7 @@ func setSettlementEvidenceFailedFinality(dst http.Header, rec *billingRecorder, 
 	if rec == nil || !rec.settlementFinalityMACActive {
 		return
 	}
-	mode, _ := rec.settlementPolicyForLedger()
+	mode, version := rec.settlementPolicyForLedger()
 	if mode != billing.RouteSnapshotModeEnforce {
 		logSettlementEvidenceFailure(rec, reason, mode, "legacy")
 		setSignedLegacyTuple(dst, rec)
@@ -278,7 +278,7 @@ func setSettlementEvidenceFailedFinality(dst http.Header, rec *billingRecorder, 
 	logSettlementEvidenceFailure(rec, reason, mode, action.String())
 	state := billing.SettlementReceiptState{
 		RouteSnapshotMode:          billing.RouteSnapshotModeEnforce,
-		RouteSnapshotPolicyVersion: billing.RouteSnapshotPolicyVersion,
+		RouteSnapshotPolicyVersion: version,
 	}
 	switch action {
 	case evidenceFailureVerified:

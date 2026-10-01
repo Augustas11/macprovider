@@ -325,6 +325,13 @@ func TestSPEC1816PoolModelRoutesSettlesAndDiscloses(t *testing.T) {
 				"pool_model_completion_rate_per_mtok":       float64(7000000),
 				"pool_generation":                           generation,
 				"model_admission_coordinator_event_id":      h.event.CoordinatorEventID,
+				// #1816 freeze R1: the receipt identity is the pool-scoped
+				// id (M3), the preimage is route_snapshot_v2 (H6), and the
+				// default-row economics are frozen at dispatch (M2).
+				"model_id":                         h.modelID,
+				"route_snapshot_policy_version":    billing.RouteSnapshotPolicyVersionV2,
+				"pool_model_global_multiplier_ppm": float64(1000000),
+				"pool_model_provider_share_bps":    float64(9000),
 			} {
 				if got := snapshot[key]; got != want {
 					t.Fatalf("route snapshot %s=%v want %v", key, got, want)
@@ -355,6 +362,43 @@ func TestSPEC1816PoolModelRoutesSettlesAndDiscloses(t *testing.T) {
 				t.Fatalf("usage source = %q want %q", ledger.usageSource, wantSource)
 			}
 		})
+	}
+}
+
+// #1816 freeze R1 SECURITY M2: a reload that changes the default-row
+// multiplier, provider share, and config generation after dispatch does not
+// re-price the in-flight pool-model attempt.
+func TestSPEC1816PoolModelFreezesEconomicsAtDispatch(t *testing.T) {
+	reloaded := config.Default().Rewards
+	reloaded.GlobalMultiplier = 2.0
+	reloaded.ProviderShare = 0.95
+	h := newPoolModelHarness(t, poolModelFixture{midFlight: func(h *poolModelHarness) {
+		h.server.PublishEconomics(reloaded, 999, 1, nil)
+	}})
+	rec := postChat(t, h.server, h.body(), externalRuntimePoolHeaders(h.poolID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pool-model route status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	snapshot := queryRouteSnapshotBYOMBinding(t, h.dbPath)
+	frozenSnapshotID, _ := snapshot["pool_model_config_snapshot_id"].(float64)
+	if frozenSnapshotID <= 0 || frozenSnapshotID == 999 {
+		t.Fatalf("route snapshot config generation = %v, want the dispatch-time snapshot", snapshot["pool_model_config_snapshot_id"])
+	}
+	db, err := sql.Open("sqlite", h.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var multiplier, share, gross, configSnapshotID int64
+	if err := db.QueryRow(`SELECT lrc.global_multiplier_ppm, lrc.provider_share_bps, lrc.gross_credits, lpis.config_snapshot_id
+  FROM ledger_request_credits lrc JOIN ledger_provider_identity_snapshots lpis
+    ON lpis.request_id = lrc.request_id AND lpis.attempt_n = lrc.attempt_n AND lpis.provider_id = lrc.provider_id`).
+		Scan(&multiplier, &share, &gross, &configSnapshotID); err != nil {
+		t.Fatalf("query ledger: %v", err)
+	}
+	if multiplier != 1000000 || share != 9000 || gross != 10 || configSnapshotID != int64(frozenSnapshotID) {
+		t.Fatalf("ledger multiplier=%d share=%d gross=%d config_snapshot_id=%d, want the dispatch-time 1000000/9000/10/%v",
+			multiplier, share, gross, configSnapshotID, frozenSnapshotID)
 	}
 }
 

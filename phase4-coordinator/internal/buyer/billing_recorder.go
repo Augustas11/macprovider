@@ -525,6 +525,11 @@ func (b *billingRecorder) recordRow(
 			if entry, ok := poolManifestRoute.PoolModelRateEntry(); ok {
 				economics.rateEntry = entry
 			}
+			// SPEC-005-R015: bill the multiplier, share, and config
+			// generation frozen in the route snapshot at dispatch.
+			if multiplier, share, snapshotID, ok := poolManifestRoute.PoolModelEconomics(); ok {
+				economics.multiplierPPM, economics.providerShareBps, economics.snapshotID = multiplier, share, snapshotID
+			}
 			poolFence = poolManifestFence
 		}
 		billingInput := billing.HotPathInput{

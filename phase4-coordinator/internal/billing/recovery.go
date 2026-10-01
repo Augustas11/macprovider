@@ -404,6 +404,9 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 			rateEntry = RateCardEntry{}
 			if isPoolRoute {
 				rateEntry, _ = poolRoute.PoolModelRateEntry()
+				// SPEC-005-R015: the multiplier, share, and config
+				// generation frozen at dispatch, never a later snapshot.
+				multiplier, share, snapshotID, _ = poolRoute.PoolModelEconomics()
 				if verified, ok := poolAttested[attemptID]; ok && verified.routeHash == poolRouteHash && verified.poolManifest {
 					poolManifestBillable = s.poolAttestationFenceHolds(ctx, tx, &verified.fence)
 				}
@@ -494,7 +497,7 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 		if err := insertOperatorCreditTx(ctx, tx, id, input, result, now); err != nil {
 			return recoveryStats{}, err
 		}
-		reason, err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, tx, requestID, int64(attemptN), providerID)
+		reason, err := s.syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, tx, requestID, int64(attemptN), providerID)
 		if err != nil {
 			return recoveryStats{}, err
 		}

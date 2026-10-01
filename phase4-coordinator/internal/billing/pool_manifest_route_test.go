@@ -29,6 +29,11 @@ func poolManifestSnapshot(route RouteSnapshot) RouteSnapshot {
 	route.PoolModelPromptCacheHitRatePerMtok = 30000
 	route.PoolModelCompletionRatePerMtok = 700000
 	route.PoolModelPricingBoundsSHA256 = strings.Repeat("b", 64)
+	route.PoolModelGlobalMultiplierPPM = 1_000_000
+	route.PoolModelProviderShareBps = 9000
+	route.PoolModelConfigSnapshotID = 1
+	route.ModelID = route.PoolModelID
+	route.RouteSnapshotPolicyVersion = RouteSnapshotPolicyVersionV2
 	return route
 }
 
@@ -53,7 +58,10 @@ func TestRouteSnapshotPoolManifestSourcePreimage(t *testing.T) {
 	}
 	for name, mutate := range map[string]func(*RouteSnapshot){
 		"price":      func(r *RouteSnapshot) { r.PoolModelCompletionRatePerMtok++ },
-		"pool model": func(r *RouteSnapshot) { r.PoolModelID = "pool/" + testPoolID + "/other" },
+		"pool model": func(r *RouteSnapshot) { r.PoolModelID = "pool/" + testPoolID + "/other"; r.ModelID = r.PoolModelID },
+		"multiplier": func(r *RouteSnapshot) { r.PoolModelGlobalMultiplierPPM = 2_000_000 },
+		"share":      func(r *RouteSnapshot) { r.PoolModelProviderShareBps = 9500 },
+		"config gen": func(r *RouteSnapshot) { r.PoolModelConfigSnapshotID = 2 },
 		"bounds":     func(r *RouteSnapshot) { r.PoolModelPricingBoundsSHA256 = strings.Repeat("c", 64) },
 		"generation": func(r *RouteSnapshot) { r.PoolGeneration = 8 },
 	} {
@@ -89,6 +97,16 @@ func TestRouteSnapshotPoolManifestSourcePreimage(t *testing.T) {
 		"catalog key":         func(r *RouteSnapshot) { r.ModelAdmissionCatalogModelKey = "model-a" },
 		"feed evidence":       func(r *RouteSnapshot) { r.ArtifactID = "artifact-a" },
 		"member account only": func(r *RouteSnapshot) { r.PoolMemberAccountID = "acct-member" },
+		// #1816 freeze R1 SECURITY M3 / H6 / M2.
+		"provider-local model_id": func(r *RouteSnapshot) { r.ModelID = "mlx-community/Popular-Model" },
+		"v1 policy version":       func(r *RouteSnapshot) { r.RouteSnapshotPolicyVersion = RouteSnapshotPolicyVersion },
+		"v2 without provenance": func(r *RouteSnapshot) {
+			*r = testRouteSnapshot()
+			r.RouteSnapshotPolicyVersion = RouteSnapshotPolicyVersionV2
+		},
+		"no multiplier":      func(r *RouteSnapshot) { r.PoolModelGlobalMultiplierPPM = 0 },
+		"share above 100%":   func(r *RouteSnapshot) { r.PoolModelProviderShareBps = 10001 },
+		"no config snapshot": func(r *RouteSnapshot) { r.PoolModelConfigSnapshotID = 0 },
 	} {
 		bad := pool
 		mutate(&bad)

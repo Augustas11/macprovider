@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
@@ -19,16 +20,20 @@ var _ billing.PoolRouteFenceSource = (*Store)(nil)
 
 // PoolRouteFenceHolds is the durable settlement fence of SPEC-042-R015 and
 // SPEC-047-R011, read through q so a caller holding the ledger write
-// transaction decides on the same durable state it commits against. An
-// attempt keeps settling from its immutable route snapshot across ordinary
-// manifest rotation and across removing or changing its entry in a later
-// core. It stops only when the durable log shows, between routing and now,
-// a revocation of that provider's membership (member_revoked, or
+// transaction decides on the same durable state it commits against. It reads
+// only the claim's pool through the (pool_id, id) index, never the global
+// log. An attempt keeps settling from its immutable route snapshot across
+// ordinary manifest rotation and across removing or changing its entry in a
+// later core. It stops only when the durable log shows, between routing and
+// now, a revocation of that provider's membership (member_revoked, or
 // delegation_revoked for a delegated admission), the pool retired or frozen,
-// or, for a SPEC-042-R016 member, a later accepted core that no longer
-// attests that member account for the route's runtime class. The claim's
-// manifest label must also be an accepted core of the pool, so a forged
-// label never holds.
+// or, for a SPEC-042-R016 member, a later accepted core that no longer attests
+// that member account for the route's runtime class and has taken effect
+// (its not_before has passed). A future-dated core accepted before it takes
+// effect is not a revocation of traffic routed under the core active at route
+// time. The claim's manifest label must be an accepted core of the pool, and
+// for a pool_manifest claim that core must carry the claim's exact entry, so
+// a forged label or entry never holds.
 func (s *Store) PoolRouteFenceHolds(ctx context.Context, q billing.PoolFenceQueryer, claim billing.PoolOperatorAttestationClaim) error {
 	if s == nil || q == nil {
 		return ErrStoreClosed
@@ -37,22 +42,37 @@ func (s *Store) PoolRouteFenceHolds(ctx context.Context, q billing.PoolFenceQuer
 		claim.ManifestVersion == 0 || claim.ManifestCoreDigest == "" {
 		return fmt.Errorf("%w: incomplete fence claim", ErrPoolOperatorAttestation)
 	}
-	events, err := eventsFromQueryer(ctx, q)
+	events, err := poolEventsFromQueryer(ctx, q, claim.PoolID)
 	if err != nil {
 		return err
 	}
-	return poolRouteFenceFromEvents(events, claim)
+	return poolRouteFenceFromEvents(events, claim, s.nowUTC())
 }
 
-func poolRouteFenceFromEvents(events []DurableEvent, claim billing.PoolOperatorAttestationClaim) error {
+func poolRouteFenceFromEvents(events []poolEvent, claim billing.PoolOperatorAttestationClaim, now time.Time) error {
 	var labelAccepted, admitted, delegated, revoked, membershipRemoved, poolEnded, attestationRemoved bool
-	for i, e := range events {
+	nowUnix := now.Unix()
+	for _, pe := range events {
+		e := pe.event
 		if e.PoolID != claim.PoolID {
 			continue
 		}
 		switch e.EventType {
 		case EventManifestAccepted:
 			if e.ManifestVersion == claim.ManifestVersion && e.ManifestCoreDigest == claim.ManifestCoreDigest {
+				if claim.ExpectedModelHashSource == billing.ExpectedModelHashSourcePoolManifest {
+					core, err := acceptedPolicyCoreFromManifestSnapshot(e)
+					if err != nil {
+						return fmt.Errorf("%w: manifest %d: %v", ErrPoolOperatorAttestation, e.ManifestVersion, err)
+					}
+					runtimeSource := claim.RuntimeSource
+					if runtimeSource == "" {
+						runtimeSource = poolmanifest.RuntimeSourceNativeMLX
+					}
+					if err := poolManifestEntryMatchesClaim(core, claim, runtimeSource); err != nil {
+						return err
+					}
+				}
 				labelAccepted = true
 				continue
 			}
@@ -60,10 +80,14 @@ func poolRouteFenceFromEvents(events []DurableEvent, claim billing.PoolOperatorA
 				continue
 			}
 			// A later generation is ordinary rotation unless it drops the
-			// R016 attestation the route's member relied on.
+			// R016 attestation the route's member relied on and has taken
+			// effect.
 			core, err := acceptedPolicyCoreFromManifestSnapshot(e)
 			if err != nil {
 				return fmt.Errorf("%w: manifest %d: %v", ErrPoolOperatorAttestation, e.ManifestVersion, err)
+			}
+			if nowUnix < 0 || uint64(nowUnix) < core.NotBeforeUnix {
+				continue
 			}
 			members, err := core.PoolAttestedMembers()
 			if err != nil {
@@ -75,7 +99,7 @@ func poolRouteFenceFromEvents(events []DurableEvent, claim billing.PoolOperatorA
 		case EventMemberAdmitted:
 			// The admission the route relied on is the latest one at or
 			// before its fenced generation; a removal after it ends it.
-			if e.ProviderID != claim.ProviderID || revoked || uint64(i+1) > claim.PoolGeneration {
+			if e.ProviderID != claim.ProviderID || revoked || uint64(pe.id) > claim.PoolGeneration {
 				continue
 			}
 			admitted = true
@@ -218,17 +242,15 @@ func (r poolRouteReplay) attestsMember(accountID, runtimeSource string) bool {
 // a current manifest.
 func (s *Store) replayPoolRouteClaim(ctx context.Context, claim billing.PoolOperatorAttestationClaim, runtimeSource string) (poolRouteReplay, error) {
 	var r poolRouteReplay
-	events, err := s.Events(ctx)
+	events, err := poolEventsFromQueryer(ctx, s.db, claim.PoolID)
 	if err != nil {
 		return r, err
 	}
-	for i, e := range events {
-		if uint64(i+1) > claim.PoolGeneration {
+	for _, pe := range events {
+		if uint64(pe.id) > claim.PoolGeneration {
 			break
 		}
-		if e.PoolID != claim.PoolID {
-			continue
-		}
+		e := pe.event
 		switch e.EventType {
 		case EventPoolCreated:
 			r.creator = e.CreatorAccountID

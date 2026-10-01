@@ -353,7 +353,7 @@ func (s *Store) applySettlementReceiptVerdict(ctx context.Context, id Settlement
 		if err != nil {
 			return err
 		}
-		if reason, err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, state.RequestID, state.AttemptN, state.ProviderID); err != nil {
+		if reason, err := s.syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, state.RequestID, state.AttemptN, state.ProviderID); err != nil {
 			return err
 		} else if reason != "" {
 			state.ReceiptResult = SettlementReceiptResultInvalid
@@ -385,9 +385,46 @@ func (s *Store) applySettlementReceiptVerdict(ctx context.Context, id Settlement
 type settlementReceiptCreditSyncDB interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }
 
-func syncVerifiedReceiptLedgerCreditForAttemptTx(ctx context.Context, db settlementReceiptCreditSyncDB, requestID string, attemptN int64, providerID string) (string, error) {
+// PoolRouteFenceNotSettlementEligible is the quarantine reason for a verified
+// receipt whose pool route no longer holds at final settlement: a durable
+// revocation since routing (membership, delegation, R016 attestation, pool
+// retired or frozen), a label or pool_manifest entry the durable records do
+// not support, or a disputed settlement-time label (SPEC-042-R006/R015,
+// SPEC-005-R015, SPEC-022-R013).
+const PoolRouteFenceNotSettlementEligible = "pool_route_fence_not_settlement_eligible"
+
+// poolRouteSettlementFenced reports whether final settlement of a route is
+// gated by the durable pool fence: every loopback pool route (SPEC-022-R012)
+// and every pool_manifest route (SPEC-022-R013), the two route kinds the hot
+// path fences before it records any credit.
+func poolRouteSettlementFenced(route RouteSnapshot) bool {
+	return route.PoolID != "" && (route.RuntimeSource != "" || route.PoolManifestSourced())
+}
+
+// poolRouteSettlementDecision re-evaluates, through the ledger write
+// transaction q, the durable fence and the settlement-time label of a fenced
+// pool route. Nil holds. A decided failure wraps
+// ErrPoolOperatorAttestationRejected (or Unavailable when trusted pools are
+// off); any other error could not be read and leaves the receipt retryable.
+func (s *Store) poolRouteSettlementDecision(ctx context.Context, q PoolFenceQueryer, route RouteSnapshot) error {
+	source, ok := s.poolOperatorAttestationAuthority().(PoolRouteFenceSource)
+	if !ok || source == nil {
+		return ErrPoolOperatorAttestationUnavailable
+	}
+	if err := source.PoolRouteFenceHolds(ctx, q, poolAttestationClaimForRoute(route)); err != nil {
+		return err
+	}
+	labels := s.settlementPoolLabels(route.PoolID, "")
+	if labels == nil || !poolLabelRotationUndisputed(route.ManifestVersion, route.ManifestCoreDigest, labels) {
+		return fmt.Errorf("%w: settlement-time pool label disputed or unverified", ErrPoolOperatorAttestationRejected)
+	}
+	return nil
+}
+
+func (s *Store) syncVerifiedReceiptLedgerCreditForAttemptTx(ctx context.Context, db settlementReceiptCreditSyncDB, requestID string, attemptN int64, providerID string) (string, error) {
 	var requestCreditID int64
 	var promptRate, completionRate, multiplier, share int64
 	var cachedPromptTokens, configSnapshotID sql.NullInt64
@@ -458,6 +495,30 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
 		}
 		return "", err
 	}
+	// SPEC-042-R015 / SPEC-005-R015 / SPEC-022-R012-R013: the terminal
+	// verdict and its credit commit in this transaction, so the durable pool
+	// fence and the settlement-time label are decided here, against the
+	// state this commit is made against. A decided failure zero-bills and
+	// quarantines; an unreadable state rolls the receipt back for a retry.
+	var route RouteSnapshot
+	if err := json.Unmarshal([]byte(routeSnapshotJSON), &route); err != nil {
+		return "", fmt.Errorf("decode settlement route snapshot: %w", err)
+	}
+	if poolRouteSettlementFenced(route) {
+		if err := s.poolRouteSettlementDecision(ctx, db, route); err != nil {
+			if !poolOperatorAttestationPermanent(err) {
+				return "", fmt.Errorf("%w: %v", ErrPoolOperatorAttestationTransient, err)
+			}
+			reason := PoolRouteFenceNotSettlementEligible
+			if err := markVerifiedReceiptCacheQuarantinedTx(ctx, db, requestCreditID, reason); err != nil {
+				return "", err
+			}
+			if err := markSettlementReceiptCacheQuarantinedTx(ctx, db, accountScopeHash, requestID, attemptN, providerID, reason); err != nil {
+				return "", err
+			}
+			return reason, nil
+		}
+	}
 	var usage settlementUsageV04
 	if err := json.Unmarshal([]byte(usageJSON), &usage); err != nil {
 		return "", fmt.Errorf("decode settlement receipt-bound usage: %w", err)
@@ -468,6 +529,15 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
 		chargedPrompt = ledgerPrompt.Int64
 	}
 	completion := usage.BillableOutputTokens
+	// SPEC-015/SPEC-005 completion clamp: a signed receipt proves its tuple,
+	// not the delivered bytes, so final usage never exceeds the ledger's
+	// independent byte-derived ceiling. The formula applies the hot path's
+	// clamp to it (the lower value bills, as byte_estimated).
+	var completionCeiling *int64
+	if ledgerEstimate.Valid {
+		ceiling := ledgerEstimate.Int64
+		completionCeiling = &ceiling
+	}
 	rateEntry := RateCardEntry{PromptCreditsPerMtok: promptRate, CompletionCreditsPerMtok: completionRate}
 	var cached *int64
 	if cachedPromptTokens.Valid && cachedPromptTokens.Int64 > 0 {
@@ -554,20 +624,24 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
 		&chargedPrompt,
 		cached,
 		&completion,
-		nil,
+		completionCeiling,
 		UsageProviderReported,
 		faultFlag,
 		rateEntry,
 		multiplier,
 		share,
 	)
+	var keptEstimate *int64
+	if result.UsageSource == UsageByteEstimated {
+		keptEstimate = completionCeiling
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := db.ExecContext(ctx, `
 		UPDATE ledger_request_credits
 		   SET prompt_tokens = ?,
 		       charged_prompt_tokens = ?,
 		       completion_tokens = ?,
-		       estimated_completion_tokens = NULL,
+		       estimated_completion_tokens = ?,
 		       usage_source = ?,
        gross_credits = ?,
        provider_credits = ?,
@@ -577,6 +651,7 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
 		nullInt64(result.PromptTokens),
 		nullInt64(result.PromptTokens),
 		nullInt64(result.CompletionTokens),
+		nullInt64(keptEstimate),
 		result.UsageSource,
 		result.GrossCredits,
 		result.ProviderCredits,
@@ -959,6 +1034,9 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 		PoolModelPromptCacheHitRatePerMtok int64  `json:"pool_model_prompt_cache_hit_rate_per_mtok"`
 		PoolModelCompletionRatePerMtok     int64  `json:"pool_model_completion_rate_per_mtok"`
 		PoolModelPricingBoundsSHA256       string `json:"pool_model_pricing_bounds_sha256"`
+		PoolModelGlobalMultiplierPPM       int64  `json:"pool_model_global_multiplier_ppm"`
+		PoolModelProviderShareBps          int64  `json:"pool_model_provider_share_bps"`
+		PoolModelConfigSnapshotID          int64  `json:"pool_model_config_snapshot_id"`
 		PoolMemberAccountID                string `json:"pool_member_account_id"`
 	}
 	if err := json.Unmarshal([]byte(routeSnapshotJSON), &recovered); err != nil {
@@ -990,6 +1068,9 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 	r.PoolModelPromptCacheHitRatePerMtok = recovered.PoolModelPromptCacheHitRatePerMtok
 	r.PoolModelCompletionRatePerMtok = recovered.PoolModelCompletionRatePerMtok
 	r.PoolModelPricingBoundsSHA256 = recovered.PoolModelPricingBoundsSHA256
+	r.PoolModelGlobalMultiplierPPM = recovered.PoolModelGlobalMultiplierPPM
+	r.PoolModelProviderShareBps = recovered.PoolModelProviderShareBps
+	r.PoolModelConfigSnapshotID = recovered.PoolModelConfigSnapshotID
 	r.PoolMemberAccountID = recovered.PoolMemberAccountID
 	r.ComputeIntegrityCaptureRequired = computeIntegrityCaptureRequired == 1
 	r.ComputeIntegritySamplingCovered = computeIntegritySamplingCovered == 1

@@ -30,7 +30,14 @@ const (
 	// string (currently phase5-gateway's settlementPolicyVersion check)
 	// must accept both this and the immediately-prior version during
 	// rollout so in-flight/legacy rows keep settling.
-	RouteSnapshotPolicyVersion       = "spec022-prereq-v1"
+	RouteSnapshotPolicyVersion = "spec022-prereq-v1"
+	// RouteSnapshotPolicyVersionV2 names the SPEC-015 §N.2
+	// route_snapshot_v2 preimage (SPEC-022-R013.2 option B). A snapshot
+	// carries the #1816 pool provenance members (a pool_manifest source or a
+	// SPEC-042-R016 pool_member_account_id) if and only if it is pinned to
+	// this version; every other snapshot keeps the byte-identical v1
+	// preimage under RouteSnapshotPolicyVersion.
+	RouteSnapshotPolicyVersionV2     = "spec022-route-snapshot-v2"
 	RouteSnapshotModeObserve         = "observe"
 	RouteSnapshotModeEnforce         = "enforce"
 	MaxPendingReceiptDeadlineSeconds = 900
@@ -136,6 +143,13 @@ type RouteSnapshot struct {
 	PoolModelPromptCacheHitRatePerMtok int64  `json:"pool_model_prompt_cache_hit_rate_per_mtok,omitempty"`
 	PoolModelCompletionRatePerMtok     int64  `json:"pool_model_completion_rate_per_mtok,omitempty"`
 	PoolModelPricingBoundsSHA256       string `json:"pool_model_pricing_bounds_sha256,omitempty"`
+	// SPEC-005-R015: the default-row multiplier and provider share and the
+	// config (rate-card) snapshot generation that supplied them, frozen at
+	// dispatch. Settlement, receipt sync, and recovery price the attempt
+	// from these, never from a later reload.
+	PoolModelGlobalMultiplierPPM int64 `json:"pool_model_global_multiplier_ppm,omitempty"`
+	PoolModelProviderShareBps    int64 `json:"pool_model_provider_share_bps,omitempty"`
+	PoolModelConfigSnapshotID    int64 `json:"pool_model_config_snapshot_id,omitempty"`
 	// PoolMemberAccountID is the serving provider's recorded owner account
 	// when it serves under a SPEC-042-R016 creator attestation rather than
 	// as the creator (json-carried, digested only when set).
@@ -217,6 +231,9 @@ func (r RouteSnapshot) Value() map[string]any {
 		value["pool_model_prompt_cache_hit_rate_per_mtok"] = r.PoolModelPromptCacheHitRatePerMtok
 		value["pool_model_completion_rate_per_mtok"] = r.PoolModelCompletionRatePerMtok
 		value["pool_model_pricing_bounds_sha256"] = r.PoolModelPricingBoundsSHA256
+		value["pool_model_global_multiplier_ppm"] = r.PoolModelGlobalMultiplierPPM
+		value["pool_model_provider_share_bps"] = r.PoolModelProviderShareBps
+		value["pool_model_config_snapshot_id"] = r.PoolModelConfigSnapshotID
 		if r.RuntimeSource == "" {
 			value["pool_generation"] = int64(r.PoolGeneration)
 		}
@@ -239,6 +256,22 @@ func (r RouteSnapshot) Value() map[string]any {
 // SPEC-042-R015 pool-manifest entry (SPEC-022-R013).
 func (r RouteSnapshot) PoolManifestSourced() bool {
 	return r.ExpectedModelHashSource == ExpectedModelHashSourcePoolManifest
+}
+
+// CarriesPoolProvenance reports whether the snapshot carries a #1816
+// provenance member, which only the route_snapshot_v2 preimage may carry.
+func (r RouteSnapshot) CarriesPoolProvenance() bool {
+	return r.ExpectedModelHashSource != "" || r.PoolMemberAccountID != ""
+}
+
+// PoolModelEconomics is the dispatch-frozen SPEC-005-R015 multiplier,
+// provider share, and config snapshot generation of a pool_manifest
+// snapshot; ok is false for any other snapshot.
+func (r RouteSnapshot) PoolModelEconomics() (multiplierPPM, providerShareBps, configSnapshotID int64, ok bool) {
+	if !r.PoolManifestSourced() {
+		return 0, 0, 0, false
+	}
+	return r.PoolModelGlobalMultiplierPPM, r.PoolModelProviderShareBps, r.PoolModelConfigSnapshotID, true
 }
 
 // PoolModelRateEntry is the trusted SPEC-005-R015 price a pool-manifest
@@ -264,7 +297,8 @@ func (r RouteSnapshot) validatePoolManifestSource() error {
 	switch r.ExpectedModelHashSource {
 	case "":
 		if r.PoolModelID != "" || r.PoolModelPromptRatePerMtok != 0 || r.PoolModelPromptCacheHitRatePerMtok != 0 ||
-			r.PoolModelCompletionRatePerMtok != 0 || r.PoolModelPricingBoundsSHA256 != "" {
+			r.PoolModelCompletionRatePerMtok != 0 || r.PoolModelPricingBoundsSHA256 != "" ||
+			r.PoolModelGlobalMultiplierPPM != 0 || r.PoolModelProviderShareBps != 0 || r.PoolModelConfigSnapshotID != 0 {
 			return fmt.Errorf("route snapshot pool model members require expected_model_hash_source pool_manifest")
 		}
 		return nil
@@ -293,6 +327,15 @@ func (r RouteSnapshot) validatePoolManifestSource() error {
 	}
 	if !hex64Pattern.MatchString(r.PoolModelPricingBoundsSHA256) {
 		return fmt.Errorf("route snapshot pool_model_pricing_bounds_sha256 invalid")
+	}
+	// SPEC-022-R013.3: the receipt identity of a pool_manifest attempt is
+	// the pool-scoped pool_model_id, never a provider-local served label.
+	if r.ModelID != r.PoolModelID {
+		return fmt.Errorf("route snapshot pool_manifest model_id must be the pool_model_id")
+	}
+	if r.PoolModelGlobalMultiplierPPM <= 0 || r.PoolModelProviderShareBps < 0 || r.PoolModelProviderShareBps > providerShareDenom ||
+		r.PoolModelConfigSnapshotID <= 0 {
+		return fmt.Errorf("route snapshot pool model economics invalid")
 	}
 	if r.ArtifactDerived() || r.ModelAdmissionCatalogModelKey != "" {
 		return fmt.Errorf("route snapshot pool_manifest source cannot carry catalog or feed identity")
@@ -364,6 +407,18 @@ func (r RouteSnapshot) Validate() error {
 	// snapshot plus the digest recompute, never a lookup in a current feed.
 	if err := r.validatePoolManifestSource(); err != nil {
 		return err
+	}
+	// SPEC-015 §N.2 / SPEC-022-R013.2 option B: provenance members exist
+	// only in the route_snapshot_v2 preimage, and v2 exists only for them.
+	switch r.RouteSnapshotPolicyVersion {
+	case RouteSnapshotPolicyVersionV2:
+		if !r.CarriesPoolProvenance() {
+			return fmt.Errorf("route snapshot route_snapshot_v2 requires pool provenance members")
+		}
+	default:
+		if r.CarriesPoolProvenance() {
+			return fmt.Errorf("route snapshot pool provenance members require route_snapshot_v2")
+		}
 	}
 	// A pool-manifest GGUF identity is the signed entry's exact pair
 	// (SPEC-010-R007(j)), not a feed member, so the feed rule does not apply.

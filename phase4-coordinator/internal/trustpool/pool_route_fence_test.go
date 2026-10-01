@@ -92,7 +92,76 @@ func TestPoolRouteFenceAcrossRotationAndRevocation(t *testing.T) {
 	}
 }
 
+// #1816 freeze R1 SECURITY H5: a later core that drops an R016 attestation
+// revokes the member's in-flight routes only once it takes effect. A creator
+// that pre-accepts a future-dated core cannot zero-bill traffic that routes,
+// legitimately, under the core active at route time before that core starts.
+func TestPoolRouteFenceIgnoresFutureDatedAttestationRemoval(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	members := []poolmanifest.AttestedMember{{ProviderAccountID: "acct-member-d", RuntimeClasses: []string{poolmanifest.RuntimeSourceLlamacppLoopback}}}
+	f := newPoolRouteFenceFixture(t, ctx, members)
+	var notBefore uint64
+	v3 := signedManifestExtendingWithPolicyCoreMutation(t, "op-manifest-3", f.ts.Add(10*time.Second), f.v2, f.root, func(core *poolmanifest.PolicyCore) {
+		if err := core.SetPoolExtensions(poolEntriesFor(f.root.poolID), nil); err != nil {
+			t.Fatal(err)
+		}
+		notBefore = core.NotBeforeUnix
+	})
+	insertPromotedEvent(t, ctx, f.db, v3)
+	attested := f.claims()[2]
+	// The pre-accepted v3 is not yet in effect: v2 still attests the member.
+	f.clock = time.Unix(int64(notBefore)-1, 0).UTC()
+	if err := f.fenceHolds(ctx, attested); err != nil {
+		t.Fatalf("future-dated attestation removal revoked an in-flight route: %v", err)
+	}
+	// Once v3 takes effect the removal is a revocation since routing.
+	f.clock = time.Unix(int64(notBefore), 0).UTC()
+	if err := f.fenceHolds(ctx, attested); !errors.Is(err, trustpool.ErrPoolOperatorAttestation) {
+		t.Fatalf("attestation removal in effect: err=%v, want ErrPoolOperatorAttestation", err)
+	}
+}
+
+// #1816 freeze R1 CODE H1: the fence reads only the claim's pool. A
+// malformed event of another pool (which a global-log replay would decode
+// and fail on) is never visited.
+func TestPoolRouteFenceReadsOnlyTheClaimPool(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	members := []poolmanifest.AttestedMember{{ProviderAccountID: "acct-member-d", RuntimeClasses: []string{poolmanifest.RuntimeSourceLlamacppLoopback}}}
+	f := newPoolRouteFenceFixture(t, ctx, members)
+	if _, err := f.db.ExecContext(ctx, `INSERT INTO trustpool_events (operation_id, ts_utc, event_type, pool_id, manifest_version, payload_json) VALUES ('op-junk', '2026-01-01T00:00:00Z', 'member_revoked', 'pool-unrelated', 0, '{not json')`); err != nil {
+		t.Fatalf("insert unrelated malformed event: %v", err)
+	}
+	for i, c := range f.claims() {
+		if err := f.fenceHolds(ctx, c); err != nil {
+			t.Fatalf("claim %d: fence visited an unrelated pool's event: %v", i, err)
+		}
+	}
+}
+
+// #1816 freeze R1 SECURITY H2: a pool_manifest claim holds only when the
+// accepted core it names carries its exact entry.
+func TestPoolRouteFenceRequiresTheExactPoolManifestEntry(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	members := []poolmanifest.AttestedMember{{ProviderAccountID: "acct-member-d", RuntimeClasses: []string{poolmanifest.RuntimeSourceLlamacppLoopback}}}
+	f := newPoolRouteFenceFixture(t, ctx, members)
+	native := f.claims()[3]
+	forged := native
+	forged.ExpectedModelHash = poolEntryGGUFHash
+	if err := f.fenceHolds(ctx, forged); !errors.Is(err, trustpool.ErrPoolOperatorAttestation) {
+		t.Fatalf("forged entry pair: err=%v, want ErrPoolOperatorAttestation", err)
+	}
+	unknown := native
+	unknown.PoolModelID = "pool/" + f.root.poolID + "/not-an-entry"
+	if err := f.fenceHolds(ctx, unknown); !errors.Is(err, trustpool.ErrPoolOperatorAttestation) {
+		t.Fatalf("unknown entry: err=%v, want ErrPoolOperatorAttestation", err)
+	}
+}
+
 type poolRouteFenceFixture struct {
+	clock time.Time
 	ts    time.Time
 	root  rootFixture
 	v2    trustpool.DurableEvent
@@ -107,7 +176,11 @@ type poolRouteFenceFixture struct {
 func newPoolRouteFenceFixture(t *testing.T, ctx context.Context, members []poolmanifest.AttestedMember) *poolRouteFenceFixture {
 	t.Helper()
 	db := openTrustPoolDB(t)
-	store, err := trustpool.NewStore(db, trustpool.WithPoolModelAcceptance(acceptAllPoolModels))
+	// The fence clock defaults to after every core the fixtures accept, so
+	// a later core is in effect unless a test moves the clock back.
+	f := &poolRouteFenceFixture{clock: time.Unix(1<<50, 0).UTC()}
+	store, err := trustpool.NewStore(db, trustpool.WithPoolModelAcceptance(acceptAllPoolModels),
+		trustpool.WithClock(func() time.Time { return f.clock }))
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
@@ -152,7 +225,8 @@ func newPoolRouteFenceFixture(t *testing.T, ctx context.Context, members []poolm
 		e.ProviderID = "provider-d"
 		e.DelegationID = "delegation-1"
 	}))
-	return &poolRouteFenceFixture{ts: ts, root: root, v2: v2, db: db, store: store}
+	f.ts, f.root, f.v2, f.db, f.store = ts, root, v2, db, store
+	return f
 }
 
 // claims are the four route kinds, in the order of the test's want arrays.

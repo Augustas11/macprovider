@@ -15,7 +15,7 @@ func TestIngestPoolSettlementReceiptTransientAuthorityErrorIsRetryable(t *testin
 	input := r012SettlementInput(t, "receipt_tuple_v4_normal_done", true)
 	_, store := newRequestAndBillingStores(t)
 	createSettlementReceiptAuditLog(t, store.db)
-	store.SetPoolOperatorAttestationAuthority(&fakePoolAttestationAuthority{err: errors.New("database is locked")})
+	setHoldingPoolRoute(store, &fakePoolAttestationAuthority{err: errors.New("database is locked")})
 	seedSettlementReceiptEvidence(t, store, input)
 	if _, err := store.db.Exec(`UPDATE settlement_attempt_outputs SET usage_source = ? WHERE request_id = ?`, UsageSourcePoolOperatorAttested, input.RequestID); err != nil {
 		t.Fatal(err)
@@ -44,7 +44,7 @@ func TestIngestPoolSettlementReceiptTransientAuthorityErrorIsRetryable(t *testin
 
 	// The retry, once the authority answers, settles with the FIRST
 	// observation time even though the store clock is now past the deadline.
-	store.SetPoolOperatorAttestationAuthority(&fakePoolAttestationAuthority{})
+	setHoldingPoolRoute(store, &fakePoolAttestationAuthority{})
 	store.now = func() time.Time { return time.UnixMilli(input.ReceiptReceivedUnixMS).Add(24 * time.Hour) }
 	state, err := store.IngestPoolSettlementReceipt(context.Background(), SettlementReceiptIngestionInput{
 		SettlementReceiptIdentity: settlementIdentityFromInput(input),

@@ -180,6 +180,9 @@ type Store struct {
 	// entries are checked against at online manifest acceptance (pricing
 	// bounds, catalog shadow/overlap). Nil fails every entry closed.
 	poolModelAcceptance func() poolmanifest.PoolModelAcceptanceContext
+	// now is the settlement-fence clock (a later accepted core takes effect
+	// at its not_before). Nil is time.Now.
+	now func() time.Time
 }
 
 type productionActivationGate struct {
@@ -241,6 +244,22 @@ func WithPoolModelAcceptance(source func() poolmanifest.PoolModelAcceptanceConte
 		s.poolModelAcceptance = source
 		return nil
 	}
+}
+
+// WithClock replaces the clock the settlement fence compares a later core's
+// not_before against.
+func WithClock(now func() time.Time) StoreOption {
+	return func(s *Store) error {
+		s.now = now
+		return nil
+	}
+}
+
+func (s *Store) nowUTC() time.Time {
+	if s != nil && s.now != nil {
+		return s.now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 // Pool-model acceptance rejection codes (SPEC-042-R015, SPEC-005-R015).
@@ -2274,6 +2293,44 @@ func eventsFromQueryer(ctx context.Context, q eventQueryer) ([]DurableEvent, err
 		}
 		seen[e.OperationID] = id
 		events = append(events, e)
+	}
+	return events, rows.Err()
+}
+
+// poolEvent is one durable event of a pool with its row id. Row ids are the
+// AUTOINCREMENT ordinals the replay indexes by, never below an event's replay
+// position, so comparing them with a route's pool_generation can only treat
+// an event as later than it is (fail closed), never earlier.
+type poolEvent struct {
+	id    int64
+	event DurableEvent
+}
+
+// poolEventsFromQueryer reads only one pool's events, in durable order,
+// through the (pool_id, id) index. Settlement fences run inside the ledger
+// writer transaction, so they must never scan or decode the global log.
+func poolEventsFromQueryer(ctx context.Context, q eventQueryer, poolID string) ([]poolEvent, error) {
+	rows, err := q.QueryContext(ctx, `SELECT id, operation_id, payload_json FROM trustpool_events WHERE pool_id = ? ORDER BY id`, poolID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []poolEvent
+	for rows.Next() {
+		var id int64
+		var operationID string
+		var raw string
+		if err := rows.Scan(&id, &operationID, &raw); err != nil {
+			return nil, err
+		}
+		var e DurableEvent
+		if err := json.Unmarshal([]byte(raw), &e); err != nil {
+			return nil, fmt.Errorf("%w: row %d payload_json: %v", ErrMalformedDurableEvent, id, err)
+		}
+		if e.OperationID != operationID || e.PoolID != poolID {
+			return nil, fmt.Errorf("%w: row %d operation_id or pool_id column does not match its payload", ErrMalformedDurableEvent, id)
+		}
+		events = append(events, poolEvent{id: id, event: e})
 	}
 	return events, rows.Err()
 }
