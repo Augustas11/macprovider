@@ -212,25 +212,52 @@ or each failure filed as a finding with a repro in the Findings section.
 ## Results
 
 Acceptance: `a1e059632` (`feat/1816-pool-scoped-models`, fixers A and B),
-baseline `origin/main` `65ee6791`. Pass 1 ran the full chain; the harness was
-then corrected in two places it got wrong (the updater's durable state
-survived the bootstrap wipe, so pass 1's S2 ran as a same-version
-`repair_pair`, not an `upgrade`; and the member-revocation case depended on
-the non-creator member binding, see A-5), and passes 2 and 3 run the full
-chain consecutively on the final harness (results below when they finish).
-Evidence: `$E2E_WORK/evidence-a1e059632-pass1.tgz`,
-`$E2E_WORK/results-a1e059632-pass1.jsonl`.
+baseline `origin/main` `65ee6791`, three full passes, each from a fresh
+bootstrap. Pass 1 ran before two harness corrections (the updater's durable
+state survived the bootstrap wipe, so pass 1's S2 was a same-version
+`repair_pair`; and the member-revocation case depended on the non-creator
+member binding, A-5); passes 2 and 3 ran consecutively on the final harness.
+Evidence: `$E2E_WORK/evidence-a1e059632-pass1-3.tgz`,
+`$E2E_WORK/results-a1e059632-pass1-3.jsonl` (pass 1 alone:
+`*-a1e059632-pass1.*`).
 
-Pass 1 (`a1e059632`):
+**Merge gate: not met.** Every scenario has at least one product failure
+on both consecutive passes 2 and 3 except S4, so each is filed below.
+Results that are not PASS in some pass (PASS everywhere else):
 
-| scenario | result |
-|---|---|
-| S1 baseline (old/old) | FAIL only on P-1 (`st_dc` hold outlives 660 s on origin/main too: pre-existing) |
-| S2 updater | PASS: plan, rollback rehearsal (exact restore), apply, artifact paths, live release, dead-man, pricing floor, restart order, nginx step (before the apply) and byte-identical feed, real canary proof; guards PASS (one history-dependent updater test GAP, D9). FAIL: catalog traffic on the gateway-first pair and the new pair only on P-1 holds and the resulting shape difference |
-| S3 pool models | PASS: config, pools, delegation, binding (loopback + native), events, pool `/v1/models`, disclosure, never-global, entry-price credits (43/39 and 32/29 credits, exact). FAIL: P-1 `st_dc` holds; `/poolz` hash_status (A-6); **coordinator-first order (A-1)** |
-| S4 refusals | PASS every case (blocked identity GAP, D4) |
-| S5 rotation/revocation | PASS: rotation without a gap (0 non-200, all settle, rebound), entry removal in flight (settles at the snapshot price, then refused, `pool_manifest_entry_revoked`), SIGHUP bounds now apply. FAIL: A-4 label, A-5 attestation binding (and so both in-flight cases had nothing in flight), A-7 owner-account reload silent |
-| S6 rollback | PASS: pause (in-flight settles, new refused, catalog untouched), retire, s9 rollback steps, no rows lost. FAIL: **A-2 preflight** (and the old coordinator disables every pool); P-1 after the rollback |
+| scenario | p1 | p2 | p3 | finding |
+|---|---|---|---|---|
+| S1 baseline (old/old) | FAIL | FAIL | FAIL | A-3 (pre-existing) |
+| S2 gateway-first catalog / shape | FAIL/FAIL | FAIL/PASS | FAIL/FAIL | A-3 |
+| S2 new-pair catalog / shape | FAIL/FAIL | FAIL/PASS | FAIL/FAIL | A-3 |
+| S2 updater test suite | GAP | GAP | GAP | D9 |
+| S3 `/poolz` hash_status | FAIL | FAIL | FAIL | A-6 |
+| S3 pool traffic gguf / native | FAIL | FAIL | FAIL | A-3 (only the `st_dc` hold; every entry-price check PASS) |
+| S3 coordinator-first pool / after new gw | FAIL | FAIL | FAIL | **A-1** |
+| S3 coordinator-first catalog / shape | FAIL | FAIL | FAIL | A-1, A-3 |
+| S4 blocked catalog identity | GAP | GAP | GAP | D4 |
+| S4 pool still routes after the bounds restart | PASS | FAIL | FAIL | **A-8** |
+| S5 rotation no gap / settles | PASS | FAIL | PASS | A-8 |
+| S5 future core, current / new price | FAIL | FAIL | PASS | A-4 (p2 also A-8) |
+| S5 attested member binds / paid / removal in flight | FAIL | FAIL | FAIL | **A-5** |
+| S5 member revoked in flight | FAIL (harness, pre-fix) | FAIL | FAIL | **A-9** |
+| S5 entry removed in flight | PASS | FAIL | PASS | A-8 |
+| S5 SIGHUP owner accounts | FAIL | FAIL | FAIL | A-7 |
+| S6 pause in flight settles | PASS | FAIL | PASS | A-8 |
+| S6 rollback preflight with extension cores | FAIL | FAIL | FAIL | **A-2** |
+| S6 s9 step 2 drain holds | PASS | FAIL | FAIL | A-9 (its held reservations block the drain) |
+| S6 traffic after rollback | FAIL | FAIL | PASS | A-3 |
+
+PASS on all three passes: the updater plan, the rollback rehearsal (exact
+restore of `current`, config bytes, binaries), the real apply, the
+`catalog_artifacts_path`/`_sig_path` config, the live activation release, the
+dead-man pause/restore, the pricing floor, the restart order, the nginx step
+and byte-identical feed, the real canary proof, the deploy guard tests; S3
+config, pools, delegation, binding of both runtimes and the second member,
+admission events, pool `/v1/models`, disclosure headers, never-global; every
+S4 refusal; SIGHUP of the bounds (fixed since the shakedown); entry removal
+revoking the binding; S6 pause/retire, nginx 503, gateway pre-check,
+coordinator binary rollback, no rows lost.
 
 ### Shakedown (harness debug, `e7964a233`, baseline `65ee6791`)
 
@@ -298,13 +325,15 @@ stops routing, not only the pool-model ones. Repro: S6 (`S6-preflight-extension-
 `S6-old-coordinator-extension-cores`).
 
 **A-3 (P-1, pre-existing).** Disconnect holds outlive the receipt deadline
-(see P-1); seen on old/old in S1, so not #1816.
+(see P-1). Seen on old/old in S1 in every pass, so it is not #1816, but it
+fails the I1 oracle on every catalog and pool run with an `st_dc` request.
 
-**A-4 MEDIUM (labels).** While a pre-accepted future core exists (and after
-it activates), pool-model attempts settle `verified` with the right price but
-`settlement_receipt_verdicts.pool_label_status` is NULL instead of `verified`
-(`p1As5pre`, `p1As5post`, P10). The rotation run just before (no future core
-queued beyond the keeper's next window) has `verified` labels.
+**A-4 MEDIUM (labels, intermittent).** While a pre-accepted future core
+exists (and after it activates), pool-model attempts settled `verified` at
+the right price but with `settlement_receipt_verdicts.pool_label_status` NULL
+instead of `verified` (pass 1 `p1As5pre`, `p1As5post`, oracle P10). Pass 3
+passed the same case; pass 2 was masked by A-8. The rotation run just before
+has `verified` labels in every pass.
 
 **A-5 MEDIUM (R016 binding).** A non-creator member whose owner account is
 attested by a LATER core never binds: its offer head stays
@@ -324,6 +353,26 @@ says `hash_verified`.
 `pool_model_pricing_bounds` (fixed since the shakedown), but a change to
 `provider_owner_account_ids` logs nothing (applied or refused); an operator
 cannot tell whether an owner remap took effect without a restart.
+
+**A-8 HIGH (availability).** After the coordinator restart in S4 (the
+bounds-unset case restores the bounds and restarts), with a bound pool-model
+member offline (`e2e-prov-7`, bound in S3 and stopped), the coordinator runs
+at ~75-100 % of a core with nothing logged but repeated `model admission
+binding refresh: listing failed; binding preserved` / `pool manifest binding:
+listing failed` (`context deadline exceeded`, `routing: closed_until_refresh`).
+Pool requests then answer `503 pool_unavailable` (pass 2: 45 of 45 in S5
+rotation) or complete and are refunded (delivered, unbilled: S4 "pool still
+routes" `st` refunded in passes 2 and 3). It cleared after the next
+coordinator restart. Passes 2 and 3 (with the offline member); not seen in
+pass 1 (no offline member). Repro: S3 then S4; watch `top` and the coordinator
+journal after `S4-bounds-unset-route`.
+
+**A-9 MEDIUM (money/ops, revocation).** A pool-model attempt in flight when
+its member is revoked is zero-billed on both sides as specified (debit 0,
+payable 0), but its buyer reservation stays `active` with
+`settlement_hold=1` past the 660 s drain (`p2As5rev`, `p3As5rev`), and those
+holds make runbook s9 rollback step 2 fail ("2 holds left after 600s",
+`S6-step2-drain`, passes 2 and 3). Repro: S5 d.
 
 ### Shakedown ref `e7964a233`
 
