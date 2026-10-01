@@ -90,31 +90,33 @@ func TestVerifyPoolOperatorAttestationFromDurableRecords(t *testing.T) {
 		t.Fatalf("provider-b at generation 6 (before its revocation): %v", err)
 	}
 
-	// Cancel-fix audit R2: the ledger fence reads the pool's durable event
-	// high-water mark through the caller's own transaction, and any durable
-	// pool event advances it.
-	readHighWater := func(poolID string) int64 {
+	// #1816 F2: the ledger fence reads the durable log through the caller's
+	// own transaction and fails only on a revocation since routing, never
+	// on the manifest moving on.
+	fenceHolds := func(c billing.PoolOperatorAttestationClaim) error {
 		t.Helper()
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			t.Fatalf("begin ledger tx: %v", err)
 		}
 		defer func() { _ = tx.Rollback() }()
-		highWater, err := store.PoolEventHighWater(ctx, tx, poolID)
-		if err != nil {
-			t.Fatalf("PoolEventHighWater: %v", err)
-		}
-		return highWater
+		return store.PoolRouteFenceHolds(ctx, tx, c)
 	}
-	before := readHighWater(root.poolID)
-	if before == 0 {
-		t.Fatal("pool with durable events has high-water 0")
+	routed := claim
+	routed.PoolGeneration = 5
+	if err := fenceHolds(routed); err != nil {
+		t.Fatalf("fence for an unrevoked member: %v", err)
+	}
+	forged := routed
+	forged.ManifestCoreDigest = hexDigest("forged")
+	if err := fenceHolds(forged); !errors.Is(err, trustpool.ErrPoolOperatorAttestation) {
+		t.Fatalf("fence for a label naming no accepted core: err=%v", err)
+	}
+	if err := fenceHolds(revokedLater); !errors.Is(err, trustpool.ErrPoolOperatorAttestation) {
+		t.Fatalf("fence for provider-b revoked after its routing generation: err=%v", err)
 	}
 	insertPromotedEvent(t, ctx, db, ev("op-revoke-a", ts.Add(8*time.Second), trustpool.EventMemberRevoked, root.poolID, func(e *trustpool.DurableEvent) { e.ProviderID = "provider-a" }))
-	if after := readHighWater(root.poolID); after <= before {
-		t.Fatalf("high-water after a durable pool event=%d, want > %d", after, before)
-	}
-	if other := readHighWater("pool-without-events"); other != 0 {
-		t.Fatalf("unknown pool high-water=%d, want 0", other)
+	if err := fenceHolds(routed); !errors.Is(err, trustpool.ErrPoolOperatorAttestation) {
+		t.Fatalf("fence after provider-a's revocation: err=%v", err)
 	}
 }

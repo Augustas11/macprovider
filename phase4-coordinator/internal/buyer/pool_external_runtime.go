@@ -8,6 +8,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
+	"github.com/augstar/macprovider-coordinator/internal/trustpool"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 )
 
@@ -33,6 +34,36 @@ type poolRouteView struct {
 	manifestVersion     uint64
 	manifestCoreDigest  string
 	poolModel           *poolmanifest.PoolModelEntry
+	// priorManifestVersion and priorManifestCoreDigest are set only when the
+	// accepted core immediately before the active one carries a
+	// byte-identical poolModel entry: a binding to that generation stays
+	// routable until the sweep records its rebind (#1816 F3).
+	priorManifestVersion    uint64
+	priorManifestCoreDigest string
+}
+
+// poolModelPriorGeneration returns the prior accepted generation when it
+// carries an entry byte-identical to entry, so routing never gaps across a
+// rotation that keeps the entry (SPEC-047-R011, #1816 F3).
+func poolModelPriorGeneration(snap trustpool.Snapshot, entry *poolmanifest.PoolModelEntry) (uint64, string) {
+	if entry == nil || snap.PriorManifestVersion == 0 || snap.PriorManifestVersion+1 != snap.ManifestVersion || snap.PriorManifestCoreDigest == "" {
+		return 0, ""
+	}
+	for _, prior := range snap.PriorModelEntries {
+		if prior.PoolModelID == entry.PoolModelID && prior.Equal(*entry) {
+			return snap.PriorManifestVersion, snap.PriorManifestCoreDigest
+		}
+	}
+	return 0, ""
+}
+
+// bindingGenerationRoutable reports whether a binding's manifest label is the
+// active generation, or the prior one carrying the same entry unchanged.
+func (v poolRouteView) bindingGenerationRoutable(version uint64, digest string) bool {
+	if version == v.manifestVersion && digest == v.manifestCoreDigest {
+		return true
+	}
+	return v.priorManifestVersion != 0 && version == v.priorManifestVersion && digest == v.priorManifestCoreDigest
 }
 
 func (st *forwardState) poolRouteView() poolRouteView {
@@ -51,6 +82,9 @@ func (st *forwardState) poolRouteView() poolRouteView {
 		manifestVersion:     st.poolManifestVersion,
 		manifestCoreDigest:  st.poolManifestCoreDigest,
 		poolModel:           st.poolModelEntry,
+
+		priorManifestVersion:    st.poolPriorManifestVersion,
+		priorManifestCoreDigest: st.poolPriorManifestCoreDigest,
 	}
 }
 

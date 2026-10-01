@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/artifactidentity"
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
@@ -462,4 +463,68 @@ func TestSQLiteModelAdmissionStorePoolBindingColumns(t *testing.T) {
 		head.PoolMaxContextTokens != 32768 || head.PoolPromptCacheHitRatePerMtok != 10 || head.Actor != PoolManifestActor(testPoolA, 1, poolDigestV1) {
 		t.Fatalf("sqlite pool head = %+v", head)
 	}
+}
+
+// activationPoolModelSource reports generation activations like the
+// trust-pool registry does (#1816 F3).
+type activationPoolModelSource struct {
+	fakePoolModelSource
+	hookMu sync.Mutex
+	hook   func()
+}
+
+func (a *activationPoolModelSource) SetManifestActivationHook(fn func()) {
+	a.hookMu.Lock()
+	defer a.hookMu.Unlock()
+	a.hook = fn
+}
+
+func (a *activationPoolModelSource) activate(snap trustpool.Snapshot) {
+	// A time-based activation changes the active core without a new
+	// durable revision.
+	a.mu.Lock()
+	a.snapshots[snap.PoolID] = snap
+	a.mu.Unlock()
+	a.hookMu.Lock()
+	hook := a.hook
+	a.hookMu.Unlock()
+	if hook != nil {
+		hook()
+	}
+}
+
+// #1816 F3: the binding sweep runs at activation time, not only on its
+// timer, so the rebind is recorded well inside one sweep interval.
+func TestPoolManifestSweepKickedAtActivation(t *testing.T) {
+	f := newBindingFixture(t)
+	source := &activationPoolModelSource{}
+	bounds := &poolmanifest.PoolModelPricingBounds{MaxPromptRatePerMtok: 1 << 30, MaxPromptCacheHitRatePerMtok: 1 << 30, MaxCompletionRatePerMtok: 1 << 30}
+	f.server.SetPoolModelSource(source, func() *poolmanifest.PoolModelPricingBounds { return bounds })
+	source.set(poolSnapshot(testPoolA, 1, poolDigestV1, ggufPoolEntry()))
+	f.registerPoolSession(t, poolProvider, "llamacpp_loopback", modelidentity.GGUFFileV1, poolGGUFHash)
+	offer := f.offer(t, poolProvider, "k", "llamacpp_loopback", map[string]string{modelidentity.GGUFFileV1: poolGGUFHash})
+	f.reevaluate(poolProvider)
+	if head := f.latest(t, poolProvider, offer.CandidateID); head.PoolManifestVersion != 1 {
+		t.Fatalf("bind = %+v", head)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.server.RunPoolManifestBindingSweep(ctx)
+	}()
+	source.activate(poolSnapshot(testPoolA, 2, poolDigestV2, ggufPoolEntry()))
+	deadline := time.Now().Add(poolManifestBindingSweepInterval / 2)
+	for {
+		if head := f.latest(t, poolProvider, offer.CandidateID); head.PoolManifestVersion == 2 && head.ReasonCode == ModelAdmissionReasonPoolManifestRebound {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("rebind not recorded within %s of activation", poolManifestBindingSweepInterval/2)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
 }

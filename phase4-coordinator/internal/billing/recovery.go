@@ -665,9 +665,9 @@ SELECT DISTINCT COALESCE(rl.account_id, ''), lpis.request_id, lpis.attempt_n, lp
 		if !poolAttestedAttemptOutputRecorded(ctx, s.db, c.id) {
 			continue
 		}
-		// The fence is read before the durable checks, so any pool change
-		// after it makes the in-transaction re-read differ.
-		fence, ok := s.PoolAttestationFenceFor(ctx, route.PoolID)
+		// The fence pins the route-time claim; the ledger transaction
+		// re-evaluates it against the durable revocation records.
+		fence, ok := s.PoolAttestationFenceFor(ctx, route)
 		if !ok || !PoolAttestationFenceMatchesRoute(fence, route) {
 			continue
 		}
@@ -743,7 +743,7 @@ SELECT DISTINCT srs.account_scope, srs.request_id, srs.attempt_n, srs.provider_i
 		if !route.PoolManifestSourced() || route.RuntimeSource != "" {
 			continue
 		}
-		fence, ok := s.PoolAttestationFenceFor(ctx, route.PoolID)
+		fence, ok := s.PoolAttestationFenceFor(ctx, route)
 		if !ok || !PoolAttestationFenceMatchesRoute(fence, route) {
 			continue
 		}

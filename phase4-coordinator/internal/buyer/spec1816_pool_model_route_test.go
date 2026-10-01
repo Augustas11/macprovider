@@ -46,6 +46,9 @@ type poolModelFixture struct {
 	noBounds   bool   // no configured pricing bounds
 	staleEvent bool   // the binding is for an older manifest version
 	routeErr   error  // the durable pool_manifest verdict (nil = supported)
+	// midFlight runs while the provider holds the dispatched request
+	// (between routing and settlement, #1816 F2).
+	midFlight func(*poolModelHarness)
 }
 
 type poolModelHarness struct {
@@ -56,6 +59,10 @@ type poolModelHarness struct {
 	entry     poolmanifest.PoolModelEntry
 	event     providerws.ModelAdmissionEvent
 	authority *poolModelAuthority
+	// trustPools and routeable are the pool registry and the snapshot it
+	// was loaded with, so a test can rotate the manifest mid-flight.
+	trustPools *trustpool.Registry
+	routeable  trustpool.RouteableSnapshot
 }
 
 // poolModelAuthority stands in for trustpool.Store (tested in its package):
@@ -66,10 +73,13 @@ type poolModelAuthority struct {
 	manifest    []billing.PoolOperatorAttestationClaim
 	attestedErr error
 	routeErr    error
+	fenceErr    error
 }
 
-func (a *poolModelAuthority) PoolEventHighWater(context.Context, billing.PoolFenceQueryer, string) (int64, error) {
-	return 1, nil
+func (a *poolModelAuthority) PoolRouteFenceHolds(context.Context, billing.PoolFenceQueryer, billing.PoolOperatorAttestationClaim) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.fenceErr
 }
 
 func (a *poolModelAuthority) VerifyPoolOperatorAttestation(_ context.Context, claim billing.PoolOperatorAttestationClaim) error {
@@ -98,7 +108,11 @@ func newPoolModelHarness(t *testing.T, fx poolModelFixture) *poolModelHarness {
 	if err != nil {
 		t.Fatal(err)
 	}
+	h := &poolModelHarness{}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fx.midFlight != nil {
+			fx.midFlight(h)
+		}
 		if meta := decodeSettlementMetadataHeader(r.Header.Get("X-MacProvider-Settlement-Metadata")); meta != nil {
 			terminalTS := time.Now().UTC().UnixMilli()
 			w.Header().Set("X-MacProvider-Receipt-Terminal-State-TS-Unix-MS", strconv.FormatInt(terminalTS, 10))
@@ -238,7 +252,9 @@ func newPoolModelHarness(t *testing.T, fx poolModelFixture) *poolModelHarness {
 		buyer.WithModelAdmissionRouteGuard(testRouteGuard{registry: registry, store: store}),
 		buyer.WithPoolModelPricingBounds(func() *poolmanifest.PoolModelPricingBounds { return bounds }),
 	)
-	return &poolModelHarness{server: server, dbPath: dbPath, poolID: poolID, modelID: entry.PoolModelID, entry: entry, event: event, authority: authority}
+	h.server, h.dbPath, h.poolID, h.modelID, h.entry, h.event, h.authority = server, dbPath, poolID, entry.PoolModelID, entry, event, authority
+	h.trustPools, h.routeable = trustPools, routeable
+	return h
 }
 
 func (h *poolModelHarness) body() []byte {

@@ -7429,6 +7429,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			state.poolRequiresSettlementEnforce = poolRequiresSettlementEnforce
 			state.poolManifestVersion = snap.ManifestVersion
 			state.poolManifestCoreDigest = snap.ManifestCoreDigest
+			state.poolPriorManifestVersion, state.poolPriorManifestCoreDigest = poolModelPriorGeneration(snap, poolModelEntry)
 			state.poolRuntimeAllowlist = append([]string(nil), poolRuntimeAllowlist...)
 			state.poolCreatorAccountID = snap.CreatorAccountID
 			state.poolCreatorOwnedMembers = snap.CreatorOwnedMembers
@@ -7599,6 +7600,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			manifestCoreDigest:  poolSnap.ManifestCoreDigest,
 			poolModel:           poolModelEntry,
 		}
+		checker.poolView.priorManifestVersion, checker.poolView.priorManifestCoreDigest = poolModelPriorGeneration(poolSnap, poolModelEntry)
 		checker.routeAdmissionCtx = withPoolRouteView(admissionCtx, checker.poolView)
 	}
 	result := s.eligibleCandidates(providers, exSet, checker)

@@ -86,72 +86,69 @@ var errPoolOperatorAttestationNotEnforce = errors.New("billing: pool_operator_at
 // commit are one atomic decision.
 type PoolFenceQueryer interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
-// PoolEventHighWaterSource reads the id of a pool's latest durable event
-// through q. The durable pool authority implements it; any durable change
-// to a pool (membership, manifest, lifecycle) advances it.
-type PoolEventHighWaterSource interface {
-	PoolEventHighWater(ctx context.Context, q PoolFenceQueryer, poolID string) (int64, error)
+// PoolRouteFenceSource is the durable half of a pool settlement fence
+// (SPEC-042-R015, SPEC-047-R011, SPEC-022-R013). Read through q, it reports
+// whether an attempt routed under claim may still settle from its immutable
+// route snapshot: the claim's manifest label is an accepted core of the pool,
+// and since routing no event revoked the provider's membership or the
+// provider, retired or froze the pool, or (for a SPEC-042-R016 member)
+// removed that member's attestation from a later accepted core. Ordinary
+// manifest rotation, and removing or changing the route's entry in a later
+// core, never fail it. A nil error holds; ErrPoolOperatorAttestationRejected
+// is a decided failure; anything else could not be read. The durable pool
+// authority implements it.
+type PoolRouteFenceSource interface {
+	PoolRouteFenceHolds(ctx context.Context, q PoolFenceQueryer, claim PoolOperatorAttestationClaim) error
 }
 
-// PoolAttestationFence pins the pool state a pool_operator_attested decision
-// used: the pool's durable event high-water mark, read before the durable
-// checks, and the settlement-time label it verified against.
+// PoolAttestationFence pins the route-time pool claim a pool settlement
+// decision used. The ledger transaction re-evaluates it against the durable
+// revocation and membership records, never against the current manifest
+// version, so an in-flight attempt settles across manifest rotation.
 type PoolAttestationFence struct {
-	PoolID             string
-	PoolEventHighWater int64
-	ManifestVersion    uint64
-	ManifestCoreDigest string
+	Claim PoolOperatorAttestationClaim
 }
 
-// PoolAttestationFenceFor reads the fence for poolID before a
-// pool_operator_attested decision. False when trusted pools are off or the
-// pool state cannot be read.
-func (s *Store) PoolAttestationFenceFor(ctx context.Context, poolID string) (*PoolAttestationFence, bool) {
-	if s == nil || poolID == "" {
+// PoolAttestationFenceFor evaluates the fence for a route snapshot before a
+// pool settlement decision. False when trusted pools are off, the snapshot
+// carries no pool label, or the fence does not hold.
+func (s *Store) PoolAttestationFenceFor(ctx context.Context, route RouteSnapshot) (*PoolAttestationFence, bool) {
+	if s == nil || route.PoolID == "" || route.ManifestVersion == 0 || route.ManifestCoreDigest == "" {
 		return nil, false
 	}
-	return s.readPoolAttestationFence(ctx, s.db, poolID)
+	fence := &PoolAttestationFence{Claim: poolAttestationClaimForRoute(route)}
+	if !s.poolAttestationFenceHolds(ctx, s.db, fence) {
+		return nil, false
+	}
+	return fence, true
 }
 
-func (s *Store) readPoolAttestationFence(ctx context.Context, q PoolFenceQueryer, poolID string) (*PoolAttestationFence, bool) {
-	source, ok := s.poolOperatorAttestationAuthority().(PoolEventHighWaterSource)
-	if !ok || source == nil {
-		return nil, false
-	}
-	highWater, err := source.PoolEventHighWater(ctx, q, poolID)
-	if err != nil || highWater <= 0 {
-		return nil, false
-	}
-	labels := s.settlementPoolLabels(poolID, "")
-	if labels == nil {
-		return nil, false
-	}
-	return &PoolAttestationFence{
-		PoolID:             poolID,
-		PoolEventHighWater: highWater,
-		ManifestVersion:    labels.ManifestVersion,
-		ManifestCoreDigest: labels.ManifestCoreDigest,
-	}, true
-}
-
-// poolAttestationFenceHolds re-reads the fence through the ledger write
-// transaction q and reports whether the pool is unchanged since the
-// decision. Trusted pools off, an unreadable state, or any change is false.
+// poolAttestationFenceHolds re-evaluates the fence through the ledger write
+// transaction q: the durable records still support the route-time claim and
+// the live label view does not dispute it. Trusted pools off, an unreadable
+// state, a revocation, or a disputed label is false.
 func (s *Store) poolAttestationFenceHolds(ctx context.Context, q PoolFenceQueryer, fence *PoolAttestationFence) bool {
-	if fence == nil || fence.PoolID == "" {
+	if s == nil || q == nil || fence == nil || fence.Claim.PoolID == "" {
 		return false
 	}
-	current, ok := s.readPoolAttestationFence(ctx, q, fence.PoolID)
-	return ok && *current == *fence
+	source, ok := s.poolOperatorAttestationAuthority().(PoolRouteFenceSource)
+	if !ok || source == nil {
+		return false
+	}
+	if err := source.PoolRouteFenceHolds(ctx, q, fence.Claim); err != nil {
+		return false
+	}
+	labels := s.settlementPoolLabels(fence.Claim.PoolID, "")
+	return labels != nil && poolLabelRotationUndisputed(fence.Claim.ManifestVersion, fence.Claim.ManifestCoreDigest, labels)
 }
 
-// PoolAttestationFenceMatchesRoute reports whether a fence's label is the
-// route snapshot's routing-time label.
+// PoolAttestationFenceMatchesRoute reports whether a fence pins exactly the
+// route snapshot's route-time pool claim.
 func PoolAttestationFenceMatchesRoute(fence *PoolAttestationFence, route RouteSnapshot) bool {
-	return fence != nil && fence.PoolID == route.PoolID &&
-		fence.ManifestVersion == route.ManifestVersion && fence.ManifestCoreDigest == route.ManifestCoreDigest
+	return fence != nil && fence.Claim == poolAttestationClaimForRoute(route)
 }
 
 // PoolAttestedCreditRecorded reports whether an attempt's ledger row carries

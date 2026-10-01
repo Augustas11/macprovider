@@ -15,18 +15,99 @@ var ErrPoolOperatorAttestation = fmt.Errorf("trustpool: %w", billing.ErrPoolOper
 
 var _ billing.PoolOperatorAttestationAuthority = (*Store)(nil)
 var _ billing.PoolManifestRouteAuthority = (*Store)(nil)
-var _ billing.PoolEventHighWaterSource = (*Store)(nil)
+var _ billing.PoolRouteFenceSource = (*Store)(nil)
 
-// PoolEventHighWater returns the id of the pool's latest durable event, read
-// through q so a caller holding the ledger write transaction fences on it
-// without a second connection. 0 means the pool has no durable events.
-func (s *Store) PoolEventHighWater(ctx context.Context, q billing.PoolFenceQueryer, poolID string) (int64, error) {
+// PoolRouteFenceHolds is the durable settlement fence of SPEC-042-R015 and
+// SPEC-047-R011, read through q so a caller holding the ledger write
+// transaction decides on the same durable state it commits against. An
+// attempt keeps settling from its immutable route snapshot across ordinary
+// manifest rotation and across removing or changing its entry in a later
+// core. It stops only when the durable log shows, between routing and now,
+// a revocation of that provider's membership (member_revoked, or
+// delegation_revoked for a delegated admission), the pool retired or frozen,
+// or, for a SPEC-042-R016 member, a later accepted core that no longer
+// attests that member account for the route's runtime class. The claim's
+// manifest label must also be an accepted core of the pool, so a forged
+// label never holds.
+func (s *Store) PoolRouteFenceHolds(ctx context.Context, q billing.PoolFenceQueryer, claim billing.PoolOperatorAttestationClaim) error {
 	if s == nil || q == nil {
-		return 0, ErrStoreClosed
+		return ErrStoreClosed
 	}
-	var highWater int64
-	err := q.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM trustpool_events WHERE pool_id = ?`, poolID).Scan(&highWater)
-	return highWater, err
+	if claim.PoolID == "" || claim.ProviderID == "" || claim.PoolGeneration == 0 ||
+		claim.ManifestVersion == 0 || claim.ManifestCoreDigest == "" {
+		return fmt.Errorf("%w: incomplete fence claim", ErrPoolOperatorAttestation)
+	}
+	events, err := eventsFromQueryer(ctx, q)
+	if err != nil {
+		return err
+	}
+	return poolRouteFenceFromEvents(events, claim)
+}
+
+func poolRouteFenceFromEvents(events []DurableEvent, claim billing.PoolOperatorAttestationClaim) error {
+	var labelAccepted, admitted, delegated, revoked, membershipRemoved, poolEnded, attestationRemoved bool
+	for i, e := range events {
+		if e.PoolID != claim.PoolID {
+			continue
+		}
+		switch e.EventType {
+		case EventManifestAccepted:
+			if e.ManifestVersion == claim.ManifestVersion && e.ManifestCoreDigest == claim.ManifestCoreDigest {
+				labelAccepted = true
+				continue
+			}
+			if e.ManifestVersion <= claim.ManifestVersion || claim.PoolMemberAccountID == "" {
+				continue
+			}
+			// A later generation is ordinary rotation unless it drops the
+			// R016 attestation the route's member relied on.
+			core, err := acceptedPolicyCoreFromManifestSnapshot(e)
+			if err != nil {
+				return fmt.Errorf("%w: manifest %d: %v", ErrPoolOperatorAttestation, e.ManifestVersion, err)
+			}
+			members, err := core.PoolAttestedMembers()
+			if err != nil {
+				return fmt.Errorf("%w: manifest %d attested members: %v", ErrPoolOperatorAttestation, e.ManifestVersion, err)
+			}
+			if !(poolRouteReplay{attestedMembers: members}).attestsMember(claim.PoolMemberAccountID, claim.RuntimeSource) {
+				attestationRemoved = true
+			}
+		case EventMemberAdmitted:
+			// The admission the route relied on is the latest one at or
+			// before its fenced generation; a removal after it ends it.
+			if e.ProviderID != claim.ProviderID || revoked || uint64(i+1) > claim.PoolGeneration {
+				continue
+			}
+			admitted = true
+			delegated = strings.TrimSpace(e.DelegationID) != ""
+			membershipRemoved = false
+		case EventDelegationRevoked:
+			if e.ProviderID == claim.ProviderID && admitted && delegated {
+				membershipRemoved = true
+			}
+		case EventMemberRevoked:
+			if e.ProviderID == claim.ProviderID {
+				revoked = true
+			}
+		case EventLifecycleChanged:
+			if e.Lifecycle == LifecycleRetired {
+				poolEnded = true
+			}
+		case EventRootCompromiseFrozen:
+			poolEnded = true
+		}
+	}
+	switch {
+	case !labelAccepted:
+		return fmt.Errorf("%w: route label names no accepted core of the pool", ErrPoolOperatorAttestation)
+	case revoked || !admitted || membershipRemoved:
+		return fmt.Errorf("%w: provider membership revoked since routing", ErrPoolOperatorAttestation)
+	case poolEnded:
+		return fmt.Errorf("%w: pool retired or frozen since routing", ErrPoolOperatorAttestation)
+	case attestationRemoved:
+		return fmt.Errorf("%w: member attestation removed since routing", ErrPoolOperatorAttestation)
+	}
+	return nil
 }
 
 // VerifyPoolOperatorAttestation re-evaluates SPEC-042-R006 conditions 2-4 for

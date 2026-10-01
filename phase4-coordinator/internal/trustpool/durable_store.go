@@ -3613,6 +3613,20 @@ func (p *ReconstructedPoolState) activePolicyView(at time.Time) (*ReconstructedP
 	return p, time.Time{}, false
 }
 
+// priorPolicyWindow returns the accepted core immediately before version,
+// or a zero window when there is none (#1816 F3).
+func (p *ReconstructedPoolState) priorPolicyWindow(version uint64) manifestPolicyWindow {
+	if p == nil || version < 2 {
+		return manifestPolicyWindow{}
+	}
+	for _, w := range p.ManifestPolicies {
+		if w.Version == version-1 {
+			return w
+		}
+	}
+	return manifestPolicyWindow{}
+}
+
 func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 	if s == nil {
 		return nil
@@ -3631,6 +3645,7 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 		pool := s.Pools[id]
 		p, policyUntil, policyActive := pool.activePolicyView(at)
 		routeable, routeabilityReason := poolRouteability(p)
+		prior := pool.priorPolicyWindow(p.ManifestVersion)
 		if routeable && !policyActive {
 			routeable, routeabilityReason = false, "pool_policy_stale"
 		}
@@ -3696,6 +3711,9 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 			ManifestVersion:           p.ManifestVersion,
 			ManifestCoreDigest:        p.ManifestCoreDigest,
 			LaunchEnvironment:         rootIssuerLaunchEnvironment(p),
+			PriorManifestVersion:      prior.Version,
+			PriorManifestCoreDigest:   prior.CoreDigest,
+			PriorModelEntries:         poolmanifest.ClonePoolModelEntries(prior.ModelEntries),
 		})
 	}
 	return out

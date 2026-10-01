@@ -133,7 +133,8 @@ func TestSPEC022R012PoolOperatorAttestedSettlesOnlyWhenR012Holds(t *testing.T) {
 func TestSPEC022R012FailClosedSet(t *testing.T) {
 	disputed := func(routeHash string) *SettlementPoolLabels {
 		labels := matchingR012Labels(routeHash)
-		labels.ManifestVersion = 3
+		// Same generation, other core: a real dispute (a later generation
+		// is ordinary rotation, #1816 F2).
 		labels.ManifestCoreDigest = strings.Repeat("e", 64)
 		return labels
 	}
@@ -303,5 +304,21 @@ func TestSPEC022R012GenericIngestionRejectsPoolOperatorAttested(t *testing.T) {
 	}
 	if state.SettlementOutcome == SettlementOutcomeVerified {
 		t.Fatalf("generic ingestion verified a pool_operator_attested attempt: %+v", state)
+	}
+}
+
+// #1816 F2: a receipt ingested after an ordinary manifest rotation still
+// cross-checks against its immutable route snapshot.
+func TestSPEC022R012PoolOperatorAttestedSettlesAcrossRotation(t *testing.T) {
+	input := r012SettlementInput(t, "receipt_tuple_v4_normal_done", true)
+	rotated := func(routeHash string) *SettlementPoolLabels {
+		labels := matchingR012Labels(routeHash)
+		labels.ManifestVersion = 3
+		labels.ManifestCoreDigest = strings.Repeat("e", 64)
+		return labels
+	}
+	run := runR012Settlement(t, input, UsageSourcePoolOperatorAttested, &fakePoolAttestationAuthority{}, rotated)
+	if run.state.SettlementOutcome != SettlementOutcomeVerified || run.finality.TokenSource != UsageSourcePoolOperatorAttested {
+		t.Fatalf("attested attempt after a rotation outcome=%s reason=%s finality=%+v, want verified", run.state.SettlementOutcome, run.state.Reason, run.finality)
 	}
 }

@@ -143,7 +143,9 @@ func (s *Server) poolModelEligibility(ctx context.Context, p pool.Provider) mode
 // poolModelRouteBinding is the SPEC-047-R011 current-route predicate,
 // re-evaluated before every selection and snapshot insert: the session's
 // head is the pool-scoped catalog_priced event bound to the requested entry
-// of the pool's ACTIVE core (an unrebound binding is unroutable), its pair,
+// of the pool's ACTIVE core, or of the immediately prior core when that core
+// carries the same entry byte-identically (the sweep records the rebind
+// asynchronously, so routing never gaps; #1816 F3), its pair,
 // runtime class, rates, and account match the entry and member state, the
 // entry's price is inside the configured bounds, and the receipt and
 // enforce-mode prerequisites hold.
@@ -167,7 +169,7 @@ func (s *Server) poolModelRouteBinding(ctx context.Context, p pool.Provider, vie
 	if event.CoordinatorEventID == "" || event.CoordinatorEventID != strings.TrimSpace(p.ModelAdmissionCoordinatorEventID) ||
 		!event.PoolScoped() || event.State != "catalog_priced" || event.CatalogModelKey != "" ||
 		event.PoolID != view.poolID || event.PoolModelID != entry.PoolModelID ||
-		event.PoolManifestVersion != view.manifestVersion || event.PoolManifestCoreDigest != view.manifestCoreDigest ||
+		!view.bindingGenerationRoutable(event.PoolManifestVersion, event.PoolManifestCoreDigest) ||
 		event.ExpectedCatalogModelHashAlgorithm != entry.ArtifactHashAlgorithm || event.ExpectedCatalogModelHash != entry.ArtifactHash ||
 		eventRuntime != runtime ||
 		event.PoolPromptRatePerMtok != int64(entry.Pricing.PromptRatePerMtok) ||
@@ -387,7 +389,7 @@ func (b *billingRecorder) poolManifestVerification(ctx context.Context, store *b
 		// pool_operator_attested (that authority replays the entry too).
 		return snap, poolAttested, poolFence
 	}
-	f, ok := store.PoolAttestationFenceFor(ctx, snap.PoolID)
+	f, ok := store.PoolAttestationFenceFor(ctx, *snap)
 	if !ok || !billing.PoolAttestationFenceMatchesRoute(f, *snap) {
 		return snap, false, nil
 	}

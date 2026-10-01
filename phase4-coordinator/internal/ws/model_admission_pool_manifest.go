@@ -197,6 +197,29 @@ func (s *Server) SetPoolModelSource(source PoolModelSource, bounds func() *poolm
 		return
 	}
 	s.poolModels.Store(&poolModelWiring{source: source, bounds: bounds})
+	if activations, ok := source.(poolManifestActivationSource); ok {
+		activations.SetManifestActivationHook(s.kickPoolManifestBindingSweep)
+	}
+}
+
+// poolManifestActivationSource is a PoolModelSource that reports, at
+// activation time, when a different accepted generation becomes active.
+type poolManifestActivationSource interface {
+	SetManifestActivationHook(func())
+}
+
+func (s *Server) poolManifestSweepKick() chan struct{} {
+	s.poolSweepKickOnce.Do(func() { s.poolSweepKick = make(chan struct{}, 1) })
+	return s.poolSweepKick
+}
+
+// kickPoolManifestBindingSweep wakes the binding sweep for an immediate full
+// pass. It never blocks: a pending kick already covers this activation.
+func (s *Server) kickPoolManifestBindingSweep() {
+	select {
+	case s.poolManifestSweepKick() <- struct{}{}:
+	default:
+	}
 }
 
 // PoolManifestActor is the R001 signed pool manifest actor string.
@@ -523,19 +546,24 @@ func (s *Server) reevaluatePoolManifestBindings(ctx context.Context, providerID 
 
 // RunPoolManifestBindingSweep re-evaluates R011 candidates whenever the
 // trust-pool registry revision or the release generation changes (manifest
-// acceptance, membership change, catalog promotion), and in full every
+// acceptance, membership change, catalog promotion), immediately when a new
+// accepted generation becomes active (#1816 F3), and in full every
 // poolManifestBindingSweepFullEvery ticks. Route time re-checks every
 // predicate, so the sweep only records the durable transitions.
 func (s *Server) RunPoolManifestBindingSweep(ctx context.Context) {
 	ticker := time.NewTicker(poolManifestBindingSweepInterval)
 	defer ticker.Stop()
+	kick := s.poolManifestSweepKick()
 	var lastRevision, lastRelease uint64
 	tick := 0
 	for {
+		kicked := false
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		case <-kick:
+			kicked = true
 		}
 		wiring := s.poolModels.Load()
 		if wiring == nil || s.modelAdmissions == nil {
@@ -543,7 +571,7 @@ func (s *Server) RunPoolManifestBindingSweep(ctx context.Context) {
 		}
 		tick++
 		revision, release := wiring.source.Revision(), s.ReleaseGeneration()
-		if revision == lastRevision && release == lastRelease && tick%poolManifestBindingSweepFullEvery != 0 {
+		if !kicked && revision == lastRevision && release == lastRelease && tick%poolManifestBindingSweepFullEvery != 0 {
 			continue
 		}
 		lastRevision, lastRelease = revision, release

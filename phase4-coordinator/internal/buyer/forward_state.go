@@ -78,6 +78,10 @@ type forwardState struct {
 	// routing-time labels of the manifest that authorized this route.
 	poolManifestVersion    uint64
 	poolManifestCoreDigest string
+	// poolPriorManifestVersion/CoreDigest: the prior generation, set only
+	// when it carries the requested pool model entry unchanged (#1816 F3).
+	poolPriorManifestVersion    uint64
+	poolPriorManifestCoreDigest string
 	// SPEC-042-R004 external-runtime predicate inputs, captured from the same
 	// consistent snapshot: the signed runtime allowlist, the pool creator's
 	// account, and the creator-owned members.

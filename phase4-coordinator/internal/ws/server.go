@@ -87,6 +87,10 @@ type Server struct {
 	// trust-pool registry and the configured pricing bounds), nil when
 	// trusted pools are off.
 	poolModels atomic.Pointer[poolModelWiring]
+	// poolSweepKick wakes RunPoolManifestBindingSweep the moment a new
+	// accepted generation becomes active (#1816 F3), not only on its timer.
+	poolSweepKickOnce sync.Once
+	poolSweepKick     chan struct{}
 
 	proofOfWeightsAdmissionMu sync.RWMutex
 	proofOfWeightsMu          sync.RWMutex

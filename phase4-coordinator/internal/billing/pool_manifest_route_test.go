@@ -128,7 +128,7 @@ func TestHotPathPoolManifestPricing(t *testing.T) {
 	run := func(t *testing.T, mutate func(*HotPathInput, *Store)) (gross, provider, quarantined int64, reason string) {
 		t.Helper()
 		reqStore, store := newRequestAndBillingStores(t)
-		authority := &fakePoolManifestAuthority{fencedPoolAuthority: fencedPoolAuthority{highWaters: []int64{7}}}
+		authority := &fakePoolManifestAuthority{fencedPoolAuthority: fencedPoolAuthority{results: []error{nil}}}
 		store.SetPoolOperatorAttestationAuthority(authority)
 		store.SetSettlementPoolLabelSource(poolManifestLabels)
 		snapshotID, err := store.InsertConfigSnapshot(context.Background(), cfg, time.Unix(100, 0).UTC())
@@ -140,7 +140,7 @@ func TestHotPathPoolManifestPricing(t *testing.T) {
 		row := requestlog.Row{TSUtc: time.Unix(200, 0).UTC(), RequestID: "pool-hot", Model: model, ProviderAssignedID: "assigned-a",
 			PromptTokens: &prompt, CompletionTokens: &completion, Status: 200, BuyerIP: "127.0.0.1"}
 		entry, _ := poolManifestSnapshot(testRouteSnapshot()).PoolModelRateEntry()
-		fence, ok := store.PoolAttestationFenceFor(context.Background(), testPoolID)
+		fence, ok := store.PoolAttestationFenceFor(context.Background(), poolManifestSnapshot(testRouteSnapshot()))
 		if !ok {
 			t.Fatal("no fence")
 		}
@@ -169,14 +169,27 @@ func TestHotPathPoolManifestPricing(t *testing.T) {
 			t.Fatalf("gross=%d provider=%d quarantined=%d, want 1700 priced from the entry", gross, provider, quarantined)
 		}
 	})
+	// #1816 F2: a manifest rotation between the decision and the commit is
+	// not a dispute; the route snapshot's entry rates still price it.
+	t.Run("rotated before commit still priced from the snapshot", func(t *testing.T) {
+		gross, _, quarantined, _ := run(t, func(_ *HotPathInput, store *Store) {
+			store.SetSettlementPoolLabelSource(func(string) (uint64, string, bool) { return 3, strings.Repeat("e", 64), true })
+		})
+		if gross != 1700 || quarantined != 0 {
+			t.Fatalf("gross=%d quarantined=%d, want 1700 from the route snapshot", gross, quarantined)
+		}
+	})
 	for name, mutate := range map[string]func(*HotPathInput, *Store){
 		"unverified route": func(in *HotPathInput, _ *Store) { in.PoolManifestVerified = false },
 		"pool model on a non-pool route": func(in *HotPathInput, _ *Store) {
 			in.PoolManifestRoute, in.PoolManifestVerified = false, false
 			in.RateEntry = RateFor(cfg.RateCard, in.Model)
 		},
-		"fence moved": func(_ *HotPathInput, store *Store) {
-			store.SetSettlementPoolLabelSource(func(string) (uint64, string, bool) { return 3, strings.Repeat("e", 64), true })
+		"label rolled back": func(_ *HotPathInput, store *Store) {
+			store.SetSettlementPoolLabelSource(func(string) (uint64, string, bool) { return 1, strings.Repeat("e", 64), true })
+		},
+		"revoked before commit": func(_ *HotPathInput, store *Store) {
+			store.SetPoolOperatorAttestationAuthority(&fakePoolManifestAuthority{fencedPoolAuthority: fencedPoolAuthority{results: []error{fmt.Errorf("%w: revoked", ErrPoolOperatorAttestationRejected)}}})
 		},
 		"no fence": func(in *HotPathInput, _ *Store) { in.PoolAttestationFence = nil },
 	} {
@@ -238,7 +251,7 @@ func TestRecoverLedger_PoolManifestRoutes(t *testing.T) {
 		return gross, quarantined, reasonNull.String
 	}
 	verifying := func() *fakePoolManifestAuthority {
-		return &fakePoolManifestAuthority{fencedPoolAuthority: fencedPoolAuthority{highWaters: []int64{7}}}
+		return &fakePoolManifestAuthority{fencedPoolAuthority: fencedPoolAuthority{results: []error{nil}}}
 	}
 	authority := verifying()
 	if gross, quarantined, _ := run(t, true, authority, poolManifestLabels); gross != 1700 || quarantined != 0 {
@@ -247,6 +260,12 @@ func TestRecoverLedger_PoolManifestRoutes(t *testing.T) {
 	if authority.last.PoolModelID != "pool/"+testPoolID+"/creator-mlx" || authority.last.ExpectedModelHashSource != ExpectedModelHashSourcePoolManifest {
 		t.Fatalf("authority claim = %+v", authority.last)
 	}
+	// #1816 F2: recovery after an ordinary rotation still prices the
+	// attempt from its immutable route snapshot.
+	rotated := func(poolID string) (uint64, string, bool) { return 3, strings.Repeat("e", 64), poolID == testPoolID }
+	if gross, quarantined, _ := run(t, true, verifying(), rotated); gross != 1700 || quarantined != 0 {
+		t.Fatalf("native pool route after rotation: gross=%d quarantined=%d, want 1700", gross, quarantined)
+	}
 	rejecting := verifying()
 	rejecting.routeErr = fmt.Errorf("%w: entry removed", ErrPoolOperatorAttestationRejected)
 	for name, tc := range map[string]struct {
@@ -254,11 +273,11 @@ func TestRecoverLedger_PoolManifestRoutes(t *testing.T) {
 		authority *fakePoolManifestAuthority
 		labels    SettlementPoolLabelSource
 	}{
-		"authority rejects":     {true, rejecting, poolManifestLabels},
-		"no authority":          {true, nil, poolManifestLabels},
-		"label moved":           {true, verifying(), movedPoolLabels},
-		"pool model, no route":  {false, verifying(), poolManifestLabels},
-		"pool event mid-commit": {true, &fakePoolManifestAuthority{fencedPoolAuthority: fencedPoolAuthority{highWaters: []int64{7, 8}}}, poolManifestLabels},
+		"authority rejects":      {true, rejecting, poolManifestLabels},
+		"no authority":           {true, nil, poolManifestLabels},
+		"pool unknown to labels": {true, verifying(), movedPoolLabels},
+		"pool model, no route":   {false, verifying(), poolManifestLabels},
+		"revocation mid-commit":  {true, &fakePoolManifestAuthority{fencedPoolAuthority: fencedPoolAuthority{results: []error{nil, fmt.Errorf("%w: revoked", ErrPoolOperatorAttestationRejected)}}}, poolManifestLabels},
 	} {
 		t.Run(name, func(t *testing.T) {
 			gross, quarantined, reason := run(t, tc.snapshot, tc.authority, tc.labels)

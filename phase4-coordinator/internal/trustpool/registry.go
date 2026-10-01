@@ -44,6 +44,9 @@ type Registry struct {
 	// providerOwnerAccounts is the operator-configured SPEC-003 owner
 	// account per provider id (SPEC-042-R016 match input only).
 	providerOwnerAccounts map[string]string
+	// manifestActivated is called, without blocking, whenever a load makes a
+	// different accepted generation active for any pool (#1816 F3).
+	manifestActivated func()
 }
 
 type poolState struct {
@@ -97,6 +100,12 @@ type poolState struct {
 	manifestVersion    uint64
 	manifestCoreDigest string
 	launchEnvironment  string
+	// priorManifestVersion, priorManifestCoreDigest, and priorModelEntries
+	// are the accepted core immediately before the active one (#1816 F3),
+	// so a binding not yet rebound stays routable for an unchanged entry.
+	priorManifestVersion    uint64
+	priorManifestCoreDigest string
+	priorModelEntries       []poolmanifest.PoolModelEntry
 }
 
 // Snapshot is a single consistent read of a pool's routable membership and
@@ -142,6 +151,12 @@ type Snapshot struct {
 	// authorizes routing (SPEC-042 R006). Zero/empty for seed-only pools.
 	ManifestVersion    uint64
 	ManifestCoreDigest string
+	// PriorManifestVersion, PriorManifestCoreDigest, and PriorModelEntries
+	// are the accepted core immediately before the active one; zero/empty
+	// when there is none (SPEC-047-R011 rotation without a routing gap).
+	PriorManifestVersion    uint64
+	PriorManifestCoreDigest string
+	PriorModelEntries       []poolmanifest.PoolModelEntry
 }
 
 // RouteableSnapshot is a durable reconstruction input: one coherent pool state
@@ -169,6 +184,9 @@ type RouteableSnapshot struct {
 	ManifestVersion           uint64
 	ManifestCoreDigest        string
 	LaunchEnvironment         string
+	PriorManifestVersion      uint64
+	PriorManifestCoreDigest   string
+	PriorModelEntries         []poolmanifest.PoolModelEntry
 }
 
 // NewRegistry returns an empty registry.
@@ -479,6 +497,10 @@ func (r *Registry) LoadRouteableSnapshot(s RouteableSnapshot) error {
 		manifestVersion:    s.ManifestVersion,
 		manifestCoreDigest: s.ManifestCoreDigest,
 		launchEnvironment:  s.LaunchEnvironment,
+
+		priorManifestVersion:    s.PriorManifestVersion,
+		priorManifestCoreDigest: s.PriorManifestCoreDigest,
+		priorModelEntries:       poolmanifest.ClonePoolModelEntries(s.PriorModelEntries),
 	}
 	r.notifyRevokedWatchersForPoolsLocked(map[string]*poolState{s.PoolID: r.pools[s.PoolID]})
 	return nil
@@ -811,6 +833,9 @@ func buildRouteablePoolStates(snapshots []RouteableSnapshot) (map[string]*poolSt
 			manifestVersion:         s.ManifestVersion,
 			manifestCoreDigest:      s.ManifestCoreDigest,
 			launchEnvironment:       s.LaunchEnvironment,
+			priorManifestVersion:    s.PriorManifestVersion,
+			priorManifestCoreDigest: s.PriorManifestCoreDigest,
+			priorModelEntries:       poolmanifest.ClonePoolModelEntries(s.PriorModelEntries),
 		}
 	}
 	return next, nil
@@ -833,6 +858,7 @@ func (r *Registry) applyRouteablePoolStatesLocked(revision uint64, next map[stri
 		}
 	}
 	changed := r.revision != revision || !poolStateMapsEqual(r.pools, next)
+	activated := manifestGenerationChanged(r.pools, next)
 	r.pools = next
 	if enforceRevision {
 		r.revision = revision
@@ -840,7 +866,35 @@ func (r *Registry) applyRouteablePoolStatesLocked(revision uint64, next map[stri
 	if changed {
 		r.notifyRevokedWatchersForPoolsLocked(next)
 	}
+	if activated && r.manifestActivated != nil {
+		r.manifestActivated()
+	}
 	return changed, nil
+}
+
+// manifestGenerationChanged reports whether any pool in next has a
+// different active accepted generation than in prev.
+func manifestGenerationChanged(prev, next map[string]*poolState) bool {
+	for poolID, ps := range next {
+		old := prev[poolID]
+		if ps.manifestVersion != 0 && (old == nil || old.manifestVersion != ps.manifestVersion || old.manifestCoreDigest != ps.manifestCoreDigest) {
+			return true
+		}
+	}
+	return false
+}
+
+// SetManifestActivationHook registers fn to run whenever a registry load
+// makes a different accepted generation active for any pool (SPEC-047-R011
+// rebind at activation time, #1816 F3). fn runs under the registry lock and
+// MUST NOT block or call back into the registry.
+func (r *Registry) SetManifestActivationHook(fn func()) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.manifestActivated = fn
 }
 
 const revocationWatchSep = "\x00"
@@ -922,6 +976,8 @@ func poolStatesEqual(a, b *poolState) bool {
 		a.routeableExpired == b.routeableExpired &&
 		a.manifestVersion == b.manifestVersion &&
 		a.manifestCoreDigest == b.manifestCoreDigest &&
+		a.priorManifestVersion == b.priorManifestVersion &&
+		a.priorManifestCoreDigest == b.priorManifestCoreDigest &&
 		a.launchEnvironment == b.launchEnvironment &&
 		stringSetsEqual(a.members, b.members) &&
 		stringSetsEqual(a.revoked, b.revoked) &&
@@ -1098,6 +1154,10 @@ func (r *Registry) RouteableSnapshots() []RouteableSnapshot {
 			ManifestVersion:    ps.manifestVersion,
 			ManifestCoreDigest: ps.manifestCoreDigest,
 			LaunchEnvironment:  ps.launchEnvironment,
+
+			PriorManifestVersion:    ps.priorManifestVersion,
+			PriorManifestCoreDigest: ps.priorManifestCoreDigest,
+			PriorModelEntries:       poolmanifest.ClonePoolModelEntries(ps.priorModelEntries),
 		})
 	}
 	return out
@@ -1162,6 +1222,10 @@ func (r *Registry) Snapshot(poolID string) Snapshot {
 		RouteableExpired:    routeableExpired,
 		ManifestVersion:     ps.manifestVersion,
 		ManifestCoreDigest:  ps.manifestCoreDigest,
+
+		PriorManifestVersion:    ps.priorManifestVersion,
+		PriorManifestCoreDigest: ps.priorManifestCoreDigest,
+		PriorModelEntries:       poolmanifest.ClonePoolModelEntries(ps.priorModelEntries),
 	}
 }
 
@@ -1210,6 +1274,10 @@ func (r *Registry) authorizeAndSnapshotLocked(poolID, buyerAccountID string) (Sn
 		RouteableExpired:    routeableExpired,
 		ManifestVersion:     ps.manifestVersion,
 		ManifestCoreDigest:  ps.manifestCoreDigest,
+
+		PriorManifestVersion:    ps.priorManifestVersion,
+		PriorManifestCoreDigest: ps.priorManifestCoreDigest,
+		PriorModelEntries:       poolmanifest.ClonePoolModelEntries(ps.priorModelEntries),
 	}, authorized
 }
 

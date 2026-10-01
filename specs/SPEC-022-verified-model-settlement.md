@@ -1,11 +1,19 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.2.6
+Version: v0.2.7
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.2.7
+
+#1816 lab e2e fixes. R-13.4 states the in-flight rule precisely: an attempt
+settles from its immutable route snapshot across manifest rotation and entry
+removal or change, and falls back to zero only under the SPEC-042-R015
+durable route fence or a real SPEC-042-R006 label mismatch. R-12 decisions
+use the same fence in the hot path and in ledger recovery.
 
 ### v0.2.6
 
@@ -1392,9 +1400,12 @@ route_snapshot.expected_catalog_model_hash`, and the receipt/session algorithm
 MUST equal the expected algorithm. For `pool_manifest`, settlement MUST also
 replay the accepted immutable core named by the snapshot and verify that the
 exact entry existed there; it MUST NOT consult a current manifest to repair
-missing evidence or re-price the attempt. A later entry removal does not alter
-the immutable snapshot, but SPEC-042-R006's label-dispute and revocation rules
-may still force zero billable usage.
+missing evidence or re-price the attempt. A later manifest rotation, entry
+removal, or entry change does not alter the immutable snapshot and does not
+dispute its label. Only the SPEC-042-R015 durable route fence (membership,
+delegation, or R016 attestation revoked, or the pool retired or frozen,
+between routing and settlement, re-read inside the ledger transaction) or a
+real SPEC-042-R006 label mismatch forces zero billable usage.
 
 R-13.5. Native pool entries. A native `mlx_cache` session serving an R015 entry
 that lists `mlx_cache` (SPEC-042-R004 native pool-entry path) has an empty

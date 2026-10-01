@@ -136,7 +136,10 @@ func TestSettlementPoolLabelStatus(t *testing.T) {
 		{"pool without settlement labels", route, nil, PoolLabelStatusUnverified},
 		{"matching", route, match, PoolLabelStatusVerified},
 		{"pool mismatch", route, &SettlementPoolLabels{PoolID: "pool-x", ManifestVersion: 2, ManifestCoreDigest: strings.Repeat("d", 64)}, PoolLabelStatusDisputed},
-		{"version mismatch", route, &SettlementPoolLabels{PoolID: "pool-abc", ManifestVersion: 3, ManifestCoreDigest: strings.Repeat("d", 64)}, PoolLabelStatusDisputed},
+		// #1816 F2: a later generation is ordinary rotation; an earlier one
+		// is a rollback or forged label.
+		{"later generation", route, &SettlementPoolLabels{PoolID: "pool-abc", ManifestVersion: 3, ManifestCoreDigest: strings.Repeat("e", 64)}, PoolLabelStatusVerified},
+		{"earlier generation", route, &SettlementPoolLabels{PoolID: "pool-abc", ManifestVersion: 1, ManifestCoreDigest: strings.Repeat("d", 64)}, PoolLabelStatusDisputed},
 		{"digest mismatch", route, &SettlementPoolLabels{PoolID: "pool-abc", ManifestVersion: 2, ManifestCoreDigest: strings.Repeat("e", 64)}, PoolLabelStatusDisputed},
 		{"route hash mismatch", route, &SettlementPoolLabels{PoolID: "pool-abc", ManifestVersion: 2, ManifestCoreDigest: strings.Repeat("d", 64), RouteSnapshotHash: "other"}, PoolLabelStatusDisputed},
 	}
@@ -202,7 +205,7 @@ func TestSettlementPoolLabels_DisputedSettlesUnchangedAndIsSticky(t *testing.T) 
 		return rec, v
 	}
 	match := &SettlementPoolLabels{PoolID: "pool-abc", ManifestVersion: 2, ManifestCoreDigest: strings.Repeat("d", 64)}
-	mismatch := &SettlementPoolLabels{PoolID: "pool-abc", ManifestVersion: 3, ManifestCoreDigest: strings.Repeat("e", 64)}
+	mismatch := &SettlementPoolLabels{PoolID: "pool-abc", ManifestVersion: 2, ManifestCoreDigest: strings.Repeat("e", 64)}
 
 	_, global := run(t, false, nil, nil)
 	if global.poolID.Valid || global.status.Valid || global.manifestVersion.Valid {

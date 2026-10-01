@@ -814,8 +814,10 @@ func (b *billingRecorder) poolOperatorAttestedAttempt(ctx context.Context, store
 }
 
 // poolOperatorAttestation is poolOperatorAttestedAttempt plus the pool fence
-// the decision used, read before the durable checks. The ledger write
-// transaction re-reads the fence and keeps the credit only if it holds.
+// the decision used: the route-time claim, checked against the durable
+// revocation records (never the current manifest version, #1816 F2). The
+// ledger write transaction re-evaluates it and keeps the credit only if it
+// still holds.
 func (b *billingRecorder) poolOperatorAttestation(ctx context.Context, store *billing.Store, providerID, providerRuntimeSource string, promptTok, cachedPromptTok, completionTok *int64) (bool, *billing.PoolAttestationFence) {
 	if b == nil || store == nil || !providerws.IsBYOMLoopbackRuntimeSource(providerRuntimeSource) {
 		return false, nil
@@ -839,7 +841,7 @@ func (b *billingRecorder) poolOperatorAttestation(ctx context.Context, store *bi
 		}
 		return false, nil
 	}
-	fence, ok := store.PoolAttestationFenceFor(ctx, snap.PoolID)
+	fence, ok := store.PoolAttestationFenceFor(ctx, *snap)
 	if !ok || !billing.PoolAttestationFenceMatchesRoute(fence, *snap) {
 		if b.server != nil {
 			b.server.log.Warn().
@@ -847,7 +849,7 @@ func (b *billingRecorder) poolOperatorAttestation(ctx context.Context, store *bi
 				Str("pool_id", snap.PoolID).
 				Str("request_id", b.requestID).
 				Str("provider_id", providerID).
-				Msg("external-runtime attempt recorded byte_estimated: pool state could not be fenced")
+				Msg("external-runtime attempt recorded byte_estimated: pool membership, attestation, or lifecycle revoked since routing, or pool state unreadable")
 		}
 		return false, nil
 	}
