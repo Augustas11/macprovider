@@ -928,11 +928,28 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertTrue(ModelRuntime.retainedRecurrentCheckpoints(for: serialFormat).isEmpty)
 
         let bare = ContinuousBatchRetainedCache(retainedSequence: retained, layers: [])
-        XCTAssertFalse(ModelRuntime.retainedCacheIsCommittable(bare, modelHasRecurrentLayers: true))
-        XCTAssertTrue(ModelRuntime.retainedCacheIsCommittable(bare, modelHasRecurrentLayers: false))
+        XCTAssertFalse(ModelRuntime.retainedCacheIsCommittable(
+            bare,
+            modelHasRecurrentLayers: true,
+            canonicalTokenCount: 36
+        ))
+        XCTAssertTrue(ModelRuntime.retainedCacheIsCommittable(
+            bare,
+            modelHasRecurrentLayers: false,
+            canonicalTokenCount: 36
+        ))
         let withCheckpoint = ContinuousBatchRetainedCache(
             retainedSequence: retained, layers: [], recurrentCheckpoints: [checkpoint])
-        XCTAssertTrue(ModelRuntime.retainedCacheIsCommittable(withCheckpoint, modelHasRecurrentLayers: true))
+        XCTAssertTrue(ModelRuntime.retainedCacheIsCommittable(
+            withCheckpoint,
+            modelHasRecurrentLayers: true,
+            canonicalTokenCount: 36
+        ))
+        XCTAssertFalse(ModelRuntime.retainedCacheIsCommittable(
+            withCheckpoint,
+            modelHasRecurrentLayers: true,
+            canonicalTokenCount: 37
+        ))
         XCTAssertEqual(withCheckpoint.withDeliveryID(UUID()).recurrentCheckpoints, [checkpoint])
         try await allocator.discardRetained(retained)
     }

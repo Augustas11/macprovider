@@ -1,8 +1,23 @@
 # SPEC-024 - Prefix-cache billing and provider-local cache isolation
 
-**Version:** 0.2.8 (2026-09-27, native-MTP cache exclusion)
+**Version:** 0.2.9 (2026-10-01, hybrid reply-end recurrent checkpoint)
 **Status:** **Billing arithmetic (§4 ledger / §5 rate card / §6 formula) MOVED to SPEC-005 v0.6** (canonical). SPEC-024 **retains** the `cached_prompt_tokens` **wire field** (§3, a SPEC-002 addendum), the **buyer-visible** mirror field (§8, a SPEC-006 addendum), the fraud model (§7), and the provider-local cache-**isolation** baseline (§11–§16) — none of which SPEC-005 **re-owns** (SPEC-005 §5.3.1 does fold in the §14 coordinator cross-check *gates* as billing-eligibility rules, but SPEC-024 remains their canonical home).
 **Depends on:** SPEC-002 v1.5.2 (coordinator-provider wire), SPEC-004 v0.3.2 (sticky affinity; FR-SR-2 provider-visibility carve-out), SPEC-005 v0.6.10 (billing — the canonical owner of prefix-cache billing arithmetic, formula, ledger columns, and rate-card keys), SPEC-006 v0.9.39 (buyer API; §1.3 conversation-key derivation + survivability (b) carve-out + OpenAI nested usage), SPEC-008 v0.4.1 (Tier-2 trust; §2.2 invariant (b) carve-out permitting the provider-visible derived conversation_key), SPEC-018 v0.2.4 (tool calling)
+
+**Change log v0.2.9 (2026-10-01, issue #1791 — hybrid reply-end recurrent checkpoint):**
+- **FR-CI2 hybrid models.** The recurrent checkpoint set now includes the
+  covered reply end in addition to scaffold end and last-turn start. A later
+  append-only turn therefore restores recurrent state through the previous
+  assistant reply and reports that reply-end checkpoint length as
+  `cached_prompt_tokens` when `C <= LCP`. Hot-tier bounds remain per entry:
+  at most three checkpoints, no disk persistence for hybrid entries, and no
+  billing arithmetic change. The reply-end checkpoint is at the canonical
+  covered token count after dropping a trailing model-stop token; if that
+  checkpoint cannot be captured, the hybrid terminal cache entry is not
+  published. The reply-end checkpoint may be the sole checkpoint when no prompt
+  checkpoint position was eligible. A serial natural-EOS/model-stop completion
+  MUST NOT publish a hybrid entry unless it can prove the recurrent checkpoint
+  was captured before the stripped stop token advanced recurrent state.
 
 **Change log v0.2.8 (2026-09-27, SPEC-048 native-MTP cache exclusion):**
 The unified decode selector runs before cache admission. Any request carrying a
@@ -385,10 +400,19 @@ for full-attention models so this trim guard can succeed after the serve cap wou
 filled. Keyless traffic keeps the rotating cap. Genuine sliding-window models that remain
 `RotatingKVCache` with `maxKVSize = nil` MUST miss even while `isTrimmable` is temporarily
 true (`offset < maxSize`). **(v0.2.5):** non-trimmable recurrent layers MUST be reused only from
-a recurrent-state checkpoint taken while prefilling a stable history prefix. For ChatML that is
+a recurrent-state checkpoint taken while prefilling a stable history prefix or, **(v0.2.9)**, at
+the covered end of a normally completed assistant reply. For ChatML the prefill checkpoints are
 the token before the first `<|im_start|>` opening a `user` turn (end of the system/tools
-scaffold) and before the last `<|im_start|>`; at most two checkpoints per entry, each ≥ the LCP
-minimum. A hit restores the largest checkpoint `C ≤ LCP`, trims every attention layer to exactly
+scaffold) and before the last `<|im_start|>`; the reply-end checkpoint is captured after decode
+at the largest token count whose attention KV and recurrent state are both covered by the cache
+entry, after excluding any trailing model-stop token the response parser removes from canonical
+conversation history. If an entry would carry a recurrent checkpoint beyond its canonical token
+list, or would require a missing reply-end checkpoint for the terminal hybrid handoff, it MUST be
+discarded instead of stored. The reply-end checkpoint MAY be the only stored checkpoint for a
+prompt with no eligible prefill checkpoint. Serial natural-EOS/model-stop completions MUST fail
+closed for hybrid cache publication unless they capture the reply-end recurrent state before the
+stripped stop token mutates recurrent state. At most three checkpoints per entry are stored, each ≥ the LCP minimum for reuse. A hit
+restores the largest checkpoint `C ≤ LCP`, trims every attention layer to exactly
 `C` tokens, and reports `C` as the reused length (so `cached_prompt_tokens = C`). When LCP
 reaches no checkpoint the request is a **miss** (`recurrent_checkpoint_diverged`); a hybrid
 entry without checkpoints stays a `cache_not_trimmable` miss. Because reused KV corresponds to *identical

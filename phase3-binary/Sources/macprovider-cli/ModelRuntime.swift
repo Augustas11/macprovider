@@ -5726,6 +5726,7 @@ actor ModelRuntime: ModelRuntimeServing {
         cachedPromptTokens: Int = 0,
         retainedPagedKVSequence: PagedKVRetainedSequence? = nil,
         recurrentCheckpointPositions: [Int] = [],
+        modelHasRecurrentLayers: Bool = false,
         retainedRecurrentCheckpoints: [RecurrentStateCheckpoint] = [],
         serialToolStopObserver: ContinuousBatchCanonicalStopObserver? = nil,
         nativeMTPAdmission: NativeMTPRuntimeAdmission? = nil
@@ -5752,6 +5753,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 cachedPromptTokens: cachedPromptTokens,
                 retainedPagedKVSequence: retainedPagedKVSequence,
                 recurrentCheckpointPositions: recurrentCheckpointPositions,
+                modelHasRecurrentLayers: modelHasRecurrentLayers,
                 retainedRecurrentCheckpoints: retainedRecurrentCheckpoints,
                 serialToolStopObserver: serialToolStopObserver,
                 decodePath: nativeMTPAdmission?.effectivePath ?? .ordinary,
@@ -6006,9 +6008,11 @@ actor ModelRuntime: ModelRuntimeServing {
     /// could resume (SPEC-038 AC-26).
     nonisolated static func retainedCacheIsCommittable(
         _ retainedCache: ContinuousBatchRetainedCache,
-        modelHasRecurrentLayers: Bool
+        modelHasRecurrentLayers: Bool,
+        canonicalTokenCount: Int
     ) -> Bool {
-        !modelHasRecurrentLayers || !retainedCache.recurrentCheckpoints.isEmpty
+        !modelHasRecurrentLayers
+            || retainedCache.recurrentCheckpoints.contains { $0.tokenCount == canonicalTokenCount }
     }
 
     /// A retained paged-KV sequence, plus on a hybrid model the recurrent
@@ -6161,6 +6165,7 @@ actor ModelRuntime: ModelRuntimeServing {
             cachedPromptTokens: lease?.cachedPromptTokens ?? 0,
             retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
             recurrentCheckpointPositions: prepared.recurrentCheckpointPositions,
+            modelHasRecurrentLayers: prepared.modelHasRecurrentLayers,
             retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
             serialToolStopObserver: serialToolStop,
             nativeMTPAdmission: nativeMTPAdmission
@@ -6203,11 +6208,13 @@ actor ModelRuntime: ModelRuntimeServing {
             }
             let completion = try Self.validateStructuredCompletion(finalized.completion, request: request)
             let generatedTokens = finalized.generatedTokens
+            let canonicalTokenCount = preparedPromptTokenIDs.count + generatedTokens.count
             if !finalized.truncatedAtSerialStop,
                let lease, let retainedCache = result.retainedCache,
                Self.retainedCacheIsCommittable(
                    retainedCache,
-                   modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
+                   modelHasRecurrentLayers: prepared.modelHasRecurrentLayers,
+                   canonicalTokenCount: canonicalTokenCount
                ) {
                 await conversationCache.commit(
                     lease,
@@ -6398,6 +6405,7 @@ actor ModelRuntime: ModelRuntimeServing {
             cachedPromptTokens: lease?.cachedPromptTokens ?? 0,
             retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
             recurrentCheckpointPositions: prepared.recurrentCheckpointPositions,
+            modelHasRecurrentLayers: prepared.modelHasRecurrentLayers,
             retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
             serialToolStopObserver: serialToolStop,
             nativeMTPAdmission: nativeMTPAdmission
@@ -6488,11 +6496,13 @@ actor ModelRuntime: ModelRuntimeServing {
                 onChunk: onChunk
             )
             let generatedTokens = finalized.generatedTokens
+            let canonicalTokenCount = preparedPromptTokenIDs.count + generatedTokens.count
             if !finalized.truncatedAtSerialStop,
                let lease, let retainedCache = result.retainedCache,
                Self.retainedCacheIsCommittable(
                    retainedCache,
-                   modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
+                   modelHasRecurrentLayers: prepared.modelHasRecurrentLayers,
+                   canonicalTokenCount: canonicalTokenCount
                ) {
                 await conversationCache.commit(
                     lease,
@@ -6980,6 +6990,14 @@ actor ModelRuntime: ModelRuntimeServing {
                         } else {
                             finishReason = "stop"
                         }
+                        let terminalModelStopStripped = Self.serialTerminalModelStopStripped(
+                            rawLengthFinish: rawLengthFinish,
+                            hitStop: filtered.hitStop,
+                            parsedHitStop: parsed.hitStop,
+                            harmonyTerminalFinish: harmonyTerminalFinish,
+                            stoppedBySerialToolCall: serialToolStopApplies
+                                && serialToolObserver.hasCompletedValidToolCall
+                        )
 
                         let cachedPromptTokens = lease?.cachedPromptTokens ?? 0
                         let kvCacheBytesReused = Self.cachedPromptUTF8Bytes(
@@ -7001,7 +7019,28 @@ actor ModelRuntime: ModelRuntimeServing {
                             settlementDisposition: .eligibleOwner
                         ), request: request)
                         if let lease {
-                            await conversationCache.commit(lease, cache: ConversationCacheLayers(kvCache, recurrentCheckpoints: recurrent.checkpoints), fullTokens: promptTokenIds + resultTokenIDs.map(Int32.init), cold: coldContext)
+                            let fullTokens = promptTokenIds + resultTokenIDs.map(Int32.init)
+                            guard Self.serialHybridCacheCanPublishTerminalCheckpoint(
+                                cache: kvCache,
+                                terminalModelStopStripped: terminalModelStopStripped
+                            ) else {
+                                await conversationCache.abort(lease)
+                                return completion
+                            }
+                            guard let recurrentCheckpoints = Self.serialTerminalRecurrentCheckpoints(
+                                promptCheckpoints: recurrent.checkpoints,
+                                cache: kvCache,
+                                tokenCount: fullTokens.count
+                            ) else {
+                                await conversationCache.abort(lease)
+                                return completion
+                            }
+                            await conversationCache.commit(
+                                lease,
+                                cache: ConversationCacheLayers(kvCache, recurrentCheckpoints: recurrentCheckpoints),
+                                fullTokens: fullTokens,
+                                cold: coldContext
+                            )
                         }
                         return completion
                     } catch {
@@ -7538,6 +7577,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     }
 
                     var stoppedByRequestStop = false
+                    var stoppedBySerialToolCall = false
                     var textEmitter = SerialStreamingTextEmitter(request: request)
                     var streamingParseError: APIError?
                     var harmonyObservedFinalTokenCount = 0
@@ -7635,7 +7675,10 @@ actor ModelRuntime: ModelRuntimeServing {
                                 case .requestStop:
                                     stoppedByRequestStop = true
                                     return .stop
-                                case .toolCallComplete, .structuredError:
+                                case .toolCallComplete:
+                                    stoppedBySerialToolCall = true
+                                    return .stop
+                                case .structuredError:
                                     return .stop
                                 }
                             })
@@ -7703,6 +7746,13 @@ actor ModelRuntime: ModelRuntimeServing {
                         } else {
                             finishReason = "stop"
                         }
+                        let terminalModelStopStripped = Self.serialTerminalModelStopStripped(
+                            rawLengthFinish: rawLengthFinish,
+                            hitStop: final.hitStop || stoppedByRequestStop,
+                            parsedHitStop: parsed.hitStop,
+                            harmonyTerminalFinish: harmonyTerminalFinish,
+                            stoppedBySerialToolCall: stoppedBySerialToolCall
+                        )
 
                         let cachedPromptTokens = lease?.cachedPromptTokens ?? 0
                         let kvCacheBytesReused = Self.cachedPromptUTF8Bytes(
@@ -7731,7 +7781,28 @@ actor ModelRuntime: ModelRuntimeServing {
                             buyerVisibleContent: structuredAccumulator.content
                         )
                         if let lease {
-                            await conversationCache.commit(lease, cache: ConversationCacheLayers(kvCache, recurrentCheckpoints: recurrent.checkpoints), fullTokens: promptTokenIds + resultTokenIDs.map(Int32.init), cold: coldContext)
+                            let fullTokens = promptTokenIds + resultTokenIDs.map(Int32.init)
+                            guard Self.serialHybridCacheCanPublishTerminalCheckpoint(
+                                cache: kvCache,
+                                terminalModelStopStripped: terminalModelStopStripped
+                            ) else {
+                                await conversationCache.abort(lease)
+                                return validated
+                            }
+                            guard let recurrentCheckpoints = Self.serialTerminalRecurrentCheckpoints(
+                                promptCheckpoints: recurrent.checkpoints,
+                                cache: kvCache,
+                                tokenCount: fullTokens.count
+                            ) else {
+                                await conversationCache.abort(lease)
+                                return validated
+                            }
+                            await conversationCache.commit(
+                                lease,
+                                cache: ConversationCacheLayers(kvCache, recurrentCheckpoints: recurrentCheckpoints),
+                                fullTokens: fullTokens,
+                                cold: coldContext
+                            )
                         }
                         return validated
                     } catch {
@@ -9421,15 +9492,66 @@ actor ModelRuntime: ModelRuntimeServing {
             }
             eval(cache)
             cursor = position
-            var states: [Int: [MLXArray]] = [:]
-            for (index, layer) in cache.enumerated() where layer is ArraysCache {
-                let state = layer.state
-                guard !state.isEmpty else { return (checkpoints, cursor > cachedTokens ? cursor : nil) }
-                states[index] = state
+            guard let checkpoint = captureRecurrentCheckpoint(cache: cache, tokenCount: position) else {
+                return (checkpoints, cursor > cachedTokens ? cursor : nil)
             }
-            checkpoints.append(RecurrentStateCheckpoint(tokenCount: position, states: states))
+            checkpoints.append(checkpoint)
         }
         return (checkpoints, cursor > cachedTokens ? cursor : nil)
+    }
+
+    static func captureRecurrentCheckpoint(cache: [KVCache], tokenCount: Int) -> RecurrentStateCheckpoint? {
+        var states: [Int: [MLXArray]] = [:]
+        for (index, layer) in cache.enumerated() where layer is ArraysCache {
+            let state = layer.state
+            guard !state.isEmpty else { return nil }
+            states[index] = state
+        }
+        guard !states.isEmpty else { return nil }
+        return RecurrentStateCheckpoint(tokenCount: tokenCount, states: states)
+    }
+
+    static func serialHybridCacheCanPublishTerminalCheckpoint(
+        cache: [KVCache],
+        terminalModelStopStripped: Bool
+    ) -> Bool {
+        guard ConversationCacheLayers.hasRecurrentLayers(cache) else { return true }
+        return !terminalModelStopStripped
+    }
+
+    static func serialTerminalModelStopStripped(
+        rawLengthFinish: Bool,
+        hitStop: Bool,
+        parsedHitStop: Bool,
+        harmonyTerminalFinish: Bool,
+        stoppedBySerialToolCall: Bool
+    ) -> Bool {
+        !rawLengthFinish
+            && !hitStop
+            && !parsedHitStop
+            && !harmonyTerminalFinish
+            && !stoppedBySerialToolCall
+    }
+
+    static func serialTerminalRecurrentCheckpoints(
+        promptCheckpoints: [RecurrentStateCheckpoint],
+        cache: [KVCache],
+        tokenCount: Int
+    ) -> [RecurrentStateCheckpoint]? {
+        var checkpoints = promptCheckpoints
+        guard ConversationCacheLayers.hasRecurrentLayers(cache),
+              tokenCount >= ConversationCache.lcpThreshold
+        else {
+            return checkpoints
+        }
+        if checkpoints.contains(where: { $0.tokenCount == tokenCount }) {
+            return checkpoints
+        }
+        guard let terminalCheckpoint = captureRecurrentCheckpoint(cache: cache, tokenCount: tokenCount) else {
+            return nil
+        }
+        checkpoints.append(terminalCheckpoint)
+        return checkpoints.sorted { $0.tokenCount < $1.tokenCount }
     }
 
     static func cachedPromptUTF8Bytes(

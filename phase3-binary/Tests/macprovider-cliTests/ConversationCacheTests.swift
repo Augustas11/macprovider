@@ -740,7 +740,8 @@ final class ConversationCacheTests: XCTestCase {
     }
 
     func testSelectRecurrentCheckpointTakesLargestWithinCommonPrefix() {
-        let checkpoints = [40, 70].map { RecurrentStateCheckpoint(tokenCount: $0, states: [:]) }
+        let checkpoints = [40, 70, 89].map { RecurrentStateCheckpoint(tokenCount: $0, states: [:]) }
+        XCTAssertEqual(ConversationCache.selectRecurrentCheckpoint(checkpoints, lcp: 89)?.tokenCount, 89, "reply-end match")
         XCTAssertEqual(ConversationCache.selectRecurrentCheckpoint(checkpoints, lcp: 75)?.tokenCount, 70, "full-history match")
         XCTAssertEqual(ConversationCache.selectRecurrentCheckpoint(checkpoints, lcp: 70)?.tokenCount, 70)
         XCTAssertEqual(ConversationCache.selectRecurrentCheckpoint(checkpoints, lcp: 69)?.tokenCount, 40, "scaffold-only match")
@@ -848,7 +849,8 @@ final class ConversationCacheTests: XCTestCase {
 
     /// A batched hybrid first turn commits attention covering all but the last
     /// sampled token, empty recurrent layers and its checkpoints; `begin` must
-    /// trim the attention layers exactly onto the checkpoint.
+    /// trim the attention layers exactly onto the largest checkpoint, including
+    /// the reply-end checkpoint when the next turn repeats the answer.
     func testBatchedHybridEntryTrimsAttentionOntoCheckpoint() async {
         let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let canonical = int32Range(0..<90)
@@ -857,14 +859,14 @@ final class ConversationCacheTests: XCTestCase {
         let fullTokens = ModelRuntime.serialConversationCacheCommitTokens(canonicalTokens: canonical, coveredTokenCount: 89)!
         await cache.commit(
             seed!,
-            cache: ConversationCacheLayers([attention, MambaCache()], recurrentCheckpoints: [40, 70].map {
+            cache: ConversationCacheLayers([attention, MambaCache()], recurrentCheckpoints: [40, 70, 89].map {
                 RecurrentStateCheckpoint(tokenCount: $0, states: [1: []])
             }),
             fullTokens: fullTokens)
 
-        let hit = await cache.begin(conversationKey: "conv:batched", incomingTokens: int32Range(0..<85) + [999], modelID: "hybrid", kvBits: nil)
-        XCTAssertEqual(hit?.cachedPromptTokens, 70)
-        XCTAssertEqual(attention.offset, 70)
+        let hit = await cache.begin(conversationKey: "conv:batched", incomingTokens: int32Range(0..<89) + [999], modelID: "hybrid", kvBits: nil)
+        XCTAssertEqual(hit?.cachedPromptTokens, 89)
+        XCTAssertEqual(attention.offset, 89)
         await cache.abort(hit!)
     }
 

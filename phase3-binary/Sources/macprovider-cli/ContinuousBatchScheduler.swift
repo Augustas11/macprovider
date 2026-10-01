@@ -310,9 +310,15 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     let cachedPromptTokens: Int
     let retainedPagedKVSequence: PagedKVRetainedSequence?
     /// Prompt positions (`ConversationCache.recurrentCheckpointPositions`) at which
-    /// a keyed hybrid row snapshots its recurrent state during prefill. Derived
+    /// a keyed hybrid row snapshots its recurrent state during prefill. A
+    /// reply-end checkpoint is added at terminal when cache is retained or
+    /// materialized. Derived
     /// from `promptTokens`, so it stays out of the idempotency fingerprint.
     let recurrentCheckpointPositions: [Int]
+    /// Runtime-only model cache shape. Hybrid recurrent rows need a terminal
+    /// reply-end checkpoint even when no prompt checkpoint was eligible.
+    /// Excluded from the idempotency fingerprint like the checkpoint positions.
+    let modelHasRecurrentLayers: Bool
     /// SPEC-038 AC-26 hybrid cached turn: the retained entry's recurrent
     /// checkpoints at or below `cachedPromptTokens`. The one at exactly
     /// `cachedPromptTokens` is installed with the retained paged KV; any others
@@ -356,6 +362,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         cachedPromptTokens: Int = 0,
         retainedPagedKVSequence: PagedKVRetainedSequence? = nil,
         recurrentCheckpointPositions: [Int] = [],
+        modelHasRecurrentLayers: Bool = false,
         retainedRecurrentCheckpoints: [RecurrentStateCheckpoint] = [],
         serialToolStopObserver: ContinuousBatchCanonicalStopObserver? = nil,
         decodePath: DecodePath = .ordinary,
@@ -380,6 +387,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         self.cachedPromptTokens = max(0, cachedPromptTokens)
         self.retainedPagedKVSequence = retainedPagedKVSequence
         self.recurrentCheckpointPositions = recurrentCheckpointPositions
+        self.modelHasRecurrentLayers = modelHasRecurrentLayers
         self.retainedRecurrentCheckpoints = retainedRecurrentCheckpoints
         self.serialToolStopObserver = serialToolStopObserver
         self.decodePath = decodePath
@@ -1512,7 +1520,8 @@ actor ContinuousBatchScheduler {
         var stopCause: ContinuousBatchSchedulerStopCause? = nil
         var prefillCursor: Int
         var snapshot: ContinuousBatchSchedulerSnapshot
-        /// Keyed hybrid rows: recurrent state at each reached checkpoint (<= 2).
+        /// Keyed hybrid rows: recurrent state at each reached prompt checkpoint
+        /// plus the terminal covered-token checkpoint.
         var recurrentCheckpoints: [RecurrentStateCheckpoint] = []
         var decodePath: DecodePath = .ordinary
         var nativeMTPAdaptation: NativeMTPDepthAdaptationState?
@@ -1523,6 +1532,10 @@ actor ContinuousBatchScheduler {
 
         var retainedLogicalTokenCount: Int {
             request.promptTokens.count + generatedTokens.count
+        }
+
+        var canonicalRetainedLogicalTokenCount: Int {
+            retainedLogicalTokenCount - (stopCause == .modelStop ? 1 : 0)
         }
 
         var usesNativeMTP: Bool {
@@ -3871,7 +3884,7 @@ actor ContinuousBatchScheduler {
     private func finishTerminal(_ row: Row, status: ContinuousBatchSchedulerTerminalStatus) async {
         if let retainedCache = await retainTerminalCache(
             for: row,
-            targetLogicalTokens: row.retainedLogicalTokenCount
+            targetLogicalTokens: row.canonicalRetainedLogicalTokenCount
         ) {
             if cancelledIDs.remove(row.request.id) != nil {
                 await discardRetainedCache(
@@ -3882,6 +3895,19 @@ actor ContinuousBatchScheduler {
                 return
             }
             finish(row, status: status, errorCode: nil, retainedCache: retainedCache)
+            return
+        }
+        if contiguousCacheBridge != nil, row.request.modelHasRecurrentLayers {
+            let released = await release(row.handle)
+            if cancelledIDs.remove(row.request.id) != nil {
+                finish(row, status: released ? .cancelled : .requestFailed, errorCode: released
+                    ? "request_cancelled"
+                    : "continuous_batching_cleanup_failed")
+                return
+            }
+            finish(row, status: released ? status : .requestFailed, errorCode: released
+                ? nil
+                : "continuous_batching_cleanup_failed")
             return
         }
         let serialCache = await materializeSerialConversationCache(for: row)
@@ -4743,6 +4769,12 @@ actor ContinuousBatchScheduler {
             } else if targetLogicalTokens < binding.currentTable.logicalTokenCount {
                 _ = try await allocator.trim(row.handle, toLogicalTokens: targetLogicalTokens)
             }
+            guard let recurrentCheckpoints = await terminalRecurrentCheckpoints(
+                for: row,
+                tokenCount: targetLogicalTokens
+            ) else {
+                return nil
+            }
             let retained = try await allocator.retain(row.handle)
             retainedSequence = retained
             let retainedBinding = try await allocator.binding(for: retained.handle)
@@ -4753,7 +4785,7 @@ actor ContinuousBatchScheduler {
             return ContinuousBatchRetainedCache(
                 retainedSequence: retained,
                 layers: handoff.caches,
-                recurrentCheckpoints: row.recurrentCheckpoints
+                recurrentCheckpoints: recurrentCheckpoints
             )
         } catch {
             if let retainedSequence {
@@ -4769,7 +4801,8 @@ actor ContinuousBatchScheduler {
     }
 
     /// Checkpoint positions this row still captures: keyed rows only, inside the
-    /// prefilled prompt, at most two.
+    /// prefilled prompt, at most two. The reply-end checkpoint is captured at
+    /// terminal separately.
     private func pendingRecurrentCheckpointPositions(for row: Row) -> [Int] {
         guard row.recurrentCheckpoints.count < 2,
               !row.request.conversationKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -4787,7 +4820,7 @@ actor ContinuousBatchScheduler {
     /// last (never fed back), which is a prefix of the canonical token list the
     /// runtime commits. Best effort: any failure commits nothing.
     private func materializeSerialConversationCache(for row: Row) async -> ContinuousBatchSerialConversationCache? {
-        guard !row.recurrentCheckpoints.isEmpty,
+        guard row.request.modelHasRecurrentLayers,
               !row.request.conversationKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { return nil }
         // A zero-output request commits the whole prompt during prefill. Once
@@ -4799,15 +4832,42 @@ actor ContinuousBatchScheduler {
         do {
             let binding = try await allocator.binding(for: row.handle)
             guard tokenCount <= binding.currentTable.logicalTokenCount else { return nil }
+            guard let recurrentCheckpoints = await terminalRecurrentCheckpoints(for: row, tokenCount: tokenCount) else {
+                return nil
+            }
+            guard !recurrentCheckpoints.isEmpty else { return nil }
             return try await backend.materializeSerialConversationCache(
                 requestID: row.request.id,
                 binding: binding,
                 tokenCount: tokenCount,
-                recurrentCheckpoints: row.recurrentCheckpoints
+                recurrentCheckpoints: recurrentCheckpoints
             )
         } catch {
             return nil
         }
+    }
+
+    private func terminalRecurrentCheckpoints(
+        for row: Row,
+        tokenCount: Int
+    ) async -> [RecurrentStateCheckpoint]? {
+        var checkpoints = row.recurrentCheckpoints
+        guard row.request.modelHasRecurrentLayers,
+              (!checkpoints.isEmpty || tokenCount >= ConversationCache.lcpThreshold)
+        else {
+            return checkpoints
+        }
+        if checkpoints.contains(where: { $0.tokenCount == tokenCount }) {
+            return checkpoints
+        }
+        guard let checkpoint = await backend.snapshotRecurrentState(
+            requestID: row.request.id,
+            tokenCount: tokenCount
+        ) else {
+            return nil
+        }
+        checkpoints.append(checkpoint)
+        return checkpoints.sorted { $0.tokenCount < $1.tokenCount }
     }
 
     func discardRetainedCache(_ retained: PagedKVRetainedSequence, conversationKey: String) async {
