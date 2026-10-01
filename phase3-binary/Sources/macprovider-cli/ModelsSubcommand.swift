@@ -89,7 +89,7 @@ struct ModelsDiscoverCommand: AsyncParsableCommand {
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
             llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
-        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: BYOMLiveCatalogMatcher.configuredCoordinatorURL())
+        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try BYOMLiveCatalogMatcher.configuredCoordinatorURL())
         let document = await BYOMDiscoveryRunner(environment: environment).discoverIncludingMLXLM()
         for warning in document.warnings.sorted() {
             writeStderr("models discover warning: \(warning)")
@@ -162,7 +162,7 @@ struct ModelsEvaluateCommand: AsyncParsableCommand {
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
             llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
-        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: BYOMLiveCatalogMatcher.configuredCoordinatorURL())
+        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try BYOMLiveCatalogMatcher.configuredCoordinatorURL())
         let document = await BYOMEvaluationRunner(target: candidate, environment: environment).evaluateIncludingMLXLM()
         for warning in document.warnings.sorted() {
             writeStderr("models evaluate warning: \(warning)")
@@ -260,7 +260,7 @@ struct ModelsOfferCommand: AsyncParsableCommand {
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
             llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
-        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config))
+        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config))
         if dryRun {
             let document = await BYOMOfferDryRunRunner(target: candidate, environment: environment).dryRun()
             for warning in document.warnings.sorted() {
@@ -462,7 +462,7 @@ struct ModelsProposeCommand: AsyncParsableCommand {
                 llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
             ).withCatalogMatcher(
                 offline: offlineArtifactFeed,
-                coordinatorURL: coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)
+                coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)
             )
             let bundle = yes
                 ? try await submitAndPropose(environment: environment, pricing: pricing, evaluationDigest: evaluationDigest)
@@ -483,10 +483,13 @@ struct ModelsProposeCommand: AsyncParsableCommand {
         pricing: PoolModelProposalWire.Pricing?,
         evaluationDigest: String?
     ) async throws -> PoolModelProposalWire {
-        let config = try? ConfigLoader.load(cli: CLIOverrides(
+        // A config that fails to load (a missing explicit --config, or any
+        // invalid one) is an error, not a proposal without the configured
+        // provider and artifact hints.
+        let config = try ConfigLoader.load(cli: CLIOverrides(
             coordinatorURL: coordinatorURL,
             providerID: providerID,
-            configPath: config
+            configPath: self.config
         ))
         let runtime = BYOMModelAdmissionRuntime(environment: environment, client: nil)
         let resolved: (candidate: BYOMDiscoveryWire.Candidate, artifactHashes: [String: String])
@@ -497,15 +500,15 @@ struct ModelsProposeCommand: AsyncParsableCommand {
             try Self.requirePoolEligible(found)
             let artifact = try await runtime.offerArtifact(
                 for: found,
-                servedArtifactPath: config?.modelArtifactPath,
-                servedModelID: config?.model
+                servedArtifactPath: config.modelArtifactPath,
+                servedModelID: config.model
             )
             resolved = (found, artifact.hashes)
         }
         return try PoolModelProposalBuilder.makeBundle(
             poolID: poolID,
             slug: slug,
-            providerID: config?.providerID?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty,
+            providerID: config.providerID?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty,
             candidate: resolved.candidate,
             artifactHashes: resolved.artifactHashes,
             pricing: pricing,
@@ -673,7 +676,7 @@ struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
                 lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
                 llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
                 llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
-            ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config))
+            ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config))
             let client = try resolved.coordinatorURL.map { try BYOMModelAdmissionClient(coordinatorURL: $0) }
             let runtime = BYOMModelAdmissionRuntime(
                 environment: environment,
@@ -782,7 +785,7 @@ struct ModelsAdmissionWithdrawCommand: AsyncParsableCommand {
                 lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
                 llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
                 llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
-            ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config))
+            ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config))
             let client = try BYOMModelAdmissionClient(coordinatorURL: resolved.coordinatorURL)
             let runtime = BYOMModelAdmissionRuntime(
                 environment: environment,
@@ -893,7 +896,7 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
             llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
-        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config))
+        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config))
         // BYOM identity is resolved through the one matcher selection every
         // admission command shares (#1816): the coordinator's signed live
         // artifact feed when usable, else the compiled-in release; the

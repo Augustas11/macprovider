@@ -291,7 +291,12 @@ enum PoolModelProposalBuilder {
         var requirements: [PoolModelProposalWire.Requirement] = [.licenseRequired, .paidServingAttestedRequired]
         requirements.append(pricing == nil ? .pricingRequired : .pricingWithinBounds)
         if maxContext == nil { requirements.append(.maxContextRequired) }
-        requirements.append(contentsOf: [.runtimeAllowlisted, .memberAttestation])
+        // SPEC-042-R004/R016: native mlx_cache is never on runtime_allowlist
+        // and never in a member attestation; only an external loopback
+        // runtime needs those creator controls.
+        if candidate.runtimeSource != "mlx_cache" {
+            requirements.append(contentsOf: [.runtimeAllowlisted, .memberAttestation])
+        }
 
         var warnings: Set<String> = []
         if candidate.catalogModelKey != nil { warnings.insert(PoolModelProposalWire.Warning.catalogMatchExists.rawValue) }

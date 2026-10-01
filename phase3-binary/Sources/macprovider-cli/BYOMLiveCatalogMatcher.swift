@@ -51,9 +51,12 @@ enum BYOMLiveCatalogMatcher {
     }
 
     /// The coordinator URL a command without its own `--coordinator-url`
-    /// reads the feed from: the provider config's, when one resolves.
-    static func configuredCoordinatorURL(configPath: String? = nil) -> String? {
-        (try? ConfigLoader.load(cli: CLIOverrides(configPath: configPath)))?.coordinatorURL
+    /// reads the feed from: the provider config's. A config that is missing
+    /// (when named by `--config` or `MACPROVIDER_CONFIG`), unreadable, or
+    /// invalid is an error, never a silent fall-back to the production
+    /// coordinator; production is the default only after the config loaded.
+    static func configuredCoordinatorURL(configPath: String? = nil) throws -> String? {
+        try ConfigLoader.load(cli: CLIOverrides(configPath: configPath)).coordinatorURL
     }
 
     static func boundedFetch(_ url: URL) async throws -> Data {

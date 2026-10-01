@@ -122,6 +122,52 @@ final class PoolModelProposalTests: XCTestCase {
         XCTAssertTrue(Set(try XCTUnwrap(fixture["creator_requirements"] as? [String])).isSubset(of: codes))
     }
 
+    /// Freeze audit R1 (#1816) CODE M6: a native mlx_cache proposal asks for
+    /// no loopback-only control (runtime_allowlist, R016 attestation); an
+    /// MLX loopback proposal still does.
+    func testNativeProposalOmitsLoopbackOnlyRequirements() throws {
+        func requirements(_ runtime: String) throws -> [String] {
+            try PoolModelProposalBuilder.makeBundle(
+                poolID: Self.poolID, slug: "qwen-local", providerID: nil,
+                candidate: Self.candidate(runtimeSource: runtime),
+                artifactHashes: [ModelArtifactIdentity.snapshotManifestV1: Self.hash],
+                pricing: try PoolModelProposalBuilder.pricing(prompt: 100, cacheHit: 10, completion: 400),
+                evaluationDigestSHA256: nil, offerStatus: nil
+            ).creatorRequirements
+        }
+        XCTAssertEqual(try requirements("mlx_cache"), [
+            "license_spdx_or_licenseref_required",
+            "paid_serving_attested_must_be_true",
+            "pricing_must_be_within_pool_model_bounds",
+        ])
+        XCTAssertEqual(try requirements("mlxlm_loopback"), [
+            "license_spdx_or_licenseref_required",
+            "paid_serving_attested_must_be_true",
+            "pricing_must_be_within_pool_model_bounds",
+            "runtime_source_in_runtime_allowlist",
+            "attested_member_required_for_non_creator_account",
+        ])
+    }
+
+    /// Freeze audit R1 (#1816) CODE M7: a missing or malformed explicit
+    /// config is an error; the command never falls back to the production
+    /// coordinator feed for it.
+    func testExplicitConfigErrorsNeverFallBackToProduction() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        XCTAssertThrowsError(try BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: dir.appendingPathComponent("missing.yaml").path))
+        let malformed = dir.appendingPathComponent("malformed.yaml")
+        try "coordinator_url: [unclosed\n".write(to: malformed, atomically: true, encoding: .utf8)
+        XCTAssertThrowsError(try BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: malformed.path))
+        let mistyped = dir.appendingPathComponent("mistyped.yaml")
+        try "coordinator_url: 42\n".write(to: mistyped, atomically: true, encoding: .utf8)
+        XCTAssertThrowsError(try BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: mistyped.path))
+        let staging = dir.appendingPathComponent("staging.yaml")
+        try "coordinator_url: wss://staging.example.test/ws\n".write(to: staging, atomically: true, encoding: .utf8)
+        XCTAssertEqual(try BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: staging.path), "wss://staging.example.test/ws")
+    }
+
     func testRuntimeAlgorithmPairsAndFailClosedInputs() throws {
         // Native MLX and the MLX loopbacks name snapshot-manifest entries.
         for runtime in ["mlx_cache", "mlxlm_loopback", "omlx_loopback"] {
