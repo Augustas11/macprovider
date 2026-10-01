@@ -75,17 +75,56 @@ func (s *Server) persistSettlementReceipt(ctx context.Context, store *billing.St
 	return state, err
 }
 
+type settlementPoolLabelRecordFunc func(context.Context, *billing.Store, billing.SettlementReceiptIdentity, *billing.SettlementPoolLabels) (billing.SettlementPoolLabelRecord, error)
+
+func recordSettlementPoolLabelsDirect(ctx context.Context, store *billing.Store, id billing.SettlementReceiptIdentity, labels *billing.SettlementPoolLabels) (billing.SettlementPoolLabelRecord, error) {
+	return store.RecordSettlementPoolLabels(ctx, id, labels)
+}
+
 // recordSettlementPoolLabels stamps the SPEC-042 R006 labels after the verdict
 // is durable. A failure only leaves the label unrecorded, which already keeps
 // the request out of pool-scoped accounting; it never fails settlement.
+//
+// The synchronous receipt path shares one short deadline between the verdict
+// and the label, so under SQLite pressure the label write could miss it and
+// stay NULL on a verified verdict (#1816 VM acceptance A-4). The stamp is
+// idempotent and a dispute is sticky, so an unrecorded label is retried in
+// the background on its own deadline.
 func (s *Server) recordSettlementPoolLabels(ctx context.Context, store *billing.Store, input settlementReceiptRecoveryInput) {
+	rec, err := s.tryRecordSettlementPoolLabels(ctx, store, input)
+	if err == nil {
+		s.reportSettlementPoolLabel(rec, nil, input)
+		return
+	}
+	if s.settlementPoolLabelRetries.Add(1) > settlementPoolLabelMaxBackground {
+		s.settlementPoolLabelRetries.Add(-1)
+		s.reportSettlementPoolLabel(rec, err, input)
+		return
+	}
+	go func() {
+		defer s.settlementPoolLabelRetries.Add(-1)
+		for attempt := 0; attempt < settlementPoolLabelBackgroundAttempts; attempt++ {
+			time.Sleep(settlementReceiptRecoveryBaseDelay << attempt)
+			retryCtx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
+			rec, err = s.tryRecordSettlementPoolLabels(retryCtx, store, input)
+			cancel()
+			if err == nil {
+				break
+			}
+		}
+		s.reportSettlementPoolLabel(rec, err, input)
+	}()
+}
+
+func (s *Server) tryRecordSettlementPoolLabels(ctx context.Context, store *billing.Store, input settlementReceiptRecoveryInput) (billing.SettlementPoolLabelRecord, error) {
+	record := s.settlementPoolLabelRecord
+	if record == nil {
+		record = recordSettlementPoolLabelsDirect
+	}
 	var rec billing.SettlementPoolLabelRecord
 	var err error
-	// A transient store failure is retried; a persistent one is logged as a
-	// terminal, operator-visible event. Either way the request stays out of
-	// pool-scoped accounting, because only a verified label counts there.
 	for attempt := 1; attempt <= settlementPoolLabelAttempts; attempt++ {
-		rec, err = store.RecordSettlementPoolLabels(ctx, input.identity, input.poolLabels)
+		rec, err = record(ctx, store, input.identity, input.poolLabels)
 		if err == nil || ctx.Err() != nil {
 			break
 		}
@@ -93,6 +132,12 @@ func (s *Server) recordSettlementPoolLabels(ctx context.Context, store *billing.
 			time.Sleep(time.Duration(attempt) * settlementPoolLabelRetryBackoff)
 		}
 	}
+	return rec, err
+}
+
+// reportSettlementPoolLabel logs a label that stayed unrecorded after every
+// retry (terminal, operator-visible) or a disputed one.
+func (s *Server) reportSettlementPoolLabel(rec billing.SettlementPoolLabelRecord, err error, input settlementReceiptRecoveryInput) {
 	if err != nil {
 		s.log.Error().Err(err).
 			Str("event", "trusted_pool_label_unrecorded").
@@ -146,6 +191,9 @@ func (b *billingRecorder) settlementPoolLabels() *billing.SettlementPoolLabels {
 const (
 	settlementPoolLabelAttempts     = 3
 	settlementPoolLabelRetryBackoff = 50 * time.Millisecond
+	// Background label retries: bounded in count and in flight.
+	settlementPoolLabelBackgroundAttempts = 5
+	settlementPoolLabelMaxBackground      = 256
 )
 
 func settlementReceiptRecoveryKey(input settlementReceiptRecoveryInput) string {

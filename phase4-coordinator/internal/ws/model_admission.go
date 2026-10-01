@@ -1584,6 +1584,36 @@ func modelAdmissionEventWithPriorEvidence(event, previous ModelAdmissionEvent) M
 	return event
 }
 
+// modelAdmissionOfferRepeatsHead reports whether a provider offer repeats
+// the content of the candidate's live (non-terminal) head: same candidate,
+// served ref, runtime class, evidence digests, disclosure class, and
+// artifact pair (the offered pair, or the pair a pool binding recorded).
+// Such an offer is idempotent; a re-offer from a terminal head still needs
+// refreshed evidence.
+func modelAdmissionOfferRepeatsHead(head, offer ModelAdmissionEvent) bool {
+	if modelAdmissionStateTerminal(head.State) || !sameModelAdmissionTuple(head, offer) ||
+		modelAdmissionRuntimeClass(head.RuntimeSource) != modelAdmissionRuntimeClass(offer.RuntimeSource) ||
+		modelAdmissionEvidenceRefreshed(head, offer) || head.RequestedDisclosureClass != offer.RequestedDisclosureClass {
+		return false
+	}
+	if len(head.OfferedArtifactHashes) > 0 {
+		if len(head.OfferedArtifactHashes) != len(offer.OfferedArtifactHashes) {
+			return false
+		}
+		for algorithm, hash := range head.OfferedArtifactHashes {
+			if !strings.EqualFold(strings.TrimSpace(offer.OfferedArtifactHashes[algorithm]), strings.TrimSpace(hash)) {
+				return false
+			}
+		}
+		return true
+	}
+	if head.PoolScoped() {
+		algorithm, hash, ok := offeredPoolPair(offer)
+		return ok && algorithm == head.ExpectedCatalogModelHashAlgorithm && hash == head.ExpectedCatalogModelHash
+	}
+	return false
+}
+
 func modelAdmissionRequiresRefreshedEvidence(previousState string) bool {
 	switch previousState {
 	case "offer_rejected", "withdrawn", "revoked":
@@ -2065,6 +2095,19 @@ func (s *Server) handleProviderModelAdmissionOffer(w http.ResponseWriter, r *htt
 	stored, replay, err := s.appendModelAdmissionEventInSection(r.Context(), providerID, func(ctx context.Context) (ModelAdmissionEvent, bool, error) {
 		return s.modelAdmissions.AppendModelAdmissionOffer(ctx, event)
 	})
+	if errors.Is(err, errModelAdmissionReplayConflict) {
+		// #1816 VM acceptance A-5: the identical offer for a live candidate
+		// (runbook "submits (or keeps) its offer") answers its current
+		// status, after the pool-manifest binding re-evaluates it.
+		if head, found, headErr := s.modelAdmissions.LatestModelAdmissionStatus(r.Context(), providerID, event.CandidateID); headErr == nil && found && modelAdmissionOfferRepeatsHead(head, event) {
+			s.reevaluatePoolManifestBindings(r.Context(), providerID)
+			if current, ok, err := s.modelAdmissions.LatestModelAdmissionStatus(r.Context(), providerID, event.CandidateID); err == nil && ok {
+				head = current
+			}
+			writeJSON(w, http.StatusOK, s.modelAdmissionStatusResponseFromEvent(head, true))
+			return
+		}
+	}
 	if err != nil {
 		status := http.StatusInternalServerError
 		code := "model_admission_store_error"

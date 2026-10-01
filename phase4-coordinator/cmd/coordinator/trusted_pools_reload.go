@@ -39,8 +39,9 @@ var liveTrustPoolOwnerAuthority atomic.Pointer[trustPoolOwnerAuthority]
 // candidate config and returns the step that applies them. The reload runs
 // the step only after every other fallible step succeeded, so a rejected
 // reload leaves bounds and owner authority untouched and a recorded applied
-// config is the one in force.
-func prepareTrustedPoolsReload(cfg config.TrustedPoolsConfig) (func(), error) {
+// config is the one in force. The step reports the owner-account outcome,
+// and whether the owner authority was applied at all (pools loaded).
+func prepareTrustedPoolsReload(cfg config.TrustedPoolsConfig) (func() (trustpool.ProviderOwnerAccountsUpdate, bool), error) {
 	keys, err := trustpool.ParseProviderOwnerPublicKeys(cfg.ProviderOwnerPublicKeys)
 	if err != nil {
 		return nil, fmt.Errorf("trusted_pools.provider_owner_public_keys: %w", err)
@@ -50,11 +51,12 @@ func prepareTrustedPoolsReload(cfg config.TrustedPoolsConfig) (func(), error) {
 	authority := liveTrustPoolOwnerAuthority.Load()
 	bounds := poolModelPricingBounds(cfg.PoolModelPricingBounds)
 	accounts := cfg.ProviderOwnerAccountIDs
-	return func() {
+	return func() (trustpool.ProviderOwnerAccountsUpdate, bool) {
 		livePoolModelPricingBounds.Store(bounds)
-		if authority != nil {
-			_ = authority.store.SetProviderOwnerPublicKeys(keys)
-			authority.registry.SetProviderOwnerAccounts(accounts)
+		if authority == nil {
+			return trustpool.ProviderOwnerAccountsUpdate{}, false
 		}
+		_ = authority.store.SetProviderOwnerPublicKeys(keys)
+		return authority.registry.SetProviderOwnerAccounts(accounts), true
 	}, nil
 }

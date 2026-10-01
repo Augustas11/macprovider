@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -629,5 +630,75 @@ func TestPoolManifestBlockedArtifactFeedPairDenies(t *testing.T) {
 				t.Fatalf("blocked artifact-feed pair binding = %+v, want revoked %s", head, ModelAdmissionRevokePoolEntryRevoked)
 			}
 		})
+	}
+}
+
+// countingModelAdmissionStore counts the listings and appends a sweep makes.
+type countingModelAdmissionStore struct {
+	ModelAdmissionStore
+	perProvider, inStates, appends atomic.Int32
+}
+
+func (s *countingModelAdmissionStore) LatestModelAdmissionStatusesForProvider(ctx context.Context, providerID string) ([]ModelAdmissionEvent, error) {
+	s.perProvider.Add(1)
+	return s.ModelAdmissionStore.LatestModelAdmissionStatusesForProvider(ctx, providerID)
+}
+
+func (s *countingModelAdmissionStore) LatestModelAdmissionStatusesInStates(ctx context.Context, states []string) ([]ModelAdmissionEvent, error) {
+	s.inStates.Add(1)
+	return s.ModelAdmissionStore.LatestModelAdmissionStatusesInStates(ctx, states)
+}
+
+func (s *countingModelAdmissionStore) AppendModelAdmissionDecision(ctx context.Context, event ModelAdmissionEvent) (ModelAdmissionEvent, error) {
+	s.appends.Add(1)
+	return s.ModelAdmissionStore.AppendModelAdmissionDecision(ctx, event)
+}
+
+// #1816 VM acceptance A-8: after a restart, a bound member whose session is
+// gone is skipped, never re-appended, and costs one per-provider listing per
+// sweep; an online member of the same pool keeps its binding and session.
+func TestPoolManifestSweepOfflineMemberIsCheap(t *testing.T) {
+	const offline = "provider-offline"
+	f := newBindingFixture(t)
+	source := wirePoolSource(f)
+	snap := poolSnapshot(testPoolA, 1, poolDigestV1, ggufPoolEntry())
+	snap.Members[offline] = true
+	snap.CreatorOwnedMembers[offline] = true
+	source.set(snap)
+	f.registerPoolSession(t, poolProvider, "llamacpp_loopback", modelidentity.GGUFFileV1, poolGGUFHash)
+	f.registerPoolSession(t, offline, "llamacpp_loopback", modelidentity.GGUFFileV1, poolGGUFHash)
+	online := f.offer(t, poolProvider, "t", "llamacpp_loopback", map[string]string{modelidentity.GGUFFileV1: poolGGUFHash})
+	gone := f.offer(t, offline, "u", "llamacpp_loopback", map[string]string{modelidentity.GGUFFileV1: poolGGUFHash})
+	f.server.sweepPoolManifestBindings(context.Background())
+	onlineHead := f.latest(t, poolProvider, online.CandidateID)
+	goneHead := f.latest(t, offline, gone.CandidateID)
+	if onlineHead.State != "catalog_priced" || goneHead.State != "catalog_priced" {
+		t.Fatalf("both members should bind first: %+v / %+v", onlineHead, goneHead)
+	}
+	// The offline member's session ends (as across a coordinator restart).
+	p, _ := f.server.pool.Resolve(offline, "")
+	if !f.server.pool.RemoveIfSession(offline, p.AssignedID) {
+		t.Fatal("remove offline session")
+	}
+	counting := &countingModelAdmissionStore{ModelAdmissionStore: f.server.modelAdmissions}
+	f.server.modelAdmissions = counting
+	const sweeps = 5
+	for i := 0; i < sweeps; i++ {
+		f.server.sweepPoolManifestBindings(context.Background())
+	}
+	if n := counting.appends.Load(); n != 0 {
+		t.Fatalf("%d sweeps appended %d decisions in steady state", sweeps, n)
+	}
+	if in, per := counting.inStates.Load(), counting.perProvider.Load(); in != sweeps || per > 2*sweeps {
+		t.Fatalf("%d sweeps listed %d times globally and %d per provider, want %d and at most %d", sweeps, in, per, sweeps, 2*sweeps)
+	}
+	if head := f.latest(t, offline, gone.CandidateID); head.CoordinatorEventID != goneHead.CoordinatorEventID {
+		t.Fatalf("offline member's binding changed: %+v", head)
+	}
+	if head := f.latest(t, poolProvider, online.CandidateID); head.CoordinatorEventID != onlineHead.CoordinatorEventID {
+		t.Fatalf("online member's binding changed: %+v", head)
+	}
+	if provider, ok := f.server.pool.Resolve(poolProvider, ""); !ok || provider.ModelAdmissionCandidateID != online.CandidateID || provider.ModelAdmissionPoolModelID != poolModelGGUF {
+		t.Fatalf("online member's session binding = %+v", provider)
 	}
 }

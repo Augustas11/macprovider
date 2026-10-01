@@ -96,6 +96,11 @@ acceptance, binding, routing, the pool `/v1/models` view, and provider status.
 Existing route snapshots keep their recorded prices. A binding whose rates
 fall outside tightened bounds stops routing (and its status stops claiming
 `pool_attested_earning`) until the creator publishes conforming rates.
+An applied reload logs `trusted pools pool-model bounds and owner authority
+reloaded` with `trusted_pools_provider_owner_account_ids_applied`, `_changed`,
+`_providers` (count) and `_sha256` (digest of the provider -> account map; no
+account id is logged). Compare the digest before and after to confirm an
+owner remap took effect; a rejected reload logs the rejection instead.
 
 **Owner accounts for attested members (SPEC-042-R016).** A loopback session
 of a member the creator does not own binds only when the core's
@@ -228,7 +233,20 @@ routes only after its rebind.
 
 After the new window is active, the member submits (or keeps) its offer for
 the candidate (`macprovider-cli models offer <candidate> --json`) and
-restarts `serve` so its session re-evaluates it. The coordinator binds the
+restarts `serve` so its session re-evaluates it. Re-submitting the identical
+offer is idempotent: it answers the candidate's current status (and
+re-evaluates the pool binding), not `409 replay_conflict`.
+
+**Delegated (non-creator) members need a delegation for the active core.**
+A `ProviderPoolDelegationV1` grant is bound to the core digest it names
+(SPEC-043-R006), so a delegated member, which every R016 attested member
+is, stops being a pool member when any later core activates: its binding
+stops routing and it never binds under the new core. Once the new core is
+active, the provider owner revokes the old grant (`delegation_revoked`) and
+signs a new grant for the new core's `manifest_core_digest`, then the
+operator appends `member_admitted` with the new `delegation_id`. The
+binding sweep then binds the live offer within seconds; no new offer is
+needed. The coordinator binds the
 offer from `offer_submitted`, or from the synthetic-probe states it reaches
 first (`sandbox_probe_only`, `network_visible_unpriced`,
 `network_admitted_unsettled`). The binding is pool-scoped `catalog_priced`
@@ -247,7 +265,11 @@ Pass: `manifest_core_digest` equals the submitted event's digest, and the
 entry is listed in `model_entries` with `disclosure_class:
 pool_attested_unverified` (R016 attestations are in `attested_members`). The
 provider's `/poolz` row shows the engine's `runtime_source`, the entry's hash
-algorithm, `hash_status: hash_verified`, and `state: ready`. A native
+algorithm, `catalog_admission_mode: pool_entry`, `hash_status: uncatalogued`,
+and `state: ready`. `hash_status` is the Tier-2 catalog status, and a pool
+entry's pair is by definition not catalog-priced; the pair is checked against
+the entry at route time (SPEC-032-R004 case (b), creator-attested), which is
+not `hash_verified`. A native
 `mlx_cache` member's `/poolz` `runtime_source` is null: it echoes the hello,
 which the native CLI omits.
 

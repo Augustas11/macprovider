@@ -14,6 +14,8 @@
 package trustpool
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
@@ -873,11 +875,15 @@ func (r *Registry) applyRouteablePoolStatesLocked(revision uint64, next map[stri
 }
 
 // manifestGenerationChanged reports whether any pool in next has a
-// different active accepted generation than in prev.
+// different active accepted generation than in prev, or became routeable
+// with one. The binding sweep skips an unrouteable pool, so a generation
+// that activates across a routeability gap (a window boundary) must kick it
+// again when the pool routes (#1816 VM acceptance A-5).
 func manifestGenerationChanged(prev, next map[string]*poolState) bool {
 	for poolID, ps := range next {
 		old := prev[poolID]
-		if ps.manifestVersion != 0 && (old == nil || old.manifestVersion != ps.manifestVersion || old.manifestCoreDigest != ps.manifestCoreDigest) {
+		if ps.manifestVersion != 0 && (old == nil || old.manifestVersion != ps.manifestVersion || old.manifestCoreDigest != ps.manifestCoreDigest ||
+			(ps.routeable && !old.routeable)) {
 			return true
 		}
 	}
@@ -1419,7 +1425,10 @@ func (r *Registry) routeMembersLocked(ps *poolState, now time.Time) (map[string]
 // the SPEC-042-R016 attestation match reads; a provider listed under two
 // accounts is ambiguous and gets no owner account. Changing the map advances
 // the routing generation so no attempt keeps a stale owner match.
-func (r *Registry) SetProviderOwnerAccounts(accountProviders map[string][]string) {
+//
+// The returned update names no account: a count, a digest, and whether the
+// map changed, so a reload can log its outcome (#1816 VM acceptance A-7).
+func (r *Registry) SetProviderOwnerAccounts(accountProviders map[string][]string) ProviderOwnerAccountsUpdate {
 	owners := make(map[string]string)
 	ambiguous := make(map[string]bool)
 	for account, providers := range accountProviders {
@@ -1441,13 +1450,34 @@ func (r *Registry) SetProviderOwnerAccounts(accountProviders map[string][]string
 	for providerID := range ambiguous {
 		delete(owners, providerID)
 	}
+	providers := make([]string, 0, len(owners))
+	for providerID := range owners {
+		providers = append(providers, providerID)
+	}
+	sort.Strings(providers)
+	h := sha256.New()
+	for _, providerID := range providers {
+		fmt.Fprintf(h, "%s\x00%s\n", providerID, owners[providerID])
+	}
+	update := ProviderOwnerAccountsUpdate{Providers: len(owners), Digest: hex.EncodeToString(h.Sum(nil))}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if stringMapsEqual(r.providerOwnerAccounts, owners) {
-		return
+		return update
 	}
 	r.providerOwnerAccounts = owners
 	r.ceilingGeneration++
+	update.Changed = true
+	return update
+}
+
+// ProviderOwnerAccountsUpdate is the outcome of SetProviderOwnerAccounts:
+// how many providers have an owner account, a SHA-256 digest of the
+// provider -> account map, and whether it differs from the prior map.
+type ProviderOwnerAccountsUpdate struct {
+	Providers int
+	Digest    string
+	Changed   bool
 }
 
 func stringMapsEqual(a, b map[string]string) bool {

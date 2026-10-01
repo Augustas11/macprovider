@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -106,6 +107,7 @@ func TestRunbookRollbackCheckRefusesTargetsWithoutExtensionCodec(t *testing.T) {
 	}
 
 	extended := build(true)
+	assertGoReplayCheckAgrees(t, extended, map[string]bool{"v1-only": true, "m8": true, "m9": true, "p1816": false})
 	for tier, wantCode := range map[string]int{"v1-only": 1, "m8": 1, "m9": 1, "p1816": 0} {
 		out, code := runRollbackCheck(t, script, extended, tier)
 		if code != wantCode {
@@ -120,7 +122,32 @@ func TestRunbookRollbackCheckRefusesTargetsWithoutExtensionCodec(t *testing.T) {
 	}
 	// A v2 history without extensions stays replayable on m9.
 	plain := build(false)
+	assertGoReplayCheckAgrees(t, plain, map[string]bool{"v1-only": true, "m8": false, "m9": false, "p1816": false})
 	if out, code := runRollbackCheck(t, script, plain, "m9"); code != 0 || !strings.Contains(out, "extensions in history: none") {
 		t.Fatalf("extension-free v2 history on m9: exit %d\n%s", code, out)
+	}
+}
+
+// #1816 VM acceptance A-2: `coordinator pool-rollback-preflight` exited 0
+// with extension cores in the store. Its manifest-history check
+// (CheckManifestHistoryReplay) must refuse exactly the tiers step 4b does.
+func assertGoReplayCheckAgrees(t *testing.T, path string, blocked map[string]bool) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for tier, want := range blocked {
+		got, err := trustpool.CheckManifestHistoryReplay(context.Background(), db, tier)
+		if err != nil {
+			t.Fatalf("tier %s: %v", tier, err)
+		}
+		if (len(got.CannotReplay) > 0) != want {
+			t.Fatalf("tier %s: cannot_replay=%v want blocked=%v (%+v)", tier, got.CannotReplay, want, got)
+		}
+		if want && tier != "v1-only" && !slices.Contains(got.CannotReplay, "extension pool_model_entries/v1") {
+			t.Fatalf("tier %s: refusal does not name the extension: %v", tier, got.CannotReplay)
+		}
 	}
 }

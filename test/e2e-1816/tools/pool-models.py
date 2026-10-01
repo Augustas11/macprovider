@@ -289,12 +289,39 @@ def cmd_delegate(a):
     d = d_(a.name)
     pid = pool_id(a.name)
     cfg = json.loads((d / "config.json").read_text())
-    digest = json.loads((d / ("manifest-v%d.json" % versions(d)[-1])).read_text())["manifest_core_digest"]
+    version = versions(d)[-1]
+    digest = json.loads((d / ("manifest-v%d.json" % version)).read_text())["manifest_core_digest"]
     pub = subprocess.run(["openssl", "pkey", "-in", a.owner_key, "-pubout", "-outform", "DER"], check=True, capture_output=True).stdout[-32:]
     issued = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(minutes=1)
     env = "candidate"
+    # SPEC-043-R006: a delegation is bound to one core digest, so a member
+    # stays a member under a later core only after its owner revokes the old
+    # grant and delegates for the new core (run once that core is active).
+    prior_path = d / ("delegation-%s.json" % a.provider)
+    if prior_path.exists():
+        prior = json.loads(prior_path.read_text())
+        rfields = {"schema_version": "provider-pool-delegation-revocation-v1", "creator_account_id": CREATOR, "pool_id": pid,
+                   "provider_identity": a.provider, "delegation_id": prior["delegation_id"],
+                   "operation_id": "e2e-deleg-revoke-op-%s-%s" % (cfg["run_id"], prior["delegation_id"]),
+                   "manifest_core_digest": prior["manifest_core_digest"], "environment_network_id": env,
+                   "coordinator_audience": "macprovider/spec043/coordinator-audience/v1/" + env, "provider_owner_key_id": "e2e-owner-key-1",
+                   "provider_owner_key_version": "1", "revoked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                   "revocation_semantics": "owner_revocable"}
+        rmsg = d / "delegation-revocation.msg"
+        rmsg.write_bytes(b"macprovider/spec043/provider-pool-delegation-revocation-sig/v1" +
+                         json.dumps(rfields, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode())
+        rsig = subprocess.run(["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", a.owner_key, "-in", str(rmsg)], check=True, capture_output=True).stdout
+        must("POST", "/admin/trust-pools/events", {
+            "operation_id": "e2e-deleg-revoke-%s-%s" % (cfg["run_id"], prior["delegation_id"]), "timestamp_utc": now_iso(),
+            "event_type": "delegation_revoked", "pool_id": pid, "creator_account_id": CREATOR, "provider_id": a.provider,
+            "delegation_id": prior["delegation_id"], "delegation_operation_id": rfields["operation_id"],
+            "manifest_core_digest": prior["manifest_core_digest"], "environment_network_id": env,
+            "coordinator_audience": rfields["coordinator_audience"], "provider_owner_key_id": rfields["provider_owner_key_id"],
+            "provider_owner_key_version": rfields["provider_owner_key_version"], "delegation_revoked_at": rfields["revoked_at"],
+            "provider_pool_delegation_revocation_signature": base64.b64encode(rsig).decode()})
     fields = {"schema_version": "provider-pool-delegation-v1", "creator_account_id": CREATOR, "pool_id": pid, "provider_identity": a.provider,
-              "delegation_id": "e2e-deleg-%s-%s" % (cfg["run_id"], a.provider), "operation_id": "e2e-deleg-op-%s-%s" % (cfg["run_id"], a.provider),
+              "delegation_id": "e2e-deleg-%s-%s-v%d" % (cfg["run_id"], a.provider, version),
+              "operation_id": "e2e-deleg-op-%s-%s-v%d" % (cfg["run_id"], a.provider, version),
               "manifest_core_digest": digest, "environment_network_id": env,
               "coordinator_audience": "macprovider/spec043/coordinator-audience/v1/" + env, "provider_owner_key_id": "e2e-owner-key-1",
               "provider_owner_key_version": "1", "provider_owner_public_key": base64.b64encode(pub).decode(),
@@ -305,17 +332,18 @@ def cmd_delegate(a):
     msg.write_bytes(b"macprovider/spec043/provider-pool-delegation-sig/v1" + canonical)
     sig = subprocess.run(["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", a.owner_key, "-in", str(msg)], check=True, capture_output=True).stdout
     must("POST", "/admin/trust-pools/events", {
-        "operation_id": "e2e-deleg-grant-%s-%s" % (cfg["run_id"], a.provider), "timestamp_utc": now_iso(), "event_type": "delegation_granted",
+        "operation_id": "e2e-deleg-grant-%s-%s-v%d" % (cfg["run_id"], a.provider, version), "timestamp_utc": now_iso(), "event_type": "delegation_granted",
         "pool_id": pid, "creator_account_id": CREATOR, "provider_id": a.provider, "delegation_id": fields["delegation_id"],
         "delegation_operation_id": fields["operation_id"], "manifest_core_digest": digest, "environment_network_id": env,
         "coordinator_audience": fields["coordinator_audience"], "provider_owner_key_id": fields["provider_owner_key_id"],
         "provider_owner_key_version": fields["provider_owner_key_version"], "provider_owner_public_key": fields["provider_owner_public_key"],
         "delegation_issued_at": fields["issued_at"], "delegation_expires_at": fields["expires_at"],
         "provider_pool_delegation_signature": base64.b64encode(sig).decode()})
-    must("POST", "/admin/trust-pools/events", {"operation_id": "e2e-deleg-admit-%s-%s" % (cfg["run_id"], a.provider), "timestamp_utc": now_iso(),
+    must("POST", "/admin/trust-pools/events", {"operation_id": "e2e-deleg-admit-%s-%s-v%d" % (cfg["run_id"], a.provider, version), "timestamp_utc": now_iso(),
                                                "event_type": "member_admitted", "pool_id": pid, "provider_id": a.provider,
                                                "delegation_id": fields["delegation_id"]})
-    print("delegated member %s admitted" % a.provider)
+    prior_path.write_text(json.dumps({"delegation_id": fields["delegation_id"], "manifest_core_digest": digest}))
+    print("delegated member %s admitted under v%d" % (a.provider, version))
 
 
 def cmd_event(a):

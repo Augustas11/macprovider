@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -333,6 +334,10 @@ type Server struct {
 	settlementReceiptRecoveryKeys    map[string]struct{}
 	settlementReceiptRecoveryWorkers int
 	settlementReceiptPersist         settlementReceiptPersistFunc
+	// settlementPoolLabelRecord stamps SPEC-042 R006 labels (a test seam);
+	// settlementPoolLabelRetries counts background label retries in flight.
+	settlementPoolLabelRecord  settlementPoolLabelRecordFunc
+	settlementPoolLabelRetries atomic.Int32
 }
 
 type receiptKeysBucket struct {
@@ -880,6 +885,7 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		version:                       "dev",
 		settlementReceiptRecoveryKeys: make(map[string]struct{}),
 		settlementReceiptPersist:      persistSettlementReceiptDirect,
+		settlementPoolLabelRecord:     recordSettlementPoolLabelsDirect,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -1177,9 +1183,11 @@ func (s *Server) authorizeTrustPoolFromDurableState(ctx context.Context, poolID,
 	}
 	state, err := s.trustPoolStatusStore.Reconstruct(ctx)
 	if err != nil {
-		if s.trustPools != nil {
-			s.trustPools.Disable()
-		}
+		// Only malformed durable state disables routing. A transient replay
+		// failure (a timeout on a busy connection) fails this request closed:
+		// every request replays, so nothing stale is authorized (#1816 VM
+		// acceptance A-8).
+		s.disableTrustPoolsOnMalformedDurableState(err)
 		return trustpool.Snapshot{}, false, err
 	}
 	return s.trustPools.AuthorizeAtDurableRevision(state.Revision, state.RouteableSnapshots(), poolID, accountID)

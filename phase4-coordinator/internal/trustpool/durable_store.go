@@ -3107,7 +3107,7 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 		if e.RootIssuerKeyID != p.RootIssuer.KeyID || e.RootIssuerPublicKeyFingerprint != p.RootIssuer.PublicKeyFingerprint {
 			return nil, fmt.Errorf("%w: event %d manifest root issuer mismatch for pool %q", ErrMalformedDurableEvent, index, e.PoolID)
 		}
-		prevDigest, core, err := VerifyManifestAcceptedEvent(e, *p.RootIssuer)
+		prevDigest, core, err := verifyManifestAcceptedEventCached(e, *p.RootIssuer)
 		if err != nil {
 			return nil, fmt.Errorf("%w: event %d manifest signature invalid: %v", ErrMalformedDurableEvent, index, err)
 		}

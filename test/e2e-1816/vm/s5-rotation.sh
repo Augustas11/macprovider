@@ -84,6 +84,10 @@ G_RATES=$G_RATES2
 e0="$(max_event)"
 $PM stage Q --attest "$MEMBER_ACCT=llamacpp_loopback" >/dev/null
 v="$(sign_change Q attest)"; wait_window Q "$v"; sleep 5
+# SPEC-043-R006: the delegation is bound to a core digest; the owner
+# re-delegates for the attesting core once it is active (runbook section 4).
+$PM delegate Q --provider e2e-prov-5 --owner-key $K/owner-prov-5.pem >"$EV/redelegate-5.txt" 2>&1 \
+  || result S5-attested-member-redelegate FAIL "$(head -c 300 "$EV/redelegate-5.txt")"
 reoffer_5 offer-5-attested
 events_since e2e-prov-5 "$e0" >"$EV/attest-events.txt"
 grep -q '|catalog_priced|pool_manifest_\(re\)\?bound|pool|' "$EV/attest-events.txt" \

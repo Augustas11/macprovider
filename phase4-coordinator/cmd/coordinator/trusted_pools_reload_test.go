@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
@@ -55,7 +56,15 @@ func TestPrepareTrustedPoolsReloadAppliesBoundsAndOwnerAuthority(t *testing.T) {
 	if key, ok := store.ProviderOwnerPublicKey("p1"); !ok || string(key) != string(oldKey) {
 		t.Fatal("owner key changed before apply")
 	}
-	apply()
+	owners, applied := apply()
+	// #1816 VM acceptance A-7: the reload outcome is loggable without the
+	// account ids: applied, changed, a count, and a digest.
+	if !applied || !owners.Changed || owners.Providers != 1 || len(owners.Digest) != 64 || strings.Contains(owners.Digest, "acct") {
+		t.Fatalf("owner account reload outcome = %+v applied=%v", owners, applied)
+	}
+	if again, _ := apply(); again.Changed || again.Digest != owners.Digest {
+		t.Fatalf("re-applying the same owner accounts = %+v, want unchanged digest %s", again, owners.Digest)
+	}
 	if b := currentPoolModelPricingBounds(); b == nil || b.MaxCompletionRatePerMtok != 1000 {
 		t.Fatalf("tightened bounds not applied: %+v", b)
 	}
