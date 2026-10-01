@@ -1135,7 +1135,7 @@
     {
       "spec_id": "SPEC-039",
       "title": "Paged KV / paged-attention engine",
-      "version": "v0.1.13",
+      "version": "v0.1.14",
       "path": "specs/SPEC-039-paged-kv-attention-engine.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -4958,6 +4958,8 @@
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testQwen3xHybridArchitectureRequiresExactAllowlistedIdentityAndConfigMetadata",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testGPTOSS120BMixedArchitectureRequiresExactAllowlistedIdentityAndConfigMetadata",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testMeasuredMixedPagedKVTopologyIsFamilySpecific",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testMoEDispatchGateRequiresGenuinelyProvenSharedForwardIsolation",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVSlidingWindowTests.swift:testRotatingCacheKindMapsKeepZeroAndRejectsSinkPrefix",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVSlidingWindowTests.swift:testLegacyFullHistoryMaskPredicateStillWindows",
@@ -4966,12 +4968,19 @@
         "phase3-binary/Tests/macprovider-cliTests/PagedKVSlidingWindowTests.swift:testBatchedEqualLengthDecodePastWindowUsesPresentedWindow"
       ],
       "journeys": [],
-      "evidence": [],
+      "evidence": [
+        {
+          "artifact": "sha256:e800f7c0888a4d534c734bafb826e6d7e158976c4f84599ff1a35c2892e659d2",
+          "source": "audits/2026-10-01-1780-gpt-oss-120b-evidence.md",
+          "captured_at": "2026-10-01",
+          "expires_at": "2027-10-01"
+        }
+      ],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1773",
-        "rationale": "FR-PKV12 v0.1.13 can represent keep=0 sliding-window layers for isolated measurement with full-history paged storage and rotating-equivalent attention presentation, but admits no rotating identity; gpt-oss-20b evidence does not prove gpt-oss-120b. v0.1.9 still holds the measured Qwen hybrid allowlist. Runtime attach fails closed unless the identity/config pair and fresh 48-token shared-forward proof pass; release and production deployment remain pending."
+        "rationale": "FR-PKV12 v0.1.14 admits the exact openai/gpt-oss-120b identity/config pair after Mac Studio packaged-runtime evidence recorded in audits/2026-10-01-1780-gpt-oss-120b-evidence.md: 1024-token prefill, 48-token parity, standalone=[true,true], batched=[true,true], isolation/replay/drain pass. stdout sha256 ca05b28d8cbbb55fd1db530109a0c8e1c7de782149bb127a89607036f2013f0e; stderr sha256 648b75892ed8b47023fe253cf3874dacd0c25582e82c6ecb7d1ed32942d58b87. The grant remains exact-identity only; gpt-oss-20b evidence does not generalize to aliases or the gpt_oss family. Runtime attach still fails closed unless the identity/config pair and fresh 48-token shared-forward proof pass; release and production deployment remain pending."
       }
     },
     {

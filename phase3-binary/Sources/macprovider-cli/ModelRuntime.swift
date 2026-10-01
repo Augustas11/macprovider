@@ -1974,11 +1974,11 @@ actor ModelRuntime: ModelRuntimeServing {
         }
         guard let cacheKinds,
               runtimeCacheClass != "mixed"
-                || (cacheKinds.contains(.recurrentMamba) && cacheKinds.contains(.pagedAttention))
+                || Self.measuredMixedPagedKVTopology(
+                    cacheKinds,
+                    modelCapabilities: modelCapabilities
+                )
         else { return (nil, nil) }
-        // Sliding-window mixed layouts are recognized by CacheKind but are not
-        // this Qwen-hybrid probe exception. Unverified mixed, including gpt-oss
-        // rotating+simple, stays unprobed and fail-closed at attach.
         let promptTokens = await container.perform { context in
             context.tokenizer.encode(text: Self.pagedKVRuntimeParityProbePrompt, addSpecialTokens: true)
         }
@@ -2081,6 +2081,26 @@ actor ModelRuntime: ModelRuntimeServing {
             && result.rowsDecodedInSharedForward == 2
             && result.rowFailures == 0
             && result.crossRowDivergences == 0
+    }
+
+    static func measuredMixedPagedKVTopology(
+        _ cacheKinds: [PagedKVSharedForwardBackend.CacheKind],
+        modelCapabilities: PagedKVRuntimeModelCapabilities
+    ) -> Bool {
+        guard modelCapabilities.hybridDecoderArchitectureVerified,
+              cacheKinds.contains(.pagedAttention)
+        else { return false }
+        if modelCapabilities.modelFamily == "qwen",
+           cacheKinds.contains(.recurrentMamba),
+           !cacheKinds.contains(where: \.hasSlidingWindow) {
+            return true
+        }
+        if modelCapabilities.modelFamily == "gpt_oss",
+           cacheKinds.contains(where: \.hasSlidingWindow),
+           !cacheKinds.contains(.recurrentMamba) {
+            return true
+        }
+        return false
     }
 
     private static func repeatedProbeTokens(_ seed: [Int], targetCount: Int) -> [Int] {
@@ -2229,13 +2249,16 @@ actor ModelRuntime: ModelRuntimeServing {
         // family/architecture guesswork. That is not hypothetical here — the
         // listed Qwen3.x hybrids passed exact serial-vs-shared-forward parity
         // across the production 512-token prefill boundary, plus batched row
-        // isolation and the campaign leftovers gates. Non-hybrid Qwen models do
-        // not appear here; they are admitted by the base `KVCacheSimple`
-        // allowlist. Adding a future measured hybrid is one entry here plus the
-        // matching SPEC-039 line. The runtime parity/MoE probes still gate every
-        // attach; this only lets a measured hybrid be evaluated instead of
-        // rejected outright as an unproven `mixed` class.
+        // isolation and the campaign leftovers gates. The gpt-oss 120b entry is
+        // the separately measured sliding-window/full-attention tuple proven in
+        // #1780; it does not admit the 20b fixture or the gpt_oss family. Non-
+        // hybrid Qwen models are admitted by the base `KVCacheSimple` allowlist.
+        // Adding a future measured mixed identity is one entry here plus the
+        // matching SPEC-039 line. The runtime parity/isolation probes still gate
+        // every attach; this only lets a measured mixed tuple be evaluated
+        // instead of rejected outright as an unproven `mixed` class.
         let hybridArchitectureAllowlist: [String: String] = [
+            "openai/gpt-oss-120b": "GptOssForCausalLM",
             "qwen/qwen3.5-27b": "Qwen3_5ForConditionalGeneration",
             "qwen/qwen3.5-35b-a3b": "Qwen3_5MoeForConditionalGeneration",
             "qwen/qwen3.6-27b": "Qwen3_5ForConditionalGeneration",
