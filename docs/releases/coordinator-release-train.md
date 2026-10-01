@@ -187,6 +187,7 @@ release. The table below tracks changes for the next runtime cut.
 | Net change in coordinator / gateway / Pearl assets | Status | PR |
 |---|---|---|
 | The authenticated gateway default output cap is 32,768 tokens while the demo surface remains capped at 512. Served buyer documentation and OpenRouter model metadata now report the effective configured/live-context limit consistently; SPEC-006 is v0.9.42. | merged `d5767b4a5` 2026-09-30 | #1801 |
+| Gateway demand telemetry for #1807 records attempted demand, served/unmet/capacity/substitution outcomes, privacy-bucketed buyer/model/provider fields, timing/usage metrics, 14-day retention pruning, and demand summaries. Release handoff: `docs/releases/gateway-release-1807-demand-telemetry.md`. | merged `2be9975a6` 2026-10-01; deploy pending | #1812 |
 
 ## Open Pearl actions (not new code)
 

@@ -62,15 +62,24 @@ because request telemetry has landed.
    `Ministral-3-3B-Instruct-2512-4bit` on 8GB on the designated Mac Studio.
    Do not run the hardware campaign on `Augustas-Air.local`, and do not connect
    an unreleased local CLI to the live Malibu coordinator.
-3. If validation passes, prepare the reversible catalog allocation:
+3. Preserve limited Llama coverage during the trial:
+   keep Llama 3.1 8B on part of the 16GB fleet, keep minimal Llama 3.2 3B
+   coverage for compatibility and existing buyers, do not add Qwen3 8B while
+   its OpenRouter route is scheduled for 2026-10-09 deprecation, and do not
+   prioritize Gemma 3 4B or Qwen2.5-Coder 7B without new Malibu demand evidence.
+4. If validation passes, prepare the reversible trial allocation:
    16GB at 60% Qwen3.5-9B / 40% Llama 3.1 8B, and 8GB at 80%
-   Ministral 3 3B / 20% Llama 3.2 3B.
-4. Sign and publish catalog changes only after the validation evidence and
-   rollback plan are attached to the issue/PR.
-5. Start the 14-day observation window only after candidates pass, the
+   Ministral 3 3B / 20% Llama 3.2 3B. Keep one inference slot per machine
+   initially, advertise only validated context limits, and attach the rollback
+   evidence package before signing.
+5. Hand off catalog signing and publication only after the validation evidence,
+   Llama coverage floor, allocation math, and rollback plan are attached to the
+   issue/PR. The signing session owns the signed catalog bytes and release
+   mechanics; this telemetry runbook owns the measurement and evidence gates.
+6. Start the 14-day observation window only after candidates pass, the
    allocation is live and stable, telemetry is complete enough, and provider
    availability is high.
-6. Publish the dated decision artifact with the raw window, queries,
+7. Publish the dated decision artifact with the raw window, queries,
    exclusions, gaps, and recommendation before pruning or reallocating Llama
    coverage.
 
