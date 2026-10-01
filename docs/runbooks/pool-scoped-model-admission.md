@@ -81,6 +81,11 @@ acceptance, binding, routing, the pool `/v1/models` view, and provider status.
 Existing route snapshots keep their recorded prices. A binding whose rates
 fall outside tightened bounds stops routing (and its status stops claiming
 `pool_attested_earning`) until the creator publishes conforming rates.
+An applied reload logs `trusted pools pool-model bounds and owner authority
+reloaded` with `trusted_pools_provider_owner_account_ids_applied`, `_changed`,
+`_providers` (count) and `_sha256` (digest of the provider -> account map; no
+account id is logged). Compare the digest before and after to confirm an
+owner remap took effect; a rejected reload logs the rejection instead.
 
 **Owner accounts for attested members (SPEC-042-R016).** A loopback session
 of a member the creator does not own binds only when the core's
