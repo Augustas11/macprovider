@@ -29,6 +29,15 @@ nargs() { echo "$common -chunk-delay-ms ${1:-100} -trusted-pool -model-id e2e-ml
 restart_member() { fakeprov_args "$1" "$2"; systemctl restart e2e-fakeprov@$1; sleep 6; }
 events_since() { csql "SELECT id, provider_id, state, reason_code, binding_scope, pool_manifest_version FROM model_admission_events WHERE provider_id='$1' AND id > $2 ORDER BY id"; }
 max_event() { csql "SELECT COALESCE(MAX(id),0) FROM model_admission_events"; }
+# reoffer_5: runbook section 4 "after the new window is active, the member
+# submits (or keeps) its offer and restarts serve so its session re-evaluates it".
+reoffer_5() {
+  systemctl restart e2e-fakeprov@5; sleep 6
+  /opt/macprovider/e2e-fakeprov offer -coord-http http://127.0.0.1:8444 -provider-id e2e-prov-5 -token-file /root/e2e/token-e2e-prov-5 \
+    -admission-key-file /root/e2e/admission-key-5 -runtime-source llamacpp_loopback -served-model-ref gguf-g-model -catalog-key "" \
+    -artifact-hash-algorithm macprovider.gguf-file.v1 -artifact-hash $H_GGUF -out "$EV/$1.json" >"$EV/$1.txt" 2>&1
+  sleep 3
+}
 # sign_change <pool> <label>: sign the staged change now; echo its version.
 sign_change() {
   local out; out="$($PM manifest "$1" 2>&1)"; echo "$out" >"$EV/$2.manifest.txt"
@@ -75,6 +84,7 @@ G_RATES=$G_RATES2
 e0="$(max_event)"
 $PM stage Q --attest "$MEMBER_ACCT=llamacpp_loopback" >/dev/null
 v="$(sign_change Q attest)"; wait_window Q "$v"; sleep 5
+reoffer_5 offer-5-attested
 events_since e2e-prov-5 "$e0" >"$EV/attest-events.txt"
 grep -q '|catalog_priced|pool_manifest_\(re\)\?bound|pool|' "$EV/attest-events.txt" \
   && result S5-attested-member-binds PASS "$(tail -1 "$EV/attest-events.txt")" \
@@ -98,7 +108,8 @@ pool_check S5-attestation-removed-new-refused "$run" --refused
 
 # ---- d. member revocation in flight (re-attest first) ------------------------------------------
 $PM stage Q --attest "$MEMBER_ACCT=llamacpp_loopback" >/dev/null
-v="$(sign_change Q reattest)"; wait_window Q "$v"; sleep 8
+v="$(sign_change Q reattest)"; wait_window Q "$v"; sleep 5
+reoffer_5 offer-5-reattested
 run="$(run_id s5rev)"
 pool_traffic "$run" Q "$MG" llamacpp "st=2" 2 &
 bg=$!; sleep 5
