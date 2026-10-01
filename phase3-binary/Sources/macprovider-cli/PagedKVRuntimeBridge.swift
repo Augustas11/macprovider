@@ -564,7 +564,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         /// evaluated as the first column of this verification round.
         let currentToken: Int
         let targetState: MTPPackedVerificationRowState
-        let draftTokens: MLXArray?
+        /// Proposal IDs verified this round; the accepted prefix advances the
+        /// drafter at finalize.
+        let proposalTokens: [Int]
         let layers: [NativeMTPPendingLayerResolution]
     }
 
@@ -582,9 +584,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     private var rows: [String: RowState] = [:]
     private var decodeSession: DecodeSession?
     private var nativeMTPPendingTransactions: [String: NativeMTPPendingTransaction] = [:]
-    private var nativeMTPTargetStates: [String: MTPPackedVerificationRowState] = [:]
+    /// Row-owned drafter state. Only prompt prefill and a committed finalize
+    /// change it, so an aborted or cancelled round leaves the pre-round
+    /// state in place.
     private var nativeMTPDrafterStates: [String: MTPDrafterState] = [:]
-    private var nativeMTPDraftTokens: [String: MLXArray] = [:]
+    /// Each row's next depth-one proposal, read back with the round that
+    /// produced it so proposal needs no GPU work.
+    private var nativeMTPDrafterSeedTokens: [String: Int] = [:]
     private var activeOperations = 0
     private var cancelRequested = false
     private var cancellationWaiters: [CheckedContinuation<Void, Never>] = []
@@ -894,63 +900,30 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
         defer { endOperation() }
 
-        return try await container.perform(nonSendable: inputs) { (targetContext: ModelContext, inputs: [ContinuousBatchNativeMTPProposalInput]) in
-            var proposals: [String: [Int]] = [:]
-            for input in inputs {
-                guard input.maximumProposalDepth > 0 else {
-                    proposals[input.requestID] = []
-                    continue
-                }
-                guard let targetState = self.nativeMTPTargetState(for: input.requestID),
-                      let drafterState = self.nativeMTPDrafterState(for: input.requestID)
-                else {
-                    proposals[input.requestID] = []
-                    continue
-                }
-                let proposalResult = try await drafterContainer.perform(
-                    nonSendable: (input, targetState, drafterState, targetContext.model)
-                ) { drafterContext, values in
-                    let (input, targetState, drafterState, targetModel) = values
-                    let blockSize = input.maximumProposalDepth + 1
-                    let sampler = GenerateParameters(temperature: 0).sampler()
-                    guard let statefulDrafter = drafterContext.model as? any StatefulMTPDrafterModel else {
-                        throw ContinuousBatchSchedulerError.unsupported("native_mtp_stateful_drafter_required")
-                    }
-                    guard NativeMTPProposalBounds.fits(
-                        maximumProposalDepth: input.maximumProposalDepth,
-                        maximumBlockSize: statefulDrafter.maximumBlockSize
-                    ) else {
-                        throw ContinuousBatchSchedulerError.unsupported("native_mtp_proposal_depth_exceeds_drafter")
-                    }
-                    var state = drafterState
-                    let lastToken = MLXArray([Int32(input.currentToken)])
-                    let hiddenIndex = max(0, targetState.lastHidden.dim(1) - 1)
-                    let lastHidden = targetState.lastHidden[0..., hiddenIndex ..< (hiddenIndex + 1), 0...]
-                    let draftTokens = statefulDrafter.draftBlock(
-                        target: targetModel,
-                        lastToken: lastToken,
-                        lastHidden: lastHidden,
-                        sharedKV: targetState.sharedKV,
-                        positionDeltas: targetState.positionDeltas,
-                        queryOffset: targetState.queryOffset,
-                        blockSize: blockSize,
-                        state: &state,
-                        sampler: sampler
-                    )
-                    eval(draftTokens)
-                    self.rollbackTentativeNativeMTPDrafterWrites(&state)
-                    return (
-                        proposals: Array(draftTokens.asArray(Int.self).prefix(input.maximumProposalDepth)),
-                        state: state,
-                        draftTokens: draftTokens
-                    )
-                }
-                self.storeNativeMTPDrafterState(proposalResult.state, for: input.requestID)
-                self.storeNativeMTPDraftTokens(proposalResult.draftTokens, for: input.requestID)
-                proposals[input.requestID] = proposalResult.proposals
+        // The drafter already proposed each row's next token in the round
+        // that last advanced it (prefill or finalize), so proposal is a host
+        // lookup. The drafter is consulted only to bound the depth.
+        let maximumBlockSize = try await drafterContainer.perform { context -> Int? in
+            guard context.model is any MTPPackedStatefulDrafterModel else {
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_drafter_required")
             }
-            return proposals
+            return context.model.maximumBlockSize
         }
+        var proposals: [String: [Int]] = [:]
+        for input in inputs {
+            guard input.maximumProposalDepth > 0 else {
+                proposals[input.requestID] = []
+                continue
+            }
+            guard NativeMTPProposalBounds.fits(
+                maximumProposalDepth: input.maximumProposalDepth,
+                maximumBlockSize: maximumBlockSize
+            ) else {
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_proposal_depth_exceeds_drafter")
+            }
+            proposals[input.requestID] = nativeMTPDrafterSeedToken(for: input.requestID).map { [$0] } ?? []
+        }
+        return proposals
     }
 
     func verifyNativeMTPPackedRound(
@@ -1012,13 +985,6 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     rows: output.rows
                 ).map { ($0.0, $0.1) }
             )
-            self.replaceNativeMTPTargetStates(
-                requestIDs: inputs.map(\.requestID),
-                states: Dictionary(uniqueKeysWithValues: output.rows.map { row in
-                    let input = inputs[row.map.rowIndex]
-                    return (input.requestID, row.continuationState)
-                })
-            )
             self.replaceNativeMTPPendingTransactions(
                 requestIDs: inputs.map(\.requestID),
                 transactions: pendingByRequestID.mapValues { $0 }
@@ -1052,6 +1018,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         defer { endOperation() }
         try await container.perform(nonSendable: inputs) { context, inputs in
             if inputs.allSatisfy({ !$0.shouldCommit }) {
+                // Proposal never mutates drafter state, so an aborted round
+                // only drops its staged target transactions.
                 let transactions = self.consumeAvailableNativeMTPPendingTransactions(for: inputs)
                 if !transactions.isEmpty {
                     let presentInputs = inputs.filter { transactions[$0.requestID] != nil }
@@ -1059,37 +1027,44 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         presentInputs,
                         transactions: transactions)
                 }
-                for input in inputs {
-                    self.rollbackNativeMTPDrafterState(for: input.requestID)
-                }
                 return
             }
             let transactions = try self.consumeNativeMTPPendingTransactions(for: inputs)
-            let byRequestID = Dictionary(uniqueKeysWithValues: inputs.map { ($0.requestID, $0) })
             try self.validateNativeMTPFinalizeInputs(inputs, transactions: transactions)
+            let committing = inputs.filter(\.shouldCommit).compactMap { input in
+                transactions[input.requestID].map { (input, $0) }
+            }
+            // Advance every committing row's drafter with one packed forward
+            // that also proposes each row's next token. It validates every
+            // row before staging anything, and mutates no stored state.
+            let advance = try await self.advanceNativeMTPDrafters(
+                targetModel: context.model,
+                rows: committing
+            )
             // Publish every committing row's target KV and recurrent state for
-            // all layers, then evaluate them together: one GPU wait per round
-            // instead of one per row per layer.
-            var stagedTargetState: [MLXArray] = []
-            for (requestID, transaction) in transactions {
-                guard let input = byRequestID[requestID], input.shouldCommit else { continue }
+            // all layers, then evaluate them together with the drafter
+            // advance: one GPU wait per round instead of one per row per layer.
+            var staged: [MLXArray] = []
+            for (input, transaction) in committing {
                 for layer in transaction.layers {
-                    stagedTargetState += try layer.stageCommit(inputCount: input.committedInputTokenCount)
+                    staged += try layer.stageCommit(inputCount: input.committedInputTokenCount)
                 }
             }
-            eval(stagedTargetState)
-            for (requestID, transaction) in transactions {
-                guard let input = byRequestID[requestID] else { continue }
-                guard input.shouldCommit else {
-                    self.rollbackNativeMTPDrafterState(for: requestID)
-                    continue
-                }
-                try await self.commitNativeMTPDrafterState(
-                    targetModel: context.model,
-                    input: input,
-                    transaction: transaction
+            if let advance {
+                staged += advance.states.flatMap { $0.cache.flatMap(\.state) }
+                staged.append(advance.proposals)
+            }
+            eval(staged)
+            if let advance {
+                let seeds = advance.proposals.asType(.int32).asArray(Int32.self).map(Int.init)
+                self.storeNativeMTPDrafterAdvance(
+                    requestIDs: committing.map(\.0.requestID),
+                    states: advance.states,
+                    seedTokens: seeds
                 )
-                self.invalidateDecodeSession(containing: requestID)
+            }
+            for (input, _) in committing {
+                self.invalidateDecodeSession(containing: input.requestID)
             }
         }
     }
@@ -1241,9 +1216,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             let handlesToDiscard = rows.compactMap { Self.pagedAttentionCaches(in: $0.value.caches).first?.binding.handle }
             rows.removeAll()
             nativeMTPPendingTransactions.removeAll()
-            nativeMTPTargetStates.removeAll()
             nativeMTPDrafterStates.removeAll()
-            nativeMTPDraftTokens.removeAll()
+            nativeMTPDrafterSeedTokens.removeAll()
             if activeOperations == 0 {
                 lock.unlock()
                 handlesToDiscard.forEach { contiguousCacheBridge?.discardContiguousCache(handle: $0) }
@@ -1539,62 +1513,29 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         return result
     }
 
-    private func nativeMTPTargetState(for requestID: String) -> MTPPackedVerificationRowState? {
-        lock.lock()
-        defer { lock.unlock() }
-        return nativeMTPTargetStates[requestID]
-    }
-
     private func nativeMTPDrafterState(for requestID: String) -> MTPDrafterState? {
         lock.lock()
         defer { lock.unlock() }
         return nativeMTPDrafterStates[requestID]
     }
 
-    private func storeNativeMTPDrafterState(_ state: MTPDrafterState, for requestID: String) {
-        lock.lock()
-        nativeMTPDrafterStates[requestID] = state
-        lock.unlock()
-    }
-
-    private func storeNativeMTPDraftTokens(_ tokens: MLXArray, for requestID: String) {
-        lock.lock()
-        nativeMTPDraftTokens[requestID] = tokens
-        lock.unlock()
-    }
-
-    private func consumeNativeMTPDraftTokens(for requestID: String) -> MLXArray? {
+    private func nativeMTPDrafterSeedToken(for requestID: String) -> Int? {
         lock.lock()
         defer { lock.unlock() }
-        return nativeMTPDraftTokens.removeValue(forKey: requestID)
+        return nativeMTPDrafterSeedTokens[requestID]
     }
 
-    private func replaceNativeMTPTargetStates(
+    private func storeNativeMTPDrafterAdvance(
         requestIDs: [String],
-        states: [String: MTPPackedVerificationRowState?]
+        states: [MTPDrafterState],
+        seedTokens: [Int?]
     ) {
         lock.lock()
-        for requestID in requestIDs {
-            nativeMTPTargetStates[requestID] = states[requestID] ?? nil
+        for (index, requestID) in requestIDs.enumerated() {
+            nativeMTPDrafterStates[requestID] = states[index]
+            nativeMTPDrafterSeedTokens[requestID] = seedTokens[index]
         }
         lock.unlock()
-    }
-
-    private func rollbackTentativeNativeMTPDrafterWrites(_ state: inout MTPDrafterState) {
-        guard state.proposalAppended > 0 else { return }
-        let trimmed = trimPromptCache(state.cache, numTokens: state.proposalAppended)
-        state.nextPosition = max(0, state.nextPosition - trimmed)
-        state.proposalAppended = 0
-    }
-
-    private func rollbackNativeMTPDrafterState(for requestID: String) {
-        lock.lock()
-        var state = nativeMTPDrafterStates[requestID]
-        nativeMTPDraftTokens.removeValue(forKey: requestID)
-        lock.unlock()
-        guard var state else { return }
-        rollbackTentativeNativeMTPDrafterWrites(&state)
-        storeNativeMTPDrafterState(state, for: requestID)
     }
 
     private func prepareNativeMTPDrafterState(
@@ -1614,7 +1555,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         else {
             throw ContinuousBatchSchedulerError.unsupported("native_mtp_invalid_prompt_hidden_state")
         }
-        let state = try await drafterContainer.perform(
+        let prepared = try await drafterContainer.perform(
             nonSendable: (targetModel, prompt, targetHidden, firstBonusToken, output.state)
         ) { drafterContext, values in
             let (targetModel, prompt, targetHidden, firstBonusToken, outputState) = values
@@ -1632,50 +1573,48 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 state: &state,
                 sampler: sampler
             )
-            eval(state.cache)
-            return state
+            eval(state.cache.flatMap(\.state) + (state.seedToken.map { [$0] } ?? []))
+            return (state: state, seed: state.seedToken?.asType(.int32).asArray(Int32.self).first.map(Int.init))
         }
-        storeNativeMTPDrafterState(state, for: requestID)
+        storeNativeMTPDrafterAdvance(requestIDs: [requestID], states: [prepared.state], seedTokens: [prepared.seed])
     }
 
-    private func commitNativeMTPDrafterState(
+    /// One packed drafter forward for every committing row. Returns `nil`
+    /// when this backend has no drafter. Fails closed, before any state is
+    /// staged, when a committing row has no drafter state.
+    private func advanceNativeMTPDrafters(
         targetModel: any LanguageModel,
-        input: ContinuousBatchNativeMTPFinalizeInput,
-        transaction: NativeMTPPendingTransaction
-    ) async throws {
-        guard let drafterContainer else { return }
-        guard let finalTokenID = input.acceptedTokenIDs.last else { return }
-        let state = try await drafterContainer.perform(
-            nonSendable: (input, transaction, targetModel, finalTokenID)
-        ) { drafterContext, values in
-            let (input, transaction, targetModel, finalTokenID) = values
-            guard let statefulDrafter = drafterContext.model as? any StatefulMTPDrafterModel else {
-                throw ContinuousBatchSchedulerError.unsupported("native_mtp_stateful_drafter_required")
-            }
-            let sampler = GenerateParameters(temperature: 0).sampler()
-            var state: MTPDrafterState
-            if let existing = self.nativeMTPDrafterState(for: input.requestID) {
-                state = existing
-            } else {
+        rows: [(ContinuousBatchNativeMTPFinalizeInput, NativeMTPPendingTransaction)]
+    ) async throws -> MTPPackedDrafterAdvanceResult? {
+        guard let drafterContainer, !rows.isEmpty else { return nil }
+        let advanceRows = try rows.map { input, transaction -> MTPPackedDrafterAdvanceRow in
+            guard let state = nativeMTPDrafterState(for: input.requestID) else {
                 throw ContinuousBatchSchedulerError.unsupported("native_mtp_missing_drafter_state")
             }
-
-            let draftTokens = transaction.draftTokens
-                ?? MLXArray([Int32](), [1, 0])
-            statefulDrafter.commitDrafterState(
-                target: targetModel,
+            guard let finalTokenID = input.acceptedTokenIDs.last else {
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_finalize_accepted_tokens_mismatch")
+            }
+            return MTPPackedDrafterAdvanceRow(
                 targetHidden: transaction.targetState.lastHidden,
-                draftTokens: draftTokens,
-                acceptedCount: input.committedProposalTokenCount,
-                finalToken: MLXArray([Int32(finalTokenID)]),
+                acceptedTokens: Array(transaction.proposalTokens.prefix(input.committedProposalTokenCount)),
+                finalToken: finalTokenID,
                 positionDeltas: transaction.targetState.positionDeltas,
-                state: &state,
-                sampler: sampler
+                state: state
             )
-            eval(state.cache)
-            return state
         }
-        storeNativeMTPDrafterState(state, for: input.requestID)
+        return try await drafterContainer.perform(
+            nonSendable: (advanceRows, targetModel)
+        ) { drafterContext, values in
+            let (advanceRows, targetModel) = values
+            guard let drafter = drafterContext.model as? any MTPPackedStatefulDrafterModel else {
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_drafter_required")
+            }
+            return try drafter.advanceAndProposePacked(
+                target: targetModel,
+                rows: advanceRows,
+                sampler: GenerateParameters(temperature: 0).sampler()
+            )
+        }
     }
 
     private func pendingNativeMTPTransactions(
@@ -1707,7 +1646,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     proposalTokenCount: input.proposalTokens.count,
                     currentToken: input.currentToken,
                     targetState: continuationState,
-                    draftTokens: self.consumeNativeMTPDraftTokens(for: input.requestID),
+                    proposalTokens: input.proposalTokens,
                     layers: layers
                 )
             )
@@ -1765,9 +1704,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
 
     private func removeNativeMTPRowState(for requestID: String) {
         lock.lock()
-        nativeMTPTargetStates.removeValue(forKey: requestID)
         nativeMTPDrafterStates.removeValue(forKey: requestID)
-        nativeMTPDraftTokens.removeValue(forKey: requestID)
+        nativeMTPDrafterSeedTokens.removeValue(forKey: requestID)
         lock.unlock()
     }
 

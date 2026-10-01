@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import MLX
+import MLXLLM
 import MLXLMCommon
 import MLXNN
 @testable import MacProviderCore
@@ -999,6 +1000,179 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(model.forwardCallCount(), 1)
         XCTAssertEqual(drafter.preparedPromptWidths(), [3])
         XCTAssertEqual(drafter.preparedHiddenWidths(), [3])
+    }
+
+    /// End to end through the scheduler with a real (tiny, random-weight)
+    /// hybrid Qwen3.5 target and its real MTP drafter: every native round is
+    /// one packed verify, one staged target commit, and one packed drafter
+    /// advance. Rows with different prompt lengths, depth-one rows beside a
+    /// forced depth-zero row and an ordinary row, a row that leaves early, a
+    /// row that joins mid-flight, and a row cancelled mid-flight must each
+    /// emit exactly the serial ordinary greedy tokens for their own prompt.
+    func testRealQwen35PackedNativeMTPRowsMatchSerialOrdinaryGreedy() async throws {
+        try requireMetal()
+
+        let configuration = try JSONDecoder().decode(
+            Qwen35TextConfiguration.self,
+            from: Data(Self.tinyQwen35HybridConfiguration.utf8)
+        )
+        MLXRandom.seed(1770)
+        let target = Qwen35TextModel(configuration)
+        let drafter = Qwen35MTPDraftModel(configuration)
+        eval(target, drafter)
+
+        func serialGreedy(_ prompt: [Int], count: Int) -> [Int] {
+            let cache = target.newCache(parameters: nil)
+            var logits = target(MLXArray(prompt.map(Int32.init)).reshaped(1, prompt.count), cache: cache)
+            var tokens: [Int] = []
+            for _ in 0 ..< count {
+                let next = argMax(logits[0, -1], axis: -1).item(Int.self)
+                tokens.append(next)
+                logits = target(MLXArray([Int32(next)]).reshaped(1, 1), cache: cache)
+            }
+            return tokens
+        }
+
+        let descriptor = Self.bridgeDescriptor(maxPhysicalBlocks: 64)
+        let backend = RuntimeBridgeRecordingNativeMTPBackend(PagedKVSharedForwardBackend(
+            container: ModelContainer(context: ModelContext(
+                configuration: ModelConfiguration(id: descriptor.modelID),
+                model: target,
+                processor: StandInUserInputProcessor(),
+                tokenizer: RuntimeBridgeFakeTokenizer()
+            )),
+            descriptor: descriptor,
+            layerCount: 2,
+            cacheKinds: [.recurrentMamba, .pagedAttention],
+            drafterContainer: MTPDrafterContainer(context: MTPDrafterContext(
+                configuration: ModelConfiguration(id: "mtp"),
+                model: drafter
+            ))
+        ))
+        let scheduler = try Self.makeScheduler(maxActiveRows: 6, backend: backend, maxPhysicalBlocks: 64)
+        let fence = Self.nativeMTPFence()
+        func native(_ id: String, _ prompt: [Int], _ maxTokens: Int, forcedDepthZero: Bool = false)
+            -> ContinuousBatchSchedulerRequest
+        {
+            ContinuousBatchSchedulerRequest(
+                id: id,
+                conversationKey: "",
+                promptTokens: prompt,
+                maxOutputTokens: maxTokens,
+                samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: id),
+                temperature: 0,
+                topP: 1,
+                decodePath: .nativeMTP,
+                nativeMTPMaximumProposalDepth: 1,
+                nativeMTPCompleteWindowBytesByDepth: [16, 16],
+                nativeMTPTupleFence: fence,
+                nativeMTPAdaptationDirective: forcedDepthZero
+                    ? NativeMTPAdaptationDirective(generation: 1, forcedDepth: 0, runtimeFailureReason: nil)
+                    : nil
+            )
+        }
+
+        let prompts: [String: [Int]] = [
+            "long": [1, 5, 2, 7, 3, 6, 4, 0, 2],
+            "short": [3, 1],
+            "zero": [6, 2, 5, 1],
+            "early": [7, 7, 1, 4, 2, 6],
+            "ordinary": [2, 4, 6, 1, 3],
+            "joiner": [5, 0, 3],
+            "cancelled": [4, 6, 0, 2, 5, 1, 7],
+        ]
+        let budgets = ["long": 14, "short": 12, "zero": 10, "early": 4, "ordinary": 9, "joiner": 10, "cancelled": 14]
+        let joinerTask = RuntimeBridgeTaskBox()
+        let longTask = Task {
+            try await scheduler.submit(native("long", prompts["long"]!, budgets["long"]!)) { event in
+                // A native row joins while the first cohort is mid-flight.
+                if event.tokenIndex == 3 {
+                    joinerTask.start {
+                        try await scheduler.submit(native("joiner", prompts["joiner"]!, budgets["joiner"]!))
+                    }
+                }
+            }
+        }
+        let shortTask = Task { try await scheduler.submit(native("short", prompts["short"]!, budgets["short"]!)) }
+        let zeroTask = Task {
+            try await scheduler.submit(native("zero", prompts["zero"]!, budgets["zero"]!, forcedDepthZero: true))
+        }
+        let earlyTask = Task { try await scheduler.submit(native("early", prompts["early"]!, budgets["early"]!)) }
+        let ordinaryTask = Task {
+            try await scheduler.submit(Self.schedulerRequest(
+                id: "ordinary",
+                promptTokens: prompts["ordinary"]!,
+                maxOutputTokens: budgets["ordinary"]!
+            ))
+        }
+        // Cancel one row while its packed verify is in flight, so the same
+        // finalize commits the other rows and aborts this one.
+        let cancelArmed = RuntimeBridgeFlag()
+        let cancelFired = RuntimeBridgeFlag()
+        backend.onVerify = { requestIDs in
+            guard requestIDs.contains("cancelled"), requestIDs.count > 1,
+                  cancelArmed.isSet, cancelFired.setIfUnset()
+            else { return }
+            await scheduler.cancel(requestID: "cancelled")
+        }
+        let cancelledTask = Task {
+            try await scheduler.submit(native("cancelled", prompts["cancelled"]!, budgets["cancelled"]!)) { event in
+                if event.tokenIndex == 2 {
+                    _ = cancelArmed.setIfUnset()
+                }
+            }
+        }
+
+        var results: [String: ContinuousBatchSchedulerResult] = [:]
+        results["long"] = try await longTask.value
+        // Fallback so a failing run reports instead of waiting forever; the
+        // mid-flight join itself is asserted below.
+        let joinedMidFlight = joinerTask.isStarted
+        joinerTask.start {
+            try await scheduler.submit(native("joiner", prompts["joiner"]!, budgets["joiner"]!))
+        }
+        results["short"] = try await shortTask.value
+        results["zero"] = try await zeroTask.value
+        results["early"] = try await earlyTask.value
+        results["ordinary"] = try await ordinaryTask.value
+        results["cancelled"] = try await cancelledTask.value
+        results["joiner"] = try await joinerTask.value()
+
+        for id in ["long", "short", "zero", "early", "ordinary", "joiner"] {
+            let result = try XCTUnwrap(results[id])
+            XCTAssertEqual(result.terminalStatus, .length, id)
+            XCTAssertEqual(
+                result.generatedTokens,
+                serialGreedy(prompts[id]!, count: budgets[id]!),
+                "\(id) diverged from serial ordinary greedy"
+            )
+        }
+        XCTAssertTrue(joinedMidFlight, "joiner must be admitted while the first cohort is decoding")
+        let cancelled = try XCTUnwrap(results["cancelled"])
+        XCTAssertEqual(cancelled.terminalStatus, .cancelled)
+        XCTAssertLessThan(cancelled.generatedTokens.count, budgets["cancelled"]!)
+        XCTAssertEqual(
+            cancelled.generatedTokens,
+            Array(serialGreedy(prompts["cancelled"]!, count: budgets["cancelled"]!)
+                .prefix(cancelled.generatedTokens.count))
+        )
+
+        // The run exercised packed rounds with several native rows, accepted
+        // and rejected proposals, and depth-zero rows beside depth-one rows.
+        let finalized = backend.finalizedRounds()
+        let committed = finalized.flatMap { $0 }.filter(\.shouldCommit)
+        XCTAssertGreaterThan(finalized.map(\.count).max() ?? 0, 2)
+        XCTAssertTrue(committed.contains { $0.proposalTokenCount == 1 && $0.committedProposalTokenCount == 1 })
+        XCTAssertTrue(committed.contains { $0.proposalTokenCount == 1 && $0.committedProposalTokenCount == 0 })
+        XCTAssertTrue(finalized.contains { round in
+            round.contains { $0.proposalTokenCount == 0 } && round.contains { $0.proposalTokenCount == 1 }
+        })
+        XCTAssertTrue(cancelFired.isSet)
+        XCTAssertTrue(finalized.contains { round in
+            round.contains { $0.requestID == "cancelled" && !$0.shouldCommit && $0.acceptedTokenIDs.isEmpty }
+                && round.contains { $0.requestID != "cancelled" && $0.shouldCommit }
+        }, "cancellation must abort only the cancelled row inside a committing round")
+        XCTAssertEqual(backend.base.retainedRowCountForTest(), 0)
     }
 
     func testNativeMTPIntegrityProbeBlocksBuyerAdmissionAndReleasesAfterCompletion() async throws {
@@ -2292,11 +2466,12 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
 
     private static func makeScheduler(
         maxActiveRows: Int,
-        backend: any ContinuousBatchSchedulerBackend
+        backend: any ContinuousBatchSchedulerBackend,
+        maxPhysicalBlocks: Int = 16
     ) throws -> ContinuousBatchScheduler {
         let descriptor = PagedKVDescriptor(
             blockSizeTokens: 4,
-            maxPhysicalBlocks: 16,
+            maxPhysicalBlocks: maxPhysicalBlocks,
             modelID: "mlx-community/Qwen-Test",
             modelSHA256: String(repeating: "a", count: 64),
             tokenizerSHA256: nil,
@@ -2334,7 +2509,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
                     weightsGeneration: 1
                 )
             ),
-            allocator: try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16),
+            allocator: try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: maxPhysicalBlocks),
             backend: backend,
             replayAuthority: RuntimeBridgeReplayAuthority()
         )
@@ -2403,6 +2578,41 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         ]
         return try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     }
+
+    /// Two-layer hybrid (one gated-delta recurrent layer, one full-attention
+    /// layer) with a one-layer MTP head, small enough for unit tests. The
+    /// gated-delta Metal kernel needs key heads of a multiple of 32.
+    private static let tinyQwen35HybridConfiguration = """
+        {
+          "model_type": "qwen3_5_text",
+          "hidden_size": 16,
+          "num_hidden_layers": 2,
+          "intermediate_size": 32,
+          "num_attention_heads": 2,
+          "num_key_value_heads": 1,
+          "head_dim": 8,
+          "linear_num_value_heads": 2,
+          "linear_num_key_heads": 1,
+          "linear_key_head_dim": 32,
+          "linear_value_head_dim": 32,
+          "linear_conv_kernel_dim": 2,
+          "rms_norm_eps": 1e-6,
+          "vocab_size": 8,
+          "rope_theta": 100000.0,
+          "partial_rotary_factor": 0.25,
+          "max_position_embeddings": 128,
+          "tie_word_embeddings": true,
+          "attention_bias": false,
+          "full_attention_interval": 2,
+          "mtp_num_hidden_layers": 1,
+          "mtp_use_dedicated_embeddings": false,
+          "rope_parameters": {
+            "type": "default",
+            "rope_theta": 100000.0,
+            "partial_rotary_factor": 0.25
+          }
+        }
+        """
 
     private static func bridgeDescriptor(blockSizeTokens: Int = 4, maxPhysicalBlocks: Int = 16) -> PagedKVDescriptor {
         PagedKVDescriptor(
@@ -2708,6 +2918,166 @@ private final class RuntimeBridgeFakeModel: Module, LanguageModel, KVCacheDimens
         lock.lock()
         defer { lock.unlock() }
         return forwardCalls
+    }
+}
+
+/// Forwards to the real backend and records each native finalize batch.
+private final class RuntimeBridgeRecordingNativeMTPBackend: ContinuousBatchSchedulerBackend, @unchecked Sendable {
+    let base: PagedKVSharedForwardBackend
+    private let lock = NSLock()
+    private var finalized: [[ContinuousBatchNativeMTPFinalizeInput]] = []
+    private var verifyHook: (@Sendable ([String]) async -> Void)?
+
+    /// Runs before each packed verify with the round's request IDs.
+    var onVerify: (@Sendable ([String]) async -> Void)? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return verifyHook
+        }
+        set {
+            lock.lock()
+            verifyHook = newValue
+            lock.unlock()
+        }
+    }
+
+    init(_ base: PagedKVSharedForwardBackend) {
+        self.base = base
+    }
+
+    func finalizedRounds() -> [[ContinuousBatchNativeMTPFinalizeInput]] {
+        lock.lock()
+        defer { lock.unlock() }
+        return finalized
+    }
+
+    func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
+        try await base.prefill(rows: rows)
+    }
+
+    func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
+        try await base.decode(rows: rows)
+    }
+
+    func decodeLockstepWindow(
+        rows: [ContinuousBatchDecodeInput],
+        steps: Int
+    ) async throws -> [ContinuousBatchDecodeOutcome] {
+        try await base.decodeLockstepWindow(rows: rows, steps: steps)
+    }
+
+    func proposeNativeMTPPackedRound(
+        rows: [ContinuousBatchNativeMTPProposalInput]
+    ) async throws -> [String: [Int]]? {
+        try await base.proposeNativeMTPPackedRound(rows: rows)
+    }
+
+    func verifyNativeMTPPackedRound(
+        rows: [ContinuousBatchNativeMTPVerifyInput]
+    ) async throws -> [NativeMTPVerifiedRow] {
+        await onVerify?(rows.map(\.requestID))
+        return try await base.verifyNativeMTPPackedRound(rows: rows)
+    }
+
+    func finalizeNativeMTPPackedRound(rows: [ContinuousBatchNativeMTPFinalizeInput]) async throws {
+        lock.lock()
+        finalized.append(rows)
+        lock.unlock()
+        try await base.finalizeNativeMTPPackedRound(rows: rows)
+    }
+
+    func installRetainedPagedKVCache(
+        requestID: String,
+        handoff: PagedKVPagedCacheHandoff,
+        binding: PagedKVStorageBinding,
+        recurrentCheckpoint: RecurrentStateCheckpoint?
+    ) async throws {
+        try await base.installRetainedPagedKVCache(
+            requestID: requestID,
+            handoff: handoff,
+            binding: binding,
+            recurrentCheckpoint: recurrentCheckpoint
+        )
+    }
+
+    func commitTerminalKV(_ input: ContinuousBatchTerminalKVCommitInput) async throws {
+        try await base.commitTerminalKV(input)
+    }
+
+    func snapshotRecurrentState(requestID: String, tokenCount: Int) async -> RecurrentStateCheckpoint? {
+        await base.snapshotRecurrentState(requestID: requestID, tokenCount: tokenCount)
+    }
+
+    func materializeSerialConversationCache(
+        requestID: String,
+        binding: PagedKVStorageBinding,
+        tokenCount: Int,
+        recurrentCheckpoints: [RecurrentStateCheckpoint]
+    ) async throws -> ContinuousBatchSerialConversationCache? {
+        try await base.materializeSerialConversationCache(
+            requestID: requestID,
+            binding: binding,
+            tokenCount: tokenCount,
+            recurrentCheckpoints: recurrentCheckpoints
+        )
+    }
+
+    func finish(requestID: String) {
+        base.finish(requestID: requestID)
+    }
+
+    func cancelInFlight() async {
+        await base.cancelInFlight()
+    }
+}
+
+private final class RuntimeBridgeFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    var isSet: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    /// Sets the flag; returns true only for the call that set it.
+    func setIfUnset() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !value else { return false }
+        value = true
+        return true
+    }
+}
+
+/// Holds a task started from inside a token sink so the test can await it.
+private final class RuntimeBridgeTaskBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var task: Task<ContinuousBatchSchedulerResult, any Error>?
+
+    var isStarted: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return task != nil
+    }
+
+    func start(_ body: @escaping @Sendable () async throws -> ContinuousBatchSchedulerResult) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard task == nil else { return }
+        task = Task { try await body() }
+    }
+
+    func value() async throws -> ContinuousBatchSchedulerResult {
+        while true {
+            lock.lock()
+            let current = task
+            lock.unlock()
+            if let current { return try await current.value }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
     }
 }
 

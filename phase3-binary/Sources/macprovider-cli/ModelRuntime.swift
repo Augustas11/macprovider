@@ -8697,7 +8697,7 @@ actor ModelRuntime: ModelRuntimeServing {
             )
             try capturedArtifacts.revalidateAfterLoad()
             let drafterRuntimeObservation = await drafterContainer.perform { context -> (maximumBlockSize: Int?, stateLayerCount: Int?) in
-                let stateLayerCount = (context.model as? any StatefulMTPDrafterModel)?
+                let stateLayerCount = (context.model as? any MTPPackedStatefulDrafterModel)?
                     .makeState(parameters: nil)
                     .cache
                     .count
