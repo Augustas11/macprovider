@@ -404,8 +404,15 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
         hard_gate_runs = [run for pair in pairs for run in pair] + sustained_runs
         parity_mismatches = sum(int(r["parity_mismatch"]) for r in hard_gate_runs)
         non_native_admissions = sum(r["non_native_admissions"] for r in hard_gate_runs)
+        # A load-gate downgrade is a recorded admission decision, not a
+        # missing one.
         missing_native_admissions = sum(
-            max(0, r["native_requests"] - r["native_admissions"])
+            max(
+                0,
+                r["native_requests"]
+                - r["native_admissions"]
+                - (r["load_gate_downgrades"] if _is_count(r.get("load_gate_downgrades")) else 0),
+            )
             for r in hard_gate_runs
             if r.get("path") == "native_mtp"
         )

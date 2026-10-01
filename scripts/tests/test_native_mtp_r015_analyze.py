@@ -60,6 +60,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         cell = result["cells"][0]
         self.assertNotIn("native_mtp_proposals_missing", cell["hard_failures"])
         self.assertNotIn("native_mtp_target_forwards_missing", cell["hard_failures"])
+        self.assertNotIn("missing_native_admissions", cell["hard_failures"])
         self.assertEqual(cell["load_gate_downgrades"], 10)
 
     def test_ungated_run_without_proposals_still_fails(self):
