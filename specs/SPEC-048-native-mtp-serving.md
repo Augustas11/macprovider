@@ -157,7 +157,7 @@ If this spec and an owner spec conflict, the owner spec governs its domain and
 | NativeMTPCapability | Immutable load-time description binding model identity, MTP tensors, family adapter, depth, cache/state support, request-feature support, quantization, and runtime revision. |
 | Path sticky | After the first native proposal/target-state mutation (and therefore before any possible buyer-visible output), execution cannot switch between native MTP and ordinary decode. |
 | Qualified tuple | Exact hardware, OS/toolchain, provider release, MLX runtime, model/artifact, quantization, cache mode, MTP depth, slot-count, and native active-row bound combination covered by evidence. |
-| Native active-row bound | Signed per-tuple `max_native_active_rows`, `1 <= bound <= qualified_slots`: the largest number of concurrently active decode rows, native and ordinary together, at which the tuple's evidence shows native MTP beating ordinary decode. |
+| Native active-row bound | Signed per-tuple `max_native_active_rows`, `1 <= bound <= qualified_slots`: the largest number of concurrently active decode rows, native and ordinary together, at which the tuple's native-eligible R015 cells show native MTP beating ordinary decode. Gated cells above it prove only safety and non-inferiority and never justify or raise it. |
 
 The request path state machine is closed:
 
@@ -632,8 +632,11 @@ Admission and in-flight behavior are:
 
 A bound equal to `qualified_slots` never engages for a runtime that admits at
 most that many rows. The bound is chosen from R015 cells measured at each slot
-count from one up to `qualified_slots`: it is the largest row count whose cell
-passes the R015 throughput gate.
+count from one up to `qualified_slots`: it is the largest row count whose
+native-eligible cell passes the R015 improvement gate. Only native-eligible
+cells set or justify the bound; a gated cell (slot count above the bound)
+passing MTP-15 non-inferiority shows the gate is safe there and never raises
+the bound.
 
 Native MTP MUST use SPEC-038 FCFS admission and shared-iteration fairness; it
 MUST NOT create a second priority queue or skip an older ready ordinary row for
