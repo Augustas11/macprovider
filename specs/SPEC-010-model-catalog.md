@@ -1,8 +1,8 @@
 # SPEC-010 — Provider Model Catalog
 
-**Version:** 1.15
-**Status:** v1.15 pool-scoped identity boundary (R007(j), #1816,
-2026-10-01) over v1.14 MLX-snapshot identity leg for `omlx_loopback` (R009(f),
+**Version:** 1.16
+**Status:** v1.16 pool-scoped identity boundary (R007(j), #1816,
+2026-10-01; v1.15 draft amended before landing) over v1.14 MLX-snapshot identity leg for `omlx_loopback` (R009(f),
 #1690 M9, 2026-09-25) over v1.13 serving-time GGUF binding for
 `lmstudio_loopback` (R007(i), #1690 M9, 2026-09-25) over v1.12 MLX-snapshot identity leg for
 `mlxlm_loopback` (R009, #1690 M8, 2026-09-24) over v1.11 GGUF `huggingface_revision` source and pool-scoped
@@ -47,8 +47,16 @@ SPEC-023 owns candidate-catalog `bench_gate` provenance, including
   in its own release's set (slice-4 implementation). Bounded
   `model-catalog-identity` amendment.
 
+**Change log v1.16 (issue #1816 round-1 audit fixes):**
+- R007(j): the pool entry is the SPEC-042-R015 `pool_model_entries/v1`
+  extension of a v2 core. A pair that resolves to any catalog identity, in any
+  tier, cannot be a pool entry; a later catalog addition revokes the pool
+  binding and the catalog path applies. A snapshot-manifest entry may be
+  served natively (`mlx_cache`) on that pool's routes only; uncatalogued
+  native MLX stays closed everywhere else.
+
 **Change log v1.15 (issue #1816 — pool-scoped identity source):**
-- R007(j) recognizes the exact artifact pair in a signed SPEC-042 v3 pool
+- R007(j) recognizes the exact artifact pair in a signed SPEC-042 pool
   entry as a route-snapshot identity source only for that pool. It does not
   create or shadow a canonical catalog id, does not enter the global artifact
   set, and cannot authorize global routing or `settlement_capable`.
@@ -1314,20 +1322,26 @@ algorithm.
   are administrative trust (SPEC-042-R004), exactly as for every loopback
   runtime. LM Studio MLX-format models have no leg: no `mlx_safetensors`
   member is ever valid for `lmstudio_loopback` ((h), SPEC-023 §3.7.4).
-  (j) **Pool-manifest identity source (v1.15, #1816).** A signed
-  SPEC-042-R015 v3 entry is an explicitly scoped exception to catalog-owned
-  identity: on an authorized route to that same pool, its exact
+  (j) **Pool-manifest identity source (v1.15, amended v1.16, #1816).** A signed
+  SPEC-042-R015 entry (the `pool_model_entries/v1` extension of an accepted
+  v2 core) is an explicitly scoped exception to catalog-owned identity: on an authorized route to that same pool, its exact
   `(artifact_hash_algorithm, artifact_hash)` pair MAY be the expected model
   identity under SPEC-047-R011 and SPEC-022-R013. The CLI still computes the
   pair from the complete local bytes under (a) for GGUF or R009(a) for a
-  snapshot manifest; provider claims and runtime-reported names remain
+  snapshot manifest, including for a native `mlx_cache` session serving a
+  snapshot-manifest entry that lists `mlx_cache` (SPEC-042-R004); provider claims and runtime-reported names remain
   insufficient. The entry's `pool_model_id` is never a canonical catalog id,
   MUST NOT equal or normalize onto one, and is not inserted into the global
   R007 identity set or artifact-feed uniqueness domain. A pool-manifest pair
   MUST NOT satisfy catalog matching, global routing, catalog pricing, or
-  `settlement_capable`. The route snapshot records source `pool_manifest`, the
+  `settlement_capable`, and a pair that resolves to any catalog identity in
+  any tier is never a valid pool entry (SPEC-042-R015 catalog overlap); if a
+  later release catalogs it, the pool binding is revoked and the catalog path
+  applies. Uncatalogued native MLX outside such a pool route stays closed
+  (SPEC-032). The route snapshot records source `pool_manifest`, the
   exact pair, `pool_id`, `pool_model_id`, `manifest_version`, and
-  `manifest_core_digest`; settlement replays those bytes and never repairs
+  `manifest_core_digest` (SPEC-022-R013, which keeps every existing route's
+  receipt-bound preimage unchanged); settlement replays those bytes and never repairs
   them from a current manifest. This clause makes no model-honesty or
   network-verification claim beyond SPEC-042-R006.
 

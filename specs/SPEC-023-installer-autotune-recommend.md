@@ -1,12 +1,21 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.3
+version: v0.22.4
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-01
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.22.4 (2026-10-01)** — #1816 round-1 audit fixes to `SPEC-023-R026`.
+  Hash-derived intake keys and the opt-in v2 offer-count frame move to their
+  producer, SPEC-047-R009; the pool-proven aggregate is produced by
+  SPEC-047-R012 (`model_admission_pool_proven.v1`), retained as
+  `model-admission-pool-proven.json`, and re-derived under §16.8 rule 9, with
+  an explicit suppressed representation. Pool-proven admission to `listed`
+  now also requires a current passing SPEC-047-R011 known-answer evidence
+  record. §16.2 lists four signals and §16.3 names the pool-proven term.
 
 - **v0.22.3 (2026-10-01)** — Pool-proven catalog intake (#1816). Registers
   `SPEC-023-R026`: unmatched supported artifact pairs receive deterministic
@@ -3466,7 +3475,7 @@ No model key may enter `listed` — and therefore, transitively, `recommendable`
 
 ### 16.2 Intake signals
 
-Three signals feed the intake decision. Each is an aggregate; none carries provider or buyer identity, and none is a score that ranks rows against each other.
+Four signals feed the intake decision: (a)-(c) below and, **[v0.22.4]** (d) the §16.9 pool-proven evidence. Each is an aggregate; none carries provider or buyer identity, and none is a score that ranks rows against each other.
 
 **(a) Buyer demand.**
 
@@ -3527,6 +3536,8 @@ The cap and bound are therefore an admission filter ahead of the summary, never 
 - `fleet_fit_fraction(artifact)` — the fraction of providers active in the trailing 30 days whose reported `ram_gb` satisfies the §5 headroom rule for that artifact: `artifact.min_ram_gb <= ram_gb - safety_margin_gb`, with `safety_margin_gb = 4`. Computed per artifact, because §3.7.4 makes `min_ram_gb` per-artifact. A key's fit is the maximum over its verified artifacts. **[sourced v0.10.4]** The fleet input is the SPEC-017 v0.2.1 §5.2b.6 `fleet_ram` histogram of the same `/v1/stats/intake` response: active providers bucketed by unified-memory class floor, classes below `k_anonymity_min` suppressed. The fraction is evaluated conservatively from that object — `Σ provider_count` over unsuppressed classes with `ram_gb_floor − safety_margin_gb ≥ artifact.min_ram_gb`, divided by `provider_total`; a suppressed class contributes zero fit and stays in the denominator — and recorded as `fleet_fit_fraction_ppm = floor(floor(fraction × 1 000 000) / 50 000) × 50 000` — the exact ratio floored to a 50 000 ppm (5%) grid, because the manifest is public while the fleet count is not, and an exact ppm over a small `provider_total` reproduces the ratio (583 333 ppm is 7 of 12) — compared against `INTAKE_FLEET_FIT_MIN_PCT × 10 000` (the threshold is a percentage; the recorded value is ppm; 25% is 250 000 ppm); `fleet_fit_absent_reason: "no_observations"` when `provider_total` is zero. The histogram is materialized once per 30-day period (SPEC-017 §5.2b.6), so two reads within one period carry identical `fleet_ram` bytes.
 - `tier_target` — the operator's named hardware-tier target for the release, an explicit statement of which part of the fleet the release is trying to serve. Its default is stated in §16.4.
 
+**(d) Pool-proven evidence [v0.22.4].** `pool_proven_evidence`, defined and consumed only under §16.9 (`SPEC-023-R026`). It is absent for every key without an exact artifact pair in the SPEC-047-R012 aggregate, and its absence blocks nothing.
+
 ### 16.3 The intake rule
 
 **SPEC-023-R006:** Catalog intake MUST follow this rule. Its thresholds are operator-tunable release policy; the rule's shape, its preconditions, and its tier boundary are normative.
@@ -3537,7 +3548,8 @@ The cap and bound are therefore an admission filter ahead of the summary, never 
 
 - `openrouter_demand_rank != null AND openrouter_demand_rank <= INTAKE_DEMAND_RANK_MAX`; or
 - `distinct_provider_offer_count >= INTAKE_OFFER_FLOOR`; or
-- `unmatched_model_request_count >= INTAKE_BUYER_REQUEST_FLOOR`;
+- `unmatched_model_request_count >= INTAKE_BUYER_REQUEST_FLOOR`; or
+- **[v0.22.4]** the key's artifact is *pool-proven* under §16.9 (`SPEC-023-R026`), which carries its own additional preconditions;
 
 AND at least one of the following fit terms is satisfied:
 
@@ -3572,6 +3584,7 @@ AND at least one of the following fit terms is satisfied:
 | `tier_target` | `<= 16 GB` | The live fleet is dominated by 8-16 GB Macs (13 of 24 observed hardware profiles), while only 3 catalog rows fit at or under 16 GB. The default target is therefore the under-covered small-RAM tier until that is no longer true. |
 | `INTAKE_COLDSTART_SLOTS` | `1` | Per release, the operator MAY admit up to this many new `listed` rows on P1-P4 plus the fit term alone, with no demand-or-supply term, when the declared `tier_target` is under-covered. The slot is a **discretionary permission, not a reservation**: it permits an admission the demand-or-supply disjunction would otherwise refuse; it never obliges the operator to admit anything, and an unused slot does not accumulate. This is the explicit cold-start escape hatch (FM-2). |
 | `INTAKE_MIN_LISTED_DAYS` | `30` | One release cycle of `listed` observation before a key can carry a price. |
+| `INTAKE_POOL_PAID_REQUEST_FLOOR` | `100` | **[v0.22.4, §16.9]** Buyer-final, positively credited, undisputed pool-manifest requests for one exact artifact pair in the trailing 30 days. Sized so a pool-proven key has served real paid traffic across at least `INTAKE_OFFER_FLOOR` distinct owner accounts, not a single trial. |
 
 Every threshold above except `INTAKE_K_ANONYMITY_MIN` (fixed at 3 in v0.10.4, see its row) is release policy the operator may change; each change MUST be recorded in the release notes for the release that applies it. Release notes alone do not make an intake decision reconstructible, because the decision also depends on the signal VALUES it was taken against; §16.8 defines the release-bound record that carries those values, and reconstructibility is claimed there and only there.
 
@@ -3712,84 +3725,39 @@ The manifest is a **closed schema at every level**. An unknown key, a missing ke
 
 ### 16.9 Pool-proven intake and graduation (SPEC-023-R026)
 
-**Hash-derived intake key.** When a SPEC-047 offer does not resolve to any
-catalog key, but contains exactly one format-compatible supported artifact
-pair for the candidate's signed runtime source, the coordinator MUST set
-`intake_model_key` to
-`artifact/<artifact_hash_algorithm>/<artifact_hash>`. The algorithm is the
-exact SPEC-010 identifier and the hash is lowercase 64-hex, so the resulting
-ASCII key matches `[a-z0-9._/-]{1,128}`. Zero compatible pairs, more than one
-distinct compatible pair, a duplicate/conflicting pair, or a malformed hash
-produces no key and no supply count; the provider's model name and asserted
-catalog key are never used. Once the same pair resolves to a catalog key, new
-offers use that catalog key while the immutable prior hash-key evidence remains
-auditable and is joined by exact pair, never by display name.
+**Ownership.** SPEC-047 owns the producers: the offer-time hash-derived `intake_model_key` (`artifact/<artifact_hash_algorithm>/<artifact_hash>`) and the opt-in `model_admission_intake_offer_counts.v2` frame (SPEC-047-R009), the pool-proven aggregate `model_admission_pool_proven.v1` (SPEC-047-R012), and the known-answer evidence record `model_admission_probe_evidence.v1` (SPEC-047-R011). This section owns only how the release generator consumes them and the catalog decision. A generator that reads the v2 offer-count frame MUST treat a hash-derived key only as an exact artifact pair, never as a catalog identity, and MUST reject an unknown schema. A v1 frame stays valid for releases that do not use hash-derived keys.
 
-The private intake response gains schema
-`model_admission_intake_offer_counts.v2`. Its row key is named
-`intake_model_key` and accepts either a SPEC-010 canonical key or the
-hash-derived form above; all other v1 row fields and suppression rules are
-unchanged. A v1 response remains valid for catalog-only rows, but MUST NOT
-represent or count an unmatched artifact. Consumers MUST reject an
-unrecognized schema version rather than interpreting an artifact key as a
-catalog identity.
+**Source retention.** A release that cites pool-proven evidence retains the one SPEC-047-R012 response byte-exact as `model-admission-pool-proven.json` in the private intake audit store, under every §16.8 rule 9 obligation (identity encoding, retention before authoring, append-only, `0600`/`0700`, retention lifetime, closed-schema parse, and re-derivation). The generator MUST re-derive every recorded value from that file, select the row for the exact pair, and fail closed on any disagreement, on a missing row, or on a frame whose `generated_at` is more than 24 hours older than the release's `generated_at`.
 
-**Pool-proven signal.** Section 16.2 gains a fourth signal,
-`pool_proven_evidence`, aggregated by exact artifact pair over one complete
-trailing-30-day window from immutable SPEC-022-R013 pool-manifest route
-snapshots and final settled rows. Its closed value is exactly:
+**Pool-proven value.** The closed value recorded for one key is exactly:
 
 ```json
 {
   "artifact_hash_algorithm": "macprovider.gguf-file.v1",
   "artifact_hash": "<64 lowercase hex>",
-  "paid_request_count": 0,
-  "distinct_provider_count": 0,
-  "license_on_file": true,
+  "paid_request_count": 120,
+  "distinct_provider_count": 4,
+  "suppressed": false,
+  "license_id": "Apache-2.0",
+  "probe_evidence_digest": "<64 lowercase hex>",
+  "probe_evaluated_at": "RFC3339 UTC",
   "window_start": "RFC3339 UTC",
   "window_end": "RFC3339 UTC",
   "source_sha256": "<64 lowercase hex>"
 }
 ```
 
-Only successful, buyer-final, positively provider-credited attempts with
-`expected_model_hash_source: pool_manifest`, `pool_label_status: verified`,
-and no dispute or reversal count toward `paid_request_count`. Providers are
-distinct SPEC-003 owner accounts, not sessions or provider ids; the count is
-suppressed below `INTAKE_K_ANONYMITY_MIN` and a suppressed value satisfies no
-floor. `license_on_file` is true only when every pool entry contributing to
-the signal names the same SPDX/`LicenseRef-*` identifier, attests paid serving,
-and the operator's private intake audit store contains the reviewed licence
-record. The aggregate MUST carry no pool, provider, creator, buyer, request,
-or wallet identity. Its exact source bytes are retained and re-derived under
-§16.8 rule 9.
+The first eight fields are the R012 row verbatim, including its nullability: when `suppressed` is `true`, `paid_request_count` and `distinct_provider_count` are `null`, and a suppressed value satisfies no floor. `license_id`, `probe_evidence_digest`, and `probe_evaluated_at` are nullable exactly as in R012. `window_start` / `window_end` are the frame's window, and `source_sha256` is the SHA-256 of the retained file.
 
-**Admission and cadence.** A model is *pool-proven* when P1-P4 hold,
-`paid_request_count >= INTAKE_POOL_PAID_REQUEST_FLOOR` (default `100`),
-`distinct_provider_count >= INTAKE_OFFER_FLOOR`, and `license_on_file` is true.
-This is a new §16.2 supply term and the §16.8 `admission_clause` enum gains
-`pool_proven`. An operator MAY publish an out-of-band release that adds only
-pool-proven models as `listed`, plus necessary signed artifact/feed/ledger
-records; this is the sole addition exception to §16.5. The release MUST NOT
-promote a row, change a rate, or make it recommendable, and its intake decision
-record MUST carry the pool-proven value/digest and the ordinary P1-P4 and fit
-evidence. Safety blocking remains allowed in the same release.
+**Admission.** A key is *pool-proven* when all of the following hold:
 
-An out-of-band pool-proven release MUST use
-`macprovider.intake-decision.v2`. Relative to v1, each `admit_listed` decision
-adds nullable `pool_proven_evidence` with exactly the closed object above and
-adds `pool_proven` to `admission_clause`; the field is null for all other
-clauses and for every `promote_recommendable` decision. Its `thresholds`
-object also adds `intake_pool_paid_request_floor`. Version 1 remains valid for
-releases that do not select the pool-proven clause. A generator or verifier
-MUST reject an unknown field, a v1 record selecting `pool_proven`, a v2
-pool-proven decision without the value and authenticated source digest, or a
-non-pool decision carrying the value.
+- P1-P4 (§16.1), with P3 satisfied by the operator's reviewed licence record for the recorded non-null `license_id`;
+- `suppressed` is `false`, `paid_request_count >= INTAKE_POOL_PAID_REQUEST_FLOOR` (default `100`, §16.4), and `distinct_provider_count >= INTAKE_OFFER_FLOOR`;
+- `probe_evidence_digest` is non-null, so a current passing SPEC-047-R011 known-answer record exists for the exact pair; and
+- the explicit operator decision recorded in the intake decision below.
 
-Promotion from `listed` to `recommendable` still requires every §16.3
-condition, the minimum listed duration, a published rate row, bench provenance,
-demand-rank eligibility, and an explicit operator decision. Neither pool paid
-volume nor provider count auto-promotes a model. Pool earning is creator-scoped
-evidence, not permissionless global earning; the latter remains out of scope
-until SPEC-036 compute-integrity requirements are normatively adopted and
-implemented.
+An operator MAY publish an out-of-band release that adds only pool-proven keys as `listed`, plus the necessary signed artifact/feed/ledger records; this is the sole addition exception to §16.5. It MUST NOT promote a row, change a rate, or make a row recommendable. Safety blocking remains allowed in the same release. **Consequence the operator must weigh:** once the pair is a catalog identity, SPEC-042-R015 revokes every pool binding to it and the catalog path applies, and a `listed` row pays nothing (§3.2), so pool earning for that pair stops until the row is promoted to `recommendable`.
+
+**Intake decision v2.** A release that selects the pool-proven clause MUST use `macprovider.intake-decision.v2`. Relative to v1, each `admit_listed` decision adds nullable `pool_proven_evidence` with exactly the closed value above, and `admission_clause` gains `pool_proven`; the field is non-null exactly when the clause is `pool_proven`, and null for every other clause and every `promote_recommendable` decision. The `thresholds` object adds `intake_pool_paid_request_floor`. Version 1 remains valid for releases that do not select the clause. A generator or verifier MUST reject an unknown field, a v1 record selecting `pool_proven`, a `pool_proven` decision with a missing, suppressed, or null-probe value, a value whose `source_sha256` names no retained file, or a non-pool decision carrying the value.
+
+**Graduation to `recommendable`** still requires every §16.3 promotion condition, the minimum listed duration, a published rate row, bench provenance, demand-rank eligibility, and an explicit operator decision. Neither pool paid volume, provider count, nor a passing probe auto-promotes a model. Pool earning is creator-scoped evidence, not permissionless global earning; the latter remains out of scope until SPEC-036 compute-integrity requirements are normatively adopted and implemented.

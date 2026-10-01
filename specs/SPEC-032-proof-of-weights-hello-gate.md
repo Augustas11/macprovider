@@ -1,6 +1,13 @@
 # SPEC-032 — Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary
 
-**Status:** v0.3.5-draft
+**Status:** v0.3.6-draft
+**Amendment (v0.3.6, #1816 round-1 fixes):** SPEC-032-R004's pool route
+predicate requires the SPEC-047-R003(iv) clause or the SPEC-047-R011 binding,
+as applicable. A native `mlx_cache` hello for an uncatalogued model whose
+snapshot-manifest pair matches a current SPEC-042-R015 entry listing
+`mlx_cache`, in a pool the provider currently belongs to, is admitted
+`admission_sandboxed` instead of hard-closed and is selectable only on that
+pool's routes. Every other uncatalogued native hello stays hard-closed.
 **Amendment (v0.3.5, #1816):** SPEC-032-R004 permits a sandboxed pool
 member whose exact served artifact pair matches a current signed SPEC-042-R015
 entry to serve that pool's routes only. Global sandbox behavior is unchanged;
@@ -443,8 +450,10 @@ buyer-serving, and receives no newly minted durable provider credentials; this F
 hello-time evaluation is unchanged (`phase4-coordinator/internal/ws/server.go:3535`).
 The one exception is route-time and pool-scoped. SPEC-042 pool routing MAY select a
 sandboxed loopback session for a request whose route carries a `pool_id`, but only when
-every condition of the SPEC-042-R004 runtime-allowlist predicate and of the
-SPEC-047-R003(iv) pool route-time clause holds at that selection attempt. That selection
+every condition of the SPEC-042-R004 runtime-allowlist predicate holds and, as
+applicable, either the SPEC-047-R003(iv) pool route-time clause (a catalog
+member) or the SPEC-047-R011 pool-manifest binding (a pool entry) holds at that
+selection attempt. That selection
 does not clear `admission_sandboxed`, does not make the session eligible for any global
 request or any other pool's request, and changes no hello-time close reason. FR-HG7 is
 preserved globally: a pool route requires either (a) a SPEC-010 artifact member whose
@@ -453,7 +462,24 @@ to a current SPEC-042-R015 entry, bound as pool-scoped `catalog_priced` under
 SPEC-047-R011. A merely `listed` row never satisfies paid routing; this corrects the
 prior listed-vs-recommendable inconsistency. Case (b) is creator-attested and may serve
 only the matching pool; it does not clear `admission_sandboxed`, enter global
-`/v1/models`, or become `settlement_capable`. The FR-HG3/FR-HG7 hardware capacity
+`/v1/models`, or become `settlement_capable`.
+**Native pool-entry exemption (v0.3.6, #1816).** A hello whose `runtime_source` is
+`mlx_cache` or absent, for a model that is not in the catalog, is hard-closed as
+`autotune_model_uncatalogued` under FR-HG4 as before, with exactly one exception:
+when the hello-reported `macprovider.snapshot-manifest.v1` pair equals the pair of a
+current SPEC-042-R015 entry that lists `mlx_cache`, in the accepted core of a pool of
+which the provider is a current member, the coordinator MUST instead admit the
+session `admission_sandboxed`. It is then selectable only for a request whose route
+carries that pool's `pool_id`, only through the SPEC-042-R004 native pool-entry path
+and a current SPEC-047-R011 binding, and only after the CLI-computed pair is verified
+at route time. It never becomes globally routable or buyer-serving and never serves
+another pool. The exemption is evaluated after the FR-HG4 dependency-wired check, and
+is re-evaluated whenever the pool's accepted core or the provider's membership
+changes; a session whose match lapses is closed with `autotune_model_uncatalogued`.
+The FR-HG3/FR-HG7 catalog capacity ceiling is not evaluated for a pool entry, which
+has no `MinRAMGB`; slot and capacity accounting follow SPEC-002. Native receipts and
+`coordinator_observed` usage are unchanged (SPEC-022-R013). Uncatalogued `mlx_cache`
+outside this exact match stays hard-closed everywhere. The FR-HG3/FR-HG7 hardware capacity
 ceiling for catalog MLX models is not evaluated for the external runtime; slot and
 capacity accounting follow SPEC-002 as for any selected provider. Current state: routing
 excludes every `admission_sandboxed` session (`Provider.RoutingEligible`,

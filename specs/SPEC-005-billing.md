@@ -1,11 +1,15 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.6.11 (2026-10-01, pool-manifest trusted pricing)
+**Version:** 0.6.12 (2026-10-01, pool-manifest trusted pricing, config-bounded)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.6, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.39, SPEC-024 v0.2.7 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.18.0 / SPEC-005-R011 / SPEC-005-R013 (SPEC-023-R019) is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
 
+**Change log v0.6.12 (2026-10-01, issue #1816 round-1 audit fixes):**
+- R015 bounds move out of the signed rate card, whose FeedSchema-A is closed (SPEC-023) and whose fleet CLI parser rejects extra keys, into coordinator config `trusted_pools.pool_model_pricing_bounds`. Unset or invalid bounds fail every pool model entry closed. The rate card and its schema are unchanged.
+- Entry pricing is the formula's own three int64 rates (`prompt_rate_per_mtok`, `prompt_cache_hit_rate_per_mtok` <= prompt, `completion_rate_per_mtok`); `provider_share_bps` and `global_multiplier_ppm` come from the rate card `default` row. The formula is unchanged.
+
 **Change log v0.6.11 (2026-10-01, issue #1816 — pool-manifest trusted pricing):**
-- Registers `SPEC-005-R015`. A current signed SPEC-042 v3 `model_entries[].pricing` is a trusted price source only for the same pool's R011 routes. The buyer quote and reservation use it after inclusive network floor/ceiling validation; the existing units, formula, platform fee/provider share, usage bounds, finality, and no-repricing history rules are unchanged.
-- The signed network rate card gains closed pool-model floor/ceiling bounds. Missing or out-of-bounds pricing fails manifest acceptance and route reservation closed. No provider proposal, global route, or different pool may consume the price.
+- Registers `SPEC-005-R015`. A current signed SPEC-042-R015 pool model entry's pricing is a trusted price source only for the same pool's R011 routes. The buyer quote and reservation use it after inclusive network floor/ceiling validation; the existing units, formula, platform fee/provider share, usage bounds, finality, and no-repricing history rules are unchanged.
+- Draft network floor/ceiling bounds (moved to coordinator config in v0.6.12). Missing or out-of-bounds pricing fails manifest acceptance and route reservation closed. No provider proposal, global route, or different pool may consume the price.
 
 **Change log v0.6.10 (2026-09-27, issue #1768 — auto-prefix cache-hit billing):**
 - §5.3.1 accepts a valid first-attempt provider `cached_prompt_tokens` report on an authenticated conversation-cache-only auto-prefix request as creditable reuse. The row keeps the cached count, applies the configured cache-hit rate, and exposes the same count in the flat buyer field. This supersedes v0.6.8's full-prompt-rate carve-out for that request class without enabling sticky routing.
@@ -53,7 +57,7 @@
 
 ## Preliminary conformance unit IDs
 
-SPEC-005 v0.6.11 registers `SPEC-005-R001`..`SPEC-005-R015` in
+SPEC-005 v0.6.12 registers `SPEC-005-R001`..`SPEC-005-R015` in
 `specs/CONFORMANCE.json`. R001–R003 remain the paid-path formula, hot-path,
 and crash-recovery units. R004–R009 group additional existing obligation
 areas without changing them. R010 is the D1a wholesale statement unit.
@@ -91,8 +95,9 @@ invariant unit:
   valid first-attempt cached tokens and earn the configured cache-hit rate without
   enabling sticky routing (§5.3.1 gate 4).
 - `SPEC-005-R015` — creator-signed pool-manifest pricing as a trusted source for
-  the same pool's routes only, bounded by the signed network rate card and used by
-  quote, reservation, immutable rate snapshot, and the unchanged formula (§5.7).
+  the same pool's routes only, bounded by coordinator config
+  `trusted_pools.pool_model_pricing_bounds` and used by quote, reservation,
+  immutable rate snapshot, and the unchanged formula (§5.7).
 
 `requirement_id_migration` is `complete`. R004–R015 are not promoted from
 this close. Signed journey-result evidence is still required before any of
@@ -1508,13 +1513,15 @@ Invariant check: every `ledger_config_snapshots` row inserted by a pricing reloa
 
 ## 5.7 Pool-manifest trusted price source
 
-**SPEC-005-R015.** A verified current SPEC-042 v3 `model_entries[].pricing` object is a trusted price source only for a SPEC-047-R011 binding and buyer route carrying the same `pool_id`, `manifest_version`, and `manifest_core_digest`. It is creator-signed policy, not a provider-proposed price and not a global catalog rate. Global/poolless routes, other pools, catalog lookup, `RateFor`, and the `default` fallback MUST ignore it.
+**SPEC-005-R015.** The three rates of a verified current SPEC-042-R015 pool model entry (the `pool_model_entries/v1` extension) are a trusted price source only for a SPEC-047-R011 binding and buyer route carrying the same `pool_id`, `manifest_version`, and `manifest_core_digest`. They are creator-signed policy, not a provider-proposed price and not a global catalog rate. Global/poolless routes, other pools, catalog lookup, `RateFor`, and the `default` fallback MUST ignore them.
 
-The signed network rate card MUST carry one closed `pool_model_pricing_bounds` object with exactly four unsigned 64-bit SPEC-005-unit fields: `min_input_credits_per_million`, `max_input_credits_per_million`, `min_output_credits_per_million`, and `max_output_credits_per_million`. Each minimum MUST be less than or equal to its maximum. A v3 manifest entry is acceptable only when both of its rates fall within the inclusive bound for the matching axis. Missing, unverified, stale, malformed, or internally inverted bounds, integer overflow, or an out-of-bounds entry fails manifest acceptance closed. Changing bounds affects only manifests accepted or re-evaluated under the new rate-card generation; it MUST NOT re-price an existing immutable route snapshot or ledger row.
+**Rates.** An entry carries exactly the formula's three per-million-token rates: `prompt_rate_per_mtok`, `prompt_cache_hit_rate_per_mtok`, and `completion_rate_per_mtok`, each an integer in `[0, 2^63 - 1]` (the signed 64-bit domain of `BilledRow`, `phase4-coordinator/internal/billing/formula.go`), with `prompt_cache_hit_rate_per_mtok <= prompt_rate_per_mtok`. `provider_share_bps` and `global_multiplier_ppm` are not pool-settable: they come from the signed rate card's `default` row in force when the route is quoted, exactly as for a model that falls through to `default`.
 
-For an authorized pool route, the buyer quote and quota reservation MUST resolve the R011 binding before dispatch and use its `input_credits_per_million` and `output_credits_per_million`. The route snapshot/config snapshot MUST durably record those rates, the active bounds' signed rate-card digest/generation, `pool_id`, `manifest_version`, `manifest_core_digest`, and `pool_model_id`. The existing closed-form token arithmetic, rounding, cache rule, completion clamp, `global_multiplier_ppm`, platform fee/provider-share formula, buyer finality, provider credit, reconciliation, and historical no-repricing rules apply unchanged. The price source changes; the formula and platform fee do not.
+**Bounds live in coordinator config, not the rate card.** The signed rate card is a closed schema (SPEC-023 FeedSchema-A, §3.3) and the fleet CLI rejects extra keys, so it carries no pool bounds and is unchanged by this requirement. The coordinator config key `trusted_pools.pool_model_pricing_bounds` holds exactly six integers: `min_prompt_rate_per_mtok`, `max_prompt_rate_per_mtok`, `min_prompt_cache_hit_rate_per_mtok`, `max_prompt_cache_hit_rate_per_mtok`, `min_completion_rate_per_mtok`, and `max_completion_rate_per_mtok`. Config load MUST reject the object, leaving the bounds unset, when any key is missing or unknown, any value is negative, any minimum exceeds its maximum, or any maximum would overflow the formula's checked int64 arithmetic at `maxBillableTokens` with the current `default` row's multiplier. When the bounds are unset or rejected, every pool model entry fails closed: manifest acceptance rejects any core carrying `pool_model_entries/v1`, and route reservation refuses every R011 binding. An entry is acceptable only when each of its three rates lies within the inclusive bound for that rate. A config change applies only to manifests accepted, and bindings rebound (SPEC-047-R011), after the reload; a binding whose rates fall outside new bounds is unroutable until the creator publishes conforming rates. It MUST NOT re-price an existing immutable route snapshot or ledger row.
 
-A quote/reservation produced from one manifest or rate-card generation MUST NOT be silently refreshed to another after dispatch. A mismatch before dispatch fails closed and may retry only from a newly quoted reservation; a mismatch after dispatch follows the immutable snapshot and SPEC-042-R006/SPEC-022-R013 dispute rules. A `label_disputed` or non-verifiable pool attempt receives no buyer-final debit or positive provider credit. No `model_entries[].pricing` value may be exposed as network-verified, globally available, or usable outside the signing pool.
+**Quote, reservation, and snapshot.** For an authorized pool route, the buyer quote and quota reservation MUST resolve the R011 binding before dispatch and use its three rates with the `default` row's `provider_share_bps` and `global_multiplier_ppm`. The route snapshot/config snapshot MUST durably record those five values, a digest of the bounds object in force, the rate card digest/generation that supplied the `default` row, `pool_id`, `manifest_version`, `manifest_core_digest`, and `pool_model_id`. The existing closed-form token arithmetic, rounding, cache rule, completion clamp, platform fee/provider-share formula, buyer finality, provider credit, reconciliation, and historical no-repricing rules apply unchanged. The price source changes; the formula and platform fee do not.
+
+A quote/reservation produced from one manifest, bounds, or rate-card generation MUST NOT be silently refreshed to another after dispatch. A mismatch before dispatch fails closed and may retry only from a newly quoted reservation; a mismatch after dispatch follows the immutable snapshot and SPEC-042-R006/SPEC-022-R013 dispute rules. A `label_disputed` or non-verifiable pool attempt receives no buyer-final debit or positive provider credit. No pool entry rate may be exposed as network-verified, globally available, or usable outside the signing pool.
 
 ## 6. Credit calculation: D8 mapping
 
