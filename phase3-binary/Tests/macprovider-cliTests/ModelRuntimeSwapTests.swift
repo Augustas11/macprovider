@@ -238,6 +238,50 @@ final class ModelRuntimeSwapTests: XCTestCase {
         ))
     }
 
+    func testNativeMTPServePathRejectionLogIsSingleStructuredPathFreeLine() throws {
+        let line = ModelRuntime.nativeMTPServePathRejectionLogLine(
+            reasonCode: "artifact_quantization_unsupported",
+            artifactRole: "pair"
+        )
+        XCTAssertEqual(line.filter(\.isNewline).count, 1)
+        XCTAssertTrue(line.hasSuffix("\n"))
+        XCTAssertFalse(line.contains("/"))
+
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: String]
+        )
+        XCTAssertEqual(object, [
+            "artifact_role": "pair",
+            "event": "native_mtp_serve_path_admission",
+            "reason_code": "artifact_quantization_unsupported",
+            "status": "rejected",
+        ])
+    }
+
+    func testNativeMTPServePathRejectionReasonNeverEchoesErrorPayload() {
+        let secretPath = "/Users/someone/models/target/model.safetensors"
+        let cases: [(Error, String, String)] = [
+            (NativeMTPArtifactObservationError.unsupportedQuantization(secretPath), "artifact_quantization_unsupported", "pair"),
+            (NativeMTPArtifactObservationError.missingQuantizationMetadata(secretPath), "artifact_quantization_metadata_missing", "pair"),
+            (NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders(secretPath), "artifact_tensor_representation_rejected", "pair"),
+            (NativeMTPArtifactObservationError.unsupportedDType(secretPath), "artifact_tensor_representation_rejected", "pair"),
+            (NativeMTPArtifactObservationError.observationDrift(secretPath), "artifact_observation_drift", "pair"),
+            (NativeMTPArtifactObservationError.malformedConfig(secretPath), "artifact_observation_invalid", "pair"),
+            (ModelRuntimeLoadError(target: secretPath), "artifact_load_failed", "pair"),
+            (CocoaError(.fileReadNoSuchFile), "serve_path_admission_failed", "runtime"),
+        ]
+        for (error, reasonCode, artifactRole) in cases {
+            let rejection = ModelRuntime.nativeMTPServePathRejection(for: error)
+            XCTAssertEqual(rejection.reasonCode, reasonCode)
+            XCTAssertEqual(rejection.artifactRole, artifactRole)
+            let line = ModelRuntime.nativeMTPServePathRejectionLogLine(
+                reasonCode: rejection.reasonCode,
+                artifactRole: rejection.artifactRole
+            )
+            XCTAssertFalse(line.contains(secretPath))
+        }
+    }
+
     func testNativeMTPCapturedTokenizerMustBeCanonicalTargetTokenizer() {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ModelRuntimeSwapTests-\(UUID().uuidString)", isDirectory: true)
