@@ -1335,6 +1335,54 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(result.rowStateTokenCountsAfterResolution, [2, 1])
     }
 
+    /// Finalize stages every row/layer commit and evaluates once. The staged
+    /// path must leave each row byte-identical to the old per-row
+    /// commit-and-eval path, including uncommitted (aborted) rows.
+    func testMTPPackedCacheStagedCommitMatchesPerRowCommitByteForByte() async throws {
+        try requireMetal()
+
+        let rowMaps = [
+            MTPPackedVerificationRowMap(rowIndex: 0, queryOffset: 2, inputCount: 2, proposalCount: 1),
+            MTPPackedVerificationRowMap(rowIndex: 1, queryOffset: 0, inputCount: 1, proposalCount: 0),
+            MTPPackedVerificationRowMap(rowIndex: 2, queryOffset: 1, inputCount: 2, proposalCount: 1),
+            MTPPackedVerificationRowMap(rowIndex: 3, queryOffset: 3, inputCount: 2, proposalCount: 1),
+        ]
+        // Accept one proposal, depth-zero commit, reject the proposal, abort.
+        let commits: [Int?] = [2, 1, 1, nil]
+        func run(staged: Bool) async throws -> PagedKVMTPPackedCacheResolutionResult {
+            let descriptor = Self.bridgeDescriptor()
+            let allocator = try PagedKVBlockAllocator(
+                blockSizeTokens: descriptor.blockSizeTokens,
+                maxPhysicalBlocks: descriptor.maxPhysicalBlocks
+            )
+            let rows = try await Self.pagedRows(
+                descriptor: descriptor,
+                allocator: allocator,
+                ids: ["accept", "depth-zero", "reject", "abort"],
+                initialOffsets: [2, 0, 1, 3]
+            )
+            return try PagedKVSharedForwardBackend.exerciseMTPPackedCacheResolutionForTest(
+                rowCaches: rows,
+                rowMaps: rowMaps,
+                width: 2,
+                committedInputCounts: commits,
+                stagedCommit: staged
+            )
+        }
+
+        let perRow = try await run(staged: false)
+        let staged = try await run(staged: true)
+
+        XCTAssertEqual(staged, perRow)
+        XCTAssertEqual(staged.rowOffsetsAfterResolution, [4, 1, 2, 3])
+        XCTAssertEqual(staged.rowStoredTokensAfterResolution, [2, 1, 1, 0])
+        // Row-local values: each committed row holds only its own packed
+        // columns (row r's columns are 2r+1, 2r+2; values add 1000).
+        XCTAssertEqual(staged.rowStateValuesAfterResolution[0].filter { $0 != 0 }, [1, 2, 1_001, 1_002])
+        XCTAssertEqual(staged.rowStateValuesAfterResolution[1].filter { $0 != 0 }, [3, 1_003])
+        XCTAssertEqual(staged.rowStateValuesAfterResolution[2].filter { $0 != 0 }, [5, 1_005])
+    }
+
     func testMTPPackedCacheAbortRestoresExactRowsAfterFacadeFinalize() async throws {
         try requireMetal()
 

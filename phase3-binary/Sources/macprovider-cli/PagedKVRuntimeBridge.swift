@@ -468,6 +468,8 @@ struct PagedKVMTPPackedCacheResolutionResult: Equatable {
     let rowOffsetsAfterResolution: [Int]
     let rowStoredTokensAfterResolution: [Int]
     let rowStateTokenCountsAfterResolution: [Int]
+    /// Each row's flattened keys then values after resolution.
+    let rowStateValuesAfterResolution: [[Float]]
 }
 
 final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unchecked Sendable {
@@ -1065,14 +1067,22 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             let transactions = try self.consumeNativeMTPPendingTransactions(for: inputs)
             let byRequestID = Dictionary(uniqueKeysWithValues: inputs.map { ($0.requestID, $0) })
             try self.validateNativeMTPFinalizeInputs(inputs, transactions: transactions)
+            // Publish every committing row's target KV and recurrent state for
+            // all layers, then evaluate them together: one GPU wait per round
+            // instead of one per row per layer.
+            var stagedTargetState: [MLXArray] = []
+            for (requestID, transaction) in transactions {
+                guard let input = byRequestID[requestID], input.shouldCommit else { continue }
+                for layer in transaction.layers {
+                    stagedTargetState += try layer.stageCommit(inputCount: input.committedInputTokenCount)
+                }
+            }
+            eval(stagedTargetState)
             for (requestID, transaction) in transactions {
                 guard let input = byRequestID[requestID] else { continue }
                 guard input.shouldCommit else {
                     self.rollbackNativeMTPDrafterState(for: requestID)
                     continue
-                }
-                for layer in transaction.layers {
-                    try layer.commit(inputCount: input.committedInputTokenCount)
                 }
                 try await self.commitNativeMTPDrafterState(
                     targetModel: context.model,
@@ -1923,7 +1933,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         rowCaches: [PagedKVCache],
         rowMaps: [MTPPackedVerificationRowMap],
         width: Int,
-        committedInputCounts: [Int?]
+        committedInputCounts: [Int?],
+        stagedCommit: Bool = false
     ) throws -> PagedKVMTPPackedCacheResolutionResult {
         guard committedInputCounts.count == rowMaps.count else {
             throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_cache_resolution_count_mismatch")
@@ -1932,8 +1943,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             let cache = PagedKVBatchLayerCache(rowCaches: rowCaches)
             try cache.prepareMTPPackedVerification(rowMaps: rowMaps)
             cache.prepare(lengths: rowMaps.map(\.inputCount))
-            let keys = MLXArray.zeros([rowCaches.count, 1, width, 1], dtype: .float32, stream: .cpu)
-            let values = MLXArray.zeros([rowCaches.count, 1, width, 1], dtype: .float32, stream: .cpu)
+            let incoming = (0 ..< rowCaches.count * width).map { Float($0 + 1) }
+            let keys = MLXArray(incoming, [rowCaches.count, 1, width, 1])
+            let values = MLXArray(incoming.map { $0 + 1_000 }, [rowCaches.count, 1, width, 1])
             _ = cache.update(keys: keys, values: values)
             let pendingBeforeFinalize = try cache.pendingMTPResolutions()
             let rowStateCountsAfterStaging = rowCaches.map { row -> Int in
@@ -1944,10 +1956,16 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             let rowStoredTokensAfterStaging = rowCaches.map(\.storedTokens)
             cache.finalize()
             let pendingAfterFinalize = try cache.pendingMTPResolutions()
+            var staged: [MLXArray] = []
             for (index, inputCount) in committedInputCounts.enumerated() {
                 guard let inputCount else { continue }
-                try pendingAfterFinalize[index].commit(inputCount: inputCount)
+                if stagedCommit {
+                    staged += try pendingAfterFinalize[index].stageCommit(inputCount: inputCount)
+                } else {
+                    try pendingAfterFinalize[index].commit(inputCount: inputCount)
+                }
             }
+            eval(staged)
             return PagedKVMTPPackedCacheResolutionResult(
                 rowOffsetsAfterStaging: rowOffsetsAfterStaging,
                 rowStoredTokensAfterStaging: rowStoredTokensAfterStaging,
@@ -1961,6 +1979,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 rowStateTokenCountsAfterResolution: rowCaches.map { row -> Int in
                     let state = row.state
                     return state.count == 2 ? state[0].dim(2) : 0
+                },
+                rowStateValuesAfterResolution: rowCaches.map { row -> [Float] in
+                    row.state.flatMap { $0.asType(.float32).asArray(Float.self) }
                 }
             )
         }
@@ -2217,12 +2238,14 @@ private enum NativeMTPPendingLayerResolution {
         }
     }
 
-    func commit(inputCount: Int) throws {
+    /// Publish this layer's committed row state and return the arrays to
+    /// evaluate. Finalize evaluates every row and layer of a round together.
+    func stageCommit(inputCount: Int) throws -> [MLXArray] {
         switch self {
         case .pagedAttention(let resolution):
-            try resolution.commit(inputCount: inputCount)
+            try resolution.stageCommit(inputCount: inputCount)
         case .recurrent(let resolution):
-            try resolution.commit(retaining: inputCount)
+            try resolution.stageCommit(retaining: inputCount)
         }
     }
 }
@@ -2236,14 +2259,20 @@ private final class PagedKVBatchLayerCache: MTPPackedVerificationCache, @uncheck
         let inputValues: MLXArray
 
         func commit(inputCount: Int) throws {
+            eval(try stageCommit(inputCount: inputCount))
+        }
+
+        /// Write the accepted prefix into the row cache without evaluating it;
+        /// returns the arrays `commit` would have evaluated.
+        func stageCommit(inputCount: Int) throws -> [MLXArray] {
             guard inputCount >= 0, inputCount <= inputTokenCount else {
                 throw ContinuousBatchSchedulerError.unsupported("native_mtp_finalize_input_count_mismatch")
             }
-            guard inputCount > 0 else { return }
+            guard inputCount > 0 else { return [] }
             let keySlice = inputKeys[0..., 0..., 0 ..< inputCount, 0...]
             let valueSlice = inputValues[0..., 0..., 0 ..< inputCount, 0...]
             let updated = rowCache.update(keys: keySlice, values: valueSlice)
-            eval(updated.0, updated.1)
+            return [updated.0, updated.1]
         }
     }
 
