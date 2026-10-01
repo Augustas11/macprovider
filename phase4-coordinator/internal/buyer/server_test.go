@@ -4293,7 +4293,7 @@ func TestModelClassAliasRewrittenToConcreteModelOnDispatch(t *testing.T) {
 			streamField = `,"stream":true`
 			responseFormat = ""
 		}
-		return []byte(`{"model":"mlx-accurate","messages":[{"role":"user","content":"hello"}],"max_tokens":8,"seed":12345,"presence_penalty":0.25,"frequency_penalty":-0.5,` + responseFormat + `"metadata":{"trace":"preserve-me"}` + streamField + `}`)
+		return []byte(`{"model":"mlx-accurate","messages":[{"role":"user","content":"hello"}],"max_tokens":8,"seed":12345,"presence_penalty":0,"frequency_penalty":0,` + responseFormat + `"metadata":{"trace":"preserve-me"}` + streamField + `}`)
 	}
 	assertForwardedBody := func(t *testing.T, body []byte, expectResponseFormat bool) {
 		t.Helper()
@@ -4318,10 +4318,10 @@ func TestModelClassAliasRewrittenToConcreteModelOnDispatch(t *testing.T) {
 		if string(got["seed"]) != `12345` {
 			t.Fatalf("seed not preserved: %s", string(got["seed"]))
 		}
-		if string(got["presence_penalty"]) != `0.25` {
+		if string(got["presence_penalty"]) != `0` {
 			t.Fatalf("presence_penalty not preserved: %s", string(got["presence_penalty"]))
 		}
-		if string(got["frequency_penalty"]) != `-0.5` {
+		if string(got["frequency_penalty"]) != `0` {
 			t.Fatalf("frequency_penalty not preserved: %s", string(got["frequency_penalty"]))
 		}
 		if string(got["metadata"]) != `{"trace":"preserve-me"}` {
@@ -4401,6 +4401,32 @@ func TestModelClassAliasRewrittenToConcreteModelOnDispatch(t *testing.T) {
 			if len(capturedBody) == 0 {
 				t.Fatal("provider did not receive request body")
 			}
+		})
+	}
+}
+
+func TestChatCompletionsRejectsNonDefaultSamplingPenalties(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+		value string
+	}{
+		{name: "presence", field: "presence_penalty", value: "0.25"},
+		{name: "frequency", field: "frequency_penalty", value: "-0.5"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: "https://provider.example"}})
+			registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "https://provider.example", 30)
+			server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+			body := []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"` + tc.field + `":` + tc.value + `}`)
+			rr := postChat(t, server, body, nil)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+			}
+			assertErrorEnvelopeWithParam(t, rr, "unsupported_sampling_penalty", "invalid_request_error", tc.field)
 		})
 	}
 }
@@ -7056,6 +7082,33 @@ func assertOpenAIErrorEnvelope(t *testing.T, rr *httptest.ResponseRecorder, want
 	}
 	if body.Error.Param != nil {
 		t.Fatalf("error.param = %v, want null; body=%s", body.Error.Param, rr.Body.String())
+	}
+}
+
+func assertErrorEnvelopeWithParam(t *testing.T, rr *httptest.ResponseRecorder, wantCode, wantType, wantParam string) {
+	t.Helper()
+	var body struct {
+		Error struct {
+			Code    string `json:"code"`
+			Type    string `json:"type"`
+			Message string `json:"message"`
+			Param   string `json:"param"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("error envelope decode failed: %v; body=%s", err, rr.Body.String())
+	}
+	if body.Error.Code != wantCode {
+		t.Fatalf("error.code = %q, want %q; body=%s", body.Error.Code, wantCode, rr.Body.String())
+	}
+	if body.Error.Type != wantType {
+		t.Fatalf("error.type = %q, want %q; body=%s", body.Error.Type, wantType, rr.Body.String())
+	}
+	if body.Error.Message == "" {
+		t.Fatalf("error.message is empty; body=%s", rr.Body.String())
+	}
+	if body.Error.Param != wantParam {
+		t.Fatalf("error.param = %q, want %q; body=%s", body.Error.Param, wantParam, rr.Body.String())
 	}
 }
 

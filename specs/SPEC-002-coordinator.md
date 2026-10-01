@@ -2934,8 +2934,8 @@ inline so this spec is self-contained for build session use; if SPEC-001
 | `stream` | bool | false | If true, response is SSE; see FR-B6. |
 | `stream_options` | object | null | `{include_usage: bool}`. Per FR-B1/SPEC-001 FR-7, `include_usage=false` is silently ignored; coordinator always relays the provider's usage chunk. |
 | `stop` | string or array | null | Max 4 stop sequences. |
-| `presence_penalty` | float | 0.0 | -2.0 to 2.0 |
-| `frequency_penalty` | float | 0.0 | -2.0 to 2.0 |
+| `presence_penalty` | float | 0.0 | MUST be omitted or `0.0`. Valid non-zero values within the legacy `-2.0` to `2.0` range are rejected with HTTP 400 `unsupported_sampling_penalty` and `param: "presence_penalty"` until the native MLX runtime applies the penalty in every serving path; malformed or out-of-range values remain `invalid_request`. Plaintext requests are rejected before provider dispatch. Relay-blind encrypted envelopes are rejected by provider validation before generation or billing and surfaced by the coordinator as non-retryable HTTP 400. |
+| `frequency_penalty` | float | 0.0 | MUST be omitted or `0.0`. Valid non-zero values within the legacy `-2.0` to `2.0` range are rejected with HTTP 400 `unsupported_sampling_penalty` and `param: "frequency_penalty"` until the native MLX runtime applies the penalty in every serving path; malformed or out-of-range values remain `invalid_request`. Plaintext requests are rejected before provider dispatch. Relay-blind encrypted envelopes are rejected by provider validation before generation or billing and surfaced by the coordinator as non-retryable HTTP 400. |
 | `seed` | int | null | Passed through to provider. |
 | `user` | string | null | Logged at DEBUG only. |
 | `response_format` | object | `{type:"text"}` | `type` ∈ {`"text"`, `"json_object"`}. Other values rejected 400. `content_filter` is Tier 2-reserved; v1 rejects 400. |

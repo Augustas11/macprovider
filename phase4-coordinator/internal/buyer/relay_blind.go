@@ -74,6 +74,7 @@ var relayBlindErrors = map[string]relayBlindErrorShape{
 	"relay_blind_ciphertext_invalid":        {http.StatusBadRequest, false, "none"},
 	"relay_blind_committed_failed":          {http.StatusInternalServerError, false, "do_not_resubmit"},
 	"relay_blind_provider_unsupported":      {http.StatusServiceUnavailable, true, "new_reservation_and_envelope"},
+	"unsupported_sampling_penalty":          {http.StatusBadRequest, false, "none"},
 }
 
 func writeRelayBlindError(w http.ResponseWriter, code, message string) {

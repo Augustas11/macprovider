@@ -223,6 +223,40 @@ func TestRelayBlindAuthenticatedPregenerationRejection(t *testing.T) {
 	}
 }
 
+func TestRelayBlindUnsupportedSamplingPenaltyIsNonRetryableBuyerError(t *testing.T) {
+	now := time.Unix(1_800_100_180, 0).UTC()
+	server, _, providerPrivate, closeStore := relayBlindTestServer(t, now, func(_ context.Context, _ pool.Provider, requestID string, _ []byte, _ bool, context providerws.RelayBlindDispatchContext) (*providerws.RelayStream, error) {
+		validations := make(chan providerws.RelayBlindValidation, 1)
+		rejected := relayBlindValidationForContext(context, "rejected", 0)
+		rejected.ErrorCode = "unsupported_sampling_penalty"
+		validations <- rejected
+		return &providerws.RelayStream{RequestID: requestID, Chunks: make(chan providerws.InferenceResponseChunk), Done: make(chan providerws.InferenceResponseEnd, 1), Errors: make(chan error, 1), Validations: validations}, nil
+	})
+	defer closeStore()
+	reservationRaw, _ := json.Marshal(relayblind.ReservationRequest{EndpointFamily: relayblind.EndpointChatCompletions, Model: "model-a", MaxOutputTokens: 32, InputTokenUpperBound: 96, EncryptedRequestBytes: 1024})
+	response := relayBlindRequest(t, server, http.MethodPost, "/v1/relay-blind/route-reservations", reservationRaw, "")
+	reservation, _ := relayblind.ParseReservationResponse(response.Body.Bytes())
+	envelope, _ := reservation.NewEnvelope("unsupported-penalty", now, bytes.Repeat([]byte{0x43}, 32))
+	buyerPrivate, _ := ecdh.X25519().GenerateKey(nil)
+	envelope, _ = envelope.Encrypt([]byte(`{"model":"model-a","messages":[],"presence_penalty":0.25}`), providerPrivate.PublicKey().Bytes(), buyerPrivate.Bytes())
+	envelopeRaw, _ := json.Marshal(envelope)
+	response = relayBlindRequest(t, server, http.MethodPost, "/v1/relay-blind/consume", envelopeRaw, "")
+	consume, _ := relayblind.ParseConsumeResponse(response.Body.Bytes())
+	response = relayBlindRequest(t, server, http.MethodPost, "/v1/chat/completions", envelopeRaw, consume.ExecutionAuthorization)
+	if response.Code != http.StatusBadRequest || response.Header().Get(relayBlindValidatedHeader) != "" {
+		t.Fatalf("unsupported penalty response code=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
+	}
+	for _, want := range []string{
+		`"code":"unsupported_sampling_penalty"`,
+		`"retryable":false`,
+		`"retry_action":"none"`,
+	} {
+		if !strings.Contains(response.Body.String(), want) {
+			t.Fatalf("missing %s in %s", want, response.Body.String())
+		}
+	}
+}
+
 func TestRelayBlindPostValidationTerminalErrorPreservesSatisfiedOutcome(t *testing.T) {
 	now := time.Unix(1_800_100_190, 0).UTC()
 	server, _, providerPrivate, closeStore := relayBlindTestServer(t, now, func(_ context.Context, _ pool.Provider, requestID string, _ []byte, _ bool, context providerws.RelayBlindDispatchContext) (*providerws.RelayStream, error) {

@@ -2073,8 +2073,8 @@ Example legacy response (with `\/`), which consumers MUST still tolerate:
 | `stream` | bool | false | |
 | `stream_options` | object | null | `{include_usage: bool}`. Per FR-7, binary always emits the usage chunk when `stream=true`; a client-provided `include_usage=false` is silently ignored (not an error). Documented to remove ambiguity for buyers expecting strict opt-out semantics. |
 | `stop` | string or array | null | Max 4 stop sequences. |
-| `presence_penalty` | float | 0.0 | -2.0 to 2.0 |
-| `frequency_penalty` | float | 0.0 | -2.0 to 2.0 |
+| `presence_penalty` | float | 0.0 | MUST be omitted or `0.0`. Valid non-zero values within the legacy `-2.0` to `2.0` range are rejected with HTTP 400 `unsupported_sampling_penalty` and `param: "presence_penalty"` until the native MLX runtime applies the penalty in every serving path; malformed or out-of-range values remain `invalid_request`. Relay-blind providers reject the same non-zero plaintext after decrypting the envelope but before generation or billing. |
+| `frequency_penalty` | float | 0.0 | MUST be omitted or `0.0`. Valid non-zero values within the legacy `-2.0` to `2.0` range are rejected with HTTP 400 `unsupported_sampling_penalty` and `param: "frequency_penalty"` until the native MLX runtime applies the penalty in every serving path; malformed or out-of-range values remain `invalid_request`. Relay-blind providers reject the same non-zero plaintext after decrypting the envelope but before generation or billing. |
 | `seed` | int | null | Passed to MLX for deterministic decoding if supported. |
 | `user` | string | null | Logged at DEBUG level for diagnostics only. |
 | `response_format` | object | `{type:"text"}` | `type` is `"text"` or `"json_object"`. `"json_object"` engages MLX structured-decoding hint if available. Any other value rejected with 400. |
