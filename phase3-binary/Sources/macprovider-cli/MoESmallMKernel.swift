@@ -253,6 +253,47 @@ enum MoESmallM {
           }
         """
 
+    /// Gather variant without the bucket launch: one threadgroup row per
+    /// router pair p. A threadgroup keeps going only if p is the first pair
+    /// of its expert; each simdgroup then lists that expert's pairs in
+    /// ascending order (prefix sums over the P indices) in threadgroup memory.
+    static let gatherInlineSource: String = {
+        let head = """
+              const int slot = int(threadgroup_position_in_grid.y);
+              const int c = counts[slot];
+              if (c == 0) {
+                return;
+              }
+              const int e = experts[slot];
+            """
+        let inlineHead = """
+              threadgroup int plist_all[NT * KS * TMAX];
+              threadgroup int* plist = plist_all + sg * TMAX;
+              const int slot = int(threadgroup_position_in_grid.y);
+              const uint ev = inds[slot];
+              bool earlier = false;
+              int c = 0;
+              for (int q0 = 0; q0 < P; q0 += 32) {
+                const int q = q0 + lane;
+                const bool match = q < P && inds[q] == ev;
+                earlier = earlier || (match && q < slot);
+                const int pos = simd_prefix_exclusive_sum(match ? 1 : 0);
+                if (match) {
+                  plist[c + pos] = q;
+                }
+                c += simd_sum(match ? 1 : 0);
+              }
+              if (simd_any(earlier)) {
+                return;
+              }
+              simdgroup_barrier(mem_flags::mem_threadgroup);
+              const int e = int(ev);
+            """
+        precondition(gatherSource.contains(head))
+        return gatherSource.replacingOccurrences(of: head, with: inlineHead)
+            .replacingOccurrences(of: "pairs[slot * TMAX + ", with: "plist[")
+    }()
+
     /// One threadgroup, thread e = expert e. Slots are the active experts in
     /// ascending expert order; each slot's pair list is in ascending pair
     /// order. Slots past the active count get count 0.
@@ -312,6 +353,14 @@ enum MoESmallM {
         inputNames: ["x", "w0", "s0", "b0", "w1", "s1", "b1", "experts", "counts", "pairs"],
         outputNames: ["y"],
         source: gatherSource,
+        header: header
+    )
+
+    nonisolated(unsafe) static let gatherInlineKernel = MLXFast.metalKernel(
+        name: "moe_smallm_vb_gather_inline",
+        inputNames: ["x", "w0", "s0", "b0", "w1", "s1", "b1", "inds"],
+        outputNames: ["y"],
+        source: gatherInlineSource,
         header: header
     )
 
@@ -454,6 +503,9 @@ enum MoESmallM {
         let k = x.dim(1)
         let topk = inds.dim(1)
         let dtype = x.dtype
+        if inlineBucket {
+            return groupedInline(x, inds: inds, gate: gate, up: up, down: down, stages: stages)
+        }
         let b = bucket(inds, experts: gate.experts)
         if stages == 1 { return b.counts }
         let mm = min(maxTokensPerPass, t >= 8 ? 8 : (t >= 4 ? 4 : (t >= 2 ? 2 : 1)))
@@ -474,6 +526,47 @@ enum MoESmallM {
                 outputDTypes: [dtype]
             )[0]
         }
+        let act = launch(
+            [x, gate.w, gate.scales, gate.biases, up.w, up.scales, up.biases],
+            mode: 1, tl: gateUpTiling, kIn: k, nOut: hidden)
+        if stages == 2 { return act }
+        let y = launch(
+            [act, down.w, down.scales, down.biases, down.w, down.scales, down.biases],
+            mode: 2, tl: downTiling, kIn: hidden, nOut: down.outDims)
+        return y.reshaped([t, topk, down.outDims])
+    }
+
+    /// Skip the bucket launch (gather kernels find their expert's pairs).
+    nonisolated(unsafe) static var inlineBucket = false
+
+    static func groupedInline(
+        _ x: MLXArray, inds: MLXArray, gate: QWeight, up: QWeight, down: QWeight, stages: Int
+    ) -> MLXArray {
+        let t = x.dim(0)
+        let k = x.dim(1)
+        let topk = inds.dim(1)
+        let p = t * topk
+        let dtype = x.dtype
+        let flat = inds.reshaped([p]).asType(.uint32)
+        let mm = min(maxTokensPerPass, t >= 8 ? 8 : (t >= 4 ? 4 : (t >= 2 ? 2 : 1)))
+        let hidden = gate.outDims
+        func launch(_ inputs: [MLXArray], mode: Int, tl: Tiling, kIn: Int, nOut: Int) -> MLXArray {
+            let rowsPerSG = (32 / tl.lpr) * (mode == 1 ? 1 : tl.r)
+            let groups = nOut / rowsPerSG / tl.nt
+            let threads = 32 * tl.ks * tl.nt
+            return gatherInlineKernel(
+                inputs + [flat],
+                template: [
+                    ("T", dtype), ("MODE", mode), ("MM", mm), ("R", tl.r), ("KS", tl.ks), ("NT", tl.nt),
+                    ("LPR", tl.lpr), ("XS", tl.xs), ("K", kIn), ("N", nOut), ("TOPK", topk), ("TMAX", t), ("P", p),
+                ],
+                grid: (groups * threads, p, 1),
+                threadGroup: (threads, 1, 1),
+                outputShapes: [[p, nOut]],
+                outputDTypes: [dtype]
+            )[0]
+        }
+        if stages == 1 { return flat }
         let act = launch(
             [x, gate.w, gate.scales, gate.biases, up.w, up.scales, up.biases],
             mode: 1, tl: gateUpTiling, kIn: k, nOut: hidden)

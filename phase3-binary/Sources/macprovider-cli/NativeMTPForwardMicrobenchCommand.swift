@@ -50,8 +50,14 @@ struct NativeMTPForwardMicrobenchCommand: AsyncParsableCommand {
     @Option(name: .customLong("gate-up-tiling"), help: "Lab: grouped gate/up tiling r-lpr-ks-nt-xs.")
     var gateUpTiling: String?
 
+    @Option(name: .customLong("token-source"), help: "Lab: random token ids (default) or text (consecutive real-text tokens per row).")
+    var tokenSource: String = "random"
+
     @Option(name: .customLong("moe-mm"), help: "Lab: grouped max tokens per expert per weight pass.")
     var moeMM: Int?
+
+    @Flag(name: .customLong("moe-inline-bucket"), help: "Lab: grouped kernels find expert pairs themselves (no bucket launch).")
+    var moeInlineBucket = false
 
     @Option(name: .customLong("down-tiling"), help: "Lab: grouped down tiling r-lpr-ks-nt-xs.")
     var downTiling: String?
@@ -59,6 +65,7 @@ struct NativeMTPForwardMicrobenchCommand: AsyncParsableCommand {
     func run() async throws {
         try MoESmallM.applyTilingOverrides(gateUp: gateUpTiling, down: downTiling)
         if let moeMM { MoESmallM.maxTokensPerPass = moeMM }
+        MoESmallM.inlineBucket = moeInlineBucket
         let batchSizes = batches.split(separator: ",").compactMap { Int($0) }
         let widthValues = widths.split(separator: ",").compactMap { Int($0) }
         let variantValues = variants.split(separator: ",").map(String.init)
@@ -74,6 +81,16 @@ struct NativeMTPForwardMicrobenchCommand: AsyncParsableCommand {
         let routed = try await MLXSmallMProbeCommand.installSmallMRouting(smallmQMV, container: container)
         let smallmLabel = smallmQMV
         let moeLabel = moeSmallM
+        let tokenLabel = tokenSource
+        var textPool: [Int32]?
+        if tokenSource == "text" {
+            textPool = await container.perform { context in
+                let text = Array(repeating: MLXSmallMProbeCommand.moePrompts.joined(separator: " "), count: 64)
+                    .joined(separator: "\n")
+                return context.tokenizer.encode(text: text).map { Int32($0) }
+            }
+        }
+        let pool = textPool
         let ablateLabel = ablate
         let promptTokens = self.promptTokens
         let warmup = self.warmup
@@ -91,11 +108,12 @@ struct NativeMTPForwardMicrobenchCommand: AsyncParsableCommand {
                             width: width,
                             promptTokens: promptTokens,
                             warmup: warmup,
-                            iters: iters
+                            iters: iters,
+                            pool: pool
                         )
                     }
                     print(line.dropLast() + ",\"smallm_qmv\":\"\(smallmLabel)\",\"smallm_routed_layers\":\(routed)"
-                        + ",\"moe_smallm\":\"\(moeLabel)\",\"moe_tiling\":\"\(MoESmallM.gateUpTiling)/\(MoESmallM.downTiling)/mm\(MoESmallM.maxTokensPerPass)\",\"ablate\":\"\(ablateLabel)\",\"moe_notes\":\"\(moeNotes)\"}")
+                        + ",\"moe_smallm\":\"\(moeLabel)\",\"moe_tiling\":\"\(MoESmallM.gateUpTiling)/\(MoESmallM.downTiling)/mm\(MoESmallM.maxTokensPerPass)\(MoESmallM.inlineBucket ? "/ib" : "")\",\"token_source\":\"\(tokenLabel)\",\"ablate\":\"\(ablateLabel)\",\"moe_notes\":\"\(moeNotes)\"}")
                     fflush(stdout)
                 }
             }
@@ -110,11 +128,22 @@ struct NativeMTPForwardMicrobenchCommand: AsyncParsableCommand {
         width: Int,
         promptTokens: Int,
         warmup: Int,
-        iters: Int
+        iters: Int,
+        pool: [Int32]? = nil
     ) throws -> String {
         var seed: UInt64 = 0x9E37_79B9_7F4A_7C15 &+ UInt64(batch * 31 + width)
+        // Text mode: row r reads consecutive pool tokens from its own cursor.
+        var cursors = (0 ..< batch).map { $0 * 977 }
         func nextTokens(_ count: Int) -> [Int32] {
-            (0 ..< count).map { _ in
+            if let pool {
+                let per = count / batch
+                return (0 ..< batch).flatMap { r -> [Int32] in
+                    let start = cursors[r]
+                    cursors[r] += per
+                    return (0 ..< per).map { pool[(start + $0) % pool.count] }
+                }
+            }
+            return (0 ..< count).map { _ in
                 seed = seed &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
                 return Int32(1_000 + Int((seed >> 33) % 40_000))
             }

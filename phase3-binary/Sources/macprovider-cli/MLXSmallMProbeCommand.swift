@@ -71,6 +71,9 @@ struct MLXSmallMProbeCommand: AsyncParsableCommand {
     @Option(name: .customLong("moe-mm"), help: "Grouped: max tokens per expert per weight pass (1, 2, 4, 8).")
     var moeMM: Int?
 
+    @Flag(name: .customLong("moe-inline-bucket"), help: "Lab: grouped kernels find expert pairs themselves (no bucket launch).")
+    var moeInlineBucket = false
+
     @Option(name: .customLong("down-tiling"), help: "grouped down tiling r-lpr-ks-nt-xs, e.g. 1-8-1-4-1.")
     var downTiling: String?
 
@@ -86,6 +89,7 @@ struct MLXSmallMProbeCommand: AsyncParsableCommand {
     func run() async throws {
         try MoESmallM.applyTilingOverrides(gateUp: gateUpTiling, down: downTiling)
         if let moeMM { MoESmallM.maxTokensPerPass = moeMM }
+        MoESmallM.inlineBucket = moeInlineBucket
         switch mode {
         case "qmm":
             try runQMM()
