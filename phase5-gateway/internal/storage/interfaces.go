@@ -136,6 +136,13 @@ type UsageStore interface {
 	ReleaseConcurrency(ctx context.Context, accountID, requestID string, releasedAt time.Time) error
 }
 
+type DemandTelemetryStore interface {
+	InsertDemandEvent(ctx context.Context, event DemandEvent) error
+	PruneDemandEvents(ctx context.Context, before time.Time) (int64, error)
+	DemandSummary(ctx context.Context, query DemandSummaryQuery) ([]DemandSummaryRow, error)
+	DemandRouteSummary(ctx context.Context, query DemandSummaryQuery) ([]DemandRouteSummaryRow, error)
+}
+
 type WalletSessionStore interface {
 	StoreWalletSessionChallenge(ctx context.Context, challenge WalletSessionChallenge) error
 	RegisterWalletSession(ctx context.Context, req WalletSessionRegistrationRequest) (WalletSession, error)

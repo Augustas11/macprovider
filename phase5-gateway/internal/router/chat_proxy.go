@@ -37,15 +37,21 @@ type chatRequest struct {
 }
 
 type tokenUsage struct {
-	PromptTokens        int64               `json:"prompt_tokens"`
-	CachedPromptTokens  int64               `json:"cached_prompt_tokens"`
-	CompletionTokens    int64               `json:"completion_tokens"`
-	TotalTokens         int64               `json:"total_tokens"`
-	PromptTokensDetails promptTokensDetails `json:"prompt_tokens_details"`
+	PromptTokens            int64                   `json:"prompt_tokens"`
+	CachedPromptTokens      int64                   `json:"cached_prompt_tokens"`
+	CompletionTokens        int64                   `json:"completion_tokens"`
+	ReasoningTokens         int64                   `json:"reasoning_tokens"`
+	TotalTokens             int64                   `json:"total_tokens"`
+	PromptTokensDetails     promptTokensDetails     `json:"prompt_tokens_details"`
+	CompletionTokensDetails completionTokensDetails `json:"completion_tokens_details"`
 }
 
 type promptTokensDetails struct {
 	CachedTokens int64 `json:"cached_tokens"`
+}
+
+type completionTokensDetails struct {
+	ReasoningTokens int64 `json:"reasoning_tokens"`
 }
 
 func (u tokenUsage) observedCachedTokens() int64 {
@@ -181,6 +187,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	upCtx := deadlines.Context()
 	sw := &statusWriter{ResponseWriter: w, statusCode: 0}
 	w = sw
+	demand := newDemandTelemetryState(start, requestID(r))
+	r = r.WithContext(withDemandTelemetry(r.Context(), demand))
 	// Issue #190 R1 security HIGH: chat-completion responses now
 	// carry per-tenant headers (X-RateLimit-Remaining-Requests).
 	// Forbid intermediary caching unconditionally so a misconfigured
@@ -211,8 +219,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			"status", sw.statusCode,
 			"deadline_phase", deadlines.expiredPhase(),
 		}
-		attrs = append(attrs, timing.attrs(s.now())...)
+		now := s.now()
+		if demand != nil {
+			demand.setTiming(timing, now)
+		}
+		attrs = append(attrs, timing.attrs(now)...)
 		slog.Info("chat completion", attrs...)
+		s.flushDemandTelemetry(r, demand, sw.statusCode)
 	}()
 
 	if r.Method != http.MethodPost {
@@ -240,6 +253,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		subject = usageSubject{AccountID: authn.Bearer.AccountID}
 	}
 	accountID = subject.AccountID
+	demand.setSubject(subject, s.cfg.Auth.KeyHashSecret)
 	if s.isWholesaleAccount(subject.AccountID) {
 		dailyQuota = s.dailyQuotaForAccount(r.Context(), subject.AccountID)
 	}
@@ -313,7 +327,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	body = rewriteChatRequestToolCallIDs(body)
 	model = chat.Model
 	streamMode = chat.Stream
+	maxTokens := maxAllowed
+	if chat.MaxTokens != nil {
+		maxTokens = *chat.MaxTokens
+	}
+	demand.setRequest(chat, "", "", maxTokens)
 	if chat.N != nil && *chat.N != 1 {
+		demand.markGatewayFailure(http.StatusBadRequest, "n_must_be_1")
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "n_must_be_1", "n must be 1")
 		return
 	}
@@ -327,6 +347,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	poolID, poolErr := s.resolvePoolSelection(upCtx, r.Header, subject.AccountID, poolSelectionAllowed)
 	if poolErr != nil {
 		s.enforcePoolRejectionTimingFloor(start)
+		demand.markGatewayFailure(poolErr.status, poolErr.code)
 		writeError(w, poolErr.status, poolErr.typ, poolErr.code, poolErr.message)
 		return
 	}
@@ -334,14 +355,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// quota reservation. A non-native engine without a pool is refused here.
 	engineClass, engineErr := resolveEngineSelection(r.Header, poolID)
 	if engineErr != nil {
+		demand.markGatewayFailure(engineErr.status, engineErr.code)
 		writeError(w, engineErr.status, engineErr.typ, engineErr.code, engineErr.message)
 		return
 	}
-	maxTokens := maxAllowed
-	if chat.MaxTokens != nil {
-		maxTokens = *chat.MaxTokens
-	}
+	demand.setRequest(chat, poolID, engineClass, maxTokens)
 	if maxTokens < 0 || maxTokens > maxAllowed {
+		demand.markGatewayFailure(http.StatusBadRequest, "max_tokens_exceeded")
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "max_tokens_exceeded", "max_tokens exceeds configured limit")
 		return
 	}
@@ -402,6 +422,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			// load-bearing: it makes the terminal defer below a no-op, so
 			// only the claim winner can ever publish or drop.
 			dedupeFingerprint = ""
+			demand.suppress()
 			// Adopt attempt 1's id for the rest of the request. The response
 			// header must be overwritten too — the middleware already wrote
 			// this attempt's freshly minted id (server.go:257) — or a
@@ -498,6 +519,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil {
 		adapter.setPromptEstimate(promptEstimate)
 	}
+	demand.setAttemptedTokens(promptEstimate, maxTokens)
 	promptReservation := promptCapTokens(body)
 	reservationTokens := promptReservation + maxTokens
 	if reservationTokens < maxTokens {
@@ -521,6 +543,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	if errors.Is(err, storage.ErrQuotaExceeded) {
 		setRateLimitHeaders(w, decision.LimitTokens, decision.RemainingTokens, decision.ResetUnix)
+		demand.markGatewayFailure(http.StatusTooManyRequests, "quota_exhausted")
 		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "quota_exhausted", "Quota exhausted")
 		return
 	}
@@ -531,6 +554,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// decision already shows quota exceeded, surface 429 rather than 500.
 	if err != nil && !decision.Admitted && decision.RemainingTokens == 0 && decision.LimitTokens > 0 {
 		setRateLimitHeaders(w, decision.LimitTokens, decision.RemainingTokens, decision.ResetUnix)
+		demand.markGatewayFailure(http.StatusTooManyRequests, "quota_exhausted")
 		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "quota_exhausted", "Quota exhausted")
 		return
 	}
@@ -610,6 +634,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		// rate-limit headers so client SDKs can self-pace
 		// instead of retrying blindly until 429.
 		setConcurrencyRateLimitHeaders(w, concurrencyLimit, 0, concurrencyRetryAfterSeconds, s.now())
+		demand.markGatewayFailure(http.StatusTooManyRequests, concurrencyErrCode)
 		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", concurrencyErrCode, concurrencyErrMsg)
 		return
 	} else if concurrencyErr != nil {
@@ -740,6 +765,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	timing.markCoordinatorStart(s.now())
 	resp, retryExhausted, priorProviderDispatch, err := s.doCoordinatorChatWithRetry(upCtx, r, subject.AccountID, buildUpReq)
+	demand.markCoordinatorResponse(resp)
 	if authn.WalletSession != nil && err == nil && resp != nil {
 		if markErr := s.store.MarkWalletSessionDispatched(context.Background(), authn.WalletSession.Session.SessionID, requestID(r), s.now().UTC()); markErr != nil {
 			_ = resp.Body.Close()
@@ -783,6 +809,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.refundWalletAwareReservation(subject, requestID(r))
+		if demand := demandTelemetryFromContext(r.Context()); demand != nil {
+			demand.markGatewayFailure(http.StatusServiceUnavailable, "coordinator_unavailable")
+		}
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
 		return
 	}
@@ -1011,16 +1040,26 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
 		return
 	}
+	passNoProvider := func() {
+		if demand := demandTelemetryFromContext(r.Context()); demand != nil {
+			if demandNoProviderCoordinatorErrorSettlesAsProviderFailure(resp, body) {
+				demand.markProviderFailure(promptEstimate, 0, http.StatusBadGateway, "upstream_provider_error")
+			} else {
+				demand.markNoProvider(resp.StatusCode, openAIErrorCode(body))
+			}
+		}
+		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, window)
+	}
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		if isNullUsageProviderError(body) {
 			s.passThroughReceiptEligibleProviderError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, maxTokens)
 			return
 		}
 		if coordinatorTier2PolicyError(resp.StatusCode, body) {
-			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, window)
+			passNoProvider()
 			return
 		}
-		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, window)
+		passNoProvider()
 		return
 	}
 	if resp.StatusCode == http.StatusGatewayTimeout {
@@ -1036,19 +1075,19 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	// reservation and pass the OpenAI-shaped error body through verbatim so
 	// the buyer sees an actionable 404 instead of an opaque 502.
 	if resp.StatusCode == http.StatusNotFound {
-		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, window)
+		passNoProvider()
 		return
 	}
 	if coordinatorTier2PolicyError(resp.StatusCode, body) {
-		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, window)
+		passNoProvider()
 		return
 	}
 	if coordinatorIdempotencyError(resp.StatusCode, body) {
-		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, window)
+		passNoProvider()
 		return
 	}
 	if !priorProviderDispatch && coordinatorPreDispatchNoChargeError(resp.StatusCode, body, resp.Header) {
-		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, window)
+		passNoProvider()
 		return
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -1057,7 +1096,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		if coordinatorValidationError(resp.StatusCode, body) {
-			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, window)
+			passNoProvider()
 			return
 		}
 		completion := completionFromHeaderCapped(resp.Header, maxTokens)
@@ -1066,6 +1105,9 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 		}
 		writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
 		return
+	}
+	if demand := demandTelemetryFromContext(r.Context()); demand != nil {
+		demand.setRoutedModel(demandRoutedModelFromJSON(body))
 	}
 	// Delivered-only billing (SPEC-022 R-5.6): a coordinator that negotiated
 	// trailers records a non-streaming success only after its body write, so
@@ -1090,6 +1132,9 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	} else if usageErr == nil {
 		tokenSource = "provider_reported"
 		usage = relayBlindBoundSettlementUsage(r, usage)
+		if demand := demandTelemetryFromContext(r.Context()); demand != nil {
+			demand.setTokenUsage(usage)
+		}
 	}
 	if anthropicDuplicateProviderResponse {
 		settlePrompt, settleCompletion, settleSource := promptEstimate, int64(0), "gateway_estimated"
@@ -1172,13 +1217,23 @@ func emitProviderAttribution(dst, src http.Header) {
 func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, model string, retryExhausted, priorProviderDispatch bool, deadlines *requestDeadlines, structuredStreaming bool, reservationWindow string, timing *gatewayPhaseTiming) {
 	upstreamCtx := deadlines.Context()
 	cancelUpstream := deadlines.Cancel
+	passNoProvider := func(body []byte) {
+		if demand := demandTelemetryFromContext(r.Context()); demand != nil {
+			if demandNoProviderCoordinatorErrorSettlesAsProviderFailure(resp, body) {
+				demand.markProviderFailure(promptEstimate, 0, http.StatusBadGateway, "upstream_provider_error")
+			} else {
+				demand.markNoProvider(resp.StatusCode, openAIErrorCode(body))
+			}
+		}
+		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, reservationWindow)
+	}
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		body, _ := io.ReadAll(resp.Body)
 		if coordinatorTier2PolicyError(resp.StatusCode, body) {
-			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, reservationWindow)
+			passNoProvider(body)
 			return
 		}
-		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, reservationWindow)
+		passNoProvider(body)
 		return
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -1195,7 +1250,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		// See forwardNonStreamingChat for the matching non-stream branch.
 		if resp.StatusCode == http.StatusNotFound {
 			body, _ := io.ReadAll(resp.Body)
-			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, reservationWindow)
+			passNoProvider(body)
 			return
 		}
 		body, _ := io.ReadAll(resp.Body)
@@ -1204,19 +1259,19 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			return
 		}
 		if coordinatorValidationError(resp.StatusCode, body) {
-			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, reservationWindow)
+			passNoProvider(body)
 			return
 		}
 		if coordinatorIdempotencyError(resp.StatusCode, body) {
-			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, reservationWindow)
+			passNoProvider(body)
 			return
 		}
 		if coordinatorTier2PolicyError(resp.StatusCode, body) {
-			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, reservationWindow)
+			passNoProvider(body)
 			return
 		}
 		if !priorProviderDispatch && coordinatorPreDispatchNoChargeError(resp.StatusCode, body, resp.Header) {
-			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, reservationWindow)
+			passNoProvider(body)
 			return
 		}
 		if !s.settleOrRefundPreStreamUpstreamError(w, r, subject, promptEstimate, completionFromHeaderCapped(resp.Header, maxTokens), maxUsageTokens, "gateway_estimated", "upstream_error", resp.StatusCode, body, resp.Header, true, reservationWindow) {
@@ -1283,10 +1338,16 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	forwardedUsage := false
 	terminalStructuredErrorCode := ""
 	refundTerminalStructuredError := func() {
+		if demand := demandTelemetryFromContext(r.Context()); demand != nil {
+			demand.markTerminalOutcome(promptEstimate, estimateStreamingCompletionTokens(emitted, maxTokens), terminalStructuredErrorCode, true)
+		}
 		s.refundWalletAwareReservation(subject, requestID(r))
 	}
 	settleReported := func(outcome string) {
 		usage := *reported
+		if demand := demandTelemetryFromContext(r.Context()); demand != nil {
+			demand.setTokenUsage(usage)
+		}
 		observedRawCompletion := estimateTokensFromBytes(emitted)
 		observedCompletion := estimateStreamingCompletionTokens(emitted, maxTokens)
 		maxCompletion := maxStreamingCompletionTokens(maxTokens)
@@ -1542,6 +1603,9 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					progressDeadline = streamingProgressDeadline(idleTimeout)
 					// First content-bearing delta: the first-token phase is
 					// satisfied. Only the (never-re-armed) ceiling remains.
+					if timing != nil {
+						timing.markFirstToken(s.now())
+					}
 					deadlines.disarmPhase()
 				}
 				frameBytes := boundedStreamingFallbackFrameBytes(line)
@@ -1559,6 +1623,9 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				if relayBlindExecutionFor(r) != nil {
 					data = string(relayBlindUsageMetadataBody(r, []byte(data)))
 					line = []byte("data: " + data + "\n")
+				}
+				if demand := demandTelemetryFromContext(r.Context()); demand != nil {
+					demand.setRoutedModel(demandRoutedModelFromJSON([]byte(data)))
 				}
 				if usage, ok, err := usageFromJSON([]byte(data), maxUsageTokens, maxTokens, true); ok {
 					if err != nil {
@@ -2014,6 +2081,15 @@ func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r 
 	_, _ = w.Write(body)
 }
 
+func demandNoProviderCoordinatorErrorSettlesAsProviderFailure(resp *http.Response, body []byte) bool {
+	if resp == nil {
+		return false
+	}
+	return coordinatorPoolStateStaleError(resp.StatusCode, body) &&
+		(strings.TrimSpace(resp.Header.Get(gatewayPriorProviderDispatchHeader)) != "" || strings.TrimSpace(resp.Header.Get(settlementNoPriorDispatchHeader)) == "") ||
+		coordinatorStructuredNoProviderNeedsSettlement(resp.StatusCode, body, resp.Header)
+}
+
 func refundedCoordinatorAuditOutcome(status int, body []byte) string {
 	if isCoordNoProviderAvailable503(status, body) {
 		return "no_provider_available"
@@ -2132,6 +2208,9 @@ func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, 
 			"settlement_outcome", finality.Outcome,
 			"settlement_reason", finality.Reason,
 		)
+	}
+	if demand := demandTelemetryFromContext(r.Context()); demand != nil {
+		demand.markProviderFailure(promptEstimate, 0, resp.StatusCode, openAIErrorCode(body))
 	}
 	// PR #250 R1 code MEDIUM: this path serves provider-SELECTED
 	// errors (null-usage 5xx, etc.) where the coord did pick a
@@ -2508,6 +2587,7 @@ func (s *Server) settleBeforeResponseWithFinality(w http.ResponseWriter, r *http
 			writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Could not settle usage")
 			return false
 		}
+		markDemandSettlement(r, prompt, completion, outcome)
 		return true
 	case settlementFinalityHold:
 		holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -2560,6 +2640,7 @@ func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Reque
 				"error", err,
 			)
 		}
+		markDemandSettlement(r, prompt, completion, outcome)
 	case settlementFinalityHold:
 		// A facade may finish before HTTP EOF makes trailers available. Keep
 		// receipt authority in the reconciler; missing finality is not a debit.
@@ -2617,6 +2698,7 @@ func (s *Server) settleMissingFinalityTrailerAsObserve(r *http.Request, subject 
 	if err := s.settleObserveFallbackCandidate(ctx, candidate); err != nil {
 		slog.Error("gateway deferred observe fallback to durable reconciliation", "request_id", requestID(r), "error", err)
 	}
+	markDemandSettlement(r, prompt, completion, outcome)
 	return true
 }
 
@@ -2704,6 +2786,7 @@ func (s *Server) markStreamingSettlementHoldForReconciliation(r *http.Request, s
 		"settlement_outcome", finality.Outcome,
 		"settlement_reason", finality.Reason,
 	)
+	markDemandSettlement(r, prompt, completion, outcome)
 	s.nudgeBoundSettlementReconciler(r, subject, maxTotal, h, reservationWindow, candidateSaved)
 }
 
@@ -2714,6 +2797,7 @@ func (s *Server) boundStreamingSettlementHoldWithCandidate(ctx context.Context, 
 		prompt, completion, maxTotal, source, outcome, reservationWindow)
 	holdBound := s.boundStreamingSettlementHold(ctx, r, subject, finality)
 	if holdBound {
+		markDemandSettlement(r, prompt, completion, outcome)
 		s.nudgeBoundSettlementReconciler(r, subject, maxTotal, h, reservationWindow, candidateSaved)
 	}
 	return holdBound
@@ -3209,6 +3293,9 @@ func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt
 			"outcome", outcome,
 			"settle_error", err.Error(),
 		)
+		if demand := demandTelemetryFromContext(r.Context()); demand != nil {
+			demand.markSettlement(prompt, completion, outcome)
+		}
 		return
 	}
 	// The normal path: SettleReservation wrote the usage_events row and
@@ -3372,20 +3459,31 @@ func (s *Server) settleRequest(r *http.Request, subject usageSubject, prompt, co
 		AccountID:  subject.AccountID, RequestID: requestID(r), PromptTokens: prompt, CompletionTokens: completion,
 		MaxTotalTokens: maxTotal, TokenSource: source, Outcome: outcome, SettledAt: s.now(),
 	}
+	var err error
 	if subject.DemoIdentity != "" {
-		return s.store.SettleDemoReservation(context.Background(), settlement, storage.DemoUsageEvent{
+		err = s.store.SettleDemoReservation(context.Background(), settlement, storage.DemoUsageEvent{
 			RequestID: requestID(r), ClientIP: subject.DemoIdentity, DemoTokenHash: subject.DemoTokenHash, CreatedAt: s.now(),
 		})
-	}
-	if subject.WalletSessionID != "" {
-		return s.store.FinalizeWalletSessionReservation(context.Background(), storage.WalletSessionReservationSettlement{
+	} else if subject.WalletSessionID != "" {
+		err = s.store.FinalizeWalletSessionReservation(context.Background(), storage.WalletSessionReservationSettlement{
 			RelayBlind: relayBlindMetadataFor(r),
 			SessionID:  subject.WalletSessionID, AccountID: subject.AccountID, RequestID: requestID(r),
 			PromptTokens: prompt, CompletionTokens: completion, MaxTotalTokens: maxTotal,
 			TokenSource: source, Outcome: outcome, SettledAt: s.now(),
 		})
+	} else {
+		err = s.store.SettleReservation(context.Background(), settlement)
 	}
-	return s.store.SettleReservation(context.Background(), settlement)
+	if err == nil {
+		markDemandSettlement(r, prompt, completion, outcome)
+	}
+	return err
+}
+
+func markDemandSettlement(r *http.Request, prompt, completion int64, outcome string) {
+	if demand := demandTelemetryFromContext(r.Context()); demand != nil {
+		demand.markSettlement(prompt, completion, outcome)
+	}
 }
 
 // estimateStreamingCompletionTokens caps the streaming-fallback
@@ -4015,11 +4113,12 @@ func usageFromJSON(body []byte, maxUsageTokens, maxCompletion int64, allowComple
 		return tokenUsage{}, false, nil
 	}
 	var rawUsage struct {
-		PromptTokens        *int64          `json:"prompt_tokens"`
-		CachedPromptTokens  json.RawMessage `json:"cached_prompt_tokens"`
-		CompletionTokens    *int64          `json:"completion_tokens"`
-		TotalTokens         *int64          `json:"total_tokens"`
-		PromptTokensDetails json.RawMessage `json:"prompt_tokens_details"`
+		PromptTokens            *int64          `json:"prompt_tokens"`
+		CachedPromptTokens      json.RawMessage `json:"cached_prompt_tokens"`
+		CompletionTokens        *int64          `json:"completion_tokens"`
+		TotalTokens             *int64          `json:"total_tokens"`
+		PromptTokensDetails     json.RawMessage `json:"prompt_tokens_details"`
+		CompletionTokensDetails json.RawMessage `json:"completion_tokens_details"`
 	}
 	if err := json.Unmarshal(envelope.Usage, &rawUsage); err != nil {
 		return tokenUsage{}, true, fmt.Errorf("usage object is malformed")
@@ -4038,6 +4137,8 @@ func usageFromJSON(body []byte, maxUsageTokens, maxCompletion int64, allowComple
 	}
 	usage.CachedPromptTokens = sanitizedCachedPromptTokens(rawUsage.CachedPromptTokens, usage.PromptTokens)
 	usage.PromptTokensDetails.CachedTokens = sanitizedNestedCachedTokens(rawUsage.PromptTokensDetails, usage.PromptTokens, usage.CachedPromptTokens)
+	usage.ReasoningTokens = sanitizedReasoningTokens(rawUsage.CompletionTokensDetails, usage.CompletionTokens)
+	usage.CompletionTokensDetails.ReasoningTokens = usage.ReasoningTokens
 	if usage.PromptTokens > math.MaxInt64-usage.CompletionTokens {
 		return tokenUsage{}, true, fmt.Errorf("usage token total overflows int64")
 	}
@@ -4071,6 +4172,10 @@ func usageFromJSON(body []byte, maxUsageTokens, maxCompletion int64, allowComple
 		}
 		if usage.CompletionTokens < 0 {
 			usage.CompletionTokens = 0
+		}
+		if usage.ReasoningTokens > usage.CompletionTokens {
+			usage.ReasoningTokens = usage.CompletionTokens
+			usage.CompletionTokensDetails.ReasoningTokens = usage.ReasoningTokens
 		}
 		if usage.CachedPromptTokens > usage.PromptTokens {
 			usage.CachedPromptTokens = usage.PromptTokens
@@ -4109,6 +4214,29 @@ func sanitizedNestedCachedTokens(raw json.RawMessage, promptTokens, billedCached
 		return billedCached
 	}
 	return sanitizedCachedPromptTokens(details.CachedTokens, promptTokens)
+}
+
+func sanitizedReasoningTokens(raw json.RawMessage, completionTokens int64) int64 {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return 0
+	}
+	var details struct {
+		ReasoningTokens json.RawMessage `json:"reasoning_tokens"`
+	}
+	if err := json.Unmarshal(raw, &details); err != nil {
+		return 0
+	}
+	if len(details.ReasoningTokens) == 0 || bytes.Equal(bytes.TrimSpace(details.ReasoningTokens), []byte("null")) {
+		return 0
+	}
+	var reasoning int64
+	if err := json.Unmarshal(details.ReasoningTokens, &reasoning); err != nil {
+		return 0
+	}
+	if reasoning < 0 || reasoning > completionTokens {
+		return 0
+	}
+	return reasoning
 }
 
 func usageBodyWithTokenUsage(body []byte, usage tokenUsage) []byte {

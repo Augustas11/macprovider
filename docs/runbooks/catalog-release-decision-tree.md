@@ -115,6 +115,55 @@ no signing key and never re-signs. The release is built from
   transaction is in progress (`pearl_locks_free`), and no pricing transaction
   journal exists (`pricing_txn_absent`).
 
+### Issue #1807 8GB/16GB trial-allocation evidence
+
+The #1807 8GB/16GB model migration is a catalog-content release only when the
+signed commit changes candidate, demand, Tier-2 model entries, or the
+not-buyer-serving list without changing policy, schema, keyring, signer,
+artifact-bound state, or pricing globals. Catalog signing is a separate
+predecessor step: this content lane deploys already-signed catalog bytes from
+the reviewed commit and never re-signs on Pearl.
+
+Current dated validation evidence is recorded in
+`audits/2026-10-01-issue-1807-studio-validation.md`: Qwen3.5-9B passed the
+tested 16GB one-slot 32K-context claim, while Ministral 3 3B loaded on the
+Studio but failed strict JSON-mode and normalized OpenAI tool-call behavior.
+Do not sign a #1807 8GB Ministral row that advertises those capabilities until
+that gap is fixed and revalidated, or the catalog/runtime claim is deliberately
+scoped to exclude them.
+
+Before the signing session cuts the #1807 catalog commit, attach an evidence
+package to the issue or PR with:
+
+- Mac Studio validation for `mlx-community/Qwen3.5-9B-4bit` on 16GB-class
+  placement and `mlx-community/Ministral-3-3B-Instruct-2512-4bit` on 8GB-class
+  placement, including clean acquisition/provenance, cold and warm load,
+  memory pressure, TTFT, sustained output TPS, OpenAI-compatible responses,
+  structured-output/tool behavior if claimed, context limits, cancellation,
+  restart, repeated-request stability, and one-slot operation.
+- The Llama coverage floor: keep Llama 3.1 8B on part of the 16GB fleet and
+  keep minimal Llama 3.2 3B coverage on 8GB for compatibility and existing
+  buyers. Do not add Qwen3 8B for this trial while its OpenRouter route is
+  scheduled for 2026-10-09 deprecation.
+- The initial allocation math: 16GB at 60% Qwen3.5-9B / 40% Llama 3.1 8B, 8GB
+  at 80% Ministral 3 3B / 20% Llama 3.2 3B, one inference slot per machine at
+  first, approximately 32K advertised/validated context on 16GB, and only the
+  validated 8K-16K context range on 8GB.
+- Rollback proof: the live predecessor release id and candidate SHA, the exact
+  rollback path through this runbook, and the conditions that force rollback
+  before the 14-day observation window starts: candidate instability,
+  over-advertised context or capability, provider unavailability dominating the
+  comparison, catalog claims diverging from runtime validation, or telemetry
+  gaps that prevent served/unmet/substituted demand from being counted.
+- Telemetry readiness: gateway demand telemetry from #1812 is deployed and can
+  distinguish requested, served, unmet, capacity-constrained, and substituted
+  traffic without storing prompt or completion content.
+
+After that signed commit lands on `origin/main`, deploy it with the normal
+content-lane preflight/deploy below. Start #1807's 14-day observation window
+only after the content lane is live and stable and the gateway telemetry is
+complete enough for the decision rule in the issue.
+
 ### Run
 
 ```bash

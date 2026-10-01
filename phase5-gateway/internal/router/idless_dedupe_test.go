@@ -170,10 +170,11 @@ func TestIdlessDedupe_ConcurrentIdenticalRequestsBillOnce(t *testing.T) {
 		return responseWithBody(http.StatusOK,
 			http.Header{"Content-Type": []string{"application/json"}}, seamCompletionJSON), nil
 	})}
+	accountID := "acct_idless_concurrent"
 	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"
 	}, WithHTTPClient(client))
-	key := createAccountAndKey(t, store, cfg, "acct_idless_concurrent")
+	key := createAccountAndKey(t, store, cfg, accountID)
 
 	firstCh := make(chan *httptest.ResponseRecorder, 1)
 	go func() { firstCh <- postChat(t, h, key, idlessDedupeBody, nil) }()
@@ -208,9 +209,12 @@ func TestIdlessDedupe_ConcurrentIdenticalRequestsBillOnce(t *testing.T) {
 	if used := billedTokens(t, h, key); used != 20 {
 		t.Fatalf("billed %v want 20", used)
 	}
-	state := gatewaySettlementSnapshot(t, dbPath, "acct_idless_concurrent")
+	state := gatewaySettlementSnapshot(t, dbPath, accountID)
 	if state.settledRows != 1 || state.activeRows != 0 {
 		t.Fatalf("reservations %+v; want exactly one settled row and no active hold", state)
+	}
+	if got := demandEventCount(t, dbPath, accountID); got != 1 {
+		t.Fatalf("demand events=%d want 1 (adopted replay attempt must not count as new demand)", got)
 	}
 }
 
@@ -270,10 +274,11 @@ func TestIdlessDedupe_ReplayEmitsNoSettlementHeaders(t *testing.T) {
 		"X-MacProvider-Settlement-Outcome": []string{"settled"},
 		"Retry-After":                      []string{"7"},
 	})
-	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+	accountID := "acct_idless_headers"
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"
 	}, WithHTTPClient(client))
-	key := createAccountAndKey(t, store, cfg, "acct_idless_headers")
+	key := createAccountAndKey(t, store, cfg, accountID)
 
 	first := postChat(t, h, key, idlessDedupeBody, nil)
 	if first.Code != http.StatusOK {
@@ -319,6 +324,9 @@ func TestIdlessDedupe_ReplayEmitsNoSettlementHeaders(t *testing.T) {
 	}
 	if got := hits.Load(); got != 1 {
 		t.Fatalf("upstream dispatches=%d want 1", got)
+	}
+	if got := demandEventCount(t, dbPath, accountID); got != 1 {
+		t.Fatalf("demand events=%d want 1 (replayed duplicate must be telemetry-suppressed)", got)
 	}
 }
 
@@ -382,10 +390,11 @@ func TestIdlessDedupe_OverWaiterCapFallsThroughToDurable409(t *testing.T) {
 		return responseWithBody(http.StatusOK,
 			http.Header{"Content-Type": []string{"application/json"}}, seamCompletionJSON), nil
 	})}
+	accountID := "acct_idless_overcap"
 	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"
 	}, WithHTTPClient(client))
-	key := createAccountAndKey(t, store, cfg, "acct_idless_overcap")
+	key := createAccountAndKey(t, store, cfg, accountID)
 
 	ownerCh := make(chan *httptest.ResponseRecorder, 1)
 	go func() { ownerCh <- postChat(t, h, key, idlessDedupeBody, nil) }()
@@ -439,9 +448,12 @@ func TestIdlessDedupe_OverWaiterCapFallsThroughToDurable409(t *testing.T) {
 	if used := billedTokens(t, h, key); used != 20 {
 		t.Fatalf("billed %v want 20 (six identical id-less attempts, one intent)", used)
 	}
-	state := gatewaySettlementSnapshot(t, dbPath, "acct_idless_overcap")
+	state := gatewaySettlementSnapshot(t, dbPath, accountID)
 	if state.settledRows != 1 || state.activeRows != 0 {
 		t.Fatalf("reservations %+v; want exactly one settled row", state)
+	}
+	if got := demandEventCount(t, dbPath, accountID); got != 1 {
+		t.Fatalf("demand events=%d want 1 (adopted durable-conflict attempt must not count as new demand)", got)
 	}
 }
 

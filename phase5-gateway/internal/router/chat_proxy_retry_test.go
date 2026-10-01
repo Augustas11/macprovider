@@ -817,8 +817,9 @@ func TestGatewayRetriedProvider502ThenMarkedNoProviderDoesNotRefund(t *testing.T
 		}
 		return responseWithBody(http.StatusServiceUnavailable, markedNoProviderHeaders(), noProviderBody()), nil
 	})}
-	h, store, _, cfg := newRetryHarness(t, client, nil)
-	fullKey := createAccountAndKey(t, store, cfg, "acct_retry_provider_then_no_provider")
+	h, store, dbPath, cfg := newRetryHarness(t, client, nil)
+	accountID := "acct_retry_provider_then_no_provider"
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
 
 	resp := postChat(t, h, fullKey, chatBody(false), nil)
 
@@ -832,6 +833,10 @@ func TestGatewayRetriedProvider502ThenMarkedNoProviderDoesNotRefund(t *testing.T
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	if used := readQuota(t, usageResp)["daily_tokens_used"].(float64); used == 0 {
 		t.Fatalf("daily_tokens_used=0 — no_provider after prior provider dispatch must charge the estimate")
+	}
+	event := readDemandEvent(t, dbPath, accountID)
+	if event.FailureReason != "upstream_provider_failure" || !event.EligibleProviderExists {
+		t.Fatalf("demand event=%+v, want prior provider dispatch as upstream provider failure", event)
 	}
 }
 

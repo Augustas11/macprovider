@@ -80,6 +80,8 @@ type Server struct {
 	settlementReconcileNudgeActiveWorkers int
 	settlementReconcileCatchupPending     bool
 	settlementReconcileCatchupRunning     bool
+	demandRetentionMu                     sync.Mutex
+	demandRetentionStop                   chan struct{}
 }
 
 // readStore returns the read-only view of the database. M2-4: this
@@ -99,6 +101,7 @@ func (s *Server) readStore() ReadStore {
 type Store interface {
 	storage.AuthStore
 	storage.UsageStore
+	storage.DemandTelemetryStore
 	storage.WalletSessionStore
 	storage.RelayBlindStore
 	storage.AuditStore
@@ -201,6 +204,8 @@ func New(cfg config.Config, store Store, oauth auth.OAuthProvider, opts ...Optio
 	for _, opt := range opts {
 		opt(s)
 	}
+	s.pruneDemandTelemetryRetention(context.Background())
+	s.startDemandTelemetryRetentionPruner()
 	s.loadRuntimeKillSwitch(context.Background())
 	return s
 }
