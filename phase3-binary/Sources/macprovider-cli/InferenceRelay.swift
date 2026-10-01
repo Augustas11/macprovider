@@ -955,7 +955,7 @@ actor InferenceRelay {
         do {
             if let settlementMetadata {
                 guard settlementMetadata.providerID == providerID,
-                      settlementMetadata.modelID == request.model else {
+                      settlementMetadata.servedModelID == request.model else {
                     ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .constructionFailed)
                     return nil
                 }

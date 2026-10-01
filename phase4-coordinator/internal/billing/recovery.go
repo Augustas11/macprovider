@@ -399,13 +399,21 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 		}
 		rateEntry := RateFor(rewards.RateCard, model)
 		poolManifestBillable := true
+		// fenceHeld records that this transaction already read the pool
+		// fence for the attempt, so the loopback rule below does not read it
+		// again (one fence read per attempt in the writer transaction).
+		fenceHeld := false
 		if poolRoute, poolRouteHash, isPoolRoute := recoveredPoolManifestRouteTx(ctx, tx, attemptID); isPoolRoute || poolmanifest.IsPoolModelID(model) {
 			poolManifestBillable = false
 			rateEntry = RateCardEntry{}
 			if isPoolRoute {
 				rateEntry, _ = poolRoute.PoolModelRateEntry()
+				// SPEC-005-R015: the multiplier, share, and config
+				// generation frozen at dispatch, never a later snapshot.
+				multiplier, share, snapshotID, _ = poolRoute.PoolModelEconomics()
 				if verified, ok := poolAttested[attemptID]; ok && verified.routeHash == poolRouteHash && verified.poolManifest {
 					poolManifestBillable = s.poolAttestationFenceHolds(ctx, tx, &verified.fence)
+					fenceHeld = poolManifestBillable
 				}
 			}
 		}
@@ -480,7 +488,7 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 			RequestID:    requestID,
 			AttemptN:     int64(attemptN),
 			ProviderID:   providerID,
-		}, pp, cp, poolAttested) {
+		}, pp, cp, poolAttested, fenceHeld) {
 			if _, err := insertRequestCreditTx(ctx, tx, input, zeroCredits(result), in.Source, now, true, LoopbackRuntimeNotSettlementEligible); err != nil {
 				return recoveryStats{}, err
 			}
@@ -494,7 +502,7 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 		if err := insertOperatorCreditTx(ctx, tx, id, input, result, now); err != nil {
 			return recoveryStats{}, err
 		}
-		reason, err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, tx, requestID, int64(attemptN), providerID)
+		reason, err := s.syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, tx, requestID, int64(attemptN), providerID)
 		if err != nil {
 			return recoveryStats{}, err
 		}
@@ -551,7 +559,7 @@ UPDATE ledger_reconciliation_runs
 //     transaction and the route snapshot read here is still that digest;
 //   - anything else, including a row written before runtime_source existed
 //     (NULL) and an unrecognised runtime, is never billable.
-func (s *Store) recoveredLoopbackAttemptBillable(ctx context.Context, tx *sql.Tx, runtimeSource sql.NullString, id SettlementReceiptIdentity, prompt, completion *int64, poolAttested map[SettlementReceiptIdentity]recoveryPoolAttestation) bool {
+func (s *Store) recoveredLoopbackAttemptBillable(ctx context.Context, tx *sql.Tx, runtimeSource sql.NullString, id SettlementReceiptIdentity, prompt, completion *int64, poolAttested map[SettlementReceiptIdentity]recoveryPoolAttestation, fenceHeld bool) bool {
 	if !runtimeSource.Valid {
 		return false
 	}
@@ -575,8 +583,8 @@ func (s *Store) recoveredLoopbackAttemptBillable(ctx context.Context, tx *sql.Tx
 		return false
 	}
 	// The pool state the pre-read decided on must still hold inside this
-	// transaction.
-	return s.poolAttestationFenceHolds(ctx, tx, &verified.fence)
+	// transaction (already read for a pool_manifest route).
+	return fenceHeld || s.poolAttestationFenceHolds(ctx, tx, &verified.fence)
 }
 
 // recoveryPoolAttestation is one pre-read pool_operator_attested decision:

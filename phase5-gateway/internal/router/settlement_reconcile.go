@@ -709,7 +709,7 @@ func (s *Server) markSettlementHoldOperatorReview(ctx context.Context, reservati
 // Older coordinators omit the completeness flag and remain fail-closed.
 func coordinatorObserveFallbackAllowed(finality coordinatorRequestSettlementFinality) bool {
 	if !finality.ModeScopeComplete || finality.RequestID == "" || strings.TrimSpace(finality.RequiredInternalRequestID) == "" || finality.Mode != "observe" ||
-		(finality.PolicyVersion != settlementPolicyVersion && finality.PolicyVersion != legacySettlementPolicyVersion) ||
+		!knownSettlementPolicyVersion(finality.PolicyVersion) ||
 		finality.Reason == "mixed_settlement_policy_snapshot" || finality.Reason == "missing_current_settlement_finality" {
 		return false
 	}

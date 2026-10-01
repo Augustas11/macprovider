@@ -243,6 +243,9 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 		if !poolView.creatorOwned[provider.ProviderID] {
 			if account, ok := poolView.attestedMemberAccount(provider); ok {
 				snapshot.PoolMemberAccountID = account
+				// SPEC-015 §N.2 / SPEC-022-R013.2: the member account is a
+				// #1816 provenance member, carried only by route_snapshot_v2.
+				snapshot.RouteSnapshotPolicyVersion = billing.RouteSnapshotPolicyVersionV2
 			}
 		}
 	}

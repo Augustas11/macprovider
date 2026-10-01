@@ -254,16 +254,25 @@ func (b *billingRecorder) recordPoolModelRouteSnapshot(ctx context.Context, prov
 	if err != nil {
 		return nil, err
 	}
+	// SPEC-005-R015: freeze the default-row multiplier and provider share
+	// with the config generation that supplied them at dispatch; settlement
+	// never re-resolves them after a reload.
+	economics := b.server.economicsSnapshotForModel(entry.PoolModelID)
+	if economics.snapshotID <= 0 || economics.multiplierPPM <= 0 {
+		return nil, fmt.Errorf("pool model attempt requires a committed config snapshot")
+	}
 	snapshot := billing.RouteSnapshot{
-		AccountScope:                         accountScopeForSettlement(b.accountID),
-		RequestID:                            b.requestID,
-		AttemptN:                             int64(attemptN),
-		ProviderID:                           provider.ProviderID,
-		ProviderSessionID:                    stringPtrOrNil(provider.AssignedID),
-		PaidEntrypoint:                       "coordinator_buyer_v1_chat_completions",
-		ProviderReceiptKeyID:                 keyID,
-		ProviderReceiptKeySource:             "auth_session",
-		ModelID:                              provider.ModelID,
+		AccountScope:             accountScopeForSettlement(b.accountID),
+		RequestID:                b.requestID,
+		AttemptN:                 int64(attemptN),
+		ProviderID:               provider.ProviderID,
+		ProviderSessionID:        stringPtrOrNil(provider.AssignedID),
+		PaidEntrypoint:           "coordinator_buyer_v1_chat_completions",
+		ProviderReceiptKeyID:     keyID,
+		ProviderReceiptKeySource: "auth_session",
+		// SPEC-022-R013.3: the receipt identity is the pool-scoped id; the
+		// provider-local served label rides only in the relay metadata.
+		ModelID:                              entry.PoolModelID,
 		ProviderReportedModelHash:            reportedHash,
 		ProviderReportedModelHashAlgorithm:   entry.ArtifactHashAlgorithm,
 		ExpectedCatalogModelHash:             entry.ArtifactHash,
@@ -274,7 +283,7 @@ func (b *billingRecorder) recordPoolModelRouteSnapshot(ctx context.Context, prov
 		CatalogSignaturePubkeyFingerprint:    envelope.CatalogSignaturePubkeyFingerprint,
 		CatalogExpiresAtUnixMS:               envelope.CatalogExpiresAt.UnixMilli(),
 		Spec008HashStatus:                    string(pool.HashStatusUncatalogued),
-		RouteSnapshotPolicyVersion:           billing.RouteSnapshotPolicyVersion,
+		RouteSnapshotPolicyVersion:           billing.RouteSnapshotPolicyVersionV2,
 		RouteSnapshotMode:                    routeMode,
 		RouteDecisionTSUnixMS:                b.state.routingDone.UnixMilli(),
 		RequestStartTSUnixMS:                 b.startedAt.UnixMilli(),
@@ -291,6 +300,9 @@ func (b *billingRecorder) recordPoolModelRouteSnapshot(ctx context.Context, prov
 		PoolModelPromptCacheHitRatePerMtok:   int64(entry.Pricing.PromptCacheHitRatePerMtok),
 		PoolModelCompletionRatePerMtok:       int64(entry.Pricing.CompletionRatePerMtok),
 		PoolModelPricingBoundsSHA256:         bounds.SHA256Hex(),
+		PoolModelGlobalMultiplierPPM:         economics.multiplierPPM,
+		PoolModelProviderShareBps:            economics.providerShareBps,
+		PoolModelConfigSnapshotID:            economics.snapshotID,
 		ModelAdmissionCandidateID:            event.CandidateID,
 		ModelAdmissionCoordinatorEventID:     event.CoordinatorEventID,
 		ModelAdmissionServedModelRef:         event.ServedModelRef,
@@ -334,6 +346,7 @@ func (b *billingRecorder) recordPoolModelRouteSnapshot(ctx context.Context, prov
 		ProviderID:                 snapshot.ProviderID,
 		ProviderReceiptKeyID:       snapshot.ProviderReceiptKeyID,
 		ModelID:                    snapshot.ModelID,
+		ExecutionModelID:           provider.ModelID,
 		ExpectedCatalogModelHash:   snapshot.ExpectedCatalogModelHash,
 		CatalogID:                  snapshot.CatalogID,
 		CatalogBodyDigest:          snapshot.CatalogBodyDigest,

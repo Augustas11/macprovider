@@ -451,12 +451,17 @@ type InferenceResponseValidation struct {
 }
 
 type SettlementReceiptMetadata struct {
-	AccountScope               string `json:"account_scope"`
-	RequestID                  string `json:"request_id"`
-	AttemptN                   int64  `json:"attempt_n"`
-	ProviderID                 string `json:"provider_id"`
-	ProviderReceiptKeyID       string `json:"provider_receipt_key_id"`
-	ModelID                    string `json:"model_id"`
+	AccountScope         string `json:"account_scope"`
+	RequestID            string `json:"request_id"`
+	AttemptN             int64  `json:"attempt_n"`
+	ProviderID           string `json:"provider_id"`
+	ProviderReceiptKeyID string `json:"provider_receipt_key_id"`
+	ModelID              string `json:"model_id"`
+	// ExecutionModelID is the provider-local served label the relayed body
+	// names when it differs from the receipt identity model_id: a SPEC-022-R013
+	// pool_manifest attempt signs model_id = pool_model_id while the runtime
+	// is asked for its own label. Absent on every other frame.
+	ExecutionModelID           string `json:"execution_model_id,omitempty"`
 	ExpectedCatalogModelHash   string `json:"expected_catalog_model_hash"`
 	CatalogID                  string `json:"catalog_id"`
 	CatalogBodyDigest          string `json:"catalog_body_digest"`

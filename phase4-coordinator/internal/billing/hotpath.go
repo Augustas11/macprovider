@@ -78,11 +78,11 @@ const PoolManifestRouteNotSettlementEligible = "pool_manifest_route_not_settleme
 // attempt for a pool/ model id, or on a pool_manifest route, earns and bills
 // only behind a verified pool_manifest decision whose fence still holds.
 // Every other attempt is unaffected.
-func (s *Store) poolManifestAttemptBillable(ctx context.Context, q PoolFenceQueryer, in HotPathInput) bool {
+func poolManifestAttemptBillable(in HotPathInput, fenceHolds bool) bool {
 	if !in.PoolManifestRoute && !poolmanifest.IsPoolModelID(in.Model) {
 		return true
 	}
-	return in.PoolManifestRoute && in.PoolManifestVerified && s.poolAttestationFenceHolds(ctx, q, in.PoolAttestationFence)
+	return in.PoolManifestRoute && in.PoolManifestVerified && fenceHolds
 }
 
 // LoopbackRuntimeNotSettlementEligible is the ledger quarantine reason for an
@@ -253,11 +253,15 @@ func (s *Store) writeHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 		// The pool state that decision used is re-read inside this
 		// transaction, so a manifest, membership, or lifecycle change, or
 		// trusted pools going off, before the commit zero-bills it.
-		poolAttestedUsage := in.PoolOperatorAttested && in.PromptTokens != nil && in.CompletionTokens != nil &&
+		// The fence is read once per attempt: a loopback pool-model attempt
+		// is both pool_operator_attested and pool_manifest, and both rules
+		// decide on the same read.
+		fenceHolds := (in.PoolOperatorAttested || in.PoolManifestRoute) &&
 			s.poolAttestationFenceHolds(ctx, conn, in.PoolAttestationFence)
+		poolAttestedUsage := in.PoolOperatorAttested && in.PromptTokens != nil && in.CompletionTokens != nil && fenceHolds
 		// SPEC-005-R015 / SPEC-022-R013: a pool-model attempt is priced only
 		// from its verified pool_manifest route, never a rate-card fallback.
-		if !s.poolManifestAttemptBillable(ctx, conn, in) {
+		if !poolManifestAttemptBillable(in, fenceHolds) {
 			result := zeroCredits(ComputeCredits(
 				in.PromptTokens,
 				in.CompletionTokens,
@@ -347,7 +351,7 @@ func (s *Store) writeHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 		if err := insertProviderIdentitySnapshotTx(ctx, conn, in, now); err != nil {
 			return err
 		}
-		if _, err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, in.RequestID, int64(in.AttemptN), in.ProviderID); err != nil {
+		if _, err := s.syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, in.RequestID, int64(in.AttemptN), in.ProviderID); err != nil {
 			return err
 		}
 		return nil
