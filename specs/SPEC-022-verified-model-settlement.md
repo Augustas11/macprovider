@@ -1,11 +1,28 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.2.7
+Version: v0.2.8
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.2.8
+
+#1816 freeze-audit R1 fixes. R-13.2 names option B: #1816 provenance rides
+only in the SPEC-015 §N.2 `route_snapshot_v2` preimage, pinned by
+`route_snapshot_policy_version = spec022-route-snapshot-v2`; every other
+route keeps the byte-identical v1 preimage, and the standalone verifier
+recomputes both. R-13.3 is implemented: a `pool_manifest` snapshot's
+`model_id` is the `pool_model_id`, and the provider-local served label rides
+in the settlement metadata's `execution_model_id` (SPEC-015 §N.12 item 8).
+R-13.4: final receipt settlement re-reads the SPEC-042-R015 durable route
+fence and the R006 label in the transaction that writes the terminal verdict
+and its credit, for every loopback and `pool_manifest` route; a decided
+revocation or a disputed or unverifiable label quarantines with no
+buyer-final debit or provider credit, and an unreadable fence leaves the
+receipt retryable. Receipt-bound usage never raises the completion count
+above the ledger's byte-derived ceiling (the existing SPEC-005 clamp).
 
 ### v0.2.7
 
@@ -1373,7 +1390,14 @@ provenance members are `expected_model_hash_source` (present only as
 
 The choice is **implementation-defined pending** the implementation slice,
 which MUST name it in this clause's implementation state before R013 leaves
-pending. Option (B) additionally requires a SPEC-015 §N.2 amendment that lists
+pending. **Implementation state (v0.2.8): option (B).** The provenance
+members are carried only by `route_snapshot_v2`
+(`route_snapshot_policy_version = spec022-route-snapshot-v2`, SPEC-015 §N.2
+v0.4.12): `expected_model_hash_source`, `pool_model_id`, the entry rates,
+the bounds digest, the SPEC-005-R015 dispatch-frozen multiplier, provider
+share, and config snapshot generation, `pool_generation` for a native route,
+and `pool_member_account_id` (the value of `serving_provider_account_id`).
+A snapshot carries them if and only if it is pinned to v2. Option (B) additionally requires a SPEC-015 §N.2 amendment that lists
 the v2 members before any v2 digest is issued; option (A) needs none, because
 the v1 preimage is unchanged. Under either option settlement verifies the
 provenance members as strictly as digested members: a missing, mixed-source,

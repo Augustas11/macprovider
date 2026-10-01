@@ -220,7 +220,11 @@ func (r RouteSnapshot) Value() map[string]any {
 		value["model_admission_candidate_id"] = r.ModelAdmissionCandidateID
 		value["model_admission_coordinator_event_id"] = r.ModelAdmissionCoordinatorEventID
 		value["model_admission_served_model_ref"] = r.ModelAdmissionServedModelRef
-		value["model_admission_catalog_model_key"] = r.ModelAdmissionCatalogModelKey
+		// A SPEC-047-R011 pool binding has no catalog key; route_snapshot_v2
+		// omits the member rather than digesting an empty string.
+		if !r.PoolManifestSourced() {
+			value["model_admission_catalog_model_key"] = r.ModelAdmissionCatalogModelKey
+		}
 		value["model_admission_discovery_digest_sha256"] = r.ModelAdmissionDiscoveryDigestSHA256
 		value["model_admission_evaluation_digest_sha256"] = r.ModelAdmissionEvaluationDigestSHA256
 	}
