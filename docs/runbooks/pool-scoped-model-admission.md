@@ -36,7 +36,8 @@ Pool creation, keys and the base manifest flow:
 
 Every entry's three rates must fall inside inclusive per-rate bounds held in
 coordinator config. If the bounds are absent, every manifest that carries
-entries is refused (`ErrPoolModelPricingBounds`). The bounds are **not** a
+entries is refused (`pool_model_pricing_bounds_unset`; a rate outside them is
+`pool_model_pricing_out_of_bounds`). The bounds are **not** a
 rate-card field: the signed rate card is a closed schema (SPEC-023
 FeedSchema-A), and the fleet CLI rejects extra keys as
 `rate_card_integrity_failure`. Changing the bounds is a coordinator config
@@ -131,7 +132,7 @@ attestation (SPEC-042-R004):
   snapshot-manifest hash. It must equal `artifact_hash`.
 - **Not already global.** If the artifact pair is already in the global
   catalog, the coordinator rejects the manifest
-  (`ErrPoolModelCatalogOverlap`), and the catalog path applies to that
+  (`pool_model_entry_catalog_overlap`), and the catalog path applies to that
   model. Do not propose catalog models as pool entries.
 - **Licence.** `license` must be a pinned SPDX id or `LicenseRef-*`. A
   `LicenseRef-*` needs the licence text in the pool's reviewed disclosure
@@ -176,12 +177,25 @@ Acceptance refuses the whole manifest if any entry is wrong, for these
 reasons: order or duplicates, a foreign pool segment, a shadowed catalog id,
 catalog overlap, a bad runtime pairing, a bad licence, an unattested paid
 serving flag, out-of-bounds or missing bounds, a context out of range, or
-`observe` mode.
+`observe` mode. The admin surface answers HTTP 400 with the specific closed
+code (SPEC-042-R010 manifest acceptance codes, for example
+`pool_model_entry_duplicate`, `pool_model_entry_runtime_pairing`,
+`pool_model_entry_license_invalid`,
+`pool_model_entry_paid_serving_unattested`,
+`pool_model_entry_limit_exceeded`), and the coordinator logs
+`trusted_pool_manifest_rejected` with the reason.
 
 **Windows.** `sign-manifest` refuses a `--not-before` earlier than the
 current window's end, and routing uses the ACTIVE window. A new entry
 therefore takes effect when the new window starts, not on submit. A pool
 that adds entries often should use short windows.
+
+**Rotation without a gap.** When the new window starts, the binding sweep
+runs at once and appends `pool_manifest_rebound` for every unchanged entry.
+Until it does, a binding to the immediately prior generation still routes
+when the new core carries the same entry byte-identically, so buyers see no
+`503` across a rotation that keeps the entry. A changed entry (any field)
+routes only after its rebind.
 
 ## 4. Admission and status
 
@@ -203,9 +217,12 @@ coordinator-cli trust-pool-admin get-pool --admin-url http://127.0.0.1:8444 --po
 ```
 
 Pass: `manifest_core_digest` equals the submitted event's digest, and the
-entry is listed with `disclosure_class: pool_attested_unverified`. The
+entry is listed in `model_entries` with `disclosure_class:
+pool_attested_unverified` (R016 attestations are in `attested_members`). The
 provider's `/poolz` row shows the engine's `runtime_source`, the entry's hash
-algorithm, `hash_status: hash_verified`, and `state: ready`.
+algorithm, `hash_status: hash_verified`, and `state: ready`. A native
+`mlx_cache` member's `/poolz` `runtime_source` is null: it echoes the hello,
+which the native CLI omits.
 
 ## 5. Buyer request
 
@@ -266,10 +283,24 @@ Pass: the newest admission event is `catalog_priced` with
 `binding_scope=pool`, `reason_code` `pool_manifest_bound` (or
 `pool_manifest_rebound`) and `actor` `pool_manifest:<pool_id>:<version>:<digest>`;
 `src=pool_manifest`, `pmid` and `core` equal to the active entry and
-digest, `completion_rate` equal to the entry's rate, `usage_source=pool_operator_attested`, `settlement_outcome=verified`,
+digest, `completion_rate` equal to the entry's rate, `rt` the loopback class
+(null for a native `mlx_cache` route by contract, SPEC-022 R-13.5),
+`settlement_attempt_outputs.usage_source=pool_operator_attested`
+(`coordinator_observed` for native), `settlement_outcome=verified`,
 `pool_label_status=verified`, one payable ledger row with
 `provider_credits>0`, a settled reservation, and `token_source=pool_operator_attested`.
-The last query must return 0.
+The last query must return 0. `ledger_request_credits.usage_source` reads
+`provider_reported` (or `byte_estimated`) on pool routes by contract: it is
+the closed SPEC-005 ledger vocabulary, and the attested source is in
+`settlement_attempt_outputs` (#1750). A catalog route snapshot has no
+`expected_model_hash_source` key; absent means `catalog`.
+
+**In-flight attempts across a rotation.** An attempt routed before a new
+generation activates settles from its own snapshot, at its snapshot's rates,
+even if the new core removes or changes its entry. It is zero-billed only if,
+between routing and settlement, the provider's membership or delegation was
+revoked, its R016 attestation was removed by a later core, or the pool was
+retired or frozen (SPEC-042-R015).
 
 ## 7. Rollback
 

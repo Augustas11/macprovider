@@ -146,7 +146,8 @@ def pool_signer(d, args):
 
 def cli_window(d, prev_version, window_seconds):
     """Mirror labtool: genesis starts a minute ago; a successor starts when its
-    predecessor ends, so windows never overlap."""
+    predecessor ends, so windows never overlap. windows.json only records
+    versions the coordinator accepted (record_accepted_manifest)."""
     windows = json.loads((d / "windows.json").read_text()) if (d / "windows.json").exists() else {}
     if prev_version is None:
         start = int(datetime.now(timezone.utc).timestamp()) - 60
@@ -168,6 +169,8 @@ def cli_manifest(name, args, prev, op):
     prev_version = json.loads(prev.read_text())["manifest_version"] if prev else None
     windows, not_before, expires_at = cli_window(d, prev_version, args.window_seconds)
     out = d / f"signed-{op}.json"
+    # A signed manifest left by a refused submit was never accepted; re-sign.
+    out.unlink(missing_ok=True)
     cmd = ["sign-manifest", "--identity", str(keys / "pool-identity.json"),
            "--root-issuer-key", str(keys / "root-issuer-key.pem"), "--root-issuer-key-id", CLI_ROOT_KEY_ID,
            "--policy-signer-key", str(keys / "policy-signer-key.pem"), "--operation-id", op,
@@ -175,7 +178,11 @@ def cli_manifest(name, args, prev, op):
            "--models", MODELS, "--min-binary-version", "1.8.33", "--min-attestation-tier", "hardware",
            "--retention-policy-id", "standard", "--min-eligible-members", "1",
            "--not-before", rfc3339(not_before), "--expires-at", rfc3339(expires_at), "--out", str(out)]
-    if args.runtime_allowlist:
+    if args.encoding == 2:
+        # sign-manifest needs an explicit allowlist for encoding 2; "" is a
+        # native-only pool (mlx_cache entries need no allowlist).
+        cmd += ["--runtime-allowlist", args.runtime_allowlist]
+    elif args.runtime_allowlist:
         cmd += ["--runtime-allowlist", args.runtime_allowlist]
     if prev:
         cmd += ["--prev", str(prev)]
@@ -187,8 +194,15 @@ def cli_manifest(name, args, prev, op):
     coordinator_cli(*cmd)
     event = json.loads(out.read_text())
     windows[str(event["manifest_version"])] = [not_before, expires_at]
-    (d / "windows.json").write_text(json.dumps(windows))
-    return event
+    return event, windows
+
+
+def record_accepted_manifest(d, event, windows=None):
+    """Persist manifest-vN.json (and its window) only after the coordinator
+    accepted it, so a refused manifest never becomes the next --prev."""
+    if windows is not None:
+        (d / "windows.json").write_text(json.dumps(windows))
+    (d / f"manifest-v{event['manifest_version']}.json").write_text(json.dumps(event))
 
 
 def entry_from_proposal(bundle, pool_id, creator):
@@ -245,7 +259,7 @@ def load_pool_models(d):
 
 
 def manifest_args(name, args, prev, op=None):
-    op = op or f"op-{name}-manifest-{len(list(pool_dir(name).glob('manifest-v*.json'))) + 1}"
+    op = op or f"op-{name}-{run_id(pool_dir(name))}-manifest-{len(list(pool_dir(name).glob('manifest-v*.json'))) + 1}"
     out = ["pool-manifest", "--keys", str(pool_dir(name) / "keys.json"), "--op", op,
            "--encoding", str(args.encoding), "--settlement-mode", args.settlement_mode, "--models", MODELS,
            "--window-seconds", str(args.window_seconds)]
@@ -265,6 +279,18 @@ def pool_state(pool_id):
     pool_created."""
     status, doc = admin("GET", f"/admin/trust-pools/pools/{pool_id}", expect=(200, 404))
     return doc.get("pool") if status == 200 else None
+
+
+def run_id(d):
+    """A random id minted once per pool directory and part of every operation
+    id this script submits, so the same pool name can be reused in a fresh
+    LAB directory without colliding with operation ids the coordinator
+    already holds (409 operation_conflict)."""
+    f = d / "run_id"
+    if not f.exists():
+        d.mkdir(parents=True, exist_ok=True)
+        f.write_text(os.urandom(4).hex() + "\n")
+    return f.read_text().strip()
 
 
 def next_attempt(d):
@@ -300,7 +326,7 @@ def create(args):
         if not keys.exists():
             labtool("pool-keygen", "--out", str(keys))
         pool_id = json.loads(keys.read_text())["pool_id"]
-    op = f"op-{args.name}-a{next_attempt(d)}"
+    op = f"op-{args.name}-{run_id(d)}-a{next_attempt(d)}"
     print(f"pool {args.name} pool_id={pool_id} ({op})")
     state = pool_state(pool_id)
     if state is None:
@@ -334,12 +360,13 @@ def create(args):
         post_event(root)
         state = pool_state(pool_id)
     if not state.get("manifest_version"):
+        windows = None
         if signer == "coordinator-cli":
-            manifest = cli_manifest(args.name, args, None, f"{op}-manifest")
+            manifest, windows = cli_manifest(args.name, args, None, f"{op}-manifest")
         else:
             manifest = json.loads(labtool(*manifest_args(args.name, args, None, op=f"{op}-manifest")))
-        (d / "manifest-v1.json").write_text(json.dumps(manifest))
         post_event(manifest)
+        record_accepted_manifest(d, manifest, windows)
         state = pool_state(pool_id)
     if PROVIDER not in (state.get("members") or []):
         post_event({"operation_id": f"{op}-member", "timestamp_utc": now(), "event_type": "member_admitted",
@@ -357,12 +384,13 @@ def manifest(args):
     d = pool_dir(args.name)
     versions = sorted(d.glob("manifest-v*.json"), key=lambda p: int(p.stem.split("-v")[1]))
     prev = versions[-1]
+    windows = None
     if pool_signer(d, args) == "coordinator-cli":
-        event = cli_manifest(args.name, args, prev, f"op-{args.name}-manifest-{len(versions) + 1}")
+        event, windows = cli_manifest(args.name, args, prev, f"op-{args.name}-{run_id(d)}-manifest-{len(versions) + 1}")
     else:
         event = json.loads(labtool(*manifest_args(args.name, args, prev)))
-    (d / f"manifest-v{event['manifest_version']}.json").write_text(json.dumps(event))
     post_event(event)
+    record_accepted_manifest(d, event, windows)
     print(f"manifest v{event['manifest_version']} digest={event['manifest_core_digest']}")
 
 
@@ -417,7 +445,7 @@ def entry(args):
 
 def event(args):
     pool_id = (pool_dir(args.name) / "pool_id").read_text().strip()
-    body = {"operation_id": f"op-{args.name}-{args.event_type}-{datetime.now().timestamp():.0f}", "timestamp_utc": now(),
+    body = {"operation_id": f"op-{args.name}-{run_id(pool_dir(args.name))}-{args.event_type}-{datetime.now().timestamp():.0f}", "timestamp_utc": now(),
             "event_type": args.event_type, "pool_id": pool_id}
     if args.provider_id:
         body["provider_id"] = args.provider_id

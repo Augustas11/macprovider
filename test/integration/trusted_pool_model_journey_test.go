@@ -172,8 +172,16 @@ func TestTrustedPoolModelJourney(t *testing.T) {
 
 // setUpPoolModelJourneyPool creates, signs, populates, and activates the
 // candidate pool through the operator admin surface and the offline signer.
-func setUpPoolModelJourneyPool(t *testing.T, s *scenario, keysDir, poolID, providerID, creator, poolModelID, ggufHash string) {
+func setUpPoolModelJourneyPool(t *testing.T, s *scenario, keysDir, poolID, providerID, creator, poolModelID, ggufHash string, opts ...poolModelJourneyMember) {
 	t.Helper()
+	member := poolModelJourneyMember{}
+	if len(opts) > 0 {
+		member = opts[0]
+	}
+	attestedMembers := []any{}
+	if member.attestedAccount != "" {
+		attestedMembers = append(attestedMembers, map[string]any{"provider_account_id": member.attestedAccount, "runtime_classes": []string{"llamacpp_loopback"}})
+	}
 	env := map[string]string{
 		"MACPROVIDER_COORDINATOR_ADMIN_URL": s.coordProvURL,
 		"MACPROVIDER_OPERATOR_KEY":          s.operatorKey,
@@ -245,7 +253,7 @@ func setUpPoolModelJourneyPool(t *testing.T, s *scenario, keysDir, poolID, provi
 			"disclosure_class":   "pool_attested_unverified",
 			"max_context_tokens": 8192,
 		}},
-		"attested_members": []any{},
+		"attested_members": attestedMembers,
 	})
 	notBefore := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
 	manifestEvent := filepath.Join(t.TempDir(), "manifest.json")
@@ -260,7 +268,18 @@ func setUpPoolModelJourneyPool(t *testing.T, s *scenario, keysDir, poolID, provi
 		"--not-before", notBefore.Format(time.RFC3339), "--expires-at", notBefore.Add(24*time.Hour).Format(time.RFC3339),
 		"--out", manifestEvent)
 	runTrustPoolCLI(t, env, "submit-policy", "--operation-id", "journey-manifest-1", "--input", manifestEvent)
-	runTrustPoolCLI(t, env, "admit-provider", "--operation-id", "journey-admit-1", "--pool-id", poolID, "--provider-id", providerID)
+	if member.ownerKey != nil {
+		var manifest struct {
+			ManifestCoreDigest string `json:"manifest_core_digest"`
+		}
+		raw, err := os.ReadFile(manifestEvent)
+		if err != nil || json.Unmarshal(raw, &manifest) != nil {
+			t.Fatalf("read signed manifest: %v", err)
+		}
+		admitDelegatedPoolMember(t, env, member.ownerKey, poolID, creator, providerID, manifest.ManifestCoreDigest)
+	} else {
+		runTrustPoolCLI(t, env, "admit-provider", "--operation-id", "journey-admit-1", "--pool-id", poolID, "--provider-id", providerID)
+	}
 	runTrustPoolCLI(t, env, "authorize-buyer", "--operation-id", "journey-buyer-1", "--pool-id", poolID, "--buyer-account-id", s.accountID)
 	runTrustPoolCLI(t, env, "promote", "--operation-id", "journey-promote-1", "--pool-id", poolID, "--reason", "integration_journey")
 

@@ -77,11 +77,32 @@ Every later `$PS manifest Q --signer coordinator-cli --encoding 2
 core and starts when the current one ends. Wait for that boundary
 (`windows.json` in the pool dir) before you expect routing to change.
 
+`pool_setup.py` notes:
+
+- `manifest` records `manifest-vN.json` and its `windows.json` slot only
+  after the coordinator accepts the event. A refused manifest leaves no
+  phantom `--prev`; fix the cause and run `manifest` again.
+- Every operation id carries a per-directory run id (`$LAB/pools/<name>/run_id`),
+  so a pool name can be reused in a fresh `$LAB` without 409
+  `operation_conflict`.
+- For `--encoding 2` the script always passes `--runtime-allowlist`; the
+  default `""` is a native-only pool (an `mlx_cache` entry needs no
+  allowlist).
+- A manifest refused for its entries answers a specific code, for example
+  `pool_model_pricing_out_of_bounds`, `pool_model_entry_catalog_overlap`, or
+  `pool_model_entry_license_invalid` (SPEC-042-R010 manifest acceptance
+  codes), never the opaque `invalid_event`.
+- `get-pool` / `pool-status` list the active core's `model_entries` and
+  `attested_members`.
+
 ## 3. Case G: GGUF, non-catalog (the paid path)
 
 1. Serve G: `LAB_SERVE_GGUF_FILE=qwen2.5-0.5b-instruct-q8_0.gguf ENGINE=llamacpp scripts/lab/1690-m6/rig.sh server-start`.
 2. **Propose (provider).** Run the CLI propose step against the served file
-   through the lab CLI (`cli.sh`), with the llama.cpp origin flags from
+   through the lab CLI (`cli.sh`; export
+   `LAB_LLAMACPP_MODEL_PATH=$LAB/models/qwen2.5-0.5b-instruct-q8_0.gguf` so
+   the CLI names the Q8_0 file, not the default Q4_K_M), with the llama.cpp
+   origin flags from
    `rig.sh`:
    `models propose llamacpp:qwen2.5-0.5b-instruct-q8_0 --pool <Q pool_id>
    --slug qwen25-05b-q8 --json`. Save the `pool_model_proposal.v1` output
@@ -126,8 +147,11 @@ core and starts when the current one ends. Wait for that boundary
    against `$LAB/db/coordinator.db` and `$LAB/db/gateway.db`. Pass:
    - `expected_model_hash_source=pool_manifest`, with the entry's
      `pool_model_id` and the Q `manifest_core_digest`;
-   - `usage_source=pool_operator_attested`, `settlement_outcome=verified`,
-     `pool_label_status=verified`;
+   - `settlement_attempt_outputs.usage_source=pool_operator_attested`,
+     `settlement_outcome=verified`, `pool_label_status=verified`.
+     `ledger_request_credits.usage_source` reads `provider_reported` on pool
+     routes by contract (the closed SPEC-005 ledger vocabulary, #1750); join
+     on `request_id` / `attempt_n` to read the attested source;
    - one payable ledger row with `provider_credits>0`;
    - a settled reservation;
    - buyer debit equal to finality equal to the ledger, priced at the entry's
@@ -140,11 +164,23 @@ core and starts when the current one ends. Wait for that boundary
 | R1 global | `buyer.py --engine llamacpp --model "$M"` (no `--pool`) | refused (503 `engine_unavailable`, or the coordinator's unknown-model refusal); `$M` absent from global `/v1/models` |
 | R2 cross-pool | `buyer.py --pool A --engine llamacpp --model "$M"` (A is authorized for the buyer and has the same member) | refused; the `pool/<Q>/…` id is not authority on A's routes |
 | R3 out-of-bounds price | the same proposal with a fresh `--slug`, staged with `--completion-rate 2160001` (or `--prompt-rate 13499`), `entry` + `manifest` | `manifest_accepted` refused with the pricing-bounds error; `get-pool` unchanged. `$PS entry Q --remove <id>` before continuing |
-| R4 catalog overlap (case C) | a proposal for the Q4_K_M file (sha256 `74a4da8c…`), `entry` + `manifest` | manifest refused (`ErrPoolModelCatalogOverlap`). Serving Q4_K_M on pool A still settles through the catalog path (`expected_model_hash_source=catalog`) |
+| R4 catalog overlap (case C) | a proposal for the Q4_K_M file (sha256 `74a4da8c…`), `entry` + `manifest` | manifest refused with `pool_model_entry_catalog_overlap`. Serving Q4_K_M on pool A still settles through the catalog path: the snapshot has **no** `expected_model_hash_source` key (absent means `catalog`, so catalog preimages stay byte-identical) |
 | R5 revocation | `$PS entry Q --remove "$M"`, then `manifest` (the extension is omitted); after the window boundary, `buyer.py --pool Q --engine llamacpp --model "$M"` | the binding is `revoked` with `pool_manifest_entry_revoked`; the request is refused; no new snapshot for `$M` |
 
 For R5, also send one long streaming request just before the boundary. It
-must settle from its own snapshot.
+must settle from its own snapshot (SPEC-042-R015 in-flight rule): verified,
+payable, priced at the snapshot's rates.
+
+**Rollover keeping the entry (no gap).** Sign one more manifest for Q with
+the entry unchanged and drive a steady request loop across the window
+boundary. Expect zero `503 byom_non_settlement_unavailable`: until the sweep
+records `pool_manifest_rebound` (it now runs at activation), a binding to the
+immediately prior generation routes when the active core carries the entry
+byte-identically. In-flight requests across the boundary settle verified.
+
+Only a revocation between routing and settlement zero-bills an in-flight
+attempt: `member_revoked` / `delegation_revoked` for the provider, an R016
+attestation removed by a later core, or the pool retired or frozen.
 
 ## 5. Case N: native MLX, non-catalog
 
@@ -157,22 +193,39 @@ $PS create QN --signer coordinator-cli --encoding 2 --window-seconds 300
 ```
 
 1. Serve N natively with the lab native CLI (`rig.sh build-native`). Use the
-   provider `model` set to the N snapshot and no catalog key; the exact
-   native non-catalog serve config comes from the CLI lane's #1816 notes.
+   provider `model` set to the N snapshot and no catalog key. The native
+   propose and serve config needs `model_artifact_path` (the snapshot
+   directory) and `pool_model_id` (`pool/<QN pool_id>/qwen25-05b-mlx8`).
+   `--mlx-cache-dir` takes the Hugging Face `.../hub` directory, not the
+   snapshot directory.
 2. Propose with `models propose <candidate> --pool <QN pool_id> --slug
    qwen25-05b-mlx8 --json`; the bundle's `model_entry` must carry
    `artifact_hash_algorithm: macprovider.snapshot-manifest.v1` and
    `allowed_runtime_sources: ["mlx_cache"]`. Stage it with `$PS entry QN`
    and the same creator flags as §3 step 3, then sign it into QN.
 3. Send requests with `--pool QN --model pool/<QN>/qwen25-05b-mlx8` and no
-   engine selector. Expect `200`, `runtime_source=mlx_cache`, and
-   settlement as in §3 step 5.
+   engine selector. Expect `200` and settlement as in §3 step 5, with
+   `settlement_attempt_outputs.usage_source=coordinator_observed`. The native
+   route snapshot carries **no** `runtime_source` (null): a native session's
+   runtime class is the empty `runtime_source` under SPEC-022 R-12.1/R-13.5,
+   and setting it would route the snapshot through the loopback attestation
+   path. `/poolz` echoes the provider hello's `runtime_source`, which the
+   native CLI omits, so it is null there too. The pool view of `/v1/models`
+   lists the entry with `provider_count` and `total_slots` from the bound
+   members and `max_context_tokens` from the entry.
 4. Negative: a snapshot entry naming `llamacpp_loopback`, or a GGUF entry
    naming `mlx_cache`, is refused at acceptance (runtime/format pairing).
 
 ## 6. Teardown
 
 `$PS event Q member_revoked --provider-id lab-1690-m6-provider` is optional.
+
+The SPEC-042-R016 non-creator member case (a delegated member paid
+`pool_operator_attested` only when the creator's core attests its owner
+account) needs signed `ProviderPoolDelegationV1` grants, which the lab has no
+tooling for. It is covered by
+`test/integration/trusted_pool_model_r016_journey_test.go`
+(`TestTrustedPoolModelR016NonCreatorMember`) instead.
 `rig.sh down` stops only recorded PIDs. Leave `$LAB` for the report digests.
 
 ## 7. Report

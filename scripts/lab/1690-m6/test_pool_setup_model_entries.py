@@ -137,6 +137,39 @@ class ModelEntries(unittest.TestCase):
         self.assertEqual(json.loads((self.d / "windows.json").read_text())["2"], [1600, 2200])
         self.assertEqual(self.posted[-1]["manifest_version"], 2)
 
+    def test_refused_manifest_leaves_no_phantom_prev(self):
+        # #1816 harness: a manifest the coordinator refuses is never recorded,
+        # so the next attempt still chains from the last accepted version.
+        self.stage(proposal())
+
+        def refuse(event):
+            raise SystemExit("POST /admin/trust-pools/events -> 400")
+        self.mod.post_event = refuse
+        with self.assertRaises(SystemExit):
+            self.manifest()
+        self.assertFalse((self.d / "manifest-v2.json").exists())
+        self.assertNotIn("2", json.loads((self.d / "windows.json").read_text()))
+        self.mod.post_event = self.posted.append
+        call = self.manifest()
+        self.assertEqual(call[call.index("--prev") + 1], str(self.d / "manifest-v1.json"))
+        self.assertTrue((self.d / "manifest-v3.json").exists() or (self.d / "manifest-v2.json").exists())
+
+    def test_native_only_pool_passes_an_explicit_empty_allowlist(self):
+        self.mod.manifest(types.SimpleNamespace(name="P", encoding=2, runtime_allowlist="", settlement_mode="enforce",
+                                                window_seconds=600, signer="coordinator-cli"))
+        call = self.cli.calls[-1]
+        self.assertEqual(call[call.index("--runtime-allowlist") + 1], "")
+
+    def test_operation_ids_are_unique_per_pool_directory(self):
+        # A fresh LAB directory reusing pool name P mints a new run id, so its
+        # operation ids never collide with the first directory's.
+        self.manifest()
+        first = self.posted[-1]
+        other = load_pool_setup(self.lab / "fresh")
+        self.assertNotEqual(self.mod.run_id(self.d), other.run_id(self.lab / "fresh" / "pools" / "P"))
+        self.assertIn(self.mod.run_id(self.d), self.cli.calls[-1][self.cli.calls[-1].index("--operation-id") + 1])
+        self.assertEqual(first["manifest_version"], 2)
+
     def test_bundle_pricing_is_kept_when_the_creator_gives_none(self):
         rates = {"prompt_rate_per_mtok": 30000, "prompt_cache_hit_rate_per_mtok": 7500, "completion_rate_per_mtok": 60000}
         self.stage(proposal(pricing=rates), prompt_rate=None, cache_hit_rate=None, completion_rate=None)
