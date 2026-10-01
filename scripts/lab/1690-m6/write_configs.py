@@ -131,6 +131,10 @@ def main():
         if not 19100 <= proxy <= 19199:
             sys.exit(f"refusing non-lab proxy port {proxy}")
         gateway["coordinator"]["buyer_url"] = f"http://127.0.0.1:{proxy}"
+    # #1816: pool-model pricing bounds (SPEC-005-R015), a JSON object, written
+    # only when set so a pre-#1816 coordinator never sees the key.
+    if os.environ.get("LAB_POOL_MODEL_PRICING_BOUNDS"):
+        coord["trusted_pools"]["pool_model_pricing_bounds"] = json.loads(os.environ["LAB_POOL_MODEL_PRICING_BOUNDS"])
     (LAB / "run" / "coordinator.yaml").write_text(json.dumps(coord, indent=2))
     (LAB / "run" / "gateway.yaml").write_text(json.dumps(gateway, indent=2))
     for p in ("coordinator.yaml", "gateway.yaml"):
