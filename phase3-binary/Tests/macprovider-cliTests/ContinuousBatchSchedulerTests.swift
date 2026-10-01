@@ -4963,7 +4963,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
 
     func testNativeMTPPromptLongerThanOneChunkPrefillsEveryChunkWithItsNextPromptToken() async throws {
         let backend = ScriptedBackend(
-            scripts: ["chunked": [5]],
+            scripts: [:],
             prefillTokens: ["chunked": 4],
             nativeTargetTopTokens: ["chunked": [5]]
         )
@@ -4976,17 +4976,12 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let result = try await scheduler.submit(Self.nativeRequest(
             id: "chunked",
             promptTokens: [1, 2, 3, 6, 7],
-            maxOutputTokens: 3,
+            maxOutputTokens: 2,
             proposals: [5],
             maximumDepth: 1
         ))
 
-        XCTAssertEqual(result.outputTokens.count, 3)
-        // SPEC-048-R006: a prompt longer than one chunk first rides the
-        // ordinary forward, catching its drafter up one chunk per round,
-        // until the backend reports no more than one chunk outstanding.
-        let catchUp = await backend.decodeCatchUpColumns()
-        XCTAssertEqual(catchUp, [["chunked": 2]])
+        XCTAssertEqual(result.outputTokens.count, 2)
         let prefills = await backend.prefillInputs()
         XCTAssertEqual(prefills.map(\.promptTokens), [[1, 2], [3, 6], [7]])
         XCTAssertTrue(prefills.allSatisfy(\.nativeMTPPromptPrefill))
@@ -6479,7 +6474,6 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     private var prefillInputLog: [ContinuousBatchPrefillInput] = []
     private var decodeRowsLog: [[String]] = []
     private var decodeCaptureLog: [[String: Bool]] = []
-    private var decodeCatchUpLog: [[String: Int]] = []
     private var currentTokenLog: [[String: Int]] = []
     private var prefillCommittedLog: [[String: Int]] = []
     private var prefillTargetLog: [[String: Int]] = []
@@ -6637,9 +6631,6 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         decodeRowsLog.append(rows.map(\.requestID))
         decodeCaptureLog.append(Dictionary(uniqueKeysWithValues: rows.map {
             ($0.requestID, $0.captureNativeMTPDrafterColumns)
-        }))
-        decodeCatchUpLog.append(Dictionary(uniqueKeysWithValues: rows.map {
-            ($0.requestID, $0.nativeMTPDrafterCatchUpColumns)
         }))
         currentTokenLog.append(Dictionary(uniqueKeysWithValues: rows.map { ($0.requestID, $0.currentToken) }))
         decodeCommittedLog.append(Dictionary(uniqueKeysWithValues: rows.map {
@@ -6799,7 +6790,6 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     func decodeCallCount() -> Int { decodeCalls }
     func decodeBatches() -> [[String]] { decodeRowsLog }
     func decodeCaptureFlags() -> [[String: Bool]] { decodeCaptureLog }
-    func decodeCatchUpColumns() -> [[String: Int]] { decodeCatchUpLog }
     func prefillInputs() -> [ContinuousBatchPrefillInput] { prefillInputLog }
     func prefillOrder() -> [[String]] { prefillRowsLog }
     func observedSamplerSeeds() -> [String: [Int]] { samplerSeedLog }
