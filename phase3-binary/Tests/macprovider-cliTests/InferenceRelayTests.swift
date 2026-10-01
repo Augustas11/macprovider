@@ -865,6 +865,194 @@ final class InferenceRelayTests: XCTestCase {
         XCTAssertTrue(publicKey.isValidSignature(signature, for: tupleBytes))
     }
 
+    func testPoolAuthorizedLoopbackStreamingReceiptBindsDeliveredToolCallBytes() async throws {
+        let model = "mlx-community/Test-Model"
+        let hash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
+        let runtime = FakePoolAuthorizedLoopbackToolChatterRuntime(
+            servedSnapshot: RuntimeSnapshot(state: .ready, container: nil, modelID: model, modelHash: hash)
+        )
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        let recorder = FrameRecorder()
+        let relay = InferenceRelay(
+            modelRuntime: runtime,
+            providerStatus: ProviderStatus(
+                modelID: model,
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+            ),
+            loadedModelID: model,
+            warmSwapEnabled: true,
+            maxActiveRequests: 1,
+            maxBodyBytes: 4096,
+            receiptBuilder: ReceiptBuilder(keyStore: FixedRelayReceiptKeyStore(key: key)),
+            receiptProviderID: "provider-relay-test",
+            sendFrame: { frame in await recorder.append(frame) }
+        )
+        var metadata = settlementMetadataWire(keyID: receiptKeyID(key.publicKey.rawRepresentation), modelHash: hash)
+        metadata["pool_runtime_authorization"] = ReceiptEligibilityFixtures.poolRuntimeAuthorizationWire(
+            runtimeSource: FakePoolAuthorizedLoopbackToolChatterRuntime.runtimeSource,
+            requestID: "req-relay-v04",
+            providerID: "provider-relay-test"
+        )
+
+        try await relay.handleInferenceRequest([
+            "type": "inference_request",
+            "request_id": "req-relay-v04",
+            "stream": true,
+            "body": #"{"model":"mlx-community/Test-Model","stream":true,"messages":[{"role":"user","content":"Use lookup."}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object","properties":{"query":{"type":"string"}}}}}]}"#,
+            "settlement": metadata,
+        ])
+
+        let frames = try await waitForFrames { frames in
+            frames.contains { $0["type"] as? String == "inference_response_end" }
+        } from: {
+            await recorder.frames
+        }
+        let deliveredWire = frames.compactMap { $0["data"] as? String }.joined()
+        XCTAssertTrue(deliveredWire.contains("visible "))
+        XCTAssertTrue(deliveredWire.contains("tool_calls"))
+        XCTAssertFalse(deliveredWire.contains("hidden tail"))
+
+        let endFrame = try XCTUnwrap(frames.last { $0["type"] as? String == "inference_response_end" })
+        XCTAssertEqual(endFrame["status"] as? String, "complete")
+        let receiptHeader = try XCTUnwrap(endFrame["receipt"] as? String)
+        let tupleBytes = try XCTUnwrap(Data(base64Encoded: String(receiptHeader.split(separator: ".")[0])))
+        let tuple = try XCTUnwrap(JSONSerialization.jsonObject(with: tupleBytes) as? [String: Any])
+        XCTAssertEqual((tuple["output_prefix_end_byte"] as? NSNumber)?.int64Value, Int64("visible ".utf8.count))
+        let usage = try XCTUnwrap(tuple["usage"] as? [String: Any])
+        XCTAssertEqual((usage["delivered_output_bytes"] as? NSNumber)?.int64Value, Int64("visible ".utf8.count))
+        XCTAssertEqual((usage["observed_output_tokens"] as? NSNumber)?.int64Value, 3)
+        XCTAssertEqual((usage["billable_output_tokens"] as? NSNumber)?.int64Value, 3)
+        XCTAssertEqual(
+            tuple["output_hash"] as? String,
+            try settlementOutputHash(
+                content: "visible ",
+                toolCalls: [FakePoolAuthorizedLoopbackToolChatterRuntime.toolCall],
+                finishReason: "tool_calls",
+                terminalState: "normal_done",
+                start: 0
+            )
+        )
+        XCTAssertNotEqual(
+            tuple["output_hash"] as? String,
+            try settlementOutputHash(
+                content: "visible hidden tail",
+                toolCalls: [FakePoolAuthorizedLoopbackToolChatterRuntime.toolCall],
+                finishReason: "tool_calls",
+                terminalState: "normal_done",
+                start: 0
+            )
+        )
+    }
+
+    func testPoolAuthorizedLoopbackStreamingReceiptOmittedWhenDeliveredContentProofFails() async throws {
+        let model = "mlx-community/Test-Model"
+        let hash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
+        let runtime = FakePoolAuthorizedLoopbackToolChatterRuntime(
+            servedSnapshot: RuntimeSnapshot(state: .ready, container: nil, modelID: model, modelHash: hash),
+            finalContent: "visible hidden tail",
+            emitsHiddenTail: true
+        )
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        let recorder = FrameRecorder()
+        let relay = InferenceRelay(
+            modelRuntime: runtime,
+            providerStatus: ProviderStatus(
+                modelID: model,
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+            ),
+            loadedModelID: model,
+            warmSwapEnabled: true,
+            maxActiveRequests: 1,
+            maxBodyBytes: 4096,
+            receiptBuilder: ReceiptBuilder(keyStore: FixedRelayReceiptKeyStore(key: key)),
+            receiptProviderID: "provider-relay-test",
+            sendFrame: { frame in await recorder.append(frame) }
+        )
+        var metadata = settlementMetadataWire(keyID: receiptKeyID(key.publicKey.rawRepresentation), modelHash: hash)
+        metadata["pool_runtime_authorization"] = ReceiptEligibilityFixtures.poolRuntimeAuthorizationWire(
+            runtimeSource: FakePoolAuthorizedLoopbackToolChatterRuntime.runtimeSource,
+            requestID: "req-relay-v04",
+            providerID: "provider-relay-test"
+        )
+
+        try await relay.handleInferenceRequest([
+            "type": "inference_request",
+            "request_id": "req-relay-v04",
+            "stream": true,
+            "body": #"{"model":"mlx-community/Test-Model","stream":true,"messages":[{"role":"user","content":"Use lookup."}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object","properties":{"query":{"type":"string"}}}}}]}"#,
+            "settlement": metadata,
+        ])
+
+        let frames = try await waitForFrames { frames in
+            frames.contains { $0["type"] as? String == "inference_response_end" }
+        } from: {
+            await recorder.frames
+        }
+        let deliveredWire = frames.compactMap { $0["data"] as? String }.joined()
+        XCTAssertTrue(deliveredWire.contains("visible "))
+        XCTAssertTrue(deliveredWire.contains("tool_calls"))
+        XCTAssertFalse(deliveredWire.contains("hidden tail"))
+        let endFrame = try XCTUnwrap(frames.last { $0["type"] as? String == "inference_response_end" })
+        XCTAssertEqual(endFrame["status"] as? String, "complete")
+        XCTAssertNil(endFrame["receipt"])
+    }
+
+    func testPoolAuthorizedLoopbackStreamingReceiptOmittedWhenPostToolContentWasSuppressed() async throws {
+        let model = "mlx-community/Test-Model"
+        let hash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
+        let runtime = FakePoolAuthorizedLoopbackToolChatterRuntime(
+            servedSnapshot: RuntimeSnapshot(state: .ready, container: nil, modelID: model, modelHash: hash),
+            finalContent: "visible ",
+            emitsHiddenTail: true
+        )
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        let recorder = FrameRecorder()
+        let relay = InferenceRelay(
+            modelRuntime: runtime,
+            providerStatus: ProviderStatus(
+                modelID: model,
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+            ),
+            loadedModelID: model,
+            warmSwapEnabled: true,
+            maxActiveRequests: 1,
+            maxBodyBytes: 4096,
+            receiptBuilder: ReceiptBuilder(keyStore: FixedRelayReceiptKeyStore(key: key)),
+            receiptProviderID: "provider-relay-test",
+            sendFrame: { frame in await recorder.append(frame) }
+        )
+        var metadata = settlementMetadataWire(keyID: receiptKeyID(key.publicKey.rawRepresentation), modelHash: hash)
+        metadata["pool_runtime_authorization"] = ReceiptEligibilityFixtures.poolRuntimeAuthorizationWire(
+            runtimeSource: FakePoolAuthorizedLoopbackToolChatterRuntime.runtimeSource,
+            requestID: "req-relay-v04",
+            providerID: "provider-relay-test"
+        )
+
+        try await relay.handleInferenceRequest([
+            "type": "inference_request",
+            "request_id": "req-relay-v04",
+            "stream": true,
+            "body": #"{"model":"mlx-community/Test-Model","stream":true,"messages":[{"role":"user","content":"Use lookup."}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object","properties":{"query":{"type":"string"}}}}}]}"#,
+            "settlement": metadata,
+        ])
+
+        let frames = try await waitForFrames { frames in
+            frames.contains { $0["type"] as? String == "inference_response_end" }
+        } from: {
+            await recorder.frames
+        }
+        let deliveredWire = frames.compactMap { $0["data"] as? String }.joined()
+        XCTAssertTrue(deliveredWire.contains("visible "))
+        XCTAssertTrue(deliveredWire.contains("tool_calls"))
+        XCTAssertFalse(deliveredWire.contains("hidden tail"))
+        let endFrame = try XCTUnwrap(frames.last { $0["type"] as? String == "inference_response_end" })
+        XCTAssertEqual(endFrame["status"] as? String, "complete")
+        XCTAssertNil(endFrame["receipt"])
+    }
+
     func testRelayNonStreamingCancelledAfterCompletionCarriesBuyerCancelSettlementReceipt() async throws {
         let telemetry = KVCacheTelemetryCapture()
         let hash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
@@ -1503,7 +1691,89 @@ private actor FakeReceiptCompletionRuntime: ModelRuntimeServing {
         shouldCancel: @escaping @Sendable () -> Bool,
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
-        CompletionResult(content: "answer", finishReason: "stop", promptTokens: 5, completionTokens: 2, settlementDisposition: .eligibleOwner)
+        onChunk(.content("answer"))
+        return CompletionResult(content: "answer", finishReason: "stop", promptTokens: 5, completionTokens: 2, settlementDisposition: .eligibleOwner)
+    }
+
+    func unregisterInFlight(_ id: Int) { }
+}
+
+private actor FakePoolAuthorizedLoopbackToolChatterRuntime: ModelRuntimeServing {
+    static let runtimeSource = OllamaLoopbackServeModel.runtimeSource
+    static let toolCall = macprovider_cli.ToolCall(
+        id: "call_0123456789abcdef0123456789abcdef",
+        functionName: "lookup",
+        arguments: #"{"query":"weather"}"#
+    )
+
+    private let servedSnapshot: RuntimeSnapshot
+    private let finalContent: String
+    private let emitsHiddenTail: Bool
+
+    init(servedSnapshot: RuntimeSnapshot, finalContent: String = "visible ", emitsHiddenTail: Bool = false) {
+        self.servedSnapshot = servedSnapshot
+        self.finalContent = finalContent
+        self.emitsHiddenTail = emitsHiddenTail
+    }
+
+    var loadedModelHash: String? { nil }
+    var loadedModelHashAlgorithm: String? { nil }
+    var loadedWeightsManifestSHA256: String? { nil }
+    var isLoaded: Bool { true }
+    nonisolated var isSettlementReceiptEligible: Bool { false }
+    nonisolated var settlementRuntimeSource: String? { Self.runtimeSource }
+    func setProviderStatus(_ providerStatus: ProviderStatus) {}
+
+    func currentSnapshot() async -> RuntimeSnapshot {
+        servedSnapshot
+    }
+
+    func complete(
+        _ request: ChatCompletionRequest,
+        shouldCancel: @escaping @Sendable () -> Bool
+    ) async throws -> CompletionResult {
+        CompletionResult(
+            content: finalContent,
+            finishReason: "tool_calls",
+            promptTokens: 5,
+            completionTokens: 3,
+            generatedCompletionTokens: 3,
+            toolCalls: [Self.toolCall],
+            settlementDisposition: .notEligible
+        )
+    }
+
+    func completeWithServedSnapshot(
+        _ request: ChatCompletionRequest,
+        shouldCancel: @escaping @Sendable () -> Bool
+    ) async throws -> (CompletionResult, RuntimeSnapshot) {
+        (try await complete(request, shouldCancel: shouldCancel), servedSnapshot)
+    }
+
+    func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle {
+        RequestHandle(snapshot: servedSnapshot, registrationID: 0, drainCancelled: DrainCancelToken())
+    }
+
+    func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws { }
+
+    func stream(
+        _ request: ChatCompletionRequest,
+        with handle: RequestHandle,
+        shouldCancel: @escaping @Sendable () -> Bool,
+        onChunk: @escaping @Sendable (StreamChunk) -> Void
+    ) async throws -> CompletionResult {
+        onChunk(.content("visible "))
+        onChunk(.toolCallDelta(StreamToolCallDelta(
+            index: 0,
+            id: Self.toolCall.id,
+            type: "function",
+            functionName: Self.toolCall.functionName,
+            arguments: Self.toolCall.arguments
+        )))
+        if emitsHiddenTail {
+            onChunk(.content("hidden tail"))
+        }
+        return try await complete(request, shouldCancel: shouldCancel)
     }
 
     func unregisterInFlight(_ id: Int) { }
@@ -1521,6 +1791,41 @@ private func buyerCancelOutputHash(content: String, start: Int) throws -> String
         "tool_calls": .null,
     ]))
     return SHA256.hash(data: Data(canonical.utf8)).map { String(format: "%02x", $0) }.joined()
+}
+
+private func settlementOutputHash(
+    content: String,
+    toolCalls: [macprovider_cli.ToolCall]?,
+    finishReason: String,
+    terminalState: String,
+    start: Int
+) throws -> String {
+    let end = start + content.utf8.count
+    let canonical = try RFC8785JCS.canonicalString(.object([
+        "content": .string(content),
+        "finish_reason": finishReason.isEmpty ? .null : .string(finishReason),
+        "output_prefix_end_byte": .int(end),
+        "output_prefix_start_byte": .int(start),
+        "terminal_state": .string(terminalState),
+        "tool_calls": settlementToolCallsValue(toolCalls),
+    ]))
+    return SHA256.hash(data: Data(canonical.utf8)).map { String(format: "%02x", $0) }.joined()
+}
+
+private func settlementToolCallsValue(_ toolCalls: [macprovider_cli.ToolCall]?) -> RFC8785JCS.Value {
+    guard let toolCalls, !toolCalls.isEmpty else {
+        return .null
+    }
+    return .array(toolCalls.map { call in
+        .object([
+            "id": .string(call.id),
+            "type": .string("function"),
+            "function": .object([
+                "name": .string(call.functionName),
+                "arguments": .rawString(call.arguments),
+            ]),
+        ])
+    })
 }
 
 final class UnattestedUsageWireTests: XCTestCase {
@@ -1924,6 +2229,27 @@ final class RelayStreamBatcherConcurrencyTests: XCTestCase {
         XCTAssertNil(batcher.deliveredContent(sent: sink.all.count - 1))
         batcher.flushContent()
         XCTAssertEqual(batcher.deliveredContent(sent: sink.all.count), "abcde")
+    }
+
+    func testCompletedOutputProofRequiresByteExactContent() {
+        let sink = FrameSink()
+        let batcher = RelayStreamBatcher(
+            streamInterval: 1,
+            deltaFrame: { delta in (delta["content"] as? String) ?? "" },
+            enqueueFrame: { sink.append($0) }
+        )
+        batcher.accept(.content("\u{00E9}"))
+        let decomposed = CompletionResult(
+            content: "e\u{0301}",
+            finishReason: "stop",
+            promptTokens: 1,
+            completionTokens: 1,
+            settlementDisposition: .eligibleOwner
+        )
+
+        XCTAssertEqual("\u{00E9}", "e\u{0301}")
+        XCTAssertFalse("\u{00E9}".utf8.elementsEqual("e\u{0301}".utf8))
+        XCTAssertNil(batcher.deliveredCompleteOutput(sent: sink.all.count, completion: decomposed))
     }
 
     func testDeliveredContentIsNilOnceAToolCallOpened() {
