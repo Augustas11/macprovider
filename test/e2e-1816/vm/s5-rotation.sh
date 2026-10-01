@@ -9,7 +9,7 @@
 #   c  R016 attestation of the non-creator member e2e-prov-5: it binds and is
 #      paid pool_operator_attested; then the attestation is removed by a later
 #      core while its requests are in flight: zero credit; new requests refused
-#   d  member revocation in flight (e2e-prov-5 re-attested first): zero credit
+#   d  member revocation in flight (e2e-prov-7, a second creator-owned member): zero credit
 #   e  entry removal in flight (QN): in-flight attempts settle at their
 #      snapshot's rates; new requests refused; binding revoked
 #      pool_manifest_entry_revoked
@@ -106,20 +106,22 @@ run="$(run_id s5unattnew)"
 pool_traffic "$run" Q "$MG" llamacpp "ns=1,st=1" 1
 pool_check S5-attestation-removed-new-refused "$run" --refused
 
-# ---- d. member revocation in flight (re-attest first) ------------------------------------------
-$PM stage Q --attest "$MEMBER_ACCT=llamacpp_loopback" >/dev/null
-v="$(sign_change Q reattest)"; wait_window Q "$v"; sleep 5
-reoffer_5 offer-5-reattested
+# ---- d. member revocation in flight ---------------------------------------------------------
+# e2e-prov-7 is the second creator-owned member of Q (bound in S3, kept
+# offline); it serves alone here so the revoked member is the one in flight.
+restart_member 7 "$(gargs 7 1000)"
+systemctl stop e2e-fakeprov@3 e2e-fakeprov@5; sleep 3
 run="$(run_id s5rev)"
 pool_traffic "$run" Q "$MG" llamacpp "st=2" 2 &
-bg=$!; sleep 5
-$PM event Q member_revoked --provider-id e2e-prov-5 >"$EV/member-revoked.txt" 2>&1
+bg=$!; sleep 6
+$PM event Q member_revoked --provider-id e2e-prov-7 >"$EV/member-revoked.txt" 2>&1
 wait $bg
 result S5-member-revoked-event INFO "$(head -c 200 "$EV/member-revoked.txt")"
 pool_check S5-member-revoked-inflight "$run" --zero-credit --min-routed 2
 run="$(run_id s5revnew)"
 pool_traffic "$run" Q "$MG" llamacpp "ns=1,st=1" 1
 pool_check S5-member-revoked-new-refused "$run" --refused
+systemctl stop e2e-fakeprov@7
 restart_member 5 "$(gargs 5)"
 systemctl start e2e-fakeprov@3; wait_providers 5 || true; sleep 5
 

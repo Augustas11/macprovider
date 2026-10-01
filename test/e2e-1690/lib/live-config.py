@@ -21,6 +21,7 @@ PROVIDERS = [
     ("e2e-prov-4", "http://127.0.0.1:19104", "E2E fake provider 4 (native pool-model member)"),
     ("e2e-prov-5", "http://127.0.0.1:19105", "E2E fake provider 5 (non-creator pool-model member)"),
     ("e2e-prov-canary", "http://127.0.0.1:19106", "E2E catalog canary provider"),
+    ("e2e-prov-7", "http://127.0.0.1:19107", "E2E fake provider 7 (second creator-owned pool-model member)"),
 ]
 text = sys.stdin.read()
 

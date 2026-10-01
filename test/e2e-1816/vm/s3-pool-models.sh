@@ -39,7 +39,7 @@ $PM init QN --allowlist "" >"$EV/init-qn.txt" 2>&1 || die "init QN: $(tail -2 "$
 $PM stage Q --add gguf-g macprovider.gguf-file.v1 $H_GGUF llamacpp_loopback $G_RATES 8192 >/dev/null
 $PM stage QN --add mlx-n macprovider.snapshot-manifest.v1 $H_MLX mlx_cache $N_RATES 8192 >/dev/null
 cp /root/e2e/pools16/Q/pool-models.json "$EV/pool-models-q.json"; cp /root/e2e/pools16/QN/pool-models.json "$EV/pool-models-qn.json"
-for p in Q:e2e-prov-3 QN:e2e-prov-4; do
+for p in Q:e2e-prov-3,e2e-prov-7 QN:e2e-prov-4; do
   n=${p%%:*}; m=${p#*:}
   if $PM create $n --members $m --buyer "$ACCT" >"$EV/create-$n.txt" 2>&1; then
     result "S3-pool-$n-create" PASS "pool $(pool_id $n): approval, root, genesis core with pool_model_entries/v1 (coordinator-cli --pool-models), member $m, buyer, promote"
@@ -71,9 +71,10 @@ PY
 common="-omit-catalog -stream-chunks 20 -chunk-delay-ms 100 -nonstream-delay-ms 1500"
 fakeprov_args 3 "$common -model-id gguf-g-model -model-hash $H_GGUF -model-hash-algorithm macprovider.gguf-file.v1 -runtime-source llamacpp_loopback -admission-key-file /root/e2e/admission-key-3 -receipt-key-file /root/e2e/receipt-key-3"
 fakeprov_args 5 "$common -model-id gguf-g-model -model-hash $H_GGUF -model-hash-algorithm macprovider.gguf-file.v1 -runtime-source llamacpp_loopback -admission-key-file /root/e2e/admission-key-5 -receipt-key-file /root/e2e/receipt-key-5"
+fakeprov_args 7 "$common -model-id gguf-g-model -model-hash $H_GGUF -model-hash-algorithm macprovider.gguf-file.v1 -runtime-source llamacpp_loopback -admission-key-file /root/e2e/admission-key-7 -receipt-key-file /root/e2e/receipt-key-7"
 fakeprov_args 4 "$common -trusted-pool -model-id e2e-mlx-n -model-hash $H_MLX -model-hash-algorithm macprovider.snapshot-manifest.v1 -admission-key-file /root/e2e/admission-key-4 -receipt-key-file /root/e2e/receipt-key-4"
 systemctl enable e2e-fakeprov@3 e2e-fakeprov@4 e2e-fakeprov@5 >/dev/null 2>&1
-systemctl restart e2e-fakeprov@3 e2e-fakeprov@4 e2e-fakeprov@5
+systemctl restart e2e-fakeprov@3 e2e-fakeprov@4 e2e-fakeprov@5 e2e-fakeprov@7
 wait_providers 5 || result S3-members-connected FAIL "not every member is ready: $(coord_healthz | head -c 300)"
 sleep 3
 offer() {  # offer <i> <runtime> <served-ref> <alg> <hash> <out>
@@ -83,6 +84,7 @@ offer() {  # offer <i> <runtime> <served-ref> <alg> <hash> <out>
 offer 3 llamacpp_loopback gguf-g-model macprovider.gguf-file.v1 $H_GGUF "$EV/offer-3"
 offer 4 mlx_cache e2e-mlx-n macprovider.snapshot-manifest.v1 $H_MLX "$EV/offer-4"
 offer 5 llamacpp_loopback gguf-g-model macprovider.gguf-file.v1 $H_GGUF "$EV/offer-5"
+offer 7 llamacpp_loopback gguf-g-model macprovider.gguf-file.v1 $H_GGUF "$EV/offer-7"
 check_binding() {  # check_binding <offer.json> <pmid> <want-bound 1|0>
   python3 - "$1" "$2" "$3" <<'PY'
 import json, sys
@@ -94,6 +96,11 @@ PY
 }
 check_binding "$EV/offer-3.json" "$MG" 1 >"$EV/bind-3.txt" 2>&1 && result S3-bind-loopback PASS "e2e-prov-3 offer: $(cat "$EV/bind-3.txt")" \
   || result S3-bind-loopback FAIL "e2e-prov-3: $(cat "$EV/bind-3.txt" "$EV/offer-3.txt" | tr '\n' ' ' | head -c 600)"
+check_binding "$EV/offer-7.json" "$MG" 1 >"$EV/bind-7.txt" 2>&1 && result S3-bind-loopback-second-member PASS "e2e-prov-7 offer: $(cat "$EV/bind-7.txt")" \
+  || result S3-bind-loopback-second-member FAIL "e2e-prov-7: $(cat "$EV/bind-7.txt" "$EV/offer-7.txt" | tr '\n' ' ' | head -c 600)"
+# e2e-prov-7 stays bound but offline until S5's member revocation, so every
+# other pool-model check has exactly one serving member per pool.
+systemctl stop e2e-fakeprov@7
 check_binding "$EV/offer-4.json" "$MN" 1 >"$EV/bind-4.txt" 2>&1 && result S3-bind-native PASS "e2e-prov-4 offer: $(cat "$EV/bind-4.txt")" \
   || result S3-bind-native FAIL "e2e-prov-4: $(cat "$EV/bind-4.txt" "$EV/offer-4.txt" | tr '\n' ' ' | head -c 600)"
 csql "SELECT provider_id, state, actor, reason_code, binding_scope, pool_model_id, pool_manifest_version FROM model_admission_events WHERE provider_id IN ('e2e-prov-3','e2e-prov-4','e2e-prov-5') ORDER BY id" >"$EV/admission-events.txt" 2>&1
