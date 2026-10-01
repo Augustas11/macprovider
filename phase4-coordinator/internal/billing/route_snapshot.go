@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	"modernc.org/sqlite"
 )
 
@@ -36,6 +37,13 @@ const (
 	routeSnapshotRetryInitialDelay   = 10 * time.Millisecond
 	routeSnapshotRetryMaxDelay       = 100 * time.Millisecond
 	routeSnapshotPrimaryMirrorBudget = 25 * time.Millisecond
+
+	// SPEC-022-R013 closed expected_model_hash_source enum. A snapshot that
+	// omits the source is catalog (every pre-#1816 row); only pool_manifest
+	// is written explicitly, so catalog route-snapshot preimages and digests
+	// are byte-identical to before.
+	ExpectedModelHashSourceCatalog      = "catalog"
+	ExpectedModelHashSourcePoolManifest = "pool_manifest"
 )
 
 var (
@@ -108,12 +116,30 @@ type RouteSnapshot struct {
 	// feed-derived binding. Carried in route_snapshot_json (no dedicated
 	// columns), bound into the digest only when present, recovered on the
 	// settlement recompute path. All six or none; a partial record is invalid.
-	ArtifactFeedSHA256              string `json:"artifact_feed_sha256"`
-	ArtifactID                      string `json:"artifact_id"`
-	ArtifactHash                    string `json:"artifact_hash"`
-	ArtifactHashAlgorithm           string `json:"artifact_hash_algorithm"`
-	ArtifactFeedSignerKeyID         string `json:"artifact_feed_signer_key_id"`
-	ArtifactCandidateCatalogSHA256  string `json:"artifact_candidate_catalog_sha256"`
+	ArtifactFeedSHA256             string `json:"artifact_feed_sha256"`
+	ArtifactID                     string `json:"artifact_id"`
+	ArtifactHash                   string `json:"artifact_hash"`
+	ArtifactHashAlgorithm          string `json:"artifact_hash_algorithm"`
+	ArtifactFeedSignerKeyID        string `json:"artifact_feed_signer_key_id"`
+	ArtifactCandidateCatalogSHA256 string `json:"artifact_candidate_catalog_sha256"`
+	// SPEC-022-R013 / SPEC-005-R015 (#1816): a pool-manifest route records
+	// the source of its expected identity, the pool_model_id of the signed
+	// SPEC-042-R015 entry whose artifact pair is the expected hash, the
+	// entry's trusted rates, and the digest of the pricing bounds the entry
+	// was checked against. All are json-carried and digested only when the
+	// source is pool_manifest, so no catalog preimage changes. The catalog_*
+	// members of such a snapshot record the global catalog envelope in force
+	// at route time (which does not carry the pair), never the identity.
+	ExpectedModelHashSource            string `json:"expected_model_hash_source,omitempty"`
+	PoolModelID                        string `json:"pool_model_id,omitempty"`
+	PoolModelPromptRatePerMtok         int64  `json:"pool_model_prompt_rate_per_mtok,omitempty"`
+	PoolModelPromptCacheHitRatePerMtok int64  `json:"pool_model_prompt_cache_hit_rate_per_mtok,omitempty"`
+	PoolModelCompletionRatePerMtok     int64  `json:"pool_model_completion_rate_per_mtok,omitempty"`
+	PoolModelPricingBoundsSHA256       string `json:"pool_model_pricing_bounds_sha256,omitempty"`
+	// PoolMemberAccountID is the serving provider's recorded owner account
+	// when it serves under a SPEC-042-R016 creator attestation rather than
+	// as the creator (json-carried, digested only when set).
+	PoolMemberAccountID             string `json:"pool_member_account_id,omitempty"`
 	ComputeIntegrityCaptureRequired bool   `json:"-"`
 	ComputeIntegritySamplingCovered bool   `json:"-"`
 	ComputeIntegrityHardwareDigest  string `json:"-"`
@@ -184,6 +210,20 @@ func (r RouteSnapshot) Value() map[string]any {
 		value["model_admission_discovery_digest_sha256"] = r.ModelAdmissionDiscoveryDigestSHA256
 		value["model_admission_evaluation_digest_sha256"] = r.ModelAdmissionEvaluationDigestSHA256
 	}
+	if r.PoolManifestSourced() {
+		value["expected_model_hash_source"] = r.ExpectedModelHashSource
+		value["pool_model_id"] = r.PoolModelID
+		value["pool_model_prompt_rate_per_mtok"] = r.PoolModelPromptRatePerMtok
+		value["pool_model_prompt_cache_hit_rate_per_mtok"] = r.PoolModelPromptCacheHitRatePerMtok
+		value["pool_model_completion_rate_per_mtok"] = r.PoolModelCompletionRatePerMtok
+		value["pool_model_pricing_bounds_sha256"] = r.PoolModelPricingBoundsSHA256
+		if r.RuntimeSource == "" {
+			value["pool_generation"] = int64(r.PoolGeneration)
+		}
+	}
+	if r.PoolMemberAccountID != "" {
+		value["pool_member_account_id"] = r.PoolMemberAccountID
+	}
 	if r.ArtifactDerived() {
 		value["artifact_feed_sha256"] = r.ArtifactFeedSHA256
 		value["artifact_id"] = r.ArtifactID
@@ -193,6 +233,71 @@ func (r RouteSnapshot) Value() map[string]any {
 		value["artifact_candidate_catalog_sha256"] = r.ArtifactCandidateCatalogSHA256
 	}
 	return value
+}
+
+// PoolManifestSourced reports whether the snapshot's expected identity is a
+// SPEC-042-R015 pool-manifest entry (SPEC-022-R013).
+func (r RouteSnapshot) PoolManifestSourced() bool {
+	return r.ExpectedModelHashSource == ExpectedModelHashSourcePoolManifest
+}
+
+// PoolModelRateEntry is the trusted SPEC-005-R015 price a pool-manifest
+// snapshot recorded; ok is false for any other snapshot.
+func (r RouteSnapshot) PoolModelRateEntry() (RateCardEntry, bool) {
+	if !r.PoolManifestSourced() {
+		return RateCardEntry{}, false
+	}
+	entry := RateCardEntry{
+		PromptCreditsPerMtok:     r.PoolModelPromptRatePerMtok,
+		CompletionCreditsPerMtok: r.PoolModelCompletionRatePerMtok,
+	}
+	entry.SetPromptCacheHitCreditsPerMtok(r.PoolModelPromptCacheHitRatePerMtok)
+	return entry, true
+}
+
+// validatePoolManifestSource is SPEC-022-R013.2: a pool_manifest snapshot
+// carries the full pool label set, a pool_model_id of the same pool, the
+// expected pair, a fenced pool generation, a non-negative entry price with
+// cache-hit <= prompt, and the bounds digest; a catalog snapshot carries none
+// of these members.
+func (r RouteSnapshot) validatePoolManifestSource() error {
+	switch r.ExpectedModelHashSource {
+	case "":
+		if r.PoolModelID != "" || r.PoolModelPromptRatePerMtok != 0 || r.PoolModelPromptCacheHitRatePerMtok != 0 ||
+			r.PoolModelCompletionRatePerMtok != 0 || r.PoolModelPricingBoundsSHA256 != "" {
+			return fmt.Errorf("route snapshot pool model members require expected_model_hash_source pool_manifest")
+		}
+		return nil
+	case ExpectedModelHashSourcePoolManifest:
+	default:
+		// "catalog" is the implicit value and is never written explicitly,
+		// so catalog digests stay byte-identical.
+		return fmt.Errorf("route snapshot expected_model_hash_source invalid")
+	}
+	poolID, _, ok := poolmanifest.ParsePoolModelID(r.PoolModelID)
+	if !ok || r.PoolID == "" || poolID != r.PoolID {
+		return fmt.Errorf("route snapshot pool_model_id does not belong to pool_id")
+	}
+	if r.ManifestVersion == 0 || !hex64Pattern.MatchString(r.ManifestCoreDigest) {
+		return fmt.Errorf("route snapshot pool_manifest source requires manifest labels")
+	}
+	if r.PoolGeneration == 0 || r.PoolGeneration > math.MaxInt64 {
+		return fmt.Errorf("route snapshot pool_manifest source requires pool_generation")
+	}
+	if r.ExpectedCatalogModelHashAlgorithm != modelidentity.GGUFFileV1 && r.ExpectedCatalogModelHashAlgorithm != modelidentity.SnapshotManifestV1 {
+		return fmt.Errorf("route snapshot pool_manifest source requires an exact artifact algorithm")
+	}
+	if r.PoolModelPromptRatePerMtok < 0 || r.PoolModelPromptCacheHitRatePerMtok < 0 || r.PoolModelCompletionRatePerMtok < 0 ||
+		r.PoolModelPromptCacheHitRatePerMtok > r.PoolModelPromptRatePerMtok {
+		return fmt.Errorf("route snapshot pool model rates invalid")
+	}
+	if !hex64Pattern.MatchString(r.PoolModelPricingBoundsSHA256) {
+		return fmt.Errorf("route snapshot pool_model_pricing_bounds_sha256 invalid")
+	}
+	if r.ArtifactDerived() || r.ModelAdmissionCatalogModelKey != "" {
+		return fmt.Errorf("route snapshot pool_manifest source cannot carry catalog or feed identity")
+	}
+	return nil
 }
 
 // ArtifactDerived reports whether the snapshot references an artifact-feed
@@ -257,7 +362,12 @@ func (r RouteSnapshot) Validate() error {
 	// value present requires all six, well-formed and equal to the expected
 	// pair. Settlement re-verification is this same check on the recovered
 	// snapshot plus the digest recompute, never a lookup in a current feed.
-	if r.ArtifactDerived() || r.ExpectedCatalogModelHashAlgorithm == modelidentity.GGUFFileV1 {
+	if err := r.validatePoolManifestSource(); err != nil {
+		return err
+	}
+	// A pool-manifest GGUF identity is the signed entry's exact pair
+	// (SPEC-010-R007(j)), not a feed member, so the feed rule does not apply.
+	if !r.PoolManifestSourced() && (r.ArtifactDerived() || r.ExpectedCatalogModelHashAlgorithm == modelidentity.GGUFFileV1) {
 		if err := r.validateArtifactEvidence(); err != nil {
 			return err
 		}
@@ -292,7 +402,7 @@ func (r RouteSnapshot) Validate() error {
 	// SPEC-022-R012.1: an external-runtime snapshot carries the full pool
 	// label set, a loopback runtime class, the fenced generation, and the
 	// operator account, or it is invalid and fails closed before dispatch.
-	if r.RuntimeSource != "" || r.PoolGeneration != 0 || r.PoolOperatorAccountID != "" {
+	if r.RuntimeSource != "" || (r.PoolGeneration != 0 && !r.PoolManifestSourced()) || r.PoolOperatorAccountID != "" || r.PoolMemberAccountID != "" {
 		if !IsLoopbackRuntimeSource(r.RuntimeSource) {
 			return fmt.Errorf("route snapshot runtime_source must be a loopback runtime class")
 		}
@@ -312,13 +422,18 @@ func (r RouteSnapshot) Validate() error {
 		}
 	}
 	if r.ModelAdmissionCandidateID != "" {
-		for field, value := range map[string]string{
+		required := map[string]string{
 			"model_admission_coordinator_event_id":     r.ModelAdmissionCoordinatorEventID,
 			"model_admission_served_model_ref":         r.ModelAdmissionServedModelRef,
-			"model_admission_catalog_model_key":        r.ModelAdmissionCatalogModelKey,
 			"model_admission_discovery_digest_sha256":  r.ModelAdmissionDiscoveryDigestSHA256,
 			"model_admission_evaluation_digest_sha256": r.ModelAdmissionEvaluationDigestSHA256,
-		} {
+		}
+		// A SPEC-047-R011 pool binding has no catalog key (it is never
+		// laundered into one); every other binding carries it.
+		if !r.PoolManifestSourced() {
+			required["model_admission_catalog_model_key"] = r.ModelAdmissionCatalogModelKey
+		}
+		for field, value := range required {
 			if strings.TrimSpace(value) == "" {
 				return fmt.Errorf("route snapshot missing %s", field)
 			}

@@ -25,6 +25,25 @@ type PoolOperatorAttestationClaim struct {
 	PoolGeneration        uint64
 	PoolOperatorAccountID string
 	ProviderID            string
+	// SPEC-022-R013 (#1816): for a pool_manifest route the claim also names
+	// the SPEC-042-R015 entry and its exact pair, which the authority must
+	// find in the accepted core the snapshot names. PoolMemberAccountID is
+	// the serving provider's recorded owner account when it serves under a
+	// SPEC-042-R016 attestation instead of as the creator.
+	ExpectedModelHashSource    string
+	PoolModelID                string
+	ExpectedModelHashAlgorithm string
+	ExpectedModelHash          string
+	PoolMemberAccountID        string
+}
+
+// PoolManifestRouteAuthority re-evaluates a pool_manifest route that is not
+// pool_operator_attested (a native mlx_cache session serving an R015 entry):
+// the accepted core the snapshot names carries the exact entry for the
+// runtime, and the provider is an admitted, unrevoked member at the fenced
+// generation. The trust-pool store implements it.
+type PoolManifestRouteAuthority interface {
+	VerifyPoolManifestRoute(ctx context.Context, claim PoolOperatorAttestationClaim) error
 }
 
 // PoolOperatorAttestationAuthority re-evaluates SPEC-042-R006 conditions 2-4
@@ -215,7 +234,11 @@ func (s *Store) PoolOperatorAttestationEligible(ctx context.Context, route Route
 	if authority == nil {
 		return ErrPoolOperatorAttestationUnavailable
 	}
-	return authority.VerifyPoolOperatorAttestation(ctx, PoolOperatorAttestationClaim{
+	return authority.VerifyPoolOperatorAttestation(ctx, poolAttestationClaimForRoute(route))
+}
+
+func poolAttestationClaimForRoute(route RouteSnapshot) PoolOperatorAttestationClaim {
+	claim := PoolOperatorAttestationClaim{
 		PoolID:                route.PoolID,
 		ManifestVersion:       route.ManifestVersion,
 		ManifestCoreDigest:    route.ManifestCoreDigest,
@@ -223,7 +246,41 @@ func (s *Store) PoolOperatorAttestationEligible(ctx context.Context, route Route
 		PoolGeneration:        route.PoolGeneration,
 		PoolOperatorAccountID: route.PoolOperatorAccountID,
 		ProviderID:            route.ProviderID,
-	})
+		PoolMemberAccountID:   route.PoolMemberAccountID,
+	}
+	if route.PoolManifestSourced() {
+		claim.ExpectedModelHashSource = route.ExpectedModelHashSource
+		claim.PoolModelID = route.PoolModelID
+		claim.ExpectedModelHashAlgorithm = route.ExpectedCatalogModelHashAlgorithm
+		claim.ExpectedModelHash = route.ExpectedCatalogModelHash
+	}
+	return claim
+}
+
+// PoolManifestRouteEligible is SPEC-022-R013.3 for a pool_manifest route
+// served natively (mlx_cache): the immutable accepted core the snapshot
+// names must carry the exact entry, replayed from the durable pool records,
+// never repaired from a current manifest. A loopback pool_manifest route is
+// covered by PoolOperatorAttestationEligible, whose authority checks the
+// same entry. Any other snapshot is not a pool_manifest route.
+func (s *Store) PoolManifestRouteEligible(ctx context.Context, route RouteSnapshot) error {
+	if !route.PoolManifestSourced() {
+		return errPoolOperatorAttestationSnapshot
+	}
+	if route.RouteSnapshotMode != RouteSnapshotModeEnforce {
+		return errPoolOperatorAttestationNotEnforce
+	}
+	if route.Validate() != nil {
+		return errPoolOperatorAttestationSnapshot
+	}
+	if route.RuntimeSource != "" {
+		return s.PoolOperatorAttestationEligible(ctx, route)
+	}
+	authority, ok := s.poolOperatorAttestationAuthority().(PoolManifestRouteAuthority)
+	if !ok || authority == nil {
+		return ErrPoolOperatorAttestationUnavailable
+	}
+	return authority.VerifyPoolManifestRoute(ctx, poolAttestationClaimForRoute(route))
 }
 
 // poolOperatorAttestationSnapshotComplete reports whether a route snapshot
