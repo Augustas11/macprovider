@@ -297,6 +297,28 @@ func TestRegistryManifestActivationHookAndPriorGeneration(t *testing.T) {
 	if fired != 2 {
 		t.Fatalf("hook fired %d times after a new generation, want 2", fired)
 	}
+	// #1816 VM acceptance A-5: a generation that activates while the pool is
+	// unrouteable (a window boundary) kicks the sweep again when the pool
+	// routes; the sweep skips unrouteable pools.
+	gap := next
+	gap.ManifestVersion, gap.ManifestCoreDigest, gap.Routeable = 3, hexDigest("v3"), false
+	if _, err := registry.RefreshRouteableSnapshotsAtRevision(3, []trustpool.RouteableSnapshot{gap}); err != nil {
+		t.Fatal(err)
+	}
+	routes := gap
+	routes.Routeable = true
+	if _, err := registry.RefreshRouteableSnapshotsAtRevision(3, []trustpool.RouteableSnapshot{routes}); err != nil {
+		t.Fatal(err)
+	}
+	if fired != 4 {
+		t.Fatalf("hook fired %d times after activation across a routeability gap, want 4", fired)
+	}
+	if _, err := registry.RefreshRouteableSnapshotsAtRevision(3, []trustpool.RouteableSnapshot{routes}); err != nil {
+		t.Fatal(err)
+	}
+	if fired != 4 {
+		t.Fatalf("hook re-fired on an unchanged refresh (%d)", fired)
+	}
 	view := registry.Snapshot(snap.PoolID)
 	if view.PriorManifestVersion != 1 || view.PriorManifestCoreDigest != hexDigest("v1") || len(view.PriorModelEntries) != len(entries) {
 		t.Fatalf("prior generation view = %d %s %d", view.PriorManifestVersion, view.PriorManifestCoreDigest, len(view.PriorModelEntries))

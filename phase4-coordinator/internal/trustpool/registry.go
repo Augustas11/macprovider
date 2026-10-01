@@ -875,11 +875,15 @@ func (r *Registry) applyRouteablePoolStatesLocked(revision uint64, next map[stri
 }
 
 // manifestGenerationChanged reports whether any pool in next has a
-// different active accepted generation than in prev.
+// different active accepted generation than in prev, or became routeable
+// with one. The binding sweep skips an unrouteable pool, so a generation
+// that activates across a routeability gap (a window boundary) must kick it
+// again when the pool routes (#1816 VM acceptance A-5).
 func manifestGenerationChanged(prev, next map[string]*poolState) bool {
 	for poolID, ps := range next {
 		old := prev[poolID]
-		if ps.manifestVersion != 0 && (old == nil || old.manifestVersion != ps.manifestVersion || old.manifestCoreDigest != ps.manifestCoreDigest) {
+		if ps.manifestVersion != 0 && (old == nil || old.manifestVersion != ps.manifestVersion || old.manifestCoreDigest != ps.manifestCoreDigest ||
+			(ps.routeable && !old.routeable)) {
 			return true
 		}
 	}

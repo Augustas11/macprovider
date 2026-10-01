@@ -256,7 +256,12 @@ func setUpPoolModelJourneyPool(t *testing.T, s *scenario, keysDir, poolID, provi
 		"attested_members": attestedMembers,
 	})
 	notBefore := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
-	manifestEvent := filepath.Join(t.TempDir(), "manifest.json")
+	expiresAt := notBefore.Add(24 * time.Hour)
+	if member.genesisWindow > 0 {
+		expiresAt = time.Now().UTC().Add(member.genesisWindow).Truncate(time.Second)
+	}
+	// The next core chains to this file (signNextPoolModelManifest).
+	manifestEvent := filepath.Join(keysDir, "manifest-1.json")
 	runTrustPoolCLI(t, nil, "sign-manifest", "--identity", filepath.Join(keysDir, "pool-identity.json"),
 		"--root-issuer-key", filepath.Join(keysDir, "root-issuer-key.pem"), "--root-issuer-key-id", "journey-root-1",
 		"--manifest-authority-key", filepath.Join(keysDir, "manifest-authority-key.pem"),
@@ -265,7 +270,7 @@ func setUpPoolModelJourneyPool(t *testing.T, s *scenario, keysDir, poolID, provi
 		"--settlement-mode", "enforce", "--runtime-allowlist", "llamacpp_loopback", "--pool-models", poolModels,
 		"--models", "journey-unused-model", "--min-binary-version", "1.0.0", "--min-attestation-tier", "self_signed",
 		"--retention-policy-id", "standard", "--min-eligible-members", "1",
-		"--not-before", notBefore.Format(time.RFC3339), "--expires-at", notBefore.Add(24*time.Hour).Format(time.RFC3339),
+		"--not-before", notBefore.Format(time.RFC3339), "--expires-at", expiresAt.Format(time.RFC3339),
 		"--out", manifestEvent)
 	runTrustPoolCLI(t, env, "submit-policy", "--operation-id", "journey-manifest-1", "--input", manifestEvent)
 	if member.ownerKey != nil {

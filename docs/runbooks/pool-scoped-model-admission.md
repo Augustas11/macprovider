@@ -218,7 +218,20 @@ routes only after its rebind.
 
 After the new window is active, the member submits (or keeps) its offer for
 the candidate (`macprovider-cli models offer <candidate> --json`) and
-restarts `serve` so its session re-evaluates it. The coordinator binds the
+restarts `serve` so its session re-evaluates it. Re-submitting the identical
+offer is idempotent: it answers the candidate's current status (and
+re-evaluates the pool binding), not `409 replay_conflict`.
+
+**Delegated (non-creator) members need a delegation for the active core.**
+A `ProviderPoolDelegationV1` grant is bound to the core digest it names
+(SPEC-043-R006), so a delegated member, which every R016 attested member
+is, stops being a pool member when any later core activates: its binding
+stops routing and it never binds under the new core. Once the new core is
+active, the provider owner revokes the old grant (`delegation_revoked`) and
+signs a new grant for the new core's `manifest_core_digest`, then the
+operator appends `member_admitted` with the new `delegation_id`. The
+binding sweep then binds the live offer within seconds; no new offer is
+needed. The coordinator binds the
 offer from `offer_submitted`, or from the synthetic-probe states it reaches
 first (`sandbox_probe_only`, `network_visible_unpriced`,
 `network_admitted_unsettled`). The binding is pool-scoped `catalog_priced`
