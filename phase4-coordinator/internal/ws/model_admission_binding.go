@@ -72,6 +72,8 @@ var modelAdmissionDriftReasons = map[string]struct{}{
 	modelAdmissionDriftRowIneligible:         {},
 	modelAdmissionDriftRuntimeSourceDisallow: {},
 	modelAdmissionDriftReceiptKeyUnavailable: {},
+	// SPEC-047-R011 pool-binding drift (session pair, runtime, receipt key).
+	ModelAdmissionRevokePoolBindingDrift: {},
 }
 
 // ---- provider decision critical sections
@@ -235,7 +237,7 @@ func bindableCandidates(events []ModelAdmissionEvent, servedModelID string) []Mo
 	}
 	var out []ModelAdmissionEvent
 	for _, event := range events {
-		if modelAdmissionStateTerminal(event.State) || event.CatalogMatchState != modelAdmissionCatalogMatched {
+		if modelAdmissionStateTerminal(event.State) || event.CatalogMatchState != modelAdmissionCatalogMatched || event.PoolScoped() {
 			continue
 		}
 		if autotune.NormalizeModelID(event.CatalogRowModelID) != served {
@@ -269,7 +271,7 @@ func (s *Server) refreshModelAdmissionBindingLocked(ctx context.Context, provide
 			s.log.Warn().Err(err).Str("provider_id", providerID).Str("routing", "closed_until_refresh").Msg("model admission binding refresh: listing failed; binding preserved")
 			return
 		}
-		candidates := bindableCandidates(events, provider.ModelID)
+		candidates := append(bindableCandidates(events, provider.ModelID), bindablePoolCandidates(events, provider)...)
 		switch len(candidates) {
 		case 0:
 			s.setModelAdmissionBindingLocked(providerID, nil, section)
@@ -349,6 +351,21 @@ func (s *Server) modelAdmissionBindingFor(candidate ModelAdmissionEvent) pool.Mo
 		ServedModelRef:     candidate.ServedModelRef,
 		CatalogModelKey:    candidate.CatalogModelKey,
 	}
+	if candidate.PoolScoped() {
+		// SPEC-047-R011: the binding is validated under the current release
+		// only while its pair is neither catalog-priceable for its runtime
+		// class nor blocked (SPEC-042-R015 precedence).
+		binding.PoolID = candidate.PoolID
+		binding.PoolModelID = candidate.PoolModelID
+		s.withReleaseRead(func() {
+			current, _ := s.autotuneCatalogSnapshot()
+			status := classifyCatalogPairLocked(current, s.usableIdentitySetLocked(current), candidate.ExpectedCatalogModelHashAlgorithm, candidate.ExpectedCatalogModelHash)
+			if !status.blocked && !status.priceableFor(modelAdmissionRuntimeClass(candidate.RuntimeSource)) {
+				binding.ValidatedReleaseGeneration = s.artifactIdentitySets.generationLocked()
+			}
+		})
+		return binding
+	}
 	s.withReleaseRead(func() {
 		current, _ := s.autotuneCatalogSnapshot()
 		if row, ok := current.Row(candidate.CatalogModelKey); ok {
@@ -387,6 +404,16 @@ func (s *Server) setModelAdmissionBindingLocked(providerID string, binding *pool
 // admissible member (a), and — for settlement_capable — the receipt key (d).
 func sessionDriftReason(provider pool.Provider, candidate ModelAdmissionEvent) (string, bool) {
 	if !modelAdmissionStateDecided(candidate.State) {
+		return "", false
+	}
+	if candidate.PoolScoped() {
+		// SPEC-047-R011: artifact or runtime drift of a pool binding.
+		if poolSessionDrift(provider, candidate) {
+			return ModelAdmissionRevokePoolBindingDrift, true
+		}
+		if !sessionReceiptKeyPresent(provider) {
+			return ModelAdmissionRevokePoolBindingDrift, true
+		}
 		return "", false
 	}
 	if autotune.NormalizeModelID(provider.ModelID) != autotune.NormalizeModelID(candidate.CatalogRowModelID) {
@@ -537,7 +564,7 @@ func (s *Server) helloSessionBindingLocked(providerID string, prior pool.Provide
 		candidateIDs = append(candidateIDs, prior.ModelAdmissionCandidateID)
 	}
 	if events, err := s.modelAdmissions.LatestModelAdmissionStatusesForProvider(ctx, providerID); err == nil {
-		if candidates := bindableCandidates(events, provider.ModelID); len(candidates) == 1 {
+		if candidates := append(bindableCandidates(events, provider.ModelID), bindablePoolCandidates(events, provider)...); len(candidates) == 1 {
 			candidateIDs = append(candidateIDs, candidates[0].CandidateID)
 		}
 	}
@@ -673,6 +700,11 @@ func (s *Server) matchModelAdmissionOffer(runtimeSource, assertedKey string, art
 		match = matchRuntimeOfferArtifactHashes(current, set, s.artifactIdentitySets.integrityFailed(), runtimeSource, assertedKey, artifactHashes)
 		intakeKey = intakeModelKeyForOffer(current, set, artifactHashes)
 	})
+	// SPEC-047 v0.2.5 / SPEC-023-R026: an offer that resolves to no catalog
+	// key records the hash-derived key of its single runtime-compatible pair.
+	if intakeKey == "" && match.CatalogModelKey == "" {
+		intakeKey = hashDerivedModelAdmissionIntakeKey(runtimeSource, artifactHashes)
+	}
 	return match, intakeKey
 }
 
@@ -883,6 +915,14 @@ func (s *Server) applyModelAdmissionOfferCatalogMatch(event ModelAdmissionEvent,
 	event.CatalogCandidateSHA256 = match.CandidateSHA256
 	event.CatalogSignerKeyID = match.SignerKeyID
 	event.CatalogMembers = match.Members
+	// SPEC-047-R011: the offered pairs are kept so a pool entry accepted
+	// after this offer can match it exactly.
+	if len(body.ArtifactHashes) > 0 {
+		event.OfferedArtifactHashes = make(map[string]string, len(body.ArtifactHashes))
+		for algorithm, hash := range body.ArtifactHashes {
+			event.OfferedArtifactHashes[algorithm] = strings.ToLower(strings.TrimSpace(hash))
+		}
+	}
 	return event
 }
 
@@ -1017,6 +1057,11 @@ func (s *Server) sweepProviderRelease(ctx context.Context, providerID string, ca
 			if err != nil || !found || !modelAdmissionStateDecided(candidate.State) {
 				continue
 			}
+			// A SPEC-047-R011 pool binding has no catalog match to re-resolve;
+			// its catalog precedence is evaluated by the pool sweep below.
+			if candidate.PoolScoped() {
+				continue
+			}
 			var (
 				eval       catalogPreconditionResult
 				boundDrift bool
@@ -1060,6 +1105,9 @@ func (s *Server) sweepProviderRelease(ctx context.Context, providerID string, ca
 		if provider, ok := s.pool.Resolve(providerID, ""); ok && provider.ModelAdmissionCandidateID != "" {
 			s.evaluateSessionDriftLocked(ctx, provider, []string{provider.ModelAdmissionCandidateID}, section)
 		}
+		// SPEC-042-R015 catalog precedence for pool bindings: a release that
+		// makes a bound pair catalog-priceable or blocked revokes it here.
+		s.evaluatePoolManifestBindingsLocked(ctx, providerID, section)
 		// Survivors: refresh the binding (row status + validated generation).
 		s.refreshModelAdmissionBindingLocked(ctx, providerID, section)
 	})

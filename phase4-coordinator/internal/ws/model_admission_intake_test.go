@@ -77,8 +77,11 @@ func TestModelAdmissionIntakeAggregate(t *testing.T) {
 	f.offer(t, "p1", "b", "mlx_cache", map[string]string{modelidentity.SnapshotManifestV1: bindingRowHash})
 	f.registerSession(t, "p4", "s-p4", "model-a", true)
 	unresolved := f.offer(t, "p4", "a", "mlx_cache", map[string]string{modelidentity.SnapshotManifestV1: strings.Repeat("f", 64)})
-	if unresolved.IntakeModelKey != "" || unresolved.CatalogModelKey != "" {
-		t.Fatalf("an unresolved offer must carry no intake key: %+v", unresolved)
+	// SPEC-047 v0.2.5 (#1816): an offer resolving to no catalog key records
+	// the hash-derived key of its single runtime-compatible pair; the v1
+	// frame never carries it.
+	if unresolved.IntakeModelKey != "artifact/"+modelidentity.SnapshotManifestV1+"/"+strings.Repeat("f", 64) || unresolved.CatalogModelKey != "" {
+		t.Fatalf("an unresolved offer must carry the hash-derived intake key: %+v", unresolved)
 	}
 	if err := s.buildModelAdmissionIntakeSnapshot(context.Background()); err != nil {
 		t.Fatalf("build: %v", err)
@@ -116,6 +119,24 @@ func TestModelAdmissionIntakeAggregate(t *testing.T) {
 	}
 	if _, again := c.do(http.MethodGet, intakePath, "alice-secret", nil); again["nonce"] == first {
 		t.Fatalf("nonce must be fresh per build")
+	}
+
+	// The opt-in v2 frame carries the hash-derived key (suppressed: one
+	// provider) next to the catalog key, from the same build.
+	code, v2 := c.do(http.MethodGet, intakePath+"?schema="+modelAdmissionIntakeSchemaV2, "alice-secret", nil)
+	if code != http.StatusOK || v2["schema"] != modelAdmissionIntakeSchemaV2 || v2["nonce"] == nil {
+		t.Fatalf("v2 frame: code=%d body=%v", code, v2)
+	}
+	v2Rows := v2["rows"].([]any)
+	if len(v2Rows) != 2 {
+		t.Fatalf("v2 rows = %v, want catalog + hash-derived keys", v2Rows)
+	}
+	hashRow := v2Rows[0].(map[string]any)
+	if hashRow["intake_model_key"] != unresolved.IntakeModelKey || hashRow["suppressed"] != true || hashRow["distinct_provider_offer_count"] != nil || len(hashRow) != 3 {
+		t.Fatalf("v2 hash-derived row = %v", hashRow)
+	}
+	if code, body := c.do(http.MethodGet, intakePath+"?schema=model_admission_intake_offer_counts.v3", "alice-secret", nil); code != http.StatusBadRequest || errorCode(body) != "invalid_request" {
+		t.Fatalf("unknown schema: code=%d body=%v", code, body)
 	}
 
 	// Auth and query rules.

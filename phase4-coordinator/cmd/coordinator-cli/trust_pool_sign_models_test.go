@@ -56,7 +56,7 @@ func openSignModelsStore(t *testing.T, bounds *poolmanifest.PoolModelPricingBoun
 		return poolmanifest.PoolModelAcceptanceContext{
 			PricingBounds:     bounds,
 			IsCatalogModelID:  func(string) bool { return false },
-			ArtifactInCatalog: func(string, string) bool { return false },
+			ArtifactInCatalog: func(string, string, []string) bool { return false },
 		}
 	}))
 	if err != nil {

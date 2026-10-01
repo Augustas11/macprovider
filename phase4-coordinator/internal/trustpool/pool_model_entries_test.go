@@ -40,7 +40,7 @@ func acceptAllPoolModels() poolmanifest.PoolModelAcceptanceContext {
 	return poolmanifest.PoolModelAcceptanceContext{
 		PricingBounds:     &poolmanifest.PoolModelPricingBounds{MaxPromptRatePerMtok: 1 << 40, MaxPromptCacheHitRatePerMtok: 1 << 40, MaxCompletionRatePerMtok: 1 << 40},
 		IsCatalogModelID:  func(string) bool { return false },
-		ArtifactInCatalog: func(string, string) bool { return false },
+		ArtifactInCatalog: func(string, string, []string) bool { return false },
 	}
 }
 
@@ -186,21 +186,21 @@ func TestPoolModelEntriesOnlineAcceptance(t *testing.T) {
 		"creator attested as a member": {acceptAllPoolModels, trustpool.PoolModelRejectCreatorMember,
 			[]poolmanifest.AttestedMember{{ProviderAccountID: "creator-a", RuntimeClasses: []string{poolmanifest.RuntimeSourceLlamacppLoopback}}}},
 		"accepted": {func() poolmanifest.PoolModelAcceptanceContext {
-			return poolmanifest.PoolModelAcceptanceContext{PricingBounds: bounds, IsCatalogModelID: func(string) bool { return false }, ArtifactInCatalog: func(string, string) bool { return false }}
+			return poolmanifest.PoolModelAcceptanceContext{PricingBounds: bounds, IsCatalogModelID: func(string) bool { return false }, ArtifactInCatalog: func(string, string, []string) bool { return false }}
 		}, "", nil},
 		"no bounds configured": {nil, trustpool.PoolModelRejectPricingBounds, nil},
 		"price above ceiling": {func() poolmanifest.PoolModelAcceptanceContext {
 			tight := *bounds
 			tight.MaxCompletionRatePerMtok = 200
-			return poolmanifest.PoolModelAcceptanceContext{PricingBounds: &tight, IsCatalogModelID: func(string) bool { return false }, ArtifactInCatalog: func(string, string) bool { return false }}
+			return poolmanifest.PoolModelAcceptanceContext{PricingBounds: &tight, IsCatalogModelID: func(string) bool { return false }, ArtifactInCatalog: func(string, string, []string) bool { return false }}
 		}, trustpool.PoolModelRejectPricingBounds, nil},
 		"artifact already catalogued": {func() poolmanifest.PoolModelAcceptanceContext {
 			return poolmanifest.PoolModelAcceptanceContext{PricingBounds: bounds, IsCatalogModelID: func(string) bool { return false },
-				ArtifactInCatalog: func(_, hash string) bool { return hash == poolEntryGGUFHash }}
+				ArtifactInCatalog: func(_, hash string, _ []string) bool { return hash == poolEntryGGUFHash }}
 		}, trustpool.PoolModelRejectCatalogOverlap, nil},
 		"slug shadows catalog id": {func() poolmanifest.PoolModelAcceptanceContext {
 			return poolmanifest.PoolModelAcceptanceContext{PricingBounds: bounds, IsCatalogModelID: func(id string) bool { return id == "creator-mlx" },
-				ArtifactInCatalog: func(string, string) bool { return false }}
+				ArtifactInCatalog: func(string, string, []string) bool { return false }}
 		}, trustpool.PoolModelRejectCatalogShadow, nil},
 	} {
 		db := openTrustPoolDB(t)

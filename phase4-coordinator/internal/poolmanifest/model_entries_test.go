@@ -293,7 +293,7 @@ func TestPoolModelAcceptanceContext(t *testing.T) {
 	ok := PoolModelAcceptanceContext{
 		PricingBounds:     &bounds,
 		IsCatalogModelID:  func(string) bool { return false },
-		ArtifactInCatalog: func(string, string) bool { return false },
+		ArtifactInCatalog: func(string, string, []string) bool { return false },
 	}
 	if err := core.ValidatePoolModelAcceptance(ok); err != nil {
 		t.Fatalf("inclusive bounds rejected: %v", err)
@@ -324,7 +324,9 @@ func TestPoolModelAcceptanceContext(t *testing.T) {
 		t.Fatalf("slug shadowing a catalog id accepted: %v", err)
 	}
 	overlap := ok
-	overlap.ArtifactInCatalog = func(alg, hash string) bool { return alg == ArtifactHashAlgorithmGGUFFileV1 && hash == testGGUFHash }
+	overlap.ArtifactInCatalog = func(alg, hash string, runtimes []string) bool {
+		return alg == ArtifactHashAlgorithmGGUFFileV1 && hash == testGGUFHash && len(runtimes) == 2
+	}
 	if err := core.ValidatePoolModelAcceptance(overlap); !errors.Is(err, ErrPoolModelCatalogOverlap) {
 		t.Fatalf("artifact already in catalog accepted: %v", err)
 	}

@@ -546,6 +546,21 @@ func (r *Registry) RefreshRouteableSnapshotsAtRevision(revision uint64, snapshot
 	return r.loadRouteableSnapshots(revision, snapshots, true, true)
 }
 
+// PoolIDs returns every pool id the registry holds, sorted.
+func (r *Registry) PoolIDs() []string {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	ids := make([]string, 0, len(r.pools))
+	for id := range r.pools {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
 func (r *Registry) Revision() uint64 {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

@@ -90,8 +90,8 @@ var (
 	// ErrPoolModelShadowsCatalog rejects a pool_model_id that equals,
 	// normalizes onto, or shadows a SPEC-010 canonical id.
 	ErrPoolModelShadowsCatalog = errors.New("poolmanifest: pool_model_id shadows a SPEC-010 canonical catalog id")
-	// ErrPoolModelCatalogOverlap rejects an entry whose exact artifact pair
-	// already resolves to a global catalog identity: the catalog path wins.
+	// ErrPoolModelCatalogOverlap rejects an entry whose exact artifact pair is
+	// catalog-priceable for a runtime it lists, or blocked: the catalog wins.
 	ErrPoolModelCatalogOverlap = errors.New("poolmanifest: pool model entry artifact resolves to a global catalog identity")
 )
 
@@ -446,15 +446,17 @@ type PoolModelAcceptanceContext struct {
 	// IsCatalogModelID reports whether id equals or normalizes onto a
 	// SPEC-010 canonical id.
 	IsCatalogModelID func(id string) bool
-	// ArtifactInCatalog reports whether an exact artifact pair already
-	// resolves to a global catalog identity.
-	ArtifactInCatalog func(algorithm, hash string) bool
+	// ArtifactInCatalog reports whether an exact artifact pair is
+	// catalog-priceable for any of runtimes (a recommendable row with a
+	// verified member usable by that class) or resolves to a blocked row
+	// (SPEC-042-R015 catalog overlap and precedence).
+	ArtifactInCatalog func(algorithm, hash string, runtimes []string) bool
 }
 
 // ValidatePoolModelAcceptance applies the context-dependent R015 rules: every
 // entry rate inside the configured bounds, no pool_model_id shadowing a
 // catalog id (the full id, its lowercase form, or its slug), and no artifact
-// pair that already resolves to a catalog identity. A core without entries
+// pair that is catalog-priceable for a listed runtime or blocked. A core without entries
 // needs no context; a core with entries and missing context fails closed.
 func (pc PolicyCore) ValidatePoolModelAcceptance(ctx PoolModelAcceptanceContext) error {
 	entries, err := pc.PoolModelEntries()
@@ -483,7 +485,7 @@ func (pc PolicyCore) ValidatePoolModelAcceptance(ctx PoolModelAcceptanceContext)
 				return ErrPoolModelShadowsCatalog
 			}
 		}
-		if ctx.ArtifactInCatalog(m.ArtifactHashAlgorithm, m.ArtifactHash) {
+		if ctx.ArtifactInCatalog(m.ArtifactHashAlgorithm, m.ArtifactHash, m.AllowedRuntimeSources) {
 			return ErrPoolModelCatalogOverlap
 		}
 	}
