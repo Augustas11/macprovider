@@ -115,7 +115,7 @@ done
 chown -R macprovider:macprovider /var/lib/macprovider
 
 log "old gateway via the real deploy-pearl-vps.sh (first deploy: FORCE_RESTART=1, no live gateway yet)"
-install -o macprovider -g macprovider -m 0640 $E2E_H/lib/gateway.yaml /opt/macprovider/gateway.yaml
+install -o root -g macprovider -m 0640 $E2E_H/lib/gateway.yaml /opt/macprovider/gateway.yaml
 FORCE_RESTART=1 gw_deploy old first || die "first gateway deploy failed"
 for i in $(seq 1 30); do gwsql "select 1 from sqlite_master where name='api_keys'" 2>/dev/null | grep -q 1 && break; sleep 2; done
 python3 $E2E_H/lib/seed-buyer.py $GWDB "$(cat $K/key_hash_secret)" >/root/e2e/buyer-api-key; chmod 600 /root/e2e/buyer-api-key

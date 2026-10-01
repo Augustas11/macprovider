@@ -95,7 +95,7 @@ for p in parts[:-1]:
 cur[parts[-1]] = val
 open(path, "w").write(yaml.safe_dump(doc, sort_keys=False))
 PY
-  chown macprovider:macprovider /opt/macprovider/gateway.yaml; chmod 0640 /opt/macprovider/gateway.yaml
+  chown root:macprovider /opt/macprovider/gateway.yaml; chmod 0640 /opt/macprovider/gateway.yaml
 }
 
 # wait_providers <n>: until the coordinator reports n ready providers.

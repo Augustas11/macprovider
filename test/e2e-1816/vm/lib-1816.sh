@@ -56,7 +56,10 @@ coord_restart() {
 # catalog-canary ssh first (the system ssh; no shim).
 run_updater() {
   local mode="$1" tag="$2" src="$3" logf="$4" rc=0
-  MACPROVIDER_UPDATER_TESTING=1 PEARL_UPDATER_TEST_PUBLIC_KEY=$K/release-signing-public.pem SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+  install -d -m 0755 /root/e2e/shim-bin && install -m 0755 $E2E_H16/lib/python3-shim /root/e2e/shim-bin/python3
+  /usr/bin/python3 $E2E_H16/tools/verify-cache.py record /usr/local/share/macprovider/scripts/catalog-release.py verify-directory \
+    --directory "$src" --tier2-coordinator-config /opt/macprovider/coordinator.yaml >>"$logf.verify" 2>&1
+  PATH=/root/e2e/shim-bin:$PATH MACPROVIDER_UPDATER_TESTING=1 PEARL_UPDATER_TEST_PUBLIC_KEY=$K/release-signing-public.pem SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     setpriv --regid=macprovider --clear-groups -- "$UPD" "--$mode" --tag "$tag" --source-dir "$src" >"$logf" 2>&1 || rc=$?
   echo "rc=$rc" >>"$logf"
   return $rc
