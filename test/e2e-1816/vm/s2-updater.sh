@@ -225,9 +225,14 @@ python3 $E2E_H/tools/compare-shape.py "$E2E_EVIDENCE/baseline-p$PASS_ID.oracle.j
   || result S2-new-pair-shape FAIL "per-kind outcome shape differs from the S1 baseline (see $run.shape.txt)"
 
 # ---- 7. existing deploy guards in the new tree -------------------------------------------
-( cd $WTN && PYTHONDONTWRITEBYTECODE=1 timeout 1200 python3 ops/pearl-updater/test_pearl_updater.py ) >"$EV/test_pearl_updater.txt" 2>&1 \
-  && result S2-guard-updater-tests PASS "$(tail -3 "$EV/test_pearl_updater.txt" | tr '\n' ' ')" \
-  || result S2-guard-updater-tests FAIL "$(tail -6 "$EV/test_pearl_updater.txt" | tr '\n' ' ' | head -c 600)"
+if ( cd $WTN && PYTHONDONTWRITEBYTECODE=1 timeout 1200 python3 ops/pearl-updater/test_pearl_updater.py ) >"$EV/test_pearl_updater.txt" 2>&1; then
+  result S2-guard-updater-tests PASS "$(tail -3 "$EV/test_pearl_updater.txt" | tr '\n' ' ')"
+elif grep -q 'FAILED (errors=1)$' "$EV/test_pearl_updater.txt" && grep -q "Command '\['git', 'show'" "$EV/test_pearl_updater.txt"; then
+  # The VM tree is a git archive (no history); one test reads a pinned commit.
+  result S2-guard-updater-tests GAP "all but the one history-dependent test pass ($(grep -m1 '^ERROR:' "$EV/test_pearl_updater.txt")); the VM repo has no git history"
+else
+  result S2-guard-updater-tests FAIL "$(tail -6 "$EV/test_pearl_updater.txt" | tr '\n' ' ' | head -c 600)"
+fi
 for t in check_deploy_static_feed_access deploy_canary_live_catalog_proof deploy_catalog_compare_live; do
   ( cd $WTN && timeout 600 bash phase4-coordinator/dist/test/$t.test.sh ) >"$EV/guard-$t.txt" 2>&1 \
     && result "S2-guard-$t" PASS "$(tail -1 "$EV/guard-$t.txt")" || result "S2-guard-$t" FAIL "$(tail -4 "$EV/guard-$t.txt" | tr '\n' ' ' | head -c 500)"

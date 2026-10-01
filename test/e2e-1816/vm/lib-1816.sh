@@ -82,7 +82,7 @@ import re, sys
 src, live = open(sys.argv[1]).read(), open(sys.argv[2]).read()
 blocks = re.findall(r"(?ms)^    location = /v1/catalog-artifacts(?:\.sig)? \{.*?^    \}\n", src)
 assert len(blocks) == 2, "expected two catalog-artifacts blocks in the release conf"
-if "/v1/catalog-artifacts" in live:
+if "location = /v1/catalog-artifacts" in live:
     sys.exit("live vhost already has catalog-artifacts")
 m = re.search(r"(?m)^    location /v1/ \{", live)
 assert m, "no catch-all location /v1/ in the live vhost"

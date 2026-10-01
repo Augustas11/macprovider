@@ -27,8 +27,10 @@ reconcile_once() {
 drain() {
   local run="$1" max="${2:-480}" t=0 a h
   while :; do
+    # Only this run's reservations (a held one is active too): a hold another
+    # run left behind must not fail every later drain.
     a="$(reservations_active "$run")"; h="$(holds_active)"
-    [ "$a" = 0 ] && [ "$h" = 0 ] && { log "drain $run: clean after ${t}s"; return 0; }
+    [ "$a" = 0 ] && { log "drain $run: clean after ${t}s (holds anywhere: $h)"; return 0; }
     [ "$t" -ge "$max" ] && { log "drain $run: TIMEOUT after ${t}s active=$a holds=$h"; return 1; }
     reconcile_once >/dev/null || true
     sleep 10; t=$((t + 10))

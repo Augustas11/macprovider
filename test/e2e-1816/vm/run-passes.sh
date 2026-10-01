@@ -9,7 +9,7 @@
 #   other in chain order (S2 leaves the new pair, S3 the pools, ...).
 set -uo pipefail
 . /root/e2e/h/vm/lib.sh
-export DRAIN_MAX="${DRAIN_MAX:-900}"   # st_dc holds take > 8 min to close on origin/main
+export DRAIN_MAX="${DRAIN_MAX:-660}"   # a disconnect hold waits out the 300 s receipt deadline, then the reconciler
 passes="${1:-2}"; steps="${2:-B1 B2 S1 S2 S3 S4 S5 S6}"; first="${3:-1}"
 bash $E2E_H/vm/10-build.sh || die "build failed"
 if [ "$first" = 1 ] && [ "${E2E_KEEP_EVIDENCE:-0}" != 1 ]; then
