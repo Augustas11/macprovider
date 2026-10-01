@@ -25,6 +25,10 @@ set -euo pipefail
 . /root/e2e/h16/vm/lib-1816.sh
 WTO=/root/e2e/wt-old
 
+# The Pearl updater's durable state survives the shared bootstrap's wipe; a
+# previous run's current-release.json would turn the S2 upgrade into a
+# same-version repair_pair.
+rm -rf /var/lib/macprovider-pearl-updater /root/e2e/releases /root/e2e/verify-cache /root/e2e/shim-bin
 log "1816: provider tokens"
 rm -f /root/e2e/receipt-key-* /root/e2e/admission-key-4 /root/e2e/admission-key-5
 for p in e2e-prov-4 e2e-prov-5 $CANARY_ID; do
