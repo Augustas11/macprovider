@@ -20,6 +20,7 @@ final class BYOMOfferDryRunTests: XCTestCase {
         let root = try temporaryBYOMOfferDirectory("byom-offer-command")
         let unsafeTarget = "http://192.168.1.10:11434/private-model?api_key=secret"
         let command = try ModelsOfferCommand.parse([
+            "--offline-artifact-feed",
             unsafeTarget,
             "--dry-run",
             "--json",
