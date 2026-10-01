@@ -28,7 +28,7 @@ WTO=/root/e2e/wt-old
 log "1816: provider tokens"
 rm -f /root/e2e/receipt-key-* /root/e2e/admission-key-4 /root/e2e/admission-key-5
 for p in e2e-prov-4 e2e-prov-5 $CANARY_ID; do
-  out="$(/opt/macprovider/coordinator-cli issue-token -db $CDB -provider-id $p -provider-name $p)"
+  for t in 1 2 3 4 5 6 7 8 9 10; do out="$(/opt/macprovider/coordinator-cli issue-token -db $CDB -provider-id $p -provider-name $p 2>&1)" && break; sleep 3; done
   printf '%s\n' "$out" | sed -n 's/^token=//p' >/root/e2e/token-$p; chmod 600 /root/e2e/token-$p
   [ -s /root/e2e/token-$p ] || die "issue-token $p failed"
 done

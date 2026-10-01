@@ -108,7 +108,8 @@ log "old coordinator"
 coord_install old
 log "provider tokens"
 for p in e2e-prov-1 e2e-prov-2 e2e-prov-3; do
-  out="$(/opt/macprovider/coordinator-cli issue-token -db $CDB -provider-id $p -provider-name $p)"
+  # the just-started coordinator may still hold the write lock (SQLITE_BUSY)
+  for t in 1 2 3 4 5 6 7 8 9 10; do out="$(/opt/macprovider/coordinator-cli issue-token -db $CDB -provider-id $p -provider-name $p 2>&1)" && break; sleep 3; done
   printf '%s\n' "$out" | sed -n 's/^token=//p' >/root/e2e/token-$p; chmod 600 /root/e2e/token-$p
   [ -s /root/e2e/token-$p ] || die "issue-token $p failed: $out"
 done

@@ -11,17 +11,18 @@ set -uo pipefail
 . /root/e2e/h/vm/lib.sh
 export DRAIN_MAX="${DRAIN_MAX:-660}"   # a disconnect hold waits out the 300 s receipt deadline, then the reconciler
 passes="${1:-2}"; steps="${2:-B1 B2 S1 S2 S3 S4 S5 S6}"; first="${3:-1}"
-bash $E2E_H/vm/10-build.sh || die "build failed"
+bash $E2E_H/vm/10-build.sh || { log "RUN-PASSES-ABORTED: build failed"; exit 1; }
 if [ "$first" = 1 ] && [ "${E2E_KEEP_EVIDENCE:-0}" != 1 ]; then
   : >"$E2E_EVIDENCE/results.jsonl"
   rm -rf "$E2E_EVIDENCE"/p[0-9]* /root/e2e/pools16
 fi
-step() { log "=== pass $1: $2"; PASS_ID=$1 bash "$2" || log "=== $2 exited $?"; }
+step() { log "=== pass $1: $2"; PASS_ID=$1 bash "$2"; local rc=$?; [ $rc = 0 ] || log "=== $2 exited $rc"; return $rc; }
 for p in $(seq "$first" $((first + passes - 1))); do
   for s in $steps; do
     case $s in
-      B1) rm -rf /root/e2e/pools16; systemctl stop e2e-1816-keeper 2>/dev/null; step ${p}A $E2E_H/vm/20-bootstrap.sh ;;
-      B2) step ${p}A /root/e2e/h16/vm/21-bootstrap-1816.sh ;;
+      B1) rm -rf /root/e2e/pools16; systemctl stop e2e-1816-keeper 2>/dev/null
+          step ${p}A $E2E_H/vm/20-bootstrap.sh || { result "pass$p-bootstrap" FAIL "vm/20-bootstrap.sh failed; chain skipped"; break; } ;;
+      B2) step ${p}A /root/e2e/h16/vm/21-bootstrap-1816.sh || { result "pass$p-bootstrap" FAIL "vm/21-bootstrap-1816.sh failed; chain skipped"; break; } ;;
       S1) step ${p}A $E2E_H/vm/s1-baseline.sh ;;
       S2) step ${p}A /root/e2e/h16/vm/s2-updater.sh ;;
       S3) step ${p}A /root/e2e/h16/vm/s3-pool-models.sh ;;
