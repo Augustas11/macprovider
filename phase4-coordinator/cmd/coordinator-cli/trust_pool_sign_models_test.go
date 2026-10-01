@@ -119,7 +119,7 @@ func TestTrustPoolSignManifestPoolModels(t *testing.T) {
 	}
 	signed := readSignedEvent(t, manifestOut)
 	if _, _, _, err := unbounded.AppendValidatedEvent(ctx, signed); !errors.Is(err, trustpool.ErrPoolModelEntryRejected) ||
-		!strings.Contains(err.Error(), trustpool.PoolModelRejectPricingBounds) {
+		!strings.Contains(err.Error(), trustpool.PoolModelRejectPricingBoundsUnset) {
 		t.Fatalf("append without bounds: err=%v", err)
 	}
 

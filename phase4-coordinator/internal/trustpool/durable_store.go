@@ -244,13 +244,46 @@ func WithPoolModelAcceptance(source func() poolmanifest.PoolModelAcceptanceConte
 }
 
 // Pool-model acceptance rejection codes (SPEC-042-R015, SPEC-005-R015).
+// The extension-rule codes come from poolmanifest.PoolModelRejectCode.
 const (
-	PoolModelRejectPricingBounds  = "pool_model_pricing_out_of_bounds"
-	PoolModelRejectCatalogShadow  = "pool_model_id_shadows_catalog"
-	PoolModelRejectCatalogOverlap = "pool_model_entry_catalog_overlap"
-	PoolModelRejectCreatorMember  = "pool_attested_member_is_creator"
-	PoolModelRejectInvalid        = "pool_model_entry_invalid"
+	PoolModelRejectPricingBounds      = poolmanifest.RejectCodePricingOutOfBounds
+	PoolModelRejectPricingBoundsUnset = poolmanifest.RejectCodePricingBoundsUnset
+	PoolModelRejectCatalogShadow      = poolmanifest.RejectCodeShadowsCatalog
+	PoolModelRejectCatalogOverlap     = poolmanifest.RejectCodeCatalogOverlap
+	PoolModelRejectCreatorMember      = "pool_attested_member_is_creator"
+	PoolModelRejectInvalid            = poolmanifest.RejectCodeInvalid
 )
+
+// PoolModelEntryRejectionError carries the closed rejection code of a
+// manifest refused for its R015/R016 extensions (#1816 F4).
+type PoolModelEntryRejectionError struct {
+	Code string
+	Err  error
+}
+
+func (e *PoolModelEntryRejectionError) Error() string {
+	if e.Err == nil {
+		return ErrPoolModelEntryRejected.Error() + ": " + e.Code
+	}
+	return ErrPoolModelEntryRejected.Error() + ": " + e.Code + ": " + e.Err.Error()
+}
+
+func (e *PoolModelEntryRejectionError) Unwrap() []error {
+	if e.Err == nil {
+		return []error{ErrPoolModelEntryRejected}
+	}
+	return []error{ErrPoolModelEntryRejected, e.Err}
+}
+
+// poolModelRejection wraps err with its closed rejection code, or returns nil
+// when err is not an R015/R016 extension failure.
+func poolModelRejection(err error) error {
+	code := poolmanifest.PoolModelRejectCode(err)
+	if code == "" {
+		return nil
+	}
+	return &PoolModelEntryRejectionError{Code: code, Err: err}
+}
 
 // ErrPoolModelEntryRejected rejects a manifest whose pool_model_entries fail
 // the context-dependent acceptance rules.
@@ -268,11 +301,14 @@ func (s *Store) verifyPoolModelAcceptance(e DurableEvent, creatorAccountID strin
 	// redundant and invalidates the core.
 	members, err := core.PoolAttestedMembers()
 	if err != nil {
-		return fmt.Errorf("%w: %s: %v", ErrPoolModelEntryRejected, PoolModelRejectInvalid, err)
+		if rejection := poolModelRejection(err); rejection != nil {
+			return rejection
+		}
+		return &PoolModelEntryRejectionError{Code: PoolModelRejectInvalid, Err: err}
 	}
 	for _, member := range members {
 		if member.ProviderAccountID == creatorAccountID {
-			return fmt.Errorf("%w: %s", ErrPoolModelEntryRejected, PoolModelRejectCreatorMember)
+			return &PoolModelEntryRejectionError{Code: PoolModelRejectCreatorMember}
 		}
 	}
 	var ctx poolmanifest.PoolModelAcceptanceContext
@@ -280,18 +316,13 @@ func (s *Store) verifyPoolModelAcceptance(e DurableEvent, creatorAccountID strin
 		ctx = s.poolModelAcceptance()
 	}
 	err = core.ValidatePoolModelAcceptance(ctx)
-	switch {
-	case err == nil:
+	if err == nil {
 		return nil
-	case errors.Is(err, poolmanifest.ErrPoolModelPricingBounds):
-		return fmt.Errorf("%w: %s", ErrPoolModelEntryRejected, PoolModelRejectPricingBounds)
-	case errors.Is(err, poolmanifest.ErrPoolModelShadowsCatalog):
-		return fmt.Errorf("%w: %s", ErrPoolModelEntryRejected, PoolModelRejectCatalogShadow)
-	case errors.Is(err, poolmanifest.ErrPoolModelCatalogOverlap):
-		return fmt.Errorf("%w: %s", ErrPoolModelEntryRejected, PoolModelRejectCatalogOverlap)
-	default:
-		return fmt.Errorf("%w: %s: %v", ErrPoolModelEntryRejected, PoolModelRejectInvalid, err)
 	}
+	if rejection := poolModelRejection(err); rejection != nil {
+		return rejection
+	}
+	return &PoolModelEntryRejectionError{Code: PoolModelRejectInvalid, Err: err}
 }
 
 func (s *Store) validateProviderOwnerPublicKeyBinding(state *ReconstructedState, e DurableEvent) error {
@@ -1932,6 +1963,9 @@ func (s *Store) appendValidatedEvent(ctx context.Context, e DurableEvent, allowS
 		}
 		if e.EventType == EventManifestAccepted {
 			if err := verifyManifestAcceptanceOnline(e); err != nil {
+				if rejection := poolModelRejection(err); rejection != nil {
+					return fmt.Errorf("%w: manifest policy not acceptable now: %w", errCreatorInvalidEvent, rejection)
+				}
 				return fmt.Errorf("%w: manifest policy not acceptable now: %v", errCreatorInvalidEvent, err)
 			}
 			creatorAccountID := ""

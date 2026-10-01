@@ -13,6 +13,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"math"
 	"regexp"
 	"sort"
@@ -95,7 +96,66 @@ var (
 	// ErrPoolModelCatalogOverlap rejects an entry whose exact artifact pair is
 	// catalog-priceable for a runtime it lists, or blocked: the catalog wins.
 	ErrPoolModelCatalogOverlap = errors.New("poolmanifest: pool model entry artifact resolves to a global catalog identity")
+	// ErrPoolModelPricingBoundsUnset rejects every core carrying entries
+	// while the coordinator has no valid configured pricing bounds.
+	ErrPoolModelPricingBoundsUnset = fmt.Errorf("%w: bounds are unset or invalid", ErrPoolModelPricingBounds)
 )
+
+// Closed manifest-acceptance rejection codes for R015/R016 extension
+// failures (SPEC-042-R010 manifest acceptance table, #1816 F4).
+const (
+	RejectCodePricingOutOfBounds = "pool_model_pricing_out_of_bounds"
+	RejectCodePricingBoundsUnset = "pool_model_pricing_bounds_unset"
+	RejectCodeShadowsCatalog     = "pool_model_id_shadows_catalog"
+	RejectCodeCatalogOverlap     = "pool_model_entry_catalog_overlap"
+	RejectCodeRuntimePairing     = "pool_model_entry_runtime_pairing"
+	RejectCodeRuntimeNotAllowed  = "pool_model_entry_runtime_not_allowed"
+	RejectCodeLicense            = "pool_model_entry_license_invalid"
+	RejectCodePaidServing        = "pool_model_entry_paid_serving_unattested"
+	RejectCodeDuplicate          = "pool_model_entry_duplicate"
+	RejectCodeLimitExceeded      = "pool_model_entry_limit_exceeded"
+	RejectCodeInvalid            = "pool_model_entry_invalid"
+)
+
+// PoolModelRejectCode classifies an error from R015/R016 extension
+// validation or online acceptance into its closed rejection code. It returns
+// "" for any other error.
+func PoolModelRejectCode(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, ErrPoolModelPricingBoundsUnset):
+		return RejectCodePricingBoundsUnset
+	case errors.Is(err, ErrPoolModelPricingBounds):
+		return RejectCodePricingOutOfBounds
+	case errors.Is(err, ErrPoolModelShadowsCatalog):
+		return RejectCodeShadowsCatalog
+	case errors.Is(err, ErrPoolModelCatalogOverlap):
+		return RejectCodeCatalogOverlap
+	case errors.Is(err, errModelEntryPairing):
+		return RejectCodeRuntimePairing
+	case errors.Is(err, errModelEntryRuntimes), errors.Is(err, errAttestedMemberRuntimes):
+		return RejectCodeRuntimeNotAllowed
+	case errors.Is(err, errModelEntryLicense):
+		return RejectCodeLicense
+	case errors.Is(err, errModelEntryPaidServing):
+		return RejectCodePaidServing
+	case errors.Is(err, errModelEntryDupHash), errors.Is(err, errModelEntriesOrder), errors.Is(err, errAttestedMembersOrder):
+		return RejectCodeDuplicate
+	case errors.Is(err, errModelEntriesBound), errors.Is(err, errAttestedMembersBound):
+		return RejectCodeLimitExceeded
+	}
+	for _, invalid := range []error{
+		errExtensionBody, errExtensionEmptyList, errModelEntryID, errModelEntryPoolID, errModelEntryAlgorithm,
+		errModelEntryHash, errModelEntryDisclosure, errModelEntryContext, errModelEntryPriceRange,
+		errModelEntriesObserve, errAttestedMemberAccount,
+	} {
+		if errors.Is(err, invalid) {
+			return RejectCodeInvalid
+		}
+	}
+	return ""
+}
 
 // PoolModelPricing is an entry's trusted price in the SPEC-005 formula's
 // three rates (credits per million tokens).
@@ -487,7 +547,7 @@ func (pc PolicyCore) ValidatePoolModelAcceptance(ctx PoolModelAcceptanceContext)
 		return nil
 	}
 	if ctx.PricingBounds == nil || ctx.PricingBounds.Validate() != nil {
-		return ErrPoolModelPricingBounds
+		return ErrPoolModelPricingBoundsUnset
 	}
 	if ctx.IsCatalogModelID == nil {
 		return ErrPoolModelShadowsCatalog

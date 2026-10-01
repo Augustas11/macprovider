@@ -188,7 +188,7 @@ func TestPoolModelEntriesOnlineAcceptance(t *testing.T) {
 		"accepted": {func() poolmanifest.PoolModelAcceptanceContext {
 			return poolmanifest.PoolModelAcceptanceContext{PricingBounds: bounds, IsCatalogModelID: func(string) bool { return false }, ArtifactInCatalog: func(string, string, []string) bool { return false }}
 		}, "", nil},
-		"no bounds configured": {nil, trustpool.PoolModelRejectPricingBounds, nil},
+		"no bounds configured": {nil, trustpool.PoolModelRejectPricingBoundsUnset, nil},
 		"price above ceiling": {func() poolmanifest.PoolModelAcceptanceContext {
 			tight := *bounds
 			tight.MaxCompletionRatePerMtok = 200
