@@ -237,7 +237,11 @@ Pass: `manifest_core_digest` equals the submitted event's digest, and the
 entry is listed in `model_entries` with `disclosure_class:
 pool_attested_unverified` (R016 attestations are in `attested_members`). The
 provider's `/poolz` row shows the engine's `runtime_source`, the entry's hash
-algorithm, `hash_status: hash_verified`, and `state: ready`. A native
+algorithm, `catalog_admission_mode: pool_entry`, `hash_status: uncatalogued`,
+and `state: ready`. `hash_status` is the Tier-2 catalog status, and a pool
+entry's pair is by definition not catalog-priced; the pair is checked against
+the entry at route time (SPEC-032-R004 case (b), creator-attested), which is
+not `hash_verified`. A native
 `mlx_cache` member's `/poolz` `runtime_source` is null: it echoes the hello,
 which the native CLI omits.
 

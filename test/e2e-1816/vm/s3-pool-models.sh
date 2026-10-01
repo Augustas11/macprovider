@@ -119,8 +119,10 @@ ok = True
 for r in rows:
     pid = r.get("provider_id") or r.get("id")
     if pid in want:
-        print(pid, r.get("runtime_source"), r.get("model_hash_algorithm"), r.get("hash_status"), r.get("state"))
-        ok = ok and r.get("runtime_source") == want[pid] and r.get("hash_status") == "hash_verified" and r.get("state") == "ready"
+        print(pid, r.get("runtime_source"), r.get("model_hash_algorithm"), r.get("catalog_admission_mode"), r.get("hash_status"), r.get("state"))
+        # runbook section 4: a pool entry is pool_entry + uncatalogued (Tier-2), never hash_verified
+        ok = ok and r.get("runtime_source") == want[pid] and r.get("catalog_admission_mode") == "pool_entry" \
+            and r.get("hash_status") == "uncatalogued" and r.get("state") == "ready"
         want.pop(pid)
 sys.exit(0 if ok and not want else 1)
 PY
