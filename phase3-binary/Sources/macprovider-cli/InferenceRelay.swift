@@ -826,10 +826,13 @@ actor InferenceRelay {
     /// What the buyer received of the generated output (SPEC-015 delivered-
     /// prefix rule). `.nothing`: no output, so a settlement receipt binds the empty
     /// prefix and a legacy receipt is omitted. `.prefix`: a cancelled stream's
-    /// delivered content, with no finish reason or tool calls. `.unknown`: some
-    /// frames may not have reached the buyer, so no receipt is signed.
+    /// delivered content, with no finish reason or tool calls. `.completeSnapshot`:
+    /// a normal completed stream whose accepted frames were all sent and matched
+    /// the runtime's final accumulator. `.unknown`: some frames may not have
+    /// reached the buyer, so no receipt is signed.
     enum DeliveredOutput: Equatable {
         case complete
+        case completeSnapshot(content: String, toolCalls: [ToolCall]?, finishReason: String)
         case nothing
         case prefix(String)
         case unknown
@@ -897,7 +900,7 @@ actor InferenceRelay {
         // Delivery is checked after eligibility, so an ineligible runtime
         // keeps its #1695 omission reason on every cancel path.
         switch deliveredOutput {
-        case .complete, .prefix:
+        case .complete, .completeSnapshot, .prefix:
             break
         case .unknown:
             ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .constructionFailed)
@@ -913,16 +916,29 @@ actor InferenceRelay {
         // reason and no tool calls were sent (SPEC-015 §N.5).
         let settlementContent: String
         let settlementComplete: Bool
+        let settlementToolCalls: [ToolCall]?
+        let settlementFinishReason: String
         switch deliveredOutput {
         case .complete:
             settlementContent = completion.content
             settlementComplete = true
+            settlementToolCalls = completion.toolCalls
+            settlementFinishReason = completion.finishReason
+        case .completeSnapshot(let content, let toolCalls, let finishReason):
+            settlementContent = content
+            settlementComplete = true
+            settlementToolCalls = toolCalls
+            settlementFinishReason = finishReason
         case .prefix(let delivered):
             settlementContent = delivered
             settlementComplete = false
+            settlementToolCalls = nil
+            settlementFinishReason = ""
         case .nothing, .unknown:
             settlementContent = ""
             settlementComplete = false
+            settlementToolCalls = nil
+            settlementFinishReason = ""
         }
         // SPEC-015 §M.2.2 — refuse receipt construction when the
         // request-start container cannot be identified.
@@ -951,7 +967,7 @@ actor InferenceRelay {
                     PoolLoopbackUsageGuard.schedule(
                         settlementMetadata: settlementMetadata,
                         providerID: providerID,
-                        completionText: completion.content,
+                        completionText: settlementContent,
                         reportedCompletionTokens: Int64(completion.generatedCompletionTokens)
                     )
                 }
@@ -962,8 +978,8 @@ actor InferenceRelay {
                         metadata: settlementMetadata,
                         modelHash: modelHash,
                         content: settlementContent,
-                        toolCalls: settlementComplete ? completion.toolCalls : nil,
-                        finishReason: settlementComplete ? completion.finishReason : "",
+                        toolCalls: settlementComplete ? settlementToolCalls : nil,
+                        finishReason: settlementComplete ? settlementFinishReason : "",
                         promptTokens: Int64(completion.promptTokens),
                         completionTokens: Int64(completion.generatedCompletionTokens),
                         terminalState: terminalState,
@@ -977,9 +993,9 @@ actor InferenceRelay {
                 input: ReceiptInput(
                     modelId: request.model,
                     request: request,
-                    outputContent: completion.content,
-                    outputToolCalls: completion.toolCalls,
-                    finishReason: completion.finishReason,
+                    outputContent: settlementContent,
+                    outputToolCalls: settlementComplete ? settlementToolCalls : nil,
+                    finishReason: settlementComplete ? settlementFinishReason : "",
                     ttftMs: ttftMs,
                     tokensOut: Int64(completion.generatedCompletionTokens),
                     unixTsSeconds: unixTsSeconds,
@@ -1204,6 +1220,7 @@ actor InferenceRelay {
                     snapshot: handle.snapshot,
                     settlementMetadata: settlementMetadata
                 )
+                let deliveredOutput = batcher.deliveredCompleteOutput(sent: chunksSent, completion: completion) ?? .unknown
                 let receiptHeader = Self.buildReceiptHeader(
                     receiptBuilder: receiptBuilder,
                     providerID: receiptProviderID,
@@ -1217,7 +1234,8 @@ actor InferenceRelay {
                     runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible,
                     settlementRuntimeSource: modelRuntime.settlementRuntimeSource,
                     relayBlindSuppressed: relayBlindClaim != nil,
-                    terminalStateTSUnixMS: terminalStateTSUnixMS
+                    terminalStateTSUnixMS: terminalStateTSUnixMS,
+                    deliveredOutput: deliveredOutput
                 )
                 if let receiptHeader {
                     endFrame["receipt"] = receiptHeader
@@ -1593,6 +1611,7 @@ final class RelayStreamBatcher: @unchecked Sendable {
     private var pendingContent = ""
     private var pendingCount = 0
     private var emittedToolCall = false
+    private var suppressedPostToolContent = false
     private var enqueuedContent = ""
     private var accepted = 0
     private var dropped = 0
@@ -1623,7 +1642,12 @@ final class RelayStreamBatcher: @unchecked Sendable {
             // Leftover </tool_call> or chatter after tool_calls opened must
             // not become a content delta (the coordinator would kill the
             // stream as "fell back to content").
-            guard !emittedToolCall else { return }
+            guard !emittedToolCall else {
+                if !text.isEmpty {
+                    suppressedPostToolContent = true
+                }
+                return
+            }
             pendingContent += text
             pendingCount += 1
             if pendingCount >= streamInterval {
@@ -1658,6 +1682,26 @@ final class RelayStreamBatcher: @unchecked Sendable {
         defer { lock.unlock() }
         guard dropped == 0, sent >= accepted, !emittedToolCall else { return nil }
         return enqueuedContent
+    }
+
+    /// The completed output the buyer received, when every accepted frame was
+    /// sent and the runtime's final completion is compatible with that stream.
+    func deliveredCompleteOutput(sent: Int, completion: CompletionResult) -> InferenceRelay.DeliveredOutput? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard dropped == 0, sent >= accepted, !suppressedPostToolContent else { return nil }
+        if emittedToolCall {
+            guard completion.toolCalls?.isEmpty == false,
+                  completion.content.utf8.elementsEqual(enqueuedContent.utf8)
+            else { return nil }
+        } else {
+            guard completion.content.utf8.elementsEqual(enqueuedContent.utf8) else { return nil }
+        }
+        return .completeSnapshot(
+            content: enqueuedContent,
+            toolCalls: completion.toolCalls,
+            finishReason: completion.finishReason
+        )
     }
 
     private func flushContentLocked() {

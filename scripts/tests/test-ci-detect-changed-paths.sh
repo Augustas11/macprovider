@@ -166,12 +166,14 @@ _repo="$(mktemp -d)"
   git add -A && git commit -qm base
 )
 _head="$(cd "$_repo" && git rev-parse HEAD)"
-_out="$(cd "$_repo" && GITHUB_OUTPUT="" GITHUB_STEP_SUMMARY="" bash "$DETECT" "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" "$_head")"
-if [ "$(printf '%s' "$_out" | sed -n 's/^swift=//p')" = "true" ] && \
+_rc=0
+_out="$(cd "$_repo" && GITHUB_OUTPUT="" GITHUB_STEP_SUMMARY="" bash "$DETECT" "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" "$_head")" || _rc=$?
+if [ "$_rc" -eq 0 ] && \
+   [ "$(printf '%s' "$_out" | sed -n 's/^swift=//p')" = "true" ] && \
    [ "$(printf '%s' "$_out" | sed -n 's/^code=//p')" = "true" ]; then
   echo "PASS | fail-open on unknown base                swift=true code=true"
 else
-  echo "FAIL | fail-open on unknown base -> $_out"; fail=1
+  echo "FAIL | fail-open on unknown base rc=$_rc -> $_out"; fail=1
 fi
 rm -rf "$_repo"
 
