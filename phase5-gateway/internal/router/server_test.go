@@ -21,6 +21,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1395,6 +1396,95 @@ func TestKillSwitchVersionConflictRejectsStaleWrite(t *testing.T) {
 	}
 }
 
+func TestNewPrunesExpiredDemandTelemetry(t *testing.T) {
+	cfg := config.Default()
+	cfg.Auth.KeyHashSecret = "test-key-hash-secret"
+	cfg.Auth.Demo.SigningSecret = "test-demo-secret"
+	cfg.Coordinator.OperatorKey = "operator-key"
+	cfg.Storage.DBPath = filepath.Join(t.TempDir(), "gateway.db")
+	store, err := sqlite.Open(context.Background(), cfg.Storage.DBPath)
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	defer store.Close()
+	now := fixedNow()
+	if err := store.InsertDemandEvent(context.Background(), storage.DemandEvent{
+		RequestID: "old", BuyerHash: "buyer_old", TrafficClass: "paid", RequestedModel: "llama",
+		TerminalResult: "success", CreatedAt: now.Add(-15 * 24 * time.Hour),
+	}); err != nil {
+		t.Fatalf("InsertDemandEvent old: %v", err)
+	}
+	if err := store.InsertDemandEvent(context.Background(), storage.DemandEvent{
+		RequestID: "keep", BuyerHash: "buyer_keep", TrafficClass: "paid", RequestedModel: "llama",
+		TerminalResult: "success", CreatedAt: now.Add(-13 * 24 * time.Hour),
+	}); err != nil {
+		t.Fatalf("InsertDemandEvent keep: %v", err)
+	}
+
+	_ = New(cfg, store, fakeOAuth{}, WithNow(func() time.Time { return now }))
+	db, err := sql.Open("sqlite", cfg.Storage.DBPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+	var remaining int
+	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM demand_events`).Scan(&remaining); err != nil {
+		t.Fatalf("count demand_events: %v", err)
+	}
+	if remaining != 1 {
+		t.Fatalf("remaining demand_events=%d want 1", remaining)
+	}
+}
+
+func TestDemandTelemetryRetentionPrunerRunsWithoutRestart(t *testing.T) {
+	oldInterval := demandTelemetryPruneInterval
+	demandTelemetryPruneInterval = 10 * time.Millisecond
+	t.Cleanup(func() { demandTelemetryPruneInterval = oldInterval })
+
+	cfg := config.Default()
+	cfg.Auth.KeyHashSecret = "test-key-hash-secret"
+	cfg.Auth.Demo.SigningSecret = "test-demo-secret"
+	cfg.Coordinator.OperatorKey = "operator-key"
+	cfg.Storage.DBPath = filepath.Join(t.TempDir(), "gateway.db")
+	store, err := sqlite.Open(context.Background(), cfg.Storage.DBPath)
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	defer store.Close()
+	var nowNS atomic.Int64
+	now := fixedNow()
+	nowNS.Store(now.UnixNano())
+	srv := New(cfg, store, fakeOAuth{}, WithNow(func() time.Time {
+		return time.Unix(0, nowNS.Load()).UTC()
+	}))
+	t.Cleanup(srv.stopDemandTelemetryRetentionPruner)
+	if err := store.InsertDemandEvent(context.Background(), storage.DemandEvent{
+		RequestID: "event_becomes_old", BuyerHash: "buyer_old", TrafficClass: "paid", RequestedModel: "llama",
+		TerminalResult: "success", CreatedAt: now.Add(-13 * 24 * time.Hour),
+	}); err != nil {
+		t.Fatalf("InsertDemandEvent: %v", err)
+	}
+	nowNS.Store(now.Add(2 * 24 * time.Hour).UnixNano())
+
+	db, err := sql.Open("sqlite", cfg.Storage.DBPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		var remaining int
+		if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM demand_events`).Scan(&remaining); err != nil {
+			t.Fatalf("count demand_events: %v", err)
+		}
+		if remaining == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("demand retention pruner did not remove expired row without restart")
+}
+
 type failCapacitySetStore struct {
 	*sqlite.Store
 }
@@ -2193,10 +2283,11 @@ func TestNullUsageErrorReceiptHeaderForwarded(t *testing.T) {
 			"X-MacProvider-Completion-Tokens": []string{"4"},
 		}, `{"error":{"message":"model not loaded","type":"api_error","param":null,"code":"error_model_not_loaded"}}`), nil
 	})}
-	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"
 	}, WithHTTPClient(client))
-	fullKey := createAccountAndKey(t, store, cfg, "acct_receipt_null_usage")
+	accountID := "acct_receipt_null_usage"
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
 
 	resp := postChat(t, h, fullKey, `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, nil)
 
@@ -2211,6 +2302,10 @@ func TestNullUsageErrorReceiptHeaderForwarded(t *testing.T) {
 		if got := resp.Header().Get(header); got != "" {
 			t.Fatalf("null-usage response exposed %s=%q", header, got)
 		}
+	}
+	event := readDemandEvent(t, dbPath, accountID)
+	if event.FailureReason != "upstream_provider_failure" || !event.EligibleProviderExists {
+		t.Fatalf("demand event = %+v, want provider failure with eligible provider", event)
 	}
 }
 
@@ -2263,6 +2358,14 @@ func TestContextExceededReceiptRequiresProviderAttributedZeroSettlement(t *testi
 				state := gatewaySettlementSnapshot(t, dbPath, accountID)
 				if state.usageRows != 0 || state.settledRows != 0 || state.refundedRows != 1 || state.activeRows != 0 {
 					t.Fatalf("settlement snapshot=%+v, want one refund and no usage/settlement/active reservation", state)
+				}
+				event := readDemandEvent(t, dbPath, accountID)
+				if providerReached {
+					if event.FailureReason != "unsupported_context" || !event.EligibleProviderExists {
+						t.Fatalf("provider-reached demand event=%+v, want unsupported_context with eligible provider", event)
+					}
+				} else if event.FailureReason != "unsupported_context" || event.EligibleProviderExists {
+					t.Fatalf("preflight demand event=%+v, want unsupported_context without eligible provider", event)
 				}
 			})
 		}

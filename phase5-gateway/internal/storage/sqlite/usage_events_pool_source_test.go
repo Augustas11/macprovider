@@ -57,8 +57,8 @@ func TestUsageEventsMigratesToPoolOperatorAttestedSource(t *testing.T) {
 		t.Fatalf("usage_events DDL missing pool_operator_attested: %s", sqlText)
 	}
 	var version int64
-	if err := store.db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 15 {
-		t.Fatalf("schema version=%d err=%v, want 15", version, err)
+	if err := store.db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != maxKnownSchemaVersion {
+		t.Fatalf("schema version=%d err=%v, want %d", version, err, maxKnownSchemaVersion)
 	}
 	if err := store.InsertUsageEvent(ctx, storage.UsageEvent{
 		RequestID: "req_pool", AccountID: "acct_v13", WindowDate: "2026-09-24",

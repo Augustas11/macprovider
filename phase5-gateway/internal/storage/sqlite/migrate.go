@@ -262,6 +262,55 @@ BEGIN
 END;
 `
 
+const demandEventsDDL = `
+CREATE TABLE IF NOT EXISTS demand_events (
+	event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+	request_id TEXT NOT NULL,
+	buyer_hash TEXT NOT NULL DEFAULT '',
+	traffic_class TEXT NOT NULL CHECK (traffic_class IN ('paid', 'free', 'promotional', 'test', 'unknown')),
+	requested_model TEXT NOT NULL CHECK (length(requested_model) <= 128),
+	routed_model TEXT NOT NULL DEFAULT '' CHECK (length(routed_model) <= 128),
+	provider_id TEXT NOT NULL DEFAULT '' CHECK (length(provider_id) <= 64),
+	pool_id TEXT NOT NULL DEFAULT '',
+	engine_class TEXT NOT NULL DEFAULT '',
+	stream INTEGER NOT NULL CHECK (stream IN (0, 1)),
+	structured_output INTEGER NOT NULL CHECK (structured_output IN (0, 1)),
+	tools_requested INTEGER NOT NULL CHECK (tools_requested IN (0, 1)),
+	max_output_tokens INTEGER NOT NULL DEFAULT 0 CHECK (max_output_tokens >= 0),
+	requested_prompt_tokens INTEGER NOT NULL DEFAULT 0 CHECK (requested_prompt_tokens >= 0),
+	requested_output_tokens INTEGER NOT NULL DEFAULT 0 CHECK (requested_output_tokens >= 0),
+	requested_total_tokens INTEGER NOT NULL DEFAULT 0 CHECK (requested_total_tokens >= 0),
+	prompt_tokens INTEGER NOT NULL DEFAULT 0 CHECK (prompt_tokens >= 0),
+	cached_prompt_tokens INTEGER NOT NULL DEFAULT 0 CHECK (cached_prompt_tokens >= 0),
+	completion_tokens INTEGER NOT NULL DEFAULT 0 CHECK (completion_tokens >= 0),
+	reasoning_tokens INTEGER NOT NULL DEFAULT 0 CHECK (reasoning_tokens >= 0 AND reasoning_tokens <= completion_tokens),
+	total_tokens INTEGER NOT NULL DEFAULT 0 CHECK (total_tokens >= 0),
+	terminal_result TEXT NOT NULL CHECK (terminal_result IN ('success', 'failure', 'cancellation', 'timeout')),
+	failure_reason TEXT NOT NULL DEFAULT '' CHECK (failure_reason IN ('', 'no_provider', 'all_providers_busy', 'quota_exhausted', 'tenant_concurrency_limited', 'gateway_rejection', 'unsupported_context', 'unsupported_tools', 'trust_routing_rejection', 'upstream_provider_failure', 'buyer_cancelled')),
+	eligible_provider_exists INTEGER NOT NULL CHECK (eligible_provider_exists IN (0, 1)),
+	substituted INTEGER NOT NULL CHECK (substituted IN (0, 1)),
+	queue_latency_ms INTEGER NOT NULL DEFAULT 0 CHECK (queue_latency_ms >= 0),
+	time_to_first_token_ms INTEGER NOT NULL DEFAULT 0 CHECK (time_to_first_token_ms >= 0),
+	provider_prefill_ms INTEGER NOT NULL DEFAULT 0 CHECK (provider_prefill_ms >= 0),
+	provider_decode_ms INTEGER NOT NULL DEFAULT 0 CHECK (provider_decode_ms >= 0),
+	output_tps_millitokens INTEGER NOT NULL DEFAULT 0 CHECK (output_tps_millitokens >= 0),
+	total_latency_ms INTEGER NOT NULL DEFAULT 0 CHECK (total_latency_ms >= 0),
+	created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_demand_created_model ON demand_events(created_at, requested_model);
+CREATE INDEX IF NOT EXISTS idx_demand_model_created ON demand_events(requested_model, created_at);
+CREATE INDEX IF NOT EXISTS idx_demand_buyer_model_created ON demand_events(buyer_hash, requested_model, created_at);
+` + demandEventsUpdateTriggerDDL
+
+const demandEventsUpdateTriggerDDL = `
+
+CREATE TRIGGER IF NOT EXISTS demand_events_no_update BEFORE UPDATE ON demand_events
+BEGIN
+	SELECT RAISE(ABORT, 'demand_events are append-only');
+END;
+`
+
 const settlementFallbackCandidatesDDL = `
 CREATE TABLE IF NOT EXISTS settlement_reconcile_attempts (
 	attempt_sequence INTEGER PRIMARY KEY AUTOINCREMENT,

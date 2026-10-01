@@ -19,6 +19,7 @@ type gatewayPhaseTiming struct {
 	startedAt             time.Time
 	coordinatorStartAt    time.Time
 	coordinatorResponseAt time.Time
+	firstTokenAt          time.Time
 
 	coordRoutingMS     int64
 	coordAdmissionMS   int64
@@ -34,6 +35,13 @@ func newGatewayPhaseTiming(start time.Time) *gatewayPhaseTiming {
 
 func (t *gatewayPhaseTiming) markCoordinatorStart(at time.Time) {
 	t.coordinatorStartAt = at
+}
+
+func (t *gatewayPhaseTiming) markFirstToken(at time.Time) {
+	if t == nil || !t.firstTokenAt.IsZero() {
+		return
+	}
+	t.firstTokenAt = at
 }
 
 func (t *gatewayPhaseTiming) observeCoordinatorResponse(h http.Header, at time.Time) {
@@ -52,6 +60,37 @@ func (t *gatewayPhaseTiming) observeCoordinatorTimings(h http.Header) {
 	setHeaderMillis(h, phaseTimingProviderPrefillHeader, &t.providerPrefillMS)
 	setHeaderMillis(h, phaseTimingProviderDecodeHeader, &t.providerDecodeMS)
 	setHeaderMillis(h, phaseTimingCoordinatorTotalHeader, &t.coordinatorTotalMS)
+}
+
+type demandTimingSnapshot struct {
+	queueLatencyMS                   int64
+	timeToFirstTokenMS               int64
+	providerPrefillMS                int64
+	providerDecodeMS                 int64
+	outputTokensPerSecondMilliTokens int64
+}
+
+func (t *gatewayPhaseTiming) demandSnapshot(completionTokens int64) demandTimingSnapshot {
+	if t == nil {
+		return demandTimingSnapshot{}
+	}
+	queueMS := t.coordAdmissionMS
+	ttftMS := millisBetween(t.startedAt, t.firstTokenAt)
+	if ttftMS == 0 && t.providerPrefillMS > 0 {
+		ttftMS = t.coordRoutingMS + t.coordAdmissionMS + t.providerDispatchMS + t.providerPrefillMS
+	}
+	decodeMS := t.providerDecodeMS
+	throughputMilliTokens := int64(0)
+	if completionTokens > 0 && decodeMS > 0 {
+		throughputMilliTokens = completionTokens * 1_000_000 / decodeMS
+	}
+	return demandTimingSnapshot{
+		queueLatencyMS:                   queueMS,
+		timeToFirstTokenMS:               ttftMS,
+		providerPrefillMS:                t.providerPrefillMS,
+		providerDecodeMS:                 decodeMS,
+		outputTokensPerSecondMilliTokens: throughputMilliTokens,
+	}
 }
 
 func (t *gatewayPhaseTiming) attrs(now time.Time) []any {
