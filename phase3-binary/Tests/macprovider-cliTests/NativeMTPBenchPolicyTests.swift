@@ -91,6 +91,20 @@ final class NativeMTPBenchPolicyTests: XCTestCase {
         XCTAssertThrowsError(try load(relaxed))
     }
 
+    func testGatedCellsRequireStaggeredArrivals() throws {
+        XCTAssertEqual(try load(template()).arrivalIntervalMS, 250)
+        var simultaneous = try template()
+        simultaneous["arrival_interval_ms"] = 0
+        XCTAssertThrowsError(try load(simultaneous)) { error in
+            XCTAssertTrue("\(error)".contains("arrival_interval_ms must be > 0"), "\(error)")
+        }
+        // A bound covering every slot leaves no gated cell to stagger.
+        var ungated = try template()
+        ungated["arrival_interval_ms"] = 0
+        ungated["max_native_active_rows"] = 8
+        XCTAssertNoThrow(try load(ungated))
+    }
+
     func testExploratoryPolicyMayUseAReducedMatrix() throws {
         var object = try template()
         object["schema"] = "macprovider.native-mtp-exploratory-policy.v1"

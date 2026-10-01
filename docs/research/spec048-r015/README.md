@@ -30,7 +30,11 @@ Cells at or below `max_native_active_rows` are native-eligible and gate the
 native improvement; cells above it are gated and must prove every admission
 honored the bound (`effective_paths[].other_active_rows`, header
 `run_metrics_version` 3) and stay non-inferior to ordinary at the frozen
-`gated_*` thresholds.
+`gated_*` thresholds. Gated cells also need a staggered `arrival_interval_ms`
+> 0 and must show the in-flight depth-zero hold: native runs carry the
+scheduler's `gated_depth_zero_rounds`, `gated_hold_episodes`,
+`gated_depth_restorations`, `gated_held_finishes_clean`, and
+`gated_held_unresolved` (`run_metrics_version` 4).
 
 Do not edit or regenerate the policy after measurement begins. Any change,
 including whitespace, creates a different preregistration and requires a new

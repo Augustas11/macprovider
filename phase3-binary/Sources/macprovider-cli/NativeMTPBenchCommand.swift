@@ -64,6 +64,9 @@ private final class NativeMTPBenchRunner {
     private let providerCommit: String
     private let policy: NativeMTPBenchPolicy
     private let policySHA256: String
+    /// The native runtime's scheduler load-gate recorder for the current
+    /// cell fixture (SPEC-048-R015 gated-cell evidence).
+    private var nativeLoadGateRecorder: NativeMTPLoadGateRecorder?
 
     init(
         rootPath: String,
@@ -261,11 +264,17 @@ private final class NativeMTPBenchRunner {
             maxNativeActiveRows: policy.maxNativeActiveRows(for: cell),
             maxPhysicalBlocks: maxBlocks
         )
-        return try await runner.loadRuntimeFixture(
+        let fixture = try await runner.loadRuntimeFixture(
             maxContextTokens: cell.promptTokens + cell.maxTokens + 256,
             ordinaryAdmissionRecorder: nil,
             nativeAdmissionRecorder: NativeMTPHardwareAdmissionRecorder()
         )
+        let recorder = NativeMTPLoadGateRecorder()
+        guard await fixture.runtimes.native.installLabNativeMTPLoadGateRecorder(recorder) else {
+            throw NativeMTPBenchError.assertionFailed("native runtime has no continuous-batch scheduler")
+        }
+        nativeLoadGateRecorder = recorder
+        return fixture
     }
 
     private func runPath(
@@ -381,6 +390,9 @@ private final class NativeMTPBenchRunner {
                 ] as [String: Any]
             },
             statusDelta: statusDelta,
+            loadGate: path == .nativeMTP
+                ? nativeLoadGateRecorder?.summary(requestIDs: Set(results.map(\.requestID)))
+                : nil,
             targetForwardsPerCommittedToken: path == .nativeMTP && committed > 0
                 ? Double(statusDelta.targetForwards) / Double(committed)
                 : nil,
@@ -470,7 +482,8 @@ private final class NativeMTPBenchRunner {
             "arrival_interval_ms": policy.arrivalIntervalMS,
             // 2: run records carry decode-only throughput (SPEC-048-R015).
             // 3: effective_paths carry each admission's other_active_rows.
-            "run_metrics_version": 3,
+            // 4: native runs carry the scheduler's gated_* load-gate evidence.
+            "run_metrics_version": 4,
         ]
     }
 
@@ -667,6 +680,8 @@ private struct NativeMTPBenchRunResult {
     let missingNativeAdmissions: Int
     let effectivePaths: [[String: Any]]
     let statusDelta: NativeMTPStatusDelta
+    /// Scheduler in-flight load-gate evidence; nil on the ordinary path.
+    let loadGate: NativeMTPLoadGateRecorder.Summary?
     let targetForwardsPerCommittedToken: Double?
     let peakPhysFootprintBytes: UInt64?
     let minAvailableMemoryBytes: UInt64?
@@ -746,6 +761,11 @@ private struct NativeMTPBenchRunResult {
             "thermal_state_start": thermalStart,
             "thermal_state_end": thermalEnd,
             "parity_mismatch": parityMismatch,
+            "gated_depth_zero_rounds": loadGate.map { $0.depthZeroRounds as Any } ?? NSNull(),
+            "gated_hold_episodes": loadGate.map { $0.holdEpisodes as Any } ?? NSNull(),
+            "gated_depth_restorations": loadGate.map { $0.depthRestorations as Any } ?? NSNull(),
+            "gated_held_finishes_clean": loadGate.map { $0.heldFinishesClean as Any } ?? NSNull(),
+            "gated_held_unresolved": loadGate.map { $0.heldUnresolved as Any } ?? NSNull(),
         ]
     }
 }
@@ -1062,6 +1082,11 @@ struct NativeMTPBenchPolicy {
             )
         }
         guard !exploratory else { return }
+        // A gated cell must exercise the in-flight hold: the first request
+        // admits native before later arrivals cross the bound.
+        if let bound = maxNativeActiveRows, slots.contains(where: { $0 > bound }), arrivalIntervalMS <= 0 {
+            throw NativeMTPBenchError.invalidPolicy("arrival_interval_ms must be > 0 when a cell exceeds max_native_active_rows")
+        }
         guard let qualifiedSlots else {
             throw NativeMTPBenchError.invalidPolicy("qualified_slots is required")
         }

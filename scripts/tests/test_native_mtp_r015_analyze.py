@@ -115,19 +115,15 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         self.assertIn("missing_native_admissions", result["cells"][0]["hard_failures"])
 
     def test_gated_cell_passes_with_zero_native_work_when_non_inferior(self):
-        downgrade = {"request_id": "r1", "effective_path": "ordinary", "selector_reason": "capacity_above_native_bound", "other_active_rows": 1}
-        held = {"request_id": "r0", "effective_path": "native_mtp", "selector_reason": "", "other_active_rows": 0}
         result = self._run_case(
             gated_native_overrides={
-                "native_requests": 2,
-                "native_admissions": 1,
-                "load_gate_downgrades": 1,
                 "mtp_proposed_tokens": 0,
                 "mtp_accepted_tokens": 0,
                 "mtp_accepted_by_position": [0],
                 "target_forwards": 0,
                 "target_forwards_per_committed_token": 0.0,
-                "effective_paths": [held, downgrade],
+                "gated_depth_restorations": 0,
+                "gated_held_finishes_clean": 1,
                 "aggregate_decode_tps": 99.0,
                 "per_request_decode_tps": [99.0],
             }
@@ -140,18 +136,56 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
             self.assertEqual(cell["metrics"]["throughput"]["threshold"], -0.05)
         self.assertEqual(result["overall_status"], "PASS")
 
-    def test_fully_downgraded_gated_run_needs_no_proposals(self):
+    def test_fully_downgraded_gated_cell_fails_without_a_native_admission(self):
         result = self._run_case(
             gated_native_overrides={
-                "load_gate_downgrades": 1,
                 "native_admissions": 0,
+                "load_gate_downgrades": 2,
                 "mtp_proposed_tokens": 0,
                 "mtp_accepted_tokens": 0,
                 "target_forwards": 0,
-                "effective_paths": [{"request_id": "r0", "effective_path": "ordinary", "selector_reason": "capacity_above_native_bound", "other_active_rows": 1}],
+                "effective_paths": [dict(self.DOWNGRADE, request_id="r0"), self.DOWNGRADE],
+                "gated_depth_zero_rounds": 0,
+                "gated_hold_episodes": 0,
+                "gated_depth_restorations": 0,
             }
         )
-        self.assertEqual(result["overall_status"], "PASS")
+        self.assertEqual(result["overall_status"], "FAIL")
+        for cell in result["cells"]:
+            if cell["cell_class"] == "gated":
+                self.assertIn("gated_cell_missing_native_admission", cell["hard_failures"])
+                self.assertIn("gated_depth_zero_hold_missing", cell["hard_failures"])
+                self.assertNotIn("native_mtp_proposals_missing", cell["hard_failures"])
+
+    def test_gated_cell_without_a_downgrade_or_hold_fails(self):
+        result = self._run_case(
+            gated_native_overrides={
+                "native_admissions": 2,
+                "load_gate_downgrades": 0,
+                "effective_paths": [self.HELD, dict(self.HELD, request_id="r1", other_active_rows=1)],
+                "gated_depth_zero_rounds": 0,
+                "gated_hold_episodes": 0,
+                "gated_depth_restorations": 0,
+            }
+        )
+        failures = {f for c in result["cells"] if c["cell_class"] == "gated" for f in c["hard_failures"]}
+        self.assertIn("gated_cell_missing_load_gate_downgrade", failures)
+        self.assertIn("gated_depth_zero_hold_missing", failures)
+        # r1 was admitted native while r0 was in flight: over the bound.
+        self.assertIn("native_admission_above_bound", failures)
+
+    def test_gated_hold_must_end_restored_or_cleanly(self):
+        unresolved = self._run_case(gated_native_overrides={"gated_depth_restorations": 0, "gated_held_unresolved": 1})
+        self.assertIn("gated_hold_unresolved", [f for c in unresolved["cells"] for f in c["hard_failures"]])
+        unaccounted = self._run_case(gated_native_overrides={"gated_hold_episodes": 2})
+        self.assertIn("gated_hold_unresolved", [f for c in unaccounted["cells"] for f in c["hard_failures"]])
+        missing = self._run_case(gated_native_overrides={"gated_depth_zero_rounds": self._DELETE})
+        self.assertIn("gated_load_gate_evidence_missing", [f for c in missing["cells"] for f in c["hard_failures"]])
+
+    def test_gated_cells_require_staggered_arrivals(self):
+        result = self._run_case(policy_overrides={"arrival_interval_ms": 0})
+        self.assertEqual(result["reason"], "policy_matrix_incomplete")
+        self.assertIn("arrival_interval_ms_required_for_gated_cells", result["matrix_violations"])
 
     def test_gated_cell_fails_on_regression_against_ordinary(self):
         result = self._run_case(
@@ -175,9 +209,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
 
     def test_gated_native_admission_above_bound_fails(self):
         result = self._run_case(
-            gated_native_overrides={
-                "effective_paths": [{"request_id": "r0", "effective_path": "native_mtp", "selector_reason": "", "other_active_rows": 1}]
-            }
+            gated_native_overrides={"effective_paths": [dict(self.HELD, other_active_rows=1), self.DOWNGRADE]}
         )
         self.assertEqual(result["overall_status"], "FAIL")
         gated = [cell for cell in result["cells"] if cell["cell_class"] == "gated"]
@@ -185,14 +217,10 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
 
     def test_gated_downgrade_below_bound_or_missing_rows_fails(self):
         below = self._run_case(
-            gated_native_overrides={
-                "native_admissions": 0,
-                "load_gate_downgrades": 1,
-                "effective_paths": [{"request_id": "r0", "effective_path": "ordinary", "selector_reason": "capacity_above_native_bound", "other_active_rows": 0}],
-            }
+            gated_native_overrides={"effective_paths": [self.HELD, dict(self.DOWNGRADE, other_active_rows=0)]}
         )
         self.assertIn("load_gate_downgrade_below_bound", [f for c in below["cells"] for f in c["hard_failures"]])
-        missing = self._run_case(gated_native_overrides={"effective_paths": [{"request_id": "r0", "effective_path": "native_mtp"}]})
+        missing = self._run_case(gated_native_overrides={"effective_paths": [self.HELD, {"request_id": "r1", "effective_path": "ordinary"}]})
         self.assertIn("admission_active_rows_missing", [f for c in missing["cells"] for f in c["hard_failures"]])
 
     def test_load_gate_downgrade_in_eligible_cell_fails(self):
@@ -394,6 +422,21 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
     SLOTS = (1, 2)
     # s1 cells are native-eligible; s2 cells are gated (SPEC-048-R015).
     BOUND = 1
+    HELD = {"request_id": "r0", "effective_path": "native_mtp", "selector_reason": "", "other_active_rows": 0}
+    DOWNGRADE = {"request_id": "r1", "effective_path": "ordinary", "selector_reason": "capacity_above_native_bound", "other_active_rows": 1}
+    # A healthy gated run: r0 admitted native, r1 downgraded, r0 held at
+    # depth zero for 12 rounds and restored once the gate released.
+    GATED_BASE = {
+        "native_requests": 2,
+        "native_admissions": 1,
+        "load_gate_downgrades": 1,
+        "effective_paths": [HELD, DOWNGRADE],
+        "gated_depth_zero_rounds": 12,
+        "gated_hold_episodes": 1,
+        "gated_depth_restorations": 1,
+        "gated_held_finishes_clean": 0,
+        "gated_held_unresolved": 0,
+    }
     PROMPTS = (1536, 4096, 8192)
     OUTPUTS = (128, 512)
 
@@ -438,6 +481,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
             else "macprovider.native-mtp-r015-policy.v1",
             "qualified_slots": 2,
             "max_native_active_rows": self.BOUND,
+            "arrival_interval_ms": 250,
             "slots": list(self.SLOTS),
             "prompt_tokens": list(self.PROMPTS),
             "max_tokens": list(self.OUTPUTS),
@@ -515,7 +559,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
                 native_record = self._run_record("native_mtp", block, native_tps, native_ttft, native_itl, parity_mismatch, policy_sha=run_policy_sha or policy_sha, native_admissions=native_admissions, peak_phys_footprint_bytes=peak_phys_footprint_bytes, decode_tps=native_decode_tps, cell_id=cell_id, **record_options)
                 overrides = dict(native_overrides or {})
                 if int(cell_id.split("-")[0][1:]) > self.BOUND:
-                    overrides.update(gated_native_overrides or {})
+                    overrides = {**self.GATED_BASE, **overrides, **(gated_native_overrides or {})}
                 for field, value in overrides.items():
                     if value is self._DELETE:
                         native_record.pop(field, None)

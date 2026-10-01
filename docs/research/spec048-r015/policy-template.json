@@ -21,6 +21,7 @@
   "confidence_method": "paired_block_bootstrap_holm_v1",
   "qualified_slots": 8,
   "max_native_active_rows": 1,
+  "arrival_interval_ms": 250,
   "slots": [1, 2, 3, 4, 5, 6, 7, 8],
   "prompt_tokens": [1536, 4096, 8192],
   "max_tokens": [128, 512],

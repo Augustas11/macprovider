@@ -1624,6 +1624,9 @@ actor ContinuousBatchScheduler {
     /// `nativeMTPLoadGateReleaseRounds` consecutive decode rounds at or below
     /// it, so a row finishing and another arriving cannot flap the depth.
     private var nativeMTPLoadGateEngaged = false
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    private var labNativeMTPLoadGateRecorder: NativeMTPLoadGateRecorder?
+    #endif
     private var nativeMTPLoadGateCalmRounds = 0
     static let nativeMTPLoadGateReleaseRounds = 8
     private var pendingTerminalDeliveries: [String: PendingTerminalDelivery] = [:]
@@ -3485,6 +3488,9 @@ actor ContinuousBatchScheduler {
                 active.nativeMTPFixtureProposalsConsumed = true
                 activeDecode[item.row.request.id] = active
             }
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            labNativeMTPLoadGateRecorder?.recordNativeRound(requestID: item.row.request.id)
+            #endif
             for candidate in candidatesByID[item.row.request.id] ?? [] {
                 guard activeDecode[item.row.request.id] != nil else { break }
                 await applyToken(candidate.tokenID, to: item.row)
@@ -3565,6 +3571,14 @@ actor ContinuousBatchScheduler {
         }
     }
 
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    /// Lab-only: record the in-flight load gate's real decisions for R015
+    /// gated-cell evidence. Never installed outside lab builds.
+    func installLabNativeMTPLoadGateRecorder(_ recorder: NativeMTPLoadGateRecorder?) {
+        labNativeMTPLoadGateRecorder = recorder
+    }
+    #endif
+
     private func updateNativeMTPLoadGate(nativeRows: [Row]) {
         let bound = nativeRows.map(\.request.nativeMTPMaximumActiveRows).min() ?? Int.max
         let activeRows = activeDecode.count + activePrompt.count
@@ -3606,6 +3620,11 @@ actor ContinuousBatchScheduler {
             ? Set(allNativeRows.filter { !$0.request.nativeMTPIntegrityProbe }.map(\.request.id))
             : []
         let nativeRows = allNativeRows.filter { !fusedIDs.contains($0.request.id) }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if !fusedIDs.isEmpty {
+            labNativeMTPLoadGateRecorder?.recordHeldRound(requestIDs: fusedIDs)
+        }
+        #endif
         guard !nativeRows.isEmpty else {
             await runOrdinaryDecodeStep(rows: rows)
             return
@@ -4586,6 +4605,9 @@ actor ContinuousBatchScheduler {
     }
 
     private func complete(requestID: String, result: ContinuousBatchSchedulerResult) {
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        labNativeMTPLoadGateRecorder?.recordTerminal(requestID: requestID, status: result.terminalStatus)
+        #endif
         CBTrace.log(requestID, "sch_complete status=\(result.terminalStatus) waiters=\(requestWaiters[requestID]?.count ?? 0) stopping=\(stoppingActiveWaiters.values.contains(where: { $0.requestID == requestID }))")
         endQueueWait(requestID: requestID)
         guard terminalResults[requestID] == nil, pendingTerminalDeliveries[requestID] == nil else { return }
@@ -5093,3 +5115,90 @@ actor ContinuousBatchScheduler {
         admissionTurnWaiters.removeValue(forKey: currentAdmissionSequence)?.resume()
     }
 }
+
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+/// Lab-only SPEC-048-R015 gated-cell evidence, taken from the scheduler's own
+/// R007 in-flight gate decisions: rounds in which an admitted native row was
+/// held at depth zero (riding the ordinary forward), and how each hold ended —
+/// a later committed native round (depth restored, drafter caught up) or a
+/// clean terminal while still held.
+final class NativeMTPLoadGateRecorder: @unchecked Sendable {
+    struct Summary: Sendable, Equatable {
+        /// (round, row) pairs held at depth zero.
+        var depthZeroRounds = 0
+        /// Transitions of a row from native to held.
+        var holdEpisodes = 0
+        /// Holds ended by a committed native round.
+        var depthRestorations = 0
+        /// Holds ended by a stop/length terminal while still held.
+        var heldFinishesClean = 0
+        /// Holds that ended any other way, or have not ended.
+        var heldUnresolved = 0
+    }
+
+    private struct RowState {
+        var depthZeroRounds = 0
+        var holdEpisodes = 0
+        var depthRestorations = 0
+        var held = false
+        var terminal: ContinuousBatchSchedulerTerminalStatus?
+        var heldAtTerminal = false
+    }
+
+    private let lock = NSLock()
+    private var rows: [String: RowState] = [:]
+
+    func recordHeldRound(requestIDs: Set<String>) {
+        lock.lock()
+        defer { lock.unlock() }
+        for requestID in requestIDs {
+            var row = rows[requestID] ?? RowState()
+            if !row.held {
+                row.held = true
+                row.holdEpisodes += 1
+            }
+            row.depthZeroRounds += 1
+            rows[requestID] = row
+        }
+    }
+
+    func recordNativeRound(requestID: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        var row = rows[requestID] ?? RowState()
+        if row.held {
+            row.held = false
+            row.depthRestorations += 1
+        }
+        rows[requestID] = row
+    }
+
+    func recordTerminal(requestID: String, status: ContinuousBatchSchedulerTerminalStatus) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard var row = rows[requestID], row.terminal == nil else { return }
+        row.terminal = status
+        row.heldAtTerminal = row.held
+        rows[requestID] = row
+    }
+
+    func summary(requestIDs: Set<String>) -> Summary {
+        lock.lock()
+        defer { lock.unlock() }
+        var summary = Summary()
+        for requestID in requestIDs {
+            guard let row = rows[requestID] else { continue }
+            summary.depthZeroRounds += row.depthZeroRounds
+            summary.holdEpisodes += row.holdEpisodes
+            summary.depthRestorations += row.depthRestorations
+            guard row.held else { continue }
+            if row.heldAtTerminal, row.terminal == .stop || row.terminal == .length {
+                summary.heldFinishesClean += 1
+            } else {
+                summary.heldUnresolved += 1
+            }
+        }
+        return summary
+    }
+}
+#endif

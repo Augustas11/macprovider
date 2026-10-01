@@ -6344,6 +6344,16 @@ actor ModelRuntime: ModelRuntimeServing {
         }
     }
 
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    /// Lab-only R015 hook: record the attached scheduler's in-flight load-gate
+    /// decisions. Returns false when no scheduler is attached.
+    func installLabNativeMTPLoadGateRecorder(_ recorder: NativeMTPLoadGateRecorder?) async -> Bool {
+        guard let continuousBatchScheduler else { return false }
+        await continuousBatchScheduler.installLabNativeMTPLoadGateRecorder(recorder)
+        return true
+    }
+    #endif
+
     nonisolated static func schedulerRequestID(for request: ChatCompletionRequest) -> String? {
         nonEmpty(request.requestID)
     }

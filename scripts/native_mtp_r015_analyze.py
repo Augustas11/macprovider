@@ -81,6 +81,15 @@ def _matrix_violations(policy: dict) -> list[str]:
         violations.append("max_tokens_missing:" + ",".join(map(str, missing_outputs)))
     if policy.get("sustained_cell_id") not in _observed_cells(policy):
         violations.append("sustained_cell_not_in_matrix")
+    # A gated cell must exercise the in-flight hold: staggered arrivals let the
+    # first request admit native before later ones cross the bound.
+    arrival = policy.get("arrival_interval_ms")
+    if (
+        _is_int(bound)
+        and any(v > bound for v in slots)
+        and not (_is_int(arrival) and arrival > 0)
+    ):
+        violations.append("arrival_interval_ms_required_for_gated_cells")
     return violations
 
 
@@ -122,6 +131,48 @@ def _admission_bound_failures(native_runs: list[dict], bound: int) -> list[str]:
                 failures.add("native_admission_above_bound")
             if entry.get("selector_reason") == "capacity_above_native_bound" and other < bound:
                 failures.add("load_gate_downgrade_below_bound")
+    return sorted(failures)
+
+
+GATED_EVIDENCE_FIELDS = (
+    "gated_depth_zero_rounds",
+    "gated_hold_episodes",
+    "gated_depth_restorations",
+    "gated_held_finishes_clean",
+    "gated_held_unresolved",
+)
+
+
+def _gated_hold_failures(native_runs: list[dict], bound: int) -> list[str]:
+    """SPEC-048-R015 gated cell: the cell must show the gate at work on real
+    hardware — a native admission under the bound, a downgrade at it, rounds
+    in which an admitted native row was held at depth zero, and every hold
+    ending in a restored native round or a clean terminal."""
+    failures: set[str] = set()
+    admitted = downgraded = False
+    held_rounds = 0
+    for run in native_runs:
+        for entry in run.get("effective_paths") or []:
+            if not isinstance(entry, dict) or not _is_int(entry.get("other_active_rows")):
+                continue
+            if entry.get("effective_path") == "native_mtp" and entry["other_active_rows"] < bound:
+                admitted = True
+            if entry.get("selector_reason") == "capacity_above_native_bound" and entry["other_active_rows"] >= bound:
+                downgraded = True
+        if not all(_is_count(run.get(field)) for field in GATED_EVIDENCE_FIELDS):
+            failures.add("gated_load_gate_evidence_missing")
+            continue
+        held_rounds += run["gated_depth_zero_rounds"]
+        if run["gated_held_unresolved"] or run["gated_hold_episodes"] != (
+            run["gated_depth_restorations"] + run["gated_held_finishes_clean"]
+        ):
+            failures.add("gated_hold_unresolved")
+    if not admitted:
+        failures.add("gated_cell_missing_native_admission")
+    if not downgraded:
+        failures.add("gated_cell_missing_load_gate_downgrade")
+    if held_rounds <= 0:
+        failures.add("gated_depth_zero_hold_missing")
     return sorted(failures)
 
 
@@ -647,6 +698,7 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
         proof_runs = [] if gated else ungated_native_runs
         if gated and bound is not None:
             hard_failures.extend(_admission_bound_failures(native_runs, bound))
+            hard_failures.extend(_gated_hold_failures(native_runs, bound))
         elif load_gate_downgrades:
             hard_failures.append("load_gate_downgrade_in_native_eligible_cell")
         if any(

@@ -5166,6 +5166,78 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         )
     }
 
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    /// SPEC-048-R015 gated-cell evidence comes from the scheduler's own gate:
+    /// every fused round of a held native row counts, and the hold ends in a
+    /// committed native round once the gate releases.
+    func testLoadGateRecorderCountsHeldRoundsAndRestoration() async throws {
+        let backend = ScriptedBackend(
+            scripts: ["gated": Array(100..<160), "ordinary": [31, 32, 33, 34]],
+            prefillTokens: ["gated": 99]
+        )
+        let scheduler = try await makeScheduler(maxActiveRows: 2, maxPrefillRowsPerIteration: 2, backend: backend)
+        let recorder = NativeMTPLoadGateRecorder()
+        await scheduler.installLabNativeMTPLoadGateRecorder(recorder)
+
+        let native = Task {
+            try await scheduler.submit(Self.nativeRequest(
+                id: "gated", promptTokens: [10], maxOutputTokens: 30,
+                proposals: [], maximumDepth: 1, maximumActiveRows: 1
+            ))
+        }
+        let ordinary = Task {
+            try await scheduler.submit(.init(
+                id: "ordinary", conversationKey: "", promptTokens: [30],
+                maxOutputTokens: 4, temperature: 0.0, topP: 1.0
+            ))
+        }
+        _ = try await ordinary.value
+        let nativeResult = try await native.value
+        XCTAssertEqual(nativeResult.terminalStatus, .length)
+
+        let fusedRounds = await backend.events().filter { $0 == "decode:gated" }.count
+        let summary = recorder.summary(requestIDs: ["gated", "ordinary"])
+        XCTAssertGreaterThan(fusedRounds, 0)
+        XCTAssertEqual(summary.depthZeroRounds, fusedRounds)
+        XCTAssertEqual(summary.holdEpisodes, 1)
+        XCTAssertEqual(summary.depthRestorations, 1)
+        XCTAssertEqual(summary.heldFinishesClean, 0)
+        XCTAssertEqual(summary.heldUnresolved, 0)
+    }
+
+    func testLoadGateRecorderCountsARowThatFinishesWhileHeld() async throws {
+        let backend = ScriptedBackend(
+            scripts: ["gated": Array(100..<160), "ordinary": Array(31..<61)],
+            prefillTokens: ["gated": 99]
+        )
+        let scheduler = try await makeScheduler(maxActiveRows: 2, maxPrefillRowsPerIteration: 2, backend: backend)
+        let recorder = NativeMTPLoadGateRecorder()
+        await scheduler.installLabNativeMTPLoadGateRecorder(recorder)
+
+        let native = Task {
+            try await scheduler.submit(Self.nativeRequest(
+                id: "gated", promptTokens: [10], maxOutputTokens: 4,
+                proposals: [], maximumDepth: 1, maximumActiveRows: 1
+            ))
+        }
+        let ordinary = Task {
+            try await scheduler.submit(.init(
+                id: "ordinary", conversationKey: "", promptTokens: [30],
+                maxOutputTokens: 30, temperature: 0.0, topP: 1.0
+            ))
+        }
+        let nativeResult = try await native.value
+        _ = try await ordinary.value
+        XCTAssertEqual(nativeResult.terminalStatus, .length)
+
+        let summary = recorder.summary(requestIDs: ["gated"])
+        XCTAssertGreaterThan(summary.depthZeroRounds, 0)
+        XCTAssertEqual(summary.holdEpisodes, summary.depthRestorations + summary.heldFinishesClean)
+        XCTAssertEqual(summary.heldFinishesClean, 1)
+        XCTAssertEqual(summary.heldUnresolved, 0)
+    }
+    #endif
+
     func testNativeMTPLoadGateLeavesMixedBatchWithinBoundAtFullDepth() async throws {
         let backend = ScriptedBackend(
             scripts: ["within": Array(100..<120), "ordinary": [31, 32, 33, 34]],

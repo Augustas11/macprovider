@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.18
+**Version:** 0.1.19
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -975,6 +975,22 @@ thresholds (`gated_throughput_lower_bound_min` -0.05,
 `gated_ttft_p95_upper_bound_max` 0.05, `gated_itl_p95_upper_bound_max` 0.05)
 and join the same Holm family. A tuple whose bound is 1 therefore passes R015
 with a native gain at one slot and non-inferiority everywhere above it.
+
+A gated cell MUST also exercise the in-flight hold on the measured hardware,
+so a policy with any gated cell MUST freeze a staggered arrival profile
+(`arrival_interval_ms` > 0: the first request admits native before later
+arrivals cross the bound); the bench refuses and the analyzer fails closed
+without it. Across its native runs each gated cell MUST record at least one
+native admission while the other in-flight rows were below the bound, at
+least one `capacity_above_native_bound` downgrade at or above it, and at
+least one round in which an admitted native row was held at depth zero. The
+hold evidence comes from the scheduler's own gate decisions through a
+lab-only recorder (absent from release builds): per run, depth-zero held
+rounds, hold episodes, holds ended by a later committed native round (depth
+restored, drafter caught up), holds ended by a stop/length terminal while
+held, and unresolved holds. Every hold MUST end restored or cleanly finished
+and none may be unresolved; a cell whose every request was downgraded fails.
+Zero proposals remain allowed for held rows.
 The campaign MUST report median and corrected confidence interval for
 aggregate and per-request decode throughput, aggregate committed tokens/s and
 per-request tokens/s end to end, p50/p95 TTFT and
@@ -1175,6 +1191,13 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.19 (2026-10-01)** — MTP-15 gated cells must prove the R007 in-flight
+  hold on hardware (#1770): a frozen staggered arrival profile, a native
+  admission below the bound and a downgrade at it, depth-zero held rounds
+  from the scheduler's lab-only gate recorder, and every hold ending restored
+  or cleanly finished; a fully downgraded gated cell fails. The bound
+  definition and MTP-7 now say only native-eligible cells set and justify
+  `max_native_active_rows`; a gated non-inferiority pass never raises it.
 - **0.1.18 (2026-10-01)** — MTP-15 splits the R015 matrix at the frozen
   `max_native_active_rows` (#1770). Native-eligible cells keep the
   improvement gates and native-work proofs and may not downgrade; gated cells
