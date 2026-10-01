@@ -1127,7 +1127,8 @@ func main() {
 	var trustPoolRegistry *trustpool.Registry
 	if cfg.TrustedPools.Enabled {
 		var trustPoolsReady bool
-		poolModelAcceptance := trustPoolModelAcceptance(cfg.TrustedPools.PoolModelPricingBounds, wsServer)
+		livePoolModelPricingBounds.Store(poolModelPricingBounds(cfg.TrustedPools.PoolModelPricingBounds))
+		poolModelAcceptance := trustPoolModelAcceptance(currentPoolModelPricingBounds, wsServer)
 		trustPoolStore, trustPoolRegistry, trustPoolsReady, err = loadTrustedPools(context.Background(), reqLogStore.DB(), cfg.TrustedPools, poolModelAcceptance, logger)
 		if err != nil {
 			logger.Fatal().Err(err).Msg("trusted pools durable store open failed")
@@ -1143,8 +1144,10 @@ func main() {
 				snap := registry.Snapshot(poolID)
 				return snap.ManifestVersion, snap.ManifestCoreDigest, snap.Exists
 			})
-			poolModelBounds := poolModelPricingBounds(cfg.TrustedPools.PoolModelPricingBounds)
-			poolModelBoundsSource := func() *poolmanifest.PoolModelPricingBounds { return poolModelBounds }
+			// SIGHUP reloads bounds and owner authority through these
+			// (trusted_pools_reload.go).
+			poolModelBoundsSource := currentPoolModelPricingBounds
+			liveTrustPoolOwnerAuthority.Store(&trustPoolOwnerAuthority{store: trustPoolStore, registry: trustPoolRegistry})
 			buyerOpts = append(
 				buyerOpts,
 				buyer.WithPoolMembership(trustPoolRegistry),
@@ -1199,10 +1202,6 @@ func main() {
 		if err != nil {
 			logger.Fatal().Err(err).Msg("trusted pools creator admin credential config invalid")
 		}
-		providerOwnerKeys, err := trustpool.ParseProviderOwnerPublicKeys(cfg.TrustedPools.ProviderOwnerPublicKeys)
-		if err != nil {
-			logger.Fatal().Err(err).Msg("trusted pools provider owner public keys invalid")
-		}
 		trustPoolAdminHandler := trustpool.NewAdminHandler(trustpool.AdminDeps{
 			Store:                            trustPoolStore,
 			Registry:                         trustPoolRegistry,
@@ -1214,7 +1213,8 @@ func main() {
 			CreatorProviderAdmitted: func(providerID string) bool {
 				return creatorProviderServingCapable(registry, providerID)
 			},
-			ProviderOwnerPublicKeyForProvider: trustpool.ProviderOwnerPublicKeyLookup(providerOwnerKeys),
+			// Read through the store so a SIGHUP key rotation applies here too.
+			ProviderOwnerPublicKeyForProvider: trustPoolStore.ProviderOwnerPublicKey,
 		})
 		if reloader, ok := trustPoolAdminHandler.(trustpool.CreatorAdminConfigReloader); ok {
 			trustPoolAdminReloader = reloader
@@ -3431,12 +3431,12 @@ func creatorProviderServingCapable(registry *pool.Registry, providerID string) b
 // trustPoolModelAcceptance is the SPEC-042-R015 / SPEC-005-R015 acceptance
 // context: the configured pool-model pricing bounds (nil fails every entry
 // closed) and the live catalog shadow/overlap probes.
-func trustPoolModelAcceptance(bounds *config.TrustedPoolsPoolModelPricingBounds, catalog interface {
+func trustPoolModelAcceptance(bounds func() *poolmanifest.PoolModelPricingBounds, catalog interface {
 	IsCatalogModelID(string) bool
 	ArtifactPairInCatalog(string, string, []string) bool
 }) func() poolmanifest.PoolModelAcceptanceContext {
 	return func() poolmanifest.PoolModelAcceptanceContext {
-		ctx := poolmanifest.PoolModelAcceptanceContext{PricingBounds: poolModelPricingBounds(bounds)}
+		ctx := poolmanifest.PoolModelAcceptanceContext{PricingBounds: bounds()}
 		if catalog != nil {
 			ctx.IsCatalogModelID = catalog.IsCatalogModelID
 			ctx.ArtifactInCatalog = catalog.ArtifactPairInCatalog
@@ -3936,6 +3936,11 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 			return
 		}
 	}
+	applyTrustedPools, err := prepareTrustedPoolsReload(cfg.TrustedPools)
+	if err != nil {
+		logger.Error().Err(err).Msg("trusted pools config reload rejected")
+		return
+	}
 	if tier2StartupFieldsChangedWithLogger(startupTier2, cfg.Tier2, logger) {
 		logger.Error().Msg("tier2 config reload rejected: startup-only tier2 fields require restart")
 		return
@@ -4094,6 +4099,14 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 			Int("trusted_pools_creator_buyer_allowlist_creators", len(cfg.TrustedPools.CreatorAdminBuyerAccountIDs)).
 			Msg("trusted pools creator admin config reloaded")
 	}
+	// SPEC-005-R015 / SPEC-042-R016: pool-model bounds and provider owner
+	// authority apply together, after every fallible step.
+	applyTrustedPools()
+	logger.Info().
+		Bool("trusted_pools_pool_model_pricing_bounds_set", currentPoolModelPricingBounds() != nil).
+		Int("trusted_pools_provider_owner_public_keys", len(cfg.TrustedPools.ProviderOwnerPublicKeys)).
+		Int("trusted_pools_provider_owner_accounts", len(cfg.TrustedPools.ProviderOwnerAccountIDs)).
+		Msg("trusted pools pool-model bounds and owner authority reloaded")
 	// Every fallible step above returned early on rejection, so reaching here
 	// means this reload's config is the applied one.
 	recordAppliedConfig(logger, "sighup", configPath, configOverlay, configDigests, configLoadedAt, buyerServer.AppliedEconomics())
