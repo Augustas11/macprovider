@@ -124,6 +124,14 @@ artifact-bound state, or pricing globals. Catalog signing is a separate
 predecessor step: this content lane deploys already-signed catalog bytes from
 the reviewed commit and never re-signs on Pearl.
 
+Current dated validation evidence is recorded in
+`audits/2026-10-01-issue-1807-studio-validation.md`: Qwen3.5-9B passed the
+tested 16GB one-slot 32K-context claim, while Ministral 3 3B loaded on the
+Studio but failed strict JSON-mode and normalized OpenAI tool-call behavior.
+Do not sign a #1807 8GB Ministral row that advertises those capabilities until
+that gap is fixed and revalidated, or the catalog/runtime claim is deliberately
+scoped to exclude them.
+
 Before the signing session cuts the #1807 catalog commit, attach an evidence
 package to the issue or PR with:
 
