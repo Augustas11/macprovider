@@ -1,11 +1,23 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.6
+Version: v0.3.7
 Status: draft (normative contract; runtime enablement remains tuple- and campaign-gated)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.7 (2026-10-01, hybrid reply-end recurrent checkpoint handoff):**
+Aligns scheduler-owned hybrid conversation-cache handoff with SPEC-024 v0.2.9.
+At normal terminal, retained and serial-format hybrid cache publication append
+the covered reply-end recurrent checkpoint when it is distinct from prompt
+checkpoints. Cached turns can therefore resume through the previous assistant
+reply when their LCP reaches that terminal checkpoint. The reply-end boundary is
+the canonical covered length after dropping a trailing model-stop token. Hybrid
+retained handoff fails closed when the terminal recurrent snapshot cannot be
+captured; it MUST NOT publish a shorter serial-format cache as a fallback for
+that terminal. The reply-end checkpoint may be the only checkpoint when no
+prompt checkpoint was eligible.
+
 **Change log v0.3.6 (2026-09-30, reservation-bound omitted output):** The
 SPEC-038 v0.3.5 out-of-band dependency is now implemented by SPEC-001 v1.9.27,
 SPEC-002 v1.6.4, and SPEC-006 v0.9.41. Gateway traffic that omits `max_tokens`
@@ -507,12 +519,19 @@ semantics (including a mid-block LCP boundary).
 For a hybrid model (paged attention plus recurrent layers), whose recurrent
 state cannot be retained or trimmed as paged KV, a conversation-keyed batched
 row with zero cached tokens MUST end a prefill chunk exactly on each SPEC-024
-FR-CI2 recurrent checkpoint position (at most two) and snapshot only its own
-recurrent-layer state there. At a normal terminal (stop or length), before
-releasing its blocks, it MUST commit a serial-format conversation-cache entry:
-its attention KV materialized through FR-PKV10 into contiguous caches covering
-a prefix of the canonical token list (prompt plus generated tokens, trailing
-model stop dropped), and the snapshots as that entry's recurrent checkpoints.
+FR-CI2 prompt recurrent checkpoint position (scaffold end and last-turn start)
+and snapshot only its own recurrent-layer state there. At a normal terminal
+(stop or length), before releasing its blocks, it MUST commit a serial-format
+conversation-cache entry: its attention KV materialized through FR-PKV10 into
+contiguous caches covering a prefix of the canonical token list (prompt plus
+generated tokens, trailing model stop dropped), and the snapshots plus the
+covered reply-end recurrent checkpoint as that entry's recurrent checkpoints.
+The reply-end checkpoint length MUST NOT exceed the canonical token list length;
+if it cannot be captured at the covered terminal length, the hybrid cache entry
+MUST be discarded rather than published with only prompt checkpoints or with a
+shorter fallback prefix. The reply-end checkpoint MAY be the only recurrent
+checkpoint for a hybrid row with no eligible prompt checkpoint and a covered
+terminal length at or above the SPEC-024 LCP threshold.
 Keyless, cancelled and failed rows MUST commit nothing and MUST release every
 block and snapshot they hold. A later turn with positive
 `cached_prompt_tokens` still serial-routes until AC-26.
@@ -531,8 +550,13 @@ and `sticky_cache_handoff_unavailable` otherwise. With the flag off, behaviour M
 model. With the flag on, for a hybrid model:
 - A conversation-keyed row that reached at least one checkpoint MUST, at a
   normal terminal, retain its paged attention KV through FR-PKV10 together with
-  those checkpoints, in place of the serial-format entry above. A retained
-  delivery without any checkpoint MUST be discarded, not committed.
+  those checkpoints plus the covered reply-end checkpoint, in place of the
+  serial-format entry above. For a model-stop terminal, the retained logical
+  token count is the canonical count after dropping that stop token. A retained
+  delivery without any checkpoint, or without a checkpoint exactly at the
+  retained canonical length for a hybrid row, MUST be discarded, not committed;
+  it MUST NOT fall back to publishing a shorter
+  serial-format hybrid cache.
 - `begin` on a retained hybrid entry MUST resume from the largest checkpoint C
   with `lcpThreshold <= C <= lcp` and report `cached_prompt_tokens = C`, which
   is the value the serial path reports for the same checkpoint hit (SPEC-024

@@ -253,7 +253,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             promptTokens: Array(1...12),
             maxOutputTokens: 2,
             temperature: 0.0,
-            recurrentCheckpointPositions: [5, 9]
+            recurrentCheckpointPositions: [5, 9],
+            modelHasRecurrentLayers: true
         )
 
         let result = try await scheduler.submit(request)
@@ -266,12 +267,13 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             "prefill:hybrid:4",
             "snapshot:hybrid:9",
             "prefill:hybrid:3",
+            "snapshot:hybrid:13",
         ], "chunks end exactly on each checkpoint and the snapshot follows that chunk")
         XCTAssertEqual(result.terminalStatus, .length)
         XCTAssertEqual(result.generatedTokens, [7, 8])
         XCTAssertNil(result.retainedCache)
         let serialCache = try XCTUnwrap(result.serialConversationCache)
-        XCTAssertEqual(serialCache.recurrentCheckpoints.map(\.tokenCount), [5, 9])
+        XCTAssertEqual(serialCache.recurrentCheckpoints.map(\.tokenCount), [5, 9, 13])
         XCTAssertEqual(serialCache.tokenCount, 13, "prompt + generated - the last sampled token, never fed back")
         let materialized = await backend.serialMaterializations()
         XCTAssertEqual(materialized["hybrid"], [13, 13], "materialized once, before the row's blocks are released")
@@ -280,6 +282,84 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let replay = try await scheduler.submit(request)
         XCTAssertEqual(replay.settlementDisposition, .nonSettlingReplay)
         XCTAssertNil(replay.serialConversationCache, "only the settlement owner receives the cache")
+    }
+
+    func testHybridTerminalSnapshotLossPublishesNoCache() async throws {
+        let bridge = HeadlessRetainedCacheBridge()
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 32)
+        let backend = ScriptedBackend(
+            scripts: ["hybrid": [500, 501]],
+            terminalNilRecurrentSnapshots: ["hybrid": [42]],
+            recurrentCheckpointBackend: true
+        )
+        let scheduler = try await makeScheduler(
+            descriptor: Self.descriptor(blockSizeTokens: 4, maxPhysicalBlocks: 32),
+            maxActiveRows: 1,
+            maxPromptChunkTokens: 8,
+            backend: backend,
+            allocator: allocator,
+            contiguousCacheBridge: bridge
+        )
+
+        let result = try await scheduler.submit(.init(
+            id: "hybrid",
+            conversationKey: "conv:hybrid",
+            promptTokens: Array(0..<40),
+            maxOutputTokens: 2,
+            temperature: 0.0,
+            recurrentCheckpointPositions: [33, 38],
+            modelHasRecurrentLayers: true
+        ))
+
+        XCTAssertEqual(result.terminalStatus, .length)
+        XCTAssertNil(result.retainedCache)
+        XCTAssertNil(result.serialConversationCache)
+        let snapshots = await backend.recurrentSnapshots()
+        XCTAssertEqual(snapshots["hybrid"], [33, 38, 42])
+        let materialized = await backend.serialMaterializations()
+        XCTAssertNil(materialized["hybrid"])
+        try await eventually { await allocator.freeBlockCount() == 32 }
+    }
+
+    func testHybridModelStopRetainedCacheUsesCanonicalTokenCount() async throws {
+        let bridge = HeadlessRetainedCacheBridge()
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 32)
+        let backend = ScriptedBackend(
+            scripts: ["hybrid-stop": [500, 7]],
+            recurrentCheckpointBackend: true
+        )
+        let scheduler = try await makeScheduler(
+            descriptor: Self.descriptor(blockSizeTokens: 4, maxPhysicalBlocks: 32),
+            maxActiveRows: 1,
+            maxPromptChunkTokens: 8,
+            backend: backend,
+            allocator: allocator,
+            contiguousCacheBridge: bridge
+        )
+
+        let result = try await scheduler.submit(.init(
+            id: "hybrid-stop",
+            conversationKey: "conv:hybrid-stop",
+            promptTokens: Array(0..<40),
+            maxOutputTokens: 2,
+            stopTokenSequences: [[7]],
+            modelStopTokenIDs: [7],
+            temperature: 0.0,
+            recurrentCheckpointPositions: [33, 38],
+            modelHasRecurrentLayers: true
+        ))
+
+        XCTAssertEqual(result.terminalStatus, .stop)
+        XCTAssertEqual(result.stopCause, .modelStop)
+        let retained = try XCTUnwrap(result.retainedCache)
+        XCTAssertEqual(retained.recurrentCheckpoints.map(\.tokenCount), [33, 38, 41])
+        let snapshots = await backend.recurrentSnapshots()
+        XCTAssertEqual(snapshots["hybrid-stop"], [33, 38, 41])
+        let terminalCommits = await backend.terminalCommits()
+        XCTAssertNil(terminalCommits["hybrid-stop"])
+        await scheduler.acknowledgeRetainedCacheDelivery(retained)
+        await scheduler.discardRetainedCache(retained.retainedSequence, conversationKey: "conv:hybrid-stop")
+        try await eventually { await allocator.freeBlockCount() == 32 }
     }
 
     func testZeroOutputHybridRowMaterializesTheFullPrefilledPrompt() async throws {
@@ -298,7 +378,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             promptTokens: Array(1...12),
             maxOutputTokens: 0,
             temperature: 0.0,
-            recurrentCheckpointPositions: [5, 12]
+            recurrentCheckpointPositions: [5, 12],
+            modelHasRecurrentLayers: true
         ))
 
         XCTAssertEqual(result.terminalStatus, .length)
@@ -332,14 +413,16 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             promptTokens: Array(1...12),
             maxOutputTokens: 1,
             temperature: 0.0,
-            recurrentCheckpointPositions: [5, 9]
+            recurrentCheckpointPositions: [5, 9],
+            modelHasRecurrentLayers: true
         ))
         let positionless = try await scheduler.submit(.init(
             id: "positionless",
             conversationKey: "conv:hybrid",
             promptTokens: Array(1...12),
             maxOutputTokens: 1,
-            temperature: 0.0
+            temperature: 0.0,
+            modelHasRecurrentLayers: true
         ))
 
         let events = await backend.events().filter { !$0.hasPrefix("decode:") }
@@ -375,7 +458,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 promptTokens: Array(1...12),
                 maxOutputTokens: 3,
                 temperature: 0.0,
-                recurrentCheckpointPositions: [5, 9]
+                recurrentCheckpointPositions: [5, 9],
+                modelHasRecurrentLayers: true
             ))
         }
         try await eventually { await backend.decodeCallCount() == 1 }
@@ -416,7 +500,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 promptTokens: Array(1...12),
                 maxOutputTokens: 0,
                 temperature: 0.0,
-                recurrentCheckpointPositions: [11]
+                recurrentCheckpointPositions: [11],
+                modelHasRecurrentLayers: true
             ))
         }
         try await eventually { await backend.recurrentSnapshots()["hybrid"] == [11] }
@@ -457,7 +542,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 promptTokens: Array(1...12),
                 maxOutputTokens: 0,
                 temperature: 0.0,
-                recurrentCheckpointPositions: [5]
+                recurrentCheckpointPositions: [5],
+                modelHasRecurrentLayers: true
             ))
         }
         try await eventually { await backend.serialMaterializations()["hybrid"] != nil }
@@ -490,7 +576,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             promptTokens: Array(1...12),
             maxOutputTokens: 2,
             temperature: 0.0,
-            recurrentCheckpointPositions: [5, 9]
+            recurrentCheckpointPositions: [5, 9],
+            modelHasRecurrentLayers: true
         ))
 
         XCTAssertEqual(result.terminalStatus, .batchFailed)
@@ -648,14 +735,19 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             promptTokens: firstPrompt,
             maxOutputTokens: 2,
             temperature: 0.0,
-            recurrentCheckpointPositions: [33, 38]
+            recurrentCheckpointPositions: [33, 38],
+            modelHasRecurrentLayers: true
         ))
 
         XCTAssertEqual(first.terminalStatus, .length)
         let firstRetained = try XCTUnwrap(first.retainedCache, "a keyed hybrid row retains its paged KV")
         XCTAssertNil(first.serialConversationCache, "retention replaces the serial-format materialize")
-        XCTAssertEqual(firstRetained.recurrentCheckpoints.map(\.tokenCount), [33, 38])
-        XCTAssertTrue(ModelRuntime.retainedCacheIsCommittable(firstRetained, modelHasRecurrentLayers: true))
+        XCTAssertEqual(firstRetained.recurrentCheckpoints.map(\.tokenCount), [33, 38, 42])
+        XCTAssertTrue(ModelRuntime.retainedCacheIsCommittable(
+            firstRetained,
+            modelHasRecurrentLayers: true,
+            canonicalTokenCount: 42
+        ))
         await conversationCache.commit(
             firstLease!,
             cache: ConversationCacheLayers(
@@ -679,8 +771,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             allowRetainedPagedKVHandoff: true
         )
         let lease = try XCTUnwrap(begun)
-        XCTAssertEqual(lease.cachedPromptTokens, 38, "largest checkpoint within the 42-token shared prefix")
-        XCTAssertEqual(lease.recurrentCheckpoint?.tokenCount, 38)
+        XCTAssertEqual(lease.cachedPromptTokens, 42, "largest checkpoint within the 42-token shared prefix")
+        XCTAssertEqual(lease.recurrentCheckpoint?.tokenCount, 42)
         XCTAssertFalse(ModelRuntime.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
             mode: .canary,
             cachedPromptTokens: lease.cachedPromptTokens,
@@ -698,24 +790,25 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             cachedPromptTokens: lease.cachedPromptTokens,
             retainedPagedKVSequence: lease.reusableCache?.retainedPagedKVSequence,
             recurrentCheckpointPositions: [33, 44],
+            modelHasRecurrentLayers: true,
             retainedRecurrentCheckpoints: ModelRuntime.retainedRecurrentCheckpoints(for: lease)
         ))
 
         XCTAssertEqual(second.terminalStatus, .length)
-        XCTAssertEqual(second.cachedPromptTokens, 38, "billing sees C, the serial checkpoint-hit value")
+        XCTAssertEqual(second.cachedPromptTokens, 42, "billing sees C, the serial checkpoint-hit value")
         let installs = await backend.retainedInstalls()
         let checkpointInstalls = await backend.retainedCheckpointInstalls()
-        XCTAssertEqual(installs["turn-2"], 38, "the reattach trimmed the retained KV to exactly C")
-        XCTAssertEqual(checkpointInstalls["turn-2"], 38, "the checkpoint reached the backend install")
+        XCTAssertEqual(installs["turn-2"], 42, "the reattach trimmed the retained KV to exactly C")
+        XCTAssertEqual(checkpointInstalls["turn-2"], 42, "the checkpoint reached the backend install")
         let committed = await backend.prefillCommittedCounts()
-        XCTAssertEqual(committed.first(where: { $0["turn-2"] != nil })?["turn-2"], 38, "prefill resumes at C")
+        XCTAssertEqual(committed.first(where: { $0["turn-2"] != nil })?["turn-2"], 42, "prefill resumes at C")
         let snapshots = await backend.recurrentSnapshots()
-        XCTAssertEqual(snapshots["turn-2"], [44], "only the new checkpoint is snapshotted")
+        XCTAssertEqual(snapshots["turn-2"], [44, 49], "the new prompt checkpoint and reply-end checkpoint are snapshotted")
         let secondRetained = try XCTUnwrap(second.retainedCache)
         XCTAssertEqual(
             secondRetained.recurrentCheckpoints.map(\.tokenCount),
-            [33, 44],
-            "the scaffold checkpoint carries forward and the row adds its own"
+            [33, 44, 49],
+            "the scaffold checkpoint carries forward and the row adds prompt plus reply-end checkpoints"
         )
         await conversationCache.commit(
             lease,
@@ -731,6 +824,82 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         )
         await scheduler.acknowledgeRetainedCacheDelivery(secondRetained)
         _ = await conversationCache.purgeHot(conversationKey: key)
+        try await eventually { await allocator.freeBlockCount() == 32 }
+    }
+
+    func testHybridCachedTurnReusesSoleReplyEndCheckpoint() async throws {
+        let bridge = HeadlessRetainedCacheBridge()
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 32)
+        let backend = ScriptedBackend(
+            scripts: ["turn-1": [500, 501]],
+            recurrentCheckpointBackend: true
+        )
+        let scheduler = try await makeScheduler(
+            descriptor: Self.descriptor(blockSizeTokens: 4, maxPhysicalBlocks: 32),
+            maxActiveRows: 1,
+            maxPromptChunkTokens: 8,
+            backend: backend,
+            allocator: allocator,
+            contiguousCacheBridge: bridge
+        )
+        let conversationCache = ConversationCache(
+            config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900)
+        )
+        let key = "conv:hybrid-sole-reply-end"
+        let firstPrompt = Array(0..<40)
+        let begunFirst = await conversationCache.begin(
+            conversationKey: key,
+            incomingTokens: firstPrompt.map(Int32.init),
+            modelID: Self.modelID,
+            kvBits: nil,
+            allowRetainedPagedKVHandoff: true
+        )
+        let firstLease = try XCTUnwrap(begunFirst)
+
+        let first = try await scheduler.submit(.init(
+            id: "turn-1",
+            conversationKey: key,
+            promptTokens: firstPrompt,
+            maxOutputTokens: 2,
+            temperature: 0.0,
+            modelHasRecurrentLayers: true
+        ))
+
+        let retained = try XCTUnwrap(first.retainedCache)
+        XCTAssertEqual(retained.recurrentCheckpoints.map(\.tokenCount), [42])
+        XCTAssertTrue(ModelRuntime.retainedCacheIsCommittable(
+            retained,
+            modelHasRecurrentLayers: true,
+            canonicalTokenCount: 42
+        ))
+        let snapshots = await backend.recurrentSnapshots()
+        XCTAssertEqual(snapshots["turn-1"], [42])
+        await conversationCache.commit(
+            firstLease,
+            cache: ConversationCacheLayers(
+                retained.layers,
+                retainedPagedKVSequence: retained.retainedSequence,
+                discardRetainedPagedKVSequence: { retained, key in
+                    await scheduler.discardRetainedCache(retained, conversationKey: key)
+                },
+                recurrentCheckpoints: retained.recurrentCheckpoints
+            ),
+            fullTokens: (firstPrompt + first.generatedTokens).map(Int32.init)
+        )
+        await scheduler.acknowledgeRetainedCacheDelivery(retained)
+
+        let secondPrompt = firstPrompt + first.generatedTokens + [900]
+        let begunSecond = await conversationCache.begin(
+            conversationKey: key,
+            incomingTokens: secondPrompt.map(Int32.init),
+            modelID: Self.modelID,
+            kvBits: nil,
+            allowRetainedPagedKVHandoff: true
+        )
+        let lease = try XCTUnwrap(begunSecond)
+        XCTAssertEqual(lease.cachedPromptTokens, 42)
+        XCTAssertEqual(lease.recurrentCheckpoint?.tokenCount, 42)
+        await conversationCache.abort(lease)
         try await eventually { await allocator.freeBlockCount() == 32 }
     }
 
@@ -839,6 +1008,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 temperature: 0.0,
                 cachedPromptTokens: 6,
                 retainedPagedKVSequence: retained,
+                modelHasRecurrentLayers: true,
                 retainedRecurrentCheckpoints: testCase.checkpoints
             ))
 
@@ -879,6 +1049,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 temperature: 0.0,
                 cachedPromptTokens: 6,
                 retainedPagedKVSequence: retained,
+                modelHasRecurrentLayers: true,
                 retainedRecurrentCheckpoints: [RecurrentStateCheckpoint(tokenCount: 6, states: [1: []])]
             ))
         }
@@ -925,6 +1096,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 temperature: 0.0,
                 cachedPromptTokens: 6,
                 retainedPagedKVSequence: retained,
+                modelHasRecurrentLayers: true,
                 retainedRecurrentCheckpoints: [RecurrentStateCheckpoint(tokenCount: 6, states: [1: []])]
             ))
         }
@@ -6015,6 +6187,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     private let retainedInstallErrors: [String: any Error]
     /// Acts as a hybrid backend: snapshots and materializes the serial cache.
     private let recurrentCheckpointBackend: Bool
+    private let terminalNilRecurrentSnapshots: [String: Set<Int>]
     private var recurrentSnapshotLog: [String: [Int]] = [:]
     private let snapshotGate: AsyncGate?
     private let materializeGate: AsyncGate?
@@ -6069,6 +6242,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         terminalCommitCaches: [PagedKVCache] = [],
         retainedInstallGates: [String: AsyncGate] = [:],
         retainedInstallErrors: [String: any Error] = [:],
+        terminalNilRecurrentSnapshots: [String: Set<Int>] = [:],
         recurrentCheckpointBackend: Bool = false,
         snapshotGate: AsyncGate? = nil,
         materializeGate: AsyncGate? = nil
@@ -6098,6 +6272,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         self.terminalCommitCaches = terminalCommitCaches
         self.retainedInstallGates = retainedInstallGates
         self.retainedInstallErrors = retainedInstallErrors
+        self.terminalNilRecurrentSnapshots = terminalNilRecurrentSnapshots
     }
 
     func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
@@ -6295,6 +6470,9 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         recurrentSnapshotLog[requestID, default: []].append(tokenCount)
         await snapshotGate?.wait()
         eventLog.append("snapshot:\(requestID):\(tokenCount)")
+        if terminalNilRecurrentSnapshots[requestID]?.contains(tokenCount) == true {
+            return nil
+        }
         return RecurrentStateCheckpoint(tokenCount: tokenCount, states: [1: []])
     }
 
