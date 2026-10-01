@@ -3411,6 +3411,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(cancelledResult.completionTokens, 0)
         XCTAssertEqual(cancelledResult.outputTokens, [])
         XCTAssertEqual(healthyResult.outputTokens, [8, 9])
+        XCTAssertNil(healthyResult.errorCode)
         XCTAssertEqual(healthyResult.terminalStatus, .length)
     }
 
@@ -4672,6 +4673,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let (failedResult, healthyResult) = try await (failed, healthy)
         XCTAssertEqual(failedResult.terminalStatus, .requestFailed)
         XCTAssertEqual(failedResult.errorCode, "continuous_batching_prefill_failed")
+        XCTAssertNil(healthyResult.errorCode)
         XCTAssertEqual(healthyResult.terminalStatus, .length)
         XCTAssertEqual(healthyResult.outputTokens, [102])
         let metrics = await scheduler.metrics()
@@ -5764,6 +5766,103 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(finalization?.shouldCommit, false)
         XCTAssertEqual(finalization?.committedProposalTokenCount, 0)
         XCTAssertEqual(finalization?.committedInputTokenCount, 0)
+        let reservedRoundBytes = await scheduler.nativeMTPReservedRoundBytesSnapshot()
+        XCTAssertEqual(reservedRoundBytes, 0)
+        try await eventually { await allocator.freeBlockCount() == 16 }
+    }
+
+    /// A tuple disabled while the backend finalize is awaited lands after the
+    /// backend published every committing row. Only the disabled row may fail;
+    /// its healthy peer must commit that round, not roll it back and replay it
+    /// against already-advanced backend state.
+    func testNativeMTPDisableDuringFinalizeFailsOnlyStaleRowAndHealthyPeerCommits() async throws {
+        let decodeGate = AsyncGate()
+        let finalizeGate = AsyncGate()
+        let staleRecorder = TokenEventRecorder()
+        let healthyRecorder = TokenEventRecorder()
+        let staleFence = Self.nativeMTPFence(admission: String(repeating: "a", count: 64))
+        let healthyFence = Self.nativeMTPFence(admission: String(repeating: "b", count: 64))
+        let backend = ScriptedBackend(
+            scripts: ["blocker": [4, 5]],
+            prefillTokens: ["stale": 6, "healthy": 6],
+            decodeGate: decodeGate,
+            nativeTargetTopTokensByStep: [
+                "stale": [[7, 8], [9]],
+                "healthy": [[7, 8], [9]],
+            ],
+            nativeFinalizeGate: finalizeGate
+        )
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 3,
+            maxPrefillRowsPerIteration: 2,
+            backend: backend,
+            allocator: allocator
+        )
+
+        let blocker = Task {
+            try await scheduler.submit(.init(
+                id: "blocker",
+                conversationKey: "",
+                promptTokens: [0],
+                maxOutputTokens: 2
+            ))
+        }
+        try await eventually { await scheduler.metrics().activeDecodeRows == 1 }
+        let stale = Task {
+            try await scheduler.submit(Self.nativeRequest(
+                id: "stale",
+                promptTokens: [1],
+                maxOutputTokens: 4,
+                proposals: [7],
+                maximumDepth: 1,
+                nativeMTPTupleFence: staleFence
+            ), tokenSink: { event in
+                staleRecorder.append(event)
+            })
+        }
+        let healthy = Task {
+            try await scheduler.submit(Self.nativeRequest(
+                id: "healthy",
+                promptTokens: [2],
+                maxOutputTokens: 4,
+                proposals: [7],
+                maximumDepth: 1,
+                nativeMTPTupleFence: healthyFence
+            ), tokenSink: { event in
+                healthyRecorder.append(event)
+            })
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 2 }
+        await decodeGate.open()
+        _ = try await blocker.value
+
+        try await eventually { await backend.nativeFinalizations().count == 1 }
+        let firstRound = await backend.nativeFinalizations().first ?? []
+        XCTAssertEqual(Set(firstRound.map(\.requestID)), ["stale", "healthy"])
+        XCTAssertTrue(firstRound.allSatisfy(\.shouldCommit))
+        await scheduler.disableNativeMTPTuple(staleFence)
+        await finalizeGate.open()
+
+        let staleResult = try await stale.value
+        let healthyResult = try await healthy.value
+        XCTAssertEqual(staleResult.terminalStatus, .requestFailed)
+        XCTAssertEqual(staleResult.errorCode, "continuous_batching_native_mtp_tuple_disabled_postoutput")
+        XCTAssertEqual(staleRecorder.events().map(\.token), [6])
+
+        // Same tokens an undisturbed native (and ordinary) run produces:
+        // round 1 accepts 7 and adds bonus 8; fixture proposals are spent, so round 2
+        // verifies at depth zero and commits 9.
+        XCTAssertEqual(healthyResult.terminalStatus, .length)
+        XCTAssertEqual(healthyResult.outputTokens, [6, 7, 8, 9])
+        XCTAssertEqual(healthyRecorder.events().map(\.token), [6, 7, 8, 9])
+        let verifiedCurrentTokens = await backend.nativeVerifyCurrentTokens().compactMap { $0["healthy"] }
+        XCTAssertEqual(verifiedCurrentTokens, [6, 8])
+        let healthyCommits = await backend.nativeFinalizations()
+            .flatMap { $0 }
+            .filter { $0.requestID == "healthy" && $0.shouldCommit }
+        XCTAssertEqual(healthyCommits.map(\.committedInputTokenCount), [2, 1])
+
         let reservedRoundBytes = await scheduler.nativeMTPReservedRoundBytesSnapshot()
         XCTAssertEqual(reservedRoundBytes, 0)
         try await eventually { await allocator.freeBlockCount() == 16 }

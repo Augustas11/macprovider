@@ -3310,25 +3310,13 @@ actor ContinuousBatchScheduler {
             }
             return
         }
-        let staleFinalizedRows = staleNativeMTPRows(prepared.map(\.row))
-        guard staleFinalizedRows.isEmpty else {
-            let abortError: (any Error)?
-            do {
-                try await abortNativeMTPRound(prepared)
-                abortError = nil
-            } catch {
-                abortError = error
-            }
-            await failStaleNativeMTPRows(
-                abortError == nil ? staleFinalizedRows : prepared.map(\.row),
-                cleanupError: abortError,
-                fallbackErrorCode: abortError == nil
-                    ? "continuous_batching_native_mtp_stale_row"
-                    : "continuous_batching_native_mtp_abort_failed"
-            )
-            return
-        }
-
+        // The backend finalize above is the commit point: it has already
+        // published target KV and drafter state for every committing row. A
+        // row that went stale (tuple disabled) during that await is handled
+        // per row below: its allocator transaction aborts and the row fails,
+        // which drops its backend state through `finish`. Aborting the whole
+        // round here would roll back healthy peers' scheduler and allocator
+        // state while their backend state stays advanced.
         let finalizedByID = Dictionary(uniqueKeysWithValues: finalizeRows.map { ($0.requestID, $0) })
         var healthyOutputIDs: Set<String> = []
         for item in prepared {
