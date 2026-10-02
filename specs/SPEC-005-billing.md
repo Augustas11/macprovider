@@ -1,7 +1,16 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.6.10 (2026-09-27, auto-prefix cache-hit billing)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.6, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.39, SPEC-024 v0.2.7 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.18.0 / SPEC-005-R011 / SPEC-005-R013 (SPEC-023-R019) is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
+**Version:** 0.6.11 (2026-10-02, bounded SQLite evidence maintenance)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.5, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.39, SPEC-024 v0.2.7 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.18.0 / SPEC-005-R011 / SPEC-005-R013 (SPEC-023-R019) is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
+
+**Change log v0.6.11 (2026-10-02, issue #1793):** The primary money database
+and dedicated route-snapshot journal each own one bounded WAL checkpoint loop
+on a connection separate from their writer pools. Route-snapshot
+materialization cannot consume the post-credit attempt-output write budget.
+Periodic receipt-audit delivery performs bounded multi-batch catch-up while
+remaining subordinate to buyer traffic. Registers `SPEC-002-R003`; extends
+`SPEC-005-R003` and SPEC-022-R003/R011 without changing pricing, settlement,
+quarantine, or payout eligibility.
 
 **Change log v0.6.10 (2026-09-27, issue #1768 — auto-prefix cache-hit billing):**
 - §5.3.1 accepts a valid first-attempt provider `cached_prompt_tokens` report on an authenticated conversation-cache-only auto-prefix request as creditable reuse. The row keeps the cached count, applies the configured cache-hit rate, and exposes the same count in the flat buyer field. This supersedes v0.6.8's full-prompt-rate carve-out for that request class without enabling sticky routing.
@@ -1796,7 +1805,14 @@ request_log, ledger_request_credits, ledger_operator_credits, and any provider i
 Crash before COMMIT loses all rows together.
 Crash after COMMIT preserves all rows together.
 No 2PC is used.
-The coordinator SQLite database MUST be operated in WAL mode (`PRAGMA journal_mode = WAL`). Recovery scans MUST execute under `BEGIN DEFERRED` to obtain a consistent reader snapshot.
+The primary coordinator money database and dedicated route-snapshot journal
+MUST be operated in WAL mode (`PRAGMA journal_mode = WAL`). Each physical WAL
+MUST have exactly one coordinator-owned bounded checkpoint worker on a
+connection separate from the writer pool; all writer handles MUST disable
+automatic checkpointing. A worker MUST use PASSIVE checkpointing while buyer
+traffic is active, MAY use TRUNCATE only after the configured idle condition,
+and MUST leave a failed or timed-out WAL for a later retry. Recovery scans MUST
+execute under `BEGIN DEFERRED` to obtain a consistent reader snapshot.
 
 **Pool cap (operational invariant).** The Go `*sql.DB` handle backing the coordinator SQLite store MUST set `MaxOpenConns(1)` and `MaxIdleConns(1)`. SQLite already serializes writers at one-at-a-time; the Go-pool cap converts that into an enforceable serialization point and eliminates the implicit-pool unbounded growth that surfaced as latent p99 latency and post-inference `request_log_failed` 500s on prior uncapped builds (issue #21 / ARCH-3 / 2026-06-10 audit QW-5). Callers that share the requestlog/billing/admission `*sql.DB` MUST NOT hold an outer `*sql.Rows` cursor open across an inner query against the SAME pool, and inside a transaction MUST NOT call helpers that issue against the un-pinned `*sql.DB` (they will deadlock waiting for a second connection that cannot be obtained while the tx pins the only one). The reference IMPL is `phase4-coordinator/internal/requestlog/store.go` `OpenStore`.
 
@@ -2563,7 +2579,9 @@ Config changes affect only new request-credit rows.
 | `billing.force_credit_settlement_hold_seconds` | integer | `86400` | pre-payout hold for force-credit maturity; zero/missing uses the default |
 | `endpoints.provider_earnings.rate_limit_per_minute` | integer | `60` | per-provider read limit for earnings endpoint |
 
-The coordinator SQLite database MUST run in WAL mode (`journal_mode = WAL`). SPEC-005 behavior is undefined under `journal_mode = DELETE`.
+The SQLite files governed by §10.1 MUST run in WAL mode. SPEC-005 behavior is
+undefined under `journal_mode = DELETE` or when a physical WAL has no bounded
+checkpoint owner.
 
 ### 13.1 Initial placeholder rate card
 
@@ -2933,10 +2951,15 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
-### AC-WAL: WAL mode required
+### AC-WAL: WAL mode and checkpoint ownership required
 
-**Verification:** Coordinator startup runs `PRAGMA journal_mode` against the SQLite fixture.
-**Expected:** Startup asserts `journal_mode = WAL` and fails fast otherwise.
+**Verification:** Coordinator startup runs `PRAGMA journal_mode` against the
+primary money database and route-snapshot journal fixtures, with sustained
+writers active.
+**Expected:** Both files use WAL mode, automatic checkpointing is disabled on
+writer handles, and each file has one separate bounded checkpoint worker.
+PASSIVE checkpoints keep live frames bounded during writes; TRUNCATE is
+idle-only and lock wait is capped.
 **Network:** Not required.
 **State reset:** Fresh fixture database.
 
