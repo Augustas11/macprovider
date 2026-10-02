@@ -122,10 +122,11 @@ pool_check S5-window-rotation-keeps-delegated-member "$run" --expect ns=settled,
 restart_member 5 "$(gargs 5 1000)"       # 20 chunks x 1 s: streams span the boundary
 $PM stage Q --unattest "$MEMBER_ACCT" >/dev/null
 v="$(sign_change Q unattest)"
-nb="$(at_boundary Q "$v" 8)"
+nb="$(at_boundary Q "$v" 30)"
 run="$(run_id s5unatt)"
 pool_traffic "$run" Q "$MG" llamacpp "st=2" 2 &
-bg=$!; sleep 25; wait $bg
+bg=$!; wait_run_route_snapshots "$run" 2 25 || result S5-attestation-removed-inflight-barrier FAIL "streams were not routed before the unattestation window activated"
+wait $bg
 pool_check S5-attestation-removed-inflight "$run" --zero-credit --min-routed 2
 run="$(run_id s5unattnew)"
 pool_traffic "$run" Q "$MG" llamacpp "ns=1,st=1" 1
@@ -138,7 +139,7 @@ restart_member 7 "$(gargs 7 1000)"
 systemctl stop e2e-fakeprov@3 e2e-fakeprov@5; sleep 3
 run="$(run_id s5rev)"
 pool_traffic "$run" Q "$MG" llamacpp "st=2" 2 &
-bg=$!; sleep 6
+bg=$!; wait_run_route_snapshots "$run" 2 30 || result S5-member-revoked-inflight-barrier FAIL "streams were not routed before member revocation"
 $PM event Q member_revoked --provider-id e2e-prov-7 >"$EV/member-revoked.txt" 2>&1
 wait $bg
 result S5-member-revoked-event INFO "$(head -c 200 "$EV/member-revoked.txt")"
@@ -155,10 +156,11 @@ e0="$(max_event)"
 restart_member 4 "$(nargs 1000)"
 $PM stage QN --remove mlx-n >/dev/null
 v="$(sign_change QN remove)"
-nb="$(at_boundary QN "$v" 8)"
+nb="$(at_boundary QN "$v" 30)"
 run="$(run_id s5rm)"
 pool_traffic "$run" QN "$MN" "" "st=2" 2 &
-bg=$!; sleep 25; wait $bg
+bg=$!; wait_run_route_snapshots "$run" 2 25 || result S5-entry-removed-inflight-barrier FAIL "streams were not routed before the removal window activated"
+wait $bg
 pool_check S5-entry-removed-inflight-settles "$run" --expect st=settled --min-settled 2 --pool-model-id "$MN" --rates $N_RATES \
   --usage-source coordinator_observed --provider e2e-prov-4
 run="$(run_id s5rmnew)"

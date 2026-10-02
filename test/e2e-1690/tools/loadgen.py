@@ -11,7 +11,7 @@ Kinds (each request carries a client X-Request-ID "<run>-<kind>-<n>"):
          (the gateway answers 502 invalid_provider_usage)
 Writes one JSON line per request to --out and prints a summary line.
 """
-import argparse, concurrent.futures, http.client, json, socket, ssl, sys, time, uuid
+import argparse, concurrent.futures, http.client, json, socket, ssl, sys, threading, time, uuid
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--run", required=True)
@@ -29,6 +29,9 @@ ap.add_argument("--header", action="append", default=[], help="extra request hea
 a = ap.parse_args()
 key = open(a.key_file).read().strip()
 ctx = ssl.create_default_context()
+started_lock = threading.Lock()
+started_path = a.out + ".started"
+open(started_path, "w").close()
 
 
 def conn():
@@ -57,6 +60,9 @@ def one(kind, n):
     # travels in the evidence file (and in the prompt).
     rid = str(uuid.uuid4())
     rec = {"rid": rid, "run": a.run, "kind": kind, "label": "%s-%s-%03d" % (a.run, kind, n), "t0": time.time()}
+    with started_lock:
+        with open(started_path, "a") as sf:
+            sf.write(json.dumps({k: rec[k] for k in ("rid", "run", "kind", "label", "t0")}, sort_keys=True) + "\n")
     try:
         if kind == "ns_dc":
             raw = socket.create_connection((a.host, a.port), timeout=30)

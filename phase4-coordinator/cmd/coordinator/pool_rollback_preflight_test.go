@@ -57,6 +57,34 @@ func TestPoolRollbackPreflightHonorsConfigOverlay(t *testing.T) {
 	}
 }
 
+func TestPoolRollbackPreflightAllowsEmptyPoolHistory(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "coordinator.db")
+	configPath := filepath.Join(dir, "coordinator.yaml")
+	reqStore, err := requestlog.OpenStore(dbPath)
+	if err != nil {
+		t.Fatalf("seed request log: %v", err)
+	}
+	if _, err := billing.NewStore(reqStore.DB()); err != nil {
+		t.Fatalf("seed billing schema: %v", err)
+	}
+	if _, err := trustpool.NewStore(reqStore.DB()); err != nil {
+		t.Fatalf("seed trustpool schema: %v", err)
+	}
+	_ = reqStore.Close()
+	if err := os.WriteFile(configPath, []byte("auth:\n  operator_key: 0123456789abcdefABCDEFghijklmnop\n  gateway_service_token: fedcba9876543210PONMLKJIHGFEDCBA\nstorage:\n  db_path: "+dbPath+"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	rc := runPoolRollbackPreflightIO([]string{"--config", configPath}, &stdout, &stderr, time.Now)
+	if rc != 0 {
+		t.Fatalf("rc=%d want 0\nstdout=%s\nstderr=%s", rc, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"rollback_blocked":false`) || !strings.Contains(stdout.String(), `"manifests":0`) {
+		t.Fatalf("empty history result missing clear verdict: stdout=%s", stdout.String())
+	}
+}
+
 // #1816 VM acceptance A-2: with a pool_model_entries/v1 core in the manifest
 // history, the preflight exited 0 and the rolled-back coordinator then
 // disabled every pool ("replay event 3: invalid manifest snapshot"). It must

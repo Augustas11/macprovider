@@ -25,7 +25,7 @@ fakeprov_args 3 "-omit-catalog -stream-chunks 20 -chunk-delay-ms 500 -nonstream-
 systemctl restart e2e-fakeprov@3; sleep 8
 run="$(run_id s6pause)"
 pool_traffic "$run" Q "$MG" llamacpp "st=1" 1 &
-bg=$!; sleep 3
+bg=$!; wait_run_route_snapshots "$run" 1 30 || result S6-pause-inflight-barrier FAIL "stream was not routed before pause"
 $PM lifecycle Q paused >"$EV/pause.txt" 2>&1 && result S6-pool-pause PASS "set-lifecycle paused: $(head -c 120 "$EV/pause.txt")" || result S6-pool-pause FAIL "$(head -c 300 "$EV/pause.txt")"
 wait $bg
 pool_check S6-pause-inflight-settles "$run" --expect st=settled --min-settled 1 --pool-model-id "$MG" --rates "$GR" --usage-source pool_operator_attested --provider e2e-prov-3

@@ -226,6 +226,64 @@ func TestPoolManifestLateEntryRebindAndRevocations(t *testing.T) {
 	}
 }
 
+// #1816 F3: a request can be selected on a prior byte-identical manifest
+// binding while the sweep appends pool_manifest_rebound before route snapshot
+// insert. The compare-and-insert guard must not refund that in-flight request
+// merely because the catalog_priced head advanced to an equivalent earning
+// pool head.
+func TestPoolManifestRouteSnapshotGuardAllowsEarningRebindRace(t *testing.T) {
+	f := newBindingFixture(t)
+	source := wirePoolSource(f)
+	source.set(poolSnapshot(testPoolA, 1, poolDigestV1, ggufPoolEntry()))
+	f.registerPoolSession(t, poolProvider, "llamacpp_loopback", modelidentity.GGUFFileV1, poolGGUFHash)
+	offer := f.offer(t, poolProvider, "g", "llamacpp_loopback", map[string]string{modelidentity.GGUFFileV1: poolGGUFHash})
+	f.reevaluate(poolProvider)
+	bound := f.latest(t, poolProvider, offer.CandidateID)
+	provider, ok := f.server.pool.Resolve(poolProvider, "")
+	if !ok || provider.ModelAdmissionCoordinatorEventID != bound.CoordinatorEventID {
+		t.Fatalf("session not bound to v1: provider=%+v bound=%+v", provider, bound)
+	}
+	expect := ModelAdmissionRouteExpectation{
+		ProviderID:         poolProvider,
+		CandidateID:        offer.CandidateID,
+		CoordinatorEventID: bound.CoordinatorEventID,
+		BindingGeneration:  provider.ModelAdmissionBindingGeneration,
+		SessionEpoch:       provider.ModelAdmissionSessionEpoch,
+	}
+
+	next := poolSnapshot(testPoolA, 2, poolDigestV2, ggufPoolEntry())
+	next.PriorManifestVersion = 1
+	next.PriorManifestCoreDigest = poolDigestV1
+	next.PriorModelEntries = []poolmanifest.PoolModelEntry{ggufPoolEntry()}
+	source.set(next)
+	f.reevaluate(poolProvider)
+	rebound := f.latest(t, poolProvider, offer.CandidateID)
+	if rebound.CoordinatorEventID == bound.CoordinatorEventID || rebound.ReasonCode != ModelAdmissionReasonPoolManifestRebound {
+		t.Fatalf("expected rebound head, got %+v", rebound)
+	}
+	inserted := false
+	if err := f.server.CompareAndInsertPoolModelAdmissionRouteSnapshot(context.Background(), expect, func() error {
+		inserted = true
+		return nil
+	}); err != nil || !inserted {
+		t.Fatalf("earning rebind race rejected: inserted=%v err=%v rebound=%+v", inserted, err, rebound)
+	}
+
+	removed := poolSnapshot(testPoolA, 3, strings.Repeat("3", 64))
+	source.set(removed)
+	f.reevaluate(poolProvider)
+	revoked := f.latest(t, poolProvider, offer.CandidateID)
+	if revoked.State != modelAdmissionRevoked {
+		t.Fatalf("entry removal did not revoke: %+v", revoked)
+	}
+	if err := f.server.CompareAndInsertPoolModelAdmissionRouteSnapshot(context.Background(), expect, func() error {
+		t.Fatal("revoked head must not insert")
+		return nil
+	}); !errors.Is(err, ErrModelAdmissionRouteDrift) {
+		t.Fatalf("revoked binding err=%v, want drift", err)
+	}
+}
+
 func TestPoolManifestRevocationReasons(t *testing.T) {
 	for name, tc := range map[string]struct {
 		mutate func(*trustpool.Snapshot)

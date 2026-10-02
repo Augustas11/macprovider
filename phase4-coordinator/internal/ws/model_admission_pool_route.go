@@ -161,32 +161,19 @@ func (s *Server) CompareAndInsertPoolModelAdmissionRouteSnapshot(ctx context.Con
 	if !ok {
 		return modelAdmissionRouteDriftError()
 	}
-	if provider.ModelAdmissionCandidateID != expect.CandidateID || provider.ModelAdmissionCoordinatorEventID != expect.CoordinatorEventID ||
-		provider.ModelAdmissionSessionEpoch != expect.SessionEpoch || s.modelAdmissionSections.get(expect.ProviderID).generation.Load() != expect.BindingGeneration {
+	if provider.ModelAdmissionCandidateID != expect.CandidateID || provider.ModelAdmissionSessionEpoch != expect.SessionEpoch ||
+		!s.poolModelRouteHeadStillEarns(ctx, provider, expect) {
 		return modelAdmissionRouteDriftError()
 	}
 	if provider.ModelAdmissionValidatedReleaseGeneration == 0 {
 		return ErrModelAdmissionRouteStale
 	}
-	headOK := func() (bool, error) {
-		head, found, err := s.modelAdmissions.LatestModelAdmissionStatus(ctx, expect.ProviderID, expect.CandidateID)
-		if err != nil {
-			return false, err
-		}
-		return found && head.CoordinatorEventID == expect.CoordinatorEventID && head.State == "catalog_priced", nil
-	}
 	var generation uint64
 	stale := false
-	var headErr error
 	s.withReleaseRead(func() {
 		generation = s.artifactIdentitySets.generationLocked()
-		var ok bool
-		ok, headErr = headOK()
-		stale = provider.ModelAdmissionValidatedReleaseGeneration != generation || !ok
+		stale = provider.ModelAdmissionValidatedReleaseGeneration != generation
 	})
-	if headErr != nil {
-		return headErr
-	}
 	if generation == 0 {
 		return ErrModelAdmissionRouteStale
 	}
@@ -197,22 +184,30 @@ func (s *Server) CompareAndInsertPoolModelAdmissionRouteSnapshot(ctx context.Con
 		return err
 	}
 	s.withReleaseRead(func() {
-		var ok bool
-		ok, headErr = headOK()
-		stale = s.artifactIdentitySets.generationLocked() != generation || !ok ||
-			s.modelAdmissionSections.get(expect.ProviderID).generation.Load() != expect.BindingGeneration
+		stale = s.artifactIdentitySets.generationLocked() != generation
 	})
-	if headErr != nil {
-		return headErr
-	}
 	if stale {
 		return modelAdmissionRouteDriftError()
 	}
 	after, ok := s.pool.Resolve(expect.ProviderID, "")
-	if !ok || after.ModelAdmissionCandidateID != expect.CandidateID || after.ModelAdmissionCoordinatorEventID != expect.CoordinatorEventID ||
-		after.ModelAdmissionBindingGeneration != provider.ModelAdmissionBindingGeneration || after.ModelAdmissionSessionEpoch != expect.SessionEpoch ||
-		after.ModelAdmissionValidatedReleaseGeneration != generation {
+	if !ok || after.ModelAdmissionCandidateID != expect.CandidateID || after.ModelAdmissionSessionEpoch != expect.SessionEpoch ||
+		after.ModelAdmissionValidatedReleaseGeneration != generation || !s.poolModelRouteHeadStillEarns(ctx, after, expect) {
 		return modelAdmissionRouteDriftError()
 	}
 	return nil
+}
+
+func (s *Server) poolModelRouteHeadStillEarns(ctx context.Context, provider pool.Provider, expect ModelAdmissionRouteExpectation) bool {
+	if provider.ModelAdmissionCandidateID != expect.CandidateID {
+		return false
+	}
+	head, found, err := s.modelAdmissions.LatestModelAdmissionStatus(ctx, expect.ProviderID, expect.CandidateID)
+	if err != nil || !found || head.State != "catalog_priced" {
+		return false
+	}
+	if head.CoordinatorEventID == expect.CoordinatorEventID {
+		return true
+	}
+	wiring := s.poolModels.Load()
+	return poolBindingEarningNow(wiring, expect.ProviderID, head, s.classifyCatalogPair, s.now())
 }

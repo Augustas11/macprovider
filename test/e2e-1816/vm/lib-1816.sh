@@ -103,6 +103,44 @@ pool_traffic() {
   [ -n "$engine" ] && hdr+=(--header "X-MacProvider-Engine-Select:$engine")
   MODEL="$model" traffic "$run" "$mix" "${hdr[@]}" --workers "$workers"
 }
+# wait_run_route_snapshots <run> <want> [max-seconds]: wait until loadgen has
+# started the intended requests and the coordinator has written their route
+# snapshots. This makes "in flight" scenarios mutate pool state only after the
+# target requests have actually routed, not after an arbitrary sleep.
+wait_run_route_snapshots() {
+  local run="$1" want="$2" max="${3:-45}" t=0 started=0 routed=0 ids
+  local started_file="$E2E_EVIDENCE/$run.load.jsonl.started"
+  while [ "$t" -le "$max" ]; do
+    if [ -s "$started_file" ]; then
+      ids="$(python3 - "$started_file" <<'PY'
+import json, sys
+rows = []
+for line in open(sys.argv[1]):
+    try:
+        r = json.loads(line)
+    except Exception:
+        continue
+    rid = r.get("rid")
+    if rid:
+        rows.append("'" + rid.replace("'", "''") + "'")
+print(",".join(rows))
+PY
+)"
+      started="$(python3 - "$started_file" <<'PY'
+import sys
+print(sum(1 for line in open(sys.argv[1]) if line.strip()))
+PY
+)"
+      if [ -n "$ids" ]; then
+        routed="$(csql "SELECT COUNT(*) FROM settlement_route_snapshots WHERE request_id IN ($ids)" 2>/dev/null || echo 0)"
+      fi
+    fi
+    [ "${started:-0}" -ge "$want" ] && [ "${routed:-0}" -ge "$want" ] && { log "run $run routed $routed/$want after ${t}s"; return 0; }
+    sleep 1; t=$((t + 1))
+  done
+  log "run $run did not route $want requests within ${max}s (started=${started:-0}, routed=${routed:-0})"
+  return 1
+}
 # pool_check <label> <run> <pool-oracle args...>: drain + base oracle + pool oracle.
 pool_check() {
   local label="$1" run="$2"; shift 2
