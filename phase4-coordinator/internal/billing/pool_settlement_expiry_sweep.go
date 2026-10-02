@@ -49,13 +49,11 @@ func poolSweepBackoffDelayMS(failures int) int64 {
 	return min(d, poolSweepBackoffMax).Milliseconds()
 }
 
-// SweepExpiredPoolSettlementVerdicts closes open pending verdicts of pool
-// attempts whose pending deadline has passed, exactly as a finality read
-// would (RequestSettlementFinality calls RecordMissingSettlementReceipt for
-// the same rows). A gateway retry can refund its reservation while the
-// coordinator attempt stays pending; no later finality read reaches that
-// attempt, so without this sweep its verdict never closes and
-// pool-rollback-preflight blocks forever (SPEC-022-R012.8).
+// SweepExpiredSettlementVerdicts closes every open pending verdict whose
+// pinned deadline has passed, exactly as a finality read would
+// (RequestSettlementFinality calls RecordMissingSettlementReceipt for the
+// same row). This completes SPEC-022-R008 independently of whether a gateway
+// retries finality or the route belonged to a provider pool.
 //
 // Unexpired verdicts are never selected, and a verdict that is already closed
 // is not selected again, so a pass is idempotent and changes nothing for an
@@ -68,7 +66,7 @@ func poolSweepBackoffDelayMS(failures int) int64 {
 // is reached within a bounded number of passes. A failed verdict is skipped
 // until its backoff expires, and a pass never attempts more than limit
 // finalizations.
-func (s *Store) SweepExpiredPoolSettlementVerdicts(ctx context.Context, nowUnixMS int64, limit int) (int, error) {
+func (s *Store) SweepExpiredSettlementVerdicts(ctx context.Context, nowUnixMS int64, limit int) (int, error) {
 	if limit <= 0 || limit > DefaultPoolSettlementExpirySweepLimit {
 		limit = DefaultPoolSettlementExpirySweepLimit
 	}
@@ -93,14 +91,14 @@ func (s *Store) SweepExpiredPoolSettlementVerdicts(ctx context.Context, nowUnixM
 SELECT v.pending_deadline_unix_ms, v.id, rs.id,
        rs.account_scope, v.account_scope_hash, v.request_id, v.attempt_n, v.provider_id
   FROM settlement_receipt_verdicts v
-  JOIN settlement_route_snapshots rs
-    ON rs.request_id = v.request_id
-   AND rs.attempt_n = v.attempt_n
-   AND rs.provider_id = v.provider_id
- WHERE v.settlement_outcome = ? AND v.closed = 0
-   AND v.pending_deadline_unix_ms > 0 AND v.pending_deadline_unix_ms <= ?
-   AND rs.pool_id IS NOT NULL AND rs.pool_id != ''
-   AND (v.pending_deadline_unix_ms, v.id, rs.id) > (?, ?, ?)
+	  JOIN settlement_route_snapshots rs
+	    ON rs.route_snapshot_digest = v.route_snapshot_digest
+	   AND rs.request_id = v.request_id
+	   AND rs.attempt_n = v.attempt_n
+	   AND rs.provider_id = v.provider_id
+	 WHERE v.settlement_outcome = ? AND v.closed = 0
+	   AND v.pending_deadline_unix_ms > 0 AND v.pending_deadline_unix_ms < ?
+	   AND (v.pending_deadline_unix_ms, v.id, rs.id) > (?, ?, ?)
  ORDER BY v.pending_deadline_unix_ms ASC, v.id ASC, rs.id ASC
  LIMIT ?`, SettlementOutcomePending, nowUnixMS, c.deadlineUnixMS, c.verdictID, c.snapshotID, limit)
 	if err != nil {
@@ -175,4 +173,10 @@ SELECT v.pending_deadline_unix_ms, v.id, rs.id,
 		st.cursor = page[processed-1].key
 	}
 	return closed, errors.Join(errs...)
+}
+
+// SweepExpiredPoolSettlementVerdicts is retained for callers compiled against
+// the v0.2.0 pool-specific API. Deadline quarantine is now route-agnostic.
+func (s *Store) SweepExpiredPoolSettlementVerdicts(ctx context.Context, nowUnixMS int64, limit int) (int, error) {
+	return s.SweepExpiredSettlementVerdicts(ctx, nowUnixMS, limit)
 }

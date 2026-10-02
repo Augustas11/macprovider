@@ -36,6 +36,7 @@ func settlementReceiptRetryable(err error) bool {
 type settlementReceiptRecoveryItem struct {
 	key     string
 	input   settlementReceiptRecoveryInput
+	store   *billing.Store
 	attempt int
 }
 
@@ -170,7 +171,7 @@ func (b *billingRecorder) deferredSettlementReceiptState(input settlementReceipt
 // the receipt verdict write encounters transient SQLite pressure. The signed
 // receipt remains memory-only and is retried through a bounded, coalesced
 // worker queue; raw receipt bytes are never written to a recovery table.
-func (s *Server) deferSettlementReceiptRecovery(input settlementReceiptRecoveryInput) bool {
+func (s *Server) deferSettlementReceiptRecovery(store *billing.Store, input settlementReceiptRecoveryInput) (accepted, queued bool) {
 	key := settlementReceiptRecoveryKey(input)
 	s.settlementReceiptRecoveryMu.Lock()
 	defer s.settlementReceiptRecoveryMu.Unlock()
@@ -178,7 +179,7 @@ func (s *Server) deferSettlementReceiptRecovery(input settlementReceiptRecoveryI
 		s.settlementReceiptRecoveryKeys = make(map[string]struct{})
 	}
 	if _, exists := s.settlementReceiptRecoveryKeys[key]; exists {
-		return true
+		return true, false
 	}
 	if len(s.settlementReceiptRecoveryKeys) >= settlementReceiptRecoveryMaxPending {
 		s.log.Error().
@@ -186,19 +187,20 @@ func (s *Server) deferSettlementReceiptRecovery(input settlementReceiptRecoveryI
 			Str("provider_id", input.identity.ProviderID).
 			Int("queue_limit", settlementReceiptRecoveryMaxPending).
 			Msg("settlement receipt recovery queue full")
-		return false
+		return false, false
 	}
 	s.settlementReceiptRecoveryKeys[key] = struct{}{}
 	s.settlementReceiptRecoveryPending = append(s.settlementReceiptRecoveryPending, settlementReceiptRecoveryItem{
 		key:     key,
 		input:   input,
+		store:   store,
 		attempt: 2,
 	})
 	if s.settlementReceiptRecoveryWorkers < settlementReceiptRecoveryMaxWorkers {
 		s.settlementReceiptRecoveryWorkers++
 		go s.drainSettlementReceiptRecoveries()
 	}
-	return true
+	return true, true
 }
 
 func (s *Server) drainSettlementReceiptRecoveries() {
@@ -230,6 +232,9 @@ func (s *Server) drainSettlementReceiptRecoveries() {
 			retryable = settlementReceiptRetryable(err)
 		}
 		if err == nil {
+			if item.store != nil {
+				item.store.EndSettlementReceiptRecovery(item.input.identity)
+			}
 			s.finishSettlementReceiptRecovery(item.key)
 			s.log.Info().
 				Str("request_id", item.input.identity.RequestID).
@@ -250,6 +255,9 @@ func (s *Server) drainSettlementReceiptRecoveries() {
 				Int("next_attempt", item.attempt).
 				Msg("settlement receipt recovery retry scheduled")
 			continue
+		}
+		if item.store != nil {
+			item.store.EndSettlementReceiptRecovery(item.input.identity)
 		}
 		s.finishSettlementReceiptRecovery(item.key)
 		s.log.Error().

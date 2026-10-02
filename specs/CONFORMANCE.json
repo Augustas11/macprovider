@@ -35,7 +35,7 @@
     {
       "spec_id": "SPEC-002",
       "title": "Phase 4 Coordinator: Mac Provider Request Router",
-      "version": "1.6.5",
+      "version": "1.6.6",
       "path": "specs/SPEC-002-coordinator.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -120,7 +120,7 @@
     {
       "spec_id": "SPEC-005",
       "title": "Billing, Settlement, and Provider Rewards",
-      "version": "0.6.11",
+      "version": "0.6.12",
       "path": "specs/SPEC-005-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -627,7 +627,7 @@
     {
       "spec_id": "SPEC-022",
       "title": "Verified model settlement",
-      "version": "v0.2.5",
+      "version": "v0.2.6",
       "path": "specs/SPEC-022-verified-model-settlement.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1680,12 +1680,18 @@
       "implementation": [
         "phase4-coordinator/cmd/coordinator/main.go:startMoneySQLiteWALCheckpointer",
         "phase4-coordinator/cmd/coordinator/main.go:startRouteSnapshotJournalWALCheckpointer",
+        "phase4-coordinator/cmd/coordinator/main.go:startRouteSnapshotJournalMirrorWithConfig",
+        "phase4-coordinator/cmd/coordinator/main.go:startSettlementReceiptAuditOutboxDrainerWithConfig",
+        "phase4-coordinator/internal/billing/store.go:ensureLedgerReconciliationRecoveryColumns",
         "phase4-coordinator/internal/sqliteutil/dsn.go:WithManualWALCheckpointPragmas"
       ],
       "tests": [
         "phase4-coordinator/cmd/coordinator/main_test.go:TestMoneySQLiteWALCheckpointerKeepsCheckpointingUnderSustainedWrites",
         "phase4-coordinator/cmd/coordinator/main_test.go:TestRouteSnapshotJournalWALCheckpointerUsesJournalComponent",
-        "phase4-coordinator/cmd/coordinator/main_test.go:TestMoneySQLiteIdleTruncateDoesNotHoldWriterPastBusyCap"
+        "phase4-coordinator/cmd/coordinator/main_test.go:TestMoneySQLiteIdleTruncateDoesNotHoldWriterPastBusyCap",
+        "phase4-coordinator/cmd/coordinator/main_test.go:TestRouteSnapshotJournalMirrorCapsBatchesPerRun",
+        "phase4-coordinator/cmd/coordinator/main_test.go:TestSettlementReceiptAuditOutboxDrainerRunsDuringContinuousTraffic",
+        "phase4-coordinator/internal/billing/store_test.go:TestRecoverySelectorQueryPlansUseTimeIDKeysets"
       ],
       "journeys": [],
       "evidence": [],
@@ -1693,7 +1699,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1793",
-        "rationale": "v1.6.5 assigns one bounded checkpoint owner to each money-path WAL governed here: the primary coordinator database and dedicated route-snapshot journal. Isolated audit and provider-event stores retain their existing lifecycle and are outside this requirement. Local implementation and regression coverage are mapped; sustained staging load and production rollout evidence remain pending."
+        "rationale": "v1.6.6 retains one bounded checkpoint owner per money-path WAL and adds continuously paced, outer-bounded evidence maintenance with indexed scans and explicit stats freshness. Local implementation and regression coverage are mapped; sustained staging throughput and buyer-latency evidence remain pending."
       }
     },
     {
@@ -5512,13 +5518,29 @@
       "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/billing/recovery.go:StartStartupScan",
+        "phase4-coordinator/internal/billing/recovery.go:nextRecoveryIDs",
+        "phase4-coordinator/internal/billing/settlement.go:RunMissedSettlements",
+        "phase4-coordinator/internal/billing/settlement.go:RunSettlement",
         "phase4-coordinator/cmd/coordinator/main.go:startMoneySQLiteWALCheckpointer",
         "phase4-coordinator/cmd/coordinator/main.go:startRouteSnapshotJournalWALCheckpointer"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/store_test.go:TestRecoverLedger_Idempotent",
+        "phase4-coordinator/internal/billing/recovery_chunk_test.go:TestRecoverLedgerCrashResumeUsesDurableCursor",
+        "phase4-coordinator/internal/billing/recovery_chunk_test.go:TestRecoverLedgerDenseWindowBoundsEveryWriterBatchByRows",
+        "phase4-coordinator/internal/billing/recovery_chunk_test.go:TestNextRecoveryIDsCanonicalizesVariableWidthCursorTimestamp",
+        "phase4-coordinator/internal/billing/recovery_chunk_test.go:TestRecoverLedgerFencesCompetingRunners",
+        "phase4-coordinator/internal/billing/recovery_chunk_test.go:TestRecoverLedgerReclaimsStaleCrashLease",
+        "phase4-coordinator/internal/billing/recovery_chunk_test.go:TestRecoverLedgerDrainsExpiredForeignSourceRunsBeforeRequestedSource",
+        "phase4-coordinator/internal/billing/recovery_chunk_test.go:TestRecoverLedgerMovingWindowFinishesDurableResumeBeforeFreshRun",
+        "phase4-coordinator/internal/billing/store_test.go:TestRecoverySelectorQueryPlansUseTimeIDKeysets",
         "phase4-coordinator/internal/billing/store_test.go:TestRecoverLedger_QuarantinesOrphanLedgerRows",
         "phase4-coordinator/internal/billing/store_test.go:TestWriteRequestLogWithIdentity_AllowsRecoveryAfterHotPathFailure",
+        "phase4-coordinator/internal/billing/settlement_jobs_test.go:TestRunSettlementCommitsEmptyWindowMarker",
+        "phase4-coordinator/internal/billing/settlement_jobs_test.go:TestRunMissedSettlementsReplaysWindowsInOrder",
+        "phase4-coordinator/internal/billing/settlement_jobs_test.go:TestRunMissedSettlementsBootstrapsEveryHistoricalLedgerWindow",
+        "phase4-coordinator/internal/billing/settlement_jobs_test.go:TestRunMissedSettlementsRepairsMarkerHoleBeforeLatestMarker",
+        "phase4-coordinator/internal/billing/settlement_jobs_test.go:TestRunMissedSettlementsCapsPassAndResumesThroughMarkers",
         "phase4-coordinator/cmd/coordinator/main_test.go:TestRouteSnapshotJournalWALCheckpointerUsesJournalComponent",
         "test/integration/buyer_crash_recovery_journey_test.go:TestJourneyBuyerCrashRecoveryIsolatedCandidate"
       ],
@@ -6470,6 +6492,7 @@
         "phase4-coordinator/internal/billing/route_snapshot_test.go:TestSettlementRouteSnapshotIsImmutable",
         "phase4-coordinator/internal/billing/route_snapshot_test.go:TestInsertRouteSnapshotJournalBuffersMainWriterPressure",
         "phase4-coordinator/internal/billing/route_snapshot_test.go:TestInsertRouteSnapshotJournalSerializesConcurrentWriters",
+        "phase4-coordinator/cmd/coordinator/main_test.go:TestRouteSnapshotJournalMirrorCapsBatchesPerRun",
         "phase4-coordinator/internal/buyer/billing_recorder_test.go:TestPersistSettlementAttemptOutputRouteMirrorPressureKeepsOutputBudget"
       ],
       "journeys": [
@@ -6489,6 +6512,7 @@
       "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/billing/settlement_receipts.go:IngestSettlementReceipt",
+        "phase4-coordinator/internal/billing/pool_settlement_expiry_sweep.go:SweepExpiredSettlementVerdicts",
         "phase4-coordinator/internal/billing/settlement_verifier.go:VerifySettlementReceipt"
       ],
       "tests": [
@@ -6599,6 +6623,10 @@
         "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022PayableCreditGateRequiresVerifiedReceipt",
         "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022PayableCreditGateBlocksQuarantineAndOverlap",
         "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022PayoutClaimRevalidatesSourceRows",
+        "phase4-coordinator/internal/billing/pool_settlement_expiry_sweep_test.go:TestSweepExpiredSettlementVerdictsClosesPoolAndNativeRows",
+        "phase4-coordinator/internal/billing/pool_settlement_expiry_sweep_test.go:TestSweepExpiredSettlementVerdictsDefersToObservedReceiptRecovery",
+        "phase4-coordinator/internal/billing/pool_settlement_expiry_sweep_test.go:TestObservedReceiptRecoveryFenceIsReferenceCounted",
+        "phase4-coordinator/internal/billing/pool_settlement_expiry_sweep_test.go:TestMissingVerdictDefersToObservedReceiptRecoveryBeforeFirstInsert",
         "test/integration/buyer_enforce_journey_test.go:TestJourneyBuyerEnforceIsolatedCandidate"
       ],
       "journeys": [
@@ -6706,11 +6734,14 @@
       "implementation": [
         "phase4-coordinator/internal/billing/settlement_receipts.go:insertSettlementReceiptVerdictAuditConn",
         "phase4-coordinator/internal/billing/settlement_receipts.go:DrainSettlementReceiptAuditOutbox",
+        "phase4-coordinator/internal/billing/settlement_receipts.go:func (s *Store) SettlementReceiptAuditOutboxStats",
+        "phase4-coordinator/internal/billing/settlement_receipts.go:PruneSettlementReceiptAuditOutbox",
         "phase4-coordinator/cmd/coordinator/main.go:startSettlementReceiptAuditOutboxDrainer"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/settlement_receipts_test.go:TestIngestSettlementReceiptPersistsVerifiedStateAndRedactedAudit",
-        "phase4-coordinator/cmd/coordinator/main_test.go:TestSettlementReceiptAuditOutboxIdleCatchupIsBounded",
+        "phase4-coordinator/cmd/coordinator/main_test.go:TestSettlementReceiptAuditOutboxDrainerRunsDuringContinuousTraffic",
+        "phase4-coordinator/internal/billing/store_test.go:TestBillingMigrationAddsSettlementReceiptAuditOutboxPoisonColumnsAfterLegacyTable",
         "phase4-coordinator/cmd/coordinator/main_test.go:TestSettlementReceiptAuditOutboxShutdownFlushDrains"
       ],
       "journeys": [
@@ -6803,6 +6834,7 @@
         "phase4-coordinator/internal/billing/settlement_undelivered_quarantine_test.go:TestQuarantinedUndeliveredCreditFinalityIsClosedQuarantined",
         "phase4-coordinator/internal/billing/settlement_undelivered_quarantine_test.go:TestEnforceCreditWithoutEvidenceClosesAfterSnapshotDeadline",
         "phase4-coordinator/internal/billing/settlement_undelivered_quarantine_test.go:TestEnforceCreditWithoutSnapshotClosesAfterGrace",
+        "phase4-coordinator/internal/billing/settlement_undelivered_quarantine_test.go:TestFallbackFinalityDoesNotBorrowEvidenceAcrossAttemptsOnSameProvider",
         "phase4-coordinator/internal/billing/settlement_undelivered_quarantine_test.go:TestEvidenceMissingRuleScope",
         "phase4-coordinator/internal/buyer/delivered_only_billing_test.go:TestHTTPNonStreamingNegotiatedCallerGetsMACdTrailerFinality",
         "phase4-coordinator/internal/buyer/delivered_only_billing_test.go:TestHTTPNonStreamingLegacyCallerGetsHeaderFinalityRecordedBeforeWrite",

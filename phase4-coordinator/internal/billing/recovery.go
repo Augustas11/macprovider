@@ -2,10 +2,12 @@ package billing
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"runtime"
 	"strings"
 	"time"
 
@@ -18,15 +20,32 @@ type RecoverInput struct {
 	Source   string
 }
 
-// recoverLedgerChunkWindow bounds how long one recovery transaction holds the
-// single money writer. Pearl measured ~2.4 ms per scanned row (48,774 rows in
-// ~2 min), so five minutes stays under the 6 s buyer write budget up to ~2k
-// requests per window (~1B tokens/day at the 2026-09 token/request ratio).
-// Beyond that, recovery moves with the ledger (docs/design/money-datastore-1b-tokens-per-day.md).
-const recoverLedgerChunkWindow = 5 * time.Minute
+const (
+	recoverLedgerBatchRows   = 128
+	recoverLedgerBatchBudget = 2 * time.Second
+	recoverLedgerLeaseTTL    = 15 * time.Second
+)
 
-// recoverLedgerBeforeChunkForTest lets tests fail a run between chunks.
-var recoverLedgerBeforeChunkForTest func(RecoverInput) error
+var (
+	ErrRecoveryInProgress = errors.New("ledger recovery already in progress")
+
+	recoverLedgerAfterClaimForTest func()
+	recoverLedgerAfterBatchForTest func(phase string, rows int, cursor int64) error
+)
+
+type recoveryRun struct {
+	id            int64
+	owner         string
+	phase         string
+	orphanCursor  recoveryCursor
+	requestCursor recoveryCursor
+	stats         recoveryStats
+}
+
+type recoveryCursor struct {
+	tsUTC string
+	id    int64
+}
 
 type recoveryStats struct {
 	scanned         int64
@@ -49,90 +68,335 @@ func (s *Store) RecoverLedger(ctx context.Context, in RecoverInput) (retErr erro
 	if in.Source == "" {
 		in.Source = "startup_scan"
 	}
-	started := time.Now().UTC()
-	// Chunks commit independently, so the run row is created first and each
-	// chunk's transaction advances its cumulative counters atomically with the
-	// ledger rows it wrote. A failed or interrupted run therefore still
-	// reports exactly the work that became durable.
-	runID, err := s.insertRecoveryRun(ctx, in, started)
+	requested := in
+	claimCtx, cancelClaim := context.WithTimeout(ctx, recoverLedgerBatchBudget)
+	run, in, err := s.acquireRecoveryRun(claimCtx, in)
+	cancelClaim()
 	if err != nil {
 		return err
 	}
-	var total recoveryStats
 	defer func() {
 		if retErr == nil {
 			return
 		}
-		_, _ = s.db.ExecContext(context.Background(), `
+		failCtx, cancelFail := context.WithTimeout(context.Background(), recoverLedgerBatchBudget)
+		defer cancelFail()
+		_, _ = s.db.ExecContext(failCtx, `
 UPDATE ledger_reconciliation_runs
-   SET status = 'failed', error = ?, finished_at_utc = ?
- WHERE id = ?`,
+   SET status = 'failed', error = ?, finished_at_utc = ?,
+       recovery_lease_owner = NULL, recovery_lease_expires_at_utc = NULL
+ WHERE id = ? AND recovery_lease_owner = ? AND status = 'running'`,
 			retErr.Error(),
 			time.Now().UTC().Format(time.RFC3339Nano),
-			runID,
+			run.id,
+			run.owner,
 		)
 	}()
-	for chunkFrom := in.ScanFrom.UTC(); chunkFrom.Before(in.ScanTo.UTC()); {
-		chunkTo := chunkFrom.Add(recoverLedgerChunkWindow)
-		if chunkTo.After(in.ScanTo.UTC()) {
-			chunkTo = in.ScanTo.UTC()
+	if recoverLedgerAfterClaimForTest != nil {
+		recoverLedgerAfterClaimForTest()
+	}
+
+	for run.phase == "orphan" {
+		batchCtx, cancel := context.WithTimeout(ctx, recoverLedgerBatchBudget)
+		ids, next, hasMore, err := s.nextRecoveryIDs(batchCtx, "ledger_request_credits", "ts_utc", run.orphanCursor, in)
+		if err != nil {
+			cancel()
+			return err
 		}
-		chunk := in
-		chunk.ScanFrom = chunkFrom
-		chunk.ScanTo = chunkTo
-		if recoverLedgerBeforeChunkForTest != nil {
-			if err := recoverLedgerBeforeChunkForTest(chunk); err != nil {
+		affected, err := s.recoverOrphanBatch(batchCtx, in, run, ids, next, hasMore)
+		cancel()
+		if err != nil {
+			return err
+		}
+		run.orphanCursor = next
+		run.stats.quarantined += affected
+		if !hasMore {
+			run.phase = "request"
+		}
+		if recoverLedgerAfterBatchForTest != nil {
+			if err := recoverLedgerAfterBatchForTest("orphan", len(ids), run.orphanCursor.id); err != nil {
 				return err
 			}
 		}
-		// SPEC-022-R012.3/R006 pool decisions are pre-read per chunk, then
-		// fenced again inside that chunk's writer transaction.
-		poolAttested, err := s.recoveryPoolAttestedRoutes(ctx, chunk)
+	}
+
+	for run.phase == "request" {
+		batchCtx, cancel := context.WithTimeout(ctx, recoverLedgerBatchBudget)
+		ids, next, hasMore, err := s.nextRecoveryIDs(batchCtx, "request_log", "ts_utc", run.requestCursor, in)
+		if err != nil {
+			cancel()
+			return err
+		}
+		poolAttested, err := s.recoveryPoolAttestedRoutes(batchCtx, ids)
+		if err == nil {
+			var stats recoveryStats
+			stats, err = s.recoverLedgerRequestBatch(batchCtx, in, ids, next, poolAttested, run, hasMore)
+			if err == nil {
+				run.stats = run.stats.add(stats)
+			}
+		}
+		cancel()
 		if err != nil {
 			return err
 		}
-		stats, err := s.recoverLedgerChunk(ctx, chunk, poolAttested, runID, total)
-		if err != nil {
-			return err
+		run.requestCursor = next
+		if !hasMore {
+			run.phase = "complete"
 		}
-		total = total.add(stats)
-		chunkFrom = chunkTo
-		if chunkFrom.Before(in.ScanTo.UTC()) {
-			runtime.Gosched()
+		if recoverLedgerAfterBatchForTest != nil {
+			if err := recoverLedgerAfterBatchForTest("request", len(ids), run.requestCursor.id); err != nil {
+				return err
+			}
 		}
 	}
-	_, err = s.db.ExecContext(ctx, `
-UPDATE ledger_reconciliation_runs
-   SET status = 'complete', finished_at_utc = ?
- WHERE id = ?`,
-		time.Now().UTC().Format(time.RFC3339Nano),
-		runID,
-	)
-	return err
+	if in.Source != requested.Source || !in.ScanFrom.Equal(requested.ScanFrom) || !in.ScanTo.Equal(requested.ScanTo) {
+		// A scheduled invocation first drains the durable cursor from an older
+		// failed/crashed run, then covers the newly requested moving window.
+		return s.RecoverLedger(ctx, requested)
+	}
+	return nil
 }
 
-func (s *Store) insertRecoveryRun(ctx context.Context, in RecoverInput, started time.Time) (int64, error) {
-	res, err := s.db.ExecContext(ctx, `
+func (s *Store) acquireRecoveryRun(ctx context.Context, in RecoverInput) (recoveryRun, RecoverInput, error) {
+	ownerBytes := make([]byte, 16)
+	if _, err := rand.Read(ownerBytes); err != nil {
+		return recoveryRun{}, in, fmt.Errorf("recovery lease owner: %w", err)
+	}
+	owner := hex.EncodeToString(ownerBytes)
+	now := time.Now().UTC()
+	leaseExpires := now.Add(recoverLedgerLeaseTTL).Format(time.RFC3339Nano)
+	var run recoveryRun
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		var activeID int64
+		err := conn.QueryRowContext(ctx, `
+SELECT id
+  FROM ledger_reconciliation_runs
+ WHERE status='running'
+   AND run_type IN ('startup_scan','nightly_reconcile','admin_reconcile')
+   AND recovery_lease_expires_at_utc IS NOT NULL
+   AND julianday(recovery_lease_expires_at_utc) > julianday(?)
+ ORDER BY id DESC LIMIT 1`, now.Format(time.RFC3339Nano)).Scan(&activeID)
+		if err == nil {
+			return ErrRecoveryInProgress
+		}
+		if err != sql.ErrNoRows {
+			return err
+		}
+
+		fromUTC := sqliteTimeText(in.ScanFrom)
+		toUTC := sqliteTimeText(in.ScanTo)
+		var resumedSource, resumedFromUTC, resumedToUTC string
+		err = conn.QueryRowContext(ctx, `
+SELECT id, run_type, from_utc, to_utc, recovery_phase,
+       recovery_orphan_cursor_ts_utc, recovery_orphan_cursor_id,
+       recovery_request_cursor_ts_utc, recovery_request_cursor_id,
+       request_log_rows_scanned, missing_credit_rows_created,
+       orphan_credit_rows_quarantined, buyer_equivalent_credits, provider_gross_credits
+  FROM ledger_reconciliation_runs
+ WHERE run_type IN ('startup_scan','nightly_reconcile','admin_reconcile')
+   AND status IN ('running','failed') AND recovery_phase != 'complete'
+ ORDER BY id ASC LIMIT 1`).Scan(
+			&run.id, &resumedSource, &resumedFromUTC, &resumedToUTC, &run.phase,
+			&run.orphanCursor.tsUTC, &run.orphanCursor.id,
+			&run.requestCursor.tsUTC, &run.requestCursor.id,
+			&run.stats.scanned, &run.stats.created, &run.stats.quarantined,
+			&run.stats.buyerEquivalent, &run.stats.providerGross,
+		)
+		if err != nil && err != sql.ErrNoRows {
+			return err
+		}
+		if err == nil {
+			resumedFrom, parseErr := time.Parse(time.RFC3339Nano, resumedFromUTC)
+			if parseErr != nil {
+				return fmt.Errorf("parse recovery resume from_utc: %w", parseErr)
+			}
+			resumedTo, parseErr := time.Parse(time.RFC3339Nano, resumedToUTC)
+			if parseErr != nil {
+				return fmt.Errorf("parse recovery resume to_utc: %w", parseErr)
+			}
+			in.Source, in.ScanFrom, in.ScanTo = resumedSource, resumedFrom.UTC(), resumedTo.UTC()
+			res, err := conn.ExecContext(ctx, `
+UPDATE ledger_reconciliation_runs
+   SET status='running', error=NULL, finished_at_utc=NULL,
+       recovery_lease_owner=?, recovery_lease_expires_at_utc=?
+ WHERE id=? AND (status='failed' OR recovery_lease_expires_at_utc IS NULL
+                  OR julianday(recovery_lease_expires_at_utc) <= julianday(?))`,
+				owner, leaseExpires, run.id, now.Format(time.RFC3339Nano))
+			if err != nil {
+				return err
+			}
+			claimed, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if claimed != 1 {
+				return ErrRecoveryInProgress
+			}
+			run.owner = owner
+			return nil
+		}
+
+		res, err := conn.ExecContext(ctx, `
 INSERT INTO ledger_reconciliation_runs (
     run_type, from_utc, to_utc, request_log_rows_scanned,
     missing_credit_rows_created, orphan_credit_rows_quarantined,
     buyer_equivalent_credits, provider_gross_credits,
     reconciliation_delta_credits, started_at_utc, finished_at_utc, status,
-    error, created_at_utc
-) VALUES (?, ?, ?, 0, 0, 0, 0, 0, 0, ?, NULL, 'running', NULL, ?)`,
-		in.Source,
-		in.ScanFrom.UTC().Format(time.RFC3339Nano),
-		in.ScanTo.UTC().Format(time.RFC3339Nano),
-		started.Format(time.RFC3339Nano),
-		started.Format(time.RFC3339Nano),
-	)
+	    error, recovery_phase, recovery_orphan_cursor_ts_utc, recovery_orphan_cursor_id,
+	    recovery_request_cursor_ts_utc, recovery_request_cursor_id,
+	    recovery_lease_owner, recovery_lease_expires_at_utc, created_at_utc
+) VALUES (?, ?, ?, 0, 0, 0, 0, 0, 0, ?, NULL, 'running', NULL,
+	          'orphan', ?, 0, ?, 0, ?, ?, ?)`,
+			in.Source, fromUTC, toUTC, now.Format(time.RFC3339Nano),
+			fromUTC, fromUTC, owner, leaseExpires, now.Format(time.RFC3339Nano),
+		)
+		if err != nil {
+			return err
+		}
+		run.id, err = res.LastInsertId()
+		if err != nil {
+			return err
+		}
+		run.owner = owner
+		run.phase = "orphan"
+		run.orphanCursor.tsUTC = fromUTC
+		run.requestCursor.tsUTC = fromUTC
+		return nil
+	})
+	return run, in, err
+}
+
+func (s *Store) nextRecoveryIDs(ctx context.Context, table, timeColumn string, cursor recoveryCursor, in RecoverInput) ([]int64, recoveryCursor, bool, error) {
+	index := ""
+	switch table {
+	case "ledger_request_credits":
+		index = "idx_lrc_recovery_ts_id"
+	case "request_log":
+		index = "idx_request_log_recovery_ts_id"
+	default:
+		return nil, cursor, false, fmt.Errorf("unsupported recovery table %q", table)
+	}
+	if cursor.tsUTC == "" {
+		cursor.tsUTC = sqliteTimeText(in.ScanFrom)
+	} else if cursor.id == 0 {
+		// A zero-ID cursor is a scan boundary (including legacy migration
+		// state), not a selected row. Canonicalize that boundary once. Cursors
+		// copied from selected rows must remain byte-exact so even malformed
+		// historical timestamps advance lexically instead of being reselected.
+		parsed, err := time.Parse(time.RFC3339Nano, cursor.tsUTC)
+		if err != nil {
+			return nil, cursor, false, fmt.Errorf("parse recovery cursor timestamp: %w", err)
+		}
+		cursor.tsUTC = sqliteTimeText(parsed)
+	}
+	query := `SELECT id, ` + timeColumn + ` FROM ` + table + ` INDEXED BY ` + index +
+		` WHERE ` + sqliteTimeRange(timeColumn) + ` AND (` + timeColumn + `, id) > (?, ?) ORDER BY ` + timeColumn + `, id LIMIT ?`
+	rows, err := s.db.QueryContext(ctx, query, sqliteTimeText(in.ScanFrom), sqliteTimeText(in.ScanTo), cursor.tsUTC, cursor.id, recoverLedgerBatchRows+1)
+	if err != nil {
+		return nil, cursor, false, err
+	}
+	defer rows.Close()
+	ids := make([]int64, 0, recoverLedgerBatchRows+1)
+	cursors := make([]recoveryCursor, 0, recoverLedgerBatchRows+1)
+	for rows.Next() {
+		var next recoveryCursor
+		if err := rows.Scan(&next.id, &next.tsUTC); err != nil {
+			return nil, cursor, false, err
+		}
+		ids = append(ids, next.id)
+		cursors = append(cursors, next)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, cursor, false, err
+	}
+	hasMore := len(ids) > recoverLedgerBatchRows
+	if hasMore {
+		ids = ids[:recoverLedgerBatchRows]
+		cursors = cursors[:recoverLedgerBatchRows]
+	}
+	if len(cursors) > 0 {
+		cursor = cursors[len(cursors)-1]
+	}
+	return ids, cursor, hasMore, nil
+}
+
+func recoveryIDClause(ids []int64) (string, []any) {
+	if len(ids) == 0 {
+		return "NULL", nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	return strings.Join(placeholders, ","), args
+}
+
+func (s *Store) recoverOrphanBatch(ctx context.Context, in RecoverInput, run recoveryRun, ids []int64, next recoveryCursor, hasMore bool) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
 		return 0, err
 	}
-	return res.LastInsertId()
+	defer func() { _ = tx.Rollback() }()
+	if err := verifyRecoveryLeaseTx(ctx, tx, run); err != nil {
+		return 0, err
+	}
+	now := time.Now().UTC()
+	clause, args := recoveryIDClause(ids)
+	updateArgs := []any{now.Format(time.RFC3339Nano)}
+	updateArgs = append(updateArgs, args...)
+	orphanRes, err := tx.ExecContext(ctx, `
+UPDATE ledger_request_credits
+   SET quarantined = 1,
+       quarantine_reason = COALESCE(quarantine_reason, 'missing_request_log'),
+       updated_at_utc = ?
+ WHERE quarantined = 0
+   AND settled = 0
+   AND settlement_id IS NULL
+   AND id IN (`+clause+`)
+	AND NOT EXISTS (
+       SELECT 1
+         FROM request_log rl
+         JOIN ledger_provider_identity_snapshots lpis
+           ON lpis.request_id = rl.request_id
+          AND lpis.provider_assigned_id = rl.provider_assigned_id
+          AND lpis.attempt_n = ledger_request_credits.attempt_n
+          AND lpis.provider_id = ledger_request_credits.provider_id
+        WHERE rl.request_id = ledger_request_credits.request_id
+          AND `+requestLogAttemptOrdinalSQL("rl")+` = ledger_request_credits.attempt_n
+	)`, updateArgs...)
+	if err != nil {
+		return 0, err
+	}
+	affected, err := orphanRes.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	phase := "orphan"
+	if !hasMore {
+		phase = "request"
+	}
+	res, err := tx.ExecContext(ctx, `
+UPDATE ledger_reconciliation_runs
+   SET recovery_phase=?, recovery_orphan_cursor_ts_utc=?, recovery_orphan_cursor_id=?,
+       orphan_credit_rows_quarantined=?, recovery_lease_expires_at_utc=?
+ WHERE id=? AND recovery_lease_owner=? AND status='running'`,
+		phase, next.tsUTC, next.id, run.stats.quarantined+affected,
+		now.Add(recoverLedgerLeaseTTL).Format(time.RFC3339Nano), run.id, run.owner)
+	if err != nil {
+		return 0, err
+	}
+	if err := requireRecoveryLeaseUpdate(res); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return affected, nil
 }
 
-func (s *Store) recoverLedgerChunk(ctx context.Context, in RecoverInput, poolAttested map[SettlementReceiptIdentity]recoveryPoolAttestation, runID int64, prior recoveryStats) (recoveryStats, error) {
+func (s *Store) recoverLedgerRequestBatch(ctx context.Context, in RecoverInput, ids []int64, next recoveryCursor, poolAttested map[SettlementReceiptIdentity]recoveryPoolAttestation, run recoveryRun, hasMore bool) (recoveryStats, error) {
 	// SPEC-022-R012.3 and the R006 label are decided before the transaction
 	// opens: the durable pool authority reads this same database.
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
@@ -140,7 +404,11 @@ func (s *Store) recoverLedgerChunk(ctx context.Context, in RecoverInput, poolAtt
 		return recoveryStats{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := verifyRecoveryLeaseTx(ctx, tx, run); err != nil {
+		return recoveryStats{}, err
+	}
+	nowTime := time.Now().UTC()
+	now := nowTime.Format(time.RFC3339Nano)
 	// SPEC-002 v1.5.0 / issue #211 money-path defense-in-depth: the
 	// orphan-detection subquery and the `prior` / `same` counts below
 	// scope by (account_id, request_id) using SQLite `IS` semantics
@@ -157,35 +425,7 @@ func (s *Store) recoverLedgerChunk(ctx context.Context, in RecoverInput, poolAtt
 	// misclassified as cross-account retries. NULL-account_id
 	// legacy rows cluster with NULL-account_id rows only —
 	// backwards-compatible with pre-v1.5.0 single-account behavior.
-	orphanRes, err := tx.ExecContext(ctx, `
-UPDATE ledger_request_credits
-   SET quarantined = 1,
-       quarantine_reason = COALESCE(quarantine_reason, 'missing_request_log'),
-       updated_at_utc = ?
- WHERE quarantined = 0
-    AND settled = 0
-    AND settlement_id IS NULL
-    AND `+sqliteTimeRange("ts_utc")+`
-	AND NOT EXISTS (
-       SELECT 1
-         FROM request_log rl
-         JOIN ledger_provider_identity_snapshots lpis
-           ON lpis.request_id = rl.request_id
-          AND lpis.provider_assigned_id = rl.provider_assigned_id
-          AND lpis.attempt_n = ledger_request_credits.attempt_n
-          AND lpis.provider_id = ledger_request_credits.provider_id
-        WHERE rl.request_id = ledger_request_credits.request_id
-          -- SPEC-002 v1.5.2 / SPEC-005 v0.3.3 (issue #168): prefer
-          -- the persisted monotonic rl.attempt_n exact match when
-          -- non-NULL; fall back to the v0.3.1 id-ASC derivation for
-          -- legacy NULL rows during the rollout window. Both paths
-          -- compute identical ordinals.
-          AND `+requestLogAttemptOrdinalSQL("rl")+` = ledger_request_credits.attempt_n
-	)`, now, sqliteTimeText(in.ScanFrom), sqliteTimeText(in.ScanTo))
-	if err != nil {
-		return recoveryStats{}, err
-	}
-	orphanRows, _ := orphanRes.RowsAffected()
+	clause, queryArgs := recoveryIDClause(ids)
 	rows, err := tx.QueryContext(ctx, `
 SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_assigned_id,
        rl.prompt_tokens, rl.cached_prompt_tokens, rl.completion_tokens, rl.estimated_completion_tokens,
@@ -198,18 +438,15 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
        -- rollout window. Both paths compute identical ordinals.
        `+requestLogAttemptOrdinalSQL("rl")+` AS attempt_n
   FROM request_log rl
- WHERE `+sqliteTimeRange("rl.ts_utc")+`
-   AND rl.provider_assigned_id IS NOT NULL
-   AND rl.status != 503
- ORDER BY rl.ts_utc, rl.id`,
-		sqliteTimeText(in.ScanFrom),
-		sqliteTimeText(in.ScanTo),
-	)
+	 WHERE rl.id IN (`+clause+`)
+	   AND rl.provider_assigned_id IS NOT NULL
+	   AND rl.status != 503
+	 ORDER BY rl.ts_utc, rl.id`, queryArgs...)
 	if err != nil {
 		return recoveryStats{}, err
 	}
 	defer rows.Close()
-	scanned, created, quarantined := int64(0), int64(0), orphanRows
+	scanned, created, quarantined := int64(0), int64(0), int64(0)
 	buyerEquivalent, providerGross := int64(0), int64(0)
 	for rows.Next() {
 		var rlID int64
@@ -486,30 +723,74 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 		buyerEquivalent: buyerEquivalent,
 		providerGross:   providerGross,
 	}
-	cumulative := prior.add(stats)
-	if _, err := tx.ExecContext(ctx, `
+	cumulative := run.stats.add(stats)
+	phase, status := "request", "running"
+	var finishedAt, leaseOwner, leaseExpires any = nil, run.owner, nowTime.Add(recoverLedgerLeaseTTL).Format(time.RFC3339Nano)
+	if !hasMore {
+		phase, status = "complete", "complete"
+		finishedAt = now
+		leaseOwner, leaseExpires = nil, nil
+	}
+	res, err := tx.ExecContext(ctx, `
 UPDATE ledger_reconciliation_runs
    SET request_log_rows_scanned = ?,
        missing_credit_rows_created = ?,
        orphan_credit_rows_quarantined = ?,
        buyer_equivalent_credits = ?,
        provider_gross_credits = ?,
-       reconciliation_delta_credits = ?
- WHERE id = ?`,
+       reconciliation_delta_credits = ?,
+       recovery_request_cursor_ts_utc = ?, recovery_request_cursor_id = ?,
+       recovery_phase = ?, status = ?,
+       finished_at_utc = ?, recovery_lease_owner = ?, recovery_lease_expires_at_utc = ?
+ WHERE id = ? AND recovery_lease_owner = ? AND status = 'running'`,
 		cumulative.scanned,
 		cumulative.created,
 		cumulative.quarantined,
 		cumulative.buyerEquivalent,
 		cumulative.providerGross,
 		cumulative.providerGross-cumulative.buyerEquivalent,
-		runID,
-	); err != nil {
+		next.tsUTC, next.id, phase, status, finishedAt, leaseOwner, leaseExpires, run.id, run.owner,
+	)
+	if err != nil {
+		return recoveryStats{}, err
+	}
+	if err := requireRecoveryLeaseUpdate(res); err != nil {
 		return recoveryStats{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return recoveryStats{}, err
 	}
 	return stats, nil
+}
+
+func verifyRecoveryLeaseTx(ctx context.Context, tx *sql.Tx, run recoveryRun) error {
+	var owner, status string
+	if err := tx.QueryRowContext(ctx, `
+SELECT COALESCE(recovery_lease_owner, ''), status
+  FROM ledger_reconciliation_runs
+	WHERE id=?
+	  AND recovery_lease_expires_at_utc IS NOT NULL
+	  AND julianday(recovery_lease_expires_at_utc) > julianday(?)`, run.id, sqliteTimeText(time.Now().UTC())).Scan(&owner, &status); err != nil {
+		if err == sql.ErrNoRows {
+			return ErrRecoveryInProgress
+		}
+		return err
+	}
+	if owner != run.owner || status != "running" {
+		return ErrRecoveryInProgress
+	}
+	return nil
+}
+
+func requireRecoveryLeaseUpdate(res sql.Result) error {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return ErrRecoveryInProgress
+	}
+	return nil
 }
 
 // recoveredLoopbackAttemptBillable applies the hot path's loopback rule to a
@@ -557,30 +838,28 @@ type recoveryPoolAttestation struct {
 }
 
 // recoveryPoolAttestedRoutes finds, outside any transaction, the loopback
-// attempts in the recovery window that have no ledger row and whose route
+// attempts in one bounded recovery batch that have no ledger row and whose route
 // snapshot satisfies SPEC-022-R012: every R-12.1 member for the recorded
 // runtime, enforce mode, the durable pool authority (R-12.3), and a verified
 // R006 label against the settlement-time pool view. It returns the snapshot
 // digest each was verified against. Any attempt that cannot be verified is
 // left out, so recovery zero-bills it.
-func (s *Store) recoveryPoolAttestedRoutes(ctx context.Context, in RecoverInput) (map[SettlementReceiptIdentity]recoveryPoolAttestation, error) {
+func (s *Store) recoveryPoolAttestedRoutes(ctx context.Context, ids []int64) (map[SettlementReceiptIdentity]recoveryPoolAttestation, error) {
+	clause, args := recoveryIDClause(ids)
 	rows, err := s.db.QueryContext(ctx, `
 SELECT DISTINCT COALESCE(rl.account_id, ''), lpis.request_id, lpis.attempt_n, lpis.provider_id, lpis.runtime_source
   FROM ledger_provider_identity_snapshots lpis
   JOIN request_log rl
     ON rl.request_id = lpis.request_id
    AND rl.provider_assigned_id = lpis.provider_assigned_id
- WHERE `+sqliteTimeRange("rl.ts_utc")+`
-   AND lpis.runtime_source IN ('ollama_loopback','lmstudio_loopback','llamacpp_loopback','openai_compatible_loopback','mlxlm_loopback','omlx_loopback')
+	 WHERE rl.id IN (`+clause+`)
+	   AND lpis.runtime_source IN ('ollama_loopback','lmstudio_loopback','llamacpp_loopback','openai_compatible_loopback','mlxlm_loopback','omlx_loopback')
    AND NOT EXISTS (
        SELECT 1 FROM ledger_request_credits lrc
         WHERE lrc.request_id = lpis.request_id
           AND lrc.attempt_n = lpis.attempt_n
           AND lrc.provider_id = lpis.provider_id
-   )`,
-		sqliteTimeText(in.ScanFrom),
-		sqliteTimeText(in.ScanTo),
-	)
+	   )`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -706,7 +985,7 @@ INSERT OR IGNORE INTO ledger_request_credits (
 		attemptN,
 		providerID,
 		nullString(assignedID),
-		ts.UTC().Format(time.RFC3339Nano),
+		sqliteTimeText(ts),
 		model,
 		status,
 		boolInt(stream),

@@ -1,7 +1,17 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.6.11 (2026-10-02, bounded SQLite evidence maintenance)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.5, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.39, SPEC-024 v0.2.7 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.18.0 / SPEC-005-R011 / SPEC-005-R013 (SPEC-023-R019) is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
+**Version:** 0.6.12 (2026-10-02, crash-safe bounded maintenance)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.6, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.39, SPEC-024 v0.2.7 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.18.0 / SPEC-005-R011 / SPEC-005-R013 (SPEC-023-R019) is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
+
+**Change log v0.6.12 (2026-10-02, issue #1793):** Recovery uses durable,
+atomically advanced bounded progress with overlap fencing; weekly settlement
+records every completed window in the settlement transaction and catches up
+missed closed windows after restart. Receipt-audit drain, exact/stale stats,
+and retention pruning are independently paced and indexed. Expired pending
+receipt verdicts are terminalized for both pool and non-pool attempts through
+the existing per-row verifier; a signed receipt already observed and queued
+for bounded persistence recovery fences that missing-receipt writer until the
+retry commits or exhausts.
 
 **Change log v0.6.11 (2026-10-02, issue #1793):** The primary money database
 and dedicated route-snapshot journal each own one bounded WAL checkpoint loop
@@ -1623,6 +1633,20 @@ The job runs as an in-process coordinator goroutine.
 The boundary is UTC Monday 00:00.
 settlement.cadence_days defaults to 7.
 No cron or external scheduler is introduced in v1.
+Every attempted closed window MUST have a durable completion marker committed
+in the same transaction as its payout/source-row effects, including empty and
+below-threshold windows. Startup and every scheduler wake MUST replay unmarked
+closed cadence windows in chronological order. A transient catch-up failure
+MUST retry before the next weekly boundary. The marker guides scheduling only;
+it MUST NOT remove the existing idempotent direct-rerun behavior or prevent
+below-threshold credits from rolling forward.
+When upgrading a database with no markers, the first closed boundary after the
+oldest ledger credit anchors replay; an empty ledger bootstraps only the latest
+closed window.
+Catch-up MUST inspect the complete cadence sequence from that anchor so a hole
+before a later marker is repaired. Each invocation MUST process at most four
+unmarked windows; when more remain, the scheduler MUST retry within one minute
+through the committed markers rather than hold the money writer indefinitely.
 
 ### 7.2 Threshold
 
@@ -1851,6 +1875,21 @@ For a clean range, delta_gross_credits MUST equal 0 when provider gross credits 
 Provider/operator split deltas MUST be checked separately by verifying provider_credits + operator_credits == gross_credits for each row.
 A non-zero gross delta MUST be recorded in `/admin/ledger/reconcile` output and MUST fail AC-H005.
 `buyer_equivalent_credits` is the SPEC-005-internal buyer-equivalent total computed from `request_log` via the section  6 D8 matrix and the same section  5.3 formula. SPEC-005 does NOT read SPEC-006 usage tables. AC-H005 verifies symmetry of the SPEC-005 model only; cross-process consistency between SPEC-005 and SPEC-006 is a separate H-005-EXT verification owned by the operator outside SPEC-005 v0.3.
+
+Startup, nightly, and administrative recovery MUST share one durable overlap
+fence. Each writer transaction MUST have a fixed row ceiling and a short time
+budget, including orphan quarantine. Each source table and persisted cursor
+MUST use canonical fixed-width UTC text and an indexed `(ts_utc, id)` keyset so
+selector cost does not grow with history outside the requested window. The
+upgrade migration MUST re-normalize timestamps written by an older recovery
+writer after the prior normalization pass. A selected-row cursor MUST preserve
+the source timestamp bytes so malformed historical rows still advance in the
+same lexical order; only a zero-ID scan-boundary cursor may be canonicalized.
+The recovery phase and both cursor members MUST
+advance in the same transaction as the ledger effects and cumulative counters.
+After a crash or timeout, a later owner MAY reclaim an expired lease and MUST
+resume from the last committed cursor; it MUST NOT restart committed work from
+the beginning of the range.
 
 ### 10.4 Deterministic algorithm
 

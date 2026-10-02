@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func TestSweepExpiredPoolSettlementVerdictsUnblocksRollbackPreflight(t *testing.T) {
+func TestSweepExpiredSettlementVerdictsClosesPoolAndNativeRows(t *testing.T) {
 	ctx := context.Background()
 	pooled := r012SettlementInput(t, "receipt_tuple_v4_normal_done", true)
 	native := r012SettlementInput(t, "receipt_tuple_v4_buyer_cancel_prefix", false)
@@ -55,12 +55,26 @@ func TestSweepExpiredPoolSettlementVerdictsUnblocksRollbackPreflight(t *testing.
 
 	// Unexpired: nothing is swept, nothing is written, preflight still blocks.
 	beforeVerdicts, beforeAudit := verdictRows(), auditRows()
-	n, err := store.SweepExpiredPoolSettlementVerdicts(ctx, deadline-50, 0)
+	n, err := store.SweepExpiredSettlementVerdicts(ctx, deadline-50, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if n != 0 || poolClosed() != 0 || verdictRows() != beforeVerdicts || auditRows() != beforeAudit {
 		t.Fatalf("unexpired sweep closed=%d pool_closed=%d, want no change", n, poolClosed())
+	}
+	n, err = store.SweepExpiredSettlementVerdicts(ctx, deadline, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 || poolClosed() != 0 {
+		t.Fatalf("exact-deadline sweep closed=%d pool_closed=%d, want pending", n, poolClosed())
+	}
+	exact, found, err := store.RequestSettlementFinality(ctx, native.AccountScope, native.RequestID, nativeDeadline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || exact.Closed || exact.Outcome != SettlementOutcomePending || exact.PendingAttempts != 1 {
+		t.Fatalf("exact-deadline finality=%+v found=%v, want one pending attempt", exact, found)
 	}
 	blocked, err := CheckPoolRollbackPreflight(ctx, store.db, time.UnixMilli(deadline+time.Hour.Milliseconds()))
 	if err != nil {
@@ -70,18 +84,18 @@ func TestSweepExpiredPoolSettlementVerdictsUnblocksRollbackPreflight(t *testing.
 		t.Fatalf("expired open pool verdict before sweep: %+v, want blocked", blocked)
 	}
 
-	// Expired: the pool verdict is finalized as a finality read would, and
-	// preflight clears. The expired native verdict is left to its own reader.
+	// Expired: both pool and native verdicts are finalized as a finality read
+	// would, and pool preflight clears.
 	sweepAt := max(deadline, nativeDeadline) + 1000
-	n, err = store.SweepExpiredPoolSettlementVerdicts(ctx, sweepAt, 0)
+	n, err = store.SweepExpiredSettlementVerdicts(ctx, sweepAt, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 || poolClosed() != 1 {
-		t.Fatalf("expired sweep closed=%d pool_closed=%d, want 1/1", n, poolClosed())
+	if n != 2 || poolClosed() != 1 {
+		t.Fatalf("expired sweep closed=%d pool_closed=%d, want 2/1", n, poolClosed())
 	}
-	if got := scalar(t, store.db, `SELECT closed FROM settlement_receipt_verdicts WHERE request_id = ?`, native.RequestID); got != 0 {
-		t.Fatalf("native verdict closed=%d, want untouched", got)
+	if got := scalar(t, store.db, `SELECT closed FROM settlement_receipt_verdicts WHERE request_id = ?`, native.RequestID); got != 1 {
+		t.Fatalf("native verdict closed=%d, want terminal", got)
 	}
 	var outcome string
 	if err := store.db.QueryRow(`SELECT settlement_outcome FROM settlement_receipt_verdicts WHERE request_id = ?`, pooled.RequestID).Scan(&outcome); err != nil {
@@ -100,7 +114,7 @@ func TestSweepExpiredPoolSettlementVerdictsUnblocksRollbackPreflight(t *testing.
 
 	// Idempotent: a second pass selects nothing and writes nothing.
 	afterVerdicts, afterAudit := verdictRows(), auditRows()
-	n, err = store.SweepExpiredPoolSettlementVerdicts(ctx, sweepAt+time.Hour.Milliseconds(), 0)
+	n, err = store.SweepExpiredSettlementVerdicts(ctx, sweepAt+time.Hour.Milliseconds(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,6 +129,113 @@ func TestSweepExpiredPoolSettlementVerdictsUnblocksRollbackPreflight(t *testing.
 	}
 	if !finality.Closed || finality.PendingAttempts != 0 {
 		t.Fatalf("finality after sweep: %+v, want closed", finality)
+	}
+}
+
+func TestSweepExpiredSettlementVerdictsDefersToObservedReceiptRecovery(t *testing.T) {
+	ctx := context.Background()
+	input := r012SettlementInput(t, "receipt_tuple_v4_normal_done", false)
+	_, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	seedSettlementReceiptEvidence(t, store, input)
+	id := settlementIdentityFromInput(input)
+	deadline := input.TerminalStateTSUnixMS + input.RouteSnapshot.PendingDeadlineSeconds*1000
+	if _, err := store.RecordMissingSettlementReceipt(ctx, SettlementReceiptMissingInput{
+		SettlementReceiptIdentity: id,
+		NowUnixMS:                 deadline - 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	store.now = func() time.Time { return time.UnixMilli(deadline - 1) }
+	if observedAt := store.ObserveSettlementReceiptForRecovery(id); observedAt != deadline-1 {
+		t.Fatalf("atomic receipt observation=%d want %d", observedAt, deadline-1)
+	}
+	n, err := store.SweepExpiredSettlementVerdicts(ctx, deadline+1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 || scalar(t, store.db, `SELECT closed FROM settlement_receipt_verdicts WHERE request_id = ?`, input.RequestID) != 0 {
+		t.Fatalf("sweep closed=%d while observed receipt recovery was pending", n)
+	}
+	state, err := store.IngestSettlementReceipt(ctx, SettlementReceiptIngestionInput{
+		SettlementReceiptIdentity: id,
+		Header:                    input.Header,
+		ProviderReceiptPubkey:     input.ProviderReceiptPubkey,
+	}.WithReceivedAt(input.ReceiptReceivedUnixMS))
+	store.EndSettlementReceiptRecovery(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Closed || state.SettlementOutcome != SettlementOutcomeVerified {
+		t.Fatalf("recovered receipt state=%+v, want verified terminal", state)
+	}
+}
+
+func TestObservedReceiptRecoveryFenceIsReferenceCounted(t *testing.T) {
+	ctx := context.Background()
+	input := r012SettlementInput(t, "receipt_tuple_v4_normal_done", false)
+	_, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	seedSettlementReceiptEvidence(t, store, input)
+	id := settlementIdentityFromInput(input)
+	deadline := input.TerminalStateTSUnixMS + input.RouteSnapshot.PendingDeadlineSeconds*1000
+	if _, err := store.RecordMissingSettlementReceipt(ctx, SettlementReceiptMissingInput{
+		SettlementReceiptIdentity: id,
+		NowUnixMS:                 deadline - 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	store.BeginSettlementReceiptRecovery(id)
+	store.BeginSettlementReceiptRecovery(id)
+	store.EndSettlementReceiptRecovery(id)
+	if !store.settlementReceiptRecoveryPending(id) {
+		t.Fatal("first completion released a fence still owned by another queued receipt")
+	}
+	if n, err := store.SweepExpiredSettlementVerdicts(ctx, deadline+1, 0); err != nil || n != 0 {
+		t.Fatalf("sweep while one recovery remains closed=%d err=%v", n, err)
+	}
+	store.EndSettlementReceiptRecovery(id)
+	if store.settlementReceiptRecoveryPending(id) {
+		t.Fatal("final completion did not release receipt recovery fence")
+	}
+	if n, err := store.SweepExpiredSettlementVerdicts(ctx, deadline+1, 0); err != nil || n != 1 {
+		t.Fatalf("sweep after all recoveries finished closed=%d err=%v, want 1", n, err)
+	}
+}
+
+func TestMissingVerdictDefersToObservedReceiptRecoveryBeforeFirstInsert(t *testing.T) {
+	ctx := context.Background()
+	input := r012SettlementInput(t, "receipt_tuple_v4_normal_done", false)
+	_, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	seedSettlementReceiptEvidence(t, store, input)
+	id := settlementIdentityFromInput(input)
+	deadline := input.TerminalStateTSUnixMS + input.RouteSnapshot.PendingDeadlineSeconds*1000
+
+	store.BeginSettlementReceiptRecovery(id)
+	finality, found, err := store.RequestSettlementFinality(ctx, input.AccountScope, input.RequestID, deadline+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || finality.Closed || finality.Outcome != SettlementOutcomePending || finality.PendingAttempts != 1 {
+		t.Fatalf("finality during first-insert recovery=%+v found=%v, want one pending attempt", finality, found)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_receipt_verdicts WHERE request_id = ?`, input.RequestID); got != 0 {
+		t.Fatalf("missing-receipt finality inserted %d verdict rows during signed receipt recovery", got)
+	}
+	state, err := store.IngestSettlementReceipt(ctx, SettlementReceiptIngestionInput{
+		SettlementReceiptIdentity: id,
+		Header:                    input.Header,
+		ProviderReceiptPubkey:     input.ProviderReceiptPubkey,
+	}.WithReceivedAt(input.ReceiptReceivedUnixMS))
+	store.EndSettlementReceiptRecovery(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Closed || state.SettlementOutcome != SettlementOutcomeVerified {
+		t.Fatalf("recovered first receipt state=%+v, want verified terminal", state)
 	}
 }
 
@@ -172,7 +293,7 @@ func clonePoolVerdict(t *testing.T, store *Store, from, requestID string, deadli
 	clone("settlement_receipt_verdicts", map[string]string{"request_id": "?", "pending_deadline_unix_ms": "?"}, requestID, deadlineUnixMS)
 }
 
-func TestSweepExpiredPoolSettlementVerdictsFailingBacklogCannotStarve(t *testing.T) {
+func TestSweepExpiredSettlementVerdictsFailingBacklogCannotStarve(t *testing.T) {
 	ctx := context.Background()
 	pooled := r012SettlementInput(t, "receipt_tuple_v4_normal_done", true)
 	native := r012SettlementInput(t, "receipt_tuple_v4_buyer_cancel_prefix", false)
@@ -215,13 +336,13 @@ func TestSweepExpiredPoolSettlementVerdictsFailingBacklogCannotStarve(t *testing
 		}
 		return fmt.Sprintf("closed=%d outcome=%s received=%d updated=%v", closed, outcome, received, updated)
 	}
-	nativeBefore, unexpiredBefore := rowState(native.RequestID), rowState(unexpiredID)
+	unexpiredBefore := rowState(unexpiredID)
 	pooledClosed := func() int64 {
 		return scalar(t, store.db, `SELECT closed FROM settlement_receipt_verdicts WHERE request_id = ?`, pooled.RequestID)
 	}
 	pass := func(now int64, limit int) (int, int) {
 		t.Helper()
-		n, err := store.SweepExpiredPoolSettlementVerdicts(ctx, now, limit)
+		n, err := store.SweepExpiredSettlementVerdicts(ctx, now, limit)
 		f := poolSweepFailures(err)
 		if n+f > DefaultPoolSettlementExpirySweepLimit {
 			t.Fatalf("pass attempted %d finalizations, hard cap is %d", n+f, DefaultPoolSettlementExpirySweepLimit)
@@ -235,8 +356,8 @@ func TestSweepExpiredPoolSettlementVerdictsFailingBacklogCannotStarve(t *testing
 		t.Fatalf("pass 1 closed=%d failed=%d pooled_closed=%d, want 0/100/0", n, f, pooledClosed())
 	}
 	// Pass 2: the cursor moves past them, so the valid verdict finalizes.
-	if n, f := pass(sweepAt, 0); n != 1 || f != failing-DefaultPoolSettlementExpirySweepLimit || pooledClosed() != 1 {
-		t.Fatalf("pass 2 closed=%d failed=%d pooled_closed=%d, want 1/50/1", n, f, pooledClosed())
+	if n, f := pass(sweepAt, 0); n != 2 || f != failing-DefaultPoolSettlementExpirySweepLimit || pooledClosed() != 1 {
+		t.Fatalf("pass 2 closed=%d failed=%d pooled_closed=%d, want 2/50/1", n, f, pooledClosed())
 	}
 	// Pass 3: the cursor wrapped, but every failed row is in backoff.
 	if n, f := pass(sweepAt+1, 0); n != 0 || f != 0 {
@@ -257,9 +378,9 @@ func TestSweepExpiredPoolSettlementVerdictsFailingBacklogCannotStarve(t *testing
 		t.Fatalf("pass 6 closed=%d failed=%d, want 0/0 in doubled backoff", n, f)
 	}
 
-	// Non-pool and unexpired rows were never touched.
-	if got := rowState(native.RequestID); got != nativeBefore {
-		t.Fatalf("native verdict changed: %s -> %s", nativeBefore, got)
+	// The native row closes while the unexpired pool row stays untouched.
+	if got := scalar(t, store.db, `SELECT closed FROM settlement_receipt_verdicts WHERE request_id = ?`, native.RequestID); got != 1 {
+		t.Fatalf("native verdict closed=%d, want terminal", got)
 	}
 	if got := rowState(unexpiredID); got != unexpiredBefore {
 		t.Fatalf("unexpired pool verdict changed: %s -> %s", unexpiredBefore, got)

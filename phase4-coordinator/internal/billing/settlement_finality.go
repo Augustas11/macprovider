@@ -76,7 +76,7 @@ func enforceCreditWithoutEvidence(row requestSettlementVerdictRow, creditTS stri
 	}
 	row.receiptResult = SettlementReceiptResultInconclusive
 	deadline := ts.Add(grace).UnixMilli()
-	if nowUnixMS < deadline {
+	if nowUnixMS <= deadline {
 		row.settlementOutcome = SettlementOutcomePending
 		row.reason = "settlement_evidence_pending"
 		row.pendingDeadlineUnixMS = deadline
@@ -201,11 +201,11 @@ func (s *Store) RequestSettlementFinality(ctx context.Context, accountScope, req
 	changed := false
 	pending := make([]requestSettlementVerdictRow, 0, len(missing))
 	for _, row := range missing {
-		if row.pendingDeadlineUnixMS <= 0 || nowUnixMS < row.pendingDeadlineUnixMS {
+		if row.pendingDeadlineUnixMS <= 0 || nowUnixMS <= row.pendingDeadlineUnixMS {
 			pending = append(pending, row)
 			continue
 		}
-		if _, err := s.RecordMissingSettlementReceipt(ctx, SettlementReceiptMissingInput{
+		state, err := s.RecordMissingSettlementReceipt(ctx, SettlementReceiptMissingInput{
 			SettlementReceiptIdentity: SettlementReceiptIdentity{
 				AccountScope: accountScope,
 				RequestID:    requestID,
@@ -213,13 +213,18 @@ func (s *Store) RequestSettlementFinality(ctx context.Context, accountScope, req
 				ProviderID:   row.providerID,
 			},
 			NowUnixMS: nowUnixMS,
-		}); err != nil {
+		})
+		if err != nil {
 			return RequestSettlementFinality{}, false, err
+		}
+		if !state.Closed && state.SettlementOutcome == SettlementOutcomePending {
+			pending = append(pending, row)
+			continue
 		}
 		changed = true
 	}
 	for _, row := range rows {
-		if row.settlementOutcome == SettlementOutcomePending && !row.closed && row.pendingDeadlineUnixMS > 0 && nowUnixMS >= row.pendingDeadlineUnixMS {
+		if row.settlementOutcome == SettlementOutcomePending && !row.closed && row.pendingDeadlineUnixMS > 0 && nowUnixMS > row.pendingDeadlineUnixMS {
 			_, err := s.RecordMissingSettlementReceipt(ctx, SettlementReceiptMissingInput{
 				SettlementReceiptIdentity: SettlementReceiptIdentity{
 					AccountScope: accountScope,
@@ -470,6 +475,7 @@ SELECT rs.attempt_n, rs.provider_id,
            SELECT lrc.quarantine_reason
              FROM ledger_request_credits lrc
             WHERE lrc.request_id = rs.request_id
+              AND lrc.attempt_n = rs.attempt_n
               AND lrc.provider_id = rs.provider_id
               AND lrc.settlement_account_scope_hash = ?
               AND lrc.quarantined = 1
@@ -480,6 +486,7 @@ SELECT rs.attempt_n, rs.provider_id,
            SELECT MIN(lrc.ts_utc)
              FROM ledger_request_credits lrc
             WHERE lrc.request_id = rs.request_id
+              AND lrc.attempt_n = rs.attempt_n
               AND lrc.provider_id = rs.provider_id
               AND lrc.settlement_account_scope_hash = ?
               AND lrc.settlement_policy_mode = 'enforce'), '')
@@ -554,11 +561,14 @@ SELECT lrc.attempt_n, lrc.provider_id, lrc.ts_utc,
    AND lrc.settlement_account_scope_hash = ?
    AND lrc.settlement_policy_mode = 'enforce'
    AND NOT EXISTS (SELECT 1 FROM settlement_route_snapshots rs
-                    WHERE rs.account_scope = ? AND rs.request_id = lrc.request_id AND rs.provider_id = lrc.provider_id)
+                    WHERE rs.account_scope = ? AND rs.request_id = lrc.request_id
+                      AND rs.attempt_n = lrc.attempt_n AND rs.provider_id = lrc.provider_id)
    AND NOT EXISTS (SELECT 1 FROM settlement_attempt_outputs sao
-                    WHERE sao.account_scope = ? AND sao.request_id = lrc.request_id AND sao.provider_id = lrc.provider_id)
+                    WHERE sao.account_scope = ? AND sao.request_id = lrc.request_id
+                      AND sao.attempt_n = lrc.attempt_n AND sao.provider_id = lrc.provider_id)
    AND NOT EXISTS (SELECT 1 FROM settlement_receipt_verdicts srv
-                    WHERE srv.account_scope_hash = ? AND srv.request_id = lrc.request_id AND srv.provider_id = lrc.provider_id)
+                    WHERE srv.account_scope_hash = ? AND srv.request_id = lrc.request_id
+                      AND srv.attempt_n = lrc.attempt_n AND srv.provider_id = lrc.provider_id)
  ORDER BY lrc.attempt_n ASC, lrc.provider_id ASC`,
 		UndeliveredSettlementQuarantineReasons[0], UndeliveredSettlementQuarantineReasons[1], UndeliveredSettlementQuarantineReasons[2],
 		requestID, scopeHash, accountScope, accountScope, scopeHash)
