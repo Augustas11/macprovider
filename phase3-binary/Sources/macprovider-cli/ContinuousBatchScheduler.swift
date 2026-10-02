@@ -1627,6 +1627,10 @@ actor ContinuousBatchScheduler {
     #if DEBUG || MACPROVIDER_LAB_HARNESS
     private var labNativeMTPLoadGateRecorder: NativeMTPLoadGateRecorder?
     private var labNativeMTPProposalOverride: NativeMTPLabProposalOverride?
+    /// Lab-only batch-composition fence. The journey harness installs the exact
+    /// request order before submitting a batch; the pump stays stopped until
+    /// every named row is queued, then consumes them in that order.
+    private var labBatchComposition: [String]?
     #endif
     private var nativeMTPLoadGateCalmRounds = 0
     static let nativeMTPLoadGateReleaseRounds = 8
@@ -2388,6 +2392,23 @@ actor ContinuousBatchScheduler {
     }
 
     private func ensurePump() {
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if let requestIDs = labBatchComposition {
+            let positions = Dictionary(uniqueKeysWithValues: requestIDs.enumerated().map {
+                ($0.element, $0.offset)
+            })
+            guard requestIDs.allSatisfy({ id in waiting.contains(where: { $0.id == id }) }) else {
+                return
+            }
+            waiting.sort { lhs, rhs in
+                let left = positions[lhs.id] ?? Int.max
+                let right = positions[rhs.id] ?? Int.max
+                if left != right { return left < right }
+                return admissionPrecedes(lhs.id, rhs.id)
+            }
+            labBatchComposition = nil
+        }
+        #endif
         guard !pumpRunning else { return }
         pumpRunning = true
         Task { await self.pumpUntilIdle() }
@@ -3592,6 +3613,20 @@ actor ContinuousBatchScheduler {
     /// boundary step. Never installed outside lab builds.
     func installLabNativeMTPProposalOverride(_ override: NativeMTPLabProposalOverride?) {
         labNativeMTPProposalOverride = override
+    }
+
+    /// Lab-only: hold the pump until every named request is queued, then order
+    /// those rows exactly as supplied. Only an idle scheduler may install it.
+    func installLabBatchComposition(_ requestIDs: [String]?) -> Bool {
+        guard waiting.isEmpty, activePrompt.isEmpty, activeDecode.isEmpty,
+              admittingRequests.isEmpty, !pumpRunning else { return false }
+        guard let requestIDs else {
+            labBatchComposition = nil
+            return true
+        }
+        guard !requestIDs.isEmpty, Set(requestIDs).count == requestIDs.count else { return false }
+        labBatchComposition = requestIDs
+        return true
     }
     #endif
 

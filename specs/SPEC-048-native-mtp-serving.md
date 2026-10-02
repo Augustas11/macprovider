@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.21
+**Version:** 0.1.22
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.21",
+  "version": "0.1.22",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -349,10 +349,12 @@ is blocked until a reviewed upstream API is available. A commit pin may be
 used only under an explicitly reviewed immutable-dependency exception; a
 tagged release is the default production requirement.
 
-The first such exception is closed and exact:
+The campaign's immutable-dependency exception is exact. The candidate pin may
+be built and tested while the review gate below is pending, but it MUST NOT be
+signed, activated, or treated as production-qualified until that gate closes:
 
 - repository: `https://github.com/Augustas11/mlx-swift-lm.git`;
-- revision: `ef4ff8568c38c640bc90a8176dc3acfe943a288d`;
+- revision: `ca29e9544777068a0b53aad87310ff1cfaf3fd1d`;
 - upstream base: `ml-explore/mlx-swift-lm@bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57`
   (`3.31.4`);
 - reviewed surface: `MTPKVCacheStorage`, `MTPKVCacheTransaction`,
@@ -374,15 +376,19 @@ The first such exception is closed and exact:
   `MTPPackedStatefulDrafterModel`, `MTPPackedDrafterAdvanceRow`,
   `MTPPackedDrafterAdvanceResult`, `MTPPackedDrafterError`, and the Qwen 3.5
   `advanceAndProposePacked` implementation that advances every native row's
-  drafter state and proposes its next token in one drafter forward;
-- review date and owner: `2026-09-28`, `@Augustas11`;
+  drafter state and proposes its next token in one drafter forward; plus the
+  Qwen3.5/3.6 sparse-MoE fused small-token path, including its exact affine
+  quantization-layout gate, per-call scratch, overlapping-call safety, and
+  stock fallback above seven flattened tokens;
+- review date and owner: `2026-10-02`, `@Augustas11`;
 - mandatory exception re-review date: `2026-12-27`;
 - review gate: upstream-focused build-tests, MacProvider qualification and
   real-hardware tests, plus an independent adversarial review with zero
-  Critical, High, or Medium findings; the prior transaction surface passed
-  15/15 focused upstream tests, the expanded surface compiled in the complete
-  upstream test bundle, and the real Qwen 3.5 target/MTP tuple passed the
-  Mac Studio ordinary-versus-native-MTP parity test; and
+  Critical, High, or Medium findings. The prior transaction surface passed
+  15/15 focused upstream tests and real Qwen target/MTP parity. The fused-MoE
+  production reduction compiles in the focused upstream test bundle; its
+  Mac Studio runtime tests, the re-derived R015 matrix, and the frozen-diff
+  audit remain required before this candidate revision is production-qualified;
 - removal trigger: replace the fork pin with the first reviewed upstream tag
   that contains equivalent standalone-checkpoint loading, public transaction,
   packed target-verification, and hybrid recurrent-cache surfaces and passes
@@ -1249,6 +1255,18 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.22 (2026-10-02)** — Moves the immutable fork candidate to
+  `ca29e9544777068a0b53aad87310ff1cfaf3fd1d` and binds qualification to its
+  production-reduced Qwen3.5/3.6 A3B fused small-token MoE path (#1770). The
+  path is default-on only for the exact affine layout at flattened token counts
+  `1...7`, is batch-invariant and overlap-safe, and falls back to stock at
+  `8+`; the environment value `0`/`false`/`no`/`off` is the emergency kill
+  switch. Because the fused accumulation order can flip bf16 near-tied
+  argmaxes, every ordinary oracle, R015 baseline, journey, and release for the
+  tuple must use the same setting. Stock-baseline evidence cannot qualify the
+  fused pin. The candidate still requires Studio runtime tests, a re-derived
+  R015 result, and the frozen-diff audit before signing or activation.
+
 - **0.1.21 (2026-10-02)** — MTP-15 right-sizes the mandatory R015 matrix to
   the cells that answer its two questions (#1770). Native-eligible cells
   (every slot count up to the frozen `max_native_active_rows`) run prompt
@@ -1414,7 +1432,23 @@ requests.
   overload). The evidence records 15/15 upstream Xcode qualification tests and
   independent adversarial review with 0 Critical, 0 High, and 0 Medium findings.
   The exception remains default-off and makes no scheduler, artifact, signed
-  journey, hardware, release, or production enablement claim.
+journey, hardware, release, or production enablement claim.
+
+For the exact Qwen3.5/3.6 A3B affine layout recognized by the pinned fork, the
+fused sparse-MoE path is the ordinary and native-MTP kernel baseline at a
+flattened token count of `1...7`; calls at `8` or more tokens use the stock
+path. `MLX_LM_QWEN35_FUSED_MOE=0` (and the equivalent case-insensitive
+`false`, `no`, or `off`) is the process-level emergency kill switch, not a
+separately qualified performance baseline. The fused path preserves expert
+selection and is batch-invariant, but its bf16 accumulation order can change
+an argmax at near-tied logits. That is the same bounded numerical-drift class
+already documented for stock batched quantized kernels: every R005 oracle,
+R015 ordinary baseline, serving journey, and signed tuple using this pin MUST
+run the same fused-kernel setting. Evidence comparing fused native MTP against
+stock ordinary decode is invalid. Widening the layout or token bound requires a
+new R003 review and new R015 evidence. The dependency-revision change also
+changes `KVBuildIdentity`; prior disk-cold-tier entries are expected misses and
+MUST NOT be relabeled as belonging to the new revision.
 - **0.1.2 (2026-09-28)** — Extends the exact immutable-dependency exception
   to the reviewed public packed target-verification facade at fork revision
   `31223c97262bd5123e76055c5662a42677936eea`. The exception remains

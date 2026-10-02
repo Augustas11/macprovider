@@ -6392,6 +6392,13 @@ actor ModelRuntime: ModelRuntimeServing {
         return true
     }
 
+    /// Lab-only journey hook: freeze one exact batch composition before any
+    /// prefill/decode work starts. Returns false unless the scheduler is idle.
+    func installLabBatchComposition(_ requestIDs: [String]?) async -> Bool {
+        guard let continuousBatchScheduler else { return false }
+        return await continuousBatchScheduler.installLabBatchComposition(requestIDs)
+    }
+
     /// Lab-only token-level probe through the attached scheduler, the same
     /// request shape `native_mtp_selftest_v1` submits: a native integrity
     /// probe at a fixed depth (exempt from the load gate), or an ordinary

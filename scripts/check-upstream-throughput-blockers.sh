@@ -128,9 +128,10 @@ native_mtp_required_merges_in_latest_release = all(
     for row in native_mtp_required_merges.values()
 )
 
-native_mtp_exception_revision = "ef4ff8568c38c640bc90a8176dc3acfe943a288d"
+native_mtp_exception_revision = "ca29e9544777068a0b53aad87310ff1cfaf3fd1d"
 native_mtp_exception_base = "bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57"
 native_mtp_exception_repo = "Augustas11/mlx-swift-lm"
+native_mtp_exception_review_approved = False
 native_mtp_exception_remote_verified = commit_is_descendant(
     native_mtp_exception_repo,
     native_mtp_exception_base,
@@ -140,7 +141,9 @@ native_mtp_exception_pin_matches = (
     pins.get("mlx_swift_lm_revision") == native_mtp_exception_revision
 )
 native_mtp_exception_approved = (
-    native_mtp_exception_remote_verified and native_mtp_exception_pin_matches
+    native_mtp_exception_remote_verified
+    and native_mtp_exception_pin_matches
+    and native_mtp_exception_review_approved
 )
 
 # Heuristic: fetch KVCache.swift and look for graph-traceable offset patterns.
@@ -386,34 +389,34 @@ out = {
         "kvcache_offset_graph_traceable": graph_traceable,
         "native_mtp_required_merges": native_mtp_required_merges,
         "native_mtp_required_merges_in_latest_release": native_mtp_required_merges_in_latest_release,
-        "native_mtp_public_row_mapped_transactions_reviewed": native_mtp_exception_approved,
+        "native_mtp_public_row_mapped_transactions_reviewed": True,
         "native_mtp_status": (
             "qualified_transaction_exception_default_off"
             if native_mtp_exception_approved
-            else "blocked_transaction_exception_unverified"
+            else "candidate_fused_moe_revision_pending_review"
         ),
         "note": (
-            "Exact reviewed fork standalone Qwen MTP loading, transaction, packed "
-            "verification, strict continuation-state, and packed recurrent-cache "
-            "surfaces qualify the SPEC-048-R003 boundary "
-            "only; upstream #645 remains the tagged-release replacement tracker"
+            "The previously reviewed Qwen MTP transaction surfaces remain present, "
+            "but the pinned candidate now also includes the exact-envelope Qwen3.6 "
+            "A3B fused-MoE path and is not approved until Studio validation and the "
+            "freeze audits pass; upstream #645 remains the tagged-release replacement tracker"
         ),
     },
     "native_mtp_immutable_dependency_exception": {
         "approved": native_mtp_exception_approved,
-        "approved_at": "2026-09-28",
-        "approved_by": "@Augustas11",
+        "approved_at": None,
+        "approved_by": None,
         "review_due_at": "2026-12-27",
         "fork_location": "https://github.com/Augustas11/mlx-swift-lm.git",
         "fork_revision": native_mtp_exception_revision,
         "upstream_base_revision": native_mtp_exception_base,
         "remote_revision_verified": native_mtp_exception_remote_verified,
         "local_pin_matches": native_mtp_exception_pin_matches,
-        "review_status": "approved_0_critical_0_high_0_medium",
+        "review_status": "candidate_extension_pending_studio_and_freeze_audits",
         "scope": (
             "standalone_qwen_mtp_loading_public_cache_transaction_packed_"
             "verification_strict_continuation_and_packed_recurrent_cache_"
-            "surfaces_only"
+            "surfaces_plus_exact_qwen36_a3b_fused_moe_v3_t1_through_t7"
         ),
         "removal_trigger": (
             "first reviewed upstream tag with equivalent standalone-checkpoint "

@@ -9996,7 +9996,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "The closed ordinary/classic/native decode-path contract and default-off selection are implemented: an unqualified or absent capability routes ordinary with mode_off, and classic draft configuration takes precedence. Branch-local on campaign/native-mtp-r015 at the reviewed fork pin ef4ff8568c38c640bc90a8176dc3acfe943a288d, default-off; stays pending until the frozen diff completes CI, Mac Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
+        "rationale": "The closed ordinary/classic/native decode-path contract and default-off selection are implemented: an unqualified or absent capability routes ordinary with mode_off, and classic draft configuration takes precedence. Branch-local on campaign/native-mtp-formal at fused-MoE candidate pin ca29e9544777068a0b53aad87310ff1cfaf3fd1d, default-off; stays pending until the fused baseline completes Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
       }
     },
     {
@@ -10019,7 +10019,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "The immutable NativeMTPCapability, the artifact observer that must match the pinned MLX loader and the signed capability (including the mlx_affine representation manifest digest), and negative artifact fixtures are implemented. Exact immutable production Qwen tuple hashes and signed artifact evidence are still missing. Branch-local on campaign/native-mtp-r015 at the reviewed fork pin ef4ff8568c38c640bc90a8176dc3acfe943a288d, default-off; stays pending until the frozen diff completes CI, Mac Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
+        "rationale": "The immutable NativeMTPCapability, the artifact observer that must match the pinned MLX loader and the signed capability (including the mlx_affine representation manifest digest), and negative artifact fixtures are implemented. Exact immutable production Qwen tuple hashes and signed artifact evidence are still missing. Branch-local on campaign/native-mtp-formal at fused-MoE candidate pin ca29e9544777068a0b53aad87310ff1cfaf3fd1d, default-off; stays pending until the fused baseline completes Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
       }
     },
     {
@@ -10048,7 +10048,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "The exact reviewed fork revision ef4ff8568c38c640bc90a8176dc3acfe943a288d (SPEC-048 v0.1.13 immutable-dependency exception, moved from c4bc3461) adds standalone Qwen 3.5 MTP checkpoint loading, public row-mapped cache transactions, packed target verification, strict row-local continuation state, serialized non-Sendable drafter-state access, and packed recurrent Mamba row transactions, plus the round-overhead delta: host-mirrored packed-verify offset validation, deferred recurrent row-commit evaluation, and a packed stateful-drafter API that advances and proposes every native row in one forward. Drafter state never selects an emitted token, so the delta does not touch the R005 oracle. R003 remains pending until the frozen MacProvider diff completes every audit, release, and signed-campaign gate and the exception is replaced by an upstream tag. This does not make any production tuple eligible."
+        "rationale": "Candidate fork revision ca29e9544777068a0b53aad87310ff1cfaf3fd1d retains the previously reviewed standalone Qwen MTP loading, public row-mapped cache transactions, packed target verification, strict row-local continuation state, serialized drafter-state access, packed recurrent Mamba transactions, and round-overhead reductions from ef4ff8568c38c640bc90a8176dc3acfe943a288d. It additionally introduces a default-on, kill-switchable fused Qwen3.6-35B-A3B MoE path only for the exact affine layout and flattened token counts 1 through 7, with stock fallback outside that envelope. The extension is a candidate, not an approved exception: R003 remains pending until Studio correctness/performance validation and the complete code, security, and architecture freeze audits report 0 Critical/High/Medium, followed by every release and signed-campaign gate. This does not make any production tuple eligible."
       }
     },
     {
@@ -10070,7 +10070,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "Request eligibility (greedy and the signed sampled profile), the closed bounded fallback-reason set, and runtime downgrade before any native state exists are implemented. Branch-local on campaign/native-mtp-r015 at the reviewed fork pin ef4ff8568c38c640bc90a8176dc3acfe943a288d, default-off; stays pending until the frozen diff completes CI, Mac Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
+        "rationale": "Request eligibility (greedy and the signed sampled profile), the closed bounded fallback-reason set, and runtime downgrade before any native state exists are implemented. Branch-local on campaign/native-mtp-formal at fused-MoE candidate pin ca29e9544777068a0b53aad87310ff1cfaf3fd1d, default-off; stays pending until the fused baseline completes Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
       }
     },
     {
@@ -10090,7 +10090,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "Target-authoritative prefix acceptance is implemented for greedy and seeded-sampled rows (target-sample exact match with the row's own seeded sampler); unit tests cover ragged rows and rejection at every position, and Studio parity runs are campaign-PR records, not yet signed evidence. Branch-local on campaign/native-mtp-r015 at the reviewed fork pin ef4ff8568c38c640bc90a8176dc3acfe943a288d, default-off; stays pending until the frozen diff completes CI, Mac Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
+        "rationale": "Target-authoritative prefix acceptance is implemented for greedy and seeded-sampled rows (target-sample exact match with the row's own seeded sampler); unit tests cover ragged rows and rejection at every position, and Studio parity runs are campaign-PR records, not yet signed evidence. Branch-local on campaign/native-mtp-formal at fused-MoE candidate pin ca29e9544777068a0b53aad87310ff1cfaf3fd1d, default-off; stays pending until the fused baseline completes Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
       }
     },
     {
@@ -10113,7 +10113,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "Row-local transactional paged-KV and hybrid-state staging, accepted-prefix commit, discard, and rewind are implemented; a row that goes stale after the backend publishes its round fails alone without rolling back healthy peers. Branch-local on campaign/native-mtp-r015 at the reviewed fork pin ef4ff8568c38c640bc90a8176dc3acfe943a288d, default-off; stays pending until the frozen diff completes CI, Mac Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
+        "rationale": "Row-local transactional paged-KV and hybrid-state staging, accepted-prefix commit, discard, and rewind are implemented; a row that goes stale after the backend publishes its round fails alone without rolling back healthy peers. Branch-local on campaign/native-mtp-formal at fused-MoE candidate pin ca29e9544777068a0b53aad87310ff1cfaf3fd1d, default-off; stays pending until the fused baseline completes Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
       }
     },
     {
@@ -10137,7 +10137,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "Variable-span packed multi-row native rounds mixed with ordinary rows, complete-window capacity reservation with deterministic depth reduction, FCFS fairness, and the signed max_native_active_rows admission and in-flight load gate are implemented. The bound value 1 for the first A3B tuple is justified by the formal R015 run (policy 30934c07, docs/research/spec048-r015/evidence-2026-10-02-a3b-formal): s1 native-eligible cells pass the improvement gate and the gated s2/s8 cells pass non-inferiority. Branch-local on campaign/native-mtp-r015 at the reviewed fork pin ef4ff8568c38c640bc90a8176dc3acfe943a288d, default-off; stays pending until the frozen diff completes CI, Mac Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
+        "rationale": "Variable-span packed multi-row native rounds mixed with ordinary rows, complete-window capacity reservation with deterministic depth reduction, FCFS fairness, and the signed max_native_active_rows admission and in-flight load gate are implemented. The prior bound-one R015 run (policy 30934c07, docs/research/spec048-r015/evidence-2026-10-02-a3b-formal) remains valid historical evidence only for the stock-MoE baseline. Branch-local on campaign/native-mtp-formal at fused-MoE candidate pin ca29e9544777068a0b53aad87310ff1cfaf3fd1d, default-off; the fused baseline requires a new preregistered R015 before it can justify an admission bound."
       }
     },
     {
@@ -10190,7 +10190,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "Local native-MTP status with the closed R010 field set, derived counters, bounded metric labels, counter saturation, and a fresh sink generation per runtime publication are implemented and unit-tested. Dedicated warm-swap reset and wire-schema omission evidence is not mapped here yet. Branch-local on campaign/native-mtp-r015 at the reviewed fork pin ef4ff8568c38c640bc90a8176dc3acfe943a288d, default-off; stays pending until the frozen diff completes CI, Mac Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
+        "rationale": "Local native-MTP status with the closed R010 field set, derived counters, bounded metric labels, counter saturation, and a fresh sink generation per runtime publication are implemented and unit-tested. Dedicated warm-swap reset and wire-schema omission evidence is not mapped here yet. Branch-local on campaign/native-mtp-formal at fused-MoE candidate pin ca29e9544777068a0b53aad87310ff1cfaf3fd1d, default-off; stays pending until the fused baseline completes Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
       }
     },
     {
@@ -10242,7 +10242,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "The strict consumer side of signed admission is implemented: the SPEC-023-R024 sidecar parser and resolved artifact authority (mapped under SPEC-023-R024) and the signed tuple revocation feed with rollback/replay protection. The signed catalog/autotune admission generator, release-ledger binding, and immutable evidence records do not exist yet. Branch-local on campaign/native-mtp-r015 at the reviewed fork pin ef4ff8568c38c640bc90a8176dc3acfe943a288d, default-off; stays pending until the frozen diff completes CI, Mac Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
+        "rationale": "The strict consumer side of signed admission is implemented: the SPEC-023-R024 sidecar parser and resolved artifact authority (mapped under SPEC-023-R024) and the signed tuple revocation feed with rollback/replay protection. The signed catalog/autotune admission generator, release-ledger binding, and immutable evidence records do not exist yet. Branch-local on campaign/native-mtp-formal at fused-MoE candidate pin ca29e9544777068a0b53aad87310ff1cfaf3fd1d, default-off; stays pending until the fused baseline completes Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
       }
     },
     {

@@ -1,12 +1,23 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.6
+version: v0.22.7
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.22.7 (2026-10-02)** — Binds native-MTP admission to the fused ordinary
+  baseline (#1770). The pinned SPEC-048-R003 dependency makes its exact
+  Qwen3.5/3.6 A3B fused small-token MoE path the default at flattened token
+  counts `1...7`, with stock fallback above that bound. The fused path is
+  batch-invariant and preserves expert selection but can change argmax at bf16
+  near-ties. Therefore an R024 entry's `runtime_revision`,
+  `provider_revision`, ordinary-baseline measurement, R015 evidence, journey,
+  and release build MUST all use the same fused-kernel setting. A stock-kernel
+  ordinary measurement cannot authorize or seed a tuple built on this pin.
+  The revision bump intentionally invalidates prior KV disk-cache identities.
 
 - **v0.22.6 (2026-10-02)** — Native-MTP signed prompt bound (#1770).
   SPEC-023-R024 entries gain the required `max_prompt_tokens` integer

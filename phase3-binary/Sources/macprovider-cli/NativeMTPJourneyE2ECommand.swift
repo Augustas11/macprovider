@@ -326,7 +326,10 @@ private final class NativeMTPJourneyRunner {
         let cases: [(String, String, [String]?, Int, Double)] = [
             ("journey-stream-stop", "Count from one to thirty in English words, separated by commas.", [" twelve"], 256, 0),
             ("journey-stream-length", "Write a long essay about the history of printing.", nil, 160, 0),
-            ("journey-stream-eos", "Reply with exactly the single word OK and nothing else.", nil, 64, 0),
+            // The A3B response did not reach EOS inside 64 tokens, so that cap
+            // accidentally duplicated the length-terminal case instead of
+            // exercising the model's end-of-sequence terminal.
+            ("journey-stream-eos", "Reply with exactly the single word OK and nothing else.", nil, 512, 0),
             ("journey-stream-sampled", "Invent a recipe for a winter soup.", nil, 160, 0.7),
         ]
         var terminals: [String: String] = [:]
@@ -392,41 +395,25 @@ private final class NativeMTPJourneyRunner {
                 conversationKey: ineligible ? "conv:journey-mixed-\(row)" : nil
             ))
         }
-        let expected = try await complete(requests, runtime: ordinary, staggerMS: 150)
-        // Control: ordinary batched decode must reproduce itself under the
-        // same staggered load, or a native mismatch would mean nothing.
+        let expected = try await completeDeterministicBatch(requests, runtime: ordinary)
+        // Control: the exact ordinary batch composition must reproduce itself,
+        // or a native mismatch would mean nothing.
         // Fresh request ids and keys: the scheduler rejects a reused id with a
         // different body, and a reused key would hit the conversation cache.
-        let control = try await complete(
+        let control = try await completeDeterministicBatch(
             requests.map {
                 $0.withRequestID(($0.requestID ?? "") + "-control")
                     .withConversationKey($0.conversationKey.map { $0 + "-control" })
             },
-            runtime: ordinary,
-            staggerMS: 150
+            runtime: ordinary
         )
-        // Diagnostic: the same ordinary batch under slightly different arrival
-        // timing. A row that differs here is batch-composition sensitive on
-        // the ordinary path itself; it is reported, never counted as parity.
-        let perturbed = try await complete(
-            requests.map {
-                $0.withRequestID(($0.requestID ?? "") + "-perturbed")
-                    .withConversationKey($0.conversationKey.map { $0 + "-perturbed" })
-            },
-            runtime: ordinary,
-            staggerMS: 170
-        )
-        let actual = try await complete(requests, runtime: native, staggerMS: 150)
-        var timingSensitive: [String] = []
+        let actual = try await completeDeterministicBatch(requests, runtime: native)
         var paths: [String: String] = [:]
         var reasons: [String: String] = [:]
         for request in requests {
             let id = request.requestID ?? ""
             step.check("\(id).ordinary_control_reproducible", expected[id].map { exp in control[id + "-control"].map { same(exp, $0) } ?? false } ?? false)
             step.check("\(id).parity", expected[id].map { exp in actual[id].map { same(exp, $0) } ?? false } ?? false)
-            if let exp = expected[id], let other = perturbed[id + "-perturbed"], !same(exp, other) {
-                timingSensitive.append(id)
-            }
             let admission = recorder.requestSnapshot().last { $0.requestID == id }
             paths[id] = admission?.admission.effectivePath.rawValue ?? "missing"
             reasons[id] = admission?.admission.selection.nativeMTPReason?.rawValue ?? ""
@@ -453,7 +440,7 @@ private final class NativeMTPJourneyRunner {
         let cappedAdmission = recorder.requestSnapshot().last { $0.requestID == "journey-prompt-cap" }
         step.check("prompt_cap.selected_ordinary", cappedAdmission?.admission.effectivePath == .ordinary
             && cappedAdmission?.admission.selection.nativeMTPReason == .capabilityMismatch)
-        step.details["ordinary_rows_differing_under_perturbed_arrival_timing"] = timingSensitive.sorted()
+        step.details["oracle_batch_composition"] = requests.compactMap(\.requestID)
         step.details["paths"] = paths
         step.details["selector_reasons"] = reasons
         step.details["prompt_cap_reason"] = cappedAdmission?.admission.selection.nativeMTPReason?.rawValue ?? ""
@@ -653,6 +640,20 @@ private final class NativeMTPJourneyRunner {
             for try await (id, result) in group { results[id] = result }
             return results
         }
+    }
+
+    private func completeDeterministicBatch(
+        _ requests: [ChatCompletionRequest],
+        runtime: ModelRuntime
+    ) async throws -> [String: CompletionResult] {
+        let requestIDs = requests.compactMap(\.requestID)
+        guard requestIDs.count == requests.count,
+              await runtime.installLabBatchComposition(requestIDs) else {
+            throw NativeMTPHardwareE2EError.assertionFailed(
+                "could not install deterministic batch composition on an idle scheduler"
+            )
+        }
+        return try await complete(requests, runtime: runtime, staggerMS: 0)
     }
 
     private func streamCollect(_ request: ChatCompletionRequest, runtime: ModelRuntime) async throws -> (CompletionResult, String) {
