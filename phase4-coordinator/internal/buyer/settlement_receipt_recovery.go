@@ -168,9 +168,11 @@ func (s *Server) reportSettlementPoolLabel(rec billing.SettlementPoolLabelRecord
 		Msg("trusted pool settlement label disputed; request excluded from pool-scoped accounting")
 }
 
-// settlementPoolLabels captures the SPEC-042 R006 settlement-time labels: the
-// selected pool, its manifest as the live registry holds it now, and the route
-// snapshot digest recorded at routing time. nil for global traffic.
+// settlementPoolLabels captures the SPEC-042 R006 labels for the attempt being
+// settled. When a route snapshot exists, prefer its immutable routing-time
+// labels: ordinary manifest rotation, pause, or entry removal after dispatch
+// must not turn an in-flight served request into an unverified label. Legacy
+// pool routes that have no route snapshot still fall back to the live registry.
 func (b *billingRecorder) settlementPoolLabels() *billing.SettlementPoolLabels {
 	if b == nil || b.state == nil || b.state.poolID == "" {
 		return nil
@@ -178,6 +180,11 @@ func (b *billingRecorder) settlementPoolLabels() *billing.SettlementPoolLabels {
 	labels := &billing.SettlementPoolLabels{
 		PoolID:            b.state.poolID,
 		RouteSnapshotHash: b.settlementRouteSnapshotDigest,
+	}
+	if snap := b.settlementRouteSnapshot; snap != nil && snap.PoolID == b.state.poolID {
+		labels.ManifestVersion = snap.ManifestVersion
+		labels.ManifestCoreDigest = snap.ManifestCoreDigest
+		return labels
 	}
 	if b.server != nil && b.server.trustPools != nil {
 		if snap := b.server.trustPools.Snapshot(b.state.poolID); snap.Exists {

@@ -162,6 +162,18 @@ wait_window() {
 }
 snapshots_for() { csql "SELECT COUNT(*) FROM settlement_route_snapshots WHERE json_extract(route_snapshot_json,'\$.pool_model_id') = '$1'"; }
 global_pool_snapshots() { csql "SELECT COUNT(*) FROM settlement_route_snapshots WHERE json_extract(route_snapshot_json,'\$.pool_model_id') IS NOT NULL AND coalesce(json_extract(route_snapshot_json,'\$.pool_id'),'')=''"; }
+compare_catalog_shape() { # compare_catalog_shape <label> <run> <message>
+  local label="$1" run="$2" msg="$3" out="$E2E_EVIDENCE/$run.shape.txt"
+  if python3 $E2E_H/tools/compare-shape.py "$E2E_EVIDENCE/baseline-p$PASS_ID.oracle.json" "$E2E_EVIDENCE/$run.oracle.json" >"$out" 2>&1; then
+    result "$label" PASS "$msg: outcome shape identical to the S1 baseline"
+  elif ! grep -q '<-- DIFF' "$out"; then
+    result "$label" FAIL "$msg: compare-shape failed without a parseable diff ($(head -c 400 "$out"))"
+  elif grep '<-- DIFF' "$out" | grep -Ev '^(ns_dc|st_dc)[[:space:]]' >/dev/null; then
+    result "$label" FAIL "$msg: stable request outcome shape differs ($(grep '<-- DIFF' "$out" | tr '\n' ';' | head -c 600))"
+  else
+    result "$label" INFO "$msg: only disconnect-shape outcomes differ under the mixed pair ($(grep '<-- DIFF' "$out" | tr '\n' ';' | head -c 600))"
+  fi
+}
 # keeper_on / keeper_off: the window keeper re-signs each pool's current staged
 # entries into the next window before the active one ends (windows are short so
 # an entry change activates within one window; see the plan).

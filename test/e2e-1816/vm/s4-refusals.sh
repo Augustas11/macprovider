@@ -87,7 +87,7 @@ refused_manifest S4-catalog-overlap-mlx QN pool_model_entry_catalog_overlap "$EV
 # SIGHUP; an entry for H_BLK must be refused; then the live config is restored.
 H_BLK=$(printf 'e2e-1816 lab blocked gguf' | sha256sum | cut -c1-64)
 OVL=/etc/macprovider/coordinator.pearl-overlays.yaml
-LAB=/tmp/macprovider-e2e-lab-blocked-release
+LAB=/var/tmp/macprovider-e2e/lab-blocked-release
 [ -f /root/e2e/keys/lab-catalog.pem ] || openssl genpkey -algorithm ed25519 -out /root/e2e/keys/lab-catalog.pem
 cp -p "$OVL" "$EV/overlay.pre-lab"
 rm -rf "$LAB"; install -d -m 0755 "$LAB"

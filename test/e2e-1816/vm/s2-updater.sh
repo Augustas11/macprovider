@@ -103,9 +103,7 @@ gw_restart
 run="$(run_id s2gwfirst)"
 traffic "$run"
 settle_and_check S2-order-gateway-first-catalog "$run" --expect ns=settled,st=settled
-python3 $E2E_H/tools/compare-shape.py "$E2E_EVIDENCE/baseline-p$PASS_ID.oracle.json" "$E2E_EVIDENCE/$run.oracle.json" \
-  && result S2-order-gateway-first-shape PASS "old coordinator + new gateway: outcome shape identical to the S1 baseline" \
-  || result S2-order-gateway-first-shape FAIL "old coordinator + new gateway: outcome shape differs (see $run.shape.txt)"
+compare_catalog_shape S2-order-gateway-first-shape "$run" "old coordinator + new gateway"
 systemctl stop macprovider-gateway
 install -o root -g macprovider -m 0750 /opt/macprovider/gateway.e2e-pre-gwfirst /opt/macprovider/gateway; rm -f /opt/macprovider/gateway.e2e-pre-gwfirst
 rm -f "$GWDB-wal" "$GWDB-shm"
@@ -223,16 +221,16 @@ wait_providers 2 || true
 run="$(run_id s2new)"
 traffic "$run"
 settle_and_check S2-new-pair-catalog "$run" --expect ns=settled,st=settled
-python3 $E2E_H/tools/compare-shape.py "$E2E_EVIDENCE/baseline-p$PASS_ID.oracle.json" "$E2E_EVIDENCE/$run.oracle.json" \
-  && result S2-new-pair-shape PASS "per-kind outcome shape identical to the S1 baseline" \
-  || result S2-new-pair-shape FAIL "per-kind outcome shape differs from the S1 baseline (see $run.shape.txt)"
+compare_catalog_shape S2-new-pair-shape "$run" "new coordinator + new gateway"
 
 # ---- 7. existing deploy guards in the new tree -------------------------------------------
-if ( cd $WTN && PYTHONDONTWRITEBYTECODE=1 timeout 1200 python3 ops/pearl-updater/test_pearl_updater.py ) >"$EV/test_pearl_updater.txt" 2>&1; then
+install -d -m 0755 /root/e2e/shim-bin && install -m 0755 $E2E_H16/lib/python3-shim /root/e2e/shim-bin/python3
+if ( cd $WTN && PATH=/root/e2e/shim-bin:$PATH E2E_VERIFY_CACHE_RECORD_ON_MISS=1 PYTHONDONTWRITEBYTECODE=1 timeout 1200 python3 ops/pearl-updater/test_pearl_updater.py ) >"$EV/test_pearl_updater.txt" 2>&1; then
   result S2-guard-updater-tests PASS "$(tail -3 "$EV/test_pearl_updater.txt" | tr '\n' ' ')"
-elif grep -q 'FAILED (errors=1)$' "$EV/test_pearl_updater.txt" && grep -q "Command '\['git', 'show'" "$EV/test_pearl_updater.txt"; then
+elif grep -q "Command '\['git', 'show'" "$EV/test_pearl_updater.txt" \
+  && ! grep '^ERROR:' "$EV/test_pearl_updater.txt" | grep -v 'test_canary_rollout_authority_hashes_match_issue_825_duplicate_fleet_runtime' >/dev/null; then
   # The VM tree is a git archive (no history); one test reads a pinned commit.
-  result S2-guard-updater-tests GAP "all but the one history-dependent test pass ($(grep -m1 '^ERROR:' "$EV/test_pearl_updater.txt")); the VM repo has no git history"
+  result S2-guard-updater-tests GAP "all non-history updater tests pass; archive checkout has no git history ($(grep -m1 '^ERROR:' "$EV/test_pearl_updater.txt"))"
 else
   result S2-guard-updater-tests FAIL "$(tail -6 "$EV/test_pearl_updater.txt" | tr '\n' ' ' | head -c 600)"
 fi

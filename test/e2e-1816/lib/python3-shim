@@ -9,6 +9,11 @@ case " $* " in
     k="$($REAL /root/e2e/h16/tools/verify-cache.py key "$@" 2>/dev/null)" || exec $REAL "$@"
     c=/root/e2e/verify-cache/$k
     if [ -n "$k" ] && [ -f "$c.out" ]; then cat "$c.out"; cat "$c.err" >&2; echo "e2e-verify-cache hit $k" >>/root/e2e/logs/verify-cache.log; exit 0; fi
+    if [ "${E2E_VERIFY_CACHE_RECORD_ON_MISS:-0}" = 1 ]; then
+      echo "e2e-verify-cache record-miss $k" >>/root/e2e/logs/verify-cache.log
+      $REAL /root/e2e/h16/tools/verify-cache.py record "$@" >>/root/e2e/logs/verify-cache.log 2>&1 || exec $REAL "$@"
+      if [ -f "$c.out" ]; then cat "$c.out"; cat "$c.err" >&2; exit 0; fi
+    fi
     echo "e2e-verify-cache miss $k" >>/root/e2e/logs/verify-cache.log ;;
 esac
 exec $REAL "$@"

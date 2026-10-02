@@ -282,6 +282,7 @@ func TestNoPriorDispatchResponseWriterMarks(t *testing.T) {
 		name       string
 		credited   bool
 		dispatched bool
+		faultFlag  string
 		status     int  // WriteHeader status; ignored when viaWrite
 		viaWrite   bool // exercise Write() (implicit 200) instead of WriteHeader()
 		wantMarker bool
@@ -289,6 +290,7 @@ func TestNoPriorDispatchResponseWriterMarks(t *testing.T) {
 		{name: "route_snapshot_failed_pre_dispatch", credited: false, dispatched: false, status: http.StatusInternalServerError, wantMarker: true},
 		{name: "cold_no_provider_503", credited: false, dispatched: false, status: http.StatusServiceUnavailable, wantMarker: true},
 		{name: "single_provider_failed_502", credited: false, dispatched: true, status: http.StatusBadGateway, wantMarker: false},
+		{name: "breaker_provider_failed_502_zero_payable", credited: false, dispatched: true, faultFlag: billing.FaultBreakerQualifying, status: http.StatusBadGateway, wantMarker: true},
 		{name: "dispatched_queue_full_503_not_billed", credited: false, dispatched: true, status: http.StatusServiceUnavailable, wantMarker: true},
 		{name: "failover_exhaustion_503_after_billed", credited: true, dispatched: false, status: http.StatusServiceUnavailable, wantMarker: false},
 		{name: "credited_and_dispatched_502", credited: true, dispatched: true, status: http.StatusBadGateway, wantMarker: false},
@@ -297,7 +299,7 @@ func TestNoPriorDispatchResponseWriterMarks(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inner := httptest.NewRecorder()
-			rec := &billingRecorder{providerCredited: tc.credited, dispatchedThisAttempt: tc.dispatched}
+			rec := &billingRecorder{providerCredited: tc.credited, dispatchedThisAttempt: tc.dispatched, dispatchedThisAttemptFaultFlag: tc.faultFlag}
 			w := &noPriorDispatchResponseWriter{ResponseWriter: inner, rec: rec}
 			if tc.viaWrite {
 				if _, err := w.Write([]byte("data: {}\n\n")); err != nil {

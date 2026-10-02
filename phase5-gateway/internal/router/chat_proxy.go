@@ -2163,7 +2163,7 @@ func shouldRefundLegacyPreStreamProvider502(status int, body []byte, h http.Head
 		return false
 	}
 	switch openAIErrorCode(body) {
-	case "provider_error", "provider_failed", "provider_disconnected":
+	case "provider_error", "provider_failed", "provider_disconnected", "upstream_provider_error":
 		return true
 	default:
 		return false

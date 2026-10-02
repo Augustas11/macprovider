@@ -156,9 +156,10 @@ g="$(global_pool_snapshots)"
 # ---- deploy order, coordinator first: NEW coordinator + OLD gateway with pool models live ----
 # The manual runbook order (trusted-pool-production-launch s9: coordinator,
 # then gateway) leaves this pairing up for a while; the Pearl updater never
-# serves it (S2-updater-order). Pool-model settlement must not be held, and
-# catalog traffic must behave like the baseline. Then the new gateway returns
-# and every hold must settle.
+# serves it (S2-updater-order). Pool-model traffic must fail closed because
+# the old gateway cannot send route-snapshot/v2 settlement context; catalog
+# traffic must behave like the baseline. Then the new gateway returns and fresh
+# pool-model traffic settles normally.
 systemctl stop macprovider-gateway
 cp -p /opt/macprovider/gateway /opt/macprovider/gateway.e2e-new
 install -o root -g macprovider -m 0750 /root/e2e/bins/old/gateway-linux-amd64 /opt/macprovider/gateway
@@ -170,15 +171,17 @@ if (gw_restart) >"$EV/oldgw-start.txt" 2>&1; then
   journal_since macprovider-gateway "$since" "$EV/oldgw-gateway.log"
   pv="$(grep -c 'invalid_settlement_policy_version' "$EV/oldgw-gateway.log")"
   result S3-order-coordinator-first-holds INFO "new coordinator + old gateway, pool-model traffic: holds right after=$h, invalid_settlement_policy_version log lines=$pv"
-  DRAIN_MAX=120 pool_check S3-order-coordinator-first-pool "$run" --expect ns=settled,st=settled --min-settled 4 --pool-model-id "$MG" --rates $G_RATES \
-    --usage-source pool_operator_attested --token-source pool_operator_attested --provider e2e-prov-3
-  cfrun="$run"
+  if DRAIN_MAX=120 pool_check S3-order-coordinator-first-pool "$run" --refused \
+    && grep -q 'pool_model_requires_gateway_upgrade' "$E2E_EVIDENCE/$run.load.jsonl"; then
+    result S3-order-coordinator-first-upgrade-refusal PASS "old gateway pool-model traffic is refused with pool_model_requires_gateway_upgrade"
+  else
+    result S3-order-coordinator-first-upgrade-refusal FAIL "old gateway pool-model traffic did not expose pool_model_requires_gateway_upgrade ($(head -c 400 "$E2E_EVIDENCE/$run.load.jsonl" 2>/dev/null))"
+  fi
+  cfrun=1
   run="$(run_id s3cfcat)"
   traffic "$run"
   settle_and_check S3-order-coordinator-first-catalog "$run" --expect ns=settled,st=settled
-  python3 $E2E_H/tools/compare-shape.py "$E2E_EVIDENCE/baseline-p$PASS_ID.oracle.json" "$E2E_EVIDENCE/$run.oracle.json" \
-    && result S3-order-coordinator-first-catalog-shape PASS "new coordinator + old gateway: catalog outcome shape identical to the S1 baseline" \
-    || result S3-order-coordinator-first-catalog-shape FAIL "new coordinator + old gateway: catalog outcome shape differs (see $run.shape.txt)"
+  compare_catalog_shape S3-order-coordinator-first-catalog-shape "$run" "new coordinator + old gateway catalog"
 else
   result S3-order-coordinator-first-holds FAIL "the old gateway does not start on the new pair's gateway DB: $(tail -3 "$EV/oldgw-start.txt" | tr '\n' ' ' | head -c 300)"
   cfrun=""
@@ -187,7 +190,10 @@ systemctl stop macprovider-gateway
 install -o root -g macprovider -m 0750 /opt/macprovider/gateway.e2e-new /opt/macprovider/gateway; rm -f /opt/macprovider/gateway.e2e-new
 gw_restart
 if [ -n "$cfrun" ]; then
-  pool_check S3-order-coordinator-first-pool-after-new-gw "$cfrun" --pool-model-id "$MG" --rates $G_RATES --usage-source pool_operator_attested --provider e2e-prov-3
+  run="$(run_id s3cfpoolnew)"
+  pool_traffic "$run" Q "$MG" llamacpp "ns=2,st=2" 2
+  pool_check S3-order-coordinator-first-pool-after-new-gw "$run" --expect ns=settled,st=settled --min-settled 4 --pool-model-id "$MG" --rates $G_RATES \
+    --usage-source pool_operator_attested --token-source pool_operator_attested --provider e2e-prov-3
 fi
 
 # catalog traffic alongside, unchanged
