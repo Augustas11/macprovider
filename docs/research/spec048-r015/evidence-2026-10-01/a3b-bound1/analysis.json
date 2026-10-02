@@ -1,0 +1,2080 @@
+{
+  "cells": [
+    {
+      "acceptance_rate": null,
+      "cell_class": "native_eligible",
+      "cell_id": "s1-p1536-o128",
+      "decode_tps_sources": [],
+      "forwards_per_committed_token": null,
+      "hard_failures": [
+        "incomplete: 0/10 paired blocks"
+      ],
+      "informational_metrics": {
+        "end_to_end_throughput": {
+          "ci_lower": null,
+          "ci_upper": null,
+          "confidence_level": 0.95,
+          "gated": false,
+          "median": null
+        }
+      },
+      "load_gate_downgrades": 0,
+      "memory_failures": [
+        "min_available_memory_fraction"
+      ],
+      "metric_failures": [
+        "throughput",
+        "ttft",
+        "itl",
+        "rejection"
+      ],
+      "metrics": {
+        "itl": {
+          "confidence_level": 0.9991379310344828,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0008620689655172415,
+          "holm_rank": 15,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.0
+        },
+        "rejection": {
+          "confidence_level": 0.9991228070175439,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0008771929824561404,
+          "holm_rank": 16,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 1.0
+        },
+        "throughput": {
+          "confidence_level": 0.9991666666666666,
+          "corrected_lower_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0008333333333333334,
+          "holm_rank": 13,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.15
+        },
+        "ttft": {
+          "confidence_level": 0.9991525423728813,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0008474576271186442,
+          "holm_rank": 14,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.1
+        }
+      },
+      "min_available_memory_fraction": 0,
+      "paired_blocks": 0,
+      "peak_phys_footprint_bytes": 0,
+      "reported_metrics": {},
+      "required_blocks": 10,
+      "status": "FAIL",
+      "sustained_duration_seconds": 0,
+      "sustained_min_available_memory_fraction": 0,
+      "thermal_end_states": [],
+      "thermal_start_states": []
+    },
+    {
+      "acceptance_rate": 0.8514492753623188,
+      "cell_class": "native_eligible",
+      "cell_id": "s1-p1536-o512",
+      "decode_tps_sources": [
+        "recorded"
+      ],
+      "forwards_per_committed_token": 0.5390625,
+      "hard_failures": [],
+      "informational_metrics": {
+        "end_to_end_throughput": {
+          "ci_lower": 0.19688006639247724,
+          "ci_upper": 0.21488024084085833,
+          "confidence_level": 0.95,
+          "gated": false,
+          "median": 0.20677104358267095
+        }
+      },
+      "load_gate_downgrades": 0,
+      "memory_failures": [],
+      "metric_failures": [],
+      "metrics": {
+        "itl": {
+          "confidence_level": 0.9992857142857143,
+          "corrected_upper_bound": -0.9041649971623922,
+          "holm_adjusted_p_value": 0.007199280071992801,
+          "holm_alpha": 0.0007142857142857143,
+          "holm_rank": 3,
+          "median": -0.9049056513815734,
+          "p_value": 9.999000099990002e-05,
+          "status": "PASS",
+          "threshold": 0.0
+        },
+        "rejection": {
+          "confidence_level": 0.9992753623188406,
+          "corrected_upper_bound": 0.0,
+          "holm_adjusted_p_value": 0.007199280071992801,
+          "holm_alpha": 0.0007246376811594203,
+          "holm_rank": 4,
+          "median": 0.0,
+          "p_value": 9.999000099990002e-05,
+          "status": "PASS",
+          "threshold": 1.0
+        },
+        "throughput": {
+          "confidence_level": 0.9993055555555556,
+          "corrected_lower_bound": 0.2448212768517516,
+          "holm_adjusted_p_value": 0.007199280071992801,
+          "holm_alpha": 0.0006944444444444445,
+          "holm_rank": 1,
+          "median": 0.2581516858663274,
+          "p_value": 9.999000099990002e-05,
+          "status": "PASS",
+          "threshold": 0.15
+        },
+        "ttft": {
+          "confidence_level": 0.9992957746478873,
+          "corrected_upper_bound": 0.0506936721427792,
+          "holm_adjusted_p_value": 0.007199280071992801,
+          "holm_alpha": 0.0007042253521126761,
+          "holm_rank": 2,
+          "median": 0.04299164377725706,
+          "p_value": 9.999000099990002e-05,
+          "status": "PASS",
+          "threshold": 0.1
+        }
+      },
+      "min_available_memory_fraction": 0.724704384803772,
+      "paired_blocks": 10,
+      "peak_phys_footprint_bytes": 25323781624,
+      "reported_metrics": {
+        "native_mtp": {
+          "aggregate_committed_tps": {
+            "ci_lower": 89.01822955922252,
+            "ci_upper": 91.04020881748777,
+            "confidence_level": 0.9982142857142857,
+            "median": 89.81151308441605
+          },
+          "aggregate_decode_tps": {
+            "ci_lower": 107.67549239501945,
+            "ci_upper": 110.59140918655474,
+            "confidence_level": 0.9982142857142857,
+            "median": 108.82976691702322
+          },
+          "capacity_rejection_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "fallback_error_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "inter_token_gap_p50_seconds": {
+            "ci_lower": 0.016609489917755127,
+            "ci_upper": 0.016724765300750732,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.01668095588684082
+          },
+          "inter_token_gap_p95_seconds": {
+            "ci_lower": 0.017054671049118043,
+            "ci_upper": 0.01718917489051819,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.017138051986694335
+          },
+          "mtp_acceptance_rate": {
+            "ci_lower": 0.8315412186379928,
+            "ci_upper": 0.8786764705882353,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.8514492753623188
+          },
+          "mtp_accepted_tokens": {
+            "ci_lower": 232.0,
+            "ci_upper": 239.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 235.0
+          },
+          "mtp_proposed_tokens": {
+            "ci_lower": 272.0,
+            "ci_upper": 279.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 276.0
+          },
+          "peak_phys_footprint_bytes": {
+            "ci_lower": 25322421752.0,
+            "ci_upper": 25323732472.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 25323060728.0
+          },
+          "per_request_decode_tps": {
+            "ci_lower": 107.67549239501945,
+            "ci_upper": 110.59140918655474,
+            "confidence_level": 0.9982142857142857,
+            "median": 108.82976691702322
+          },
+          "per_request_tps": {
+            "ci_lower": 89.0203790444059,
+            "ci_upper": 91.04225024001117,
+            "confidence_level": 0.9982142857142857,
+            "median": 89.81363341959675
+          },
+          "target_forwards_per_committed_token": {
+            "ci_lower": 0.53125,
+            "ci_upper": 0.544921875,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.5390625
+          },
+          "ttft_p50_seconds": {
+            "ci_lower": 1.0031254887580872,
+            "ci_upper": 1.0132999420166016,
+            "confidence_level": 0.9982142857142857,
+            "median": 1.0055979490280151
+          },
+          "ttft_p95_seconds": {
+            "ci_lower": 1.0031254887580872,
+            "ci_upper": 1.0132999420166016,
+            "confidence_level": 0.9982142857142857,
+            "median": 1.0055979490280151
+          }
+        },
+        "ordinary": {
+          "aggregate_committed_tps": {
+            "ci_lower": 74.33876199111941,
+            "ci_upper": 75.07469165651875,
+            "confidence_level": 0.9982142857142857,
+            "median": 74.6001825567123
+          },
+          "aggregate_decode_tps": {
+            "ci_lower": 86.36280792992368,
+            "ci_upper": 87.25438580987118,
+            "confidence_level": 0.9982142857142857,
+            "median": 86.66438264371108
+          },
+          "capacity_rejection_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "fallback_error_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "inter_token_gap_p50_seconds": {
+            "ci_lower": 0.00019407272338867188,
+            "ci_upper": 0.00020422491111925678,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.00019919872283935547
+          },
+          "inter_token_gap_p95_seconds": {
+            "ci_lower": 0.1790546953678131,
+            "ci_upper": 0.18095784187316893,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.17974517345428465
+          },
+          "mtp_accepted_tokens": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "mtp_proposed_tokens": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "peak_phys_footprint_bytes": {
+            "ci_lower": 25319374316.0,
+            "ci_upper": 25323675128.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 25323240952.0
+          },
+          "per_request_decode_tps": {
+            "ci_lower": 86.36280792992368,
+            "ci_upper": 87.25438580987118,
+            "confidence_level": 0.9982142857142857,
+            "median": 86.66438264371108
+          },
+          "per_request_tps": {
+            "ci_lower": 74.34079098138082,
+            "ci_upper": 75.07609454607362,
+            "confidence_level": 0.9982142857142857,
+            "median": 74.60194795824006
+          },
+          "ttft_p50_seconds": {
+            "ci_lower": 0.9623450040817261,
+            "ci_upper": 0.9752334952354431,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.9642574787139893
+          },
+          "ttft_p95_seconds": {
+            "ci_lower": 0.9623450040817261,
+            "ci_upper": 0.9752334952354431,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.9642574787139893
+          }
+        }
+      },
+      "required_blocks": 10,
+      "status": "PASS",
+      "sustained_duration_seconds": 0,
+      "sustained_min_available_memory_fraction": 0,
+      "thermal_end_states": [
+        "nominal"
+      ],
+      "thermal_start_states": [
+        "nominal"
+      ]
+    },
+    {
+      "acceptance_rate": null,
+      "cell_class": "native_eligible",
+      "cell_id": "s1-p4096-o128",
+      "decode_tps_sources": [],
+      "forwards_per_committed_token": null,
+      "hard_failures": [
+        "incomplete: 0/10 paired blocks"
+      ],
+      "informational_metrics": {
+        "end_to_end_throughput": {
+          "ci_lower": null,
+          "ci_upper": null,
+          "confidence_level": 0.95,
+          "gated": false,
+          "median": null
+        }
+      },
+      "load_gate_downgrades": 0,
+      "memory_failures": [
+        "min_available_memory_fraction"
+      ],
+      "metric_failures": [
+        "throughput",
+        "ttft",
+        "itl",
+        "rejection"
+      ],
+      "metrics": {
+        "itl": {
+          "confidence_level": 0.9990740740740741,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.000925925925925926,
+          "holm_rank": 19,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.0
+        },
+        "rejection": {
+          "confidence_level": 0.9990566037735849,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0009433962264150943,
+          "holm_rank": 20,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 1.0
+        },
+        "throughput": {
+          "confidence_level": 0.9991071428571429,
+          "corrected_lower_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0008928571428571429,
+          "holm_rank": 17,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.15
+        },
+        "ttft": {
+          "confidence_level": 0.9990909090909091,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0009090909090909091,
+          "holm_rank": 18,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.1
+        }
+      },
+      "min_available_memory_fraction": 0,
+      "paired_blocks": 0,
+      "peak_phys_footprint_bytes": 0,
+      "reported_metrics": {},
+      "required_blocks": 10,
+      "status": "FAIL",
+      "sustained_duration_seconds": 0,
+      "sustained_min_available_memory_fraction": 0,
+      "thermal_end_states": [],
+      "thermal_start_states": []
+    },
+    {
+      "acceptance_rate": null,
+      "cell_class": "native_eligible",
+      "cell_id": "s1-p4096-o512",
+      "decode_tps_sources": [],
+      "forwards_per_committed_token": null,
+      "hard_failures": [
+        "incomplete: 0/10 paired blocks"
+      ],
+      "informational_metrics": {
+        "end_to_end_throughput": {
+          "ci_lower": null,
+          "ci_upper": null,
+          "confidence_level": 0.95,
+          "gated": false,
+          "median": null
+        }
+      },
+      "load_gate_downgrades": 0,
+      "memory_failures": [
+        "min_available_memory_fraction"
+      ],
+      "metric_failures": [
+        "throughput",
+        "ttft",
+        "itl",
+        "rejection"
+      ],
+      "metrics": {
+        "itl": {
+          "confidence_level": 0.999,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.001,
+          "holm_rank": 23,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.0
+        },
+        "rejection": {
+          "confidence_level": 0.9989795918367347,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0010204081632653062,
+          "holm_rank": 24,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 1.0
+        },
+        "throughput": {
+          "confidence_level": 0.9990384615384615,
+          "corrected_lower_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0009615384615384616,
+          "holm_rank": 21,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.15
+        },
+        "ttft": {
+          "confidence_level": 0.9990196078431373,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.000980392156862745,
+          "holm_rank": 22,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.1
+        }
+      },
+      "min_available_memory_fraction": 0,
+      "paired_blocks": 0,
+      "peak_phys_footprint_bytes": 0,
+      "reported_metrics": {},
+      "required_blocks": 10,
+      "status": "FAIL",
+      "sustained_duration_seconds": 0,
+      "sustained_min_available_memory_fraction": 0,
+      "thermal_end_states": [],
+      "thermal_start_states": []
+    },
+    {
+      "acceptance_rate": null,
+      "cell_class": "native_eligible",
+      "cell_id": "s1-p8192-o128",
+      "decode_tps_sources": [],
+      "forwards_per_committed_token": null,
+      "hard_failures": [
+        "incomplete: 0/10 paired blocks"
+      ],
+      "informational_metrics": {
+        "end_to_end_throughput": {
+          "ci_lower": null,
+          "ci_upper": null,
+          "confidence_level": 0.95,
+          "gated": false,
+          "median": null
+        }
+      },
+      "load_gate_downgrades": 0,
+      "memory_failures": [
+        "min_available_memory_fraction"
+      ],
+      "metric_failures": [
+        "throughput",
+        "ttft",
+        "itl",
+        "rejection"
+      ],
+      "metrics": {
+        "itl": {
+          "confidence_level": 0.9989130434782608,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0010869565217391304,
+          "holm_rank": 27,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.0
+        },
+        "rejection": {
+          "confidence_level": 0.9988888888888889,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0011111111111111111,
+          "holm_rank": 28,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 1.0
+        },
+        "throughput": {
+          "confidence_level": 0.9989583333333333,
+          "corrected_lower_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0010416666666666667,
+          "holm_rank": 25,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.15
+        },
+        "ttft": {
+          "confidence_level": 0.9989361702127659,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0010638297872340426,
+          "holm_rank": 26,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.1
+        }
+      },
+      "min_available_memory_fraction": 0,
+      "paired_blocks": 0,
+      "peak_phys_footprint_bytes": 0,
+      "reported_metrics": {},
+      "required_blocks": 10,
+      "status": "FAIL",
+      "sustained_duration_seconds": 0,
+      "sustained_min_available_memory_fraction": 0,
+      "thermal_end_states": [],
+      "thermal_start_states": []
+    },
+    {
+      "acceptance_rate": 0.8512345516350892,
+      "cell_class": "native_eligible",
+      "cell_id": "s1-p8192-o512",
+      "decode_tps_sources": [
+        "recorded"
+      ],
+      "forwards_per_committed_token": 0.5400390625,
+      "hard_failures": [],
+      "informational_metrics": {
+        "end_to_end_throughput": {
+          "ci_lower": 0.0383339823799137,
+          "ci_upper": 0.04939358273136585,
+          "confidence_level": 0.95,
+          "gated": false,
+          "median": 0.04323660869704016
+        }
+      },
+      "load_gate_downgrades": 0,
+      "memory_failures": [],
+      "metric_failures": [
+        "throughput"
+      ],
+      "metrics": {
+        "itl": {
+          "confidence_level": 0.9992537313432835,
+          "corrected_upper_bound": -0.8921954836175799,
+          "holm_adjusted_p_value": 0.007199280071992801,
+          "holm_alpha": 0.0007462686567164179,
+          "holm_rank": 6,
+          "median": -0.8932905866730105,
+          "p_value": 9.999000099990002e-05,
+          "status": "PASS",
+          "threshold": 0.0
+        },
+        "rejection": {
+          "confidence_level": 0.9992424242424243,
+          "corrected_upper_bound": 0.0,
+          "holm_adjusted_p_value": 0.007199280071992801,
+          "holm_alpha": 0.0007575757575757576,
+          "holm_rank": 7,
+          "median": 0.0,
+          "p_value": 9.999000099990002e-05,
+          "status": "PASS",
+          "threshold": 1.0
+        },
+        "throughput": {
+          "confidence_level": 0.9991803278688525,
+          "corrected_lower_bound": 0.12302036631896729,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.000819672131147541,
+          "holm_rank": 12,
+          "median": 0.13937509032805784,
+          "p_value": 0.9989001099890011,
+          "status": "FAIL",
+          "threshold": 0.15
+        },
+        "ttft": {
+          "confidence_level": 0.9992647058823529,
+          "corrected_upper_bound": 0.0612606648944668,
+          "holm_adjusted_p_value": 0.007199280071992801,
+          "holm_alpha": 0.0007352941176470588,
+          "holm_rank": 5,
+          "median": 0.05734823515746734,
+          "p_value": 9.999000099990002e-05,
+          "status": "PASS",
+          "threshold": 0.1
+        }
+      },
+      "min_available_memory_fraction": 0.6949679255485535,
+      "paired_blocks": 10,
+      "peak_phys_footprint_bytes": 33472904840,
+      "reported_metrics": {
+        "native_mtp": {
+          "aggregate_committed_tps": {
+            "ci_lower": 47.8381819940025,
+            "ci_upper": 48.51314763187338,
+            "confidence_level": 0.9982142857142857,
+            "median": 48.220454416204696
+          },
+          "aggregate_decode_tps": {
+            "ci_lower": 93.10942028071418,
+            "ci_upper": 95.67267453548159,
+            "confidence_level": 0.9982142857142857,
+            "median": 94.64404460488082
+          },
+          "capacity_rejection_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "fallback_error_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "inter_token_gap_p50_seconds": {
+            "ci_lower": 0.019088774919509888,
+            "ci_upper": 0.019214540719985962,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.01913398504257202
+          },
+          "inter_token_gap_p95_seconds": {
+            "ci_lower": 0.019978418946266174,
+            "ci_upper": 0.02021840214729309,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.020115417242050168
+          },
+          "mtp_acceptance_rate": {
+            "ci_lower": 0.825,
+            "ci_upper": 0.8717948717948718,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.8512345516350892
+          },
+          "mtp_accepted_tokens": {
+            "ci_lower": 231.0,
+            "ci_upper": 238.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 234.5
+          },
+          "mtp_proposed_tokens": {
+            "ci_lower": 272.5,
+            "ci_upper": 280.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 275.5
+          },
+          "peak_phys_footprint_bytes": {
+            "ci_lower": 33471274572.0,
+            "ci_upper": 33472650900.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 33472249480.0
+          },
+          "per_request_decode_tps": {
+            "ci_lower": 93.10942028071418,
+            "ci_upper": 95.67267453548159,
+            "confidence_level": 0.9982142857142857,
+            "median": 94.64404460488082
+          },
+          "per_request_tps": {
+            "ci_lower": 47.83919252199951,
+            "ci_upper": 48.51409947939852,
+            "confidence_level": 0.9982142857142857,
+            "median": 48.22147665730655
+          },
+          "target_forwards_per_committed_token": {
+            "ci_lower": 0.533203125,
+            "ci_upper": 0.546875,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.5400390625
+          },
+          "ttft_p50_seconds": {
+            "ci_lower": 5.21051549911499,
+            "ci_upper": 5.226017083813037,
+            "confidence_level": 0.9982142857142857,
+            "median": 5.219190537929535
+          },
+          "ttft_p95_seconds": {
+            "ci_lower": 5.21051549911499,
+            "ci_upper": 5.226017083813037,
+            "confidence_level": 0.9982142857142857,
+            "median": 5.219190537929535
+          }
+        },
+        "ordinary": {
+          "aggregate_committed_tps": {
+            "ci_lower": 46.058382646542015,
+            "ci_upper": 46.2721531899451,
+            "confidence_level": 0.9982142857142857,
+            "median": 46.19458984246096
+          },
+          "aggregate_decode_tps": {
+            "ci_lower": 82.81308879907897,
+            "ci_upper": 83.36325017504304,
+            "confidence_level": 0.9982142857142857,
+            "median": 83.0029014871429
+          },
+          "capacity_rejection_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "fallback_error_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "inter_token_gap_p50_seconds": {
+            "ci_lower": 0.0001919269561767578,
+            "ci_upper": 0.000216752290725708,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.00020745396614074707
+          },
+          "inter_token_gap_p95_seconds": {
+            "ci_lower": 0.18732693791389465,
+            "ci_upper": 0.18861746191978454,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.18803013861179352
+          },
+          "mtp_accepted_tokens": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "mtp_proposed_tokens": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "peak_phys_footprint_bytes": {
+            "ci_lower": 33470455384.0,
+            "ci_upper": 33472773780.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 33472134780.0
+          },
+          "per_request_decode_tps": {
+            "ci_lower": 82.81308879907897,
+            "ci_upper": 83.36325017504304,
+            "confidence_level": 0.9982142857142857,
+            "median": 83.0029014871429
+          },
+          "per_request_tps": {
+            "ci_lower": 46.05929591792568,
+            "ci_upper": 46.273106883110685,
+            "confidence_level": 0.9982142857142857,
+            "median": 46.1954630644225
+          },
+          "ttft_p50_seconds": {
+            "ci_lower": 4.924167513847351,
+            "ci_upper": 4.946516036987305,
+            "confidence_level": 0.9982142857142857,
+            "median": 4.935793936252594
+          },
+          "ttft_p95_seconds": {
+            "ci_lower": 4.924167513847351,
+            "ci_upper": 4.946516036987305,
+            "confidence_level": 0.9982142857142857,
+            "median": 4.935793936252594
+          }
+        }
+      },
+      "required_blocks": 10,
+      "status": "FAIL",
+      "sustained_duration_seconds": 0,
+      "sustained_min_available_memory_fraction": 0,
+      "thermal_end_states": [
+        "nominal"
+      ],
+      "thermal_start_states": [
+        "nominal"
+      ]
+    },
+    {
+      "acceptance_rate": null,
+      "cell_class": "gated",
+      "cell_id": "s2-p1536-o128",
+      "decode_tps_sources": [],
+      "forwards_per_committed_token": null,
+      "hard_failures": [
+        "incomplete: 0/10 paired blocks",
+        "gated_cell_missing_load_gate_downgrade",
+        "gated_cell_missing_native_admission",
+        "gated_depth_zero_hold_missing"
+      ],
+      "informational_metrics": {
+        "end_to_end_throughput": {
+          "ci_lower": null,
+          "ci_upper": null,
+          "confidence_level": 0.95,
+          "gated": false,
+          "median": null
+        }
+      },
+      "load_gate_downgrades": 0,
+      "memory_failures": [
+        "min_available_memory_fraction"
+      ],
+      "metric_failures": [
+        "throughput",
+        "ttft",
+        "itl",
+        "rejection"
+      ],
+      "metrics": {
+        "itl": {
+          "confidence_level": 0.9988095238095238,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0011904761904761906,
+          "holm_rank": 31,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.05
+        },
+        "rejection": {
+          "confidence_level": 0.998780487804878,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0012195121951219512,
+          "holm_rank": 32,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 1.0
+        },
+        "throughput": {
+          "confidence_level": 0.9988636363636364,
+          "corrected_lower_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0011363636363636365,
+          "holm_rank": 29,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": -0.05
+        },
+        "ttft": {
+          "confidence_level": 0.9988372093023256,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0011627906976744186,
+          "holm_rank": 30,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.05
+        }
+      },
+      "min_available_memory_fraction": 0,
+      "paired_blocks": 0,
+      "peak_phys_footprint_bytes": 0,
+      "reported_metrics": {},
+      "required_blocks": 10,
+      "status": "FAIL",
+      "sustained_duration_seconds": 0,
+      "sustained_min_available_memory_fraction": 0,
+      "thermal_end_states": [],
+      "thermal_start_states": []
+    },
+    {
+      "acceptance_rate": null,
+      "cell_class": "gated",
+      "cell_id": "s2-p1536-o512",
+      "decode_tps_sources": [],
+      "forwards_per_committed_token": null,
+      "hard_failures": [
+        "incomplete: 0/10 paired blocks",
+        "gated_cell_missing_load_gate_downgrade",
+        "gated_cell_missing_native_admission",
+        "gated_depth_zero_hold_missing"
+      ],
+      "informational_metrics": {
+        "end_to_end_throughput": {
+          "ci_lower": null,
+          "ci_upper": null,
+          "confidence_level": 0.95,
+          "gated": false,
+          "median": null
+        }
+      },
+      "load_gate_downgrades": 0,
+      "memory_failures": [
+        "min_available_memory_fraction"
+      ],
+      "metric_failures": [
+        "throughput",
+        "ttft",
+        "itl",
+        "rejection"
+      ],
+      "metrics": {
+        "itl": {
+          "confidence_level": 0.9986842105263158,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0013157894736842105,
+          "holm_rank": 35,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.05
+        },
+        "rejection": {
+          "confidence_level": 0.9986486486486487,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0013513513513513514,
+          "holm_rank": 36,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 1.0
+        },
+        "throughput": {
+          "confidence_level": 0.99875,
+          "corrected_lower_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.00125,
+          "holm_rank": 33,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": -0.05
+        },
+        "ttft": {
+          "confidence_level": 0.9987179487179487,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.001282051282051282,
+          "holm_rank": 34,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.05
+        }
+      },
+      "min_available_memory_fraction": 0,
+      "paired_blocks": 0,
+      "peak_phys_footprint_bytes": 0,
+      "reported_metrics": {},
+      "required_blocks": 10,
+      "status": "FAIL",
+      "sustained_duration_seconds": 0,
+      "sustained_min_available_memory_fraction": 0,
+      "thermal_end_states": [],
+      "thermal_start_states": []
+    },
+    {
+      "acceptance_rate": null,
+      "cell_class": "gated",
+      "cell_id": "s2-p4096-o128",
+      "decode_tps_sources": [],
+      "forwards_per_committed_token": null,
+      "hard_failures": [
+        "incomplete: 0/10 paired blocks",
+        "gated_cell_missing_load_gate_downgrade",
+        "gated_cell_missing_native_admission",
+        "gated_depth_zero_hold_missing"
+      ],
+      "informational_metrics": {
+        "end_to_end_throughput": {
+          "ci_lower": null,
+          "ci_upper": null,
+          "confidence_level": 0.95,
+          "gated": false,
+          "median": null
+        }
+      },
+      "load_gate_downgrades": 0,
+      "memory_failures": [
+        "min_available_memory_fraction"
+      ],
+      "metric_failures": [
+        "throughput",
+        "ttft",
+        "itl",
+        "rejection"
+      ],
+      "metrics": {
+        "itl": {
+          "confidence_level": 0.9985294117647059,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0014705882352941176,
+          "holm_rank": 39,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.05
+        },
+        "rejection": {
+          "confidence_level": 0.9984848484848485,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0015151515151515152,
+          "holm_rank": 40,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 1.0
+        },
+        "throughput": {
+          "confidence_level": 0.9986111111111111,
+          "corrected_lower_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.001388888888888889,
+          "holm_rank": 37,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": -0.05
+        },
+        "ttft": {
+          "confidence_level": 0.9985714285714286,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0014285714285714286,
+          "holm_rank": 38,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.05
+        }
+      },
+      "min_available_memory_fraction": 0,
+      "paired_blocks": 0,
+      "peak_phys_footprint_bytes": 0,
+      "reported_metrics": {},
+      "required_blocks": 10,
+      "status": "FAIL",
+      "sustained_duration_seconds": 0,
+      "sustained_min_available_memory_fraction": 0,
+      "thermal_end_states": [],
+      "thermal_start_states": []
+    },
+    {
+      "acceptance_rate": null,
+      "cell_class": "gated",
+      "cell_id": "s2-p4096-o512",
+      "decode_tps_sources": [],
+      "forwards_per_committed_token": null,
+      "hard_failures": [
+        "incomplete: 0/10 paired blocks",
+        "gated_cell_missing_load_gate_downgrade",
+        "gated_cell_missing_native_admission",
+        "gated_depth_zero_hold_missing"
+      ],
+      "informational_metrics": {
+        "end_to_end_throughput": {
+          "ci_lower": null,
+          "ci_upper": null,
+          "confidence_level": 0.95,
+          "gated": false,
+          "median": null
+        }
+      },
+      "load_gate_downgrades": 0,
+      "memory_failures": [
+        "min_available_memory_fraction"
+      ],
+      "metric_failures": [
+        "throughput",
+        "ttft",
+        "itl",
+        "rejection"
+      ],
+      "metrics": {
+        "itl": {
+          "confidence_level": 0.9983333333333333,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0016666666666666668,
+          "holm_rank": 43,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.05
+        },
+        "rejection": {
+          "confidence_level": 0.9982758620689656,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.001724137931034483,
+          "holm_rank": 44,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 1.0
+        },
+        "throughput": {
+          "confidence_level": 0.9984375,
+          "corrected_lower_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0015625,
+          "holm_rank": 41,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": -0.05
+        },
+        "ttft": {
+          "confidence_level": 0.9983870967741936,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0016129032258064516,
+          "holm_rank": 42,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.05
+        }
+      },
+      "min_available_memory_fraction": 0,
+      "paired_blocks": 0,
+      "peak_phys_footprint_bytes": 0,
+      "reported_metrics": {},
+      "required_blocks": 10,
+      "status": "FAIL",
+      "sustained_duration_seconds": 0,
+      "sustained_min_available_memory_fraction": 0,
+      "thermal_end_states": [],
+      "thermal_start_states": []
+    },
+    {
+      "acceptance_rate": null,
+      "cell_class": "gated",
+      "cell_id": "s2-p8192-o128",
+      "decode_tps_sources": [],
+      "forwards_per_committed_token": null,
+      "hard_failures": [
+        "incomplete: 0/10 paired blocks",
+        "gated_cell_missing_load_gate_downgrade",
+        "gated_cell_missing_native_admission",
+        "gated_depth_zero_hold_missing"
+      ],
+      "informational_metrics": {
+        "end_to_end_throughput": {
+          "ci_lower": null,
+          "ci_upper": null,
+          "confidence_level": 0.95,
+          "gated": false,
+          "median": null
+        }
+      },
+      "load_gate_downgrades": 0,
+      "memory_failures": [
+        "min_available_memory_fraction"
+      ],
+      "metric_failures": [
+        "throughput",
+        "ttft",
+        "itl",
+        "rejection"
+      ],
+      "metrics": {
+        "itl": {
+          "confidence_level": 0.9980769230769231,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0019230769230769232,
+          "holm_rank": 47,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.05
+        },
+        "rejection": {
+          "confidence_level": 0.998,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.002,
+          "holm_rank": 48,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 1.0
+        },
+        "throughput": {
+          "confidence_level": 0.9982142857142857,
+          "corrected_lower_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0017857142857142859,
+          "holm_rank": 45,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": -0.05
+        },
+        "ttft": {
+          "confidence_level": 0.9981481481481481,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.001851851851851852,
+          "holm_rank": 46,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.05
+        }
+      },
+      "min_available_memory_fraction": 0,
+      "paired_blocks": 0,
+      "peak_phys_footprint_bytes": 0,
+      "reported_metrics": {},
+      "required_blocks": 10,
+      "status": "FAIL",
+      "sustained_duration_seconds": 0,
+      "sustained_min_available_memory_fraction": 0,
+      "thermal_end_states": [],
+      "thermal_start_states": []
+    },
+    {
+      "acceptance_rate": null,
+      "cell_class": "gated",
+      "cell_id": "s2-p8192-o512",
+      "decode_tps_sources": [],
+      "forwards_per_committed_token": null,
+      "hard_failures": [
+        "incomplete: 0/10 paired blocks",
+        "gated_cell_missing_load_gate_downgrade",
+        "gated_cell_missing_native_admission",
+        "gated_depth_zero_hold_missing"
+      ],
+      "informational_metrics": {
+        "end_to_end_throughput": {
+          "ci_lower": null,
+          "ci_upper": null,
+          "confidence_level": 0.95,
+          "gated": false,
+          "median": null
+        }
+      },
+      "load_gate_downgrades": 0,
+      "memory_failures": [
+        "min_available_memory_fraction"
+      ],
+      "metric_failures": [
+        "throughput",
+        "ttft",
+        "itl",
+        "rejection"
+      ],
+      "metrics": {
+        "itl": {
+          "confidence_level": 0.9977272727272727,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.002272727272727273,
+          "holm_rank": 51,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.05
+        },
+        "rejection": {
+          "confidence_level": 0.9976190476190476,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.002380952380952381,
+          "holm_rank": 52,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 1.0
+        },
+        "throughput": {
+          "confidence_level": 0.9979166666666667,
+          "corrected_lower_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0020833333333333333,
+          "holm_rank": 49,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": -0.05
+        },
+        "ttft": {
+          "confidence_level": 0.9978260869565218,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.002173913043478261,
+          "holm_rank": 50,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.05
+        }
+      },
+      "min_available_memory_fraction": 0,
+      "paired_blocks": 0,
+      "peak_phys_footprint_bytes": 0,
+      "reported_metrics": {},
+      "required_blocks": 10,
+      "status": "FAIL",
+      "sustained_duration_seconds": 0,
+      "sustained_min_available_memory_fraction": 0,
+      "thermal_end_states": [],
+      "thermal_start_states": []
+    },
+    {
+      "acceptance_rate": null,
+      "cell_class": "gated",
+      "cell_id": "s8-p1536-o128",
+      "decode_tps_sources": [],
+      "forwards_per_committed_token": null,
+      "hard_failures": [
+        "incomplete: 0/10 paired blocks",
+        "gated_cell_missing_load_gate_downgrade",
+        "gated_cell_missing_native_admission",
+        "gated_depth_zero_hold_missing"
+      ],
+      "informational_metrics": {
+        "end_to_end_throughput": {
+          "ci_lower": null,
+          "ci_upper": null,
+          "confidence_level": 0.95,
+          "gated": false,
+          "median": null
+        }
+      },
+      "load_gate_downgrades": 0,
+      "memory_failures": [
+        "min_available_memory_fraction"
+      ],
+      "metric_failures": [
+        "throughput",
+        "ttft",
+        "itl",
+        "rejection"
+      ],
+      "metrics": {
+        "itl": {
+          "confidence_level": 0.9972222222222222,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.002777777777777778,
+          "holm_rank": 55,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.05
+        },
+        "rejection": {
+          "confidence_level": 0.9970588235294118,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0029411764705882353,
+          "holm_rank": 56,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 1.0
+        },
+        "throughput": {
+          "confidence_level": 0.9975,
+          "corrected_lower_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0025,
+          "holm_rank": 53,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": -0.05
+        },
+        "ttft": {
+          "confidence_level": 0.9973684210526316,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.002631578947368421,
+          "holm_rank": 54,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.05
+        }
+      },
+      "min_available_memory_fraction": 0,
+      "paired_blocks": 0,
+      "peak_phys_footprint_bytes": 0,
+      "reported_metrics": {},
+      "required_blocks": 10,
+      "status": "FAIL",
+      "sustained_duration_seconds": 0,
+      "sustained_min_available_memory_fraction": 0,
+      "thermal_end_states": [],
+      "thermal_start_states": []
+    },
+    {
+      "acceptance_rate": null,
+      "cell_class": "gated",
+      "cell_id": "s8-p1536-o512",
+      "decode_tps_sources": [
+        "recorded"
+      ],
+      "forwards_per_committed_token": 0.0,
+      "hard_failures": [],
+      "informational_metrics": {
+        "end_to_end_throughput": {
+          "ci_lower": -0.006556427230080375,
+          "ci_upper": -0.0021200261498175443,
+          "confidence_level": 0.95,
+          "gated": false,
+          "median": -0.00514107333625452
+        }
+      },
+      "load_gate_downgrades": 70,
+      "memory_failures": [
+        "sustained_min_available_memory_fraction"
+      ],
+      "metric_failures": [],
+      "metrics": {
+        "itl": {
+          "confidence_level": 0.9992063492063492,
+          "corrected_upper_bound": 0.010104438259623847,
+          "holm_adjusted_p_value": 0.007199280071992801,
+          "holm_alpha": 0.0007936507936507937,
+          "holm_rank": 10,
+          "median": 0.005740177131592916,
+          "p_value": 9.999000099990002e-05,
+          "status": "PASS",
+          "threshold": 0.05
+        },
+        "rejection": {
+          "confidence_level": 0.9991935483870967,
+          "corrected_upper_bound": 0.0,
+          "holm_adjusted_p_value": 0.007199280071992801,
+          "holm_alpha": 0.0008064516129032258,
+          "holm_rank": 11,
+          "median": 0.0,
+          "p_value": 9.999000099990002e-05,
+          "status": "PASS",
+          "threshold": 1.0
+        },
+        "throughput": {
+          "confidence_level": 0.9992307692307693,
+          "corrected_lower_bound": -0.023318918866198246,
+          "holm_adjusted_p_value": 0.007199280071992801,
+          "holm_alpha": 0.0007692307692307692,
+          "holm_rank": 8,
+          "median": -0.0018634606843336843,
+          "p_value": 9.999000099990002e-05,
+          "status": "PASS",
+          "threshold": -0.05
+        },
+        "ttft": {
+          "confidence_level": 0.99921875,
+          "corrected_upper_bound": 0.010599649417999542,
+          "holm_adjusted_p_value": 0.007199280071992801,
+          "holm_alpha": 0.00078125,
+          "holm_rank": 9,
+          "median": -0.0007497268265970747,
+          "p_value": 9.999000099990002e-05,
+          "status": "PASS",
+          "threshold": 0.05
+        }
+      },
+      "min_available_memory_fraction": 0.6604494452476501,
+      "paired_blocks": 10,
+      "peak_phys_footprint_bytes": 42906091120,
+      "reported_metrics": {
+        "native_mtp": {
+          "aggregate_committed_tps": {
+            "ci_lower": 184.542698030257,
+            "ci_upper": 185.81397173442403,
+            "confidence_level": 0.9981481481481481,
+            "median": 185.24254206033368
+          },
+          "aggregate_decode_tps": {
+            "ci_lower": 193.92329397810406,
+            "ci_upper": 198.1982410280759,
+            "confidence_level": 0.9981481481481481,
+            "median": 195.80912828070103
+          },
+          "capacity_rejection_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "fallback_error_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "inter_token_gap_p50_seconds": {
+            "ci_lower": 0.0008684992790222168,
+            "ci_upper": 0.0009435415267944336,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0009107291698455811
+          },
+          "inter_token_gap_p95_seconds": {
+            "ci_lower": 0.4127970457077026,
+            "ci_upper": 0.41865296959877013,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.41483772695064547
+          },
+          "mtp_accepted_tokens": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "mtp_proposed_tokens": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "peak_phys_footprint_bytes": {
+            "ci_lower": 41316756967.46667,
+            "ci_upper": 42905976444.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 42905542256.0
+          },
+          "per_request_decode_tps": {
+            "ci_lower": 33.879347692471406,
+            "ci_upper": 34.98257934297938,
+            "confidence_level": 0.9981481481481481,
+            "median": 34.355739189567814
+          },
+          "per_request_tps": {
+            "ci_lower": 24.455729831951288,
+            "ci_upper": 24.5954329506869,
+            "confidence_level": 0.9981481481481481,
+            "median": 24.50348163290323
+          },
+          "target_forwards_per_committed_token": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "ttft_p50_seconds": {
+            "ci_lower": 6.031370460987091,
+            "ci_upper": 6.460038244724274,
+            "confidence_level": 0.9981481481481481,
+            "median": 6.220999240875244
+          },
+          "ttft_p95_seconds": {
+            "ci_lower": 6.6633241176605225,
+            "ci_upper": 6.757722136378288,
+            "confidence_level": 0.9981481481481481,
+            "median": 6.6884645283222195
+          }
+        },
+        "ordinary": {
+          "aggregate_committed_tps": {
+            "ci_lower": 185.5267961179872,
+            "ci_upper": 186.3629778458836,
+            "confidence_level": 0.9981481481481481,
+            "median": 185.99414594769183
+          },
+          "aggregate_decode_tps": {
+            "ci_lower": 193.77535708427988,
+            "ci_upper": 198.6710249501143,
+            "confidence_level": 0.9981481481481481,
+            "median": 196.12072072947223
+          },
+          "capacity_rejection_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "fallback_error_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "inter_token_gap_p50_seconds": {
+            "ci_lower": 0.000837254524230957,
+            "ci_upper": 0.0009739398956298828,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0008894801139831543
+          },
+          "inter_token_gap_p95_seconds": {
+            "ci_lower": 0.41120181083679197,
+            "ci_upper": 0.41620221734046936,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.4133137583732605
+          },
+          "mtp_accepted_tokens": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "mtp_proposed_tokens": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "peak_phys_footprint_bytes": {
+            "ci_lower": 41990846672.6,
+            "ci_upper": 42905935460.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 42905648764.0
+          },
+          "per_request_decode_tps": {
+            "ci_lower": 34.04288303186175,
+            "ci_upper": 35.12258715207338,
+            "confidence_level": 0.9981481481481481,
+            "median": 34.282709146240336
+          },
+          "per_request_tps": {
+            "ci_lower": 24.5008368685895,
+            "ci_upper": 24.7101066598427,
+            "confidence_level": 0.9981481481481481,
+            "median": 24.6201972247797
+          },
+          "ttft_p50_seconds": {
+            "ci_lower": 6.057373464107513,
+            "ci_upper": 6.423440515995026,
+            "confidence_level": 0.9981481481481481,
+            "median": 6.129349261522293
+          },
+          "ttft_p95_seconds": {
+            "ci_lower": 6.629821848869324,
+            "ci_upper": 6.762895718812943,
+            "confidence_level": 0.9981481481481481,
+            "median": 6.698528179526329
+          }
+        }
+      },
+      "required_blocks": 10,
+      "status": "FAIL",
+      "sustained_duration_seconds": 0,
+      "sustained_min_available_memory_fraction": 0,
+      "thermal_end_states": [
+        "nominal"
+      ],
+      "thermal_start_states": [
+        "nominal"
+      ]
+    },
+    {
+      "acceptance_rate": null,
+      "cell_class": "gated",
+      "cell_id": "s8-p4096-o128",
+      "decode_tps_sources": [],
+      "forwards_per_committed_token": null,
+      "hard_failures": [
+        "incomplete: 0/10 paired blocks",
+        "gated_cell_missing_load_gate_downgrade",
+        "gated_cell_missing_native_admission",
+        "gated_depth_zero_hold_missing"
+      ],
+      "informational_metrics": {
+        "end_to_end_throughput": {
+          "ci_lower": null,
+          "ci_upper": null,
+          "confidence_level": 0.95,
+          "gated": false,
+          "median": null
+        }
+      },
+      "load_gate_downgrades": 0,
+      "memory_failures": [
+        "min_available_memory_fraction"
+      ],
+      "metric_failures": [
+        "throughput",
+        "ttft",
+        "itl",
+        "rejection"
+      ],
+      "metrics": {
+        "itl": {
+          "confidence_level": 0.9964285714285714,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0035714285714285718,
+          "holm_rank": 59,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.05
+        },
+        "rejection": {
+          "confidence_level": 0.9961538461538462,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0038461538461538464,
+          "holm_rank": 60,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 1.0
+        },
+        "throughput": {
+          "confidence_level": 0.996875,
+          "corrected_lower_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.003125,
+          "holm_rank": 57,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": -0.05
+        },
+        "ttft": {
+          "confidence_level": 0.9966666666666667,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0033333333333333335,
+          "holm_rank": 58,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.05
+        }
+      },
+      "min_available_memory_fraction": 0,
+      "paired_blocks": 0,
+      "peak_phys_footprint_bytes": 0,
+      "reported_metrics": {},
+      "required_blocks": 10,
+      "status": "FAIL",
+      "sustained_duration_seconds": 0,
+      "sustained_min_available_memory_fraction": 0,
+      "thermal_end_states": [],
+      "thermal_start_states": []
+    },
+    {
+      "acceptance_rate": null,
+      "cell_class": "gated",
+      "cell_id": "s8-p4096-o512",
+      "decode_tps_sources": [],
+      "forwards_per_committed_token": null,
+      "hard_failures": [
+        "incomplete: 0/10 paired blocks",
+        "gated_cell_missing_load_gate_downgrade",
+        "gated_cell_missing_native_admission",
+        "gated_depth_zero_hold_missing"
+      ],
+      "informational_metrics": {
+        "end_to_end_throughput": {
+          "ci_lower": null,
+          "ci_upper": null,
+          "confidence_level": 0.95,
+          "gated": false,
+          "median": null
+        }
+      },
+      "load_gate_downgrades": 0,
+      "memory_failures": [
+        "min_available_memory_fraction"
+      ],
+      "metric_failures": [
+        "throughput",
+        "ttft",
+        "itl",
+        "rejection"
+      ],
+      "metrics": {
+        "itl": {
+          "confidence_level": 0.995,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.005,
+          "holm_rank": 63,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.05
+        },
+        "rejection": {
+          "confidence_level": 0.9944444444444445,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.005555555555555556,
+          "holm_rank": 64,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 1.0
+        },
+        "throughput": {
+          "confidence_level": 0.9958333333333333,
+          "corrected_lower_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.004166666666666667,
+          "holm_rank": 61,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": -0.05
+        },
+        "ttft": {
+          "confidence_level": 0.9954545454545455,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.004545454545454546,
+          "holm_rank": 62,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.05
+        }
+      },
+      "min_available_memory_fraction": 0,
+      "paired_blocks": 0,
+      "peak_phys_footprint_bytes": 0,
+      "reported_metrics": {},
+      "required_blocks": 10,
+      "status": "FAIL",
+      "sustained_duration_seconds": 0,
+      "sustained_min_available_memory_fraction": 0,
+      "thermal_end_states": [],
+      "thermal_start_states": []
+    },
+    {
+      "acceptance_rate": null,
+      "cell_class": "gated",
+      "cell_id": "s8-p8192-o128",
+      "decode_tps_sources": [],
+      "forwards_per_committed_token": null,
+      "hard_failures": [
+        "incomplete: 0/10 paired blocks",
+        "gated_cell_missing_load_gate_downgrade",
+        "gated_cell_missing_native_admission",
+        "gated_depth_zero_hold_missing"
+      ],
+      "informational_metrics": {
+        "end_to_end_throughput": {
+          "ci_lower": null,
+          "ci_upper": null,
+          "confidence_level": 0.95,
+          "gated": false,
+          "median": null
+        }
+      },
+      "load_gate_downgrades": 0,
+      "memory_failures": [
+        "min_available_memory_fraction"
+      ],
+      "metric_failures": [
+        "throughput",
+        "ttft",
+        "itl",
+        "rejection"
+      ],
+      "metrics": {
+        "itl": {
+          "confidence_level": 0.9916666666666667,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.008333333333333333,
+          "holm_rank": 67,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.05
+        },
+        "rejection": {
+          "confidence_level": 0.99,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.01,
+          "holm_rank": 68,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 1.0
+        },
+        "throughput": {
+          "confidence_level": 0.99375,
+          "corrected_lower_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.00625,
+          "holm_rank": 65,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": -0.05
+        },
+        "ttft": {
+          "confidence_level": 0.9928571428571429,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0071428571428571435,
+          "holm_rank": 66,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.05
+        }
+      },
+      "min_available_memory_fraction": 0,
+      "paired_blocks": 0,
+      "peak_phys_footprint_bytes": 0,
+      "reported_metrics": {},
+      "required_blocks": 10,
+      "status": "FAIL",
+      "sustained_duration_seconds": 0,
+      "sustained_min_available_memory_fraction": 0,
+      "thermal_end_states": [],
+      "thermal_start_states": []
+    },
+    {
+      "acceptance_rate": null,
+      "cell_class": "gated",
+      "cell_id": "s8-p8192-o512",
+      "decode_tps_sources": [],
+      "forwards_per_committed_token": null,
+      "hard_failures": [
+        "incomplete: 0/10 paired blocks",
+        "gated_cell_missing_load_gate_downgrade",
+        "gated_cell_missing_native_admission",
+        "gated_depth_zero_hold_missing"
+      ],
+      "informational_metrics": {
+        "end_to_end_throughput": {
+          "ci_lower": null,
+          "ci_upper": null,
+          "confidence_level": 0.95,
+          "gated": false,
+          "median": null
+        }
+      },
+      "load_gate_downgrades": 0,
+      "memory_failures": [
+        "min_available_memory_fraction"
+      ],
+      "metric_failures": [
+        "throughput",
+        "ttft",
+        "itl",
+        "rejection"
+      ],
+      "metrics": {
+        "itl": {
+          "confidence_level": 0.975,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.025,
+          "holm_rank": 71,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.05
+        },
+        "rejection": {
+          "confidence_level": 0.95,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.05,
+          "holm_rank": 72,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 1.0
+        },
+        "throughput": {
+          "confidence_level": 0.9875,
+          "corrected_lower_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0125,
+          "holm_rank": 69,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": -0.05
+        },
+        "ttft": {
+          "confidence_level": 0.9833333333333333,
+          "corrected_upper_bound": null,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.016666666666666666,
+          "holm_rank": 70,
+          "median": null,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.05
+        }
+      },
+      "min_available_memory_fraction": 0,
+      "paired_blocks": 0,
+      "peak_phys_footprint_bytes": 0,
+      "reported_metrics": {},
+      "required_blocks": 10,
+      "status": "FAIL",
+      "sustained_duration_seconds": 0,
+      "sustained_min_available_memory_fraction": 0,
+      "thermal_end_states": [],
+      "thermal_start_states": []
+    }
+  ],
+  "overall_status": "EXPLORATORY_NO_VERDICT",
+  "policy_sha256": "13f5d19b1d84def5cfa10129ef6323d27ac9b9fa5f9afc28d37d6c4a1050cb30",
+  "provider_commit": "f8a3087b5e80752ad195095222bc1875a192f883",
+  "schema": "macprovider.native-mtp-r015-analysis.v1",
+  "unavailable_metrics": []
+}

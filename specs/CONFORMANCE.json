@@ -665,7 +665,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.22.2",
+      "version": "v0.22.5",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1474,7 +1474,7 @@
     {
       "spec_id": "SPEC-048",
       "title": "Native Multi-Token Prediction Serving",
-      "version": "0.1.10",
+      "version": "0.1.20",
       "path": "specs/SPEC-048-native-mtp-serving.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -3230,8 +3230,16 @@
       "requirement_id": "SPEC-023-R024",
       "spec_id": "SPEC-023",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/NativeMTPAdmissionSidecar.swift:struct NativeMTPAdmissionCapability"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testValidSidecarReturnsImmutableCapability",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testCompleteWindowBytesByDepthIsRequiredMonotonicAndCapacityBounded",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testSpec023LiveExecutableCDHashIsRequiredLowercaseAndSignedIntoTuple",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testReleaseEnvelopeBindsNativeActiveRowBoundIntoTupleIdentity",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testReleaseEnvelopeRejectsNativeActiveRowBoundOutsideQualifiedSlots"
+      ],
       "journeys": [
         "JOURNEY-NATIVE-MTP-SERVING"
       ],
@@ -3240,7 +3248,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "SPEC-023 v0.21.2 defines the closed signed native-MTP admission sidecar, including the authenticated live executable CDHash binding and complete-window byte closure; generator, strict consumers, release-ledger binding, negative fixtures, and signed release evidence are not implemented."
+        "rationale": "SPEC-023 v0.22.5 defines the closed signed native-MTP admission sidecar. The strict consumer is implemented branch-local (campaign/native-mtp-r015, #1770) and fails closed on the live executable CDHash binding, complete-window byte closure, MLX affine 4-bit representation, the SPEC-048-R007 max_native_active_rows bound, and the greedy/sampled request profile, with negative fixtures. The production sidecar generator, release-ledger binding, and signed release evidence are not implemented, so the requirement stays pending."
       }
     },
     {
@@ -9968,30 +9976,45 @@
       "requirement_id": "SPEC-048-R001",
       "spec_id": "SPEC-048",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/NativeMTP.swift:enum DecodePath",
+        "phase3-binary/Sources/macprovider-cli/NativeMTP.swift:static func select"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPSelectorTests.swift:testDecodePathEnumIsClosedAndDistinctFromClassicSpeculation",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPSelectorTests.swift:testDefaultUnavailableCapabilityRoutesOrdinaryWithModeOff",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPSelectorTests.swift:testClassicDraftConfigurationTakesPrecedenceOverNativeMTP"
+      ],
       "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "The closed ordinary/classic/native decode-path contract and default-off selection gate are not implemented."
+        "rationale": "The closed ordinary/classic/native decode-path contract and default-off selection are implemented: an unqualified or absent capability routes ordinary with mode_off, and classic draft configuration takes precedence. Branch-local on campaign/native-mtp-r015 at the reviewed fork pin ef4ff8568c38c640bc90a8176dc3acfe943a288d, default-off; stays pending until the frozen diff completes CI, Mac Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
       }
     },
     {
       "requirement_id": "SPEC-048-R002",
       "spec_id": "SPEC-048",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/NativeMTP.swift:struct NativeMTPCapability",
+        "phase3-binary/Sources/macprovider-cli/NativeMTPArtifactObservation.swift:enum NativeMTPArtifactObserver"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift:testNativeMTPCapabilityRejectsSignedFieldMismatches",
+        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift:testNativeMTPArtifactObservationMustMatchSignedCapability",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPArtifactObservationTests.swift:testAffineFourRejectsUnpairedMismatchedAndPaddedHeaders",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPArtifactObservationTests.swift:testUnquantizedObservationRejectsMissingFloat32AndGarbageDType"
+      ],
       "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "No immutable native-MTP capability, manifest binding, or negative artifact fixtures exist."
+        "rationale": "The immutable NativeMTPCapability, the artifact observer that must match the pinned MLX loader and the signed capability (including the mlx_affine representation manifest digest), and negative artifact fixtures are implemented. Exact immutable production Qwen tuple hashes and signed artifact evidence are still missing. Branch-local on campaign/native-mtp-r015 at the reviewed fork pin ef4ff8568c38c640bc90a8176dc3acfe943a288d, default-off; stays pending until the frozen diff completes CI, Mac Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
       }
     },
     {
@@ -10020,67 +10043,96 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "The exact reviewed fork revision adds standalone Qwen 3.5 MTP checkpoint loading plus public row-mapped cache transactions, packed target verification, strict row-local continuation state, serialized non-Sendable drafter-state access, and packed recurrent Mamba row transactions under the SPEC-048 v0.1.6 immutable-dependency exception. The v0.1.6 repin preserves the audited API delta while restoring Swift 6.1 package-manifest compatibility for MacProvider release CI. The expanded upstream test bundle compiled and the real Qwen 3.5 target/MTP tuple passed Mac Studio ordinary-versus-native-MTP parity, but R003 remains pending until the frozen MacProvider diff completes every audit, release, and signed-campaign gate. This does not make any production tuple eligible."
+        "rationale": "The exact reviewed fork revision ef4ff8568c38c640bc90a8176dc3acfe943a288d (SPEC-048 v0.1.13 immutable-dependency exception, moved from c4bc3461) adds standalone Qwen 3.5 MTP checkpoint loading, public row-mapped cache transactions, packed target verification, strict row-local continuation state, serialized non-Sendable drafter-state access, and packed recurrent Mamba row transactions, plus the round-overhead delta: host-mirrored packed-verify offset validation, deferred recurrent row-commit evaluation, and a packed stateful-drafter API that advances and proposes every native row in one forward. Drafter state never selects an emitted token, so the delta does not touch the R005 oracle. R003 remains pending until the frozen MacProvider diff completes every audit, release, and signed-campaign gate and the exception is replaced by an upstream tag. This does not make any production tuple eligible."
       }
     },
     {
       "requirement_id": "SPEC-048-R004",
       "spec_id": "SPEC-048",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/NativeMTP.swift:enum NativeMTPSelectorReason",
+        "phase3-binary/Sources/macprovider-cli/NativeMTP.swift:static func reason"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPSelectorTests.swift:testNativeMTPReasonsFitBoundedDiagnosticContract",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPSelectorTests.swift:testNativeMTPRejectsRequestFeaturesWithClosedReasons",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPSelectorTests.swift:testNativeMTPRejectsTupleAndRuntimeGatesBeforeRequestEligibility"
+      ],
       "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "Native-MTP request eligibility, bounded fallback reasons, and pre-output restoration are not implemented."
+        "rationale": "Request eligibility (greedy and the signed sampled profile), the closed bounded fallback-reason set, and runtime downgrade before any native state exists are implemented. Branch-local on campaign/native-mtp-r015 at the reviewed fork pin ef4ff8568c38c640bc90a8176dc3acfe943a288d, default-off; stays pending until the frozen diff completes CI, Mac Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
       }
     },
     {
       "requirement_id": "SPEC-048-R005",
       "spec_id": "SPEC-048",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/NativeMTPAcceptance.swift:static func acceptGreedy"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAcceptanceTests.swift:testMixedRaggedRowsAcceptIndependently",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAcceptanceTests.swift:testRejectsAtEveryProposalPosition"
+      ],
       "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "Target-authoritative prefix acceptance and exact greedy ordinary-decode parity are unimplemented and unproven."
+        "rationale": "Target-authoritative prefix acceptance is implemented for greedy and seeded-sampled rows (target-sample exact match with the row's own seeded sampler); unit tests cover ragged rows and rejection at every position, and Studio parity runs are campaign-PR records, not yet signed evidence. Branch-local on campaign/native-mtp-r015 at the reviewed fork pin ef4ff8568c38c640bc90a8176dc3acfe943a288d, default-off; stays pending until the frozen diff completes CI, Mac Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
       }
     },
     {
       "requirement_id": "SPEC-048-R006",
       "spec_id": "SPEC-048",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/MacProviderCore/PagedKVEngine.swift:public func checkpointNativeMTPTransaction",
+        "phase3-binary/Sources/MacProviderCore/PagedKVEngine.swift:public func commitNativeMTPTransaction",
+        "phase3-binary/Sources/MacProviderCore/PagedKVEngine.swift:public func abortNativeMTPTransaction"
+      ],
+      "tests": [
+        "phase3-binary/Tests/MacProviderCoreTests/PagedKVEngineTests.swift:testNativeMTPAbortRestoresCheckpointAndReleasesStagedBlocks",
+        "phase3-binary/Tests/MacProviderCoreTests/PagedKVEngineTests.swift:testNativeMTPRaggedRowsCommitIndependently",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testNativeMTPDisableDuringFinalizeFailsOnlyStaleRowAndHealthyPeerCommits"
+      ],
       "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "Row-local transactional KV and hybrid-state staging, prefix commit, discard, and exact rewind are not implemented."
+        "rationale": "Row-local transactional paged-KV and hybrid-state staging, accepted-prefix commit, discard, and rewind are implemented; a row that goes stale after the backend publishes its round fails alone without rolling back healthy peers. Branch-local on campaign/native-mtp-r015 at the reviewed fork pin ef4ff8568c38c640bc90a8176dc3acfe943a288d, default-off; stays pending until the frozen diff completes CI, Mac Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
       }
     },
     {
       "requirement_id": "SPEC-048-R007",
       "spec_id": "SPEC-048",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func runNativeMTPDecodeStep",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func updateNativeMTPLoadGate",
+        "phase3-binary/Sources/macprovider-cli/NativeMTP.swift:func resolvingActiveRows"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testNativeMTPPackedRoundPartitionsOrdinaryRowsFromRaggedNativeRows",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testNativeMTPLoadGateHoldsDepthZeroAboveBoundAndRestoresWithHysteresis",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testNativeMTPConcurrentRowsCannotOvercommitRoundByteBudgetBeforeProposal",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPSelectorTests.swift:testNativeMTPRuntimeAdmissionDowngradesAtSignedActiveRowBound"
+      ],
       "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "Variable-span multi-row native-MTP batching, capacity accounting, and mixed-path fairness are not implemented."
+        "rationale": "Variable-span packed multi-row native rounds mixed with ordinary rows, complete-window capacity reservation with deterministic depth reduction, FCFS fairness, and the signed max_native_active_rows admission and in-flight load gate are implemented. The bound value itself still needs R015 cell evidence. Branch-local on campaign/native-mtp-r015 at the reviewed fork pin ef4ff8568c38c640bc90a8176dc3acfe943a288d, default-off; stays pending until the frozen diff completes CI, Mac Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
       }
     },
     {
@@ -10117,15 +10169,23 @@
       "requirement_id": "SPEC-048-R010",
       "spec_id": "SPEC-048",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/NativeMTPStatus.swift:public struct NativeMTPStatusSnapshot",
+        "phase3-binary/Sources/macprovider-cli/NativeMTPStatus.swift:final class NativeMTPStatusSink"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPStatusTests.swift:testStatusObjectUsesClosedR010FieldSetAndDerivedCounters",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPStatusTests.swift:testMetricsSamplesUseOnlyBoundedLabels",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPStatusTests.swift:testCounterSaturationDisablesNativeTupleUntilNewSinkGeneration",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPStatusTests.swift:testLocalStatusPublishesCapabilityAndExactlyOneNativeMTPObject"
+      ],
       "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "Native-MTP local observability, warm-swap reset, and wire-schema omission gates are not implemented."
+        "rationale": "Local native-MTP status with the closed R010 field set, derived counters, bounded metric labels, counter saturation, and a fresh sink generation per runtime publication are implemented and unit-tested. Dedicated warm-swap reset and wire-schema omission evidence is not mapped here yet. Branch-local on campaign/native-mtp-r015 at the reviewed fork pin ef4ff8568c38c640bc90a8176dc3acfe943a288d, default-off; stays pending until the frozen diff completes CI, Mac Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
       }
     },
     {
@@ -10162,15 +10222,22 @@
       "requirement_id": "SPEC-048-R013",
       "spec_id": "SPEC-048",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/NativeMTPRevocationFeed.swift:struct NativeMTPRevocationFeed",
+        "phase3-binary/Sources/macprovider-cli/NativeMTPAdmissionSidecar.swift:struct NativeMTPResolvedArtifactAuthority"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testProductionLoaderRejectsLegacyObjectSchema",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPRevocationFeedTests.swift:testAcceptsSignedFeedAndPersistsRecoverableAnchor",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPRevocationFeedTests.swift:testRejectsRollbackReplayAndRevokedSetRegression"
+      ],
       "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "Signed immutable native-MTP catalog/autotune admission and evidence binding do not exist."
+        "rationale": "The strict consumer side of signed admission is implemented: the SPEC-023-R024 sidecar parser and resolved artifact authority (mapped under SPEC-023-R024) and the signed tuple revocation feed with rollback/replay protection. The signed catalog/autotune admission generator, release-ledger binding, and immutable evidence records do not exist yet. Branch-local on campaign/native-mtp-r015 at the reviewed fork pin ef4ff8568c38c640bc90a8176dc3acfe943a288d, default-off; stays pending until the frozen diff completes CI, Mac Studio hardware evidence, three-lane audits, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
       }
     },
     {
@@ -10192,15 +10259,29 @@
       "requirement_id": "SPEC-048-R015",
       "spec_id": "SPEC-048",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/NativeMTPBenchCommand.swift:struct NativeMTPBenchPolicy",
+        "phase3-binary/Sources/macprovider-cli/NativeMTPBenchCommand.swift:static func nativeFirstOrder",
+        "phase3-binary/Sources/macprovider-cli/NativeMTPBenchCommand.swift:func validateMatrix",
+        "scripts/native_mtp_r015_analyze.py:analyze",
+        "scripts/native_mtp_r015_analyze.py:_pair_runs",
+        "scripts/native_mtp_r015_analyze.py:_matrix_violations",
+        "scripts/native_mtp_r015_analyze.py:_gated_hold_failures"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPBenchPolicyTests.swift:testAdmissionPolicyWithoutOneSlotCellFailsClosed",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPBenchPolicyTests.swift:testGatedCellsRequireStaggeredArrivals",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPBenchPolicyTests.swift:testPreregisteredRunOrderMatchesAnalyzerGoldenVectors",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testLoadGateRecorderCountsHeldRoundsAndRestoration",
+        "scripts/tests/test_native_mtp_r015_analyze.py:class NativeMTPR015AnalyzeTests"
+      ],
       "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "No preregistered 256 GB Studio and advertised-tier benchmark campaign has passed the material production-economics gate."
+        "rationale": "The R015 gate surfaces are implemented branch-local (campaign/native-mtp-r015, #1770), lab-only and compiled out of release: the native-mtp-bench preregistered policy (mandatory matrix, frozen thresholds including gated non-inferiority margins, staggered arrivals, seeded counterbalanced run order) and scripts/native_mtp_r015_analyze.py (independent matrix, sample-size, run-order, native-eligible improvement and gated non-inferiority gates with scheduler-sourced load-gate hold evidence, Holm correction). Pending: no preregistered 256 GB Studio or advertised-tier campaign has been run or passed the production-economics gate, and the representative post-gateway replay is not implemented."
       }
     },
     {

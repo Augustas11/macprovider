@@ -9,6 +9,7 @@ public enum NativeMTPStatusReason: String, CaseIterable, Sendable, Equatable {
     case requestIneligible = "request_ineligible"
     case unsupportedCacheState = "unsupported_cache_state"
     case capacityUnavailable = "capacity_unavailable"
+    case capacityAboveNativeBound = "capacity_above_native_bound"
     case lowAcceptanceDepthZero = "low_acceptance_depth_zero"
     case runtimeFailure = "runtime_failure"
     case warmSwap = "warm_swap"

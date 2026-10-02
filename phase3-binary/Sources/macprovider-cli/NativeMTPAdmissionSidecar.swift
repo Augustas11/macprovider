@@ -25,6 +25,9 @@ struct NativeMTPAdmissionCapability: Equatable, Sendable {
     let providerRevision: String
     let upstreamMLXSwiftLMRevision: String
     let qualifiedSlots: Int
+    /// SPEC-048-R007 load gate: native MTP serves a row only while at most
+    /// this many decode rows are active; signed, `1...qualifiedSlots`.
+    let maxNativeActiveRows: Int
     let spec023ReleaseID: String
     let spec023SourceCommit: String
     let spec023BuildDigestSHA256: String
@@ -34,6 +37,9 @@ struct NativeMTPAdmissionCapability: Equatable, Sendable {
     let revocationSignerKeyID: String
     let selfTestChallengeBank: NativeMTPSelfTestChallengeBank
     let capturedArtifacts: NativeMTPAdmissionCapturedArtifacts?
+    /// SPEC-023-R024 `request_feature_profile` is the sampled profile: the
+    /// tuple qualified target-sample exact-match verification (SPEC-048-R004).
+    var supportsSampling: Bool = false
 }
 
 struct NativeMTPSelfTestChallengeBank: Equatable, Sendable {
@@ -470,6 +476,14 @@ enum NativeMTPAdmissionSidecarError: Error, Equatable, CustomStringConvertible {
 
 enum NativeMTPAdmissionSidecar {
     static let schemaVersion = "macprovider.native-mtp-admission.v1"
+    static let greedyRequestFeatureProfile = "native_mtp_greedy_text_v1"
+    /// Adds sampled rows (temperature/top_p) verified by target-sample exact
+    /// match to the greedy profile (SPEC-023-R024, SPEC-048-R004).
+    static let sampledRequestFeatureProfile = "native_mtp_sampled_text_v1"
+    static let requestFeatureProfiles: Set<String> = [
+        greedyRequestFeatureProfile,
+        sampledRequestFeatureProfile,
+    ]
     static let maxSidecarBytes = 1 * 1024 * 1024
     static let maxSignatureBytes = 16 * 1024
     static let maxSelfTestChallengeBankBytes = 256 * 1024
@@ -524,6 +538,26 @@ enum NativeMTPAdmissionSidecar {
     struct Quantization: Equatable, Sendable {
         let target: String
         let mtp: String
+        let blockSizeElements: Int?
+        let representationManifestSHA256: String?
+        let unquantizedExceptions: [String]
+        let perLayerExceptions: [String]
+
+        init(
+            target: String,
+            mtp: String,
+            blockSizeElements: Int? = nil,
+            representationManifestSHA256: String? = nil,
+            unquantizedExceptions: [String] = [],
+            perLayerExceptions: [String] = []
+        ) {
+            self.target = target
+            self.mtp = mtp
+            self.blockSizeElements = blockSizeElements
+            self.representationManifestSHA256 = representationManifestSHA256
+            self.unquantizedExceptions = unquantizedExceptions
+            self.perLayerExceptions = perLayerExceptions
+        }
     }
 
     struct TrustedKeyring: Equatable, Sendable {
@@ -573,6 +607,7 @@ enum NativeMTPAdmissionSidecar {
         let osVersion: String
         let qualifiedSlots: Int
         let maxSlots: Int
+        let maxNativeActiveRows: Int
         let requestProfile: RequestProfile
         let spec023: Spec023
         let challengeBankSignerKeyID: String
@@ -608,6 +643,7 @@ enum NativeMTPAdmissionSidecar {
                 osVersion: osVersion,
                 qualifiedSlots: qualifiedSlots,
                 maxSlots: maxSlots,
+                maxNativeActiveRows: maxNativeActiveRows,
                 requestProfile: requestProfile,
                 spec023: spec023,
                 challengeBankSignerKeyID: challengeBankSignerKeyID,
@@ -641,6 +677,7 @@ enum NativeMTPAdmissionSidecar {
         let hardwareClass: String
         let ramBytes: Int
         let qualifiedSlots: Int
+        let maxNativeActiveRows: Int
         let requestFeatureProfile: String
         let decreaseThresholdPPM: Int
         let increaseThresholdPPM: Int
@@ -682,6 +719,7 @@ enum NativeMTPAdmissionSidecar {
         let diskCache: Bool
         let maxPromptTokens: Int
         let maxCompletionTokens: Int
+        var sampling: Bool = false
     }
 
     private struct Spec023: Equatable {
@@ -904,6 +942,7 @@ enum NativeMTPAdmissionSidecar {
             providerRevision: parsed.providerRevision,
             upstreamMLXSwiftLMRevision: parsed.upstreamMLXSwiftLMRevision,
             qualifiedSlots: parsed.qualifiedSlots,
+            maxNativeActiveRows: parsed.maxNativeActiveRows,
             spec023ReleaseID: parsed.spec023.releaseID,
             spec023SourceCommit: parsed.spec023.sourceCommit,
             spec023BuildDigestSHA256: parsed.spec023.reproducibleBuildSHA256,
@@ -912,7 +951,8 @@ enum NativeMTPAdmissionSidecar {
             challengeBankSignerKeyID: parsed.challengeBankSignerKeyID,
             revocationSignerKeyID: parsed.revocationSignerKeyID,
             selfTestChallengeBank: parsed.selfTest,
-            capturedArtifacts: capturedArtifacts
+            capturedArtifacts: capturedArtifacts,
+            supportsSampling: parsed.requestProfile.sampling
         )
     }
 
@@ -990,7 +1030,80 @@ enum NativeMTPAdmissionSidecar {
         )
 
         let quantization = try requireObject(object, "quantization", path: "$")
-        try rejectUnknown(quantization, allowed: ["target", "mtp"], path: "$.quantization")
+        let targetQuantization = try requireString(
+            quantization,
+            "target",
+            path: "$.quantization",
+            allowed: ["bf16", "fp16", "mlx_affine_4bit", "mlx_mxfp8"]
+        )
+        let mtpQuantization = try requireString(
+            quantization,
+            "mtp",
+            path: "$.quantization",
+            allowed: ["bf16", "fp16", "mlx_affine_4bit", "mlx_mxfp8"]
+        )
+        let normalizedAffine = targetQuantization == "mlx_affine_4bit" || mtpQuantization == "mlx_affine_4bit"
+        let quantizationFields: Set<String> = normalizedAffine
+            ? [
+                "target", "mtp", "representation_manifest_sha256",
+                "block_size_elements", "unquantized_exceptions", "per_layer_exceptions",
+            ]
+            : ["target", "mtp"]
+        try rejectUnknownFields(quantization, allowed: quantizationFields, path: "$.quantization")
+        let representationManifestSHA256: String?
+        let blockSizeElements: Int?
+        let unquantizedExceptions: [String]
+        let perLayerExceptions: [String]
+        if normalizedAffine {
+            guard targetQuantization == "mlx_affine_4bit", mtpQuantization == "mlx_affine_4bit" else {
+                throw NativeMTPAdmissionSidecarError.invalidValue("$.quantization")
+            }
+            representationManifestSHA256 = try requireSHA256(
+                quantization,
+                "representation_manifest_sha256",
+                path: "$.quantization"
+            )
+            let affineBlockSize = try requireInt(
+                quantization,
+                "block_size_elements",
+                path: "$.quantization",
+                range: 32...128
+            )
+            guard [32, 64, 128].contains(affineBlockSize) else {
+                throw NativeMTPAdmissionSidecarError.invalidValue("$.quantization.block_size_elements")
+            }
+            blockSizeElements = affineBlockSize
+            unquantizedExceptions = try requirePatternArray(
+                quantization,
+                "unquantized_exceptions",
+                path: "$.quantization"
+            )
+            perLayerExceptions = try requirePatternArray(
+                quantization,
+                "per_layer_exceptions",
+                path: "$.quantization"
+            )
+            try validateQuantizationExceptionArray(
+                unquantizedExceptions,
+                key: "unquantized_exceptions",
+                path: "$.quantization"
+            )
+            try validateQuantizationExceptionArray(
+                perLayerExceptions,
+                key: "per_layer_exceptions",
+                path: "$.quantization"
+            )
+        } else {
+            guard quantization["representation_manifest_sha256"] == nil,
+                  quantization["unquantized_exceptions"] == nil,
+                  quantization["per_layer_exceptions"] == nil else {
+                throw NativeMTPAdmissionSidecarError.invalidValue("$.quantization")
+            }
+            representationManifestSHA256 = nil
+            blockSizeElements = nil
+            unquantizedExceptions = []
+            perLayerExceptions = []
+        }
         let cacheState = try requireObject(object, "cache_state", path: "$")
         try rejectUnknown(cacheState, allowed: ["cache_class", "state_class"], path: "$.cache_state")
         let revisions = try requireObject(object, "revisions", path: "$")
@@ -1021,18 +1134,12 @@ enum NativeMTPAdmissionSidecar {
             adaptationEnabled: try requireBool(mtp, "adaptation_enabled", path: "$.mtp"),
             adaptationMaxDepth: try requireInt(mtp, "adaptation_max_depth", path: "$.mtp", range: 1...16),
             quantization: Quantization(
-                target: try requireString(
-                    quantization,
-                    "target",
-                    path: "$.quantization",
-                    allowed: ["bf16", "fp16", "mlx_affine_4bit", "mlx_mxfp8"]
-                ),
-                mtp: try requireString(
-                    quantization,
-                    "mtp",
-                    path: "$.quantization",
-                    allowed: ["bf16", "fp16", "mlx_affine_4bit", "mlx_mxfp8"]
-                )
+                target: targetQuantization,
+                mtp: mtpQuantization,
+                blockSizeElements: blockSizeElements,
+                representationManifestSHA256: representationManifestSHA256,
+                unquantizedExceptions: unquantizedExceptions,
+                perLayerExceptions: perLayerExceptions
             ),
             cacheClass: try requireString(cacheState, "cache_class", path: "$.cache_state", allowed: ["paged_kv"]),
             stateClass: try requireString(cacheState, "state_class", path: "$.cache_state", allowed: ["stageable_rewindable", "hybrid_stageable_rewindable"]),
@@ -1043,6 +1150,9 @@ enum NativeMTPAdmissionSidecar {
             osVersion: try requireNonEmptyString(hardware, "os_version", path: "$.hardware"),
             qualifiedSlots: try requireInt(hardware, "qualified_slots", path: "$.hardware", range: 1...1024),
             maxSlots: try requireInt(hardware, "max_slots", path: "$.hardware", range: 1...1024),
+            // The debug-only legacy object predates the R007 load gate; it
+            // never reaches a release consumer, so it gates at the slot count.
+            maxNativeActiveRows: try requireInt(hardware, "qualified_slots", path: "$.hardware", range: 1...1024),
             requestProfile: requestProfile,
             spec023: spec023,
             challengeBankSignerKeyID: selfTest.signerKeyID,
@@ -1141,6 +1251,12 @@ enum NativeMTPAdmissionSidecar {
             expectedSHA256: selected.entry.artifactManifestSHA256,
             authority: resolvedArtifactAuthority
         )
+        // The signed entry's tokenizer digest is the authority; the projection
+        // only locates the bytes. A disagreement means the loader would use a
+        // tokenizer the admission never named.
+        guard artifacts["tokenizer"]?.sha256 == selected.entry.tokenizerSHA256 else {
+            throw NativeMTPAdmissionSidecarError.artifactDigestMismatch("$.entries.tokenizer_sha256")
+        }
         return Parsed(
             tupleSHA256: tupleSHA256,
             sidecarSHA256: sidecarSHA256,
@@ -1168,6 +1284,7 @@ enum NativeMTPAdmissionSidecar {
             osVersion: context.osVersion,
             qualifiedSlots: selected.entry.qualifiedSlots,
             maxSlots: selected.entry.qualifiedSlots,
+            maxNativeActiveRows: selected.entry.maxNativeActiveRows,
             requestProfile: RequestProfile(
                 textOnly: true,
                 streaming: true,
@@ -1178,7 +1295,8 @@ enum NativeMTPAdmissionSidecar {
                 conversationCache: false,
                 diskCache: false,
                 maxPromptTokens: 1_048_576,
-                maxCompletionTokens: 1_048_576
+                maxCompletionTokens: 1_048_576,
+                sampling: selected.entry.requestFeatureProfile == Self.sampledRequestFeatureProfile
             ),
             spec023: Spec023(
                 releaseID: releaseID,
@@ -1259,7 +1377,7 @@ enum NativeMTPAdmissionSidecar {
             "runtime_revision", "provider_revision", "source_commit",
             "reproducible_build_sha256", "live_executable_cdhash",
             "cache_state_classes", "hardware_class", "ram_bytes",
-            "qualified_slots", "request_feature_profile", "decrease_threshold_ppm",
+            "qualified_slots", "max_native_active_rows", "request_feature_profile", "decrease_threshold_ppm",
             "increase_threshold_ppm", "max_verification_positions_per_committed_milli",
             "throughput_delta_ppm", "benchmark_policy_sha256", "challenge_bank_sha256",
             "quantization", "ordinary_baseline",
@@ -1271,7 +1389,10 @@ enum NativeMTPAdmissionSidecar {
             equals: NativeMTPResolvedArtifactAuthority.nativeMTPHashAlgorithm
         )
         let decodePath = try requireString(object, "decode_path", path: path, allowed: ["native_mtp"])
-        let requestFeatureProfile = try requireString(object, "request_feature_profile", path: path, equals: "native_mtp_greedy_text_v1")
+        let requestFeatureProfile = try requireNonEmptyString(object, "request_feature_profile", path: path)
+        guard requestFeatureProfiles.contains(requestFeatureProfile) else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("\(path).request_feature_profile")
+        }
         let proposalDepth = try requireInt(object, "proposal_depth", path: path, range: 1...16)
         let completeWindowBytesByDepth = try requireCompleteWindowBytesByDepth(
             object,
@@ -1282,6 +1403,19 @@ enum NativeMTPAdmissionSidecar {
         let cacheStateClasses = try requireStringArray(object, "cache_state_classes", path: path, range: 1...16)
         guard cacheStateClasses == cacheStateClasses.sorted(), Set(cacheStateClasses).count == cacheStateClasses.count else {
             throw NativeMTPAdmissionSidecarError.invalidValue("\(path).cache_state_classes")
+        }
+        let mtpStateClass = try requireString(object, "mtp_state_class", path: path, allowed: Self.releaseStateClasses)
+        // The runtime admits only `mtp_state_class` (checked against the live
+        // model at load); every signed cache/state class must be one it can
+        // stage and rewind, and the admitted class must be among them.
+        guard cacheStateClasses.allSatisfy(Self.releaseStateClasses.contains),
+              cacheStateClasses.contains(mtpStateClass) else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("\(path).cache_state_classes")
+        }
+        let qualifiedSlots = try requireInt(object, "qualified_slots", path: path, range: 2...8)
+        let maxNativeActiveRows = try requireInt(object, "max_native_active_rows", path: path, range: 1...8)
+        guard maxNativeActiveRows <= qualifiedSlots else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("\(path).max_native_active_rows")
         }
         let decreaseThreshold = try requireInt(object, "decrease_threshold_ppm", path: path, range: 0...1_000_000)
         let increaseThreshold = try requireInt(object, "increase_threshold_ppm", path: path, range: 0...1_000_000)
@@ -1295,7 +1429,7 @@ enum NativeMTPAdmissionSidecar {
         try parseOrdinaryBaseline(
             try requireObject(object, "ordinary_baseline", path: path),
             path: "\(path).ordinary_baseline",
-            entrySlots: try requireInt(object, "qualified_slots", path: path, range: 2...8),
+            entrySlots: qualifiedSlots,
             artifactHash: try requireSHA256(object, "artifact_hash", path: path),
             runtimeRevision: try requireShortString(object, "runtime_revision", path: path),
             providerRevision: try requireShortString(object, "provider_revision", path: path)
@@ -1313,7 +1447,7 @@ enum NativeMTPAdmissionSidecar {
             decodePath: decodePath,
             mtpManifestSHA256: try requireSHA256(object, "mtp_manifest_sha256", path: path),
             familyAdapter: try requireNonEmptyString(object, "mtp_family_adapter", path: path),
-            mtpStateClass: try requireString(object, "mtp_state_class", path: path, allowed: ["stageable_rewindable", "hybrid_stageable_rewindable"]),
+            mtpStateClass: mtpStateClass,
             mtpHeadCount: try requireInt(object, "mtp_head_count", path: path, range: 1...16),
             proposalDepth: proposalDepth,
             completeWindowBytesByDepth: completeWindowBytesByDepth,
@@ -1325,7 +1459,8 @@ enum NativeMTPAdmissionSidecar {
             cacheStateClasses: cacheStateClasses,
             hardwareClass: try requireHardwareClass(object, "hardware_class", path: path),
             ramBytes: try requireInt(object, "ram_bytes", path: path, range: 1...Int.max),
-            qualifiedSlots: try requireInt(object, "qualified_slots", path: path, range: 2...8),
+            qualifiedSlots: qualifiedSlots,
+            maxNativeActiveRows: maxNativeActiveRows,
             requestFeatureProfile: requestFeatureProfile,
             decreaseThresholdPPM: decreaseThreshold,
             increaseThresholdPPM: increaseThreshold,
@@ -1338,6 +1473,8 @@ enum NativeMTPAdmissionSidecar {
         )
     }
 
+    private static let releaseStateClasses: Set<String> = ["stageable_rewindable", "hybrid_stageable_rewindable"]
+
     private static func parseReleaseQuantization(
         _ object: [String: NativeMTPSidecarJSON],
         path: String
@@ -1348,10 +1485,10 @@ enum NativeMTPAdmissionSidecar {
             "padding_rule", "unquantized_exceptions", "per_layer_exceptions",
             "representation_manifest_sha256",
         ], path: path)
-        let kind = try requireString(object, "kind", path: path, allowed: ["base", "mlx_mxfp8"])
-        let packedDataDType = try requireString(object, "packed_data_dtype", path: path, allowed: ["none", "uint8"])
+        let kind = try requireString(object, "kind", path: path, allowed: ["base", "mlx_affine", "mlx_mxfp8"])
+        let packedDataDType = try requireString(object, "packed_data_dtype", path: path, allowed: ["none", "uint8", "uint32"])
         let packedLayout = try requireString(object, "packed_layout", path: path, allowed: ["none", "mlx_array_native_v1"])
-        let scaleDType = try requireString(object, "scale_dtype", path: path, allowed: ["none", "float16", "float32"])
+        let scaleDType = try requireString(object, "scale_dtype", path: path, allowed: ["none", "bfloat16", "float16", "float32"])
         let scaleLayout = try requireString(object, "scale_layout", path: path, allowed: ["none", "per_block"])
         let blockSize = try requireNullableInt(object, "block_size_elements", path: path, range: 1...1024)
         let alignmentBytes = try requireNullableInt(object, "alignment_bytes", path: path, range: 1...4096)
@@ -1361,9 +1498,12 @@ enum NativeMTPAdmissionSidecar {
             }
         }
         let paddingRule = try requireString(object, "padding_rule", path: path, allowed: ["none", "zero_pad_to_alignment"])
-        _ = try requirePatternArray(object, "unquantized_exceptions", path: path)
-        _ = try requirePatternArray(object, "per_layer_exceptions", path: path)
-        _ = try requireSHA256(object, "representation_manifest_sha256", path: path)
+        let unquantizedExceptions = try requirePatternArray(object, "unquantized_exceptions", path: path)
+        let perLayerExceptions = try requirePatternArray(object, "per_layer_exceptions", path: path)
+        let representationManifestSHA256 = try requireSHA256(object, "representation_manifest_sha256", path: path)
+        // R024 exception-array grammar applies to every kind, not only affine.
+        try validateQuantizationExceptionArray(unquantizedExceptions, key: "unquantized_exceptions", path: path)
+        try validateQuantizationExceptionArray(perLayerExceptions, key: "per_layer_exceptions", path: path)
         switch kind {
         case "base":
             guard packedDataDType == "none",
@@ -1372,21 +1512,56 @@ enum NativeMTPAdmissionSidecar {
                   scaleLayout == "none",
                   blockSize == nil,
                   alignmentBytes == nil,
+                  paddingRule == "none",
+                  unquantizedExceptions.isEmpty,
+                  perLayerExceptions.isEmpty else {
+                throw NativeMTPAdmissionSidecarError.invalidValue(path)
+            }
+            return Quantization(
+                target: "bf16",
+                mtp: "bf16",
+                blockSizeElements: blockSize,
+                representationManifestSHA256: representationManifestSHA256,
+                unquantizedExceptions: unquantizedExceptions,
+                perLayerExceptions: perLayerExceptions
+            )
+        case "mlx_affine":
+            guard packedDataDType == "uint32",
+                  packedLayout == "mlx_array_native_v1",
+                  scaleDType == "bfloat16",
+                  scaleLayout == "per_block",
+                  let blockSize,
+                  [32, 64, 128].contains(blockSize),
+                  alignmentBytes == nil,
                   paddingRule == "none" else {
                 throw NativeMTPAdmissionSidecarError.invalidValue(path)
             }
-            return Quantization(target: "bf16", mtp: "bf16")
+            return Quantization(
+                target: "mlx_affine_4bit",
+                mtp: "mlx_affine_4bit",
+                blockSizeElements: blockSize,
+                representationManifestSHA256: representationManifestSHA256,
+                unquantizedExceptions: unquantizedExceptions,
+                perLayerExceptions: perLayerExceptions
+            )
         case "mlx_mxfp8":
             guard packedDataDType == "uint8",
                   packedLayout == "mlx_array_native_v1",
-                  scaleDType != "none",
+                  ["float16", "float32"].contains(scaleDType),
                   scaleLayout != "none",
                   blockSize != nil,
                   alignmentBytes != nil,
                   paddingRule == "zero_pad_to_alignment" else {
                 throw NativeMTPAdmissionSidecarError.invalidValue(path)
             }
-            return Quantization(target: "mlx_mxfp8", mtp: "mlx_mxfp8")
+            return Quantization(
+                target: "mlx_mxfp8",
+                mtp: "mlx_mxfp8",
+                blockSizeElements: blockSize,
+                representationManifestSHA256: representationManifestSHA256,
+                unquantizedExceptions: unquantizedExceptions,
+                perLayerExceptions: perLayerExceptions
+            )
         default:
             throw NativeMTPAdmissionSidecarError.invalidValue("\(path).kind")
         }
@@ -2678,6 +2853,12 @@ enum NativeMTPAdmissionSidecar {
             "selftest.signature_sha256=\(parsed.selfTest.signatureSHA256)",
             "flags.admission_allowed=\(parsed.admissionAllowed)",
         ]
+        if let representationManifestSHA256 = parsed.quantization.representationManifestSHA256 {
+            fields.append("quantization.block_size_elements=\(parsed.quantization.blockSizeElements!)")
+            fields.append("quantization.representation_manifest_sha256=\(representationManifestSHA256)")
+            fields.append("quantization.per_layer_exceptions=\(parsed.quantization.perLayerExceptions.joined(separator: ","))")
+            fields.append("quantization.unquantized_exceptions=\(parsed.quantization.unquantizedExceptions.joined(separator: ","))")
+        }
         fields.append(contentsOf: parsed.spec023.evidenceArtifactSHA256.enumerated().map { index, digest in
             "spec023.evidence_artifact_sha256.\(index)=\(digest)"
         })
@@ -2698,6 +2879,16 @@ enum NativeMTPAdmissionSidecar {
         }
         for key in allowed where object[key] == nil {
             throw NativeMTPAdmissionSidecarError.missingField("\(path).\(key)")
+        }
+    }
+
+    private static func rejectUnknownFields(
+        _ object: [String: NativeMTPSidecarJSON],
+        allowed: Set<String>,
+        path: String
+    ) throws {
+        for key in object.keys where !allowed.contains(key) {
+            throw NativeMTPAdmissionSidecarError.unknownField("\(path).\(key)")
         }
     }
 
@@ -2857,6 +3048,26 @@ enum NativeMTPAdmissionSidecar {
             }
         }
         return values
+    }
+
+    private static func validateQuantizationExceptionArray(
+        _ values: [String],
+        key: String,
+        path: String
+    ) throws {
+        for value in values {
+            let module: Substring
+            if value.hasPrefix("target/") {
+                module = value.dropFirst("target/".count)
+            } else if value.hasPrefix("mtp/") {
+                module = value.dropFirst("mtp/".count)
+            } else {
+                throw NativeMTPAdmissionSidecarError.invalidValue("\(path).\(key)")
+            }
+            guard (1...128).contains(module.utf8.count), !module.contains("/") else {
+                throw NativeMTPAdmissionSidecarError.invalidValue("\(path).\(key)")
+            }
+        }
     }
 
     private static func requireRelativeArtifactPath(_ object: [String: NativeMTPSidecarJSON], _ key: String, path: String) throws -> String {

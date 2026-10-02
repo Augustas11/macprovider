@@ -19,7 +19,7 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "e874140ecb5b04aeb445eb3837d48f7b187b867e"
+            revision: "ef4ff8568c38c640bc90a8176dc3acfe943a288d"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

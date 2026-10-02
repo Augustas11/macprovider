@@ -134,25 +134,21 @@ final class ModelRuntimeSwapTests: XCTestCase {
     }
 
     func testNativeMTPArtifactObservationMustMatchSignedCapability() {
-        let capability = makeNativeMTPAdmissionCapability(
-            predictionLayerCount: 2,
-            maxProposalDepth: 2,
-            quantization: NativeMTPAdmissionSidecar.Quantization(
-                target: "mlx_affine_4bit",
-                mtp: "mlx_affine_4bit"
-            )
-        )
         func observation(
             targetFormat: NativeMTPObservedArtifactFormat = .mlxAffine4(bits: 4, groupSize: 32),
             mtpFormat: NativeMTPObservedArtifactFormat = .mlxAffine4(bits: 4, groupSize: 32),
             targetLayerCount: Int = 2,
-            mtpLayerCount: Int = 2
+            mtpLayerCount: Int = 2,
+            targetOverrides: [String: NativeMTPAffineModuleOverride] = [
+                "model.layers.0.mlp.gate": .init(bits: 8, groupSize: 32),
+            ]
         ) -> NativeMTPArtifactPairObservation {
             NativeMTPArtifactPairObservation(
                 target: NativeMTPArtifactObservation(
                     format: targetFormat,
                     mtpPredictionLayerCount: targetLayerCount,
-                    tensorPairs: []
+                    tensorPairs: [],
+                    affineModuleOverrides: targetOverrides
                 ),
                 mtp: NativeMTPArtifactObservation(
                     format: mtpFormat,
@@ -161,6 +157,19 @@ final class ModelRuntimeSwapTests: XCTestCase {
                 )
             )
         }
+        let representation = try! NativeMTPArtifactObserver.affineRepresentation(for: observation())
+        let capability = makeNativeMTPAdmissionCapability(
+            predictionLayerCount: 2,
+            maxProposalDepth: 2,
+            quantization: NativeMTPAdmissionSidecar.Quantization(
+                target: "mlx_affine_4bit",
+                mtp: "mlx_affine_4bit",
+                blockSizeElements: representation.groupSize,
+                representationManifestSHA256: representation.manifestSHA256,
+                unquantizedExceptions: representation.unquantizedExceptions,
+                perLayerExceptions: representation.perLayerExceptions
+            )
+        )
 
         XCTAssertTrue(ModelRuntime.nativeMTPArtifactObservationMatchesAdmissionForTest(
             observation(),
@@ -178,6 +187,202 @@ final class ModelRuntimeSwapTests: XCTestCase {
             observation(mtpLayerCount: 1),
             admissionCapability: capability
         ))
+        XCTAssertFalse(ModelRuntime.nativeMTPArtifactObservationMatchesAdmissionForTest(
+            observation(targetOverrides: [:]),
+            admissionCapability: capability
+        ))
+        XCTAssertFalse(ModelRuntime.nativeMTPArtifactObservationMatchesAdmissionForTest(
+            observation(),
+            admissionCapability: makeNativeMTPAdmissionCapability(
+                predictionLayerCount: 2,
+                maxProposalDepth: 2,
+                quantization: NativeMTPAdmissionSidecar.Quantization(
+                    target: "mlx_affine_4bit",
+                    mtp: "mlx_affine_4bit",
+                    blockSizeElements: 64,
+                    representationManifestSHA256: representation.manifestSHA256,
+                    unquantizedExceptions: representation.unquantizedExceptions,
+                    perLayerExceptions: representation.perLayerExceptions
+                )
+            )
+        ))
+        XCTAssertFalse(ModelRuntime.nativeMTPArtifactObservationMatchesAdmissionForTest(
+            observation(),
+            admissionCapability: makeNativeMTPAdmissionCapability(
+                predictionLayerCount: 2,
+                maxProposalDepth: 2,
+                quantization: NativeMTPAdmissionSidecar.Quantization(
+                    target: "mlx_affine_4bit",
+                    mtp: "mlx_affine_4bit",
+                    blockSizeElements: representation.groupSize,
+                    representationManifestSHA256: String(repeating: "f", count: 64),
+                    unquantizedExceptions: representation.unquantizedExceptions,
+                    perLayerExceptions: representation.perLayerExceptions
+                )
+            )
+        ))
+        XCTAssertFalse(ModelRuntime.nativeMTPArtifactObservationMatchesAdmissionForTest(
+            observation(),
+            admissionCapability: makeNativeMTPAdmissionCapability(
+                predictionLayerCount: 2,
+                maxProposalDepth: 2,
+                quantization: NativeMTPAdmissionSidecar.Quantization(
+                    target: "mlx_affine_4bit",
+                    mtp: "mlx_affine_4bit",
+                    blockSizeElements: representation.groupSize,
+                    representationManifestSHA256: representation.manifestSHA256,
+                    unquantizedExceptions: ["mtp/norm"],
+                    perLayerExceptions: representation.perLayerExceptions
+                )
+            )
+        ))
+    }
+
+    func testNativeMTPBaseRepresentationIsRecomputedNotTrusted() throws {
+        func observation(
+            format: NativeMTPObservedArtifactFormat = .unquantized(dtype: "bf16"),
+            unquantized: [String] = []
+        ) -> NativeMTPArtifactPairObservation {
+            NativeMTPArtifactPairObservation(
+                target: NativeMTPArtifactObservation(
+                    format: format,
+                    mtpPredictionLayerCount: 2,
+                    tensorPairs: [],
+                    unquantizedModules: unquantized
+                ),
+                mtp: NativeMTPArtifactObservation(format: format, mtpPredictionLayerCount: 2, tensorPairs: [])
+            )
+        }
+        func capability(
+            target: String = "bf16",
+            digest: String?,
+            unquantized: [String] = [],
+            perLayer: [String] = []
+        ) -> NativeMTPAdmissionCapability {
+            makeNativeMTPAdmissionCapability(
+                predictionLayerCount: 2,
+                maxProposalDepth: 2,
+                quantization: NativeMTPAdmissionSidecar.Quantization(
+                    target: target,
+                    mtp: target,
+                    blockSizeElements: nil,
+                    representationManifestSHA256: digest,
+                    unquantizedExceptions: unquantized,
+                    perLayerExceptions: perLayer
+                )
+            )
+        }
+        let base = try NativeMTPArtifactObserver.baseRepresentation(for: observation())
+        XCTAssertEqual(
+            String(decoding: base.manifestBytes, as: UTF8.self),
+            #"{"mtp":{"dtype":"bfloat16"},"schema":"macprovider.native-mtp-representation.v1","target":{"dtype":"bfloat16"}}"#
+        )
+        func matches(_ observed: NativeMTPArtifactPairObservation, _ admitted: NativeMTPAdmissionCapability) -> Bool {
+            ModelRuntime.nativeMTPArtifactObservationMatchesAdmissionForTest(observed, admissionCapability: admitted)
+        }
+        XCTAssertTrue(matches(observation(), capability(digest: base.manifestSHA256)))
+        // A signed digest that is not the recomputed base manifest.
+        XCTAssertFalse(matches(observation(), capability(digest: String(repeating: "7", count: 64))))
+        XCTAssertFalse(matches(observation(), capability(digest: nil)))
+        // Signed exceptions the observed base artifacts do not carry.
+        XCTAssertFalse(matches(observation(), capability(digest: base.manifestSHA256, unquantized: ["target/model.norm"])))
+        XCTAssertFalse(matches(observation(), capability(digest: base.manifestSHA256, perLayer: ["mtp/fc"])))
+        // Observed config exceptions on a base artifact.
+        XCTAssertFalse(matches(observation(unquantized: ["model.norm"]), capability(digest: base.manifestSHA256)))
+        // fp16 is not base, and a kind the observer cannot recompute never admits.
+        XCTAssertFalse(matches(observation(format: .unquantized(dtype: "fp16")), capability(target: "fp16", digest: base.manifestSHA256)))
+        XCTAssertFalse(matches(
+            observation(format: .mlxMXFP8(bits: 8, groupSize: 32)),
+            capability(target: "mlx_mxfp8", digest: base.manifestSHA256)
+        ))
+    }
+
+    func testNativeMTPServePathRejectionLogIsSingleStructuredPathFreeLine() throws {
+        let line = ModelRuntime.nativeMTPServePathRejectionLogLine(
+            reasonCode: "artifact_quantization_unsupported",
+            artifactRole: "pair"
+        )
+        XCTAssertEqual(line.filter(\.isNewline).count, 1)
+        XCTAssertTrue(line.hasSuffix("\n"))
+        XCTAssertFalse(line.contains("/"))
+
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: String]
+        )
+        XCTAssertEqual(object, [
+            "artifact_role": "pair",
+            "event": "native_mtp_serve_path_admission",
+            "reason_code": "artifact_quantization_unsupported",
+            "status": "rejected",
+        ])
+    }
+
+    /// Regression for the serve-path hardware e2e that always rejected with
+    /// the catch-all reason: its challenge bank was not a production bank.
+    func testNativeMTPHardwareE2EChallengeBankSatisfiesProductionParser() throws {
+        let legacyPlaceholder = Data(#"{"schema":"native_mtp_selftest_bank.v1","release_id":"native-mtp-hardware-e2e-selftest","prompts":[[1,2,3]]}"#.utf8)
+        XCTAssertThrowsError(try NativeMTPSelfTest.parseChallengeBank(legacyPlaceholder)) { error in
+            XCTAssertEqual(
+                ModelRuntime.nativeMTPServePathRejection(for: error).reasonCode,
+                "selftest_challenge_bank_rejected"
+            )
+        }
+
+        let modelID = "mlx-community/Qwen3.6-35B-A3B-4bit"
+        let targetSHA = String(repeating: "a", count: 64)
+        let mtpSHA = String(repeating: "b", count: 64)
+        let tokenizerSHA = String(repeating: "c", count: 64)
+        let manifestSHA = String(repeating: "d", count: 64)
+        let runner = NativeMTPHardwareE2ERunner(rootPath: NSTemporaryDirectory(), modelID: modelID)
+        let data = try runner.selfTestChallengeBankData(
+            targetSHA: targetSHA,
+            mtpSHA: mtpSHA,
+            tokenizerSHA: tokenizerSHA,
+            manifestSHA: manifestSHA,
+            signerKeyID: "native-mtp-hardware-e2e"
+        )
+        let bank = try NativeMTPSelfTest.parseChallengeBank(data)
+        XCTAssertEqual(bank.releaseID, "native-mtp-hardware-e2e")
+        XCTAssertEqual(bank.signerKeyID, "native-mtp-hardware-e2e")
+        XCTAssertEqual(bank.entries.count, 1)
+        let entry = try XCTUnwrap(bank.entries.first)
+        XCTAssertEqual(entry.modelID, modelID)
+        XCTAssertEqual(entry.modelHash, targetSHA)
+        XCTAssertEqual(entry.tokenizerSHA256, tokenizerSHA)
+        XCTAssertEqual(entry.artifactSHA256, mtpSHA)
+        XCTAssertEqual(entry.mtpManifestSHA256, manifestSHA)
+        XCTAssertEqual(entry.fixedProposalDepth, 1)
+        XCTAssertEqual(try NativeMTPSelfTest.selectChallenge(bank, challengeID: entry.challengeID), entry)
+    }
+
+    func testNativeMTPServePathRejectionReasonNeverEchoesErrorPayload() {
+        let secretPath = "/Users/someone/models/target/model.safetensors"
+        let cases: [(Error, String, String)] = [
+            (NativeMTPArtifactObservationError.unsupportedQuantization(secretPath), "artifact_quantization_unsupported", "pair"),
+            (NativeMTPArtifactObservationError.missingQuantizationMetadata(secretPath), "artifact_quantization_metadata_missing", "pair"),
+            (NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders(secretPath), "artifact_tensor_representation_rejected", "pair"),
+            (NativeMTPArtifactObservationError.unsupportedDType(secretPath), "artifact_tensor_representation_rejected", "pair"),
+            (NativeMTPArtifactObservationError.observationDrift(secretPath), "artifact_observation_drift", "pair"),
+            (NativeMTPArtifactObservationError.malformedConfig(secretPath), "artifact_observation_invalid", "pair"),
+            (ModelRuntimeLoadError(target: secretPath), "artifact_load_failed", "pair"),
+            (NativeMTPSelfTestError.unknownField(secretPath), "selftest_challenge_bank_rejected", "challenge_bank"),
+            (NativeMTPSelfTestError.missingOrInvalidField(secretPath), "selftest_challenge_bank_rejected", "challenge_bank"),
+            (NativeMTPSelfTestError.challengeBankMismatch, "selftest_challenge_bank_rejected", "challenge_bank"),
+            (ModelFactoryError.unsupportedModelType(secretPath), "model_factory_load_failed", "pair"),
+            (ModelFactoryError.invalidConfiguration(secretPath), "model_factory_load_failed", "pair"),
+            (CocoaError(.fileReadNoSuchFile, userInfo: [NSFilePathErrorKey: secretPath]), "artifact_io_failed", "pair"),
+            (URLError(.badURL), "serve_path_admission_failed", "runtime"),
+        ]
+        for (error, reasonCode, artifactRole) in cases {
+            let rejection = ModelRuntime.nativeMTPServePathRejection(for: error)
+            XCTAssertEqual(rejection.reasonCode, reasonCode)
+            XCTAssertEqual(rejection.artifactRole, artifactRole)
+            let line = ModelRuntime.nativeMTPServePathRejectionLogLine(
+                reasonCode: rejection.reasonCode,
+                artifactRole: rejection.artifactRole
+            )
+            XCTAssertFalse(line.contains(secretPath))
+        }
     }
 
     func testNativeMTPCapturedTokenizerMustBeCanonicalTargetTokenizer() {
@@ -1557,7 +1762,8 @@ final class ModelRuntimeSwapTests: XCTestCase {
         ),
         spec023SourceCommit: String = String(repeating: "a", count: 40),
         spec023BuildDigestSHA256: String = String(repeating: "b", count: 64),
-        spec023LiveExecutableCDHash: String = String(repeating: "1", count: 40)
+        spec023LiveExecutableCDHash: String = String(repeating: "1", count: 40),
+        maxNativeActiveRows: Int = 2
     ) -> NativeMTPAdmissionCapability {
         NativeMTPAdmissionCapability(
             tupleSHA256: String(repeating: "1", count: 64),
@@ -1582,6 +1788,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
             providerRevision: providerRevision,
             upstreamMLXSwiftLMRevision: upstreamRevision,
             qualifiedSlots: 2,
+            maxNativeActiveRows: maxNativeActiveRows,
             spec023ReleaseID: "native-mtp-test",
             spec023SourceCommit: spec023SourceCommit,
             spec023BuildDigestSHA256: spec023BuildDigestSHA256,

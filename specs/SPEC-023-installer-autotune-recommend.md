@@ -1,12 +1,40 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.2
+version: v0.22.5
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-01
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.22.5 (2026-10-01)** — Native-MTP sampled request profile (#1770).
+  SPEC-023-R024 `request_feature_profile` is now the closed set
+  `native_mtp_greedy_text_v1` | `native_mtp_sampled_text_v1`. The sampled
+  profile admits SPEC-048-R004 sampled rows verified by SPEC-048-R005
+  target-sample exact match; the greedy profile keeps them ordinary. The
+  value is part of the complete entry and therefore of
+  `native_mtp_admission_tuple_sha256`; any other value fails the entry closed.
+
+- **v0.22.4 (2026-10-01)** — Native-MTP active-row bound (#1770).
+  SPEC-023-R024 entries gain the required `max_native_active_rows` integer
+  `1..8`, no larger than the entry's `qualified_slots`, consumed by the
+  SPEC-048-R007 load gate. It is part of the complete entry and therefore of
+  `native_mtp_admission_tuple_sha256`; a missing, zero, non-integer, or
+  larger-than-slots value fails the entry closed.
+
+- **v0.22.3 (2026-10-01)** — Native-MTP MLX affine 4-bit admission
+  (#1770). SPEC-023-R024 now admits the closed `mlx_affine` quantization
+  representation used by mlx-community 4-bit Qwen target and MTP artifacts,
+  including the canonical representation manifest digest and sorted
+  per-layer/unquantized exception arrays consumed by SPEC-048. Every signed
+  R024 field is now enforced or recomputed: `hash_algorithm` states the
+  `macprovider.snapshot-manifest.v1` value consumers already required (the
+  table previously said `"sha256"`), `tokenizer_sha256` must equal the
+  projected tokenizer digest, `cache_state_classes` is closed to the
+  `mtp_state_class` values and must contain the admitted class, the
+  exception-array grammar applies to every kind, and `base` binds a defined
+  canonical representation digest.
 
 - **v0.22.2 (2026-10-01)** — Default context memory residency now uses the
   verified artifact byte footprint when it is available (#1794). Catalog
@@ -3088,8 +3116,8 @@ unsigned JSON integers and never floats.
 | Field | Type / closed rule |
 |---|---|
 | `model_key`, `artifact_id` | existing SPEC-023 grammars |
-| `hash_algorithm` | `"sha256"` |
-| `artifact_hash`, `artifact_manifest_sha256`, `tokenizer_sha256` | `sha256` |
+| `hash_algorithm` | exactly `"macprovider.snapshot-manifest.v1"`, the §3.7.4 `mlx_safetensors` algorithm of the bound artifact-feed member; `artifact_hash` is that member's `hash` |
+| `artifact_hash`, `artifact_manifest_sha256`, `tokenizer_sha256` | `sha256`; `tokenizer_sha256` MUST equal the tokenizer digest in the signed artifact projection manifest, or the entry fails closed |
 | `decode_path` | exactly `"native_mtp"` |
 | `mtp_manifest_sha256` | `sha256` |
 | `mtp_family_adapter`, `mtp_state_class` | `short_string` |
@@ -3099,11 +3127,12 @@ unsigned JSON integers and never floats.
 | `source_commit` | full lowercase Git object id for the source repository's object format, exactly 40 or 64 hex characters |
 | `reproducible_build_sha256` | `sha256` |
 | `live_executable_cdhash` | exact lowercase 40-hex Mach-O CodeDirectory CDHash of the live signed executable admitted to consume this tuple |
-| `cache_state_classes` | sorted unique array `1..16` of `short_string` |
+| `cache_state_classes` | sorted unique array `1..16`; every element is an `mtp_state_class` value (`stageable_rewindable` or `hybrid_stageable_rewindable`) and the array MUST contain the entry's `mtp_state_class`, which the runtime matches against the loaded model |
 | `hardware_class` | lowercase ASCII matching `^[a-z0-9][a-z0-9._-]{0,63}$` |
 | `ram_bytes` | exact physical RAM integer `> 0`, not a minimum |
 | `qualified_slots` | integer `2..8`, exact admitted slot count |
-| `request_feature_profile` | exactly `"native_mtp_greedy_text_v1"` |
+| `max_native_active_rows` | integer `1..8`, no larger than `qualified_slots`; the SPEC-048-R007 load bound above which the tuple serves ordinary decode |
+| `request_feature_profile` | exactly `"native_mtp_greedy_text_v1"` (greedy rows only) or `"native_mtp_sampled_text_v1"` (greedy rows plus SPEC-048-R004 sampled rows verified by SPEC-048-R005 target-sample exact match) |
 | `decrease_threshold_ppm`, `increase_threshold_ppm` | integers `0..1000000`, strictly increasing |
 | `max_verification_positions_per_committed_milli` | integer `1000..4000` |
 | `throughput_delta_ppm` | signed integer result from the frozen R015 cell for this exact tuple |
@@ -3116,20 +3145,60 @@ unsigned JSON integers and never floats.
 `quantization` is exactly `{kind, packed_data_dtype, packed_layout,
 scale_dtype, scale_layout, block_size_elements, alignment_bytes, padding_rule,
 unquantized_exceptions, per_layer_exceptions,
-representation_manifest_sha256}`. `kind` is `base` or `mlx_mxfp8`.
-`packed_data_dtype` is `none|uint8`; `packed_layout` is
-`none|mlx_array_native_v1`; `scale_dtype` is `none|float16|float32`;
-`scale_layout` is `none|per_block`; `block_size_elements` is null or integer
-`1..1024`; `alignment_bytes` is null or a power of two `1..4096`;
-`padding_rule` is `none|zero_pad_to_alignment`; each exceptions field is a
-sorted unique array of at most 256 tensor-name patterns, each 1..128 printable
-ASCII bytes; and the manifest is a `sha256`. `base` requires the three layout/
-dtype values `none`, numeric fields null, `padding_rule=none`, empty exception
-arrays, and a manifest describing the loaded base representation. `mlx_mxfp8`
-requires `uint8`, `mlx_array_native_v1`, non-`none` scale fields, non-null
-numeric fields, and passes the SPEC-048-R012 `1.01x` perplexity, one-point task,
-5% fit-error, and 10% system-headroom bounds. Compressed-tensors FP8, TorchAO
+representation_manifest_sha256}`. `kind` is `base`, `mlx_mxfp8`, or
+`mlx_affine`. `packed_data_dtype` is `none|uint8|uint32`; `packed_layout` is
+`none|mlx_array_native_v1`; `scale_dtype` is
+`none|float16|float32|bfloat16`; `scale_layout` is `none|per_block`;
+`block_size_elements` is null or integer `1..1024`; `alignment_bytes` is null
+or a power of two `1..4096`; `padding_rule` is
+`none|zero_pad_to_alignment`; and the manifest is a lowercase `sha256`.
+
+Each exceptions field is sorted bytewise, unique, and contains at most 256
+entries. Every entry is exactly `target/<module>` or `mtp/<module>` and the
+full prefixed entry is 1..128 printable ASCII bytes; `<module>` is the exact
+config module key, which SPEC-048-R002 requires to be the pinned loader's
+post-sanitize module path (a standalone drafter key therefore carries its
+`mtp.` prefix), and contains no slash. This grammar applies to every
+quantization kind. The
+`per_layer_exceptions` array names every per-module quantization override in
+the target and MTP configs; override widths are `4` or `8` bits and group sizes
+are `32`, `64`, or `128`. The `unquantized_exceptions` array names every
+config entry whose value is exactly `false`. Consumers MUST fail closed above
+the array bound, on unsorted or duplicate arrays, on an invalid prefix, or when
+the arrays do not match the observed target/MTP artifacts.
+
+`base` requires the three layout/dtype values `none`, numeric fields null,
+`padding_rule=none`, empty exception arrays, and a
+`representation_manifest_sha256` equal to SHA-256 of the canonical bytes
+`{"mtp":{"dtype":"bfloat16"},"schema":"macprovider.native-mtp-representation.v1","target":{"dtype":"bfloat16"}}`,
+recomputed by the consumer from target and MTP artifacts observed as
+unquantized bfloat16 with no config overrides or `false` entries. `mlx_mxfp8` requires `uint8`,
+`mlx_array_native_v1`, non-`none` scale fields, non-null numeric fields, and
+passes the SPEC-048-R012 `1.01x` perplexity, one-point task, 5% fit-error, and
+10% system-headroom bounds. `mlx_affine` requires `packed_data_dtype=uint32`,
+`packed_layout=mlx_array_native_v1`, `scale_dtype=bfloat16`,
+`scale_layout=per_block`, `block_size_elements` equal to the global group size
+`32`, `64`, or `128`, `alignment_bytes=null`, and `padding_rule=none`. v0.1
+admits only global width `4`, represented to the runtime as
+`mlx_affine_4bit` for both target and MTP. Compressed-tensors FP8, TorchAO
 FP8, GGUF, a name containing `FP8`, or another microscaling format is invalid.
+
+For `mlx_affine`, `representation_manifest_sha256` is SHA-256 of the UTF-8
+bytes of the canonical representation manifest:
+
+```json
+{"mtp":{"bits":B,"group_size":G,"overrides":{"<module>":{"bits":b,"group_size":g}},"unquantized":["<module>"]},"schema":"macprovider.native-mtp-representation.v1","target":{"bits":B,"group_size":G,"overrides":{"<module>":{"bits":b,"group_size":g}},"unquantized":["<module>"]}}
+```
+
+The canonical form uses sorted object keys at every depth, no insignificant
+whitespace, UTF-8 encoding, decimal JSON integers only, the exact schema string
+shown above, the top-level key order `mtp`, `schema`, `target` as a consequence
+of sorted keys, and
+sorted unique `unquantized` arrays. `overrides` contains every config override
+except entries set to `false`, keyed by the unprefixed module name and valued
+as exactly `{bits,group_size}`. The global `{bits,group_size}` are the observed
+global config values for the target or MTP artifact. Recomputing this canonical
+manifest from the observed artifacts MUST produce the signed digest exactly.
 
 `ordinary_baseline` is exactly `{decode_path, runtime_revision,
 provider_revision, artifact_hash, qualified_slots, measurement_sha256,
@@ -3162,7 +3231,8 @@ profile because they do not say which identity layer they bind.
    presenting a value that differs from the live signed executable's CDHash
    MUST fail closed. `reproducible_build_sha256` remains the installed artifact
    byte digest and MUST NOT be substituted for the live CodeDirectory CDHash.
-   The `entry.complete_window_bytes_by_depth` array is likewise part of the
+   The `entry.complete_window_bytes_by_depth` array and the
+   `entry.max_native_active_rows` integer are likewise part of the
    canonical object; every indexed value MUST be encoded deterministically, with
    no defaulting from `proposal_depth` or runtime heuristics.
    This is the stable identity used by admission, evidence, revocation, and

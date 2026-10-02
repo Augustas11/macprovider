@@ -1241,13 +1241,6 @@ actor ModelRuntime: ModelRuntimeServing {
         )
     }
 
-    static func nativeMTPFullPromptPrefillTokenLimit(prefillStepSize: Int) -> Int {
-        min(
-            max(1, prefillStepSize),
-            ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
-        )
-    }
-
     private func nativeMTPRuntimeAdmission(
         for request: ChatCompletionRequest,
         snapshot: RuntimeSnapshot
@@ -1256,6 +1249,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let schedulerSupportsNativeMTP = currentNativeMTPDrafterContainer != nil
             && continuousBatchScheduler != nil
             || nativeMTPSchedulerSupported
+        let otherActiveRows = inFlightCancellations.count - 1
         let admission = Self.nativeMTPRuntimeAdmission(
             for: request,
             draftConfigured: snapshot.hasTargetCompatibleDraft || currentDraftModelID != nil,
@@ -1271,8 +1265,14 @@ actor ModelRuntime: ModelRuntimeServing {
                 targetGeneration: $0.targetGeneration
             )
         })
+        // The caller's own handle is registered, so every other in-flight
+        // request is a row this one would share the target forward with.
+        // Check and registration are both actor-isolated, so a burst of
+        // concurrent arrivals cannot all observe an empty runtime.
+        .resolvingActiveRows(otherActiveRows: otherActiveRows)
         recordNativeMTPAdmissionStatus(admission)
         testNativeMTPAdmissionObserver?(admission)
+        testNativeMTPAdmissionRequestObserver?(request.requestID, admission, otherActiveRows)
         return admission
     }
 
@@ -1304,6 +1304,8 @@ actor ModelRuntime: ModelRuntimeServing {
             return .unsupportedCacheState
         case .insufficientVerificationCapacity:
             return .capacityUnavailable
+        case .capacityAboveNativeBound:
+            return .capacityAboveNativeBound
         default:
             return .requestIneligible
         }
@@ -1495,6 +1497,7 @@ actor ModelRuntime: ModelRuntimeServing {
     private let nativeMTPCapability: NativeMTPCapability?
     private let nativeMTPSchedulerSupported: Bool
     private let testNativeMTPAdmissionObserver: (@Sendable (NativeMTPRuntimeAdmission) -> Void)?
+    private let testNativeMTPAdmissionRequestObserver: (@Sendable (String?, NativeMTPRuntimeAdmission, Int) -> Void)?
     /// Injectable seam over the on-device SPEC-039 parity/MoE self-measurement probes.
     /// Production uses `.live`; tests inject a stub so unit coverage of the
     /// measurement→attach pipeline needs no MLX/metallib. Mirrors
@@ -2466,6 +2469,7 @@ actor ModelRuntime: ModelRuntimeServing {
         nativeMTPResolvedArtifactAuthority: NativeMTPResolvedArtifactAuthority? = nil,
         nativeMTPSelfTestRunner: NativeMTPSelfTestRunner = .unavailable,
         testNativeMTPAdmissionObserver: (@Sendable (NativeMTPRuntimeAdmission) -> Void)? = nil,
+        testNativeMTPAdmissionRequestObserver: (@Sendable (String?, NativeMTPRuntimeAdmission, Int) -> Void)? = nil,
         warmSwapEnabled: Bool = false,
         swapDrainTimeoutSeconds: Int = 30,
         catalogModelIDAlias: String? = nil,
@@ -2500,7 +2504,7 @@ actor ModelRuntime: ModelRuntimeServing {
             publicKeysByKeyID: AutotuneStaticInputs.defaultTrustedPublicKeys,
             requiredKeyID: AutotuneStaticInputs.keyID
         )
-        #if DEBUG
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
         self.configuredNativeMTPRunningBuildIdentity = nativeMTPRunningBuildIdentity
         #else
         self.configuredNativeMTPRunningBuildIdentity = nil
@@ -2524,7 +2528,13 @@ actor ModelRuntime: ModelRuntimeServing {
         self.nativeMTPMode = nativeMTPMode
         self.nativeMTPCapability = nativeMTPCapability
         self.nativeMTPSchedulerSupported = nativeMTPSchedulerSupported
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
         self.testNativeMTPAdmissionObserver = testNativeMTPAdmissionObserver
+        self.testNativeMTPAdmissionRequestObserver = testNativeMTPAdmissionRequestObserver
+        #else
+        self.testNativeMTPAdmissionObserver = nil
+        self.testNativeMTPAdmissionRequestObserver = nil
+        #endif
         self.pagedKVRuntimeProber = .live
         self.continuousBatchReplayAuthority = ContinuousBatchRuntimeReplayAuthority()
         self.pagedKVAttachDecision = Self.pagedKVRuntimeCapabilityDecision(
@@ -2603,25 +2613,32 @@ actor ModelRuntime: ModelRuntimeServing {
         let candidateNativeMTPLoad: NativeMTPRuntimeLoadResult?
         if normalizedDraftModelID == nil,
            let verifiedModelArtifactSHA256,
-           let targetDirectory = try? Self.localModelDirectory(for: targetLoadPath) {
-            candidateNativeMTPLoad = await Self.loadNativeMTPDrafterIfAdmitted(
-                mode: self.nativeMTPMode,
-                targetModelID: modelID,
-                targetModelRevision: verifiedModelArtifactSHA256,
-                targetDirectory: targetDirectory,
-                maxContextTokens: self.maxContextTokens,
-                kvBitsOverride: self.kvBitsOverride,
-                prefillStepSize: self.prefillStepSize,
-                slotCount: self.maxBatch,
-                sidecarPath: self.configuredNativeMTPAdmissionSidecarPath,
-                signaturePath: self.configuredNativeMTPAdmissionSignaturePath,
-                trustedKeyring: self.configuredNativeMTPTrustedKeyring,
-                runningBuildIdentity: self.configuredNativeMTPRunningBuildIdentity,
-                revokedTupleSHA256: self.configuredNativeMTPRevokedTupleSHA256,
-                resolvedArtifactAuthority: self.configuredNativeMTPResolvedArtifactAuthority,
-                targetGeneration: UInt64(max(1, self.currentSpecDecodeGeneration + 1)),
-                selfTestRunner: self.nativeMTPSelfTestRunner
-            )
+           self.nativeMTPMode == .auto {
+            if let targetDirectory = try? Self.localModelDirectory(for: targetLoadPath) {
+                candidateNativeMTPLoad = await Self.loadNativeMTPDrafterIfAdmitted(
+                    mode: self.nativeMTPMode,
+                    targetModelID: modelID,
+                    targetModelRevision: verifiedModelArtifactSHA256,
+                    targetDirectory: targetDirectory,
+                    maxContextTokens: self.maxContextTokens,
+                    kvBitsOverride: self.kvBitsOverride,
+                    prefillStepSize: self.prefillStepSize,
+                    slotCount: self.maxBatch,
+                    sidecarPath: self.configuredNativeMTPAdmissionSidecarPath,
+                    signaturePath: self.configuredNativeMTPAdmissionSignaturePath,
+                    trustedKeyring: self.configuredNativeMTPTrustedKeyring,
+                    runningBuildIdentity: self.configuredNativeMTPRunningBuildIdentity,
+                    revokedTupleSHA256: self.configuredNativeMTPRevokedTupleSHA256,
+                    resolvedArtifactAuthority: self.configuredNativeMTPResolvedArtifactAuthority,
+                    targetGeneration: UInt64(max(1, self.currentSpecDecodeGeneration + 1)),
+                    selfTestRunner: self.nativeMTPSelfTestRunner
+                )
+            } else {
+                candidateNativeMTPLoad = Self.rejectNativeMTPServePath(
+                    reasonCode: "target_directory_unavailable",
+                    artifactRole: "target"
+                )
+            }
         } else {
             candidateNativeMTPLoad = nil
         }
@@ -2770,14 +2787,27 @@ actor ModelRuntime: ModelRuntimeServing {
         self.continuousBatchingDurableReplayAuthorityAvailable =
             self.continuousBatchScheduler != nil && self.continuousBatchReplayAuthority.durableAvailable
         if let nativeMTPLoad = candidateNativeMTPLoad {
-            if let scheduler = self.continuousBatchScheduler,
-               let receipt = try? await self.executeNativeMTPSelfTest(
-                   nativeMTPLoad.selfTestInput,
-                   scheduler: scheduler,
-                   capability: nativeMTPLoad.capability,
-                   servedSnapshotID: nativeMTPLoad.servedSnapshotID
-               ),
-               (try? await NativeMTPSelfTestRunner { _ in receipt }.validate(nativeMTPLoad.selfTestInput)) != nil {
+            let selfTestReceipt: NativeMTPSelfTestReceipt?
+            if let scheduler = self.continuousBatchScheduler {
+                do {
+                    let receipt = try await self.executeNativeMTPSelfTest(
+                        nativeMTPLoad.selfTestInput,
+                        scheduler: scheduler,
+                        capability: nativeMTPLoad.capability,
+                        servedSnapshotID: nativeMTPLoad.servedSnapshotID
+                    )
+                    if (try? await NativeMTPSelfTestRunner { _ in receipt }.validate(nativeMTPLoad.selfTestInput)) != nil {
+                        selfTestReceipt = receipt
+                    } else {
+                        selfTestReceipt = Self.rejectNativeMTPSelfTest(reasonCode: "selftest_receipt_invalid")
+                    }
+                } catch {
+                    selfTestReceipt = Self.rejectNativeMTPSelfTest(reasonCode: "selftest_execution_failed")
+                }
+            } else {
+                selfTestReceipt = Self.rejectNativeMTPSelfTest(reasonCode: "selftest_scheduler_unavailable")
+            }
+            if let receipt = selfTestReceipt {
                 self.currentNativeMTPCapability = nativeMTPLoad.capability
                 self.currentNativeMTPAdmissionCapability = nativeMTPLoad.admissionCapability
                 self.currentNativeMTPDrafterContainer = nativeMTPLoad.drafterContainer
@@ -2884,8 +2914,10 @@ actor ModelRuntime: ModelRuntimeServing {
         nativeMTPRevokedTupleSHA256: Set<String>? = nil,
         nativeMTPResolvedArtifactAuthority: NativeMTPResolvedArtifactAuthority? = nil,
         nativeMTPDrafterContainer: MTPDrafterContainer? = nil,
+        labNativeMTPAdmissionCapability: NativeMTPAdmissionCapability? = nil,
         nativeMTPSelfTestRunner: NativeMTPSelfTestRunner = .unavailable,
         testNativeMTPAdmissionObserver: (@Sendable (NativeMTPRuntimeAdmission) -> Void)? = nil,
+        testNativeMTPAdmissionRequestObserver: (@Sendable (String?, NativeMTPRuntimeAdmission, Int) -> Void)? = nil,
         warmSwapEnabled: Bool,
         swapDrainTimeoutSeconds: Int = 30,
         providerStatus: ProviderStatus? = nil,
@@ -2922,14 +2954,27 @@ actor ModelRuntime: ModelRuntimeServing {
         self.currentDraftModelID = normalizedDraftModelID
         self.currentDraftTargetModelID = normalizedDraftModelID == nil ? nil : modelID
         self.currentDraftContainer = nil
-        #if DEBUG
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
         self.currentNativeMTPDrafterContainer = nativeMTPDrafterContainer
         self.currentNativeMTPCapability = nativeMTPDrafterContainer == nil ? nil : nativeMTPCapability
         #else
         self.currentNativeMTPDrafterContainer = nil
         self.currentNativeMTPCapability = nil
         #endif
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        self.currentNativeMTPAdmissionCapability = nativeMTPDrafterContainer == nil
+            ? nil
+            : labNativeMTPAdmissionCapability
+        self.nativeMTPStatusResetGeneration = self.currentNativeMTPAdmissionCapability == nil ? 0 : 1
+        self.currentNativeMTPStatusSink = Self.nativeMTPStatusSink(
+            capability: self.currentNativeMTPCapability,
+            admissionCapability: self.currentNativeMTPAdmissionCapability,
+            mode: nativeMTPMode,
+            resetGeneration: self.nativeMTPStatusResetGeneration
+        )
+        #else
         self.currentNativeMTPAdmissionCapability = nil
+        #endif
         self.currentNativeMTPTupleOffer = nil
         self.currentNativeMTPSelfTestInput = nil
         self.configuredDraftModelID = normalizedDraftModelID
@@ -2937,14 +2982,14 @@ actor ModelRuntime: ModelRuntimeServing {
         self.configuredNativeMTPAdmissionSidecarPath = Self.nonEmpty(nativeMTPAdmissionSidecarPath)
         self.configuredNativeMTPAdmissionSignaturePath = Self.nonEmpty(nativeMTPAdmissionSignaturePath)
         self.configuredNativeMTPTrustedKeyring = nativeMTPTrustedKeyring
-        #if DEBUG
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
         self.configuredNativeMTPRunningBuildIdentity = nativeMTPRunningBuildIdentity
         #else
         self.configuredNativeMTPRunningBuildIdentity = nil
         #endif
         self.configuredNativeMTPRevokedTupleSHA256 = nativeMTPRevokedTupleSHA256
         self.configuredNativeMTPResolvedArtifactAuthority = nativeMTPResolvedArtifactAuthority
-        #if DEBUG
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
         self.nativeMTPSelfTestRunner = nativeMTPSelfTestRunner
         #else
         self.nativeMTPSelfTestRunner = .unavailable
@@ -2985,7 +3030,7 @@ actor ModelRuntime: ModelRuntimeServing {
         // prebuilt paged-KV attach evidence. A release provider ignores caller-supplied
         // identity/proof/backend flags and can only attach from real on-device measurement,
         // so this test initializer can never become a self-authored-evidence bypass.
-        #if DEBUG
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
         let effectiveObservedIdentity = pagedKVObservedRuntimeIdentity
         let effectiveSizingProof = pagedKVHardwareSizingProof
         let effectiveBackendInstalled = pagedKVSchedulerBackendInstalled
@@ -3001,11 +3046,17 @@ actor ModelRuntime: ModelRuntimeServing {
         self.nativeMTPMode = nativeMTPMode
         self.nativeMTPCapability = nativeMTPCapability
         self.nativeMTPSchedulerSupported = nativeMTPSchedulerSupported
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
         self.testNativeMTPAdmissionObserver = testNativeMTPAdmissionObserver
+        self.testNativeMTPAdmissionRequestObserver = testNativeMTPAdmissionRequestObserver
+        #else
+        self.testNativeMTPAdmissionObserver = nil
+        self.testNativeMTPAdmissionRequestObserver = nil
+        #endif
         // Defense-in-depth: only DEBUG/test builds may inject a non-`.live` prober. A
         // release provider always re-derives evidence via the real on-device `.live`
         // probes, so an injected prober can never revive the "self-authored" attach path.
-        #if DEBUG
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
         self.pagedKVRuntimeProber = pagedKVRuntimeProber
         #else
         self.pagedKVRuntimeProber = .live
@@ -3083,6 +3134,10 @@ actor ModelRuntime: ModelRuntimeServing {
             modelSHA256: modelHash,
             weightsGeneration: self.currentSpecDecodeGeneration,
             prefillStepSize: self.prefillStepSize,
+            nativeMTPRoundByteCapacity: Self.nativeMTPRoundByteCapacity(
+                from: self.currentNativeMTPAdmissionCapability
+            ),
+            nativeMTPStatusSink: self.currentNativeMTPStatusSink,
             replayAuthority: replayAuthority
         )
         self.continuousBatchScheduler = continuousBatchScheduler
@@ -4540,6 +4595,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 modelSHA256: modelSHA256,
                 weightsGeneration: weightsGeneration,
                 prefillStepSize: prefillStepSize,
+                maxDecodeLockstepWindow: decodeLockstepWindow(backendOverride: backendOverride),
                 nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
                 nativeMTPStatusSink: nativeMTPStatusSink,
                 replayAuthority: replayAuthority
@@ -4557,12 +4613,7 @@ actor ModelRuntime: ModelRuntimeServing {
         // serial-format materialize at terminal instead.
         let isHybrid = cacheKinds.contains(.recurrentMamba)
         let contiguousCacheBridge = isHybrid && !cachedTurns ? nil : PagedKVRuntimeContiguousCacheBridge()
-        // Hybrid recurrent state is split/repacked only at decode window
-        // boundaries. Keep production windows to one token until the Qwen35/38
-        // shared-state path proves exact beyond the 512-token prompt boundary.
-        let maxDecodeLockstepWindow = isHybrid
-            ? 1
-            : ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow
+        let maxDecodeLockstepWindow = servePathDecodeLockstepWindow(cacheKinds: cacheKinds)
         return makeContinuousBatchScheduler(
             decision: decision,
             tuple: tuple,
@@ -4599,6 +4650,30 @@ actor ModelRuntime: ModelRuntimeServing {
             replayAuthority: replayAuthority,
             contiguousCacheBridge: contiguousCacheBridge
         )
+    }
+
+    /// Hybrid recurrent state is split/repacked only at decode window
+    /// boundaries. Keep production windows to one token until the Qwen35/38
+    /// shared-state path proves exact beyond the 512-token prompt boundary.
+    nonisolated static func servePathDecodeLockstepWindow(
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
+    ) -> Int {
+        cacheKinds.contains(.recurrentMamba)
+            ? 1
+            : ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow
+    }
+
+    /// An injected real paged-KV backend (native-MTP bench / hardware E2E)
+    /// must decode in the serve path's windows, or its stream cadence and
+    /// throughput are not production's. Scripted test backends keep the
+    /// default window.
+    nonisolated static func decodeLockstepWindow(
+        backendOverride: any ContinuousBatchSchedulerBackend
+    ) -> Int {
+        guard let paged = backendOverride as? PagedKVSharedForwardBackend else {
+            return ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow
+        }
+        return servePathDecodeLockstepWindow(cacheKinds: paged.cacheKinds)
     }
 
     private static func pagedKVCacheKinds(
@@ -5759,6 +5834,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 decodePath: nativeMTPAdmission?.effectivePath ?? .ordinary,
                 nativeMTPMaximumProposalDepth: nativeMTPAdmission?.initialProposalDepth ?? 0,
                 nativeMTPCompleteWindowBytesByDepth: nativeMTPAdmission?.completeWindowBytesByDepth ?? [],
+                nativeMTPMaximumActiveRows: nativeMTPAdmission?.maximumNativeActiveRows ?? 0,
                 nativeMTPTupleFence: nativeMTPAdmission?.tupleFence
             )
         )
@@ -6121,10 +6197,7 @@ actor ModelRuntime: ModelRuntimeServing {
         )
         let nativeMTPAdmission = nativeMTPAdmission.resolvingTokenBounds(
             promptTokenCount: prepared.promptTokens.count,
-            maxOutputTokens: maxOutputTokens,
-            runtimeMaximumPromptTokens: Self.nativeMTPFullPromptPrefillTokenLimit(
-                prefillStepSize: prefillStepSize
-            )
+            maxOutputTokens: maxOutputTokens
         )
         let preparedPromptTokenIDs = prepared.promptTokens.map(Int32.init)
         let batchKVBits = Self.effectiveKVBits(
@@ -6271,6 +6344,16 @@ actor ModelRuntime: ModelRuntimeServing {
         }
     }
 
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    /// Lab-only R015 hook: record the attached scheduler's in-flight load-gate
+    /// decisions. Returns false when no scheduler is attached.
+    func installLabNativeMTPLoadGateRecorder(_ recorder: NativeMTPLoadGateRecorder?) async -> Bool {
+        guard let continuousBatchScheduler else { return false }
+        await continuousBatchScheduler.installLabNativeMTPLoadGateRecorder(recorder)
+        return true
+    }
+    #endif
+
     nonisolated static func schedulerRequestID(for request: ChatCompletionRequest) -> String? {
         nonEmpty(request.requestID)
     }
@@ -6369,10 +6452,7 @@ actor ModelRuntime: ModelRuntimeServing {
         )
         let nativeMTPAdmission = nativeMTPAdmission.resolvingTokenBounds(
             promptTokenCount: prepared.promptTokens.count,
-            maxOutputTokens: maxOutputTokens,
-            runtimeMaximumPromptTokens: Self.nativeMTPFullPromptPrefillTokenLimit(
-                prefillStepSize: prefillStepSize
-            )
+            maxOutputTokens: maxOutputTokens
         )
         let preparedPromptTokenIDs = prepared.promptTokens.map(Int32.init)
         let batchKVBits = Self.effectiveKVBits(
@@ -8494,12 +8574,17 @@ actor ModelRuntime: ModelRuntimeServing {
         targetGeneration: UInt64,
         selfTestRunner: NativeMTPSelfTestRunner
     ) async -> NativeMTPRuntimeLoadResult? {
-        guard mode == .auto,
-              let targetModelRevision,
-              let trustedKeyring,
-              let runningBuildIdentity = injectedRunningBuildIdentity ?? nativeMTPRunningBuildIdentity()
-        else {
-            return nil
+        guard mode == .auto else {
+            return rejectNativeMTPServePath(reasonCode: "mode_not_auto", artifactRole: "runtime")
+        }
+        guard let targetModelRevision else {
+            return rejectNativeMTPServePath(reasonCode: "target_revision_missing", artifactRole: "target")
+        }
+        guard let trustedKeyring else {
+            return rejectNativeMTPServePath(reasonCode: "trusted_keyring_missing", artifactRole: "sidecar")
+        }
+        guard let runningBuildIdentity = injectedRunningBuildIdentity ?? nativeMTPRunningBuildIdentity() else {
+            return rejectNativeMTPServePath(reasonCode: "running_build_identity_unavailable", artifactRole: "runtime")
         }
         let bundleRoot = targetDirectory.deletingLastPathComponent()
         let bundledSidecar = bundleRoot.appendingPathComponent("native-mtp-admission.json")
@@ -8512,10 +8597,11 @@ actor ModelRuntime: ModelRuntimeServing {
         let signatureURL = signaturePath
             .map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
             ?? sidecarURL.deletingLastPathComponent().appendingPathComponent("native-mtp-admission.json.sig")
-        guard FileManager.default.fileExists(atPath: sidecarURL.path),
-              FileManager.default.fileExists(atPath: signatureURL.path)
-        else {
-            return nil
+        guard FileManager.default.fileExists(atPath: sidecarURL.path) else {
+            return rejectNativeMTPServePath(reasonCode: "sidecar_missing", artifactRole: "sidecar")
+        }
+        guard FileManager.default.fileExists(atPath: signatureURL.path) else {
+            return rejectNativeMTPServePath(reasonCode: "signature_missing", artifactRole: "signature")
         }
         do {
             let revocationAdmissionState: NativeMTPRevocationAdmissionState
@@ -8532,7 +8618,10 @@ actor ModelRuntime: ModelRuntimeServing {
                     signatureURL: signatureURL,
                     trustedKeyring: trustedKeyring
                 ) else {
-                    return nil
+                    return rejectNativeMTPServePath(
+                        reasonCode: "revocation_state_unavailable",
+                        artifactRole: "sidecar"
+                    )
                 }
                 revocationAdmissionState = loadedRevocationState
             }
@@ -8559,26 +8648,29 @@ actor ModelRuntime: ModelRuntimeServing {
                 captureArtifacts: true
             )
             guard nativeMTPAdmissionMatchesRunningBuild(
-                    admissionCapability,
-                    targetModelRevision: targetModelRevision,
-                    runningBuildIdentity: runningBuildIdentity
-                  ),
-                  admissionCapability.qualifiedSlots <= slotCount,
-                  let capturedArtifacts = admissionCapability.capturedArtifacts
-            else {
-                return nil
+                admissionCapability,
+                targetModelRevision: targetModelRevision,
+                runningBuildIdentity: runningBuildIdentity
+            ) else {
+                return rejectNativeMTPServePath(reasonCode: "build_binding_mismatch", artifactRole: "sidecar")
+            }
+            guard admissionCapability.qualifiedSlots <= slotCount else {
+                return rejectNativeMTPServePath(reasonCode: "qualified_slots_exceed_runtime", artifactRole: "runtime")
+            }
+            guard let capturedArtifacts = admissionCapability.capturedArtifacts else {
+                return rejectNativeMTPServePath(reasonCode: "captured_artifacts_unavailable", artifactRole: "pair")
             }
             let drafterDirectory = try nativeMTPArtifactDirectory(for: capturedArtifacts.mtpURL)
             guard let capturedTokenizerLoader = nativeMTPCapturedTokenizerLoader(
                 capturedArtifacts: capturedArtifacts
             ) else {
-                return nil
+                return rejectNativeMTPServePath(reasonCode: "captured_tokenizer_invalid", artifactRole: "target")
             }
             guard try nativeMTPCapturedManifestMatchesAdmission(
                 capturedArtifacts: capturedArtifacts,
                 admissionCapability: admissionCapability
             ) else {
-                return nil
+                return rejectNativeMTPServePath(reasonCode: "captured_manifest_mismatch", artifactRole: "pair")
             }
             let artifactObservation = try NativeMTPArtifactObserver.observePair(
                 targetDirectory: capturedArtifacts.targetURL,
@@ -8588,7 +8680,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 artifactObservation,
                 admissionCapability: admissionCapability
             ) else {
-                return nil
+                return rejectNativeMTPServePath(reasonCode: "artifact_observation_mismatch", artifactRole: "pair")
             }
             let targetLoad = try await loadLocalContainer(
                 from: capturedArtifacts.targetURL.path,
@@ -8602,7 +8694,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 .resolvingSymlinksInPath()
                 .standardizedFileURL
             else {
-                return nil
+                return rejectNativeMTPServePath(reasonCode: "captured_target_identity_mismatch", artifactRole: "target")
             }
             let modelCapabilities = pagedKVModelCapabilities(modelID: targetModelID, directory: capturedTargetDirectory)
             let runtimeCacheClass = await pagedKVRuntimeCacheClass(
@@ -8612,16 +8704,17 @@ actor ModelRuntime: ModelRuntimeServing {
                 prefillStepSize: prefillStepSize
             )
             guard let canonicalCacheClass = nativeMTPAdmissionCacheClass(
-                    runtimeCacheClass: runtimeCacheClass,
-                    modelCapabilities: modelCapabilities
-                  ),
-                  nativeMTPAdmissionCapabilitySupported(
-                    admissionCapability,
-                    canonicalCacheClass: canonicalCacheClass,
-                    modelCapabilities: modelCapabilities
-                  )
-            else {
-                return nil
+                runtimeCacheClass: runtimeCacheClass,
+                modelCapabilities: modelCapabilities
+            ) else {
+                return rejectNativeMTPServePath(reasonCode: "runtime_cache_class_unsupported", artifactRole: "runtime")
+            }
+            guard nativeMTPAdmissionCapabilitySupported(
+                admissionCapability,
+                canonicalCacheClass: canonicalCacheClass,
+                modelCapabilities: modelCapabilities
+            ) else {
+                return rejectNativeMTPServePath(reasonCode: "admission_capability_unsupported", artifactRole: "sidecar")
             }
             await Qwen35TextMTPRegistration.register()
             let drafterContainer = try await MTPDrafterModelFactory.shared.loadContainer(
@@ -8630,20 +8723,20 @@ actor ModelRuntime: ModelRuntimeServing {
             )
             try capturedArtifacts.revalidateAfterLoad()
             let drafterRuntimeObservation = await drafterContainer.perform { context -> (maximumBlockSize: Int?, stateLayerCount: Int?) in
-                let stateLayerCount = (context.model as? any StatefulMTPDrafterModel)?
+                let stateLayerCount = (context.model as? any MTPPackedStatefulDrafterModel)?
                     .makeState(parameters: nil)
                     .cache
                     .count
                 return (context.model.maximumBlockSize, stateLayerCount)
             }
             guard drafterRuntimeObservation.stateLayerCount == admissionCapability.predictionLayerCount else {
-                return nil
+                return rejectNativeMTPServePath(reasonCode: "drafter_state_layer_count_mismatch", artifactRole: "mtp")
             }
             guard NativeMTPProposalBounds.fits(
                 maximumProposalDepth: admissionCapability.maxProposalDepth,
                 maximumBlockSize: drafterRuntimeObservation.maximumBlockSize
             ) else {
-                return nil
+                return rejectNativeMTPServePath(reasonCode: "drafter_proposal_depth_unsupported", artifactRole: "mtp")
             }
             let selectedChallenge = try loadNativeMTPSelfTestChallenge(
                 admissionCapability: admissionCapability,
@@ -8687,7 +8780,9 @@ actor ModelRuntime: ModelRuntimeServing {
                 maximumCompletionTokens: admissionCapability.maxCompletionTokens,
                 completeWindowBytesByDepth: admissionCapability.completeWindowBytesByDepth,
                 family: admissionCapability.familyAdapter,
-                throughputDeltaPPM: admissionCapability.throughputDeltaPPM
+                throughputDeltaPPM: admissionCapability.throughputDeltaPPM,
+                maximumNativeActiveRows: admissionCapability.maxNativeActiveRows,
+                supportsSampling: admissionCapability.supportsSampling
             )
             let runtimeTuple = NativeMTPPublishedRuntimeTuple(
                 modelID: selfTestRuntimeTuple.modelID,
@@ -8728,9 +8823,132 @@ actor ModelRuntime: ModelRuntimeServing {
                 revocationExpiresAt: revocationAdmissionState.expiresAt
             )
         } catch {
-            return nil
+            let rejection = nativeMTPServePathRejection(for: error)
+            return rejectNativeMTPServePath(
+                reasonCode: rejection.reasonCode,
+                artifactRole: rejection.artifactRole
+            )
         }
     }
+
+    /// Maps a serve-path admission error to a closed reason code. Error
+    /// payloads are never logged: they can carry tensor names or paths.
+    static func nativeMTPServePathRejection(for error: Error) -> (reasonCode: String, artifactRole: String) {
+        if let observationError = error as? NativeMTPArtifactObservationError {
+            switch observationError {
+            case .unsupportedQuantization:
+                return ("artifact_quantization_unsupported", "pair")
+            case .missingQuantizationMetadata:
+                return ("artifact_quantization_metadata_missing", "pair")
+            case .incompatibleSafetensorsHeaders, .unsupportedDType:
+                return ("artifact_tensor_representation_rejected", "pair")
+            case .observationDrift:
+                return ("artifact_observation_drift", "pair")
+            case .missingConfig, .malformedConfig, .missingMTPPredictionLayerCount,
+                 .invalidMTPPredictionLayerCount, .missingSafetensors, .malformedSafetensors:
+                return ("artifact_observation_invalid", "pair")
+            }
+        }
+        if error is NativeMTPAdmissionSidecarError {
+            return ("sidecar_validation_rejected", "sidecar")
+        }
+        if error is ModelRuntimeLoadError {
+            return ("artifact_load_failed", "pair")
+        }
+        if error is NativeMTPSelfTestError {
+            return ("selftest_challenge_bank_rejected", "challenge_bank")
+        }
+        if error is ModelFactoryError {
+            return ("model_factory_load_failed", "pair")
+        }
+        if error is CocoaError {
+            return ("artifact_io_failed", "pair")
+        }
+        return ("serve_path_admission_failed", "runtime")
+    }
+
+    private static func rejectNativeMTPServePath(
+        reasonCode: String,
+        artifactRole: String
+    ) -> NativeMTPRuntimeLoadResult? {
+        logNativeMTPServePathRejection(reasonCode: reasonCode, artifactRole: artifactRole)
+        return nil
+    }
+
+    private static func rejectNativeMTPSelfTest(reasonCode: String) -> NativeMTPSelfTestReceipt? {
+        logNativeMTPServePathRejection(reasonCode: reasonCode, artifactRole: "runtime")
+        return nil
+    }
+
+    private static func logNativeMTPServePathRejection(reasonCode: String, artifactRole: String) {
+        FileHandle.standardError.write(Data(nativeMTPServePathRejectionLogLine(
+            reasonCode: reasonCode,
+            artifactRole: artifactRole
+        ).utf8))
+    }
+
+    /// One sorted-key JSON object per rejection, terminated by a single newline.
+    static func nativeMTPServePathRejectionLogLine(reasonCode: String, artifactRole: String) -> String {
+        let payload: [String: String] = [
+            "artifact_role": artifactRole,
+            "event": "native_mtp_serve_path_admission",
+            "reason_code": reasonCode,
+            "status": "rejected",
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) {
+            return String(decoding: data, as: UTF8.self) + "\n"
+        }
+        return "event=native_mtp_serve_path_admission status=rejected reason_code=\(reasonCode) artifact_role=\(artifactRole)\n"
+    }
+
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    struct NativeMTPHardwareE2EServePathLoad: @unchecked Sendable {
+        let targetContainer: ModelContainer
+        let drafterContainer: MTPDrafterContainer
+    }
+
+    /// Lab-only entry into the production serve-path admission loader, so the
+    /// hardware e2e exercises the real sidecar, capture, observer, and drafter
+    /// admission instead of an injected drafter. The self-test runs later in
+    /// production startup and is not part of this load.
+    static func nativeMTPServePathLoadForHardwareE2E(
+        targetModelID: String,
+        targetModelRevision: String,
+        targetDirectory: URL,
+        maxContextTokens: Int,
+        slotCount: Int,
+        sidecarURL: URL,
+        signatureURL: URL,
+        trustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring,
+        runningBuildIdentity: NativeMTPRunningBuildIdentity,
+        resolvedArtifactAuthority: NativeMTPResolvedArtifactAuthority
+    ) async -> NativeMTPHardwareE2EServePathLoad? {
+        guard let load = await loadNativeMTPDrafterIfAdmitted(
+            mode: .auto,
+            targetModelID: targetModelID,
+            targetModelRevision: targetModelRevision,
+            targetDirectory: targetDirectory,
+            maxContextTokens: maxContextTokens,
+            kvBitsOverride: nil,
+            prefillStepSize: 512,
+            slotCount: slotCount,
+            sidecarPath: sidecarURL.path,
+            signaturePath: signatureURL.path,
+            trustedKeyring: trustedKeyring,
+            runningBuildIdentity: runningBuildIdentity,
+            revokedTupleSHA256: [],
+            resolvedArtifactAuthority: resolvedArtifactAuthority,
+            targetGeneration: 1,
+            selfTestRunner: .unavailable
+        ) else {
+            return nil
+        }
+        return NativeMTPHardwareE2EServePathLoad(
+            targetContainer: load.targetContainer,
+            drafterContainer: load.drafterContainer
+        )
+    }
+    #endif
 
     private struct NativeMTPRevocationAdmissionState {
         let revokedTupleSHA256: Set<String>
@@ -8979,10 +9197,36 @@ actor ModelRuntime: ModelRuntimeServing {
         admissionCapability: NativeMTPAdmissionCapability
     ) -> Bool {
         guard let observation else { return false }
-        return observation.target.format.sidecarQuantizationLabel == admissionCapability.quantization.target
+        guard observation.target.format.sidecarQuantizationLabel == admissionCapability.quantization.target
             && observation.mtp.format.sidecarQuantizationLabel == admissionCapability.quantization.mtp
             && observation.target.mtpPredictionLayerCount == admissionCapability.predictionLayerCount
             && observation.mtp.mtpPredictionLayerCount == admissionCapability.predictionLayerCount
+        else {
+            return false
+        }
+        // Every signed quantization field is recomputed from the observed
+        // artifacts; a kind the observer cannot recompute never admits.
+        let quantization = admissionCapability.quantization
+        switch (quantization.target, quantization.mtp) {
+        case ("mlx_affine_4bit", "mlx_affine_4bit"):
+            guard let representation = try? NativeMTPArtifactObserver.affineRepresentation(for: observation) else {
+                return false
+            }
+            return representation.groupSize == quantization.blockSizeElements
+                && representation.manifestSHA256 == quantization.representationManifestSHA256
+                && representation.perLayerExceptions == quantization.perLayerExceptions
+                && representation.unquantizedExceptions == quantization.unquantizedExceptions
+        case ("bf16", "bf16"):
+            guard let representation = try? NativeMTPArtifactObserver.baseRepresentation(for: observation) else {
+                return false
+            }
+            return quantization.blockSizeElements == nil
+                && representation.manifestSHA256 == quantization.representationManifestSHA256
+                && quantization.perLayerExceptions.isEmpty
+                && quantization.unquantizedExceptions.isEmpty
+        default:
+            return false
+        }
     }
 
     static func nativeMTPArtifactObservationMatchesAdmissionForTest(
@@ -11151,3 +11395,34 @@ final class StreamedFlag: @unchecked Sendable {
         return value
     }
 }
+
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+extension ModelRuntime {
+    /// Lab harness entry point: runs the same live parity + batched-isolation/MoE
+    /// probes and measurement that the production load path runs, so lab runtimes
+    /// attach paged KV from real on-device evidence instead of a synthesized identity.
+    func labMeasurePagedKVRuntime(
+        container: ModelContainer,
+        modelID: String,
+        modelCapabilities: PagedKVRuntimeModelCapabilities,
+        runtimeCacheClass: String
+    ) async -> PagedKVRuntimeMeasurement? {
+        let (parityProbe, moeProbe) = await computePagedKVRuntimeProbes(
+            container: container,
+            modelID: modelID,
+            modelCapabilities: modelCapabilities,
+            runtimeCacheClass: runtimeCacheClass
+        )
+        return Self.measurePagedKVRuntime(
+            config: pagedKVConfig,
+            modelID: modelID,
+            modelSHA256: currentModelHash,
+            tokenizerSHA256: currentTokenizerConfigSHA256,
+            chatTemplateSHA256: currentChatTemplateSHA256,
+            modelCapabilities: modelCapabilities,
+            parityProbe: parityProbe,
+            moeProbe: moeProbe
+        )
+    }
+}
+#endif

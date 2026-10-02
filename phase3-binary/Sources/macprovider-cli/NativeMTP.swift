@@ -39,6 +39,12 @@ struct NativeMTPCapability: Sendable, Equatable {
     let completeWindowBytesByDepth: [Int]
     let family: String?
     let throughputDeltaPPM: Int
+    /// SPEC-048-R007 signed load bound. `Int.max` is only for capabilities
+    /// that never came from a signed sidecar (unit fixtures).
+    let maximumNativeActiveRows: Int
+    /// The signed tuple qualified sampled rows (SPEC-023-R024
+    /// `native_mtp_sampled_text_v1`); greedy-only tuples route them ordinary.
+    let supportsSampling: Bool
 
     init(
         admitted: Bool,
@@ -55,7 +61,9 @@ struct NativeMTPCapability: Sendable, Equatable {
         maximumCompletionTokens: Int,
         completeWindowBytesByDepth: [Int] = [],
         family: String? = nil,
-        throughputDeltaPPM: Int = 0
+        throughputDeltaPPM: Int = 0,
+        maximumNativeActiveRows: Int = Int.max,
+        supportsSampling: Bool = false
     ) {
         self.admitted = admitted
         self.revoked = revoked
@@ -72,6 +80,8 @@ struct NativeMTPCapability: Sendable, Equatable {
         self.completeWindowBytesByDepth = completeWindowBytesByDepth
         self.family = family
         self.throughputDeltaPPM = throughputDeltaPPM
+        self.maximumNativeActiveRows = max(1, maximumNativeActiveRows)
+        self.supportsSampling = supportsSampling
     }
 
     static let unavailable = NativeMTPCapability(
@@ -108,6 +118,7 @@ enum NativeMTPSelectorReason: String, CaseIterable, Sendable {
     case unsupportedProcessor = "unsupported_processor"
     case unsupportedStateCache = "unsupported_state_cache"
     case insufficientVerificationCapacity = "insufficient_verification_capacity"
+    case capacityAboveNativeBound = "capacity_above_native_bound"
     case capabilityMismatch = "capability_mismatch"
     case tupleNotAdmitted = "tuple_not_admitted"
     case tupleRevoked = "tuple_revoked"
@@ -226,8 +237,18 @@ struct NativeMTPSelector: Sendable {
               request.streamOptionKeys.isSubset(of: admittedStreamOptionKeys) else {
             return .unknownRequestField
         }
-        guard request.temperature == 0.0, request.topP == 1.0 else {
-            return .sampling
+        // Sampled rows verify by target-sample exact match with the row's own
+        // sampler, so a tuple qualified for sampling admits any temperature/
+        // top_p pair the ordinary row sampler supports; anything else, and
+        // every sampled request on a greedy-only tuple, stays ordinary.
+        if request.temperature != 0.0 || request.topP != 1.0 {
+            guard nativeCapability.supportsSampling,
+                  ContinuousBatchRowSampler.supports(
+                      temperature: request.temperature,
+                      topP: request.topP
+                  ) else {
+                return .sampling
+            }
         }
         guard jsonInt(request.promptSource.n) ?? 1 == 1 else {
             return .multipleCompletions
@@ -342,6 +363,7 @@ struct NativeMTPRuntimeAdmission: Sendable, Equatable {
     let maximumPromptTokens: Int
     let maximumCompletionTokens: Int
     let completeWindowBytesByDepth: [Int]
+    let maximumNativeActiveRows: Int
     let tupleFence: NativeMTPTupleFence?
 
     var usesNativeMTP: Bool {
@@ -368,6 +390,7 @@ struct NativeMTPRuntimeAdmission: Sendable, Equatable {
                 maximumPromptTokens: 0,
                 maximumCompletionTokens: 0,
                 completeWindowBytesByDepth: [],
+                maximumNativeActiveRows: 0,
                 tupleFence: nil
             )
         }
@@ -378,22 +401,40 @@ struct NativeMTPRuntimeAdmission: Sendable, Equatable {
             maximumPromptTokens: capability.maximumPromptTokens,
             maximumCompletionTokens: capability.maximumCompletionTokens,
             completeWindowBytesByDepth: capability.completeWindowBytesByDepth,
+            maximumNativeActiveRows: capability.maximumNativeActiveRows,
+            tupleFence: nil
+        )
+    }
+
+    /// SPEC-048-R007 load gate at admission. `otherActiveRows` counts every
+    /// other in-flight request on the served runtime, native or ordinary.
+    /// Admitting this request native would make the active row count exceed
+    /// the signed bound, so it takes ordinary decode before any native state
+    /// exists.
+    func resolvingActiveRows(otherActiveRows: Int) -> NativeMTPRuntimeAdmission {
+        guard usesNativeMTP, max(0, otherActiveRows) >= maximumNativeActiveRows else { return self }
+        return Self.ordinary(reason: .capacityAboveNativeBound)
+    }
+
+    private static func ordinary(reason: NativeMTPSelectorReason) -> NativeMTPRuntimeAdmission {
+        NativeMTPRuntimeAdmission(
+            selection: DecodePathSelection(path: .ordinary, nativeMTPReason: reason),
+            effectivePath: .ordinary,
+            initialProposalDepth: 0,
+            maximumPromptTokens: 0,
+            maximumCompletionTokens: 0,
+            completeWindowBytesByDepth: [],
+            maximumNativeActiveRows: 0,
             tupleFence: nil
         )
     }
 
     func resolvingTokenBounds(
         promptTokenCount: Int,
-        maxOutputTokens: Int,
-        runtimeMaximumPromptTokens: Int? = nil
+        maxOutputTokens: Int
     ) -> NativeMTPRuntimeAdmission {
         guard usesNativeMTP else { return self }
-        let effectiveMaximumPromptTokens: Int
-        if let runtimeMaximumPromptTokens {
-            effectiveMaximumPromptTokens = min(maximumPromptTokens, runtimeMaximumPromptTokens)
-        } else {
-            effectiveMaximumPromptTokens = maximumPromptTokens
-        }
+        let effectiveMaximumPromptTokens = maximumPromptTokens
         let reason: NativeMTPSelectorReason?
         if promptTokenCount < 0
             || effectiveMaximumPromptTokens <= 0
@@ -405,15 +446,7 @@ struct NativeMTPRuntimeAdmission: Sendable, Equatable {
             reason = nil
         }
         guard let reason else { return self }
-        return NativeMTPRuntimeAdmission(
-            selection: DecodePathSelection(path: .ordinary, nativeMTPReason: reason),
-            effectivePath: .ordinary,
-            initialProposalDepth: 0,
-            maximumPromptTokens: 0,
-            maximumCompletionTokens: 0,
-            completeWindowBytesByDepth: [],
-            tupleFence: nil
-        )
+        return Self.ordinary(reason: reason)
     }
 
     func binding(to fence: NativeMTPTupleFence?) -> NativeMTPRuntimeAdmission {
@@ -424,6 +457,7 @@ struct NativeMTPRuntimeAdmission: Sendable, Equatable {
             maximumPromptTokens: maximumPromptTokens,
             maximumCompletionTokens: maximumCompletionTokens,
             completeWindowBytesByDepth: completeWindowBytesByDepth,
+            maximumNativeActiveRows: maximumNativeActiveRows,
             tupleFence: usesNativeMTP ? fence : nil
         )
     }
