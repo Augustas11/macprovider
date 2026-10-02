@@ -10038,6 +10038,12 @@
       ],
       "evidence": [
         {
+          "artifact": "commit:0c93b86d50f22b3708ca0ffe455f7acf643ae92f",
+          "source": null,
+          "captured_at": "2026-10-03",
+          "expires_at": "2026-11-02"
+        },
+        {
           "artifact": "sha256:3d524840e0996c735e84fcde0490c586178e32995282909aa600b6e946321220",
           "source": "journeys/evidence/network-model-admission-20260916T135000Z.spec-047-r001-spec-047-r002-spec-047-r003-spec-047-r004-spec-047-r005-spec-047-r006-spec-047-r007-spec-047-r008.journey-result.signed.json",
           "captured_at": "2026-09-16",
