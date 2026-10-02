@@ -3,8 +3,9 @@ import Foundation
 import XCTest
 @testable import macprovider_cli
 
-/// SPEC-048-R015 / R007: an admission policy must cover the mandatory matrix
-/// before any measurement, so a reduced matrix can never be analyzed to PASS.
+/// SPEC-048-R015 / R007: an admission policy must name exactly the mandatory
+/// matrix before any measurement, so a reduced or substituted matrix can never
+/// be analyzed to PASS.
 final class NativeMTPBenchPolicyTests: XCTestCase {
     private static let templateURL = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()
@@ -15,31 +16,104 @@ final class NativeMTPBenchPolicyTests: XCTestCase {
 
     func testTemplateCoversTheMandatoryMatrix() throws {
         let policy = try load(template())
-        XCTAssertEqual(policy.slots, Array(1...8))
+        XCTAssertEqual(policy.slots, [1])
         XCTAssertEqual(policy.qualifiedSlots, 8)
-        XCTAssertTrue(NativeMTPBenchPolicy.mandatoryPromptTokens.isSubset(of: Set(policy.promptTokens)))
-        XCTAssertTrue(NativeMTPBenchPolicy.mandatoryMaxTokens.isSubset(of: Set(policy.maxTokens)))
+        XCTAssertEqual(policy.maximumPromptTokens, 4096)
+        XCTAssertEqual(policy.promptTokens, [1536, 4096])
+        XCTAssertEqual(Set(policy.maxTokens), NativeMTPBenchPolicy.mandatoryMaxTokens)
+        XCTAssertEqual(
+            policy.matrixCells.map(\.id),
+            ["s1-p1536-o128", "s1-p1536-o512", "s1-p4096-o128", "s1-p4096-o512", "s2-p1536-o512", "s8-p1536-o512"]
+        )
+        XCTAssertEqual(policy.sustainedCellID, "s8-p1536-o512")
+        XCTAssertNotNil(policy.cell(id: "s2-p1536-o512"))
+        XCTAssertNil(policy.cell(id: "s2-p4096-o512"))
     }
 
-    func testAdmissionPolicyWithoutOneSlotCellFailsClosed() throws {
-        var object = try template()
-        object["slots"] = [2, 4, 8]
-        XCTAssertThrowsError(try load(object)) { error in
-            XCTAssertTrue("\(error)".contains("slots missing mandatory counts [1, 3, 5, 6, 7]"), "\(error)")
+    func testMandatoryPromptStrataAreCappedAndIncludeTheCap() {
+        XCTAssertEqual(NativeMTPBenchPolicy.mandatoryPromptTokens(cap: 4096), [1536, 4096])
+        XCTAssertEqual(NativeMTPBenchPolicy.mandatoryPromptTokens(cap: 2048), [1536, 2048])
+        XCTAssertEqual(NativeMTPBenchPolicy.mandatoryPromptTokens(cap: 32768), [1536, 4096, 32768])
+        XCTAssertEqual(NativeMTPBenchPolicy.mandatoryGatedCellIDs(bound: 1, qualifiedSlots: 8), ["s2-p1536-o512", "s8-p1536-o512"])
+        XCTAssertEqual(NativeMTPBenchPolicy.mandatoryGatedCellIDs(bound: 7, qualifiedSlots: 8), ["s8-p1536-o512"])
+        XCTAssertEqual(NativeMTPBenchPolicy.mandatoryGatedCellIDs(bound: 8, qualifiedSlots: 8), [])
+    }
+
+    func testAdmissionPolicyNativeEligibleSlotsMustBeExactlyOneThroughTheBound() throws {
+        var missing = try template()
+        missing["max_native_active_rows"] = 2
+        missing["gated_cells"] = ["s3-p1536-o512", "s8-p1536-o512"]
+        XCTAssertThrowsError(try load(missing)) { error in
+            XCTAssertTrue("\(error)".contains("slots must be exactly 1...2"), "\(error)")
+        }
+        var above = try template()
+        above["slots"] = [1, 3]
+        XCTAssertThrowsError(try load(above)) { error in
+            XCTAssertTrue("\(error)".contains("slots must be exactly 1...1"), "\(error)")
         }
     }
 
-    func testAdmissionPolicyMissingAPromptStratumOrOutputBudgetFailsClosed() throws {
-        var prompts = try template()
-        prompts["prompt_tokens"] = [1536, 4096]
-        XCTAssertThrowsError(try load(prompts)) { error in
-            XCTAssertTrue("\(error)".contains("prompt_tokens missing mandatory strata [8192]"), "\(error)")
+    func testAdmissionPolicyPromptStrataAndOutputBudgetsAreExact() throws {
+        var missing = try template()
+        missing["prompt_tokens"] = [1536]
+        XCTAssertThrowsError(try load(missing)) { error in
+            XCTAssertTrue("\(error)".contains("prompt_tokens must be exactly [1536, 4096]"), "\(error)")
         }
+        var aboveCap = try template()
+        aboveCap["prompt_tokens"] = [1536, 4096, 8192]
+        XCTAssertThrowsError(try load(aboveCap))
+        var noCap = try template()
+        noCap.removeValue(forKey: "maximum_prompt_tokens")
+        XCTAssertThrowsError(try load(noCap)) { error in
+            XCTAssertTrue("\(error)".contains("maximum_prompt_tokens is required"), "\(error)")
+        }
+        var smallCap = try template()
+        smallCap["maximum_prompt_tokens"] = 1024
+        smallCap["prompt_tokens"] = [1024]
+        XCTAssertThrowsError(try load(smallCap))
         var outputs = try template()
         outputs["max_tokens"] = [128]
         XCTAssertThrowsError(try load(outputs)) { error in
-            XCTAssertTrue("\(error)".contains("max_tokens missing mandatory budgets [512]"), "\(error)")
+            XCTAssertTrue("\(error)".contains("max_tokens must be exactly [128, 512]"), "\(error)")
         }
+    }
+
+    func testAdmissionPolicyGatedCellsAndSustainedCellAreExact() throws {
+        var missing = try template()
+        missing["gated_cells"] = ["s8-p1536-o512"]
+        XCTAssertThrowsError(try load(missing)) { error in
+            XCTAssertTrue("\(error)".contains("gated_cells must be exactly"), "\(error)")
+        }
+        var substituted = try template()
+        substituted["gated_cells"] = ["s2-p4096-o512", "s8-p1536-o512"]
+        XCTAssertThrowsError(try load(substituted))
+        var malformed = try template()
+        malformed["gated_cells"] = ["s2-p1536"]
+        XCTAssertThrowsError(try load(malformed))
+        var duplicate = try template()
+        duplicate["gated_cells"] = ["s1-p1536-o512", "s2-p1536-o512", "s8-p1536-o512"]
+        XCTAssertThrowsError(try load(duplicate))
+        var sustained = try template()
+        sustained["sustained_cell_id"] = "s2-p1536-o512"
+        XCTAssertThrowsError(try load(sustained)) { error in
+            XCTAssertTrue("\(error)".contains("sustained_cell_id must be s8-p1536-o512"), "\(error)")
+        }
+        var short = try template()
+        short["sustained_seconds"] = 1799
+        XCTAssertThrowsError(try load(short))
+    }
+
+    func testBoundCoveringEverySlotNeedsNoGatedCells() throws {
+        var object = try template()
+        object["qualified_slots"] = 2
+        object["max_native_active_rows"] = 2
+        object["slots"] = [1, 2]
+        object["gated_cells"] = []
+        object["sustained_cell_id"] = "s2-p1536-o512"
+        object["arrival_interval_ms"] = 0
+        let policy = try load(object)
+        XCTAssertEqual(policy.matrixCells.count, 8)
+        XCTAssertNotNil(policy.cell(id: policy.sustainedCellID))
     }
 
     func testAdmissionPolicyRequiresQualifiedSlotsAndBound() throws {
@@ -54,12 +128,15 @@ final class NativeMTPBenchPolicyTests: XCTestCase {
     func testSlotsAndBoundCannotExceedQualifiedSlots() throws {
         var overSlot = try template()
         overSlot["qualified_slots"] = 4
-        XCTAssertThrowsError(try load(overSlot))
+        XCTAssertThrowsError(try load(overSlot)) { error in
+            XCTAssertTrue("\(error)".contains("cell s8-p1536-o512 exceeds qualified_slots 4"), "\(error)")
+        }
         var overBound = try template()
-        overBound["slots"] = [1, 2, 3, 4]
         overBound["qualified_slots"] = 4
         overBound["max_native_active_rows"] = 5
-        overBound["sustained_cell_id"] = "s4-p4096-o512"
+        overBound["slots"] = [1, 2, 3, 4, 5]
+        overBound["gated_cells"] = []
+        overBound["sustained_cell_id"] = "s4-p1536-o512"
         XCTAssertThrowsError(try load(overBound))
         var outOfRange = try template()
         outOfRange["qualified_slots"] = 9
@@ -69,6 +146,8 @@ final class NativeMTPBenchPolicyTests: XCTestCase {
     func testCellBoundIsClampedToTheCellsQualifiedRuntime() throws {
         var object = try template()
         object["max_native_active_rows"] = 4
+        object["slots"] = [1, 2, 3, 4]
+        object["gated_cells"] = ["s5-p1536-o512", "s8-p1536-o512"]
         let policy = try load(object)
         XCTAssertEqual(policy.maxNativeActiveRows(for: NativeMTPBenchCell(slots: 1, promptTokens: 1536, maxTokens: 128)), 2)
         XCTAssertEqual(policy.maxNativeActiveRows(for: NativeMTPBenchCell(slots: 3, promptTokens: 1536, maxTokens: 128)), 3)
@@ -101,7 +180,11 @@ final class NativeMTPBenchPolicyTests: XCTestCase {
         // A bound covering every slot leaves no gated cell to stagger.
         var ungated = try template()
         ungated["arrival_interval_ms"] = 0
-        ungated["max_native_active_rows"] = 8
+        ungated["qualified_slots"] = 2
+        ungated["max_native_active_rows"] = 2
+        ungated["slots"] = [1, 2]
+        ungated["gated_cells"] = []
+        ungated["sustained_cell_id"] = "s2-p1536-o512"
         XCTAssertNoThrow(try load(ungated))
     }
 
@@ -131,7 +214,16 @@ final class NativeMTPBenchPolicyTests: XCTestCase {
         object["sustained_cell_id"] = "s2-p384-o64"
         object.removeValue(forKey: "qualified_slots")
         object.removeValue(forKey: "max_native_active_rows")
+        object.removeValue(forKey: "maximum_prompt_tokens")
+        object.removeValue(forKey: "gated_cells")
         XCTAssertNoThrow(try load(object))
+    }
+
+    func testCellIDsRoundTripExactly() {
+        XCTAssertEqual(NativeMTPBenchCell(id: "s8-p1536-o512"), NativeMTPBenchCell(slots: 8, promptTokens: 1536, maxTokens: 512))
+        for bad in ["s08-p1536-o512", "s8-p1536-o512-x", "s8-p1536", "x8-p1536-o512", "s0-p1536-o512", "s8-p-o512", "s+8-p1536-o512"] {
+            XCTAssertNil(NativeMTPBenchCell(id: bad), bad)
+        }
     }
 
     private func template() throws -> [String: Any] {

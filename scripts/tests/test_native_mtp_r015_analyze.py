@@ -6,7 +6,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.native_mtp_r015_analyze import _holm_adjusted, _native_first_order, analyze, main
+from scripts.native_mtp_r015_analyze import (
+    _holm_adjusted,
+    _native_first_order,
+    analyze,
+    main,
+    mandatory_gated_cells,
+    mandatory_prompt_tokens,
+)
 
 
 class NativeMTPR015AnalyzeTests(unittest.TestCase):
@@ -298,18 +305,71 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         self.assertEqual(result["overall_status"], "FAIL")
         self.assertIn("native_mtp_proposals_missing", result["cells"][0]["hard_failures"])
 
-    def test_matrix_without_one_slot_cell_fails_closed(self):
-        result = self._run_case(policy_overrides={"slots": [2], "sustained_cell_id": "s2-p1536-o128"})
+    def test_matrix_native_eligible_slots_must_be_one_to_bound(self):
+        result = self._run_case(policy_overrides={"slots": [2]})
         self.assertEqual(result["overall_status"], "FAIL")
         self.assertEqual(result["reason"], "policy_matrix_incomplete")
-        self.assertIn("slots_missing:1", result["matrix_violations"])
+        self.assertIn("slots_not_exactly_1_to_bound:2", result["matrix_violations"])
+        result = self._run_case(policy_overrides={"slots": [1, 2]})
+        self.assertIn("slots_not_exactly_1_to_bound:1,2", result["matrix_violations"])
 
-    def test_matrix_missing_prompt_or_output_stratum_fails_closed(self):
-        result = self._run_case(policy_overrides={"prompt_tokens": [1536, 4096], "max_tokens": [128]})
+    def test_matrix_prompt_strata_are_capped_and_exact(self):
+        result = self._run_case(policy_overrides={"prompt_tokens": [1536], "max_tokens": [128]})
         self.assertEqual(result["overall_status"], "FAIL")
         self.assertEqual(result["reason"], "policy_matrix_incomplete")
-        self.assertIn("prompt_tokens_missing:8192", result["matrix_violations"])
-        self.assertIn("max_tokens_missing:512", result["matrix_violations"])
+        self.assertIn("prompt_tokens_not_exactly:1536,4096", result["matrix_violations"])
+        self.assertIn("max_tokens_not_exactly:128,512", result["matrix_violations"])
+        above_cap = self._run_case(policy_overrides={"prompt_tokens": [1536, 4096, 8192]})
+        self.assertIn("prompt_tokens_not_exactly:1536,4096", above_cap["matrix_violations"])
+        cap_8192 = self._run_case(policy_overrides={"maximum_prompt_tokens": 8192})
+        self.assertIn("prompt_tokens_not_exactly:1536,4096,8192", cap_8192["matrix_violations"])
+        no_cap = self._run_case(policy_overrides={"maximum_prompt_tokens": self._DELETE})
+        self.assertIn("maximum_prompt_tokens_missing_or_below_gated_prompt", no_cap["matrix_violations"])
+
+    def test_mandatory_strata_helpers(self):
+        self.assertEqual(mandatory_prompt_tokens(4096), [1536, 4096])
+        self.assertEqual(mandatory_prompt_tokens(2048), [1536, 2048])
+        self.assertEqual(mandatory_prompt_tokens(32768), [1536, 4096, 32768])
+        self.assertEqual(mandatory_gated_cells(1, 8), ["s2-p1536-o512", "s8-p1536-o512"])
+        self.assertEqual(mandatory_gated_cells(7, 8), ["s8-p1536-o512"])
+        self.assertEqual(mandatory_gated_cells(8, 8), [])
+
+    def test_matrix_gated_and_sustained_cells_are_exact(self):
+        missing = self._run_case(policy_overrides={"gated_cells": []})
+        self.assertIn("gated_cells_not_exactly:s2-p1536-o512", missing["matrix_violations"])
+        substituted = self._run_case(policy_overrides={"gated_cells": ["s2-p4096-o512"]})
+        self.assertIn("gated_cells_not_exactly:s2-p1536-o512", substituted["matrix_violations"])
+        malformed = self._run_case(policy_overrides={"gated_cells": ["s2-p1536"]})
+        self.assertIn("gated_cells_malformed", malformed["matrix_violations"])
+        sustained = self._run_case(policy_overrides={"sustained_cell_id": "s1-p1536-o512"})
+        self.assertIn("sustained_cell_not:s2-p1536-o512", sustained["matrix_violations"])
+        short = self._run_case(policy_overrides={"sustained_seconds": 1799})
+        self.assertIn("sustained_seconds_below_1800", short["matrix_violations"])
+
+    def test_matrix_only_cell_is_not_failed_for_an_unrun_sustained_window(self):
+        # An exploratory matrix-only policy (sustained_seconds 0) analyzes the
+        # sustained cell without its window; the window is judged from its
+        # own run, so the matrix analysis must not fail the cell for it.
+        result = self._run_case(
+            exploratory_policy=True,
+            write_sustained=False,
+            sustained_min_available_memory_fraction=0.0,
+            policy_overrides={"blocks": 10},
+        )
+        cell = self._cell(result, "s2-p1536-o512")
+        self.assertEqual(cell["sustained_runs"], 0)
+        self.assertEqual(cell["memory_failures"], [])
+        self.assertEqual(cell["hard_failures"], [])
+        self.assertEqual(cell["status"], "PASS")
+
+    def test_sustained_phase_reuses_the_cells_matrix_records(self):
+        result = self._run_case()
+        cell = self._cell(result, "s2-p1536-o512")
+        self.assertEqual(cell["paired_blocks"], 10)
+        self.assertEqual(cell["sustained_runs"], 2)
+        self.assertEqual(cell["status"], "PASS")
+        missing = self._run_case(write_sustained=False)
+        self.assertIn("sustained_missing", self._cell(missing, "s2-p1536-o512")["hard_failures"])
 
     def test_matrix_requires_qualified_slots_and_bound(self):
         missing_qualified = self._run_case(policy_overrides={"qualified_slots": self._DELETE})
@@ -321,9 +381,20 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
     def test_exploratory_policy_may_use_reduced_matrix(self):
         result = self._run_case(
             exploratory_policy=True,
-            policy_overrides={"slots": [2], "qualified_slots": self._DELETE, "sustained_cell_id": "s2-p1536-o128"},
+            policy_overrides={
+                "slots": [2],
+                "qualified_slots": self._DELETE,
+                "gated_cells": [],
+                "sustained_cell_id": "s2-p1536-o128",
+            },
         )
         self.assertEqual(result["overall_status"], "EXPLORATORY_NO_VERDICT")
+        duplicate = self._run_case(
+            exploratory_policy=True,
+            policy_overrides={"slots": [2], "qualified_slots": self._DELETE, "sustained_cell_id": "s2-p1536-o128"},
+        )
+        self.assertEqual(duplicate["reason"], "policy_matrix_incomplete")
+        self.assertEqual(duplicate["matrix_violations"], ["duplicate_cells"])
 
     def test_memory_margin_fail(self):
         result = self._run_case(peak_phys_footprint_bytes=256 * 1_073_741_824)
@@ -333,7 +404,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
     def test_sustained_min_available_memory_fail(self):
         result = self._run_case(sustained_min_available_memory_fraction=0.05)
         self.assertEqual(result["overall_status"], "FAIL")
-        self.assertIn("sustained_min_available_memory_fraction", result["cells"][0]["memory_failures"])
+        self.assertIn("sustained_min_available_memory_fraction", self._cell(result, "s2-p1536-o512")["memory_failures"])
 
     def test_matrix_min_available_memory_fail(self):
         result = self._run_case(matrix_min_available_memory_fraction=0.05)
@@ -353,7 +424,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
     def test_sustained_duration_fail(self):
         result = self._run_case(sustained_wall_seconds=100.0)
         self.assertEqual(result["overall_status"], "FAIL")
-        self.assertTrue(any(item.startswith("sustained_incomplete:") for item in result["cells"][0]["hard_failures"]))
+        self.assertTrue(any(item.startswith("sustained_incomplete:") for item in self._cell(result, "s2-p1536-o512")["hard_failures"]))
 
     def test_exploratory_never_yields_pass(self):
         # Pilot data is reported but never becomes an admission verdict.
@@ -463,9 +534,10 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
             self.assertIn(name, reported["native_mtp"])
 
     _DELETE = object()
-    SLOTS = (1, 2)
+    SLOTS = (1,)
     # s1 cells are native-eligible; s2 cells are gated (SPEC-048-R015).
     BOUND = 1
+    GATED_CELLS = ("s2-p1536-o512",)
     HELD = {"request_id": "r0", "effective_path": "native_mtp", "selector_reason": "", "other_active_rows": 0}
     DOWNGRADE = {"request_id": "r1", "effective_path": "ordinary", "selector_reason": "capacity_above_native_bound", "other_active_rows": 1}
     # A healthy gated run: r0 admitted native, r1 downgraded, r0 held at
@@ -481,8 +553,12 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         "gated_held_finishes_clean": 0,
         "gated_held_unresolved": 0,
     }
-    PROMPTS = (1536, 4096, 8192)
+    PROMPTS = (1536, 4096)
     OUTPUTS = (128, 512)
+
+    @staticmethod
+    def _cell(result, cell_id):
+        return next(cell for cell in result["cells"] if cell["cell_id"] == cell_id)
 
     def _run_case(self, **kwargs):
         with tempfile.TemporaryDirectory() as tmp:
@@ -517,6 +593,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         policy_overrides=None,
         gated_native_overrides=None,
         order_override=None,
+        write_sustained=True,
     ):
         policy_path = root / "policy.json"
         jsonl_path = root / "runs.jsonl"
@@ -528,13 +605,15 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
             "max_native_active_rows": self.BOUND,
             "arrival_interval_ms": 250,
             "slots": list(self.SLOTS),
+            "maximum_prompt_tokens": 4096,
             "prompt_tokens": list(self.PROMPTS),
             "max_tokens": list(self.OUTPUTS),
+            "gated_cells": list(self.GATED_CELLS),
             "warmup_runs": 0,
             "blocks": 10,
             "seed": 1234,
             "sustained_seconds": 1800,
-            "sustained_cell_id": "s1-p1536-o128",
+            "sustained_cell_id": "s2-p1536-o512",
             "memory_safety_margin_bytes": 1024,
             "hw_model": "Mac15,14",
             "chip": "Apple M3 Ultra",
@@ -594,10 +673,21 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
             for slots in policy.get("slots", [])
             for prompt in policy.get("prompt_tokens", [])
             for output in policy.get("max_tokens", [])
-        ]
+        ] + [cell for cell in policy.get("gated_cells", []) if isinstance(cell, str) and cell.count("-") == 2]
         for cell_id in cell_ids:
             slots, prompt, output = (int(part[1:]) for part in cell_id.split("-"))
             native_first = order_override or _native_first_order(policy["seed"], slots, prompt, output, max(blocks_written, policy["blocks"]))
+            overrides = dict(native_overrides or {})
+            if int(cell_id.split("-")[0][1:]) > self.BOUND:
+                overrides = {**self.GATED_BASE, **overrides, **(gated_native_overrides or {})}
+
+            def apply(native_record):
+                for field, value in overrides.items():
+                    if value is self._DELETE:
+                        native_record.pop(field, None)
+                    else:
+                        native_record[field] = value
+
             for block in range(blocks_written):
                 ordinary = self._run_record("ordinary", block, 100.0, 0.100, 0.010, False, policy_sha=run_policy_sha or policy_sha, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=matrix_min_available_memory_fraction, cell_id=cell_id, **record_options)
                 ordinary["order_position"] = 1 if native_first[block] else 0
@@ -605,20 +695,16 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
                 if duplicate_matrix_path and block == 0:
                     records.append(dict(ordinary))
                 native_record = self._run_record("native_mtp", block, native_tps, native_ttft, native_itl, parity_mismatch, policy_sha=run_policy_sha or policy_sha, native_admissions=native_admissions, peak_phys_footprint_bytes=peak_phys_footprint_bytes, decode_tps=native_decode_tps, cell_id=cell_id, **record_options)
-                overrides = dict(native_overrides or {})
-                if int(cell_id.split("-")[0][1:]) > self.BOUND:
-                    overrides = {**self.GATED_BASE, **overrides, **(gated_native_overrides or {})}
-                for field, value in overrides.items():
-                    if value is self._DELETE:
-                        native_record.pop(field, None)
-                    else:
-                        native_record[field] = value
+                apply(native_record)
                 native_record.setdefault("order_position", 0 if native_first[block] else 1)
                 records.append(native_record)
-            if blocks_written >= 10 and cell_id == policy.get("sustained_cell_id"):
+            if write_sustained and blocks_written >= 10 and cell_id == policy.get("sustained_cell_id"):
                 # Sustained block 100 is even: native runs first.
                 records.append(self._run_record("ordinary", 100, 100.0, 0.100, 0.010, False, sustained=True, order_position=1, policy_sha=run_policy_sha or policy_sha, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=sustained_min_available_memory_fraction, wall_seconds=sustained_wall_seconds, cell_id=cell_id, **record_options))
-                records.append(self._run_record("native_mtp", 100, native_tps, native_ttft, native_itl, parity_mismatch, sustained=True, order_position=0, policy_sha=run_policy_sha or policy_sha, native_admissions=native_admissions, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=sustained_min_available_memory_fraction, wall_seconds=sustained_wall_seconds, decode_tps=native_decode_tps, cell_id=cell_id, **record_options))
+                sustained_native = self._run_record("native_mtp", 100, native_tps, native_ttft, native_itl, parity_mismatch, sustained=True, order_position=0, policy_sha=run_policy_sha or policy_sha, native_admissions=native_admissions, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=sustained_min_available_memory_fraction, wall_seconds=sustained_wall_seconds, decode_tps=native_decode_tps, cell_id=cell_id, **record_options)
+                apply(sustained_native)
+                sustained_native["order_position"] = 0
+                records.append(sustained_native)
         jsonl_path.write_text("\n".join(json.dumps(r, sort_keys=True) for r in records) + "\n", encoding="utf-8")
         return jsonl_path, policy_path
 

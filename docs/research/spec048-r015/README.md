@@ -21,11 +21,15 @@ shasum -a 256 /path/to/frozen-policy.json
 chmod a-w /path/to/frozen-policy.json
 ```
 
-An admission policy must name the tuple's `qualified_slots` and
-`max_native_active_rows` and cover every slot count from 1 to
-`qualified_slots`, prompt strata 1536/4096/8192, and output budgets 128/512
-(SPEC-048 MTP-15). The bench refuses, and the analyzer fails closed on, a
-policy missing any mandatory cell; only exploratory pilots may run less.
+An admission policy names the tuple's `qualified_slots`,
+`max_native_active_rows` (the bound), and `maximum_prompt_tokens` (the signed
+SPEC-023-R024 `max_prompt_tokens`, at least 1536), and contains exactly the
+SPEC-048 MTP-15 mandatory matrix: `slots` 1..bound, `prompt_tokens` 1536 and
+4096 at or below the cap plus the cap itself, `max_tokens` 128 and 512, and
+`gated_cells` at slot counts bound + 1 and `qualified_slots` (prompt 1536,
+output 512); `sustained_cell_id` is `s<qualified_slots>-p1536-o512`. The bench
+refuses, and the analyzer fails closed on, any other matrix; only exploratory
+pilots may run less.
 Cells at or below `max_native_active_rows` are native-eligible and gate the
 native improvement; cells above it are gated and must prove every admission
 honored the bound (`effective_paths[].other_active_rows`, header
@@ -59,6 +63,27 @@ MACPROVIDER_NATIVE_MTP_E2E=1 \
   --provider-commit <40-hex-provider-commit>
 ```
 
+Run the matrix and the sustained window as separate phases (for example in
+separate lab windows); the sustained phase appends to the same `--out`,
+reuses the sustained cell's matrix records, and never re-runs them:
+
+```bash
+MACPROVIDER_NATIVE_MTP_E2E=1 \
+.build/release/macprovider-cli native-mtp-bench \
+  --root /path/to/frozen-fixture \
+  --policy /path/to/frozen-policy.json \
+  --out /path/to/native-mtp-r015.jsonl \
+  --only-cell s8-p1536-o512 --phase matrix \
+  --provider-commit <40-hex-provider-commit>
+MACPROVIDER_NATIVE_MTP_E2E=1 \
+.build/release/macprovider-cli native-mtp-bench \
+  --root /path/to/frozen-fixture \
+  --policy /path/to/frozen-policy.json \
+  --out /path/to/native-mtp-r015.jsonl \
+  --phase sustained \
+  --provider-commit <40-hex-provider-commit>
+```
+
 Resume one cell:
 
 ```bash
@@ -67,7 +92,7 @@ MACPROVIDER_NATIVE_MTP_E2E=1 \
   --root /path/to/frozen-fixture \
   --policy /path/to/frozen-policy.json \
   --out /path/to/native-mtp-r015.jsonl \
-  --only-cell s8-p4096-o512 \
+  --only-cell s1-p4096-o512 \
   --provider-commit <40-hex-provider-commit>
 ```
 

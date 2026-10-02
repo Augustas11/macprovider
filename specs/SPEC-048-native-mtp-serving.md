@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.20
+**Version:** 0.1.21
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.20",
+  "version": "0.1.21",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -420,8 +420,9 @@ path treats it as a documented no-op (the continuous-batching row sampler
 seeds from the scheduler request identity, not the buyer `seed`). Legacy completions, `echo`,
 `suffix`, an unknown top-level key, or any generation-affecting key/value not
 explicitly admitted above routes ordinary. A nonempty `conversation_key` also
-routes ordinary. Prompt length is bounded only by the signed request
-profile's maximum prompt tokens: a prompt longer than one prefill chunk is
+routes ordinary. Prompt length is bounded only by the selected SPEC-023-R024
+entry's signed `max_prompt_tokens`; a longer prompt selects ordinary with
+reason `capability_mismatch`. A prompt longer than one prefill chunk is
 prefilled in chunks with per-chunk drafter seeding (MTP-6), and the prefill
 chunk size is not an eligibility bound. The request additionally requires an admitted
 capability, a supported cache/state class, and enough capacity for the next
@@ -631,12 +632,13 @@ Admission and in-flight behavior are:
   are exempt from the in-flight depth gate.
 
 A bound equal to `qualified_slots` never engages for a runtime that admits at
-most that many rows. The bound is chosen from R015 cells measured at each slot
-count from one up to `qualified_slots`: it is the largest row count whose
-native-eligible cell passes the R015 improvement gate. Only native-eligible
-cells set or justify the bound; a gated cell (slot count above the bound)
-passing MTP-15 non-inferiority shows the gate is safe there and never raises
-the bound.
+most that many rows. The bound is preregistered in the frozen R015 policy and
+justified by its native-eligible cells: every slot count from one up to the
+bound, at every mandatory prompt and output stratum, MUST pass the R015
+improvement gate. Only native-eligible cells set or justify the bound; a gated
+cell (slot count above the bound) passing MTP-15 non-inferiority shows the
+gate is safe there and never raises the bound. A larger bound needs a new
+frozen policy whose native-eligible cells cover it.
 
 Native MTP MUST use SPEC-038 FCFS admission and shared-iteration fairness; it
 MUST NOT create a second priority queue or skip an older ready ordinary row for
@@ -835,14 +837,15 @@ SPEC-023 sidecar before any native-MTP tuple can advertise capability.
 
 ### MTP-13 — signed admission and immutable evidence (SPEC-048-R013)
 
-Catalog/autotune admission MUST be based on the SPEC-023 v0.22.4
+Catalog/autotune admission MUST be based on the SPEC-023 v0.22.6
 `macprovider.native-mtp-admission.v1` signed sidecar bound to one immutable SPEC-023
 `release_id` and SPEC-010 model/artifact member, never provider self-report.
 The sidecar MUST bind the exact decode path, model/artifact/tokenizer digests,
 MTP manifest and family adapter, proposal depth, quantization representation,
 runtime/provider revisions, cache/state classes, exact hardware/RAM,
 qualified slot count, native active-row bound (`max_native_active_rows`),
-request-feature profile, benchmark policy digest, source
+request-feature profile, maximum prompt tokens (`max_prompt_tokens`),
+benchmark policy digest, source
 commit, reproducible-build digest, the exact lowercase 40-hex
 `spec023.live_executable_cdhash` CodeDirectory identity for the live signed
 executable, `mtp.complete_window_bytes_by_depth`, and evidence artifact
@@ -934,10 +937,9 @@ The matrix MUST compare native MTP with the best production-qualified ordinary
 configuration the same host can run, including ordinary continuous batching at
 its validated Entry-110 depth; a one-slot ordinary baseline cannot justify an
 MTP tuple that reduces node capacity. It MUST also compare MXFP8 ordinary
-decode and combined native MTP plus MXFP8 when those artifacts exist, at slot counts
-1, 4, and 8 or every lower maximum the tuple advertises; prompt lengths near
-1.5k, 4k, and 8k tokens; fixed short and long outputs; and a sustained thermal
-window of at least 30 minutes. Each cell MUST have at least ten counterbalanced measured runs after
+decode and combined native MTP plus MXFP8 when those artifacts exist, at every
+cell of the mandatory matrix below and in a sustained thermal window of at
+least 30 minutes. Each cell MUST have at least ten counterbalanced measured runs after
 warmup. The pairing unit is one counterbalanced run block on one host/thermal
 window containing ordinary then MTP in randomized order; the bootstrap
 resamples whole blocks with 10,000 draws. Gates apply separately to every
@@ -957,16 +959,38 @@ blocks are not counterbalanced, and it fails an admission policy with fewer
 than ten blocks, independent of the bench's own checks.
 
 **Mandatory matrix.** The frozen admission policy MUST name the tuple's
-advertised `qualified_slots` (2...8) and its `max_native_active_rows`
-(`1..qualified_slots`), and MUST contain a cell at every slot count from 1 up
-to `qualified_slots` (R007 chooses the load-gate bound from these cells), at
-every prompt stratum 1536, 4096, and 8192 tokens (each realized within ±2%),
-and at both fixed output budgets 128 (short) and 512 (long) tokens. The
-sustained window runs on one of those cells. Extra prompt or output strata are
-allowed; a slot count above `qualified_slots` is not. The bench refuses, and
-the analyzer fails closed on, a policy missing any mandatory cell, so a
-reduced matrix cannot pass. Exploratory pilot policies are exempt and never
-yield an admission verdict.
+advertised `qualified_slots` (2...8), its `max_native_active_rows`
+(`1..qualified_slots`, written *bound* below), and its signed SPEC-023-R024
+`max_prompt_tokens` (policy `maximum_prompt_tokens`, written *cap*, at least
+1536), and MUST contain exactly these cells:
+
+- *Native-eligible cells.* Every slot count from 1 up to the bound, at every
+  prompt stratum of {1536, 4096} that is at or below the cap plus the cap
+  itself (each realized within ±2%), and at both fixed output budgets 128
+  (short) and 512 (long) tokens. These carry the native speedup claim and
+  justify the R007 bound. A prompt above the cap selects ordinary under R004,
+  so no native stratum exists there to measure.
+- *Gated cells* (policy `gated_cells`). When the bound is below
+  `qualified_slots`, exactly the cells at slot counts bound + 1 and
+  `qualified_slots` (one cell when those coincide), each at prompt 1536 and
+  output 512 under the staggered arrival profile below. Gated rows execute the
+  ordinary path (admitted native rows ride the ordinary forward at depth zero
+  and later arrivals are downgraded), so their cost does not depend on the
+  native speedup strata; non-inferiority at the first gated count and at full
+  load bounds the intermediate counts, which repeat the same ordinary-path work
+  at a load between the two.
+- *Sustained window* of at least 1800 s on the cell at `qualified_slots`,
+  prompt 1536, output 512 (`s<qualified_slots>-p1536-o512`, staggered):
+  production-shaped full load. It is a separate bench phase on the same frozen
+  policy and output file; it reuses that cell's matrix records rather than
+  re-running them, binds the same policy digest, and keeps the alternating
+  order below. When the bound equals `qualified_slots` the cell is
+  native-eligible and already in the matrix.
+
+A slot count above `qualified_slots` is not allowed. The bench refuses, and
+the analyzer fails closed on, a policy whose cells differ from these, so a
+reduced or substituted matrix cannot pass. Exploratory pilot policies are
+exempt and never yield an admission verdict.
 
 **Cell classes.** The frozen `max_native_active_rows` splits the matrix. A
 cell whose slot count is at or below it is *native-eligible*: it carries the
@@ -988,7 +1012,7 @@ at most one percentage point. These margins are frozen in the policy
 thresholds (`gated_throughput_lower_bound_min` -0.05,
 `gated_ttft_p95_upper_bound_max` 0.05, `gated_itl_p95_upper_bound_max` 0.05)
 and join the same Holm family. A tuple whose bound is 1 therefore passes R015
-with a native gain at one slot and non-inferiority everywhere above it.
+with a native gain at one slot and non-inferiority at its gated cells.
 
 A gated cell MUST also exercise the in-flight hold on the measured hardware,
 so a policy with any gated cell MUST freeze a staggered arrival profile
@@ -1204,6 +1228,23 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.21 (2026-10-02)** — MTP-15 right-sizes the mandatory R015 matrix to
+  the cells that answer its two questions (#1770). Native-eligible cells
+  (every slot count up to the frozen `max_native_active_rows`) run prompt
+  strata 1536 and 4096 capped by the tuple's signed `max_prompt_tokens`, cap
+  included, at outputs 128 and 512, and carry the speedup claim. Gated cells
+  shrink to two representatives, bound + 1 and `qualified_slots` at prompt 1536
+  and output 512 with staggered arrivals, keeping every gated proof. The
+  sustained window moves to `s<qualified_slots>-p1536-o512` and is a separate
+  bench phase that reuses that cell's matrix records under the same policy
+  digest. Thresholds, ten blocks, run order, and Holm correction are unchanged.
+  The previous 48-cell matrix cost about 2.5 days of Studio time for an A3B
+  tuple at bound 1, nearly all re-measuring the ordinary path in gated cells
+  and 8192-token prefill that the cap makes ineligible; the new matrix is six
+  cells plus the window. MTP-4/MTP-13 bind the prompt bound to the new
+  SPEC-023-R024 `max_prompt_tokens` (SPEC-023 v0.22.6), and MTP-7 states the
+  bound is preregistered and justified by the native-eligible cells.
 
 - **0.1.20 (2026-10-01)** — MTP-15 preregisters the run order (#1770): per
   cell, a seeded Fisher-Yates permutation runs half the blocks (rounded up)
