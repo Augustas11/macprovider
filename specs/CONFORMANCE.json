@@ -1100,7 +1100,7 @@
     {
       "spec_id": "SPEC-038",
       "title": "Continuous batching for concurrent provider inference",
-      "version": "v0.3.7",
+      "version": "v0.3.8",
       "path": "specs/SPEC-038-continuous-batching.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -4503,7 +4503,14 @@
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeMixedCacheTests.swift:testEqualOffsetEqualLengthPrefillUsesSharedForwardForMixedCacheAndIsolatesRows",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeMixedCacheTests.swift:testIncompatibleOrRaggedPrefillUsesSerialForwardsForMixedCache",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeMixedCacheTests.swift:testCachePackingIncompatibilityFallsBackToIsolatedSerialPrefill",
-        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeMixedCacheTests.swift:testBackendLevelStateDiscardsSharedAttemptAndFallsBackPerRow"
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeMixedCacheTests.swift:testBackendLevelStateDiscardsSharedAttemptAndFallsBackPerRow",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testLockstepWindowDeliversEachStepBeforeTheWindowReturns",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testStopTokenMidWindowTruncatesAndEndsWindowEarly",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testCancelMidWindowStopsDeliveryAndEndsWindowEarly",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testLockstepWindowStreamsEveryRowAndKeepsUsageExact",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testStreamedTokensThatDisagreeWithWindowResultFailTheRow",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testDeliveryBackpressureMidWindowKeepsBackpressureTerminal",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testLockstepWindowStreamsStepsAndEndsWhenObserverStops"
       ],
       "journeys": [],
       "evidence": [],
