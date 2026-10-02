@@ -48,11 +48,10 @@ Do **not** rebase `campaign/native-mtp-formal`. Its frozen R015 policy, sha256 `
 - **Live:** `~/macprovider/macprovider-cli serve` (v1.8.207, LaunchAgent `live.malibu.provider`). Pause it only for lab windows, then restore it and confirm the Pearl buyer-runner is active.
 - **Kept for resume:**
   - `~/macprovider-mtp-formal` (build tree);
-  - `~/macprovider-mtp-r015`;
   - `~/mtp-r015-a3b-formal-v2` (formal run records; S01 contaminated records are in `contaminated/`);
   - `~/mtp-journey-a3b`;
   - `~/mtp-r015-*` (exploratory runs);
-  - `~/lab-cb-sampling`;
+  - `~/lab-cb-sampling` (its `bench.sh` is the shared lab-window wrapper other sessions use; never delete it);
   - `~/.cache/macprovider-mtp-e2e` (fixture artifacts);
   - `~/a3b-fused-lab` (fused MoE raw logs `w4..w7`).
   Everything else stale was deleted on 2026-10-02.
