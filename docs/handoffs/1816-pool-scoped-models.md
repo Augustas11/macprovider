@@ -4,7 +4,7 @@
 
 **Resume condition:** the operator says "resume #1816". Nothing resumes automatically. Each item below says whether it needs a new session's work or an operator action.
 
-**Reading order:** this file, then #1830's body, then `docs/testing/1816-vm-acceptance-plan.md` (harness and findings), then `docs/runbooks/pool-scoped-model-admission.md`.
+**Reading order:** this file, then #1830's body, then `docs/runbooks/vm-e2e-1816-lima.md` (how to drive the VM on this Mac), then `docs/testing/1816-vm-acceptance-plan.md` (harness and findings), then `docs/runbooks/pool-scoped-model-admission.md`.
 
 ## Where things stand
 
