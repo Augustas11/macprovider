@@ -10011,7 +10011,7 @@
     {
       "requirement_id": "SPEC-047-R008",
       "spec_id": "SPEC-047",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/ws/model_admission.go:type ModelAdmissionStore",
         "phase4-coordinator/internal/routing/filter.go:func EligibleCandidates",
@@ -10038,19 +10038,18 @@
       ],
       "evidence": [
         {
-          "artifact": "commit:0c93b86d50f22b3708ca0ffe455f7acf643ae92f",
-          "source": null,
-          "captured_at": "2026-10-03",
-          "expires_at": "2026-11-02"
-        },
-        {
           "artifact": "sha256:3d524840e0996c735e84fcde0490c586178e32995282909aa600b6e946321220",
           "source": "journeys/evidence/network-model-admission-20260916T135000Z.spec-047-r001-spec-047-r002-spec-047-r003-spec-047-r004-spec-047-r005-spec-047-r006-spec-047-r007-spec-047-r008.journey-result.signed.json",
           "captured_at": "2026-09-16",
           "expires_at": "2026-10-16"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "The tag-only BYOM dry-run fixture now correctly proves the non-catalog no-earning path, changing a mapped selector after the 2026-09-16 signed network-admission journey. Historical signed evidence is retained without redating or rebinding; restore conformant only after a fresh independently trusted JOURNEY-NETWORK-MODEL-ADMISSION promotion pins the revised selector."
+      }
     },
     {
       "requirement_id": "SPEC-047-R009",
