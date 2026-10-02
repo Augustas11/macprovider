@@ -91,6 +91,37 @@ taken about 2.5 days.
    lock, with the live provider paused and no foreign model process recorded
    by the contamination sampler.
 
+## JOURNEY-NATIVE-MTP-SERVING hardware steps (unsigned, incomplete)
+
+`journey-hardware-result.json` (sha256 `c1648f7b…`) is the output of the
+lab-only `native-mtp-journey-e2e` harness from window J06 (06:58–07:01Z). It
+ran at provider commit `577424560`, at the tuple's exact shape (8 slots,
+bound 1, cap 4096, sampled profile), with one isolated no-join process and
+the live provider paused under the lock. It is not a journey result:
+`journey_complete` is false, and nothing is signed.
+
+| Journey step | Hardware status | Evidence |
+| --- | --- | --- |
+| 01 bind tuple | pending | Release-bound fields (CDHash, build sha, sidecar sha, tuple identity) do not exist before the release cut. |
+| 02 capability negatives | pending on hardware | Covered by Swift fixtures (`NativeMTPAdmissionSidecarTests`, `NativeMTPArtifactObservationTests`). |
+| 03 artifact security negatives | pending on hardware | Same Swift fixtures. |
+| 04 serial token oracle | **pass** | 3 greedy + 2 seeded sampled requests match ordinary (text, usage, terminal). Greedy probe-path token IDs are equal. 439 accepted and 73 rejected proposals. |
+| 05 cache/state boundary | **pass** | Forced rejection on every round (254/254 rejected) and at paged-KV block boundaries. Output still exact. |
+| 06 streaming/stop | **fail (harness case)** | Streaming, non-streaming, and ordinary match for stop-string, length, and sampled rows. The "EOS" case ran to its 64-token length on both paths, so no EOS terminal was observed. The case needs a prompt or budget that actually reaches EOS. Post-output injected failure is not implemented. |
+| 07/08 mixed multi-row + capacity | **fail** | An 8-row batch was observed. Admissions: 1 native, conversation-key rows ordinary, `capacity_above_native_bound` downgrades, prompt above the cap sent to ordinary (`capability_mismatch`). Depth-zero hold ended cleanly. Greedy rows 3 and 5 differ from ordinary. Diagnosis: two ordinary runs of the same batch with 150 ms vs 170 ms arrival spacing also differ (rows 3 and 6), so continuous-batching greedy output depends on batch composition on the ordinary path itself. This is the open "Batched-verify numerical parity" class in SPEC-048 §6. A cross-runtime exact oracle for staggered mixed batches needs deterministic batch composition or kernel-matched numerics. |
+| 09 cancellation | **pass** | Cancelled after 16 chunks. The scheduler released the row, and the next native row matches ordinary. |
+| 10 warm swap | pending | Not exercised on hardware. |
+| 11 accounting | pending on hardware | Swift accounting-invariance fixtures only. |
+| 12 native canary | provider half **pass**; coordinator half pending | The `native_mtp_selftest_v1` probe equals the ordinary oracle and is deterministic across two executions. The emitted challenge-bank record is in the result. The SPEC-031-R033 coordinator canary was not run (isolated no-join). |
+| 13 MXFP8 | n/a | Base `mlx_affine` tuple. |
+| 14 Studio benchmark | **pass** | This directory's formal R015. No lower tier is advertised. |
+| 15 redaction review | pending | |
+
+Earlier windows J01–J05 found and fixed harness defects: a rejected
+`presence_penalty` row, a reused control id, and replayed scheduler ids that
+could make step-06 and step-12 pass vacuously. Their results are superseded
+by J06.
+
 ## Not covered (R015 stays pending)
 
 - The representative post-gateway eligibility replay (at least 10% eligible
@@ -104,7 +135,7 @@ taken about 2.5 days.
 
 Files: `policy.json`, `analysis.json`, `analysis.md`,
 `admission-tuple-input.json`, `admission-tuple-provenance.md`,
-`superseded-policy-525ac686/`.
+`journey-hardware-result.json`, `superseded-policy-525ac686/`.
 
 Raw JSONL and logs stay on the lab host by operator decision. Their digests
 are bound here so the committed analysis can be checked against them:
