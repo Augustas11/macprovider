@@ -1,12 +1,22 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.5
+version: v0.22.6
 status: LOCKED
 owner: operator (a11)
-last-locked: 2026-10-01
+last-locked: 2026-10-02
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.22.6 (2026-10-02)** — Native-MTP signed prompt bound (#1770).
+  SPEC-023-R024 entries gain the required `max_prompt_tokens` integer
+  `1..1048576`, the SPEC-048-R004 prompt bound above which an otherwise
+  eligible request selects ordinary. Before this the release envelope carried
+  no prompt bound and consumers defaulted it to 1048576, so a tuple whose
+  R015 evidence fails above a prompt length (Qwen3.6-35B-A3B at 8192 tokens)
+  could not be admitted with that limit. It is part of the complete entry and
+  therefore of `native_mtp_admission_tuple_sha256`; a missing, zero,
+  non-integer, or out-of-range value fails the entry closed.
 
 - **v0.22.5 (2026-10-01)** — Native-MTP sampled request profile (#1770).
   SPEC-023-R024 `request_feature_profile` is now the closed set
@@ -3132,6 +3142,7 @@ unsigned JSON integers and never floats.
 | `ram_bytes` | exact physical RAM integer `> 0`, not a minimum |
 | `qualified_slots` | integer `2..8`, exact admitted slot count |
 | `max_native_active_rows` | integer `1..8`, no larger than `qualified_slots`; the SPEC-048-R007 load bound above which the tuple serves ordinary decode |
+| `max_prompt_tokens` | integer `1..1048576`; the SPEC-048-R004 prompt bound, in target-tokenizer tokens after chat templating, above which an otherwise eligible request selects ordinary |
 | `request_feature_profile` | exactly `"native_mtp_greedy_text_v1"` (greedy rows only) or `"native_mtp_sampled_text_v1"` (greedy rows plus SPEC-048-R004 sampled rows verified by SPEC-048-R005 target-sample exact match) |
 | `decrease_threshold_ppm`, `increase_threshold_ppm` | integers `0..1000000`, strictly increasing |
 | `max_verification_positions_per_committed_milli` | integer `1000..4000` |

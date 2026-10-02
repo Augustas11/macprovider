@@ -423,6 +423,7 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
             "qualified_slots": 2,
             "max_native_active_rows": 2,
             "request_feature_profile": "native_mtp_greedy_text_v1",
+            "max_prompt_tokens": 32768,
             "decrease_threshold_ppm": 1,
             "increase_threshold_ppm": 2,
             "max_verification_positions_per_committed_milli": 1000,
