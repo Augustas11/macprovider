@@ -889,11 +889,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// Lockstep decode of `steps` tokens inside one `container.perform`; each
     /// row samples with its own parameters (`ContinuousBatchRowSampler`).
     /// Returns every sampled token in generation order so the scheduler can
-    /// apply stop/stream/receipt without dropping intermediates. The throughput
-    /// harness uses the same seam.
+    /// apply stop/stream/receipt without dropping intermediates, and reports
+    /// each step's tokens to `onStep` as soon as they are on the host. The
+    /// throughput harness uses the same seam.
     func decodeLockstepWindow(
         rows inputs: [ContinuousBatchDecodeInput],
-        steps: Int
+        steps: Int,
+        onStep: ContinuousBatchDecodeWindowStepObserver?
     ) async throws -> [ContinuousBatchDecodeOutcome] {
         guard steps >= 1 else { return [] }
         guard !inputs.isEmpty else { return [] }
@@ -910,7 +912,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             let decoded = try self.performDecode(
                 model: context.model,
                 supportedInputs: supportedInputs,
-                steps: steps
+                steps: steps,
+                onStep: onStep
             )
             return await self.flushingNativeMTPDrafterColumns(
                 targetModel: context.model,
@@ -1298,6 +1301,17 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
     }
 
+    /// Ends a running window at the next step boundary once `cancelInFlight`
+    /// has started, instead of finishing every remaining step.
+    private func throwIfCancelRequested() throws {
+        lock.lock()
+        let cancelled = cancelRequested
+        lock.unlock()
+        if cancelled {
+            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_backend_cancelled")
+        }
+    }
+
     private func beginOperation() -> Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -1403,7 +1417,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     private func performDecode(
         model: any LanguageModel,
         supportedInputs: [ContinuousBatchDecodeInput],
-        steps: Int
+        steps: Int,
+        onStep: ContinuousBatchDecodeWindowStepObserver? = nil
     ) throws -> [ContinuousBatchDecodeOutcome] {
         let decodeSteps = max(1, steps)
         var rowStates = supportedInputs.map {
@@ -1450,6 +1465,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             && cachesAsKV.allSatisfy { !$0.innerState().isEmpty }
 
         let sampledByRow: [[Int]]
+        // Set when the step observer ends the window because every row in it
+        // is cancelled; their partially advanced state is then not recorded.
+        var endedEarly = false
         if canCompile {
             var compiledCaches: [KVCache]
             let step: CompiledDecodeStep
@@ -1493,6 +1511,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 for index in supportedInputs.indices {
                     collected[index].append(stepTokens[index])
                 }
+                try throwIfCancelRequested()
+                // The compiled writeback assumes every target step ran, so
+                // this path streams but never ends the window early.
+                _ = onStep?(ContinuousBatchDecodeWindowStep(stepIndex: stepIndex, tokens: stepTokens))
             }
             Stream().synchronize()
             sampledByRow = collected
@@ -1543,13 +1565,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                             hidden: hidden[index ..< index + 1, (-1)..., 0...]
                         ))
                     }
-                    for index in supportedInputs.indices {
-                        collected[index].append(stepSampled[index])
-                    }
-                    currentTokens = stepSampled
-                    continue
-                }
-                if supportedInputs.count == 1 {
+                } else if supportedInputs.count == 1 {
                     rowStates[0].state = output.state
                 } else if output.state != nil {
                     return supportedInputs.map { ContinuousBatchDecodeOutcome.rowFailure(requestID: $0.requestID) }
@@ -1558,13 +1574,23 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     collected[index].append(stepSampled[index])
                 }
                 currentTokens = stepSampled
+                try throwIfCancelRequested()
+                if let onStep, !onStep(ContinuousBatchDecodeWindowStep(stepIndex: stepIndex, tokens: stepSampled)) {
+                    endedEarly = stepIndex + 1 < decodeSteps
+                    break
+                }
             }
             sampledByRow = collected
             batchedCaches.forEach { $0.syncRowsFromBatch() }
         }
 
+        // Every row ran the same steps: all of them, or fewer only when the
+        // step observer ended the window.
+        let ranSteps = sampledByRow.first?.count ?? 0
         guard sampledByRow.count == supportedInputs.count,
-              sampledByRow.allSatisfy({ $0.count == decodeSteps }) else {
+              ranSteps >= 1,
+              ranSteps == decodeSteps || endedEarly,
+              sampledByRow.allSatisfy({ $0.count == ranSteps }) else {
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_logits_shape")
         }
         // Hybrid recurrent decoders (Qwen3.5/Qwen3.8) are exact only when the
@@ -1573,6 +1599,21 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         // wrong boundary after long prefills, so force the next hybrid window to
         // rebuild from the just-synced row caches. KV-only layouts still keep the
         // reusable session that amortizes contiguous compiled decode.
+        if endedEarly {
+            // Every row is cancelled and about to be released. Its KV now ends
+            // before its block table (extended for the full window), so it
+            // must not be recorded for retention or reused as a session.
+            storeDecodeSession(nil)
+            for input in supportedInputs {
+                removeRowState(for: input.requestID)
+            }
+            return zip(supportedInputs, sampledByRow).map { input, tokens in
+                ContinuousBatchDecodeOutcome.output(ContinuousBatchDecodeOutput(
+                    requestID: input.requestID,
+                    tokens: tokens
+                ))
+            }
+        }
         storeDecodeSession(cacheKinds.contains(.recurrentMamba) ? nil : session)
         for (index, input) in supportedInputs.enumerated() {
             try self.setRowState(rowStates[index], for: input.requestID, binding: input.binding)

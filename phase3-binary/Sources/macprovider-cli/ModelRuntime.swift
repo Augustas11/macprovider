@@ -6534,7 +6534,10 @@ actor ModelRuntime: ModelRuntimeServing {
             try Task.checkCancellation()
             if shouldCancel() { throw CancellationError() }
             guard result.terminalStatus == .stop || result.terminalStatus == .length else {
-                throw Self.terminalFailureError(code: result.errorCode ?? "continuous_batching_request_failed")
+                throw Self.terminalFailureError(
+                    code: result.errorCode ?? "continuous_batching_request_failed",
+                    streamedTokens: result.emittedTokens
+                )
             }
             let completionEndedAt = Date()
             let finalized = try await container.perform { context in
@@ -6641,16 +6644,29 @@ actor ModelRuntime: ModelRuntimeServing {
 
     /// SPEC-038 AC-25: a non-terminal scheduler *result*, as distinct from a
     /// thrown scheduler error. Most carried codes are pre-inference, so they
-    /// take the `inferenceRan: false` shape. The one that is not is
-    /// post-token delivery backpressure — the row was decoding and the buyer
-    /// may already hold partial output — so it reuses the single
-    /// `.deliveryBackpressure` mapping rather than a second, divergent copy.
-    private nonisolated static func terminalFailureError(code: String) -> APIError {
+    /// take the `inferenceRan: false` shape. Post-token delivery backpressure
+    /// reuses the single `.deliveryBackpressure` mapping. Any other failure
+    /// after a stream already delivered tokens (a decode window streams per
+    /// step, so a forward, sampling or stream-mismatch failure can follow
+    /// visible output) is also post-inference and not retryable: a retry
+    /// would re-run work the buyer partly received.
+    nonisolated static func terminalFailureError(code: String, streamedTokens: Int = 0) -> APIError {
         if code == ContinuousBatchSchedulerError.deliveryBackpressureCode,
            let mapped = ContinuousBatchSchedulerError.deliveryBackpressure.asAPIError() {
             return mapped
         }
-        return attachedPagedKVUnavailableError(code: code)
+        guard streamedTokens > 0 else {
+            return attachedPagedKVUnavailableError(code: code)
+        }
+        return APIError(
+            status: 503,
+            message: "Inference engine unavailable",
+            type: "server_error",
+            code: code,
+            retryable: false,
+            inferenceRan: true,
+            settlementRan: false
+        )
     }
 
     private nonisolated static func attachedPagedKVUnavailableError(code: String) -> APIError {
