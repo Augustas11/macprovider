@@ -247,6 +247,7 @@ func TestPoolManifestRouteSnapshotGuardAllowsEarningRebindRace(t *testing.T) {
 		ProviderID:         poolProvider,
 		CandidateID:        offer.CandidateID,
 		CoordinatorEventID: bound.CoordinatorEventID,
+		PoolBindingEvent:   bound,
 		BindingGeneration:  provider.ModelAdmissionBindingGeneration,
 		SessionEpoch:       provider.ModelAdmissionSessionEpoch,
 	}
@@ -269,7 +270,22 @@ func TestPoolManifestRouteSnapshotGuardAllowsEarningRebindRace(t *testing.T) {
 		t.Fatalf("earning rebind race rejected: inserted=%v err=%v rebound=%+v", inserted, err, rebound)
 	}
 
-	removed := poolSnapshot(testPoolA, 3, strings.Repeat("3", 64))
+	changedEntry := ggufPoolEntry()
+	changedEntry.Pricing.CompletionRatePerMtok++
+	changed := poolSnapshot(testPoolA, 3, strings.Repeat("3", 64), changedEntry)
+	changed.PriorManifestVersion = 2
+	changed.PriorManifestCoreDigest = poolDigestV2
+	changed.PriorModelEntries = []poolmanifest.PoolModelEntry{ggufPoolEntry()}
+	source.set(changed)
+	f.reevaluate(poolProvider)
+	if err := f.server.CompareAndInsertPoolModelAdmissionRouteSnapshot(context.Background(), expect, func() error {
+		t.Fatal("changed-price head must not insert the old route snapshot")
+		return nil
+	}); !errors.Is(err, ErrModelAdmissionRouteDrift) {
+		t.Fatalf("changed-price binding err=%v, want drift", err)
+	}
+
+	removed := poolSnapshot(testPoolA, 4, strings.Repeat("4", 64))
 	source.set(removed)
 	f.reevaluate(poolProvider)
 	revoked := f.latest(t, poolProvider, offer.CandidateID)

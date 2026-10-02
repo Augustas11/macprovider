@@ -385,6 +385,7 @@ func (s *Server) insertPoolModelRouteSnapshot(ctx context.Context, p pool.Provid
 		ProviderID:         p.ProviderID,
 		CandidateID:        event.CandidateID,
 		CoordinatorEventID: event.CoordinatorEventID,
+		PoolBindingEvent:   event,
 		BindingGeneration:  p.ModelAdmissionBindingGeneration,
 		SessionEpoch:       p.ModelAdmissionSessionEpoch,
 	}, insert)

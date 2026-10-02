@@ -159,8 +159,8 @@ provider = rhe(gross * share_bps, 10^4)
 |---|---|---|
 | B1, B2 | shared `vm/20-bootstrap.sh`, `vm/21-bootstrap-1816.sh` | fresh old/old Pearl-shaped host, then the #1816 host state above |
 | S1 | shared `vm/s1-baseline.sh` | old coordinator + old gateway, catalog traffic, all four kinds; the reference shape |
-| S2 | `vm/s2-updater.sh` | deploy order gateway-first (old coordinator + new gateway, catalog shape == S1); the new tree's updater bundle; `--plan`; **rollback rehearsal**: `--apply` with the canary Mac down, the updater's transaction rollback must restore `current`, the exact config bytes and the binaries; the real `--apply` of the artifact-bound activation release with a buyer probe running: config gets `catalog_artifacts_path`/`_sig_path`, live release `published-2026-10-01-artifact-feed-activation-v1`, the dead-man paused and restored, the pricing floor admits both binaries, the restart order and what a buyer sees in the mixed window; the runbook's manual additive nginx step BEFORE the apply, then `/v1/catalog-artifacts` 200 and byte-identical through nginx; the real canary proof over ssh (`live_verified`); catalog traffic shape == S1; `test_pearl_updater.py` and the deploy guard tests of the new tree |
-| S3 | `vm/s3-pool-models.sh` | runbook config (`trusted_pools` with `pool_model_pricing_bounds`, `provider_owner_account_ids`), pools Q and QN, signed offers bind `catalog_priced` with a `pool_binding`, `get-pool`, `/poolz`, the pool `/v1/models` view, disclosure headers, pool-model traffic of all four kinds through nginx for both members (oracle above), never global; **deploy order coordinator-first** (new coordinator + old gateway) with pool models live: holds and settlement, catalog shape == S1, then holds settle once the new gateway is back |
+| S2 | `vm/s2-updater.sh` | deploy order gateway-first (old coordinator + new gateway, catalog stable outcomes match S1; disconnect-only shape drift is recorded); the new tree's updater bundle; `--plan`; **rollback rehearsal**: `--apply` with the canary Mac down, the updater's transaction rollback must restore `current`, the exact config bytes and the binaries; the real `--apply` of the artifact-bound activation release with a buyer probe running: config gets `catalog_artifacts_path`/`_sig_path`, live release `published-2026-10-01-artifact-feed-activation-v1`, the dead-man paused and restored, the pricing floor admits both binaries, the restart order and what a buyer sees in the mixed window; the runbook's manual additive nginx step BEFORE the apply, then `/v1/catalog-artifacts` 200 and byte-identical through nginx; the real canary proof over ssh (`live_verified`); catalog stable outcomes match S1; `test_pearl_updater.py` and the deploy guard tests of the new tree |
+| S3 | `vm/s3-pool-models.sh` | runbook config (`trusted_pools` with `pool_model_pricing_bounds`, `provider_owner_account_ids`), pools Q and QN, signed offers bind `catalog_priced` with a `pool_binding`, `get-pool`, `/poolz`, the pool `/v1/models` view, disclosure headers, pool-model traffic of all four kinds through nginx for both members (oracle above), never global; **deploy order coordinator-first** (new coordinator + old gateway) with pool models live: pool-model traffic is refused before dispatch with `pool_model_requires_gateway_upgrade`, catalog stable outcomes match S1, then fresh pool traffic settles once the new gateway is back |
 | S4 | `vm/s4-refusals.sh` | global route; other pool; out-of-bounds price; catalog overlap (artifact-feed GGUF, catalog MLX snapshot; blocked identity is a GAP); unset bounds (manifest and route); non-attested non-creator member (never bound, refused when it is the only server, no credit); runtime outside the allowlist; runtime/format pairing. Each fails closed |
 | S5 | `vm/s5-rotation.sh` | rotation keeping the entry under continuous traffic (zero non-200, all settle, `pool_manifest_rebound`); a future-dated core changing the price (current price billed until it activates, then the new one); R016 attestation (binds, paid) and its removal in flight (zero credit, then refused); member revocation in flight (zero credit, then refused); entry removal in flight (settles at the snapshot price, then refused, `pool_manifest_entry_revoked`); SIGHUP of bounds and owner accounts (applies or is refused clearly) |
 | S6 | `vm/s6-rollback.sh` | runbook section 7 (pause with an attempt in flight, paused pool refused, catalog untouched, retire after pause); the coordinator rollback preflight with pool-model extension cores present must refuse a target that cannot replay them; the shared #1690 s9 rollback, literally; what the old coordinator does with the extension cores |
@@ -199,19 +199,26 @@ or each failure filed as a finding with a repro in the Findings section.
   a restart.
 - D7 the updater's `catalog-release.py verify-directory` call has a hardcoded
   30 s timeout and the unchanged verifier takes ~36 s under qemu TCG. The
-  harness runs the real verifier first without a timeout and the python3
-  shim on the updater's PATH replays that exact output only when every
-  catalog file, the Tier-2 config and the verifier are byte-identical
-  (`tools/verify-cache.py`); a miss runs the real verifier.
+  harness runs the real verifier first without a timeout for updater releases
+  and the python3 shim on the updater/test PATH replays or records that exact
+  output only when every catalog file, the Tier-2 config and the verifier are
+  byte-identical (`tools/verify-cache.py`). This is a harness-only QEMU escape
+  hatch; production timeouts are unchanged and cache misses outside the
+  explicit test-suite record mode run the real verifier.
 - D8 runtime allowlist and runtime/format pairing errors are refused offline
   by `coordinator-cli sign-manifest` (the runbook's only signer) before
   anything is sent, so the coordinator's own `pool_model_entry_runtime_*`
   codes are not reached (that would need a hand-encoded core).
 - D9 `test_pearl_updater.py` has one test that reads a pinned commit with
-  `git show`; the VM trees are `git archive` copies, so that test is a GAP.
+  `git show`; the VM trees are `git archive` copies, so that one
+  history-dependent test is classified as a GAP only when every other updater
+  test outcome is clean.
 - D10 the catalog canary is a real provider of the catalog model and serves
   catalog traffic too (3 completion tokens per response, so some catalog
   debits are 11 tokens; the shape oracle compares outcomes, not amounts).
+- D11 S5/S6 in-flight revocation, entry-removal and pause cases wait until
+  their route snapshots exist before mutating pool state. A missing snapshot
+  barrier is a harness failure, not an accepted product outcome.
 
 ## Results
 

@@ -16,7 +16,6 @@ from urllib.parse import parse_qs, urlparse
 
 MODEL_NAME = "qwen3-8b"
 SERVED_MODEL_REF = "ollama:" + MODEL_NAME
-CATALOG_MODEL_KEY = "qwen3-8b"
 NOW = "2027-01-15T08:00:00Z"
 
 
@@ -182,7 +181,7 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
         provider_id = self.server.state["provider_id"]
         assert_true(payload["provider_id"] == provider_id, "wrong provider_id in offer")
         assert_true(payload["served_model_ref"] == SERVED_MODEL_REF, "wrong served_model_ref in offer")
-        assert_true(payload["catalog_model_key"] == CATALOG_MODEL_KEY, "wrong catalog_model_key in offer")
+        assert_true(payload["catalog_model_key"] is None, "bare Ollama tag unexpectedly minted a catalog key")
         assert_true(len(payload["evaluation_digest_sha256"]) == 64, "offer missing evaluation digest")
         assert_true("endpoint" not in json.dumps(payload), "offer reflected endpoint material")
         candidate_id = payload["candidate_id"]
@@ -328,25 +327,25 @@ def find_candidate(document):
     raise HarnessFailure("candidate not found in discovery output")
 
 
-def assert_catalog_offer_dry_run(document, candidate_id, coordinator_requests):
+def assert_non_catalog_offer_dry_run(document, candidate_id, coordinator_requests):
     assert_true(document.get("schema") == "model_admission_offer_dry_run.v1", "wrong dry-run schema")
     assert_true(document.get("candidate_id") == candidate_id, "dry-run resolved a different candidate")
     assert_true(document.get("served_model_ref") == SERVED_MODEL_REF, "dry-run changed served model")
-    assert_true(document.get("catalog_model_key") == CATALOG_MODEL_KEY, "dry-run changed catalog key")
+    assert_true(document.get("catalog_model_key") is None, "dry-run minted catalog key without artifact identity")
     # SPEC-047-R002 makes evaluation advisory for explicitly non-earning offers.
     # would_submit is local eligibility, not proof of submission or admission.
     assert_true(document.get("would_submit") is True, "offerable fixture was blocked by dry-run")
-    assert_true(document.get("reason_code") == "catalog_binding_unverified", "dry-run lost unverified binding reason")
+    assert_true(document.get("reason_code") == "no_trusted_catalog_match", "dry-run overstated catalog identity")
     assert_true(document.get("likely_admission_state") == "offerable", "dry-run promoted local admission state")
     assert_true(document.get("likely_admission_state_source") == "local_default", "dry-run claimed coordinator authority")
     warnings = document.get("warnings")
     assert_true(isinstance(warnings, list), "dry-run warnings missing")
     assert_true("evaluation_required" in warnings, "dry-run lost advisory evaluation warning")
-    assert_true("catalog_match_unverified" in warnings, "dry-run lost unverified catalog warning")
+    assert_true("catalog_match_unverified" not in warnings, "dry-run claimed unverified catalog match")
     guidance = document.get("provider_guidance") or {}
-    assert_true(guidance.get("state_meaning_key") == "byom.offer_dry_run.catalog_path_missing_trusted_binding", "dry-run overstated catalog binding")
-    assert_true(guidance.get("earning_path_class") == "not_earning_yet_catalog_or_receipt_path_exists", "dry-run overstated earning eligibility")
-    assert_true(guidance.get("transition_reason_code") == "catalog_binding_unverified", "dry-run guidance lost binding reason")
+    assert_true(guidance.get("state_meaning_key") == "byom.offer_dry_run.no_earning_path_v0_1", "dry-run overstated catalog binding")
+    assert_true(guidance.get("earning_path_class") == "no_earning_path_in_v0_1", "dry-run overstated earning eligibility")
+    assert_true(guidance.get("transition_reason_code") == "no_trusted_catalog_match", "dry-run guidance lost non-catalog reason")
     assert_true(guidance.get("next_action") == "submit_offer", "dry-run lost explicit submission step")
     assert_true(coordinator_requests == [], "dry-run contacted coordinator")
 
@@ -442,12 +441,13 @@ def main():
             "MACPROVIDER_CONFIG": str(config),
             "MACPROVIDER_PROTECTED_CREDENTIAL_ROOT": str(protected_root),
             "MACPROVIDER_BYOM_ALLOW_INSECURE_LOOPBACK_COORDINATOR": "1",
-            # The catalog fixture (qwen3-8b, ~16 GB estimate) reports
-            # does_not_fit on CI runners and ordinary dev Macs, which would
-            # block the offer/economics flow this harness actually tests. Supply
-            # a RAM value so BYOM discovery's advisory local-fit signal treats
-            # the fixture as fitting; the fit logic still runs. Scoped to BYOM
-            # discovery only -- not autotune. (#1381 F8, cause 2)
+            # qwen3-8b (~16 GB estimate) reports does_not_fit on CI runners and
+            # ordinary dev Macs, which would block the offer/economics flow this
+            # harness actually tests. Supply a RAM value so BYOM discovery's
+            # advisory local-fit signal treats the fixture as fitting; the fit
+            # logic still runs. Scoped to BYOM discovery only -- not autotune.
+            # The fake Ollama runtime reports only the tag, not the GGUF digest,
+            # so the fresh artifact feed must keep catalog_model_key null.
             "MACPROVIDER_BYOM_E2E_DETECTED_RAM_GB": "64",
         })
 
@@ -477,7 +477,7 @@ def main():
         candidate_id = candidate["candidate_id"]
         assert_true(candidate.get("admission_state_source") == "local_default", "discovery admission source mutated")
         assert_true(candidate.get("admission_state") == "offerable", "candidate not locally offerable")
-        assert_true(candidate.get("catalog_model_key") == CATALOG_MODEL_KEY, "catalog key was not discovered")
+        assert_true(candidate.get("catalog_model_key") is None, "bare Ollama tag unexpectedly minted a catalog key")
         assert_true(coordinator.state["requests"] == [], "discovery contacted coordinator")
 
         evaluation_result = run_cli(
@@ -502,7 +502,7 @@ def main():
             env,
             root,
         ))
-        assert_catalog_offer_dry_run(dry_run, candidate_id, coordinator.state["requests"])
+        assert_non_catalog_offer_dry_run(dry_run, candidate_id, coordinator.state["requests"])
 
         offer = parse_json_output(run_cli(
             cli,

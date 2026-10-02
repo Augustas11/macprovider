@@ -208,6 +208,11 @@ func (s *Server) poolModelRouteHeadStillEarns(ctx context.Context, provider pool
 	if head.CoordinatorEventID == expect.CoordinatorEventID {
 		return true
 	}
+	selected := expect.PoolBindingEvent
+	if selected.ProviderID != expect.ProviderID || selected.CandidateID != expect.CandidateID ||
+		selected.CoordinatorEventID != expect.CoordinatorEventID || selected.State != "catalog_priced" {
+		return false
+	}
 	wiring := s.poolModels.Load()
-	return poolBindingEarningNow(wiring, expect.ProviderID, head, s.classifyCatalogPair, s.now())
+	return poolBindingEarningNow(wiring, expect.ProviderID, selected, s.classifyCatalogPair, s.now())
 }
