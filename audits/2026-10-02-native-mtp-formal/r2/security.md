@@ -1,6 +1,6 @@
 METHOD CONSTRAINT: First-party software-correctness / proof review. Do NOT author or construct malformed payloads or exploit inputs; evaluate by reading source and running EXISTING tests; describe gaps abstractly (field + condition) in prose.
 
-LANE: CODE REVIEW (correctness, regressions, test adequacy).
+LANE: SECURITY REVIEW.
 
 Repository: the current working directory (a detached worktree of branch campaign/native-mtp-formal, based on origin/main b29b7b8f5, which merged PR #1820). This is the freeze audit for the #1770 native-MTP formal campaign: formal (non-exploratory) SPEC-048-R015 evidence and the unsigned SPEC-023-R024 sidecar / JOURNEY-NATIVE-MTP-SERVING inputs for the first native-MTP tuple (Qwen3.6-35B-A3B 4-bit + MTP-4bit drafter, qualified_slots 8, max_native_active_rows 1, max_prompt_tokens 4096, sampled request profile, M3 Ultra 256 GB Studio).
 
@@ -19,24 +19,32 @@ Local verification at HEAD: `cd phase3-binary && swift test --filter 'NativeMTP|
 
 Out of scope (do not report): signing keys or how the operator stores them; the live coordinator; release cutting.
 
-ROUND 3 (final round; anchored-loop cap). Round 2 reported code 0/0/3/2, security 0/0/2/2, architect 0/0/1/1. The fix commit following 10fa0289a addresses them; verify each round-2 finding is VERIFIED or still open and check for regressions:
-- SECURITY M1 placeholder evidence digests -> the generator refuses to build while any all-zero placeholder digest remains (committed tuple input is intentionally not buildable until the journey evidence exists); tests resolve placeholders explicitly; golden fixture regenerated in both languages.
-- SECURITY L2 / CODE L2 field domains -> generator mirrors the Swift consumer: source_commit 40-hex only, artifact_id ^[a-z0-9][a-z0-9-]{0,63}$, envelope identifiers 0x21-0x7e (no space), hardware class [a-z0-9-].
-- SECURITY L1 analyzer duplicate keys -> strict duplicate-rejecting loader for policy and every JSONL record.
-- CODE M1 step-05 causal rejection -> every forced proposal must be rejected (rejected >= forced), reject-all row requires proposed == forced == rejected.
-- CODE M2 analyzer policy contract -> analyzer validates the closed admission policy like the bench (schema, unknown keys, frozen methodology incl. prompt_corpus v2, exact threshold key set and values).
-- CODE L1 sustained gaps -> bench existing-evidence loader and analyzer require sustained block indexes contiguous from 0.
-- ARCH M1 partial steps labeled pass -> harness reports status partial with uncovered_contract for steps 04/05/06/09/12; README table says partial and lists uncovered clauses; J06 predates the label and is described as such.
-- ARCH L1 step 14 wording -> pending (R015 matrix passed; post-gateway replay missing).
-- CODE M3 / SECURITY M2 step-07 mixed-batch parity -> NOT fixable in this campaign: ordinary continuous-batching greedy output itself changes with arrival timing (batch-composition numerics, SPEC-048 §6 open gap). It blocks JOURNEY-NATIVE-MTP-SERVING, which stays unsigned and incomplete; it is not a defect introduced by this diff. Classify it accordingly.
+ROUND 2. Round 1 of this freeze audit reported (code 0/0/5/4, security 0/0/1/4, architect 0/0/3/3). Fix commit 577424560 addresses them; verify each round-1 finding is VERIFIED or still open, and review the complete diff again for regressions:
+- CODE M1 step-04 token IDs / acceptance classes -> probe-path token-ID equality for greedy prompts + accepted>0 and rejected>0 (depth 1: rounds are all- or none-accepted).
+- CODE M2 step-06 reused ids (terminal replay) -> distinct "-ns"/"-s" scheduler ids, each mode compared with ordinary under the same id, EOS case added. Post-output injected failure is NOT implemented (stays a pending journey item).
+- CODE M3 step-07 depth -> outputs 256+32*row and maxObservedBatchDepth >= qualified_slots.
+- CODE M4 cancellation could pass without firing -> threshold reached AND CancellationError AND not completed.
+- CODE M5 self-test replay -> distinct execution ids run-a / run-b.
+- CODE L1 --phase sustained on incomplete matrix -> refused unless every sustained-cell matrix block exists in --out.
+- CODE L2 hardware-class grammar -> generator emits only the Swift-accepted [a-z0-9-] subset.
+- CODE/SECURITY L lab guard test -> covers NativeMTPJourneyE2ECommand and the lab hook symbols.
+- CODE L4 / ARCH L3 stale CONFORMANCE narratives -> R007/R015 updated, still pending.
+- SECURITY M Unicode NFC identity divergence -> generator restricts every identity-bearing string to printable ASCII.
+- SECURITY L duplicate keys -> strict duplicate-rejecting JSON loader for all generator inputs.
+- SECURITY L prompt-cap ceiling -> bench, analyzer, journey enforce <= 1048576.
+- SECURITY L operator path in prompts -> removed.
+- ARCH M1 MTP-7 fixture vs bound -> MTP-7 now scopes the native-row fixture to the bound and the load-gate fixture to the advertised maximum.
+- ARCH M2 endpoint gated cells -> MTP-15 states the gated cost model (above the bound native adds only per-held-row work, constant in ordinary rows, so relative regression is maximal at bound+1) and requires all gated counts if the model is broken. The operator mandated the two-representative matrix.
+- ARCH M3 raw results not committed -> operator decision keeps raw JSONL off-repo; the README now binds the lab-host run files by SHA-256 and line count, and analysis.json reproduces byte-exact from the bound file (verified).
+- ARCH L1 harness status -> executed_steps_status, covered_steps, pending_steps, journey_complete=false.
+- ARCH L2 derived-value provenance -> admission-tuple-provenance.md maps every field to source/formula; analytical and policy-chosen values labeled.
+Known open (report severity honestly): the journey step-07 mixed-batch parity fails on hardware because ordinary continuous-batching greedy output itself changes under perturbed arrival timing (batch-composition numerics); see the J05/J06 results.
 
 Report findings as CRITICAL / HIGH / MEDIUM / LOW / INFO, each with file:line, a concrete failure scenario described in prose, and a fix; say whether each is new in this diff or pre-existing. Be adversarial but do not report style nits as MEDIUM or above. End with a single final line exactly: `VERDICT: <n> CRITICAL, <n> HIGH, <n> MEDIUM, <n> LOW`.
 
 Focus for this lane:
-- Swift bench validateMatrix vs Python analyzer _matrix_violations: identical acceptance of the mandatory matrix (slots exactly 1..bound, capped prompt strata incl. cap, outputs, exact gated_cells, sustained_cell_id, sustained_seconds >= 1800, staggered arrivals, duplicate cells); any policy one accepts and the other rejects.
-- --phase sustained: refusal/resume logic in NativeMTPBenchRunner.run and NativeMTPExistingEvidence; can a sustained phase re-run, skip, or double-count matrix blocks, or append under a different policy digest; alternating order preserved across a resumed window.
-- Served-prompt strata realization (makePrompts): termination, ±2% bounds, cap handling, determinism across ordinary/native paths of a block.
-- ModelRuntime.recordNativeMTPTokenBoundDowngrade: double-counting of status reasons, observer semantics, any production behavior change beyond recording.
-- Analyzer sustained memory check change: can a required sustained window now pass without being judged.
-- NativeMTPJourneyE2ECommand: any check that passes vacuously (e.g. empty comparisons, wrong request id, last-admission lookups), or steps reported pass without exercising the claimed behavior.
-- scripts/native_mtp_admission_sidecar.py vs the Swift R024 consumer: field set, ranges, canonical bytes, tuple identity.
+- R024 max_prompt_tokens: fail-closed parsing (missing, zero, wrong type, out of range), inclusion in native_mtp_admission_tuple_sha256, and whether any path still defaults the prompt bound.
+- Lab-only surfaces (NativeMTPLabProposalOverride, installLabNativeMTPProposalOverride, labTokenProbe, native-mtp-journey-e2e, native-mtp-bench): are they fully compiled out of a plain release build (no symbol, no registration, no reachable hook); can any production path install or reach them.
+- recordNativeMTPTokenBoundDowngrade: can it change selection, accounting, receipts, or buyer-visible output; information exposure through status reasons.
+- scripts/native_mtp_admission_sidecar.py: never reads or accepts key material; strict closed-schema validation; no path where an unvalidated or partially specified sidecar is emitted; canonical-bytes identity consistent with the Swift consumer so a signed body cannot mean two things.
+- Committed evidence (docs/research/spec048-r015/**, journeys/** drafts, audits/**): no secrets, private keys, operator paths, raw prompts/completions beyond synthetic corpora, model weights, or tokens.

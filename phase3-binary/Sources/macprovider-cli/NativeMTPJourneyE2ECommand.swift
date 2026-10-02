@@ -64,6 +64,9 @@ private struct NativeMTPJourneyStep {
     let id: String
     var checks: [(String, Bool)] = []
     var details: [String: Any] = [:]
+    /// Journey-contract subclauses this harness does not exercise; a step
+    /// with any is at most `partial`, never `pass`.
+    var uncovered: [String] = []
 
     var passed: Bool { !checks.isEmpty && checks.allSatisfy(\.1) }
 
@@ -74,7 +77,8 @@ private struct NativeMTPJourneyStep {
     var document: [String: Any] {
         [
             "step_id": id,
-            "status": passed ? "pass" : "fail",
+            "status": !passed ? "fail" : (uncovered.isEmpty ? "pass" : "partial"),
+            "uncovered_contract": uncovered,
             "checks": Dictionary(uniqueKeysWithValues: checks.map { ($0.0, $0.1) }),
             "details": details,
         ]
@@ -262,6 +266,7 @@ private final class NativeMTPJourneyRunner {
         // At depth one each round is all-accepted or none-accepted; both must
         // occur (partial acceptance needs depth >= 2, which this tuple lacks).
         step.check("acceptance_all_and_none_observed", accepted > 0 && rejected > 0)
+        step.uncovered = ["partial acceptance within a round (needs proposal depth >= 2)"]
         step.details["requests"] = compared
         step.details["accepted"] = accepted
         step.details["rejected"] = rejected
@@ -278,6 +283,7 @@ private final class NativeMTPJourneyRunner {
         override: NativeMTPLabProposalOverride
     ) async throws -> NativeMTPJourneyStep {
         var step = NativeMTPJourneyStep(id: "step-05-cache-state-boundary")
+        step.uncovered = ["committed-state digest parity after each forced rejection (only output parity is compared)"]
         for id in ["journey-reject-all-0", "journey-boundary-0", "journey-boundary-1"] {
             let request = try makeRequest(
                 id: id,
@@ -294,7 +300,12 @@ private final class NativeMTPJourneyRunner {
             step.check("\(id).parity", same(expected, actual))
             step.check("\(id).native_admitted", lastPath(recorder, id) == .nativeMTP)
             step.check("\(id).forced_rejections_applied", forced > 0)
-            step.check("\(id).rejections_observed", delta.rejectedTokens >= UInt64(forced) / 2)
+            // Every forced proposal must be rejected (natural rejections can only
+            // add); on the reject-all row every proposal is forced.
+            step.check("\(id).every_forced_proposal_rejected", forced > 0 && delta.rejectedTokens >= UInt64(forced))
+            if id.hasPrefix("journey-reject-all-") {
+                step.check("\(id).all_rejected", delta.proposedTokens == UInt64(forced) && delta.rejectedTokens == delta.proposedTokens)
+            }
             step.details[id] = [
                 "forced_rounds": forced,
                 "proposed": delta.proposedTokens,
@@ -340,6 +351,11 @@ private final class NativeMTPJourneyRunner {
         step.check("stop_terminal_observed", terminals["journey-stream-stop"] == "stop")
         step.check("length_terminal_observed", terminals["journey-stream-length"] == "length")
         step.check("eos_terminal_observed", terminals["journey-stream-eos"] == "stop")
+        step.uncovered = [
+            "stop string verified to span a proposal/round boundary",
+            "early consumer stop (covered only as step-09 cancellation)",
+            "post-output injected failure with no retry or stitching",
+        ]
         step.details["terminals"] = terminals
         return step
     }
@@ -452,6 +468,7 @@ private final class NativeMTPJourneyRunner {
     /// row still matches ordinary.
     private func cancellation(ordinary: ModelRuntime, native: ModelRuntime, recorder: NativeMTPHardwareAdmissionRecorder) async throws -> NativeMTPJourneyStep {
         var step = NativeMTPJourneyStep(id: "step-09-cancellation")
+        step.uncovered = ["cancellation at the proposal, verification, and commit boundaries (only mid-stream is exercised)"]
         let request = try makeRequest(
             id: "journey-cancel-0",
             prompt: "Write a very long story about a journey across a desert.",
@@ -500,6 +517,7 @@ private final class NativeMTPJourneyRunner {
     /// can be signed into the release challenge bank. Emits that record.
     private func selfTest(ordinary: ModelRuntime, native: ModelRuntime, fixture: NativeMTPHardwareRuntimeFixture) async throws -> NativeMTPJourneyStep {
         var step = NativeMTPJourneyStep(id: "step-12-native-selftest")
+        step.uncovered = ["coordinator-issued SPEC-031-R033 canary and its negative outcomes"]
         let promptTokenIDs = try await fixture.runtimes.targetContainer.perform { context in
             context.tokenizer.encode(
                 text: "native_mtp_selftest_v1 synthetic challenge: continue the sequence alpha beta gamma delta",

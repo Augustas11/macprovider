@@ -24,7 +24,7 @@ id, validity, signer key ids) are not in this file. The generator
 | `benchmark_policy_sha256` | `30934c07…` | SHA-256 of `policy.json`. |
 | `performance_evidence_sha256`, `fit_evidence_sha256`, `ordinary_baseline.measurement_sha256` | `c780939f…` | SHA-256 of `analysis.json`. It carries throughput, latency, peak footprint, and min-available memory per cell. |
 | `ordinary_baseline.aggregate_tps_milli` | 193824 | `analysis.json` cell `s8-p1536-o512`, `reported_metrics.ordinary.aggregate_committed_tps.median` = 193.8249 tok/s, × 1000, truncated. |
-| `correctness_evidence_sha256`, `quality_evidence_sha256`, `state_rollback_evidence_sha256`, `batch_evidence_sha256`, `security_negative_evidence_sha256` | all-zero placeholder | **Pending.** They bind to the journey hardware result and the negative-fixture record once the serving journey's steps pass. The generator accepts the placeholder syntactically; a release must not sign it. |
+| `correctness_evidence_sha256`, `quality_evidence_sha256`, `state_rollback_evidence_sha256`, `batch_evidence_sha256`, `security_negative_evidence_sha256` | all-zero placeholder | **Pending.** They bind to the journey hardware result and the negative-fixture record once the serving journey's steps pass. The generator refuses to build a sidecar while any placeholder remains. |
 
 The analyzer input for `analysis.json` is the lab-host file
 `mtp-r015-a3b-formal-v2/r015-a3b-formal.jsonl` (211 lines, SHA-256

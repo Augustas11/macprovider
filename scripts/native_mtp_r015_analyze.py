@@ -29,9 +29,22 @@ def _sha256(path: Path) -> str:
 EXPLORATORY_POLICY_SCHEMA = "macprovider.native-mtp-exploratory-policy.v1"
 
 
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
+    keys = [key for key, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise ValueError(f"duplicate JSON key: {sorted(k for k in set(keys) if keys.count(k) > 1)}")
+    return dict(pairs)
+
+
+def _strict_loads(text: str) -> object:
+    """json.loads that rejects duplicate object keys (last-key-wins would let
+    one hash-bound record mean two things)."""
+    return json.loads(text, object_pairs_hook=_reject_duplicate_keys)
+
+
 def _load_policy(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as fh:
-        return json.load(fh)
+        return _strict_loads(fh.read())
 
 
 def _is_exploratory(policy: dict) -> bool:
@@ -73,6 +86,65 @@ def mandatory_gated_cells(bound: int, qualified: int) -> list[str]:
     return [_cell_id(s, GATED_PROMPT_TOKENS, GATED_MAX_TOKENS) for s in sorted({bound + 1, qualified})]
 
 
+ADMISSION_POLICY_SCHEMA = "macprovider.native-mtp-r015-policy.v1"
+POLICY_KEYS = {
+    "schema", "model_id", "target_sha256", "mtp_sha256", "tokenizer_sha256",
+    "slots", "prompt_tokens", "max_tokens", "warmup_runs", "blocks", "seed",
+    "sustained_seconds", "sustained_cell_id", "memory_safety_margin_bytes", "thresholds",
+    "hw_model", "chip", "ram_gb", "os_build", "xcode_build_version", "swift_version",
+    "provider_commit", "mlx_fork_revision", "quantization", "cache_mode", "proposal_depth",
+    "run_order", "prompt_corpus", "exclusion_rules", "confidence_method",
+    "max_native_active_rows", "qualified_slots", "temperature", "arrival_interval_ms",
+    "gated_cells", "maximum_prompt_tokens",
+}
+# Mirrors NativeMTPBenchPolicy.load: the frozen methodology and thresholds an
+# admission policy must carry, so the analyzer never judges a policy the bench
+# would refuse.
+FIXED_METHODOLOGY = {
+    "quantization": "4bit",
+    "cache_mode": "paged_kv_mixed",
+    "proposal_depth": 1,
+    "run_order": "seeded_random_counterbalanced",
+    "prompt_corpus": "deterministic_synthetic_unique_v2",
+    "exclusion_rules": "none",
+    "confidence_method": "paired_block_bootstrap_holm_v1",
+}
+FROZEN_THRESHOLDS = {
+    "throughput_lower_bound_min": 0.15,
+    "ttft_p95_upper_bound_max": 0.10,
+    "itl_p95_upper_bound_max": 0.0,
+    "rejection_increase_max_pp": 1.0,
+    "min_available_memory_fraction": 0.10,
+    "bootstrap_draws": 10000,
+    "alpha": 0.05,
+    "gated_throughput_lower_bound_min": -0.05,
+    "gated_ttft_p95_upper_bound_max": 0.05,
+    "gated_itl_p95_upper_bound_max": 0.05,
+}
+
+
+def _policy_contract_violations(policy: dict) -> list[str]:
+    """Closed-policy violations of an admission policy beyond the matrix."""
+    violations: list[str] = []
+    if policy.get("schema") != ADMISSION_POLICY_SCHEMA:
+        violations.append("policy_schema_not_admission")
+    unknown = sorted(set(policy) - POLICY_KEYS)
+    if unknown:
+        violations.append("policy_unknown_keys:" + ",".join(unknown))
+    for key, expected in FIXED_METHODOLOGY.items():
+        if policy.get(key) != expected or isinstance(policy.get(key), bool):
+            violations.append(f"methodology_not_frozen:{key}")
+    thresholds = policy.get("thresholds")
+    if not isinstance(thresholds, dict) or set(thresholds) != set(FROZEN_THRESHOLDS):
+        violations.append("thresholds_key_set_not_frozen")
+    else:
+        for key, expected in FROZEN_THRESHOLDS.items():
+            value = thresholds[key]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or abs(value - expected) >= 1e-7:
+                violations.append(f"threshold_not_frozen:{key}")
+    return violations
+
+
 def _matrix_violations(policy: dict) -> list[str]:
     """Mandatory-matrix violations of an admission (non-exploratory) policy;
     duplicate cells are rejected for every policy, as the bench does."""
@@ -82,7 +154,7 @@ def _matrix_violations(policy: dict) -> list[str]:
         except (KeyError, TypeError):
             return ["matrix_malformed"]
         return ["duplicate_cells"] if len(set(cells)) != len(cells) else []
-    violations: list[str] = []
+    violations: list[str] = _policy_contract_violations(policy)
     blocks = policy.get("blocks")
     if not _is_int(blocks) or blocks < 10:
         violations.append("blocks_below_ten")
@@ -256,7 +328,7 @@ def _load_jsonl(path: Path) -> tuple[dict, list[dict]]:
             line = line.strip()
             if not line:
                 continue
-            record = json.loads(line)
+            record = _strict_loads(line)
             if record.get("schema") != SCHEMA:
                 raise ValueError(f"{path}:{lineno}: unexpected schema {record.get('schema')!r}")
             if record.get("record_type") == "header":
@@ -622,11 +694,14 @@ def _pair_runs(
 
 
 def _sustained_order_issues(sustained_runs: list[dict]) -> list[str]:
-    """The sustained window alternates: native first on even blocks."""
+    """The sustained window alternates (native first on even blocks) and its
+    blocks are contiguous from zero: a resume never skips an index."""
     by_block: dict[int, dict[str, dict]] = defaultdict(dict)
     for run in sustained_runs:
         by_block[int(run.get("block_index", -1))][run.get("path")] = run
     issues = []
+    if by_block and sorted(by_block) != list(range(max(by_block) + 1)):
+        issues.append("sustained blocks not contiguous from 0")
     for block in sorted(by_block):
         item = by_block[block]
         if "ordinary" not in item or "native_mtp" not in item:

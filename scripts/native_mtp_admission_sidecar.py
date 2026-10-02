@@ -43,7 +43,12 @@ HASH_ALGORITHM = "macprovider.snapshot-manifest.v1"
 
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 CDHASH = re.compile(r"^[0-9a-f]{40}$")
-COMMIT = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+# The Swift consumer accepts only SHA-1 object ids; emit only what it accepts.
+COMMIT = re.compile(r"^[0-9a-f]{40}$")
+ARTIFACT_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+# Envelope identifiers: the consumer's requireASCIIString (0x21...0x7e, no space).
+ENVELOPE_ID = re.compile(r"^[\x21-\x7e]+$")
+PLACEHOLDER_SHA256 = "0" * 64
 # The Swift consumer accepts the stricter `[a-z0-9-]` subset of the SPEC-023
 # grammar; emit only what it accepts.
 HARDWARE_CLASS = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -210,12 +215,16 @@ def validate_quantization(q: object, path: str) -> None:
 def validate_entry(entry: object, path: str) -> dict:
     entry = _exact_keys(entry, ENTRY_KEYS, path)
     _str(entry["model_key"], f"{path}.model_key")
-    _str(entry["artifact_id"], f"{path}.artifact_id")
+    _str(entry["artifact_id"], f"{path}.artifact_id", ARTIFACT_ID)
     if entry["hash_algorithm"] != HASH_ALGORITHM:
         fail(f"{path}.hash_algorithm", f"must be {HASH_ALGORITHM}")
     for key in ("artifact_hash", "artifact_manifest_sha256", "tokenizer_sha256", "mtp_manifest_sha256",
                 "reproducible_build_sha256", "benchmark_policy_sha256", "challenge_bank_sha256", *EVIDENCE_KEYS):
         _str(entry[key], f"{path}.{key}", SHA256)
+        # An all-zero digest is the committed "evidence pending" placeholder;
+        # a signable sidecar must bind real evidence bytes.
+        if entry[key] == PLACEHOLDER_SHA256:
+            fail(f"{path}.{key}", "is the pending-evidence placeholder; bind the real evidence digest")
     if entry["decode_path"] != "native_mtp":
         fail(f"{path}.decode_path", "must be native_mtp")
     _str(entry["mtp_family_adapter"], f"{path}.mtp_family_adapter")
@@ -271,13 +280,13 @@ def validate_sidecar(body: object) -> dict:
     body = _exact_keys(body, TOP_KEYS, "$")
     if body["schema_version"] != SCHEMA_VERSION:
         fail("$.schema_version", f"must be {SCHEMA_VERSION}")
-    _str(body["release_id"], "$.release_id", re.compile(r"^[\x20-\x7e]+$"))
+    _str(body["release_id"], "$.release_id", ENVELOPE_ID)
     issued = _timestamp(body["issued_at"], "$.issued_at")
     expires = _timestamp(body["expires_at"], "$.expires_at")
     if not issued < expires <= issued + timedelta(days=90):
         fail("$.expires_at", "must be after issued_at and at most 90 days later")
     for key in ("signer_key_id", "challenge_bank_signer_key_id", "revocation_signer_key_id"):
-        _str(body[key], f"$.{key}", re.compile(r"^[\x20-\x7e]+$"))
+        _str(body[key], f"$.{key}", ENVELOPE_ID)
     entries = body["entries"]
     if not isinstance(entries, list) or not 1 <= len(entries) <= 256:
         fail("$.entries", "must hold 1..256 entries")

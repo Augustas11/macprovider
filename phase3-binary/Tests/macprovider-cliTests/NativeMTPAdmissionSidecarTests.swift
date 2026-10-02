@@ -1094,7 +1094,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         XCTAssertEqual(reserialized, data, "generator bytes are not the canonical sorted form")
         XCTAssertEqual(
             try NativeMTPAdmissionSidecar.admissionTupleSHA256ForTesting(object),
-            "fd54231d7ae6d1caf1e96c4e54a2c8217fad600b6493cea8c88dc1d9dd058182"
+            "eac0736b406e032013a6fd7893a306be1b57b6a8a374e655c3ce209770d3d0b4"
         )
     }
 

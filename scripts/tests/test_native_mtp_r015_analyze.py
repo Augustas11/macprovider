@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import scripts.native_mtp_r015_analyze as analyzer
 from scripts.native_mtp_r015_analyze import (
     _holm_adjusted,
     _native_first_order,
@@ -17,6 +18,17 @@ from scripts.native_mtp_r015_analyze import (
 
 
 class NativeMTPR015AnalyzeTests(unittest.TestCase):
+    # The frozen policy uses 10,000 bootstrap draws; tests freeze 1,000 so the
+    # suite stays fast. Every other frozen threshold is the production value.
+    @classmethod
+    def setUpClass(cls):
+        cls._frozen_draws = analyzer.FROZEN_THRESHOLDS["bootstrap_draws"]
+        analyzer.FROZEN_THRESHOLDS["bootstrap_draws"] = 1000
+
+    @classmethod
+    def tearDownClass(cls):
+        analyzer.FROZEN_THRESHOLDS["bootstrap_draws"] = cls._frozen_draws
+
     def test_pass(self):
         result = self._run_case()
         self.assertEqual(result["overall_status"], "PASS")
@@ -291,7 +303,8 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
             "bootstrap_draws": 1000,
             "alpha": 0.05,
         }})
-        self.assertEqual(result["reason"], "gated_thresholds_missing")
+        self.assertEqual(result["reason"], "policy_matrix_incomplete")
+        self.assertIn("thresholds_key_set_not_frozen", result["matrix_violations"])
 
     def test_downgrades_beyond_requests_fail_accounting(self):
         result = self._run_case(
@@ -347,6 +360,43 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         self.assertIn("sustained_cell_not:s2-p1536-o512", sustained["matrix_violations"])
         short = self._run_case(policy_overrides={"sustained_seconds": 1799})
         self.assertIn("sustained_seconds_below_1800", short["matrix_violations"])
+
+    def test_admission_policy_contract_is_closed_and_frozen(self):
+        relaxed = self._run_case(policy_overrides={"thresholds": {
+            "throughput_lower_bound_min": 0.10,
+            "ttft_p95_upper_bound_max": 0.10,
+            "itl_p95_upper_bound_max": 0.0,
+            "rejection_increase_max_pp": 1.0,
+            "min_available_memory_fraction": 0.10,
+            "bootstrap_draws": 10000,
+            "alpha": 0.05,
+            "gated_throughput_lower_bound_min": -0.05,
+            "gated_ttft_p95_upper_bound_max": 0.05,
+            "gated_itl_p95_upper_bound_max": 0.05,
+        }})
+        self.assertIn("threshold_not_frozen:throughput_lower_bound_min", relaxed["matrix_violations"])
+        method = self._run_case(policy_overrides={"prompt_corpus": "deterministic_synthetic_unique_v1"})
+        self.assertIn("methodology_not_frozen:prompt_corpus", method["matrix_violations"])
+        unknown = self._run_case(policy_overrides={"extra": 1})
+        self.assertIn("policy_unknown_keys:extra", unknown["matrix_violations"])
+
+    def test_duplicate_json_keys_are_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jsonl_path, policy_path = self._write_case(Path(tmp))
+            text = policy_path.read_text("utf-8")
+            policy_path.write_text(text.replace('"blocks": 10', '"blocks": 10, "blocks": 10', 1), "utf-8")
+            with self.assertRaisesRegex(ValueError, "duplicate JSON key"):
+                analyze(jsonl_path, policy_path)
+
+    def test_sustained_blocks_must_be_contiguous(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jsonl_path, policy_path = self._write_case(Path(tmp))
+            lines = jsonl_path.read_text("utf-8").splitlines()
+            shifted = [line.replace('"block_index": 0', '"block_index": 2') if '"sustained": true' in line else line for line in lines]
+            jsonl_path.write_text("\n".join(shifted) + "\n", "utf-8")
+            result = analyze(jsonl_path, policy_path)
+            cell = self._cell(result, "s2-p1536-o512")
+            self.assertIn("sustained blocks not contiguous from 0", cell["hard_failures"])
 
     def test_matrix_only_cell_is_not_failed_for_an_unrun_sustained_window(self):
         # An exploratory matrix-only policy (sustained_seconds 0) analyzes the
@@ -625,6 +675,17 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
             "swift_version": "Apple Swift version 6.2",
             "provider_commit": "a" * 40,
             "mlx_fork_revision": "b" * 40,
+            "quantization": "4bit",
+            "cache_mode": "paged_kv_mixed",
+            "proposal_depth": 1,
+            "run_order": "seeded_random_counterbalanced",
+            "prompt_corpus": "deterministic_synthetic_unique_v2",
+            "exclusion_rules": "none",
+            "confidence_method": "paired_block_bootstrap_holm_v1",
+            "model_id": "m",
+            "target_sha256": "1" * 64,
+            "mtp_sha256": "2" * 64,
+            "tokenizer_sha256": "3" * 64,
             "thresholds": {
                 "throughput_lower_bound_min": 0.15,
                 "ttft_p95_upper_bound_max": 0.10,
@@ -701,9 +762,9 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
                 native_record.setdefault("order_position", 0 if native_first[block] else 1)
                 records.append(native_record)
             if write_sustained and blocks_written >= 10 and cell_id == policy.get("sustained_cell_id"):
-                # Sustained block 100 is even: native runs first.
-                records.append(self._run_record("ordinary", 100, 100.0, 0.100, 0.010, False, sustained=True, order_position=1, policy_sha=run_policy_sha or policy_sha, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=sustained_min_available_memory_fraction, wall_seconds=sustained_wall_seconds, cell_id=cell_id, **record_options))
-                sustained_native = self._run_record("native_mtp", 100, native_tps, native_ttft, native_itl, parity_mismatch, sustained=True, order_position=0, policy_sha=run_policy_sha or policy_sha, native_admissions=native_admissions, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=sustained_min_available_memory_fraction, wall_seconds=sustained_wall_seconds, decode_tps=native_decode_tps, cell_id=cell_id, **record_options)
+                # Sustained block 0 is even: native runs first.
+                records.append(self._run_record("ordinary", 0, 100.0, 0.100, 0.010, False, sustained=True, order_position=1, policy_sha=run_policy_sha or policy_sha, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=sustained_min_available_memory_fraction, wall_seconds=sustained_wall_seconds, cell_id=cell_id, **record_options))
+                sustained_native = self._run_record("native_mtp", 0, native_tps, native_ttft, native_itl, parity_mismatch, sustained=True, order_position=0, policy_sha=run_policy_sha or policy_sha, native_admissions=native_admissions, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=sustained_min_available_memory_fraction, wall_seconds=sustained_wall_seconds, decode_tps=native_decode_tps, cell_id=cell_id, **record_options)
                 apply(sustained_native)
                 sustained_native["order_position"] = 0
                 records.append(sustained_native)

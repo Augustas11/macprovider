@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 TUPLE = ROOT / "docs/research/spec048-r015/evidence-2026-10-02-a3b-formal/admission-tuple-input.json"
 GOLDEN = Path(__file__).resolve().parent / "fixtures/native_mtp_admission_golden.json"
 # Shared with NativeMTPAdmissionSidecarTests.testGoldenSidecarTupleIdentityMatchesPythonGenerator.
-GOLDEN_TUPLE_SHA256 = "fd54231d7ae6d1caf1e96c4e54a2c8217fad600b6493cea8c88dc1d9dd058182"
+GOLDEN_TUPLE_SHA256 = "eac0736b406e032013a6fd7893a306be1b57b6a8a374e655c3ce209770d3d0b4"
 
 
 def release_input():
@@ -42,9 +42,32 @@ def release_input():
     }
 
 
+EVIDENCE_FIELDS = (
+    "correctness_evidence_sha256",
+    "quality_evidence_sha256",
+    "state_rollback_evidence_sha256",
+    "batch_evidence_sha256",
+    "security_negative_evidence_sha256",
+)
+
+
+def resolved_tuple():
+    """The committed tuple with its pending-evidence placeholders resolved to
+    stand-in digests, as a release would after the journey passes."""
+    value = json.loads(TUPLE.read_text("utf-8"))
+    for index, key in enumerate(EVIDENCE_FIELDS):
+        value["entry"][key] = f"{index + 1:x}" * 64
+    return value
+
+
 class NativeMTPAdmissionSidecarTests(unittest.TestCase):
     def setUp(self):
-        self.tuple = json.loads(TUPLE.read_text("utf-8"))
+        self.tuple = resolved_tuple()
+
+    def test_committed_tuple_with_pending_evidence_is_not_buildable(self):
+        committed = json.loads(TUPLE.read_text("utf-8"))
+        with self.assertRaisesRegex(SidecarError, "pending-evidence placeholder"):
+            build(committed, release_input())
 
     def test_committed_tuple_builds_canonical_closed_sidecar(self):
         data = build(self.tuple, release_input())
@@ -102,6 +125,19 @@ class NativeMTPAdmissionSidecarTests(unittest.TestCase):
         window["expires_at"] = "2027-01-01T00:00:01Z"
         with self.assertRaisesRegex(SidecarError, "90 days"):
             build(self.tuple, window)
+        for key, value in (("source_commit", "b" * 64), ("artifact_id", "Primary_1")):
+            bad_field = copy.deepcopy(self.tuple) if key == "artifact_id" else self.tuple
+            bad_release = release_input()
+            if key == "artifact_id":
+                bad_field["entry"][key] = value
+            else:
+                bad_release["entry"][key] = value
+            with self.assertRaises(SidecarError, msg=key):
+                build(bad_field, bad_release)
+        spaced = release_input()
+        spaced["signer_key_id"] = "static key"
+        with self.assertRaises(SidecarError):
+            build(self.tuple, spaced)
         bad_cdhash = release_input()
         bad_cdhash["entry"]["live_executable_cdhash"] = "D" * 40
         with self.assertRaises(SidecarError):
@@ -136,8 +172,9 @@ class NativeMTPAdmissionSidecarTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             (tmp / "release.json").write_text(json.dumps(release_input()), "utf-8")
+            (tmp / "tuple.json").write_text(json.dumps(self.tuple), "utf-8")
             out = tmp / "native-mtp-admission.json"
-            self.assertEqual(main(["build", "--tuple", str(TUPLE), "--release", str(tmp / "release.json"), "--out", str(out)]), 0)
+            self.assertEqual(main(["build", "--tuple", str(tmp / "tuple.json"), "--release", str(tmp / "release.json"), "--out", str(out)]), 0)
             self.assertEqual(out.read_bytes(), build(self.tuple, release_input()))
             self.assertEqual(main(["identity", "--sidecar", str(out)]), 0)
 

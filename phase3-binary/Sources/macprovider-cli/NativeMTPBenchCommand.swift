@@ -1468,6 +1468,13 @@ private struct NativeMTPExistingEvidence {
                     "existing --out contains partial sustained block \(cellID)/\(partial.key)"
                 )
             }
+            // A resume continues after the highest block; a gap below it would
+            // be skipped silently.
+            if let highest = blocks.keys.max(), Set(blocks.keys) != Set(0...highest) {
+                throw NativeMTPBenchError.assertionFailed(
+                    "existing --out sustained blocks of \(cellID) are not contiguous from 0"
+                )
+            }
         }
         return NativeMTPExistingEvidence(
             hasRecords: true,
