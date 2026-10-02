@@ -10,10 +10,10 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC | Title | Version | Lifecycle | ID migration | Conformance | Link |
 |---|---|---|---|---|---|---|
 | SPEC-001 | Phase 3 Binary: Mac Provider Inference CLI | 1.9.27 | normative | pending | pending: 4 | [SPEC-001-phase3-binary.md](SPEC-001-phase3-binary.md) |
-| SPEC-002 | Phase 4 Coordinator: Mac Provider Request Router | 1.6.4 | normative | pending | pending: 2 | [SPEC-002-coordinator.md](SPEC-002-coordinator.md) |
+| SPEC-002 | Phase 4 Coordinator: Mac Provider Request Router | 1.6.5 | normative | pending | pending: 3 | [SPEC-002-coordinator.md](SPEC-002-coordinator.md) |
 | SPEC-003 | Open Onboarding: Distribution, Lifecycle & Onboarding UX | 0.12.0 | normative | pending | pending: 5 | [SPEC-003-open-onboarding.md](SPEC-003-open-onboarding.md) |
 | SPEC-004 | Smart Router | 0.3.5 | normative | pending | pending corpus migration | [SPEC-004-smart-router.md](SPEC-004-smart-router.md) |
-| SPEC-005 | Billing, Settlement, and Provider Rewards | 0.6.10 | normative | complete | conformant: 2, pending: 12 | [SPEC-005-billing.md](SPEC-005-billing.md) |
+| SPEC-005 | Billing, Settlement, and Provider Rewards | 0.6.11 | normative | complete | conformant: 2, pending: 12 | [SPEC-005-billing.md](SPEC-005-billing.md) |
 | SPEC-006 | Buyer API Gateway: Mac Provider's first public buyer surface | 0.9.42 | normative | complete | conformant: 2, pending: 15 | [SPEC-006-buyer-api.md](SPEC-006-buyer-api.md) |
 | SPEC-007 | Internal Operator Protocol Explorer | 0.5.1 | normative | pending | pending corpus migration | [SPEC-007-explorer.md](SPEC-007-explorer.md) |
 | SPEC-008 | Tier-2 Trust Layer | 0.7.0 | normative | pending | pending: 4 | [SPEC-008-tier2.md](SPEC-008-tier2.md) |
@@ -30,7 +30,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-019 | Structured output (`response_format: json_schema`) | 0.2.6 | normative | pending | pending corpus migration | [SPEC-019-structured-output.md](SPEC-019-structured-output.md) |
 | SPEC-020 | Provider autoupdate | v0.1.20 | normative | pending | pending: 6 | [SPEC-020-provider-autoupdate.md](SPEC-020-provider-autoupdate.md) |
 | SPEC-021 | MALIBU rewards emission ledger | 0.4.0 | draft | complete | pending: 10 | [SPEC-021-malibu-emission-ledger.md](SPEC-021-malibu-emission-ledger.md) |
-| SPEC-022 | Verified model settlement | v0.2.4 | draft | complete | conformant: 2, pending: 10 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
+| SPEC-022 | Verified model settlement | v0.2.5 | draft | complete | conformant: 1, pending: 11 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
 | SPEC-023 | Installer-Integrated Autotune Recommend | v0.22.7 | normative | pending | conformant: 2, pending: 22 | [SPEC-023-installer-autotune-recommend.md](SPEC-023-installer-autotune-recommend.md) |
 | SPEC-024 | Prefix-cache billing and provider-local cache isolation | 0.2.9 | normative | pending | pending: 3 | [SPEC-024-prefix-cache-billing.md](SPEC-024-prefix-cache-billing.md) |
 | SPEC-025 | Native Mac App (signed `.dmg` + menu bar wrapper) | v0.29 | draft | pending | pending corpus migration | [SPEC-025-native-mac-app.md](SPEC-025-native-mac-app.md) |
@@ -46,7 +46,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-035 | Provider connection diagnostics and failure history | v0.4.3 | draft | complete | pending: 13 | [SPEC-035-provider-connection-diagnostics.md](SPEC-035-provider-connection-diagnostics.md) |
 | SPEC-036 | Compute-Integrity Receipt Companion | v0.1.2 | draft | complete | pending: 18 | [SPEC-036-compute-integrity-receipt.md](SPEC-036-compute-integrity-receipt.md) |
 | SPEC-037 | KV survival across provider restarts (encrypted provider-local disk tier) | v0.1.5 | draft | complete | pending: 13 | [SPEC-037-kv-survival-restart.md](SPEC-037-kv-survival-restart.md) |
-| SPEC-038 | Continuous batching for concurrent provider inference | v0.3.7 | draft | complete | pending: 18 | [SPEC-038-continuous-batching.md](SPEC-038-continuous-batching.md) |
+| SPEC-038 | Continuous batching for concurrent provider inference | v0.3.8 | draft | complete | pending: 18 | [SPEC-038-continuous-batching.md](SPEC-038-continuous-batching.md) |
 | SPEC-039 | Paged KV / paged-attention engine | v0.1.14 | draft | complete | pending: 15 | [SPEC-039-paged-kv-attention-engine.md](SPEC-039-paged-kv-attention-engine.md) |
 | SPEC-040 | Wallet-Native Buyer Sessions | 0.1.9 | draft | complete | pending: 10 | [SPEC-040-wallet-native-buyer-sessions.md](SPEC-040-wallet-native-buyer-sessions.md) |
 | SPEC-041 | Relay-Blind Request Encryption | 0.2.0 | draft | complete | pending: 8 | [SPEC-041-relay-blind-request-encryption.md](SPEC-041-relay-blind-request-encryption.md) |

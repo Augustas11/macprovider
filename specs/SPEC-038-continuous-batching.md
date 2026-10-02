@@ -1,11 +1,28 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.7
+Version: v0.3.8
 Status: draft (normative contract; runtime enablement remains tuple- and campaign-gated)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.8 (2026-10-02, per-step emission inside decode windows):**
+FR-CB2 emission is per step, not per window. A multi-token hop still runs
+inside one backend call, but each step's sampled tokens go through stop,
+visibility and token delivery as soon as that step's tokens are on the host,
+so buyers on non-hybrid models (lockstep window 16) no longer receive tokens in
+window-sized bursts. Release and terminal removal stay at the hop boundary
+because the backend still writes every row's blocks until the hop returns. The
+hop's returned tokens stay authoritative: streamed tokens MUST be a prefix of
+them, or the row fails with `continuous_batching_decode_stream_mismatch`. A
+terminal or failure decided while streaming is not overtaken by a later
+cancel. A hop MAY end before `W` steps only once every row in it is cancelled
+(their state is then not recorded); rows that stopped normally keep the hop
+running because their blocks were extended for all `W` steps. A backend
+cancellation ends a running hop at the next step boundary. A failure after streamed
+tokens is reported as post-inference and not retryable, and a returned row
+longer than `W` fails.
+
 **Change log v0.3.7 (2026-10-01, hybrid reply-end recurrent checkpoint handoff):**
 Aligns scheduler-owned hybrid conversation-cache handoff with SPEC-024 v0.2.9.
 At normal terminal, retained and serial-format hybrid cache publication append
@@ -432,6 +449,31 @@ a prompt is mid-prefill and nothing else is waiting to join, `W` MUST NOT
 exceed the prefill decode window. The prefill decode window gives active rows
 several tokens per prefill turn rather than one, so long prompts slow them by
 a bounded factor instead of stalling them.
+
+When `W > 1`, each step's sampled tokens MUST be handed to stop handling,
+visibility and token delivery as soon as they exist, without waiting for the
+hop to return, so buyer-visible cadence follows decode steps rather than
+`W`-token bursts. (Delivery latency after hand-off is subject to scheduler
+actor scheduling; the backend does not wait for it.) A row
+that reaches a terminal token or fails delivery mid-hop stops streaming at that
+token; its release and terminal result wait for the hop boundary. A cancelled
+row stops streaming at once. The hop's returned tokens are authoritative:
+tokens already streamed MUST be a prefix of them, otherwise the row MUST fail
+with `continuous_batching_decode_stream_mismatch`. Validation of returned
+windows (stream mismatch, more than `W` tokens, out-of-vocabulary tokens) MUST
+precede cancellation processing so a late cancel cannot mask it. A terminal or failure is decided when the scheduler
+applies the token that causes it, as at a one-token hop boundary; once
+decided while streaming it MUST NOT be overtaken by a later cancel of the same
+row (a cancel that lands before the token is applied wins, as it always did).
+A returned row with more tokens than `W` MUST fail. A failure after a stream
+already delivered tokens MUST be reported as post-inference and not
+retryable. Streamed steps MUST be
+validated against the hop's row order and step sequence before any of their
+tokens are delivered; a malformed step halts streaming for the hop and the
+returned window decides the remaining tokens. A hop MAY end before `W` steps
+only when every row in it is cancelled, and the backend MUST then not record
+those rows' cache state. A backend cancellation MUST end a running hop at the
+next step boundary.
 
 Prefill MUST be bounded by a configured per-iteration prefill token budget. A
 single row MUST NOT consume more than its configured per-row chunk limit in one
