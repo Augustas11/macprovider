@@ -71,4 +71,5 @@ The triage below is **unverified**: it is a first sort from the result details o
 - Campaign worktree: `/Users/augstar/macprovider-1816-pool-models`, the only #1816 worktree. The lane worktrees and branches were removed on 2026-10-02, after checking that each one was merged into the campaign branch.
 - Studio: the #1816 lab and build directories (`~/lab-1816-e2e`, `~/build-1816-e2e`, `~/build-1816-cli`) were removed on 2026-10-02. The Studio lab evidence is kept on this Mac under `.omc/e2e-1816/`.
 - The VM `macprovider-1690` is stopped.
-- Raw audit transcripts are kept outside the repo; they trip the secret preflight on key-marker excerpts.
+- Raw audit transcripts are in `~/macprovider-audit-logs/1816/` on this Mac, outside any worktree, because they trip the secret preflight on key-marker excerpts.
+- VM evidence for every run is in `.omc/e2e-1816/` (`vm-shakedown-e7964a233`, `vm-a1e059632`, `vm-1832627e7`), together with the Studio lab evidence.

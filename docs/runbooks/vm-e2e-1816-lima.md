@@ -118,7 +118,7 @@ PY
 ```
 
 - `.omc/` is gitignored and survives reboots. `$TMPDIR` does not survive reliably, so don't leave the only copy of the evidence there.
-- Earlier runs are kept under `.omc/e2e-1816/vm-1832627e7/` in the campaign worktree.
+- Earlier runs are kept under `.omc/e2e-1816/vm-{shakedown-e7964a233,a1e059632,1832627e7}/` in the campaign worktree.
 
 Each result row has `scenario`, `result` (PASS, FAIL, INFO, GAP or BUG), `detail` and `ts`. Oracle details (I1 to I5, EXPECT, P0) are explained in the plan's Oracle section:
 - **I3:** buyer debit must equal provider payable.
