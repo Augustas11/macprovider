@@ -4488,7 +4488,11 @@
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:runPrefillStep",
         "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:prefill",
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:private nonisolated static func makeContinuousBatchScheduler"
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:private nonisolated static func makeContinuousBatchScheduler",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:runOrdinaryDecodeStep",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:applyStreamedDecodeStep",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:advanceDecodeRow",
+        "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:performDecode"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testPrefillBatchesCompatibleChunksWithinRowAndTokenBudgets",
@@ -4505,10 +4509,11 @@
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeMixedCacheTests.swift:testCachePackingIncompatibilityFallsBackToIsolatedSerialPrefill",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeMixedCacheTests.swift:testBackendLevelStateDiscardsSharedAttemptAndFallsBackPerRow",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testLockstepWindowDeliversEachStepBeforeTheWindowReturns",
-        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testStopTokenMidWindowTruncatesAndEndsWindowEarly",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testStopTokenMidWindowTruncatesStreamExactly",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testCancelMidWindowStopsDeliveryAndEndsWindowEarly",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testLockstepWindowStreamsEveryRowAndKeepsUsageExact",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testStreamedTokensThatDisagreeWithWindowResultFailTheRow",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testMalformedStepHaltsStreamingAndWindowResultDelivers",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testDeliveryBackpressureMidWindowKeepsBackpressureTerminal",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testLockstepWindowStreamsStepsAndEndsWhenObserverStops"
       ],
@@ -4518,7 +4523,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1758",
-        "rationale": "FR-CB2 v0.3.2 batched-prefill scheduling commits the whole prompt, samples the first generated token from the final prefill position, preserves bounded group/per-row token budgets and isolated fallback, and uses the production 512-token partition. Issue #1773 records packaged-runtime boundary parity at L511/L512/L513; broader rollout remains release-gated."
+        "rationale": "FR-CB2 v0.3.8 streams each decode-window step to buyers (stop, visibility and delivery per step; release at the hop boundary; returned window authoritative; early hop exit only when every row is cancelled), measured on Studio llama-3.1-8b in audits/2026-10-02-cb-stream-per-step. FR-CB2 v0.3.2 batched-prefill scheduling commits the whole prompt, samples the first generated token from the final prefill position, preserves bounded group/per-row token budgets and isolated fallback, and uses the production 512-token partition. Issue #1773 records packaged-runtime boundary parity at L511/L512/L513; broader rollout remains release-gated."
       }
     },
     {

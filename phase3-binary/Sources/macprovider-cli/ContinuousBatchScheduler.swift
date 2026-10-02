@@ -843,18 +843,19 @@ enum ContinuousBatchDecodeOutcome: Sendable, Equatable {
     }
 }
 
-/// Tokens sampled by one step inside a lockstep window, in the window's row
-/// order. Streamed so buyers see each token when it is sampled instead of in
-/// window-sized bursts; the window's returned outcomes stay authoritative.
+/// Tokens sampled by one step inside a lockstep window. `tokens[i]` belongs to
+/// `rows[i]` of the window call. Streamed so buyers see each token when it is
+/// sampled instead of in window-sized bursts; the window's returned outcomes
+/// stay authoritative.
 struct ContinuousBatchDecodeWindowStep: Sendable, Equatable {
     let stepIndex: Int
-    let requestIDs: [String]
     let tokens: [Int]
 }
 
 /// Called synchronously after each window step's tokens are on the host.
-/// Returning false lets the backend end the window after this step; every
-/// returned row then carries `stepIndex + 1` tokens.
+/// Returning false means every row in the window is cancelled: the backend
+/// may end the window after this step (every returned row then carries
+/// `stepIndex + 1` tokens) and must not record those rows' state.
 typealias ContinuousBatchDecodeWindowStepObserver = @Sendable (ContinuousBatchDecodeWindowStep) -> Bool
 
 protocol ContinuousBatchSchedulerBackend: Sendable {
@@ -866,17 +867,12 @@ protocol ContinuousBatchSchedulerBackend: Sendable {
     /// writes `currentToken` at `committedKVTokenCount` and returns one sampled
     /// token without advancing any other row's cursor.
     func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome]
-    /// Greedy lockstep decode of `steps` tokens. Implementations MAY keep the
-    /// work inside one model-container hop. Returned `tokens` MUST contain every
-    /// sampled token in generation order, not only the last.
-    func decodeLockstepWindow(
-        rows: [ContinuousBatchDecodeInput],
-        steps: Int
-    ) async throws -> [ContinuousBatchDecodeOutcome]
-    /// Same window, reporting each step's sampled tokens to `onStep` as soon
-    /// as they exist. Streamed tokens MUST equal the returned `tokens` prefix.
-    /// The backend MAY end the window early only when `onStep` returns false,
-    /// and then with the same token count for every row.
+    /// Lockstep decode of `steps` tokens. Implementations MAY keep the work
+    /// inside one model-container hop. Returned `tokens` MUST contain every
+    /// sampled token in generation order, not only the last. Each step's
+    /// sampled tokens go to `onStep` as soon as they exist and MUST equal the
+    /// returned `tokens` prefix. The backend MAY end the window early only when
+    /// `onStep` returns false, and then with the same token count for every row.
     func decodeLockstepWindow(
         rows: [ContinuousBatchDecodeInput],
         steps: Int,
@@ -959,25 +955,28 @@ extension ContinuousBatchSchedulerBackend {
         }
     }
 
-    /// Backends without step reporting run the plain window; the scheduler
-    /// then delivers the whole window when it returns.
+    func decodeLockstepWindow(
+        rows: [ContinuousBatchDecodeInput],
+        steps: Int
+    ) async throws -> [ContinuousBatchDecodeOutcome] {
+        try await decodeLockstepWindow(rows: rows, steps: steps, onStep: nil)
+    }
+
+    /// One `decode(rows:)` per step. Steps stream while every row is still
+    /// producing; after a row fails the rest arrives with the window result.
     func decodeLockstepWindow(
         rows: [ContinuousBatchDecodeInput],
         steps: Int,
         onStep: ContinuousBatchDecodeWindowStepObserver?
     ) async throws -> [ContinuousBatchDecodeOutcome] {
-        try await decodeLockstepWindow(rows: rows, steps: steps)
-    }
-
-    func decodeLockstepWindow(
-        rows: [ContinuousBatchDecodeInput],
-        steps: Int
-    ) async throws -> [ContinuousBatchDecodeOutcome] {
         let window = max(1, steps)
         var tokensByID: [String: [Int]] = [:]
         var failed: Set<String> = []
         var current = rows
-        for _ in 0..<window {
+        // Step k streams only while every row has produced exactly k + 1
+        // tokens, so streamed tokens stay a prefix of each row's result.
+        var streaming = onStep != nil
+        for stepIndex in 0..<window {
             guard !current.isEmpty else { break }
             let outcomes = try await decode(rows: current)
             var byID: [String: ContinuousBatchDecodeOutcome] = [:]
@@ -1000,6 +999,9 @@ extension ContinuousBatchSchedulerBackend {
                         failed.insert(input.requestID)
                         continue
                     }
+                    if sampled.count != 1 {
+                        streaming = false
+                    }
                     tokensByID[output.requestID, default: []].append(contentsOf: sampled)
                     next.append(ContinuousBatchDecodeInput(
                         requestID: input.requestID,
@@ -1020,6 +1022,13 @@ extension ContinuousBatchSchedulerBackend {
                 }
             }
             current = next
+            guard streaming, failed.isEmpty, next.count == rows.count, let onStep else {
+                streaming = false
+                continue
+            }
+            if !onStep(ContinuousBatchDecodeWindowStep(stepIndex: stepIndex, tokens: next.map(\.currentToken))) {
+                break
+            }
         }
         return rows.map { row in
             if failed.contains(row.requestID) {
@@ -1089,41 +1098,31 @@ protocol ContinuousBatchSchedulerReplayAuthority: Sendable {
     func release(_ key: ContinuousBatchSchedulerReplayKey)
 }
 
-/// Lets a running lockstep window end once every row no longer needs it.
-/// The scheduler marks rows; the backend reads it from inside the model hop.
+/// Lets a running lockstep window end once every row in it is cancelled.
+/// `cancel(requestID:)` marks rows synchronously; the backend reads it from
+/// inside the model hop after each step. Rows that stopped normally keep the
+/// window running: its blocks were extended for the full window, and ending
+/// early would leave their recorded KV shorter than their block table.
 final class ContinuousBatchDecodeWindowControl: @unchecked Sendable {
     private let lock = NSLock()
     private let requestIDs: Set<String>
-    /// Row is done once the window has completed this step index.
-    private var doneAfterStep: [String: Int] = [:]
+    private var cancelled: Set<String> = []
 
     init(requestIDs: [String]) {
         self.requestIDs = Set(requestIDs)
     }
 
-    /// A row that reached a terminal token at step `s` still needs step
-    /// `s + 1`, which writes that token's KV for terminal-cache retention.
-    func markTerminal(_ requestID: String, atStep step: Int) {
-        mark(requestID, doneAfterStep: step + 1)
-    }
-
-    /// A cancelled row retains nothing, so it needs no further step.
     func markCancelled(_ requestID: String) {
-        mark(requestID, doneAfterStep: 0)
-    }
-
-    func shouldContinue(afterStep step: Int) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        guard doneAfterStep.count == requestIDs.count else { return true }
-        return doneAfterStep.values.contains { $0 > step }
-    }
-
-    private func mark(_ requestID: String, doneAfterStep step: Int) {
         lock.lock()
         defer { lock.unlock() }
         guard requestIDs.contains(requestID) else { return }
-        doneAfterStep[requestID] = min(doneAfterStep[requestID] ?? Int.max, step)
+        cancelled.insert(requestID)
+    }
+
+    var shouldContinue: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled.count < requestIDs.count
     }
 }
 
@@ -1728,6 +1727,11 @@ actor ContinuousBatchScheduler {
     /// next applied token (a serial tool turn completed its first tool call).
     private var earlyStopIDs: Set<String> = []
     private var decodeWindowControl: ContinuousBatchDecodeWindowControl?
+    /// Row order of the running window; step tokens are positional to it.
+    private var streamedWindowIDs: [String] = []
+    private var nextStreamedWindowStep = 0
+    /// Kept until the hop's outputs are applied so a completion decided while
+    /// streaming still fences a later `cancel(requestID:)`.
     private var streamedWindowRows: [String: StreamedWindowRow] = [:]
     private var draining = false
     private var cleanupFailedClosed = false
@@ -3840,6 +3844,10 @@ actor ContinuousBatchScheduler {
         // Multi-step windows stream each step's tokens to buyers as they are
         // sampled; the window still runs inside one backend hop.
         let windowIDs = prepared.map { $0.row.request.id }
+        defer {
+            streamedWindowRows = [:]
+            streamedWindowIDs = []
+        }
         var stepObserver: ContinuousBatchDecodeWindowStepObserver?
         var stepContinuation: AsyncStream<ContinuousBatchDecodeWindowStep>.Continuation?
         var stepConsumer: Task<Void, Never>?
@@ -3849,8 +3857,14 @@ actor ContinuousBatchScheduler {
                 control.markCancelled(id)
             }
             decodeWindowControl = control
+            streamedWindowIDs = windowIDs
+            nextStreamedWindowStep = 0
             streamedWindowRows = Dictionary(uniqueKeysWithValues: windowIDs.map { ($0, StreamedWindowRow()) })
-            let (stream, continuation) = AsyncStream<ContinuousBatchDecodeWindowStep>.makeStream()
+            // At most one element per step; anything beyond is a backend
+            // shape error and is dropped, which halts streaming for the hop.
+            let (stream, continuation) = AsyncStream<ContinuousBatchDecodeWindowStep>.makeStream(
+                bufferingPolicy: .bufferingOldest(windowSteps)
+            )
             stepContinuation = continuation
             stepConsumer = Task {
                 for await step in stream {
@@ -3859,7 +3873,7 @@ actor ContinuousBatchScheduler {
             }
             stepObserver = { step in
                 continuation.yield(step)
-                return control.shouldContinue(afterStep: step.stepIndex)
+                return control.shouldContinue
             }
         }
         let outcomes: [ContinuousBatchDecodeOutcome]
@@ -3877,7 +3891,6 @@ actor ContinuousBatchScheduler {
         await stepConsumer?.value
         decodeWindowControl = nil
         let streamed = streamedWindowRows
-        streamedWindowRows = [:]
         do {
             outcomes = try windowResult.get()
             try validateDecodeOutputStructure(outcomes, expectedRequestIDs: windowIDs)
@@ -3917,6 +3930,25 @@ actor ContinuousBatchScheduler {
             }
         }
         if backendCancellationPending { return }
+        // Streamed tokens are already visible to buyers; the window result
+        // must extend them exactly or the row's history is unknowable. Decided
+        // before cancellation so a late cancel cannot mask the mismatch.
+        for outcome in outcomes {
+            guard case .output(let output) = outcome,
+                  let streamedTokens = streamed[output.requestID]?.tokens,
+                  !output.tokens.starts(with: streamedTokens),
+                  let removed = activeDecode.removeValue(forKey: output.requestID) else { continue }
+            record(.localPreparationFailed)
+            let released = await release(removed.handle)
+            finish(
+                removed,
+                status: .requestFailed,
+                errorCode: released
+                    ? "continuous_batching_decode_stream_mismatch"
+                    : "continuous_batching_cleanup_failed"
+            )
+            if !released { return }
+        }
         await processCancellations()
         guard !cleanupFailedClosed else { return }
         for outcome in outcomes {
@@ -3942,11 +3974,7 @@ actor ContinuousBatchScheduler {
             let sampled = output.tokens
             let invalid = sampled.isEmpty
                 || sampled.contains { !(0..<configuration.vocabularySize).contains($0) }
-            let streamedTokens = streamed[output.requestID]?.tokens ?? []
-            // Streamed tokens are already visible to buyers; the window result
-            // must extend them exactly or the row's history is unknowable.
-            let streamMismatch = !invalid && !sampled.starts(with: streamedTokens)
-            guard invalid || streamMismatch else { continue }
+            guard invalid else { continue }
             invalidOutputIDs.insert(output.requestID)
             record(.localPreparationFailed)
             if let removed = activeDecode.removeValue(forKey: output.requestID) {
@@ -3955,9 +3983,7 @@ actor ContinuousBatchScheduler {
                     removed,
                     status: .requestFailed,
                     errorCode: released
-                        ? (invalid
-                            ? "continuous_batching_invalid_decode_token"
-                            : "continuous_batching_decode_stream_mismatch")
+                        ? "continuous_batching_invalid_decode_token"
                         : "continuous_batching_cleanup_failed"
                 )
                 if !released { return }
@@ -3972,10 +3998,18 @@ actor ContinuousBatchScheduler {
     }
 
     /// Applies one streamed window step: stop filtering, visibility, and
-    /// delivery run now; release and terminal finish wait for the window.
+    /// delivery run now; release and terminal finish wait for the window. A
+    /// step out of order or of the wrong shape halts streaming for the whole
+    /// hop before any of it is delivered; the window result then decides.
     private func applyStreamedDecodeStep(_ step: ContinuousBatchDecodeWindowStep) {
-        guard let control = decodeWindowControl, !cleanupFailedClosed else { return }
-        for (id, token) in zip(step.requestIDs, step.tokens) {
+        guard decodeWindowControl != nil, !cleanupFailedClosed, !streamedWindowIDs.isEmpty else { return }
+        guard step.stepIndex == nextStreamedWindowStep,
+              step.tokens.count == streamedWindowIDs.count else {
+            streamedWindowIDs = []
+            return
+        }
+        nextStreamedWindowStep += 1
+        for (id, token) in zip(streamedWindowIDs, step.tokens) {
             guard var streamed = streamedWindowRows[id],
                   !streamed.halted,
                   streamed.completion == nil else { continue }
@@ -3989,10 +4023,7 @@ actor ContinuousBatchScheduler {
                 continue
             }
             streamed.tokens.append(token)
-            if let completion = advanceDecodeRow(token, requestID: id) {
-                streamed.completion = completion
-                control.markTerminal(id, atStep: step.stepIndex)
-            }
+            streamed.completion = advanceDecodeRow(token, requestID: id)
             streamedWindowRows[id] = streamed
         }
     }

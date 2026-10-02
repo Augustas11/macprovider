@@ -2274,7 +2274,6 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
                 XCTAssertEqual(recorded.map(\.tokens), [[4, 7], [5, 8]])
             }
             XCTAssertEqual(recorded.map(\.stepIndex), Array(0 ..< recorded.count))
-            XCTAssertTrue(recorded.allSatisfy { $0.requestIDs == ["row-a", "row-b"] })
             backend.finish(requestID: "row-a")
             backend.finish(requestID: "row-b")
         }
@@ -3436,14 +3435,15 @@ private final class RuntimeBridgeRecordingNativeMTPBackend: ContinuousBatchSched
 
     func decodeLockstepWindow(
         rows: [ContinuousBatchDecodeInput],
-        steps: Int
+        steps: Int,
+        onStep: ContinuousBatchDecodeWindowStepObserver?
     ) async throws -> [ContinuousBatchDecodeOutcome] {
         lock.lock()
         for row in rows where row.captureNativeMTPDrafterColumns {
             capturedDecodeSteps[row.requestID, default: []].append(row.samplerStep)
         }
         lock.unlock()
-        return try await base.decodeLockstepWindow(rows: rows, steps: steps)
+        return try await base.decodeLockstepWindow(rows: rows, steps: steps, onStep: onStep)
     }
 
     func proposeNativeMTPPackedRound(

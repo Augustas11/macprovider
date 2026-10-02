@@ -14,11 +14,12 @@ so buyers on non-hybrid models (lockstep window 16) no longer receive tokens in
 window-sized bursts. Release and terminal removal stay at the hop boundary
 because the backend still writes every row's blocks until the hop returns. The
 hop's returned tokens stay authoritative: streamed tokens MUST be a prefix of
-them, or the row fails with `continuous_batching_decode_stream_mismatch`. A hop
-MAY end before `W` steps once every row in it is cancelled or has completed the
-step after its terminal token (that step writes the terminal token's KV for
-retention), and a backend cancellation ends a running hop at the next step
-boundary.
+them, or the row fails with `continuous_batching_decode_stream_mismatch`. A
+terminal or failure decided while streaming is not overtaken by a later
+cancel. A hop MAY end before `W` steps only once every row in it is cancelled
+(their state is then not recorded); rows that stopped normally keep the hop
+running because their blocks were extended for all `W` steps. A backend
+cancellation ends a running hop at the next step boundary.
 
 **Change log v0.3.7 (2026-10-01, hybrid reply-end recurrent checkpoint handoff):**
 Aligns scheduler-owned hybrid conversation-cache handoff with SPEC-024 v0.2.9.
@@ -454,9 +455,14 @@ that reaches a terminal token or fails delivery mid-hop stops streaming at that
 token; its release and terminal result wait for the hop boundary. A cancelled
 row stops streaming at once. The hop's returned tokens are authoritative:
 tokens already streamed MUST be a prefix of them, otherwise the row MUST fail
-with `continuous_batching_decode_stream_mismatch`. A hop MAY end before `W`
-steps only when every row in it is cancelled or has completed the step after
-its terminal token, and a backend cancellation MUST end a running hop at the
+with `continuous_batching_decode_stream_mismatch`, and that check MUST precede
+cancellation processing. A terminal or failure decided while streaming MUST
+NOT be overtaken by a later cancel of the same row. Streamed steps MUST be
+validated against the hop's row order and step sequence before any of their
+tokens are delivered; a malformed step halts streaming for the hop and the
+returned window decides the remaining tokens. A hop MAY end before `W` steps
+only when every row in it is cancelled, and the backend MUST then not record
+those rows' cache state. A backend cancellation MUST end a running hop at the
 next step boundary.
 
 Prefill MUST be bounded by a configured per-iteration prefill token budget. A
