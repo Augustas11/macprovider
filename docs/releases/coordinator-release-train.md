@@ -199,13 +199,16 @@ request, one capacity-constrained Qwen request, and one unknown-model request.
 The new checkpoint owners were non-busy and successful; all 78 observed billing,
 settlement-output and settlement-receipt transactions succeeded. Route snapshot
 materialization recorded 163 successes and one classified deadline error, while
-the durable journal recorded 89 successes. The audit outbox drained 100 rows to
-zero pending/poisoned rows, although its short maintenance stats/prune queries
-continued to log deadline warnings under active buyer traffic. The deferred
-billing startup scan also reached its designed 30 s timeout after listeners
-were already serving. These warnings did not lose durable evidence, but remain
-rollout observations for the SQLite pressure follow-up rather than a claim of a
-quiet startup.
+the durable journal recorded 89 successes. The outbox drainer demonstrated its
+bounded five-batch catch-up (five consecutive 100-row batches), but its
+stats/prune queries continued to hit short deadlines and later drain passes were
+skipped under active buyer traffic. The initial zero-pending gauge was therefore
+stale, not proof of an empty backlog: a direct indexed count at 09:22Z found
+210,406 pending rows, 106 unacknowledged poisoned rows, and 756,281 retained
+rows. The deferred billing startup scan also reached its designed 30 s timeout
+after listeners were already serving. Durable evidence and buyer serving stayed
+healthy, but the growing historical outbox remains open scaling work under
+#1793 rather than a quiet-rollout or backlog-closure claim.
 
 ## Open Pearl actions (not new code)
 
