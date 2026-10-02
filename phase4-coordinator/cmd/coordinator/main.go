@@ -4101,11 +4101,16 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 	}
 	// SPEC-005-R015 / SPEC-042-R016: pool-model bounds and provider owner
 	// authority apply together, after every fallible step.
-	applyTrustedPools()
+	owners, ownersApplied := applyTrustedPools()
+	// #1816 VM acceptance A-7: the owner-account outcome, never the ids.
 	logger.Info().
 		Bool("trusted_pools_pool_model_pricing_bounds_set", currentPoolModelPricingBounds() != nil).
 		Int("trusted_pools_provider_owner_public_keys", len(cfg.TrustedPools.ProviderOwnerPublicKeys)).
 		Int("trusted_pools_provider_owner_accounts", len(cfg.TrustedPools.ProviderOwnerAccountIDs)).
+		Bool("trusted_pools_provider_owner_account_ids_applied", ownersApplied).
+		Bool("trusted_pools_provider_owner_account_ids_changed", owners.Changed).
+		Int("trusted_pools_provider_owner_account_ids_providers", owners.Providers).
+		Str("trusted_pools_provider_owner_account_ids_sha256", owners.Digest).
 		Msg("trusted pools pool-model bounds and owner authority reloaded")
 	// Every fallible step above returned early on rejection, so reaching here
 	// means this reload's config is the applied one.
