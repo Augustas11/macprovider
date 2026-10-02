@@ -78,15 +78,15 @@ A coordinator deploy compares the tag's catalog with live (`compare-live`):
 
 ## Live on Pearl
 
-Probed 2026-09-30 (`/healthz`).
+Probed 2026-10-02 (`/healthz`).
 
 | Field | Value |
 |---|---|
-| Coordinator | **v1.8.209** @ `5245dc9f`. Applied 2026-09-30 at 10:03Z through the signed runtime updater; public `/healthz` reported `v1.8.209`. |
-| Gateway | **v1.8.209** (`gateway.db` schema 15; `coordinator.require_settlement_trailers: true`). The live `api.malibu.tech` nginx carries certbot TLS and `/ws/provider` routes absent from the repo template. **Never run the gateway `deploy-pearl-vps.sh`**; use the signed runtime updater for binary-only releases. |
-| Release | [Pearl runtime v1.8.209](https://github.com/Augustas11/macprovider/releases/tag/v1.8.209), immutable runtime-only prerelease. The apply preserved the live September 25 catalog; no full deploy followed it. |
+| Coordinator | **v1.8.210** @ `6756706b`. Applied 2026-10-02 at 09:15Z through the signed runtime updater; public `/healthz` reported `v1.8.210`. |
+| Gateway | **v1.8.210** (`gateway.db` schema 17; `coordinator.require_settlement_trailers: true`). The live `api.malibu.tech` nginx carries certbot TLS and `/ws/provider` routes absent from the repo template. **Never run the gateway `deploy-pearl-vps.sh`**; use the signed runtime updater for binary-only releases. |
+| Release | [Pearl runtime v1.8.210](https://github.com/Augustas11/macprovider/releases/tag/v1.8.210), immutable runtime-only prerelease; build run [36986865579](https://github.com/Augustas11/macprovider/actions/runs/36986865579). The apply preserved the live September 25 catalog; no full deploy followed it. |
 | `recommended_binary_version` | 1.8.207 (CLI train owns this) |
-| Includes | Everything on `main` through `5245dc9f`, including #1804's Qwen3.6 OpenRouter capabilities. |
+| Includes | Everything on `main` through `6756706b`, including #1801, #1812, #1818, #1822/#1823/#1825 and #1831. |
 | nginx | `/v1/stats/routability` route added on Pearl 2026-09-24 10:24Z, additively and verbatim from `phase4-coordinator/dist` (backups `*.bak-routability-20260924T102404Z`). Pearl's nginx still lags the repo on `/v1/catalog-artifacts`, `/v1/portal/session` and `/v1/provider/malibu-reward-audit`, and carries a hand-deployed `/v1/provider/model-admission/` (BYOM) route the repo lacks, so **do not copy the repo site file over it**. |
 
 Signed prerelease `v1.8.189` at `0ac51afa` exists and is immutable, but it was
@@ -112,7 +112,8 @@ The canary Mac mp-26592d… now runs signed CLI candidate v1.8.195, whose payloa
 
 | Tag | Commit | Head PR |
 |---|---|---|
-| v1.8.209 | `5245dc9f` | #1804 Qwen3.6 OpenRouter capabilities — **live** |
+| v1.8.210 | `6756706b` | #1831 bounded SQLite evidence maintenance; also #1801, #1812, #1818 and runtime dependency updates — **live** |
+| v1.8.209 | `5245dc9f` | #1804 Qwen3.6 OpenRouter capabilities |
 | v1.8.208 | `bc276ea5` | #1783 (#1752 operator drain) |
 | v1.8.206 | `40ed8752` | #1779 (#1775 money-writer starvation), #1781 (updater snapshot timeout), #1782 (gateway schema-15 upgrade); also carries #1754, #1763, #1769, #1732, #1658 |
 | v1.8.205 | `3ca8e792` | rolled back: gateway schema-15 migration (`no such column: operator_review`) |
@@ -177,34 +178,34 @@ around 2026-10-23. The fix takes effect at the next renewal (Wed 2026-09-30
 16:00 UTC), or earlier with a manual dispatch of
 `renew-autotune-static-feed-signed.yml`.
 
-## Next coordinator release — v1.8.210 reserved, net changes vs v1.8.209
+## Next coordinator release — none assigned, net changes vs v1.8.210
 
-`v1.8.209` was applied through the signed runtime-only updater on 2026-09-30.
-The public model document then returned exactly one paid Qwen3.6 row with the
-#1804 feature descriptors, while the live catalog stayed on the September 25
-release. `v1.8.210` is reserved by the 2026-10-02 Pearl deployment session for
-one signed runtime-only cut from current `main`. No `dist/`, unit, nginx,
-updater, or catalog-verifier asset changed after v1.8.209, so a full deploy is
-out of scope and the live catalog target must remain byte-for-byte unchanged.
-The pre-apply gate is the updater's explicit `--tag v1.8.210` plan, with no
-active transaction and enough disk for a new database snapshot. The table below
-is the complete runtime payload for that cut.
+`v1.8.210` was applied through the signed runtime-only updater on 2026-10-02.
+No coordinator, gateway, or Pearl-asset change has merged since that cut.
 
 | Net change in coordinator / gateway / Pearl assets | Status | PR |
 |---|---|---|
-| The authenticated gateway default output cap is 32,768 tokens while the demo surface remains capped at 512. Served buyer documentation and OpenRouter model metadata now report the effective configured/live-context limit consistently; SPEC-006 is v0.9.42. | merged `d5767b4a5` 2026-09-30 | #1801 |
-| Gateway demand telemetry for #1807 records attempted demand, served/unmet/capacity/substitution outcomes, privacy-bucketed buyer/model/provider fields, timing/usage metrics, 14-day retention pruning, and demand summaries. Release handoff: `docs/releases/gateway-release-1807-demand-telemetry.md`. | merged `2be9975a6` 2026-10-01; deploy pending | #1812 |
-| Provider runtime sampling-contract fixes carry coordinator relay changes that preserve buyer cancellation and delivered-only billing semantics, plus gateway OpenRouter-model metadata corrections. | merged `2b1de5040` 2026-10-01 | #1818 |
-| Runtime dependencies advance to modernc SQLite 1.60.0, `golang.org/x/text` 0.42.0, and chi 5.3.2. The testcontainers PostgreSQL bump is build/test-only and does not enter the Pearl binaries. | merged `d84d072b7`, `cac7283c4`, `1e5baa087` 2026-10-01 | #1822, #1823, #1825 |
-| SQLite evidence maintenance is bounded under buyer traffic: one route-journal WAL checkpoint owner, a 25 ms billing-output evidence budget with fresh-row reuse, classified SQLite-pressure shedding only, and five-batch audit-outbox catch-up. Integrity failures remain fail-closed and the new pressure/catch-up metrics provide rollout evidence. | merged `45032a1fe` 2026-10-02 | #1831 |
+| — | — | — |
 
-Apply verification for v1.8.210 must additionally prove gateway schema 17 and
-the `demand_events` append-only/index contract, confirm the coordinator starts
-without a billing startup-scan failure, and inspect the new SQLite
-pressure/catch-up metrics and journals for unclassified evidence loss. Rolling
-back the gateway binary after schema 17 requires restoring the updater's
-pre-v1.8.210 gateway database snapshot; do not run an old binary against the
-newer schema.
+**2026-10-02 v1.8.210 apply.** The protected release built the signed runtime
+pair from exact tag commit `6756706b`; the repository release verifier passed,
+and Pearl's updater completed the schema-15-to-17 transaction with an 11 GB
+rollback snapshot. Public coordinator and gateway health both reported
+`v1.8.210`, the updater reported `already_current`, services were active, and
+the live catalog symlink remained
+`published-2026-09-25-artifact-hash-correction-v1-d9e402203f81679e`.
+Demand telemetry recorded three privacy-bucketed paid smokes: one served Llama
+request, one capacity-constrained Qwen request, and one unknown-model request.
+The new checkpoint owners were non-busy and successful; all 78 observed billing,
+settlement-output and settlement-receipt transactions succeeded. Route snapshot
+materialization recorded 163 successes and one classified deadline error, while
+the durable journal recorded 89 successes. The audit outbox drained 100 rows to
+zero pending/poisoned rows, although its short maintenance stats/prune queries
+continued to log deadline warnings under active buyer traffic. The deferred
+billing startup scan also reached its designed 30 s timeout after listeners
+were already serving. These warnings did not lose durable evidence, but remain
+rollout observations for the SQLite pressure follow-up rather than a claim of a
+quiet startup.
 
 ## Open Pearl actions (not new code)
 

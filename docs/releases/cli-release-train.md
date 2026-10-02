@@ -41,11 +41,10 @@ binary the Mac runs.
   in-scope change.
 
 Pearl coordinator/gateway release numbering is independent from the provider
-CLI train. Pearl currently reports runtime `v1.8.209`; failed or superseded
-runtime attempts remain consumed tags. Runtime tag `v1.8.210` is reserved for
-the 2026-10-02 Pearl coordinator/gateway rollout. Public provider release
-`v1.8.207` is the current fleet recommendation and none of those tags may be
-reused by either train.
+CLI train. Pearl currently reports runtime `v1.8.210`; failed or superseded
+runtime attempts remain consumed tags. Public provider release `v1.8.207` is
+the current fleet recommendation and none of those tags may be reused by either
+train.
 
 ## Current promoted stable
 
@@ -60,8 +59,8 @@ reused by either train.
 ## Next CLI candidate — net changes vs 1.8.207
 
 No candidate has been cut from this table yet. Use the next unused tag after
-the coordinator and CLI train reservations at cut time; `v1.8.210` is reserved
-for the 2026-10-02 Pearl runtime and must not be used for a CLI candidate.
+the coordinator and CLI train reservations at cut time; runtime tag `v1.8.210`
+is consumed and must not be reused for a CLI candidate.
 
 | Net change in CLI / Malibu / installer | Status | PR |
 |---|---|---|

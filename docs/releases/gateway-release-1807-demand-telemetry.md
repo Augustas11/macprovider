@@ -4,16 +4,16 @@ Date: 2026-10-01
 
 ## Status
 
-Gateway demand telemetry for issue #1807 is implemented on `main` but is not
-live on Pearl yet.
+Gateway demand telemetry for issue #1807 is live on Pearl in runtime
+`v1.8.210`.
 
 - Implementation PR: #1812, `2be9975a6dffeddbae8edd7407c3a820420f6430`
 - Evidence/update commits after merge:
   - `bd8a99a8dfb591c02f24b1bc7064ee8fdabd128f`
   - `17cbfb16d448ea17b8d5ead41a840c875ad7f0c1`
-- Live Pearl runtime before this handoff: `v1.8.209` at `5245dc9f`
-- Next unused runtime tag observed locally: `v1.8.210`; reserve/check again
-  before cutting because the CLI and Pearl runtime trains share the namespace.
+- Previous Pearl runtime: `v1.8.209` at `5245dc9f`
+- Applied runtime: `v1.8.210` at `6756706b`, 2026-10-02 09:15Z
+- Release workflow: [36986865579](https://github.com/Augustas11/macprovider/actions/runs/36986865579)
 
 ## What the release must carry
 
@@ -100,5 +100,26 @@ package now exist:
 - release/deploy ownership recorded here and in
   `docs/releases/coordinator-release-train.md`.
 
-Remaining work is operational release execution and catalog-signing follow-up,
-not more issue #1807 implementation.
+Operational release execution is complete. The remaining work is the separate
+catalog-signing follow-up, not more issue #1807 implementation.
+
+## Deployment evidence — 2026-10-02
+
+- The signed runtime verifier matched every release asset to exact tag commit
+  `6756706b5c6bc8971e49b97b72684e10a0297c28`.
+- The Pearl updater snapshotted `gateway.db`, `coordinator.db`, and
+  `coordinator-audit.db`, applied the pair, and now reports
+  `action=already_current` for v1.8.210.
+- Gateway `/healthz` reports v1.8.210 and `schema_migrations` reports 17.
+- `demand_events` has its no-update trigger and all three demand indexes.
+- A one-token paid Llama request returned 200 and recorded a served row; a
+  Qwen request with no free provider recorded `all_providers_busy`; and an
+  unroutable request recorded the fixed `unknown_model_id` bucket.
+- The live schema stores only bounded request/routing/timing/token metadata. It
+  has no prompt text, message, request/response body, raw account, API-key, or
+  wallet fields.
+- The three-row release-smoke aggregate distinguishes served, unmet, and
+  capacity-constrained demand. Substitution remained zero in this sample.
+- The 14-day pruning path was not forced against production rows; its migration
+  and bounded-delete behavior remain covered by the reviewed implementation and
+  CI. The observation window can now collect natural retention evidence.
