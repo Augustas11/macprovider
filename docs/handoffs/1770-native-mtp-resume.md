@@ -14,7 +14,10 @@ campaign is signed, released, deployed, or activated.
 | MacProvider campaign | PR #1832, `campaign/native-mtp-formal` | Draft; do not merge yet |
 | Fused upstream baseline | `Augustas11/mlx-swift-lm@ca29e9544777068a0b53aad87310ff1cfaf3fd1d` | Pushed production candidate; Studio validation pending |
 | Fused MacProvider pin | `3600d7b9f` | Exact pin and fused qualification requirements committed |
+| SwiftPM release lock | `618dbe2d5` | Xcode 16.4 transitive pins restored; fused upstream revision preserved |
 | Operator-pause fix | `0e5e63b0c` | Targeted test passes; reviewed signed CLI needed for live validation |
+| Post-gateway replay analyzer | `e2a5b51fc` | Exact R004 mix semantics and frozen corrected gates; capture/replay pending |
+| Governance versions | `bfbdc0d94` | SPEC-023 v0.22.7 and SPEC-048 0.1.22 reconciled in `CONFORMANCE.json` |
 | Historical stock R015 | policy `30934c07e5b6ca6dfa569505bbfdb2fd118be719cba81ddf99193a4ebe72d581` | PASS, preserved, superseded for fused authorization |
 | Serving journey | `NativeMTPJourneyE2ECommand.swift` | Incomplete; deterministic step-07 harness committed |
 
@@ -62,8 +65,11 @@ connect a local, unsigned, ad-hoc-signed, or unreleased build to Malibu.
    cache-state digest, proposal/verify/commit boundary cancellations,
    deterministic mixed batch, warm swap, accounting, self-test, isolated
    coordinator canary, and redaction.
-5. Run the representative post-gateway eligibility replay, including the
-   required eligible request and completion-token share.
+5. Privacy-review and preregister the representative post-gateway sample,
+   capture/replay it on the Studio, and validate the evidence with
+   `scripts/native_mtp_post_gateway_replay_analyze.py`. The analyzer requires
+   the exact pre-capacity R004 conversation-key state, at least 10% eligible
+   requests and completion tokens, and the frozen paired ordinary-row bounds.
 6. Freeze the full diff and run fresh code, security, and architecture audits.
    The final gate is 0 Critical, 0 High, and 0 Medium findings.
 7. The operator signs the R024 sidecar, challenge bank, and serving journey.
@@ -94,6 +100,11 @@ cannot be established, fail closed and leave the hardware run pending.
   states.
 - Upstream watcher suite: 19 tests PASS; live comparison unchanged with remote
   revision and pin verified.
+- Post-gateway replay analyzer suite: 19 tests PASS, including closed selector
+  reasons, conversation-key semantics, privacy/schema rejection, fixed
+  eligibility floors, paired-block integrity, and frozen corrected bounds.
+- SwiftPM lock contract: PASS locally; the exact Xcode 16.4 locked-resolution
+  job passed on parent head `e2a5b51fc` before the governance-only follow-up.
 - PR governance declaration: PASS.
 - Full CI for the latest head remains a GitHub Actions gate; do not reproduce
   it locally on `Augustas-Air.local`.
