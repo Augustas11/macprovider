@@ -314,7 +314,10 @@ struct ProviderLifecycleStateRecord: Codable, Equatable, Sendable {
         case .degradedServing:
             [.loadingModel, .pausedByOperator, .locallyReadyConnecting, .servingBuyers, .degradedServing]
         case .pausedByOperator:
-            [.installing, .loadingModel, .locallyReadyConnecting, .servingBuyers, .degradedServing, .pausedByOperator]
+            [
+                .installing, .loadingModel, .locallyReadyConnecting, .servingBuyers,
+                .networkOffline, .coordinatorUnavailable, .degradedServing, .pausedByOperator,
+            ]
         case .servingBuyers:
             [
                 .locallyReadyConnecting, .networkOffline, .coordinatorUnavailable,
@@ -356,6 +359,13 @@ struct ProviderLifecycleStateRecord: Codable, Equatable, Sendable {
             default:
                 break
             }
+        }
+        // A disconnected serve has already written the predecessor, but only an
+        // explicit operator command may convert that state into durable pause.
+        if [.networkOffline, .coordinatorUnavailable].contains(previous.state),
+           state == .pausedByOperator,
+           writer != .operatorCommand {
+            throw ProviderLifecycleStateError.invalidTransition(from: previous.state.rawValue, to: state.rawValue)
         }
     }
 

@@ -166,6 +166,46 @@ final class ProviderLifecycleStateTests: XCTestCase {
         XCTAssertNotEqual(resumed.previousTransitionID, restarting.transitionID)
     }
 
+    func testOperatorCanPauseAfterCoordinatorDisconnectsDuringDrain() throws {
+        for disconnectedState in [ProviderLifecycleState.networkOffline, .coordinatorUnavailable] {
+            let fixture = try Fixture()
+            let store = ProviderLifecycleStateStore(url: fixture.recordURL)
+            let disconnected = try store.transition(
+                to: disconnectedState,
+                reasonCode: "coordinator_disconnected_during_drain",
+                writer: .serve,
+                operationID: "serve:disconnect"
+            )
+
+            XCTAssertThrowsError(
+                try store.transition(
+                    to: .pausedByOperator,
+                    reasonCode: "installer_pause_attempt",
+                    writer: .installer,
+                    operationID: "installer:disconnect",
+                    operatorPaused: true
+                )
+            ) { error in
+                XCTAssertEqual(
+                    error as? ProviderLifecycleStateError,
+                    .invalidTransition(from: disconnectedState.rawValue, to: "paused_by_operator")
+                )
+            }
+
+            let paused = try store.transition(
+                to: .pausedByOperator,
+                reasonCode: "operator_pause_confirmed",
+                writer: .operatorCommand,
+                operationID: "operator-pause:disconnect",
+                operatorPaused: true
+            )
+
+            XCTAssertEqual(paused.state, .pausedByOperator)
+            XCTAssertTrue(paused.operatorPauseRequested)
+            XCTAssertEqual(paused.previousTransitionID, disconnected.transitionID)
+        }
+    }
+
     func testInstallerRecordsRollbackFromUninstalledForFailedReinstall() throws {
         // #1421: a reinstall after an uninstall tombstone whose cutover fails
         // before the `installing` checkpoint must still be able to persist the
