@@ -40,6 +40,11 @@ struct A3BFusedMoEBenchCommand: AsyncParsableCommand {
     @Option(name: .customLong("gate-up-rows")) var gateUpRows: Int?
     @Option(name: .customLong("down-rows")) var downRows: Int?
     @Option(name: .customLong("down-sgs")) var downSGs: Int?
+    @Option(name: .customLong("kernel-version")) var kernelVersion: Int?
+    @Option(name: .customLong("router-rows")) var routerRows: Int?
+    @Option(name: .customLong("gate-up-tokens")) var gateUpTokens: Int?
+    @Option(name: .customLong("down-tpb")) var downTPB: Int?
+    @Option(name: .customLong("stop-after")) var stopAfter: Int?
 
     static let prompts: [String] = [
         "Explain how a hash map handles collisions, compare chaining with open addressing, and give the time complexity of insert and lookup in the average and worst case.",
@@ -56,6 +61,11 @@ struct A3BFusedMoEBenchCommand: AsyncParsableCommand {
         if let gateUpRows { Qwen35FusedMoE.gateUpRows = gateUpRows }
         if let downRows { Qwen35FusedMoE.downRows = downRows }
         if let downSGs { Qwen35FusedMoE.downSimdgroups = downSGs }
+        if let kernelVersion { Qwen35FusedMoE.kernelVersion = kernelVersion }
+        if let routerRows { Qwen35FusedMoE.routerRows = routerRows }
+        if let gateUpTokens { Qwen35FusedMoE.gateUpTokens = gateUpTokens }
+        if let downTPB { Qwen35FusedMoE.downTokensPerBlock = downTPB }
+        if let stopAfter { Qwen35FusedMoE.labStopAfter = stopAfter }
         await Qwen35TextMTPRegistration.register()
         let container = try await LLMModelFactory.shared.loadContainer(
             from: URL(fileURLWithPath: modelDir, isDirectory: true),
@@ -127,6 +137,8 @@ struct A3BFusedMoEBenchCommand: AsyncParsableCommand {
     }
 
     static func emit(_ record: [String: Any]) {
+        var record = record
+        for (k, v) in record { if let d = v as? Double, !d.isFinite { record[k] = "\(d)" } }
         if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]) {
             print(String(decoding: data, as: UTF8.self))
             fflush(stdout)
@@ -254,18 +266,27 @@ struct A3BFusedMoEBenchCommand: AsyncParsableCommand {
                 let x = taps[li].reshaped([-1, h])[64 ..< (64 + tcount)]
                 let layer = block as! UnaryLayer
                 let params = Dictionary(uniqueKeysWithValues: block.parameters().flattened())
+                // Evaluate each fused call on its own: the v2 router's per-block
+                // completion counter assumes one in-flight call per block.
                 Qwen35FusedMoE.mode = .off
                 let stock = layer(x.reshaped([1, tcount, h])).reshaped([tcount, h])
+                eval(stock)
                 Qwen35FusedMoE.mode = .full
                 let fused = layer(x.reshaped([1, tcount, h])).reshaped([tcount, h])
+                eval(fused)
                 var singles: [MLXArray] = []
                 for t in 0 ..< tcount {
                     singles.append(layer(x[t ..< (t + 1)].reshaped([1, 1, h])).reshaped([1, h]))
+                    eval(singles[t])
                 }
                 let single = concatenated(singles, axis: 0)
                 Qwen35FusedMoE.mode = .off
                 let stockSel = sortedRows(stockRouter(params, x))
-                let fusedSel = sortedRows(Qwen35FusedMoE.labRouter(block, x)!.0)
+                Qwen35FusedMoE.mode = .full
+                let fusedRouter = Qwen35FusedMoE.labRouter(block, x)!.0
+                eval(fusedRouter)
+                Qwen35FusedMoE.mode = .off
+                let fusedSel = sortedRows(fusedRouter)
                 let (ref, refSel) = reference(params, x)
                 eval(stock, fused, single, ref)
                 var agree: [Int] = []
@@ -361,6 +382,11 @@ struct A3BFusedMoEBenchCommand: AsyncParsableCommand {
                     "graph_us_per_layer_p50": med(graph), "gpu_us_per_layer_p50": med(gpu),
                     "gate_up_rows": Qwen35FusedMoE.gateUpRows, "down_rows": Qwen35FusedMoE.downRows,
                     "down_sgs": Qwen35FusedMoE.downSimdgroups,
+                    "kernel_version": Qwen35FusedMoE.kernelVersion,
+                    "router_rows": Qwen35FusedMoE.routerRows,
+                    "gate_up_tokens": Qwen35FusedMoE.gateUpTokens,
+                    "down_tpb": Qwen35FusedMoE.downTokensPerBlock,
+                    "stop_after": Qwen35FusedMoE.labStopAfter,
                 ])
             }
         }
