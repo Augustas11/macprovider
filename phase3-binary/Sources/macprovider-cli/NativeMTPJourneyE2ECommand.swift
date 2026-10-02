@@ -316,13 +316,22 @@ private final class NativeMTPJourneyRunner {
         let expected = try await complete(requests, runtime: ordinary, staggerMS: 150)
         // Control: ordinary batched decode must reproduce itself under the
         // same staggered load, or a native mismatch would mean nothing.
-        let control = try await complete(requests.map { $0.withConversationKey($0.conversationKey.map { $0 + "-control" }) }, runtime: ordinary, staggerMS: 150)
+        // Fresh request ids and keys: the scheduler rejects a reused id with a
+        // different body, and a reused key would hit the conversation cache.
+        let control = try await complete(
+            requests.map {
+                $0.withRequestID(($0.requestID ?? "") + "-control")
+                    .withConversationKey($0.conversationKey.map { $0 + "-control" })
+            },
+            runtime: ordinary,
+            staggerMS: 150
+        )
         let actual = try await complete(requests, runtime: native, staggerMS: 150)
         var paths: [String: String] = [:]
         var reasons: [String: String] = [:]
         for request in requests {
             let id = request.requestID ?? ""
-            step.check("\(id).ordinary_control_reproducible", expected[id].map { exp in control[id].map { same(exp, $0) } ?? false } ?? false)
+            step.check("\(id).ordinary_control_reproducible", expected[id].map { exp in control[id + "-control"].map { same(exp, $0) } ?? false } ?? false)
             step.check("\(id).parity", expected[id].map { exp in actual[id].map { same(exp, $0) } ?? false } ?? false)
             let admission = recorder.requestSnapshot().last { $0.requestID == id }
             paths[id] = admission?.admission.effectivePath.rawValue ?? "missing"
