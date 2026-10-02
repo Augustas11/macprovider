@@ -459,8 +459,9 @@ that reaches a terminal token or fails delivery mid-hop stops streaming at that
 token; its release and terminal result wait for the hop boundary. A cancelled
 row stops streaming at once. The hop's returned tokens are authoritative:
 tokens already streamed MUST be a prefix of them, otherwise the row MUST fail
-with `continuous_batching_decode_stream_mismatch`, and that check MUST precede
-cancellation processing. A terminal or failure is decided when the scheduler
+with `continuous_batching_decode_stream_mismatch`. Validation of returned
+windows (stream mismatch, more than `W` tokens, out-of-vocabulary tokens) MUST
+precede cancellation processing so a late cancel cannot mask it. A terminal or failure is decided when the scheduler
 applies the token that causes it, as at a one-token hop boundary; once
 decided while streaming it MUST NOT be overtaken by a later cancel of the same
 row (a cancel that lands before the token is applied wins, as it always did).

@@ -3930,22 +3930,34 @@ actor ContinuousBatchScheduler {
             }
         }
         if backendCancellationPending { return }
-        // Streamed tokens are already visible to buyers; the window result
-        // must extend them exactly or the row's history is unknowable. Decided
-        // before cancellation so a late cancel cannot mask the mismatch.
+        // Malformed window results are decided before cancellation so a late
+        // cancel cannot mask them. Streamed tokens are already visible to
+        // buyers, so the result must extend them exactly or the row's history
+        // is unknowable; more tokens than the window extended blocks for would
+        // advance the row past its prepared KV capacity.
+        var invalidOutputIDs: Set<String> = []
         for outcome in outcomes {
-            guard case .output(let output) = outcome,
-                  let streamedTokens = streamed[output.requestID]?.tokens,
-                  !output.tokens.starts(with: streamedTokens),
-                  let removed = activeDecode.removeValue(forKey: output.requestID) else { continue }
+            guard case .output(let output) = outcome else { continue }
+            let sampled = output.tokens
+            let errorCode: String
+            if sampled.isEmpty
+                || sampled.count > windowSteps
+                || sampled.contains(where: { !(0..<configuration.vocabularySize).contains($0) }) {
+                errorCode = "continuous_batching_invalid_decode_token"
+            } else if let streamedTokens = streamed[output.requestID]?.tokens,
+                      !sampled.starts(with: streamedTokens) {
+                errorCode = "continuous_batching_decode_stream_mismatch"
+            } else {
+                continue
+            }
+            invalidOutputIDs.insert(output.requestID)
             record(.localPreparationFailed)
+            guard let removed = activeDecode.removeValue(forKey: output.requestID) else { continue }
             let released = await release(removed.handle)
             finish(
                 removed,
                 status: .requestFailed,
-                errorCode: released
-                    ? "continuous_batching_decode_stream_mismatch"
-                    : "continuous_batching_cleanup_failed"
+                errorCode: released ? errorCode : "continuous_batching_cleanup_failed"
             )
             if !released { return }
         }
@@ -3968,29 +3980,6 @@ actor ContinuousBatchScheduler {
         let outputs = outcomes.compactMap { outcome -> ContinuousBatchDecodeOutput? in
             guard case .output(let output) = outcome else { return nil }
             return output
-        }
-        var invalidOutputIDs: Set<String> = []
-        for output in outputs {
-            let sampled = output.tokens
-            // More tokens than the window extended blocks for would advance
-            // the row past its prepared KV capacity.
-            let invalid = sampled.isEmpty
-                || sampled.count > windowSteps
-                || sampled.contains { !(0..<configuration.vocabularySize).contains($0) }
-            guard invalid else { continue }
-            invalidOutputIDs.insert(output.requestID)
-            record(.localPreparationFailed)
-            if let removed = activeDecode.removeValue(forKey: output.requestID) {
-                let released = await release(removed.handle)
-                finish(
-                    removed,
-                    status: .requestFailed,
-                    errorCode: released
-                        ? "continuous_batching_invalid_decode_token"
-                        : "continuous_batching_cleanup_failed"
-                )
-                if !released { return }
-            }
         }
         let stillActive = Set(activeDecode.keys)
         await applyDecodeOutputs(outputs.filter {

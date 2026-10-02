@@ -4515,6 +4515,7 @@
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testStreamedTokensThatDisagreeWithWindowResultFailTheRow",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testMalformedStepHaltsStreamingAndWindowResultDelivers",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testWindowResultLongerThanWindowFailsTheRow",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testCancelDuringHopDoesNotMaskOverlongWindowResult",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testTerminalFailureAfterStreamedTokensIsPostInference",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testDeliveryBackpressureMidWindowKeepsBackpressureTerminal",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testLockstepWindowStreamsStepsAndEndsWhenObserverStops"

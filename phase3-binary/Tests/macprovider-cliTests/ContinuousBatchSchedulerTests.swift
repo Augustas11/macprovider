@@ -4592,6 +4592,37 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(result.errorCode, "continuous_batching_invalid_decode_token")
     }
 
+    /// A malformed window result is decided before cancellation, so a cancel
+    /// landing during the hop cannot turn it into a clean cancellation.
+    func testCancelDuringHopDoesNotMaskOverlongWindowResult() async throws {
+        let afterFirstStep = AsyncGate()
+        let recorder = TokenEventRecorder()
+        let backend = StreamingWindowBackend(
+            scripts: ["overlong": Array(10 ..< 40)],
+            gateAfterStep: 0,
+            gate: afterFirstStep,
+            extraReturnedTokens: 8
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            tokenDeliveryBufferLimit: 64,
+            maxDecodeLockstepWindow: 8,
+            backend: backend
+        )
+        let submitted = Task {
+            try await scheduler.submit(
+                .init(id: "overlong", conversationKey: "", promptTokens: [1], maxOutputTokens: 20),
+                tokenSink: { recorder.append($0) }
+            )
+        }
+        try await eventually { recorder.events().count == 2 }
+        await scheduler.cancel(requestID: "overlong")
+        await afterFirstStep.open()
+        let result = try await submitted.value
+        XCTAssertEqual(result.terminalStatus, .requestFailed)
+        XCTAssertEqual(result.errorCode, "continuous_batching_invalid_decode_token")
+    }
+
     /// Streamed tokens are already visible, so a window result that does not
     /// extend them exactly fails the row instead of rewriting its history.
     func testStreamedTokensThatDisagreeWithWindowResultFailTheRow() async throws {
