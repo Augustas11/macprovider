@@ -3972,7 +3972,10 @@ actor ContinuousBatchScheduler {
         var invalidOutputIDs: Set<String> = []
         for output in outputs {
             let sampled = output.tokens
+            // More tokens than the window extended blocks for would advance
+            // the row past its prepared KV capacity.
             let invalid = sampled.isEmpty
+                || sampled.count > windowSteps
                 || sampled.contains { !(0..<configuration.vocabularySize).contains($0) }
             guard invalid else { continue }
             invalidOutputIDs.insert(output.requestID)

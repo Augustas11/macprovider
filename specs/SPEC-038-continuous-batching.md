@@ -19,7 +19,9 @@ terminal or failure decided while streaming is not overtaken by a later
 cancel. A hop MAY end before `W` steps only once every row in it is cancelled
 (their state is then not recorded); rows that stopped normally keep the hop
 running because their blocks were extended for all `W` steps. A backend
-cancellation ends a running hop at the next step boundary.
+cancellation ends a running hop at the next step boundary. A failure after streamed
+tokens is reported as post-inference and not retryable, and a returned row
+longer than `W` fails.
 
 **Change log v0.3.7 (2026-10-01, hybrid reply-end recurrent checkpoint handoff):**
 Aligns scheduler-owned hybrid conversation-cache handoff with SPEC-024 v0.2.9.
@@ -448,16 +450,23 @@ exceed the prefill decode window. The prefill decode window gives active rows
 several tokens per prefill turn rather than one, so long prompts slow them by
 a bounded factor instead of stalling them.
 
-When `W > 1`, stop handling, visibility and token delivery for each step MUST
-happen when that step's sampled tokens exist, not when the hop returns, so
-buyer-visible cadence follows decode steps rather than `W`-token bursts. A row
+When `W > 1`, each step's sampled tokens MUST be handed to stop handling,
+visibility and token delivery as soon as they exist, without waiting for the
+hop to return, so buyer-visible cadence follows decode steps rather than
+`W`-token bursts. (Delivery latency after hand-off is subject to scheduler
+actor scheduling; the backend does not wait for it.) A row
 that reaches a terminal token or fails delivery mid-hop stops streaming at that
 token; its release and terminal result wait for the hop boundary. A cancelled
 row stops streaming at once. The hop's returned tokens are authoritative:
 tokens already streamed MUST be a prefix of them, otherwise the row MUST fail
 with `continuous_batching_decode_stream_mismatch`, and that check MUST precede
-cancellation processing. A terminal or failure decided while streaming MUST
-NOT be overtaken by a later cancel of the same row. Streamed steps MUST be
+cancellation processing. A terminal or failure is decided when the scheduler
+applies the token that causes it, as at a one-token hop boundary; once
+decided while streaming it MUST NOT be overtaken by a later cancel of the same
+row (a cancel that lands before the token is applied wins, as it always did).
+A returned row with more tokens than `W` MUST fail. A failure after a stream
+already delivered tokens MUST be reported as post-inference and not
+retryable. Streamed steps MUST be
 validated against the hop's row order and step sequence before any of their
 tokens are delivered; a malformed step halts streaming for the hop and the
 returned window decides the remaining tokens. A hop MAY end before `W` steps

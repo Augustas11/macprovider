@@ -2933,6 +2933,25 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
     // offered its caller an event. The decode pump's post-token failure is
     // `.deliveryBackpressure`: inference ran, partial output may already be
     // with the buyer, so it is a distinct code and not retryable.
+    /// A stream that already delivered tokens and then fails (forward,
+    /// sampling or stream mismatch inside a per-step window) is post-inference
+    /// and not retryable; the same code before any token stays pre-inference.
+    func testTerminalFailureAfterStreamedTokensIsPostInference() throws {
+        let code = "continuous_batching_decode_stream_mismatch"
+        let after = ModelRuntime.terminalFailureError(code: code, streamedTokens: 3)
+        XCTAssertEqual(after.status, 503)
+        XCTAssertEqual(after.code, code)
+        XCTAssertTrue(after.inferenceRan)
+        XCTAssertFalse(after.settlementRan)
+        let envelope = after.envelope["error"] as? [String: Any]
+        XCTAssertEqual(envelope?["retryable"] as? Bool, false)
+        XCTAssertEqual(envelope?["inference_ran"] as? Bool, true)
+
+        let before = ModelRuntime.terminalFailureError(code: "continuous_batching_forward_failed", streamedTokens: 0)
+        XCTAssertFalse(before.inferenceRan)
+        XCTAssertFalse(before.settlementRan)
+    }
+
     func testAC25DeliveryBackpressureIsAPostTokenNonRetryableOutcome() throws {
         let apiError = try XCTUnwrap(ContinuousBatchSchedulerError.deliveryBackpressure.asAPIError())
         XCTAssertEqual(apiError.status, 503)
@@ -4551,6 +4570,26 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(result.outputTokens, [10, 11, 12, 13, 14, 15])
         XCTAssertEqual(recorder.events().map(\.token), result.outputTokens)
         XCTAssertEqual(recorder.events().map(\.tokenIndex), Array(0 ..< 6))
+    }
+
+    /// A window result longer than the steps the scheduler extended blocks
+    /// for fails the row instead of advancing it past its KV capacity.
+    func testWindowResultLongerThanWindowFailsTheRow() async throws {
+        let backend = StreamingWindowBackend(
+            scripts: ["long": Array(10 ..< 30)],
+            extraReturnedTokens: 1
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            tokenDeliveryBufferLimit: 64,
+            maxDecodeLockstepWindow: 4,
+            backend: backend
+        )
+        let result = try await scheduler.submit(
+            .init(id: "long", conversationKey: "", promptTokens: [1], maxOutputTokens: 20)
+        )
+        XCTAssertEqual(result.terminalStatus, .requestFailed)
+        XCTAssertEqual(result.errorCode, "continuous_batching_invalid_decode_token")
     }
 
     /// Streamed tokens are already visible, so a window result that does not
@@ -6635,6 +6674,7 @@ private actor StreamingWindowBackend: ContinuousBatchSchedulerBackend {
     private let gate: AsyncGate?
     private let streamedTokenOffset: Int
     private let malformedStep: Int?
+    private let extraReturnedTokens: Int
     private var stepsRun: [Int] = []
     private var waitingAtGate = false
 
@@ -6643,13 +6683,15 @@ private actor StreamingWindowBackend: ContinuousBatchSchedulerBackend {
         gateAfterStep: Int? = nil,
         gate: AsyncGate? = nil,
         streamedTokenOffset: Int = 0,
-        malformedStep: Int? = nil
+        malformedStep: Int? = nil,
+        extraReturnedTokens: Int = 0
     ) {
         self.scripts = scripts
         self.gateAfterStep = gateAfterStep
         self.gate = gate
         self.streamedTokenOffset = streamedTokenOffset
         self.malformedStep = malformedStep
+        self.extraReturnedTokens = extraReturnedTokens
     }
 
     func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
@@ -6700,7 +6742,10 @@ private actor StreamingWindowBackend: ContinuousBatchSchedulerBackend {
         }
         stepsRun.append(ran)
         return zip(rows, collected).map { row, tokens in
-            .output(ContinuousBatchDecodeOutput(requestID: row.requestID, tokens: tokens))
+            let extra = (0 ..< extraReturnedTokens).map {
+                token(for: row.requestID, at: row.generatedTokens.count + ran + $0)
+            }
+            return .output(ContinuousBatchDecodeOutput(requestID: row.requestID, tokens: tokens + extra))
         }
     }
 
