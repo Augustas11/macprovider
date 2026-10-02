@@ -286,6 +286,14 @@ func main() {
 	routeSnapshotJournalDB.SetMaxOpenConns(routeSnapshotJournalSQLiteMaxOpenConns)
 	routeSnapshotJournalDB.SetMaxIdleConns(routeSnapshotJournalSQLiteMaxOpenConns)
 	defer routeSnapshotJournalDB.Close()
+	routeSnapshotJournalCheckpointDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(routeSnapshotJournalDBPath(cfg.Storage.DBPath)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "route snapshot journal checkpoint sqlite: %v\n", err)
+		os.Exit(1)
+	}
+	routeSnapshotJournalCheckpointDB.SetMaxOpenConns(1)
+	routeSnapshotJournalCheckpointDB.SetMaxIdleConns(1)
+	defer routeSnapshotJournalCheckpointDB.Close()
 	// SPEC-002 v1.4.2 R-2 / ISS-188: request_log.external_request_id
 	// is added by OpenStore as an additive column. The matching partial-
 	// NULL reconciliation index is NOT auto-built here — the request-log
@@ -471,6 +479,7 @@ func main() {
 	defer stopBackground()
 	moneySQLiteActivity := newMoneySQLiteActivity(time.Now())
 	startMoneySQLiteWALCheckpointer(shutdownCtx, moneyCheckpointDB, metricsHandle, logger, moneySQLiteActivity, cfg.Storage.DBPath)
+	startRouteSnapshotJournalWALCheckpointer(shutdownCtx, routeSnapshotJournalCheckpointDB, metricsHandle, logger, moneySQLiteActivity, routeSnapshotJournalDBPath(cfg.Storage.DBPath))
 	// SPEC-017 v0.1.8 Step 2 — rollup runner. Reads OLTP source
 	// tables via `statsPools.Rollup`, writes the seven
 	// stats_* + stats_components_health + stats_rewards_populated
@@ -1864,14 +1873,26 @@ type routeSnapshotJournalMirrorConfig struct {
 	Interval    time.Duration
 	Timeout     time.Duration
 	Batch       int
+	MaxBatches  int
 	MinIdle     time.Duration
 	MaxDeferral time.Duration
 }
 
 type settlementReceiptAuditOutboxObserver interface {
 	ObserveSettlementReceiptAuditOutbox(int64, int64, int64, time.Duration)
+	ObserveSettlementReceiptAuditOutboxStatsHealth(bool, time.Duration)
 	IncSettlementReceiptAuditOutboxDrain(string)
 	AddSettlementReceiptAuditOutboxRows(string, int64)
+}
+
+type settlementReceiptAuditOutboxDrainerConfig struct {
+	BatchLimit          int
+	CatchupBatches      int
+	PruneLimit          int
+	DrainInterval       time.Duration
+	MaintenanceInterval time.Duration
+	DrainTimeout        time.Duration
+	StatsTimeout        time.Duration
 }
 
 const (
@@ -1898,6 +1919,8 @@ const (
 	routeSnapshotJournalMirrorInterval     = 250 * time.Millisecond
 	routeSnapshotJournalMirrorTimeout      = 2 * time.Second
 	routeSnapshotJournalMirrorBatch        = 100
+	moneySQLiteWALCheckpointComponent      = "wal_checkpoint"
+	routeSnapshotJournalWALComponent       = "route_snapshot_journal"
 )
 
 func defaultRouteSnapshotJournalMirrorConfig() routeSnapshotJournalMirrorConfig {
@@ -1905,6 +1928,7 @@ func defaultRouteSnapshotJournalMirrorConfig() routeSnapshotJournalMirrorConfig 
 		Interval:    routeSnapshotJournalMirrorInterval,
 		Timeout:     routeSnapshotJournalMirrorTimeout,
 		Batch:       routeSnapshotJournalMirrorBatch,
+		MaxBatches:  5,
 		MinIdle:     moneySQLiteMaintenanceMinIdle,
 		MaxDeferral: moneySQLiteMaintenanceMaxDeferral,
 	}
@@ -1925,6 +1949,7 @@ type moneySQLiteWALCheckpointerConfig struct {
 	BusyTimeout    time.Duration
 	BytesPerSecond int64
 	DBPath         string
+	Component      string
 }
 
 func defaultMoneySQLiteWALCheckpointerConfig(dbPath string) moneySQLiteWALCheckpointerConfig {
@@ -1936,6 +1961,25 @@ func defaultMoneySQLiteWALCheckpointerConfig(dbPath string) moneySQLiteWALCheckp
 		BusyTimeout:    moneySQLiteCheckpointBusyTimeout,
 		BytesPerSecond: moneySQLiteCheckpointBytesPerSecond,
 		DBPath:         dbPath,
+		Component:      moneySQLiteWALCheckpointComponent,
+	}
+}
+
+func routeSnapshotJournalWALCheckpointerConfig(dbPath string) moneySQLiteWALCheckpointerConfig {
+	cfg := defaultMoneySQLiteWALCheckpointerConfig(dbPath)
+	cfg.Component = routeSnapshotJournalWALComponent
+	return cfg
+}
+
+func defaultSettlementReceiptAuditOutboxDrainerConfig() settlementReceiptAuditOutboxDrainerConfig {
+	return settlementReceiptAuditOutboxDrainerConfig{
+		BatchLimit:          20,
+		CatchupBatches:      1,
+		PruneLimit:          500,
+		DrainInterval:       250 * time.Millisecond,
+		MaintenanceInterval: 30 * time.Second,
+		DrainTimeout:        200 * time.Millisecond,
+		StatsTimeout:        time.Second,
 	}
 }
 
@@ -2068,9 +2112,16 @@ func startMoneySQLiteWALCheckpointer(ctx context.Context, db *sql.DB, observer s
 	startMoneySQLiteWALCheckpointerWithConfig(ctx, db, observer, logger, idle, defaultMoneySQLiteWALCheckpointerConfig(dbPath))
 }
 
+func startRouteSnapshotJournalWALCheckpointer(ctx context.Context, db *sql.DB, observer sqliteutil.WALObserver, logger zerolog.Logger, idle moneySQLiteIdleTracker, dbPath string) {
+	startMoneySQLiteWALCheckpointerWithConfig(ctx, db, observer, logger, idle, routeSnapshotJournalWALCheckpointerConfig(dbPath))
+}
+
 func startMoneySQLiteWALCheckpointerWithConfig(ctx context.Context, db *sql.DB, observer sqliteutil.WALObserver, logger zerolog.Logger, idle moneySQLiteIdleTracker, cfg moneySQLiteWALCheckpointerConfig) {
 	if db == nil {
 		return
+	}
+	if cfg.Component == "" {
+		cfg.Component = moneySQLiteWALCheckpointComponent
 	}
 	if cfg.PollInterval <= 0 || cfg.IdleInterval <= 0 || cfg.MinTimeout <= 0 || cfg.MaxTimeout <= 0 || cfg.BusyTimeout <= 0 || cfg.BytesPerSecond <= 0 {
 		return
@@ -2125,6 +2176,9 @@ func moneySQLiteCheckpointDecision(idle, idleInterval time.Duration, walBytes in
 }
 
 func runMoneySQLiteWALCheckpoint(ctx context.Context, db *sql.DB, observer sqliteutil.WALObserver, logger zerolog.Logger, idle moneySQLiteIdleTracker, cfg moneySQLiteWALCheckpointerConfig) {
+	if cfg.Component == "" {
+		cfg.Component = moneySQLiteWALCheckpointComponent
+	}
 	idleFor := time.Duration(0)
 	if idle != nil {
 		idleFor = idle.IdleFor(time.Now())
@@ -2141,7 +2195,7 @@ func runMoneySQLiteWALCheckpoint(ctx context.Context, db *sql.DB, observer sqlit
 	deadline := time.Now().Add(timeout)
 	checkpointCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	result, err := sqliteutil.RunWALCheckpointMode(checkpointCtx, db, "wal_checkpoint", observer, sqliteutil.WALCheckpointPassive)
+	result, err := sqliteutil.RunWALCheckpointMode(checkpointCtx, db, cfg.Component, observer, sqliteutil.WALCheckpointPassive)
 	if err != nil {
 		logger.Warn().Err(err).Str("mode", string(sqliteutil.WALCheckpointPassive)).Int64("wal_bytes", walBytes).Msg("money sqlite WAL checkpoint failed")
 		return
@@ -2162,7 +2216,7 @@ func runMoneySQLiteWALCheckpoint(ctx context.Context, db *sql.DB, observer sqlit
 	}
 	truncateCtx, truncateCancel := context.WithTimeout(ctx, remaining)
 	defer truncateCancel()
-	if _, err := sqliteutil.RunWALCheckpointMode(truncateCtx, db, "wal_checkpoint", observer, sqliteutil.WALCheckpointTruncate); err != nil {
+	if _, err := sqliteutil.RunWALCheckpointMode(truncateCtx, db, cfg.Component, observer, sqliteutil.WALCheckpointTruncate); err != nil {
 		logger.Warn().Err(err).Str("mode", string(sqliteutil.WALCheckpointTruncate)).Int64("wal_bytes", walBytes).Msg("money sqlite WAL checkpoint failed")
 	}
 }
@@ -2202,7 +2256,7 @@ func startRouteSnapshotJournalMirrorWithConfig(ctx context.Context, mirror route
 	if mirror == nil {
 		return
 	}
-	if cfg.Interval <= 0 || cfg.Timeout <= 0 || cfg.Batch <= 0 {
+	if cfg.Interval <= 0 || cfg.Timeout <= 0 || cfg.Batch <= 0 || cfg.MaxBatches <= 0 {
 		return
 	}
 	attempts := newMoneySQLiteMaintenanceAttemptState(time.Now())
@@ -2211,7 +2265,7 @@ func startRouteSnapshotJournalMirrorWithConfig(ctx context.Context, mirror route
 			runCtx = context.Background()
 		}
 		attempts.MarkAttempt(time.Now())
-		for {
+		for batch := 0; batch < cfg.MaxBatches; batch++ {
 			if runCtx.Err() != nil {
 				return
 			}
@@ -2250,21 +2304,34 @@ func startRouteSnapshotJournalMirrorWithConfig(ctx context.Context, mirror route
 }
 
 func startSettlementReceiptAuditOutboxDrainer(ctx context.Context, store settlementReceiptAuditOutboxDrainer, sink billing.SettlementReceiptAuditSink, retentionDays int, observer settlementReceiptAuditOutboxObserver, idle moneySQLiteIdleTracker, logger zerolog.Logger) func(context.Context) {
+	return startSettlementReceiptAuditOutboxDrainerWithConfig(ctx, store, sink, retentionDays, observer, idle, logger, defaultSettlementReceiptAuditOutboxDrainerConfig())
+}
+
+func startSettlementReceiptAuditOutboxDrainerWithConfig(ctx context.Context, store settlementReceiptAuditOutboxDrainer, sink billing.SettlementReceiptAuditSink, retentionDays int, observer settlementReceiptAuditOutboxObserver, idle moneySQLiteIdleTracker, logger zerolog.Logger, cfg settlementReceiptAuditOutboxDrainerConfig) func(context.Context) {
 	if store == nil || sink == nil {
 		return func(context.Context) {}
 	}
-	const (
-		batchLimit    = 100
-		pruneLimit    = 500
-		drainInterval = 30 * time.Second
-		drainTimeout  = 5 * time.Second
-		statsTimeout  = time.Second
-	)
+	if cfg.BatchLimit <= 0 || cfg.CatchupBatches <= 0 || cfg.PruneLimit <= 0 || cfg.DrainInterval <= 0 || cfg.MaintenanceInterval <= 0 || cfg.DrainTimeout <= 0 || cfg.StatsTimeout <= 0 {
+		return func(context.Context) {}
+	}
+	// Delivery is paced instead of idle-gated. At the default 20 rows every
+	// 250ms the configured ceiling is 80 rows/s, leaving headroom above the
+	// 60 rows/s arrival rate at the 30 request/s acceptance target while each
+	// acknowledgement remains a short independent SQLite write.
+	_ = idle
+	var lastStatsSuccess time.Time
 	observeStats := func(runCtx context.Context) {
-		statsCtx, cancel := context.WithTimeout(runCtx, statsTimeout)
+		statsCtx, cancel := context.WithTimeout(runCtx, cfg.StatsTimeout)
 		defer cancel()
 		stats, err := store.SettlementReceiptAuditOutboxStats(statsCtx)
 		if err != nil {
+			if observer != nil {
+				age := time.Duration(0)
+				if !lastStatsSuccess.IsZero() {
+					age = time.Since(lastStatsSuccess)
+				}
+				observer.ObserveSettlementReceiptAuditOutboxStatsHealth(true, age)
+			}
 			logger.Warn().Err(err).Msg("settlement receipt audit outbox stats failed")
 			return
 		}
@@ -2277,12 +2344,14 @@ func startSettlementReceiptAuditOutboxDrainer(ctx context.Context, store settlem
 		}
 		if observer != nil {
 			observer.ObserveSettlementReceiptAuditOutbox(stats.PendingRows, stats.PoisonedRows, stats.RetainedPoisonedRows, oldestAge)
+			observer.ObserveSettlementReceiptAuditOutboxStatsHealth(false, 0)
 		}
+		lastStatsSuccess = time.Now()
 	}
-	drain := func(runCtx context.Context) (billing.SettlementReceiptAuditOutboxDrainResult, error) {
-		drainCtx, cancel := context.WithTimeout(runCtx, drainTimeout)
+	drainBatch := func(runCtx context.Context) (billing.SettlementReceiptAuditOutboxDrainResult, error) {
+		drainCtx, cancel := context.WithTimeout(runCtx, cfg.DrainTimeout)
 		defer cancel()
-		result, err := store.DrainSettlementReceiptAuditOutbox(drainCtx, sink, batchLimit)
+		result, err := store.DrainSettlementReceiptAuditOutbox(drainCtx, sink, cfg.BatchLimit)
 		outcome := "success"
 		if err != nil {
 			outcome = "error"
@@ -2299,11 +2368,14 @@ func startSettlementReceiptAuditOutboxDrainer(ctx context.Context, store settlem
 				Int("poisoned_rows", result.PoisonedRows).
 				Msg("settlement receipt audit outbox processed rows")
 		}
+		return result, err
+	}
+	finishRun := func(runCtx context.Context) {
 		if retentionDays > 0 {
 			cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays)
-			pruneCtx, cancel := context.WithTimeout(runCtx, drainTimeout)
+			pruneCtx, cancel := context.WithTimeout(runCtx, cfg.DrainTimeout)
 			defer cancel()
-			pruned, err := store.PruneSettlementReceiptAuditOutbox(pruneCtx, cutoff, pruneLimit)
+			pruned, err := store.PruneSettlementReceiptAuditOutbox(pruneCtx, cutoff, cfg.PruneLimit)
 			if err != nil {
 				logger.Warn().Err(err).Msg("settlement receipt audit outbox prune failed")
 			} else if pruned > 0 {
@@ -2314,7 +2386,6 @@ func startSettlementReceiptAuditOutboxDrainer(ctx context.Context, store settlem
 			}
 		}
 		observeStats(runCtx)
-		return result, err
 	}
 	attempts := newMoneySQLiteMaintenanceAttemptState(time.Now())
 	flushOne := func(runCtx context.Context) {
@@ -2322,43 +2393,54 @@ func startSettlementReceiptAuditOutboxDrainer(ctx context.Context, store settlem
 			runCtx = context.Background()
 		}
 		attempts.MarkAttempt(time.Now())
-		_, _ = drain(runCtx)
+		_, _ = drainBatch(runCtx)
+		finishRun(runCtx)
+	}
+	flushCatchup := func(runCtx context.Context) {
+		if runCtx == nil {
+			runCtx = context.Background()
+		}
+		attempts.MarkAttempt(time.Now())
+		for i := 0; i < cfg.CatchupBatches; i++ {
+			if runCtx.Err() != nil {
+				break
+			}
+			result, _ := drainBatch(runCtx)
+			progressed := result.ProgressedRows()
+			if progressed == 0 || progressed < cfg.BatchLimit {
+				break
+			}
+		}
 	}
 	flushAll := func(runCtx context.Context) {
 		if runCtx == nil {
 			runCtx = context.Background()
 		}
+		defer finishRun(runCtx)
 		for {
 			if runCtx.Err() != nil {
 				return
 			}
-			result, err := drain(runCtx)
-			if result.ProgressedRows() == 0 || (err == nil && result.ProgressedRows() < batchLimit) {
+			result, _ := drainBatch(runCtx)
+			if result.ProgressedRows() == 0 {
 				return
 			}
 		}
 	}
-	flushOneIfIdle := func(runCtx context.Context) {
-		if runCtx == nil {
-			runCtx = context.Background()
-		}
-		if shouldYieldMoneySQLiteMaintenance(idle, moneySQLiteMaintenanceMinIdle, attempts, moneySQLiteMaintenanceMaxDeferral, time.Now()) {
-			observeStats(runCtx)
-			logger.Debug().Msg("settlement receipt audit outbox drain skipped during active buyer money-path traffic")
-			return
-		}
-		flushOne(runCtx)
-	}
 	flushOne(ctx)
 	go func() {
-		ticker := time.NewTicker(drainInterval)
-		defer ticker.Stop()
+		drainTicker := time.NewTicker(cfg.DrainInterval)
+		maintenanceTicker := time.NewTicker(cfg.MaintenanceInterval)
+		defer drainTicker.Stop()
+		defer maintenanceTicker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
-				flushOneIfIdle(ctx)
+			case <-drainTicker.C:
+				flushCatchup(ctx)
+			case <-maintenanceTicker.C:
+				finishRun(ctx)
 			}
 		}
 	}()
@@ -2610,12 +2692,12 @@ func startReferralServingReconciler(ctx context.Context, reconciler referralapi.
 }
 
 type poolSettlementExpirySweeper interface {
-	SweepExpiredPoolSettlementVerdicts(context.Context, int64, int) (int, error)
+	SweepExpiredSettlementVerdicts(context.Context, int64, int) (int, error)
 }
 
-// startPoolSettlementExpirySweeper closes expired pending pool verdicts that no
-// finality read will reach (a refunded gateway retry), so
-// pool-rollback-preflight can clear without a buyer request touching them.
+// startPoolSettlementExpirySweeper closes expired pending verdicts that no
+// finality read reaches. The historical name is retained because the worker
+// originated as the pool rollback sweeper.
 func startPoolSettlementExpirySweeper(ctx context.Context, sweeper poolSettlementExpirySweeper, idle moneySQLiteIdleTracker, logger zerolog.Logger) {
 	if sweeper == nil {
 		return
@@ -2626,7 +2708,7 @@ func startPoolSettlementExpirySweeper(ctx context.Context, sweeper poolSettlemen
 			attempts.MarkAttempt(time.Now())
 			sweepCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
-			closed, err := sweeper.SweepExpiredPoolSettlementVerdicts(sweepCtx, time.Now().UTC().UnixMilli(), billing.DefaultPoolSettlementExpirySweepLimit)
+			closed, err := sweeper.SweepExpiredSettlementVerdicts(sweepCtx, time.Now().UTC().UnixMilli(), billing.DefaultPoolSettlementExpirySweepLimit)
 			if err != nil && ctx.Err() == nil {
 				logger.Error().Err(err).Int("closed", closed).Msg("pool settlement expiry sweep failed")
 				return

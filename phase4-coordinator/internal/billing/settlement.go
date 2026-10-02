@@ -3,10 +3,15 @@ package billing
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 )
+
+const settlementCatchUpMaxWindowsPerPass = 4
+
+var ErrSettlementCatchUpIncomplete = errors.New("settlement catch-up has more unmarked windows")
 
 func (s *Store) RunSettlement(ctx context.Context, cfg SettlementConfig, windowStart, windowEnd time.Time) error {
 	s.SetSettlementConfig(cfg)
@@ -235,6 +240,16 @@ UPDATE ledger_request_credits
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	if _, err := conn.ExecContext(ctx, `
+INSERT INTO ledger_settlement_windows (
+    window_start_utc, window_end_utc, cadence_days, completed_at_utc
+) VALUES (?, ?, ?, ?)
+ON CONFLICT(window_start_utc, window_end_utc, cadence_days) DO UPDATE SET
+    completed_at_utc = excluded.completed_at_utc`,
+		sqliteTimeText(windowStart), sqliteTimeText(windowEnd), cfg.CadenceDays, now,
+	); err != nil {
+		return err
+	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		return err
 	}
@@ -246,13 +261,32 @@ func (s *Store) StartWeeklySettlement(ctx context.Context, cfg SettlementConfig)
 	s.SetSettlementConfig(cfg)
 	go func() {
 		for {
-			next := NextMondayUTC(time.Now().UTC())
-			timer := time.NewTimer(time.Until(next))
+			now := time.Now().UTC()
+			cfg := s.SettlementConfig(cfg)
+			catchupFailed := false
+			if cfg.JobEnabled {
+				if err := s.RunMissedSettlements(ctx, cfg, now); err != nil {
+					end := PreviousOrCurrentMondayUTC(now)
+					logBillingJobError("weekly_settlement_catchup", err, end.AddDate(0, 0, -cfg.CadenceDays), end)
+					catchupFailed = true
+				}
+			}
+			next := NextMondayUTC(now)
+			wakeAt := next
+			if catchupFailed {
+				// A transient catch-up failure must not defer the missed window
+				// for another week. Retry through the same durable marker path.
+				wakeAt = now.Add(time.Minute)
+			}
+			timer := time.NewTimer(time.Until(wakeAt))
 			select {
 			case <-ctx.Done():
 				timer.Stop()
 				return
 			case <-timer.C:
+				if catchupFailed {
+					continue
+				}
 				cfg := s.SettlementConfig(cfg)
 				if !cfg.JobEnabled {
 					continue
@@ -265,6 +299,75 @@ func (s *Store) StartWeeklySettlement(ctx context.Context, cfg SettlementConfig)
 			}
 		}
 	}()
+}
+
+// RunMissedSettlements completes unmarked closed cadence windows in
+// chronological order. A pass is capped so historical replay cannot monopolize
+// the SQLite writer; ErrSettlementCatchUpIncomplete makes the scheduler retry
+// after one minute through the same durable markers.
+func (s *Store) RunMissedSettlements(ctx context.Context, cfg SettlementConfig, now time.Time) error {
+	if cfg.CadenceDays <= 0 {
+		return fmt.Errorf("settlement cadence_days must be positive")
+	}
+	latestEnd := PreviousOrCurrentMondayUTC(now)
+	var oldestCreditText, firstMarkerText sql.NullString
+	if err := s.reader().QueryRowContext(ctx, `
+SELECT (SELECT MIN(ts_utc) FROM ledger_request_credits WHERE ts_utc < ?),
+       (SELECT MIN(window_end_utc) FROM ledger_settlement_windows WHERE cadence_days = ?)`,
+		sqliteTimeText(latestEnd), cfg.CadenceDays).Scan(&oldestCreditText, &firstMarkerText); err != nil {
+		return err
+	}
+	nextEnd := latestEnd
+	if oldestCreditText.Valid && oldestCreditText.String != "" {
+		oldest, err := time.Parse(time.RFC3339Nano, oldestCreditText.String)
+		if err != nil {
+			return fmt.Errorf("parse oldest ledger credit timestamp: %w", err)
+		}
+		daysBack := int(latestEnd.Sub(oldest.UTC()).Hours() / 24)
+		windowsBack := daysBack / cfg.CadenceDays
+		nextEnd = latestEnd.AddDate(0, 0, -windowsBack*cfg.CadenceDays)
+		if !nextEnd.After(oldest.UTC()) {
+			nextEnd = nextEnd.AddDate(0, 0, cfg.CadenceDays)
+		}
+	}
+	if firstMarkerText.Valid && firstMarkerText.String != "" {
+		firstMarker, err := time.Parse(time.RFC3339Nano, firstMarkerText.String)
+		if err != nil {
+			return fmt.Errorf("parse first settlement window marker: %w", err)
+		}
+		if firstMarker.UTC().Before(nextEnd) {
+			nextEnd = firstMarker.UTC()
+		}
+	}
+	processed := 0
+	for !nextEnd.After(latestEnd) {
+		var marked int
+		err := s.reader().QueryRowContext(ctx, `
+SELECT 1 FROM ledger_settlement_windows
+ WHERE window_start_utc=? AND window_end_utc=? AND cadence_days=?`,
+			sqliteTimeText(nextEnd.AddDate(0, 0, -cfg.CadenceDays)), sqliteTimeText(nextEnd), cfg.CadenceDays).Scan(&marked)
+		if err == nil {
+			nextEnd = nextEnd.AddDate(0, 0, cfg.CadenceDays)
+			continue
+		}
+		if err != sql.ErrNoRows {
+			return err
+		}
+		if processed >= settlementCatchUpMaxWindowsPerPass {
+			return ErrSettlementCatchUpIncomplete
+		}
+		start := nextEnd.AddDate(0, 0, -cfg.CadenceDays)
+		if err := s.RunSettlement(ctx, cfg, start, nextEnd); err != nil {
+			return err
+		}
+		processed++
+		nextEnd = nextEnd.AddDate(0, 0, cfg.CadenceDays)
+	}
+	return nil
+}
+
+func PreviousOrCurrentMondayUTC(t time.Time) time.Time {
+	return NextMondayUTC(t).AddDate(0, 0, -7)
 }
 
 func NextMondayUTC(t time.Time) time.Time {

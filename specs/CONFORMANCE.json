@@ -27,7 +27,7 @@
       "evidence": [],
       "requirement_id_migration": "pending",
       "gap": {
-        "verdict": "UNKNOWN",
+        "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614"
       }
@@ -35,7 +35,7 @@
     {
       "spec_id": "SPEC-002",
       "title": "Phase 4 Coordinator: Mac Provider Request Router",
-      "version": "1.6.4",
+      "version": "1.6.6",
       "path": "specs/SPEC-002-coordinator.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -54,7 +54,7 @@
       "evidence": [],
       "requirement_id_migration": "pending",
       "gap": {
-        "verdict": "UNKNOWN",
+        "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614"
       }
@@ -120,7 +120,7 @@
     {
       "spec_id": "SPEC-005",
       "title": "Billing, Settlement, and Provider Rewards",
-      "version": "0.6.13",
+      "version": "0.6.15",
       "path": "specs/SPEC-005-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -363,7 +363,7 @@
       "evidence": [],
       "requirement_id_migration": "pending",
       "gap": {
-        "verdict": "CODE_BUG",
+        "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614"
       }
@@ -627,7 +627,7 @@
     {
       "spec_id": "SPEC-022",
       "title": "Verified model settlement",
-      "version": "v0.2.8",
+      "version": "v0.2.10",
       "path": "specs/SPEC-022-verified-model-settlement.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -659,7 +659,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "SPEC-022-R001/R003/R010 restored to conformant from signed observe-mode JOURNEY-BUYER-PAID-PATH envelope 20260918T034532Z (#1022, expires 2026-10-18). v0.2.1 tracks R-3.4.2 (#1690) under the pending SPEC-022-R012, so R003 keeps that envelope's native-path evidence. R002 returns to pending in v0.1.9: R-2.7 (#1689) expands it, and that envelope predates R-2.7; it needs a signed enforce-mode journey covering AC-022-65. R004 returned to pending when its signed paid-path evidence expired 2026-09-26. R005/R006 remain pending on still-in-date paid-path evidence until a selector-fresh consume. Isolated JOURNEY-BUYER-ENFORCE (#1044) is the candidate harness for R007/R008/R009/R011; R007/R009 signed evidence expired 2026-09-17 and R011 signed evidence expired 2026-09-26, so those rows remain pending. Observe-mode paid-path must not promote R007/R008. No production Pearl / enforce activation."
+        "rationale": "SPEC-022-R001/R010 retain conformant observe-mode JOURNEY-BUYER-PAID-PATH evidence from 20260918T034532Z (#1022, expires 2026-10-18). R003 returns to pending in v0.2.5 because #1793 adds journal authority, bounded materialization, and an independent attempt-output budget that the earlier journey did not exercise. R002 remains pending because R-2.7 (#1689) needs a signed enforce-mode journey covering AC-022-65. R004 returned to pending when its signed paid-path evidence expired 2026-09-26. R005/R006 remain pending on still-in-date paid-path evidence until a selector-fresh consume. Isolated JOURNEY-BUYER-ENFORCE (#1044) is the candidate harness for R007/R008/R009/R011; R007/R009 signed evidence expired 2026-09-17 and R011 signed evidence expired 2026-09-26, so those rows remain pending. Observe-mode paid-path must not promote R007/R008. No production Pearl / enforce activation."
       }
     },
     {
@@ -686,7 +686,7 @@
       "evidence": [],
       "requirement_id_migration": "pending",
       "gap": {
-        "verdict": "CODE_BUG",
+        "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614"
       }
@@ -1671,6 +1671,35 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "Local tests pin trusted routing quota semantics, authenticated trust lookup, credential-custody continuity, and revoked-history demotion; live Pearl sustained-routing evidence remains pending rollout."
+      }
+    },
+    {
+      "requirement_id": "SPEC-002-R003",
+      "spec_id": "SPEC-002",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/cmd/coordinator/main.go:startMoneySQLiteWALCheckpointer",
+        "phase4-coordinator/cmd/coordinator/main.go:startRouteSnapshotJournalWALCheckpointer",
+        "phase4-coordinator/cmd/coordinator/main.go:startRouteSnapshotJournalMirrorWithConfig",
+        "phase4-coordinator/cmd/coordinator/main.go:startSettlementReceiptAuditOutboxDrainerWithConfig",
+        "phase4-coordinator/internal/billing/store.go:ensureLedgerReconciliationRecoveryColumns",
+        "phase4-coordinator/internal/sqliteutil/dsn.go:WithManualWALCheckpointPragmas"
+      ],
+      "tests": [
+        "phase4-coordinator/cmd/coordinator/main_test.go:TestMoneySQLiteWALCheckpointerKeepsCheckpointingUnderSustainedWrites",
+        "phase4-coordinator/cmd/coordinator/main_test.go:TestRouteSnapshotJournalWALCheckpointerUsesJournalComponent",
+        "phase4-coordinator/cmd/coordinator/main_test.go:TestMoneySQLiteIdleTruncateDoesNotHoldWriterPastBusyCap",
+        "phase4-coordinator/cmd/coordinator/main_test.go:TestRouteSnapshotJournalMirrorCapsBatchesPerRun",
+        "phase4-coordinator/cmd/coordinator/main_test.go:TestSettlementReceiptAuditOutboxDrainerRunsDuringContinuousTraffic",
+        "phase4-coordinator/internal/billing/store_test.go:TestRecoverySelectorQueryPlansUseTimeIDKeysets"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1793",
+        "rationale": "v1.6.6 retains one bounded checkpoint owner per money-path WAL and adds continuously paced, outer-bounded evidence maintenance with indexed scans and explicit stats freshness. Local implementation and regression coverage are mapped; sustained staging throughput and buyer-latency evidence remain pending."
       }
     },
     {
@@ -5488,12 +5517,31 @@
       "spec_id": "SPEC-005",
       "state": "pending",
       "implementation": [
-        "phase4-coordinator/internal/billing/recovery.go:StartStartupScan"
+        "phase4-coordinator/internal/billing/recovery.go:StartStartupScan",
+        "phase4-coordinator/internal/billing/recovery.go:nextRecoveryIDs",
+        "phase4-coordinator/internal/billing/settlement.go:RunMissedSettlements",
+        "phase4-coordinator/internal/billing/settlement.go:RunSettlement",
+        "phase4-coordinator/cmd/coordinator/main.go:startMoneySQLiteWALCheckpointer",
+        "phase4-coordinator/cmd/coordinator/main.go:startRouteSnapshotJournalWALCheckpointer"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/store_test.go:TestRecoverLedger_Idempotent",
+        "phase4-coordinator/internal/billing/recovery_chunk_test.go:TestRecoverLedgerCrashResumeUsesDurableCursor",
+        "phase4-coordinator/internal/billing/recovery_chunk_test.go:TestRecoverLedgerDenseWindowBoundsEveryWriterBatchByRows",
+        "phase4-coordinator/internal/billing/recovery_chunk_test.go:TestNextRecoveryIDsCanonicalizesVariableWidthCursorTimestamp",
+        "phase4-coordinator/internal/billing/recovery_chunk_test.go:TestRecoverLedgerFencesCompetingRunners",
+        "phase4-coordinator/internal/billing/recovery_chunk_test.go:TestRecoverLedgerReclaimsStaleCrashLease",
+        "phase4-coordinator/internal/billing/recovery_chunk_test.go:TestRecoverLedgerDrainsExpiredForeignSourceRunsBeforeRequestedSource",
+        "phase4-coordinator/internal/billing/recovery_chunk_test.go:TestRecoverLedgerMovingWindowFinishesDurableResumeBeforeFreshRun",
+        "phase4-coordinator/internal/billing/store_test.go:TestRecoverySelectorQueryPlansUseTimeIDKeysets",
         "phase4-coordinator/internal/billing/store_test.go:TestRecoverLedger_QuarantinesOrphanLedgerRows",
         "phase4-coordinator/internal/billing/store_test.go:TestWriteRequestLogWithIdentity_AllowsRecoveryAfterHotPathFailure",
+        "phase4-coordinator/internal/billing/settlement_jobs_test.go:TestRunSettlementCommitsEmptyWindowMarker",
+        "phase4-coordinator/internal/billing/settlement_jobs_test.go:TestRunMissedSettlementsReplaysWindowsInOrder",
+        "phase4-coordinator/internal/billing/settlement_jobs_test.go:TestRunMissedSettlementsBootstrapsEveryHistoricalLedgerWindow",
+        "phase4-coordinator/internal/billing/settlement_jobs_test.go:TestRunMissedSettlementsRepairsMarkerHoleBeforeLatestMarker",
+        "phase4-coordinator/internal/billing/settlement_jobs_test.go:TestRunMissedSettlementsCapsPassAndResumesThroughMarkers",
+        "phase4-coordinator/cmd/coordinator/main_test.go:TestRouteSnapshotJournalWALCheckpointerUsesJournalComponent",
         "test/integration/buyer_crash_recovery_journey_test.go:TestJourneyBuyerCrashRecoveryIsolatedCandidate"
       ],
       "journeys": [
@@ -6431,33 +6479,32 @@
     {
       "requirement_id": "SPEC-022-R003",
       "spec_id": "SPEC-022",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
-        "phase4-coordinator/internal/billing/route_snapshot.go:Digest"
+        "phase4-coordinator/internal/billing/route_snapshot.go:Digest",
+        "phase4-coordinator/internal/billing/route_snapshot.go:InsertRouteSnapshot",
+        "phase4-coordinator/internal/billing/route_snapshot.go:MirrorPendingRouteSnapshots",
+        "phase4-coordinator/internal/buyer/billing_recorder.go:persistSettlementAttemptOutput"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/route_snapshot_test.go:TestRouteSnapshotStrictKeysAndDigestSensitivity",
         "phase4-coordinator/internal/billing/route_snapshot_test.go:TestInsertRouteSnapshotPersistsCanonicalDigestAndRejectsRewrite",
-        "phase4-coordinator/internal/billing/route_snapshot_test.go:TestSettlementRouteSnapshotIsImmutable"
+        "phase4-coordinator/internal/billing/route_snapshot_test.go:TestSettlementRouteSnapshotIsImmutable",
+        "phase4-coordinator/internal/billing/route_snapshot_test.go:TestInsertRouteSnapshotJournalBuffersMainWriterPressure",
+        "phase4-coordinator/internal/billing/route_snapshot_test.go:TestInsertRouteSnapshotJournalSerializesConcurrentWriters",
+        "phase4-coordinator/cmd/coordinator/main_test.go:TestRouteSnapshotJournalMirrorCapsBatchesPerRun",
+        "phase4-coordinator/internal/buyer/billing_recorder_test.go:TestPersistSettlementAttemptOutputRouteMirrorPressureKeepsOutputBudget"
       ],
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:160d0e2ff62b0e40c65dd3741a35de4be322ea8e",
-          "source": null,
-          "captured_at": "2026-09-18",
-          "expires_at": "2026-10-18"
-        },
-        {
-          "artifact": "sha256:3ff2a7603caa0a3a28d71f5eba4852b60efb56d850b085a77f6e0e1742bda0a7",
-          "source": "journeys/evidence/buyer-paid-path-20260918T034532Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r010.journey-result.signed.json",
-          "captured_at": "2026-09-18",
-          "expires_at": "2026-10-18"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1793",
+        "rationale": "v0.2.5 adds journal authority, bounded asynchronous materialization, and an independent post-credit attempt-output budget. Local tests cover the implementation; the prior signed journey predates these selectors and cannot promote this requirement."
+      }
     },
     {
       "requirement_id": "SPEC-022-R004",
@@ -6465,6 +6512,7 @@
       "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/billing/settlement_receipts.go:IngestSettlementReceipt",
+        "phase4-coordinator/internal/billing/pool_settlement_expiry_sweep.go:SweepExpiredSettlementVerdicts",
         "phase4-coordinator/internal/billing/settlement_verifier.go:VerifySettlementReceipt"
       ],
       "tests": [
@@ -6575,6 +6623,10 @@
         "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022PayableCreditGateRequiresVerifiedReceipt",
         "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022PayableCreditGateBlocksQuarantineAndOverlap",
         "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022PayoutClaimRevalidatesSourceRows",
+        "phase4-coordinator/internal/billing/pool_settlement_expiry_sweep_test.go:TestSweepExpiredSettlementVerdictsClosesPoolAndNativeRows",
+        "phase4-coordinator/internal/billing/pool_settlement_expiry_sweep_test.go:TestSweepExpiredSettlementVerdictsDefersToObservedReceiptRecovery",
+        "phase4-coordinator/internal/billing/pool_settlement_expiry_sweep_test.go:TestObservedReceiptRecoveryFenceIsReferenceCounted",
+        "phase4-coordinator/internal/billing/pool_settlement_expiry_sweep_test.go:TestMissingVerdictDefersToObservedReceiptRecoveryBeforeFirstInsert",
         "test/integration/buyer_enforce_journey_test.go:TestJourneyBuyerEnforceIsolatedCandidate"
       ],
       "journeys": [
@@ -6680,10 +6732,17 @@
       "spec_id": "SPEC-022",
       "state": "pending",
       "implementation": [
-        "phase4-coordinator/internal/billing/settlement_receipts.go:insertSettlementReceiptVerdictAuditConn"
+        "phase4-coordinator/internal/billing/settlement_receipts.go:insertSettlementReceiptVerdictAuditConn",
+        "phase4-coordinator/internal/billing/settlement_receipts.go:DrainSettlementReceiptAuditOutbox",
+        "phase4-coordinator/internal/billing/settlement_receipts.go:func (s *Store) SettlementReceiptAuditOutboxStats",
+        "phase4-coordinator/internal/billing/settlement_receipts.go:PruneSettlementReceiptAuditOutbox",
+        "phase4-coordinator/cmd/coordinator/main.go:startSettlementReceiptAuditOutboxDrainer"
       ],
       "tests": [
-        "phase4-coordinator/internal/billing/settlement_receipts_test.go:TestIngestSettlementReceiptPersistsVerifiedStateAndRedactedAudit"
+        "phase4-coordinator/internal/billing/settlement_receipts_test.go:TestIngestSettlementReceiptPersistsVerifiedStateAndRedactedAudit",
+        "phase4-coordinator/cmd/coordinator/main_test.go:TestSettlementReceiptAuditOutboxDrainerRunsDuringContinuousTraffic",
+        "phase4-coordinator/internal/billing/store_test.go:TestBillingMigrationAddsSettlementReceiptAuditOutboxPoisonColumnsAfterLegacyTable",
+        "phase4-coordinator/cmd/coordinator/main_test.go:TestSettlementReceiptAuditOutboxShutdownFlushDrains"
       ],
       "journeys": [
         "JOURNEY-BUYER-ENFORCE"
@@ -6775,6 +6834,7 @@
         "phase4-coordinator/internal/billing/settlement_undelivered_quarantine_test.go:TestQuarantinedUndeliveredCreditFinalityIsClosedQuarantined",
         "phase4-coordinator/internal/billing/settlement_undelivered_quarantine_test.go:TestEnforceCreditWithoutEvidenceClosesAfterSnapshotDeadline",
         "phase4-coordinator/internal/billing/settlement_undelivered_quarantine_test.go:TestEnforceCreditWithoutSnapshotClosesAfterGrace",
+        "phase4-coordinator/internal/billing/settlement_undelivered_quarantine_test.go:TestFallbackFinalityDoesNotBorrowEvidenceAcrossAttemptsOnSameProvider",
         "phase4-coordinator/internal/billing/settlement_undelivered_quarantine_test.go:TestEvidenceMissingRuleScope",
         "phase4-coordinator/internal/buyer/delivered_only_billing_test.go:TestHTTPNonStreamingNegotiatedCallerGetsMACdTrailerFinality",
         "phase4-coordinator/internal/buyer/delivered_only_billing_test.go:TestHTTPNonStreamingLegacyCallerGetsHeaderFinalityRecordedBeforeWrite",

@@ -12,6 +12,8 @@
 //	settlement_receipt_audit_outbox_poisoned_rows               — Gauge
 //	settlement_receipt_audit_outbox_poisoned_retained_rows      — Gauge
 //	settlement_receipt_audit_outbox_oldest_pending_age_seconds  — Gauge
+//	settlement_receipt_audit_outbox_stats_stale                 — Gauge
+//	settlement_receipt_audit_outbox_stats_age_seconds           — Gauge
 //	settlement_receipt_audit_outbox_drain_total{outcome}        — Counter
 //	settlement_receipt_audit_outbox_rows_total{operation}       — Counter
 //
@@ -57,6 +59,12 @@
 //   - `settlement_receipt_audit_outbox_rows_total{operation}` uses closed
 //     operation values "drained" / "poisoned" / "pruned".
 //
+//   - `money_sqlite_write_duration_seconds{component,operation,outcome}` uses
+//     closed component and operation sets. Route snapshot components include
+//     "route_snapshot", "route_snapshot_journal", and
+//     "route_snapshot_materializer"; route snapshot operations include
+//     "route_snapshot_insert" and "route_snapshot_materialize".
+//
 // No label takes an operator- or attacker-controllable string directly.
 // A `Reset` method exists for test isolation.
 package metrics
@@ -96,6 +104,8 @@ type Metrics struct {
 	SettlementReceiptAuditOutboxPoisonedRows            prometheus.Gauge
 	SettlementReceiptAuditOutboxPoisonedRetainedRows    prometheus.Gauge
 	SettlementReceiptAuditOutboxOldestPendingAgeSeconds prometheus.Gauge
+	SettlementReceiptAuditOutboxStatsStale              prometheus.Gauge
+	SettlementReceiptAuditOutboxStatsAgeSeconds         prometheus.Gauge
 	SettlementReceiptAuditOutboxDrainTotal              *prometheus.CounterVec
 	SettlementReceiptAuditOutboxRowsTotal               *prometheus.CounterVec
 	// CapacityOverClaimTotal is the issue-#764 over-claim tripwire. It is
@@ -278,6 +288,18 @@ func New(reg prometheus.Registerer) *Metrics {
 			prometheus.GaugeOpts{
 				Name: "settlement_receipt_audit_outbox_oldest_pending_age_seconds",
 				Help: "Age in seconds of the oldest undrained settlement receipt audit outbox row, or zero when none are pending.",
+			},
+		),
+		SettlementReceiptAuditOutboxStatsStale: f.NewGauge(
+			prometheus.GaugeOpts{
+				Name: "settlement_receipt_audit_outbox_stats_stale",
+				Help: "Whether the exported settlement receipt audit outbox gauges are stale because the latest exact stats query failed (1 stale, 0 fresh).",
+			},
+		),
+		SettlementReceiptAuditOutboxStatsAgeSeconds: f.NewGauge(
+			prometheus.GaugeOpts{
+				Name: "settlement_receipt_audit_outbox_stats_age_seconds",
+				Help: "Age in seconds of the last successful exact settlement receipt audit outbox stats observation.",
 			},
 		),
 		SettlementReceiptAuditOutboxDrainTotal: f.NewCounterVec(
@@ -504,6 +526,21 @@ func (m *Metrics) ObserveSettlementReceiptAuditOutbox(pendingRows, poisonedRows,
 	m.SetSettlementReceiptAuditOutboxOldestPendingAge(oldestPendingAge)
 }
 
+func (m *Metrics) ObserveSettlementReceiptAuditOutboxStatsHealth(stale bool, age time.Duration) {
+	if m == nil || m.SettlementReceiptAuditOutboxStatsStale == nil || m.SettlementReceiptAuditOutboxStatsAgeSeconds == nil {
+		return
+	}
+	if age < 0 {
+		age = 0
+	}
+	if stale {
+		m.SettlementReceiptAuditOutboxStatsStale.Set(1)
+	} else {
+		m.SettlementReceiptAuditOutboxStatsStale.Set(0)
+	}
+	m.SettlementReceiptAuditOutboxStatsAgeSeconds.Set(age.Seconds())
+}
+
 func (m *Metrics) IncSettlementReceiptAuditOutboxDrain(outcome string) {
 	if m == nil || m.SettlementReceiptAuditOutboxDrainTotal == nil || !allowSettlementReceiptAuditOutboxDrainOutcome(outcome) {
 		return
@@ -521,7 +558,8 @@ func (m *Metrics) AddSettlementReceiptAuditOutboxRows(operation string, rows int
 func allowMoneySQLiteComponent(component string) bool {
 	switch component {
 	case "billing_hot_path", "request_log_identity", "billing_reload_config", "route_snapshot", "wal_checkpoint",
-		"ledger_recovery", "settlement_attempt_output", "settlement_pool_labels", "settlement_receipt":
+		"route_snapshot_journal", "route_snapshot_materializer", "ledger_recovery", "settlement_attempt_output",
+		"settlement_pool_labels", "settlement_receipt":
 		return true
 	default:
 		return false
@@ -530,7 +568,7 @@ func allowMoneySQLiteComponent(component string) bool {
 
 func allowMoneySQLiteOperation(operation string) bool {
 	switch operation {
-	case "route_snapshot_insert":
+	case "route_snapshot_insert", "route_snapshot_materialize":
 		return true
 	default:
 		return false

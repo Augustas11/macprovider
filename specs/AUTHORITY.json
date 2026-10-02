@@ -32,7 +32,9 @@
       "consumers": [
         "SPEC-003",
         "SPEC-004",
+        "SPEC-005",
         "SPEC-006",
+        "SPEC-022",
         "SPEC-031",
         "SPEC-032",
         "SPEC-042",

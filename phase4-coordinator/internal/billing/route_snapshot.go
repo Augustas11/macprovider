@@ -685,6 +685,8 @@ CREATE TABLE IF NOT EXISTS settlement_route_snapshot_journal (
 CREATE INDEX IF NOT EXISTS idx_srsj_request ON settlement_route_snapshot_journal(account_scope, request_id, attempt_n);
 CREATE INDEX IF NOT EXISTS idx_srsj_provider ON settlement_route_snapshot_journal(provider_id, created_at_utc);
 CREATE INDEX IF NOT EXISTS idx_srsj_digest ON settlement_route_snapshot_journal(route_snapshot_digest);
+CREATE INDEX IF NOT EXISTS idx_srsj_pending ON settlement_route_snapshot_journal(id)
+    WHERE mirrored_at_utc IS NULL;
 CREATE TRIGGER IF NOT EXISTS trg_srsj_immutable
 BEFORE UPDATE OF account_scope, request_id, attempt_n, provider_id,
                  provider_session_id, provider_generation_id, pool_id,
@@ -850,7 +852,11 @@ SELECT account_scope, request_id, attempt_n, provider_id,
 	return row, true, nil
 }
 
-func (s *Store) insertPersistedRouteSnapshot(ctx context.Context, row persistedRouteSnapshotRow) error {
+func (s *Store) insertPersistedRouteSnapshot(ctx context.Context, row persistedRouteSnapshotRow) (err error) {
+	started := time.Now()
+	defer func() {
+		s.observeSQLiteWrite("route_snapshot_materializer", "route_snapshot_materialize", err, time.Since(started))
+	}()
 	if s == nil {
 		return fmt.Errorf("billing store is closed")
 	}

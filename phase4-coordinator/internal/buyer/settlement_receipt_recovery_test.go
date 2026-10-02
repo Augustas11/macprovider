@@ -152,7 +152,7 @@ func TestSettlementReceiptRecoveryQueueIsBounded(t *testing.T) {
 		},
 		header: "signed-receipt",
 	}
-	if s.deferSettlementReceiptRecovery(input) {
+	if accepted, _ := s.deferSettlementReceiptRecovery(nil, input); accepted {
 		t.Fatal("full receipt recovery queue accepted another item")
 	}
 	s.settlementReceiptRecoveryMu.Lock()

@@ -1,19 +1,38 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.6.13 (2026-10-01, pool-manifest trusted pricing, config-bounded, reloadable)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.6, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.39, SPEC-024 v0.2.7 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.18.0 / SPEC-005-R011 / SPEC-005-R013 (SPEC-023-R019) is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
+**Version:** 0.6.15 (2026-10-03, pool-manifest trusted pricing, config-bounded, reloadable)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.6, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.39, SPEC-024 v0.2.7 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.18.0 / SPEC-005-R011 / SPEC-005-R013 (SPEC-023-R019) is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
 
-**Change log v0.6.13 (2026-10-01, issue #1816 freeze audit R1, fixer B):**
+**Change log v0.6.15 (2026-10-01, issue #1816 freeze audit R1, fixer B):**
 - R015 bounds config is a closed object: a missing, duplicated, unknown, or non-integer key fails config load (startup or SIGHUP), instead of silently decoding to zero. The overflow check is per maximum at the largest pool `max_context_tokens` (2^20) and `rewards.global_multiplier`; the per-request 10,000,000-token ceiling would reject rates the live catalog already uses.
 - An applied SIGHUP reload replaces the one bounds snapshot that acceptance, binding, routing, listing, and status read (previously reload was recorded as applied while every reader kept the startup bounds). Existing route snapshots and ledger rows are never re-priced.
 
-**Change log v0.6.12 (2026-10-01, issue #1816 round-1 audit fixes):**
+**Change log v0.6.14 (2026-10-01, issue #1816 round-1 audit fixes):**
 - R015 bounds move out of the signed rate card, whose FeedSchema-A is closed (SPEC-023) and whose fleet CLI parser rejects extra keys, into coordinator config `trusted_pools.pool_model_pricing_bounds`. Unset or invalid bounds fail every pool model entry closed. The rate card and its schema are unchanged.
 - Entry pricing is the formula's own three int64 rates (`prompt_rate_per_mtok`, `prompt_cache_hit_rate_per_mtok` <= prompt, `completion_rate_per_mtok`); `provider_share_bps` and `global_multiplier_ppm` come from the rate card `default` row. The formula is unchanged.
 
-**Change log v0.6.11 (2026-10-01, issue #1816 — pool-manifest trusted pricing):**
+**Change log v0.6.13 (2026-10-01, issue #1816 — pool-manifest trusted pricing):**
 - Registers `SPEC-005-R015`. A current signed SPEC-042-R015 pool model entry's pricing is a trusted price source only for the same pool's R011 routes. The buyer quote and reservation use it after inclusive network floor/ceiling validation; the existing units, formula, platform fee/provider share, usage bounds, finality, and no-repricing history rules are unchanged.
-- Draft network floor/ceiling bounds (moved to coordinator config in v0.6.12). Missing or out-of-bounds pricing fails manifest acceptance and route reservation closed. No provider proposal, global route, or different pool may consume the price.
+- Draft network floor/ceiling bounds (moved to coordinator config in v0.6.14). Missing or out-of-bounds pricing fails manifest acceptance and route reservation closed. No provider proposal, global route, or different pool may consume the price.
+
+**Change log v0.6.12 (2026-10-02, issue #1793):** Recovery uses durable,
+atomically advanced bounded progress with overlap fencing; weekly settlement
+records every completed window in the settlement transaction and catches up
+missed closed windows after restart. Receipt-audit drain, exact/stale stats,
+and retention pruning are independently paced and indexed. Expired pending
+receipt verdicts are terminalized for both pool and non-pool attempts through
+the existing per-row verifier; a signed receipt already observed and queued
+for bounded persistence recovery fences that missing-receipt writer until the
+retry commits or exhausts.
+
+**Change log v0.6.11 (2026-10-02, issue #1793):** The primary money database
+and dedicated route-snapshot journal each own one bounded WAL checkpoint loop
+on a connection separate from their writer pools. Route-snapshot
+materialization cannot consume the post-credit attempt-output write budget.
+Periodic receipt-audit delivery performs bounded multi-batch catch-up while
+remaining subordinate to buyer traffic. Registers `SPEC-002-R003`; extends
+`SPEC-005-R003` and SPEC-022-R003/R011 without changing pricing, settlement,
+quarantine, or payout eligibility.
 
 **Change log v0.6.10 (2026-09-27, issue #1768 — auto-prefix cache-hit billing):**
 - §5.3.1 accepts a valid first-attempt provider `cached_prompt_tokens` report on an authenticated conversation-cache-only auto-prefix request as creditable reuse. The row keeps the cached count, applies the configured cache-hit rate, and exposes the same count in the flat buyer field. This supersedes v0.6.8's full-prompt-rate carve-out for that request class without enabling sticky routing.
@@ -61,7 +80,7 @@
 
 ## Preliminary conformance unit IDs
 
-SPEC-005 v0.6.12 registers `SPEC-005-R001`..`SPEC-005-R015` in
+SPEC-005 v0.6.15 registers `SPEC-005-R001`..`SPEC-005-R015` in
 `specs/CONFORMANCE.json`. R001–R003 remain the paid-path formula, hot-path,
 and crash-recovery units. R004–R009 group additional existing obligation
 areas without changing them. R010 is the D1a wholesale statement unit.
@@ -1642,6 +1661,20 @@ The job runs as an in-process coordinator goroutine.
 The boundary is UTC Monday 00:00.
 settlement.cadence_days defaults to 7.
 No cron or external scheduler is introduced in v1.
+Every attempted closed window MUST have a durable completion marker committed
+in the same transaction as its payout/source-row effects, including empty and
+below-threshold windows. Startup and every scheduler wake MUST replay unmarked
+closed cadence windows in chronological order. A transient catch-up failure
+MUST retry before the next weekly boundary. The marker guides scheduling only;
+it MUST NOT remove the existing idempotent direct-rerun behavior or prevent
+below-threshold credits from rolling forward.
+When upgrading a database with no markers, the first closed boundary after the
+oldest ledger credit anchors replay; an empty ledger bootstraps only the latest
+closed window.
+Catch-up MUST inspect the complete cadence sequence from that anchor so a hole
+before a later marker is repaired. Each invocation MUST process at most four
+unmarked windows; when more remain, the scheduler MUST retry within one minute
+through the committed markers rather than hold the money writer indefinitely.
 
 ### 7.2 Threshold
 
@@ -1824,7 +1857,14 @@ request_log, ledger_request_credits, ledger_operator_credits, and any provider i
 Crash before COMMIT loses all rows together.
 Crash after COMMIT preserves all rows together.
 No 2PC is used.
-The coordinator SQLite database MUST be operated in WAL mode (`PRAGMA journal_mode = WAL`). Recovery scans MUST execute under `BEGIN DEFERRED` to obtain a consistent reader snapshot.
+The primary coordinator money database and dedicated route-snapshot journal
+MUST be operated in WAL mode (`PRAGMA journal_mode = WAL`). Each physical WAL
+MUST have exactly one coordinator-owned bounded checkpoint worker on a
+connection separate from the writer pool; all writer handles MUST disable
+automatic checkpointing. A worker MUST use PASSIVE checkpointing while buyer
+traffic is active, MAY use TRUNCATE only after the configured idle condition,
+and MUST leave a failed or timed-out WAL for a later retry. Recovery scans MUST
+execute under `BEGIN DEFERRED` to obtain a consistent reader snapshot.
 
 **Pool cap (operational invariant).** The Go `*sql.DB` handle backing the coordinator SQLite store MUST set `MaxOpenConns(1)` and `MaxIdleConns(1)`. SQLite already serializes writers at one-at-a-time; the Go-pool cap converts that into an enforceable serialization point and eliminates the implicit-pool unbounded growth that surfaced as latent p99 latency and post-inference `request_log_failed` 500s on prior uncapped builds (issue #21 / ARCH-3 / 2026-06-10 audit QW-5). Callers that share the requestlog/billing/admission `*sql.DB` MUST NOT hold an outer `*sql.Rows` cursor open across an inner query against the SAME pool, and inside a transaction MUST NOT call helpers that issue against the un-pinned `*sql.DB` (they will deadlock waiting for a second connection that cannot be obtained while the tx pins the only one). The reference IMPL is `phase4-coordinator/internal/requestlog/store.go` `OpenStore`.
 
@@ -1863,6 +1903,21 @@ For a clean range, delta_gross_credits MUST equal 0 when provider gross credits 
 Provider/operator split deltas MUST be checked separately by verifying provider_credits + operator_credits == gross_credits for each row.
 A non-zero gross delta MUST be recorded in `/admin/ledger/reconcile` output and MUST fail AC-H005.
 `buyer_equivalent_credits` is the SPEC-005-internal buyer-equivalent total computed from `request_log` via the section  6 D8 matrix and the same section  5.3 formula. SPEC-005 does NOT read SPEC-006 usage tables. AC-H005 verifies symmetry of the SPEC-005 model only; cross-process consistency between SPEC-005 and SPEC-006 is a separate H-005-EXT verification owned by the operator outside SPEC-005 v0.3.
+
+Startup, nightly, and administrative recovery MUST share one durable overlap
+fence. Each writer transaction MUST have a fixed row ceiling and a short time
+budget, including orphan quarantine. Each source table and persisted cursor
+MUST use canonical fixed-width UTC text and an indexed `(ts_utc, id)` keyset so
+selector cost does not grow with history outside the requested window. The
+upgrade migration MUST re-normalize timestamps written by an older recovery
+writer after the prior normalization pass. A selected-row cursor MUST preserve
+the source timestamp bytes so malformed historical rows still advance in the
+same lexical order; only a zero-ID scan-boundary cursor may be canonicalized.
+The recovery phase and both cursor members MUST
+advance in the same transaction as the ledger effects and cumulative counters.
+After a crash or timeout, a later owner MAY reclaim an expired lease and MUST
+resume from the last committed cursor; it MUST NOT restart committed work from
+the beginning of the range.
 
 ### 10.4 Deterministic algorithm
 
@@ -2591,7 +2646,9 @@ Config changes affect only new request-credit rows.
 | `billing.force_credit_settlement_hold_seconds` | integer | `86400` | pre-payout hold for force-credit maturity; zero/missing uses the default |
 | `endpoints.provider_earnings.rate_limit_per_minute` | integer | `60` | per-provider read limit for earnings endpoint |
 
-The coordinator SQLite database MUST run in WAL mode (`journal_mode = WAL`). SPEC-005 behavior is undefined under `journal_mode = DELETE`.
+The SQLite files governed by §10.1 MUST run in WAL mode. SPEC-005 behavior is
+undefined under `journal_mode = DELETE` or when a physical WAL has no bounded
+checkpoint owner.
 
 ### 13.1 Initial placeholder rate card
 
@@ -2961,10 +3018,15 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
-### AC-WAL: WAL mode required
+### AC-WAL: WAL mode and checkpoint ownership required
 
-**Verification:** Coordinator startup runs `PRAGMA journal_mode` against the SQLite fixture.
-**Expected:** Startup asserts `journal_mode = WAL` and fails fast otherwise.
+**Verification:** Coordinator startup runs `PRAGMA journal_mode` against the
+primary money database and route-snapshot journal fixtures, with sustained
+writers active.
+**Expected:** Both files use WAL mode, automatic checkpointing is disabled on
+writer handles, and each file has one separate bounded checkpoint worker.
+PASSIVE checkpoints keep live frames bounded during writes; TRUNCATE is
+idle-only and lock wait is capped.
 **Network:** Not required.
 **State reset:** Fresh fixture database.
 

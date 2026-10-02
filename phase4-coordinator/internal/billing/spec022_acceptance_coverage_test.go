@@ -25,6 +25,7 @@ func TestSPEC022D8AcceptanceCoverageMapIncludesAllACs(t *testing.T) {
 		"AC-022-4":           "Partial",
 		"AC-022-5":           "Covered",
 		"AC-022-6":           "Covered",
+		"AC-022-6a":          "Covered",
 		"AC-022-7":           "Blocked",
 		"AC-022-8":           "Covered",
 		"AC-022-9":           "Partial",

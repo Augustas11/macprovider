@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
@@ -304,4 +306,135 @@ func TestRecordSettlementAttemptOutputLoopbackUsageIsNeverCoordinatorObserved(t 
 			}
 		})
 	}
+}
+
+func TestPersistSettlementAttemptOutputRouteMirrorPressureKeepsOutputBudget(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	reqLog, err := requestlog.OpenStore(dbPath)
+	if err != nil {
+		t.Fatalf("open request log: %v", err)
+	}
+	t.Cleanup(func() { _ = reqLog.Close() })
+	store, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+
+	settlementRouteSnapshotMirrorErrForTest = billing.ErrRouteSnapshotStorePressure
+	settlementRouteSnapshotMirrorContextForTest = func(ctx context.Context) context.Context {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("route-snapshot mirror context must have a deadline")
+		}
+		if remaining := time.Until(deadline); remaining > 50*time.Millisecond {
+			t.Fatalf("route-snapshot mirror budget=%s, want bounded near 25ms", remaining)
+		}
+		canceled, cancel := context.WithCancel(ctx)
+		cancel()
+		return canceled
+	}
+	outputWriteCalled := false
+	settlementOutputWriteContextForTest = func(attempt int, ctx context.Context) context.Context {
+		outputWriteCalled = true
+		if attempt != 1 {
+			t.Fatalf("settlement output attempt=%d want 1", attempt)
+		}
+		if err := ctx.Err(); err != nil {
+			t.Fatalf("settlement output context inherited mirror cancellation: %v", err)
+		}
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("settlement output context must have a deadline")
+		}
+		if remaining := time.Until(deadline); remaining < requestLogWriteTimeout-time.Second {
+			t.Fatalf("settlement output budget=%s, want fresh requestLogWriteTimeout budget", remaining)
+		}
+		return ctx
+	}
+	t.Cleanup(func() {
+		settlementRouteSnapshotMirrorErrForTest = nil
+		settlementRouteSnapshotMirrorContextForTest = nil
+		settlementOutputWriteContextForTest = nil
+	})
+
+	prompt := int64(10)
+	completion := int64(1)
+	rec := &billingRecorder{accountID: "acct-pressure", requestID: "req-pressure"}
+	err = rec.persistSettlementAttemptOutput(store, billing.HotPathInput{
+		RequestID:        "req-pressure",
+		AttemptN:         7,
+		ProviderID:       "provider-a",
+		Status:           200,
+		PromptTokens:     &prompt,
+		CompletionTokens: &completion,
+	}, settlementOutputForContent("ok", nil, nil, billing.TerminalStateNormalDone))
+	if err != nil {
+		t.Fatalf("persistSettlementAttemptOutput: %v", err)
+	}
+	if !outputWriteCalled {
+		t.Fatal("settlement output write was not attempted")
+	}
+	if got := settlementAttemptOutputCount(t, dbPath, "req-pressure"); got != 1 {
+		t.Fatalf("settlement attempt outputs=%d want 1", got)
+	}
+}
+
+func TestPersistSettlementAttemptOutputRouteMirrorIntegrityFailsClosed(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	reqLog, err := requestlog.OpenStore(dbPath)
+	if err != nil {
+		t.Fatalf("open request log: %v", err)
+	}
+	t.Cleanup(func() { _ = reqLog.Close() })
+	store, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+
+	mirrorErr := errors.New("route snapshot mirror digest mismatch")
+	settlementRouteSnapshotMirrorErrForTest = mirrorErr
+	outputWriteCalled := false
+	settlementOutputWriteContextForTest = func(attempt int, ctx context.Context) context.Context {
+		outputWriteCalled = true
+		return ctx
+	}
+	t.Cleanup(func() {
+		settlementRouteSnapshotMirrorErrForTest = nil
+		settlementOutputWriteContextForTest = nil
+	})
+
+	prompt := int64(10)
+	completion := int64(1)
+	rec := &billingRecorder{accountID: "acct-integrity", requestID: "req-integrity"}
+	err = rec.persistSettlementAttemptOutput(store, billing.HotPathInput{
+		RequestID:        "req-integrity",
+		AttemptN:         3,
+		ProviderID:       "provider-a",
+		Status:           200,
+		PromptTokens:     &prompt,
+		CompletionTokens: &completion,
+	}, settlementOutputForContent("ok", nil, nil, billing.TerminalStateNormalDone))
+	if !errors.Is(err, mirrorErr) {
+		t.Fatalf("persistSettlementAttemptOutput err=%v want mirror integrity error", err)
+	}
+	if outputWriteCalled {
+		t.Fatal("settlement output write must not run after route-snapshot integrity failure")
+	}
+	if got := settlementAttemptOutputCount(t, dbPath, "req-integrity"); got != 0 {
+		t.Fatalf("settlement attempt outputs=%d want 0", got)
+	}
+}
+
+func settlementAttemptOutputCount(t *testing.T, dbPath, requestID string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM settlement_attempt_outputs WHERE request_id = ?`, requestID).Scan(&count); err != nil {
+		t.Fatalf("count settlement attempt outputs: %v", err)
+	}
+	return count
 }

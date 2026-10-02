@@ -78,15 +78,15 @@ A coordinator deploy compares the tag's catalog with live (`compare-live`):
 
 ## Live on Pearl
 
-Probed 2026-09-30 (`/healthz`).
+Probed 2026-10-02 (`/healthz`).
 
 | Field | Value |
 |---|---|
-| Coordinator | **v1.8.209** @ `5245dc9f`. Applied 2026-09-30 at 10:03Z through the signed runtime updater; public `/healthz` reported `v1.8.209`. |
-| Gateway | **v1.8.209** (`gateway.db` schema 15; `coordinator.require_settlement_trailers: true`). The live `api.malibu.tech` nginx carries certbot TLS and `/ws/provider` routes absent from the repo template. **Never run the gateway `deploy-pearl-vps.sh`**; use the signed runtime updater for binary-only releases. |
-| Release | [Pearl runtime v1.8.209](https://github.com/Augustas11/macprovider/releases/tag/v1.8.209), immutable runtime-only prerelease. The apply preserved the live September 25 catalog; no full deploy followed it. |
+| Coordinator | **v1.8.211** @ `5550efd47`. Applied 2026-10-02 at 13:12Z through the signed runtime updater; local and public `/healthz` reported `v1.8.211`. |
+| Gateway | **v1.8.211** (`gateway.db` schema 17; `coordinator.require_settlement_trailers: true`). The live `api.malibu.tech` nginx carries certbot TLS and `/ws/provider` routes absent from the repo template. **Never run the gateway `deploy-pearl-vps.sh`**; use the signed runtime updater for binary-only releases. |
+| Release | [Pearl runtime v1.8.211](https://github.com/Augustas11/macprovider/releases/tag/v1.8.211), immutable runtime-only prerelease; build run [37007168564](https://github.com/Augustas11/macprovider/actions/runs/37007168564). The apply preserved the live September 25 catalog; no full deploy followed it. |
 | `recommended_binary_version` | 1.8.207 (CLI train owns this) |
-| Includes | Everything on `main` through `5245dc9f`, including #1804's Qwen3.6 OpenRouter capabilities. |
+| Includes | Everything on `main` through `5550efd47`, including #1801, #1812, #1818, #1822/#1823/#1825, #1831 and #1833. |
 | nginx | `/v1/stats/routability` route added on Pearl 2026-09-24 10:24Z, additively and verbatim from `phase4-coordinator/dist` (backups `*.bak-routability-20260924T102404Z`). Pearl's nginx still lags the repo on `/v1/catalog-artifacts`, `/v1/portal/session` and `/v1/provider/malibu-reward-audit`, and carries a hand-deployed `/v1/provider/model-admission/` (BYOM) route the repo lacks, so **do not copy the repo site file over it**. |
 
 Signed prerelease `v1.8.189` at `0ac51afa` exists and is immutable, but it was
@@ -112,7 +112,9 @@ The canary Mac mp-26592d… now runs signed CLI candidate v1.8.195, whose payloa
 
 | Tag | Commit | Head PR |
 |---|---|---|
-| v1.8.209 | `5245dc9f` | #1804 Qwen3.6 OpenRouter capabilities — **live** |
+| v1.8.211 | `5550efd4` | #1833 crash-safe bounded settlement maintenance — **live** |
+| v1.8.210 | `6756706b` | #1831 bounded SQLite evidence maintenance; also #1801, #1812, #1818 and runtime dependency updates |
+| v1.8.209 | `5245dc9f` | #1804 Qwen3.6 OpenRouter capabilities |
 | v1.8.208 | `bc276ea5` | #1783 (#1752 operator drain) |
 | v1.8.206 | `40ed8752` | #1779 (#1775 money-writer starvation), #1781 (updater snapshot timeout), #1782 (gateway schema-15 upgrade); also carries #1754, #1763, #1769, #1732, #1658 |
 | v1.8.205 | `3ca8e792` | rolled back: gateway schema-15 migration (`no such column: operator_review`) |
@@ -183,17 +185,66 @@ around 2026-10-23. The fix takes effect at the next renewal (Wed 2026-09-30
 16:00 UTC), or earlier with a manual dispatch of
 `renew-autotune-static-feed-signed.yml`.
 
-## Next coordinator release — none assigned, net changes vs v1.8.209
+## Next coordinator release — none assigned, net changes vs v1.8.211
 
-`v1.8.209` was applied through the signed runtime-only updater on 2026-09-30.
-The public model document then returned exactly one paid Qwen3.6 row with the
-#1804 feature descriptors, while the live catalog stayed on the September 25
-release. The table below tracks changes for the next runtime cut.
+`v1.8.211` was applied through the signed runtime-only updater on 2026-10-02.
+No coordinator, gateway, or Pearl-asset change has merged since that cut.
 
 | Net change in coordinator / gateway / Pearl assets | Status | PR |
 |---|---|---|
-| The authenticated gateway default output cap is 32,768 tokens while the demo surface remains capped at 512. Served buyer documentation and OpenRouter model metadata now report the effective configured/live-context limit consistently; SPEC-006 is v0.9.42. | merged `d5767b4a5` 2026-09-30 | #1801 |
-| Gateway demand telemetry for #1807 records attempted demand, served/unmet/capacity/substitution outcomes, privacy-bucketed buyer/model/provider fields, timing/usage metrics, 14-day retention pruning, and demand summaries. Release handoff: `docs/releases/gateway-release-1807-demand-telemetry.md`. | merged `2be9975a6` 2026-10-01; deploy pending | #1812 |
+| — | — | — |
+
+**2026-10-02 v1.8.211 apply.** The protected release built the immutable signed
+runtime from exact tag commit `5550efd47`; repository verification passed and
+the runtime-only lane preserved the provider recommendation, operator nginx,
+and live catalog. The first apply failed closed at 12:51Z because creation of
+the new recovery/outbox indexes on the 9+ GB money database exceeded the normal
+60 s coordinator health window. The updater rolled coordinator and gateway
+back to v1.8.210, restored serving and provider readiness, and left no armed
+transaction. Following the bounded precedent used for v1.8.200, the service
+health window was temporarily raised to its supported 300 s maximum. The
+second transaction created its snapshot at 13:08:49Z, completed one-time store
+initialization in about 204 s, began listening at 13:12:23Z, and passed local
+and public health, provider recovery, serving, TLS identity, and ready-provider
+gates at 13:12:30Z. The configured health window was then restored to 60 s;
+the updater reports `already_current` and no transaction is armed.
+
+Immediate evidence at 13:14Z: six of seven providers were policy-ready; the
+outbox gauge was fresh and declined from the pre-release 210,406 rows to
+170,402, with 8,642 rows drained since process start and 106 poisoned rows
+still open. Short 200 ms drain attempts recorded 425 successes and 131 deadline
+errors, so the drain is making progress but has not yet proven sustained
+capacity. Route evidence recorded 37 durable journal inserts, 727 successful
+materializations and one materializer error; primary route inserts recorded 35
+successes and two errors. The bounded weekly settlement catch-up is active but
+still reports more historical unmarked windows after each four-window pass.
+The failed and successful attempts retained two new 12 GB rollback snapshots;
+68 GB remained free. This production observation does not satisfy #1793's
+30 requests/s for 24 hours acceptance gate or close its retention, backlog,
+SLO, Postgres, and rollback work.
+
+**2026-10-02 v1.8.210 apply.** The protected release built the signed runtime
+pair from exact tag commit `6756706b`; the repository release verifier passed,
+and Pearl's updater completed the schema-15-to-17 transaction with an 11 GB
+rollback snapshot. Public coordinator and gateway health both reported
+`v1.8.210`, the updater reported `already_current`, services were active, and
+the live catalog symlink remained
+`published-2026-09-25-artifact-hash-correction-v1-d9e402203f81679e`.
+Demand telemetry recorded three privacy-bucketed paid smokes: one served Llama
+request, one capacity-constrained Qwen request, and one unknown-model request.
+The new checkpoint owners were non-busy and successful; all 78 observed billing,
+settlement-output and settlement-receipt transactions succeeded. Route snapshot
+materialization recorded 163 successes and one classified deadline error, while
+the durable journal recorded 89 successes. The outbox drainer demonstrated its
+bounded five-batch catch-up (five consecutive 100-row batches), but its
+stats/prune queries continued to hit short deadlines and later drain passes were
+skipped under active buyer traffic. The initial zero-pending gauge was therefore
+stale, not proof of an empty backlog: a direct indexed count at 09:22Z found
+210,406 pending rows, 106 unacknowledged poisoned rows, and 756,281 retained
+rows. The deferred billing startup scan also reached its designed 30 s timeout
+after listeners were already serving. Durable evidence and buyer serving stayed
+healthy, but the growing historical outbox remains open scaling work under
+#1793 rather than a quiet-rollout or backlog-closure claim.
 
 ## Open Pearl actions (not new code)
 

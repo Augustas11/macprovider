@@ -14,10 +14,16 @@ import (
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 )
 
+const settlementRouteSnapshotMirrorTimeout = 25 * time.Millisecond
+
 // settlementOutputWriteContextForTest, when set, replaces the detached
 // context used for the post-credit settlement-output write. attempt is 1
 // for the first try and 2 for the deadline retry. Production leaves it nil.
 var settlementOutputWriteContextForTest func(attempt int, ctx context.Context) context.Context
+
+// settlementRouteSnapshotMirrorContextForTest, when set, replaces the
+// detached context used for the pre-output route-snapshot mirror.
+var settlementRouteSnapshotMirrorContextForTest func(ctx context.Context) context.Context
 
 // hotPathWriteContextForTest replaces the context for a provider-credit
 // write. attempt is 1 for the first try and 2 for the deadline retry.
@@ -26,6 +32,10 @@ var hotPathWriteContextForTest func(attempt int, ctx context.Context) context.Co
 // settlementOutputWriteErrForTest, when set, fails the settlement-output
 // write after the credit is stored. A non-deadline error still fails the buyer.
 var settlementOutputWriteErrForTest error
+
+// settlementRouteSnapshotMirrorErrForTest, when set, fails the route-snapshot
+// mirror attempt before the settlement output is inserted.
+var settlementRouteSnapshotMirrorErrForTest error
 
 // markSettlementOutputMissingErrForTest, when set, makes the missing-output
 // mark fail after its write.
@@ -707,6 +717,9 @@ func (b *billingRecorder) writeProviderHotPath(ctx context.Context, store *billi
 // is logged and does not fail the buyer. Any other error still fails the
 // request.
 func (b *billingRecorder) persistSettlementAttemptOutput(store *billing.Store, in billing.HotPathInput, output *billing.SettlementOutput) error {
+	if err := b.mirrorRouteSnapshotBeforeSettlementOutput(store, in); err != nil {
+		return err
+	}
 	call := func(attempt int) error {
 		if attempt == 1 && settlementOutputWriteErrForTest != nil {
 			return settlementOutputWriteErrForTest
@@ -760,11 +773,46 @@ func (b *billingRecorder) persistSettlementAttemptOutput(store *billing.Store, i
 	return nil
 }
 
+func (b *billingRecorder) mirrorRouteSnapshotBeforeSettlementOutput(store *billing.Store, in billing.HotPathInput) error {
+	if store == nil || in.ProviderID == "" {
+		return nil
+	}
+	accountScope, evidenceAttemptN := b.settlementEvidenceIdentity(in)
+	ctx, cancel := context.WithTimeout(context.Background(), settlementRouteSnapshotMirrorTimeout)
+	defer cancel()
+	if settlementRouteSnapshotMirrorContextForTest != nil {
+		ctx = settlementRouteSnapshotMirrorContextForTest(ctx)
+	}
+	err := store.MirrorRouteSnapshotForAttempt(ctx, billing.SettlementReceiptIdentity{
+		AccountScope: accountScope,
+		RequestID:    in.RequestID,
+		AttemptN:     evidenceAttemptN,
+		ProviderID:   in.ProviderID,
+	})
+	if settlementRouteSnapshotMirrorErrForTest != nil {
+		err = settlementRouteSnapshotMirrorErrForTest
+	}
+	if err == nil {
+		return nil
+	}
+	if billing.IsRouteSnapshotStorePressure(err) {
+		if b.server != nil {
+			b.server.log.Warn().
+				Err(err).
+				Str("request_id", b.requestID).
+				Str("event", "settlement_route_snapshot_mirror_pressure").
+				Msg("route snapshot mirror pressure before settlement output; output write continues")
+		}
+		return nil
+	}
+	return err
+}
+
 func settlementOutputPersistFailedAfterCredit(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, billing.ErrRouteSnapshotStorePressure) {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return true
 	}
 	msg := err.Error()
@@ -1032,14 +1080,6 @@ func (b *billingRecorder) recordSettlementAttemptOutput(ctx context.Context, sto
 			ObservedInputTokens:  observedInput,
 			ObservedOutputTokens: observedOutput,
 		},
-	}
-	if err := store.MirrorRouteSnapshotForAttempt(ctx, billing.SettlementReceiptIdentity{
-		AccountScope: attempt.AccountScope,
-		RequestID:    attempt.RequestID,
-		AttemptN:     attempt.AttemptN,
-		ProviderID:   attempt.ProviderID,
-	}); err != nil {
-		return err
 	}
 	_, err := store.InsertSettlementAttemptOutput(ctx, attempt)
 	if err == nil {

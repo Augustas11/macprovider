@@ -272,6 +272,53 @@ func (s *Store) ReceiptObservedAtUnixMS() int64 {
 	return s.nowUTC().UnixMilli()
 }
 
+// ObserveSettlementReceiptForRecovery atomically stamps the coordinator's
+// first observation and installs the missing-receipt sweep fence. A sweep that
+// observes no fence therefore linearizes before this observation; because the
+// sweep is strict-after-deadline, it cannot close a receipt observed before
+// the deadline.
+func (s *Store) ObserveSettlementReceiptForRecovery(id SettlementReceiptIdentity) int64 {
+	s.settlementReceiptRecoveryMu.Lock()
+	defer s.settlementReceiptRecoveryMu.Unlock()
+	observedAt := s.nowUTC().UnixMilli()
+	if s.settlementReceiptRecovery == nil {
+		s.settlementReceiptRecovery = make(map[SettlementReceiptIdentity]int)
+	}
+	s.settlementReceiptRecovery[id]++
+	return observedAt
+}
+
+// BeginSettlementReceiptRecovery fences the missing-receipt sweeper while a
+// signed receipt that the coordinator already observed is waiting for a
+// bounded persistence retry. It intentionally records only the tuple identity.
+func (s *Store) BeginSettlementReceiptRecovery(id SettlementReceiptIdentity) {
+	s.settlementReceiptRecoveryMu.Lock()
+	defer s.settlementReceiptRecoveryMu.Unlock()
+	if s.settlementReceiptRecovery == nil {
+		s.settlementReceiptRecovery = make(map[SettlementReceiptIdentity]int)
+	}
+	s.settlementReceiptRecovery[id]++
+}
+
+// EndSettlementReceiptRecovery releases the in-process sweep fence after the
+// receipt commits or its bounded retry budget is exhausted.
+func (s *Store) EndSettlementReceiptRecovery(id SettlementReceiptIdentity) {
+	s.settlementReceiptRecoveryMu.Lock()
+	if pending := s.settlementReceiptRecovery[id]; pending > 1 {
+		s.settlementReceiptRecovery[id] = pending - 1
+	} else {
+		delete(s.settlementReceiptRecovery, id)
+	}
+	s.settlementReceiptRecoveryMu.Unlock()
+}
+
+func (s *Store) settlementReceiptRecoveryPending(id SettlementReceiptIdentity) bool {
+	s.settlementReceiptRecoveryMu.RLock()
+	pending := s.settlementReceiptRecovery[id]
+	s.settlementReceiptRecoveryMu.RUnlock()
+	return pending > 0
+}
+
 func (s *Store) RecordMissingSettlementReceipt(ctx context.Context, input SettlementReceiptMissingInput) (SettlementReceiptState, error) {
 	if err := input.SettlementReceiptIdentity.validate(); err != nil {
 		return SettlementReceiptState{}, err
@@ -326,6 +373,34 @@ func (s *Store) applySettlementReceiptVerdict(ctx context.Context, id Settlement
 				return err
 			}
 			outcome = existing
+			return nil
+		}
+		if !receiptPresent && s.settlementReceiptRecoveryPending(id) {
+			// A signed receipt was observed before this missing-receipt writer
+			// acquired the SQLite writer. Leave an existing verdict pending, or
+			// synthesize the same pending projection when the failed receipt write
+			// never inserted its first verdict row. The bounded retry still owns
+			// persistence and retains its original observation time.
+			if found {
+				existing.IdempotencyStatus = settlementReceiptIDPending
+				if err := hydrateSettlementReceiptRouteAuditFieldsConn(ctx, conn, &existing); err != nil {
+					return err
+				}
+				outcome = existing
+				return nil
+			}
+			evidence, err := loadSettlementEvidenceConn(ctx, conn, id)
+			if err != nil {
+				return err
+			}
+			outcome, err = settlementReceiptStateFromResult(id, evidence, SettlementVerifyResult{
+				Outcome:       SettlementOutcomePending,
+				ReceiptResult: SettlementReceiptResultInconclusive,
+				Reason:        "receipt_verdict_pending",
+			}, false, receivedAtUnixMS, false)
+			if err != nil {
+				return err
+			}
 			return nil
 		}
 		evidence, err := loadSettlementEvidenceConn(ctx, conn, id)
@@ -1409,14 +1484,23 @@ ORDER BY id
 
 func (s *Store) SettlementReceiptAuditOutboxStats(ctx context.Context) (SettlementReceiptAuditOutboxStats, error) {
 	var stats SettlementReceiptAuditOutboxStats
-	var oldest sql.NullString
 	reader := s.reader()
 	err := reader.QueryRowContext(ctx, `
-SELECT COUNT(*), MIN(created_at_utc)
+SELECT COUNT(*)
 FROM settlement_receipt_audit_outbox
 WHERE drained_at_utc IS NULL
-  AND poisoned_at_utc IS NULL`).Scan(&stats.PendingRows, &oldest)
+  AND poisoned_at_utc IS NULL`).Scan(&stats.PendingRows)
 	if err != nil {
+		return stats, err
+	}
+	var oldest sql.NullString
+	if err := reader.QueryRowContext(ctx, `
+SELECT created_at_utc
+FROM settlement_receipt_audit_outbox INDEXED BY idx_srao_pending_created
+WHERE drained_at_utc IS NULL
+  AND poisoned_at_utc IS NULL
+ORDER BY julianday(created_at_utc), id
+LIMIT 1`).Scan(&oldest); err != nil && err != sql.ErrNoRows {
 		return stats, err
 	}
 	if err := reader.QueryRowContext(ctx, `
@@ -1472,10 +1556,10 @@ func (s *Store) PruneSettlementReceiptAuditOutbox(ctx context.Context, cutoff ti
 DELETE FROM settlement_receipt_audit_outbox
  WHERE id IN (
        SELECT id
-         FROM settlement_receipt_audit_outbox
+         FROM settlement_receipt_audit_outbox INDEXED BY idx_srao_drained_retention
         WHERE drained_at_utc IS NOT NULL
           AND julianday(drained_at_utc) < julianday(?)
-     ORDER BY id
+     ORDER BY julianday(drained_at_utc), id
         LIMIT ?
  )`,
 		cutoff.UTC().Format(time.RFC3339Nano), limit)
@@ -1568,12 +1652,12 @@ func (s *Store) loadSettlementReceiptAuditOutbox(ctx context.Context, outboxID i
 	var state SettlementReceiptState
 	var attemptedReceivedAtUnixMS int64
 	var eventTime time.Time
-	found := false
-	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
-		var err error
-		eventType, accountScopeHash, state, attemptedReceivedAtUnixMS, eventTime, found, err = loadSettlementReceiptAuditOutboxConn(ctx, conn, outboxID)
-		return err
-	})
+	conn, err := s.reader().Conn(ctx)
+	if err != nil {
+		return eventType, accountScopeHash, state, attemptedReceivedAtUnixMS, eventTime, false, err
+	}
+	defer conn.Close()
+	eventType, accountScopeHash, state, attemptedReceivedAtUnixMS, eventTime, found, err := loadSettlementReceiptAuditOutboxConn(ctx, conn, outboxID)
 	return eventType, accountScopeHash, state, attemptedReceivedAtUnixMS, eventTime, found, err
 }
 

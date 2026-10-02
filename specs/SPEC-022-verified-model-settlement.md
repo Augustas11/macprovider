@@ -1,13 +1,13 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.2.8
+Version: v0.2.10
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
 
-### v0.2.8
+### v0.2.10
 
 #1816 freeze-audit R1 fixes, and the #1816 VM acceptance A-1 fix: v2 is
 negotiated with the gateway (R-13.2). R-13.2 names option B: #1816 provenance rides
@@ -25,7 +25,7 @@ buyer-final debit or provider credit, and an unreadable fence leaves the
 receipt retryable. Receipt-bound usage never raises the completion count
 above the ledger's byte-derived ceiling (the existing SPEC-005 clamp).
 
-### v0.2.7
+### v0.2.9
 
 #1816 lab e2e fixes. R-13.4 states the in-flight rule precisely: an attempt
 settles from its immutable route snapshot across manifest rotation and entry
@@ -33,7 +33,7 @@ removal or change, and falls back to zero only under the SPEC-042-R015
 durable route fence or a real SPEC-042-R006 label mismatch. R-12 decisions
 use the same fence in the hot path and in ledger recovery.
 
-### v0.2.6
+### v0.2.8
 
 #1816 round-1 audit fixes. R-12.1 and R-12.3 now admit the SPEC-047-R011
 pool-manifest identity source and SPEC-042-R016 attested members, bound as
@@ -45,7 +45,7 @@ preimage used only by routes that carry it, implementation-defined pending the
 implementation slice, and reconciled with SPEC-015 §N.2 by reference. Native
 `mlx_cache` pool-entry attempts keep native receipts and `coordinator_observed`.
 
-### v0.2.5
+### v0.2.7
 
 Pool-manifest expected identity (#1816). Adds SPEC-022-R013: a route snapshot
 names whether its expected artifact pair comes from the global catalog or the
@@ -53,6 +53,28 @@ route's signed pool manifest, and pool-manifest snapshots bind the exact core
 digest. Equality and replay remain hash-exact; the new source makes no trust
 claim beyond SPEC-042-R006 and does not make a pool model globally
 `settlement_capable`.
+
+### v0.2.6
+
+Issue #1793 completes the SQLite stop-the-bleeding contract: all expired open
+pending verdicts, not only pool-labelled attempts, are closed through the
+existing per-row verifier; a signed receipt already observed before the
+deadline and queued for bounded persistence recovery fences the missing-
+receipt writer. Audit delivery is continuously paced with capacity above the
+admitted event rate, exact/stale backlog telemetry, and indexed bounded
+retention. Route materialization has an outer batch ceiling. Weekly settlement
+and recovery gain durable crash-resume progress without changing payout,
+quarantine, or account-scope predicates.
+
+### v0.2.5
+
+Issue #1793 bounds SQLite evidence maintenance. Covered routing synchronously
+commits the immutable route snapshot to a dedicated journal before dispatch;
+primary-table materialization is digest-identical, idempotent, asynchronous,
+and bounded. Materialization pressure cannot consume the independent
+post-credit attempt-output write budget. Receipt-audit delivery may catch up in
+bounded batches and may yield to buyer traffic only until a maximum deferral.
+No settlement, quarantine, or payout predicate changes.
 
 ### v0.2.4
 
@@ -721,6 +743,22 @@ R-3.2. The snapshot MUST be immutable for the request attempt. Catalog rotation,
 catalog rollback, provider reconnect, warm-swap, or delayed receipt arrival MUST
 NOT change the snapshot used by settlement.
 
+R-3.2.1. A covered request MUST synchronously commit its immutable route
+snapshot to the dedicated route-snapshot journal before provider dispatch.
+Primary snapshot-table materialization MAY be asynchronous, but it MUST be
+digest-identical, idempotent, bounded by batch and deadline, and MUST NOT delay
+dispatch after the journal commit. The journal remains the recovery authority
+until materialization succeeds. Materialization MAY yield during active buyer
+traffic only until its configured maximum deferral.
+Each materializer invocation MUST also have a fixed maximum number of batches;
+remaining journal rows stay authoritative for a later invocation. Pending
+journal selection MUST use an indexed keyset path.
+
+R-3.2.2. Post-credit attempt-output persistence MUST have an independent write
+budget. Route-snapshot materialization pressure MUST NOT consume that budget or
+prevent the output row from being attempted. A digest mismatch or other
+non-pressure integrity failure remains fail-closed.
+
 R-3.3. Settlement MUST verify:
 
 `receipt.model_hash == route_snapshot.provider_reported_model_hash == route_snapshot.expected_catalog_model_hash`.
@@ -961,6 +999,16 @@ R-8.3. If receipt verification remains `pending` past
 `pending_deadline_seconds`, the row MUST transition to `quarantined`, release or
 refund buyer reservation, and keep provider credit zero. The deadline is
 measured from the recorded terminal-state timestamp.
+The coordinator MUST perform this transition in a bounded background sweep for
+every open pending verdict, regardless of pool membership and independently of
+gateway finality reads. Each selected tuple MUST be revalidated and closed
+through the ordinary per-row missing-receipt writer; no bulk status update is
+allowed. Exact-deadline rows remain pending until wall time is strictly later
+than the deadline. A signed receipt already observed before the deadline and
+queued for bounded persistence recovery MUST win over the sweep in that
+process. The coordinator MUST install the in-process sweep fence atomically
+with the clock sample that defines first observation; the sweep may retry after
+recovery commits or exhausts.
 
 R-8.4. If receipt verification returns `zero_settled`, the row is terminal. The
 buyer final debit MUST be zero or the buyer reservation MUST be released or
@@ -1089,6 +1137,23 @@ verdict audit event containing at least:
 - provider settlement outcome;
 - payout exclusion outcome; and
 - reason code on any non-verified outcome.
+
+R-11.1.1. The receipt/verdict transaction MUST atomically enqueue its compact
+audit outbox rows. Periodic delivery MUST be bounded by batch count and
+deadline. Shutdown catch-up MUST stop on zero progress or its outer deadline;
+it MAY consume multiple batches within that deadline. Periodic delivery MAY
+yield to active buyer traffic only until a configured maximum deferral, after
+which one bounded catch-up run MUST be attempted. Conflicting sink rows become
+retained poison and remain observable; audit delivery is not a
+provider-payability predicate.
+Normal delivery MUST be continuously paced in small batches and MUST NOT wait
+for buyer idleness. Its configured theoretical capacity MUST exceed the
+admitted receipt-event arrival rate; staging acceptance proves sustainable
+delivery rather than assuming capacity from configuration. Exact pending depth
+and oldest age MUST use indexed reads. If a stats read times out, the last
+successful values remain exposed together with an explicit stale flag and
+sample age. Retention deletes only drained rows, in bounded indexed batches;
+pending and poison evidence is never pruned by that path.
 
 R-11.2. Audit events MUST NOT contain raw prompts, raw outputs, receipt
 signatures, or receipt public keys unless an existing spec already permits the
@@ -1261,11 +1326,11 @@ the pool attempts recorded before a downgrade.
   coordinator attempt it opened stays `pending`, and no later finality read
   reaches that attempt. The v0.2.0 coordinator therefore runs a bounded,
   periodic sweep, independent of gateway holds and of whether the
-  trusted-pool feature is enabled, that closes every open `pending` pool
+  trusted-pool feature is enabled, that closes every open `pending`
   verdict past its pending deadline through `RecordMissingSettlementReceipt`,
   the same terminalization a finality read applies
   (`phase4-coordinator/internal/billing/pool_settlement_expiry_sweep.go`,
-  `SweepExpiredPoolSettlementVerdicts`). It never touches a verdict still
+  `SweepExpiredSettlementVerdicts`). It never touches a verdict still
   inside its window, and a closed verdict is never selected again. The
   downgrade gate still counts every open verdict; the sweep only makes
   expired ones close without a buyer request.
@@ -1469,10 +1534,14 @@ its existing catalog evidence validates.
   mismatch event.
 - **AC-022-4:** During warm-swap loading or draining, the provider fails the
   SPEC-022 hash predicate for the target model.
-- **AC-022-5:** Covered routing persists a route-time verification snapshot
-  before forwarding work to the provider.
+- **AC-022-5:** Covered routing commits a route-time verification snapshot to
+  the dedicated journal before forwarding work to the provider; primary-table
+  materialization is digest-identical, idempotent, and bounded.
 - **AC-022-6:** Catalog rotation after route time does not change the snapshot
   used for settlement verification.
+- **AC-022-6a:** Route-snapshot materialization pressure does not consume the
+  post-credit attempt-output write budget; output persistence is still
+  attempted, while a non-pressure digest mismatch fails closed.
 - **AC-022-7:** A request routed under an expired or unverifiable catalog cannot
   final-debit the buyer or pay the provider.
 - **AC-022-8:** A non-streaming request with a settlement-capable,
@@ -1575,7 +1644,9 @@ its existing catalog evidence validates.
   missing, empty, stale, ambiguous) is excluded from covered paid routing.
 - **AC-022-38:** Every settlement verdict audit event contains all R-11.1 fields
   and the aggregate counters required by R-11.3 are queryable by policy version,
-  model id, entrypoint, and reason code.
+  model id, entrypoint, and reason code. A sustained backlog is processed by
+  bounded multi-batch catch-up, stops on a short or zero-progress batch, remains
+  deadline-bounded, and reports pending count, oldest age, and retained poison.
 - **AC-022-39:** A manually inserted money-positive payout-ready or compensation
   row with no verified route-snapshot and receipt binding is rejected from
   payout consumption.

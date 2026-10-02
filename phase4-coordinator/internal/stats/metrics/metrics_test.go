@@ -54,13 +54,14 @@ var (
 	allowMoneySQLiteComponentLabel = map[string]bool{
 		"billing_hot_path": true, "request_log_identity": true,
 		"billing_reload_config": true, "route_snapshot": true,
-		"wal_checkpoint": true, "ledger_recovery": true,
-		"settlement_attempt_output": true, "settlement_pool_labels": true,
-		"settlement_receipt": true,
+		"route_snapshot_journal": true, "route_snapshot_materializer": true,
+		"wal_checkpoint": true, "ledger_recovery": true, "settlement_attempt_output": true,
+		"settlement_pool_labels": true, "settlement_receipt": true,
 	}
 	allowMoneySQLiteOutcomeLabel   = map[string]bool{"success": true, "error": true}
 	allowMoneySQLiteOperationLabel = map[string]bool{
-		"route_snapshot_insert": true,
+		"route_snapshot_insert":      true,
+		"route_snapshot_materialize": true,
 	}
 	allowMoneySQLitePageClassLabel = map[string]bool{
 		"busy": true, "log": true, "checkpointed": true,
@@ -128,7 +129,10 @@ func TestLabelHygiene(t *testing.T) {
 	m.ObserveSQLiteConnectionWait("billing_hot_path", "raw-attacker-value", time.Millisecond)
 	m.ObserveSQLiteTransactionDuration("request_log_identity", "error", time.Millisecond)
 	m.ObserveSQLiteWriteDuration("route_snapshot", "route_snapshot_insert", "success", time.Millisecond)
+	m.ObserveSQLiteWriteDuration("route_snapshot_journal", "route_snapshot_insert", "success", time.Millisecond)
+	m.ObserveSQLiteWriteDuration("route_snapshot_materializer", "route_snapshot_materialize", "success", time.Millisecond)
 	m.ObserveSQLiteWriteDuration("route_snapshot", "raw-attacker-value", "success", time.Millisecond)
+	m.ObserveSQLiteWriteDuration("raw-attacker-value", "route_snapshot_materialize", "success", time.Millisecond)
 	m.ObserveSQLiteWALCheckpoint("wal_checkpoint", "log", "success", 7)
 	m.ObserveSQLiteWALCheckpoint("wal_checkpoint", "raw-attacker-value", "success", 7)
 	m.ObserveSQLiteWALCheckpointDuration("wal_checkpoint", "success", time.Millisecond)
@@ -154,6 +158,14 @@ func TestLabelHygiene(t *testing.T) {
 	for _, component := range []string{"ledger_recovery", "settlement_attempt_output", "settlement_pool_labels", "settlement_receipt"} {
 		if !metricExists(families, "money_sqlite_connection_wait_seconds", map[string]string{"component": component, "outcome": "success"}) {
 			t.Errorf("money SQLite series missing for component=%q", component)
+		}
+	}
+	for _, labels := range []map[string]string{
+		{"component": "route_snapshot_journal", "operation": "route_snapshot_insert", "outcome": "success"},
+		{"component": "route_snapshot_materializer", "operation": "route_snapshot_materialize", "outcome": "success"},
+	} {
+		if !metricExists(families, "money_sqlite_write_duration_seconds", labels) {
+			t.Errorf("money SQLite write series missing for labels=%v", labels)
 		}
 	}
 
@@ -260,6 +272,7 @@ func TestSettlementReceiptAuditOutboxHelpers(t *testing.T) {
 	m.SetSettlementReceiptAuditOutboxPoisonedRows(-1)
 	m.SetSettlementReceiptAuditOutboxPoisonedRetainedRows(-1)
 	m.SetSettlementReceiptAuditOutboxOldestPendingAge(-time.Second)
+	m.ObserveSettlementReceiptAuditOutboxStatsHealth(true, 3*time.Second)
 	m.IncSettlementReceiptAuditOutboxDrain("success")
 	m.IncSettlementReceiptAuditOutboxDrain("error")
 	m.IncSettlementReceiptAuditOutboxDrain("raw-attacker-value")
@@ -279,6 +292,8 @@ func TestSettlementReceiptAuditOutboxHelpers(t *testing.T) {
 	assertMetricValue(t, families, "settlement_receipt_audit_outbox_poisoned_rows", nil, 0)
 	assertMetricValue(t, families, "settlement_receipt_audit_outbox_poisoned_retained_rows", nil, 0)
 	assertMetricValue(t, families, "settlement_receipt_audit_outbox_oldest_pending_age_seconds", nil, 0)
+	assertMetricValue(t, families, "settlement_receipt_audit_outbox_stats_stale", nil, 1)
+	assertMetricValue(t, families, "settlement_receipt_audit_outbox_stats_age_seconds", nil, 3)
 	assertMetricValue(t, families, "settlement_receipt_audit_outbox_drain_total", map[string]string{"outcome": "success"}, 1)
 	assertMetricValue(t, families, "settlement_receipt_audit_outbox_drain_total", map[string]string{"outcome": "error"}, 1)
 	assertMetricValue(t, families, "settlement_receipt_audit_outbox_rows_total", map[string]string{"operation": "drained"}, 3)
