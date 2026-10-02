@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 
-MODEL_NAME = "qwen3-8b"
+MODEL_NAME = "byom-e2e-noncatalog"
 SERVED_MODEL_REF = "ollama:" + MODEL_NAME
 NOW = "2027-01-15T08:00:00Z"
 
@@ -441,13 +441,11 @@ def main():
             "MACPROVIDER_CONFIG": str(config),
             "MACPROVIDER_PROTECTED_CREDENTIAL_ROOT": str(protected_root),
             "MACPROVIDER_BYOM_ALLOW_INSECURE_LOOPBACK_COORDINATOR": "1",
-            # qwen3-8b (~16 GB estimate) reports does_not_fit on CI runners and
-            # ordinary dev Macs, which would block the offer/economics flow this
-            # harness actually tests. Supply a RAM value so BYOM discovery's
-            # advisory local-fit signal treats the fixture as fitting; the fit
-            # logic still runs. Scoped to BYOM discovery only -- not autotune.
-            # The fake Ollama runtime reports only the tag, not the GGUF digest,
-            # so the fresh artifact feed must keep catalog_model_key null.
+            # Keep the advisory local-fit signal deterministic across CI runners
+            # and ordinary dev Macs. The deliberately noncatalog model name also
+            # keeps catalog_model_key null even when the artifact feed is stale
+            # and matching falls back to v0.1 name-level catalog resolution.
+            # Scoped to BYOM discovery only -- not autotune.
             "MACPROVIDER_BYOM_E2E_DETECTED_RAM_GB": "64",
         })
 
