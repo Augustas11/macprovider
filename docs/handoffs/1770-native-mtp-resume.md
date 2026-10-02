@@ -4,8 +4,9 @@ Resume the production-evidence campaign in draft PR #1832 on branch
 `campaign/native-mtp-formal`. Read `AGENTS.md`, `CLAUDE.md`, the PR body, and
 SPEC-048 / SPEC-023 R024 before changing the campaign.
 
-Native MTP is implemented and remains **default-off**. Nothing in this
-campaign is signed, released, deployed, or activated.
+Native MTP is implemented and remains **default-off**. A private,
+non-promotable acceptance candidate is signed and notarized. Nothing in this
+campaign is released, deployed, or activated.
 
 ## Current state
 
@@ -15,8 +16,8 @@ campaign is signed, released, deployed, or activated.
 | Fused upstream baseline | `Augustas11/mlx-swift-lm@ca29e9544777068a0b53aad87310ff1cfaf3fd1d` | Pushed production candidate; Studio validation pending |
 | Fused MacProvider pin | `3600d7b9f` | Exact pin and fused qualification requirements committed |
 | SwiftPM release lock | `618dbe2d5` | Xcode 16.4 transitive pins restored; fused upstream revision preserved |
-| Operator-pause fix | `0e5e63b0c` | Targeted test passes; reviewed signed CLI needed for live validation |
-| Private acceptance candidate | `v1.8.212`, workflow run `37007253970` | Unsigned build passed; protected signer failed closed at Apple notarization because a required developer agreement is missing or expired; no signed artifact was exported |
+| Operator-pause fix | `0e5e63b0c` | Targeted test passes; published signed CLI needed for live validation |
+| Private acceptance candidate | `v1.8.212`, workflow run `37075501296`, candidate `d806dcf203a94f813aadbe458c8de578be476bd0`, control `dac2ab8df6d1acd7bf54df61b2a604ac609780a4` | PASS; Developer ID signed, Apple notarized, stapled, and exported as a private `promotion_ready=false` artifact expiring `2026-10-03T23:42:32Z` |
 | Post-gateway replay analyzer | `e2a5b51fc` | Exact R004 mix semantics and frozen corrected gates; capture/replay pending |
 | Governance versions | `bfbdc0d94` | SPEC-023 v0.22.7 and SPEC-048 0.1.22 reconciled in `CONFORMANCE.json` |
 | Historical stock R015 | policy `30934c07e5b6ca6dfa569505bbfdb2fd118be719cba81ddf99193a4ebe72d581` | PASS, preserved, superseded for fused authorization |
@@ -51,9 +52,10 @@ released provider drained from the coordinator, entered
 
 Commit `0e5e63b0c` allows operator pause from `network_offline` and
 `coordinator_unavailable`; its focused regression test passes for both states.
-Do not retry the hardware campaign until a reviewed, signed CLI containing
-that fix is installed. Never stop or replace the live provider, and never
-connect a local, unsigned, ad-hoc-signed, or unreleased build to Malibu.
+The signed private candidate contains that fix, but it is not a published
+release and therefore cannot replace or connect as the live Malibu provider.
+Never stop or replace the live provider with it, and never connect a local,
+unsigned, ad-hoc-signed, or unreleased build to Malibu.
 
 The first private-candidate attempt used the exact campaign SHA
 `40b630905246ea49109d1458d48a1b5db3b0379d` with `promotion_ready=false`.
@@ -63,11 +65,28 @@ not export a signed candidate and did not create a tag or release. Because the
 campaign subsequently merged current `origin/main`, any retry must bind the
 new reviewed branch head rather than the failed candidate SHA.
 
+The Account Holder restored the agreement on 2026-10-03. Replacement run
+`37075501296` passed the unsigned build, independent protected-environment
+approval, Developer ID signing, notarization, stapling, acceptance-envelope
+signing, and private export. The downloaded artifact passed
+`verify-release-checksums.sh` against run `37075501296/1`; every checksum also
+passed on `1deMac-Studio.local`, and the embedded CLI passed strict code-sign
+verification for team `YF7XNRJUG4`.
+
+The next guarded Studio attempt again failed closed before any build or
+hardware workload. The live provider remains the published, Developer-ID-
+signed `v1.8.207`. The shared wrapper received
+`pause_ack accepted=false, reason=lifecycle_state_persistence_failed` from that
+old process. The exact fused source archive was staged separately on the Studio
+and verified at `d806dcf` with the `ca29e954...` upstream pin, but its lab build
+did not start. The live provider was not stopped, replaced, or modified.
+
 ## Resume order
 
-1. Restore the required Apple Developer agreement, cut a new private,
-   non-promotable candidate from the current reviewed campaign head, and
-   validate the guarded pause/resume path through the shared Studio wrapper.
+1. Land and publish the reviewed lifecycle pause fix through an allowed release
+   path, update the Studio's live provider to that published build, and validate
+   the guarded pause/resume path through the shared wrapper. Do not install the
+   private acceptance candidate into the live provider.
 2. Run the fused upstream runtime tests on the designated Mac Studio.
 3. Freeze a new fused-baseline R015 policy and run the right-sized matrix plus
    sustained window. Preserve every failed or incomplete cell.
