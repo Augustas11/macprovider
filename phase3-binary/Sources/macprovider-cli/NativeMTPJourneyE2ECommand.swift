@@ -305,17 +305,24 @@ private final class NativeMTPJourneyRunner {
                 id: id,
                 prompt: "Row \(row): summarize the causes and effects of the industrial revolution in \(3 + row) points.",
                 maxTokens: 64 + 48 * row,
-                temperature: row % 2 == 0 ? 0 : 0.7,
+                // Greedy: a sampled row's draws depend on batch composition
+                // timing even on the ordinary path, so only greedy rows give
+                // a cross-runtime oracle (sampled parity is step-04/06).
+                temperature: 0,
                 topP: 1,
-                conversationKey: ineligible ? "journey-mixed-key-\(row)" : nil
+                conversationKey: ineligible ? "conv:journey-mixed-\(row)" : nil
             ))
         }
         let expected = try await complete(requests, runtime: ordinary, staggerMS: 150)
+        // Control: ordinary batched decode must reproduce itself under the
+        // same staggered load, or a native mismatch would mean nothing.
+        let control = try await complete(requests.map { $0.withConversationKey($0.conversationKey.map { $0 + "-control" }) }, runtime: ordinary, staggerMS: 150)
         let actual = try await complete(requests, runtime: native, staggerMS: 150)
         var paths: [String: String] = [:]
         var reasons: [String: String] = [:]
         for request in requests {
             let id = request.requestID ?? ""
+            step.check("\(id).ordinary_control_reproducible", expected[id].map { exp in control[id].map { same(exp, $0) } ?? false } ?? false)
             step.check("\(id).parity", expected[id].map { exp in actual[id].map { same(exp, $0) } ?? false } ?? false)
             let admission = recorder.requestSnapshot().last { $0.requestID == id }
             paths[id] = admission?.admission.effectivePath.rawValue ?? "missing"
