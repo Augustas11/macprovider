@@ -148,6 +148,9 @@ def _str(value: object, path: str, pattern: re.Pattern | None = None, max_bytes:
     # could hash differently there than here.
     if any(not 0x20 <= ord(ch) <= 0x7E for ch in value):
         fail(path, "must be printable ASCII")
+    # The consumer rejects strings with leading or trailing whitespace.
+    if value != value.strip():
+        fail(path, "must not have leading or trailing whitespace")
     if pattern is not None and not pattern.match(value):
         fail(path, f"does not match {pattern.pattern}")
     return value

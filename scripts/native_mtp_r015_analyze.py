@@ -63,6 +63,8 @@ GATED_MAX_TOKENS = 512
 MINIMUM_SUSTAINED_SECONDS = 1800
 # SPEC-023-R024 max_prompt_tokens upper bound.
 MAXIMUM_PROMPT_TOKENS = 1_048_576
+# The bench parses policy integers as Swift Int.
+SWIFT_INT_MAX = (1 << 63) - 1
 
 
 def _is_int(value) -> bool:
@@ -150,7 +152,7 @@ def _policy_contract_violations(policy: dict) -> list[str]:
                          ("ram_gb", 1), ("arrival_interval_ms", 0), ("sustained_seconds", 0)):
         if key == "arrival_interval_ms" and key not in policy:
             continue
-        if not (_is_int(policy.get(key)) and policy[key] >= minimum):
+        if not (_is_int(policy.get(key)) and minimum <= policy[key] <= SWIFT_INT_MAX):
             violations.append(f"field_invalid:{key}")
     if "temperature" in policy:
         t = policy["temperature"]

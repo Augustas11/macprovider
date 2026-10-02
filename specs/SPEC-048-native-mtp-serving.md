@@ -649,16 +649,17 @@ more than 10% against the same SPEC-038 workload with MTP disabled.
 
 Every production tuple MUST advertise at least two slots and no more than the
 SPEC-038 validated Entry-110 depth for that exact tuple. At the largest load
-the tuple runs native (its `max_native_active_rows`, at least one native row
-beside ordinary rows), the acceptance fixture MUST place native MTP on every
-row the bound admits, use proposal depth at least one, force rejection at every proposal
+the tuple runs native (`max_native_active_rows` rows; a single row when the
+bound is one), the acceptance fixture MUST place native MTP on every row the
+bound admits, use proposal depth at least one, force rejection at every proposal
 position under load, produce unequal accepted lengths, stagger row entry and
 exit, and prove through backend trace evidence that eligible rows shared a
 packed target verification forward rather than concurrent serial iterators.
-At the advertised maximum (`qualified_slots`), the fixture instead exercises
-the load gate exactly as an MTP-15 gated cell does: native admissions up to
-the bound, `capacity_above_native_bound` downgrades above it, and held rows
-at depth zero. The result MUST match the ordinary batched oracle with no row
+Ordinary rows coexisting with native rows are proven by the load-gate fixture
+at the advertised maximum (`qualified_slots`), which exercises the gate
+exactly as an MTP-15 gated cell does: native admissions up to the bound,
+`capacity_above_native_bound` and ineligible ordinary rows above it, and held
+native rows at depth zero. The result MUST match the ordinary batched oracle with no row
 bleed, deadlock, leak, starvation, or counter corruption. An eight-slot experimental cell is
 reported on the 256 GB Studio but cannot be advertised unless SPEC-038 has
 independently validated depth eight for that tuple.

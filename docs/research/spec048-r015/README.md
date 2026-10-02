@@ -97,8 +97,11 @@ MACPROVIDER_NATIVE_MTP_E2E=1 \
 ```
 
 Resume uses the existing header, refuses any policy/model/artifact/commit
-mismatch, skips already complete paired matrix blocks, and continues the
-sustained window from its recorded elapsed duration.
+mismatch, and skips already complete paired matrix blocks. An admission
+sustained window is never resumed: if it was interrupted, move its sustained
+records aside and rerun the window whole (`--phase sustained`), which needs
+every matrix block of the sustained cell already in `--out`. Exploratory
+policies may still continue a sustained window.
 
 Analyze:
 

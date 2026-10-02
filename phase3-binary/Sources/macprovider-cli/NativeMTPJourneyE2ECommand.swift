@@ -171,11 +171,14 @@ private final class NativeMTPJourneyRunner {
             try await selfTest(ordinary: ordinary, native: native, fixture: fixture)
         }
         let passed = steps.allSatisfy(\.passed)
+        // pass only when every executed step is complete; partial when any
+        // passing step leaves journey clauses uncovered.
+        let executedStatus = !passed ? "fail" : (steps.allSatisfy { $0.uncovered.isEmpty } ? "pass" : "partial")
         let document: [String: Any] = [
             "schema": "macprovider.native-mtp-journey-hardware-result.v1",
             // Covers only the hardware steps below; never a journey verdict.
             "journey_complete": false,
-            "executed_steps_status": passed ? "pass" : "fail",
+            "executed_steps_status": executedStatus,
             "covered_steps": [
                 "step-04-serial-token-oracle",
                 "step-05-cache-state-boundary",
@@ -448,7 +451,8 @@ private final class NativeMTPJourneyRunner {
         let cappedActual = try await native.complete(capped)
         step.check("prompt_cap.parity", same(cappedExpected, cappedActual))
         let cappedAdmission = recorder.requestSnapshot().last { $0.requestID == "journey-prompt-cap" }
-        step.check("prompt_cap.selected_ordinary", cappedAdmission?.admission.effectivePath == .ordinary)
+        step.check("prompt_cap.selected_ordinary", cappedAdmission?.admission.effectivePath == .ordinary
+            && cappedAdmission?.admission.selection.nativeMTPReason == .capabilityMismatch)
         step.details["ordinary_rows_differing_under_perturbed_arrival_timing"] = timingSensitive.sorted()
         step.details["paths"] = paths
         step.details["selector_reasons"] = reasons
