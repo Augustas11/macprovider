@@ -19,6 +19,27 @@ Local verification at HEAD: `cd phase3-binary && swift test --filter 'NativeMTP|
 
 Out of scope (do not report): signing keys or how the operator stores them; the live coordinator; release cutting.
 
+ROUND 2. Round 1 of this freeze audit reported (code 0/0/5/4, security 0/0/1/4, architect 0/0/3/3). Fix commit 577424560 addresses them; verify each round-1 finding is VERIFIED or still open, and review the complete diff again for regressions:
+- CODE M1 step-04 token IDs / acceptance classes -> probe-path token-ID equality for greedy prompts + accepted>0 and rejected>0 (depth 1: rounds are all- or none-accepted).
+- CODE M2 step-06 reused ids (terminal replay) -> distinct "-ns"/"-s" scheduler ids, each mode compared with ordinary under the same id, EOS case added. Post-output injected failure is NOT implemented (stays a pending journey item).
+- CODE M3 step-07 depth -> outputs 256+32*row and maxObservedBatchDepth >= qualified_slots.
+- CODE M4 cancellation could pass without firing -> threshold reached AND CancellationError AND not completed.
+- CODE M5 self-test replay -> distinct execution ids run-a / run-b.
+- CODE L1 --phase sustained on incomplete matrix -> refused unless every sustained-cell matrix block exists in --out.
+- CODE L2 hardware-class grammar -> generator emits only the Swift-accepted [a-z0-9-] subset.
+- CODE/SECURITY L lab guard test -> covers NativeMTPJourneyE2ECommand and the lab hook symbols.
+- CODE L4 / ARCH L3 stale CONFORMANCE narratives -> R007/R015 updated, still pending.
+- SECURITY M Unicode NFC identity divergence -> generator restricts every identity-bearing string to printable ASCII.
+- SECURITY L duplicate keys -> strict duplicate-rejecting JSON loader for all generator inputs.
+- SECURITY L prompt-cap ceiling -> bench, analyzer, journey enforce <= 1048576.
+- SECURITY L operator path in prompts -> removed.
+- ARCH M1 MTP-7 fixture vs bound -> MTP-7 now scopes the native-row fixture to the bound and the load-gate fixture to the advertised maximum.
+- ARCH M2 endpoint gated cells -> MTP-15 states the gated cost model (above the bound native adds only per-held-row work, constant in ordinary rows, so relative regression is maximal at bound+1) and requires all gated counts if the model is broken. The operator mandated the two-representative matrix.
+- ARCH M3 raw results not committed -> operator decision keeps raw JSONL off-repo; the README now binds the lab-host run files by SHA-256 and line count, and analysis.json reproduces byte-exact from the bound file (verified).
+- ARCH L1 harness status -> executed_steps_status, covered_steps, pending_steps, journey_complete=false.
+- ARCH L2 derived-value provenance -> admission-tuple-provenance.md maps every field to source/formula; analytical and policy-chosen values labeled.
+Known open (report severity honestly): the journey step-07 mixed-batch parity fails on hardware because ordinary continuous-batching greedy output itself changes under perturbed arrival timing (batch-composition numerics); see the J05/J06 results.
+
 Report findings as CRITICAL / HIGH / MEDIUM / LOW / INFO, each with file:line, a concrete failure scenario described in prose, and a fix; say whether each is new in this diff or pre-existing. Be adversarial but do not report style nits as MEDIUM or above. End with a single final line exactly: `VERDICT: <n> CRITICAL, <n> HIGH, <n> MEDIUM, <n> LOW`.
 
 Focus for this lane:
