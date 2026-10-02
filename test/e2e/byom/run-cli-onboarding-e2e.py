@@ -327,7 +327,7 @@ def find_candidate(document):
     raise HarnessFailure("candidate not found in discovery output")
 
 
-def assert_non_catalog_offer_dry_run(document, candidate_id, coordinator_requests):
+def assert_catalog_offer_dry_run(document, candidate_id, coordinator_requests):
     assert_true(document.get("schema") == "model_admission_offer_dry_run.v1", "wrong dry-run schema")
     assert_true(document.get("candidate_id") == candidate_id, "dry-run resolved a different candidate")
     assert_true(document.get("served_model_ref") == SERVED_MODEL_REF, "dry-run changed served model")
@@ -502,7 +502,7 @@ def main():
             env,
             root,
         ))
-        assert_non_catalog_offer_dry_run(dry_run, candidate_id, coordinator.state["requests"])
+        assert_catalog_offer_dry_run(dry_run, candidate_id, coordinator.state["requests"])
 
         offer = parse_json_output(run_cli(
             cli,
