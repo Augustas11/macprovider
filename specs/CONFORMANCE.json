@@ -3231,7 +3231,9 @@
       "spec_id": "SPEC-023",
       "state": "pending",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/NativeMTPAdmissionSidecar.swift:struct NativeMTPAdmissionCapability"
+        "phase3-binary/Sources/macprovider-cli/NativeMTPAdmissionSidecar.swift:struct NativeMTPAdmissionCapability",
+        "scripts/native_mtp_admission_sidecar.py:build",
+        "scripts/native_mtp_admission_sidecar.py:admission_tuple_sha256"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testValidSidecarReturnsImmutableCapability",
@@ -3239,7 +3241,9 @@
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testSpec023LiveExecutableCDHashIsRequiredLowercaseAndSignedIntoTuple",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testReleaseEnvelopeBindsNativeActiveRowBoundIntoTupleIdentity",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testReleaseEnvelopeRejectsNativeActiveRowBoundOutsideQualifiedSlots",
-        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testReleaseEnvelopeBindsSignedPromptBoundIntoCapabilityAndTupleIdentity"
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testReleaseEnvelopeBindsSignedPromptBoundIntoCapabilityAndTupleIdentity",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testGoldenSidecarTupleIdentityMatchesPythonGenerator",
+        "scripts/tests/test_native_mtp_admission_sidecar.py:class NativeMTPAdmissionSidecarTests"
       ],
       "journeys": [
         "JOURNEY-NATIVE-MTP-SERVING"
@@ -3249,7 +3253,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "SPEC-023 v0.22.6 defines the closed signed native-MTP admission sidecar. The strict consumer is implemented branch-local (campaign/native-mtp-r015, #1770) and fails closed on the live executable CDHash binding, complete-window byte closure, MLX affine 4-bit representation, the SPEC-048-R007 max_native_active_rows bound, the greedy/sampled request profile, and the signed max_prompt_tokens bound, with negative fixtures. The production sidecar generator, release-ledger binding, and signed release evidence are not implemented, so the requirement stays pending."
+        "rationale": "SPEC-023 v0.22.6 defines the closed signed native-MTP admission sidecar. The strict consumer is implemented branch-local (campaign/native-mtp-r015, #1770) and fails closed on the live executable CDHash binding, complete-window byte closure, MLX affine 4-bit representation, the SPEC-048-R007 max_native_active_rows bound, the greedy/sampled request profile, and the signed max_prompt_tokens bound, with negative fixtures. An unsigned sidecar generator (scripts/native_mtp_admission_sidecar.py) renders and validates the closed body and both identities with a cross-language golden; release-ledger binding, signing, and signed release evidence are not implemented, so the requirement stays pending."
       }
     },
     {
