@@ -966,10 +966,14 @@ advertised `qualified_slots` (2...8), its `max_native_active_rows`
 
 - *Native-eligible cells.* Every slot count from 1 up to the bound, at every
   prompt stratum of {1536, 4096} that is at or below the cap plus the cap
-  itself (each realized within ±2%), and at both fixed output budgets 128
+  itself, and at both fixed output budgets 128
   (short) and 512 (long) tokens. These carry the native speedup claim and
   justify the R007 bound. A prompt above the cap selects ordinary under R004,
-  so no native stratum exists there to measure.
+  so no native stratum exists there to measure. Every stratum is counted on
+  the served prompt, after the chat template the runtime applies, and is
+  realized within ±2%; a stratum at the cap is realized at or below it. A
+  native run whose row the token bounds sent to ordinary is an error, not a
+  native measurement.
 - *Gated cells* (policy `gated_cells`). When the bound is below
   `qualified_slots`, exactly the cells at slot counts bound + 1 and
   `qualified_slots` (one cell when those coincide), each at prompt 1536 and
@@ -1242,7 +1246,12 @@ requests.
   The previous 48-cell matrix cost about 2.5 days of Studio time for an A3B
   tuple at bound 1, nearly all re-measuring the ordinary path in gated cells
   and 8192-token prefill that the cap makes ineligible; the new matrix is six
-  cells plus the window. MTP-4/MTP-13 bind the prompt bound to the new
+  cells plus the window. Strata are counted on the served (templated)
+  prompt, the cap stratum realized at or below the cap: the first frozen A3B
+  run (policy `525ac686…`) realized its 4096 stratum from raw text, the
+  template pushed it past the cap, and its native rows silently ran ordinary;
+  the runtime now records that token-bound reselection. MTP-4/MTP-13 bind the
+  prompt bound to the new
   SPEC-023-R024 `max_prompt_tokens` (SPEC-023 v0.22.6), and MTP-7 states the
   bound is preregistered and justified by the native-eligible cells.
 

@@ -16,7 +16,7 @@
   "cache_mode": "paged_kv_mixed",
   "proposal_depth": 1,
   "run_order": "seeded_random_counterbalanced",
-  "prompt_corpus": "deterministic_synthetic_unique_v1",
+  "prompt_corpus": "deterministic_synthetic_unique_v2",
   "exclusion_rules": "none",
   "confidence_method": "paired_block_bootstrap_holm_v1",
   "qualified_slots": 8,

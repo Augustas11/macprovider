@@ -1276,6 +1276,31 @@ actor ModelRuntime: ModelRuntimeServing {
         return admission
     }
 
+    /// SPEC-048-R004/R010: a native admission that the tokenized prompt or
+    /// output budget pushes past the signed bounds selects ordinary
+    /// (`capability_mismatch`) before any native state exists. Record that
+    /// selection like any other, so status reasons and admission observers see
+    /// the path the row actually runs instead of the pre-tokenization one.
+    private func recordNativeMTPTokenBoundDowngrade(
+        requestID: String?,
+        admitted: NativeMTPRuntimeAdmission,
+        resolved: NativeMTPRuntimeAdmission
+    ) {
+        guard Self.isNativeMTPTokenBoundDowngrade(admitted: admitted, resolved: resolved) else { return }
+        recordNativeMTPAdmissionStatus(resolved)
+        testNativeMTPAdmissionObserver?(resolved)
+        // -1: the active-row count belongs to the original admission, not to
+        // this token-bound reselection.
+        testNativeMTPAdmissionRequestObserver?(requestID, resolved, -1)
+    }
+
+    nonisolated static func isNativeMTPTokenBoundDowngrade(
+        admitted: NativeMTPRuntimeAdmission,
+        resolved: NativeMTPRuntimeAdmission
+    ) -> Bool {
+        admitted.effectivePath == .nativeMTP && resolved.effectivePath != .nativeMTP
+    }
+
     private func recordNativeMTPAdmissionStatus(_ admission: NativeMTPRuntimeAdmission) {
         guard nativeMTPMode == .auto else { return }
         if admission.selection.path == .nativeMTP, admission.effectivePath != .nativeMTP {
@@ -6195,10 +6220,16 @@ actor ModelRuntime: ModelRuntimeServing {
             promptTokens: prepared.promptTokens.count,
             maxContextTokens: maxContextTokens
         )
-        let nativeMTPAdmission = nativeMTPAdmission.resolvingTokenBounds(
+        let tokenBoundedNativeMTPAdmission = nativeMTPAdmission.resolvingTokenBounds(
             promptTokenCount: prepared.promptTokens.count,
             maxOutputTokens: maxOutputTokens
         )
+        recordNativeMTPTokenBoundDowngrade(
+            requestID: request.requestID,
+            admitted: nativeMTPAdmission,
+            resolved: tokenBoundedNativeMTPAdmission
+        )
+        let nativeMTPAdmission = tokenBoundedNativeMTPAdmission
         let preparedPromptTokenIDs = prepared.promptTokens.map(Int32.init)
         let batchKVBits = Self.effectiveKVBits(
             configured: kvBitsOverride,
@@ -6494,10 +6525,16 @@ actor ModelRuntime: ModelRuntimeServing {
             promptTokens: prepared.promptTokens.count,
             maxContextTokens: maxContextTokens
         )
-        let nativeMTPAdmission = nativeMTPAdmission.resolvingTokenBounds(
+        let tokenBoundedNativeMTPAdmission = nativeMTPAdmission.resolvingTokenBounds(
             promptTokenCount: prepared.promptTokens.count,
             maxOutputTokens: maxOutputTokens
         )
+        recordNativeMTPTokenBoundDowngrade(
+            requestID: request.requestID,
+            admitted: nativeMTPAdmission,
+            resolved: tokenBoundedNativeMTPAdmission
+        )
+        let nativeMTPAdmission = tokenBoundedNativeMTPAdmission
         let preparedPromptTokenIDs = prepared.promptTokens.map(Int32.init)
         let batchKVBits = Self.effectiveKVBits(
             configured: kvBitsOverride,

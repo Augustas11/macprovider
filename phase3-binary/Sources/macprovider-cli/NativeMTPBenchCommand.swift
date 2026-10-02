@@ -192,14 +192,14 @@ private final class NativeMTPBenchRunner {
         for warmup in 0..<policy.warmupRuns {
             let block = -1 - warmup
             guard !completedWarmups.contains(block) else { continue }
-            let prompts = try await makePrompts(container: fixture.runtimes.targetContainer, cell: cell, block: block)
+            let prompts = try await makePrompts(runtime: fixture.runtimes.ordinary, cell: cell, block: block)
             _ = try await runPath(.ordinary, cell: cell, block: block, order: 0, prompts: prompts, runtime: fixture.runtimes.ordinary, fixture: fixture, writer: writer, warmup: true)
             _ = try await runPath(.nativeMTP, cell: cell, block: block, order: 1, prompts: prompts, runtime: fixture.runtimes.native, fixture: fixture, writer: writer, warmup: true)
         }
         let nativeFirstByBlock = NativeMTPBenchPolicy.nativeFirstOrder(seed: policy.seed, cell: cell, blocks: policy.blocks)
         for block in 0..<policy.blocks {
             guard !completedBlocks.contains(block) else { continue }
-            let prompts = try await makePrompts(container: fixture.runtimes.targetContainer, cell: cell, block: block)
+            let prompts = try await makePrompts(runtime: fixture.runtimes.ordinary, cell: cell, block: block)
             let nativeFirst = nativeFirstByBlock[block]
             var ordinaryResult: NativeMTPBenchRunResult?
             var nativeResult: NativeMTPBenchRunResult?
@@ -236,7 +236,7 @@ private final class NativeMTPBenchRunner {
         let deadline = Date().addingTimeInterval(remainingSeconds)
         var block = startingBlock
         while Date() < deadline {
-            let prompts = try await makePrompts(container: fixture.runtimes.targetContainer, cell: cell, block: 10_000 + block)
+            let prompts = try await makePrompts(runtime: fixture.runtimes.ordinary, cell: cell, block: 10_000 + block)
             let nativeFirst = block.isMultiple(of: 2)
             var ordinaryResult: NativeMTPBenchRunResult?
             var nativeResult: NativeMTPBenchRunResult?
@@ -437,24 +437,62 @@ private final class NativeMTPBenchRunner {
         return run
     }
 
-    private func makePrompts(container: ModelContainer, cell: NativeMTPBenchCell, block: Int) async throws -> [String] {
-        try await container.perform { context in
-            try (0..<cell.slots).map { row in
+    /// SPEC-048-R015 prompt realization (`deterministic_synthetic_unique_v2`):
+    /// the stratum is counted on the served prompt, after the chat template
+    /// the runtime applies, and lies within ±2% of the nominal stratum. A
+    /// stratum at or above the tuple's signed prompt cap is realized at or
+    /// below the cap, so its native rows are not selected ordinary by R004.
+    private func makePrompts(runtime: ModelRuntime, cell: NativeMTPBenchCell, block: Int) async throws -> [String] {
+        let snapshot = await runtime.currentSnapshot()
+        guard let container = snapshot.container else {
+            throw NativeMTPBenchError.assertionFailed("runtime has no loaded container")
+        }
+        let thinkingToggle = snapshot.templateSupportsThinkingToggle
+        let preserveThinking = snapshot.templateSupportsPreserveThinking
+        let modelID = self.modelID
+        let lower = Int(ceil(Double(cell.promptTokens) * 0.98))
+        var upper = Int(floor(Double(cell.promptTokens) * 1.02))
+        var target = cell.promptTokens
+        if let cap = policy.maximumPromptTokens, cell.promptTokens >= cap {
+            upper = min(upper, cap)
+            target = max(lower, cap - 24)
+        }
+        let finalUpper = upper
+        let finalTarget = target
+        return try await container.perform { context in
+            func servedCount(_ text: String) async throws -> Int {
+                let request = try Self.makeRequest(
+                    modelID: modelID,
+                    requestID: "prompt-sizing",
+                    prompt: text,
+                    maxTokens: 1,
+                    temperature: 0
+                )
+                let input = try ModelRuntime.userInput(
+                    for: request,
+                    templateSupportsThinkingToggle: thinkingToggle,
+                    templateSupportsPreserveThinking: preserveThinking
+                )
+                return try await context.processor.prepare(input: input).text.tokens.size
+            }
+            var prompts: [String] = []
+            for row in 0..<cell.slots {
                 var salt = 0
                 var text = "Native MTP R015 deterministic prompt cell \(cell.id) block \(block) row \(row)."
-                var encoded = context.tokenizer.encode(text: text, addSpecialTokens: true)
-                while encoded.count < cell.promptTokens {
+                var count = try await servedCount(text)
+                while count < finalTarget {
                     text += " measurement-\(block)-\(row)-\(salt) throughput parity tokens"
-                    encoded = context.tokenizer.encode(text: text, addSpecialTokens: true)
+                    count = try await servedCount(text)
                     salt += 1
                 }
-                let lower = Int(floor(Double(cell.promptTokens) * 0.98))
-                let upper = Int(ceil(Double(cell.promptTokens) * 1.02))
-                guard (lower...upper).contains(encoded.count) else {
-                    throw NativeMTPBenchError.assertionFailed("prompt token count \(encoded.count) outside ±2% of \(cell.promptTokens)")
+                guard (lower...finalUpper).contains(count) else {
+                    throw NativeMTPBenchError.assertionFailed(
+                        "served prompt token count \(count) outside \(lower)...\(finalUpper) for stratum \(cell.promptTokens)"
+                    )
                 }
-                return text
+                prompts.append(text)
             }
+            return prompts
         }
     }
 
@@ -1109,7 +1147,7 @@ struct NativeMTPBenchPolicy {
             "cache_mode": "paged_kv_mixed",
             "proposal_depth": 1,
             "run_order": "seeded_random_counterbalanced",
-            "prompt_corpus": "deterministic_synthetic_unique_v1",
+            "prompt_corpus": "deterministic_synthetic_unique_v2",
             "exclusion_rules": "none",
             "confidence_method": "paired_block_bootstrap_holm_v1",
         ]
