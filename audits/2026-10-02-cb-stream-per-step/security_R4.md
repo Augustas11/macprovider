@@ -1,0 +1,31 @@
+METHOD CONSTRAINT: first-party correctness review of our own code by reading the repository and the diff. Do not construct exploit payloads, attack strings, or weaponized inputs; describe failure scenarios in prose.
+
+# security review — CB per-step streaming inside lockstep windows
+
+Repo: /Users/augstar/macprovider-cb-stream-per-step, branch fix/cb-stream-per-step. Review the FULL diff `git diff origin/main...HEAD` (code + SPEC-038 v0.3.8 FR-CB2 text + CONFORMANCE mapping). Governing: specs/SPEC-038-continuous-batching.md FR-CB2/FR-CB5 (SPEC-038-R002), SPEC-039 paged KV, SPEC-024 retained conversation cache.
+
+Change: non-hybrid continuous-batching rows decode in 16-step lockstep windows inside one backend hop. Before, tokens reached buyers only when the window returned (16-token bursts). Now `ContinuousBatchSchedulerBackend.decodeLockstepWindow(rows:steps:onStep:)` reports each step's sampled tokens (`ContinuousBatchDecodeWindowStep`) synchronously from inside the model hop; the observer yields them into an AsyncStream consumed by a Task on the scheduler actor (`applyStreamedDecodeStep`), which runs stop filtering/visibility/delivery per step via `advanceDecodeRow` and defers release/terminal finish (`completeDecodeRow`) to the hop boundary. The returned window is authoritative: streamed tokens must be its prefix or the row fails `continuous_batching_decode_stream_mismatch`. `ContinuousBatchDecodeWindowControl` lets the backend end the hop once every row is cancelled or has completed the step after its terminal token (writing the terminal token KV for retention). The bridge also throws at the next step boundary once `cancelInFlight` started. `cancel(requestID:)` ignores a row whose completion was decided mid-window. The compiled-decode path streams but never ends early. Window size 1 (hybrid models) passes no observer, preserving the old path. Studio evidence (llama-3.1-8b, M3 Ultra, batched route): audits/2026-10-02-cb-stream-per-step/studio-results-20261002T004124Z.txt.
+
+Focus: cross-row isolation (can a token of one request ever be delivered to another request id or waiter, including via zip of requestIDs/tokens or stale step events); fail-closed behavior when the backend stream and window result disagree; settlement/receipt eligibility of rows that streamed tokens then failed or were cancelled (buyer charged for undelivered or delivered-but-failed output, or paid output not charged); resource exhaustion (unbounded AsyncStream buffering, Task leaks, lock contention, blocks released while backend still writes them -> use-after-release of paged KV); cancellation/drain fail-closed guarantees; replay/dedupe terminal result codes.
+
+Output: findings with severity CRITICAL/HIGH/MEDIUM/LOW/INFO, file:line, failure scenario, fix. End with exactly one line: VERDICT: C=<n> H=<n> M=<n> L=<n>.
+
+
+## Round 3 (final round)
+
+Correction to the base description above: early hop exit is allowed ONLY when every row in the hop is cancelled (see round 2 notes); terminal rows never end a hop early.
+
+Round 2 dispositions (verify against the current full diff):
+- Post-token failures classified as pre-inference: `ModelRuntime.terminalFailureError(code:streamedTokens:)` now maps any streaming-path failure with `result.emittedTokens > 0` to 503, `inference_ran: true`, `settlement_ran: false`, `retryable: false` (same shape as delivery backpressure); zero emitted keeps the pre-inference shape. Test `testTerminalFailureAfterStreamedTokensIsPostInference`. SPEC-038 FR-CB2 states the rule. Coordinator/gateway handling of these envelopes is pre-existing and outside this diff.
+- Returned token count not bounded to the window: an output with more than `windowSteps` tokens now fails the row (`continuous_batching_invalid_decode_token`); test `testWindowResultLongerThanWindowFailsTheRow`.
+- "Cancel can overtake a terminal emitted by the backend but not yet applied": by design and stated in SPEC-038 FR-CB2 v0.3.8. A terminal is decided when the scheduler applies its token, exactly as with one-token hops on origin/main, where a cancel recorded while the backend runs is processed before that hop's tokens are applied. The fence only protects decisions already applied. An acknowledged/blocking per-step hand-off was rejected: it would block the model thread on the scheduler actor every step and cost throughput; cancellation-wins-before-apply is the pre-existing contract.
+- Per-step delivery timing under actor contention: SPEC wording now says each step is handed off without waiting for the hop and delivery latency follows actor scheduling. Studio evidence (audits/2026-10-02-cb-stream-per-step/EVIDENCE.md) shows p50 gap = decode step time at 1/4/8 slots and >=98.5% of window-16 throughput.
+- Default decode-only loop early exit: it ends early only when every row is cancelled, and such rows are released; decode-only backends commit state per decode call, so no partial-step state exists. Carried as LOW if you still consider it one.
+- Evidence provenance: EVIDENCE.md records host, commits, config, ratios, semantics probes (greedy parity identical base vs fix; stop; client disconnect).
+- Pre-existing flake: PagedKVRuntimeBridgeTests.testSharedForwardGreedyMatchesSerialLoneAndFullBatchWithUsageAndStops fails 3/12 on origin/main too (window 1, unchanged path).
+
+Review the FULL combined diff `git diff origin/main...HEAD`. Report only real defects at their true severity.
+
+## Round 4 (security lane only)
+
+Round 3 security finding (MEDIUM, cancellation masks an overlong window result): all returned-window validation (empty, more than `windowSteps`, out-of-vocabulary, stream-prefix mismatch) now runs in one loop before `processCancellations()`; regression `testCancelDuringHopDoesNotMaskOverlongWindowResult`; SPEC-038 FR-CB2 states the ordering. Code and architecture lanes returned 0/0/0/0 in round 3. Review the FULL combined diff `git diff origin/main...HEAD` again.
