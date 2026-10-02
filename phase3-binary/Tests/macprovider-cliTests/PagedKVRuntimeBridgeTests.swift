@@ -2268,6 +2268,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
                 XCTAssertEqual(tokensByID["row-a"], [4])
                 XCTAssertEqual(tokensByID["row-b"], [7])
                 XCTAssertEqual(recorded.map(\.tokens), [[4, 7]])
+                // An early-ended (all-cancelled) window records no row state.
+                XCTAssertEqual(backend.retainedRowCountForTest(), 0)
             } else {
                 XCTAssertEqual(tokensByID["row-a"], [4, 5])
                 XCTAssertEqual(tokensByID["row-b"], [7, 8])
