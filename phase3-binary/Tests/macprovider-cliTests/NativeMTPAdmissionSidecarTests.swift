@@ -28,6 +28,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         XCTAssertEqual(capability.providerRevision, Self.providerRevision)
         XCTAssertEqual(capability.upstreamMLXSwiftLMRevision, Self.upstreamRevision)
         XCTAssertEqual(capability.qualifiedSlots, 8)
+        XCTAssertEqual(capability.maxNativeActiveRows, 8)
         XCTAssertEqual(capability.sourceLayout, "separate_artifact")
         XCTAssertEqual(capability.predictionLayerCount, 4)
         XCTAssertEqual(capability.completeWindowBytesByDepth, [1024, 2048, 4096, 8192, 16384])
@@ -532,6 +533,10 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             root["quantization"] = [
                 "target": "mlx_affine_4bit",
                 "mtp": "mlx_affine_4bit",
+                "block_size_elements": 64,
+                "representation_manifest_sha256": String(repeating: "a", count: 64),
+                "unquantized_exceptions": ["mtp/norm"],
+                "per_layer_exceptions": ["target/model.layers.0.mlp.gate"],
             ]
         }, recomputeTuple: true)
 
@@ -545,6 +550,32 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
 
         XCTAssertEqual(capability.quantization.target, "mlx_affine_4bit")
         XCTAssertEqual(capability.quantization.mtp, "mlx_affine_4bit")
+        XCTAssertEqual(capability.quantization.blockSizeElements, 64)
+        XCTAssertEqual(capability.quantization.representationManifestSHA256, String(repeating: "a", count: 64))
+        XCTAssertEqual(capability.quantization.unquantizedExceptions, ["mtp/norm"])
+        XCTAssertEqual(capability.quantization.perLayerExceptions, ["target/model.layers.0.mlp.gate"])
+
+        XCTAssertEqual(
+            try rejectedError(fixture.mutatingRoot({ root in
+                root["quantization"] = [
+                    "target": "mlx_affine_4bit",
+                    "mtp": "mlx_affine_4bit",
+                ]
+            }), fixture: fixture),
+            .missingField("$.quantization.representation_manifest_sha256")
+        )
+        XCTAssertEqual(
+            try rejectedError(fixture.mutatingRoot({ root in
+                root["quantization"] = [
+                    "target": "mlx_affine_4bit",
+                    "mtp": "mlx_affine_4bit",
+                    "representation_manifest_sha256": String(repeating: "a", count: 64),
+                    "unquantized_exceptions": [],
+                    "per_layer_exceptions": [],
+                ]
+            }), fixture: fixture),
+            .missingField("$.quantization.block_size_elements")
+        )
     }
 
     func testLiveTupleDriftAndAdmissionFlagsReject() throws {
@@ -979,6 +1010,99 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         )
     }
 
+    func testReleaseEnvelopeBindsNativeActiveRowBoundIntoTupleIdentity() throws {
+        let gated = try makeReleaseEnvelopeFixture(entryEdit: { $0["max_native_active_rows"] = 1 })
+        defer { try? FileManager.default.removeItem(at: gated.base.root) }
+        let ungated = try makeReleaseEnvelopeFixture()
+        defer { try? FileManager.default.removeItem(at: ungated.base.root) }
+
+        let gatedCapability = try NativeMTPAdmissionSidecar.load(
+            sidecarData: gated.sidecarData,
+            signatureData: gated.signatureData,
+            snapshotRoot: gated.base.snapshot,
+            context: gated.context,
+            trustedKeyring: gated.base.trustedKeyring,
+            resolvedArtifactAuthority: gated.authority
+        )
+        let ungatedCapability = try NativeMTPAdmissionSidecar.load(
+            sidecarData: ungated.sidecarData,
+            signatureData: ungated.signatureData,
+            snapshotRoot: ungated.base.snapshot,
+            context: ungated.context,
+            trustedKeyring: ungated.base.trustedKeyring,
+            resolvedArtifactAuthority: ungated.authority
+        )
+
+        XCTAssertEqual(gatedCapability.maxNativeActiveRows, 1)
+        XCTAssertEqual(ungatedCapability.maxNativeActiveRows, 8)
+        XCTAssertNotEqual(gatedCapability.tupleSHA256, ungatedCapability.tupleSHA256)
+    }
+
+    func testReleaseEnvelopeSampledRequestProfileAdmitsSamplingInsideTupleIdentity() throws {
+        let sampled = try makeReleaseEnvelopeFixture(entryEdit: {
+            $0["request_feature_profile"] = "native_mtp_sampled_text_v1"
+        })
+        defer { try? FileManager.default.removeItem(at: sampled.base.root) }
+        let greedy = try makeReleaseEnvelopeFixture()
+        defer { try? FileManager.default.removeItem(at: greedy.base.root) }
+
+        let sampledCapability = try NativeMTPAdmissionSidecar.load(
+            sidecarData: sampled.sidecarData,
+            signatureData: sampled.signatureData,
+            snapshotRoot: sampled.base.snapshot,
+            context: sampled.context,
+            trustedKeyring: sampled.base.trustedKeyring,
+            resolvedArtifactAuthority: sampled.authority
+        )
+        let greedyCapability = try NativeMTPAdmissionSidecar.load(
+            sidecarData: greedy.sidecarData,
+            signatureData: greedy.signatureData,
+            snapshotRoot: greedy.base.snapshot,
+            context: greedy.context,
+            trustedKeyring: greedy.base.trustedKeyring,
+            resolvedArtifactAuthority: greedy.authority
+        )
+
+        XCTAssertTrue(sampledCapability.supportsSampling)
+        XCTAssertFalse(greedyCapability.supportsSampling)
+        XCTAssertNotEqual(sampledCapability.tupleSHA256, greedyCapability.tupleSHA256)
+
+        for profile in ["native_mtp_sampled_text_v2", "native_mtp_greedy_text", ""] {
+            let fixture = try makeReleaseEnvelopeFixture(entryEdit: { $0["request_feature_profile"] = profile })
+            defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+            XCTAssertEqual(
+                try rejectedReleaseEnvelopeError(fixture),
+                .invalidValue("$.entries[0].request_feature_profile"),
+                profile
+            )
+        }
+    }
+
+    func testReleaseEnvelopeRejectsNativeActiveRowBoundOutsideQualifiedSlots() throws {
+        let cases: [(String, (inout [String: Any]) -> Void, NativeMTPAdmissionSidecarError)] = [
+            ("missing", { $0.removeValue(forKey: "max_native_active_rows") },
+             .missingField("$.entries[0].max_native_active_rows")),
+            ("zero", { $0["max_native_active_rows"] = 0 },
+             .invalidValue("$.entries[0].max_native_active_rows")),
+            ("above schema maximum", { $0["max_native_active_rows"] = 9 },
+             .invalidValue("$.entries[0].max_native_active_rows")),
+            ("string", { $0["max_native_active_rows"] = "1" },
+             .wrongType("$.entries[0].max_native_active_rows")),
+            ("above qualified slots", { entry in
+                entry["qualified_slots"] = 4
+                var baseline = entry["ordinary_baseline"] as! [String: Any]
+                baseline["qualified_slots"] = 4
+                entry["ordinary_baseline"] = baseline
+                entry["max_native_active_rows"] = 5
+            }, .invalidValue("$.entries[0].max_native_active_rows")),
+        ]
+        for (name, edit, expected) in cases {
+            let fixture = try makeReleaseEnvelopeFixture(entryEdit: edit)
+            defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+            XCTAssertEqual(try rejectedReleaseEnvelopeError(fixture), expected, name)
+        }
+    }
+
     func testReleaseEnvelopeRejectsLegacySHA256HashAlgorithm() throws {
         let fixture = try makeReleaseEnvelopeFixture(entryEdit: { entry in
             entry["hash_algorithm"] = "sha256"
@@ -989,6 +1113,179 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             try rejectedReleaseEnvelopeError(fixture),
             .invalidValue("$.entries[0].hash_algorithm")
         )
+    }
+
+    func testReleaseEnvelopeAcceptsClosedMLXAffineQuantization() throws {
+        let digest = String(repeating: "a", count: 64)
+        let fixture = try makeReleaseEnvelopeFixture(entryEdit: { entry in
+            entry["quantization"] = [
+                "kind": "mlx_affine",
+                "packed_data_dtype": "uint32",
+                "packed_layout": "mlx_array_native_v1",
+                "scale_dtype": "bfloat16",
+                "scale_layout": "per_block",
+                "block_size_elements": 64,
+                "alignment_bytes": NSNull(),
+                "padding_rule": "none",
+                "unquantized_exceptions": ["mtp/layers.0.norm"],
+                "per_layer_exceptions": ["target/model.layers.0.mlp.gate"],
+                "representation_manifest_sha256": digest,
+            ]
+        })
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+
+        let capability = try NativeMTPAdmissionSidecar.load(
+            sidecarData: fixture.sidecarData,
+            signatureData: fixture.signatureData,
+            snapshotRoot: fixture.base.snapshot,
+            context: fixture.context,
+            trustedKeyring: fixture.base.trustedKeyring,
+            resolvedArtifactAuthority: fixture.authority
+        )
+
+        XCTAssertEqual(capability.quantization.target, "mlx_affine_4bit")
+        XCTAssertEqual(capability.quantization.mtp, "mlx_affine_4bit")
+        XCTAssertEqual(capability.quantization.representationManifestSHA256, digest)
+        XCTAssertEqual(capability.quantization.unquantizedExceptions, ["mtp/layers.0.norm"])
+        XCTAssertEqual(capability.quantization.perLayerExceptions, ["target/model.layers.0.mlp.gate"])
+    }
+
+    func testReleaseEnvelopeRejectsInvalidMLXAffineExceptionsAndRepresentationFields() throws {
+        func affine(_ edit: (inout [String: Any]) -> Void = { _ in }) -> [String: Any] {
+            var value: [String: Any] = [
+                "kind": "mlx_affine",
+                "packed_data_dtype": "uint32",
+                "packed_layout": "mlx_array_native_v1",
+                "scale_dtype": "bfloat16",
+                "scale_layout": "per_block",
+                "block_size_elements": 64,
+                "alignment_bytes": NSNull(),
+                "padding_rule": "none",
+                "unquantized_exceptions": [],
+                "per_layer_exceptions": ["mtp/layers.0.mlp.gate", "target/model.layers.0.mlp.gate"],
+                "representation_manifest_sha256": String(repeating: "a", count: 64),
+            ]
+            edit(&value)
+            return value
+        }
+        let cases: [([String: Any], NativeMTPAdmissionSidecarError)] = [
+            (affine { $0["per_layer_exceptions"] = ["target/z", "mtp/a"] }, .invalidValue("$.entries[0].quantization.per_layer_exceptions")),
+            (affine { $0["per_layer_exceptions"] = ["target/a", "target/a"] }, .invalidValue("$.entries[0].quantization.per_layer_exceptions")),
+            (affine { $0["per_layer_exceptions"] = (0...256).map { String(format: "target/module.%03d", $0) } }, .invalidValue("$.entries[0].quantization.per_layer_exceptions")),
+            (affine { $0["unquantized_exceptions"] = ["model.layers.0.mlp.down_proj"] }, .invalidValue("$.entries[0].quantization.unquantized_exceptions")),
+            (affine { $0["packed_data_dtype"] = "uint8" }, .invalidValue("$.entries[0].quantization")),
+            (affine { $0["packed_layout"] = "none" }, .invalidValue("$.entries[0].quantization")),
+            (affine { $0["scale_dtype"] = "float16" }, .invalidValue("$.entries[0].quantization")),
+            (affine { $0["scale_layout"] = "none" }, .invalidValue("$.entries[0].quantization")),
+            (affine { $0["block_size_elements"] = 16 }, .invalidValue("$.entries[0].quantization")),
+            (affine { $0["alignment_bytes"] = 16 }, .invalidValue("$.entries[0].quantization")),
+        ]
+
+        for (quantization, expected) in cases {
+            let fixture = try makeReleaseEnvelopeFixture(entryEdit: { $0["quantization"] = quantization })
+            defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+            XCTAssertEqual(try rejectedReleaseEnvelopeError(fixture), expected)
+        }
+    }
+
+    func testMLXAffineScaleDTypeDoesNotBroadenLegacyMXFP8Grammar() throws {
+        let fixture = try makeReleaseEnvelopeFixture(entryEdit: { entry in
+            entry["quantization"] = [
+                "kind": "mlx_mxfp8",
+                "packed_data_dtype": "uint8",
+                "packed_layout": "mlx_array_native_v1",
+                "scale_dtype": "bfloat16",
+                "scale_layout": "per_block",
+                "block_size_elements": 32,
+                "alignment_bytes": 16,
+                "padding_rule": "zero_pad_to_alignment",
+                "unquantized_exceptions": [],
+                "per_layer_exceptions": [],
+                "representation_manifest_sha256": String(repeating: "a", count: 64),
+            ]
+        })
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+
+        XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(fixture),
+            .invalidValue("$.entries[0].quantization")
+        )
+    }
+
+    func testBaseAndMXFP8ExceptionArraysAreFailClosed() throws {
+        func quantization(kind: String, unquantized: [String], perLayer: [String]) -> [String: Any] {
+            let isBase = kind == "base"
+            return [
+                "kind": kind,
+                "packed_data_dtype": isBase ? "none" : "uint8",
+                "packed_layout": isBase ? "none" : "mlx_array_native_v1",
+                "scale_dtype": isBase ? "none" : "float16",
+                "scale_layout": isBase ? "none" : "per_block",
+                "block_size_elements": isBase ? NSNull() : 32,
+                "alignment_bytes": isBase ? NSNull() : 16,
+                "padding_rule": isBase ? "none" : "zero_pad_to_alignment",
+                "unquantized_exceptions": unquantized,
+                "per_layer_exceptions": perLayer,
+                "representation_manifest_sha256": String(repeating: "a", count: 64),
+            ]
+        }
+        let cases: [([String: Any], NativeMTPAdmissionSidecarError)] = [
+            // `base` admits no exceptions at all, even well-formed ones.
+            (quantization(kind: "base", unquantized: ["target/model.norm"], perLayer: []), .invalidValue("$.entries[0].quantization")),
+            (quantization(kind: "base", unquantized: [], perLayer: ["mtp/fc"]), .invalidValue("$.entries[0].quantization")),
+            // R024 prefix grammar applies to every kind, not only mlx_affine.
+            (quantization(kind: "base", unquantized: ["model.norm"], perLayer: []), .invalidValue("$.entries[0].quantization.unquantized_exceptions")),
+            (quantization(kind: "mlx_mxfp8", unquantized: [], perLayer: ["model.layers.0.mlp.gate"]), .invalidValue("$.entries[0].quantization.per_layer_exceptions")),
+            (quantization(kind: "mlx_mxfp8", unquantized: ["target/a/b"], perLayer: []), .invalidValue("$.entries[0].quantization.unquantized_exceptions")),
+        ]
+        for (value, expected) in cases {
+            let fixture = try makeReleaseEnvelopeFixture(entryEdit: { $0["quantization"] = value })
+            defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+            XCTAssertEqual(try rejectedReleaseEnvelopeError(fixture), expected)
+        }
+    }
+
+    func testReleaseEnvelopeBindsSignedTokenizerDigestToProjection() throws {
+        let fixture = try makeReleaseEnvelopeFixture(entryEdit: { entry in
+            entry["tokenizer_sha256"] = String(repeating: "e", count: 64)
+        })
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+
+        XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(fixture),
+            .artifactDigestMismatch("$.entries.tokenizer_sha256")
+        )
+    }
+
+    func testReleaseEnvelopeEnforcesSignedCacheStateClasses() throws {
+        let cases: [[String]] = [
+            // The admitted state class is absent from the signed classes.
+            ["hybrid_stageable_rewindable"],
+            // A class the runtime cannot stage and rewind.
+            ["kv_quantized", "stageable_rewindable"],
+        ]
+        for classes in cases {
+            let fixture = try makeReleaseEnvelopeFixture(entryEdit: { $0["cache_state_classes"] = classes })
+            defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+            XCTAssertEqual(
+                try rejectedReleaseEnvelopeError(fixture),
+                .invalidValue("$.entries[0].cache_state_classes"),
+                "\(classes)"
+            )
+        }
+
+        let fixture = try makeReleaseEnvelopeFixture(entryEdit: {
+            $0["cache_state_classes"] = ["hybrid_stageable_rewindable", "stageable_rewindable"]
+        })
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+        XCTAssertNoThrow(try NativeMTPAdmissionSidecar.load(
+            sidecarData: fixture.sidecarData,
+            signatureData: fixture.signatureData,
+            snapshotRoot: fixture.base.snapshot,
+            context: fixture.context,
+            trustedKeyring: fixture.base.trustedKeyring,
+            resolvedArtifactAuthority: fixture.authority
+        ))
     }
 
     func testReleaseEnvelopeRejectsTargetRootAndHashMismatch() throws {
@@ -1583,6 +1880,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             "hardware_class": "m2-ultra",
             "ram_bytes": 256 * 1_073_741_824,
             "qualified_slots": 8,
+            "max_native_active_rows": 8,
             "request_feature_profile": "native_mtp_greedy_text_v1",
             "decrease_threshold_ppm": 1,
             "increase_threshold_ppm": 2,

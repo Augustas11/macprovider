@@ -40,7 +40,7 @@ func (resetBuyerWriter) Write([]byte) (int, error) {
 	return 0, errors.New("buyer connection reset")
 }
 
-const deliveredOnlyChatBody = `{"model":"model-a","messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":-0.25,"frequency_penalty":0.125}`
+const deliveredOnlyChatBody = `{"model":"model-a","messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":0,"frequency_penalty":0}`
 
 const deliveredOnlyCompletion = `{"id":"c","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"Hello world"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":4,"total_tokens":9}}`
 
@@ -376,7 +376,7 @@ func TestBufferedToolCallContinuousUsageReceiptVerifies(t *testing.T) {
 		return &providerws.RelayStream{RequestID: requestID, Chunks: ch, Done: done, Errors: make(chan error, 1)}
 	})
 
-	rr := h.post(t, []byte(`{"model":"model-a","stream":true,"messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":-0.25,"frequency_penalty":0.125}`))
+	rr := h.post(t, []byte(`{"model":"model-a","stream":true,"messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":0,"frequency_penalty":0}`))
 
 	body := rr.Body.Bytes()
 	if n := bytes.Count(body, []byte(`"finish_reason":"tool_calls"`)); n != 1 {

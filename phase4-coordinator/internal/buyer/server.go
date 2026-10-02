@@ -2457,10 +2457,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeRelayBlindError(w, "relay_blind_downgrade_rejected", "Relay-blind execution authorization is required")
 		return
 	}
-	req, status, code, msg := validateChatRequest(body)
+	req, status, code, msg, param := validateChatRequestDetailed(body)
 	if status != 0 {
 		rec.logBuyerFailure(status, msg)
-		writeError(w, status, code, msg)
+		if param != "" {
+			writeErrorWithParam(w, status, code, msg, param)
+		} else {
+			writeError(w, status, code, msg)
+		}
 		return
 	}
 	if _, _, err := effectiveMaxOutputTokens(r.Header); err != nil {
@@ -6293,63 +6297,68 @@ func writeStreamForwardError(w http.ResponseWriter, result wsForwardResult) {
 }
 
 func validateChatRequest(body []byte) (chatRequest, int, string, string) {
+	req, status, code, msg, _ := validateChatRequestDetailed(body)
+	return req, status, code, msg
+}
+
+func validateChatRequestDetailed(body []byte) (chatRequest, int, string, string, string) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(body, &raw); err != nil {
-		return chatRequest{}, http.StatusBadRequest, "invalid_json", "Invalid JSON in request body"
+		return chatRequest{}, http.StatusBadRequest, "invalid_json", "Invalid JSON in request body", ""
 	}
 	modelCount, nonCanonicalModel, err := countTopLevelField(body, "model")
 	if err != nil {
-		return chatRequest{}, http.StatusBadRequest, "invalid_json", "Invalid JSON in request body"
+		return chatRequest{}, http.StatusBadRequest, "invalid_json", "Invalid JSON in request body", ""
 	}
 	if nonCanonicalModel || modelCount > 1 {
-		return chatRequest{}, http.StatusBadRequest, "invalid_request", "Duplicate model field"
+		return chatRequest{}, http.StatusBadRequest, "invalid_request", "Duplicate model field", ""
 	}
 	var req chatRequest
 	req.raw = append(req.raw, body...)
 	modelRaw, ok := raw["model"]
 	if !ok {
-		return req, http.StatusBadRequest, "invalid_request", "Missing required field: model"
+		return req, http.StatusBadRequest, "invalid_request", "Missing required field: model", ""
 	}
 	if err := json.Unmarshal(modelRaw, &req.Model); err != nil || req.Model == "" {
-		return req, http.StatusBadRequest, "invalid_request", "Invalid model"
+		return req, http.StatusBadRequest, "invalid_request", "Invalid model", ""
 	}
 	messagesRaw, ok := raw["messages"]
 	if !ok {
-		return req, http.StatusBadRequest, "invalid_request", "Missing required field: messages"
+		return req, http.StatusBadRequest, "invalid_request", "Missing required field: messages", ""
 	}
 	if err := json.Unmarshal(messagesRaw, &req.Messages); err != nil || len(req.Messages) == 0 {
-		return req, http.StatusBadRequest, "invalid_request", "Invalid messages"
+		return req, http.StatusBadRequest, "invalid_request", "Invalid messages", ""
 	}
 	var rawMessages []map[string]json.RawMessage
 	if err := json.Unmarshal(messagesRaw, &rawMessages); err != nil || len(rawMessages) != len(req.Messages) {
-		return req, http.StatusBadRequest, "invalid_request", "Invalid messages"
+		return req, http.StatusBadRequest, "invalid_request", "Invalid messages", ""
 	}
 	if v, ok := raw["stream"]; ok {
 		if err := json.Unmarshal(v, &req.Stream); err != nil {
-			return req, http.StatusBadRequest, "invalid_request", "Invalid stream"
+			return req, http.StatusBadRequest, "invalid_request", "Invalid stream", ""
 		}
 	}
-	if status, code, msg := validateOptionalFields(raw, req.Stream); status != 0 {
-		return req, status, code, msg
+	if status, code, msg, param := validateOptionalFields(raw, req.Stream); status != 0 {
+		return req, status, code, msg, param
 	}
 	if normalized, status, code, msg := validateMessages(req.Messages, rawMessages); status != 0 {
-		return req, status, code, msg
+		return req, status, code, msg, ""
 	} else if normalized {
 		normalizedMessages, err := json.Marshal(rawMessages)
 		if err != nil {
-			return req, http.StatusBadRequest, "invalid_request", "Invalid messages"
+			return req, http.StatusBadRequest, "invalid_request", "Invalid messages", ""
 		}
 		raw["messages"] = normalizedMessages
 		normalizedBody, err := json.Marshal(raw)
 		if err != nil {
-			return req, http.StatusBadRequest, "invalid_request", "Invalid request"
+			return req, http.StatusBadRequest, "invalid_request", "Invalid request", ""
 		}
 		req.raw = normalizedBody
 	}
 	if status, code, msg := validateTools(raw, req.Messages); status != 0 {
-		return req, status, code, msg
+		return req, status, code, msg, ""
 	}
-	return req, 0, "", ""
+	return req, 0, "", "", ""
 }
 
 func countTopLevelField(body []byte, field string) (int, bool, error) {
@@ -6521,42 +6530,48 @@ func jsonValueStartForRewrite(raw []byte, keyEnd int) (int, error) {
 	return i, nil
 }
 
-func validateOptionalFields(raw map[string]json.RawMessage, stream bool) (int, string, string) {
+func validateOptionalFields(raw map[string]json.RawMessage, stream bool) (int, string, string, string) {
 	if v, ok := raw["max_tokens"]; ok {
 		var n int
 		if err := json.Unmarshal(v, &n); err != nil || n <= 0 {
-			return http.StatusBadRequest, "invalid_request", "max_tokens must be > 0"
+			return http.StatusBadRequest, "invalid_request", "max_tokens must be > 0", ""
 		}
 	}
 	for _, field := range []string{"temperature", "top_p", "presence_penalty", "frequency_penalty"} {
 		if v, ok := raw[field]; ok {
 			var f float64
 			if err := json.Unmarshal(v, &f); err != nil {
-				return http.StatusBadRequest, "invalid_request", "Invalid " + field
+				return http.StatusBadRequest, "invalid_request", "Invalid " + field, ""
 			}
 			if field == "temperature" && (f < 0 || f > 2) {
-				return http.StatusBadRequest, "invalid_request", "temperature out of range"
+				return http.StatusBadRequest, "invalid_request", "temperature out of range", ""
 			}
 			if field == "top_p" && (f < 0 || f > 1) {
-				return http.StatusBadRequest, "invalid_request", "top_p out of range"
+				return http.StatusBadRequest, "invalid_request", "top_p out of range", ""
 			}
 			if (field == "presence_penalty" || field == "frequency_penalty") && (f < -2 || f > 2) {
-				return http.StatusBadRequest, "invalid_request", field + " out of range"
+				return http.StatusBadRequest, "invalid_request", field + " out of range", ""
+			}
+			if (field == "presence_penalty" || field == "frequency_penalty") && f != 0 {
+				return http.StatusBadRequest,
+					"unsupported_sampling_penalty",
+					field + " is not supported by the native MLX provider runtime; omit it or set it to 0",
+					field
 			}
 		}
 	}
 	if v, ok := raw["n"]; ok {
 		var n int
 		if err := json.Unmarshal(v, &n); err != nil || n != 1 {
-			return http.StatusBadRequest, "invalid_request", "n must be 1"
+			return http.StatusBadRequest, "invalid_request", "n must be 1", ""
 		}
 	}
 	if v, ok := raw["response_format"]; ok {
 		if status, code, msg := validateResponseFormatSchema(v, stream); status != 0 {
-			return status, code, msg
+			return status, code, msg, ""
 		}
 	}
-	return 0, "", ""
+	return 0, "", "", ""
 }
 
 func validateResponseFormatSchema(raw json.RawMessage, stream bool) (int, string, string) {

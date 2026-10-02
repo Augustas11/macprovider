@@ -19,7 +19,7 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "e874140ecb5b04aeb445eb3837d48f7b187b867e"
+            revision: "ef4ff8568c38c640bc90a8176dc3acfe943a288d"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
@@ -30,11 +30,11 @@ let package = Package(
         // issue #718) binds to the same reviewed version.
         .package(
             url: "https://github.com/huggingface/swift-jinja.git",
-            exact: "2.4.2"
+            exact: "2.5.1"
         ),
         .package(
             url: "https://github.com/apple/swift-nio.git",
-            exact: "2.101.3"
+            exact: "2.103.0"
         ),
         .package(
             url: "https://github.com/apple/swift-argument-parser.git",

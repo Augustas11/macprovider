@@ -1,3 +1,4 @@
+import MLXLMCommon
 @testable import macprovider_cli
 import XCTest
 
@@ -24,5 +25,58 @@ final class ContinuousBatchStopTokenTests: XCTestCase {
             ModelRuntime.droppingTrailingModelStop([], terminalStatus: .stop, modelStopTokenIDs: stops),
             []
         )
+    }
+
+    func testSerialHybridCacheIsNotPublishedAfterNaturalModelStop() {
+        XCTAssertFalse(
+            ModelRuntime.serialHybridCacheCanPublishTerminalCheckpoint(
+                cache: [MambaCache()],
+                terminalModelStopStripped: true
+            ),
+            "MLX advances recurrent state through EOS before returning; the canonical cache drops EOS"
+        )
+        XCTAssertTrue(
+            ModelRuntime.serialHybridCacheCanPublishTerminalCheckpoint(
+                cache: [MambaCache()],
+                terminalModelStopStripped: false
+            )
+        )
+        XCTAssertTrue(
+            ModelRuntime.serialHybridCacheCanPublishTerminalCheckpoint(
+                cache: [KVCacheSimple()],
+                terminalModelStopStripped: true
+            )
+        )
+    }
+
+    func testSerialTerminalModelStopIgnoresBuyerFinishReasonRewrites() {
+        XCTAssertTrue(ModelRuntime.serialTerminalModelStopStripped(
+            rawLengthFinish: false,
+            hitStop: false,
+            parsedHitStop: false,
+            harmonyTerminalFinish: false,
+            stoppedBySerialToolCall: false
+        ))
+        XCTAssertFalse(ModelRuntime.serialTerminalModelStopStripped(
+            rawLengthFinish: true,
+            hitStop: false,
+            parsedHitStop: false,
+            harmonyTerminalFinish: false,
+            stoppedBySerialToolCall: false
+        ))
+        XCTAssertFalse(ModelRuntime.serialTerminalModelStopStripped(
+            rawLengthFinish: false,
+            hitStop: false,
+            parsedHitStop: false,
+            harmonyTerminalFinish: false,
+            stoppedBySerialToolCall: true
+        ))
+        XCTAssertFalse(ModelRuntime.serialTerminalModelStopStripped(
+            rawLengthFinish: false,
+            hitStop: true,
+            parsedHitStop: false,
+            harmonyTerminalFinish: false,
+            stoppedBySerialToolCall: false
+        ))
     }
 }

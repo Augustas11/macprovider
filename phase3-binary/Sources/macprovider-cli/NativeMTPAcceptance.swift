@@ -23,6 +23,9 @@ struct NativeMTPVerifiedRow: Equatable, Sendable {
     let schedulerRowID: String
     let packedRowIndex: Int
     let proposedTokenIDs: [Int]
+    /// Target-selected token at each verified position: the argmax for a
+    /// greedy row, the row sampler's draw for a sampled row. Acceptance is an
+    /// exact match against these, so one rule covers both.
     let targetTopTokenIDs: [Int]
 
     init(

@@ -33,7 +33,8 @@ extension RecurrentStateCheckpoint: Equatable {
 final class ConversationCacheLayers: @unchecked Sendable {
     let layers: [KVCache]
     let retainedPagedKVSequence: PagedKVRetainedSequence?
-    /// Ascending by `tokenCount`; at most two (scaffold end, last turn start).
+    /// Ascending by `tokenCount`; bounded to scaffold end, last turn start, and
+    /// the covered reply end for hybrid recurrent reuse.
     let recurrentCheckpoints: [RecurrentStateCheckpoint]
     private let discardRetainedPagedKVSequence: (@Sendable (PagedKVRetainedSequence, String) async -> Void)?
 
@@ -46,7 +47,7 @@ final class ConversationCacheLayers: @unchecked Sendable {
         self.layers = layers
         self.retainedPagedKVSequence = retainedPagedKVSequence
         self.discardRetainedPagedKVSequence = discardRetainedPagedKVSequence
-        self.recurrentCheckpoints = recurrentCheckpoints
+        self.recurrentCheckpoints = recurrentCheckpoints.sorted { $0.tokenCount < $1.tokenCount }
     }
 
     static func hasRecurrentLayers(_ layers: [KVCache]) -> Bool {
@@ -390,6 +391,13 @@ actor ConversationCache {
             releaseTurn(lease.key)
             return
         }
+        let checkpointTokenCounts = cache.recurrentCheckpoints.map(\.tokenCount)
+        guard checkpointTokenCounts.allSatisfy({ $0 <= fullTokens.count }) else {
+            log("event=conv_cache action=commit_rejected key_hash=\(lease.keyHash) reason=recurrent_checkpoint_beyond_canonical_tokens tokens=\(fullTokens.count) checkpoints=\(checkpointTokenCounts)")
+            await cache.discardRetainedPagedKV(conversationKey: lease.key)
+            releaseTurn(lease.key)
+            return
+        }
 
         if let old = entries.removeValue(forKey: lease.key),
            old.kvCache.retainedPagedKVSequence?.handle != cache.retainedPagedKVSequence?.handle {
@@ -534,13 +542,15 @@ actor ConversationCache {
             .max { $0.tokenCount < $1.tokenCount }
     }
 
-    /// Recurrent-state checkpoint positions for a ChatML prompt on a hybrid model,
-    /// ascending, deduplicated, each `>= lcpThreshold`:
+    /// Recurrent-state prefill checkpoint positions for a ChatML prompt on a
+    /// hybrid model, ascending, deduplicated, each `>= lcpThreshold`:
     /// - C1: the first `<|im_start|>` that opens a `user` turn — the end of the
     ///   system/tools scaffold that gateway auto-prefix keys hash, so a new
     ///   conversation under a shared key still reuses it.
     /// - C2: the last `<|im_start|>` — the history the next turn repeats; the
     ///   generation prompt and re-rendered assistant turn after it may differ.
+    /// The reply-end checkpoint is captured after decode because it is outside
+    /// the rendered prompt this helper inspects.
     /// The role is detected by decoding up to three tokens after the marker and
     /// requiring the text to start with `user\n`, which is independent of how the
     /// tokenizer splits `user` and the newline.

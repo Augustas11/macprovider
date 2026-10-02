@@ -1855,7 +1855,7 @@ func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byt
 
 func relayBlindRejectionCode(code string) bool {
 	switch code {
-	case "relay_blind_ciphertext_invalid", "relay_blind_decrypt_failed":
+	case "relay_blind_ciphertext_invalid", "relay_blind_decrypt_failed", "unsupported_sampling_penalty":
 		return true
 	default:
 		return false

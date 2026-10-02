@@ -235,7 +235,7 @@ func TestWSStreamingNativeBuyerCancelKeepsByteEstimateBilling(t *testing.T) {
 		return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: make(chan providerws.InferenceResponseEnd), Errors: make(chan error, 1), CancelTerminal: terminal}
 	})
 
-	h.post(t, []byte(`{"model":"model-a","stream":true,"messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":-0.25,"frequency_penalty":0.125}`))
+	h.post(t, []byte(`{"model":"model-a","stream":true,"messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":0,"frequency_penalty":0}`))
 
 	ev := queryBuyerCancelEvidence(t, h.dbPath)
 	if ev.terminalState != billing.TerminalStateBuyerCancel {
@@ -287,7 +287,7 @@ func TestWSNonStreamingBuyerCancelZeroSettlesEmptyPrefixReceipt(t *testing.T) {
 		return &providerws.RelayStream{RequestID: requestID, Chunks: make(chan providerws.InferenceResponseChunk), Done: make(chan providerws.InferenceResponseEnd), Errors: errs, CancelTerminal: terminal}
 	})
 
-	h.post(t, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":-0.25,"frequency_penalty":0.125}`))
+	h.post(t, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":0,"frequency_penalty":0}`))
 
 	ev := queryBuyerCancelEvidence(t, h.dbPath)
 	if ev.terminalState != billing.TerminalStateBuyerCancel || ev.deliveredBytes != 0 {
@@ -339,7 +339,7 @@ func TestWSStreamingBuyerCancelReceiptClaimingUndeliveredOutputIsNotBilled(t *te
 		return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: make(chan providerws.InferenceResponseEnd), Errors: make(chan error, 1), CancelTerminal: terminal}
 	})
 
-	h.post(t, []byte(`{"model":"model-a","stream":true,"messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":-0.25,"frequency_penalty":0.125}`))
+	h.post(t, []byte(`{"model":"model-a","stream":true,"messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":0,"frequency_penalty":0}`))
 
 	ev := queryBuyerCancelEvidence(t, h.dbPath)
 	if ev.terminalState != billing.TerminalStateBuyerCancel || ev.deliveredBytes != int64(len(delivered)) {

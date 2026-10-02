@@ -96,7 +96,7 @@ func TestJourneyTrustedPoolLayer2MVPCandidate(t *testing.T) {
 		buyer.WithRoutingConfig(config.RoutingConfig{MaxRetries: 0}),
 	)
 
-	body := []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":-0.25,"frequency_penalty":0.125}`)
+	body := []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":0,"frequency_penalty":0}`)
 	success := postChat(t, server, body, trustedPoolLayer2Headers(buyerAccountID, poolID))
 	if success.Code != http.StatusOK {
 		t.Fatalf("pooled request status=%d body=%s", success.Code, success.Body.String())

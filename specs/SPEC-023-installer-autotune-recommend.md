@@ -1,6 +1,6 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.5
+version: v0.22.8
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-01
@@ -8,14 +8,18 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
-- **v0.22.5 (2026-10-01)** — #1816 freeze audit R1 (A-M7): §16.9 states that
+- **v0.22.8 (2026-10-01)** — #1816 freeze audit R1 (A-M7): §16.9 states that
   the pool-proven graduation path is specified but not executable. Until the
   SPEC-047-R012 aggregate, the SPEC-047-R011 probe-evidence record, and the
   generator's `macprovider.intake-decision.v2` exist, no key is pool-proven, the
   generator rejects every v2 decision, and an operator MUST NOT author one. No
   rule changes; CONFORMANCE keeps `SPEC-023-R026` and `SPEC-047-R012` pending.
+  Merge note: the #1816 entries were drafted as v0.22.3-v0.22.5; origin/main
+  used those numbers for native-MTP (#1770), so the #1816 entries are
+  renumbered v0.22.6-v0.22.8 and the inline `[v0.22.4]`/`[v0.22.5]` tags in
+  §16.2-§16.9 now read `[v0.22.7]`/`[v0.22.8]`. No content change.
 
-- **v0.22.4 (2026-10-01)** — #1816 round-1 audit fixes to `SPEC-023-R026`.
+- **v0.22.7 (2026-10-01)** — #1816 round-1 audit fixes to `SPEC-023-R026`.
   Hash-derived intake keys and the opt-in v2 offer-count frame move to their
   producer, SPEC-047-R009; the pool-proven aggregate is produced by
   SPEC-047-R012 (`model_admission_pool_proven.v1`), retained as
@@ -25,7 +29,7 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
   record. Listing keeps the pool bindings; only promotion to `recommendable`
   supersedes them. §16.2 lists four signals and §16.3 names the pool-proven term.
 
-- **v0.22.3 (2026-10-01)** — Pool-proven catalog intake (#1816). Registers
+- **v0.22.6 (2026-10-01)** — Pool-proven catalog intake (#1816). Registers
   `SPEC-023-R026`: unmatched supported artifact pairs receive deterministic
   hash-derived intake keys; aggregate paid pool volume, distinct providers,
   and licence-on-file status become a bounded intake signal; an operator may
@@ -33,6 +37,33 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
   `recommendable` remains an explicit operator decision under all existing
   gates, and permissionless global earning remains out of scope pending
   SPEC-036 compute integrity.
+- **v0.22.5 (2026-10-01)** — Native-MTP sampled request profile (#1770).
+  SPEC-023-R024 `request_feature_profile` is now the closed set
+  `native_mtp_greedy_text_v1` | `native_mtp_sampled_text_v1`. The sampled
+  profile admits SPEC-048-R004 sampled rows verified by SPEC-048-R005
+  target-sample exact match; the greedy profile keeps them ordinary. The
+  value is part of the complete entry and therefore of
+  `native_mtp_admission_tuple_sha256`; any other value fails the entry closed.
+
+- **v0.22.4 (2026-10-01)** — Native-MTP active-row bound (#1770).
+  SPEC-023-R024 entries gain the required `max_native_active_rows` integer
+  `1..8`, no larger than the entry's `qualified_slots`, consumed by the
+  SPEC-048-R007 load gate. It is part of the complete entry and therefore of
+  `native_mtp_admission_tuple_sha256`; a missing, zero, non-integer, or
+  larger-than-slots value fails the entry closed.
+
+- **v0.22.3 (2026-10-01)** — Native-MTP MLX affine 4-bit admission
+  (#1770). SPEC-023-R024 now admits the closed `mlx_affine` quantization
+  representation used by mlx-community 4-bit Qwen target and MTP artifacts,
+  including the canonical representation manifest digest and sorted
+  per-layer/unquantized exception arrays consumed by SPEC-048. Every signed
+  R024 field is now enforced or recomputed: `hash_algorithm` states the
+  `macprovider.snapshot-manifest.v1` value consumers already required (the
+  table previously said `"sha256"`), `tokenizer_sha256` must equal the
+  projected tokenizer digest, `cache_state_classes` is closed to the
+  `mtp_state_class` values and must contain the admitted class, the
+  exception-array grammar applies to every kind, and `base` binds a defined
+  canonical representation digest.
 
 - **v0.22.2 (2026-10-01)** — Default context memory residency now uses the
   verified artifact byte footprint when it is available (#1794). Catalog
@@ -3114,8 +3145,8 @@ unsigned JSON integers and never floats.
 | Field | Type / closed rule |
 |---|---|
 | `model_key`, `artifact_id` | existing SPEC-023 grammars |
-| `hash_algorithm` | `"sha256"` |
-| `artifact_hash`, `artifact_manifest_sha256`, `tokenizer_sha256` | `sha256` |
+| `hash_algorithm` | exactly `"macprovider.snapshot-manifest.v1"`, the §3.7.4 `mlx_safetensors` algorithm of the bound artifact-feed member; `artifact_hash` is that member's `hash` |
+| `artifact_hash`, `artifact_manifest_sha256`, `tokenizer_sha256` | `sha256`; `tokenizer_sha256` MUST equal the tokenizer digest in the signed artifact projection manifest, or the entry fails closed |
 | `decode_path` | exactly `"native_mtp"` |
 | `mtp_manifest_sha256` | `sha256` |
 | `mtp_family_adapter`, `mtp_state_class` | `short_string` |
@@ -3125,11 +3156,12 @@ unsigned JSON integers and never floats.
 | `source_commit` | full lowercase Git object id for the source repository's object format, exactly 40 or 64 hex characters |
 | `reproducible_build_sha256` | `sha256` |
 | `live_executable_cdhash` | exact lowercase 40-hex Mach-O CodeDirectory CDHash of the live signed executable admitted to consume this tuple |
-| `cache_state_classes` | sorted unique array `1..16` of `short_string` |
+| `cache_state_classes` | sorted unique array `1..16`; every element is an `mtp_state_class` value (`stageable_rewindable` or `hybrid_stageable_rewindable`) and the array MUST contain the entry's `mtp_state_class`, which the runtime matches against the loaded model |
 | `hardware_class` | lowercase ASCII matching `^[a-z0-9][a-z0-9._-]{0,63}$` |
 | `ram_bytes` | exact physical RAM integer `> 0`, not a minimum |
 | `qualified_slots` | integer `2..8`, exact admitted slot count |
-| `request_feature_profile` | exactly `"native_mtp_greedy_text_v1"` |
+| `max_native_active_rows` | integer `1..8`, no larger than `qualified_slots`; the SPEC-048-R007 load bound above which the tuple serves ordinary decode |
+| `request_feature_profile` | exactly `"native_mtp_greedy_text_v1"` (greedy rows only) or `"native_mtp_sampled_text_v1"` (greedy rows plus SPEC-048-R004 sampled rows verified by SPEC-048-R005 target-sample exact match) |
 | `decrease_threshold_ppm`, `increase_threshold_ppm` | integers `0..1000000`, strictly increasing |
 | `max_verification_positions_per_committed_milli` | integer `1000..4000` |
 | `throughput_delta_ppm` | signed integer result from the frozen R015 cell for this exact tuple |
@@ -3142,20 +3174,60 @@ unsigned JSON integers and never floats.
 `quantization` is exactly `{kind, packed_data_dtype, packed_layout,
 scale_dtype, scale_layout, block_size_elements, alignment_bytes, padding_rule,
 unquantized_exceptions, per_layer_exceptions,
-representation_manifest_sha256}`. `kind` is `base` or `mlx_mxfp8`.
-`packed_data_dtype` is `none|uint8`; `packed_layout` is
-`none|mlx_array_native_v1`; `scale_dtype` is `none|float16|float32`;
-`scale_layout` is `none|per_block`; `block_size_elements` is null or integer
-`1..1024`; `alignment_bytes` is null or a power of two `1..4096`;
-`padding_rule` is `none|zero_pad_to_alignment`; each exceptions field is a
-sorted unique array of at most 256 tensor-name patterns, each 1..128 printable
-ASCII bytes; and the manifest is a `sha256`. `base` requires the three layout/
-dtype values `none`, numeric fields null, `padding_rule=none`, empty exception
-arrays, and a manifest describing the loaded base representation. `mlx_mxfp8`
-requires `uint8`, `mlx_array_native_v1`, non-`none` scale fields, non-null
-numeric fields, and passes the SPEC-048-R012 `1.01x` perplexity, one-point task,
-5% fit-error, and 10% system-headroom bounds. Compressed-tensors FP8, TorchAO
+representation_manifest_sha256}`. `kind` is `base`, `mlx_mxfp8`, or
+`mlx_affine`. `packed_data_dtype` is `none|uint8|uint32`; `packed_layout` is
+`none|mlx_array_native_v1`; `scale_dtype` is
+`none|float16|float32|bfloat16`; `scale_layout` is `none|per_block`;
+`block_size_elements` is null or integer `1..1024`; `alignment_bytes` is null
+or a power of two `1..4096`; `padding_rule` is
+`none|zero_pad_to_alignment`; and the manifest is a lowercase `sha256`.
+
+Each exceptions field is sorted bytewise, unique, and contains at most 256
+entries. Every entry is exactly `target/<module>` or `mtp/<module>` and the
+full prefixed entry is 1..128 printable ASCII bytes; `<module>` is the exact
+config module key, which SPEC-048-R002 requires to be the pinned loader's
+post-sanitize module path (a standalone drafter key therefore carries its
+`mtp.` prefix), and contains no slash. This grammar applies to every
+quantization kind. The
+`per_layer_exceptions` array names every per-module quantization override in
+the target and MTP configs; override widths are `4` or `8` bits and group sizes
+are `32`, `64`, or `128`. The `unquantized_exceptions` array names every
+config entry whose value is exactly `false`. Consumers MUST fail closed above
+the array bound, on unsorted or duplicate arrays, on an invalid prefix, or when
+the arrays do not match the observed target/MTP artifacts.
+
+`base` requires the three layout/dtype values `none`, numeric fields null,
+`padding_rule=none`, empty exception arrays, and a
+`representation_manifest_sha256` equal to SHA-256 of the canonical bytes
+`{"mtp":{"dtype":"bfloat16"},"schema":"macprovider.native-mtp-representation.v1","target":{"dtype":"bfloat16"}}`,
+recomputed by the consumer from target and MTP artifacts observed as
+unquantized bfloat16 with no config overrides or `false` entries. `mlx_mxfp8` requires `uint8`,
+`mlx_array_native_v1`, non-`none` scale fields, non-null numeric fields, and
+passes the SPEC-048-R012 `1.01x` perplexity, one-point task, 5% fit-error, and
+10% system-headroom bounds. `mlx_affine` requires `packed_data_dtype=uint32`,
+`packed_layout=mlx_array_native_v1`, `scale_dtype=bfloat16`,
+`scale_layout=per_block`, `block_size_elements` equal to the global group size
+`32`, `64`, or `128`, `alignment_bytes=null`, and `padding_rule=none`. v0.1
+admits only global width `4`, represented to the runtime as
+`mlx_affine_4bit` for both target and MTP. Compressed-tensors FP8, TorchAO
 FP8, GGUF, a name containing `FP8`, or another microscaling format is invalid.
+
+For `mlx_affine`, `representation_manifest_sha256` is SHA-256 of the UTF-8
+bytes of the canonical representation manifest:
+
+```json
+{"mtp":{"bits":B,"group_size":G,"overrides":{"<module>":{"bits":b,"group_size":g}},"unquantized":["<module>"]},"schema":"macprovider.native-mtp-representation.v1","target":{"bits":B,"group_size":G,"overrides":{"<module>":{"bits":b,"group_size":g}},"unquantized":["<module>"]}}
+```
+
+The canonical form uses sorted object keys at every depth, no insignificant
+whitespace, UTF-8 encoding, decimal JSON integers only, the exact schema string
+shown above, the top-level key order `mtp`, `schema`, `target` as a consequence
+of sorted keys, and
+sorted unique `unquantized` arrays. `overrides` contains every config override
+except entries set to `false`, keyed by the unprefixed module name and valued
+as exactly `{bits,group_size}`. The global `{bits,group_size}` are the observed
+global config values for the target or MTP artifact. Recomputing this canonical
+manifest from the observed artifacts MUST produce the signed digest exactly.
 
 `ordinary_baseline` is exactly `{decode_path, runtime_revision,
 provider_revision, artifact_hash, qualified_slots, measurement_sha256,
@@ -3188,7 +3260,8 @@ profile because they do not say which identity layer they bind.
    presenting a value that differs from the live signed executable's CDHash
    MUST fail closed. `reproducible_build_sha256` remains the installed artifact
    byte digest and MUST NOT be substituted for the live CodeDirectory CDHash.
-   The `entry.complete_window_bytes_by_depth` array is likewise part of the
+   The `entry.complete_window_bytes_by_depth` array and the
+   `entry.max_native_active_rows` integer are likewise part of the
    canonical object; every indexed value MUST be encoded deterministically, with
    no defaulting from `proposal_depth` or runtime heuristics.
    This is the stable identity used by admission, evidence, revocation, and
@@ -3483,7 +3556,7 @@ No model key may enter `listed` — and therefore, transitively, `recommendable`
 
 ### 16.2 Intake signals
 
-Four signals feed the intake decision: (a)-(c) below and, **[v0.22.4]** (d) the §16.9 pool-proven evidence. Each is an aggregate; none carries provider or buyer identity, and none is a score that ranks rows against each other.
+Four signals feed the intake decision: (a)-(c) below and, **[v0.22.7]** (d) the §16.9 pool-proven evidence. Each is an aggregate; none carries provider or buyer identity, and none is a score that ranks rows against each other.
 
 **(a) Buyer demand.**
 
@@ -3544,7 +3617,7 @@ The cap and bound are therefore an admission filter ahead of the summary, never 
 - `fleet_fit_fraction(artifact)` — the fraction of providers active in the trailing 30 days whose reported `ram_gb` satisfies the §5 headroom rule for that artifact: `artifact.min_ram_gb <= ram_gb - safety_margin_gb`, with `safety_margin_gb = 4`. Computed per artifact, because §3.7.4 makes `min_ram_gb` per-artifact. A key's fit is the maximum over its verified artifacts. **[sourced v0.10.4]** The fleet input is the SPEC-017 v0.2.1 §5.2b.6 `fleet_ram` histogram of the same `/v1/stats/intake` response: active providers bucketed by unified-memory class floor, classes below `k_anonymity_min` suppressed. The fraction is evaluated conservatively from that object — `Σ provider_count` over unsuppressed classes with `ram_gb_floor − safety_margin_gb ≥ artifact.min_ram_gb`, divided by `provider_total`; a suppressed class contributes zero fit and stays in the denominator — and recorded as `fleet_fit_fraction_ppm = floor(floor(fraction × 1 000 000) / 50 000) × 50 000` — the exact ratio floored to a 50 000 ppm (5%) grid, because the manifest is public while the fleet count is not, and an exact ppm over a small `provider_total` reproduces the ratio (583 333 ppm is 7 of 12) — compared against `INTAKE_FLEET_FIT_MIN_PCT × 10 000` (the threshold is a percentage; the recorded value is ppm; 25% is 250 000 ppm); `fleet_fit_absent_reason: "no_observations"` when `provider_total` is zero. The histogram is materialized once per 30-day period (SPEC-017 §5.2b.6), so two reads within one period carry identical `fleet_ram` bytes.
 - `tier_target` — the operator's named hardware-tier target for the release, an explicit statement of which part of the fleet the release is trying to serve. Its default is stated in §16.4.
 
-**(d) Pool-proven evidence [v0.22.4].** `pool_proven_evidence`, defined and consumed only under §16.9 (`SPEC-023-R026`). It is absent for every key without an exact artifact pair in the SPEC-047-R012 aggregate, and its absence blocks nothing.
+**(d) Pool-proven evidence [v0.22.7].** `pool_proven_evidence`, defined and consumed only under §16.9 (`SPEC-023-R026`). It is absent for every key without an exact artifact pair in the SPEC-047-R012 aggregate, and its absence blocks nothing.
 
 ### 16.3 The intake rule
 
@@ -3557,7 +3630,7 @@ The cap and bound are therefore an admission filter ahead of the summary, never 
 - `openrouter_demand_rank != null AND openrouter_demand_rank <= INTAKE_DEMAND_RANK_MAX`; or
 - `distinct_provider_offer_count >= INTAKE_OFFER_FLOOR`; or
 - `unmatched_model_request_count >= INTAKE_BUYER_REQUEST_FLOOR`; or
-- **[v0.22.4]** the key's artifact is *pool-proven* under §16.9 (`SPEC-023-R026`), which carries its own additional preconditions;
+- **[v0.22.7]** the key's artifact is *pool-proven* under §16.9 (`SPEC-023-R026`), which carries its own additional preconditions;
 
 AND at least one of the following fit terms is satisfied:
 
@@ -3592,7 +3665,7 @@ AND at least one of the following fit terms is satisfied:
 | `tier_target` | `<= 16 GB` | The live fleet is dominated by 8-16 GB Macs (13 of 24 observed hardware profiles), while only 3 catalog rows fit at or under 16 GB. The default target is therefore the under-covered small-RAM tier until that is no longer true. |
 | `INTAKE_COLDSTART_SLOTS` | `1` | Per release, the operator MAY admit up to this many new `listed` rows on P1-P4 plus the fit term alone, with no demand-or-supply term, when the declared `tier_target` is under-covered. The slot is a **discretionary permission, not a reservation**: it permits an admission the demand-or-supply disjunction would otherwise refuse; it never obliges the operator to admit anything, and an unused slot does not accumulate. This is the explicit cold-start escape hatch (FM-2). |
 | `INTAKE_MIN_LISTED_DAYS` | `30` | One release cycle of `listed` observation before a key can carry a price. |
-| `INTAKE_POOL_PAID_REQUEST_FLOOR` | `100` | **[v0.22.4, §16.9]** Buyer-final, positively credited, undisputed pool-manifest requests for one exact artifact pair in the trailing 30 days. Sized so a pool-proven key has served real paid traffic across at least `INTAKE_OFFER_FLOOR` distinct owner accounts, not a single trial. |
+| `INTAKE_POOL_PAID_REQUEST_FLOOR` | `100` | **[v0.22.7, §16.9]** Buyer-final, positively credited, undisputed pool-manifest requests for one exact artifact pair in the trailing 30 days. Sized so a pool-proven key has served real paid traffic across at least `INTAKE_OFFER_FLOOR` distinct owner accounts, not a single trial. |
 
 Every threshold above except `INTAKE_K_ANONYMITY_MIN` (fixed at 3 in v0.10.4, see its row) is release policy the operator may change; each change MUST be recorded in the release notes for the release that applies it. Release notes alone do not make an intake decision reconstructible, because the decision also depends on the signal VALUES it was taken against; §16.8 defines the release-bound record that carries those values, and reconstructibility is claimed there and only there.
 
@@ -3733,7 +3806,7 @@ The manifest is a **closed schema at every level**. An unknown key, a missing ke
 
 ### 16.9 Pool-proven intake and graduation (SPEC-023-R026)
 
-**Implementation status [v0.22.5].** This section is specified, not built. The SPEC-047-R012 `GET /admin/model-admission/pool-proven` aggregate, the SPEC-047-R011 `model_admission_probe_evidence.v1` record (every pool binding's `probe_evidence_digest` is `null`), and the generator's `macprovider.intake-decision.v2` schema do not exist; `scripts/catalog-release.py` accepts only `macprovider.intake-decision.v1` and rejects a v2 decision. Until all three land, no key is pool-proven and an operator MUST NOT author a pool-proven decision. A pool model reaches the global catalog only through the existing §16.1-§16.5 intake, with v1 decisions and that intake's own evidence; its pool earning is unaffected meanwhile (SPEC-042-R015). CONFORMANCE keeps `SPEC-023-R026` and `SPEC-047-R012` pending until the pieces and their tests exist.
+**Implementation status [v0.22.8].** This section is specified, not built. The SPEC-047-R012 `GET /admin/model-admission/pool-proven` aggregate, the SPEC-047-R011 `model_admission_probe_evidence.v1` record (every pool binding's `probe_evidence_digest` is `null`), and the generator's `macprovider.intake-decision.v2` schema do not exist; `scripts/catalog-release.py` accepts only `macprovider.intake-decision.v1` and rejects a v2 decision. Until all three land, no key is pool-proven and an operator MUST NOT author a pool-proven decision. A pool model reaches the global catalog only through the existing §16.1-§16.5 intake, with v1 decisions and that intake's own evidence; its pool earning is unaffected meanwhile (SPEC-042-R015). CONFORMANCE keeps `SPEC-023-R026` and `SPEC-047-R012` pending until the pieces and their tests exist.
 
 **Ownership.** SPEC-047 owns the producers: the offer-time hash-derived `intake_model_key` (`artifact/<artifact_hash_algorithm>/<artifact_hash>`) and the opt-in `model_admission_intake_offer_counts.v2` frame (SPEC-047-R009), the pool-proven aggregate `model_admission_pool_proven.v1` (SPEC-047-R012), and the known-answer evidence record `model_admission_probe_evidence.v1` (SPEC-047-R011). This section owns only how the release generator consumes them and the catalog decision. A generator that reads the v2 offer-count frame MUST treat a hash-derived key only as an exact artifact pair, never as a catalog identity, and MUST reject an unknown schema. A v1 frame stays valid for releases that do not use hash-derived keys.
 

@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.10
+**Version:** 0.1.20
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.10",
+  "version": "0.1.20",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -48,8 +48,9 @@ represented by, or counted through SPEC-028's `draft_model`,
 `num_draft_tokens`, `spec_decode_*`, single-slot flag, or external-draft
 artifact contract.
 
-The v0.1 production outcome is not a serial demonstration. It is a greedy,
-text-only, multi-row path that preserves isolated ordinary-decode semantics
+The v0.1 production outcome is not a serial demonstration. It is a
+text-only, multi-row path for greedy rows and, on tuples signed for it, seeded
+sampled rows (MTP-4/MTP-5), that preserves isolated ordinary-decode semantics
 while different rows propose and accept different token counts in one
 continuous-batching round. The serial path is a required correctness oracle
 and diagnostic milestone, not issue completion or production enablement.
@@ -68,7 +69,8 @@ Accepted journey id: `JOURNEY-NATIVE-MTP-SERVING`.
 - immutable native-MTP capability and artifact binding;
 - an upstream MLX Swift MTP dependency with stable row-mapped transaction
   primitives;
-- exact greedy token and terminal parity against ordinary decode;
+- exact greedy, and seeded sampled, token and terminal parity against
+  ordinary decode;
 - per-row proposal, verification, prefix commit, discard, and rewind;
 - mixed ordinary/native-MTP continuous batches with bounded memory and fair
   scheduling;
@@ -86,7 +88,8 @@ Accepted journey id: `JOURNEY-NATIVE-MTP-SERVING`.
 - enabling, weakening, or treating as fixed SPEC-028 classic speculation or
   upstream `mlx-swift-lm#424`;
 - training or converting an MTP head;
-- stochastic speculative acceptance or sampling-mode parity;
+- probabilistic (rejection-sampling) speculative acceptance; sampled rows are
+  verified only by target-sample exact match (MTP-5);
 - tools, structured output, logprobs, penalties, conversation-cache reuse, or
   disk-cache reuse on the v0.1 native-MTP path;
 - vision or image inputs, even when an admitted artifact originated from a
@@ -153,7 +156,8 @@ If this spec and an owner spec conflict, the owner spec governs its domain and
 | Committed state | The exact prefix of staged state corresponding to tokens the ordinary-decode oracle retains at the same boundary. |
 | NativeMTPCapability | Immutable load-time description binding model identity, MTP tensors, family adapter, depth, cache/state support, request-feature support, quantization, and runtime revision. |
 | Path sticky | After the first native proposal/target-state mutation (and therefore before any possible buyer-visible output), execution cannot switch between native MTP and ordinary decode. |
-| Qualified tuple | Exact hardware, OS/toolchain, provider release, MLX runtime, model/artifact, quantization, cache mode, MTP depth, and slot-count combination covered by evidence. |
+| Qualified tuple | Exact hardware, OS/toolchain, provider release, MLX runtime, model/artifact, quantization, cache mode, MTP depth, slot-count, and native active-row bound combination covered by evidence. |
+| Native active-row bound | Signed per-tuple `max_native_active_rows`, `1 <= bound <= qualified_slots`: the largest number of concurrently active decode rows, native and ordinary together, at which the tuple's native-eligible R015 cells show native MTP beating ordinary decode. Gated cells above it prove only safety and non-inferiority and never justify or raise it. |
 
 The request path state machine is closed:
 
@@ -236,6 +240,64 @@ the captured target directory used by the target tokenizer loader. An
 independent or merely descriptive manifest, tokenizer from another directory,
 or path alias MUST fail closed.
 
+The observer MUST accept exactly the configuration and tensor grammar the
+pinned loader consumes and reject everything else. Quantization metadata is
+read only from the top-level config `quantization` object
+(`BaseConfiguration`); the `quantization_config` copy mlx-lm also writes is
+never read, and a config carrying only that copy fails closed. `mode` is a
+case-sensitive MLX `QuantizationMode` raw value; an absent `mode` is affine,
+as in the loader, and `quant_method`, `quantization_mode`, and `linear_class`
+carry no meaning. Global `bits` and `group_size` use exactly those keys. A
+quantized module is the module whose `<path>.scales` tensor exists, with zero
+points in `<path>.biases`; no other scale or bias spelling is read.
+
+For MLX affine 4-bit artifacts, the observer MUST treat config
+`"quantization": {"mode":"affine","bits":4,"group_size":G}` (or the same
+object without `mode`) as `mlx_affine_4bit`, with `G` limited to `32`, `64`,
+or `128`, and MUST record the per-tensor observed `bits_per_value` and
+`group_size`. The observer MUST preserve per-module config overrides and
+`false` unquantized config entries so SPEC-023's
+`representation_manifest_sha256`, `per_layer_exceptions`, and
+`unquantized_exceptions` can be recomputed from the observed target/MTP pair.
+Override and `false` keys are matched only against the exact post-sanitize
+module path the loader's quantize pass looks up: for qwen3_5 / qwen3_5_moe
+targets, `model.language_model` becomes `language_model.model` and any other
+key lacking `language_model.` gains that prefix; for standalone drafters,
+every key not already under `mtp.` gains that prefix. A key the loader would
+not apply (for example a bare drafter `fc` override, which the loader ignores
+in favour of the global width) fails closed as unmatched, as does a `false`
+entry that names no consumed floating module or names a module that has
+packed weights. Overrides are admitted only for `4` or `8` bits, group sizes
+`32`, `64`, or `128`, and an absent or exactly `affine` mode. The observed
+affine representation MUST match the signed SPEC-023 quantization object
+exactly before native MTP is admitted. A SPEC-023 `base` admission likewise
+requires both artifacts observed as unquantized bfloat16 with no overrides or
+`false` entries and the signed digest recomputed from them; any other kind
+the observer cannot recompute never admits.
+
+MLX never quantizes rank-1 floating tensors or rank-3 `*.conv1d.weight`
+tensors. The pinned Qwen35 loader discards every target key with the prefix
+`vision_tower` or `model.visual`; the observer drops exactly the dotted
+`vision_tower.*` / `model.visual.*` namespaces the same way and fails closed
+on any other name that discard predicate would silently swallow (for example
+`vision_tower_evil.weight`). A vision-language-origin target remains
+admissible for v0.1 text-only serving under §8 when the signed target artifact
+and processor contract prove no image-input buyer path is admitted. A rank-2
+language-model weight without a scale pair still fails closed unless the
+config explicitly declares that module unquantized. No tensor is excluded by
+name (optimizer, moment, or otherwise): the loader keeps every remaining key
+and verifies it against the model, so the observer inspects them all, and a
+target key whose loader path is not under `language_model.model.` or
+`language_model.lm_head.` fails closed.
+
+For standalone drafter artifacts, the accepted tensor namespace is exactly
+`fc|layers|norm|pre_fc_norm_embedding|pre_fc_norm_hidden`, optionally under an
+`mtp.` prefix, matched case-sensitively, matching the pinned fork's
+`qwenMTPSanitizeWeights` `standaloneCheckpoint` path. Qwen3.6 target configs with `model_type`
+`qwen3_5` or `qwen3_5_moe` use the same `qwen3_5_mtp_v1` adapter and
+`separate_artifact` layout with the matching
+`mlx-community/Qwen3.6-*-MTP-4bit` drafter artifacts.
+
 The observer MUST inspect the same recursive set of `.safetensors` files that
 the pinned 3.31.4 loader can consume. It MUST reject symlinked or hidden weight
 files, scan every parsed tensor name before representation filters, and reject
@@ -290,7 +352,7 @@ tagged release is the default production requirement.
 The first such exception is closed and exact:
 
 - repository: `https://github.com/Augustas11/mlx-swift-lm.git`;
-- revision: `e874140ecb5b04aeb445eb3837d48f7b187b867e`;
+- revision: `ef4ff8568c38c640bc90a8176dc3acfe943a288d`;
 - upstream base: `ml-explore/mlx-swift-lm@bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57`
   (`3.31.4`);
 - reviewed surface: `MTPKVCacheStorage`, `MTPKVCacheTransaction`,
@@ -303,9 +365,16 @@ The first such exception is closed and exact:
   plus `MTPDrafterContainer.perform(nonSendable:_:)` for serialized movement
   of caller-owned drafter state without model-global mutation or unsafe
   `Sendable` capture; plus standalone Qwen 3.5 MTP checkpoint normalization,
-  `MTPPackedMambaBatchCache`, `MTPPackedMambaRowTransaction`, and the
+  `MTPPackedMambaBatchCache`, `MTPPackedMambaRowTransaction` (including the
+  deferred-evaluation `stageCommit(retaining:)`), and the
   `mtpPackedCheckpointIndex` contract needed for row-isolated commit across
-  hybrid attention/Mamba verification;
+  hybrid attention/Mamba verification; plus the
+  `mtpPackedHostBatchOffsets` host offset mirror the packed facade validates
+  instead of reading `batchOffset` back from the device; plus
+  `MTPPackedStatefulDrafterModel`, `MTPPackedDrafterAdvanceRow`,
+  `MTPPackedDrafterAdvanceResult`, `MTPPackedDrafterError`, and the Qwen 3.5
+  `advanceAndProposePacked` implementation that advances every native row's
+  drafter state and proposes its next token in one drafter forward;
 - review date and owner: `2026-09-28`, `@Augustas11`;
 - mandatory exception re-review date: `2026-12-27`;
 - review gate: upstream-focused build-tests, MacProvider qualification and
@@ -329,10 +398,17 @@ parity gates, admit MXFP8, or enable production serving.
 ### MTP-4 — v0.1 request eligibility and fallback boundary (SPEC-048-R004)
 
 Native MTP v0.1 accepts only the chat-completions request profile below. Values
-are tested after ordinary request parsing/default resolution; an absent
-`temperature` is ineligible unless the parser demonstrably resolves it to
-exactly zero. The generation-affecting allowlist is: `temperature == 0`,
-`top_p == 1`, absent/default `top_k`, absent/zero `min_p`, zero frequency and
+are tested after ordinary request parsing/default resolution (an absent
+`temperature` resolves to the ordinary default `1.0` and is therefore a
+sampled request). Sampling is eligible in one of two forms. A greedy row has
+`temperature == 0` and `top_p == 1`; every admitted tuple accepts it. A
+sampled row has any other `temperature`/`top_p` pair that the ordinary
+continuous-batching row sampler supports (`0 <= temperature <= 2`,
+`0 <= top_p <= 1`, finite); it is eligible only when the selected signed
+SPEC-023-R024 entry carries `request_feature_profile =
+"native_mtp_sampled_text_v1"`, and on a `native_mtp_greedy_text_v1` tuple it
+selects ordinary with reason `sampling`. The remaining generation-affecting
+allowlist is: absent/default `top_k`, absent/zero `min_p`, zero frequency and
 presence penalties, absent/default-one repetition penalty, `n == 1`, no logit
 bias, no `logprobs` or `top_logprobs`, no reasoning/thinking toggle or chat
 template kwargs, no tools/tool choice/tool-call history, plain-text response
@@ -340,23 +416,30 @@ format, no Harmony protocol, and text-only messages. The allowed transport or
 limit keys are `model`, `messages`, `max_tokens`, `max_completion_tokens`,
 `stream`, `stream_options` containing only `include_usage`, `stop`, and `user`;
 they retain ordinary validation. A `seed` is eligible only where the ordinary
-greedy path treats it as a documented no-op. Legacy completions, `echo`,
+path treats it as a documented no-op (the continuous-batching row sampler
+seeds from the scheduler request identity, not the buyer `seed`). Legacy completions, `echo`,
 `suffix`, an unknown top-level key, or any generation-affecting key/value not
 explicitly admitted above routes ordinary. A nonempty `conversation_key` also
-routes ordinary. The request additionally requires an admitted
+routes ordinary. Prompt length is bounded only by the signed request
+profile's maximum prompt tokens: a prompt longer than one prefill chunk is
+prefilled in chunks with per-chunk drafter seeding (MTP-6), and the prefill
+chunk size is not an eligibility bound. The request additionally requires an admitted
 capability, a supported cache/state class, and enough capacity for the next
 complete verification round. Streaming and non-streaming are eligible only
 after their respective acceptance fixtures pass.
 
 The provider MUST make decode-path selection before output and record exactly
 one closed selector reason. `eligible` selects `native_mtp` only after every
-request, tuple, sidecar, revocation, state, and capacity gate passes; each other
-reason selects ordinary:
+request, tuple, sidecar, revocation, state, capacity, and load gate passes; each
+other reason selects ordinary:
 `eligible|mode_off|classic_draft_configured|sampling|multiple_completions|tools|
 structured_output|logprobs|logit_controls|reasoning_or_template|unknown_request_field|
 conversation_key|multimodal|unsupported_processor|unsupported_state_cache|
-insufficient_verification_capacity|capability_mismatch|tuple_not_admitted|
-tuple_revoked|revocation_state_unavailable`.
+insufficient_verification_capacity|capacity_above_native_bound|capability_mismatch|
+tuple_not_admitted|tuple_revoked|revocation_state_unavailable`.
+`capacity_above_native_bound` is the R007 load gate: an otherwise eligible
+request selects ordinary when the served runtime already holds at least
+`max_native_active_rows` other in-flight requests.
 Reason strings are local diagnostics, at most 48 ASCII bytes, and do not enter
 buyer, receipt, or coordinator wire surfaces.
 
@@ -390,10 +473,25 @@ after the first rejected position may be emitted or committed. The algorithm
 MAY add at most one target-selected bonus token under one documented convention
 bound to the qualified runtime revision.
 
+For a sampled row the target-selected token at verification position `i` is
+the draw the row's own ordinary sampler makes at sampler step `s + i` from the
+target logits at that position, where `s` is the row's committed generated
+token count. The ordinary continuous-batching row sampler is a pure function
+of the request seed, the step, the sampling parameters, and the row logits
+(no carried RNG state), so a draw at a position after the first mismatch is
+discarded without affecting any later draw. A proposal is accepted iff it
+equals the target-selected token at its position; at the first mismatch that
+token is emitted, and after a fully accepted prefix the bonus position's
+draw is emitted. Greedy rows are the same rule with the argmax as the draw.
+Probabilistic `min(1, p/q)` acceptance is not used: it preserves the output
+distribution but not seeded token identity. The drafter stays greedy; it only
+proposes and never selects an emitted token.
+
 For the serial deterministic acceptance corpus, native MTP MUST produce the
 exact token-ID sequence, ordering, decoded bytes, completion-token count, and
-terminal reason produced by isolated ordinary greedy decode on the same model
-snapshot and request. The preregistered corpus MUST contain at least 200
+terminal reason produced by isolated ordinary decode with the same sampling
+parameters and request seed on the same model snapshot and request (greedy
+decode for a greedy row). The preregistered corpus MUST contain at least 200
 prompts, at least 20 per short/1.5k/4k/8k/near-boundary stratum, and at least
 6,400 compared generated positions, including all/none/partial acceptance,
 stop/EOS/max-token terminals, and deliberately near-tied logits. No prompt is
@@ -402,7 +500,8 @@ excluded by observed margin: any token-ID divergence is a hard tuple failure.
 The numerical oracle for both serial and multi-row tests is teacher-forced:
 for every emitted prefix, run that row's ordinary path on the same served
 snapshot and prefix, cast both target-logit vectors to float32, and compare the
-next-token result before advancing. Top-1 token ID MUST be exact. Maximum
+next-token result before advancing. Top-1 token ID MUST be exact; for a
+sampled row the seeded draw at that step MUST also be exact. Maximum
 absolute target-logit difference MUST be `<= 0.05`, and the ordinary top-1
 versus runner-up gap is recorded for every position. On any token divergence,
 comparison stops for that row, the tuple fails, and later positions are not
@@ -436,6 +535,27 @@ digest specifies component order, dtype, shape, logical length, and canonical
 byte encoding. Depth-zero rows retain only committed target state; when depth
 increases, proposal state is recomputed from the current committed target
 hidden state rather than reused from a stale speculative tail.
+
+Proposal state for the prompt is seeded during prefill, one chunk at a time.
+For prompt chunk `[c, c+n)` the target emits hidden states `c ..< c+n` and the
+MTP adapter advances the row's proposal state over `embed(prompt[c+1 ..< c+n+1])`
+paired with those hidden states at position `c`. For a non-final chunk the
+tail token `prompt[c+n]` is the next prompt token; only the final chunk uses
+the sampled first token as its tail and yields the row's first proposal. A
+prompt that fits one chunk is the single-pass case of the same rule. A
+non-initial chunk MUST find the previous chunk's proposal state at exactly
+position `c`, or the row fails before output; no chunk is replayed to
+synthesize hidden states.
+
+A row held at depth zero by the MTP-7 load gate does not run a one-column
+native verification. It shares the ordinary lockstep decode forward, and the
+provider keeps, in order, each token that forward commits for the row with the
+target hidden state that produced it. These are exactly the columns per-round
+depth-zero finalizes would have fed the MTP adapter. Before the row's next
+native proposal (or once it holds 64 such columns) they advance its proposal
+state in one packed step, so a restored row proposes from the same committed
+prefix as one that was never gated. The emitted tokens are ordinary decode's
+by construction.
 
 Transactions MUST preserve row identity across proposal, packed verification,
 commit, discard, cancellation, and release. State or metrics from one row MUST
@@ -478,6 +598,45 @@ missing array, wrong length, non-integer, nonpositive, decreasing value,
 integer overflow, or tuple-digest mismatch. Total scheduler capacity for the
 qualified tuple is the checked product of the max-depth value and
 `qualified_slots`; overflow is an admission failure.
+
+**Load gate.** Native MTP verifies `B * (1 + depth)` packed target positions
+per round, and small-M quantized matmul cost grows with M, so its throughput
+advantage over ordinary continuous batching shrinks as concurrent rows rise
+and inverts at a tuple-specific row count. The signed SPEC-023 sidecar MUST
+therefore carry `max_native_active_rows`, an integer
+`1 <= max_native_active_rows <= qualified_slots`; consumers MUST fail closed on
+a missing, non-integer, zero, or larger value, and the value is part of the
+canonical admission tuple identity. An active row is any in-flight request on
+the served runtime, native or ordinary, including queued and prefilling rows.
+Admission and in-flight behavior are:
+
+- **Admission.** The selection of a new request counts the other in-flight
+  requests atomically with registering it. If that count is
+  `>= max_native_active_rows`, the request selects ordinary with reason
+  `capacity_above_native_bound` before any native state exists. This is a
+  selection, not a pre-output fallback, and does not increment
+  `preoutput_fallbacks`.
+- **In flight.** Native rows never switch path. While the scheduler's admitted
+  rows (prefilling plus decoding) exceed the smallest bound among native rows,
+  every native row of that tuple is held at proposal depth zero, the existing
+  in-path degraded state, and rides the ordinary lockstep decode forward with
+  the other rows instead of a separate one-column native verification forward
+  (MTP-6 drafter catch-up). Its selection, reason, and accounting stay
+  `native_mtp`. The gate releases only after 8 consecutive decode
+  rounds at or below the bound (or when no native row remains); this round-count
+  hysteresis is an integer counter, never wall time. Depth then returns to the
+  row's adaptation or directive depth, recomputing proposal state from the
+  committed target state as for every depth increase.
+- Integrity probes (R016 self-test and coordinator canary) run in isolation and
+  are exempt from the in-flight depth gate.
+
+A bound equal to `qualified_slots` never engages for a runtime that admits at
+most that many rows. The bound is chosen from R015 cells measured at each slot
+count from one up to `qualified_slots`: it is the largest row count whose
+native-eligible cell passes the R015 improvement gate. Only native-eligible
+cells set or justify the bound; a gated cell (slot count above the bound)
+passing MTP-15 non-inferiority shows the gate is safe there and never raises
+the bound.
 
 Native MTP MUST use SPEC-038 FCFS admission and shared-iteration fairness; it
 MUST NOT create a second priority queue or skip an older ready ordinary row for
@@ -579,7 +738,10 @@ in proposal/verification bookkeeping since reset), and
 `throughput_delta_ppm` (signed integer loaded from the admitted sidecar's frozen
 R015 result, not a live estimate); `reset_generation` (nonnegative 64-bit
 integer incremented at each reset); and `last_reason` from the closed set
-`active|disabled_by_default|tuple_not_admitted|tuple_revoked|revocation_state_unavailable|request_ineligible|unsupported_cache_state|capacity_unavailable|low_acceptance_depth_zero|runtime_failure|warm_swap`.
+`active|disabled_by_default|tuple_not_admitted|tuple_revoked|revocation_state_unavailable|request_ineligible|unsupported_cache_state|capacity_unavailable|capacity_above_native_bound|low_acceptance_depth_zero|runtime_failure|warm_swap`.
+`capacity_above_native_bound` records an R007 load-gate admission downgrade or
+in-flight depth-zero engagement; a gated snapshot with native rows reads
+`mode=degraded_depth_zero`.
 No other `native_mtp` field is valid in v0.1.
 
 Every nonnegative 64-bit counter, including each position counter and
@@ -631,7 +793,7 @@ whether output is native-only or stitched. If SPEC-015 emits an existing error
 receipt, it MUST use that profile's non-settling/null-usage error form and bind
 the exact terminal error; no partial completion is represented as success.
 
-### MTP-12 — independent MXFP8 qualification (SPEC-048-R012)
+### MTP-12 — independent MLX quantization qualification (SPEC-048-R012)
 
 An MXFP8 artifact used with native MTP MUST first be admitted independently by
 SPEC-023/SPEC-010 as an MLX-native artifact for the exact runtime revision.
@@ -665,15 +827,22 @@ Passing MXFP8 ordinary decode and passing native MTP separately does not admit
 their combination. The combined tuple MUST rerun every SPEC-048 correctness,
 state, capacity, quality, and performance gate.
 
+MLX affine 4-bit (`mlx_affine_4bit`) artifacts use the SPEC-023-R024
+`mlx_affine` representation instead of the MXFP8 quality gate above. Their
+admission still requires the exact observed target/MTP representation manifest,
+per-layer override arrays, and unquantized exception arrays to match the signed
+SPEC-023 sidecar before any native-MTP tuple can advertise capability.
+
 ### MTP-13 — signed admission and immutable evidence (SPEC-048-R013)
 
-Catalog/autotune admission MUST be based on the SPEC-023 v0.21.2
+Catalog/autotune admission MUST be based on the SPEC-023 v0.22.4
 `macprovider.native-mtp-admission.v1` signed sidecar bound to one immutable SPEC-023
 `release_id` and SPEC-010 model/artifact member, never provider self-report.
 The sidecar MUST bind the exact decode path, model/artifact/tokenizer digests,
 MTP manifest and family adapter, proposal depth, quantization representation,
 runtime/provider revisions, cache/state classes, exact hardware/RAM,
-qualified slot count, request-feature profile, benchmark policy digest, source
+qualified slot count, native active-row bound (`max_native_active_rows`),
+request-feature profile, benchmark policy digest, source
 commit, reproducible-build digest, the exact lowercase 40-hex
 `spec023.live_executable_cdhash` CodeDirectory identity for the live signed
 executable, `mtp.complete_window_bytes_by_depth`, and evidence artifact
@@ -775,15 +944,88 @@ resamples whole blocks with 10,000 draws. Gates apply separately to every
 advertised `(hardware, artifact, slots, prompt/output stratum)` cell; no pooled
 pass may hide a failing cell. Holm correction at family-wise alpha 0.05 covers
 the throughput, TTFT, inter-token, and rejection hypotheses across all cells.
+
+**Run order.** The order is preregistered by the frozen policy seed: in each
+cell, half the measured blocks (rounded up) run native first, placed by a
+SplitMix64-seeded Fisher-Yates permutation of the cell's blocks keyed by the
+policy seed and the cell's slots, prompt, and output budget; the sustained
+window alternates, native first on even blocks. Every measured block MUST
+hold exactly one ordinary and one native record at order positions 0 and 1.
+The analyzer recomputes the order and fails a cell on a missing or duplicate
+record, an order that differs from the preregistered one, or a cell whose
+blocks are not counterbalanced, and it fails an admission policy with fewer
+than ten blocks, independent of the bench's own checks.
+
+**Mandatory matrix.** The frozen admission policy MUST name the tuple's
+advertised `qualified_slots` (2...8) and its `max_native_active_rows`
+(`1..qualified_slots`), and MUST contain a cell at every slot count from 1 up
+to `qualified_slots` (R007 chooses the load-gate bound from these cells), at
+every prompt stratum 1536, 4096, and 8192 tokens (each realized within ±2%),
+and at both fixed output budgets 128 (short) and 512 (long) tokens. The
+sustained window runs on one of those cells. Extra prompt or output strata are
+allowed; a slot count above `qualified_slots` is not. The bench refuses, and
+the analyzer fails closed on, a policy missing any mandatory cell, so a
+reduced matrix cannot pass. Exploratory pilot policies are exempt and never
+yield an admission verdict.
+
+**Cell classes.** The frozen `max_native_active_rows` splits the matrix. A
+cell whose slot count is at or below it is *native-eligible*: it carries the
+throughput, TTFT, inter-token, and rejection gates above, admits every row
+native (a load-gate downgrade there fails the cell), and every native run
+must show proposals and target forwards. A cell above it is *gated*: it
+measures the R007 load gate, so admitted native rows may legitimately spend
+the whole run at depth zero inside the ordinary forward and need recorded,
+consistent counters but not positive proposals. A gated cell MUST instead
+prove the gate worked and cost nothing: every admission records the other
+in-flight rows it was counted against, a native admission only while that
+count was below the bound and a `capacity_above_native_bound` downgrade only
+at or above it; admissions plus downgrades account for every request; parity
+holds and fallback/error is zero; and native is non-inferior to ordinary at
+the mixed-load margins of this section — the Holm-corrected lower bound of
+the decode-throughput change at least -5%, the corrected upper bounds of p95
+TTFT and p95 inter-token regression at most 5%, and capacity rejection up by
+at most one percentage point. These margins are frozen in the policy
+thresholds (`gated_throughput_lower_bound_min` -0.05,
+`gated_ttft_p95_upper_bound_max` 0.05, `gated_itl_p95_upper_bound_max` 0.05)
+and join the same Holm family. A tuple whose bound is 1 therefore passes R015
+with a native gain at one slot and non-inferiority everywhere above it.
+
+A gated cell MUST also exercise the in-flight hold on the measured hardware,
+so a policy with any gated cell MUST freeze a staggered arrival profile
+(`arrival_interval_ms` > 0: the first request admits native before later
+arrivals cross the bound); the bench refuses and the analyzer fails closed
+without it. Across its native runs each gated cell MUST record at least one
+native admission while the other in-flight rows were below the bound, at
+least one `capacity_above_native_bound` downgrade at or above it, and at
+least one round in which an admitted native row was held at depth zero. The
+hold evidence comes from the scheduler's own gate decisions through a
+lab-only recorder (absent from release builds): per run, depth-zero held
+rounds, hold episodes, holds ended by a later committed native round (depth
+restored, drafter caught up), holds ended by a stop/length terminal while
+held, and unresolved holds. Every hold MUST end restored or cleanly finished
+and none may be unresolved; a cell whose every request was downgraded fails.
+Zero proposals remain allowed for held rows.
 The campaign MUST report median and corrected confidence interval for
-aggregate committed tokens/s, per-request tokens/s, p50/p95 TTFT and
+aggregate and per-request decode throughput, aggregate committed tokens/s and
+per-request tokens/s end to end, p50/p95 TTFT and
 inter-token latency, proposed/accepted/per-position/mean acceptance, target
 forwards per committed token, peak/resident memory, capacity rejection,
 fallback/error rate, terminal parity, and thermal stability.
 
 Correctness, state integrity, and zero unexplained fallback/error are hard
-gates. Using the paired-bootstrap corrected 95% confidence interval, the lower bound for
-aggregate committed throughput improvement over the best ordinary baseline
+gates. R015 throughput is decode throughput: a request's completion tokens
+after its first, divided by the interval from its first token to its
+completion. A run's aggregate decode throughput is the sum of every request's
+tokens after its first, divided by the interval from the run's earliest first
+token to its latest completion. Prefill is excluded because it is the same
+work on both paths and is gated separately as TTFT below; prefill-inclusive
+(end-to-end) committed throughput MUST still be reported but is not a gate.
+A missing or non-positive decode throughput fails the run closed; evidence
+recorded before the bench emitted it may derive it from recorded per-request
+end-to-end throughput, TTFT, completion tokens, and nominal arrival offsets,
+and fails closed when any of those is missing. Using the paired-bootstrap
+corrected 95% confidence interval, the lower bound for aggregate decode
+throughput improvement over the best ordinary baseline
 MUST be at least 15% in each cell at the intended advertised slot count; both
 paths use that same slot count, and the baseline is the best ordinary
 production-qualified configuration at that count. The corrected upper bound
@@ -925,6 +1167,8 @@ the journey must include its independent and combined evidence.
 | First Qwen-family MTP artifact | `UNKNOWN` | `@Augustas11` | `#1770` | Legally/provenance-clean immutable model, tokenizer, MTP manifest, and exact hashes. |
 | Upstream MLX Swift release | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | A reviewed fork exception is pinned for this campaign; replacement by an upstream tag remains required by the re-review/removal trigger. |
 | First MLX-native MXFP8 artifact | `UNKNOWN` | `@Augustas11` | `#1770` | SPEC-023/SPEC-010 format, fit, quality, license, provenance, and hardware evidence. |
+| Batched-verify numerical parity | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | On the Mac Studio M3 Ultra, MLX `get_qmv_batch_limit` switches quantized matmul from qmv to qmm once the packed verify reaches 12 tokens for K/N above 4096. Qwen3.5-9B stayed bit-exact at 5 slots (10 packed tokens) and drifted by one bf16 step from 6 slots, flipping near-tied argmaxes. R005 as written forbids any such divergence, so multi-row verification at >=12 packed tokens cannot pass it. Decide between a bounded drift allowance and kernel-matched verification. |
+| Depth-1 throughput value | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | 2026-09-29 Studio pilot, Qwen3.6-35B-A3B, 384-token greedy prompts: native MTP 0.66x/0.61x/0.57x ordinary continuous batching at 2/4/8 slots with 87-90% acceptance. Profiling projects about 1.3x at 2 slots and break-even at 8 after overhead fixes. Evidence and parked work: branch `park/native-mtp-perf-2026-09-29`. |
 
 ## 7. Evidence
 
@@ -961,6 +1205,109 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.20 (2026-10-01)** — MTP-15 preregisters the run order (#1770): per
+  cell, a seeded Fisher-Yates permutation runs half the blocks (rounded up)
+  native first; the sustained window alternates. The analyzer recomputes it
+  and independently enforces one ordinary and one native record per block at
+  positions 0 and 1, the preregistered order, counterbalancing, and at least
+  ten blocks for an admission policy.
+- **0.1.19 (2026-10-01)** — MTP-15 gated cells must prove the R007 in-flight
+  hold on hardware (#1770): a frozen staggered arrival profile, a native
+  admission below the bound and a downgrade at it, depth-zero held rounds
+  from the scheduler's lab-only gate recorder, and every hold ending restored
+  or cleanly finished; a fully downgraded gated cell fails. The bound
+  definition and MTP-7 now say only native-eligible cells set and justify
+  `max_native_active_rows`; a gated non-inferiority pass never raises it.
+- **0.1.18 (2026-10-01)** — MTP-15 splits the R015 matrix at the frozen
+  `max_native_active_rows` (#1770). Native-eligible cells keep the
+  improvement gates and native-work proofs and may not downgrade; gated cells
+  above the bound prove each admission honored the bound (recorded
+  other-active-row counts), keep parity and zero errors, and gate
+  non-inferiority to ordinary at the section's mixed-load margins (decode
+  throughput LB >= -5%, p95 TTFT and inter-token UB <= 5%), frozen in the
+  policy. Without this a correctly gated tuple (bound 1 on an 8-slot tuple)
+  could never pass R015.
+- **0.1.17 (2026-10-01)** — MTP-15 makes the R015 matrix explicit (#1770):
+  an admission policy names `qualified_slots` and `max_native_active_rows` and
+  covers every slot count from 1 to `qualified_slots`, prompt strata 1536,
+  4096, and 8192, and output budgets 128 and 512. The bench and analyzer fail
+  closed on a policy missing a mandatory cell; previously a policy could omit
+  the one-slot cell and the analyzer judged only the listed cells.
+- **0.1.16 (2026-10-01)** — MTP-15 defines the R015 throughput gate as
+  decode throughput (completion tokens after the first, over the decode
+  interval; for a run, earliest first token to latest completion). End-to-end
+  committed throughput dilutes the native/ordinary ratio by prompt length
+  because both paths run the same prefill; it stays reported, not gated, and
+  TTFT keeps its own gate. Missing decode throughput fails closed; pre-0.1.16
+  bench records may derive it from recorded per-request throughput, TTFT, and
+  tokens (#1770).
+- **0.1.15 (2026-10-01)** — Chunked-prefill seeding, load-gate fusion, and
+  seeded sampling (#1770). MTP-6 seeds proposal state chunk by chunk over
+  each prefill chunk's own target hidden states (tail = next prompt token;
+  final chunk = sampled first token), so R004 drops the one-prefill-chunk
+  prompt bound (the open "Prompt-length eligibility" gap closes) and prompts
+  are bounded only by the signed request profile. MTP-7's in-flight load gate
+  now runs depth-zero native rows inside the ordinary lockstep forward rather
+  than a separate one-column verify forward; MTP-6 buffers their committed
+  (token, target hidden) columns and advances the drafter over them before the
+  next native proposal. MTP-4 admits sampled rows (temperature/top_p the
+  ordinary row sampler supports) on tuples whose SPEC-023-R024 entry carries
+  the new `native_mtp_sampled_text_v1` profile; MTP-5 defines target-sample
+  exact-match verification with the row's own seeded sampler at each verify
+  position, which keeps seeded sampled native output token-identical to
+  seeded ordinary output. Top-k, min-p, penalties, logit bias, and logprobs
+  stay ineligible.
+- **0.1.14 (2026-10-01)** — Adds the R007 native active-row load gate (#1770).
+  Studio evidence showed native MTP's advantage shrink with concurrency (A3B
+  +13.5%/+4.2%/-0.3% at 2/4/8 slots; 27B dense -1.0%/-2.2% at 2/4) because
+  verification of `B * (1 + depth)` rows runs MLX small-M quantized matmul whose
+  cost grows with M. The signed SPEC-023-R024 sidecar now carries
+  `max_native_active_rows` (`1..qualified_slots`, inside the admission tuple
+  identity); admission selects ordinary with the new closed reason
+  `capacity_above_native_bound` when the runtime already holds that many other
+  rows, and in-flight native rows drop to depth zero while scheduler rows exceed
+  the bound, restoring after 8 calm rounds. R004 and R010 gain the reason value;
+  R013 binds the field; the R015 bench may measure one-slot cells on a
+  two-slot qualified runtime.
+- **0.1.13 (2026-10-01)** — Moves the reviewed fork exception pin from
+  `c4bc3461673e9f035c5f11bf41dda120d4baee1d` to
+  `ef4ff8568c38c640bc90a8176dc3acfe943a288d` (#1770 round overhead). The
+  delta, three commits on `perf/mtp-verify-sync-free`, removes per-round host
+  synchronization and per-row drafter forwards without changing what is
+  committed: packed-verify offset validation reads a host mirror instead of
+  one blocking device readback per cache layer; recurrent row commits can
+  defer evaluation so a round resolves every row and layer with one `eval`;
+  and a packed stateful-drafter API advances all native rows and proposes
+  their next tokens in one drafter forward. Packed drafter state equals the
+  per-row commit bit for bit when the matmul shapes match and otherwise
+  differs only by kernel accumulation order; drafter state never selects an
+  emitted token (MTP-5), so this does not touch the R005 oracle. Proposal
+  no longer mutates drafter state, so an aborted round keeps the row's
+  pre-round drafter state (MTP-6). The delta is in scope for the campaign
+  freeze audit.
+- **0.1.12 (2026-10-01)** — Closes observer/loader divergences found in
+  the campaign round-1 audit (#1770). The MTP-2 observer now accepts exactly
+  the pinned loader grammar: only the top-level `quantization` object, the
+  case-sensitive `mode` (absent means affine), `group_size`, and
+  `.scales`/`.biases` tensors; overrides and `false` entries match the exact
+  post-sanitize loader module path (a bare standalone-drafter `fc` override
+  the loader ignores now fails closed); no tensor is excluded by name; the
+  drafter namespace is case-sensitive; and only the dotted vision-tower
+  namespaces are dropped, with any other name the loader's discard predicate
+  would swallow rejected. `base` admissions now recompute their
+  representation digest instead of trusting it.
+- **0.1.11 (2026-09-29)** — Admits SPEC-023-R024 `mlx_affine`
+  native-MTP artifacts for issue #1770 by binding observed MLX affine 4-bit
+  target/MTP representation manifests, per-module overrides, and unquantized
+  exceptions; documents real mlx-community Qwen3.5/Qwen3.6 affine observer
+  rules and standalone drafter namespaces. Moves the reviewed fork exception
+  pin from `e874140ecb5b04aeb445eb3837d48f7b187b867e` to
+  `c4bc3461673e9f035c5f11bf41dda120d4baee1d`, whose only delta is the packed
+  recurrent-cache fix: a zero-proposal row right-padded beside a one-proposal
+  row now commits its checkpoint state instead of the post-pad state (found by
+  the real Qwen3.6-27B hardware e2e; the prior pin corrupted every
+  GatedDeltaNet layer of such rows). The delta is in scope for the campaign
+  freeze audit.
 - **0.1.9 (2026-09-28)** — Makes the signed MTP manifest the exact captured
   `mtp/config.json`, binds the target loader to captured
   `target/tokenizer.json`, and requires loader-equivalent recursive tensor

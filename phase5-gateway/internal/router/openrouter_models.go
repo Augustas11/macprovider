@@ -352,14 +352,12 @@ func openRouterSlug(listing openRouterListingSpec, isFree bool) string {
 
 func openRouterSupportedParameters(modelID string, maxTokens int) map[string]openRouterParameterDescriptor {
 	params := map[string]openRouterParameterDescriptor{
-		"max_tokens":        openRouterIntegerParameter(1, maxTokens, "token"),
-		"temperature":       openRouterRangeParameter(0, 2),
-		"top_p":             openRouterRangeParameter(0, 1),
-		"stop":              {Type: "array", MaxItems: 4},
-		"stream":            {Type: "boolean"},
-		"presence_penalty":  openRouterRangeParameter(-2, 2),
-		"frequency_penalty": openRouterRangeParameter(-2, 2),
-		"seed":              openRouterIntegerParameter(0, 9007199254740991, ""),
+		"max_tokens":  openRouterIntegerParameter(1, maxTokens, "token"),
+		"temperature": openRouterRangeParameter(0, 2),
+		"top_p":       openRouterRangeParameter(0, 1),
+		"stop":        {Type: "array", MaxItems: 4},
+		"stream":      {Type: "boolean"},
+		"seed":        openRouterIntegerParameter(0, 9007199254740991, ""),
 	}
 	if openRouterToolFamilyModel(modelID) {
 		// tool_choice "required" is rewritten to "auto" by the coordinator

@@ -72,6 +72,13 @@ def commit_is_descendant(repo, base, commit):
     comparison = gh_json(["api", f"repos/{repo}/compare/{base}...{commit}"])
     return comparison.get("behind_by") == 0 and comparison.get("ahead_by", 0) >= 1
 
+def pr_status(row, merged, open_status, closed_status=None):
+    if row.get("mergedAt"):
+        return merged
+    if row.get("state") == "CLOSED":
+        return closed_status or "closed_unmerged"
+    return open_status
+
 issue406 = issue(406)
 pr364 = pr(364)
 issue312 = issue(312)
@@ -85,8 +92,14 @@ pr510 = pr(510)
 pr545 = pr(545)
 pr581 = pr(581)
 pr584 = pr(584)
+pr598 = pr(598)
+pr620 = pr(620)
 pr622 = pr(622)
+pr631 = pr(631)
+pr633 = pr(633)
 issue645 = issue(645)
+pr514 = pr(514)
+pr335 = pr(335)
 
 lm_rel = latest_release("ml-explore/mlx-swift-lm")
 swift_rel = latest_release("ml-explore/mlx-swift")
@@ -97,6 +110,7 @@ native_mtp_required_prs = {
     "mlx_swift_lm_351_qwen_mtp": pr351,
     "mlx_swift_lm_516_mtp_sliding_window": pr516,
     "mlx_swift_lm_584_rotating_cache_trim": pr584,
+    "mlx_swift_lm_598_mtp_norm_double_shift": pr598,
 }
 native_mtp_required_merges = {}
 for key, row in native_mtp_required_prs.items():
@@ -114,7 +128,7 @@ native_mtp_required_merges_in_latest_release = all(
     for row in native_mtp_required_merges.values()
 )
 
-native_mtp_exception_revision = "e874140ecb5b04aeb445eb3837d48f7b187b867e"
+native_mtp_exception_revision = "ef4ff8568c38c640bc90a8176dc3acfe943a288d"
 native_mtp_exception_base = "bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57"
 native_mtp_exception_repo = "Augustas11/mlx-swift-lm"
 native_mtp_exception_remote_verified = commit_is_descendant(
@@ -256,6 +270,26 @@ out = {
             "updated_at": pr584["updatedAt"], "merged_at": pr584.get("mergedAt"),
             "merge_commit": (pr584.get("mergeCommit") or {}).get("oid"),
         },
+        "mlx_swift_lm_598_mtp_norm_double_shift": {
+            "repo": "ml-explore/mlx-swift-lm", "kind": "pull_request", "number": 598,
+            "url": "https://github.com/ml-explore/mlx-swift-lm/pull/598",
+            "state": pr598["state"], "title": pr598["title"],
+            "runbook_tasks": ["SPEC-048-R003", "pin_bump_qualification"],
+            "updated_at": pr598["updatedAt"], "merged_at": pr598.get("mergedAt"),
+            "merge_commit": (pr598.get("mergeCommit") or {}).get("oid"),
+            "macprovider_issue": "https://github.com/Augustas11/macprovider/issues/1788",
+            "automation_status": pr_status(pr598, "awaiting_release_tag", "blocked_upstream_open"),
+        },
+        "mlx_swift_lm_620_cache_clear_first_token": {
+            "repo": "ml-explore/mlx-swift-lm", "kind": "pull_request", "number": 620,
+            "url": "https://github.com/ml-explore/mlx-swift-lm/pull/620",
+            "state": pr620["state"], "title": pr620["title"],
+            "runbook_tasks": ["pin_bump_qualification", "qwen_decode_prefill_perf"],
+            "updated_at": pr620["updatedAt"], "merged_at": pr620.get("mergedAt"),
+            "merge_commit": (pr620.get("mergeCommit") or {}).get("oid"),
+            "macprovider_issue": "https://github.com/Augustas11/macprovider/issues/1788",
+            "automation_status": pr_status(pr620, "awaiting_release_tag", "blocked_upstream_open"),
+        },
         "mlx_swift_lm_622_exact_rotating_cache_rewinds": {
             "repo": "ml-explore/mlx-swift-lm", "kind": "pull_request", "number": 622,
             "url": "https://github.com/ml-explore/mlx-swift-lm/pull/622",
@@ -264,12 +298,70 @@ out = {
             "updated_at": pr622["updatedAt"], "merged_at": pr622.get("mergedAt"),
             "merge_commit": (pr622.get("mergeCommit") or {}).get("oid"),
         },
+        "mlx_swift_lm_631_gdn_reload_leak": {
+            "repo": "ml-explore/mlx-swift-lm", "kind": "pull_request", "number": 631,
+            "url": "https://github.com/ml-explore/mlx-swift-lm/pull/631",
+            "state": pr631["state"], "title": pr631["title"],
+            "runbook_tasks": ["pin_bump_qualification", "qwen_decode_prefill_perf"],
+            "updated_at": pr631["updatedAt"], "merged_at": pr631.get("mergedAt"),
+            "merge_commit": (pr631.get("mergeCommit") or {}).get("oid"),
+            "macprovider_issue": "https://github.com/Augustas11/macprovider/issues/1788",
+            "automation_status": pr_status(
+                pr631,
+                "awaiting_release_tag",
+                "blocked_upstream_open_or_disable_MLX_QWEN_FOUR_GDN",
+                "closed_unmerged_disable_MLX_QWEN_FOUR_GDN",
+            ),
+        },
+        "mlx_swift_lm_633_qwen_gdn_epsilon": {
+            "repo": "ml-explore/mlx-swift-lm", "kind": "pull_request", "number": 633,
+            "url": "https://github.com/ml-explore/mlx-swift-lm/pull/633",
+            "state": pr633["state"], "title": pr633["title"],
+            "runbook_tasks": ["pin_bump_qualification", "qwen_token_rebaseline"],
+            "updated_at": pr633["updatedAt"], "merged_at": pr633.get("mergedAt"),
+            "merge_commit": (pr633.get("mergeCommit") or {}).get("oid"),
+            "macprovider_issue": "https://github.com/Augustas11/macprovider/issues/1788",
+            "automation_status": pr_status(
+                pr633,
+                "intended_token_diff_pre_register_before_pin_bump",
+                "blocked_upstream_open_token_diff_expected",
+                "closed_unmerged_token_diff_expected",
+            ),
+        },
         "mlx_swift_lm_645_public_mtp_transactions": {
             "repo": "ml-explore/mlx-swift-lm", "kind": "issue", "number": 645,
             "url": "https://github.com/ml-explore/mlx-swift-lm/issues/645",
             "state": issue645["state"], "title": issue645["title"],
             "runbook_tasks": ["SPEC-048-R003", "SPEC-048-R005", "SPEC-048-R006"],
             "updated_at": issue645["updatedAt"], "closed_at": issue645.get("closedAt"),
+        },
+        "mlx_swift_lm_514_max_kv_size_hybrid": {
+            "repo": "ml-explore/mlx-swift-lm", "kind": "pull_request", "number": 514,
+            "url": "https://github.com/ml-explore/mlx-swift-lm/pull/514",
+            "state": pr514["state"], "title": pr514["title"],
+            "runbook_tasks": ["pin_bump_qualification", "hybrid_cache_class_tests"],
+            "updated_at": pr514["updatedAt"], "merged_at": pr514.get("mergedAt"),
+            "merge_commit": (pr514.get("mergeCommit") or {}).get("oid"),
+            "macprovider_issue": "https://github.com/Augustas11/macprovider/issues/1788",
+            "automation_status": pr_status(
+                pr514,
+                "awaiting_per_catalog_model_cache_class_tests",
+                "blocked_upstream_open",
+            ),
+        },
+        "mlx_swift_lm_335_modelcontainer_api_break": {
+            "repo": "ml-explore/mlx-swift-lm", "kind": "pull_request", "number": 335,
+            "url": "https://github.com/ml-explore/mlx-swift-lm/pull/335",
+            "state": pr335["state"], "title": pr335["title"],
+            "runbook_tasks": ["pin_bump_qualification", "api_migration"],
+            "updated_at": pr335["updatedAt"], "merged_at": pr335.get("mergedAt"),
+            "merge_commit": (pr335.get("mergeCommit") or {}).get("oid"),
+            "macprovider_issue": "https://github.com/Augustas11/macprovider/issues/1788",
+            "automation_status": pr_status(
+                pr335,
+                "merged_api_break_requires_migration",
+                "blocked_upstream_open_modelcontainer_api_break_watch",
+            ),
         },
     },
     "releases": {

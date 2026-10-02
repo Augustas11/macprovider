@@ -11,9 +11,9 @@ import MLXLMCommon
 /// temperature 0, nucleus when `0 < topP < 1`, categorical otherwise), applied to
 /// that row's own logits. Randomness is row-local: every (request, step) gets its
 /// own seed derived from the request's `samplerSeed` and the step index, so no
-/// random state is shared across rows or carried between steps. The serial path
-/// ignores presence/frequency penalties (it never passes them to MLX), so rows
-/// ignore them too — batched output follows the same distribution as serial.
+/// random state is shared across rows or carried between steps. Native runtime
+/// admission rejects non-default buyer penalties before either the serial or
+/// batched sampler can silently ignore them.
 enum ContinuousBatchRowSampler {
     struct Row: Equatable {
         let temperature: Double

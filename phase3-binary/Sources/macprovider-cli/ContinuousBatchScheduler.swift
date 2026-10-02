@@ -310,9 +310,15 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     let cachedPromptTokens: Int
     let retainedPagedKVSequence: PagedKVRetainedSequence?
     /// Prompt positions (`ConversationCache.recurrentCheckpointPositions`) at which
-    /// a keyed hybrid row snapshots its recurrent state during prefill. Derived
+    /// a keyed hybrid row snapshots its recurrent state during prefill. A
+    /// reply-end checkpoint is added at terminal when cache is retained or
+    /// materialized. Derived
     /// from `promptTokens`, so it stays out of the idempotency fingerprint.
     let recurrentCheckpointPositions: [Int]
+    /// Runtime-only model cache shape. Hybrid recurrent rows need a terminal
+    /// reply-end checkpoint even when no prompt checkpoint was eligible.
+    /// Excluded from the idempotency fingerprint like the checkpoint positions.
+    let modelHasRecurrentLayers: Bool
     /// SPEC-038 AC-26 hybrid cached turn: the retained entry's recurrent
     /// checkpoints at or below `cachedPromptTokens`. The one at exactly
     /// `cachedPromptTokens` is installed with the retained paged KV; any others
@@ -333,6 +339,9 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     /// from the idempotency fingerprint like other runtime-only native-MTP
     /// selection metadata.
     let nativeMTPCompleteWindowBytesByDepth: [Int]
+    /// Runtime-only signed SPEC-048-R007 load bound: while more rows than
+    /// this are active, native rows of this tuple verify at depth zero.
+    let nativeMTPMaximumActiveRows: Int
     let nativeMTPTupleFence: NativeMTPTupleFence?
     let nativeMTPIntegrityProbe: Bool
     /// Test-only/request-fixture proposal source. Production native MTP rows
@@ -356,11 +365,13 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         cachedPromptTokens: Int = 0,
         retainedPagedKVSequence: PagedKVRetainedSequence? = nil,
         recurrentCheckpointPositions: [Int] = [],
+        modelHasRecurrentLayers: Bool = false,
         retainedRecurrentCheckpoints: [RecurrentStateCheckpoint] = [],
         serialToolStopObserver: ContinuousBatchCanonicalStopObserver? = nil,
         decodePath: DecodePath = .ordinary,
         nativeMTPMaximumProposalDepth: Int = 0,
         nativeMTPCompleteWindowBytesByDepth: [Int] = [],
+        nativeMTPMaximumActiveRows: Int = Int.max,
         nativeMTPTupleFence: NativeMTPTupleFence? = nil,
         nativeMTPIntegrityProbe: Bool = false,
         nativeMTPProposalTokens: [Int] = [],
@@ -380,11 +391,13 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         self.cachedPromptTokens = max(0, cachedPromptTokens)
         self.retainedPagedKVSequence = retainedPagedKVSequence
         self.recurrentCheckpointPositions = recurrentCheckpointPositions
+        self.modelHasRecurrentLayers = modelHasRecurrentLayers
         self.retainedRecurrentCheckpoints = retainedRecurrentCheckpoints
         self.serialToolStopObserver = serialToolStopObserver
         self.decodePath = decodePath
         self.nativeMTPMaximumProposalDepth = max(0, nativeMTPMaximumProposalDepth)
         self.nativeMTPCompleteWindowBytesByDepth = nativeMTPCompleteWindowBytesByDepth
+        self.nativeMTPMaximumActiveRows = max(1, nativeMTPMaximumActiveRows)
         self.nativeMTPTupleFence = decodePath == .nativeMTP ? nativeMTPTupleFence : nil
         self.nativeMTPIntegrityProbe = decodePath == .nativeMTP && nativeMTPIntegrityProbe
         self.nativeMTPProposalTokens = nativeMTPProposalTokens
@@ -652,9 +665,15 @@ struct ContinuousBatchPrefillInput: Sendable, Equatable {
     let topP: Double
     let samplerStep: Int
     /// Native MTP drafters such as Qwen require target hidden states for the
-    /// complete prompt. This flag is set only for bounded full-prompt final
-    /// chunks; the backend must not replay a larger prompt to synthesize it.
+    /// complete prompt. Every prefill chunk of a native row sets this flag so
+    /// the backend advances the row's drafter over the chunk's own hidden
+    /// states; it never replays earlier chunks to synthesize them.
     let nativeMTPPromptPrefill: Bool
+    /// For a native non-final chunk `[c, c+n)`, the prompt token at `c+n`:
+    /// the drafter pairs hidden state `c+n-1` with the next token, which for
+    /// a non-final chunk is still a prompt token. `nil` on the final chunk,
+    /// whose last pair uses the sampled first token.
+    let nativeMTPNextPromptToken: Int?
 
     init(
         requestID: String,
@@ -669,7 +688,8 @@ struct ContinuousBatchPrefillInput: Sendable, Equatable {
         temperature: Double = 0,
         topP: Double = 1,
         samplerStep: Int = 0,
-        nativeMTPPromptPrefill: Bool = false
+        nativeMTPPromptPrefill: Bool = false,
+        nativeMTPNextPromptToken: Int? = nil
     ) {
         self.requestID = requestID
         self.promptTokens = promptTokens
@@ -684,6 +704,7 @@ struct ContinuousBatchPrefillInput: Sendable, Equatable {
         self.topP = topP
         self.samplerStep = samplerStep
         self.nativeMTPPromptPrefill = nativeMTPPromptPrefill
+        self.nativeMTPNextPromptToken = nativeMTPNextPromptToken
     }
 }
 
@@ -722,6 +743,11 @@ struct ContinuousBatchDecodeInput: Sendable, Equatable {
     /// parameters, and the row logits; hidden cross-row sampler state is
     /// forbidden.
     let samplerStep: Int
+    /// A native-MTP row riding the ordinary forward at load-gate depth zero.
+    /// The backend keeps each sampled token and the target hidden state that
+    /// produced it, and advances the row's drafter over them before the
+    /// row's next native proposal (SPEC-048-R006/R007).
+    var captureNativeMTPDrafterColumns: Bool = false
 }
 
 struct ContinuousBatchNativeMTPVerifyInput: Sendable, Equatable {
@@ -740,6 +766,10 @@ struct ContinuousBatchNativeMTPVerifyInput: Sendable, Equatable {
     let targetKVTokenCount: Int
     let packedRowIndex: Int
     let samplerStep: Int
+    /// Row sampling parameters. Verification position `i` selects the target
+    /// token exactly as ordinary decode would at step `samplerStep + i`.
+    var temperature: Double = 0
+    var topP: Double = 1
 }
 
 struct ContinuousBatchNativeMTPProposalInput: Sendable, Equatable {
@@ -1469,7 +1499,6 @@ extension ContinuousBatchSchedulerError {
         "continuous_batching_duplicate_prefill_row": 503,
         "continuous_batching_prefill_row_mismatch": 503,
         "continuous_batching_reservation_overflow": 503,
-        "continuous_batching_native_mtp_prompt_prefill_exceeds_limit": 400,
     ]
 
     private static func carriedCodeStatus(_ code: String) -> Int {
@@ -1512,7 +1541,8 @@ actor ContinuousBatchScheduler {
         var stopCause: ContinuousBatchSchedulerStopCause? = nil
         var prefillCursor: Int
         var snapshot: ContinuousBatchSchedulerSnapshot
-        /// Keyed hybrid rows: recurrent state at each reached checkpoint (<= 2).
+        /// Keyed hybrid rows: recurrent state at each reached prompt checkpoint
+        /// plus the terminal covered-token checkpoint.
         var recurrentCheckpoints: [RecurrentStateCheckpoint] = []
         var decodePath: DecodePath = .ordinary
         var nativeMTPAdaptation: NativeMTPDepthAdaptationState?
@@ -1523,6 +1553,10 @@ actor ContinuousBatchScheduler {
 
         var retainedLogicalTokenCount: Int {
             request.promptTokens.count + generatedTokens.count
+        }
+
+        var canonicalRetainedLogicalTokenCount: Int {
+            retainedLogicalTokenCount - (stopCause == .modelStop ? 1 : 0)
         }
 
         var usesNativeMTP: Bool {
@@ -1585,6 +1619,16 @@ actor ContinuousBatchScheduler {
     private var disabledNativeMTPTupleFences: Set<NativeMTPTupleFence> = []
     private var nativeMTPRowsWithStagedMutation: Set<String> = []
     private var nativeMTPIntegrityProbeInFlight = false
+    /// SPEC-048-R007 in-flight load gate. Engages as soon as active rows exceed
+    /// the smallest signed bound among native rows; releases only after
+    /// `nativeMTPLoadGateReleaseRounds` consecutive decode rounds at or below
+    /// it, so a row finishing and another arriving cannot flap the depth.
+    private var nativeMTPLoadGateEngaged = false
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    private var labNativeMTPLoadGateRecorder: NativeMTPLoadGateRecorder?
+    #endif
+    private var nativeMTPLoadGateCalmRounds = 0
+    static let nativeMTPLoadGateReleaseRounds = 8
     private var pendingTerminalDeliveries: [String: PendingTerminalDelivery] = [:]
     private var stoppingWaiterIDs: Set<UUID> = []
     private var stoppingActiveWaiters: [UUID: StoppingActiveWaiter] = [:]
@@ -1710,13 +1754,6 @@ actor ContinuousBatchScheduler {
               retainedTokenCost <= configuration.maxRequestTokens else {
             await discardUnacceptedRetainedCache(for: request)
             throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_invalid_request")
-        }
-        if request.decodePath == .nativeMTP,
-           request.promptTokens.count > configuration.maxPromptChunkTokens {
-            await discardUnacceptedRetainedCache(for: request)
-            throw ContinuousBatchSchedulerError.requestFailed(
-                "continuous_batching_native_mtp_prompt_prefill_exceeds_limit"
-            )
         }
         if let fence = request.nativeMTPTupleFence,
            disabledNativeMTPTupleFences.contains(fence) {
@@ -2514,6 +2551,9 @@ actor ContinuousBatchScheduler {
     private func nativeMTPMaximumProposalDepth(for row: Row) -> Int {
         let remainingOutputTokens = max(0, row.request.maxOutputTokens - row.generatedTokens.count)
         let remainingProposalCapacity = max(0, remainingOutputTokens - 1)
+        if nativeMTPLoadGateEngaged, !row.request.nativeMTPIntegrityProbe {
+            return 0
+        }
         let requestedDepth = row.nativeMTPDirective?.forcedDepth
             ?? row.nativeMTPAdaptation?.currentDepth
             ?? row.request.nativeMTPMaximumProposalDepth
@@ -3057,7 +3097,9 @@ actor ContinuousBatchScheduler {
                     verifiedInputTokenCount: reservation.inputTokenCount,
                     targetKVTokenCount: reservation.targetKVTokenCount,
                     packedRowIndex: packedRowIndex,
-                    samplerStep: row.generatedTokens.count
+                    samplerStep: row.generatedTokens.count,
+                    temperature: row.request.temperature,
+                    topP: row.request.topP
                 )
                 let rowMap = NativeMTPPackedRowMap(
                     schedulerRowID: row.request.id,
@@ -3271,25 +3313,13 @@ actor ContinuousBatchScheduler {
             }
             return
         }
-        let staleFinalizedRows = staleNativeMTPRows(prepared.map(\.row))
-        guard staleFinalizedRows.isEmpty else {
-            let abortError: (any Error)?
-            do {
-                try await abortNativeMTPRound(prepared)
-                abortError = nil
-            } catch {
-                abortError = error
-            }
-            await failStaleNativeMTPRows(
-                abortError == nil ? staleFinalizedRows : prepared.map(\.row),
-                cleanupError: abortError,
-                fallbackErrorCode: abortError == nil
-                    ? "continuous_batching_native_mtp_stale_row"
-                    : "continuous_batching_native_mtp_abort_failed"
-            )
-            return
-        }
-
+        // The backend finalize above is the commit point: it has already
+        // published target KV and drafter state for every committing row. A
+        // row that went stale (tuple disabled) during that await is handled
+        // per row below: its allocator transaction aborts and the row fails,
+        // which drops its backend state through `finish`. Aborting the whole
+        // round here would roll back healthy peers' scheduler and allocator
+        // state while their backend state stays advanced.
         let finalizedByID = Dictionary(uniqueKeysWithValues: finalizeRows.map { ($0.requestID, $0) })
         var healthyOutputIDs: Set<String> = []
         for item in prepared {
@@ -3458,6 +3488,9 @@ actor ContinuousBatchScheduler {
                 active.nativeMTPFixtureProposalsConsumed = true
                 activeDecode[item.row.request.id] = active
             }
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            labNativeMTPLoadGateRecorder?.recordNativeRound(requestID: item.row.request.id)
+            #endif
             for candidate in candidatesByID[item.row.request.id] ?? [] {
                 guard activeDecode[item.row.request.id] != nil else { break }
                 await applyToken(candidate.tokenID, to: item.row)
@@ -3538,19 +3571,66 @@ actor ContinuousBatchScheduler {
         }
     }
 
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    /// Lab-only: record the in-flight load gate's real decisions for R015
+    /// gated-cell evidence. Never installed outside lab builds.
+    func installLabNativeMTPLoadGateRecorder(_ recorder: NativeMTPLoadGateRecorder?) {
+        labNativeMTPLoadGateRecorder = recorder
+    }
+    #endif
+
+    private func updateNativeMTPLoadGate(nativeRows: [Row]) {
+        let bound = nativeRows.map(\.request.nativeMTPMaximumActiveRows).min() ?? Int.max
+        let activeRows = activeDecode.count + activePrompt.count
+        if activeRows > bound {
+            if !nativeMTPLoadGateEngaged {
+                configuration.nativeMTPStatusSink?.recordReason(.capacityAboveNativeBound)
+                try? FileHandle.standardError.write(contentsOf: Data(
+                    "event=native_mtp_load_gate action=depth_zero active_rows=\(activeRows) bound=\(bound)\n".utf8
+                ))
+            }
+            nativeMTPLoadGateEngaged = true
+            nativeMTPLoadGateCalmRounds = 0
+        } else if nativeMTPLoadGateEngaged {
+            nativeMTPLoadGateCalmRounds += 1
+            if nativeMTPLoadGateCalmRounds >= Self.nativeMTPLoadGateReleaseRounds || nativeRows.isEmpty {
+                nativeMTPLoadGateEngaged = false
+                nativeMTPLoadGateCalmRounds = 0
+                try? FileHandle.standardError.write(contentsOf: Data(
+                    "event=native_mtp_load_gate action=restore active_rows=\(activeRows) bound=\(bound)\n".utf8
+                ))
+            }
+        }
+    }
+
     private func runDecodeStep() async {
         await fenceDisabledActiveNativeMTPRows()
         guard !cleanupFailedClosed else { return }
         let rows = activeDecode.values.sorted {
             admissionPrecedes($0.request.id, $1.request.id)
         }
-        let nativeRows = rows.filter(\.usesNativeMTP)
+        let allNativeRows = rows.filter(\.usesNativeMTP)
+        updateNativeMTPLoadGate(nativeRows: allNativeRows)
+        // While the load gate holds native rows at depth zero, a native verify
+        // of one column is the ordinary decode step with extra transaction
+        // cost, so those rows ride the ordinary lockstep forward instead and
+        // the backend keeps their drafter columns for when depth returns.
+        // Integrity probes are exempt from the gate and keep verifying.
+        let fusedIDs: Set<String> = nativeMTPLoadGateEngaged
+            ? Set(allNativeRows.filter { !$0.request.nativeMTPIntegrityProbe }.map(\.request.id))
+            : []
+        let nativeRows = allNativeRows.filter { !fusedIDs.contains($0.request.id) }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if !fusedIDs.isEmpty {
+            labNativeMTPLoadGateRecorder?.recordHeldRound(requestIDs: fusedIDs)
+        }
+        #endif
         guard !nativeRows.isEmpty else {
             await runOrdinaryDecodeStep(rows: rows)
             return
         }
-        let ordinaryRows = rows.filter { !$0.usesNativeMTP }
-        if rows.first?.usesNativeMTP == true {
+        let ordinaryRows = rows.filter { !$0.usesNativeMTP || fusedIDs.contains($0.request.id) }
+        if rows.first.map({ $0.usesNativeMTP && !fusedIDs.contains($0.request.id) }) == true {
             await runNativeMTPDecodeStep(rows: nativeRows)
             guard !cleanupFailedClosed else { return }
             let remainingOrdinary = ordinaryRows.compactMap { activeDecode[$0.request.id] }
@@ -3621,7 +3701,8 @@ actor ContinuousBatchScheduler {
                     blockTable: binding.currentTable,
                     committedKVTokenCount: committedKVTokenCount,
                     targetKVTokenCount: targetKVTokenCount,
-                    samplerStep: row.generatedTokens.count
+                    samplerStep: row.generatedTokens.count,
+                    captureNativeMTPDrafterColumns: row.usesNativeMTP
                 )))
             } catch {
                 if beganDecode {
@@ -3871,7 +3952,7 @@ actor ContinuousBatchScheduler {
     private func finishTerminal(_ row: Row, status: ContinuousBatchSchedulerTerminalStatus) async {
         if let retainedCache = await retainTerminalCache(
             for: row,
-            targetLogicalTokens: row.retainedLogicalTokenCount
+            targetLogicalTokens: row.canonicalRetainedLogicalTokenCount
         ) {
             if cancelledIDs.remove(row.request.id) != nil {
                 await discardRetainedCache(
@@ -3882,6 +3963,19 @@ actor ContinuousBatchScheduler {
                 return
             }
             finish(row, status: status, errorCode: nil, retainedCache: retainedCache)
+            return
+        }
+        if contiguousCacheBridge != nil, row.request.modelHasRecurrentLayers {
+            let released = await release(row.handle)
+            if cancelledIDs.remove(row.request.id) != nil {
+                finish(row, status: released ? .cancelled : .requestFailed, errorCode: released
+                    ? "request_cancelled"
+                    : "continuous_batching_cleanup_failed")
+                return
+            }
+            finish(row, status: released ? status : .requestFailed, errorCode: released
+                ? nil
+                : "continuous_batching_cleanup_failed")
             return
         }
         let serialCache = await materializeSerialConversationCache(for: row)
@@ -4201,9 +4295,10 @@ actor ContinuousBatchScheduler {
                         temperature: row.request.temperature,
                         topP: row.request.topP,
                         samplerStep: row.generatedTokens.count,
-                        nativeMTPPromptPrefill: row.usesNativeMTP
-                            && row.prefillCursor == 0
-                            && end == promptTokenCount
+                        nativeMTPPromptPrefill: row.usesNativeMTP,
+                        nativeMTPNextPromptToken: row.usesNativeMTP && end < promptTokenCount
+                            ? row.request.promptTokens[end]
+                            : nil
                     ),
                     chunk.count
                 ))
@@ -4324,15 +4419,20 @@ actor ContinuousBatchScheduler {
 
     private func prefillEnd(for row: Row, maxChunkTokens: Int) -> Int {
         let promptTokenCount = row.request.promptTokens.count
-        var end = min(promptTokenCount, row.prefillCursor + max(1, maxChunkTokens))
+        var spanEnd = promptTokenCount
         // Hybrid recurrent state may only be snapshotted on its declared
         // boundary, so compatible groups split before crossing one.
         if let checkpoint = pendingRecurrentCheckpointPositions(for: row).first(where: {
             $0 > row.prefillCursor
         }) {
-            end = min(end, checkpoint)
+            spanEnd = min(spanEnd, checkpoint)
         }
-        return end
+        let remaining = spanEnd - row.prefillCursor
+        guard remaining > 0 else { return row.prefillCursor }
+        let chunkLimit = max(1, maxChunkTokens)
+        let chunksRemaining = (remaining + chunkLimit - 1) / chunkLimit
+        let balancedChunkSize = (remaining + chunksRemaining - 1) / chunksRemaining
+        return min(spanEnd, row.prefillCursor + balancedChunkSize)
     }
 
     private func transitionPrefilledRow(_ row: Row, sampledToken: Int? = nil) async {
@@ -4505,6 +4605,9 @@ actor ContinuousBatchScheduler {
     }
 
     private func complete(requestID: String, result: ContinuousBatchSchedulerResult) {
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        labNativeMTPLoadGateRecorder?.recordTerminal(requestID: requestID, status: result.terminalStatus)
+        #endif
         CBTrace.log(requestID, "sch_complete status=\(result.terminalStatus) waiters=\(requestWaiters[requestID]?.count ?? 0) stopping=\(stoppingActiveWaiters.values.contains(where: { $0.requestID == requestID }))")
         endQueueWait(requestID: requestID)
         guard terminalResults[requestID] == nil, pendingTerminalDeliveries[requestID] == nil else { return }
@@ -4738,6 +4841,12 @@ actor ContinuousBatchScheduler {
             } else if targetLogicalTokens < binding.currentTable.logicalTokenCount {
                 _ = try await allocator.trim(row.handle, toLogicalTokens: targetLogicalTokens)
             }
+            guard let recurrentCheckpoints = await terminalRecurrentCheckpoints(
+                for: row,
+                tokenCount: targetLogicalTokens
+            ) else {
+                return nil
+            }
             let retained = try await allocator.retain(row.handle)
             retainedSequence = retained
             let retainedBinding = try await allocator.binding(for: retained.handle)
@@ -4748,7 +4857,7 @@ actor ContinuousBatchScheduler {
             return ContinuousBatchRetainedCache(
                 retainedSequence: retained,
                 layers: handoff.caches,
-                recurrentCheckpoints: row.recurrentCheckpoints
+                recurrentCheckpoints: recurrentCheckpoints
             )
         } catch {
             if let retainedSequence {
@@ -4764,7 +4873,8 @@ actor ContinuousBatchScheduler {
     }
 
     /// Checkpoint positions this row still captures: keyed rows only, inside the
-    /// prefilled prompt, at most two.
+    /// prefilled prompt, at most two. The reply-end checkpoint is captured at
+    /// terminal separately.
     private func pendingRecurrentCheckpointPositions(for row: Row) -> [Int] {
         guard row.recurrentCheckpoints.count < 2,
               !row.request.conversationKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -4782,7 +4892,7 @@ actor ContinuousBatchScheduler {
     /// last (never fed back), which is a prefix of the canonical token list the
     /// runtime commits. Best effort: any failure commits nothing.
     private func materializeSerialConversationCache(for row: Row) async -> ContinuousBatchSerialConversationCache? {
-        guard !row.recurrentCheckpoints.isEmpty,
+        guard row.request.modelHasRecurrentLayers,
               !row.request.conversationKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { return nil }
         // A zero-output request commits the whole prompt during prefill. Once
@@ -4794,15 +4904,42 @@ actor ContinuousBatchScheduler {
         do {
             let binding = try await allocator.binding(for: row.handle)
             guard tokenCount <= binding.currentTable.logicalTokenCount else { return nil }
+            guard let recurrentCheckpoints = await terminalRecurrentCheckpoints(for: row, tokenCount: tokenCount) else {
+                return nil
+            }
+            guard !recurrentCheckpoints.isEmpty else { return nil }
             return try await backend.materializeSerialConversationCache(
                 requestID: row.request.id,
                 binding: binding,
                 tokenCount: tokenCount,
-                recurrentCheckpoints: row.recurrentCheckpoints
+                recurrentCheckpoints: recurrentCheckpoints
             )
         } catch {
             return nil
         }
+    }
+
+    private func terminalRecurrentCheckpoints(
+        for row: Row,
+        tokenCount: Int
+    ) async -> [RecurrentStateCheckpoint]? {
+        var checkpoints = row.recurrentCheckpoints
+        guard row.request.modelHasRecurrentLayers,
+              (!checkpoints.isEmpty || tokenCount >= ConversationCache.lcpThreshold)
+        else {
+            return checkpoints
+        }
+        if checkpoints.contains(where: { $0.tokenCount == tokenCount }) {
+            return checkpoints
+        }
+        guard let checkpoint = await backend.snapshotRecurrentState(
+            requestID: row.request.id,
+            tokenCount: tokenCount
+        ) else {
+            return nil
+        }
+        checkpoints.append(checkpoint)
+        return checkpoints.sorted { $0.tokenCount < $1.tokenCount }
     }
 
     func discardRetainedCache(_ retained: PagedKVRetainedSequence, conversationKey: String) async {
@@ -4978,3 +5115,90 @@ actor ContinuousBatchScheduler {
         admissionTurnWaiters.removeValue(forKey: currentAdmissionSequence)?.resume()
     }
 }
+
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+/// Lab-only SPEC-048-R015 gated-cell evidence, taken from the scheduler's own
+/// R007 in-flight gate decisions: rounds in which an admitted native row was
+/// held at depth zero (riding the ordinary forward), and how each hold ended —
+/// a later committed native round (depth restored, drafter caught up) or a
+/// clean terminal while still held.
+final class NativeMTPLoadGateRecorder: @unchecked Sendable {
+    struct Summary: Sendable, Equatable {
+        /// (round, row) pairs held at depth zero.
+        var depthZeroRounds = 0
+        /// Transitions of a row from native to held.
+        var holdEpisodes = 0
+        /// Holds ended by a committed native round.
+        var depthRestorations = 0
+        /// Holds ended by a stop/length terminal while still held.
+        var heldFinishesClean = 0
+        /// Holds that ended any other way, or have not ended.
+        var heldUnresolved = 0
+    }
+
+    private struct RowState {
+        var depthZeroRounds = 0
+        var holdEpisodes = 0
+        var depthRestorations = 0
+        var held = false
+        var terminal: ContinuousBatchSchedulerTerminalStatus?
+        var heldAtTerminal = false
+    }
+
+    private let lock = NSLock()
+    private var rows: [String: RowState] = [:]
+
+    func recordHeldRound(requestIDs: Set<String>) {
+        lock.lock()
+        defer { lock.unlock() }
+        for requestID in requestIDs {
+            var row = rows[requestID] ?? RowState()
+            if !row.held {
+                row.held = true
+                row.holdEpisodes += 1
+            }
+            row.depthZeroRounds += 1
+            rows[requestID] = row
+        }
+    }
+
+    func recordNativeRound(requestID: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        var row = rows[requestID] ?? RowState()
+        if row.held {
+            row.held = false
+            row.depthRestorations += 1
+        }
+        rows[requestID] = row
+    }
+
+    func recordTerminal(requestID: String, status: ContinuousBatchSchedulerTerminalStatus) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard var row = rows[requestID], row.terminal == nil else { return }
+        row.terminal = status
+        row.heldAtTerminal = row.held
+        rows[requestID] = row
+    }
+
+    func summary(requestIDs: Set<String>) -> Summary {
+        lock.lock()
+        defer { lock.unlock() }
+        var summary = Summary()
+        for requestID in requestIDs {
+            guard let row = rows[requestID] else { continue }
+            summary.depthZeroRounds += row.depthZeroRounds
+            summary.holdEpisodes += row.holdEpisodes
+            summary.depthRestorations += row.depthRestorations
+            guard row.held else { continue }
+            if row.heldAtTerminal, row.terminal == .stop || row.terminal == .length {
+                summary.heldFinishesClean += 1
+            } else {
+                summary.heldUnresolved += 1
+            }
+        }
+        return summary
+    }
+}
+#endif
