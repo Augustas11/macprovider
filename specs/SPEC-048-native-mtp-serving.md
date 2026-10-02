@@ -648,14 +648,18 @@ mixed-load fixture, ordinary-row p95 ready-to-decode wait MUST NOT regress by
 more than 10% against the same SPEC-038 workload with MTP disabled.
 
 Every production tuple MUST advertise at least two slots and no more than the
-SPEC-038 validated Entry-110 depth for that exact tuple. At the advertised
-maximum, the acceptance fixture MUST place native MTP on at least half of the
-rows, use proposal depth at least one, force rejection at every proposal
+SPEC-038 validated Entry-110 depth for that exact tuple. At the largest load
+the tuple runs native (its `max_native_active_rows`, at least one native row
+beside ordinary rows), the acceptance fixture MUST place native MTP on every
+row the bound admits, use proposal depth at least one, force rejection at every proposal
 position under load, produce unequal accepted lengths, stagger row entry and
 exit, and prove through backend trace evidence that eligible rows shared a
 packed target verification forward rather than concurrent serial iterators.
-The result MUST match the ordinary batched oracle with no row bleed, deadlock,
-leak, starvation, or counter corruption. An eight-slot experimental cell is
+At the advertised maximum (`qualified_slots`), the fixture instead exercises
+the load gate exactly as an MTP-15 gated cell does: native admissions up to
+the bound, `capacity_above_native_bound` downgrades above it, and held rows
+at depth zero. The result MUST match the ordinary batched oracle with no row
+bleed, deadlock, leak, starvation, or counter corruption. An eight-slot experimental cell is
 reported on the 256 GB Studio but cannot be advertised unless SPEC-038 has
 independently validated depth eight for that tuple.
 
@@ -982,7 +986,15 @@ advertised `qualified_slots` (2...8), its `max_native_active_rows`
   and later arrivals are downgraded), so their cost does not depend on the
   native speedup strata; non-inferiority at the first gated count and at full
   load bounds the intermediate counts, which repeat the same ordinary-path work
-  at a load between the two.
+  at a load between the two. The inference rests on the gated cost model:
+  above the bound, the only work native MTP adds to a round is the drafter
+  catch-up and admission bookkeeping of at most `bound` held rows, which does
+  not grow with the ordinary rows, while the ordinary round time does not
+  shrink as rows are added; the relative regression is therefore largest at
+  bound + 1, and `qualified_slots` adds the full-load scheduling and memory
+  point. A runtime change that adds per-row native work above the bound (for
+  example drafting for downgraded rows) invalidates the model and requires
+  every gated slot count to be measured.
 - *Sustained window* of at least 1800 s on the cell at `qualified_slots`,
   prompt 1536, output 512 (`s<qualified_slots>-p1536-o512`, staggered):
   production-shaped full load. It is a separate bench phase on the same frozen
@@ -1250,7 +1262,10 @@ requests.
   prompt, the cap stratum realized at or below the cap: the first frozen A3B
   run (policy `525ac686…`) realized its 4096 stratum from raw text, the
   template pushed it past the cap, and its native rows silently ran ordinary;
-  the runtime now records that token-bound reselection. MTP-4/MTP-13 bind the
+  the runtime now records that token-bound reselection. The gated
+  representatives rest on a stated gated cost model, and the MTP-7 acceptance
+  fixture places native rows up to the bound and exercises the load gate at
+  the advertised maximum. MTP-4/MTP-13 bind the
   prompt bound to the new
   SPEC-023-R024 `max_prompt_tokens` (SPEC-023 v0.22.6), and MTP-7 states the
   bound is preregistered and justified by the native-eligible cells.

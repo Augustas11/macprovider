@@ -107,6 +107,20 @@ class NativeMTPAdmissionSidecarTests(unittest.TestCase):
         with self.assertRaises(SidecarError):
             build(self.tuple, bad_cdhash)
 
+    def test_identity_strings_are_ascii_and_duplicate_keys_fail(self):
+        bad = copy.deepcopy(self.tuple)
+        bad["entry"]["mtp_family_adapter"] = "qwen3_5_mtp_v1\u00e9"
+        with self.assertRaisesRegex(SidecarError, "printable ASCII"):
+            build(bad, release_input())
+        bad_class = copy.deepcopy(self.tuple)
+        bad_class["entry"]["hardware_class"] = "apple_m3.ultra"
+        with self.assertRaises(SidecarError):
+            build(bad_class, release_input())
+        data = build(self.tuple, release_input())
+        duplicated = data.replace(b'"schema_version":', b'"schema_version":"x","schema_version":', 1)
+        with self.assertRaisesRegex(SidecarError, "duplicate JSON key"):
+            identity(duplicated)
+
     def test_tuple_schema_is_pinned(self):
         bad = copy.deepcopy(self.tuple)
         bad["schema_version"] = "other"

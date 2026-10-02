@@ -143,6 +143,14 @@ private final class NativeMTPBenchRunner {
             tokenizerSHA256: tokenizerSHA,
             environment: environment
         )
+        // The sustained phase reuses the sustained cell's matrix records in
+        // this --out; it never starts without all of them.
+        if phase == .sustained,
+           (existing.completedMatrixBlocks[policy.sustainedCellID] ?? []) != Set(0..<policy.blocks) {
+            throw NativeMTPBenchError.assertionFailed(
+                "--phase sustained needs every matrix block of \(policy.sustainedCellID) in --out first"
+            )
+        }
         if existing.hasRecords, onlyCell == nil, phase != .sustained {
             throw NativeMTPBenchError.assertionFailed(
                 "refusing to append a full matrix to non-empty --out; use --only-cell to resume"
@@ -1240,8 +1248,8 @@ struct NativeMTPBenchPolicy {
         guard let cap = maximumPromptTokens else {
             throw NativeMTPBenchError.invalidPolicy("maximum_prompt_tokens is required")
         }
-        guard cap >= Self.gatedPromptTokens else {
-            throw NativeMTPBenchError.invalidPolicy("maximum_prompt_tokens must be >= \(Self.gatedPromptTokens)")
+        guard (Self.gatedPromptTokens...1_048_576).contains(cap) else {
+            throw NativeMTPBenchError.invalidPolicy("maximum_prompt_tokens must be within \(Self.gatedPromptTokens)...1048576 (SPEC-023-R024)")
         }
         // A gated cell must exercise the in-flight hold: the first request
         // admits native before later arrivals cross the bound.

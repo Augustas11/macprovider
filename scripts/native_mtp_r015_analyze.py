@@ -48,6 +48,8 @@ MANDATORY_MAX_TOKENS = (128, 512)
 GATED_PROMPT_TOKENS = 1536
 GATED_MAX_TOKENS = 512
 MINIMUM_SUSTAINED_SECONDS = 1800
+# SPEC-023-R024 max_prompt_tokens upper bound.
+MAXIMUM_PROMPT_TOKENS = 1_048_576
 
 
 def _is_int(value) -> bool:
@@ -91,8 +93,8 @@ def _matrix_violations(policy: dict) -> list[str]:
     if not _is_int(bound) or not 1 <= bound <= qualified:
         return violations + ["max_native_active_rows_missing_or_out_of_range"]
     cap = policy.get("maximum_prompt_tokens")
-    if not _is_int(cap) or cap < GATED_PROMPT_TOKENS:
-        return violations + ["maximum_prompt_tokens_missing_or_below_gated_prompt"]
+    if not _is_int(cap) or not GATED_PROMPT_TOKENS <= cap <= MAXIMUM_PROMPT_TOKENS:
+        return violations + ["maximum_prompt_tokens_missing_or_out_of_range"]
     slots = policy.get("slots")
     prompts = policy.get("prompt_tokens")
     outputs = policy.get("max_tokens")

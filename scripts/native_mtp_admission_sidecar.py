@@ -44,7 +44,9 @@ HASH_ALGORITHM = "macprovider.snapshot-manifest.v1"
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 CDHASH = re.compile(r"^[0-9a-f]{40}$")
 COMMIT = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
-HARDWARE_CLASS = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+# The Swift consumer accepts the stricter `[a-z0-9-]` subset of the SPEC-023
+# grammar; emit only what it accepts.
+HARDWARE_CLASS = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 EXCEPTION = re.compile(r"^(?:target|mtp)/[\x21-\x2e\x30-\x7e]+$")
 RFC3339 = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
@@ -109,6 +111,18 @@ def fail(path: str, message: str) -> None:
     raise SidecarError(f"{path}: {message}")
 
 
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
+    keys = [key for key, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise SidecarError(f"duplicate JSON key in {sorted(k for k in set(keys) if keys.count(k) > 1)}")
+    return dict(pairs)
+
+
+def strict_json_loads(text: str) -> object:
+    """json.loads that rejects duplicate object keys, as the Swift parser does."""
+    return json.loads(text, object_pairs_hook=_reject_duplicate_keys)
+
+
 def canonical_bytes(value: object) -> bytes:
     """Sorted-key compact UTF-8 JSON. For the ASCII strings, integers, nulls,
     and arrays this schema admits it is also the RFC 8785 JCS form."""
@@ -124,8 +138,11 @@ def _int(value: object, path: str, lo: int, hi: int) -> int:
 def _str(value: object, path: str, pattern: re.Pattern | None = None, max_bytes: int = 128) -> str:
     if not isinstance(value, str) or not value or len(value.encode("utf-8")) > max_bytes:
         fail(path, f"must be a 1..{max_bytes} byte string")
-    if any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in value):
-        fail(path, "must not contain control characters")
+    # Printable ASCII only: the Swift consumer canonicalizes strings (Unicode
+    # normalization) before hashing the tuple identity, so a non-ASCII value
+    # could hash differently there than here.
+    if any(not 0x20 <= ord(ch) <= 0x7E for ch in value):
+        fail(path, "must be printable ASCII")
     if pattern is not None and not pattern.match(value):
         fail(path, f"does not match {pattern.pattern}")
     return value
@@ -318,7 +335,7 @@ def build(tuple_input: dict, release_input: dict) -> bytes:
 
 
 def identity(sidecar_bytes: bytes) -> dict:
-    body = validate_sidecar(json.loads(sidecar_bytes.decode("utf-8")))
+    body = validate_sidecar(strict_json_loads(sidecar_bytes.decode("utf-8")))
     sidecar_sha = hashlib.sha256(sidecar_bytes).hexdigest()
     return {
         "sidecar_sha256": sidecar_sha,
@@ -340,7 +357,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "build":
-            data = build(json.loads(args.tuple.read_text("utf-8")), json.loads(args.release.read_text("utf-8")))
+            data = build(strict_json_loads(args.tuple.read_text("utf-8")), strict_json_loads(args.release.read_text("utf-8")))
             args.out.write_bytes(data)
             print(json.dumps(identity(data), indent=2, sort_keys=True))
         else:

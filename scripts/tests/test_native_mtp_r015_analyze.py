@@ -324,7 +324,9 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         cap_8192 = self._run_case(policy_overrides={"maximum_prompt_tokens": 8192})
         self.assertIn("prompt_tokens_not_exactly:1536,4096,8192", cap_8192["matrix_violations"])
         no_cap = self._run_case(policy_overrides={"maximum_prompt_tokens": self._DELETE})
-        self.assertIn("maximum_prompt_tokens_missing_or_below_gated_prompt", no_cap["matrix_violations"])
+        self.assertIn("maximum_prompt_tokens_missing_or_out_of_range", no_cap["matrix_violations"])
+        huge_cap = self._run_case(policy_overrides={"maximum_prompt_tokens": 1_048_577})
+        self.assertIn("maximum_prompt_tokens_missing_or_out_of_range", huge_cap["matrix_violations"])
 
     def test_mandatory_strata_helpers(self):
         self.assertEqual(mandatory_prompt_tokens(4096), [1536, 4096])

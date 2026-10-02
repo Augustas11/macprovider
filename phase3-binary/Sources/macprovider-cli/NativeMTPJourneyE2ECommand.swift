@@ -42,7 +42,7 @@ struct NativeMTPJourneyE2ECommand: AsyncParsableCommand {
         try NativeMTPHardwareE2ERunner.requireStudioHost()
         guard (2...8).contains(qualifiedSlots),
               (1...qualifiedSlots).contains(maxNativeActiveRows),
-              maxPromptTokens >= 512 else {
+              (512...1_048_576).contains(maxPromptTokens) else {
             throw ValidationError("invalid tuple shape")
         }
         let journey = NativeMTPJourneyRunner(
@@ -169,7 +169,28 @@ private final class NativeMTPJourneyRunner {
         let passed = steps.allSatisfy(\.passed)
         let document: [String: Any] = [
             "schema": "macprovider.native-mtp-journey-hardware-result.v1",
-            "status": passed ? "pass" : "fail",
+            // Covers only the hardware steps below; never a journey verdict.
+            "journey_complete": false,
+            "executed_steps_status": passed ? "pass" : "fail",
+            "covered_steps": [
+                "step-04-serial-token-oracle",
+                "step-05-cache-state-boundary",
+                "step-06-streaming-stop",
+                "step-07-mixed-multirow",
+                "step-08-capacity-and-depth-zero",
+                "step-09-cancellation",
+                "step-12-native-canary (provider-local self-test half)",
+            ],
+            "pending_steps": [
+                "step-01-bind-tuple",
+                "step-02-capability-negatives",
+                "step-03-artifact-security-negatives",
+                "step-10-warm-swap",
+                "step-11-accounting",
+                "step-12-native-canary (coordinator SPEC-031-R033 half)",
+                "step-14-studio-and-tier-benchmark",
+                "step-15-redaction-review",
+            ],
             "evidence_class": "lab_isolated_no_join",
             "model_id": modelID,
             "target_sha256": fixture.targetIdentity.digest,
@@ -204,6 +225,8 @@ private final class NativeMTPJourneyRunner {
             ("journey-serial-sampled-1", "Give three tips for learning a new language.", 1.0, 1.0),
         ]
         var compared = 0
+        var accepted: UInt64 = 0
+        var rejected: UInt64 = 0
         for (id, prompt, temperature, topP) in cases {
             let request = try makeRequest(id: id, prompt: prompt, maxTokens: 192, temperature: temperature, topP: topP)
             let expected = try await ordinary.complete(request)
@@ -213,9 +236,35 @@ private final class NativeMTPJourneyRunner {
             step.check("\(id).parity", same(expected, actual))
             step.check("\(id).native_admitted", lastPath(recorder, id) == .nativeMTP)
             step.check("\(id).proposed", delta.proposedTokens > 0)
+            accepted += delta.acceptedTokens
+            rejected += delta.rejectedTokens
             compared += 1
         }
+        // Token-ID oracle: decoded text and counts can hide a different token
+        // sequence, so compare generated token IDs on the probe path for the
+        // same templated greedy prompts (depth fixed at the tuple maximum).
+        for (index, (_, prompt, temperature, _)) in cases.enumerated() where temperature == 0 {
+            let promptTokenIDs = try await servedPromptTokens(prompt, runtime: ordinary)
+            let oracle = try await ordinary.labTokenProbe(
+                id: "journey-serial-tokens-ordinary-\(index)",
+                promptTokenIDs: promptTokenIDs,
+                maxCompletionTokens: 64,
+                nativeDepth: nil
+            )
+            let probe = try await native.labTokenProbe(
+                id: "journey-serial-tokens-native-\(index)",
+                promptTokenIDs: promptTokenIDs,
+                maxCompletionTokens: 64,
+                nativeDepth: 1
+            )
+            step.check("greedy-\(index).token_ids_equal", !oracle.generatedTokens.isEmpty && oracle.generatedTokens == probe.generatedTokens)
+        }
+        // At depth one each round is all-accepted or none-accepted; both must
+        // occur (partial acceptance needs depth >= 2, which this tuple lacks).
+        step.check("acceptance_all_and_none_observed", accepted > 0 && rejected > 0)
         step.details["requests"] = compared
+        step.details["accepted"] = accepted
+        step.details["rejected"] = rejected
         return step
     }
 
@@ -263,23 +312,34 @@ private final class NativeMTPJourneyRunner {
         let cases: [(String, String, [String]?, Int, Double)] = [
             ("journey-stream-stop", "Count from one to thirty in English words, separated by commas.", [" twelve"], 256, 0),
             ("journey-stream-length", "Write a long essay about the history of printing.", nil, 160, 0),
+            ("journey-stream-eos", "Reply with exactly the single word OK and nothing else.", nil, 64, 0),
             ("journey-stream-sampled", "Invent a recipe for a winter soup.", nil, 160, 0.7),
         ]
         var terminals: [String: String] = [:]
         for (id, prompt, stop, maxTokens, temperature) in cases {
-            let plain = try makeRequest(id: id, prompt: prompt, maxTokens: maxTokens, temperature: temperature, topP: 1, stop: stop)
-            let streamed = try makeRequest(id: id, prompt: prompt, maxTokens: maxTokens, temperature: temperature, topP: 1, stop: stop, stream: true)
+            // Distinct scheduler ids per mode: a reused id would replay the
+            // retained terminal result instead of generating again. Each
+            // mode compares with ordinary under the same id (same seed).
+            let plainID = id + "-ns"
+            let streamID = id + "-s"
+            let plain = try makeRequest(id: plainID, prompt: prompt, maxTokens: maxTokens, temperature: temperature, topP: 1, stop: stop)
+            let streamed = try makeRequest(id: streamID, prompt: prompt, maxTokens: maxTokens, temperature: temperature, topP: 1, stop: stop, stream: true)
             let expected = try await ordinary.complete(plain)
             let nonStreaming = try await native.complete(plain)
+            let (expectedStream, expectedText) = try await streamCollect(streamed, runtime: ordinary)
             let (streamingResult, text) = try await streamCollect(streamed, runtime: native)
             step.check("\(id).non_streaming_parity", same(expected, nonStreaming))
-            step.check("\(id).streaming_parity", same(expected, streamingResult))
-            step.check("\(id).streamed_text_equals_content", text == expected.content)
-            step.check("\(id).native_admitted", lastPath(recorder, id) == .nativeMTP)
+            step.check("\(id).streaming_parity", same(expectedStream, streamingResult))
+            step.check("\(id).streamed_text_equals_content", text == streamingResult.content && expectedText == expectedStream.content)
+            if temperature == 0 {
+                step.check("\(id).streaming_equals_non_streaming", same(expected, streamingResult))
+            }
+            step.check("\(id).native_admitted", lastPath(recorder, plainID) == .nativeMTP && lastPath(recorder, streamID) == .nativeMTP)
             terminals[id] = expected.finishReason
         }
         step.check("stop_terminal_observed", terminals["journey-stream-stop"] == "stop")
         step.check("length_terminal_observed", terminals["journey-stream-length"] == "length")
+        step.check("eos_terminal_observed", terminals["journey-stream-eos"] == "stop")
         step.details["terminals"] = terminals
         return step
     }
@@ -304,7 +364,7 @@ private final class NativeMTPJourneyRunner {
             requests.append(try makeRequest(
                 id: id,
                 prompt: "Row \(row): summarize the causes and effects of the industrial revolution in \(3 + row) points.",
-                maxTokens: 64 + 48 * row,
+                maxTokens: 256 + 32 * row,
                 // Greedy: a sampled row's draws depend on batch composition
                 // timing even on the ordinary path, so only greedy rows give
                 // a cross-runtime oracle (sampled parity is step-04/06).
@@ -361,7 +421,8 @@ private final class NativeMTPJourneyRunner {
         step.check("holds_resolved", summary.heldUnresolved == 0
             && summary.holdEpisodes == summary.depthRestorations + summary.heldFinishesClean)
         let snapshot = await native.currentSnapshot()
-        step.check("batch_depth_reached_qualified_slots", (snapshot.continuousBatching?.scheduler?.maxObservedBatchDepth ?? 0) >= 2)
+        step.check("batch_depth_reached_qualified_slots", (snapshot.continuousBatching?.scheduler?.maxObservedBatchDepth ?? 0) >= qualifiedSlots)
+        step.details["max_observed_batch_depth"] = snapshot.continuousBatching?.scheduler?.maxObservedBatchDepth ?? 0
         step.check("slots_unchanged", snapshot.continuousBatching?.scheduler?.slotsTotal == qualifiedSlots)
 
         // Signed prompt cap: a prompt above max_prompt_tokens selects ordinary.
@@ -402,17 +463,22 @@ private final class NativeMTPJourneyRunner {
         let chunks = NativeMTPJourneyCounter()
         let handle = try await native.acquireRequestHandle(request)
         var cancelledCleanly = false
+        var completedNormally = false
         do {
             _ = try await native.stream(request, with: handle, shouldCancel: { chunks.value >= 16 }) { chunk in
                 if case .content(let text) = chunk, !text.isEmpty { chunks.increment() }
             }
-        } catch {
+            completedNormally = true
+        } catch is CancellationError {
             cancelledCleanly = true
+        } catch {
+            step.details["cancel_error"] = String(describing: error)
         }
         await native.unregisterInFlight(handle.registrationID)
         step.details["chunks_before_cancel"] = chunks.value
         step.check("native_admitted", lastPath(recorder, "journey-cancel-0") == .nativeMTP)
-        step.check("stopped_early", chunks.value < 400 || cancelledCleanly)
+        step.check("cancellation_threshold_reached", chunks.value >= 16)
+        step.check("cancelled_not_completed", cancelledCleanly && !completedNormally)
         var idle = false
         for _ in 0..<50 {
             let scheduler = await native.currentSnapshot().continuousBatching?.scheduler
@@ -448,14 +514,16 @@ private final class NativeMTPJourneyRunner {
             maxCompletionTokens: maxCompletionTokens,
             nativeDepth: nil
         )
+        // Distinct execution ids: a reused id would replay the retained
+        // terminal result and make determinism trivially true.
         let first = try await native.labTokenProbe(
-            id: "native-mtp-selftest-journey-0001",
+            id: "native-mtp-selftest-journey-0001-run-a",
             promptTokenIDs: promptTokenIDs,
             maxCompletionTokens: maxCompletionTokens,
             nativeDepth: depth
         )
         let second = try await native.labTokenProbe(
-            id: "native-mtp-selftest-journey-0001",
+            id: "native-mtp-selftest-journey-0001-run-b",
             promptTokenIDs: promptTokenIDs,
             maxCompletionTokens: maxCompletionTokens,
             nativeDepth: depth
@@ -577,6 +645,24 @@ private final class NativeMTPJourneyRunner {
         } catch {
             await runtime.unregisterInFlight(handle.registrationID)
             throw error
+        }
+    }
+
+    private func servedPromptTokens(_ prompt: String, runtime: ModelRuntime) async throws -> [Int] {
+        let snapshot = await runtime.currentSnapshot()
+        guard let container = snapshot.container else {
+            throw NativeMTPHardwareE2EError.assertionFailed("runtime has no loaded container")
+        }
+        let request = try makeRequest(id: "journey-prompt-tokens", prompt: prompt, maxTokens: 1, temperature: 0, topP: 1)
+        let thinkingToggle = snapshot.templateSupportsThinkingToggle
+        let preserveThinking = snapshot.templateSupportsPreserveThinking
+        return try await container.perform { context in
+            let input = try ModelRuntime.userInput(
+                for: request,
+                templateSupportsThinkingToggle: thinkingToggle,
+                templateSupportsPreserveThinking: preserveThinking
+            )
+            return try await context.processor.prepare(input: input).text.tokens.asArray(Int.self)
         }
     }
 

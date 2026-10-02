@@ -103,5 +103,14 @@ taken about 2.5 days.
   journey hardware harness, not by an R015 throughput cell.
 
 Files: `policy.json`, `analysis.json`, `analysis.md`,
-`admission-tuple-input.json`, `superseded-policy-525ac686/`. Raw JSONL and
-logs stay on the lab host.
+`admission-tuple-input.json`, `admission-tuple-provenance.md`,
+`superseded-policy-525ac686/`.
+
+Raw JSONL and logs stay on the lab host by operator decision. Their digests
+are bound here so the committed analysis can be checked against them:
+
+| Lab-host file | Lines | SHA-256 |
+| --- | ---: | --- |
+| `mtp-r015-a3b-formal-v2/r015-a3b-formal.jsonl` (analyzer input for `analysis.json`) | 211 | `88c79a5757caf08d9efcee12756559d4f6dbd36341c6f43831301adb5b04e04d` |
+| `mtp-r015-a3b-formal-v2/contaminated/S01-sustained-records.jsonl` (voided S01) | 48 | `62809643c1d78093bc6d7b4997833a522aab03a59c1a3c9550edc412dff6d184` |
+| `mtp-r015-a3b-formal/r015-a3b-formal.jsonl` (superseded 525ac686 run) | 133 | `33a01f5a93a79401a267f31af28a3124ad1590bd8ab049859d00b2573e2db829` |

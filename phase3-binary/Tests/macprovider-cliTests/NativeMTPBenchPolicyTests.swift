@@ -67,6 +67,12 @@ final class NativeMTPBenchPolicyTests: XCTestCase {
         XCTAssertThrowsError(try load(noCap)) { error in
             XCTAssertTrue("\(error)".contains("maximum_prompt_tokens is required"), "\(error)")
         }
+        var hugeCap = try template()
+        hugeCap["maximum_prompt_tokens"] = 1_048_577
+        hugeCap["prompt_tokens"] = [1536, 4096, 1_048_577]
+        XCTAssertThrowsError(try load(hugeCap)) { error in
+            XCTAssertTrue("\(error)".contains("maximum_prompt_tokens must be within"), "\(error)")
+        }
         var smallCap = try template()
         smallCap["maximum_prompt_tokens"] = 1024
         smallCap["prompt_tokens"] = [1024]
