@@ -151,6 +151,17 @@ private final class NativeMTPBenchRunner {
                 "--phase sustained needs every matrix block of \(policy.sustainedCellID) in --out first"
             )
         }
+        // SPEC-048-R015: an admission sustained window is one continuous run.
+        // A partial window is never resumed (a resume would add up separate
+        // thermal windows); its records must be moved aside and the window
+        // rerun whole.
+        if !policy.exploratory, phase != .matrix,
+           let done = existing.sustainedSeconds[policy.sustainedCellID],
+           done > 0, done < Double(policy.sustainedSeconds) {
+            throw NativeMTPBenchError.assertionFailed(
+                "--out holds a partial sustained window for \(policy.sustainedCellID); an admission window is never resumed"
+            )
+        }
         if existing.hasRecords, onlyCell == nil, phase != .sustained {
             throw NativeMTPBenchError.assertionFailed(
                 "refusing to append a full matrix to non-empty --out; use --only-cell to resume"
@@ -240,6 +251,9 @@ private final class NativeMTPBenchRunner {
         }
         let fixture = try await fixture(for: cell)
         let remainingSeconds = max(0, Double(policy.sustainedSeconds) - completedSeconds)
+        // One id per continuous sustained run; the analyzer requires a single
+        // id across an admission window (run_metrics_version 5).
+        let windowID = UUID().uuidString.lowercased()
         let windowStarted = Date()
         let deadline = Date().addingTimeInterval(remainingSeconds)
         var block = startingBlock
@@ -267,13 +281,15 @@ private final class NativeMTPBenchRunner {
                 policySHA256: policySHA256,
                 sustained: true,
                 warmup: false,
-                sustainedWindowElapsedSeconds: elapsed
+                sustainedWindowElapsedSeconds: elapsed,
+                sustainedWindowID: windowID
             ))
             try writer.write(native.record(
                 policySHA256: policySHA256,
                 sustained: true,
                 warmup: false,
-                sustainedWindowElapsedSeconds: elapsed
+                sustainedWindowElapsedSeconds: elapsed,
+                sustainedWindowID: windowID
             ))
             block += 1
         }
@@ -547,7 +563,8 @@ private final class NativeMTPBenchRunner {
             // 2: run records carry decode-only throughput (SPEC-048-R015).
             // 3: effective_paths carry each admission's other_active_rows.
             // 4: native runs carry the scheduler's gated_* load-gate evidence.
-            "run_metrics_version": 4,
+            // 5: sustained records carry sustained_window_id.
+            "run_metrics_version": 5,
         ]
     }
 
@@ -779,7 +796,8 @@ private struct NativeMTPBenchRunResult {
         policySHA256: String,
         sustained: Bool,
         warmup: Bool,
-        sustainedWindowElapsedSeconds: Double? = nil
+        sustainedWindowElapsedSeconds: Double? = nil,
+        sustainedWindowID: String? = nil
     ) -> [String: Any] {
         [
             "schema": "macprovider.native-mtp-r015-run.v1",
@@ -795,6 +813,7 @@ private struct NativeMTPBenchRunResult {
             "warmup": warmup,
             "sustained": sustained,
             "sustained_window_elapsed_seconds": sustainedWindowElapsedSeconds as Any,
+            "sustained_window_id": sustainedWindowID as Any,
             "requests": requests.count,
             "wall_seconds": wallSeconds,
             "committed_completion_tokens": committedCompletionTokens,
@@ -1084,6 +1103,7 @@ struct NativeMTPBenchPolicy {
 
     static func load(from url: URL) throws -> NativeMTPBenchPolicy {
         let data = try Data(contentsOf: url)
+        try NativeMTPBenchJSON.rejectDuplicateKeys(data, label: "policy")
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw NativeMTPBenchError.invalidPolicy("policy must be a JSON object")
         }
@@ -1327,6 +1347,7 @@ struct NativeMTPBenchPolicy {
         }
         for (key, value) in expected {
             guard let actual = thresholds[key] as? NSNumber,
+                  CFGetTypeID(actual) != CFBooleanGetTypeID(),
                   abs(actual.doubleValue - value) < 0.000_000_1 else {
                 throw NativeMTPBenchError.invalidPolicy("threshold \(key) mismatch")
             }
@@ -1365,6 +1386,9 @@ private struct NativeMTPExistingEvidence {
         let data = try Data(contentsOf: url)
         guard !data.isEmpty else { return empty }
         let lines = String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline)
+        for (offset, line) in lines.enumerated() {
+            try NativeMTPBenchJSON.rejectDuplicateKeys(Data(line.utf8), label: "existing --out line \(offset + 1)")
+        }
         guard let first = lines.first,
               let header = try JSONSerialization.jsonObject(with: Data(first.utf8)) as? [String: Any],
               header["schema"] as? String == "macprovider.native-mtp-r015-run.v1",
@@ -1652,6 +1676,76 @@ private func intAtLeast(_ object: [String: Any], _ key: String, _ minimum: Int) 
         throw NativeMTPBenchError.invalidPolicy("\(key) must be >= \(minimum)")
     }
     return value
+}
+
+/// Duplicate-key rejection for the bench's policy and evidence JSON, matching
+/// the analyzer's strict loader: Foundation keeps the last duplicate, which
+/// would let one hash-bound document mean two things.
+enum NativeMTPBenchJSON {
+    static func rejectDuplicateKeys(_ data: Data, label: String) throws {
+        let bytes = [UInt8](data)
+        var index = 0
+        // One entry per open container: nil for arrays, the seen keys for objects.
+        var stack: [Set<String>?] = []
+        var expectingKey = false
+        func readString() throws -> String {
+            index += 1
+            var raw: [UInt8] = []
+            while index < bytes.count {
+                let byte = bytes[index]
+                if byte == UInt8(ascii: "\\") {
+                    guard index + 1 < bytes.count else { break }
+                    raw.append(byte)
+                    raw.append(bytes[index + 1])
+                    index += 2
+                    continue
+                }
+                if byte == UInt8(ascii: "\"") {
+                    index += 1
+                    // Decode escapes so "\u0061" and "a" compare equal.
+                    let quoted = Data([UInt8(ascii: "\"")] + raw + [UInt8(ascii: "\"")])
+                    guard let decoded = try JSONSerialization.jsonObject(with: quoted, options: [.fragmentsAllowed]) as? String else {
+                        throw NativeMTPBenchError.invalidPolicy("\(label): invalid JSON string")
+                    }
+                    return decoded
+                }
+                raw.append(byte)
+                index += 1
+            }
+            throw NativeMTPBenchError.invalidPolicy("\(label): unterminated JSON string")
+        }
+        while index < bytes.count {
+            let byte = bytes[index]
+            switch byte {
+            case UInt8(ascii: "{"):
+                stack.append(Set<String>())
+                expectingKey = true
+                index += 1
+            case UInt8(ascii: "["):
+                stack.append(nil)
+                expectingKey = false
+                index += 1
+            case UInt8(ascii: "}"), UInt8(ascii: "]"):
+                _ = stack.popLast()
+                expectingKey = false
+                index += 1
+            case UInt8(ascii: ","):
+                if let top = stack.last, top != nil { expectingKey = true }
+                index += 1
+            case UInt8(ascii: "\""):
+                let value = try readString()
+                if expectingKey, var keys = stack.last ?? nil {
+                    guard keys.insert(value).inserted else {
+                        throw NativeMTPBenchError.invalidPolicy("\(label): duplicate JSON key \(value)")
+                    }
+                    stack[stack.count - 1] = keys
+                    expectingKey = false
+                }
+            default:
+                index += 1
+            }
+        }
+    }
 }
 
 enum NativeMTPBenchError: Error, CustomStringConvertible {

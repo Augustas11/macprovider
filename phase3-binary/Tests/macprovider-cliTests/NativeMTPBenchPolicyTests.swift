@@ -225,6 +225,31 @@ final class NativeMTPBenchPolicyTests: XCTestCase {
         XCTAssertNoThrow(try load(object))
     }
 
+    func testDuplicateKeysAndBooleanThresholdsFailClosed() throws {
+        let template = try String(contentsOf: Self.templateURL, encoding: .utf8)
+        let duplicateTop = template.replacingOccurrences(of: "\"blocks\": 10,", with: "\"blocks\": 10, \"blocks\": 10,")
+        XCTAssertThrowsError(try loadText(duplicateTop)) { error in
+            XCTAssertTrue("\(error)".contains("duplicate JSON key blocks"), "\(error)")
+        }
+        let duplicateNested = template.replacingOccurrences(of: "\"alpha\": 0.05,", with: "\"alpha\": 0.05, \"alpha\": 0.05,")
+        XCTAssertThrowsError(try loadText(duplicateNested))
+        XCTAssertNoThrow(try NativeMTPBenchJSON.rejectDuplicateKeys(Data(#"{"a":[{"a":1},{"a":2}],"b":"a"}"#.utf8), label: "t"))
+        XCTAssertThrowsError(try NativeMTPBenchJSON.rejectDuplicateKeys(Data(#"{"a":1,"\u0061":2}"#.utf8), label: "t"))
+        var boolThreshold = try self.template()
+        var thresholds = try XCTUnwrap(boolThreshold["thresholds"] as? [String: Any])
+        thresholds["rejection_increase_max_pp"] = true
+        boolThreshold["thresholds"] = thresholds
+        XCTAssertThrowsError(try load(boolThreshold))
+    }
+
+    private func loadText(_ text: String) throws -> NativeMTPBenchPolicy {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("native-mtp-policy-\(UUID().uuidString).json")
+        try Data(text.utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        return try NativeMTPBenchPolicy.load(from: url)
+    }
+
     func testCellIDsRoundTripExactly() {
         XCTAssertEqual(NativeMTPBenchCell(id: "s8-p1536-o512"), NativeMTPBenchCell(slots: 8, promptTokens: 1536, maxTokens: 512))
         for bad in ["s08-p1536-o512", "s8-p1536-o512-x", "s8-p1536", "x8-p1536-o512", "s0-p1536-o512", "s8-p-o512", "s+8-p1536-o512"] {

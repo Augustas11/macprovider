@@ -1000,7 +1000,10 @@ advertised `qualified_slots` (2...8), its `max_native_active_rows`
   production-shaped full load. It is a separate bench phase on the same frozen
   policy and output file; it reuses that cell's matrix records rather than
   re-running them, binds the same policy digest, and keeps the alternating
-  order below. When the bound equals `qualified_slots` the cell is
+  order below. It is one continuous run: an interrupted admission window is
+  never resumed or stitched from separate runs; its records are set aside
+  and the window is rerun whole (every sustained record carries the run's
+  window id). When the bound equals `qualified_slots` the cell is
   native-eligible and already in the matrix.
 
 A slot count above `qualified_slots` is not allowed. The bench refuses, and

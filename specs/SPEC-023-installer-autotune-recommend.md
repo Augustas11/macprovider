@@ -16,7 +16,10 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
   R015 evidence fails above a prompt length (Qwen3.6-35B-A3B at 8192 tokens)
   could not be admitted with that limit. It is part of the complete entry and
   therefore of `native_mtp_admission_tuple_sha256`; a missing, zero,
-  non-integer, or out-of-range value fails the entry closed.
+  non-integer, or out-of-range value fails the entry closed. The R024 field
+  table now states the domains the consumer enforces: envelope identifiers
+  are printable non-space ASCII, `source_commit` is a 40-hex SHA-1 object id,
+  and `hardware_class` excludes `.` and `_`.
 
 - **v0.22.5 (2026-10-01)** — Native-MTP sampled request profile (#1770).
   SPEC-023-R024 `request_feature_profile` is now the closed set
@@ -3110,12 +3113,12 @@ schema.
 
 ```text
 schema_version = "macprovider.native-mtp-admission.v1"
-release_id: 1..128 ASCII bytes, equal to release.json version
+release_id: 1..128 printable non-space ASCII bytes (0x21-0x7e), equal to release.json version
 issued_at: RFC3339 UTC seconds
 expires_at: RFC3339 UTC seconds; issued_at < expires_at <= issued_at + 90 days
-signer_key_id: 1..128 ASCII bytes
-challenge_bank_signer_key_id: 1..128 ASCII bytes
-revocation_signer_key_id: 1..128 ASCII bytes
+signer_key_id: 1..128 printable non-space ASCII bytes (0x21-0x7e)
+challenge_bank_signer_key_id: 1..128 printable non-space ASCII bytes (0x21-0x7e)
+revocation_signer_key_id: 1..128 printable non-space ASCII bytes (0x21-0x7e)
 entries: array[1..256]
 ```
 
@@ -3134,11 +3137,11 @@ unsigned JSON integers and never floats.
 | `mtp_head_count`, `proposal_depth` | integers `1..16` |
 | `complete_window_bytes_by_depth` | exact array length `proposal_depth + 1`, indexed by proposal depth `0...proposal_depth`; every value is a positive JSON integer no larger than the consumer `Int.max`, values are monotonically nondecreasing, and the last value multiplied by `qualified_slots` MUST fit without integer overflow |
 | `runtime_revision`, `provider_revision` | `short_string` |
-| `source_commit` | full lowercase Git object id for the source repository's object format, exactly 40 or 64 hex characters |
+| `source_commit` | full lowercase SHA-1 Git object id, exactly 40 hex characters (a SHA-256 object-format repository needs a consumer amendment first) |
 | `reproducible_build_sha256` | `sha256` |
 | `live_executable_cdhash` | exact lowercase 40-hex Mach-O CodeDirectory CDHash of the live signed executable admitted to consume this tuple |
 | `cache_state_classes` | sorted unique array `1..16`; every element is an `mtp_state_class` value (`stageable_rewindable` or `hybrid_stageable_rewindable`) and the array MUST contain the entry's `mtp_state_class`, which the runtime matches against the loaded model |
-| `hardware_class` | lowercase ASCII matching `^[a-z0-9][a-z0-9._-]{0,63}$` |
+| `hardware_class` | lowercase ASCII matching `^[a-z0-9][a-z0-9-]{0,63}$`, the canonical form of the host chip name |
 | `ram_bytes` | exact physical RAM integer `> 0`, not a minimum |
 | `qualified_slots` | integer `2..8`, exact admitted slot count |
 | `max_native_active_rows` | integer `1..8`, no larger than `qualified_slots`; the SPEC-048-R007 load bound above which the tuple serves ordinary decode |

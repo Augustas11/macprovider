@@ -19,16 +19,12 @@ Local verification at HEAD: `cd phase3-binary && swift test --filter 'NativeMTP|
 
 Out of scope (do not report): signing keys or how the operator stores them; the live coordinator; release cutting.
 
-ROUND 3 (final round; anchored-loop cap). Round 2 reported code 0/0/3/2, security 0/0/2/2, architect 0/0/1/1. The fix commit following 10fa0289a addresses them; verify each round-2 finding is VERIFIED or still open and check for regressions:
-- SECURITY M1 placeholder evidence digests -> the generator refuses to build while any all-zero placeholder digest remains (committed tuple input is intentionally not buildable until the journey evidence exists); tests resolve placeholders explicitly; golden fixture regenerated in both languages.
-- SECURITY L2 / CODE L2 field domains -> generator mirrors the Swift consumer: source_commit 40-hex only, artifact_id ^[a-z0-9][a-z0-9-]{0,63}$, envelope identifiers 0x21-0x7e (no space), hardware class [a-z0-9-].
-- SECURITY L1 analyzer duplicate keys -> strict duplicate-rejecting loader for policy and every JSONL record.
-- CODE M1 step-05 causal rejection -> every forced proposal must be rejected (rejected >= forced), reject-all row requires proposed == forced == rejected.
-- CODE M2 analyzer policy contract -> analyzer validates the closed admission policy like the bench (schema, unknown keys, frozen methodology incl. prompt_corpus v2, exact threshold key set and values).
-- CODE L1 sustained gaps -> bench existing-evidence loader and analyzer require sustained block indexes contiguous from 0.
-- ARCH M1 partial steps labeled pass -> harness reports status partial with uncovered_contract for steps 04/05/06/09/12; README table says partial and lists uncovered clauses; J06 predates the label and is described as such.
-- ARCH L1 step 14 wording -> pending (R015 matrix passed; post-gateway replay missing).
-- CODE M3 / SECURITY M2 step-07 mixed-batch parity -> NOT fixable in this campaign: ordinary continuous-batching greedy output itself changes with arrival timing (batch-composition numerics, SPEC-048 §6 open gap). It blocks JOURNEY-NATIVE-MTP-SERVING, which stays unsigned and incomplete; it is not a defect introduced by this diff. Classify it accordingly.
+ROUND 4 (final; operator cap 3-4 rounds; only lanes with round-3 findings are re-run). Round 3: security 0/0/0/0 (accepted, not re-run); code 0/0/1/3; architect 0/0/1/1. Verify each round-3 finding of THIS lane is VERIFIED or still open and check the fix for regressions:
+- CODE M analyzer vs bench policy domains -> _policy_contract_violations now mirrors NativeMTPBenchPolicy.load field types/ranges/formats (hex64 digests, hex40 commits, non-empty strings, nonnegative warmup/seed/margin/arrival/sustained_seconds, ram_gb >= 1, temperature 0..2, slots 1..8 / positive unique prompt and output lists), in addition to schema, keys, frozen methodology and thresholds.
+- CODE L1 boolean thresholds -> Swift rejects CFBoolean threshold values.
+- CODE L2 Swift duplicate keys -> NativeMTPBenchJSON.rejectDuplicateKeys guards the policy and every existing --out line (escape-decoded keys).
+- CODE L3 / ARCH L SPEC-023 domains wider than implementations -> R024 table narrowed to the enforced domains (non-space ASCII envelope ids, 40-hex source_commit, [a-z0-9-] hardware_class); v0.22.6 changelog notes it.
+- ARCH M sustained duration across separate windows -> the bench refuses to resume a partial admission sustained window (records must be set aside and the window rerun whole); sustained records carry a per-run sustained_window_id (run_metrics_version 5) and the analyzer fails a v5 window that is not one run; SPEC-048 MTP-15 states the rule. The committed S02 window (run_metrics_version 4) was one uninterrupted 1839 s run (single CELL_START/CELL_END in the lab log); its analysis.json still reproduces byte-exact.
 
 Report findings as CRITICAL / HIGH / MEDIUM / LOW / INFO, each with file:line, a concrete failure scenario described in prose, and a fix; say whether each is new in this diff or pre-existing. Be adversarial but do not report style nits as MEDIUM or above. End with a single final line exactly: `VERDICT: <n> CRITICAL, <n> HIGH, <n> MEDIUM, <n> LOW`.
 

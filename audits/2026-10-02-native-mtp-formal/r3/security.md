@@ -1,6 +1,6 @@
 METHOD CONSTRAINT: First-party software-correctness / proof review. Do NOT author or construct malformed payloads or exploit inputs; evaluate by reading source and running EXISTING tests; describe gaps abstractly (field + condition) in prose.
 
-LANE: ARCHITECTURE REVIEW (spec coherence, evidence sufficiency, honest claims).
+LANE: SECURITY REVIEW.
 
 Repository: the current working directory (a detached worktree of branch campaign/native-mtp-formal, based on origin/main b29b7b8f5, which merged PR #1820). This is the freeze audit for the #1770 native-MTP formal campaign: formal (non-exploratory) SPEC-048-R015 evidence and the unsigned SPEC-023-R024 sidecar / JOURNEY-NATIVE-MTP-SERVING inputs for the first native-MTP tuple (Qwen3.6-35B-A3B 4-bit + MTP-4bit drafter, qualified_slots 8, max_native_active_rows 1, max_prompt_tokens 4096, sampled request profile, M3 Ultra 256 GB Studio).
 
@@ -19,18 +19,22 @@ Local verification at HEAD: `cd phase3-binary && swift test --filter 'NativeMTP|
 
 Out of scope (do not report): signing keys or how the operator stores them; the live coordinator; release cutting.
 
-ROUND 4 (final; operator cap 3-4 rounds; only lanes with round-3 findings are re-run). Round 3: security 0/0/0/0 (accepted, not re-run); code 0/0/1/3; architect 0/0/1/1. Verify each round-3 finding of THIS lane is VERIFIED or still open and check the fix for regressions:
-- CODE M analyzer vs bench policy domains -> _policy_contract_violations now mirrors NativeMTPBenchPolicy.load field types/ranges/formats (hex64 digests, hex40 commits, non-empty strings, nonnegative warmup/seed/margin/arrival/sustained_seconds, ram_gb >= 1, temperature 0..2, slots 1..8 / positive unique prompt and output lists), in addition to schema, keys, frozen methodology and thresholds.
-- CODE L1 boolean thresholds -> Swift rejects CFBoolean threshold values.
-- CODE L2 Swift duplicate keys -> NativeMTPBenchJSON.rejectDuplicateKeys guards the policy and every existing --out line (escape-decoded keys).
-- CODE L3 / ARCH L SPEC-023 domains wider than implementations -> R024 table narrowed to the enforced domains (non-space ASCII envelope ids, 40-hex source_commit, [a-z0-9-] hardware_class); v0.22.6 changelog notes it.
-- ARCH M sustained duration across separate windows -> the bench refuses to resume a partial admission sustained window (records must be set aside and the window rerun whole); sustained records carry a per-run sustained_window_id (run_metrics_version 5) and the analyzer fails a v5 window that is not one run; SPEC-048 MTP-15 states the rule. The committed S02 window (run_metrics_version 4) was one uninterrupted 1839 s run (single CELL_START/CELL_END in the lab log); its analysis.json still reproduces byte-exact.
+ROUND 3 (final round; anchored-loop cap). Round 2 reported code 0/0/3/2, security 0/0/2/2, architect 0/0/1/1. The fix commit following 10fa0289a addresses them; verify each round-2 finding is VERIFIED or still open and check for regressions:
+- SECURITY M1 placeholder evidence digests -> the generator refuses to build while any all-zero placeholder digest remains (committed tuple input is intentionally not buildable until the journey evidence exists); tests resolve placeholders explicitly; golden fixture regenerated in both languages.
+- SECURITY L2 / CODE L2 field domains -> generator mirrors the Swift consumer: source_commit 40-hex only, artifact_id ^[a-z0-9][a-z0-9-]{0,63}$, envelope identifiers 0x21-0x7e (no space), hardware class [a-z0-9-].
+- SECURITY L1 analyzer duplicate keys -> strict duplicate-rejecting loader for policy and every JSONL record.
+- CODE M1 step-05 causal rejection -> every forced proposal must be rejected (rejected >= forced), reject-all row requires proposed == forced == rejected.
+- CODE M2 analyzer policy contract -> analyzer validates the closed admission policy like the bench (schema, unknown keys, frozen methodology incl. prompt_corpus v2, exact threshold key set and values).
+- CODE L1 sustained gaps -> bench existing-evidence loader and analyzer require sustained block indexes contiguous from 0.
+- ARCH M1 partial steps labeled pass -> harness reports status partial with uncovered_contract for steps 04/05/06/09/12; README table says partial and lists uncovered clauses; J06 predates the label and is described as such.
+- ARCH L1 step 14 wording -> pending (R015 matrix passed; post-gateway replay missing).
+- CODE M3 / SECURITY M2 step-07 mixed-batch parity -> NOT fixable in this campaign: ordinary continuous-batching greedy output itself changes with arrival timing (batch-composition numerics, SPEC-048 §6 open gap). It blocks JOURNEY-NATIVE-MTP-SERVING, which stays unsigned and incomplete; it is not a defect introduced by this diff. Classify it accordingly.
 
 Report findings as CRITICAL / HIGH / MEDIUM / LOW / INFO, each with file:line, a concrete failure scenario described in prose, and a fix; say whether each is new in this diff or pre-existing. Be adversarial but do not report style nits as MEDIUM or above. End with a single final line exactly: `VERDICT: <n> CRITICAL, <n> HIGH, <n> MEDIUM, <n> LOW`.
 
 Focus for this lane:
-- Does the right-sized MTP-15 matrix still answer what R015/R007/R014 need: native gain justified for every slot count up to the bound at every admitted prompt/output stratum; gated non-inferiority at bound+1 and full load sufficient for intermediate counts; prompt strata capped by the signed max_prompt_tokens consistent with R004; sustained-phase record reuse not weakening the preregistration/order binding.
-- SPEC-023 v0.22.6 / SPEC-048 0.1.21 lockstep (MTP-4, MTP-13 field list, R024 table, changelogs, CONFORMANCE versions and mappings).
-- Evidence honesty: the formal R015 analysis and the superseded first freeze (525ac686) are reported accurately; no conformance promotion or production claim beyond the evidence; R015 remains pending where the post-gateway eligibility replay and lower tiers are unmet.
-- The unsigned sidecar tuple input: values that are measured vs analytically derived (complete_window_bytes_by_depth, adaptation thresholds, throughput_delta_ppm cell choice, ordinary_baseline) are justified and documented; release-owned fields are left to the release; signing process and key ownership described correctly.
-- Journey: which JOURNEY-NATIVE-MTP-SERVING steps the hardware harness covers vs remain pending (warm swap, coordinator canary, capability/artifact negatives as fixtures, MXFP8 n/a, tier coverage, redaction), and that nothing claims a signed or passing journey.
+- R024 max_prompt_tokens: fail-closed parsing (missing, zero, wrong type, out of range), inclusion in native_mtp_admission_tuple_sha256, and whether any path still defaults the prompt bound.
+- Lab-only surfaces (NativeMTPLabProposalOverride, installLabNativeMTPProposalOverride, labTokenProbe, native-mtp-journey-e2e, native-mtp-bench): are they fully compiled out of a plain release build (no symbol, no registration, no reachable hook); can any production path install or reach them.
+- recordNativeMTPTokenBoundDowngrade: can it change selection, accounting, receipts, or buyer-visible output; information exposure through status reasons.
+- scripts/native_mtp_admission_sidecar.py: never reads or accepts key material; strict closed-schema validation; no path where an unvalidated or partially specified sidecar is emitted; canonical-bytes identity consistent with the Swift consumer so a signed body cannot mean two things.
+- Committed evidence (docs/research/spec048-r015/**, journeys/** drafts, audits/**): no secrets, private keys, operator paths, raw prompts/completions beyond synthetic corpora, model weights, or tokens.

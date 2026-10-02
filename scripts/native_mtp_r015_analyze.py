@@ -134,6 +134,33 @@ def _policy_contract_violations(policy: dict) -> list[str]:
     for key, expected in FIXED_METHODOLOGY.items():
         if policy.get(key) != expected or isinstance(policy.get(key), bool):
             violations.append(f"methodology_not_frozen:{key}")
+    # Field types and ranges, mirroring NativeMTPBenchPolicy.load.
+    hex64 = re.compile(r"^[0-9a-f]{64}$")
+    hex40 = re.compile(r"^[0-9a-f]{40}$")
+    for key in ("target_sha256", "mtp_sha256", "tokenizer_sha256"):
+        if not (isinstance(policy.get(key), str) and hex64.match(policy[key])):
+            violations.append(f"field_invalid:{key}")
+    for key in ("provider_commit", "mlx_fork_revision"):
+        if not (isinstance(policy.get(key), str) and hex40.match(policy[key])):
+            violations.append(f"field_invalid:{key}")
+    for key in ("model_id", "hw_model", "chip", "os_build", "xcode_build_version", "swift_version", "sustained_cell_id"):
+        if not (isinstance(policy.get(key), str) and policy[key]):
+            violations.append(f"field_invalid:{key}")
+    for key, minimum in (("warmup_runs", 0), ("seed", 0), ("memory_safety_margin_bytes", 0),
+                         ("ram_gb", 1), ("arrival_interval_ms", 0), ("sustained_seconds", 0)):
+        if key == "arrival_interval_ms" and key not in policy:
+            continue
+        if not (_is_int(policy.get(key)) and policy[key] >= minimum):
+            violations.append(f"field_invalid:{key}")
+    if "temperature" in policy:
+        t = policy["temperature"]
+        if isinstance(t, bool) or not isinstance(t, (int, float)) or not math.isfinite(t) or not 0 <= t <= 2:
+            violations.append("field_invalid:temperature")
+    for key, low, high in (("slots", 1, 8), ("prompt_tokens", 1, None), ("max_tokens", 1, None)):
+        values = policy.get(key)
+        if not (isinstance(values, list) and values and all(_is_int(v) and v >= low and (high is None or v <= high) for v in values)
+                and len(set(values)) == len(values)):
+            violations.append(f"field_invalid:{key}")
     thresholds = policy.get("thresholds")
     if not isinstance(thresholds, dict) or set(thresholds) != set(FROZEN_THRESHOLDS):
         violations.append("thresholds_key_set_not_frozen")
@@ -847,6 +874,12 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
             if run.get("cell_id") == cell_id and run.get("sustained") is True and run.get("warmup") is not True
         ]
         hard_failures.extend(_sustained_order_issues(sustained_runs))
+        # run_metrics_version 5 binds every sustained record to its run: an
+        # admission window must be one continuous run, never stitched.
+        if sustained_runs and isinstance(header.get("run_metrics_version"), int) and header["run_metrics_version"] >= 5:
+            window_ids = {run.get("sustained_window_id") for run in sustained_runs}
+            if len(window_ids) != 1 or not all(isinstance(w, str) and w for w in window_ids):
+                hard_failures.append("sustained_window_not_one_continuous_run")
         hard_gate_runs = [run for pair in pairs for run in pair] + sustained_runs
         invalid_records = [
             f"invalid_run_record:{run.get('path')}:{run.get('block_index')}:{','.join(fields)}"

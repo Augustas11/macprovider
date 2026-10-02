@@ -380,6 +380,30 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         unknown = self._run_case(policy_overrides={"extra": 1})
         self.assertIn("policy_unknown_keys:extra", unknown["matrix_violations"])
 
+    def test_policy_field_domains_mirror_the_bench(self):
+        negative_margin = self._run_case(policy_overrides={"memory_safety_margin_bytes": -1})
+        self.assertIn("field_invalid:memory_safety_margin_bytes", negative_margin["matrix_violations"])
+        bad_commit = self._run_case(policy_overrides={"provider_commit": "A" * 40})
+        self.assertIn("field_invalid:provider_commit", bad_commit["matrix_violations"])
+        hot = self._run_case(policy_overrides={"temperature": 3})
+        self.assertIn("field_invalid:temperature", hot["matrix_violations"])
+
+    def test_v5_sustained_window_must_be_one_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jsonl_path, policy_path = self._write_case(Path(tmp))
+            lines = jsonl_path.read_text("utf-8").splitlines()
+            header = json.loads(lines[0])
+            header["run_metrics_version"] = 5
+            out = [json.dumps(header, sort_keys=True)]
+            for line in lines[1:]:
+                record = json.loads(line)
+                if record.get("sustained") is True:
+                    record["sustained_window_id"] = "w-" + record["path"]
+                out.append(json.dumps(record, sort_keys=True))
+            jsonl_path.write_text("\n".join(out) + "\n", "utf-8")
+            cell = self._cell(analyze(jsonl_path, policy_path), "s2-p1536-o512")
+            self.assertIn("sustained_window_not_one_continuous_run", cell["hard_failures"])
+
     def test_duplicate_json_keys_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             jsonl_path, policy_path = self._write_case(Path(tmp))
