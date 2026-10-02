@@ -177,17 +177,34 @@ around 2026-10-23. The fix takes effect at the next renewal (Wed 2026-09-30
 16:00 UTC), or earlier with a manual dispatch of
 `renew-autotune-static-feed-signed.yml`.
 
-## Next coordinator release — none assigned, net changes vs v1.8.209
+## Next coordinator release — v1.8.210 reserved, net changes vs v1.8.209
 
 `v1.8.209` was applied through the signed runtime-only updater on 2026-09-30.
 The public model document then returned exactly one paid Qwen3.6 row with the
 #1804 feature descriptors, while the live catalog stayed on the September 25
-release. The table below tracks changes for the next runtime cut.
+release. `v1.8.210` is reserved by the 2026-10-02 Pearl deployment session for
+one signed runtime-only cut from current `main`. No `dist/`, unit, nginx,
+updater, or catalog-verifier asset changed after v1.8.209, so a full deploy is
+out of scope and the live catalog target must remain byte-for-byte unchanged.
+The pre-apply gate is the updater's explicit `--tag v1.8.210` plan, with no
+active transaction and enough disk for a new database snapshot. The table below
+is the complete runtime payload for that cut.
 
 | Net change in coordinator / gateway / Pearl assets | Status | PR |
 |---|---|---|
 | The authenticated gateway default output cap is 32,768 tokens while the demo surface remains capped at 512. Served buyer documentation and OpenRouter model metadata now report the effective configured/live-context limit consistently; SPEC-006 is v0.9.42. | merged `d5767b4a5` 2026-09-30 | #1801 |
 | Gateway demand telemetry for #1807 records attempted demand, served/unmet/capacity/substitution outcomes, privacy-bucketed buyer/model/provider fields, timing/usage metrics, 14-day retention pruning, and demand summaries. Release handoff: `docs/releases/gateway-release-1807-demand-telemetry.md`. | merged `2be9975a6` 2026-10-01; deploy pending | #1812 |
+| Provider runtime sampling-contract fixes carry coordinator relay changes that preserve buyer cancellation and delivered-only billing semantics, plus gateway OpenRouter-model metadata corrections. | merged `2b1de5040` 2026-10-01 | #1818 |
+| Runtime dependencies advance to modernc SQLite 1.60.0, `golang.org/x/text` 0.42.0, and chi 5.3.2. The testcontainers PostgreSQL bump is build/test-only and does not enter the Pearl binaries. | merged `d84d072b7`, `cac7283c4`, `1e5baa087` 2026-10-01 | #1822, #1823, #1825 |
+| SQLite evidence maintenance is bounded under buyer traffic: one route-journal WAL checkpoint owner, a 25 ms billing-output evidence budget with fresh-row reuse, classified SQLite-pressure shedding only, and five-batch audit-outbox catch-up. Integrity failures remain fail-closed and the new pressure/catch-up metrics provide rollout evidence. | merged `45032a1fe` 2026-10-02 | #1831 |
+
+Apply verification for v1.8.210 must additionally prove gateway schema 17 and
+the `demand_events` append-only/index contract, confirm the coordinator starts
+without a billing startup-scan failure, and inspect the new SQLite
+pressure/catch-up metrics and journals for unclassified evidence loss. Rolling
+back the gateway binary after schema 17 requires restoring the updater's
+pre-v1.8.210 gateway database snapshot; do not run an old binary against the
+newer schema.
 
 ## Open Pearl actions (not new code)
 
