@@ -16,6 +16,7 @@ campaign is signed, released, deployed, or activated.
 | Fused MacProvider pin | `3600d7b9f` | Exact pin and fused qualification requirements committed |
 | SwiftPM release lock | `618dbe2d5` | Xcode 16.4 transitive pins restored; fused upstream revision preserved |
 | Operator-pause fix | `0e5e63b0c` | Targeted test passes; reviewed signed CLI needed for live validation |
+| Private acceptance candidate | `v1.8.212`, workflow run `37007253970` | Unsigned build passed; protected signer failed closed at Apple notarization because a required developer agreement is missing or expired; no signed artifact was exported |
 | Post-gateway replay analyzer | `e2a5b51fc` | Exact R004 mix semantics and frozen corrected gates; capture/replay pending |
 | Governance versions | `bfbdc0d94` | SPEC-023 v0.22.7 and SPEC-048 0.1.22 reconciled in `CONFORMANCE.json` |
 | Historical stock R015 | policy `30934c07e5b6ca6dfa569505bbfdb2fd118be719cba81ddf99193a4ebe72d581` | PASS, preserved, superseded for fused authorization |
@@ -54,10 +55,19 @@ Do not retry the hardware campaign until a reviewed, signed CLI containing
 that fix is installed. Never stop or replace the live provider, and never
 connect a local, unsigned, ad-hoc-signed, or unreleased build to Malibu.
 
+The first private-candidate attempt used the exact campaign SHA
+`40b630905246ea49109d1458d48a1b5db3b0379d` with `promotion_ready=false`.
+Its unprivileged build passed, but Apple notarization returned HTTP 403 because
+a required Apple Developer agreement is missing or expired. The workflow did
+not export a signed candidate and did not create a tag or release. Because the
+campaign subsequently merged current `origin/main`, any retry must bind the
+new reviewed branch head rather than the failed candidate SHA.
+
 ## Resume order
 
-1. Obtain the reviewed signed CLI containing the pause fix and validate the
-   guarded pause/resume path through the shared Studio wrapper.
+1. Restore the required Apple Developer agreement, cut a new private,
+   non-promotable candidate from the current reviewed campaign head, and
+   validate the guarded pause/resume path through the shared Studio wrapper.
 2. Run the fused upstream runtime tests on the designated Mac Studio.
 3. Freeze a new fused-baseline R015 policy and run the right-sized matrix plus
    sustained window. Preserve every failed or incomplete cell.
@@ -106,8 +116,10 @@ cannot be established, fail closed and leave the hardware run pending.
 - SwiftPM lock contract: PASS locally; the exact Xcode 16.4 locked-resolution
   job passed on parent head `e2a5b51fc` before the governance-only follow-up.
 - PR governance declaration: PASS.
-- Full CI for the latest head remains a GitHub Actions gate; do not reproduce
-  it locally on `Augustas-Air.local`.
+- Full CI passed on `40b630905` in run `37002887994`, including the Malibu app
+  suite after an unrelated timing flake passed on rerun. The later merge from
+  `origin/main` requires its own GitHub Actions result; do not reproduce it
+  locally on `Augustas-Air.local`.
 
 The prior full-diff audits predate the fused-baseline, scheduler-fence, and
 lifecycle changes. They are historical evidence only; run all three lanes
