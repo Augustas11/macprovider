@@ -326,13 +326,28 @@ private final class NativeMTPJourneyRunner {
             runtime: ordinary,
             staggerMS: 150
         )
+        // Diagnostic: the same ordinary batch under slightly different arrival
+        // timing. A row that differs here is batch-composition sensitive on
+        // the ordinary path itself; it is reported, never counted as parity.
+        let perturbed = try await complete(
+            requests.map {
+                $0.withRequestID(($0.requestID ?? "") + "-perturbed")
+                    .withConversationKey($0.conversationKey.map { $0 + "-perturbed" })
+            },
+            runtime: ordinary,
+            staggerMS: 170
+        )
         let actual = try await complete(requests, runtime: native, staggerMS: 150)
+        var timingSensitive: [String] = []
         var paths: [String: String] = [:]
         var reasons: [String: String] = [:]
         for request in requests {
             let id = request.requestID ?? ""
             step.check("\(id).ordinary_control_reproducible", expected[id].map { exp in control[id + "-control"].map { same(exp, $0) } ?? false } ?? false)
             step.check("\(id).parity", expected[id].map { exp in actual[id].map { same(exp, $0) } ?? false } ?? false)
+            if let exp = expected[id], let other = perturbed[id + "-perturbed"], !same(exp, other) {
+                timingSensitive.append(id)
+            }
             let admission = recorder.requestSnapshot().last { $0.requestID == id }
             paths[id] = admission?.admission.effectivePath.rawValue ?? "missing"
             reasons[id] = admission?.admission.selection.nativeMTPReason?.rawValue ?? ""
@@ -357,6 +372,7 @@ private final class NativeMTPJourneyRunner {
         step.check("prompt_cap.parity", same(cappedExpected, cappedActual))
         let cappedAdmission = recorder.requestSnapshot().last { $0.requestID == "journey-prompt-cap" }
         step.check("prompt_cap.selected_ordinary", cappedAdmission?.admission.effectivePath == .ordinary)
+        step.details["ordinary_rows_differing_under_perturbed_arrival_timing"] = timingSensitive.sorted()
         step.details["paths"] = paths
         step.details["selector_reasons"] = reasons
         step.details["prompt_cap_reason"] = cappedAdmission?.admission.selection.nativeMTPReason?.rawValue ?? ""
