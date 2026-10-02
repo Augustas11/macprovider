@@ -3,7 +3,7 @@
     "artifact_hash": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
     "artifact_id": "mlx-4bit",
     "batch_evidence_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-    "benchmark_policy_sha256": "525ac686a763d8febfeb7cbf972affa86c38c32c1c2638d06dd6ebfdabe02697",
+    "benchmark_policy_sha256": "30934c07e5b6ca6dfa569505bbfdb2fd118be719cba81ddf99193a4ebe72d581",
     "cache_state_classes": [
       "hybrid_stageable_rewindable"
     ],
@@ -14,7 +14,7 @@
     "correctness_evidence_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
     "decode_path": "native_mtp",
     "decrease_threshold_ppm": 400000,
-    "fit_evidence_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "fit_evidence_sha256": "c780939fcad3c62623cf6e3e3fc0af4e14e78b31636eac1eb200e7702bd4a19a",
     "hardware_class": "apple-m3-ultra",
     "hash_algorithm": "macprovider.snapshot-manifest.v1",
     "increase_threshold_ppm": 700000,
@@ -27,14 +27,14 @@
     "mtp_manifest_sha256": "7b38a336fa246a285ee23cc990351989bf2ee6c040506a2b793ee24e463f35a7",
     "mtp_state_class": "hybrid_stageable_rewindable",
     "ordinary_baseline": {
-      "aggregate_tps_milli": 1,
+      "aggregate_tps_milli": 193824,
       "artifact_hash": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
       "decode_path": "ordinary",
-      "measurement_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "measurement_sha256": "c780939fcad3c62623cf6e3e3fc0af4e14e78b31636eac1eb200e7702bd4a19a",
       "qualified_slots": 8,
       "runtime_revision": "ef4ff8568c38c640bc90a8176dc3acfe943a288d"
     },
-    "performance_evidence_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "performance_evidence_sha256": "c780939fcad3c62623cf6e3e3fc0af4e14e78b31636eac1eb200e7702bd4a19a",
     "proposal_depth": 1,
     "qualified_slots": 8,
     "quality_evidence_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
@@ -137,7 +137,7 @@
     "runtime_revision": "ef4ff8568c38c640bc90a8176dc3acfe943a288d",
     "security_negative_evidence_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
     "state_rollback_evidence_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-    "throughput_delta_ppm": 0,
+    "throughput_delta_ppm": 14,
     "tokenizer_sha256": "87a7830d63fcf43bf241c3c5242e96e62dd3fdc29224ca26fed8ea333db72de4"
   },
   "schema_version": "macprovider.native-mtp-admission-tuple-input.v1"
