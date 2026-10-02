@@ -1626,6 +1626,7 @@ actor ContinuousBatchScheduler {
     private var nativeMTPLoadGateEngaged = false
     #if DEBUG || MACPROVIDER_LAB_HARNESS
     private var labNativeMTPLoadGateRecorder: NativeMTPLoadGateRecorder?
+    private var labNativeMTPProposalOverride: NativeMTPLabProposalOverride?
     #endif
     private var nativeMTPLoadGateCalmRounds = 0
     static let nativeMTPLoadGateReleaseRounds = 8
@@ -3034,6 +3035,15 @@ actor ContinuousBatchScheduler {
             var consumedFixtureProposals = backendProposals == nil && !initialProposals.isEmpty
             let committedKVTokenCount = preReservation.committedKVTokenCount
             var proposals = Array(initialProposals.prefix(maximumDepth))
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            if let labNativeMTPProposalOverride, !proposals.isEmpty {
+                proposals = labNativeMTPProposalOverride.apply(
+                    requestID: row.request.id,
+                    committedKVTokenCount: committedKVTokenCount,
+                    proposals: proposals
+                )
+            }
+            #endif
             var inputTokenCount = proposals.count + 1
             var target = committedKVTokenCount.addingReportingOverflow(inputTokenCount)
             if target.overflow, !proposals.isEmpty {
@@ -3576,6 +3586,12 @@ actor ContinuousBatchScheduler {
     /// gated-cell evidence. Never installed outside lab builds.
     func installLabNativeMTPLoadGateRecorder(_ recorder: NativeMTPLoadGateRecorder?) {
         labNativeMTPLoadGateRecorder = recorder
+    }
+
+    /// Lab-only: force verification rejections for the journey's cache/state
+    /// boundary step. Never installed outside lab builds.
+    func installLabNativeMTPProposalOverride(_ override: NativeMTPLabProposalOverride?) {
+        labNativeMTPProposalOverride = override
     }
     #endif
 
@@ -5122,6 +5138,53 @@ actor ContinuousBatchScheduler {
 /// held at depth zero (riding the ordinary forward), and how each hold ended —
 /// a later committed native round (depth restored, drafter caught up) or a
 /// clean terminal while still held.
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+/// Lab-only JOURNEY-NATIVE-MTP-SERVING step-05 fault injection. For rows whose
+/// request ID starts with a configured prefix it replaces each drafter
+/// proposal with a different token id (`id ^ 1`, in range for an even
+/// vocabulary) so the target rejects it: on every round, or only on rounds
+/// whose staged positions cross a paged-KV block boundary. The target stays
+/// authoritative, so output must still match ordinary decode exactly.
+final class NativeMTPLabProposalOverride: @unchecked Sendable {
+    enum Mode: Sendable, Equatable {
+        case everyRound
+        case blockBoundary(blockTokens: Int)
+    }
+
+    private let lock = NSLock()
+    private let rules: [(prefix: String, mode: Mode)]
+    private var overriddenRounds: [String: Int] = [:]
+
+    init(rules: [(prefix: String, mode: Mode)]) {
+        self.rules = rules
+    }
+
+    func apply(requestID: String, committedKVTokenCount: Int, proposals: [Int]) -> [Int] {
+        guard let mode = rules.first(where: { requestID.hasPrefix($0.prefix) })?.mode else {
+            return proposals
+        }
+        switch mode {
+        case .everyRound:
+            break
+        case .blockBoundary(let blockTokens):
+            let first = committedKVTokenCount
+            let last = committedKVTokenCount + proposals.count
+            guard blockTokens > 0, first / blockTokens != last / blockTokens else { return proposals }
+        }
+        lock.lock()
+        overriddenRounds[requestID, default: 0] += 1
+        lock.unlock()
+        return proposals.map { $0 ^ 1 }
+    }
+
+    func overriddenRounds(requestID: String) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return overriddenRounds[requestID] ?? 0
+    }
+}
+#endif
+
 final class NativeMTPLoadGateRecorder: @unchecked Sendable {
     struct Summary: Sendable, Equatable {
         /// (round, row) pairs held at depth zero.

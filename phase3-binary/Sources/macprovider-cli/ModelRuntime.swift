@@ -6352,6 +6352,50 @@ actor ModelRuntime: ModelRuntimeServing {
         await continuousBatchScheduler.installLabNativeMTPLoadGateRecorder(recorder)
         return true
     }
+
+    /// Lab-only JOURNEY-NATIVE-MTP-SERVING step-05 hook: force proposal
+    /// rejections on matching rows. Returns false when no scheduler is attached.
+    func installLabNativeMTPProposalOverride(_ override: NativeMTPLabProposalOverride?) async -> Bool {
+        guard let continuousBatchScheduler else { return false }
+        await continuousBatchScheduler.installLabNativeMTPProposalOverride(override)
+        return true
+    }
+
+    /// Lab-only token-level probe through the attached scheduler, the same
+    /// request shape `native_mtp_selftest_v1` submits: a native integrity
+    /// probe at a fixed depth (exempt from the load gate), or an ordinary
+    /// greedy row as its oracle. Used to build and replay a self-test
+    /// challenge on real hardware without the serve-path startup.
+    func labTokenProbe(
+        id: String,
+        promptTokenIDs: [Int],
+        maxCompletionTokens: Int,
+        nativeDepth: Int?
+    ) async throws -> ContinuousBatchSchedulerResult {
+        guard let continuousBatchScheduler else {
+            throw ContinuousBatchSchedulerError.requestFailed("lab_probe_scheduler_unavailable")
+        }
+        let base = ContinuousBatchSchedulerRequest(
+            id: id,
+            conversationKey: "",
+            promptTokens: promptTokenIDs,
+            maxOutputTokens: maxCompletionTokens,
+            samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: id),
+            temperature: 0,
+            topP: 1,
+            decodePath: nativeDepth == nil ? .ordinary : .nativeMTP,
+            nativeMTPMaximumProposalDepth: nativeDepth ?? 0,
+            nativeMTPCompleteWindowBytesByDepth: nativeDepth == nil
+                ? []
+                : ((currentNativeMTPCapability ?? nativeMTPCapability)?.completeWindowBytesByDepth ?? []),
+            nativeMTPTupleFence: nil,
+            nativeMTPIntegrityProbe: nativeDepth != nil
+        )
+        if nativeDepth == nil {
+            return try await continuousBatchScheduler.submit(base)
+        }
+        return try await continuousBatchScheduler.submitNativeMTPIntegrityProbe(base)
+    }
     #endif
 
     nonisolated static func schedulerRequestID(for request: ChatCompletionRequest) -> String? {

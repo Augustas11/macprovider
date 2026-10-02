@@ -849,7 +849,7 @@ enum NativeMTPBenchDecodeThroughput {
     }
 }
 
-private struct NativeMTPStatusDelta {
+struct NativeMTPStatusDelta {
     let proposedTokens: UInt64
     let acceptedTokens: UInt64
     let rejectedTokens: UInt64
