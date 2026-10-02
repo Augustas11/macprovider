@@ -20,7 +20,7 @@ let package = Package(
         // Lab: mlx-swift-lm fork branch perf/a3b-fused-moe (fused small-T Qwen3.5 MoE).
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "2714f708897830b5d53da8902389475f561b034f"
+            revision: "df4dea7957a73b99d9397f3a6b02bd3c409e9575"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

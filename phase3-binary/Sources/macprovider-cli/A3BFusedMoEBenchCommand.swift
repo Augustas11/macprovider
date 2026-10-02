@@ -19,6 +19,12 @@ import Tokenizers
 ///   fused mode, dense caches.
 /// - `flips`: teacher-forced argmax flips vs the stock `[B, 1]` greedy path.
 /// - `greedy`: free-running greedy decode parity, fused vs stock.
+/// - `moe`: per-layer MoE timing chain over real inputs; with `--stop-afters`
+///   it also times the router-only and router+gate/up prefixes (stock and fused)
+///   and reports gate/up GB/s over the distinct-expert bytes.
+/// - `concurrency`: fused calls built without an eval between them (same block
+///   and different blocks, one stream and two streams) must be bit-equal to the
+///   same calls evaluated one at a time.
 struct A3BFusedMoEBenchCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "a3b-fused-moe-bench",
@@ -45,6 +51,13 @@ struct A3BFusedMoEBenchCommand: AsyncParsableCommand {
     @Option(name: .customLong("gate-up-tokens")) var gateUpTokens: Int?
     @Option(name: .customLong("down-tpb")) var downTPB: Int?
     @Option(name: .customLong("stop-after")) var stopAfter: Int?
+    @Option(name: .customLong("stop-afters")) var stopAfters: String = "0"
+    @Option(name: .customLong("gate-up-v3-rows")) var gateUpV3Rows: Int?
+    @Option(name: .customLong("gate-up-v3-sgs")) var gateUpV3SGs: Int?
+    @Option(name: .customLong("gate-up-v3-chunk")) var gateUpV3Chunk: Int?
+    @Option(name: .customLong("gate-up-v3-stage")) var gateUpV3Stage: Int?
+    @Option(name: .customLong("max-t")) var maxT: Int?
+    @Option(name: .customLong("concurrency-rounds")) var concurrencyRounds: Int = 4
 
     static let prompts: [String] = [
         "Explain how a hash map handles collisions, compare chaining with open addressing, and give the time complexity of insert and lookup in the average and worst case.",
@@ -66,6 +79,11 @@ struct A3BFusedMoEBenchCommand: AsyncParsableCommand {
         if let gateUpTokens { Qwen35FusedMoE.gateUpTokens = gateUpTokens }
         if let downTPB { Qwen35FusedMoE.downTokensPerBlock = downTPB }
         if let stopAfter { Qwen35FusedMoE.labStopAfter = stopAfter }
+        if let gateUpV3Rows { Qwen35FusedMoE.gateUpV3Rows = gateUpV3Rows }
+        if let gateUpV3SGs { Qwen35FusedMoE.gateUpV3Simdgroups = gateUpV3SGs }
+        if let gateUpV3Chunk { Qwen35FusedMoE.gateUpV3Chunk = gateUpV3Chunk }
+        if let gateUpV3Stage { Qwen35FusedMoE.gateUpV3Stage = gateUpV3Stage != 0 }
+        if let maxT { Qwen35FusedMoE.maxTokens = maxT }
         await Qwen35TextMTPRegistration.register()
         let container = try await LLMModelFactory.shared.loadContainer(
             from: URL(fileURLWithPath: modelDir, isDirectory: true),
@@ -86,9 +104,10 @@ struct A3BFusedMoEBenchCommand: AsyncParsableCommand {
         let (batchValues, widthValues, layerT, flipB) = (
             ints(batches), ints(widths), ints(layerTokens), ints(flipBatches)
         )
-        let (warmup, iters, promptTokens, decodeTokens) = (
-            warmup, iters, promptTokens, decodeTokens
+        let (warmup, iters, promptTokens, decodeTokens, rounds) = (
+            warmup, iters, promptTokens, decodeTokens, concurrencyRounds
         )
+        let stops = ints(stopAfters)
         for mode in modes.split(separator: ",").map(String.init) {
             switch mode {
             case "layer":
@@ -99,7 +118,12 @@ struct A3BFusedMoEBenchCommand: AsyncParsableCommand {
                 try await container.perform { context in
                     try Self.moeChain(
                         model: context.model, pool: pool, tokenCounts: layerT, modes: fused,
-                        warmup: warmup, iters: iters)
+                        stops: stops, warmup: warmup, iters: iters)
+                }
+            case "concurrency":
+                try await container.perform { context in
+                    try Self.concurrency(
+                        model: context.model, pool: pool, tokenCounts: layerT, rounds: rounds)
                 }
             case "forward":
                 for f in fused {
@@ -334,61 +358,194 @@ struct A3BFusedMoEBenchCommand: AsyncParsableCommand {
 
     // MARK: - moe chain
 
-    /// Times the MoE blocks alone on real captured inputs: a dependent chain
-    /// over every layer, `x_{l+1} = tap_{l+1} + 0 * y_l` (the two glue ops are
-    /// the same for every mode).
-    static func moeChain(
-        model: any LanguageModel, pool: [Int32], tokenCounts: [Int],
-        modes: [Qwen35FusedMoE.Mode], warmup: Int, iters: Int
-    ) throws {
-        let maxT = tokenCounts.max() ?? 16
+    private static func captureTaps(model: any LanguageModel, pool: [Int32], count: Int)
+        throws -> [MLXArray]
+    {
         var taps: [MLXArray] = []
         Qwen35FusedMoE.mode = .off
         Qwen35FusedMoE.inputTap = { taps.append($0) }
         let cache = model.newCache(parameters: nil)
-        let ids = MLXArray(Array(pool.prefix(64 + maxT)), [1, 64 + maxT])
+        let ids = MLXArray(Array(pool.prefix(count)), [1, count])
         eval(model(LMInput.Text(tokens: ids), cache: cache, state: nil).logits)
         eval(taps)
         Qwen35FusedMoE.inputTap = nil
-        let blocks = moeBlocks(model).map { $0.1 as! UnaryLayer }
+        return taps
+    }
+
+    /// Times the MoE blocks alone on real captured inputs: a dependent chain
+    /// over every layer, `x_{l+1} = tap_{l+1} + 0 * y_l` (the two glue ops are
+    /// the same for every mode). `stops` 1 / 2 time the router-only and
+    /// router + gate/up prefixes; for stock, the same stock graph prefixes.
+    static func moeChain(
+        model: any LanguageModel, pool: [Int32], tokenCounts: [Int],
+        modes: [Qwen35FusedMoE.Mode], stops: [Int], warmup: Int, iters: Int
+    ) throws {
+        let maxT = tokenCounts.max() ?? 16
+        let taps = try captureTaps(model: model, pool: pool, count: 64 + maxT)
+        let modules = moeBlocks(model).map(\.1)
+        let blocks = modules.map { $0 as! UnaryLayer }
         let zero = MLXArray(Float(0)).asType(.bfloat16)
+        // Bytes per expert: packed 4-bit weights plus bf16 scales and biases.
+        let h = taps[0].dim(-1)
+        let inter = 512
+        let gateUpBytes = Double(2 * inter * h / 2 + 2 * 2 * inter * (h / 64) * 2)
+        let downBytes = Double(h * inter / 2 + 2 * h * (inter / 64) * 2)
         for tcount in tokenCounts {
-            let h = taps[0].dim(-1)
             let xs = taps.map { $0.reshaped([-1, h])[64 ..< (64 + tcount)].reshaped([1, tcount, h]) }
             eval(xs)
-            for mode in modes {
-                Qwen35FusedMoE.mode = mode
-                var graph: [Double] = []
-                var gpu: [Double] = []
-                for it in 0 ..< (warmup + iters) {
-                    Stream().synchronize()
-                    let t0 = DispatchTime.now().uptimeNanoseconds
-                    var y = blocks[0](xs[0])
-                    for l in 1 ..< blocks.count { y = blocks[l](xs[l] + zero * y) }
-                    let t1 = DispatchTime.now().uptimeNanoseconds
-                    eval(y)
-                    Stream().synchronize()
-                    let t2 = DispatchTime.now().uptimeNanoseconds
-                    if it >= warmup {
-                        graph.append(Double(t1 - t0) / 1e3 / Double(blocks.count))
-                        gpu.append(Double(t2 - t1) / 1e3 / Double(blocks.count))
-                    }
-                }
-                Qwen35FusedMoE.mode = .off
-                let med: ([Double]) -> Double = { $0.sorted()[$0.count / 2] }
-                emit([
-                    "schema": "macprovider.a3b-fused-moe.moe-chain.v1",
-                    "tokens": tcount, "fused": mode.rawValue, "layers": blocks.count,
-                    "graph_us_per_layer_p50": med(graph), "gpu_us_per_layer_p50": med(gpu),
-                    "gate_up_rows": Qwen35FusedMoE.gateUpRows, "down_rows": Qwen35FusedMoE.downRows,
-                    "down_sgs": Qwen35FusedMoE.downSimdgroups,
-                    "kernel_version": Qwen35FusedMoE.kernelVersion,
-                    "router_rows": Qwen35FusedMoE.routerRows,
-                    "gate_up_tokens": Qwen35FusedMoE.gateUpTokens,
-                    "down_tpb": Qwen35FusedMoE.downTokensPerBlock,
-                    "stop_after": Qwen35FusedMoE.labStopAfter,
-                ])
+            var distinct: [Int] = []
+            for (l, m) in modules.enumerated() {
+                let inds = Qwen35FusedMoE.labRouter(m, xs[l])!.0
+                distinct.append(Set(inds.asType(.int32).asArray(Int32.self)).count)
             }
+            let distinctMean = Double(distinct.reduce(0, +)) / Double(max(distinct.count, 1))
+            for mode in modes {
+                var byStop: [Int: Double] = [:]
+                for stop in stops {
+                    if mode == .router && stop > 0 { continue }
+                    Qwen35FusedMoE.mode = mode
+                    Qwen35FusedMoE.labStopAfter = mode == .full ? stop : 0
+                    let call: (Int, MLXArray) -> MLXArray = { l, x in
+                        if mode == .off && stop > 0 {
+                            return Qwen35FusedMoE.labStockStage(modules[l], x, stopAfter: stop)!
+                        }
+                        return blocks[l](x)
+                    }
+                    var graph: [Double] = []
+                    var gpu: [Double] = []
+                    for it in 0 ..< (warmup + iters) {
+                        Stream().synchronize()
+                        let t0 = DispatchTime.now().uptimeNanoseconds
+                        var y = call(0, xs[0])
+                        for l in 1 ..< blocks.count { y = call(l, xs[l] + zero * y) }
+                        let t1 = DispatchTime.now().uptimeNanoseconds
+                        eval(y)
+                        Stream().synchronize()
+                        let t2 = DispatchTime.now().uptimeNanoseconds
+                        if it >= warmup {
+                            graph.append(Double(t1 - t0) / 1e3 / Double(blocks.count))
+                            gpu.append(Double(t2 - t1) / 1e3 / Double(blocks.count))
+                        }
+                    }
+                    Qwen35FusedMoE.mode = .off
+                    Qwen35FusedMoE.labStopAfter = 0
+                    let med: ([Double]) -> Double = { $0.sorted()[$0.count / 2] }
+                    byStop[stop] = med(gpu)
+                    emit([
+                        "schema": "macprovider.a3b-fused-moe.moe-chain.v2",
+                        "tokens": tcount, "fused": mode.rawValue, "layers": blocks.count,
+                        "stop_after": stop,
+                        "graph_us_per_layer_p50": med(graph), "gpu_us_per_layer_p50": med(gpu),
+                        "distinct_experts_mean": distinctMean,
+                        "kernel_version": Qwen35FusedMoE.kernelVersion,
+                        "gate_up_v3": [
+                            Qwen35FusedMoE.gateUpV3Rows, Qwen35FusedMoE.gateUpV3Simdgroups,
+                            Qwen35FusedMoE.gateUpV3Chunk, Qwen35FusedMoE.gateUpV3Stage ? 1 : 0,
+                        ],
+                        "gate_up_tokens_v2": Qwen35FusedMoE.gateUpTokens,
+                        "down_tpb_v2": Qwen35FusedMoE.downTokensPerBlock,
+                        "kernel_objects": Qwen35FusedMoE.labKernelCount,
+                    ])
+                }
+                if let s1 = byStop[1], let s2 = byStop[2] {
+                    let gu = s2 - s1
+                    var record: [String: Any] = [
+                        "schema": "macprovider.a3b-fused-moe.stage.v1",
+                        "tokens": tcount, "fused": mode.rawValue,
+                        "distinct_experts_mean": distinctMean,
+                        "router_glue_us": s1, "gate_up_us": gu,
+                        "gate_up_gbps": (distinctMean + 1) * gateUpBytes / gu / 1e3,
+                    ]
+                    if let s0 = byStop[0] {
+                        record["layer_us"] = s0
+                        record["rest_us"] = s0 - s2
+                        record["down_gbps"] = (distinctMean + 1) * downBytes / (s0 - s2) / 1e3
+                    }
+                    emit(record)
+                }
+            }
+        }
+    }
+
+    // MARK: - concurrency
+
+    /// Builds several fused MoE calls with no eval between them (the same block
+    /// on two inputs and several blocks; one stream, then two streams) and
+    /// checks every result is bit-equal to the same call evaluated alone.
+    static func concurrency(
+        model: any LanguageModel, pool: [Int32], tokenCounts: [Int], rounds: Int
+    ) throws {
+        let maxT = tokenCounts.max() ?? 16
+        let taps = try captureTaps(model: model, pool: pool, count: 64 + 2 * maxT)
+        let modules = Array(moeBlocks(model).map(\.1).prefix(4))
+        let blocks = modules.map { $0 as! UnaryLayer }
+        let h = taps[0].dim(-1)
+        let savedMax = Qwen35FusedMoE.maxTokens
+        Qwen35FusedMoE.maxTokens = max(savedMax, maxT)
+        defer {
+            Qwen35FusedMoE.maxTokens = savedMax
+            Qwen35FusedMoE.mode = .off
+        }
+        Qwen35FusedMoE.mode = .full
+        for tcount in tokenCounts {
+            var calls: [(Int, MLXArray)] = []
+            for l in 0 ..< blocks.count {
+                for v in 0 ..< 2 {
+                    let start = 64 + v * tcount
+                    let x = taps[l].reshaped([-1, h])[start ..< (start + tcount)]
+                        .reshaped([1, tcount, h])
+                    calls.append((l, x))
+                }
+            }
+            eval(calls.map(\.1))
+            let before = Qwen35FusedMoE.fusedCalls
+            var serial: [MLXArray] = []
+            for (l, x) in calls {
+                let y = blocks[l](x)
+                eval(y)
+                serial.append(y)
+            }
+            let fusedTaken = Qwen35FusedMoE.fusedCalls - before == calls.count
+            func mismatches(_ ys: [MLXArray]) -> (Int, Int) {
+                var arrays = 0
+                var elements = 0
+                for (a, b) in zip(ys, serial) {
+                    let n = (a .!= b).asType(.int32).sum().item(Int.self)
+                    if n > 0 { arrays += 1 }
+                    elements += n
+                }
+                return (arrays, elements)
+            }
+            var oneStream = (0, 0)
+            var twoStreams = (0, 0)
+            for _ in 0 ..< rounds {
+                // One stream: every call in one graph, evaluated together.
+                let ys = calls.map { blocks[$0.0]($0.1) }
+                eval(ys)
+                let m1 = mismatches(ys)
+                oneStream = (oneStream.0 + m1.0, oneStream.1 + m1.1)
+                // Two streams: half the calls on each new stream, one eval.
+                let half = calls.count / 2
+                let ya = Stream.withNewDefaultStream {
+                    calls[..<half].map { blocks[$0.0]($0.1) }
+                }
+                let yb = Stream.withNewDefaultStream {
+                    calls[half...].map { blocks[$0.0]($0.1) }
+                }
+                eval(ya + yb)
+                let m2 = mismatches(ya + yb)
+                twoStreams = (twoStreams.0 + m2.0, twoStreams.1 + m2.1)
+            }
+            emit([
+                "schema": "macprovider.a3b-fused-moe.concurrency.v1",
+                "tokens": tcount, "calls": calls.count, "blocks": blocks.count,
+                "rounds": rounds, "fused_taken": fusedTaken,
+                "kernel_version": Qwen35FusedMoE.kernelVersion,
+                "one_stream_mismatch_arrays": oneStream.0,
+                "one_stream_mismatch_elements": oneStream.1,
+                "two_streams_mismatch_arrays": twoStreams.0,
+                "two_streams_mismatch_elements": twoStreams.1,
+            ])
         }
     }
 
@@ -448,6 +605,9 @@ struct A3BFusedMoEBenchCommand: AsyncParsableCommand {
             "tokens_per_forward": batch * width,
             "iters": iters,
             "fused_block_calls_per_forward": Double(calls) / Double(warmup + iters),
+            "kernel_objects": Qwen35FusedMoE.labKernelCount,
+            "kernel_version": Qwen35FusedMoE.kernelVersion,
+            "max_t": Qwen35FusedMoE.maxTokens,
             "graph_build_ms_p50": q(graphMS, 0.5),
             "gpu_eval_ms_p50": q(evalMS, 0.5),
             "gpu_eval_ms_p10": q(evalMS, 0.1),
