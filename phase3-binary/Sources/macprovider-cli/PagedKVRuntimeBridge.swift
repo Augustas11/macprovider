@@ -886,14 +886,23 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
     }
 
-    /// Lockstep decode of `steps` tokens inside one `container.perform`; each
-    /// row samples with its own parameters (`ContinuousBatchRowSampler`).
-    /// Returns every sampled token in generation order so the scheduler can
-    /// apply stop/stream/receipt without dropping intermediates. The throughput
-    /// harness uses the same seam.
     func decodeLockstepWindow(
         rows inputs: [ContinuousBatchDecodeInput],
         steps: Int
+    ) async throws -> [ContinuousBatchDecodeOutcome] {
+        try await decodeLockstepWindow(rows: inputs, steps: steps, onStep: nil)
+    }
+
+    /// Lockstep decode of `steps` tokens inside one `container.perform`; each
+    /// row samples with its own parameters (`ContinuousBatchRowSampler`).
+    /// Returns every sampled token in generation order so the scheduler can
+    /// apply stop/stream/receipt without dropping intermediates, and reports
+    /// each step's tokens to `onStep` as soon as they are on the host. The
+    /// throughput harness uses the same seam.
+    func decodeLockstepWindow(
+        rows inputs: [ContinuousBatchDecodeInput],
+        steps: Int,
+        onStep: ContinuousBatchDecodeWindowStepObserver?
     ) async throws -> [ContinuousBatchDecodeOutcome] {
         guard steps >= 1 else { return [] }
         guard !inputs.isEmpty else { return [] }
@@ -910,7 +919,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             let decoded = try self.performDecode(
                 model: context.model,
                 supportedInputs: supportedInputs,
-                steps: steps
+                steps: steps,
+                onStep: onStep
             )
             return await self.flushingNativeMTPDrafterColumns(
                 targetModel: context.model,
@@ -1298,6 +1308,17 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
     }
 
+    /// Ends a running window at the next step boundary once `cancelInFlight`
+    /// has started, instead of finishing every remaining step.
+    private func throwIfCancelRequested() throws {
+        lock.lock()
+        let cancelled = cancelRequested
+        lock.unlock()
+        if cancelled {
+            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_backend_cancelled")
+        }
+    }
+
     private func beginOperation() -> Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -1403,9 +1424,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     private func performDecode(
         model: any LanguageModel,
         supportedInputs: [ContinuousBatchDecodeInput],
-        steps: Int
+        steps: Int,
+        onStep: ContinuousBatchDecodeWindowStepObserver? = nil
     ) throws -> [ContinuousBatchDecodeOutcome] {
         let decodeSteps = max(1, steps)
+        let requestIDs = supportedInputs.map(\.requestID)
         var rowStates = supportedInputs.map {
             self.rowState(
                 for: $0.requestID,
@@ -1427,7 +1450,6 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
         var capturedColumns: [Int: [(token: Int, hidden: MLXArray)]] = [:]
 
-        let requestIDs = supportedInputs.map(\.requestID)
         var session = copyDecodeSession()
         let batchedCaches: [PagedKVSharedLayerBatch]
         if let existing = session, existing.requestIDs == requestIDs {
@@ -1493,6 +1515,14 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 for index in supportedInputs.indices {
                     collected[index].append(stepTokens[index])
                 }
+                try throwIfCancelRequested()
+                // The compiled writeback assumes every target step ran, so
+                // this path streams but never ends the window early.
+                _ = onStep?(ContinuousBatchDecodeWindowStep(
+                    stepIndex: stepIndex,
+                    requestIDs: requestIDs,
+                    tokens: stepTokens
+                ))
             }
             Stream().synchronize()
             sampledByRow = collected
@@ -1558,13 +1588,26 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     collected[index].append(stepSampled[index])
                 }
                 currentTokens = stepSampled
+                try throwIfCancelRequested()
+                if let onStep, !onStep(ContinuousBatchDecodeWindowStep(
+                    stepIndex: stepIndex,
+                    requestIDs: requestIDs,
+                    tokens: stepSampled
+                )) {
+                    break
+                }
             }
             sampledByRow = collected
             batchedCaches.forEach { $0.syncRowsFromBatch() }
         }
 
+        // Every row ran the same steps: all of them, or fewer only when the
+        // step observer ended the window.
+        let ranSteps = sampledByRow.first?.count ?? 0
         guard sampledByRow.count == supportedInputs.count,
-              sampledByRow.allSatisfy({ $0.count == decodeSteps }) else {
+              ranSteps >= 1,
+              ranSteps == decodeSteps || onStep != nil,
+              sampledByRow.allSatisfy({ $0.count == ranSteps }) else {
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_logits_shape")
         }
         // Hybrid recurrent decoders (Qwen3.5/Qwen3.8) are exact only when the

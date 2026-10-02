@@ -843,6 +843,20 @@ enum ContinuousBatchDecodeOutcome: Sendable, Equatable {
     }
 }
 
+/// Tokens sampled by one step inside a lockstep window, in the window's row
+/// order. Streamed so buyers see each token when it is sampled instead of in
+/// window-sized bursts; the window's returned outcomes stay authoritative.
+struct ContinuousBatchDecodeWindowStep: Sendable, Equatable {
+    let stepIndex: Int
+    let requestIDs: [String]
+    let tokens: [Int]
+}
+
+/// Called synchronously after each window step's tokens are on the host.
+/// Returning false lets the backend end the window after this step; every
+/// returned row then carries `stepIndex + 1` tokens.
+typealias ContinuousBatchDecodeWindowStepObserver = @Sendable (ContinuousBatchDecodeWindowStep) -> Bool
+
 protocol ContinuousBatchSchedulerBackend: Sendable {
     /// Prefill commits the whole prompt. The final chunk samples the first
     /// generated token from its last-position logits so the prompt partition
@@ -858,6 +872,15 @@ protocol ContinuousBatchSchedulerBackend: Sendable {
     func decodeLockstepWindow(
         rows: [ContinuousBatchDecodeInput],
         steps: Int
+    ) async throws -> [ContinuousBatchDecodeOutcome]
+    /// Same window, reporting each step's sampled tokens to `onStep` as soon
+    /// as they exist. Streamed tokens MUST equal the returned `tokens` prefix.
+    /// The backend MAY end the window early only when `onStep` returns false,
+    /// and then with the same token count for every row.
+    func decodeLockstepWindow(
+        rows: [ContinuousBatchDecodeInput],
+        steps: Int,
+        onStep: ContinuousBatchDecodeWindowStepObserver?
     ) async throws -> [ContinuousBatchDecodeOutcome]
     /// Return backend-owned native MTP proposal tokens by request ID. A nil
     /// return means this backend has no drafter source; the scheduler may use
@@ -934,6 +957,16 @@ extension ContinuousBatchSchedulerBackend {
         guard rows.isEmpty else {
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_native_mtp_backend_unavailable")
         }
+    }
+
+    /// Backends without step reporting run the plain window; the scheduler
+    /// then delivers the whole window when it returns.
+    func decodeLockstepWindow(
+        rows: [ContinuousBatchDecodeInput],
+        steps: Int,
+        onStep: ContinuousBatchDecodeWindowStepObserver?
+    ) async throws -> [ContinuousBatchDecodeOutcome] {
+        try await decodeLockstepWindow(rows: rows, steps: steps)
     }
 
     func decodeLockstepWindow(
@@ -1054,6 +1087,44 @@ protocol ContinuousBatchSchedulerReplayAuthority: Sendable {
     /// so a re-claim by a different body is never deleted. Best-effort: a
     /// release that fails leaves the claim standing, which is the safe side.
     func release(_ key: ContinuousBatchSchedulerReplayKey)
+}
+
+/// Lets a running lockstep window end once every row no longer needs it.
+/// The scheduler marks rows; the backend reads it from inside the model hop.
+final class ContinuousBatchDecodeWindowControl: @unchecked Sendable {
+    private let lock = NSLock()
+    private let requestIDs: Set<String>
+    /// Row is done once the window has completed this step index.
+    private var doneAfterStep: [String: Int] = [:]
+
+    init(requestIDs: [String]) {
+        self.requestIDs = Set(requestIDs)
+    }
+
+    /// A row that reached a terminal token at step `s` still needs step
+    /// `s + 1`, which writes that token's KV for terminal-cache retention.
+    func markTerminal(_ requestID: String, atStep step: Int) {
+        mark(requestID, doneAfterStep: step + 1)
+    }
+
+    /// A cancelled row retains nothing, so it needs no further step.
+    func markCancelled(_ requestID: String) {
+        mark(requestID, doneAfterStep: 0)
+    }
+
+    func shouldContinue(afterStep step: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard doneAfterStep.count == requestIDs.count else { return true }
+        return doneAfterStep.values.contains { $0 > step }
+    }
+
+    private func mark(_ requestID: String, doneAfterStep step: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard requestIDs.contains(requestID) else { return }
+        doneAfterStep[requestID] = min(doneAfterStep[requestID] ?? Int.max, step)
+    }
 }
 
 final class ContinuousBatchTokenDeliveryCapacity: @unchecked Sendable {
@@ -1564,6 +1635,21 @@ actor ContinuousBatchScheduler {
         }
     }
 
+    /// Why a decoding row leaves `activeDecode` after its latest token.
+    private enum DecodeRowCompletion {
+        case terminal(ContinuousBatchSchedulerTerminalStatus)
+        case failed(errorCode: String)
+    }
+
+    /// Per-row progress of the lockstep window that is currently running.
+    /// Rows cannot be released mid-window (the backend still writes their
+    /// blocks), so a completion reached while streaming waits for the window.
+    private struct StreamedWindowRow {
+        var tokens: [Int] = []
+        var completion: DecodeRowCompletion?
+        var halted = false
+    }
+
     private struct PendingTerminalDelivery {
         let result: ContinuousBatchSchedulerResult
         var waiters: [Waiter]
@@ -1641,6 +1727,8 @@ actor ContinuousBatchScheduler {
     /// SPEC-038 AC-6c: decoding rows asked to end as a normal `.stop` at their
     /// next applied token (a serial tool turn completed its first tool call).
     private var earlyStopIDs: Set<String> = []
+    private var decodeWindowControl: ContinuousBatchDecodeWindowControl?
+    private var streamedWindowRows: [String: StreamedWindowRow] = [:]
     private var draining = false
     private var cleanupFailedClosed = false
     private var backendCancellationPending = false
@@ -1828,7 +1916,14 @@ actor ContinuousBatchScheduler {
         if pendingTerminalDeliveries[requestID] != nil {
             return
         }
+        // A row that already reached its terminal or failure token inside the
+        // running window has a decided outcome, as it would have had the token
+        // been applied at a one-step hop boundary; the window boundary applies it.
+        if streamedWindowRows[requestID]?.completion != nil {
+            return
+        }
         cancelledIDs.insert(requestID)
+        decodeWindowControl?.markCancelled(requestID)
         ensurePump()
     }
 
@@ -3742,13 +3837,50 @@ actor ContinuousBatchScheduler {
         record(.decodeFirstStep)
         sharedForwardCalls += 1
         maxObservedBatchDepth = max(maxObservedBatchDepth, prepared.count)
+        // Multi-step windows stream each step's tokens to buyers as they are
+        // sampled; the window still runs inside one backend hop.
+        let windowIDs = prepared.map { $0.row.request.id }
+        var stepObserver: ContinuousBatchDecodeWindowStepObserver?
+        var stepContinuation: AsyncStream<ContinuousBatchDecodeWindowStep>.Continuation?
+        var stepConsumer: Task<Void, Never>?
+        if windowSteps > 1 {
+            let control = ContinuousBatchDecodeWindowControl(requestIDs: windowIDs)
+            for id in windowIDs where cancelledIDs.contains(id) {
+                control.markCancelled(id)
+            }
+            decodeWindowControl = control
+            streamedWindowRows = Dictionary(uniqueKeysWithValues: windowIDs.map { ($0, StreamedWindowRow()) })
+            let (stream, continuation) = AsyncStream<ContinuousBatchDecodeWindowStep>.makeStream()
+            stepContinuation = continuation
+            stepConsumer = Task {
+                for await step in stream {
+                    self.applyStreamedDecodeStep(step)
+                }
+            }
+            stepObserver = { step in
+                continuation.yield(step)
+                return control.shouldContinue(afterStep: step.stepIndex)
+            }
+        }
         let outcomes: [ContinuousBatchDecodeOutcome]
+        let windowResult: Result<[ContinuousBatchDecodeOutcome], any Error>
         do {
-            outcomes = try await backend.decodeLockstepWindow(
+            windowResult = .success(try await backend.decodeLockstepWindow(
                 rows: prepared.map(\.input),
-                steps: windowSteps
-            )
-            try validateDecodeOutputStructure(outcomes, expectedRequestIDs: prepared.map { $0.row.request.id })
+                steps: windowSteps,
+                onStep: stepObserver
+            ))
+        } catch {
+            windowResult = .failure(error)
+        }
+        stepContinuation?.finish()
+        await stepConsumer?.value
+        decodeWindowControl = nil
+        let streamed = streamedWindowRows
+        streamedWindowRows = [:]
+        do {
+            outcomes = try windowResult.get()
+            try validateDecodeOutputStructure(outcomes, expectedRequestIDs: windowIDs)
         } catch {
             for item in prepared {
                 _ = await endDecodeStep(item.row.handle)
@@ -3810,7 +3942,11 @@ actor ContinuousBatchScheduler {
             let sampled = output.tokens
             let invalid = sampled.isEmpty
                 || sampled.contains { !(0..<configuration.vocabularySize).contains($0) }
-            guard invalid else { continue }
+            let streamedTokens = streamed[output.requestID]?.tokens ?? []
+            // Streamed tokens are already visible to buyers; the window result
+            // must extend them exactly or the row's history is unknowable.
+            let streamMismatch = !invalid && !sampled.starts(with: streamedTokens)
+            guard invalid || streamMismatch else { continue }
             invalidOutputIDs.insert(output.requestID)
             record(.localPreparationFailed)
             if let removed = activeDecode.removeValue(forKey: output.requestID) {
@@ -3819,7 +3955,9 @@ actor ContinuousBatchScheduler {
                     removed,
                     status: .requestFailed,
                     errorCode: released
-                        ? "continuous_batching_invalid_decode_token"
+                        ? (invalid
+                            ? "continuous_batching_invalid_decode_token"
+                            : "continuous_batching_decode_stream_mismatch")
                         : "continuous_batching_cleanup_failed"
                 )
                 if !released { return }
@@ -3830,32 +3968,90 @@ actor ContinuousBatchScheduler {
             healthyOutputIDs.contains($0.requestID)
                 && stillActive.contains($0.requestID)
                 && !invalidOutputIDs.contains($0.requestID)
-        })
+        }, streamed: streamed)
     }
 
-    private func applyDecodeOutputs(_ outputs: [ContinuousBatchDecodeOutput]) async {
+    /// Applies one streamed window step: stop filtering, visibility, and
+    /// delivery run now; release and terminal finish wait for the window.
+    private func applyStreamedDecodeStep(_ step: ContinuousBatchDecodeWindowStep) {
+        guard let control = decodeWindowControl, !cleanupFailedClosed else { return }
+        for (id, token) in zip(step.requestIDs, step.tokens) {
+            guard var streamed = streamedWindowRows[id],
+                  !streamed.halted,
+                  streamed.completion == nil else { continue }
+            guard streamed.tokens.count == step.stepIndex,
+                  activeDecode[id] != nil,
+                  !cancelledIDs.contains(id),
+                  (0..<configuration.vocabularySize).contains(token) else {
+                // The window result decides this row once the hop returns.
+                streamed.halted = true
+                streamedWindowRows[id] = streamed
+                continue
+            }
+            streamed.tokens.append(token)
+            if let completion = advanceDecodeRow(token, requestID: id) {
+                streamed.completion = completion
+                control.markTerminal(id, atStep: step.stepIndex)
+            }
+            streamedWindowRows[id] = streamed
+        }
+    }
+
+    private func applyDecodeOutputs(
+        _ outputs: [ContinuousBatchDecodeOutput],
+        streamed: [String: StreamedWindowRow] = [:]
+    ) async {
         var byID: [String: ContinuousBatchDecodeOutput] = [:]
         for output in outputs {
             byID[output.requestID] = output
         }
+        for id in activeDecode.keys.sorted(by: admissionPrecedes) {
+            guard byID[id] != nil, let completion = streamed[id]?.completion else { continue }
+            byID.removeValue(forKey: id)
+            await completeDecodeRow(id, completion)
+            if cleanupFailedClosed { return }
+        }
         var maxSteps = 1
-        for output in outputs {
+        for output in byID.values {
             let count = output.tokens.isEmpty ? 1 : output.tokens.count
             maxSteps = max(maxSteps, count)
         }
         for step in 0..<maxSteps {
             for id in activeDecode.keys.sorted(by: admissionPrecedes) {
                 guard let row = activeDecode[id], let output = byID[id] else { continue }
-                let sampled = output.tokens
-                guard step < sampled.count else { continue }
-                await applyToken(sampled[step], to: row)
+                let index = (streamed[id]?.tokens.count ?? 0) + step
+                guard index < output.tokens.count else { continue }
+                await applyToken(output.tokens[index], to: row)
                 if cleanupFailedClosed { return }
             }
         }
     }
 
     private func applyToken(_ token: Int, to initialRow: Row) async {
-        guard var row = activeDecode[initialRow.request.id] else { return }
+        guard let completion = advanceDecodeRow(token, requestID: initialRow.request.id) else { return }
+        await completeDecodeRow(initialRow.request.id, completion)
+    }
+
+    private func completeDecodeRow(_ requestID: String, _ completion: DecodeRowCompletion) async {
+        guard let row = activeDecode.removeValue(forKey: requestID) else { return }
+        switch completion {
+        case .terminal(let status):
+            await finishTerminal(row, status: status)
+        case .failed(let errorCode):
+            let released = await release(row.handle)
+            finish(
+                row,
+                status: .requestFailed,
+                errorCode: released ? errorCode : "continuous_batching_cleanup_failed"
+            )
+        }
+    }
+
+    /// Appends one sampled token, applies stop filtering, and delivers the
+    /// tokens that became visible. Returns how the row must leave decode, if
+    /// it must; the caller performs that release/finish.
+    private func advanceDecodeRow(_ token: Int, requestID: String) -> DecodeRowCompletion? {
+        guard var row = activeDecode[requestID] else { return nil }
         row.generatedTokens.append(token)
         row.currentToken = token
         row.pendingOutputTokens.append(token)
@@ -3866,16 +4062,8 @@ actor ContinuousBatchScheduler {
             stopSequences: row.request.stopTokenSequences
         ) {
             guard stopLength <= row.pendingOutputTokens.count else {
-                activeDecode.removeValue(forKey: row.request.id)
-                let released = await release(row.handle)
-                finish(
-                    row,
-                    status: .requestFailed,
-                    errorCode: released
-                        ? "continuous_batching_stop_filter_state_invalid"
-                        : "continuous_batching_cleanup_failed"
-                )
-                return
+                activeDecode[row.request.id] = row
+                return .failed(errorCode: "continuous_batching_stop_filter_state_invalid")
             }
             row.pendingOutputTokens.removeLast(stopLength)
             row.stopCause = stopLength == 1 && row.request.modelStopTokenIDs.contains(token)
@@ -3922,27 +4110,15 @@ actor ContinuousBatchScheduler {
             firstIndex: firstVisibleIndex,
             row: row
         ) {
-            activeDecode.removeValue(forKey: row.request.id)
-            let released = await release(row.handle)
             // Post-token, like the `.deliveryBackpressure` thrown at the
             // waiter above: this row was decoding when its last consumer
             // refused an event. The terminal result is replayable to a later
             // duplicate of the same request id, so it must not carry the
             // pre-admission code — that one is retryable and this is not.
-            finish(
-                row,
-                status: .requestFailed,
-                errorCode: released
-                    ? ContinuousBatchSchedulerError.deliveryBackpressureCode
-                    : "continuous_batching_cleanup_failed"
-            )
-            return
+            return .failed(errorCode: ContinuousBatchSchedulerError.deliveryBackpressureCode)
         }
 
-        if let terminalStatus {
-            activeDecode.removeValue(forKey: row.request.id)
-            await finishTerminal(row, status: terminalStatus)
-        }
+        return terminalStatus.map { .terminal($0) }
     }
 
     /// Normal terminal for a row already removed from active tracking. The

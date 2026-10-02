@@ -1846,6 +1846,17 @@ private final class MSBSchedulerWindowTimingBackend: ContinuousBatchSchedulerBac
         return result
     }
 
+    func decodeLockstepWindow(
+        rows: [ContinuousBatchDecodeInput],
+        steps: Int,
+        onStep: ContinuousBatchDecodeWindowStepObserver?
+    ) async throws -> [ContinuousBatchDecodeOutcome] {
+        let started = DispatchTime.now().uptimeNanoseconds
+        let result = try await inner.decodeLockstepWindow(rows: rows, steps: steps, onStep: onStep)
+        recordWindow(elapsed: DispatchTime.now().uptimeNanoseconds &- started)
+        return result
+    }
+
     private func recordDecodeCall() {
         lock.lock()
         decodeCalls += 1

@@ -2212,6 +2212,74 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         backend.finish(requestID: "row-b")
     }
 
+    /// The window reports each step's tokens as sampled (equal to the returned
+    /// prefix) and ends after a step when the observer asks it to.
+    func testLockstepWindowStreamsStepsAndEndsWhenObserverStops() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+        for stopAfterFirstStep in [false, true] {
+            let descriptor = Self.bridgeDescriptor()
+            let container = ModelContainer(context: ModelContext(
+                configuration: ModelConfiguration(id: descriptor.modelID),
+                model: RuntimeBridgeFakeModel(nextTokenByInput: [1: 4, 4: 5, 12: 7, 7: 8]),
+                processor: StandInUserInputProcessor(),
+                tokenizer: RuntimeBridgeFakeTokenizer()
+            ))
+            let backend = PagedKVSharedForwardBackend(container: container, descriptor: descriptor, layerCount: 1)
+            let allocator = try PagedKVBlockAllocator(blockSizeTokens: descriptor.blockSizeTokens, maxPhysicalBlocks: 16)
+            let aHandle = try await allocator.allocate(conversationKey: "row-a", maxTokens: 8)
+            let bHandle = try await allocator.allocate(conversationKey: "row-b", maxTokens: 8)
+            _ = try await allocator.extend(aHandle, by: 2)
+            _ = try await allocator.extend(bHandle, by: 2)
+            try await allocator.beginDecodeStep(aHandle)
+            try await allocator.beginDecodeStep(bHandle)
+            let steps = StepRecorder()
+            let window = try await backend.decodeLockstepWindow(
+                rows: [
+                    try await Self.decodeInput(
+                        requestID: "row-a", currentToken: 1, handle: aHandle, allocator: allocator,
+                        committedKVTokenCount: 0, extendBy: 0, beginDecode: false, targetOffset: 2
+                    ),
+                    try await Self.decodeInput(
+                        requestID: "row-b", currentToken: 12, handle: bHandle, allocator: allocator,
+                        committedKVTokenCount: 0, extendBy: 0, beginDecode: false, targetOffset: 2
+                    ),
+                ],
+                steps: 2,
+                onStep: { step in
+                    steps.append(step)
+                    return !stopAfterFirstStep
+                }
+            )
+            try await allocator.endDecodeStep(aHandle)
+            try await allocator.endDecodeStep(bHandle)
+
+            var tokensByID: [String: [Int]] = [:]
+            for outcome in window {
+                guard case .output(let output) = outcome else {
+                    XCTFail("expected window outputs, got \(outcome)")
+                    return
+                }
+                tokensByID[output.requestID] = output.tokens
+            }
+            let recorded = steps.steps()
+            if stopAfterFirstStep {
+                XCTAssertEqual(tokensByID["row-a"], [4])
+                XCTAssertEqual(tokensByID["row-b"], [7])
+                XCTAssertEqual(recorded.map(\.tokens), [[4, 7]])
+            } else {
+                XCTAssertEqual(tokensByID["row-a"], [4, 5])
+                XCTAssertEqual(tokensByID["row-b"], [7, 8])
+                XCTAssertEqual(recorded.map(\.tokens), [[4, 7], [5, 8]])
+            }
+            XCTAssertEqual(recorded.map(\.stepIndex), Array(0 ..< recorded.count))
+            XCTAssertTrue(recorded.allSatisfy { $0.requestIDs == ["row-a", "row-b"] })
+            backend.finish(requestID: "row-a")
+            backend.finish(requestID: "row-b")
+        }
+    }
+
     func testRealSharedForwardBackendCancelWaitsForActivePrefill() async throws {
         guard PagedKVMetallibGate.defaultMetallibExists() else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
@@ -3916,5 +3984,22 @@ private final class RuntimeBridgeReplayAuthority: ContinuousBatchSchedulerReplay
         lock.lock()
         defer { lock.unlock() }
         keys.remove("\(key.requestID):\(key.fingerprintSHA256.base64EncodedString())")
+    }
+}
+
+private final class StepRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [ContinuousBatchDecodeWindowStep] = []
+
+    func append(_ step: ContinuousBatchDecodeWindowStep) {
+        lock.lock()
+        stored.append(step)
+        lock.unlock()
+    }
+
+    func steps() -> [ContinuousBatchDecodeWindowStep] {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
     }
 }

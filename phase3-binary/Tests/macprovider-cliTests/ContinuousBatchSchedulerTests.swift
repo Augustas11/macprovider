@@ -4327,6 +4327,220 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(metrics.sharedForwardCalls, 1)
     }
 
+    /// Buyers see each window step's token when it is sampled, not when the
+    /// whole lockstep window returns.
+    func testLockstepWindowDeliversEachStepBeforeTheWindowReturns() async throws {
+        let afterFirstStep = AsyncGate()
+        let recorder = TokenEventRecorder()
+        let backend = StreamingWindowBackend(
+            scripts: ["solo": [10, 11, 12, 13, 14, 15]],
+            gateAfterStep: 0,
+            gate: afterFirstStep
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            tokenDeliveryBufferLimit: 64,
+            maxDecodeLockstepWindow: 8,
+            backend: backend
+        )
+        let submitted = Task {
+            try await scheduler.submit(
+                .init(id: "solo", conversationKey: "", promptTokens: [1], maxOutputTokens: 6),
+                tokenSink: { recorder.append($0) }
+            )
+        }
+        // Prefill token plus the window's first step, while the window is
+        // still blocked inside the backend hop.
+        try await eventually { recorder.events().count == 2 }
+        let finishedWhileBlocked = await backend.finishedWindowCount()
+        XCTAssertEqual(finishedWhileBlocked, 0)
+        XCTAssertEqual(recorder.events().map(\.token), [10, 11])
+
+        await afterFirstStep.open()
+        let result = try await submitted.value
+        XCTAssertEqual(result.terminalStatus, .length)
+        XCTAssertEqual(result.outputTokens, [10, 11, 12, 13, 14, 15])
+        XCTAssertEqual(result.completionTokens, 6)
+        let events = recorder.events()
+        XCTAssertEqual(events.map(\.token), result.outputTokens)
+        XCTAssertEqual(events.map(\.tokenIndex), Array(0 ..< 6))
+        let ran = await backend.stepsRunPerWindow()
+        XCTAssertEqual(ran, [5])
+    }
+
+    /// A stop token mid-window truncates the stream exactly, and the window
+    /// ends one step later (that step writes the stop token's KV) instead of
+    /// running every remaining step.
+    func testStopTokenMidWindowTruncatesAndEndsWindowEarly() async throws {
+        let recorder = TokenEventRecorder()
+        let backend = StreamingWindowBackend(
+            scripts: ["stop": [10, 11, 12, 99, 13, 14, 15, 16, 17]],
+            stepDelayNanoseconds: 20_000_000
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            tokenDeliveryBufferLimit: 64,
+            maxDecodeLockstepWindow: 8,
+            backend: backend
+        )
+        let result = try await scheduler.submit(
+            .init(
+                id: "stop",
+                conversationKey: "",
+                promptTokens: [1],
+                maxOutputTokens: 20,
+                stopTokenSequences: [[99]],
+                modelStopTokenIDs: [99]
+            ),
+            tokenSink: { recorder.append($0) }
+        )
+        XCTAssertEqual(result.terminalStatus, .stop)
+        XCTAssertEqual(result.generatedTokens, [10, 11, 12, 99])
+        XCTAssertEqual(result.outputTokens, [10, 11, 12])
+        XCTAssertEqual(result.completionTokens, 4)
+        XCTAssertEqual(recorder.events().map(\.token), [10, 11, 12])
+        // Stop sampled at window step 2; step 3 still runs, then the window ends.
+        let ran = await backend.stepsRunPerWindow()
+        XCTAssertEqual(ran, [4])
+    }
+
+    /// Cancelling a row mid-window stops its streamed delivery at once and
+    /// ends the window at the next step boundary.
+    func testCancelMidWindowStopsDeliveryAndEndsWindowEarly() async throws {
+        let afterFirstStep = AsyncGate()
+        let recorder = TokenEventRecorder()
+        let backend = StreamingWindowBackend(
+            scripts: ["cancel": Array(10 ..< 30)],
+            gateAfterStep: 0,
+            gate: afterFirstStep
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            tokenDeliveryBufferLimit: 64,
+            maxDecodeLockstepWindow: 8,
+            backend: backend
+        )
+        let submitted = Task {
+            try await scheduler.submit(
+                .init(id: "cancel", conversationKey: "", promptTokens: [1], maxOutputTokens: 20),
+                tokenSink: { recorder.append($0) }
+            )
+        }
+        try await eventually { recorder.events().count == 2 }
+        await scheduler.cancel(requestID: "cancel")
+        await afterFirstStep.open()
+        let result = try await submitted.value
+        XCTAssertEqual(result.terminalStatus, .cancelled)
+        XCTAssertEqual(recorder.events().map(\.token), [10, 11])
+        let ran = await backend.stepsRunPerWindow()
+        XCTAssertEqual(ran, [2])
+    }
+
+    /// Two rows share a window: each sees its own tokens per step, a stop on
+    /// one row does not end the window for the other, and usage is exact.
+    func testLockstepWindowStreamsEveryRowAndKeepsUsageExact() async throws {
+        let recorder = TokenEventRecorder()
+        let backend = StreamingWindowBackend(scripts: [
+            "a": [10, 11, 99, 12, 13, 14],
+            "b": [20, 21, 22, 23, 24, 25],
+        ])
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 2,
+            tokenDeliveryBufferLimit: 64,
+            maxDecodeLockstepWindow: 8,
+            maxPrefillRowsPerIteration: 2,
+            backend: backend
+        )
+        async let a = scheduler.submit(
+            .init(
+                id: "a",
+                conversationKey: "",
+                promptTokens: [1],
+                maxOutputTokens: 6,
+                stopTokenSequences: [[99]]
+            ),
+            tokenSink: { recorder.append($0) }
+        )
+        async let b = scheduler.submit(
+            .init(id: "b", conversationKey: "", promptTokens: [2], maxOutputTokens: 6),
+            tokenSink: { recorder.append($0) }
+        )
+        let (aResult, bResult) = try await (a, b)
+        XCTAssertEqual(aResult.terminalStatus, .stop)
+        XCTAssertEqual(aResult.outputTokens, [10, 11])
+        XCTAssertEqual(aResult.completionTokens, 3)
+        XCTAssertEqual(bResult.terminalStatus, .length)
+        XCTAssertEqual(bResult.outputTokens, [20, 21, 22, 23, 24, 25])
+        XCTAssertEqual(bResult.completionTokens, 6)
+        let events = recorder.events()
+        XCTAssertEqual(events.filter { $0.requestID == "a" }.map(\.token), [10, 11])
+        XCTAssertEqual(events.filter { $0.requestID == "b" }.map(\.token), bResult.outputTokens)
+    }
+
+    /// Delivery backpressure reached mid-window decides the row: the waiter's
+    /// later stop must not turn it into a cancellation, so a replay carries the
+    /// backpressure code exactly as a one-token hop would.
+    func testDeliveryBackpressureMidWindowKeepsBackpressureTerminal() async throws {
+        let sinkGate = AsyncGate()
+        let windowGate = AsyncGate()
+        let backend = StreamingWindowBackend(
+            scripts: ["slow-sink": Array(10 ..< 30)],
+            gateAfterStep: 1,
+            gate: windowGate
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            tokenDeliveryTimeoutNanoseconds: 50_000_000,
+            tokenDeliveryBufferLimit: 1,
+            maxDecodeLockstepWindow: 8,
+            backend: backend
+        )
+        let request = ContinuousBatchSchedulerRequest(
+            id: "slow-sink",
+            conversationKey: "",
+            promptTokens: [1],
+            maxOutputTokens: 20
+        )
+        let blocked = Task {
+            try await scheduler.submit(request, tokenSink: { _ in await sinkGate.wait() })
+        }
+        do {
+            _ = try await blocked.value
+            XCTFail("expected mid-window delivery backpressure")
+        } catch ContinuousBatchSchedulerError.deliveryBackpressure {
+        }
+        // Let the stopped waiter finish (and try to cancel) before the window ends.
+        try await Task.sleep(nanoseconds: 200_000_000)
+        await windowGate.open()
+        await sinkGate.open()
+        try await eventually { await scheduler.metrics().slotsFree == 1 }
+        let replay = try await scheduler.submit(request)
+        XCTAssertEqual(replay.terminalStatus, .requestFailed)
+        XCTAssertEqual(replay.errorCode, ContinuousBatchSchedulerError.deliveryBackpressureCode)
+        let ran = await backend.stepsRunPerWindow()
+        XCTAssertEqual(ran, [3])
+    }
+
+    /// Streamed tokens are already visible, so a window result that does not
+    /// extend them exactly fails the row instead of rewriting its history.
+    func testStreamedTokensThatDisagreeWithWindowResultFailTheRow() async throws {
+        let backend = StreamingWindowBackend(
+            scripts: ["drift": [10, 11, 12, 13, 14]],
+            streamedTokenOffset: 1
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            tokenDeliveryBufferLimit: 64,
+            maxDecodeLockstepWindow: 8,
+            backend: backend
+        )
+        let result = try await scheduler.submit(
+            .init(id: "drift", conversationKey: "", promptTokens: [1], maxOutputTokens: 5)
+        )
+        XCTAssertEqual(result.terminalStatus, .requestFailed)
+        XCTAssertEqual(result.errorCode, "continuous_batching_decode_stream_mismatch")
+    }
+
     func testQueuedJoinForcesOneTokenDecodeThenWindowResumes() async throws {
         let decodeGate = AsyncGate()
         let backend = WindowRecordingBackend(
@@ -6377,6 +6591,100 @@ private actor WindowRecordingBackend: ContinuousBatchSchedulerBackend {
 
     private static func nextToken(script: [Int], generated: Int) -> Int {
         script[min(generated, max(0, script.count - 1))]
+    }
+}
+
+/// Scripted lockstep window that reports every step through `onStep` and
+/// honours the observer's request to end the window.
+private actor StreamingWindowBackend: ContinuousBatchSchedulerBackend {
+    private let scripts: [String: [Int]]
+    private let gateAfterStep: Int?
+    private let gate: AsyncGate?
+    private let stepDelayNanoseconds: UInt64
+    private let streamedTokenOffset: Int
+    private var stepsRun: [Int] = []
+
+    init(
+        scripts: [String: [Int]],
+        gateAfterStep: Int? = nil,
+        gate: AsyncGate? = nil,
+        stepDelayNanoseconds: UInt64 = 0,
+        streamedTokenOffset: Int = 0
+    ) {
+        self.scripts = scripts
+        self.gateAfterStep = gateAfterStep
+        self.gate = gate
+        self.stepDelayNanoseconds = stepDelayNanoseconds
+        self.streamedTokenOffset = streamedTokenOffset
+    }
+
+    func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
+        rows.map { row in
+            ContinuousBatchPrefillOutput(
+                requestID: row.requestID,
+                sampledToken: row.sampleFirstToken ? token(for: row.requestID, at: 0) : nil
+            )
+        }
+    }
+
+    func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
+        rows.map { row in
+            .output(ContinuousBatchDecodeOutput(
+                requestID: row.requestID,
+                token: token(for: row.requestID, at: row.generatedTokens.count)
+            ))
+        }
+    }
+
+    func decodeLockstepWindow(
+        rows: [ContinuousBatchDecodeInput],
+        steps: Int
+    ) async throws -> [ContinuousBatchDecodeOutcome] {
+        try await decodeLockstepWindow(rows: rows, steps: steps, onStep: nil)
+    }
+
+    func decodeLockstepWindow(
+        rows: [ContinuousBatchDecodeInput],
+        steps: Int,
+        onStep: ContinuousBatchDecodeWindowStepObserver?
+    ) async throws -> [ContinuousBatchDecodeOutcome] {
+        var collected: [[Int]] = rows.map { _ in [] }
+        var ran = 0
+        for step in 0 ..< steps {
+            let tokens = rows.map { token(for: $0.requestID, at: $0.generatedTokens.count + step) }
+            for index in rows.indices {
+                collected[index].append(tokens[index])
+            }
+            ran += 1
+            let keepGoing = onStep?(ContinuousBatchDecodeWindowStep(
+                stepIndex: step,
+                requestIDs: rows.map(\.requestID),
+                tokens: tokens.map { $0 + streamedTokenOffset }
+            )) ?? true
+            if step == gateAfterStep, let gate {
+                await gate.wait()
+            }
+            if stepDelayNanoseconds > 0 {
+                try await Task.sleep(nanoseconds: stepDelayNanoseconds)
+            }
+            if !keepGoing { break }
+        }
+        stepsRun.append(ran)
+        return zip(rows, collected).map { row, tokens in
+            .output(ContinuousBatchDecodeOutput(requestID: row.requestID, tokens: tokens))
+        }
+    }
+
+    func cancelInFlight() async {
+        await gate?.open()
+    }
+
+    func stepsRunPerWindow() -> [Int] { stepsRun }
+    func finishedWindowCount() -> Int { stepsRun.count }
+
+    private func token(for requestID: String, at index: Int) -> Int {
+        let script = scripts[requestID] ?? [0]
+        return script[min(index, script.count - 1)]
     }
 }
 
