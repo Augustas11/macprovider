@@ -57,6 +57,12 @@
 //   - `settlement_receipt_audit_outbox_rows_total{operation}` uses closed
 //     operation values "drained" / "poisoned" / "pruned".
 //
+//   - `money_sqlite_write_duration_seconds{component,operation,outcome}` uses
+//     closed component and operation sets. Route snapshot components include
+//     "route_snapshot", "route_snapshot_journal", and
+//     "route_snapshot_materializer"; route snapshot operations include
+//     "route_snapshot_insert" and "route_snapshot_materialize".
+//
 // No label takes an operator- or attacker-controllable string directly.
 // A `Reset` method exists for test isolation.
 package metrics
@@ -521,7 +527,8 @@ func (m *Metrics) AddSettlementReceiptAuditOutboxRows(operation string, rows int
 func allowMoneySQLiteComponent(component string) bool {
 	switch component {
 	case "billing_hot_path", "request_log_identity", "billing_reload_config", "route_snapshot", "wal_checkpoint",
-		"ledger_recovery", "settlement_attempt_output", "settlement_pool_labels", "settlement_receipt":
+		"route_snapshot_journal", "route_snapshot_materializer", "ledger_recovery", "settlement_attempt_output",
+		"settlement_pool_labels", "settlement_receipt":
 		return true
 	default:
 		return false
@@ -530,7 +537,7 @@ func allowMoneySQLiteComponent(component string) bool {
 
 func allowMoneySQLiteOperation(operation string) bool {
 	switch operation {
-	case "route_snapshot_insert":
+	case "route_snapshot_insert", "route_snapshot_materialize":
 		return true
 	default:
 		return false

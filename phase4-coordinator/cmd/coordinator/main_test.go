@@ -314,6 +314,42 @@ func TestMoneySQLiteWALCheckpointerRunsAfterIdle(t *testing.T) {
 	assertWALCheckpointObservations(t, observer)
 }
 
+func TestRouteSnapshotJournalWALCheckpointerUsesJournalComponent(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "route-snapshot-journal.db")
+	writerDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(dbPath))
+	if err != nil {
+		t.Fatalf("open writer sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = writerDB.Close() })
+	writerDB.SetMaxOpenConns(1)
+	if _, err := writerDB.Exec(`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	if _, err := writerDB.Exec(`INSERT INTO t (v) VALUES ('route')`); err != nil {
+		t.Fatalf("insert route snapshot journal row: %v", err)
+	}
+
+	checkpointDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(dbPath))
+	if err != nil {
+		t.Fatalf("open checkpoint sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = checkpointDB.Close() })
+	checkpointDB.SetMaxOpenConns(1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	observer := &componentWALObserver{component: routeSnapshotJournalWALComponent, called: make(chan string, 16), durations: make(chan struct{}, 4)}
+	cfg := routeSnapshotJournalWALCheckpointerConfig(dbPath)
+	cfg.PollInterval = 10 * time.Millisecond
+	cfg.IdleInterval = time.Hour
+	cfg.MinTimeout = time.Second
+	cfg.MaxTimeout = time.Second
+	cfg.BusyTimeout = 10 * time.Millisecond
+	startMoneySQLiteWALCheckpointerWithConfig(ctx, checkpointDB, observer, zerolog.Nop(), fixedIdleTracker{idleFor: 0}, cfg)
+
+	assertComponentWALCheckpointObservations(t, observer)
+}
+
 func TestMoneySQLiteActiveCheckpointDoesNotEscalateToTruncate(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "active-checkpoint.db")
 	db, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(dbPath))
@@ -815,12 +851,75 @@ func TestSettlementReceiptAuditOutboxDrainerPrunesAfterDrainError(t *testing.T) 
 	assertStringSignal(t, observer.rowOps, "poisoned", "audit outbox poisoned row metric")
 }
 
+func TestSettlementReceiptAuditOutboxIdleCatchupIsBounded(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	store := &settlementReceiptAuditOutboxDrainerStub{
+		drainedBatches: []int{0, 100, 100, 100, 100, 100, 100},
+		drainCalled:    make(chan struct{}, 8),
+		pruneCalled:    make(chan struct{}, 4),
+		statsCalled:    make(chan struct{}, 4),
+	}
+
+	startSettlementReceiptAuditOutboxDrainerWithConfig(ctx, store, settlementReceiptAuditSinkStub{}, 90, nil, fixedIdleTracker{idleFor: time.Hour}, zerolog.Nop(), settlementReceiptAuditOutboxDrainerConfig{
+		BatchLimit:     100,
+		CatchupBatches: 5,
+		PruneLimit:     500,
+		DrainInterval:  10 * time.Millisecond,
+		DrainTimeout:   time.Second,
+		StatsTimeout:   time.Second,
+	})
+
+	assertSignal(t, store.drainCalled, "startup audit outbox drain")
+	assertSignal(t, store.pruneCalled, "startup audit outbox prune")
+	assertSignal(t, store.statsCalled, "startup audit outbox stats")
+	for i := 0; i < 5; i++ {
+		assertSignal(t, store.drainCalled, "bounded idle audit outbox catch-up drain")
+	}
+	cancel()
+	assertNoSignal(t, store.drainCalled, "idle audit outbox catch-up sixth batch")
+	assertSignal(t, store.pruneCalled, "idle audit outbox catch-up prune")
+	assertNoSignal(t, store.pruneCalled, "idle audit outbox catch-up extra prune")
+	assertSignal(t, store.statsCalled, "idle audit outbox catch-up stats")
+	assertNoSignal(t, store.statsCalled, "idle audit outbox catch-up extra stats")
+}
+
+func TestSettlementReceiptAuditOutboxIdleCatchupStopsOnShortBatch(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	store := &settlementReceiptAuditOutboxDrainerStub{
+		drainedBatches: []int{0, 100, 25, 100},
+		drainCalled:    make(chan struct{}, 5),
+		pruneCalled:    make(chan struct{}, 4),
+		statsCalled:    make(chan struct{}, 4),
+	}
+
+	startSettlementReceiptAuditOutboxDrainerWithConfig(ctx, store, settlementReceiptAuditSinkStub{}, 90, nil, fixedIdleTracker{idleFor: time.Hour}, zerolog.Nop(), settlementReceiptAuditOutboxDrainerConfig{
+		BatchLimit:     100,
+		CatchupBatches: 5,
+		PruneLimit:     500,
+		DrainInterval:  10 * time.Millisecond,
+		DrainTimeout:   time.Second,
+		StatsTimeout:   time.Second,
+	})
+
+	assertSignal(t, store.drainCalled, "startup audit outbox drain")
+	assertSignal(t, store.pruneCalled, "startup audit outbox prune")
+	assertSignal(t, store.statsCalled, "startup audit outbox stats")
+	assertSignal(t, store.drainCalled, "idle audit outbox full catch-up batch")
+	assertSignal(t, store.drainCalled, "idle audit outbox short catch-up batch")
+	cancel()
+	assertNoSignal(t, store.drainCalled, "idle audit outbox catch-up after short batch")
+	assertSignal(t, store.pruneCalled, "idle audit outbox short catch-up prune")
+	assertNoSignal(t, store.pruneCalled, "idle audit outbox short catch-up extra prune")
+	assertSignal(t, store.statsCalled, "idle audit outbox short catch-up stats")
+	assertNoSignal(t, store.statsCalled, "idle audit outbox short catch-up extra stats")
+}
+
 func TestSettlementReceiptAuditOutboxShutdownFlushDrains(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	store := &settlementReceiptAuditOutboxDrainerStub{
-		drainedBatches: []int{0, 100, 100, 50},
-		drainCalled:    make(chan struct{}, 4),
+		drainedBatches: []int{0, 100, 100, 50, 0},
+		drainCalled:    make(chan struct{}, 5),
 		pruneCalled:    make(chan struct{}, 2),
 	}
 
@@ -833,6 +932,7 @@ func TestSettlementReceiptAuditOutboxShutdownFlushDrains(t *testing.T) {
 	assertSignal(t, store.drainCalled, "shutdown audit outbox drain")
 	assertSignal(t, store.drainCalled, "shutdown audit outbox second batch")
 	assertSignal(t, store.drainCalled, "shutdown audit outbox final batch")
+	assertSignal(t, store.drainCalled, "shutdown audit outbox zero-progress stop")
 	assertNoSignal(t, store.drainCalled, "shutdown audit outbox extra batch")
 }
 
@@ -861,6 +961,7 @@ func TestSettlementReceiptAuditOutboxShutdownFlushContinuesAfterPartialError(t *
 	assertSignal(t, store.drainCalled, "shutdown audit outbox first partial batch")
 	assertSignal(t, store.drainCalled, "shutdown audit outbox second partial batch")
 	assertSignal(t, store.drainCalled, "shutdown audit outbox final successful batch")
+	assertSignal(t, store.drainCalled, "shutdown audit outbox zero-progress stop")
 	assertNoSignal(t, store.drainCalled, "shutdown audit outbox poison-only spin")
 }
 
@@ -893,6 +994,12 @@ type walObserverStub struct {
 	durations chan struct{}
 }
 
+type componentWALObserver struct {
+	component string
+	called    chan string
+	durations chan struct{}
+}
+
 type walProgressObserver struct {
 	checkpointed         chan int64
 	latestBusy           atomic.Int64
@@ -917,7 +1024,7 @@ func (o *blockingWALObserver) ObserveSQLiteWALCheckpointDuration(_ string, _ str
 }
 
 func (s *walObserverStub) ObserveSQLiteWALCheckpoint(component, pageClass, outcome string, _ int64) {
-	if component == "wal_checkpoint" && outcome == "success" {
+	if component == moneySQLiteWALCheckpointComponent && outcome == "success" {
 		select {
 		case s.called <- pageClass:
 		default:
@@ -926,7 +1033,25 @@ func (s *walObserverStub) ObserveSQLiteWALCheckpoint(component, pageClass, outco
 }
 
 func (s *walObserverStub) ObserveSQLiteWALCheckpointDuration(component, outcome string, _ time.Duration) {
-	if component == "wal_checkpoint" && outcome == "success" && s.durations != nil {
+	if component == moneySQLiteWALCheckpointComponent && outcome == "success" && s.durations != nil {
+		select {
+		case s.durations <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (s *componentWALObserver) ObserveSQLiteWALCheckpoint(component, pageClass, outcome string, _ int64) {
+	if component == s.component && outcome == "success" {
+		select {
+		case s.called <- pageClass:
+		default:
+		}
+	}
+}
+
+func (s *componentWALObserver) ObserveSQLiteWALCheckpointDuration(component, outcome string, _ time.Duration) {
+	if component == s.component && outcome == "success" && s.durations != nil {
 		select {
 		case s.durations <- struct{}{}:
 		default:
@@ -935,7 +1060,7 @@ func (s *walObserverStub) ObserveSQLiteWALCheckpointDuration(component, outcome 
 }
 
 func (o *walProgressObserver) ObserveSQLiteWALCheckpoint(component, pageClass, outcome string, pages int64) {
-	if component != "wal_checkpoint" || outcome != "success" {
+	if component != moneySQLiteWALCheckpointComponent || outcome != "success" {
 		return
 	}
 	switch pageClass {
@@ -956,6 +1081,30 @@ func (o *walProgressObserver) ObserveSQLiteWALCheckpoint(component, pageClass, o
 }
 
 func (o *walProgressObserver) ObserveSQLiteWALCheckpointDuration(string, string, time.Duration) {}
+
+func assertComponentWALCheckpointObservations(t *testing.T, observer *componentWALObserver) {
+	t.Helper()
+	seen := map[string]bool{}
+	deadline := time.After(time.Second)
+	for len(seen) < 3 {
+		select {
+		case pageClass := <-observer.called:
+			seen[pageClass] = true
+		case <-deadline:
+			t.Fatalf("checkpoint observations for %q=%v, want busy/log/checkpointed", observer.component, seen)
+		}
+	}
+	for _, pageClass := range []string{"busy", "log", "checkpointed"} {
+		if !seen[pageClass] {
+			t.Fatalf("missing checkpoint page class %q for %q in %v", pageClass, observer.component, seen)
+		}
+	}
+	select {
+	case <-observer.durations:
+	case <-time.After(time.Second):
+		t.Fatalf("missing checkpoint duration observation for %q", observer.component)
+	}
+}
 
 type fixedIdleTracker struct {
 	idleFor time.Duration
@@ -990,6 +1139,7 @@ type settlementReceiptAuditOutboxDrainerStub struct {
 	pruned                int64
 	drainCalled           chan struct{}
 	pruneCalled           chan struct{}
+	statsCalled           chan struct{}
 	statsPending          int64
 	statsPoisoned         int64
 	statsRetainedPoisoned int64
@@ -1016,6 +1166,9 @@ func (s *settlementReceiptAuditOutboxDrainerStub) PruneSettlementReceiptAuditOut
 }
 
 func (s *settlementReceiptAuditOutboxDrainerStub) SettlementReceiptAuditOutboxStats(context.Context) (billing.SettlementReceiptAuditOutboxStats, error) {
+	if s.statsCalled != nil {
+		s.statsCalled <- struct{}{}
+	}
 	stats := billing.SettlementReceiptAuditOutboxStats{
 		PendingRows:          s.statsPending,
 		PoisonedRows:         s.statsPoisoned,

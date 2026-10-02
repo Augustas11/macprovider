@@ -676,7 +676,11 @@ SELECT account_scope, request_id, attempt_n, provider_id,
 	return row, true, nil
 }
 
-func (s *Store) insertPersistedRouteSnapshot(ctx context.Context, row persistedRouteSnapshotRow) error {
+func (s *Store) insertPersistedRouteSnapshot(ctx context.Context, row persistedRouteSnapshotRow) (err error) {
+	started := time.Now()
+	defer func() {
+		s.observeSQLiteWrite("route_snapshot_materializer", "route_snapshot_materialize", err, time.Since(started))
+	}()
 	if s == nil {
 		return fmt.Errorf("billing store is closed")
 	}

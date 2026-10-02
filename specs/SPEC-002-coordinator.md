@@ -1,7 +1,14 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.4 (2026-09-30, authenticated dispatch output limit)
+**Version:** 1.6.5 (2026-10-02, bounded SQLite WAL ownership)
 **Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9); SPEC-003 FR-C9.4 composed contract — base AuthState enum (`bearer_validated`, `self_minted`, `bearerless_duplicate`) introduced in v0.8.3; `mint_failed` reserved value added in v0.8.4.
+
+**Change log v1.6.5 (2026-10-02, issue #1793):** The primary money database
+and dedicated route-snapshot journal each have one coordinator-owned bounded
+checkpoint worker. They use separate checkpoint handles; their writer handles
+disable automatic checkpointing. Checkpointing is PASSIVE while buyer traffic
+is active and TRUNCATE is idle-only. Other isolated coordinator SQLite stores
+retain their existing ownership policy and are outside this requirement.
 
 **Change log v1.6.4 (2026-09-30, authenticated dispatch output limit):**
 The coordinator accepts `X-MacProvider-Internal-Max-Output-Tokens` only under
@@ -803,7 +810,7 @@ insertion points for each. See Section 3 for hook-point locations.
     |   (SSE passthrough)                                      |
     |                                                          |
     |   Operator: /healthz  /poolz  /admin/blacklist           |
-    |   Storage:  SQLite (WAL) — tokens, request_log, snapshots|
+    |   Storage:  SQLite (WAL) — primary + snapshot journal   |
     +----------------------------------------------------------+
               ^                    ^
               |                    |
@@ -2163,8 +2170,8 @@ Returns HTTP 401 if the operator key is missing or invalid.
 **FR-O3. SIGTERM gracefully drains in-flight buyer requests.**
 On SIGTERM: stop accepting new connections, send `drain` to all
 providers (FR-P9), wait for in-flight requests (up to 30s configurable
-timeout), force-close remaining with 503, close all WebSockets, flush
-SQLite WAL, exit 0. On SIGINT, same with 5s timeout.
+timeout), force-close remaining with 503, close all WebSockets, perform only
+bounded final SQLite maintenance, exit 0. On SIGINT, same with 5s timeout.
 
 **FR-O4. Provider auth token CLI.**
 The coordinator ships with a `coordinator-cli` tool:
@@ -2181,9 +2188,12 @@ The coordinator ships with a `coordinator-cli` tool:
 Token storage schema: see Section 7.3.
 
 **FR-O5. Persist durable state to SQLite.**
-SQLite (WAL mode) persists, across coordinator restarts:
+SQLite (WAL mode) persists, across coordinator restarts, in the primary
+coordinator database and the dedicated append-only route-snapshot journal:
 - `provider_tokens` (auth tokens; restored on restart)
 - `request_log` (billing/attribution; append-only ledger)
+- route-time verification snapshots (journaled before dispatch and
+  materialized into the primary money database)
 - `pool_snapshots` (periodic debug history, every 5 min — **debugging
   only, not restored on restart**)
 
@@ -2195,8 +2205,15 @@ heartbeats. This means a coordinator restart causes ~30s of buyer-facing
 instance deployment. The `pool_snapshots` table exists only to help an
 operator debug "what did the pool look like 5 min before crash."
 
-SQLite file: `coordinator.db` (configurable via `--db-path`). Daily
-backup via cron + rsync to operator.
+SQLite files governed by this requirement are `coordinator.db` (configurable
+via `--db-path`) and its dedicated route-snapshot journal. Each of these two
+physical WAL files MUST have exactly one coordinator-owned checkpoint worker
+on a connection separate from its writer pool. Their writer handles MUST
+disable SQLite automatic checkpointing. A checkpoint worker MUST make bounded
+PASSIVE progress while traffic is active, MAY truncate only after the
+configured idle condition, and MUST leave a failed or timed-out WAL for a later
+retry. Daily backup covers both files. Isolated audit and provider-event stores
+are outside this money-path WAL ownership requirement.
 
 (Scope item in § 2 "SQLite persistence for provider auth, request log,
 pool state" should be read as: auth + log persisted across restarts;
@@ -2423,10 +2440,12 @@ restarts (SPEC-001 FR-13 exponential backoff). Buyer requests fail with
 connection errors during downtime. HA is deferred to SPEC-002.next.
 
 **NFR-3. Storage.**
-SQLite in WAL mode. Single database file. Daily backup via file copy
-(cp + rsync to operator's machine). No replication in v1. Expected
-database size: <100MB after 6 months of moderate traffic (~10K
-requests/day).
+SQLite in WAL mode. The coordinator uses a primary database and a dedicated
+append-only route-snapshot journal. Each of these two physical WALs has one
+bounded checkpoint owner; their writer handles do not auto-checkpoint. Daily
+backup includes both files. Isolated coordinator SQLite stores retain their
+own existing lifecycle. No replication in v1. Retention and the Postgres
+cutover required for the 1B-tokens/day target are tracked by issue #1793.
 
 **NFR-4. Logging.**
 JSON Lines to stdout, captured by systemd journal. Each log line
