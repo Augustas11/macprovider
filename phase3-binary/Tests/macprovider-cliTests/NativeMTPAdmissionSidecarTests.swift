@@ -1078,6 +1078,26 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         }
     }
 
+    /// Cross-language golden: the Python sidecar generator
+    /// (scripts/native_mtp_admission_sidecar.py) and this consumer compute the
+    /// same native_mtp_admission_tuple_sha256 for the same sidecar bytes.
+    func testGoldenSidecarTupleIdentityMatchesPythonGenerator() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("scripts/tests/fixtures/native_mtp_admission_golden.json")
+        let data = try Data(contentsOf: url)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let reserialized = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
+        XCTAssertEqual(reserialized, data, "generator bytes are not the canonical sorted form")
+        XCTAssertEqual(
+            try NativeMTPAdmissionSidecar.admissionTupleSHA256ForTesting(object),
+            "fd54231d7ae6d1caf1e96c4e54a2c8217fad600b6493cea8c88dc1d9dd058182"
+        )
+    }
+
     func testReleaseEnvelopeBindsSignedPromptBoundIntoCapabilityAndTupleIdentity() throws {
         let capped = try makeReleaseEnvelopeFixture(entryEdit: { $0["max_prompt_tokens"] = 4096 })
         defer { try? FileManager.default.removeItem(at: capped.base.root) }
