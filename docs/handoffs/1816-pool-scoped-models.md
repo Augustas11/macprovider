@@ -68,7 +68,7 @@ The triage below is **unverified**: it is a first sort from the result details o
 
 ## Local state
 
-- Campaign worktree: `/Users/augstar/macprovider-1816-pool-models`. Lane worktrees (merged, safe to remove): `macprovider-1816-{coord,cli,ops,updater,e2efix,fixA,fixB,vm,e2eA,e2eB}`, `macprovider-artifact-feed-activation`.
+- Campaign worktree: `/Users/augstar/macprovider-1816-pool-models`, the only #1816 worktree. The lane worktrees and branches were removed on 2026-10-02, after checking that each one was merged into the campaign branch.
 - Studio: `~/lab-1816-e2e` and `~/build-1816-e2e` (about 6 GB, no processes).
 - The VM `macprovider-1690` is stopped.
 - Raw audit transcripts are kept outside the repo; they trip the secret preflight on key-marker excerpts.
