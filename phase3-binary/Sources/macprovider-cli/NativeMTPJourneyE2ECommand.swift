@@ -129,19 +129,43 @@ private final class NativeMTPJourneyRunner {
         let gateRecorder = NativeMTPLoadGateRecorder()
         _ = await native.installLabNativeMTPLoadGateRecorder(gateRecorder)
 
+        // A throwing step is a failed step, recorded with its error; the run
+        // continues so one failure does not hide the others.
         var steps: [NativeMTPJourneyStep] = []
-        steps.append(try await serialOracle(ordinary: ordinary, native: native, recorder: recorder))
-        steps.append(try await cacheStateBoundary(ordinary: ordinary, native: native, recorder: recorder, override: override))
-        steps.append(try await streamingStop(ordinary: ordinary, native: native, recorder: recorder))
-        steps.append(try await mixedMultirowAndCapacity(
-            ordinary: ordinary,
-            native: native,
-            recorder: recorder,
-            gateRecorder: gateRecorder,
-            container: fixture.runtimes.targetContainer
-        ))
-        steps.append(try await cancellation(ordinary: ordinary, native: native, recorder: recorder))
-        steps.append(try await selfTest(ordinary: ordinary, native: native, fixture: fixture))
+        func run(_ id: String, _ body: () async throws -> NativeMTPJourneyStep) async {
+            do {
+                steps.append(try await body())
+            } catch {
+                var failed = NativeMTPJourneyStep(id: id)
+                failed.check("completed_without_error", false)
+                failed.details["error"] = String(describing: error)
+                steps.append(failed)
+            }
+        }
+        await run("step-04-serial-token-oracle") {
+            try await serialOracle(ordinary: ordinary, native: native, recorder: recorder)
+        }
+        await run("step-05-cache-state-boundary") {
+            try await cacheStateBoundary(ordinary: ordinary, native: native, recorder: recorder, override: override)
+        }
+        await run("step-06-streaming-stop") {
+            try await streamingStop(ordinary: ordinary, native: native, recorder: recorder)
+        }
+        await run("step-07-08-mixed-multirow-capacity") {
+            try await mixedMultirowAndCapacity(
+                ordinary: ordinary,
+                native: native,
+                recorder: recorder,
+                gateRecorder: gateRecorder,
+                container: fixture.runtimes.targetContainer
+            )
+        }
+        await run("step-09-cancellation") {
+            try await cancellation(ordinary: ordinary, native: native, recorder: recorder)
+        }
+        await run("step-12-native-selftest") {
+            try await selfTest(ordinary: ordinary, native: native, fixture: fixture)
+        }
         let passed = steps.allSatisfy(\.passed)
         let document: [String: Any] = [
             "schema": "macprovider.native-mtp-journey-hardware-result.v1",
@@ -283,7 +307,7 @@ private final class NativeMTPJourneyRunner {
                 maxTokens: 64 + 48 * row,
                 temperature: row % 2 == 0 ? 0 : 0.7,
                 topP: 1,
-                presencePenalty: ineligible ? 0.3 : nil
+                conversationKey: ineligible ? "journey-mixed-key-\(row)" : nil
             ))
         }
         let expected = try await complete(requests, runtime: ordinary, staggerMS: 150)
@@ -299,7 +323,7 @@ private final class NativeMTPJourneyRunner {
         }
         let nativeRows = paths.values.filter { $0 == DecodePath.nativeMTP.rawValue }.count
         let downgraded = reasons.values.filter { $0 == NativeMTPSelectorReason.capacityAboveNativeBound.rawValue }.count
-        let ineligible = reasons.values.filter { $0 == NativeMTPSelectorReason.logitControls.rawValue }.count
+        let ineligible = reasons.values.filter { $0 == NativeMTPSelectorReason.conversationKey.rawValue }.count
         step.check("mixed_paths_in_one_batch", nativeRows >= 1 && nativeRows <= maxNativeActiveRows && downgraded >= 1 && ineligible >= 1)
         let summary = gateRecorder.summary(requestIDs: Set(requests.compactMap(\.requestID)))
         step.check("depth_zero_hold_observed", summary.depthZeroRounds > 0)
@@ -462,7 +486,7 @@ private final class NativeMTPJourneyRunner {
         topP: Double,
         stop: [String]? = nil,
         stream: Bool = false,
-        presencePenalty: Double? = nil
+        conversationKey: String? = nil
     ) throws -> ChatCompletionRequest {
         var object: [String: Any] = [
             "model": modelID,
@@ -473,8 +497,9 @@ private final class NativeMTPJourneyRunner {
             "stream": stream,
         ]
         if let stop { object["stop"] = stop }
-        if let presencePenalty { object["presence_penalty"] = presencePenalty }
-        return try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: object)).withRequestID(id)
+        return try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: object))
+            .withRequestID(id)
+            .withConversationKey(conversationKey)
     }
 
     private func same(_ lhs: CompletionResult, _ rhs: CompletionResult) -> Bool {
