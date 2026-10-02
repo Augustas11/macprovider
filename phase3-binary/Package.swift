@@ -17,8 +17,11 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Lab: mlx-swift-lm fork branch perf/a3b-fused-moe checked out beside the repo.
-        .package(path: "../../a3b-lab-deps/mlx-swift-lm"),
+        // Lab: mlx-swift-lm fork branch perf/a3b-fused-moe (fused small-T Qwen3.5 MoE).
+        .package(
+            url: "https://github.com/Augustas11/mlx-swift-lm.git",
+            revision: "2714f708897830b5d53da8902389475f561b034f"
+        ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
             exact: "1.3.4"
