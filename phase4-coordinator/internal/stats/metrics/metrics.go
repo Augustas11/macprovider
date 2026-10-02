@@ -12,6 +12,8 @@
 //	settlement_receipt_audit_outbox_poisoned_rows               — Gauge
 //	settlement_receipt_audit_outbox_poisoned_retained_rows      — Gauge
 //	settlement_receipt_audit_outbox_oldest_pending_age_seconds  — Gauge
+//	settlement_receipt_audit_outbox_stats_stale                 — Gauge
+//	settlement_receipt_audit_outbox_stats_age_seconds           — Gauge
 //	settlement_receipt_audit_outbox_drain_total{outcome}        — Counter
 //	settlement_receipt_audit_outbox_rows_total{operation}       — Counter
 //
@@ -102,6 +104,8 @@ type Metrics struct {
 	SettlementReceiptAuditOutboxPoisonedRows            prometheus.Gauge
 	SettlementReceiptAuditOutboxPoisonedRetainedRows    prometheus.Gauge
 	SettlementReceiptAuditOutboxOldestPendingAgeSeconds prometheus.Gauge
+	SettlementReceiptAuditOutboxStatsStale              prometheus.Gauge
+	SettlementReceiptAuditOutboxStatsAgeSeconds         prometheus.Gauge
 	SettlementReceiptAuditOutboxDrainTotal              *prometheus.CounterVec
 	SettlementReceiptAuditOutboxRowsTotal               *prometheus.CounterVec
 	// CapacityOverClaimTotal is the issue-#764 over-claim tripwire. It is
@@ -284,6 +288,18 @@ func New(reg prometheus.Registerer) *Metrics {
 			prometheus.GaugeOpts{
 				Name: "settlement_receipt_audit_outbox_oldest_pending_age_seconds",
 				Help: "Age in seconds of the oldest undrained settlement receipt audit outbox row, or zero when none are pending.",
+			},
+		),
+		SettlementReceiptAuditOutboxStatsStale: f.NewGauge(
+			prometheus.GaugeOpts{
+				Name: "settlement_receipt_audit_outbox_stats_stale",
+				Help: "Whether the exported settlement receipt audit outbox gauges are stale because the latest exact stats query failed (1 stale, 0 fresh).",
+			},
+		),
+		SettlementReceiptAuditOutboxStatsAgeSeconds: f.NewGauge(
+			prometheus.GaugeOpts{
+				Name: "settlement_receipt_audit_outbox_stats_age_seconds",
+				Help: "Age in seconds of the last successful exact settlement receipt audit outbox stats observation.",
 			},
 		),
 		SettlementReceiptAuditOutboxDrainTotal: f.NewCounterVec(
@@ -508,6 +524,21 @@ func (m *Metrics) ObserveSettlementReceiptAuditOutbox(pendingRows, poisonedRows,
 	m.SetSettlementReceiptAuditOutboxPoisonedRows(poisonedRows)
 	m.SetSettlementReceiptAuditOutboxPoisonedRetainedRows(retainedPoisonedRows)
 	m.SetSettlementReceiptAuditOutboxOldestPendingAge(oldestPendingAge)
+}
+
+func (m *Metrics) ObserveSettlementReceiptAuditOutboxStatsHealth(stale bool, age time.Duration) {
+	if m == nil || m.SettlementReceiptAuditOutboxStatsStale == nil || m.SettlementReceiptAuditOutboxStatsAgeSeconds == nil {
+		return
+	}
+	if age < 0 {
+		age = 0
+	}
+	if stale {
+		m.SettlementReceiptAuditOutboxStatsStale.Set(1)
+	} else {
+		m.SettlementReceiptAuditOutboxStatsStale.Set(0)
+	}
+	m.SettlementReceiptAuditOutboxStatsAgeSeconds.Set(age.Seconds())
 }
 
 func (m *Metrics) IncSettlementReceiptAuditOutboxDrain(outcome string) {

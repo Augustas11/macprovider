@@ -178,14 +178,24 @@ around 2026-10-23. The fix takes effect at the next renewal (Wed 2026-09-30
 16:00 UTC), or earlier with a manual dispatch of
 `renew-autotune-static-feed-signed.yml`.
 
-## Next coordinator release — none assigned, net changes vs v1.8.210
+## Next coordinator release — v1.8.211 reserved, net changes vs v1.8.210
 
 `v1.8.210` was applied through the signed runtime-only updater on 2026-10-02.
-No coordinator, gateway, or Pearl-asset change has merged since that cut.
+`v1.8.211` is reserved by the 2026-10-02 Pearl deployment session for one
+signed runtime-only cut from current `main`. The payload changes only the
+coordinator binary and normative specs; no `dist/`, unit, nginx, gateway,
+updater, catalog, or verifier asset changed after v1.8.210. The live catalog
+must remain byte-for-byte unchanged and no full deploy may follow this apply.
+
+This operator-directed production cut does not satisfy #1793's broader
+30 requests/s for 24 hours acceptance gate by itself. Record the immediate
+money-path, buyer-latency, settlement, journal, audit-backlog, service-health,
+snapshot, and catalog evidence after apply, then keep the 24-hour acceptance
+window open rather than describing the broader scaling track as complete.
 
 | Net change in coordinator / gateway / Pearl assets | Status | PR |
 |---|---|---|
-| — | — | — |
+| SQLite settlement maintenance becomes crash-resumable and bounded under sustained traffic: lease-fenced ledger recovery, atomic settlement-window markers with ordered catch-up, account-scoped overdue-verdict expiry with signed-receipt fencing, continuously paced receipt-audit delivery, bounded route-journal materialization, and attempt-scoped fallback-finality evidence. | merged `7ff158b85` 2026-10-02; runtime-only deploy pending | #1833 (#1793) |
 
 **2026-10-02 v1.8.210 apply.** The protected release built the signed runtime
 pair from exact tag commit `6756706b`; the repository release verifier passed,

@@ -2,195 +2,341 @@ package billing
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 )
 
-func TestRecoverLedgerChunkedMatchesSingleWindowAcrossBoundary(t *testing.T) {
-	ctx := context.Background()
-	reqChunked, chunked := newRequestAndBillingStores(t)
-	in := seedRecoveryChunkEquivalenceFixture(t, reqChunked, chunked)
-
-	reqSingle, single := newRequestAndBillingStores(t)
-	seedRecoveryChunkEquivalenceFixture(t, reqSingle, single)
-
-	if err := chunked.RecoverLedger(ctx, in); err != nil {
-		t.Fatalf("chunked RecoverLedger: %v", err)
-	}
-	poolAttested, err := single.recoveryPoolAttestedRoutes(ctx, in)
-	if err != nil {
-		t.Fatalf("single-window pool attestation pre-read: %v", err)
-	}
-	singleRunID, err := single.insertRecoveryRun(ctx, in, time.Now().UTC())
-	if err != nil {
-		t.Fatalf("single-window run row: %v", err)
-	}
-	singleStats, err := single.recoverLedgerChunk(ctx, in, poolAttested, singleRunID, recoveryStats{})
-	if err != nil {
-		t.Fatalf("single-window recover chunk: %v", err)
-	}
-
-	if got, want := recoveryLedgerSnapshot(t, chunked.db), recoveryLedgerSnapshot(t, single.db); got != want {
-		t.Fatalf("chunked ledger state differs from single-window helper\ngot:\n%s\nwant:\n%s", got, want)
-	}
-	run := lastRecoveryRunStats(t, chunked.db)
-	if run != singleStats {
-		t.Fatalf("chunked run totals=%+v want single-window stats=%+v", run, singleStats)
-	}
-	if got := scalar(t, chunked.db, `SELECT COUNT(*) FROM ledger_reconciliation_runs WHERE status='complete' AND run_type='nightly_reconcile'`); got != 1 {
-		t.Fatalf("complete recovery rows=%d want 1", got)
-	}
-	if got := scalar(t, chunked.db, `SELECT COUNT(*) FROM ledger_reconciliation_runs WHERE status='failed' AND run_type='nightly_reconcile'`); got != 0 {
-		t.Fatalf("failed recovery rows=%d want 0", got)
-	}
-}
-
-func TestRecoverLedgerMidRunFailureRecordsCommittedWorkAndRerunConverges(t *testing.T) {
+func TestRecoverLedgerCrashResumeUsesDurableCursor(t *testing.T) {
 	ctx := context.Background()
 	reqStore, store := newRequestAndBillingStores(t)
-	in := seedRecoveryChunkEquivalenceFixture(t, reqStore, store)
-	reqWant, want := newRequestAndBillingStores(t)
-	seedRecoveryChunkEquivalenceFixture(t, reqWant, want)
-	if err := want.RecoverLedger(ctx, in); err != nil {
-		t.Fatalf("reference RecoverLedger: %v", err)
-	}
+	in := seedDenseRecoveryFixture(t, reqStore, store, recoverLedgerBatchRows+3)
 
-	// Fail at the chunk that starts on the fixture boundary, after earlier
-	// chunks committed the attempt stamped one second before it.
-	failAt := in.ScanFrom.Add(time.Hour)
-	injected := errors.New("injected mid-run chunk failure")
-	recoverLedgerBeforeChunkForTest = func(chunk RecoverInput) error {
-		if chunk.ScanFrom.Equal(failAt) {
+	injected := errors.New("injected crash after committed batch")
+	failedOnce := false
+	recoverLedgerAfterBatchForTest = func(phase string, rows int, _ int64) error {
+		if phase == "request" && rows == recoverLedgerBatchRows && !failedOnce {
+			failedOnce = true
 			return injected
 		}
 		return nil
 	}
-	err := store.RecoverLedger(ctx, in)
-	recoverLedgerBeforeChunkForTest = nil
-	if !errors.Is(err, injected) {
-		t.Fatalf("RecoverLedger err=%v want injected failure", err)
-	}
+	t.Cleanup(func() { recoverLedgerAfterBatchForTest = nil })
 
-	var status, runErr string
-	var failed recoveryStats
+	if err := store.RecoverLedger(ctx, in); !errors.Is(err, injected) {
+		t.Fatalf("RecoverLedger error=%v want injected crash", err)
+	}
+	var runID, cursor, scanned int64
+	var status, phase string
 	if err := store.db.QueryRow(`
-SELECT status, COALESCE(error, ''), request_log_rows_scanned, missing_credit_rows_created,
-       orphan_credit_rows_quarantined, buyer_equivalent_credits, provider_gross_credits
+SELECT id, status, recovery_phase, recovery_request_cursor_id, request_log_rows_scanned
   FROM ledger_reconciliation_runs
  WHERE run_type='nightly_reconcile'
- ORDER BY id DESC LIMIT 1`).Scan(&status, &runErr, &failed.scanned, &failed.created, &failed.quarantined, &failed.buyerEquivalent, &failed.providerGross); err != nil {
+ ORDER BY id DESC LIMIT 1`).Scan(&runID, &status, &phase, &cursor, &scanned); err != nil {
 		t.Fatal(err)
 	}
-	if status != "failed" || !strings.Contains(runErr, injected.Error()) {
-		t.Fatalf("run status=%q error=%q want failed with injected error", status, runErr)
+	if status != "failed" || phase != "request" {
+		t.Fatalf("failed run status=%q phase=%q want failed/request", status, phase)
 	}
-	if failed.scanned == 0 {
-		t.Fatalf("failed run reports no committed work: %+v", failed)
+	if cursor == 0 || scanned != recoverLedgerBatchRows {
+		t.Fatalf("durable progress cursor=%d scanned=%d want nonzero/%d", cursor, scanned, recoverLedgerBatchRows)
 	}
-	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_reconciliation_runs WHERE status='running'`); got != 0 {
-		t.Fatalf("running rows=%d want 0 after failure", got)
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits`); got != recoverLedgerBatchRows {
+		t.Fatalf("committed credits=%d want %d", got, recoverLedgerBatchRows)
 	}
 
+	recoverLedgerAfterBatchForTest = nil
 	if err := store.RecoverLedger(ctx, in); err != nil {
-		t.Fatalf("rerun RecoverLedger: %v", err)
+		t.Fatalf("resumed RecoverLedger: %v", err)
 	}
-	if got, wantSnap := recoveryLedgerSnapshot(t, store.db), recoveryLedgerSnapshot(t, want.db); got != wantSnap {
-		t.Fatalf("rerun ledger differs from uninterrupted run\ngot:\n%s\nwant:\n%s", got, wantSnap)
+	var resumedID, finalCursor, finalScanned int64
+	if err := store.db.QueryRow(`
+SELECT id, status, recovery_phase, recovery_request_cursor_id, request_log_rows_scanned
+  FROM ledger_reconciliation_runs
+ WHERE run_type='nightly_reconcile'
+ ORDER BY id DESC LIMIT 1`).Scan(&resumedID, &status, &phase, &finalCursor, &finalScanned); err != nil {
+		t.Fatal(err)
+	}
+	if resumedID != runID {
+		t.Fatalf("resume created run id=%d want original id=%d", resumedID, runID)
+	}
+	if status != "complete" || phase != "complete" {
+		t.Fatalf("resumed run status=%q phase=%q want complete/complete", status, phase)
+	}
+	if finalCursor <= cursor || finalScanned != recoverLedgerBatchRows+3 {
+		t.Fatalf("final cursor=%d scanned=%d want cursor>%d scanned=%d", finalCursor, finalScanned, cursor, recoverLedgerBatchRows+3)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits`); got != recoverLedgerBatchRows+3 {
+		t.Fatalf("final credits=%d want %d", got, recoverLedgerBatchRows+3)
 	}
 }
 
-func seedRecoveryChunkEquivalenceFixture(t *testing.T, reqStore *requestlog.Store, store *Store) RecoverInput {
-	t.Helper()
-	boundary := time.Unix(3600, 0).UTC()
-	scanFrom := boundary.Add(-time.Hour)
-	scanTo := boundary.Add(time.Hour)
+func TestRecoverLedgerDenseWindowBoundsEveryWriterBatchByRows(t *testing.T) {
+	ctx := context.Background()
+	reqStore, store := newRequestAndBillingStores(t)
+	rowCount := 2*recoverLedgerBatchRows + 5
+	in := seedDenseRecoveryFixture(t, reqStore, store, rowCount)
+	for i := 0; i < rowCount; i++ {
+		insertCreditWithRequest(t, store.db, fmt.Sprintf("dense-orphan-%04d", i), "orphan-provider", in.ScanFrom.Add(time.Second), 1)
+	}
 
+	batches := map[string]int{}
+	maxRows := map[string]int{}
+	recoverLedgerAfterBatchForTest = func(phase string, rows int, _ int64) error {
+		batches[phase]++
+		if rows > maxRows[phase] {
+			maxRows[phase] = rows
+		}
+		if rows > recoverLedgerBatchRows {
+			t.Fatalf("%s batch rows=%d exceeds bound=%d", phase, rows, recoverLedgerBatchRows)
+		}
+		return nil
+	}
+	t.Cleanup(func() { recoverLedgerAfterBatchForTest = nil })
+
+	if err := store.RecoverLedger(ctx, in); err != nil {
+		t.Fatalf("RecoverLedger: %v", err)
+	}
+	for _, phase := range []string{"orphan", "request"} {
+		if batches[phase] != 3 || maxRows[phase] != recoverLedgerBatchRows {
+			t.Fatalf("%s batches=%d max rows=%d want 3/%d", phase, batches[phase], maxRows[phase], recoverLedgerBatchRows)
+		}
+	}
+	if got := scalar(t, store.db, `SELECT request_log_rows_scanned FROM ledger_reconciliation_runs ORDER BY id DESC LIMIT 1`); got != int64(rowCount) {
+		t.Fatalf("rows scanned=%d want %d", got, rowCount)
+	}
+	if got := scalar(t, store.db, `SELECT orphan_credit_rows_quarantined FROM ledger_reconciliation_runs ORDER BY id DESC LIMIT 1`); got != int64(rowCount) {
+		t.Fatalf("orphans quarantined=%d want %d", got, rowCount)
+	}
+}
+
+func TestNextRecoveryIDsCanonicalizesVariableWidthCursorTimestamp(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
 	input, row := testHotPathInput(t, store)
-	row.RequestID = "chunk-straddle"
+	scanFrom := time.Date(2026, 10, 2, 1, 2, 3, 100_000_000, time.UTC)
+	row.RequestID = "cursor-boundary-row"
+	row.ProviderAssignedID = "cursor-boundary-assigned"
+	row.TSUtc = scanFrom.Add(time.Nanosecond)
 	input.RequestID = row.RequestID
-	row.TSUtc = boundary.Add(-time.Second)
+	input.ProviderAssignedID = row.ProviderAssignedID
 	input.TSUtc = row.TSUtc
 	if err := store.WriteRequestLogWithIdentity(context.Background(), reqStore, row, input); err != nil {
 		t.Fatal(err)
 	}
-
-	row2 := row
-	input2 := input
-	row2.TSUtc = boundary.Add(time.Second)
-	input2.TSUtc = row2.TSUtc
-	row2.ProviderAssignedID = "assigned-b"
-	input2.ProviderAssignedID = row2.ProviderAssignedID
-	input2.ProviderID = "provider-b"
-	input2.AttemptN = 1
-	row2.Retried = 1
-	if err := store.WriteRequestLogWithIdentity(context.Background(), reqStore, row2, input2); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.db.Exec(`UPDATE request_log SET attempt_n = NULL WHERE request_id = ?`, row.RequestID); err != nil {
-		t.Fatal(err)
-	}
-
-	missingInput := input
-	missingRow := row
-	missingRow.RequestID = "chunk-missing-credit"
-	missingInput.RequestID = missingRow.RequestID
-	missingRow.TSUtc = boundary.Add(10 * time.Minute)
-	missingInput.TSUtc = missingRow.TSUtc
-	missingRow.ProviderAssignedID = "assigned-missing"
-	missingInput.ProviderAssignedID = missingRow.ProviderAssignedID
-	missingInput.ProviderID = "provider-missing"
-	if err := store.WriteRequestLogWithIdentity(context.Background(), reqStore, missingRow, missingInput); err != nil {
-		t.Fatal(err)
-	}
-
-	insertCreditWithRequest(t, store.db, "chunk-orphan", "provider-orphan", boundary.Add(20*time.Minute), 500)
-	return RecoverInput{ScanFrom: scanFrom, ScanTo: scanTo, Source: "nightly_reconcile"}
-}
-
-func recoveryLedgerSnapshot(t *testing.T, db *sql.DB) string {
-	t.Helper()
-	rows, err := db.Query(`
-SELECT request_id, attempt_n, provider_id, COALESCE(provider_assigned_id, ''),
-       gross_credits, provider_credits, quarantined, COALESCE(quarantine_reason, ''), recovery_source
-  FROM ledger_request_credits
- ORDER BY request_id, attempt_n, provider_id`)
+	ids, next, hasMore, err := store.nextRecoveryIDs(context.Background(), "request_log", "ts_utc", recoveryCursor{
+		tsUTC: scanFrom.Format(time.RFC3339Nano),
+	}, RecoverInput{ScanFrom: scanFrom, ScanTo: scanFrom.Add(time.Second)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var requestID, providerID, assignedID, reason, source string
-		var attemptN int
-		var gross, provider int64
-		var quarantined int
-		if err := rows.Scan(&requestID, &attemptN, &providerID, &assignedID, &gross, &provider, &quarantined, &reason, &source); err != nil {
-			t.Fatal(err)
-		}
-		out = append(out, fmt.Sprintf("%s|%d|%s|%s|%d|%d|%d|%s|%s", requestID, attemptN, providerID, assignedID, gross, provider, quarantined, reason, source))
+	if len(ids) != 1 || hasMore || next.id != ids[0] || next.tsUTC != sqliteTimeText(row.TSUtc) {
+		t.Fatalf("boundary recovery ids=%v next=%+v hasMore=%v", ids, next, hasMore)
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
-	}
-	return strings.Join(out, "\n")
 }
 
-func lastRecoveryRunStats(t *testing.T, db *sql.DB) recoveryStats {
-	t.Helper()
-	var stats recoveryStats
-	if err := db.QueryRow(`
-SELECT request_log_rows_scanned, missing_credit_rows_created, orphan_credit_rows_quarantined,
-       buyer_equivalent_credits, provider_gross_credits
-  FROM ledger_reconciliation_runs
- WHERE run_type='nightly_reconcile' AND status='complete'
- ORDER BY id DESC LIMIT 1`).Scan(&stats.scanned, &stats.created, &stats.quarantined, &stats.buyerEquivalent, &stats.providerGross); err != nil {
+func TestNextRecoveryIDsPreservesNoncanonicalSelectedCursorAtBatchBoundary(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	scanFrom := time.Date(2026, 10, 2, 1, 2, 2, 0, time.UTC)
+	rowTime := time.Date(2026, 10, 2, 1, 2, 3, 100_000_000, time.UTC)
+	variable := rowTime.Format(time.RFC3339Nano)
+	for i := 0; i < recoverLedgerBatchRows+3; i++ {
+		input, row := testHotPathInput(t, store)
+		row.RequestID = fmt.Sprintf("noncanonical-selected-%03d", i)
+		row.ProviderAssignedID = fmt.Sprintf("noncanonical-assigned-%03d", i)
+		row.TSUtc = rowTime
+		input.RequestID = row.RequestID
+		input.ProviderAssignedID = row.ProviderAssignedID
+		input.TSUtc = row.TSUtc
+		if err := store.WriteRequestLogWithIdentity(context.Background(), reqStore, row, input); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.db.Exec(`UPDATE request_log SET ts_utc=? WHERE request_id LIKE 'noncanonical-selected-%'`, variable); err != nil {
 		t.Fatal(err)
 	}
-	return stats
+	first, cursor, hasMore, err := store.nextRecoveryIDs(context.Background(), "request_log", "ts_utc", recoveryCursor{}, RecoverInput{
+		ScanFrom: scanFrom,
+		ScanTo:   rowTime.Add(time.Second),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != recoverLedgerBatchRows || !hasMore || cursor.tsUTC != variable || cursor.id == 0 {
+		t.Fatalf("first batch len=%d cursor=%+v hasMore=%v", len(first), cursor, hasMore)
+	}
+	second, next, hasMore, err := store.nextRecoveryIDs(context.Background(), "request_log", "ts_utc", cursor, RecoverInput{
+		ScanFrom: scanFrom,
+		ScanTo:   rowTime.Add(time.Second),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 3 || hasMore || next.tsUTC != variable || next.id <= cursor.id {
+		t.Fatalf("second batch len=%d cursor=%+v previous=%+v hasMore=%v", len(second), next, cursor, hasMore)
+	}
+}
+
+func TestRecoverLedgerFencesCompetingRunners(t *testing.T) {
+	ctx := context.Background()
+	reqStore, store := newRequestAndBillingStores(t)
+	in := seedDenseRecoveryFixture(t, reqStore, store, 1)
+
+	claimed := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	recoverLedgerAfterClaimForTest = func() {
+		once.Do(func() {
+			close(claimed)
+			<-release
+		})
+	}
+	t.Cleanup(func() { recoverLedgerAfterClaimForTest = nil })
+
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- store.RecoverLedger(ctx, in) }()
+	<-claimed
+	competing := in
+	competing.Source = "admin_reconcile"
+	if err := store.RecoverLedger(ctx, competing); !errors.Is(err, ErrRecoveryInProgress) {
+		close(release)
+		t.Fatalf("competing RecoverLedger error=%v want ErrRecoveryInProgress", err)
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first RecoverLedger: %v", err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_reconciliation_runs`); got != 1 {
+		t.Fatalf("reconciliation runs=%d want 1", got)
+	}
+}
+
+func TestRecoverLedgerReclaimsStaleCrashLease(t *testing.T) {
+	ctx := context.Background()
+	reqStore, store := newRequestAndBillingStores(t)
+	in := seedDenseRecoveryFixture(t, reqStore, store, 1)
+	run, _, err := store.acquireRecoveryRun(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`
+UPDATE ledger_reconciliation_runs
+   SET recovery_lease_expires_at_utc=?
+ WHERE id=?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), run.id); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.RecoverLedger(ctx, in); err != nil {
+		t.Fatalf("reclaim stale recovery lease: %v", err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_reconciliation_runs`); got != 1 {
+		t.Fatalf("reclaimed run count=%d want 1", got)
+	}
+	var status, owner string
+	if err := store.db.QueryRow(`
+SELECT status, COALESCE(recovery_lease_owner, '')
+  FROM ledger_reconciliation_runs WHERE id=?`, run.id).Scan(&status, &owner); err != nil {
+		t.Fatal(err)
+	}
+	if status != "complete" || owner != "" {
+		t.Fatalf("reclaimed run status=%q owner=%q want complete and released", status, owner)
+	}
+}
+
+func TestRecoverLedgerDrainsExpiredForeignSourceRunsBeforeRequestedSource(t *testing.T) {
+	ctx := context.Background()
+	reqStore, store := newRequestAndBillingStores(t)
+	in := seedDenseRecoveryFixture(t, reqStore, store, 1)
+	in.Source = "startup_scan"
+	oldest, _, err := store.acquireRecoveryRun(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleLease := sqliteTimeText(time.Now().UTC().Add(-time.Minute))
+	if _, err := store.db.Exec(`UPDATE ledger_reconciliation_runs SET recovery_lease_expires_at_utc=? WHERE id=?`, staleLease, oldest.id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO ledger_reconciliation_runs (
+    run_type, from_utc, to_utc, request_log_rows_scanned,
+    missing_credit_rows_created, orphan_credit_rows_quarantined,
+    buyer_equivalent_credits, provider_gross_credits, reconciliation_delta_credits,
+    started_at_utc, finished_at_utc, status, error, recovery_phase,
+    recovery_orphan_cursor_ts_utc, recovery_orphan_cursor_id,
+    recovery_request_cursor_ts_utc, recovery_request_cursor_id,
+    recovery_lease_owner, recovery_lease_expires_at_utc, created_at_utc
+) VALUES ('admin_reconcile', ?, ?, 0, 0, 0, 0, 0, 0, ?, NULL, 'running', NULL,
+          'orphan', ?, 0, ?, 0, 'stale-admin-owner', ?, ?)`,
+		sqliteTimeText(in.ScanFrom), sqliteTimeText(in.ScanTo), staleLease,
+		sqliteTimeText(in.ScanFrom), sqliteTimeText(in.ScanFrom), staleLease, staleLease); err != nil {
+		t.Fatal(err)
+	}
+
+	requested := in
+	requested.Source = "nightly_reconcile"
+	if err := store.RecoverLedger(ctx, requested); err != nil {
+		t.Fatalf("drain stale foreign-source runs: %v", err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_reconciliation_runs WHERE status='complete'`); got != 3 {
+		t.Fatalf("complete recovery runs=%d want startup, admin, and requested nightly", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_reconciliation_runs WHERE status!='complete'`); got != 0 {
+		t.Fatalf("incomplete recovery runs=%d want 0", got)
+	}
+}
+
+func TestRecoverLedgerMovingWindowFinishesDurableResumeBeforeFreshRun(t *testing.T) {
+	ctx := context.Background()
+	reqStore, store := newRequestAndBillingStores(t)
+	in := seedDenseRecoveryFixture(t, reqStore, store, recoverLedgerBatchRows+1)
+	injected := errors.New("injected moving-window interruption")
+	failedOnce := false
+	recoverLedgerAfterBatchForTest = func(phase string, rows int, _ int64) error {
+		if phase == "request" && rows == recoverLedgerBatchRows && !failedOnce {
+			failedOnce = true
+			return injected
+		}
+		return nil
+	}
+	t.Cleanup(func() { recoverLedgerAfterBatchForTest = nil })
+	if err := store.RecoverLedger(ctx, in); !errors.Is(err, injected) {
+		t.Fatalf("first RecoverLedger error=%v want injected interruption", err)
+	}
+
+	recoverLedgerAfterBatchForTest = nil
+	moving := in
+	moving.ScanTo = moving.ScanTo.Add(time.Second)
+	if err := store.RecoverLedger(ctx, moving); err != nil {
+		t.Fatalf("moving-window RecoverLedger: %v", err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_reconciliation_runs WHERE status='complete'`); got != 2 {
+		t.Fatalf("complete recovery runs=%d want resumed old range plus fresh moving range", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_reconciliation_runs WHERE status='failed'`); got != 0 {
+		t.Fatalf("failed recovery runs=%d want resumed run promoted to complete", got)
+	}
+}
+
+func seedDenseRecoveryFixture(t *testing.T, reqStore *requestlog.Store, store *Store, count int) RecoverInput {
+	t.Helper()
+	input, row := testHotPathInput(t, store)
+	stamp := time.Unix(3600, 0).UTC()
+	for i := 0; i < count; i++ {
+		requestID := fmt.Sprintf("dense-recovery-%04d", i)
+		assignedID := fmt.Sprintf("dense-assigned-%04d", i)
+		itemRow := row
+		itemRow.RequestID = requestID
+		itemRow.ProviderAssignedID = assignedID
+		itemRow.TSUtc = stamp
+		itemInput := input
+		itemInput.RequestID = requestID
+		itemInput.ProviderAssignedID = assignedID
+		itemInput.TSUtc = stamp
+		if err := store.WriteRequestLogWithIdentity(context.Background(), reqStore, itemRow, itemInput); err != nil {
+			t.Fatalf("seed dense recovery row %d: %v", i, err)
+		}
+	}
+	return RecoverInput{ScanFrom: stamp.Add(-time.Second), ScanTo: stamp.Add(time.Second), Source: "nightly_reconcile"}
 }

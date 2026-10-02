@@ -346,6 +346,13 @@ func TestInsertRouteSnapshotJournalBuffersMainWriterPressure(t *testing.T) {
 	if err := store.InitRouteSnapshotJournal(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	if !indexExists(t, journalDB, "settlement_route_snapshot_journal", "idx_srsj_pending") {
+		t.Fatal("missing route snapshot journal pending index")
+	}
+	if plan := explainQueryPlan(t, journalDB, `SELECT id FROM settlement_route_snapshot_journal
+WHERE mirrored_at_utc IS NULL ORDER BY id LIMIT 100`); !strings.Contains(plan, "idx_srsj_pending") {
+		t.Fatalf("pending journal query plan=%q, want idx_srsj_pending", plan)
+	}
 
 	lockDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(dbPath))
 	if err != nil {
