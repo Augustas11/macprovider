@@ -26,6 +26,7 @@ func TestBillingMigration(t *testing.T) {
 		"ledger_request_credits",
 		"ledger_operator_credits",
 		"ledger_payout_ready",
+		"ledger_settlement_windows",
 		"ledger_reconciliation_runs",
 		"ledger_config_snapshots",
 		"ledger_provider_identity_snapshots",
@@ -59,6 +60,173 @@ func TestBillingMigration(t *testing.T) {
 	}
 	if columnExists(t, db, "ledger_request_credits", "prompt_cache_hit_rate_per_mtok") {
 		t.Fatalf("ledger_request_credits.prompt_cache_hit_rate_per_mtok must not be persisted")
+	}
+	for _, column := range []string{
+		"recovery_phase",
+		"recovery_orphan_cursor_ts_utc",
+		"recovery_orphan_cursor_id",
+		"recovery_request_cursor_ts_utc",
+		"recovery_request_cursor_id",
+		"recovery_lease_owner",
+		"recovery_lease_expires_at_utc",
+	} {
+		if !columnExists(t, db, "ledger_reconciliation_runs", column) {
+			t.Fatalf("missing ledger_reconciliation_runs.%s", column)
+		}
+	}
+	if !indexExists(t, db, "ledger_reconciliation_runs", "idx_lrr_recovery_lease") {
+		t.Fatal("missing idx_lrr_recovery_lease")
+	}
+	for table, index := range map[string]string{
+		"request_log":            "idx_request_log_recovery_ts_id",
+		"ledger_request_credits": "idx_lrc_recovery_ts_id",
+	} {
+		if !indexExists(t, db, table, index) {
+			t.Fatalf("missing %s", index)
+		}
+	}
+}
+
+func TestBillingMigrationAddsCrashSafeRecoveryColumnsToLegacyRuns(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "legacy-recovery.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	createRequestLogForTest(t, db)
+	if _, err := db.Exec(`
+CREATE TABLE ledger_reconciliation_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_type TEXT NOT NULL CHECK(run_type IN ('startup_scan','nightly_reconcile','admin_reconcile','spec_007_claim')),
+    from_utc TEXT NOT NULL,
+    to_utc TEXT NOT NULL,
+    request_log_rows_scanned INTEGER NOT NULL CHECK(request_log_rows_scanned >= 0),
+    missing_credit_rows_created INTEGER NOT NULL CHECK(missing_credit_rows_created >= 0),
+    orphan_credit_rows_quarantined INTEGER NOT NULL CHECK(orphan_credit_rows_quarantined >= 0),
+    buyer_equivalent_credits INTEGER NOT NULL CHECK(buyer_equivalent_credits >= 0),
+    provider_gross_credits INTEGER NOT NULL CHECK(provider_gross_credits >= 0),
+    reconciliation_delta_credits INTEGER NOT NULL,
+    started_at_utc TEXT NOT NULL,
+    finished_at_utc TEXT NULL,
+    status TEXT NOT NULL CHECK(status IN ('running','complete','failed')),
+    error TEXT NULL,
+    created_at_utc TEXT NOT NULL
+);
+INSERT INTO ledger_reconciliation_runs (
+    run_type, from_utc, to_utc, request_log_rows_scanned,
+    missing_credit_rows_created, orphan_credit_rows_quarantined,
+    buyer_equivalent_credits, provider_gross_credits, reconciliation_delta_credits,
+    started_at_utc, finished_at_utc, status, error, created_at_utc
+) VALUES (
+    'nightly_reconcile', '2026-09-01T00:00:00.1Z', '2026-09-08T00:00:00Z',
+    12, 3, 0, 10, 10, 0, '2026-09-08T01:00:00Z', NULL,
+    'failed', 'legacy crash', '2026-09-08T01:00:00Z'
+);`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewStore(db); err != nil {
+		t.Fatalf("NewStore legacy reconciliation migration: %v", err)
+	}
+	for _, column := range []string{
+		"recovery_phase",
+		"recovery_orphan_cursor_ts_utc",
+		"recovery_orphan_cursor_id",
+		"recovery_request_cursor_ts_utc",
+		"recovery_request_cursor_id",
+		"recovery_lease_owner",
+		"recovery_lease_expires_at_utc",
+	} {
+		if !columnExists(t, db, "ledger_reconciliation_runs", column) {
+			t.Fatalf("missing migrated ledger_reconciliation_runs.%s", column)
+		}
+	}
+	if !indexExists(t, db, "ledger_reconciliation_runs", "idx_lrr_recovery_lease") {
+		t.Fatal("missing migrated idx_lrr_recovery_lease")
+	}
+	var phase, orphanCursorTS, requestCursorTS string
+	var orphanCursorID, requestCursorID int64
+	if err := db.QueryRow(`
+SELECT recovery_phase, recovery_orphan_cursor_ts_utc, recovery_orphan_cursor_id,
+       recovery_request_cursor_ts_utc, recovery_request_cursor_id
+  FROM ledger_reconciliation_runs WHERE run_type='nightly_reconcile'`).Scan(
+		&phase, &orphanCursorTS, &orphanCursorID, &requestCursorTS, &requestCursorID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if phase != "orphan" || orphanCursorTS == "" || requestCursorTS == "" || orphanCursorID != 0 || requestCursorID != 0 {
+		t.Fatalf("legacy incomplete run migration phase=%q orphan=(%q,%d) request=(%q,%d)", phase, orphanCursorTS, orphanCursorID, requestCursorTS, requestCursorID)
+	}
+	for table, index := range map[string]string{
+		"request_log":            "idx_request_log_recovery_ts_id",
+		"ledger_request_credits": "idx_lrc_recovery_ts_id",
+	} {
+		if !indexExists(t, db, table, index) {
+			t.Fatalf("missing migrated %s", index)
+		}
+	}
+}
+
+func TestBillingTimeNormalizationV2RepairsPostV1RecoveryTimestamps(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	input, row := testHotPathInput(t, store)
+	row.RequestID = "post-v1-variable-time"
+	row.ProviderAssignedID = "post-v1-variable-assigned"
+	row.TSUtc = time.Date(2026, 10, 2, 1, 2, 3, 100_000_000, time.UTC)
+	input.RequestID = row.RequestID
+	input.ProviderAssignedID = row.ProviderAssignedID
+	input.TSUtc = row.TSUtc
+	if err := store.WriteRequestLogWithIdentity(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	variable := row.TSUtc.Format(time.RFC3339Nano)
+	if _, err := store.db.Exec(`UPDATE request_log SET ts_utc=? WHERE request_id=?`, variable, row.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`DELETE FROM billing_maintenance_runs WHERE name='billing_time_text_normalization_v2'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewStore(store.db); err != nil {
+		t.Fatalf("rerun v2 timestamp normalization: %v", err)
+	}
+	var got string
+	if err := store.db.QueryRow(`SELECT ts_utc FROM request_log WHERE request_id=?`, row.RequestID).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != sqliteTimeText(row.TSUtc) {
+		t.Fatalf("normalized ts_utc=%q want %q (was %q)", got, sqliteTimeText(row.TSUtc), variable)
+	}
+}
+
+func TestRecoverySelectorQueryPlansUseTimeIDKeysets(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	from := sqliteTimeText(time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC))
+	to := sqliteTimeText(time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC))
+	for _, tc := range []struct {
+		name  string
+		query string
+		index string
+	}{
+		{
+			name: "request log",
+			query: `SELECT id, ts_utc FROM request_log INDEXED BY idx_request_log_recovery_ts_id
+WHERE ts_utc >= ? AND ts_utc < ? AND (ts_utc, id) > (?, ?)
+ORDER BY ts_utc, id LIMIT ?`,
+			index: "idx_request_log_recovery_ts_id",
+		},
+		{
+			name: "ledger credits",
+			query: `SELECT id, ts_utc FROM ledger_request_credits INDEXED BY idx_lrc_recovery_ts_id
+WHERE ts_utc >= ? AND ts_utc < ? AND (ts_utc, id) > (?, ?)
+ORDER BY ts_utc, id LIMIT ?`,
+			index: "idx_lrc_recovery_ts_id",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := explainQueryPlan(t, store.db, tc.query, from, to, from, 0, recoverLedgerBatchRows+1)
+			if !strings.Contains(plan, tc.index) || strings.Contains(plan, "USE TEMP B-TREE") {
+				t.Fatalf("recovery selector plan=%q, want ordered %s scan without temp sort", plan, tc.index)
+			}
+		})
 	}
 }
 
@@ -102,6 +270,15 @@ CREATE INDEX idx_srao_pending ON settlement_receipt_audit_outbox(drained_at_utc,
 	if !indexExists(t, db, "settlement_receipt_audit_outbox", "idx_srao_pending_active") {
 		t.Fatal("missing idx_srao_pending_active after migration")
 	}
+	if !indexExists(t, db, "settlement_receipt_audit_outbox", "idx_srao_pending_created") {
+		t.Fatal("missing idx_srao_pending_created after migration")
+	}
+	if !indexExists(t, db, "settlement_receipt_audit_outbox", "idx_srao_drained_retention") {
+		t.Fatal("missing idx_srao_drained_retention after migration")
+	}
+	if !indexExists(t, db, "settlement_receipt_verdicts", "idx_srv_pending_deadline") {
+		t.Fatal("missing idx_srv_pending_deadline after migration")
+	}
 	if !indexExists(t, db, "settlement_receipt_audit_outbox", "idx_srao_poisoned") {
 		t.Fatal("missing idx_srao_poisoned after migration")
 	}
@@ -110,6 +287,16 @@ CREATE INDEX idx_srao_pending ON settlement_receipt_audit_outbox(drained_at_utc,
 	}
 	if indexExists(t, db, "settlement_receipt_audit_outbox", "idx_srao_pending") {
 		t.Fatal("legacy idx_srao_pending survived migration")
+	}
+	if plan := explainQueryPlan(t, db, `SELECT created_at_utc FROM settlement_receipt_audit_outbox INDEXED BY idx_srao_pending_created
+WHERE drained_at_utc IS NULL AND poisoned_at_utc IS NULL
+ORDER BY julianday(created_at_utc), id LIMIT 1`); !strings.Contains(plan, "idx_srao_pending_created") {
+		t.Fatalf("oldest-pending query plan=%q, want idx_srao_pending_created", plan)
+	}
+	if plan := explainQueryPlan(t, db, `SELECT id FROM settlement_receipt_audit_outbox INDEXED BY idx_srao_drained_retention
+WHERE drained_at_utc IS NOT NULL AND julianday(drained_at_utc) < julianday('2026-10-01T00:00:00Z')
+ORDER BY julianday(drained_at_utc), id LIMIT 100`); !strings.Contains(plan, "idx_srao_drained_retention") {
+		t.Fatalf("retention query plan=%q, want idx_srao_drained_retention", plan)
 	}
 }
 
@@ -2435,6 +2622,28 @@ func indexExists(t *testing.T, db *sql.DB, table, index string) bool {
 	return false
 }
 
+func explainQueryPlan(t *testing.T, db *sql.DB, query string, args ...any) string {
+	t.Helper()
+	rows, err := db.Query(`EXPLAIN QUERY PLAN `+query, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var details []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		details = append(details, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return strings.Join(details, " | ")
+}
+
 func columnExists(t *testing.T, db *sql.DB, table, column string) bool {
 	t.Helper()
 	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
@@ -2509,7 +2718,7 @@ INSERT INTO ledger_request_credits (
     global_multiplier_ppm, gross_credits, provider_share_bps, provider_credits,
     fault_flag, recovery_source, created_at_utc
 ) VALUES (?, 0, ?, 'assigned', ?, 'model-a', 200, 0, 'provider_reported', 1, 1, 1000000, ?, 9000, ?, 'none', 'hot_path', ?)`,
-		requestID, providerID, ts.Format(time.RFC3339Nano), providerCredits, providerCredits, ts.Format(time.RFC3339Nano))
+		requestID, providerID, sqliteTimeText(ts), providerCredits, providerCredits, sqliteTimeText(ts))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2524,7 +2733,7 @@ INSERT INTO ledger_operator_credits (
     request_credit_id, request_id, attempt_n, provider_id, ts_utc,
     gross_credits, operator_share_bps, operator_credits, fault_flag, created_at_utc
 ) VALUES (?, ?, 0, ?, ?, ?, 0, 0, 'none', ?)`,
-		requestCreditID, requestID, providerID, ts.Format(time.RFC3339Nano), providerCredits, ts.Format(time.RFC3339Nano))
+		requestCreditID, requestID, providerID, sqliteTimeText(ts), providerCredits, sqliteTimeText(ts))
 	if err != nil {
 		t.Fatal(err)
 	}

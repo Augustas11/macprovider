@@ -1,6 +1,6 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.5 (2026-10-02, bounded SQLite WAL ownership)
+**Version:** 1.6.6 (2026-10-02, bounded SQLite evidence maintenance)
 **Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9); SPEC-003 FR-C9.4 composed contract — base AuthState enum (`bearer_validated`, `self_minted`, `bearerless_duplicate`) introduced in v0.8.3; `mint_failed` reserved value added in v0.8.4.
 
 **Change log v1.6.5 (2026-10-02, issue #1793):** The primary money database
@@ -9,6 +9,14 @@ checkpoint worker. They use separate checkpoint handles; their writer handles
 disable automatic checkpointing. Checkpointing is PASSIVE while buyer traffic
 is active and TRUNCATE is idle-only. Other isolated coordinator SQLite stores
 retain their existing ownership policy and are outside this requirement.
+
+**Change log v1.6.6 (2026-10-02, issue #1793):** Route-snapshot
+materialization and receipt-audit delivery run continuously in bounded work
+units rather than depending on an idle traffic window. Every periodic pass has
+an outer batch ceiling; exact backlog statistics expose freshness, and their
+age/stale state remains visible after a timed-out sample. Indexed pending and
+retention scans are required so maintenance work does not degrade into a table
+scan as evidence volume grows.
 
 **Change log v1.6.4 (2026-09-30, authenticated dispatch output limit):**
 The coordinator accepts `X-MacProvider-Internal-Max-Output-Tokens` only under
@@ -2214,6 +2222,15 @@ PASSIVE progress while traffic is active, MAY truncate only after the
 configured idle condition, and MUST leave a failed or timed-out WAL for a later
 retry. Daily backup covers both files. Isolated audit and provider-event stores
 are outside this money-path WAL ownership requirement.
+
+The route-snapshot materializer MUST cap each invocation by both rows per batch
+and batches per invocation. Receipt-audit delivery MUST be paced in small
+batches with configured capacity above the admitted receipt-event arrival rate;
+it MUST NOT require buyer idleness to run. Backlog depth and oldest age MUST be
+exact when the stats sample succeeds. A failed or timed-out stats sample MUST
+retain the last successful values and mark them stale with their sample age.
+Pending-order and drained-retention scans MUST use dedicated indexes whose
+query plans are regression-tested.
 
 (Scope item in § 2 "SQLite persistence for provider auth, request log,
 pool state" should be read as: auth + log persisted across restarts;

@@ -1,11 +1,23 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.2.5
+Version: v0.2.6
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.2.6
+
+Issue #1793 completes the SQLite stop-the-bleeding contract: all expired open
+pending verdicts, not only pool-labelled attempts, are closed through the
+existing per-row verifier; a signed receipt already observed before the
+deadline and queued for bounded persistence recovery fences the missing-
+receipt writer. Audit delivery is continuously paced with capacity above the
+admitted event rate, exact/stale backlog telemetry, and indexed bounded
+retention. Route materialization has an outer batch ceiling. Weekly settlement
+and recovery gain durable crash-resume progress without changing payout,
+quarantine, or account-scope predicates.
 
 ### v0.2.5
 
@@ -691,6 +703,9 @@ digest-identical, idempotent, bounded by batch and deadline, and MUST NOT delay
 dispatch after the journal commit. The journal remains the recovery authority
 until materialization succeeds. Materialization MAY yield during active buyer
 traffic only until its configured maximum deferral.
+Each materializer invocation MUST also have a fixed maximum number of batches;
+remaining journal rows stay authoritative for a later invocation. Pending
+journal selection MUST use an indexed keyset path.
 
 R-3.2.2. Post-credit attempt-output persistence MUST have an independent write
 budget. Route-snapshot materialization pressure MUST NOT consume that budget or
@@ -937,6 +952,16 @@ R-8.3. If receipt verification remains `pending` past
 `pending_deadline_seconds`, the row MUST transition to `quarantined`, release or
 refund buyer reservation, and keep provider credit zero. The deadline is
 measured from the recorded terminal-state timestamp.
+The coordinator MUST perform this transition in a bounded background sweep for
+every open pending verdict, regardless of pool membership and independently of
+gateway finality reads. Each selected tuple MUST be revalidated and closed
+through the ordinary per-row missing-receipt writer; no bulk status update is
+allowed. Exact-deadline rows remain pending until wall time is strictly later
+than the deadline. A signed receipt already observed before the deadline and
+queued for bounded persistence recovery MUST win over the sweep in that
+process. The coordinator MUST install the in-process sweep fence atomically
+with the clock sample that defines first observation; the sweep may retry after
+recovery commits or exhausts.
 
 R-8.4. If receipt verification returns `zero_settled`, the row is terminal. The
 buyer final debit MUST be zero or the buyer reservation MUST be released or
@@ -1074,6 +1099,14 @@ yield to active buyer traffic only until a configured maximum deferral, after
 which one bounded catch-up run MUST be attempted. Conflicting sink rows become
 retained poison and remain observable; audit delivery is not a
 provider-payability predicate.
+Normal delivery MUST be continuously paced in small batches and MUST NOT wait
+for buyer idleness. Its configured theoretical capacity MUST exceed the
+admitted receipt-event arrival rate; staging acceptance proves sustainable
+delivery rather than assuming capacity from configuration. Exact pending depth
+and oldest age MUST use indexed reads. If a stats read times out, the last
+successful values remain exposed together with an explicit stale flag and
+sample age. Retention deletes only drained rows, in bounded indexed batches;
+pending and poison evidence is never pruned by that path.
 
 R-11.2. Audit events MUST NOT contain raw prompts, raw outputs, receipt
 signatures, or receipt public keys unless an existing spec already permits the
@@ -1237,11 +1270,11 @@ the pool attempts recorded before a downgrade.
   coordinator attempt it opened stays `pending`, and no later finality read
   reaches that attempt. The v0.2.0 coordinator therefore runs a bounded,
   periodic sweep, independent of gateway holds and of whether the
-  trusted-pool feature is enabled, that closes every open `pending` pool
+  trusted-pool feature is enabled, that closes every open `pending`
   verdict past its pending deadline through `RecordMissingSettlementReceipt`,
   the same terminalization a finality read applies
   (`phase4-coordinator/internal/billing/pool_settlement_expiry_sweep.go`,
-  `SweepExpiredPoolSettlementVerdicts`). It never touches a verdict still
+  `SweepExpiredSettlementVerdicts`). It never touches a verdict still
   inside its window, and a closed verdict is never selected again. The
   downgrade gate still counts every open verdict; the sweep only makes
   expired ones close without a buyer request.

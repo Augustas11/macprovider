@@ -732,6 +732,7 @@ func TestRouteSnapshotJournalMirrorStartupRunsDuringRecentTraffic(t *testing.T) 
 		Interval:    10 * time.Millisecond,
 		Timeout:     time.Second,
 		Batch:       100,
+		MaxBatches:  5,
 		MinIdle:     10 * time.Second,
 		MaxDeferral: time.Hour,
 	})
@@ -751,6 +752,7 @@ func TestRouteSnapshotJournalMirrorRunsAfterIdle(t *testing.T) {
 		Interval:    10 * time.Millisecond,
 		Timeout:     time.Second,
 		Batch:       100,
+		MaxBatches:  5,
 		MinIdle:     10 * time.Second,
 		MaxDeferral: time.Hour,
 	})
@@ -770,12 +772,36 @@ func TestRouteSnapshotJournalMirrorHonorsMaxDeferral(t *testing.T) {
 		Interval:    10 * time.Millisecond,
 		Timeout:     time.Second,
 		Batch:       100,
+		MaxBatches:  5,
 		MinIdle:     10 * time.Second,
 		MaxDeferral: 25 * time.Millisecond,
 	})
 
 	assertSignal(t, mirror.called, "startup route snapshot journal mirror")
 	assertSignal(t, mirror.called, "forced route snapshot journal mirror after max deferral")
+}
+
+func TestRouteSnapshotJournalMirrorCapsBatchesPerRun(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mirror := &routeSnapshotJournalMirrorStub{
+		called:  make(chan struct{}, 8),
+		batches: []int{100, 100, 100, 100},
+	}
+
+	startRouteSnapshotJournalMirrorWithConfig(ctx, mirror, fixedIdleTracker{idleFor: 0}, zerolog.Nop(), routeSnapshotJournalMirrorConfig{
+		Interval:    time.Hour,
+		Timeout:     time.Second,
+		Batch:       100,
+		MaxBatches:  3,
+		MinIdle:     10 * time.Second,
+		MaxDeferral: time.Hour,
+	})
+
+	for i := 0; i < 3; i++ {
+		assertSignal(t, mirror.called, "bounded route snapshot journal mirror batch")
+	}
+	assertNoSignal(t, mirror.called, "route snapshot journal mirror fourth batch")
 }
 
 func TestSettlementReceiptAuditOutboxDrainerStartupRunsDuringRecentTraffic(t *testing.T) {
@@ -826,6 +852,30 @@ func TestSettlementReceiptAuditOutboxDrainerRunsAfterIdle(t *testing.T) {
 	assertStringSignal(t, observer.drainOutcomes, "success", "audit outbox drain outcome")
 }
 
+func TestSettlementReceiptAuditOutboxDrainerRunsDuringContinuousTraffic(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := &settlementReceiptAuditOutboxDrainerStub{
+		drainedBatches: []int{0, 20},
+		drainCalled:    make(chan struct{}, 3),
+		pruneCalled:    make(chan struct{}, 1),
+		statsCalled:    make(chan struct{}, 1),
+	}
+
+	startSettlementReceiptAuditOutboxDrainerWithConfig(ctx, store, settlementReceiptAuditSinkStub{}, 90, nil, fixedIdleTracker{idleFor: 0}, zerolog.Nop(), settlementReceiptAuditOutboxDrainerConfig{
+		BatchLimit:          20,
+		CatchupBatches:      1,
+		PruneLimit:          500,
+		DrainInterval:       10 * time.Millisecond,
+		MaintenanceInterval: time.Hour,
+		DrainTimeout:        time.Second,
+		StatsTimeout:        time.Second,
+	})
+
+	assertSignal(t, store.drainCalled, "startup audit outbox drain")
+	assertSignal(t, store.drainCalled, "paced audit outbox drain during buyer traffic")
+}
+
 func TestSettlementReceiptAuditOutboxDrainerPrunesAfterDrainError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -861,12 +911,13 @@ func TestSettlementReceiptAuditOutboxIdleCatchupIsBounded(t *testing.T) {
 	}
 
 	startSettlementReceiptAuditOutboxDrainerWithConfig(ctx, store, settlementReceiptAuditSinkStub{}, 90, nil, fixedIdleTracker{idleFor: time.Hour}, zerolog.Nop(), settlementReceiptAuditOutboxDrainerConfig{
-		BatchLimit:     100,
-		CatchupBatches: 5,
-		PruneLimit:     500,
-		DrainInterval:  10 * time.Millisecond,
-		DrainTimeout:   time.Second,
-		StatsTimeout:   time.Second,
+		BatchLimit:          100,
+		CatchupBatches:      5,
+		PruneLimit:          500,
+		DrainInterval:       10 * time.Millisecond,
+		MaintenanceInterval: time.Hour,
+		DrainTimeout:        time.Second,
+		StatsTimeout:        time.Second,
 	})
 
 	assertSignal(t, store.drainCalled, "startup audit outbox drain")
@@ -877,10 +928,8 @@ func TestSettlementReceiptAuditOutboxIdleCatchupIsBounded(t *testing.T) {
 	}
 	cancel()
 	assertNoSignal(t, store.drainCalled, "idle audit outbox catch-up sixth batch")
-	assertSignal(t, store.pruneCalled, "idle audit outbox catch-up prune")
-	assertNoSignal(t, store.pruneCalled, "idle audit outbox catch-up extra prune")
-	assertSignal(t, store.statsCalled, "idle audit outbox catch-up stats")
-	assertNoSignal(t, store.statsCalled, "idle audit outbox catch-up extra stats")
+	assertNoSignal(t, store.pruneCalled, "audit outbox catch-up maintenance before maintenance interval")
+	assertNoSignal(t, store.statsCalled, "audit outbox catch-up stats before maintenance interval")
 }
 
 func TestSettlementReceiptAuditOutboxIdleCatchupStopsOnShortBatch(t *testing.T) {
@@ -893,12 +942,13 @@ func TestSettlementReceiptAuditOutboxIdleCatchupStopsOnShortBatch(t *testing.T) 
 	}
 
 	startSettlementReceiptAuditOutboxDrainerWithConfig(ctx, store, settlementReceiptAuditSinkStub{}, 90, nil, fixedIdleTracker{idleFor: time.Hour}, zerolog.Nop(), settlementReceiptAuditOutboxDrainerConfig{
-		BatchLimit:     100,
-		CatchupBatches: 5,
-		PruneLimit:     500,
-		DrainInterval:  10 * time.Millisecond,
-		DrainTimeout:   time.Second,
-		StatsTimeout:   time.Second,
+		BatchLimit:          100,
+		CatchupBatches:      5,
+		PruneLimit:          500,
+		DrainInterval:       10 * time.Millisecond,
+		MaintenanceInterval: time.Hour,
+		DrainTimeout:        time.Second,
+		StatsTimeout:        time.Second,
 	})
 
 	assertSignal(t, store.drainCalled, "startup audit outbox drain")
@@ -908,10 +958,8 @@ func TestSettlementReceiptAuditOutboxIdleCatchupStopsOnShortBatch(t *testing.T) 
 	assertSignal(t, store.drainCalled, "idle audit outbox short catch-up batch")
 	cancel()
 	assertNoSignal(t, store.drainCalled, "idle audit outbox catch-up after short batch")
-	assertSignal(t, store.pruneCalled, "idle audit outbox short catch-up prune")
-	assertNoSignal(t, store.pruneCalled, "idle audit outbox short catch-up extra prune")
-	assertSignal(t, store.statsCalled, "idle audit outbox short catch-up stats")
-	assertNoSignal(t, store.statsCalled, "idle audit outbox short catch-up extra stats")
+	assertNoSignal(t, store.pruneCalled, "audit outbox short catch-up maintenance before maintenance interval")
+	assertNoSignal(t, store.statsCalled, "audit outbox short catch-up stats before maintenance interval")
 }
 
 func TestSettlementReceiptAuditOutboxShutdownFlushDrains(t *testing.T) {
@@ -1214,6 +1262,9 @@ func (s *settlementReceiptAuditOutboxObserverStub) ObserveSettlementReceiptAudit
 		default:
 		}
 	}
+}
+
+func (s *settlementReceiptAuditOutboxObserverStub) ObserveSettlementReceiptAuditOutboxStatsHealth(bool, time.Duration) {
 }
 
 func (s *settlementReceiptAuditOutboxObserverStub) IncSettlementReceiptAuditOutboxDrain(outcome string) {

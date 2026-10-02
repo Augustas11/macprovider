@@ -45,6 +45,12 @@ type Store struct {
 	// failure backoff, carried across passes (pool_settlement_expiry_sweep.go).
 	poolSweepMu sync.Mutex
 	poolSweep   poolSettlementSweepState
+	// settlementReceiptRecovery protects a signed receipt already observed by
+	// this process from racing the missing-receipt deadline sweeper while its
+	// bounded persistence retry is in flight. The receipt bytes remain owned by
+	// the buyer package and are never stored here.
+	settlementReceiptRecoveryMu sync.RWMutex
+	settlementReceiptRecovery   map[SettlementReceiptIdentity]int
 	// SPEC-005 v0.4 §13.2 — billing.quarantine_resolution_force_void_enabled
 	// route-layer flag. Held as atomic.Bool so the handler reads it on
 	// every request (no re-wire of the HTTP handler on reload).
@@ -254,6 +260,15 @@ BEGIN
     SELECT RAISE(ABORT, 'ledger_payout_ready status is terminal');
 END;
 
+CREATE TABLE IF NOT EXISTS ledger_settlement_windows (
+    window_start_utc TEXT NOT NULL,
+    window_end_utc TEXT NOT NULL,
+    cadence_days INTEGER NOT NULL CHECK(cadence_days > 0),
+    completed_at_utc TEXT NOT NULL,
+    PRIMARY KEY(window_start_utc, window_end_utc, cadence_days)
+);
+CREATE INDEX IF NOT EXISTS idx_lsw_cadence_end ON ledger_settlement_windows(cadence_days, window_end_utc DESC);
+
 CREATE TABLE IF NOT EXISTS ledger_reconciliation_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_type TEXT NOT NULL CHECK(run_type IN ('startup_scan','nightly_reconcile','admin_reconcile','spec_007_claim')),
@@ -269,6 +284,13 @@ CREATE TABLE IF NOT EXISTS ledger_reconciliation_runs (
     finished_at_utc TEXT NULL,
     status TEXT NOT NULL CHECK(status IN ('running','complete','failed')),
     error TEXT NULL,
+    recovery_phase TEXT NOT NULL DEFAULT 'complete' CHECK(recovery_phase IN ('orphan','request','complete')),
+    recovery_orphan_cursor_ts_utc TEXT NOT NULL DEFAULT '',
+    recovery_orphan_cursor_id INTEGER NOT NULL DEFAULT 0 CHECK(recovery_orphan_cursor_id >= 0),
+    recovery_request_cursor_ts_utc TEXT NOT NULL DEFAULT '',
+    recovery_request_cursor_id INTEGER NOT NULL DEFAULT 0 CHECK(recovery_request_cursor_id >= 0),
+    recovery_lease_owner TEXT NULL,
+    recovery_lease_expires_at_utc TEXT NULL,
     created_at_utc TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_lrr_type_started ON ledger_reconciliation_runs(run_type, started_at_utc);
@@ -455,6 +477,8 @@ CREATE INDEX IF NOT EXISTS idx_srv_request ON settlement_receipt_verdicts(accoun
 CREATE INDEX IF NOT EXISTS idx_srv_provider_recent ON settlement_receipt_verdicts(provider_id, received_at_unix_ms DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_srv_provider_failed_recent ON settlement_receipt_verdicts(provider_id, received_at_unix_ms DESC, id DESC)
     WHERE closed=1 AND settlement_outcome='quarantined';
+CREATE INDEX IF NOT EXISTS idx_srv_pending_deadline ON settlement_receipt_verdicts(pending_deadline_unix_ms, id)
+    WHERE closed=0 AND settlement_outcome='pending';
 
 CREATE TABLE IF NOT EXISTS settlement_receipt_audit_outbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -532,6 +556,9 @@ CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutio
 	if err := s.ensureLedgerQuarantineResolutionsV05(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureLedgerReconciliationRecoveryColumns(ctx); err != nil {
+		return err
+	}
 	if err := s.ensureCachedPromptTokensColumn(ctx); err != nil {
 		return err
 	}
@@ -572,6 +599,56 @@ CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutio
 		return err
 	}
 	return s.validateRequestLog(ctx)
+}
+
+func (s *Store) ensureLedgerReconciliationRecoveryColumns(ctx context.Context) error {
+	add := []struct {
+		name string
+		sql  string
+	}{
+		{"recovery_phase", `ALTER TABLE ledger_reconciliation_runs ADD COLUMN recovery_phase TEXT NOT NULL DEFAULT 'complete' CHECK(recovery_phase IN ('orphan','request','complete'))`},
+		{"recovery_orphan_cursor_ts_utc", `ALTER TABLE ledger_reconciliation_runs ADD COLUMN recovery_orphan_cursor_ts_utc TEXT NOT NULL DEFAULT ''`},
+		{"recovery_orphan_cursor_id", `ALTER TABLE ledger_reconciliation_runs ADD COLUMN recovery_orphan_cursor_id INTEGER NOT NULL DEFAULT 0 CHECK(recovery_orphan_cursor_id >= 0)`},
+		{"recovery_request_cursor_ts_utc", `ALTER TABLE ledger_reconciliation_runs ADD COLUMN recovery_request_cursor_ts_utc TEXT NOT NULL DEFAULT ''`},
+		{"recovery_request_cursor_id", `ALTER TABLE ledger_reconciliation_runs ADD COLUMN recovery_request_cursor_id INTEGER NOT NULL DEFAULT 0 CHECK(recovery_request_cursor_id >= 0)`},
+		{"recovery_lease_owner", `ALTER TABLE ledger_reconciliation_runs ADD COLUMN recovery_lease_owner TEXT NULL`},
+		{"recovery_lease_expires_at_utc", `ALTER TABLE ledger_reconciliation_runs ADD COLUMN recovery_lease_expires_at_utc TEXT NULL`},
+	}
+	for _, col := range add {
+		exists, err := s.columnExists(ctx, "ledger_reconciliation_runs", col.name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, col.sql); err != nil {
+			return err
+		}
+	}
+	if err := s.runBillingMaintenanceOnce(ctx, "ledger_recovery_cursor_bootstrap_v1", func(ctx context.Context) error {
+		_, err := s.db.ExecContext(ctx, `
+UPDATE ledger_reconciliation_runs
+   SET recovery_phase='orphan',
+       recovery_orphan_cursor_ts_utc=from_utc,
+       recovery_orphan_cursor_id=0,
+       recovery_request_cursor_ts_utc=from_utc,
+       recovery_request_cursor_id=0,
+       recovery_lease_owner=NULL,
+       recovery_lease_expires_at_utc=NULL
+ WHERE run_type IN ('startup_scan','nightly_reconcile','admin_reconcile')
+   AND status IN ('running','failed')
+   AND recovery_phase='complete'`)
+		return err
+	}); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `
+CREATE INDEX IF NOT EXISTS idx_lrr_recovery_lease ON ledger_reconciliation_runs(status, recovery_lease_expires_at_utc)
+    WHERE status='running' AND run_type IN ('startup_scan','nightly_reconcile','admin_reconcile');
+CREATE INDEX IF NOT EXISTS idx_request_log_recovery_ts_id ON request_log(ts_utc, id);
+CREATE INDEX IF NOT EXISTS idx_lrc_recovery_ts_id ON ledger_request_credits(ts_utc, id)`)
+	return err
 }
 
 func (s *Store) ensureSettlementRouteSnapshotComputeIntegrityColumns(ctx context.Context) error {
@@ -658,10 +735,16 @@ func (s *Store) ensureSettlementReceiptAuditOutboxSnapshotColumns(ctx context.Co
 	if _, err := s.db.ExecContext(ctx, `
 CREATE INDEX IF NOT EXISTS idx_srao_pending_active ON settlement_receipt_audit_outbox(drained_at_utc, poisoned_at_utc, id)
     WHERE drained_at_utc IS NULL AND poisoned_at_utc IS NULL;
+CREATE INDEX IF NOT EXISTS idx_srao_pending_created ON settlement_receipt_audit_outbox(julianday(created_at_utc), id)
+    WHERE drained_at_utc IS NULL AND poisoned_at_utc IS NULL;
 CREATE INDEX IF NOT EXISTS idx_srao_poisoned ON settlement_receipt_audit_outbox(poisoned_at_utc, id)
     WHERE poisoned_at_utc IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_srao_poisoned_open ON settlement_receipt_audit_outbox(poisoned_at_utc, id)
     WHERE poisoned_at_utc IS NOT NULL AND poison_acknowledged_at_utc IS NULL;
+CREATE INDEX IF NOT EXISTS idx_srao_drained_retention ON settlement_receipt_audit_outbox(julianday(drained_at_utc), id)
+    WHERE drained_at_utc IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_srv_pending_deadline ON settlement_receipt_verdicts(pending_deadline_unix_ms, id)
+    WHERE closed=0 AND settlement_outcome='pending';
 DROP INDEX IF EXISTS idx_srao_pending;`); err != nil {
 		return err
 	}
@@ -985,7 +1068,9 @@ func (s *Store) ensureLedgerRequestCreditPromptSplitColumns(ctx context.Context)
 }
 
 func (s *Store) normalizeBillingTimeTextColumns(ctx context.Context) error {
-	return s.runBillingMaintenanceOnce(ctx, "billing_time_text_normalization_v1", func(ctx context.Context) error {
+	// v2 reruns the canonicalization for installations that completed v1 before
+	// recovery-created quarantine rows switched to fixed-width timestamps.
+	return s.runBillingMaintenanceOnce(ctx, "billing_time_text_normalization_v2", func(ctx context.Context) error {
 		for _, target := range []struct {
 			table  string
 			column string

@@ -182,3 +182,59 @@ func TestEvidenceMissingRuleScope(t *testing.T) {
 		t.Fatalf("no-snapshot rows=%+v err=%v, want none for a snapshotted, verified attempt", noSnap, err)
 	}
 }
+
+func TestFallbackFinalityDoesNotBorrowEvidenceAcrossAttemptsOnSameProvider(t *testing.T) {
+	ctx := context.Background()
+	t.Run("snapshot fallback", func(t *testing.T) {
+		store, route := enforceCreditFixture(t, "attempt-scoped-snapshot-fallback", false, true, RouteSnapshotModeEnforce)
+		if _, err := store.db.Exec(`
+UPDATE ledger_request_credits
+   SET attempt_n=1, quarantined=1, quarantine_reason=?
+ WHERE request_id=? AND attempt_n=0 AND provider_id=?`,
+			UndeliveredSettlementQuarantineReasons[0], route.RequestID, route.ProviderID); err != nil {
+			t.Fatal(err)
+		}
+		missing, err := store.requestSettlementAttemptsWithoutVerdict(ctx, route.AccountScope, route.RequestID, nil, enforceCreditFixtureTS.Add(time.Hour).UnixMilli())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(missing) != 0 {
+			t.Fatalf("attempt 0 borrowed attempt 1 credit evidence: %+v", missing)
+		}
+		noSnapshot, err := store.requestEnforceCreditsWithoutSnapshot(ctx, route.AccountScope, route.RequestID, enforceCreditFixtureTS.Add(time.Hour).UnixMilli())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(noSnapshot) != 1 || noSnapshot[0].attemptN != 1 || !noSnapshot[0].noSnapshot {
+			t.Fatalf("attempt-scoped no-snapshot rows=%+v, want attempt 1", noSnapshot)
+		}
+	})
+
+	t.Run("snapshot output and verdict exclusions", func(t *testing.T) {
+		store, route := enforceCreditFixture(t, "attempt-scoped-exclusions", true, true, RouteSnapshotModeEnforce)
+		attempt0 := SettlementAttemptOutput{
+			AccountScope:          route.AccountScope,
+			RequestID:             route.RequestID,
+			AttemptN:              0,
+			ProviderID:            route.ProviderID,
+			Output:                testSettlementOutput(),
+			OutputAvailable:       true,
+			Usage:                 testSettlementUsage(),
+			UsageSource:           UsageSourceByteEstimated,
+			TerminalStateTSUnixMS: enforceCreditFixtureTS.UnixMilli(),
+		}
+		if _, err := store.InsertSettlementAttemptOutput(ctx, attempt0); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.db.Exec(`UPDATE ledger_request_credits SET attempt_n=1 WHERE request_id=? AND attempt_n=0 AND provider_id=?`, route.RequestID, route.ProviderID); err != nil {
+			t.Fatal(err)
+		}
+		noSnapshot, err := store.requestEnforceCreditsWithoutSnapshot(ctx, route.AccountScope, route.RequestID, enforceCreditFixtureTS.Add(time.Minute).UnixMilli())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(noSnapshot) != 1 || noSnapshot[0].attemptN != 1 || !noSnapshot[0].noSnapshot {
+			t.Fatalf("attempt 0 evidence suppressed attempt 1 fallback: %+v", noSnapshot)
+		}
+	})
+}
