@@ -243,7 +243,7 @@ else
   result S2-guard-updater-tests FAIL "$(tail -6 "$EV/test_pearl_updater.txt" | tr '\n' ' ' | head -c 600)"
 fi
 for t in check_deploy_static_feed_access deploy_canary_live_catalog_proof deploy_catalog_compare_live; do
-  ( cd $WTN && timeout 600 bash phase4-coordinator/dist/test/$t.test.sh ) >"$EV/guard-$t.txt" 2>&1 \
+  ( cd $WTN && DEPLOY_COMPARE_EXPIRED_TIER2_TTL_SECONDS=30 timeout 600 bash phase4-coordinator/dist/test/$t.test.sh ) >"$EV/guard-$t.txt" 2>&1 \
     && result "S2-guard-$t" PASS "$(tail -1 "$EV/guard-$t.txt")" || result "S2-guard-$t" FAIL "$(tail -4 "$EV/guard-$t.txt" | tr '\n' ' ' | head -c 500)"
 done
 git -C $WTN status --porcelain | grep -v '^?? phase4-coordinator/dist/stats-hardware-verifier-linux-amd64$' | grep . >"$EV/tree-dirt.txt" && result S2-guards-clean-tree INFO "guard tests left files: $(head -5 "$EV/tree-dirt.txt" | tr '\n' ' ')" || true

@@ -478,6 +478,11 @@ grep -qF -- "--tier2-coordinator-config $ROOT/coordinator.yaml --tier2-coordinat
 # Real verifier: pristine committed live verifies (control), a corrupt live
 # sidecar or keyring aborts before any staging, swap, window, or override.
 VERIFY_MODE=real
+EXPIRED_TIER2_TTL_SECONDS="${DEPLOY_COMPARE_EXPIRED_TIER2_TTL_SECONDS:-2}"
+case "$EXPIRED_TIER2_TTL_SECONDS" in
+  ''|*[!0-9]*) fail "DEPLOY_COMPARE_EXPIRED_TIER2_TTL_SECONDS must be a positive integer" ;;
+esac
+[ "$EXPIRED_TIER2_TTL_SECONDS" -gt 0 ] || fail "DEPLOY_COMPARE_EXPIRED_TIER2_TTL_SECONDS must be a positive integer"
 reset
 live_release committed-live
 if run_deploy_slice ""; then
@@ -545,8 +550,8 @@ PY
   # Expired live Tier-2: still signature-verified, not refused for expiry.
   reset
   live_release committed-live
-  resign_live_tier2 2
-  sleep 3
+  resign_live_tier2 "$EXPIRED_TIER2_TTL_SECONDS"
+  sleep $((EXPIRED_TIER2_TTL_SECONDS + 1))
   run_deploy_slice "" || true
   grep -q 'LIVE catalog release autotune/current failed verify-directory' "$TMP/out" &&
     { cat "$TMP/out" >&2; fail "an EXPIRED live Tier-2 must not abort the live verify"; }

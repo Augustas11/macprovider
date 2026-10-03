@@ -408,14 +408,18 @@ def cmd_keeper(a):
             cfg = json.loads(d.read_text())
             if not cfg.get("keeper", True) or (d.parent / "keeper.off").exists():
                 continue
-            with Lock(d.parent):
-                vs, wins = versions(d.parent), windows(d.parent)
-                if not vs:
-                    continue
-                end = wins[str(vs[-1])][1]
-                if end - time.time() > a.lead:
-                    continue
-                state, detail = sign_and_submit(name)
+            try:
+                with Lock(d.parent):
+                    vs, wins = versions(d.parent), windows(d.parent)
+                    if not vs:
+                        continue
+                    end = wins[str(vs[-1])][1]
+                    if end - time.time() > a.lead:
+                        continue
+                    state, detail = sign_and_submit(name)
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+                print("%s keeper retry %s %s" % (time.strftime("%H:%M:%S"), name, exc), flush=True)
+                continue
             print("%s keeper %s %s %s" % (time.strftime("%H:%M:%S"), name, state, detail), flush=True)
         time.sleep(5)
 

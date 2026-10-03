@@ -243,6 +243,24 @@ wait_window() {
   [ "$nb" -gt "$now" ] && sleep $((nb - now + 5))
   return 0
 }
+# wait_fresh_window <pool> [minimum-runway-seconds]: keep ordinary traffic out
+# of an already-scheduled activation boundary. Boundary behavior has its own
+# continuous-traffic coverage in S5; S3 proves steady-state paid settlement.
+wait_fresh_window() {
+  local pool="$1" minimum="${2:-30}" version window nb na now
+  while :; do
+    version="$($PM latest "$pool")"
+    window="$($PM window "$pool" "$version")" || { sleep 2; continue; }
+    read -r nb na <<<"$window"
+    now="$(date +%s)"
+    if [ "$now" -lt "$nb" ]; then
+      sleep $((nb - now + 5))
+      return 0
+    fi
+    [ $((na - now)) -ge "$minimum" ] && return 0
+    sleep 2
+  done
+}
 snapshots_for() { csql "SELECT COUNT(*) FROM settlement_route_snapshots WHERE json_extract(route_snapshot_json,'\$.pool_model_id') = '$1'"; }
 global_pool_snapshots() { csql "SELECT COUNT(*) FROM settlement_route_snapshots WHERE json_extract(route_snapshot_json,'\$.pool_model_id') IS NOT NULL AND coalesce(json_extract(route_snapshot_json,'\$.pool_id'),'')=''"; }
 compare_catalog_shape() { # compare_catalog_shape <label> <run> <message>

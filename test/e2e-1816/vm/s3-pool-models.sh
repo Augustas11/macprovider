@@ -143,10 +143,12 @@ grep -qi '^x-macprovider-model-disclosure: pool_attested_unverified' "$EV/probe-
   || result S3-disclosure FAIL "headers: $(grep -i '^HTTP\|x-macprovider-\(model-disclosure\|engine\)' "$EV/probe-g.headers" | tr -d '\r' | tr '\n' ' ') body: $(head -c 200 "$EV/probe-g.body")"
 
 # ---- pool-model traffic, all four kinds -----------------------------------------------
+wait_fresh_window Q 30
 run="$(run_id s3g)"
 pool_traffic "$run" Q "$MG" llamacpp "ns=4,st=4,st_dc=1,ns_dc=1" 2
 pool_check S3-pool-traffic-gguf "$run" --expect ns=settled,st=settled --min-settled 8 --pool-model-id "$MG" --rates $G_RATES \
   --usage-source pool_operator_attested --token-source pool_operator_attested --runtime-source llamacpp_loopback --provider e2e-prov-3
+wait_fresh_window QN 30
 run="$(run_id s3n)"
 pool_traffic "$run" QN "$MN" "" "ns=4,st=4,st_dc=1,ns_dc=1" 2
 pool_check S3-pool-traffic-native "$run" --expect ns=settled,st=settled --min-settled 8 --pool-model-id "$MN" --rates $N_RATES \
