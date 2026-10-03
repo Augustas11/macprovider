@@ -9,7 +9,8 @@
 #   1 — error
 #   2 — material change detected (automation should alert / open issue)
 #
-# Material changes: issue/PR closed or merged, new release tag above macprovider pin,
+# Material changes: issue/PR closed or merged, a tracked fix-PR head changes, a fix
+# enters the latest release, a new release tag appears above the MacProvider pin,
 # KVCache compile-fix heuristic flips true, or native-MTP readiness flips true.
 
 set -euo pipefail
@@ -54,7 +55,7 @@ def issue(number):
 
 def pr(number):
     return gh_json(["pr", "view", str(number), "--repo", "ml-explore/mlx-swift-lm",
-                    "--json", "number,state,title,updatedAt,mergedAt,mergeCommit"])
+                    "--json", "number,state,title,updatedAt,mergedAt,mergeCommit,headRefOid,reviewDecision"])
 
 def latest_release(repo):
     r = gh_json(["release", "view", "--repo", repo, "--json", "tagName,publishedAt,name"])
@@ -80,6 +81,7 @@ def pr_status(row, merged, open_status, closed_status=None):
     return open_status
 
 issue406 = issue(406)
+pr550 = pr(550)
 pr364 = pr(364)
 issue312 = issue(312)
 pr453 = pr(453)
@@ -105,6 +107,24 @@ lm_rel = latest_release("ml-explore/mlx-swift-lm")
 swift_rel = latest_release("ml-explore/mlx-swift")
 transformers_rel = latest_release("huggingface/swift-transformers")
 jinja_rel = latest_release("huggingface/swift-jinja")
+
+pr550_merge_commit = (pr550.get("mergeCommit") or {}).get("oid")
+pr550_in_latest_release = bool(
+    pr550_merge_commit
+    and release_contains_commit(
+        "ml-explore/mlx-swift-lm", lm_rel["tag"], pr550_merge_commit
+    )
+)
+if pr550.get("mergedAt"):
+    pr550_automation_status = (
+        "tagged_fix_candidate_requires_t2_01_tg2_qualification"
+        if pr550_in_latest_release
+        else "awaiting_release_tag"
+    )
+elif pr550.get("state") == "CLOSED":
+    pr550_automation_status = "closed_unmerged_fix_candidate"
+else:
+    pr550_automation_status = "active_fix_candidate_review_required"
 
 native_mtp_required_prs = {
     "mlx_swift_lm_351_qwen_mtp": pr351,
@@ -175,6 +195,23 @@ out = {
             "runbook_tasks": ["T2-01", "TG2"],
             "updated_at": issue406["updatedAt"],
             "closed_at": issue406.get("closedAt"),
+        },
+        "mlx_swift_lm_550_fixed_capacity_compiled_decode": {
+            "repo": "ml-explore/mlx-swift-lm",
+            "kind": "pull_request",
+            "number": pr550["number"],
+            "url": "https://github.com/ml-explore/mlx-swift-lm/pull/550",
+            "state": pr550["state"],
+            "title": pr550["title"],
+            "runbook_tasks": ["T2-01", "TG2"],
+            "updated_at": pr550["updatedAt"],
+            "merged_at": pr550.get("mergedAt"),
+            "merge_commit": pr550_merge_commit,
+            "head_revision": pr550.get("headRefOid"),
+            "review_decision": pr550.get("reviewDecision"),
+            "in_latest_release": pr550_in_latest_release,
+            "macprovider_issue": "https://github.com/Augustas11/macprovider/issues/964",
+            "automation_status": pr550_automation_status,
         },
         "mlx_swift_lm_364_gemma_moe": {
             "repo": "ml-explore/mlx-swift-lm",
