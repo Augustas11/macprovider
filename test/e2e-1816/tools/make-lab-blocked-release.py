@@ -66,8 +66,14 @@ model["artifacts"]["gguf-lab-blocked"] = {
     "verification_status": "verified", "verified_at": "2026-10-01"}
 sign("autotune-candidates.json", cat_raw)
 sign("autotune-artifacts.json", dump(art))
-for name in ("rate-card.json", "demand-rank.json", "continuous-batching-policy.json"):
+for name in ("rate-card.json", "demand-rank.json"):
     if (feeds / name).exists():
         sign(name, (feeds / name).read_bytes())
+policy_path = feeds / "continuous-batching-policy.json"
+if policy_path.exists():
+    policy = json.loads(policy_path.read_text())
+    policy["candidate_catalog_sha256"] = hashlib.sha256(cat_raw).hexdigest()
+    policy["signer_key_id"] = a.key_id
+    sign(policy_path.name, dump(policy))
 pub = subprocess.run(["openssl", "pkey", "-in", a.key, "-pubout", "-outform", "DER"], check=True, capture_output=True).stdout[-32:]
 print(base64.b64encode(pub).decode())
