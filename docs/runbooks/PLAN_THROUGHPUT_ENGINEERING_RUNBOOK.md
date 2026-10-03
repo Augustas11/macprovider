@@ -543,7 +543,7 @@ Pending throughput blockers are tracked in `beta/throughput-engineering/UPSTREAM
 
 | Upstream | Kind | Runbook | Cursor Automation |
 |----------|------|---------|-------------------|
-| [mlx-swift-lm#406](https://github.com/ml-explore/mlx-swift-lm/issues/406) | Issue | T2-01 / TG2 | Weekday blocker watch |
+| [mlx-swift-lm#406](https://github.com/ml-explore/mlx-swift-lm/issues/406) + [#550](https://github.com/ml-explore/mlx-swift-lm/pull/550) | Issue + active fix PR | T2-01 / TG2 | Weekday blocker watch, including PR head changes |
 | [mlx-swift-lm#364](https://github.com/ml-explore/mlx-swift-lm/pull/364) | PR (**merged**, awaiting release tag) | T1-02 / TG1 | Weekday blocker watch |
 | [mlx-swift-lm#312](https://github.com/ml-explore/mlx-swift-lm/issues/312) + [#453](https://github.com/ml-explore/mlx-swift-lm/pull/453) | Issue + PR (**PR merged**, awaiting release tag) | #965 / reusable quantized KV | Weekday blocker watch |
 | [mlx-swift-lm#424](https://github.com/ml-explore/mlx-swift-lm/issues/424) | Issue | #377 / speculative rollback | Weekday blocker watch |
@@ -551,7 +551,7 @@ Pending throughput blockers are tracked in `beta/throughput-engineering/UPSTREAM
 | ml-explore release tags | Release | T1-01 pin bump | Weekly discovery watch |
 | `swift-transformers` release tags | Release | #966 token-exact migration | Weekly discovery watch |
 
-When the checker exits **2** (material change: issue/PR closed or merged, new release above pin, KVCache compile-fix heuristic), the automation must first **open or update the sticky GitHub issue**, then persist the reviewed snapshot through a normal feature-branch PR. It must never open a draft dependency-bump or implementation PR. Concretely:
+When the checker exits **2** (material change: issue/PR closed or merged, tracked fix-PR head changed, fix entered the latest release, new release above pin, or KVCache compile-fix heuristic), the automation must first **open or update the sticky GitHub issue**, then persist the reviewed snapshot through a normal feature-branch PR. It must never open a draft dependency-bump or implementation PR. Concretely:
 
 1. `gh issue list --repo Augustas11/macprovider --search "<sticky title>" --state all` to find the existing sticky issue for that blocker.
 2. If found, add a comment with the new checker snapshot (state, timestamps, pin status) and update checkboxes; if not found, create it fresh.

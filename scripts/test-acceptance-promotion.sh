@@ -188,6 +188,8 @@ release_names=(
   "autotune-candidates.json.sig"
   "compatibility-artifact-index.json"
   "compatibility-set.json"
+  "continuous-batching-policy.json"
+  "continuous-batching-policy.json.sig"
   "coordinator-cli-linux-amd64"
   "coordinator-linux-amd64"
   "demand-rank.json"
@@ -229,12 +231,32 @@ import sys
 
 root = pathlib.Path(sys.argv[1])
 digest = lambda name: hashlib.sha256((root / name).read_bytes()).hexdigest()
+policy_name = "continuous-batching-policy.json"
+policy = (root / policy_name).read_bytes()
+(root / "release.json").write_text(
+    json.dumps(
+        {
+            "feeds": {
+                policy_name: {
+                    "bytes": len(policy),
+                    "sha256": hashlib.sha256(policy).hexdigest(),
+                }
+            }
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    + "\n",
+    encoding="utf-8",
+)
 catalog_names = (
     "release.json",
     "trusted-keys.json",
     "tier2-catalog.json",
     "autotune-candidates.json",
     "autotune-candidates.json.sig",
+    "continuous-batching-policy.json",
+    "continuous-batching-policy.json.sig",
     "demand-rank.json",
     "demand-rank.json.sig",
     "rate-card.json",
@@ -467,6 +489,30 @@ printf '%s\n' "${release_names[@]}" "gateway-linux-amd64" | LC_ALL=C sort > "$ac
 expect_reject duplicate-basename "${directory_verify[@]}"
 printf '%s\n' "${release_names[@]}" | LC_ALL=C sort > "$accepted/release-assets.txt"
 
+cp "$accepted/release.json" "$work/release.cb-policy-bound"
+python3 - "$accepted/release.json" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+v = json.loads(p.read_text())
+v["feeds"].pop("continuous-batching-policy.json")
+p.write_text(json.dumps(v) + "\n")
+PY
+expect_reject cb-policy-pair-unbound "${directory_verify[@]}"
+grep -q 'carries continuous-batching-policy.json that the accepted release.json does not bind' "$work/cb-policy-pair-unbound.out"
+mv "$work/release.cb-policy-bound" "$accepted/release.json"
+
+printf '%s\n' "${release_names[@]}" \
+  | grep -v '^continuous-batching-policy\.json' \
+  | LC_ALL=C sort > "$accepted/release-assets.txt"
+expect_reject cb-policy-pair-missing-from-inventory "${directory_verify[@]}"
+printf '%s\n' "${release_names[@]}" | LC_ALL=C sort > "$accepted/release-assets.txt"
+
+cp "$accepted/continuous-batching-policy.json" "$work/continuous-batching-policy.json"
+printf 'tampered\n' >> "$accepted/continuous-batching-policy.json"
+expect_reject cb-policy-feed-differs-from-binding "${directory_verify[@]}"
+grep -q 'accepted continuous-batching-policy.json differs from its release.json binding' "$work/cb-policy-feed-differs-from-binding.out"
+mv "$work/continuous-batching-policy.json" "$accepted/continuous-batching-policy.json"
+
 # SPEC-023 §3.7.8 Stage A (BYOM v0.2 slice 2b-ii): the artifact feed and its
 # sidecar are release assets exactly when the accepted release.json binds them,
 # and then pearl-release.json binds them in catalog.files too.
@@ -483,6 +529,8 @@ root = pathlib.Path(sys.argv[1])
 feed = (root / "autotune-artifacts.json").read_bytes()
 feeds = {name: {} for name in ("autotune-candidates.json", "demand-rank.json", "rate-card.json", "tier2-catalog.json")}
 feeds["autotune-artifacts.json"] = {"sha256": hashlib.sha256(feed).hexdigest(), "bytes": len(feed)}
+policy = (root / "continuous-batching-policy.json").read_bytes()
+feeds["continuous-batching-policy.json"] = {"sha256": hashlib.sha256(policy).hexdigest(), "bytes": len(policy)}
 (root / "release.json").write_text(json.dumps({"feeds": feeds}) + "\n", encoding="utf-8")
 PY
 expect_reject artifact-pair-missing-from-inventory "${directory_verify[@]}"
