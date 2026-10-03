@@ -70,10 +70,18 @@ was signed, notarized, and stapled by acceptance run
 Independent exact-set, code-signature, notarization, stapling, Gatekeeper, and
 embedded/standalone CLI byte-identity checks passed. Promotion verification for
 the release-bound continuous-batching policy pair was corrected by #1838 and
-replayed successfully against those exact accepted bytes. Physical Studio
-install/join acceptance remains pending; the candidate has not been installed,
-joined, promoted, tagged publicly, or published. Runtime tag `v1.8.211` and
-private candidate identity `v1.8.212` are consumed and must not be reused.
+replayed successfully against those exact accepted bytes. Physical acceptance
+passed on the designated M3 Ultra Studio on 2026-10-03: the exact signed CLI
+(`9ee225a55ae1f1a54c66cde5a53c45bad8a7c4b470c2f9e4e859391d12aa0ecc`)
+replaced 1.8.207 through the established payload-only swap while preserving the
+operator config and launchd definitions; Pearl accepted the exact private set
+without changing its 1.8.207 target or recommendation; the provider joined as
+`serving_buyers`; operator pause was acknowledged and survived a full
+provider/watchdog restart; resume restored buyer serving; and a bounded local
+Qwen3.6 request completed successfully. The Pearl relay and buyer runner were
+then restored. The candidate remains unpromoted, untagged publicly, and
+unpublished. Runtime tag `v1.8.211` and private candidate identity `v1.8.212`
+are consumed and must not be reused.
 
 | Net change in CLI / Malibu / installer | Status | PR |
 |---|---|---|
