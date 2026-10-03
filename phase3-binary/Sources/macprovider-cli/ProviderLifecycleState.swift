@@ -360,6 +360,13 @@ struct ProviderLifecycleStateRecord: Codable, Equatable, Sendable {
                 break
             }
         }
+        // A disconnected serve has already written the predecessor, but only an
+        // explicit operator command may convert that state into durable pause.
+        if [.networkOffline, .coordinatorUnavailable].contains(previous.state),
+           state == .pausedByOperator,
+           writer != .operatorCommand {
+            throw ProviderLifecycleStateError.invalidTransition(from: previous.state.rawValue, to: state.rawValue)
+        }
     }
 
     private func validateSignificantEvent(_ event: SignificantEvent?) throws {

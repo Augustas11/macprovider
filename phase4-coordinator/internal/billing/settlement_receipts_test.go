@@ -93,6 +93,80 @@ WHERE settlement_receipt_audit_outbox_id = ?`, firstOutboxID).Scan(&auditTS); er
 	assertSettlementReceiptVerdictSchemaRedacted(t, store.db)
 }
 
+func TestIngestSettlementReceiptMaterializesJournaledAttemptOutputOnDemand(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithNegativeVariant(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	_, store := newRequestAndBillingStores(t)
+	if _, err := store.InsertRouteSnapshot(context.Background(), input.RouteSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	outputFixture := settlementVerifierObjectsByID(fixtures)[tuple.SettlementOutputID].Value
+	if outputFixture["tool_calls"] != nil {
+		t.Fatal("on-demand materialization fixture unexpectedly contains tool calls")
+	}
+	attempt := SettlementAttemptOutput{
+		AccountScope: input.AccountScope,
+		RequestID:    input.RequestID,
+		AttemptN:     input.AttemptN,
+		ProviderID:   input.ProviderID,
+		Output: SettlementOutput{
+			Content:               settlementFixtureString(t, outputFixture, "content"),
+			FinishReason:          settlementFixtureNullableString(t, outputFixture, "finish_reason"),
+			OutputPrefixStartByte: settlementFixtureInt(t, outputFixture, "output_prefix_start_byte"),
+			OutputPrefixEndByte:   settlementFixtureInt(t, outputFixture, "output_prefix_end_byte"),
+			TerminalState:         settlementFixtureString(t, outputFixture, "terminal_state"),
+		},
+		OutputAvailable:       true,
+		Usage:                 input.ExpectedUsage,
+		UsageSource:           input.UsageSource,
+		TerminalStateTSUnixMS: input.TerminalStateTSUnixMS,
+	}
+	if digest, _, err := attempt.Output.Digest(); err != nil || digest != input.OutputHash {
+		t.Fatalf("attempt output digest=%s err=%v want %s", digest, err, input.OutputHash)
+	}
+	conn, err := store.db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.JournalSettlementAttemptOutputConn(context.Background(), conn, attempt); err != nil {
+		_ = conn.Close()
+		t.Fatal(err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_attempt_outputs`); got != 0 {
+		t.Fatalf("attempt outputs before receipt=%d want 0", got)
+	}
+	setSettlementReceiptNow(store, input.ReceiptReceivedUnixMS)
+
+	state, err := store.IngestSettlementReceipt(context.Background(), SettlementReceiptIngestionInput{
+		SettlementReceiptIdentity: SettlementReceiptIdentity{
+			AccountScope: input.AccountScope,
+			RequestID:    input.RequestID,
+			AttemptN:     input.AttemptN,
+			ProviderID:   input.ProviderID,
+		},
+		Header:                input.Header,
+		ProviderReceiptPubkey: pubkey,
+		receiptReceivedUnixMS: input.ReceiptReceivedUnixMS,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.SettlementOutcome != SettlementOutcomeVerified || !state.Closed {
+		t.Fatalf("state=%#v, want verified terminal state", state)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_attempt_outputs`); got != 1 {
+		t.Fatalf("attempt outputs after receipt=%d want 1", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_attempt_output_journal WHERE materialized_at_utc IS NOT NULL`); got != 1 {
+		t.Fatalf("materialized journal rows=%d want 1", got)
+	}
+}
+
 func TestSettlementReceiptAuditOutboxSurvivesPostCommitDrainFailure(t *testing.T) {
 	fixtures := loadSettlementVerifierFixtures(t)
 	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)

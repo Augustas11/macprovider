@@ -461,6 +461,33 @@ func assertEnforceRefundAndQuarantine(t *testing.T, resp *http.Response, dbPath,
 	}
 }
 
+func assertEnforcePendingWithDurableEvidence(t *testing.T, resp *http.Response, dbPath string) {
+	t.Helper()
+	tr := resp.Trailer
+	if tr.Get(settlementOutcomeNames[0]) != "pending" || tr.Get("X-MacProvider-Settlement-Closed") != "false" ||
+		tr.Get("X-MacProvider-Settlement-Reason") != "missing_receipt" || tr.Get("X-MacProvider-Settlement-Mode") != "enforce" {
+		t.Fatalf("trailers=%v, want signed pending enforce settlement", tr)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var quarantined, outputs, materialized int
+	if err := db.QueryRow(`SELECT COALESCE(SUM(quarantined), 0) FROM ledger_request_credits WHERE status = 200 AND provider_credits > 0`).Scan(&quarantined); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM settlement_attempt_outputs`).Scan(&outputs); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM settlement_attempt_output_journal WHERE materialized_at_utc IS NOT NULL`).Scan(&materialized); err != nil {
+		t.Fatal(err)
+	}
+	if quarantined != 0 || outputs != 1 || materialized != 1 {
+		t.Fatalf("quarantined=%d outputs=%d materialized_journal=%d, want 0/1/1", quarantined, outputs, materialized)
+	}
+}
+
 // Review R3 MEDIUM-2 (enforce): a hard post-delivery evidence failure
 // refunds the buyer and leaves no payable provider credit.
 func TestHTTPEnforceRecordFailureRefundsAndQuarantinesCredit(t *testing.T) {
@@ -470,25 +497,23 @@ func TestHTTPEnforceRecordFailureRefundsAndQuarantinesCredit(t *testing.T) {
 	assertLookupClosedQuarantined(t, server, "settlement_record_failed_after_delivery")
 }
 
-// Review R3 MEDIUM-2 / Codex HIGH 2 (enforce): evidence lost transiently
-// after the credit refunds the buyer and quarantines the credit.
-func TestHTTPEnforceOutputMissingAfterCreditRefundsAndQuarantinesCredit(t *testing.T) {
+// Projection pressure after the atomic credit+journal commit leaves the
+// enforce attempt pending. Receipt adjudication materializes the durable row
+// on demand, so the credit is not misclassified as missing evidence.
+func TestHTTPEnforceOutputProjectionPressureKeepsDurablePendingEvidence(t *testing.T) {
 	t.Cleanup(buyer.CancelSettlementOutputWritesForTest(2))
 	server, dbPath := newDeliveredOnlyHTTPServer(t)
-	assertEnforceRefundAndQuarantine(t, postNegotiatedResponse(t, server), dbPath, "settlement_output_missing_after_credit")
-	assertLookupClosedQuarantined(t, server, "settlement_output_missing_after_credit")
+	assertEnforcePendingWithDurableEvidence(t, postNegotiatedResponse(t, server), dbPath)
 }
 
-// Review R4 MEDIUM-A: the evidence write fails after the credit AND the
-// missing-output mark fails too. The evidence is still missing, so the
-// non-streaming enforce attempt refunds (as a stream does), never a legacy
-// debit of a credit that can never be paid.
-func TestHTTPEnforceOutputMissingWithFailedMarkRefundsAndQuarantinesCredit(t *testing.T) {
+// The obsolete missing-output mark is not consulted when a durable journal
+// row exists; even a forced mark failure cannot turn projection pressure into
+// a refund or quarantine.
+func TestHTTPEnforceProjectionPressureIgnoresMissingOutputMarkFailure(t *testing.T) {
 	t.Cleanup(buyer.CancelSettlementOutputWritesForTest(2))
 	t.Cleanup(buyer.SetMarkSettlementOutputMissingErrForTest(errors.New("database is locked")))
 	server, dbPath := newDeliveredOnlyHTTPServer(t)
-	assertEnforceRefundAndQuarantine(t, postNegotiatedResponse(t, server), dbPath, "settlement_output_missing_after_credit")
-	assertLookupClosedQuarantined(t, server, "settlement_output_missing_after_credit")
+	assertEnforcePendingWithDurableEvidence(t, postNegotiatedResponse(t, server), dbPath)
 }
 
 // Review R3 MEDIUM-1: the missing-evidence latch is per attempt. Attempt 1

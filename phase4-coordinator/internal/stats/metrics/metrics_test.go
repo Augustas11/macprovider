@@ -56,7 +56,8 @@ var (
 		"billing_reload_config": true, "route_snapshot": true,
 		"route_snapshot_journal": true, "route_snapshot_materializer": true,
 		"wal_checkpoint": true, "ledger_recovery": true, "settlement_attempt_output": true,
-		"settlement_pool_labels": true, "settlement_receipt": true,
+		"settlement_attempt_output_journal_materialize": true,
+		"settlement_pool_labels":                        true, "settlement_receipt": true,
 	}
 	allowMoneySQLiteOutcomeLabel   = map[string]bool{"success": true, "error": true}
 	allowMoneySQLiteOperationLabel = map[string]bool{
@@ -69,6 +70,10 @@ var (
 	allowSettlementReceiptAuditOutboxOutcome   = map[string]bool{"success": true, "error": true}
 	allowSettlementReceiptAuditOutboxOperation = map[string]bool{
 		"drained": true, "poisoned": true, "pruned": true,
+	}
+	allowSettlementAttemptOutputJournalOutcomeLabel   = map[string]bool{"success": true, "error": true}
+	allowSettlementAttemptOutputJournalOperationLabel = map[string]bool{
+		"materialized": true, "poisoned": true, "pruned": true,
 	}
 	allowReferralOutcome = map[string]bool{
 		"disabled": true, "busy": true, "rate_limited": true,
@@ -150,6 +155,15 @@ func TestLabelHygiene(t *testing.T) {
 		m.AddSettlementReceiptAuditOutboxRows(operation, 2)
 	}
 	m.AddSettlementReceiptAuditOutboxRows("raw-attacker-value", 2)
+	m.ObserveSettlementAttemptOutputJournal(9, 1, 2, 2*time.Second)
+	for outcome := range allowSettlementAttemptOutputJournalOutcomeLabel {
+		m.IncSettlementAttemptOutputJournalMaterialize(outcome)
+	}
+	m.IncSettlementAttemptOutputJournalMaterialize("raw-attacker-value")
+	for operation := range allowSettlementAttemptOutputJournalOperationLabel {
+		m.AddSettlementAttemptOutputJournalRows(operation, 2)
+	}
+	m.AddSettlementAttemptOutputJournalRows("raw-attacker-value", 2)
 
 	families, err := reg.Gather()
 	if err != nil {
@@ -243,6 +257,10 @@ func TestLabelHygiene(t *testing.T) {
 						if !allowSettlementReceiptAuditOutboxOutcome[val] {
 							t.Errorf("metric %s outcome=%q not in settlement receipt audit outbox allowed set", mf.GetName(), val)
 						}
+					} else if mf.GetName() == "settlement_attempt_output_journal_materialize_total" {
+						if !allowSettlementAttemptOutputJournalOutcomeLabel[val] {
+							t.Errorf("metric %s outcome=%q not in attempt-output journal allowed set", mf.GetName(), val)
+						}
 					} else if !allowCredentialBootstrapOutcome[val] {
 						t.Errorf("metric %s outcome=%q not in allowed set", mf.GetName(), val)
 					}
@@ -250,6 +268,10 @@ func TestLabelHygiene(t *testing.T) {
 					if mf.GetName() == "settlement_receipt_audit_outbox_rows_total" {
 						if !allowSettlementReceiptAuditOutboxOperation[val] {
 							t.Errorf("metric %s operation=%q not in settlement receipt audit outbox allowed set", mf.GetName(), val)
+						}
+					} else if mf.GetName() == "settlement_attempt_output_journal_rows_total" {
+						if !allowSettlementAttemptOutputJournalOperationLabel[val] {
+							t.Errorf("metric %s operation=%q not in attempt-output journal allowed set", mf.GetName(), val)
 						}
 					} else if !allowMoneySQLiteOperationLabel[val] {
 						t.Errorf("metric %s operation=%q not in money SQLite allowed set", mf.GetName(), val)
@@ -306,6 +328,34 @@ func TestSettlementReceiptAuditOutboxHelpers(t *testing.T) {
 	if metricExists(families, "settlement_receipt_audit_outbox_rows_total", map[string]string{"operation": "raw-attacker-value"}) {
 		t.Fatal("invalid settlement receipt audit outbox rows operation created a metric series")
 	}
+}
+
+func TestSettlementAttemptOutputJournalHelpers(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New(reg)
+
+	m.ObserveSettlementAttemptOutputJournal(-1, -1, -1, -time.Second)
+	m.IncSettlementAttemptOutputJournalMaterialize("success")
+	m.IncSettlementAttemptOutputJournalMaterialize("error")
+	m.IncSettlementAttemptOutputJournalMaterialize("raw-attacker-value")
+	m.AddSettlementAttemptOutputJournalRows("materialized", 3)
+	m.AddSettlementAttemptOutputJournalRows("poisoned", 2)
+	m.AddSettlementAttemptOutputJournalRows("pruned", 4)
+	m.AddSettlementAttemptOutputJournalRows("raw-attacker-value", 5)
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	assertMetricValue(t, families, "settlement_attempt_output_journal_pending_rows", nil, 0)
+	assertMetricValue(t, families, "settlement_attempt_output_journal_poisoned_rows", nil, 0)
+	assertMetricValue(t, families, "settlement_attempt_output_journal_retained_poisoned_rows", nil, 0)
+	assertMetricValue(t, families, "settlement_attempt_output_journal_oldest_pending_age_seconds", nil, 0)
+	assertMetricValue(t, families, "settlement_attempt_output_journal_materialize_total", map[string]string{"outcome": "success"}, 1)
+	assertMetricValue(t, families, "settlement_attempt_output_journal_materialize_total", map[string]string{"outcome": "error"}, 1)
+	assertMetricValue(t, families, "settlement_attempt_output_journal_rows_total", map[string]string{"operation": "materialized"}, 3)
+	assertMetricValue(t, families, "settlement_attempt_output_journal_rows_total", map[string]string{"operation": "poisoned"}, 2)
+	assertMetricValue(t, families, "settlement_attempt_output_journal_rows_total", map[string]string{"operation": "pruned"}, 4)
 }
 
 func containsCaseFold(haystack, needle string) bool {

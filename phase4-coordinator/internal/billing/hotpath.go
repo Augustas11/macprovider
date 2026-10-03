@@ -3,6 +3,8 @@ package billing
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -57,6 +59,10 @@ type HotPathInput struct {
 	// PoolAttestationFence is the pool state that decision used. The ledger
 	// transaction re-reads it and keeps the credit only if it still holds.
 	PoolAttestationFence *PoolAttestationFence
+	// SettlementAttemptOutput is the compact immutable evidence event that
+	// commits with the provider credit. The asynchronous materializer projects
+	// it into settlement_attempt_outputs after this transaction commits.
+	SettlementAttemptOutput *SettlementAttemptOutput
 }
 
 // LoopbackRuntimeNotSettlementEligible is the ledger quarantine reason for an
@@ -130,7 +136,7 @@ func (s *Store) writeHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 	if account != nil {
 		reqRow.AccountID = account.ID()
 	}
-	return sqliteutil.TransactObserved(ctx, s.db, "billing_hot_path", s.sqliteMetric, func(ctx context.Context, conn *sql.Conn) error {
+	err := sqliteutil.TransactObserved(ctx, s.db, "billing_hot_path", s.sqliteMetric, func(ctx context.Context, conn *sql.Conn) error {
 		if err := reqLogStore.InsertExec(ctx, conn, reqRow); err != nil {
 			return err
 		}
@@ -192,7 +198,7 @@ func (s *Store) writeHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 					if err := insertProviderIdentitySnapshotTx(ctx, conn, in, now); err != nil {
 						return err
 					}
-					return nil
+					return s.journalHotPathSettlementAttemptOutput(ctx, conn, in, false)
 				}
 				in.AttemptN = derived
 			}
@@ -247,7 +253,10 @@ func (s *Store) writeHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 			if _, err := insertRequestCreditTx(ctx, conn, in, result, "hot_path", now, true, LoopbackRuntimeNotSettlementEligible); err != nil {
 				return err
 			}
-			return insertProviderIdentitySnapshotTx(ctx, conn, in, now)
+			if err := insertProviderIdentitySnapshotTx(ctx, conn, in, now); err != nil {
+				return err
+			}
+			return s.journalHotPathSettlementAttemptOutput(ctx, conn, in, false)
 		}
 		if in.AttemptN == 1 && reqRow.Retried == 0 {
 			result := ComputeCredits(
@@ -268,7 +277,7 @@ func (s *Store) writeHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 			if err := insertProviderIdentitySnapshotTx(ctx, conn, in, now); err != nil {
 				return err
 			}
-			return nil
+			return s.journalHotPathSettlementAttemptOutput(ctx, conn, in, poolAttestedUsage)
 		}
 		result := ComputeCreditsWithCache(
 			in.PromptTokens,
@@ -290,7 +299,7 @@ func (s *Store) writeHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 			if err := insertProviderIdentitySnapshotTx(ctx, conn, in, now); err != nil {
 				return err
 			}
-			return nil
+			return s.journalHotPathSettlementAttemptOutput(ctx, conn, in, poolAttestedUsage)
 		}
 		requestCreditID, err := insertRequestCreditTx(ctx, conn, in, result, "hot_path", now, false, in.SettlementEvidenceGapReason)
 		if err != nil {
@@ -305,8 +314,53 @@ func (s *Store) writeHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 		if _, err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, in.RequestID, int64(in.AttemptN), in.ProviderID); err != nil {
 			return err
 		}
-		return nil
+		return s.journalHotPathSettlementAttemptOutput(ctx, conn, in, poolAttestedUsage)
 	})
+	if errors.Is(err, errSettlementAttemptOutputJournalPoison) && in.SettlementAttemptOutput != nil {
+		attempt := *in.SettlementAttemptOutput
+		markCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if markErr := s.markSettlementAttemptOutputJournalPoisoned(markCtx, SettlementReceiptIdentity{
+			AccountScope: attempt.AccountScope,
+			RequestID:    in.RequestID,
+			AttemptN:     int64(in.AttemptN),
+			ProviderID:   in.ProviderID,
+		}, err); markErr != nil {
+			return fmt.Errorf("%w; retain attempt-output conflict: %v", err, markErr)
+		}
+	}
+	return err
+}
+
+func (s *Store) journalHotPathSettlementAttemptOutput(ctx context.Context, conn *sql.Conn, in HotPathInput, poolAttestedUsage bool) error {
+	if in.SettlementAttemptOutput == nil {
+		return nil
+	}
+	attempt := *in.SettlementAttemptOutput
+	// AttemptN can be derived from the request-log row inside this transaction.
+	// Bind the evidence identity to the exact ledger identity that is committing,
+	// not to the caller's pre-derivation hint.
+	attempt.RequestID = in.RequestID
+	attempt.AttemptN = int64(in.AttemptN)
+	attempt.ProviderID = in.ProviderID
+	if !IsNativeRuntimeSource(in.ProviderRuntimeSource) && poolAttestedUsage {
+		prompt, completion := in.PromptTokens, in.CompletionTokens
+		if attempt.Output.ObservedInputTokens != nil && attempt.Output.ObservedOutputTokens != nil {
+			prompt, completion = attempt.Output.ObservedInputTokens, attempt.Output.ObservedOutputTokens
+		}
+		if prompt != nil && completion != nil {
+			attempt.UsageSource = UsageSourcePoolOperatorAttested
+			attempt.Usage.ObservedInputTokens = *prompt
+			attempt.Usage.ObservedOutputTokens = *completion
+			attempt.Usage.BillableInputTokens = *prompt
+			attempt.Usage.BillableOutputTokens = *completion
+			if attempt.Output.TerminalState != TerminalStateNormalDone && attempt.Usage.DeliveredOutputBytes == 0 {
+				attempt.Usage.BillableInputTokens = 0
+				attempt.Usage.BillableOutputTokens = 0
+			}
+		}
+	}
+	return s.JournalSettlementAttemptOutputConn(ctx, conn, attempt)
 }
 
 // hotPathRateEntry is the rate the caller resolved before the write started

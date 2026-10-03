@@ -177,6 +177,20 @@ final class ProviderLifecycleStateTests: XCTestCase {
                 operationID: "serve:disconnect"
             )
 
+            XCTAssertThrowsError(
+                try store.transition(
+                    to: .pausedByOperator,
+                    reasonCode: "installer_pause_attempt",
+                    writer: .installer,
+                    operationID: "installer:disconnect",
+                    operatorPaused: true
+                )
+            ) { error in
+                XCTAssertEqual(
+                    error as? ProviderLifecycleStateError,
+                    .invalidTransition(from: disconnectedState.rawValue, to: "paused_by_operator")
+                )
+            }
             let paused = try store.transition(
                 to: .pausedByOperator,
                 reasonCode: "operator_pause_confirmed",

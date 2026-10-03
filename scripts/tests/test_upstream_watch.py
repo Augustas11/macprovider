@@ -9,6 +9,7 @@ from scripts.compare_upstream_watch import material_changes, merge_snapshot
 
 WATCH_BLOCKERS = (
     "mlx_swift_lm_406_compile_kv_offset",
+    "mlx_swift_lm_550_fixed_capacity_compiled_decode",
     "mlx_swift_lm_364_gemma_moe",
     "mlx_swift_lm_312_quantized_cache_ownership",
     "mlx_swift_lm_453_typed_cache_storage",
@@ -146,6 +147,11 @@ class UpstreamWatchComparisonTests(unittest.TestCase):
             "macprovider_pins": {"mlx_swift": "0.31.4", "mlx_swift_lm": "3.31.4"},
             "blockers": {
                 "mlx_swift_lm_406_compile_kv_offset": {"state": "OPEN", "closed_at": None},
+                "mlx_swift_lm_550_fixed_capacity_compiled_decode": {
+                    "state": "OPEN",
+                    "head_revision": "old",
+                    "in_latest_release": False,
+                },
                 "mlx_swift_lm_364_gemma_moe": {"state": "MERGED", "merged_at": "2026-07-21T19:43:49Z"},
                 "mlx_swift_lm_312_quantized_cache_ownership": {"state": "OPEN"},
                 "mlx_swift_lm_453_typed_cache_storage": {"state": "MERGED", "merged_at": "x"},
@@ -219,6 +225,40 @@ class UpstreamWatchComparisonTests(unittest.TestCase):
             },
         }
         self.assertEqual(material_changes(baseline, baseline), (False, "unchanged"))
+
+    def test_compiled_decode_fix_candidate_head_change_is_material(self):
+        old = self._baseline()
+        new = json.loads(json.dumps(old))
+        new["blockers"]["mlx_swift_lm_550_fixed_capacity_compiled_decode"][
+            "head_revision"
+        ] = "new"
+
+        changed, reason = material_changes(old, new)
+
+        self.assertTrue(changed)
+        self.assertIn("head revision changed", reason)
+
+    def test_compiled_decode_fix_entering_release_is_material(self):
+        old = self._baseline()
+        new = json.loads(json.dumps(old))
+        new["blockers"]["mlx_swift_lm_550_fixed_capacity_compiled_decode"][
+            "in_latest_release"
+        ] = True
+
+        changed, reason = material_changes(old, new)
+
+        self.assertTrue(changed)
+        self.assertIn("entered latest release", reason)
+
+    def test_tracked_fix_candidate_missing_from_live_snapshot_is_material(self):
+        old = self._baseline()
+        new = json.loads(json.dumps(old))
+        del new["blockers"]["mlx_swift_lm_550_fixed_capacity_compiled_decode"]
+
+        changed, reason = material_changes(old, new)
+
+        self.assertTrue(changed)
+        self.assertIn("missing from live upstream watch", reason)
 
     def test_new_release_tag_is_material_and_reports_pin(self):
         old = {

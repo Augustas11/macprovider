@@ -1,11 +1,21 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.2.6
+Version: v0.2.7
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.2.7
+
+Issue #1793 begins the SQLite-first evidence-journal stage. Every provider
+credit commits with a compact immutable attempt-output event in the same money
+transaction. The existing attempt-output table becomes an idempotent bounded
+projection. Receipt adjudication projects matching durable evidence on demand;
+transient materializer pressure defers adjudication and cannot create a
+missing-evidence outcome. No payout, pricing, quarantine, or account-scope
+predicate changes.
 
 ### v0.2.6
 
@@ -707,10 +717,25 @@ Each materializer invocation MUST also have a fixed maximum number of batches;
 remaining journal rows stay authoritative for a later invocation. Pending
 journal selection MUST use an indexed keyset path.
 
-R-3.2.2. Post-credit attempt-output persistence MUST have an independent write
-budget. Route-snapshot materialization pressure MUST NOT consume that budget or
-prevent the output row from being attempted. A digest mismatch or other
-non-pressure integrity failure remains fail-closed.
+R-3.2.2. The provider-credit transaction MUST atomically append its compact
+immutable attempt-output event to the money database's evidence journal. Crash
+before commit loses the credit and event together; crash after commit preserves
+both. The event key `(account_scope, request_id, attempt_n, provider_id)` MUST
+be idempotent, and a conflicting payload for that key MUST fail closed. The
+compact event MUST retain output hashes and range/terminal metadata but MUST
+NOT persist raw provider output content.
+
+The existing attempt-output table MAY be materialized asynchronously. Pending
+selection MUST use an indexed keyset; each invocation MUST be bounded by row
+count and deadline; retries MUST preserve the authoritative journal row.
+Receipt and missing-receipt adjudication MUST attempt matching materialization
+before loading evidence. A durably journaled event that is temporarily blocked
+from projection MUST defer adjudication and MUST NOT be marked missing. An
+immutable projection conflict MUST remain retained and observable. Route-
+snapshot or other maintenance pressure MUST NOT erase or rewrite the event.
+An indexed bounded retention pass MAY delete only materialized non-poison rows
+older than the configured audit retention window; pending and poison rows MUST
+remain retained.
 
 R-3.3. Settlement MUST verify:
 
