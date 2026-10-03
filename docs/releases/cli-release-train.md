@@ -58,14 +58,31 @@ train.
 
 ## Next CLI candidate — net changes vs 1.8.207
 
-No candidate has been cut from this table yet. Use the next unused tag after
-the coordinator and CLI train reservations at cut time; runtime tag `v1.8.211`
-is consumed and must not be used for a CLI candidate.
+Private signed compatibility set
+`Augustas11/macprovider:v1.8.212@d806dcf203a94f813aadbe458c8de578be476bd0`
+was produced by acceptance run [37075501296](https://github.com/Augustas11/macprovider/actions/runs/37075501296)
+under workflow control commit `dac2ab8df6d1acd7bf54df61b2a604ac609780a4`,
+but is superseded: it predates the operator-pause lifecycle fix and is not
+promotion-ready. The final version identity is staged as **v1.8.213**. Runtime
+tag `v1.8.211` and private candidate identity `v1.8.212` are consumed and must
+not be reused.
 
 | Net change in CLI / Malibu / installer | Status | PR |
 |---|---|---|
+| Operator pause remains authoritative when coordinator drain first moves the provider to `network_offline` or `coordinator_unavailable`; only the operator command may write those pause transitions. | merged `9384e5280` 2026-10-03 | #1834 (#1770) |
+| Native-MTP fused-baseline requalification, deterministic mixed-batch journey fencing, post-gateway replay analysis, and final admission evidence remain a separate hardware campaign. It is intentionally excluded from 1.8.213 until its Studio and audit gates pass. | in progress; excluded from 1.8.213 | #1832 (#1770) |
+| Non-hybrid continuous batching reports sampled tokens to the scheduler per decode step instead of delivering 16-token lockstep-window bursts, while block release and terminal completion remain hop-boundary operations. | merged `f096d7320` 2026-10-02 | #1828 |
+| SwiftNIO is updated from 2.101.3 to 2.103.0. | merged `90c1ab060` 2026-10-02 | #1827 |
+| swift-jinja is updated from 2.4.2 to 2.5.1. | merged `e797059c3` 2026-10-02 | #1826 |
+| Native MTP is production-reachable only through exact signed artifact, admission, load, batching, and fail-closed serving gates; the feature remains default-off pending the formal campaign. | merged `b29b7b8f5` 2026-10-02 | #1820 (#1770) |
+| Hybrid recurrent-cache reuse captures exact canonical reply-end checkpoints and fails closed when serial natural EOS has advanced beyond the publishable token state. | merged `65ee6791a` 2026-10-01 | #1819 |
+| Native MLX serving rejects unsupported non-zero presence/frequency penalties instead of accepting no-op buyer controls, and balances long prefill spans. | merged `2b1de5040` 2026-10-01 | #1818 |
+| The proven gpt-oss 120B mixed sliding-window paged-KV topology is admitted only for its exact measured identity, configuration, topology, and fresh-probe evidence. | merged `b01da4940` 2026-10-01 | #1815 |
 | Pool-authorized loopback streaming receipts now bind `normal_done` output hashes to the buyer-delivered byte snapshot only. Complete receipts fail closed when the relay cannot prove every accepted frame was sent, final content is not byte-exact with delivered UTF-8 bytes, or post-tool-call content was suppressed after tool calls opened. | merged `d700ab749` 2026-10-01 | #1814 (#1787) |
+| Rotating-window parity measurement follows upstream cache presentation without broadening production admission. | merged `a736d2b94` 2026-10-01 | #1813 |
 | Autotune matched-floor recommendations now use verified artifact bytes as the residency authority when local artifact facts are available, instead of treating catalog `min_ram_gb` as the model-size truth. Recommend/apply/adoption/warm-switch/live-facts paths now preserve R018 context while capping slots from measured bytes, with recursive artifact byte accounting and checked KV arithmetic. | merged `427f24d15` 2026-10-01 | #1811 (#1794) |
+| Production continuous batching requires a signed release policy; the shipped policy remains empty until packaged Studio evidence authorizes exact tuples. | merged `b55463f6f` 2026-09-30 | #1803 (#1778) |
+| An unset paged-KV pool now covers the provider's advertised maximum context instead of silently rejecting requests above the former 16K default; explicit operator values remain unchanged. | merged `1b504306a` 2026-09-30 | #1802 |
 | Continuous-batch rows stay inside the buyer's authenticated reserved-output budget. Gateway reserved-output metadata now flows through coordinator HTTP, clear WebSocket, and Tier-2 dispatch without rewriting the request body or receipt prompt hash; prompt-at-cap and output-overflow failures return terminal buyer 413 responses with no retry, failover, breaker fault, credit, or debit. Hardware campaign used an isolated `--no-join` Studio provider and did not connect a local build to live Malibu. | merged `9eb1553b` 2026-09-30 | #1806 |
 | Signed-policy hybrid-cache admission accepts the measured `mixed` cache identity. The isolated source-built Studio campaign passed automatic policy activation, local proof, paged-KV attach, batch depth 4, and scheduler-admitted HTTP 200s for Qwen3.5 27B and Qwen3.5 35B-A3B. This evidence is prequalification only: production policy remains empty and the source-built candidate was never connected to live Malibu. | merged `1c7041800` 2026-09-30 | #1808 (#1778) |
 | Recurrent-hybrid isolation verification now mirrors the production full-prompt `TokenIterator` lifecycle. On the designated M3 Ultra Studio, the isolated verifier-only candidate passed exact 48-token, two-row shared-forward parity, unequal-row isolation, peer leave/rejoin, and paged-KV attach eligibility for Qwen3.5 27B, Qwen3.5 35B-A3B, and Qwen3.8 27B. All required CI checks and the adversarial/code/security/architecture audits passed. | merged `6d1810506` 2026-09-30 | #1809 (#1778) |
@@ -185,10 +202,10 @@ not by itself make the next CLI promotable.
 #1453 is **CLOSED** (2026-09-19); it does not gate a future promotion. #1569
 is a later CLI. Spec promotion #1583 is not a CLI change.
 
-Coordinator/gateway on live Pearl is **v1.8.191** @ `98e3e4af` (includes
-#1728). Fleet Macs and the coordinator recommendation remain on provider
-binary **1.8.123**. The Studio serves signed private candidate **195**; do
-not promote the fleet from this campaign.
+Historical pre-207 record: coordinator/gateway on live Pearl was **v1.8.191**
+@ `98e3e4af` (including #1728), fleet Macs and the coordinator recommendation
+were on provider binary **1.8.123**, and the Studio served signed private
+candidate **195**. That campaign was not a fleet-promotion authority.
 
 #1632 / #1638 / #1639 (coordinator leftover rewrite + gateway R014) are
 coordinator/gateway, not CLI rows. #1653 **is** a CLI row (above); its
@@ -198,12 +215,12 @@ coordinator/gateway, not CLI rows. #1653 **is** a CLI row (above); its
 (scripts/CI), not the Mac binary. Curl-channel `get.malibu.tech/install.sh`
 was republished **from `main`** on 2026-09-19 after #1610 (SHA-256
 `c90fb44d9a780041233928f4376d7d92b71af087d034ae44c3a275fd9381d7c4`, pearl
-backup `install.sh.bak-20260919T121720Z`) so `curl | bash` already has #1582
-pagination and the #1575/#1610 CLT-stub bootstrap. Consumer health is green
-against fleet **v1.8.123**. The parity alarm still compares served bytes to
-the latest **stable tag** (v1.8.123) and stays red until this CLI is promoted
-and the tag's `install.sh` matches served (re-publish from that tag, or
-confirm bytes are unchanged).
+backup `install.sh.bak-20260919T121720Z`) so `curl | bash` already had #1582
+pagination and the #1575/#1610 CLT-stub bootstrap. At that point consumer
+health was green against fleet **v1.8.123**, while the parity alarm remained
+red until the successor stable tag carried matching installer bytes. Current
+public 1.8.207 parity and mirror status are recorded in “Current promoted
+stable” above.
 
 `install.sh` on `main` has moved past served bytes: #1613, #1620, #1625,
 #1627, #1631, and #1745 all touch `phase3-binary/dist/install.sh` after the
@@ -269,13 +286,13 @@ and silently never matching.
 
 | Field | Value |
 |---|---|
-| Last built candidate | **v1.8.207**, cut from `main` @ `d98b74a6a158000dabaecb89d75886b6817e9d0f`, acceptance run [36519497647](https://github.com/Augustas11/macprovider/actions/runs/36519497647), promoted unchanged by run [36526004611](https://github.com/Augustas11/macprovider/actions/runs/36526004611). |
+| Last built candidate | Private **v1.8.212** compatibility set `Augustas11/macprovider:v1.8.212@d806dcf203a94f813aadbe458c8de578be476bd0`, acceptance run [37075501296](https://github.com/Augustas11/macprovider/actions/runs/37075501296), signed under control commit `dac2ab8df`; superseded, not promotion-ready, and never launched. Last promoted candidate remains **v1.8.207** @ `d98b74a6a`. |
 | Mac Studio serving canary | Signed public **207** @ `d98b74a6`, installed through the established payload-only operator swap while preserving config and LaunchAgents. It serves `qwen/qwen3.6-35b-a3b` / `mlx-community/Qwen3.6-35B-A3B-4bit`, reports coordinator-authorized `buyer_serving`, and returned bounded public-buyer request `f0554d11-049b-47f8-81e5-a516d5130954` after promotion. |
 | Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
 | Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` @ `eb30981c` (BYOM #1576 `cdbb0257` + #1591 + #1590 + #1593); CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag); CLI `v1.8.172` @ `c512d342`; CLI `v1.8.174` @ `0c276ebb`; CLI `v1.8.175` @ `d02798db` |
-| Status | **207 promoted and live.** Pearl `target_id` and `latest_binary_version` are 207; accepted compatibility sets are promoted 207, 117, and 123. Public installer parity, consumer health, mirror byte identity, signed discovery rollout, Studio join, and a bounded real-buyer response are green. |
-| Coordinator tags taken | **v1.8.204**, **v1.8.205** (both applies rolled back), **v1.8.206**, and live **v1.8.208** are Pearl runtime releases; **v1.8.209** is reserved for the #1804 Pearl rollout. |
-| Next candidate | None cut. The next-candidate table contains #1806, #1808, and #1809; choose the next unused tag at cut time and do not reuse 207. |
+| Status | **207 promoted and live; 212 superseded without launch.** Pearl `target_id` and `latest_binary_version` remain 207. Public installer parity, consumer health, mirror byte identity, signed discovery rollout, Studio join, and a bounded real-buyer response are green for 207. |
+| Consumed identities | Pearl runtime tags through **v1.8.211** are consumed. Private provider candidate **v1.8.212** is also consumed and must not be reused. |
+| Next candidate | **v1.8.213 is staged but not yet cut.** Cut only after this version-staging change lands on `main`; use the complete next-candidate table above as scope, with draft #1832 explicitly excluded. |
 | Candidate 202 CB-canary confirmation (2026-09-28) | Isolated Studio loopback serve of the **signed** 202 binary (`--no-join`, ephemeral id, :8092, live :8080/201 untouched) confirmed `qwen/qwen3.6-35b-a3b` **paged-KV attach eligible** (runtime parity `established=true`, cross-row MoE isolation `proven=true`) and a keyless **scheduler-admitted batched 200** with a stable `X-Request-ID` (`event=batching_admitted action=scheduler_admitted`), hash `3fed776d…`. Measured throughput (harness, v1.8.201 same source): 2.86× aggregate vs serial at 8 rows, bit-exact parity. On candidate 202 the qwen3.5/qwen3.8 hybrids fail parity and are excluded; #1776 fixes them only in the deferred successor candidate. Buyer `continuous_batching` was already canary in live config; the 201→202 serving swap (operator-tools/swap-202.sh, 2026-09-28) made 202 the live Studio provider — a3b now served BATCHED (scheduler_admitted) at ~2.86x. |
 | Notable merges after candidate 186 | #1707 (`5ada77e1`, CLI); #1714 (`3abf42a8`, CLI + Malibu); #1706 (`2b352720`, catalog-lane file only — binary unchanged); #1713 (`57686a84`, node-operator UX — shipped in `v1.8.192`); #1742 (`03627cda`, shipped in Studio candidate `v1.8.195`); #1757 (`0197f379`, CB qualification closeout); #1745 (`ddaa551b`, China supply path); #1762 (`95a6563d`, batched prefill); #1658 (`3ec784c69`, Build 1 private staging path); #1753 (`9636a125`, signed provider-release discovery, merged after candidate 201); #1771 (`e29ea2976`, Qwen3.6 MoE paged-KV admission, shipped in candidate 202); #1776 (`38229a8c3`, Qwen3.5/Qwen3.8 exact CB parity, merged after candidate 202); #1785 (`5c09c5c9a`, keep-0 sliding-window paged KV, merged after candidate 202); #1808 (`1c7041800`, mixed-cache signed-policy admission); #1809 (`6d1810506`, recurrent-hybrid verifier lifecycle). Coordinator/gateway settlement recovery continued separately through #1728, live in Pearl runtime `v1.8.191`. |
 | Why candidate 186 exists | Prove #1700 final-answer rendering, strict-pinned buyer quality, eight-seat routing, and durable settlement on one signed Studio-only build (soak proof; live seats since reduced to one — see Mac Studio serving canary above). |
@@ -407,8 +424,9 @@ mainland-provider installer handoff.
   complete**; the three incomplete settlements keep this track open. #1728
   is merged and now **live** in Pearl runtime `v1.8.191` @ `98e3e4af` (since
   2026-09-24 05:23Z), so the settlement-complete rerun is unblocked — run it
-  against this runtime before closing Track D. Keep fleet recommendation and
-  `binaryVersion` at 1.8.123.
+  against this runtime before closing Track D. During this historical campaign,
+  fleet recommendation and `binaryVersion` remained at 1.8.123; the later
+  1.8.207 promotion superseded that hold.
 - **Candidate 201 prequalification (2026-09-28):** Qwen3.6 35B-A3B completed
   100/100 buyer requests at concurrency 4 with 12,800 completion tokens, zero
   non-capacity failures, and valid usage. The adjacent c8 harness window was
@@ -499,12 +517,14 @@ mainland-provider installer handoff.
 2. Cut one candidate off `main` (`acceptance-candidate.yml`). Do **not** reuse
    `v1.8.163` / `v1.8.164` / `v1.8.167` / `v1.8.168`.
 3. In-scope e2e green on that candidate, or an explicit carry-forward record
-   under the rule above. For 207, Tracks A/C/D/F carry forward from signed
-   201/202; Track B remains a separate BYOM-serve gate; Track E is mandatory
-   before the mainland-provider installer handoff.
-4. Exact signed-candidate install/join smoke. For 207, do not repeat the Pi or
-   batched-prefill campaigns; verify the installed CLI advertises 1.8.207,
-   joins through Pearl's exact compatibility set, and serves a bounded request.
+   under the rule above. For 1.8.213, PR #1832's still-open fused native-MTP
+   campaign is out of scope; native MTP remains default-off. Earlier signed
+   candidate evidence may carry forward only where the table and track record
+   explicitly permit it.
+4. Exact signed-candidate install/join smoke. Verify the installed CLI advertises
+   1.8.213, joins through Pearl's exact compatibility set, preserves operator
+   pause through coordinator drain, and serves a bounded request. Do not touch
+   the designated Studio until the operator releases its current session lock.
 5. Physical acceptance (`promote-acceptance-candidate.yml`) publishes the exact
    versioned bytes and moves the fleet; it does not rewrite `binaryVersion`.
 6. `verify-live-coordinator-release-rollout` before publishing discovery.
