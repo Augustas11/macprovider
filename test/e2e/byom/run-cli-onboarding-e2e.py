@@ -181,14 +181,16 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
         provider_id = self.server.state["provider_id"]
         assert_true(payload["provider_id"] == provider_id, "wrong provider_id in offer")
         assert_true(payload["served_model_ref"] == SERVED_MODEL_REF, "wrong served_model_ref in offer")
-        assert_true(payload["catalog_model_key"] is None, "bare Ollama tag unexpectedly minted a catalog key")
+        assert_true(payload["catalog_model_key"] == "", "noncatalog offer did not encode the absent asserted key as an empty string")
         assert_true(len(payload["evaluation_digest_sha256"]) == 64, "offer missing evaluation digest")
         assert_true("endpoint" not in json.dumps(payload), "offer reflected endpoint material")
         candidate_id = payload["candidate_id"]
         status = self.status_payload(
             candidate_id=candidate_id,
             served_model_ref=payload["served_model_ref"],
-            catalog_model_key=payload["catalog_model_key"],
+            # The v1 signed offer uses an empty string for no provider-asserted
+            # key; the coordinator resolves no match and returns status null.
+            catalog_model_key=None,
             state="offer_submitted",
             event_id="event_test",
         )
