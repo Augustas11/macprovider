@@ -425,6 +425,42 @@ func TestPersistSettlementAttemptOutputRouteMirrorIntegrityFailsClosed(t *testin
 	}
 }
 
+func TestPersistSettlementAttemptOutputFailsWhenJournalAndProjectionAreMissing(t *testing.T) {
+	prev := settlementOutputWriteContextForTest
+	settlementOutputWriteContextForTest = func(int, context.Context) context.Context {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx
+	}
+	t.Cleanup(func() { settlementOutputWriteContextForTest = prev })
+
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	reqLog, err := requestlog.OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reqLog.Close() })
+	store, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt, completion := int64(10), int64(1)
+	in := billing.HotPathInput{
+		RequestID:        "req-missing-durable-evidence",
+		AttemptN:         0,
+		ProviderID:       "provider-a",
+		Status:           200,
+		PromptTokens:     &prompt,
+		CompletionTokens: &completion,
+	}
+	rec := &billingRecorder{accountID: "acct-missing", requestID: in.RequestID}
+	attempt, _ := rec.buildSettlementAttemptOutput(in, settlementOutputForContent("ok", nil, nil, billing.TerminalStateNormalDone), false)
+	in.SettlementAttemptOutput = &attempt
+	if err := rec.persistSettlementAttemptOutput(store, in, nil); err == nil {
+		t.Fatal("missing journal and projection were accepted as successful persistence")
+	}
+}
+
 func settlementAttemptOutputCount(t *testing.T, dbPath, requestID string) int {
 	t.Helper()
 	db, err := sql.Open("sqlite", dbPath)

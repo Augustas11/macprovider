@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -31,6 +32,8 @@ const (
 )
 
 var terminalStatePattern = regexp.MustCompile(`^(normal_done|provider_error|buyer_cancel|gateway_timeout|upstream_transport_disconnect)$`)
+
+var errSettlementAttemptOutputJournalPoison = errors.New("settlement attempt output journal poison")
 
 type SettlementToolCall struct {
 	ID        string
@@ -79,6 +82,22 @@ type SettlementAttemptOutput struct {
 	UsageCanonicalJSON            []byte
 	OutputHash                    string
 	UsageHash                     string
+}
+
+type SettlementAttemptOutputMaterializationResult struct {
+	SelectedRows            int
+	MaterializedRows        int
+	AlreadyMaterializedRows int
+	PoisonedRows            int
+}
+
+type SettlementAttemptOutputJournalStats struct {
+	PendingRows             int64
+	PoisonedRows            int64
+	RetainedPoisonedRows    int64
+	OldestPendingCreatedAt  time.Time
+	HasOldestPendingCreated bool
+	OldestPendingAge        time.Duration
 }
 
 func (o SettlementOutput) Value() map[string]any {
@@ -390,31 +409,87 @@ SELECT
 	return hasOutput, verified, err
 }
 
-func (s *Store) InsertSettlementAttemptOutput(ctx context.Context, attempt SettlementAttemptOutput) (string, error) {
+type preparedSettlementAttemptOutput struct {
+	attempt         SettlementAttemptOutput
+	outputHash      string
+	outputCanonical sql.NullString
+	usageHash       string
+	usageCanonical  string
+	payloadHash     string
+}
+
+func prepareSettlementAttemptOutput(attempt SettlementAttemptOutput) (preparedSettlementAttemptOutput, error) {
 	if err := attempt.Validate(); err != nil {
-		return "", err
+		return preparedSettlementAttemptOutput{}, err
 	}
 	outputHash := ""
+	var outputCanonical sql.NullString
 	var err error
 	if attempt.OutputAvailable {
-		outputHash, _, err = attempt.Output.Digest()
+		var canonical []byte
+		outputHash, canonical, err = attempt.Output.Digest()
 		if err != nil {
-			return "", err
+			return preparedSettlementAttemptOutput{}, err
 		}
+		outputCanonical = sql.NullString{String: string(canonical), Valid: true}
 	}
 	usageHash, usageCanonical, err := attempt.Usage.Digest()
 	if err != nil {
+		return preparedSettlementAttemptOutput{}, err
+	}
+	payloadHash, _, err := CanonicalSHA256Hex(map[string]any{
+		"account_scope":             attempt.AccountScope,
+		"request_id":                attempt.RequestID,
+		"attempt_n":                 attempt.AttemptN,
+		"provider_id":               attempt.ProviderID,
+		"terminal_state":            attempt.Output.TerminalState,
+		"terminal_state_ts_unix_ms": attempt.TerminalStateTSUnixMS,
+		"output_available":          attempt.OutputAvailable,
+		"output_prefix_start_byte":  attempt.Output.OutputPrefixStartByte,
+		"output_prefix_end_byte":    attempt.Output.OutputPrefixEndByte,
+		"output_hash":               nullableOutputString(outputHash, attempt.OutputAvailable),
+		"usage_hash":                usageHash,
+		"usage_canonical_json":      string(usageCanonical),
+		"usage_source":              attempt.UsageSource,
+		"overlapping_or_duplicate":  attempt.OverlappingOrDuplicate,
+	})
+	if err != nil {
+		return preparedSettlementAttemptOutput{}, err
+	}
+	return preparedSettlementAttemptOutput{
+		attempt:         attempt,
+		outputHash:      outputHash,
+		outputCanonical: outputCanonical,
+		usageHash:       usageHash,
+		usageCanonical:  string(usageCanonical),
+		payloadHash:     payloadHash,
+	}, nil
+}
+
+func (s *Store) InsertSettlementAttemptOutput(ctx context.Context, attempt SettlementAttemptOutput) (string, error) {
+	prepared, err := prepareSettlementAttemptOutput(attempt)
+	if err != nil {
 		return "", err
 	}
-	now := time.Now().UTC()
 	// BEGIN IMMEDIATE (the money-path pattern): the overlap read and the
 	// insert share one write lock taken up front, so a writer on another
 	// handle to this file (routeSnapshotDB) waits in busy_timeout instead of
 	// failing the deferred read-to-write upgrade with SQLITE_BUSY_SNAPSHOT.
 	err = sqliteutil.TransactObserved(ctx, s.db, "settlement_attempt_output", s.sqliteMetric, func(ctx context.Context, conn *sql.Conn) error {
-		var overlapCount int
-		if attempt.OutputAvailable {
-			if err := conn.QueryRowContext(ctx, `
+		_, err := insertSettlementAttemptOutputConn(ctx, conn, prepared, false, s.nowUTC())
+		return err
+	})
+	if err != nil {
+		return "", err
+	}
+	return prepared.outputHash, nil
+}
+
+func insertSettlementAttemptOutputConn(ctx context.Context, conn *sql.Conn, prepared preparedSettlementAttemptOutput, persistOutputCanonical bool, now time.Time) (bool, error) {
+	attempt := prepared.attempt
+	var overlapCount int
+	if attempt.OutputAvailable {
+		if err := conn.QueryRowContext(ctx, `
 SELECT COUNT(*)
 FROM settlement_attempt_outputs
 WHERE account_scope = ?
@@ -426,16 +501,20 @@ WHERE account_scope = ?
       OR (attempt_n < ? AND output_prefix_start_byte > ?)
       OR (attempt_n > ? AND output_prefix_start_byte < ?)
   )`,
-				attempt.AccountScope, attempt.RequestID, attempt.AttemptN, attempt.ProviderID,
-				attempt.Output.OutputPrefixStartByte, attempt.Output.OutputPrefixEndByte, outputHash,
-				attempt.AttemptN, attempt.Output.OutputPrefixStartByte,
-				attempt.AttemptN, attempt.Output.OutputPrefixStartByte,
-			).Scan(&overlapCount); err != nil {
-				return err
-			}
+			attempt.AccountScope, attempt.RequestID, attempt.AttemptN, attempt.ProviderID,
+			attempt.Output.OutputPrefixStartByte, attempt.Output.OutputPrefixEndByte, prepared.outputHash,
+			attempt.AttemptN, attempt.Output.OutputPrefixStartByte,
+			attempt.AttemptN, attempt.Output.OutputPrefixStartByte,
+		).Scan(&overlapCount); err != nil {
+			return false, err
 		}
-		overlap := attempt.OverlappingOrDuplicate || overlapCount > 0
-		res, err := conn.ExecContext(ctx, `
+	}
+	overlap := attempt.OverlappingOrDuplicate || overlapCount > 0
+	outputCanonical := any(nil)
+	if persistOutputCanonical && prepared.outputCanonical.Valid {
+		outputCanonical = prepared.outputCanonical.String
+	}
+	res, err := conn.ExecContext(ctx, `
 INSERT INTO settlement_attempt_outputs (
     account_scope, request_id, attempt_n, provider_id, terminal_state, terminal_state_ts_unix_ms, output_available,
     output_prefix_start_byte, output_prefix_end_byte, output_hash,
@@ -443,28 +522,28 @@ INSERT INTO settlement_attempt_outputs (
     usage_source, overlapping_or_duplicate, created_at_utc
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(account_scope, request_id, attempt_n, provider_id) DO NOTHING`,
-			attempt.AccountScope,
-			attempt.RequestID,
-			attempt.AttemptN,
-			attempt.ProviderID,
-			attempt.Output.TerminalState,
-			attempt.TerminalStateTSUnixMS,
-			boolInt(attempt.OutputAvailable),
-			attempt.Output.OutputPrefixStartByte,
-			attempt.Output.OutputPrefixEndByte,
-			nullableOutputString(outputHash, attempt.OutputAvailable),
-			nil,
-			usageHash,
-			string(usageCanonical),
-			attempt.UsageSource,
-			boolInt(overlap),
-			now.Format(time.RFC3339Nano),
-		)
-		if err != nil {
-			return err
-		}
-		if overlap {
-			if _, err := conn.ExecContext(ctx, `
+		attempt.AccountScope,
+		attempt.RequestID,
+		attempt.AttemptN,
+		attempt.ProviderID,
+		attempt.Output.TerminalState,
+		attempt.TerminalStateTSUnixMS,
+		boolInt(attempt.OutputAvailable),
+		attempt.Output.OutputPrefixStartByte,
+		attempt.Output.OutputPrefixEndByte,
+		nullableOutputString(prepared.outputHash, attempt.OutputAvailable),
+		outputCanonical,
+		prepared.usageHash,
+		prepared.usageCanonical,
+		attempt.UsageSource,
+		boolInt(overlap),
+		now.UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return false, err
+	}
+	if overlap {
+		if _, err := conn.ExecContext(ctx, `
 UPDATE settlement_attempt_outputs
 SET overlapping_or_duplicate = 1
 WHERE account_scope = ?
@@ -477,70 +556,469 @@ WHERE account_scope = ?
       OR (attempt_n < ? AND output_prefix_start_byte > ?)
       OR (attempt_n > ? AND output_prefix_start_byte < ?)
   )`,
-				attempt.AccountScope, attempt.RequestID, attempt.AttemptN, attempt.ProviderID,
-				attempt.Output.OutputPrefixStartByte, attempt.Output.OutputPrefixEndByte, outputHash,
-				attempt.AttemptN, attempt.Output.OutputPrefixStartByte,
-				attempt.AttemptN, attempt.Output.OutputPrefixStartByte,
-			); err != nil {
-				return err
-			}
+			attempt.AccountScope, attempt.RequestID, attempt.AttemptN, attempt.ProviderID,
+			attempt.Output.OutputPrefixStartByte, attempt.Output.OutputPrefixEndByte, prepared.outputHash,
+			attempt.AttemptN, attempt.Output.OutputPrefixStartByte,
+			attempt.AttemptN, attempt.Output.OutputPrefixStartByte,
+		); err != nil {
+			return false, err
 		}
-		if rows, err := res.RowsAffected(); err == nil && rows == 0 {
-			var existing struct {
-				TerminalState         string
-				TerminalStateTSUnixMS int64
-				OutputAvailable       int
-				Start                 int64
-				End                   int64
-				OutputHash            sql.NullString
-				UsageHash             string
-				UsageCanonical        string
-				UsageSource           string
-				Overlap               int
-			}
-			err := conn.QueryRowContext(ctx, `
+	}
+	if rows, err := res.RowsAffected(); err == nil && rows > 0 {
+		return true, nil
+	}
+	if overlap {
+		if _, err := conn.ExecContext(ctx, `
+UPDATE settlement_attempt_outputs
+SET overlapping_or_duplicate = 1
+WHERE account_scope = ?
+  AND request_id = ?
+  AND attempt_n = ?
+  AND provider_id = ?`,
+			attempt.AccountScope, attempt.RequestID, attempt.AttemptN, attempt.ProviderID,
+		); err != nil {
+			return false, err
+		}
+	}
+	var existing struct {
+		TerminalState         string
+		TerminalStateTSUnixMS int64
+		OutputAvailable       int
+		Start                 int64
+		End                   int64
+		OutputHash            sql.NullString
+		UsageHash             string
+		UsageCanonical        string
+		UsageSource           string
+		Overlap               int
+	}
+	err = conn.QueryRowContext(ctx, `
 SELECT terminal_state, terminal_state_ts_unix_ms, output_available, output_prefix_start_byte,
        output_prefix_end_byte, output_hash,
        usage_hash, usage_canonical_json, usage_source, overlapping_or_duplicate
 FROM settlement_attempt_outputs
 WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
-				attempt.AccountScope, attempt.RequestID, attempt.AttemptN, attempt.ProviderID,
-			).Scan(
-				&existing.TerminalState,
-				&existing.TerminalStateTSUnixMS,
-				&existing.OutputAvailable,
-				&existing.Start,
-				&existing.End,
-				&existing.OutputHash,
-				&existing.UsageHash,
-				&existing.UsageCanonical,
-				&existing.UsageSource,
-				&existing.Overlap,
-			)
-			if err != nil {
-				if err == sql.ErrNoRows {
-					return fmt.Errorf("settlement attempt output immutable conflict")
-				}
-				return err
-			}
-			if existing.TerminalState != attempt.Output.TerminalState ||
-				existing.TerminalStateTSUnixMS != attempt.TerminalStateTSUnixMS ||
-				existing.OutputAvailable != boolInt(attempt.OutputAvailable) ||
-				existing.Start != attempt.Output.OutputPrefixStartByte ||
-				existing.End != attempt.Output.OutputPrefixEndByte ||
-				existing.OutputHash.Valid != attempt.OutputAvailable ||
-				existing.OutputHash.String != outputHash ||
-				existing.UsageHash != usageHash ||
-				existing.UsageCanonical != string(usageCanonical) ||
-				existing.UsageSource != attempt.UsageSource ||
-				existing.Overlap != boolInt(overlap) {
-				return fmt.Errorf("settlement attempt output immutable conflict")
-			}
+		attempt.AccountScope, attempt.RequestID, attempt.AttemptN, attempt.ProviderID,
+	).Scan(
+		&existing.TerminalState,
+		&existing.TerminalStateTSUnixMS,
+		&existing.OutputAvailable,
+		&existing.Start,
+		&existing.End,
+		&existing.OutputHash,
+		&existing.UsageHash,
+		&existing.UsageCanonical,
+		&existing.UsageSource,
+		&existing.Overlap,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, fmt.Errorf("%w: materialized row disappeared", errSettlementAttemptOutputJournalPoison)
 		}
+		return false, err
+	}
+	overlapCompatible := existing.Overlap == boolInt(overlap) || (existing.Overlap == 1 && !overlap)
+	if existing.TerminalState != attempt.Output.TerminalState ||
+		existing.TerminalStateTSUnixMS != attempt.TerminalStateTSUnixMS ||
+		existing.OutputAvailable != boolInt(attempt.OutputAvailable) ||
+		existing.Start != attempt.Output.OutputPrefixStartByte ||
+		existing.End != attempt.Output.OutputPrefixEndByte ||
+		existing.OutputHash.Valid != attempt.OutputAvailable ||
+		existing.OutputHash.String != prepared.outputHash ||
+		existing.UsageHash != prepared.usageHash ||
+		existing.UsageCanonical != prepared.usageCanonical ||
+		existing.UsageSource != attempt.UsageSource ||
+		!overlapCompatible {
+		return false, fmt.Errorf("%w: immutable materialized output conflict", errSettlementAttemptOutputJournalPoison)
+	}
+	return false, nil
+}
+
+func (s *Store) JournalSettlementAttemptOutputConn(ctx context.Context, conn *sql.Conn, attempt SettlementAttemptOutput) error {
+	if s == nil {
+		return fmt.Errorf("billing store is nil")
+	}
+	if conn == nil {
+		return fmt.Errorf("settlement attempt output journal connection is required")
+	}
+	prepared, err := prepareSettlementAttemptOutput(attempt)
+	if err != nil {
+		return err
+	}
+	now := s.nowUTC().Format(time.RFC3339Nano)
+	res, err := conn.ExecContext(ctx, `
+	INSERT INTO settlement_attempt_output_journal (
+    account_scope, request_id, attempt_n, provider_id, terminal_state, terminal_state_ts_unix_ms,
+    output_available, output_prefix_start_byte, output_prefix_end_byte, output_hash,
+    usage_hash, usage_canonical_json, usage_source, overlapping_or_duplicate, payload_hash, created_at_utc
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(account_scope, request_id, attempt_n, provider_id) DO NOTHING`,
+		attempt.AccountScope,
+		attempt.RequestID,
+		attempt.AttemptN,
+		attempt.ProviderID,
+		attempt.Output.TerminalState,
+		attempt.TerminalStateTSUnixMS,
+		boolInt(attempt.OutputAvailable),
+		attempt.Output.OutputPrefixStartByte,
+		attempt.Output.OutputPrefixEndByte,
+		nullableOutputString(prepared.outputHash, attempt.OutputAvailable),
+		prepared.usageHash,
+		prepared.usageCanonical,
+		attempt.UsageSource,
+		boolInt(attempt.OverlappingOrDuplicate),
+		prepared.payloadHash,
+		now,
+	)
+	if err != nil {
+		return err
+	}
+	if rows, err := res.RowsAffected(); err == nil && rows > 0 {
 		return nil
+	}
+	var existingHash string
+	err = conn.QueryRowContext(ctx, `
+SELECT payload_hash
+  FROM settlement_attempt_output_journal
+ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
+		attempt.AccountScope, attempt.RequestID, attempt.AttemptN, attempt.ProviderID,
+	).Scan(&existingHash)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("%w: journal row disappeared", errSettlementAttemptOutputJournalPoison)
+		}
+		return err
+	}
+	if existingHash != prepared.payloadHash {
+		_, _ = conn.ExecContext(ctx, `
+UPDATE settlement_attempt_output_journal
+   SET poisoned_at_utc = COALESCE(poisoned_at_utc, ?),
+       poison_reason = CASE WHEN poison_reason = '' THEN ? ELSE poison_reason END,
+       last_materialize_error = CASE WHEN last_materialize_error = '' THEN ? ELSE last_materialize_error END
+ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
+			now,
+			"settlement attempt output journal immutable conflict",
+			"settlement attempt output journal immutable conflict",
+			attempt.AccountScope, attempt.RequestID, attempt.AttemptN, attempt.ProviderID,
+		)
+		return fmt.Errorf("%w: immutable journal conflict", errSettlementAttemptOutputJournalPoison)
+	}
+	return nil
+}
+
+func (s *Store) MaterializeSettlementAttemptOutputFor(ctx context.Context, id SettlementReceiptIdentity) (bool, error) {
+	if s == nil {
+		return false, fmt.Errorf("billing store is nil")
+	}
+	if err := id.validate(); err != nil {
+		return false, err
+	}
+	var materialized bool
+	err := sqliteutil.TransactObserved(ctx, s.db, "settlement_attempt_output_journal_materialize", s.sqliteMetric, func(ctx context.Context, conn *sql.Conn) error {
+		var err error
+		materialized, err = s.materializeSettlementAttemptOutputForConn(ctx, conn, id)
+		return err
 	})
 	if err != nil {
-		return "", err
+		if errors.Is(err, errSettlementAttemptOutputJournalPoison) {
+			if markErr := s.markSettlementAttemptOutputJournalPoisoned(ctx, id, err); markErr != nil {
+				return false, fmt.Errorf("%w; mark settlement attempt output journal poison: %v", err, markErr)
+			}
+		}
 	}
-	return outputHash, nil
+	return materialized, err
+}
+
+// SettlementAttemptOutputEvidenceExists reports whether an attempt has either
+// an authoritative journal event or its materialized projection. Callers use
+// it to distinguish an idempotent materialization no-op from missing evidence.
+func (s *Store) SettlementAttemptOutputEvidenceExists(ctx context.Context, id SettlementReceiptIdentity) (bool, error) {
+	if s == nil {
+		return false, fmt.Errorf("billing store is nil")
+	}
+	if err := id.validate(); err != nil {
+		return false, err
+	}
+	var exists int
+	err := s.reader().QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM settlement_attempt_output_journal
+     WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
+    UNION ALL
+    SELECT 1 FROM settlement_attempt_outputs
+     WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
+)`,
+		id.AccountScope, id.RequestID, id.AttemptN, id.ProviderID,
+		id.AccountScope, id.RequestID, id.AttemptN, id.ProviderID,
+	).Scan(&exists)
+	return exists == 1, err
+}
+
+func (s *Store) MaterializePendingSettlementAttemptOutputs(ctx context.Context, limit int) (SettlementAttemptOutputMaterializationResult, error) {
+	if s == nil {
+		return SettlementAttemptOutputMaterializationResult{}, fmt.Errorf("billing store is nil")
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.reader().QueryContext(ctx, `
+SELECT account_scope, request_id, attempt_n, provider_id
+  FROM settlement_attempt_output_journal INDEXED BY idx_saoj_pending
+ WHERE materialized_at_utc IS NULL
+   AND poisoned_at_utc IS NULL
+ ORDER BY id
+ LIMIT ?`, limit)
+	if err != nil {
+		return SettlementAttemptOutputMaterializationResult{}, err
+	}
+	var ids []SettlementReceiptIdentity
+	for rows.Next() {
+		var id SettlementReceiptIdentity
+		if err := rows.Scan(&id.AccountScope, &id.RequestID, &id.AttemptN, &id.ProviderID); err != nil {
+			_ = rows.Close()
+			return SettlementAttemptOutputMaterializationResult{}, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return SettlementAttemptOutputMaterializationResult{}, err
+	}
+	if err := rows.Close(); err != nil {
+		return SettlementAttemptOutputMaterializationResult{}, err
+	}
+	result := SettlementAttemptOutputMaterializationResult{SelectedRows: len(ids)}
+	var firstErr error
+	for _, id := range ids {
+		materialized, err := s.MaterializeSettlementAttemptOutputFor(ctx, id)
+		if err != nil {
+			if errors.Is(err, errSettlementAttemptOutputJournalPoison) {
+				result.PoisonedRows++
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				break
+			}
+			continue
+		}
+		if materialized {
+			result.MaterializedRows++
+		} else {
+			result.AlreadyMaterializedRows++
+		}
+	}
+	return result, firstErr
+}
+
+func (s *Store) SettlementAttemptOutputJournalStats(ctx context.Context) (SettlementAttemptOutputJournalStats, error) {
+	var stats SettlementAttemptOutputJournalStats
+	if s == nil {
+		return stats, fmt.Errorf("billing store is nil")
+	}
+	reader := s.reader()
+	err := reader.QueryRowContext(ctx, `
+SELECT COUNT(*)
+  FROM settlement_attempt_output_journal
+ WHERE materialized_at_utc IS NULL
+   AND poisoned_at_utc IS NULL`).Scan(&stats.PendingRows)
+	if err != nil {
+		return stats, err
+	}
+	var oldest sql.NullString
+	if err := reader.QueryRowContext(ctx, `
+SELECT created_at_utc
+  FROM settlement_attempt_output_journal INDEXED BY idx_saoj_pending_created
+ WHERE materialized_at_utc IS NULL
+   AND poisoned_at_utc IS NULL
+ ORDER BY created_at_utc, id
+ LIMIT 1`).Scan(&oldest); err != nil && err != sql.ErrNoRows {
+		return stats, err
+	}
+	if err := reader.QueryRowContext(ctx, `
+SELECT COUNT(*)
+  FROM settlement_attempt_output_journal
+ WHERE poisoned_at_utc IS NOT NULL
+   AND poison_acknowledged_at_utc IS NULL`).Scan(&stats.PoisonedRows); err != nil {
+		return stats, err
+	}
+	if err := reader.QueryRowContext(ctx, `
+SELECT COUNT(*)
+  FROM settlement_attempt_output_journal INDEXED BY idx_saoj_poisoned_all
+ WHERE poisoned_at_utc IS NOT NULL`).Scan(&stats.RetainedPoisonedRows); err != nil {
+		return stats, err
+	}
+	if oldest.Valid && oldest.String != "" {
+		createdAt, err := time.Parse(time.RFC3339Nano, oldest.String)
+		if err != nil {
+			return stats, fmt.Errorf("parse settlement attempt output journal oldest pending created_at_utc: %w", err)
+		}
+		stats.OldestPendingCreatedAt = createdAt
+		stats.HasOldestPendingCreated = true
+		stats.OldestPendingAge = s.nowUTC().Sub(createdAt)
+		if stats.OldestPendingAge < 0 {
+			stats.OldestPendingAge = 0
+		}
+	}
+	return stats, nil
+}
+
+// PruneSettlementAttemptOutputJournal removes only old rows whose projection
+// is already durable. Pending and poisoned rows remain authoritative and are
+// never selected by this bounded retention pass.
+func (s *Store) PruneSettlementAttemptOutputJournal(ctx context.Context, cutoff time.Time, limit int) (int64, error) {
+	if s == nil {
+		return 0, fmt.Errorf("billing store is nil")
+	}
+	if limit <= 0 {
+		return 0, nil
+	}
+	res, err := s.db.ExecContext(ctx, `
+DELETE FROM settlement_attempt_output_journal
+ WHERE id IN (
+    SELECT id
+     FROM settlement_attempt_output_journal INDEXED BY idx_saoj_materialized_retention
+     WHERE materialized_at_utc IS NOT NULL
+       AND poisoned_at_utc IS NULL
+       AND materialized_at_utc < ?
+     ORDER BY materialized_at_utc, id
+     LIMIT ?
+ )`, cutoff.UTC().Format(time.RFC3339Nano), limit)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func (s *Store) materializeSettlementAttemptOutputForConn(ctx context.Context, conn *sql.Conn, id SettlementReceiptIdentity) (bool, error) {
+	prepared, found, pending, err := loadSettlementAttemptOutputJournalConn(ctx, conn, id)
+	if err != nil || !found || !pending {
+		return false, err
+	}
+	now := s.nowUTC().Format(time.RFC3339Nano)
+	if _, err := conn.ExecContext(ctx, `
+UPDATE settlement_attempt_output_journal
+   SET materialize_attempts = materialize_attempts + 1,
+       last_materialize_attempt_at_utc = ?
+ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
+		now, id.AccountScope, id.RequestID, id.AttemptN, id.ProviderID,
+	); err != nil {
+		return false, err
+	}
+	inserted, err := insertSettlementAttemptOutputConn(ctx, conn, prepared, false, s.nowUTC())
+	if err != nil {
+		return false, err
+	}
+	res, err := conn.ExecContext(ctx, `
+UPDATE settlement_attempt_output_journal
+   SET materialized_at_utc = COALESCE(materialized_at_utc, ?),
+       last_materialize_error = ''
+ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
+   AND materialized_at_utc IS NULL
+   AND poisoned_at_utc IS NULL`,
+		now, id.AccountScope, id.RequestID, id.AttemptN, id.ProviderID,
+	)
+	if err != nil {
+		return false, err
+	}
+	if rows, err := res.RowsAffected(); err == nil && rows == 0 {
+		return false, nil
+	}
+	return inserted, nil
+}
+
+func (s *Store) markSettlementAttemptOutputJournalPoisoned(ctx context.Context, id SettlementReceiptIdentity, cause error) error {
+	if cause == nil {
+		return nil
+	}
+	now := s.nowUTC().Format(time.RFC3339Nano)
+	message := cause.Error()
+	res, err := s.db.ExecContext(ctx, `
+UPDATE settlement_attempt_output_journal
+   SET materialize_attempts = materialize_attempts + 1,
+       last_materialize_attempt_at_utc = COALESCE(last_materialize_attempt_at_utc, ?),
+       last_materialize_error = ?,
+       poisoned_at_utc = COALESCE(poisoned_at_utc, ?),
+       poison_reason = CASE WHEN poison_reason = '' THEN ? ELSE poison_reason END
+ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
+		now, message, now, message,
+		id.AccountScope, id.RequestID, id.AttemptN, id.ProviderID,
+	)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("settlement attempt output journal row not found for poison retention")
+	}
+	return nil
+}
+
+func loadSettlementAttemptOutputJournalConn(ctx context.Context, conn *sql.Conn, id SettlementReceiptIdentity) (preparedSettlementAttemptOutput, bool, bool, error) {
+	var outputHash sql.NullString
+	var materializedAt sql.NullString
+	var poisonedAt sql.NullString
+	var outputAvailable, overlap int
+	var prepared preparedSettlementAttemptOutput
+	attempt := SettlementAttemptOutput{
+		AccountScope: id.AccountScope,
+		RequestID:    id.RequestID,
+		AttemptN:     id.AttemptN,
+		ProviderID:   id.ProviderID,
+	}
+	err := conn.QueryRowContext(ctx, `
+SELECT terminal_state, terminal_state_ts_unix_ms, output_available,
+       output_prefix_start_byte, output_prefix_end_byte, output_hash,
+       usage_hash, usage_canonical_json, usage_source,
+       overlapping_or_duplicate, payload_hash,
+       materialized_at_utc, poisoned_at_utc
+  FROM settlement_attempt_output_journal
+ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
+		id.AccountScope, id.RequestID, id.AttemptN, id.ProviderID,
+	).Scan(
+		&attempt.Output.TerminalState,
+		&attempt.TerminalStateTSUnixMS,
+		&outputAvailable,
+		&attempt.Output.OutputPrefixStartByte,
+		&attempt.Output.OutputPrefixEndByte,
+		&outputHash,
+		&prepared.usageHash,
+		&prepared.usageCanonical,
+		&attempt.UsageSource,
+		&overlap,
+		&prepared.payloadHash,
+		&materializedAt,
+		&poisonedAt,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return preparedSettlementAttemptOutput{}, false, false, nil
+		}
+		return preparedSettlementAttemptOutput{}, false, false, err
+	}
+	attempt.OutputAvailable = outputAvailable == 1
+	attempt.OverlappingOrDuplicate = overlap == 1
+	if outputHash.Valid {
+		prepared.outputHash = outputHash.String
+	}
+	var usage settlementUsageV04
+	if err := json.Unmarshal([]byte(prepared.usageCanonical), &usage); err != nil {
+		return preparedSettlementAttemptOutput{}, true, false, fmt.Errorf("%w: decode usage: %v", errSettlementAttemptOutputJournalPoison, err)
+	}
+	attempt.Usage = SettlementUsage{
+		BillableInputTokens:  usage.BillableInputTokens,
+		BillableOutputTokens: usage.BillableOutputTokens,
+		DeliveredOutputBytes: usage.DeliveredOutputBytes,
+		ObservedInputTokens:  usage.ObservedInputTokens,
+		ObservedOutputTokens: usage.ObservedOutputTokens,
+	}
+	attempt.Output.Content = ""
+	attempt.Output.Available = attempt.OutputAvailable
+	prepared.attempt = attempt
+	pending := !materializedAt.Valid && !poisonedAt.Valid
+	return prepared, true, pending, nil
 }
