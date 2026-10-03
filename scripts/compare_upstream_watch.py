@@ -9,6 +9,7 @@ from typing import Any
 
 BLOCKER_KEYS = (
     "mlx_swift_lm_406_compile_kv_offset",
+    "mlx_swift_lm_550_fixed_capacity_compiled_decode",
     "mlx_swift_lm_364_gemma_moe",
     "mlx_swift_lm_312_quantized_cache_ownership",
     "mlx_swift_lm_453_typed_cache_storage",
@@ -51,12 +52,18 @@ def material_changes(
         "native_mtp_immutable_dependency_exception"
     ):
         reasons.append("native MTP immutable-dependency exception changed")
+    current_blockers = new.get("blockers", {})
+    previous_blockers = old.get("blockers", {})
     for key in BLOCKER_KEYS:
-        if key not in old.get("blockers", {}):
+        if key not in current_blockers:
+            if key in previous_blockers:
+                reasons.append(f"{key} missing from live upstream watch")
+            continue
+        if key not in previous_blockers:
             reasons.append(f"{key} added to upstream watch")
             continue
-        previous = old["blockers"][key]
-        current = new["blockers"][key]
+        previous = previous_blockers[key]
+        current = current_blockers[key]
         if previous.get("state") != current.get("state"):
             reasons.append(
                 f"{key} state {previous.get('state')} -> {current.get('state')}"
@@ -65,6 +72,13 @@ def material_changes(
             reasons.append(f"{key} closed")
         if current.get("merged_at") and not previous.get("merged_at"):
             reasons.append(f"{key} merged")
+        if (
+            current.get("head_revision")
+            and current.get("head_revision") != previous.get("head_revision")
+        ):
+            reasons.append(f"{key} head revision changed")
+        if current.get("in_latest_release") and not previous.get("in_latest_release"):
+            reasons.append(f"{key} entered latest release")
 
     for release_key, pin_key in RELEASE_PIN_KEYS.items():
         previous_tag = old["releases"][release_key].get("tag")

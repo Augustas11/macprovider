@@ -24,16 +24,18 @@ Rules: CLAUDE.md worktree isolation.
    - exit 1: checker error (network/API failure, bad credentials, etc). Do NOT open or update any
      issue. Report the error and stop.
    - exit 2: material change detected (resolved pin/source/revision drift, issue/PR closed or
-     merged, new release tag above the current pin, or the KVCache compile-fix heuristic flipped).
+     merged, a tracked fix-PR head changed, a fix entered the latest release,
+     a new release tag appeared above the current pin, or the KVCache compile-fix heuristic flipped).
      Continue to step 3.
 3. On exit 2, determine which blocker(s) changed by diffing the new snapshot against
    `beta/throughput-engineering/UPSTREAM_WATCH.json` (`macprovider_pins`, `blockers.*.state`,
-   `releases.*.tag`, `implementation_signals.*`). Pin/source/revision drift is owned by #700.
+   `blockers.*.head_revision`, `blockers.*.in_latest_release`, `releases.*.tag`,
+   `implementation_signals.*`). Pin/source/revision drift is owned by #700.
 4. For each changed blocker, search for its sticky tracking issue BEFORE creating anything:
    `gh issue list --repo Augustas11/macprovider --state all --search "<sticky title text>"`
    - The mlx-swift-lm #364 (Gemma MoE) blocker's sticky issue is #700
      ("Awaiting mlx-swift-lm release containing #364 (Gemma MoE) — then T1-01 + T1-02").
-   - The mlx-swift-lm #406 (KVCache compile) blocker's sticky issue is #964.
+   - The mlx-swift-lm #406 / PR #550 (KVCache compile) blocker's sticky issue is #964.
    - The quantized reusable-KV ownership tracker is #965; watch upstream #312 and merged PR #453.
    - The speculative cache-wrap tracker is #377; watch upstream #424.
    - The independent swift-transformers migration tracker is #966.
