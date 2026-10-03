@@ -1518,6 +1518,7 @@ func main() {
 	errs := make(chan error, 2)
 
 	startRouteSnapshotJournalMirror(shutdownCtx, billingStore, moneySQLiteActivity, logger)
+	startSettlementAttemptOutputJournalMaterializer(shutdownCtx, billingStore, metricsHandle, cfg.Storage.AuditLogRetentionDays, logger)
 	billingStore.StartNightlyReconcile(shutdownCtx, cfg.Settlement)
 	billingStore.StartWeeklySettlement(shutdownCtx, cfg.Settlement)
 	flushSettlementReceiptAuditOutbox := startSettlementReceiptAuditOutboxDrainer(shutdownCtx, billingStore, settlementReceiptAuditStore, cfg.Storage.AuditLogRetentionDays, metricsHandle, moneySQLiteActivity, logger)
@@ -1860,6 +1861,18 @@ type routeSnapshotJournalMirror interface {
 	MirrorPendingRouteSnapshots(context.Context, int) (int, error)
 }
 
+type settlementAttemptOutputJournalMaterializer interface {
+	MaterializePendingSettlementAttemptOutputs(context.Context, int) (billing.SettlementAttemptOutputMaterializationResult, error)
+	SettlementAttemptOutputJournalStats(context.Context) (billing.SettlementAttemptOutputJournalStats, error)
+	PruneSettlementAttemptOutputJournal(context.Context, time.Time, int) (int64, error)
+}
+
+type settlementAttemptOutputJournalObserver interface {
+	ObserveSettlementAttemptOutputJournal(int64, int64, int64, time.Duration)
+	IncSettlementAttemptOutputJournalMaterialize(string)
+	AddSettlementAttemptOutputJournalRows(string, int64)
+}
+
 type routeSnapshotJournalMirrorConfig struct {
 	Interval    time.Duration
 	Timeout     time.Duration
@@ -1867,6 +1880,19 @@ type routeSnapshotJournalMirrorConfig struct {
 	MaxBatches  int
 	MinIdle     time.Duration
 	MaxDeferral time.Duration
+}
+
+type settlementAttemptOutputJournalMaterializerConfig struct {
+	Interval       time.Duration
+	Timeout        time.Duration
+	StatsInterval  time.Duration
+	StatsTimeout   time.Duration
+	Batch          int
+	StartupBatches int
+	Retention      time.Duration
+	PruneInterval  time.Duration
+	PruneTimeout   time.Duration
+	PruneLimit     int
 }
 
 type settlementReceiptAuditOutboxObserver interface {
@@ -1910,6 +1936,9 @@ const (
 	routeSnapshotJournalMirrorInterval     = 250 * time.Millisecond
 	routeSnapshotJournalMirrorTimeout      = 2 * time.Second
 	routeSnapshotJournalMirrorBatch        = 100
+	settlementAttemptOutputJournalInterval = 250 * time.Millisecond
+	settlementAttemptOutputJournalTimeout  = 200 * time.Millisecond
+	settlementAttemptOutputJournalBatch    = 50
 	moneySQLiteWALCheckpointComponent      = "wal_checkpoint"
 	routeSnapshotJournalWALComponent       = "route_snapshot_journal"
 )
@@ -1922,6 +1951,24 @@ func defaultRouteSnapshotJournalMirrorConfig() routeSnapshotJournalMirrorConfig 
 		MaxBatches:  5,
 		MinIdle:     moneySQLiteMaintenanceMinIdle,
 		MaxDeferral: moneySQLiteMaintenanceMaxDeferral,
+	}
+}
+
+func defaultSettlementAttemptOutputJournalMaterializerConfig(retentionDays int) settlementAttemptOutputJournalMaterializerConfig {
+	if retentionDays <= 0 {
+		retentionDays = 30
+	}
+	return settlementAttemptOutputJournalMaterializerConfig{
+		Interval:       settlementAttemptOutputJournalInterval,
+		Timeout:        settlementAttemptOutputJournalTimeout,
+		StatsInterval:  30 * time.Second,
+		StatsTimeout:   time.Second,
+		Batch:          settlementAttemptOutputJournalBatch,
+		StartupBatches: 5,
+		Retention:      time.Duration(retentionDays) * 24 * time.Hour,
+		PruneInterval:  15 * time.Second,
+		PruneTimeout:   2 * time.Second,
+		PruneLimit:     1000,
 	}
 }
 
@@ -2289,6 +2336,94 @@ func startRouteSnapshotJournalMirrorWithConfig(ctx context.Context, mirror route
 				return
 			case <-ticker.C:
 				flushIfIdle(ctx)
+			}
+		}
+	}()
+}
+
+func startSettlementAttemptOutputJournalMaterializer(ctx context.Context, store settlementAttemptOutputJournalMaterializer, observer settlementAttemptOutputJournalObserver, retentionDays int, logger zerolog.Logger) {
+	startSettlementAttemptOutputJournalMaterializerWithConfig(ctx, store, observer, logger, defaultSettlementAttemptOutputJournalMaterializerConfig(retentionDays))
+}
+
+func startSettlementAttemptOutputJournalMaterializerWithConfig(ctx context.Context, store settlementAttemptOutputJournalMaterializer, observer settlementAttemptOutputJournalObserver, logger zerolog.Logger, cfg settlementAttemptOutputJournalMaterializerConfig) {
+	if store == nil || cfg.Interval <= 0 || cfg.Timeout <= 0 || cfg.StatsInterval <= 0 || cfg.StatsTimeout <= 0 || cfg.Batch <= 0 || cfg.StartupBatches <= 0 || cfg.Retention <= 0 || cfg.PruneInterval <= 0 || cfg.PruneTimeout <= 0 || cfg.PruneLimit <= 0 {
+		return
+	}
+	materialize := func(runCtx context.Context) billing.SettlementAttemptOutputMaterializationResult {
+		materializeCtx, cancel := context.WithTimeout(runCtx, cfg.Timeout)
+		defer cancel()
+		result, err := store.MaterializePendingSettlementAttemptOutputs(materializeCtx, cfg.Batch)
+		outcome := "success"
+		if err != nil {
+			outcome = "error"
+			logger.Warn().Err(err).
+				Int("selected_rows", result.SelectedRows).
+				Int("materialized_rows", result.MaterializedRows).
+				Int("poisoned_rows", result.PoisonedRows).
+				Msg("settlement attempt-output journal materialization failed")
+		}
+		if observer != nil {
+			observer.IncSettlementAttemptOutputJournalMaterialize(outcome)
+			observer.AddSettlementAttemptOutputJournalRows("materialized", int64(result.MaterializedRows))
+			observer.AddSettlementAttemptOutputJournalRows("poisoned", int64(result.PoisonedRows))
+		}
+		return result
+	}
+	observeStats := func(runCtx context.Context) {
+		statsCtx, cancel := context.WithTimeout(runCtx, cfg.StatsTimeout)
+		defer cancel()
+		stats, err := store.SettlementAttemptOutputJournalStats(statsCtx)
+		if err != nil {
+			logger.Warn().Err(err).Msg("settlement attempt-output journal stats failed")
+			return
+		}
+		oldestAge := time.Duration(0)
+		if stats.HasOldestPendingCreated {
+			oldestAge = time.Since(stats.OldestPendingCreatedAt)
+			if oldestAge < 0 {
+				oldestAge = 0
+			}
+		}
+		if observer != nil {
+			observer.ObserveSettlementAttemptOutputJournal(stats.PendingRows, stats.PoisonedRows, stats.RetainedPoisonedRows, oldestAge)
+		}
+	}
+	prune := func(runCtx context.Context) {
+		pruneCtx, cancel := context.WithTimeout(runCtx, cfg.PruneTimeout)
+		defer cancel()
+		pruned, err := store.PruneSettlementAttemptOutputJournal(pruneCtx, time.Now().UTC().Add(-cfg.Retention), cfg.PruneLimit)
+		if err != nil {
+			logger.Warn().Err(err).Msg("settlement attempt-output journal retention failed")
+			return
+		}
+		if observer != nil {
+			observer.AddSettlementAttemptOutputJournalRows("pruned", pruned)
+		}
+	}
+	for batch := 0; batch < cfg.StartupBatches; batch++ {
+		result := materialize(context.Background())
+		if result.SelectedRows < cfg.Batch {
+			break
+		}
+	}
+	observeStats(context.Background())
+	go func() {
+		materializeTicker := time.NewTicker(cfg.Interval)
+		statsTicker := time.NewTicker(cfg.StatsInterval)
+		pruneTicker := time.NewTicker(cfg.PruneInterval)
+		defer materializeTicker.Stop()
+		defer statsTicker.Stop()
+		defer pruneTicker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-materializeTicker.C:
+				materialize(ctx)
+			case <-statsTicker.C:
+				observeStats(ctx)
+			case <-pruneTicker.C:
+				prune(ctx)
 			}
 		}
 	}()

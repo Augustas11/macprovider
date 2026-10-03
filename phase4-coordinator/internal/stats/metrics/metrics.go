@@ -108,6 +108,12 @@ type Metrics struct {
 	SettlementReceiptAuditOutboxStatsAgeSeconds         prometheus.Gauge
 	SettlementReceiptAuditOutboxDrainTotal              *prometheus.CounterVec
 	SettlementReceiptAuditOutboxRowsTotal               *prometheus.CounterVec
+	SettlementAttemptOutputJournalPendingRows           prometheus.Gauge
+	SettlementAttemptOutputJournalPoisonedRows          prometheus.Gauge
+	SettlementAttemptOutputJournalRetainedPoisonedRows  prometheus.Gauge
+	SettlementAttemptOutputJournalOldestPendingAge      prometheus.Gauge
+	SettlementAttemptOutputJournalRunsTotal             *prometheus.CounterVec
+	SettlementAttemptOutputJournalRowsTotal             *prometheus.CounterVec
 	// CapacityOverClaimTotal is the issue-#764 over-claim tripwire. It is
 	// PERMANENT by construction: a prometheus counter never decreases and is
 	// never reset for the process lifetime, and the coordinator increments it
@@ -313,6 +319,44 @@ func New(reg prometheus.Registerer) *Metrics {
 			prometheus.CounterOpts{
 				Name: "settlement_receipt_audit_outbox_rows_total",
 				Help: "Count of settlement receipt audit outbox rows processed by closed-set operation.",
+			},
+			[]string{"operation"},
+		),
+		SettlementAttemptOutputJournalPendingRows: f.NewGauge(
+			prometheus.GaugeOpts{
+				Name: "settlement_attempt_output_journal_pending_rows",
+				Help: "Latest count of durable attempt-output journal rows awaiting projection.",
+			},
+		),
+		SettlementAttemptOutputJournalPoisonedRows: f.NewGauge(
+			prometheus.GaugeOpts{
+				Name: "settlement_attempt_output_journal_poisoned_rows",
+				Help: "Latest count of retained attempt-output journal rows with immutable projection conflicts.",
+			},
+		),
+		SettlementAttemptOutputJournalRetainedPoisonedRows: f.NewGauge(
+			prometheus.GaugeOpts{
+				Name: "settlement_attempt_output_journal_retained_poisoned_rows",
+				Help: "Latest count of all retained attempt-output journal poison rows, including acknowledged rows.",
+			},
+		),
+		SettlementAttemptOutputJournalOldestPendingAge: f.NewGauge(
+			prometheus.GaugeOpts{
+				Name: "settlement_attempt_output_journal_oldest_pending_age_seconds",
+				Help: "Age in seconds of the oldest attempt-output journal row awaiting projection.",
+			},
+		),
+		SettlementAttemptOutputJournalRunsTotal: f.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "settlement_attempt_output_journal_materialize_total",
+				Help: "Count of bounded attempt-output journal materializer runs by closed-set outcome.",
+			},
+			[]string{"outcome"},
+		),
+		SettlementAttemptOutputJournalRowsTotal: f.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "settlement_attempt_output_journal_rows_total",
+				Help: "Count of attempt-output journal rows processed by closed-set operation.",
 			},
 			[]string{"operation"},
 		),
@@ -555,11 +599,50 @@ func (m *Metrics) AddSettlementReceiptAuditOutboxRows(operation string, rows int
 	m.SettlementReceiptAuditOutboxRowsTotal.WithLabelValues(operation).Add(float64(rows))
 }
 
+func (m *Metrics) ObserveSettlementAttemptOutputJournal(pendingRows, poisonedRows, retainedPoisonedRows int64, oldestPendingAge time.Duration) {
+	if m == nil || m.SettlementAttemptOutputJournalPendingRows == nil ||
+		m.SettlementAttemptOutputJournalPoisonedRows == nil ||
+		m.SettlementAttemptOutputJournalRetainedPoisonedRows == nil ||
+		m.SettlementAttemptOutputJournalOldestPendingAge == nil {
+		return
+	}
+	if pendingRows < 0 {
+		pendingRows = 0
+	}
+	if poisonedRows < 0 {
+		poisonedRows = 0
+	}
+	if retainedPoisonedRows < 0 {
+		retainedPoisonedRows = 0
+	}
+	if oldestPendingAge < 0 {
+		oldestPendingAge = 0
+	}
+	m.SettlementAttemptOutputJournalPendingRows.Set(float64(pendingRows))
+	m.SettlementAttemptOutputJournalPoisonedRows.Set(float64(poisonedRows))
+	m.SettlementAttemptOutputJournalRetainedPoisonedRows.Set(float64(retainedPoisonedRows))
+	m.SettlementAttemptOutputJournalOldestPendingAge.Set(oldestPendingAge.Seconds())
+}
+
+func (m *Metrics) IncSettlementAttemptOutputJournalMaterialize(outcome string) {
+	if m == nil || m.SettlementAttemptOutputJournalRunsTotal == nil || !allowSettlementAttemptOutputJournalOutcome(outcome) {
+		return
+	}
+	m.SettlementAttemptOutputJournalRunsTotal.WithLabelValues(outcome).Inc()
+}
+
+func (m *Metrics) AddSettlementAttemptOutputJournalRows(operation string, rows int64) {
+	if m == nil || m.SettlementAttemptOutputJournalRowsTotal == nil || !allowSettlementAttemptOutputJournalOperation(operation) || rows <= 0 {
+		return
+	}
+	m.SettlementAttemptOutputJournalRowsTotal.WithLabelValues(operation).Add(float64(rows))
+}
+
 func allowMoneySQLiteComponent(component string) bool {
 	switch component {
 	case "billing_hot_path", "request_log_identity", "billing_reload_config", "route_snapshot", "wal_checkpoint",
 		"route_snapshot_journal", "route_snapshot_materializer", "ledger_recovery", "settlement_attempt_output",
-		"settlement_pool_labels", "settlement_receipt":
+		"settlement_attempt_output_journal_materialize", "settlement_pool_labels", "settlement_receipt":
 		return true
 	default:
 		return false
@@ -605,6 +688,24 @@ func allowSettlementReceiptAuditOutboxDrainOutcome(outcome string) bool {
 func allowSettlementReceiptAuditOutboxRowsOperation(operation string) bool {
 	switch operation {
 	case "drained", "poisoned", "pruned":
+		return true
+	default:
+		return false
+	}
+}
+
+func allowSettlementAttemptOutputJournalOutcome(outcome string) bool {
+	switch outcome {
+	case "success", "error":
+		return true
+	default:
+		return false
+	}
+}
+
+func allowSettlementAttemptOutputJournalOperation(operation string) bool {
+	switch operation {
+	case "materialized", "poisoned", "pruned":
 		return true
 	default:
 		return false

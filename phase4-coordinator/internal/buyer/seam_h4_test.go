@@ -441,9 +441,9 @@ func TestSeamH4_WSNonStreamingCreditFollowsDeliveredBodyNegotiated(t *testing.T)
 }
 
 // TestSeamH4_SettlementOutputDeadlineAfterCreditKeepsBuyerSuccess is issue
-// #1675. A SQLite deadline after the credit row commits must not tell the
-// buyer the request failed. That 500 is what the gateway settles as
-// prompt-only while the ledger keeps the completion credit.
+// #1675. Projection pressure after the credit and compact evidence journal
+// commit must not tell the buyer the request failed or mark durable evidence
+// missing.
 func TestSeamH4_SettlementOutputDeadlineAfterCreditKeepsBuyerSuccess(t *testing.T) {
 	prev := settlementOutputWriteContextForTest
 	settlementOutputWriteContextForTest = func(int, context.Context) context.Context {
@@ -494,19 +494,26 @@ func TestSeamH4_SettlementOutputDeadlineAfterCreditKeepsBuyerSuccess(t *testing.
 		t.Fatalf("count settlement outputs: %v", err)
 	}
 	if outputs != 0 {
-		t.Fatalf("settlement outputs = %d, want 0 — the deadline dropped the evidence row", outputs)
+		t.Fatalf("settlement outputs = %d, want 0 while projection is pending", outputs)
+	}
+	var pending int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM settlement_attempt_output_journal WHERE materialized_at_utc IS NULL AND poisoned_at_utc IS NULL`).Scan(&pending); err != nil {
+		t.Fatalf("count pending settlement output journal: %v", err)
+	}
+	if pending != 1 {
+		t.Fatalf("pending settlement output journal rows=%d want 1", pending)
 	}
 	var quarantined int
 	var reason sql.NullString
 	if err := db.QueryRow(`SELECT quarantined, quarantine_reason FROM ledger_request_credits`).Scan(&quarantined, &reason); err != nil {
 		t.Fatalf("read credit mark: %v", err)
 	}
-	if quarantined != 0 || !reason.Valid || reason.String != "settlement_attempt_output_missing" {
-		t.Fatalf("quarantined=%d reason=%v, want the credit kept and marked settlement_attempt_output_missing", quarantined, reason)
+	if quarantined != 0 || reason.Valid {
+		t.Fatalf("quarantined=%d reason=%v, want payable credit with durable pending evidence", quarantined, reason)
 	}
 }
 
-func TestSeamH4_SettlementOutputDeadlineRetriesEvidence(t *testing.T) {
+func TestSeamH4_SettlementOutputDeadlineDrainsFromJournal(t *testing.T) {
 	prev := settlementOutputWriteContextForTest
 	settlementOutputWriteContextForTest = func(attempt int, ctx context.Context) context.Context {
 		if attempt == 1 {
@@ -525,6 +532,15 @@ func TestSeamH4_SettlementOutputDeadlineRetriesEvidence(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("buyer status = %d, want 200; body=%s", rr.Code, rr.Body.String())
 	}
+	settlementOutputWriteContextForTest = nil
+	billingStore, _, _ := s.billingState()
+	result, err := billingStore.MaterializePendingSettlementAttemptOutputs(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("materialize pending evidence: %v", err)
+	}
+	if result.MaterializedRows != 1 {
+		t.Fatalf("materialize result=%+v, want one row", result)
+	}
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
@@ -535,14 +551,14 @@ func TestSeamH4_SettlementOutputDeadlineRetriesEvidence(t *testing.T) {
 		t.Fatalf("count settlement outputs: %v", err)
 	}
 	if outputs != 1 {
-		t.Fatalf("settlement outputs = %d, want 1 after the evidence retry", outputs)
+		t.Fatalf("settlement outputs = %d, want 1 after journal drain", outputs)
 	}
 	var marked int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM ledger_request_credits WHERE quarantine_reason = 'settlement_attempt_output_missing'`).Scan(&marked); err != nil {
 		t.Fatalf("count marks: %v", err)
 	}
 	if marked != 0 {
-		t.Fatalf("marked credits = %d, want 0 when the evidence retry landed", marked)
+		t.Fatalf("marked credits = %d, want 0 when durable evidence drained", marked)
 	}
 }
 

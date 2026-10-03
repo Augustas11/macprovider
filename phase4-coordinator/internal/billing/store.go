@@ -428,6 +428,57 @@ CREATE TABLE IF NOT EXISTS settlement_attempt_outputs (
 CREATE INDEX IF NOT EXISTS idx_sao_request_range ON settlement_attempt_outputs(account_scope, request_id, output_prefix_start_byte, output_prefix_end_byte);
 CREATE INDEX IF NOT EXISTS idx_sao_output_hash ON settlement_attempt_outputs(output_hash);
 
+CREATE TABLE IF NOT EXISTS settlement_attempt_output_journal (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_scope TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    attempt_n INTEGER NOT NULL CHECK(attempt_n >= 0),
+    provider_id TEXT NOT NULL,
+    terminal_state TEXT NOT NULL CHECK(terminal_state IN ('normal_done','provider_error','buyer_cancel','gateway_timeout','upstream_transport_disconnect')),
+    terminal_state_ts_unix_ms INTEGER NOT NULL CHECK(terminal_state_ts_unix_ms > 0),
+    output_available INTEGER NOT NULL DEFAULT 1 CHECK(output_available IN (0,1)),
+    output_prefix_start_byte INTEGER NOT NULL CHECK(output_prefix_start_byte >= 0),
+    output_prefix_end_byte INTEGER NOT NULL CHECK(output_prefix_end_byte >= output_prefix_start_byte),
+    output_hash TEXT CHECK(output_hash IS NULL OR (length(output_hash) = 64 AND output_hash NOT GLOB '*[^0-9a-f]*')),
+    usage_hash TEXT NOT NULL CHECK(length(usage_hash) = 64 AND usage_hash NOT GLOB '*[^0-9a-f]*'),
+    usage_canonical_json TEXT NOT NULL,
+    usage_source TEXT NOT NULL CHECK(usage_source IN ('coordinator_observed','byte_estimated','pool_operator_attested')),
+    overlapping_or_duplicate INTEGER NOT NULL DEFAULT 0 CHECK(overlapping_or_duplicate IN (0,1)),
+    payload_hash TEXT NOT NULL CHECK(length(payload_hash) = 64 AND payload_hash NOT GLOB '*[^0-9a-f]*'),
+    created_at_utc TEXT NOT NULL,
+    materialized_at_utc TEXT NULL,
+    materialize_attempts INTEGER NOT NULL DEFAULT 0 CHECK(materialize_attempts >= 0),
+    last_materialize_attempt_at_utc TEXT NULL,
+    last_materialize_error TEXT NOT NULL DEFAULT '',
+    poisoned_at_utc TEXT NULL,
+    poison_reason TEXT NOT NULL DEFAULT '',
+    poison_acknowledged_at_utc TEXT NULL,
+    poison_acknowledged_by TEXT NOT NULL DEFAULT '',
+    poison_acknowledge_reason TEXT NOT NULL DEFAULT '',
+    UNIQUE(account_scope, request_id, attempt_n, provider_id)
+);
+CREATE INDEX IF NOT EXISTS idx_saoj_pending ON settlement_attempt_output_journal(id)
+    WHERE materialized_at_utc IS NULL AND poisoned_at_utc IS NULL;
+CREATE INDEX IF NOT EXISTS idx_saoj_pending_created ON settlement_attempt_output_journal(created_at_utc, id)
+    WHERE materialized_at_utc IS NULL AND poisoned_at_utc IS NULL;
+CREATE INDEX IF NOT EXISTS idx_saoj_poisoned_open ON settlement_attempt_output_journal(poisoned_at_utc, id)
+    WHERE poisoned_at_utc IS NOT NULL AND poison_acknowledged_at_utc IS NULL;
+CREATE INDEX IF NOT EXISTS idx_saoj_poisoned_all ON settlement_attempt_output_journal(poisoned_at_utc, id)
+    WHERE poisoned_at_utc IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_saoj_materialized_retention ON settlement_attempt_output_journal(materialized_at_utc, id)
+    WHERE materialized_at_utc IS NOT NULL AND poisoned_at_utc IS NULL;
+CREATE TRIGGER IF NOT EXISTS trg_saoj_immutable
+BEFORE UPDATE OF account_scope, request_id, attempt_n, provider_id,
+                 terminal_state, terminal_state_ts_unix_ms,
+                 output_available, output_prefix_start_byte,
+                 output_prefix_end_byte, output_hash,
+                 usage_hash, usage_canonical_json, usage_source,
+                 overlapping_or_duplicate, payload_hash, created_at_utc
+ON settlement_attempt_output_journal
+BEGIN
+    SELECT RAISE(ABORT, 'settlement attempt output journal payload is immutable');
+END;
+
 CREATE TABLE IF NOT EXISTS settlement_receipt_verdicts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_scope_hash TEXT NOT NULL CHECK(length(account_scope_hash) = 64 AND account_scope_hash NOT GLOB '*[^0-9a-f]*'),

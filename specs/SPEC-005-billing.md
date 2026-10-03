@@ -1,7 +1,14 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.6.12 (2026-10-02, crash-safe bounded maintenance)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.6, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.39, SPEC-024 v0.2.7 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.18.0 / SPEC-005-R011 / SPEC-005-R013 (SPEC-023-R019) is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
+**Version:** 0.6.13 (2026-10-03, atomic attempt-output evidence journal)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.7, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.39, SPEC-024 v0.2.7 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.18.0 / SPEC-005-R011 / SPEC-005-R013 (SPEC-023-R019) is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
+
+**Change log v0.6.13 (2026-10-03, issue #1793):** The hot-path transaction
+atomically commits a compact immutable settlement-attempt-output journal row
+with each provider credit. A bounded idempotent materializer maintains the
+existing settlement projection. Receipt adjudication materializes matching
+journal evidence on demand and defers on transient projection pressure rather
+than manufacturing an evidence gap.
 
 **Change log v0.6.12 (2026-10-02, issue #1793):** Recovery uses durable,
 atomically advanced bounded progress with overlap fencing; weekly settlement
@@ -1825,7 +1832,9 @@ This section implements the locked crash-recovery decision (D9) by keeping hot-p
 ### 10.1 Transaction contract
 
 Hot path MUST use BEGIN IMMEDIATE; ...; COMMIT.
-request_log, ledger_request_credits, ledger_operator_credits, and any provider identity snapshot for the reached provider are written together.
+request_log, ledger_request_credits, ledger_operator_credits, any provider
+identity snapshot for the reached provider, and the compact immutable
+settlement-attempt-output journal row are written together.
 Crash before COMMIT loses all rows together.
 Crash after COMMIT preserves all rows together.
 No 2PC is used.
@@ -1837,6 +1846,17 @@ automatic checkpointing. A worker MUST use PASSIVE checkpointing while buyer
 traffic is active, MAY use TRUNCATE only after the configured idle condition,
 and MUST leave a failed or timed-out WAL for a later retry. Recovery scans MUST
 execute under `BEGIN DEFERRED` to obtain a consistent reader snapshot.
+
+The attempt-output journal is the recovery authority until its existing
+`settlement_attempt_outputs` projection is materialized. Journal append and
+replay MUST be idempotent on `(account_scope, request_id, attempt_n,
+provider_id)`. Pending selection MUST use an indexed keyset and every worker
+pass MUST be bounded. A transient projection failure MUST retain the journal
+row and MUST NOT mark the corresponding provider credit as missing evidence.
+The compact event MUST retain output hashes and range/terminal metadata, not
+raw provider output content. Materialized journal rows MAY be pruned only after
+the configured audit retention window by an indexed bounded pass; pending and
+poison rows MUST remain retained.
 
 **Pool cap (operational invariant).** The Go `*sql.DB` handle backing the coordinator SQLite store MUST set `MaxOpenConns(1)` and `MaxIdleConns(1)`. SQLite already serializes writers at one-at-a-time; the Go-pool cap converts that into an enforceable serialization point and eliminates the implicit-pool unbounded growth that surfaced as latent p99 latency and post-inference `request_log_failed` 500s on prior uncapped builds (issue #21 / ARCH-3 / 2026-06-10 audit QW-5). Callers that share the requestlog/billing/admission `*sql.DB` MUST NOT hold an outer `*sql.Rows` cursor open across an inner query against the SAME pool, and inside a transaction MUST NOT call helpers that issue against the un-pinned `*sql.DB` (they will deadlock waiting for a second connection that cannot be obtained while the tx pins the only one). The reference IMPL is `phase4-coordinator/internal/requestlog/store.go` `OpenStore`.
 
