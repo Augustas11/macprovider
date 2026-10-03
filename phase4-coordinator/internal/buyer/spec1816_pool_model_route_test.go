@@ -503,10 +503,30 @@ func TestSPEC1816PoolModelUnverifiedRouteZeroBills(t *testing.T) {
 	if rec := postChat(t, h.server, h.body(), externalRuntimePoolHeaders(h.poolID)); rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	ledger := queryPoolModelLedger(t, h.dbPath)
+	db, err := sql.Open("sqlite", h.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var ledger poolModelLedger
+	var reason sql.NullString
+	if err := db.QueryRow(`SELECT usage_source, gross_credits, provider_credits, quarantined, quarantine_reason,
+       prompt_rate_per_mtok, completion_rate_per_mtok
+  FROM ledger_request_credits ORDER BY id DESC LIMIT 1`).
+		Scan(&ledger.usageSource, &ledger.gross, &ledger.provider, &ledger.quarantined, &reason, &ledger.promptRate, &ledger.compRate); err != nil {
+		t.Fatalf("query zero-billed ledger: %v", err)
+	}
+	ledger.reason = reason.String
 	if ledger.gross != 0 || ledger.provider != 0 || ledger.quarantined != 1 || ledger.reason != billing.PoolManifestRouteNotSettlementEligible ||
 		ledger.usageSource != billing.UsageSourceByteEstimated {
 		t.Fatalf("unverified pool-model ledger = %+v", ledger)
+	}
+	var outputs int
+	if err := db.QueryRow(`SELECT count(*) FROM settlement_attempt_outputs`).Scan(&outputs); err != nil {
+		t.Fatalf("count attempt outputs: %v", err)
+	}
+	if outputs != 0 {
+		t.Fatalf("unverified zero-credit route wrote %d settlement attempt outputs, want 0", outputs)
 	}
 }
 

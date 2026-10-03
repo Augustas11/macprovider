@@ -804,6 +804,81 @@ func TestRouteSnapshotJournalMirrorCapsBatchesPerRun(t *testing.T) {
 	assertNoSignal(t, mirror.called, "route snapshot journal mirror fourth batch")
 }
 
+func TestSettlementAttemptOutputJournalMaterializerCapsStartupBatches(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := &settlementAttemptOutputJournalMaterializerStub{
+		called:  make(chan struct{}, 8),
+		batches: []int{50, 50, 50, 50},
+	}
+	observer := &settlementAttemptOutputJournalObserverStub{pending: make(chan int64, 1)}
+
+	startSettlementAttemptOutputJournalMaterializerWithConfig(ctx, store, observer, zerolog.Nop(), settlementAttemptOutputJournalMaterializerConfig{
+		Interval:       time.Hour,
+		Timeout:        time.Second,
+		StatsInterval:  time.Hour,
+		StatsTimeout:   time.Second,
+		Batch:          50,
+		StartupBatches: 3,
+		Retention:      24 * time.Hour,
+		PruneInterval:  time.Hour,
+		PruneTimeout:   time.Second,
+		PruneLimit:     100,
+	})
+
+	for i := 0; i < 3; i++ {
+		assertSignal(t, store.called, "bounded attempt-output journal startup batch")
+	}
+	assertNoSignal(t, store.called, "attempt-output journal fourth startup batch")
+	assertInt64Signal(t, observer.pending, 7, "attempt-output journal pending stats")
+}
+
+func TestSettlementAttemptOutputJournalMaterializerRunsContinuously(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := &settlementAttemptOutputJournalMaterializerStub{called: make(chan struct{}, 4)}
+
+	startSettlementAttemptOutputJournalMaterializerWithConfig(ctx, store, nil, zerolog.Nop(), settlementAttemptOutputJournalMaterializerConfig{
+		Interval:       10 * time.Millisecond,
+		Timeout:        time.Second,
+		StatsInterval:  time.Hour,
+		StatsTimeout:   time.Second,
+		Batch:          50,
+		StartupBatches: 1,
+		Retention:      24 * time.Hour,
+		PruneInterval:  time.Hour,
+		PruneTimeout:   time.Second,
+		PruneLimit:     100,
+	})
+
+	assertSignal(t, store.called, "attempt-output journal startup materialization")
+	assertSignal(t, store.called, "attempt-output journal paced materialization")
+}
+
+func TestSettlementAttemptOutputJournalMaterializerRunsBoundedRetention(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := &settlementAttemptOutputJournalMaterializerStub{
+		called:      make(chan struct{}, 2),
+		pruneCalled: make(chan struct{}, 1),
+	}
+
+	startSettlementAttemptOutputJournalMaterializerWithConfig(ctx, store, nil, zerolog.Nop(), settlementAttemptOutputJournalMaterializerConfig{
+		Interval:       time.Hour,
+		Timeout:        time.Second,
+		StatsInterval:  time.Hour,
+		StatsTimeout:   time.Second,
+		Batch:          50,
+		StartupBatches: 1,
+		Retention:      24 * time.Hour,
+		PruneInterval:  10 * time.Millisecond,
+		PruneTimeout:   time.Second,
+		PruneLimit:     100,
+	})
+
+	assertSignal(t, store.pruneCalled, "attempt-output journal bounded retention")
+}
+
 func TestSettlementReceiptAuditOutboxDrainerStartupRunsDuringRecentTraffic(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1176,6 +1251,47 @@ func (s *routeSnapshotJournalMirrorStub) MirrorPendingRouteSnapshots(context.Con
 		return n, s.err
 	}
 	return 0, s.err
+}
+
+type settlementAttemptOutputJournalMaterializerStub struct {
+	called      chan struct{}
+	pruneCalled chan struct{}
+	batches     []int
+}
+
+func (s *settlementAttemptOutputJournalMaterializerStub) MaterializePendingSettlementAttemptOutputs(context.Context, int) (billing.SettlementAttemptOutputMaterializationResult, error) {
+	s.called <- struct{}{}
+	selected := 0
+	if len(s.batches) > 0 {
+		selected = s.batches[0]
+		s.batches = s.batches[1:]
+	}
+	return billing.SettlementAttemptOutputMaterializationResult{SelectedRows: selected, MaterializedRows: selected}, nil
+}
+
+func (s *settlementAttemptOutputJournalMaterializerStub) SettlementAttemptOutputJournalStats(context.Context) (billing.SettlementAttemptOutputJournalStats, error) {
+	return billing.SettlementAttemptOutputJournalStats{PendingRows: 7, PoisonedRows: 2}, nil
+}
+
+func (s *settlementAttemptOutputJournalMaterializerStub) PruneSettlementAttemptOutputJournal(context.Context, time.Time, int) (int64, error) {
+	if s.pruneCalled != nil {
+		s.pruneCalled <- struct{}{}
+	}
+	return 0, nil
+}
+
+type settlementAttemptOutputJournalObserverStub struct {
+	pending chan int64
+}
+
+func (s *settlementAttemptOutputJournalObserverStub) ObserveSettlementAttemptOutputJournal(pending, _, _ int64, _ time.Duration) {
+	s.pending <- pending
+}
+
+func (*settlementAttemptOutputJournalObserverStub) IncSettlementAttemptOutputJournalMaterialize(string) {
+}
+
+func (*settlementAttemptOutputJournalObserverStub) AddSettlementAttemptOutputJournalRows(string, int64) {
 }
 
 type settlementReceiptAuditOutboxDrainerStub struct {

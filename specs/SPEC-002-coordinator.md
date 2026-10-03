@@ -1,6 +1,6 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.6 (2026-10-02, bounded SQLite evidence maintenance)
+**Version:** 1.6.7 (2026-10-03, atomic attempt-output evidence journal)
 **Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9); SPEC-003 FR-C9.4 composed contract — base AuthState enum (`bearer_validated`, `self_minted`, `bearerless_duplicate`) introduced in v0.8.3; `mint_failed` reserved value added in v0.8.4.
 
 **Change log v1.6.5 (2026-10-02, issue #1793):** The primary money database
@@ -17,6 +17,13 @@ an outer batch ceiling; exact backlog statistics expose freshness, and their
 age/stale state remains visible after a timed-out sample. Indexed pending and
 retention scans are required so maintenance work does not degrade into a table
 scan as evidence volume grows.
+
+**Change log v1.6.7 (2026-10-03, issue #1793):** A provider credit and its
+compact immutable settlement-attempt-output journal row commit in the same
+money-database transaction. The attempt-output projection is materialized
+asynchronously with bounded indexed work and on demand before receipt
+adjudication. Projection pressure no longer converts a durably journaled event
+into missing settlement evidence.
 
 **Change log v1.6.4 (2026-09-30, authenticated dispatch output limit):**
 The coordinator accepts `X-MacProvider-Internal-Max-Output-Tokens` only under
@@ -2202,6 +2209,8 @@ coordinator database and the dedicated append-only route-snapshot journal:
 - `request_log` (billing/attribution; append-only ledger)
 - route-time verification snapshots (journaled before dispatch and
   materialized into the primary money database)
+- compact settlement attempt-output events committed atomically with provider
+  credits and materialized into the settlement evidence projection
 - `pool_snapshots` (periodic debug history, every 5 min — **debugging
   only, not restored on restart**)
 
@@ -2231,6 +2240,19 @@ exact when the stats sample succeeds. A failed or timed-out stats sample MUST
 retain the last successful values and mark them stale with their sample age.
 Pending-order and drained-retention scans MUST use dedicated indexes whose
 query plans are regression-tested.
+
+The compact journal MUST persist hashes, range and terminal metadata, canonical
+usage, and materialization state only; it MUST NOT persist raw provider output
+content. The attempt-output materializer MUST use the journal's indexed pending keyset,
+cap every invocation by rows and deadline, and remain continuously scheduled
+independently of buyer idleness. A receipt or missing-receipt adjudication MUST
+first attempt to materialize its matching journal row. A present durable row
+that is temporarily blocked from projection MUST be deferred, never classified
+as absent evidence. Immutable projection conflicts MUST remain retained and
+observable for operator resolution. Materialized non-poison rows MUST be
+removed only by an indexed, deadline- and row-bounded retention pass after the
+configured audit retention window; pending and poison rows MUST never be
+selected by that pass.
 
 (Scope item in § 2 "SQLite persistence for provider auth, request log,
 pool state" should be read as: auth + log persisted across restarts;

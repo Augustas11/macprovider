@@ -358,6 +358,13 @@ func (s *Store) applySettlementReceiptVerdict(ctx context.Context, id Settlement
 	if err := s.MirrorRouteSnapshotForAttempt(ctx, id); err != nil {
 		return SettlementReceiptState{}, err
 	}
+	// A provider credit may have committed with only its compact attempt-output
+	// journal row materialized. Project that exact row on demand before loading
+	// settlement evidence so transient background lag cannot be misclassified as
+	// permanently missing evidence.
+	if _, err := s.MaterializeSettlementAttemptOutputFor(ctx, id); err != nil {
+		return SettlementReceiptState{}, err
+	}
 	var outcome SettlementReceiptState
 	err := sqliteutil.TransactObserved(ctx, s.db, "settlement_receipt", s.sqliteMetric, func(ctx context.Context, conn *sql.Conn) error {
 		existing, found, err := loadSettlementReceiptStateConn(ctx, conn, id)

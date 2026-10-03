@@ -1,13 +1,13 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.2.10
+Version: v0.2.11
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
 
-### v0.2.10
+### v0.2.11
 
 #1816 freeze-audit R1 fixes, and the #1816 VM acceptance A-1 fix: v2 is
 negotiated with the gateway (R-13.2). R-13.2 names option B: #1816 provenance rides
@@ -25,7 +25,7 @@ buyer-final debit or provider credit, and an unreadable fence leaves the
 receipt retryable. Receipt-bound usage never raises the completion count
 above the ledger's byte-derived ceiling (the existing SPEC-005 clamp).
 
-### v0.2.9
+### v0.2.10
 
 #1816 lab e2e fixes. R-13.4 states the in-flight rule precisely: an attempt
 settles from its immutable route snapshot across manifest rotation and entry
@@ -33,7 +33,7 @@ removal or change, and falls back to zero only under the SPEC-042-R015
 durable route fence or a real SPEC-042-R006 label mismatch. R-12 decisions
 use the same fence in the hot path and in ledger recovery.
 
-### v0.2.8
+### v0.2.9
 
 #1816 round-1 audit fixes. R-12.1 and R-12.3 now admit the SPEC-047-R011
 pool-manifest identity source and SPEC-042-R016 attested members, bound as
@@ -45,7 +45,7 @@ preimage used only by routes that carry it, implementation-defined pending the
 implementation slice, and reconciled with SPEC-015 §N.2 by reference. Native
 `mlx_cache` pool-entry attempts keep native receipts and `coordinator_observed`.
 
-### v0.2.7
+### v0.2.8
 
 Pool-manifest expected identity (#1816). Adds SPEC-022-R013: a route snapshot
 names whether its expected artifact pair comes from the global catalog or the
@@ -53,6 +53,15 @@ route's signed pool manifest, and pool-manifest snapshots bind the exact core
 digest. Equality and replay remain hash-exact; the new source makes no trust
 claim beyond SPEC-042-R006 and does not make a pool model globally
 `settlement_capable`.
+### v0.2.7
+
+Issue #1793 begins the SQLite-first evidence-journal stage. Every provider
+credit commits with a compact immutable attempt-output event in the same money
+transaction. The existing attempt-output table becomes an idempotent bounded
+projection. Receipt adjudication projects matching durable evidence on demand;
+transient materializer pressure defers adjudication and cannot create a
+missing-evidence outcome. No payout, pricing, quarantine, or account-scope
+predicate changes.
 
 ### v0.2.6
 
@@ -754,10 +763,25 @@ Each materializer invocation MUST also have a fixed maximum number of batches;
 remaining journal rows stay authoritative for a later invocation. Pending
 journal selection MUST use an indexed keyset path.
 
-R-3.2.2. Post-credit attempt-output persistence MUST have an independent write
-budget. Route-snapshot materialization pressure MUST NOT consume that budget or
-prevent the output row from being attempted. A digest mismatch or other
-non-pressure integrity failure remains fail-closed.
+R-3.2.2. The provider-credit transaction MUST atomically append its compact
+immutable attempt-output event to the money database's evidence journal. Crash
+before commit loses the credit and event together; crash after commit preserves
+both. The event key `(account_scope, request_id, attempt_n, provider_id)` MUST
+be idempotent, and a conflicting payload for that key MUST fail closed. The
+compact event MUST retain output hashes and range/terminal metadata but MUST
+NOT persist raw provider output content.
+
+The existing attempt-output table MAY be materialized asynchronously. Pending
+selection MUST use an indexed keyset; each invocation MUST be bounded by row
+count and deadline; retries MUST preserve the authoritative journal row.
+Receipt and missing-receipt adjudication MUST attempt matching materialization
+before loading evidence. A durably journaled event that is temporarily blocked
+from projection MUST defer adjudication and MUST NOT be marked missing. An
+immutable projection conflict MUST remain retained and observable. Route-
+snapshot or other maintenance pressure MUST NOT erase or rewrite the event.
+An indexed bounded retention pass MAY delete only materialized non-poison rows
+older than the configured audit retention window; pending and poison rows MUST
+remain retained.
 
 R-3.3. Settlement MUST verify:
 
@@ -1456,7 +1480,7 @@ provenance members are `expected_model_hash_source` (present only as
 
 The choice is **implementation-defined pending** the implementation slice,
 which MUST name it in this clause's implementation state before R013 leaves
-pending. **Implementation state (v0.2.8): option (B).** The provenance
+pending. **Implementation state (v0.2.9): option (B).** The provenance
 members are carried only by `route_snapshot_v2`
 (`route_snapshot_policy_version = spec022-route-snapshot-v2`, SPEC-015 §N.2
 v0.4.12): `expected_model_hash_source`, `pool_model_id`, the entry rates,

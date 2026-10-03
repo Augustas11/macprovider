@@ -185,14 +185,53 @@ around 2026-10-23. The fix takes effect at the next renewal (Wed 2026-09-30
 16:00 UTC), or earlier with a manual dispatch of
 `renew-autotune-static-feed-signed.yml`.
 
-## Next coordinator release — none assigned, net changes vs v1.8.211
+## Next coordinator release — tag unassigned, net changes vs v1.8.211
 
 `v1.8.211` was applied through the signed runtime-only updater on 2026-10-02.
-No coordinator, gateway, or Pearl-asset change has merged since that cut.
+The next tag must be selected only after checking the shared coordinator/CLI
+namespace. Do not deploy this train before the current v1.8.211 evidence window
+is captured at **2026-10-03 13:12:23 UTC**, 24 hours after the final successful
+v1.8.211 coordinator start. That boundary supersedes the earlier v1.8.210
+09:15:09 UTC boundary.
 
 | Net change in coordinator / gateway / Pearl assets | Status | PR |
 |---|---|---|
-| — | — | — |
+| Stage 3A money-path evidence journal: provider credit and compact attempt-output evidence commit atomically in SQLite; indexed bounded materialization, poison-safe retention, receipt-time on-demand projection, fail-closed evidence checks, and journal health metrics. | merged `502516d52` 2026-10-03; not live | [#1835](https://github.com/Augustas11/macprovider/pull/1835) |
+
+### Stage 3A release and next-development sequence
+
+1. **Finish the v1.8.211 baseline window first.** At or after
+   2026-10-03 13:12:23 UTC, attach the uninterrupted-window evidence to #1775
+   and #1793: coordinator start identity, hot-path wait/error counters, newest
+   and aged payability cohorts, terminal evidence-loss counts, route-journal
+   health, audit-outbox pending/poison/oldest-age and drain-rate deltas, weekly
+   catch-up status, and rollback-snapshot disk usage. Do not call a merely
+   shrinking backlog steady-state proof.
+2. **Cut one reviewed runtime-only release from current `main`.** Select the
+   next unused shared `v1.8.N` tag, reserve it in both release trains, build the
+   signed coordinator/gateway pair through `pearl-runtime-release.yml`, obtain
+   the protected-environment approval, and run the independent repository
+   release verifier. Preserve the live catalog, provider recommendation,
+   operator nginx, and normal 60-second updater health setting.
+3. **Apply Stage 3A through the transactional updater.** Record the preflight
+   disk budget and rollback snapshot, apply once, and prove local/public health,
+   provider recovery, buyer serving, schema initialization, updater
+   `already_current`, and no armed transaction. Any restart establishes a new
+   24-hour acceptance boundary.
+4. **Run the Stage 3A evidence window.** Require zero hot-path write failures,
+   zero terminal evidence loss or false missing-evidence refunds, bounded
+   journal pending age, zero unacknowledged poison growth, materialization that
+   keeps pace with arrivals, and an audit outbox whose drain rate exceeds its
+   arrival rate. Also prove settlement catch-up completes and record buyer
+   latency before declaring the SQLite stage complete.
+5. **Then begin Stage 4 under #1793.** Land the Postgres ledger/evidence schema,
+   migration and reconciliation tooling, and async dual-write while SQLite
+   remains read-authoritative. No production schema migration, read switch, or
+   settlement cutover occurs before the protected staging run sustains 30
+   requests/s for 24 hours with parity and rollback evidence. Read, settlement,
+   and hot-path cutovers remain separate later gates; retention/export,
+   backup/restore, updater snapshot retention, and operator runbooks remain
+   Stage 6.
 
 **2026-10-02 v1.8.211 apply.** The protected release built the immutable signed
 runtime from exact tag commit `5550efd47`; repository verification passed and

@@ -583,6 +583,8 @@ func (b *billingRecorder) recordRow(
 			PositiveVerificationExcluded: row.PositiveVerificationExcluded,
 			RewardsExcluded:              row.RewardsExcluded,
 		}
+		attemptOutput, nextOutputCursor := b.buildSettlementAttemptOutput(billingInput, settlementOutput, false)
+		billingInput.SettlementAttemptOutput = &attemptOutput
 		if err := b.writeProviderHotPath(ctx, billingStore, row, billingInput); err != nil {
 			s.log.Warn().Err(err).Str("request_id", b.requestID).Msg("billing hot-path insert failed")
 			fallbackCtx, fallbackCancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
@@ -601,6 +603,10 @@ func (b *billingRecorder) recordRow(
 			// provider. Do not mark this leg credited.
 			return err
 		}
+		// The compact attempt-output event committed in the same transaction as
+		// the provider credit. Advancing the cursor now is therefore safe even if
+		// the projection materializer is temporarily delayed.
+		b.outputCursorByte = nextOutputCursor
 		// A provider-bound, payable row is now durably persisted — the provider
 		// has been credited. Mark BEFORE the
 		// settlement-output bookkeeping so a settlement-persist hiccup still
@@ -705,19 +711,67 @@ func (b *billingRecorder) writeProviderHotPath(ctx context.Context, store *billi
 		return err
 	}
 	if exists {
+		if in.SettlementAttemptOutput != nil {
+			accountScope, evidenceAttemptN := b.settlementEvidenceIdentity(in)
+			evidenceExists, evidenceErr := store.SettlementAttemptOutputEvidenceExists(retryCtx, billing.SettlementReceiptIdentity{
+				AccountScope: accountScope,
+				RequestID:    in.RequestID,
+				AttemptN:     evidenceAttemptN,
+				ProviderID:   in.ProviderID,
+			})
+			if evidenceErr != nil {
+				return fmt.Errorf("billing hot-path credit exists but evidence lookup failed: %w", evidenceErr)
+			}
+			if !evidenceExists {
+				return fmt.Errorf("billing hot-path credit exists without settlement attempt-output evidence")
+			}
+		}
 		b.server.log.Warn().Str("request_id", b.requestID).Msg("billing hot-path credit already stored after deadline")
 		return nil
 	}
 	return call(2, retryCtx)
 }
 
-// persistSettlementAttemptOutput writes the settlement evidence after the
-// credit row has committed. It uses its own timeout so a slow credit insert
-// cannot eat the budget for this write. A deadline or lock after the credit
-// is logged and does not fail the buyer. Any other error still fails the
-// request.
+// persistSettlementAttemptOutput projects the settlement evidence after the
+// credit and its compact journal event have committed atomically. It uses its
+// own timeout so a slow credit insert cannot eat the projection budget. A
+// deadline or lock leaves the durable journal row pending for the background
+// materializer; any integrity error still fails the request. The nil-journal
+// branch remains for callers that do not use the shared hot path.
 func (b *billingRecorder) persistSettlementAttemptOutput(store *billing.Store, in billing.HotPathInput, output *billing.SettlementOutput) error {
 	if err := b.mirrorRouteSnapshotBeforeSettlementOutput(store, in); err != nil {
+		return err
+	}
+	if in.SettlementAttemptOutput != nil {
+		accountScope, evidenceAttemptN := b.settlementEvidenceIdentity(in)
+		id := billing.SettlementReceiptIdentity{
+			AccountScope: accountScope,
+			RequestID:    in.RequestID,
+			AttemptN:     evidenceAttemptN,
+			ProviderID:   in.ProviderID,
+		}
+		materializeCtx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
+		defer cancel()
+		if settlementOutputWriteContextForTest != nil {
+			materializeCtx = settlementOutputWriteContextForTest(1, materializeCtx)
+		}
+		var err error
+		if settlementOutputWriteErrForTest != nil {
+			err = settlementOutputWriteErrForTest
+		} else {
+			_, err = store.MaterializeSettlementAttemptOutputFor(materializeCtx, id)
+		}
+		if err == nil {
+			return confirmSettlementAttemptOutputEvidence(store, id)
+		}
+		if settlementOutputPersistFailedAfterCredit(err) {
+			if confirmErr := confirmSettlementAttemptOutputEvidence(store, id); confirmErr != nil {
+				return confirmErr
+			}
+			// The journal row is already durable. Projection pressure is handled by
+			// the bounded background materializer and is not missing evidence.
+			return nil
+		}
 		return err
 	}
 	call := func(attempt int) error {
@@ -770,6 +824,21 @@ func (b *billingRecorder) persistSettlementAttemptOutput(store *billing.Store, i
 		Str("request_id", b.requestID).
 		Str("event", "settlement_output_persist_failed_after_credit").
 		Msg("settlement attempt output missing after provider credit; buyer response kept")
+	return nil
+}
+
+func confirmSettlementAttemptOutputEvidence(store *billing.Store, id billing.SettlementReceiptIdentity) error {
+	lookupCtx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
+	defer cancel()
+	exists, err := store.SettlementAttemptOutputEvidenceExists(lookupCtx, id)
+	if err != nil {
+		// Do not preserve transient classification here: accepting an ambiguous
+		// lookup would recreate the evidence gap this journal is meant to remove.
+		return fmt.Errorf("settlement attempt-output evidence could not be confirmed: %v", err)
+	}
+	if !exists {
+		return fmt.Errorf("settlement attempt-output journal and projection are both missing")
+	}
 	return nil
 }
 
@@ -970,6 +1039,19 @@ func (b *billingRecorder) recordSettlementAttemptOutput(ctx context.Context, sto
 	if store == nil || in.ProviderID == "" {
 		return nil
 	}
+	poolAttested := false
+	if !billing.IsNativeRuntimeSource(in.ProviderRuntimeSource) && in.PoolOperatorAttested {
+		poolAttested = store.PoolAttestedCreditRecorded(ctx, in.RequestID, in.AttemptN, in.ProviderID)
+	}
+	attempt, nextOutputCursor := b.buildSettlementAttemptOutput(in, output, poolAttested)
+	_, err := store.InsertSettlementAttemptOutput(ctx, attempt)
+	if err == nil {
+		b.outputCursorByte = nextOutputCursor
+	}
+	return err
+}
+
+func (b *billingRecorder) buildSettlementAttemptOutput(in billing.HotPathInput, output *billing.SettlementOutput, poolAttested bool) (billing.SettlementAttemptOutput, int64) {
 	if output == nil {
 		output = settlementOutputForContent("", nil, nil, terminalStateFromAttempt(in.Status, "", in.ErrorCode))
 	}
@@ -1001,8 +1083,7 @@ func (b *billingRecorder) recordSettlementAttemptOutput(ctx context.Context, sto
 	}
 	// The evidence follows the ledger commit: an attempt whose fenced
 	// attestation did not hold at commit is byte_estimated here too.
-	if loopback && in.PoolOperatorAttested && promptObserved != nil && completionObserved != nil &&
-		store.PoolAttestedCreditRecorded(ctx, in.RequestID, in.AttemptN, in.ProviderID) {
+	if loopback && poolAttested && promptObserved != nil && completionObserved != nil {
 		// SPEC-042-R005 site (5) / SPEC-022-R012: the pool operator's own
 		// reported usage, recorded as pool_operator_attested (never
 		// coordinator_observed). It settles only through a verified receipt
@@ -1010,11 +1091,11 @@ func (b *billingRecorder) recordSettlementAttemptOutput(ctx context.Context, sto
 		observedInput = *promptObserved
 		observedOutput = *completionObserved
 		usageSource = billing.UsageSourcePoolOperatorAttested
-	} else if !loopback && promptObserved != nil && completionObserved != nil &&
-		(!in.PoolManifestRoute || (in.PoolManifestVerified && store.PoolAttestedCreditRecorded(ctx, in.RequestID, in.AttemptN, in.ProviderID))) {
+	} else if !loopback && promptObserved != nil && completionObserved != nil {
 		// A native pool-model attempt is coordinator_observed only while its
-		// verified pool_manifest credit held at commit; otherwise it is
-		// byte_estimated and never reaches buyer-final debit (SPEC-005-R015).
+		// verified pool_manifest credit holds in the atomic hot-path transaction;
+		// a failed fence commits neither provider credit nor this journal event
+		// (SPEC-005-R015).
 		observedInput = *promptObserved
 		observedOutput = *completionObserved
 		usageSource = billing.UsageSourceCoordinatorObserved
@@ -1081,11 +1162,7 @@ func (b *billingRecorder) recordSettlementAttemptOutput(ctx context.Context, sto
 			ObservedOutputTokens: observedOutput,
 		},
 	}
-	_, err := store.InsertSettlementAttemptOutput(ctx, attempt)
-	if err == nil {
-		b.outputCursorByte = start + delivered
-	}
-	return err
+	return attempt, start + delivered
 }
 
 // logRow is the convenience wrapper matching the pre-refactor `logRow`
