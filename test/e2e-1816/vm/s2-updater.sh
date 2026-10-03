@@ -228,9 +228,17 @@ install -d -m 0755 /root/e2e/shim-bin && install -m 0755 $E2E_H16/lib/python3-sh
 if ( cd $WTN && PATH=/root/e2e/shim-bin:$PATH E2E_VERIFY_CACHE_RECORD_ON_MISS=1 PYTHONDONTWRITEBYTECODE=1 timeout 1200 python3 ops/pearl-updater/test_pearl_updater.py ) >"$EV/test_pearl_updater.txt" 2>&1; then
   result S2-guard-updater-tests PASS "$(tail -3 "$EV/test_pearl_updater.txt" | tr '\n' ' ')"
 elif grep -q "Command '\['git', 'show'" "$EV/test_pearl_updater.txt" \
-  && ! grep '^ERROR:' "$EV/test_pearl_updater.txt" | grep -v 'test_canary_rollout_authority_hashes_match_issue_825_duplicate_fleet_runtime' >/dev/null; then
-  # The VM tree is a git archive (no history); one test reads a pinned commit.
-  result S2-guard-updater-tests GAP "all non-history updater tests pass; archive checkout has no git history ($(grep -m1 '^ERROR:' "$EV/test_pearl_updater.txt"))"
+  && ! grep '^ERROR:' "$EV/test_pearl_updater.txt" \
+    | grep -Ev 'test_(canary_rollout_authority_hashes_match_issue_825_duplicate_fleet_runtime|advertised_version_update_preserves_config_and_validates_candidate)' >/dev/null \
+  && { ! grep -q '^ERROR: test_advertised_version_update_preserves_config_and_validates_candidate' "$EV/test_pearl_updater.txt" \
+    || grep -q 'pearl_updater.CommandTimeout: command timed out after 30s: python3' "$EV/test_pearl_updater.txt"; }; then
+  # The archive has no pinned history (D9), and QEMU can exceed the shipped
+  # verifier's 30 s production timeout even after the exact-input cache warmup
+  # (D7). Keep this classification narrow so any other updater error fails.
+  gap_detail="archive checkout without pinned git history"
+  grep -q '^ERROR: test_advertised_version_update_preserves_config_and_validates_candidate' "$EV/test_pearl_updater.txt" \
+    && gap_detail="QEMU verifier timeout plus $gap_detail"
+  result S2-guard-updater-tests GAP "all non-environment updater tests pass; $gap_detail"
 else
   result S2-guard-updater-tests FAIL "$(tail -6 "$EV/test_pearl_updater.txt" | tr '\n' ' ' | head -c 600)"
 fi

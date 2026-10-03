@@ -166,7 +166,7 @@ func (s *Server) afterModelAdmissionAppendLocked(ctx context.Context, providerID
 	section.generation.Add(1)
 	s.refreshModelAdmissionBindingLocked(ctx, providerID, section)
 	if provider, ok := s.pool.Resolve(providerID, ""); ok {
-		s.scheduleModelAdmissionAppendBindingRefreshRetry(providerID, provider.ModelAdmissionSessionEpoch)
+		s.scheduleModelAdmissionBindingRefreshRetry(providerID, provider.ModelAdmissionSessionEpoch)
 	}
 }
 
@@ -253,33 +253,33 @@ func bindableCandidates(events []ModelAdmissionEvent, servedModelID string) []Mo
 // binding from recorded state (caller holds the section). Zero candidates
 // bind nothing; two or more bind nothing, log `ambiguous_candidates`, and
 // revoke the affected decided candidates as identity drift (R006(a)).
-func (s *Server) refreshModelAdmissionBindingLocked(ctx context.Context, providerID string, section *providerSection) {
+func (s *Server) refreshModelAdmissionBindingLocked(ctx context.Context, providerID string, section *providerSection) bool {
 	if s.modelAdmissions == nil || s.pool == nil {
-		return
+		return true
 	}
 	provider, ok := s.pool.Resolve(providerID, "")
 	if !ok {
-		return
+		return true
 	}
 	for attempt := 0; attempt < 2; attempt++ {
 		events, err := s.modelAdmissions.LatestModelAdmissionStatusesForProvider(ctx, providerID)
 		if err != nil {
 			// Preserve the last verified binding on transient store failure.
-			// The append already advanced the provider section generation, so
-			// route compare-and-insert stays closed until a later successful
+			// The provider section may already be ahead of the session after an
+			// append or reconnect, so routing stays closed until a later successful
 			// refresh re-stamps the session at the current generation.
 			s.log.Warn().Err(err).Str("provider_id", providerID).Str("routing", "closed_until_refresh").Msg("model admission binding refresh: listing failed; binding preserved")
-			return
+			return false
 		}
 		candidates := append(bindableCandidates(events, provider.ModelID), bindablePoolCandidates(events, provider)...)
 		switch len(candidates) {
 		case 0:
 			s.setModelAdmissionBindingLocked(providerID, nil, section)
-			return
+			return true
 		case 1:
 			binding := s.modelAdmissionBindingFor(candidates[0])
 			s.setModelAdmissionBindingLocked(providerID, &binding, section)
-			return
+			return true
 		}
 		ids := make([]string, 0, len(candidates))
 		revoked := false
@@ -303,9 +303,10 @@ func (s *Server) refreshModelAdmissionBindingLocked(ctx context.Context, provide
 		}
 	}
 	s.setModelAdmissionBindingLocked(providerID, nil, section)
+	return true
 }
 
-func (s *Server) scheduleModelAdmissionAppendBindingRefreshRetry(providerID string, expectedSessionEpoch uint64) {
+func (s *Server) scheduleModelAdmissionBindingRefreshRetry(providerID string, expectedSessionEpoch uint64) {
 	if s.modelAdmissions == nil || s.pool == nil {
 		return
 	}
@@ -569,7 +570,9 @@ func (s *Server) helloSessionBindingLocked(providerID string, prior pool.Provide
 		}
 	}
 	s.evaluateSessionDriftLocked(ctx, provider, candidateIDs, section)
-	s.refreshModelAdmissionBindingLocked(ctx, providerID, section)
+	if !s.refreshModelAdmissionBindingLocked(ctx, providerID, section) {
+		s.scheduleModelAdmissionBindingRefreshRetry(providerID, provider.ModelAdmissionSessionEpoch)
+	}
 }
 
 // evaluateModelAdmissionSessionOnHeartbeat applies (a)/(d) to the bound

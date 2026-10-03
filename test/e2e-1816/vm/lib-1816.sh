@@ -103,6 +103,89 @@ pool_traffic() {
   [ -n "$engine" ] && hdr+=(--header "X-MacProvider-Engine-Select:$engine")
   MODEL="$model" traffic "$run" "$mix" "${hdr[@]}" --workers "$workers"
 }
+# wait_pool_model_routeable <label> <pool|pool-id> <pool-model-id> <runtime-source|null> <provider-id> [min-admission-event-id] [max-seconds]
+wait_pool_model_routeable() {
+  local label="$1" pool="$2" model="$3" runtime="$4" provider="$5" min_event="${6:-0}" max="${7:-90}"
+  local pid="$pool" t=0 evdir="${EV:-$E2E_EVIDENCE/p$PASS_ID-routeable}" poolz models events check bk
+  [ -f "/root/e2e/pools16/$pool/pool_id" ] && pid="$(pool_id "$pool")"
+  mkdir -p "$evdir" 2>/dev/null || true
+  poolz="$evdir/$label.poolz.json"; models="$evdir/$label.models.json"; events="$evdir/$label.admission-events.txt"; check="$evdir/$label.routeable.check"
+  bk="$(cat /root/e2e/buyer-api-key 2>/dev/null || true)"
+  while [ "$t" -le "$max" ]; do
+    curl_bearer "$(opkey)" -s http://127.0.0.1:8444/poolz >"$poolz" 2>"$poolz.err" || true
+    [ -n "$bk" ] && curl_bearer "$bk" -s https://api.malibu.tech/v1/models -H "X-MacProvider-Pool-Select: $pid" >"$models" 2>"$models.err" || true
+    csql "SELECT id, provider_id, state, reason_code, binding_scope, pool_id, pool_model_id, pool_manifest_version FROM model_admission_events WHERE provider_id='$provider' AND id > ${min_event:-0} ORDER BY id DESC LIMIT 5" >"$events" 2>"$events.err" || true
+    if python3 - "$poolz" "$models" "$events" "$provider" "$pid" "$model" "$runtime" <<'PY' >"$check" 2>&1
+import json, sys
+poolz_path, models_path, events_path, provider, pool_id, model_id, runtime = sys.argv[1:8]
+missing = []
+try:
+    d = json.load(open(poolz_path))
+    rows = d.get("providers") or d.get("pool") or []
+    if isinstance(rows, dict):
+        rows = rows.get("providers") or []
+except Exception as exc:
+    rows = []
+    missing.append("poolz unreadable: %s" % exc)
+hit = None
+for row in rows:
+    if (row.get("provider_id") or row.get("id")) == provider:
+        hit = row
+        break
+if not hit:
+    missing.append("provider %s absent from /poolz" % provider)
+else:
+    if hit.get("state") != "ready":
+        missing.append("provider state=%r" % hit.get("state"))
+    # routing_eligible describes the provider's global catalog path. Pool-only
+    # entries legitimately report false here even while their scoped route is
+    # healthy, so pool routeability is proven by admission + the pool model view.
+    if hit.get("catalog_admission_mode") != "pool_entry":
+        missing.append("catalog_admission_mode=%r" % hit.get("catalog_admission_mode"))
+    if runtime and runtime != "null" and hit.get("runtime_source") != runtime:
+        missing.append("runtime_source=%r" % hit.get("runtime_source"))
+try:
+    md = json.load(open(models_path))
+    model_rows = md.get("data") or []
+except Exception as exc:
+    model_rows = []
+    missing.append("models view unreadable: %s" % exc)
+mh = next((m for m in model_rows if m.get("id") == model_id), None)
+if not mh:
+    missing.append("pool models view missing %s" % model_id)
+else:
+    for key in ("provider_count", "total_slots"):
+        val = mh.get(key)
+        if isinstance(val, (int, float)) and val <= 0:
+            missing.append("%s=%s for %s" % (key, val, model_id))
+fresh = False
+fresh_id = ""
+lines = []
+try:
+    lines = [line.strip().split("|") for line in open(events_path) if line.strip()]
+except Exception as exc:
+    missing.append("admission events unreadable: %s" % exc)
+for cols in lines:
+    if len(cols) >= 7 and cols[1] == provider and cols[2] == "catalog_priced" and cols[4] == "pool" and cols[5] == pool_id and cols[6] == model_id:
+        fresh = True
+        fresh_id = cols[0]
+        break
+if not fresh:
+    missing.append("no fresh pool binding event for %s/%s" % (provider, model_id))
+if missing:
+    print("; ".join(missing))
+    sys.exit(1)
+print("%s ready, %s exposed, fresh binding event id=%s" % (provider, model_id, fresh_id))
+PY
+    then
+      result "$label" PASS "$(head -1 "$check") after ${t}s"
+      return 0
+    fi
+    sleep 2; t=$((t + 2))
+  done
+  result "$label" FAIL "not routeable within ${max}s: $(head -1 "$check" 2>/dev/null | head -c 700); events=$(tr '\n' ';' <"$events" 2>/dev/null | head -c 300)"
+  return 1
+}
 # wait_run_route_snapshots <run> <want> [max-seconds]: wait until loadgen has
 # started the intended requests and the coordinator has written their route
 # snapshots. This makes "in flight" scenarios mutate pool state only after the

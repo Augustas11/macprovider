@@ -42,15 +42,34 @@ for l in open(sys.argv[1]):
 # the coordinator's closed code, or (rc 4) the reviewed offline signer's
 # refusal, which validates the same acceptance rules before anything is sent.
 refused_manifest() {
-  local label="$1" pool="$2" code="$3" mf="$4" offline="${5:-}" d0 d1 out rc
-  d0="$($PM get "$pool" | python3 -c 'import json,sys;d=json.load(sys.stdin);p=d.get("pool") or d;print(p.get("manifest_core_digest"), p.get("manifest_version"))')"
+  local label="$1" pool="$2" code="$3" mf="$4" offline="${5:-}" d0 d1 out rc before after candidate active
+  before="$EV/$label.before-pool.json"; after="$EV/$label.after-pool.json"
+  $PM get "$pool" >"$before"
+  d0="$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));p=d.get("pool") or d;print(p.get("manifest_core_digest"), p.get("manifest_version"))' "$before")"
+  candidate="$(python3 - "$before" "$mf" <<'PY'
+import json, sys
+before = json.load(open(sys.argv[1])); before = before.get("pool") or before
+proposal = json.load(open(sys.argv[2]))
+old = {e.get("pool_model_id") for e in before.get("model_entries") or []}
+new = [e.get("pool_model_id") for e in proposal.get("model_entries") or [] if e.get("pool_model_id") not in old]
+print(new[0] if new else "")
+PY
+)"
   out="$($PM manifest "$pool" --models-file "$mf" 2>&1)"; rc=$?
   echo "$out" >"$EV/$label.manifest.txt"
-  d1="$($PM get "$pool" | python3 -c 'import json,sys;d=json.load(sys.stdin);p=d.get("pool") or d;print(p.get("manifest_core_digest"), p.get("manifest_version"))')"
-  if [ $rc != 0 ] && { echo "$out" | grep -q "$code" || { [ $rc = 4 ] && [ -n "$offline" ] && echo "$out" | grep -q "$offline"; }; } && [ "$d0" = "$d1" ]; then
-    result "$label" PASS "refused ($([ $rc = 4 ] && echo "offline by coordinator-cli sign-manifest: $(echo "$out" | tail -1 | head -c 160)" || echo "by the coordinator: $code")); active core unchanged ($d1)"
+  $PM get "$pool" >"$after"
+  d1="$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));p=d.get("pool") or d;print(p.get("manifest_core_digest"), p.get("manifest_version"))' "$after")"
+  active="$(python3 - "$after" "$candidate" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); p = d.get("pool") or d
+candidate = sys.argv[2]
+print("yes" if candidate and any(e.get("pool_model_id") == candidate for e in p.get("model_entries") or []) else "no")
+PY
+)"
+  if [ $rc != 0 ] && { echo "$out" | grep -q "$code" || { [ $rc = 4 ] && [ -n "$offline" ] && echo "$out" | grep -q "$offline"; }; } && [ -n "$candidate" ] && [ "$active" = no ]; then
+    result "$label" PASS "refused ($([ $rc = 4 ] && echo "offline by coordinator-cli sign-manifest: $(echo "$out" | tail -1 | head -c 160)" || echo "by the coordinator: $code")); rejected entry absent (${candidate:-unknown}); core $([ "$d0" = "$d1" ] && echo "unchanged" || echo "rotated by keeper") ($d0 -> $d1)"
   else
-    result "$label" FAIL "rc=$rc want $code: $(echo "$out" | tail -1 | head -c 400); core before/after: $d0 / $d1"
+    result "$label" FAIL "rc=$rc want $code active_candidate=$active candidate=${candidate:-unknown}: $(echo "$out" | tail -1 | head -c 400); core before/after: $d0 / $d1"
   fi
 }
 stage_variant() {  # stage_variant <pool> <out> <stage args...>: staged entries + one more, in a separate file
@@ -99,8 +118,22 @@ for p in ("/opt/macprovider/coordinator.yaml", sys.argv[1]):
 print(os.path.dirname(eff["autotune_candidates_path"]))
 PY
 )"
+rate_card_src="$(python3 - "$OVL" <<'PY'
+import sys, yaml
+eff = {}
+for p in ("/opt/macprovider/coordinator.yaml", sys.argv[1]):
+    eff.update((yaml.safe_load(open(p)) or {}).get("autotune") or {})
+print(eff.get("rate_card_path", ""))
+PY
+)"
 lab_pub="$(python3 $E2E_H16/tools/make-lab-blocked-release.py --feeds "$feeds_dir" --key /root/e2e/keys/lab-catalog.pem \
   --key-id e2e-lab-catalog-v1 --blocked-hash "$H_BLK" --out "$LAB" 2>"$EV/lab-release.err")"
+if [ ! -f "$LAB/rate-card.json" ] && [ -n "$rate_card_src" ] && [ -f "$rate_card_src" ]; then
+  install -m 0644 "$rate_card_src" "$LAB/rate-card.json"
+  openssl pkeyutl -sign -rawin -inkey /root/e2e/keys/lab-catalog.pem -in "$LAB/rate-card.json" \
+    | python3 -c 'import base64,json,sys; print(json.dumps({"key_id":"e2e-lab-catalog-v1","alg":"ed25519","signature":base64.b64encode(sys.stdin.buffer.read()).decode()}))' \
+    >"$LAB/rate-card.json.sig"
+fi
 find "$LAB" -type d -exec chmod 0755 {} + 2>/dev/null || true
 find "$LAB" -type f -exec chmod 0644 {} + 2>/dev/null || true
 if [ -n "$lab_pub" ] && python3 - "$OVL" "$LAB" "$lab_pub" <<'PY'
@@ -159,10 +192,15 @@ if coord_restart; then
   refused_traffic S4-bounds-unset-route "$(run_id s4unset)" "$MN" --header "X-MacProvider-Pool-Select:$QN"
 else result S4-bounds-unset-manifest FAIL "coordinator did not start without bounds while entries exist: $(journalctl -u macprovider-coordinator -n 4 --no-pager -o cat | tr '\n' ' ' | head -c 400)"; fi
 install -o root -g root -m 0644 "$EV/coordinator.yaml.with-bounds" /opt/macprovider/coordinator.yaml
+fresh_event="$(csql "SELECT COALESCE(MAX(id),0) FROM model_admission_events")"
 coord_restart || die "coordinator did not come back with the bounds"
 wait_providers 5 || true
 # the pools still route after the refusals
-run="$(run_id s4after)"
-pool_traffic "$run" Q "$MG" llamacpp "ns=2,st=2" 2
-pool_check S4-pool-still-routes "$run" --expect ns=settled,st=settled --min-settled 4 --pool-model-id "$MG" --rates $G_RATES \
-  --usage-source pool_operator_attested --token-source pool_operator_attested --runtime-source llamacpp_loopback --provider e2e-prov-3
+if wait_pool_model_routeable S4-post-restore-routeable Q "$MG" llamacpp_loopback e2e-prov-3 "$fresh_event" 90; then
+  run="$(run_id s4after)"
+  pool_traffic "$run" Q "$MG" llamacpp "ns=2,st=2" 2
+  pool_check S4-pool-still-routes "$run" --expect ns=settled,st=settled --min-settled 4 --pool-model-id "$MG" --rates $G_RATES \
+    --usage-source pool_operator_attested --token-source pool_operator_attested --runtime-source llamacpp_loopback --provider e2e-prov-3
+else
+  result S4-pool-still-routes FAIL "skipped traffic because Q/$MG was not routeable after the final bounds restore; see $EV/S4-post-restore-routeable.*"
+fi

@@ -22,6 +22,36 @@ line_of() {
   printf '%s' "$n"
 }
 
+run_sign_catalog() {
+  local label="$1"
+  shift
+  local log="$TMP/sign-catalog-${label}.log"
+  local attempt rc
+  : > "$log"
+  for attempt in 1 2 3; do
+    if go run "$REPO_ROOT/scripts/sign-catalog.go" "$@" > "$TMP/sign-catalog-attempt.log" 2>&1; then
+      if [ "$attempt" != 1 ]; then
+        {
+          printf 'attempt %s succeeded: go run scripts/sign-catalog.go %s\n' "$attempt" "$*"
+          cat "$TMP/sign-catalog-attempt.log"
+        } >> "$log"
+      fi
+      rm -f "$TMP/sign-catalog-attempt.log"
+      return 0
+    else
+      rc=$?
+    fi
+    {
+      printf 'attempt %s failed with rc=%s: go run scripts/sign-catalog.go %s\n' "$attempt" "$rc" "$*"
+      cat "$TMP/sign-catalog-attempt.log"
+    } >> "$log"
+    [ "$attempt" = 3 ] || sleep "$attempt"
+  done
+  printf 'sign-catalog %s failed after 3 attempts; captured output follows:\n' "$label" >&2
+  tail -n 120 "$log" >&2
+  return "$rc"
+}
+
 # --- Static placement pins -------------------------------------------------
 compare_line="$(line_of 'catalog-release.py compare-live --incoming')"
 live_verify_line="$(line_of 'verify-directory --directory /opt/macprovider/autotune/\$_live')"
@@ -478,7 +508,7 @@ PY
   # $1 = seconds until the live Tier-2 expires.
   resign_live_tier2() {
     local d="$ROOT/autotune/releases/committed-live"
-    [ -s "$TMP/t2.pub" ] || go run "$REPO_ROOT/scripts/sign-catalog.go" keygen -public-out "$TMP/t2.pub" -private-out "$TMP/t2.priv" >/dev/null 2>&1 ||
+    [ -s "$TMP/t2.pub" ] || run_sign_catalog keygen keygen -public-out "$TMP/t2.pub" -private-out "$TMP/t2.priv" ||
       fail "cannot generate a Tier-2 test key"
     python3 - "$d/tier2-catalog.json" "$TMP/t2-unsigned.json" "$1" <<'PY'
 import datetime, json, sys
@@ -489,7 +519,7 @@ o["issued_at"] = (now - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S
 o["expires_at"] = (now + datetime.timedelta(seconds=int(sys.argv[3]))).strftime("%Y-%m-%dT%H:%M:%SZ")
 open(sys.argv[2], "w").write(json.dumps(o, indent=2))
 PY
-    go run "$REPO_ROOT/scripts/sign-catalog.go" sign -key "$TMP/t2.priv" -key-id rotated-test -out "$d/tier2-catalog.json" "$TMP/t2-unsigned.json" >/dev/null 2>&1 ||
+    run_sign_catalog sign sign -key "$TMP/t2.priv" -key-id rotated-test -out "$d/tier2-catalog.json" "$TMP/t2-unsigned.json" ||
       fail "cannot sign the live Tier-2 test catalog"
     python3 - "$CR_PY" "$d" "$(cat "$TMP/t2.pub")" <<'PY'
 import importlib.util, json, pathlib, sys

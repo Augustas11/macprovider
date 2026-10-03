@@ -47,12 +47,32 @@ def body(stream, rid, max_tokens=64):
 
 
 EXTRA = dict(h.split(":", 1) for h in a.header)
+ERROR_BODY_LIMIT = 2048
+ERROR_MESSAGE_LIMIT = 240
 
 
 def headers(rid):
     h = {"Authorization": "Bearer " + key, "Content-Type": "application/json", "X-Request-ID": rid}
     h.update(EXTRA)
     return h
+
+
+def capture_response_error(rec, data):
+    try:
+        err = (json.loads(data).get("error") or {})
+    except Exception:
+        return
+    if not isinstance(err, dict):
+        return
+    code = err.get("code")
+    typ = err.get("type")
+    msg = err.get("message")
+    if isinstance(code, str):
+        rec["response_error_code"] = code[:ERROR_MESSAGE_LIMIT]
+    if isinstance(typ, str):
+        rec["response_error_type"] = typ[:ERROR_MESSAGE_LIMIT]
+    if isinstance(msg, str):
+        rec["response_error_message"] = msg[:ERROR_MESSAGE_LIMIT]
 
 
 def one(kind, n):
@@ -83,6 +103,15 @@ def one(kind, n):
         r = c.getresponse()
         rec["status"] = r.status
         rec["resp_request_id"] = r.getheader("X-Request-ID")
+        if r.status >= 400:
+            data = r.read(ERROR_BODY_LIMIT + 1)
+            rec["bytes"] = len(data)
+            rec["response_error_truncated"] = len(data) > ERROR_BODY_LIMIT
+            capture_response_error(rec, data[:ERROR_BODY_LIMIT])
+            if stream:
+                rec.update(events=0, usage=None, done=False)
+            c.close()
+            return rec
         if not stream:
             data = r.read()
             rec["bytes"] = len(data)

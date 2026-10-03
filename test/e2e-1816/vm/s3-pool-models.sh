@@ -172,10 +172,21 @@ if (gw_restart) >"$EV/oldgw-start.txt" 2>&1; then
   pv="$(grep -c 'invalid_settlement_policy_version' "$EV/oldgw-gateway.log")"
   result S3-order-coordinator-first-holds INFO "new coordinator + old gateway, pool-model traffic: holds right after=$h, invalid_settlement_policy_version log lines=$pv"
   if DRAIN_MAX=120 pool_check S3-order-coordinator-first-pool "$run" --refused \
-    && grep -q 'pool_model_requires_gateway_upgrade' "$E2E_EVIDENCE/$run.load.jsonl"; then
+    && python3 - "$E2E_EVIDENCE/$run.load.jsonl" <<'PY'
+import json, sys
+for line in open(sys.argv[1]):
+    try:
+        r = json.loads(line)
+    except Exception:
+        continue
+    if r.get("response_error_code") == "pool_model_requires_gateway_upgrade":
+        sys.exit(0)
+sys.exit(1)
+PY
+  then
     result S3-order-coordinator-first-upgrade-refusal PASS "old gateway pool-model traffic is refused with pool_model_requires_gateway_upgrade"
   else
-    result S3-order-coordinator-first-upgrade-refusal FAIL "old gateway pool-model traffic did not expose pool_model_requires_gateway_upgrade ($(head -c 400 "$E2E_EVIDENCE/$run.load.jsonl" 2>/dev/null))"
+    result S3-order-coordinator-first-upgrade-refusal FAIL "old gateway pool-model traffic did not expose response_error_code=pool_model_requires_gateway_upgrade ($(head -c 400 "$E2E_EVIDENCE/$run.load.jsonl" 2>/dev/null))"
   fi
   cfrun=1
   run="$(run_id s3cfcat)"
@@ -190,10 +201,14 @@ systemctl stop macprovider-gateway
 install -o root -g macprovider -m 0750 /opt/macprovider/gateway.e2e-new /opt/macprovider/gateway; rm -f /opt/macprovider/gateway.e2e-new
 gw_restart
 if [ -n "$cfrun" ]; then
-  run="$(run_id s3cfpoolnew)"
-  pool_traffic "$run" Q "$MG" llamacpp "ns=2,st=2" 2
-  pool_check S3-order-coordinator-first-pool-after-new-gw "$run" --expect ns=settled,st=settled --min-settled 4 --pool-model-id "$MG" --rates $G_RATES \
-    --usage-source pool_operator_attested --token-source pool_operator_attested --provider e2e-prov-3
+  if wait_pool_model_routeable S3-order-coordinator-first-new-gw-routeable Q "$MG" llamacpp_loopback e2e-prov-3 0 60; then
+    run="$(run_id s3cfpoolnew)"
+    pool_traffic "$run" Q "$MG" llamacpp "ns=2,st=2" 2
+    pool_check S3-order-coordinator-first-pool-after-new-gw "$run" --expect ns=settled,st=settled --min-settled 4 --pool-model-id "$MG" --rates $G_RATES \
+      --usage-source pool_operator_attested --token-source pool_operator_attested --provider e2e-prov-3
+  else
+    result S3-order-coordinator-first-pool-after-new-gw FAIL "skipped traffic because Q/$MG was not routeable after restoring the new gateway"
+  fi
 fi
 
 # catalog traffic alongside, unchanged
