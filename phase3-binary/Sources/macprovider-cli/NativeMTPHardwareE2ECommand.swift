@@ -122,7 +122,7 @@ struct NativeMTPHardwareRuntimeFixture: @unchecked Sendable {
 
 final class NativeMTPHardwareE2ERunner {
     static let defaultModelID = nativeMTPHardwareDefaultModelID
-    static let upstreamRevision = "ef4ff8568c38c640bc90a8176dc3acfe943a288d"
+    static let upstreamRevision = "ca29e9544777068a0b53aad87310ff1cfaf3fd1d"
     private static let providerRevision = "0123456789abcdef0123456789abcdef01234567"
     private static let liveExecutableCDHash = "456789abcdef0123456789abcdef0123456789ab"
     private static let reproducibleBuildSHA256 = String(repeating: "1", count: 64)
@@ -132,6 +132,7 @@ final class NativeMTPHardwareE2ERunner {
     private let modelID: String
     private let maxBatch: Int
     private let maxNativeActiveRows: Int
+    private let maxPromptTokens: Int
     private let maxPhysicalBlocks: Int
     private let verifyServePath: Bool
 
@@ -149,6 +150,7 @@ final class NativeMTPHardwareE2ERunner {
         modelID: String = NativeMTPHardwareE2ERunner.defaultModelID,
         maxBatch: Int = 2,
         maxNativeActiveRows: Int? = nil,
+        maxPromptTokens: Int = 1_048_576,
         maxPhysicalBlocks: Int = 512,
         verifyServePath: Bool = false
     ) {
@@ -157,6 +159,7 @@ final class NativeMTPHardwareE2ERunner {
         self.modelID = modelID
         self.maxBatch = maxBatch
         self.maxNativeActiveRows = maxNativeActiveRows ?? maxBatch
+        self.maxPromptTokens = maxPromptTokens
         self.maxPhysicalBlocks = maxPhysicalBlocks
         self.verifyServePath = verifyServePath
     }
@@ -831,6 +834,7 @@ final class NativeMTPHardwareE2ERunner {
             // The lab tuple qualifies sampled rows too (target-sample exact
             // match), so temperature cells measure the native path.
             "request_feature_profile": NativeMTPAdmissionSidecar.sampledRequestFeatureProfile,
+            "max_prompt_tokens": maxPromptTokens,
             "decrease_threshold_ppm": 1,
             "increase_threshold_ppm": 2,
             "max_verification_positions_per_committed_milli": 1000,

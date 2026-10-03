@@ -191,7 +191,6 @@ final class ProviderLifecycleStateTests: XCTestCase {
                     .invalidTransition(from: disconnectedState.rawValue, to: "paused_by_operator")
                 )
             }
-
             let paused = try store.transition(
                 to: .pausedByOperator,
                 reasonCode: "operator_pause_confirmed",

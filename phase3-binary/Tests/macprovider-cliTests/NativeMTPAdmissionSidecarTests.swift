@@ -33,7 +33,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         XCTAssertEqual(capability.predictionLayerCount, 4)
         XCTAssertEqual(capability.completeWindowBytesByDepth, [1024, 2048, 4096, 8192, 16384])
         XCTAssertEqual(capability.throughputDeltaPPM, 42_000)
-        XCTAssertEqual(capability.maxPromptTokens, 1_048_576)
+        XCTAssertEqual(capability.maxPromptTokens, 32768)
         XCTAssertEqual(capability.maxCompletionTokens, 1_048_576)
         XCTAssertEqual(capability.spec023ReleaseID, "native-mtp-release-2026-09-28")
         XCTAssertEqual(capability.spec023LiveExecutableCDHash, Self.liveExecutableCDHash)
@@ -1078,6 +1078,70 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         }
     }
 
+    /// Cross-language golden: the Python sidecar generator
+    /// (scripts/native_mtp_admission_sidecar.py) and this consumer compute the
+    /// same native_mtp_admission_tuple_sha256 for the same sidecar bytes.
+    func testGoldenSidecarTupleIdentityMatchesPythonGenerator() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("scripts/tests/fixtures/native_mtp_admission_golden.json")
+        let data = try Data(contentsOf: url)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let reserialized = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
+        XCTAssertEqual(reserialized, data, "generator bytes are not the canonical sorted form")
+        XCTAssertEqual(
+            try NativeMTPAdmissionSidecar.admissionTupleSHA256ForTesting(object),
+            "eac0736b406e032013a6fd7893a306be1b57b6a8a374e655c3ce209770d3d0b4"
+        )
+    }
+
+    func testReleaseEnvelopeBindsSignedPromptBoundIntoCapabilityAndTupleIdentity() throws {
+        let capped = try makeReleaseEnvelopeFixture(entryEdit: { $0["max_prompt_tokens"] = 4096 })
+        defer { try? FileManager.default.removeItem(at: capped.base.root) }
+        let uncapped = try makeReleaseEnvelopeFixture()
+        defer { try? FileManager.default.removeItem(at: uncapped.base.root) }
+
+        let cappedCapability = try NativeMTPAdmissionSidecar.load(
+            sidecarData: capped.sidecarData,
+            signatureData: capped.signatureData,
+            snapshotRoot: capped.base.snapshot,
+            context: capped.context,
+            trustedKeyring: capped.base.trustedKeyring,
+            resolvedArtifactAuthority: capped.authority
+        )
+        let uncappedCapability = try NativeMTPAdmissionSidecar.load(
+            sidecarData: uncapped.sidecarData,
+            signatureData: uncapped.signatureData,
+            snapshotRoot: uncapped.base.snapshot,
+            context: uncapped.context,
+            trustedKeyring: uncapped.base.trustedKeyring,
+            resolvedArtifactAuthority: uncapped.authority
+        )
+
+        XCTAssertEqual(cappedCapability.maxPromptTokens, 4096)
+        XCTAssertEqual(uncappedCapability.maxPromptTokens, 32768)
+        XCTAssertNotEqual(cappedCapability.tupleSHA256, uncappedCapability.tupleSHA256)
+
+        let cases: [(String, (inout [String: Any]) -> Void, NativeMTPAdmissionSidecarError)] = [
+            ("missing", { $0.removeValue(forKey: "max_prompt_tokens") },
+             .missingField("$.entries[0].max_prompt_tokens")),
+            ("zero", { $0["max_prompt_tokens"] = 0 },
+             .invalidValue("$.entries[0].max_prompt_tokens")),
+            ("above schema maximum", { $0["max_prompt_tokens"] = 1_048_577 },
+             .invalidValue("$.entries[0].max_prompt_tokens")),
+            ("string", { $0["max_prompt_tokens"] = "4096" },
+             .wrongType("$.entries[0].max_prompt_tokens")),
+        ]
+        for (name, edit, expected) in cases {
+            let fixture = try makeReleaseEnvelopeFixture(entryEdit: edit)
+            defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+            XCTAssertEqual(try rejectedReleaseEnvelopeError(fixture), expected, name)
+        }
+    }
+
     func testReleaseEnvelopeRejectsNativeActiveRowBoundOutsideQualifiedSlots() throws {
         let cases: [(String, (inout [String: Any]) -> Void, NativeMTPAdmissionSidecarError)] = [
             ("missing", { $0.removeValue(forKey: "max_native_active_rows") },
@@ -1882,6 +1946,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             "qualified_slots": 8,
             "max_native_active_rows": 8,
             "request_feature_profile": "native_mtp_greedy_text_v1",
+            "max_prompt_tokens": 32768,
             "decrease_threshold_ppm": 1,
             "increase_threshold_ppm": 2,
             "max_verification_positions_per_committed_milli": 1000,

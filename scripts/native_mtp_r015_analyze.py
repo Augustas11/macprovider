@@ -29,30 +29,161 @@ def _sha256(path: Path) -> str:
 EXPLORATORY_POLICY_SCHEMA = "macprovider.native-mtp-exploratory-policy.v1"
 
 
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
+    keys = [key for key, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise ValueError(f"duplicate JSON key: {sorted(k for k in set(keys) if keys.count(k) > 1)}")
+    return dict(pairs)
+
+
+def _strict_loads(text: str) -> object:
+    """json.loads that rejects duplicate object keys (last-key-wins would let
+    one hash-bound record mean two things)."""
+    return json.loads(text, object_pairs_hook=_reject_duplicate_keys)
+
+
 def _load_policy(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as fh:
-        return json.load(fh)
+        return _strict_loads(fh.read())
 
 
 def _is_exploratory(policy: dict) -> bool:
     return policy.get("schema") == EXPLORATORY_POLICY_SCHEMA
 
 
-# SPEC-048-R015 mandatory strata; R007 additionally requires a cell at every
-# slot count from one up to the advertised qualified_slots.
-MANDATORY_PROMPT_TOKENS = (1536, 4096, 8192)
+# SPEC-048-R015 mandatory matrix: native-eligible cells at every slot count
+# from one to max_native_active_rows, prompt strata 1536/4096 capped by the
+# tuple's signed max prompt tokens (cap included), and both output budgets;
+# gated cells at bound + 1 and qualified_slots; the sustained window at
+# qualified_slots. Gated and sustained cells run at prompt 1536, output 512.
+NATIVE_ELIGIBLE_PROMPT_STRATA = (1536, 4096)
 MANDATORY_MAX_TOKENS = (128, 512)
+GATED_PROMPT_TOKENS = 1536
+GATED_MAX_TOKENS = 512
+MINIMUM_SUSTAINED_SECONDS = 1800
+# SPEC-023-R024 max_prompt_tokens upper bound.
+MAXIMUM_PROMPT_TOKENS = 1_048_576
+# The bench parses policy integers as Swift Int.
+SWIFT_INT_MAX = (1 << 63) - 1
 
 
 def _is_int(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _matrix_violations(policy: dict) -> list[str]:
-    """Mandatory-matrix violations of an admission (non-exploratory) policy."""
-    if _is_exploratory(policy):
+_CELL_ID = re.compile(r"^s([1-9]\d*)-p([1-9]\d*)-o([1-9]\d*)$")
+
+
+def _cell_id(slots: int, prompt: int, output: int) -> str:
+    return f"s{slots}-p{prompt}-o{output}"
+
+
+def mandatory_prompt_tokens(cap: int) -> list[int]:
+    return sorted({p for p in NATIVE_ELIGIBLE_PROMPT_STRATA if p <= cap} | {cap})
+
+
+def mandatory_gated_cells(bound: int, qualified: int) -> list[str]:
+    if bound >= qualified:
         return []
+    return [_cell_id(s, GATED_PROMPT_TOKENS, GATED_MAX_TOKENS) for s in sorted({bound + 1, qualified})]
+
+
+ADMISSION_POLICY_SCHEMA = "macprovider.native-mtp-r015-policy.v1"
+POLICY_KEYS = {
+    "schema", "model_id", "target_sha256", "mtp_sha256", "tokenizer_sha256",
+    "slots", "prompt_tokens", "max_tokens", "warmup_runs", "blocks", "seed",
+    "sustained_seconds", "sustained_cell_id", "memory_safety_margin_bytes", "thresholds",
+    "hw_model", "chip", "ram_gb", "os_build", "xcode_build_version", "swift_version",
+    "provider_commit", "mlx_fork_revision", "quantization", "cache_mode", "proposal_depth",
+    "run_order", "prompt_corpus", "exclusion_rules", "confidence_method",
+    "max_native_active_rows", "qualified_slots", "temperature", "arrival_interval_ms",
+    "gated_cells", "maximum_prompt_tokens",
+}
+# Mirrors NativeMTPBenchPolicy.load: the frozen methodology and thresholds an
+# admission policy must carry, so the analyzer never judges a policy the bench
+# would refuse.
+FIXED_METHODOLOGY = {
+    "quantization": "4bit",
+    "cache_mode": "paged_kv_mixed",
+    "proposal_depth": 1,
+    "run_order": "seeded_random_counterbalanced",
+    "prompt_corpus": "deterministic_synthetic_unique_v2",
+    "exclusion_rules": "none",
+    "confidence_method": "paired_block_bootstrap_holm_v1",
+}
+FROZEN_THRESHOLDS = {
+    "throughput_lower_bound_min": 0.15,
+    "ttft_p95_upper_bound_max": 0.10,
+    "itl_p95_upper_bound_max": 0.0,
+    "rejection_increase_max_pp": 1.0,
+    "min_available_memory_fraction": 0.10,
+    "bootstrap_draws": 10000,
+    "alpha": 0.05,
+    "gated_throughput_lower_bound_min": -0.05,
+    "gated_ttft_p95_upper_bound_max": 0.05,
+    "gated_itl_p95_upper_bound_max": 0.05,
+}
+
+
+def _policy_contract_violations(policy: dict) -> list[str]:
+    """Closed-policy violations of an admission policy beyond the matrix."""
     violations: list[str] = []
+    if policy.get("schema") != ADMISSION_POLICY_SCHEMA:
+        violations.append("policy_schema_not_admission")
+    unknown = sorted(set(policy) - POLICY_KEYS)
+    if unknown:
+        violations.append("policy_unknown_keys:" + ",".join(unknown))
+    for key, expected in FIXED_METHODOLOGY.items():
+        if policy.get(key) != expected or isinstance(policy.get(key), bool):
+            violations.append(f"methodology_not_frozen:{key}")
+    # Field types and ranges, mirroring NativeMTPBenchPolicy.load.
+    hex64 = re.compile(r"^[0-9a-f]{64}$")
+    hex40 = re.compile(r"^[0-9a-f]{40}$")
+    for key in ("target_sha256", "mtp_sha256", "tokenizer_sha256"):
+        if not (isinstance(policy.get(key), str) and hex64.match(policy[key])):
+            violations.append(f"field_invalid:{key}")
+    for key in ("provider_commit", "mlx_fork_revision"):
+        if not (isinstance(policy.get(key), str) and hex40.match(policy[key])):
+            violations.append(f"field_invalid:{key}")
+    for key in ("model_id", "hw_model", "chip", "os_build", "xcode_build_version", "swift_version", "sustained_cell_id"):
+        if not (isinstance(policy.get(key), str) and policy[key]):
+            violations.append(f"field_invalid:{key}")
+    for key, minimum in (("warmup_runs", 0), ("seed", 0), ("memory_safety_margin_bytes", 0),
+                         ("ram_gb", 1), ("arrival_interval_ms", 0), ("sustained_seconds", 0)):
+        if key == "arrival_interval_ms" and key not in policy:
+            continue
+        if not (_is_int(policy.get(key)) and minimum <= policy[key] <= SWIFT_INT_MAX):
+            violations.append(f"field_invalid:{key}")
+    if "temperature" in policy:
+        t = policy["temperature"]
+        if isinstance(t, bool) or not isinstance(t, (int, float)) or not math.isfinite(t) or not 0 <= t <= 2:
+            violations.append("field_invalid:temperature")
+    for key, low, high in (("slots", 1, 8), ("prompt_tokens", 1, None), ("max_tokens", 1, None)):
+        values = policy.get(key)
+        if not (isinstance(values, list) and values and all(_is_int(v) and v >= low and (high is None or v <= high) for v in values)
+                and len(set(values)) == len(values)):
+            violations.append(f"field_invalid:{key}")
+    thresholds = policy.get("thresholds")
+    if not isinstance(thresholds, dict) or set(thresholds) != set(FROZEN_THRESHOLDS):
+        violations.append("thresholds_key_set_not_frozen")
+    else:
+        for key, expected in FROZEN_THRESHOLDS.items():
+            value = thresholds[key]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or abs(value - expected) >= 1e-7:
+                violations.append(f"threshold_not_frozen:{key}")
+    return violations
+
+
+def _matrix_violations(policy: dict) -> list[str]:
+    """Mandatory-matrix violations of an admission (non-exploratory) policy;
+    duplicate cells are rejected for every policy, as the bench does."""
+    if _is_exploratory(policy):
+        try:
+            cells = _observed_cells(policy)
+        except (KeyError, TypeError):
+            return ["matrix_malformed"]
+        return ["duplicate_cells"] if len(set(cells)) != len(cells) else []
+    violations: list[str] = _policy_contract_violations(policy)
     blocks = policy.get("blocks")
     if not _is_int(blocks) or blocks < 10:
         violations.append("blocks_below_ten")
@@ -61,35 +192,47 @@ def _matrix_violations(policy: dict) -> list[str]:
         return ["qualified_slots_missing_or_out_of_range"]
     bound = policy.get("max_native_active_rows")
     if not _is_int(bound) or not 1 <= bound <= qualified:
-        violations.append("max_native_active_rows_missing_or_out_of_range")
+        return violations + ["max_native_active_rows_missing_or_out_of_range"]
+    cap = policy.get("maximum_prompt_tokens")
+    if not _is_int(cap) or not GATED_PROMPT_TOKENS <= cap <= MAXIMUM_PROMPT_TOKENS:
+        return violations + ["maximum_prompt_tokens_missing_or_out_of_range"]
     slots = policy.get("slots")
     prompts = policy.get("prompt_tokens")
     outputs = policy.get("max_tokens")
     for key, value in (("slots", slots), ("prompt_tokens", prompts), ("max_tokens", outputs)):
         if not isinstance(value, list) or not all(_is_int(v) for v in value):
             violations.append(f"{key}_malformed")
+    gated = policy.get("gated_cells", [])
+    if not isinstance(gated, list) or not all(isinstance(v, str) and _CELL_ID.match(v) for v in gated):
+        violations.append("gated_cells_malformed")
     if violations:
         return violations
-    missing_slots = sorted(set(range(1, qualified + 1)) - set(slots))
-    if missing_slots:
-        violations.append("slots_missing:" + ",".join(map(str, missing_slots)))
-    over_slots = sorted(v for v in set(slots) if v > qualified or v < 1)
-    if over_slots:
-        violations.append("slots_outside_qualified:" + ",".join(map(str, over_slots)))
-    missing_prompts = sorted(set(MANDATORY_PROMPT_TOKENS) - set(prompts))
-    if missing_prompts:
-        violations.append("prompt_tokens_missing:" + ",".join(map(str, missing_prompts)))
-    missing_outputs = sorted(set(MANDATORY_MAX_TOKENS) - set(outputs))
-    if missing_outputs:
-        violations.append("max_tokens_missing:" + ",".join(map(str, missing_outputs)))
-    if policy.get("sustained_cell_id") not in _observed_cells(policy):
+    if sorted(slots) != list(range(1, bound + 1)):
+        violations.append("slots_not_exactly_1_to_bound:" + ",".join(map(str, sorted(slots))))
+    expected_prompts = mandatory_prompt_tokens(cap)
+    if sorted(prompts) != expected_prompts:
+        violations.append("prompt_tokens_not_exactly:" + ",".join(map(str, expected_prompts)))
+    if sorted(outputs) != list(MANDATORY_MAX_TOKENS):
+        violations.append("max_tokens_not_exactly:" + ",".join(map(str, MANDATORY_MAX_TOKENS)))
+    expected_gated = mandatory_gated_cells(bound, qualified)
+    if sorted(gated) != expected_gated or len(set(gated)) != len(gated):
+        violations.append("gated_cells_not_exactly:" + ",".join(expected_gated))
+    cells = _observed_cells(policy)
+    if len(set(cells)) != len(cells):
+        violations.append("duplicate_cells")
+    expected_sustained = _cell_id(qualified, GATED_PROMPT_TOKENS, GATED_MAX_TOKENS)
+    if policy.get("sustained_cell_id") != expected_sustained:
+        violations.append("sustained_cell_not:" + expected_sustained)
+    if policy.get("sustained_cell_id") not in cells:
         violations.append("sustained_cell_not_in_matrix")
+    sustained_seconds = policy.get("sustained_seconds")
+    if not _is_int(sustained_seconds) or sustained_seconds < MINIMUM_SUSTAINED_SECONDS:
+        violations.append("sustained_seconds_below_1800")
     # A gated cell must exercise the in-flight hold: staggered arrivals let the
     # first request admit native before later ones cross the bound.
     arrival = policy.get("arrival_interval_ms")
     if (
-        _is_int(bound)
-        and any(v > bound for v in slots)
+        any(_is_gated_cell(cell, bound) for cell in cells)
         and not (_is_int(arrival) and arrival > 0)
     ):
         violations.append("arrival_interval_ms_required_for_gated_cells")
@@ -214,7 +357,7 @@ def _load_jsonl(path: Path) -> tuple[dict, list[dict]]:
             line = line.strip()
             if not line:
                 continue
-            record = json.loads(line)
+            record = _strict_loads(line)
             if record.get("schema") != SCHEMA:
                 raise ValueError(f"{path}:{lineno}: unexpected schema {record.get('schema')!r}")
             if record.get("record_type") == "header":
@@ -508,15 +651,16 @@ def _bootstrap(pairs: list[tuple[dict, dict]], metric_name: str, draws: int, see
 
 
 def _observed_cells(policy: dict) -> list[str]:
+    """The native-eligible cross product, then the policy's gated cells."""
     cells = []
     for slots in policy["slots"]:
         for prompt in policy["prompt_tokens"]:
             for max_tokens in policy["max_tokens"]:
-                cells.append(f"s{slots}-p{prompt}-o{max_tokens}")
+                cells.append(_cell_id(slots, prompt, max_tokens))
+    gated = policy.get("gated_cells", [])
+    if isinstance(gated, list):
+        cells.extend(cell for cell in gated if isinstance(cell, str))
     return cells
-
-
-_CELL_ID = re.compile(r"^s(\d+)-p(\d+)-o(\d+)$")
 
 
 def _expected_native_first(policy: dict, cell_id: str) -> list[bool] | None:
@@ -579,11 +723,14 @@ def _pair_runs(
 
 
 def _sustained_order_issues(sustained_runs: list[dict]) -> list[str]:
-    """The sustained window alternates: native first on even blocks."""
+    """The sustained window alternates (native first on even blocks) and its
+    blocks are contiguous from zero: a resume never skips an index."""
     by_block: dict[int, dict[str, dict]] = defaultdict(dict)
     for run in sustained_runs:
         by_block[int(run.get("block_index", -1))][run.get("path")] = run
     issues = []
+    if by_block and sorted(by_block) != list(range(max(by_block) + 1)):
+        issues.append("sustained blocks not contiguous from 0")
     for block in sorted(by_block):
         item = by_block[block]
         if "ordinary" not in item or "native_mtp" not in item:
@@ -729,6 +876,12 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
             if run.get("cell_id") == cell_id and run.get("sustained") is True and run.get("warmup") is not True
         ]
         hard_failures.extend(_sustained_order_issues(sustained_runs))
+        # run_metrics_version 5 binds every sustained record to its run: an
+        # admission window must be one continuous run, never stitched.
+        if sustained_runs and isinstance(header.get("run_metrics_version"), int) and header["run_metrics_version"] >= 5:
+            window_ids = {run.get("sustained_window_id") for run in sustained_runs}
+            if len(window_ids) != 1 or not all(isinstance(w, str) and w for w in window_ids):
+                hard_failures.append("sustained_window_not_one_continuous_run")
         hard_gate_runs = [run for pair in pairs for run in pair] + sustained_runs
         invalid_records = [
             f"invalid_run_record:{run.get('path')}:{run.get('block_index')}:{','.join(fields)}"
@@ -900,6 +1053,7 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
             "reported_metrics": _report_metrics(pairs, draws, alpha, base_seed + cell_index * 17 + 101),
             "peak_phys_footprint_bytes": max([r["peak_phys_footprint_bytes"] for r in hard_gate_runs] or [0]),
             "min_available_memory_fraction": min([float(r["min_available_memory_fraction"]) for r in hard_gate_runs] or [0]),
+            "sustained_runs": len(sustained_runs),
             "sustained_duration_seconds": sustained_duration_seconds,
             "sustained_min_available_memory_fraction": min([float(r["min_available_memory_fraction"]) for r in sustained_runs] or [0]),
             "thermal_start_states": sorted({str(r.get("thermal_state_start")) for r in hard_gate_runs}),
@@ -960,7 +1114,15 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
         memory_failures = []
         if cell["min_available_memory_fraction"] < min_available:
             memory_failures.append("min_available_memory_fraction")
-        if cell["cell_id"] == policy.get("sustained_cell_id") and cell["sustained_min_available_memory_fraction"] < min_available:
+        # Judged only on recorded sustained runs: a cell analyzed without its
+        # sustained window (an exploratory matrix-only policy) has no window
+        # to judge, and a required window that is absent already failed the
+        # cell as `sustained_missing`.
+        if (
+            cell["cell_id"] == policy.get("sustained_cell_id")
+            and cell["sustained_runs"] > 0
+            and cell["sustained_min_available_memory_fraction"] < min_available
+        ):
             memory_failures.append("sustained_min_available_memory_fraction")
         if ram_bytes > 0 and cell["peak_phys_footprint_bytes"] + memory_margin > ram_bytes:
             memory_failures.append("peak_plus_margin_exceeds_ram")
@@ -992,7 +1154,8 @@ def markdown_table(result: dict) -> str:
     ]
     for cell in result.get("cells", []):
         metrics = cell["metrics"]
-        hard = ",".join(cell["hard_failures"]) if cell["hard_failures"] else "-"
+        failures = cell["hard_failures"] + [f"memory:{name}" for name in cell.get("memory_failures", [])]
+        hard = ",".join(failures) if failures else "-"
         lines.append(
             "| {cell} | {status} | {blocks}/{required} | {ratio} | {thr} | {ttft} | {itl} | {rej} | {e2e} | {hard} |".format(
                 cell=cell["cell_id"],

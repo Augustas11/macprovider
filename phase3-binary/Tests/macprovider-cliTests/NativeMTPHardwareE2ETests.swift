@@ -18,7 +18,7 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
     private static let enabledVariable = "MACPROVIDER_NATIVE_MTP_E2E"
     private static let rootVariable = "MACPROVIDER_NATIVE_MTP_E2E_ROOT"
     private static let modelID = "mlx-community/Qwen3.5-9B-4bit"
-    private static let upstreamRevision = "ef4ff8568c38c640bc90a8176dc3acfe943a288d"
+    private static let upstreamRevision = "ca29e9544777068a0b53aad87310ff1cfaf3fd1d"
     private static let providerRevision = "0123456789abcdef0123456789abcdef01234567"
     private static let liveExecutableCDHash = "456789abcdef0123456789abcdef0123456789ab"
     private static let releaseID = "native-mtp-hardware-e2e"
@@ -423,6 +423,7 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
             "qualified_slots": 2,
             "max_native_active_rows": 2,
             "request_feature_profile": "native_mtp_greedy_text_v1",
+            "max_prompt_tokens": 32768,
             "decrease_threshold_ppm": 1,
             "increase_threshold_ppm": 2,
             "max_verification_positions_per_committed_milli": 1000,

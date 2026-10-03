@@ -33,6 +33,12 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
     @Option(name: .customLong("provider-commit"), help: "Provider git commit for the header.")
     var providerCommit: String
 
+    @Option(
+        name: .customLong("phase"),
+        help: "all (default): matrix cells then the sustained window; matrix: matrix cells only; sustained: the sustained window only, reusing the matrix records already in --out."
+    )
+    var phase: NativeMTPBenchPhase = .all
+
     func run() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["MACPROVIDER_NATIVE_MTP_E2E"] == "1" else {
@@ -49,10 +55,20 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
             policyPath: policyPath,
             outPath: outPath,
             onlyCell: onlyCell,
-            providerCommit: providerCommit
+            providerCommit: providerCommit,
+            phase: phase
         )
         try await bench.run()
     }
+}
+
+/// SPEC-048-R015 bench phases. The sustained window is a separate phase on the
+/// same frozen policy and --out: it never re-runs the sustained cell's matrix
+/// blocks, which the analyzer pairs with the sustained records.
+enum NativeMTPBenchPhase: String, ExpressibleByArgument, Sendable {
+    case all
+    case matrix
+    case sustained
 }
 
 private final class NativeMTPBenchRunner {
@@ -62,6 +78,7 @@ private final class NativeMTPBenchRunner {
     private let outURL: URL
     private let onlyCell: String?
     private let providerCommit: String
+    private let phase: NativeMTPBenchPhase
     private let policy: NativeMTPBenchPolicy
     private let policySHA256: String
     /// The native runtime's scheduler load-gate recorder for the current
@@ -74,7 +91,8 @@ private final class NativeMTPBenchRunner {
         policyPath: String,
         outPath: String,
         onlyCell: String?,
-        providerCommit: String
+        providerCommit: String,
+        phase: NativeMTPBenchPhase
     ) async throws {
         self.root = URL(fileURLWithPath: (rootPath as NSString).expandingTildeInPath, isDirectory: true)
             .standardizedFileURL
@@ -85,6 +103,7 @@ private final class NativeMTPBenchRunner {
             .standardizedFileURL
         self.onlyCell = onlyCell
         self.providerCommit = providerCommit
+        self.phase = phase
         self.policySHA256 = try Self.sha256(of: self.policyURL)
         self.policy = try NativeMTPBenchPolicy.load(from: self.policyURL)
     }
@@ -92,6 +111,14 @@ private final class NativeMTPBenchRunner {
     func run() async throws {
         if let onlyCell, policy.cell(id: onlyCell) == nil {
             throw NativeMTPBenchError.invalidPolicy("--only-cell does not identify a policy matrix cell")
+        }
+        if phase == .sustained {
+            guard policy.sustainedSeconds > 0 else {
+                throw NativeMTPBenchError.invalidPolicy("--phase sustained needs sustained_seconds > 0")
+            }
+            if let onlyCell, onlyCell != policy.sustainedCellID {
+                throw NativeMTPBenchError.invalidPolicy("--phase sustained runs only sustained_cell_id")
+            }
         }
         let targetDirectory = root.appendingPathComponent("target", isDirectory: true)
         let mtpDirectory = root.appendingPathComponent("mtp", isDirectory: true)
@@ -116,7 +143,26 @@ private final class NativeMTPBenchRunner {
             tokenizerSHA256: tokenizerSHA,
             environment: environment
         )
-        if existing.hasRecords, onlyCell == nil {
+        // The sustained phase reuses the sustained cell's matrix records in
+        // this --out; it never starts without all of them.
+        if phase == .sustained,
+           (existing.completedMatrixBlocks[policy.sustainedCellID] ?? []) != Set(0..<policy.blocks) {
+            throw NativeMTPBenchError.assertionFailed(
+                "--phase sustained needs every matrix block of \(policy.sustainedCellID) in --out first"
+            )
+        }
+        // SPEC-048-R015: an admission sustained window is one continuous run.
+        // A partial window is never resumed (a resume would add up separate
+        // thermal windows); its records must be moved aside and the window
+        // rerun whole.
+        if !policy.exploratory, phase != .matrix,
+           let done = existing.sustainedSeconds[policy.sustainedCellID],
+           done > 0, done < Double(policy.sustainedSeconds) {
+            throw NativeMTPBenchError.assertionFailed(
+                "--out holds a partial sustained window for \(policy.sustainedCellID); an admission window is never resumed"
+            )
+        }
+        if existing.hasRecords, onlyCell == nil, phase != .sustained {
             throw NativeMTPBenchError.assertionFailed(
                 "refusing to append a full matrix to non-empty --out; use --only-cell to resume"
             )
@@ -135,21 +181,18 @@ private final class NativeMTPBenchRunner {
             try writer.write(header)
         }
 
-        for slots in policy.slots {
-            for promptTokens in policy.promptTokens {
-                for maxTokens in policy.maxTokens {
-                    let cell = NativeMTPBenchCell(slots: slots, promptTokens: promptTokens, maxTokens: maxTokens)
-                    guard onlyCell == nil || onlyCell == cell.id else { continue }
-                    try await runCell(
-                        cell,
-                        writer: writer,
-                        completedBlocks: existing.completedMatrixBlocks[cell.id] ?? [],
-                        completedWarmups: existing.completedWarmups[cell.id] ?? []
-                    )
-                }
+        if phase != .sustained {
+            for cell in policy.matrixCells {
+                guard onlyCell == nil || onlyCell == cell.id else { continue }
+                try await runCell(
+                    cell,
+                    writer: writer,
+                    completedBlocks: existing.completedMatrixBlocks[cell.id] ?? [],
+                    completedWarmups: existing.completedWarmups[cell.id] ?? []
+                )
             }
         }
-        if policy.sustainedSeconds > 0, onlyCell == nil || onlyCell == policy.sustainedCellID {
+        if phase != .matrix, policy.sustainedSeconds > 0, onlyCell == nil || onlyCell == policy.sustainedCellID {
             try await runSustained(
                 writer: writer,
                 completedSeconds: existing.sustainedSeconds[policy.sustainedCellID] ?? 0,
@@ -168,14 +211,14 @@ private final class NativeMTPBenchRunner {
         for warmup in 0..<policy.warmupRuns {
             let block = -1 - warmup
             guard !completedWarmups.contains(block) else { continue }
-            let prompts = try await makePrompts(container: fixture.runtimes.targetContainer, cell: cell, block: block)
+            let prompts = try await makePrompts(runtime: fixture.runtimes.ordinary, cell: cell, block: block)
             _ = try await runPath(.ordinary, cell: cell, block: block, order: 0, prompts: prompts, runtime: fixture.runtimes.ordinary, fixture: fixture, writer: writer, warmup: true)
             _ = try await runPath(.nativeMTP, cell: cell, block: block, order: 1, prompts: prompts, runtime: fixture.runtimes.native, fixture: fixture, writer: writer, warmup: true)
         }
         let nativeFirstByBlock = NativeMTPBenchPolicy.nativeFirstOrder(seed: policy.seed, cell: cell, blocks: policy.blocks)
         for block in 0..<policy.blocks {
             guard !completedBlocks.contains(block) else { continue }
-            let prompts = try await makePrompts(container: fixture.runtimes.targetContainer, cell: cell, block: block)
+            let prompts = try await makePrompts(runtime: fixture.runtimes.ordinary, cell: cell, block: block)
             let nativeFirst = nativeFirstByBlock[block]
             var ordinaryResult: NativeMTPBenchRunResult?
             var nativeResult: NativeMTPBenchRunResult?
@@ -208,11 +251,14 @@ private final class NativeMTPBenchRunner {
         }
         let fixture = try await fixture(for: cell)
         let remainingSeconds = max(0, Double(policy.sustainedSeconds) - completedSeconds)
+        // One id per continuous sustained run; the analyzer requires a single
+        // id across an admission window (run_metrics_version 5).
+        let windowID = UUID().uuidString.lowercased()
         let windowStarted = Date()
         let deadline = Date().addingTimeInterval(remainingSeconds)
         var block = startingBlock
         while Date() < deadline {
-            let prompts = try await makePrompts(container: fixture.runtimes.targetContainer, cell: cell, block: 10_000 + block)
+            let prompts = try await makePrompts(runtime: fixture.runtimes.ordinary, cell: cell, block: 10_000 + block)
             let nativeFirst = block.isMultiple(of: 2)
             var ordinaryResult: NativeMTPBenchRunResult?
             var nativeResult: NativeMTPBenchRunResult?
@@ -235,13 +281,15 @@ private final class NativeMTPBenchRunner {
                 policySHA256: policySHA256,
                 sustained: true,
                 warmup: false,
-                sustainedWindowElapsedSeconds: elapsed
+                sustainedWindowElapsedSeconds: elapsed,
+                sustainedWindowID: windowID
             ))
             try writer.write(native.record(
                 policySHA256: policySHA256,
                 sustained: true,
                 warmup: false,
-                sustainedWindowElapsedSeconds: elapsed
+                sustainedWindowElapsedSeconds: elapsed,
+                sustainedWindowID: windowID
             ))
             block += 1
         }
@@ -262,6 +310,7 @@ private final class NativeMTPBenchRunner {
             modelID: modelID,
             maxBatch: qualifiedSlots,
             maxNativeActiveRows: policy.maxNativeActiveRows(for: cell),
+            maxPromptTokens: policy.maximumPromptTokens ?? 1_048_576,
             maxPhysicalBlocks: maxBlocks
         )
         let fixture = try await runner.loadRuntimeFixture(
@@ -412,24 +461,62 @@ private final class NativeMTPBenchRunner {
         return run
     }
 
-    private func makePrompts(container: ModelContainer, cell: NativeMTPBenchCell, block: Int) async throws -> [String] {
-        try await container.perform { context in
-            try (0..<cell.slots).map { row in
+    /// SPEC-048-R015 prompt realization (`deterministic_synthetic_unique_v2`):
+    /// the stratum is counted on the served prompt, after the chat template
+    /// the runtime applies, and lies within ±2% of the nominal stratum. A
+    /// stratum at or above the tuple's signed prompt cap is realized at or
+    /// below the cap, so its native rows are not selected ordinary by R004.
+    private func makePrompts(runtime: ModelRuntime, cell: NativeMTPBenchCell, block: Int) async throws -> [String] {
+        let snapshot = await runtime.currentSnapshot()
+        guard let container = snapshot.container else {
+            throw NativeMTPBenchError.assertionFailed("runtime has no loaded container")
+        }
+        let thinkingToggle = snapshot.templateSupportsThinkingToggle
+        let preserveThinking = snapshot.templateSupportsPreserveThinking
+        let modelID = self.modelID
+        let lower = Int(ceil(Double(cell.promptTokens) * 0.98))
+        var upper = Int(floor(Double(cell.promptTokens) * 1.02))
+        var target = cell.promptTokens
+        if let cap = policy.maximumPromptTokens, cell.promptTokens >= cap {
+            upper = min(upper, cap)
+            target = max(lower, cap - 24)
+        }
+        let finalUpper = upper
+        let finalTarget = target
+        return try await container.perform { context in
+            func servedCount(_ text: String) async throws -> Int {
+                let request = try Self.makeRequest(
+                    modelID: modelID,
+                    requestID: "prompt-sizing",
+                    prompt: text,
+                    maxTokens: 1,
+                    temperature: 0
+                )
+                let input = try ModelRuntime.userInput(
+                    for: request,
+                    templateSupportsThinkingToggle: thinkingToggle,
+                    templateSupportsPreserveThinking: preserveThinking
+                )
+                return try await context.processor.prepare(input: input).text.tokens.size
+            }
+            var prompts: [String] = []
+            for row in 0..<cell.slots {
                 var salt = 0
                 var text = "Native MTP R015 deterministic prompt cell \(cell.id) block \(block) row \(row)."
-                var encoded = context.tokenizer.encode(text: text, addSpecialTokens: true)
-                while encoded.count < cell.promptTokens {
+                var count = try await servedCount(text)
+                while count < finalTarget {
                     text += " measurement-\(block)-\(row)-\(salt) throughput parity tokens"
-                    encoded = context.tokenizer.encode(text: text, addSpecialTokens: true)
+                    count = try await servedCount(text)
                     salt += 1
                 }
-                let lower = Int(floor(Double(cell.promptTokens) * 0.98))
-                let upper = Int(ceil(Double(cell.promptTokens) * 1.02))
-                guard (lower...upper).contains(encoded.count) else {
-                    throw NativeMTPBenchError.assertionFailed("prompt token count \(encoded.count) outside ±2% of \(cell.promptTokens)")
+                guard (lower...finalUpper).contains(count) else {
+                    throw NativeMTPBenchError.assertionFailed(
+                        "served prompt token count \(count) outside \(lower)...\(finalUpper) for stratum \(cell.promptTokens)"
+                    )
                 }
-                return text
+                prompts.append(text)
             }
+            return prompts
         }
     }
 
@@ -470,12 +557,14 @@ private final class NativeMTPBenchRunner {
             "exploratory": policy.exploratory,
             "max_native_active_rows": policy.maxNativeActiveRows.map { $0 as Any } ?? NSNull(),
             "qualified_slots": policy.qualifiedSlots.map { $0 as Any } ?? NSNull(),
+            "maximum_prompt_tokens": policy.maximumPromptTokens.map { $0 as Any } ?? NSNull(),
             "temperature": policy.temperature,
             "arrival_interval_ms": policy.arrivalIntervalMS,
             // 2: run records carry decode-only throughput (SPEC-048-R015).
             // 3: effective_paths carry each admission's other_active_rows.
             // 4: native runs carry the scheduler's gated_* load-gate evidence.
-            "run_metrics_version": 4,
+            // 5: sustained records carry sustained_window_id.
+            "run_metrics_version": 5,
         ]
     }
 
@@ -624,11 +713,32 @@ private enum NativeMTPBenchPath: String {
     case nativeMTP = "native_mtp"
 }
 
-struct NativeMTPBenchCell: Sendable {
+struct NativeMTPBenchCell: Sendable, Equatable {
     let slots: Int
     let promptTokens: Int
     let maxTokens: Int
     var id: String { "s\(slots)-p\(promptTokens)-o\(maxTokens)" }
+
+    init(slots: Int, promptTokens: Int, maxTokens: Int) {
+        self.slots = slots
+        self.promptTokens = promptTokens
+        self.maxTokens = maxTokens
+    }
+
+    /// Parses an exact canonical `s<slots>-p<prompt>-o<output>` id.
+    init?(id: String) {
+        let parts = id.split(separator: "-", omittingEmptySubsequences: false)
+        guard parts.count == 3,
+              parts[0].first == "s", parts[1].first == "p", parts[2].first == "o",
+              let slots = Int(parts[0].dropFirst()),
+              let prompt = Int(parts[1].dropFirst()),
+              let output = Int(parts[2].dropFirst()),
+              slots > 0, prompt > 0, output > 0 else {
+            return nil
+        }
+        self.init(slots: slots, promptTokens: prompt, maxTokens: output)
+        guard self.id == id else { return nil }
+    }
 }
 
 private struct NativeMTPBenchRequestResult: Sendable {
@@ -686,7 +796,8 @@ private struct NativeMTPBenchRunResult {
         policySHA256: String,
         sustained: Bool,
         warmup: Bool,
-        sustainedWindowElapsedSeconds: Double? = nil
+        sustainedWindowElapsedSeconds: Double? = nil,
+        sustainedWindowID: String? = nil
     ) -> [String: Any] {
         [
             "schema": "macprovider.native-mtp-r015-run.v1",
@@ -702,6 +813,7 @@ private struct NativeMTPBenchRunResult {
             "warmup": warmup,
             "sustained": sustained,
             "sustained_window_elapsed_seconds": sustainedWindowElapsedSeconds as Any,
+            "sustained_window_id": sustainedWindowID as Any,
             "requests": requests.count,
             "wall_seconds": wallSeconds,
             "committed_completion_tokens": committedCompletionTokens,
@@ -802,7 +914,7 @@ enum NativeMTPBenchDecodeThroughput {
     }
 }
 
-private struct NativeMTPStatusDelta {
+struct NativeMTPStatusDelta {
     let proposedTokens: UInt64
     let acceptedTokens: UInt64
     let rejectedTokens: UInt64
@@ -914,14 +1026,42 @@ private final class NativeMTPMemorySampler: @unchecked Sendable {
 }
 
 struct NativeMTPBenchPolicy {
-    /// SPEC-048-R015 mandatory prompt strata (tokens, realized within ±2%).
-    static let mandatoryPromptTokens: Set<Int> = [1536, 4096, 8192]
+    /// SPEC-048-R015 native-eligible prompt strata (tokens, realized within
+    /// ±2%) before the tuple's signed prompt cap is applied.
+    static let nativeEligiblePromptStrata: [Int] = [1536, 4096]
     /// SPEC-048-R015 mandatory fixed short and long output budgets.
     static let mandatoryMaxTokens: Set<Int> = [128, 512]
+    /// SPEC-048-R015 gated and sustained cells run at this prompt and output.
+    static let gatedPromptTokens = 1536
+    static let gatedMaxTokens = 512
+    static let minimumSustainedSeconds = 1800
+
+    /// SPEC-048-R015 native-eligible prompt strata for a tuple whose signed
+    /// SPEC-023-R024 `max_prompt_tokens` is `cap`: 1536 and 4096 at or below
+    /// the cap, plus the cap itself.
+    static func mandatoryPromptTokens(cap: Int) -> [Int] {
+        Array(Set(nativeEligiblePromptStrata.filter { $0 <= cap } + [cap])).sorted()
+    }
+
+    /// SPEC-048-R015 gated cells: slot counts bound + 1 and qualified_slots at
+    /// the gated prompt/output (one cell when those coincide; none when the
+    /// bound covers every slot).
+    static func mandatoryGatedCellIDs(bound: Int, qualifiedSlots: Int) -> [String] {
+        guard bound < qualifiedSlots else { return [] }
+        return Array(Set([bound + 1, qualifiedSlots])).sorted().map {
+            NativeMTPBenchCell(slots: $0, promptTokens: gatedPromptTokens, maxTokens: gatedMaxTokens).id
+        }
+    }
 
     let slots: [Int]
     let promptTokens: [Int]
     let maxTokens: [Int]
+    /// Cells measured outside the native-eligible cross product (policy
+    /// `gated_cells`), in policy order.
+    let gatedCells: [NativeMTPBenchCell]
+    /// The tuple's signed SPEC-023-R024 `max_prompt_tokens`. Required for an
+    /// admission policy; it caps the native-eligible prompt strata.
+    let maximumPromptTokens: Int?
     let warmupRuns: Int
     let blocks: Int
     let seed: Int
@@ -963,6 +1103,7 @@ struct NativeMTPBenchPolicy {
 
     static func load(from url: URL) throws -> NativeMTPBenchPolicy {
         let data = try Data(contentsOf: url)
+        try NativeMTPBenchJSON.rejectDuplicateKeys(data, label: "policy")
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw NativeMTPBenchError.invalidPolicy("policy must be a JSON object")
         }
@@ -974,6 +1115,7 @@ struct NativeMTPBenchPolicy {
             "provider_commit", "mlx_fork_revision", "quantization", "cache_mode", "proposal_depth",
             "run_order", "prompt_corpus", "exclusion_rules", "confidence_method",
             "max_native_active_rows", "qualified_slots", "temperature", "arrival_interval_ms",
+            "gated_cells", "maximum_prompt_tokens",
         ]
         let unknown = Set(object.keys).subtracting(allowed)
         guard unknown.isEmpty else { throw NativeMTPBenchError.invalidPolicy("unknown keys: \(unknown.sorted())") }
@@ -992,10 +1134,14 @@ struct NativeMTPBenchPolicy {
             slots: try slotCounts(object, "slots"),
             promptTokens: try positiveIntArray(object, "prompt_tokens"),
             maxTokens: try positiveIntArray(object, "max_tokens"),
+            gatedCells: try gatedCellList(object, "gated_cells"),
+            maximumPromptTokens: object["maximum_prompt_tokens"] == nil
+                ? nil
+                : try intAtLeast(object, "maximum_prompt_tokens", 1),
             warmupRuns: try nonnegativeInt(object, "warmup_runs"),
             blocks: try intAtLeast(object, "blocks", exploratory ? 2 : 10),
             seed: try nonnegativeInt(object, "seed"),
-            sustainedSeconds: try intAtLeast(object, "sustained_seconds", exploratory ? 0 : 1800),
+            sustainedSeconds: try intAtLeast(object, "sustained_seconds", exploratory ? 0 : minimumSustainedSeconds),
             sustainedCellID: try string(object, "sustained_cell_id"),
             memorySafetyMarginBytes: UInt64(try nonnegativeInt(object, "memory_safety_margin_bytes")),
             thresholds: thresholds,
@@ -1029,7 +1175,7 @@ struct NativeMTPBenchPolicy {
             "cache_mode": "paged_kv_mixed",
             "proposal_depth": 1,
             "run_order": "seeded_random_counterbalanced",
-            "prompt_corpus": "deterministic_synthetic_unique_v1",
+            "prompt_corpus": "deterministic_synthetic_unique_v2",
             "exclusion_rules": "none",
             "confidence_method": "paired_block_bootstrap_holm_v1",
         ]
@@ -1075,18 +1221,37 @@ struct NativeMTPBenchPolicy {
         maxNativeActiveRows.map { min($0, qualifiedSlots(for: cell)) }
     }
 
-    /// SPEC-048-R015 / R007: an admission policy must measure every slot
-    /// count from one up to the advertised `qualified_slots` (the load-gate
-    /// bound is chosen from those cells), every mandatory prompt stratum, and
-    /// both output budgets. Omitting a mandatory cell fails closed here, before
-    /// any measurement, instead of letting a reduced matrix pass.
+    /// Every measured cell: the native-eligible cross product of `slots`,
+    /// `prompt_tokens`, and `max_tokens`, then the policy's `gated_cells`.
+    var matrixCells: [NativeMTPBenchCell] {
+        var cells: [NativeMTPBenchCell] = []
+        for slots in slots {
+            for prompt in promptTokens {
+                for output in maxTokens {
+                    cells.append(NativeMTPBenchCell(slots: slots, promptTokens: prompt, maxTokens: output))
+                }
+            }
+        }
+        return cells + gatedCells
+    }
+
+    /// SPEC-048-R015 / R007: an admission policy measures exactly the
+    /// mandatory matrix before any measurement, so a reduced or substituted
+    /// matrix can never be analyzed to PASS. Native-eligible cells are every
+    /// slot count from one to the bound at every capped prompt stratum and
+    /// both output budgets; gated cells are bound + 1 and qualified_slots at
+    /// the gated prompt/output; the sustained window runs at qualified_slots.
     func validateMatrix() throws {
         if let qualifiedSlots, qualifiedSlots > 8 {
             throw NativeMTPBenchError.invalidPolicy("qualified_slots must be within 2...8")
         }
-        let maximumSlots = qualifiedSlots ?? max(2, slots.max() ?? 2)
-        if let qualifiedSlots, let over = slots.first(where: { $0 > qualifiedSlots }) {
-            throw NativeMTPBenchError.invalidPolicy("slots entry \(over) exceeds qualified_slots \(qualifiedSlots)")
+        let cells = matrixCells
+        guard Set(cells.map(\.id)).count == cells.count else {
+            throw NativeMTPBenchError.invalidPolicy("gated_cells duplicate a matrix cell")
+        }
+        let maximumSlots = qualifiedSlots ?? max(2, cells.map(\.slots).max() ?? 2)
+        if let qualifiedSlots, let over = cells.first(where: { $0.slots > qualifiedSlots }) {
+            throw NativeMTPBenchError.invalidPolicy("cell \(over.id) exceeds qualified_slots \(qualifiedSlots)")
         }
         if let bound = maxNativeActiveRows, bound > maximumSlots {
             throw NativeMTPBenchError.invalidPolicy(
@@ -1094,28 +1259,44 @@ struct NativeMTPBenchPolicy {
             )
         }
         guard !exploratory else { return }
-        // A gated cell must exercise the in-flight hold: the first request
-        // admits native before later arrivals cross the bound.
-        if let bound = maxNativeActiveRows, slots.contains(where: { $0 > bound }), arrivalIntervalMS <= 0 {
-            throw NativeMTPBenchError.invalidPolicy("arrival_interval_ms must be > 0 when a cell exceeds max_native_active_rows")
-        }
         guard let qualifiedSlots else {
             throw NativeMTPBenchError.invalidPolicy("qualified_slots is required")
         }
-        guard maxNativeActiveRows != nil else {
+        guard let bound = maxNativeActiveRows else {
             throw NativeMTPBenchError.invalidPolicy("max_native_active_rows is required")
         }
-        let missingSlots = Set(1...qualifiedSlots).subtracting(slots).sorted()
-        guard missingSlots.isEmpty else {
-            throw NativeMTPBenchError.invalidPolicy("slots missing mandatory counts \(missingSlots)")
+        guard let cap = maximumPromptTokens else {
+            throw NativeMTPBenchError.invalidPolicy("maximum_prompt_tokens is required")
         }
-        let missingPrompts = Self.mandatoryPromptTokens.subtracting(promptTokens).sorted()
-        guard missingPrompts.isEmpty else {
-            throw NativeMTPBenchError.invalidPolicy("prompt_tokens missing mandatory strata \(missingPrompts)")
+        guard (Self.gatedPromptTokens...1_048_576).contains(cap) else {
+            throw NativeMTPBenchError.invalidPolicy("maximum_prompt_tokens must be within \(Self.gatedPromptTokens)...1048576 (SPEC-023-R024)")
         }
-        let missingOutputs = Self.mandatoryMaxTokens.subtracting(maxTokens).sorted()
-        guard missingOutputs.isEmpty else {
-            throw NativeMTPBenchError.invalidPolicy("max_tokens missing mandatory budgets \(missingOutputs)")
+        // A gated cell must exercise the in-flight hold: the first request
+        // admits native before later arrivals cross the bound.
+        if cells.contains(where: { $0.slots > bound }), arrivalIntervalMS <= 0 {
+            throw NativeMTPBenchError.invalidPolicy("arrival_interval_ms must be > 0 when a cell exceeds max_native_active_rows")
+        }
+        guard slots.sorted() == Array(1...bound) else {
+            throw NativeMTPBenchError.invalidPolicy("slots must be exactly 1...\(bound) (max_native_active_rows)")
+        }
+        let expectedPrompts = Self.mandatoryPromptTokens(cap: cap)
+        guard promptTokens.sorted() == expectedPrompts else {
+            throw NativeMTPBenchError.invalidPolicy("prompt_tokens must be exactly \(expectedPrompts) for maximum_prompt_tokens \(cap)")
+        }
+        guard Set(maxTokens) == Self.mandatoryMaxTokens else {
+            throw NativeMTPBenchError.invalidPolicy("max_tokens must be exactly \(Self.mandatoryMaxTokens.sorted())")
+        }
+        let expectedGated = Self.mandatoryGatedCellIDs(bound: bound, qualifiedSlots: qualifiedSlots)
+        guard gatedCells.map(\.id).sorted() == expectedGated else {
+            throw NativeMTPBenchError.invalidPolicy("gated_cells must be exactly \(expectedGated)")
+        }
+        let expectedSustained = NativeMTPBenchCell(
+            slots: qualifiedSlots,
+            promptTokens: Self.gatedPromptTokens,
+            maxTokens: Self.gatedMaxTokens
+        ).id
+        guard sustainedCellID == expectedSustained else {
+            throw NativeMTPBenchError.invalidPolicy("sustained_cell_id must be \(expectedSustained)")
         }
     }
 
@@ -1143,15 +1324,7 @@ struct NativeMTPBenchPolicy {
     }
 
     func cell(id: String) -> NativeMTPBenchCell? {
-        for slots in slots {
-            for prompt in promptTokens {
-                for output in maxTokens {
-                    let cell = NativeMTPBenchCell(slots: slots, promptTokens: prompt, maxTokens: output)
-                    if cell.id == id { return cell }
-                }
-            }
-        }
-        return nil
+        matrixCells.first { $0.id == id }
     }
 
     private static func requireThresholds(_ thresholds: [String: Any]) throws {
@@ -1174,6 +1347,7 @@ struct NativeMTPBenchPolicy {
         }
         for (key, value) in expected {
             guard let actual = thresholds[key] as? NSNumber,
+                  CFGetTypeID(actual) != CFBooleanGetTypeID(),
                   abs(actual.doubleValue - value) < 0.000_000_1 else {
                 throw NativeMTPBenchError.invalidPolicy("threshold \(key) mismatch")
             }
@@ -1212,6 +1386,9 @@ private struct NativeMTPExistingEvidence {
         let data = try Data(contentsOf: url)
         guard !data.isEmpty else { return empty }
         let lines = String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline)
+        for (offset, line) in lines.enumerated() {
+            try NativeMTPBenchJSON.rejectDuplicateKeys(Data(line.utf8), label: "existing --out line \(offset + 1)")
+        }
         guard let first = lines.first,
               let header = try JSONSerialization.jsonObject(with: Data(first.utf8)) as? [String: Any],
               header["schema"] as? String == "macprovider.native-mtp-r015-run.v1",
@@ -1313,6 +1490,13 @@ private struct NativeMTPExistingEvidence {
             }) {
                 throw NativeMTPBenchError.assertionFailed(
                     "existing --out contains partial sustained block \(cellID)/\(partial.key)"
+                )
+            }
+            // A resume continues after the highest block; a gap below it would
+            // be skipped silently.
+            if let highest = blocks.keys.max(), Set(blocks.keys) != Set(0...highest) {
+                throw NativeMTPBenchError.assertionFailed(
+                    "existing --out sustained blocks of \(cellID) are not contiguous from 0"
                 )
             }
         }
@@ -1473,12 +1657,95 @@ private func slotCounts(_ object: [String: Any], _ key: String) throws -> [Int] 
     return values
 }
 
+private func gatedCellList(_ object: [String: Any], _ key: String) throws -> [NativeMTPBenchCell] {
+    guard let raw = object[key] else { return [] }
+    guard let ids = raw as? [String] else {
+        throw NativeMTPBenchError.invalidPolicy("\(key) must be an array of cell ids")
+    }
+    return try ids.map { id in
+        guard let cell = NativeMTPBenchCell(id: id), (1...8).contains(cell.slots) else {
+            throw NativeMTPBenchError.invalidPolicy("\(key) entry \(id) is not a cell id within 1...8 slots")
+        }
+        return cell
+    }
+}
+
 private func intAtLeast(_ object: [String: Any], _ key: String, _ minimum: Int) throws -> Int {
     let value = try nonnegativeInt(object, key)
     guard value >= minimum else {
         throw NativeMTPBenchError.invalidPolicy("\(key) must be >= \(minimum)")
     }
     return value
+}
+
+/// Duplicate-key rejection for the bench's policy and evidence JSON, matching
+/// the analyzer's strict loader: Foundation keeps the last duplicate, which
+/// would let one hash-bound document mean two things.
+enum NativeMTPBenchJSON {
+    static func rejectDuplicateKeys(_ data: Data, label: String) throws {
+        let bytes = [UInt8](data)
+        var index = 0
+        // One entry per open container: nil for arrays, the seen keys for objects.
+        var stack: [Set<String>?] = []
+        var expectingKey = false
+        func readString() throws -> String {
+            index += 1
+            var raw: [UInt8] = []
+            while index < bytes.count {
+                let byte = bytes[index]
+                if byte == UInt8(ascii: "\\") {
+                    guard index + 1 < bytes.count else { break }
+                    raw.append(byte)
+                    raw.append(bytes[index + 1])
+                    index += 2
+                    continue
+                }
+                if byte == UInt8(ascii: "\"") {
+                    index += 1
+                    // Decode escapes so "\u0061" and "a" compare equal.
+                    let quoted = Data([UInt8(ascii: "\"")] + raw + [UInt8(ascii: "\"")])
+                    guard let decoded = try JSONSerialization.jsonObject(with: quoted, options: [.fragmentsAllowed]) as? String else {
+                        throw NativeMTPBenchError.invalidPolicy("\(label): invalid JSON string")
+                    }
+                    return decoded
+                }
+                raw.append(byte)
+                index += 1
+            }
+            throw NativeMTPBenchError.invalidPolicy("\(label): unterminated JSON string")
+        }
+        while index < bytes.count {
+            let byte = bytes[index]
+            switch byte {
+            case UInt8(ascii: "{"):
+                stack.append(Set<String>())
+                expectingKey = true
+                index += 1
+            case UInt8(ascii: "["):
+                stack.append(nil)
+                expectingKey = false
+                index += 1
+            case UInt8(ascii: "}"), UInt8(ascii: "]"):
+                _ = stack.popLast()
+                expectingKey = false
+                index += 1
+            case UInt8(ascii: ","):
+                if let top = stack.last, top != nil { expectingKey = true }
+                index += 1
+            case UInt8(ascii: "\""):
+                let value = try readString()
+                if expectingKey, var keys = stack.last ?? nil {
+                    guard keys.insert(value).inserted else {
+                        throw NativeMTPBenchError.invalidPolicy("\(label): duplicate JSON key \(value)")
+                    }
+                    stack[stack.count - 1] = keys
+                    expectingKey = false
+                }
+            default:
+                index += 1
+            }
+        }
+    }
 }
 
 enum NativeMTPBenchError: Error, CustomStringConvertible {

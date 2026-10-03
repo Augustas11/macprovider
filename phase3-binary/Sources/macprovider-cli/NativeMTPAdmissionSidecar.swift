@@ -679,6 +679,7 @@ enum NativeMTPAdmissionSidecar {
         let qualifiedSlots: Int
         let maxNativeActiveRows: Int
         let requestFeatureProfile: String
+        let maxPromptTokens: Int
         let decreaseThresholdPPM: Int
         let increaseThresholdPPM: Int
         let maxVerificationPositionsPerCommittedMilli: Int
@@ -1294,7 +1295,7 @@ enum NativeMTPAdmissionSidecar {
                 penalties: false,
                 conversationCache: false,
                 diskCache: false,
-                maxPromptTokens: 1_048_576,
+                maxPromptTokens: selected.entry.maxPromptTokens,
                 maxCompletionTokens: 1_048_576,
                 sampling: selected.entry.requestFeatureProfile == Self.sampledRequestFeatureProfile
             ),
@@ -1377,7 +1378,8 @@ enum NativeMTPAdmissionSidecar {
             "runtime_revision", "provider_revision", "source_commit",
             "reproducible_build_sha256", "live_executable_cdhash",
             "cache_state_classes", "hardware_class", "ram_bytes",
-            "qualified_slots", "max_native_active_rows", "request_feature_profile", "decrease_threshold_ppm",
+            "qualified_slots", "max_native_active_rows", "request_feature_profile", "max_prompt_tokens",
+            "decrease_threshold_ppm",
             "increase_threshold_ppm", "max_verification_positions_per_committed_milli",
             "throughput_delta_ppm", "benchmark_policy_sha256", "challenge_bank_sha256",
             "quantization", "ordinary_baseline",
@@ -1417,6 +1419,9 @@ enum NativeMTPAdmissionSidecar {
         guard maxNativeActiveRows <= qualifiedSlots else {
             throw NativeMTPAdmissionSidecarError.invalidValue("\(path).max_native_active_rows")
         }
+        // SPEC-023-R024 / SPEC-048-R004: the signed prompt bound; a longer
+        // prompt selects ordinary.
+        let maxPromptTokens = try requireInt(object, "max_prompt_tokens", path: path, range: 1...1_048_576)
         let decreaseThreshold = try requireInt(object, "decrease_threshold_ppm", path: path, range: 0...1_000_000)
         let increaseThreshold = try requireInt(object, "increase_threshold_ppm", path: path, range: 0...1_000_000)
         guard decreaseThreshold < increaseThreshold else {
@@ -1462,6 +1467,7 @@ enum NativeMTPAdmissionSidecar {
             qualifiedSlots: qualifiedSlots,
             maxNativeActiveRows: maxNativeActiveRows,
             requestFeatureProfile: requestFeatureProfile,
+            maxPromptTokens: maxPromptTokens,
             decreaseThresholdPPM: decreaseThreshold,
             increaseThresholdPPM: increaseThreshold,
             maxVerificationPositionsPerCommittedMilli: try requireInt(object, "max_verification_positions_per_committed_milli", path: path, range: 1000...4000),

@@ -6,6 +6,36 @@ import MLXLMCommon
 import XCTest
 
 final class ContinuousBatchSchedulerTests: XCTestCase {
+    func testLabBatchCompositionWaitsForEveryRowAndUsesDeclaredOrder() async throws {
+        let backend = ScriptedBackend(scripts: ["first": [11], "second": [22]])
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 2,
+            maxPrefillRowsPerIteration: 2,
+            backend: backend
+        )
+        let installed = await scheduler.installLabBatchComposition(["second", "first"])
+        XCTAssertTrue(installed)
+
+        let first = Task {
+            try await scheduler.submit(.init(
+                id: "first", conversationKey: "", promptTokens: [1], maxOutputTokens: 1
+            ))
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+        let prefillCallsWhileFenced = await backend.prefillCallCount()
+        XCTAssertEqual(prefillCallsWhileFenced, 0, "the pump must remain fenced")
+
+        let second = Task {
+            try await scheduler.submit(.init(
+                id: "second", conversationKey: "", promptTokens: [2], maxOutputTokens: 1
+            ))
+        }
+        _ = try await (first.value, second.value)
+
+        let prefillOrder = await backend.prefillOrder()
+        XCTAssertEqual(prefillOrder.first, ["second", "first"])
+    }
+
     func testConfigurationHonorsExplicitPrefillTokensPerIterationAndDefault() {
         let snapshot = ContinuousBatchSchedulerSnapshot(
             modelID: Self.modelID,

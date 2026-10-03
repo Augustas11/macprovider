@@ -171,6 +171,24 @@ final class NativeMTPSelectorTests: XCTestCase {
         XCTAssertTrue(admission.allowsConversationCacheLease)
     }
 
+    func testTokenBoundDowngradeIsDetectedForRecording() throws {
+        let admitted = ModelRuntime.nativeMTPRuntimeAdmission(
+            for: try makeRequest(extra: ["max_completion_tokens": 8]),
+            draftConfigured: false,
+            draftLoaded: false,
+            numDraftTokens: nil,
+            nativeMTPMode: .auto,
+            nativeMTPCapability: admittedCapability(maximumPromptTokens: 4096, maximumCompletionTokens: 8),
+            schedulerSupportsNativeMTP: true
+        )
+        let over = admitted.resolvingTokenBounds(promptTokenCount: 4097, maxOutputTokens: 8)
+        let within = admitted.resolvingTokenBounds(promptTokenCount: 4096, maxOutputTokens: 8)
+        XCTAssertTrue(ModelRuntime.isNativeMTPTokenBoundDowngrade(admitted: admitted, resolved: over))
+        XCTAssertEqual(over.selection.nativeMTPReason, .capabilityMismatch)
+        XCTAssertFalse(ModelRuntime.isNativeMTPTokenBoundDowngrade(admitted: admitted, resolved: within))
+        XCTAssertFalse(ModelRuntime.isNativeMTPTokenBoundDowngrade(admitted: over, resolved: over))
+    }
+
     func testNativeMTPRuntimeAdmissionKeepsMultiChunkPromptsUpToTheSignedBound() throws {
         func admission(promptTokenCount: Int) throws -> NativeMTPRuntimeAdmission {
             ModelRuntime.nativeMTPRuntimeAdmission(
