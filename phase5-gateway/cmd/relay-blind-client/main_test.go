@@ -587,6 +587,10 @@ type privacyClientSpec struct {
 	alterUsage                   func(map[string]any) map[string]any
 	headerHook                   func(http.Header)
 	reservation                  func(relayblind.ReservationResponse) relayblind.ReservationResponse
+	// assurance is the label the fake coordinator grants (default Beta);
+	// required is the client's --privacy-assurance-required value.
+	assurance, required string
+	requiredSeen        *[]string
 }
 
 func runPrivacyClient(t *testing.T, spec privacyClientSpec) (string, string, int32, error) {
@@ -626,12 +630,18 @@ func runPrivacyClient(t *testing.T, spec privacyClientSpec) (string, string, int
 				http.Error(w, "bad", http.StatusBadRequest)
 				return
 			}
-			response := privacyReservationResponse(t, record, identity, request, now)
+			if spec.requiredSeen != nil {
+				*spec.requiredSeen = append(*spec.requiredSeen, r.Header.Get(privacyAssuranceRequiredHeader))
+			}
+			response := privacyReservationResponse(t, record, identity, request, now, spec.assurance)
 			if spec.reservation != nil {
 				response = spec.reservation(response)
 			}
 			_ = json.NewEncoder(w).Encode(response)
 		case "/v1/chat/completions":
+			if spec.requiredSeen != nil {
+				*spec.requiredSeen = append(*spec.requiredSeen, r.Header.Get(privacyAssuranceRequiredHeader))
+			}
 			writePrivacyChat(t, w, body, inner, provider, spec)
 		default:
 			http.NotFound(w, r)
@@ -642,6 +652,7 @@ func runPrivacyClient(t *testing.T, spec privacyClientSpec) (string, string, int
 		baseURL: server.URL, identityPin: pinPath, model: "model-a", input: "-",
 		maxOutputTokens: 32, inputTokenUpperBound: 96, stream: spec.stream, privacyClass: true,
 		apiKeyEnv: "TEST_API_KEY", walletSessionKeyEnv: "TEST_WALLET_KEY", timeout: time.Minute,
+		privacyAssuranceRequired: spec.required,
 	}
 	if spec.wallet {
 		opts.walletSessionID = "wallet-session-fixture"
@@ -665,6 +676,9 @@ func runPrivacyClient(t *testing.T, spec privacyClientSpec) (string, string, int
 func writePrivacyChat(t *testing.T, w http.ResponseWriter, body, inner []byte, provider *ecdh.PrivateKey, spec privacyClientSpec) {
 	t.Helper()
 	setPrivacyBuyerHeaders(w.Header())
+	if spec.assurance != "" {
+		w.Header().Set(privacyAssuranceHeader, spec.assurance)
+	}
 	if spec.headerHook != nil {
 		spec.headerHook(w.Header())
 	}
@@ -709,7 +723,7 @@ func writePrivacyChat(t *testing.T, w http.ResponseWriter, body, inner []byte, p
 		_, _ = io.WriteString(w, b.String())
 		return
 	}
-	usage := privacyClearUsage(spec.clearPrompt, spec.clearCompletion, spec.verifiedAt)
+	usage := privacyClearUsage(spec.clearPrompt, spec.clearCompletion, spec.verifiedAt, spec.assurance)
 	if spec.totalOverride != nil {
 		usage["total_tokens"] = *spec.totalOverride
 	}
@@ -717,7 +731,7 @@ func writePrivacyChat(t *testing.T, w http.ResponseWriter, body, inner []byte, p
 		usage = spec.alterUsage(usage)
 	}
 	if spec.mode == "missing_final" && spec.clearPrompt == 0 && spec.clearCompletion == 0 {
-		usage = privacyClearUsage(4, 2, spec.verifiedAt)
+		usage = privacyClearUsage(4, 2, spec.verifiedAt, spec.assurance)
 	}
 	if env.Stream {
 		var b strings.Builder
@@ -822,11 +836,14 @@ func providerResponseKeys(t *testing.T, body []byte, provider *ecdh.PrivateKey) 
 	return keys, envelope, digest, plaintext
 }
 
-func privacyReservationResponse(t *testing.T, record relayblind.KeyRecord, identity ed25519.PrivateKey, request relayblind.ReservationRequest, now time.Time) relayblind.ReservationResponse {
+func privacyReservationResponse(t *testing.T, record relayblind.KeyRecord, identity ed25519.PrivateKey, request relayblind.ReservationRequest, now time.Time, assurance string) relayblind.ReservationResponse {
 	t.Helper()
+	if assurance == "" {
+		assurance = relayblind.PrivacyAssurance
+	}
 	attestation := relayblind.PrivacyKeyAttestation{
 		Version: relayblind.PrivacyKeyAttestationVersion, KeyRecordDigest: record.KeyRecordDigest,
-		PrivacyClass: relayblind.PrivacyClassV1, Assurance: relayblind.PrivacyAssurance,
+		PrivacyClass: relayblind.PrivacyClassV1, Assurance: assurance,
 		BinaryVersion: "0.0.0-fixture", CodeCDHash: "0123456789abcdef0123456789abcdef01234567",
 		NotBeforeUnix: record.NotBeforeUnix, ExpiresAtUnix: record.ExpiresAtUnix,
 	}
@@ -846,7 +863,7 @@ func privacyReservationResponse(t *testing.T, record relayblind.KeyRecord, ident
 		ExpiresAtUnix:       now.Add(30 * time.Second).Unix(), CachePolicy: relayblind.CachePolicyNoStore,
 		FailoverPolicy:                 relayblind.FailoverPolicyDisabled,
 		PrivacyClass:                   relayblind.PrivacyClassV1,
-		PrivacyAssurance:               relayblind.PrivacyAssurance,
+		PrivacyAssurance:               assurance,
 		PrivacyKeyAttestation:          &attestation,
 		PrivacyKeyAttestationSignature: base64.RawURLEncoding.EncodeToString(ed25519.Sign(identity, framed)),
 		PrivacyPostureVerifiedAtUnix:   now.Unix(),
@@ -877,7 +894,11 @@ func cliPrivacyMaterial(t *testing.T, now time.Time) (relayblind.KeyRecord, rela
 	return record, pin, identity, provider
 }
 
-func privacyClearUsage(prompt, completion, verifiedAt int64) map[string]any {
+func privacyClearUsage(prompt, completion, verifiedAt int64, assurance string) map[string]any {
+	if assurance == "" {
+		assurance = relayblind.PrivacyAssurance
+	}
+	set := privacyStringsFor(assurance)
 	return map[string]any{
 		"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion,
 		"macprovider": map[string]any{
@@ -888,8 +909,8 @@ func privacyClearUsage(prompt, completion, verifiedAt int64) map[string]any {
 				"usage_settlement":          "standard_usage_settlement_and_clear_cap_enforcement_still_apply",
 			},
 			"privacy": map[string]any{
-				"class": relayblind.PrivacyClassV1, "assurance": relayblind.PrivacyAssurance, "scope": privacyScope,
-				"protects": privacyProtects, "does_not_protect": privacyDoesNotProtect, "residual_risks": privacyResidualRisks,
+				"class": relayblind.PrivacyClassV1, "assurance": assurance, "scope": set.scope,
+				"protects": set.protects, "does_not_protect": set.doesNotProtect, "residual_risks": set.residualRisks,
 				"posture_verified_at_unix": verifiedAt,
 			},
 		},
@@ -963,3 +984,79 @@ func assertPrivacyFailure(t *testing.T, err error, stderr string, calls, wantCal
 }
 
 func int64Ptr(v int64) *int64 { return &v }
+
+// SPEC-049-R016/R032: a code-bound reservation is verified before
+// encryption, the requirement is sent on the reservation only, and the
+// served label selects the R020 string set the client checks and prints.
+func TestPrivacyClientCodeBound(t *testing.T) {
+	var seen []string
+	stdout, stderr, calls, err := runPrivacyClient(t, privacyClientSpec{
+		content: privacyContent(false), assurance: relayblind.PrivacyAssuranceCodeBound,
+		required: relayblind.PrivacyAssuranceCodeBound, requiredSeen: &seen,
+	})
+	if err != nil || calls != 2 || !strings.Contains(stdout, "PRIVACY-COMPLETION-9b2c") {
+		t.Fatalf("err=%v calls=%d stdout=%q", err, calls, stdout)
+	}
+	if len(seen) != 2 || seen[0] != relayblind.PrivacyAssuranceCodeBound || seen[1] != "" {
+		t.Fatalf("requirement header on %v", seen)
+	}
+	for _, part := range append([]string{"assurance: " + relayblind.PrivacyAssuranceCodeBound, privacyCodeBoundScope}, privacyCodeBoundResidualRisks...) {
+		if !strings.Contains(stderr, part) {
+			t.Fatalf("stderr missing %q", part)
+		}
+	}
+	if strings.Contains(stderr, privacyScope+"\n") {
+		t.Fatal("stderr printed the Beta scope for a code-bound run")
+	}
+	// A v0.2 client also accepts a code-bound reservation without a
+	// requirement.
+	if _, _, _, err := runPrivacyClient(t, privacyClientSpec{content: privacyContent(false), assurance: relayblind.PrivacyAssuranceCodeBound}); err != nil {
+		t.Fatalf("unrequired code-bound: %v", err)
+	}
+}
+
+func TestPrivacyClientAssuranceFailures(t *testing.T) {
+	t.Run("requirement not met aborts before encryption", func(t *testing.T) {
+		_, stderr, calls, err := runPrivacyClient(t, privacyClientSpec{content: privacyContent(false), required: relayblind.PrivacyAssuranceCodeBound})
+		if err == nil || !strings.Contains(err.Error(), "requirement not met") || calls != 1 || stderr != "" {
+			t.Fatalf("err=%v calls=%d", err, calls)
+		}
+	})
+	t.Run("reservation label differs from attestation", func(t *testing.T) {
+		_, _, calls, err := runPrivacyClient(t, privacyClientSpec{content: privacyContent(false), reservation: func(res relayblind.ReservationResponse) relayblind.ReservationResponse {
+			res.PrivacyAssurance = relayblind.PrivacyAssuranceCodeBound
+			return res
+		}})
+		if err == nil || calls != 1 {
+			t.Fatalf("err=%v calls=%d", err, calls)
+		}
+	})
+	t.Run("response label differs from reservation", func(t *testing.T) {
+		_, stderr, calls, err := runPrivacyClient(t, privacyClientSpec{
+			content: privacyContent(false), assurance: relayblind.PrivacyAssuranceCodeBound,
+			headerHook: func(h http.Header) { h.Set(privacyAssuranceHeader, relayblind.PrivacyAssurance) },
+		})
+		assertPrivacyFailure(t, err, stderr, calls, 2)
+	})
+	t.Run("usage strings of the other label", func(t *testing.T) {
+		_, stderr, calls, err := runPrivacyClient(t, privacyClientSpec{
+			content: privacyContent(false), assurance: relayblind.PrivacyAssuranceCodeBound,
+			alterUsage: func(usage map[string]any) map[string]any {
+				privacyObject(usage)["scope"] = privacyScope
+				return usage
+			},
+		})
+		assertPrivacyFailure(t, err, stderr, calls, 2)
+	})
+	t.Run("flag validation", func(t *testing.T) {
+		for _, opts := range []options{
+			{privacyAssuranceRequired: relayblind.PrivacyAssuranceCodeBound},
+			{privacyClass: true, privacyAssuranceRequired: relayblind.PrivacyAssurance},
+		} {
+			err := run(context.Background(), opts, strings.NewReader(""), io.Discard, io.Discard, func(string) string { return "" })
+			if err == nil || !strings.Contains(err.Error(), "--privacy-assurance-required") {
+				t.Fatalf("opts %+v err=%v", opts, err)
+			}
+		}
+	})
+}

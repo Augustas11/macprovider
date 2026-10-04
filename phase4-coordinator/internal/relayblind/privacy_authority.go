@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/appattest"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 )
 
@@ -46,6 +48,16 @@ type PrivacyAuthority struct {
 	quarantine      int
 	maxRecords      int
 	replayRetention time.Duration
+
+	// SPEC-049 v0.2 code-bound state. appAttestRoot is nil when the
+	// compiled root failed its fingerprint check; code-bound then fails
+	// closed (SPEC-049-R033).
+	codeBound      bool
+	teamID         string
+	maxEnrollments int
+	appAttestRoot  *x509.Certificate
+	notifyMu       sync.Mutex
+	notify         AppAttestNotifier
 
 	mu         sync.Mutex
 	sessions   map[privacySessionID]*privacySession
@@ -77,6 +89,21 @@ type privacySession struct {
 	nonceIssued  int64
 	hasNonce     bool
 	attestations map[string]string
+	// assurances maps each accepted key digest to its attested label.
+	assurances map[string]string
+	// label is the assurance of the latest verified posture.
+	label string
+	// Enrolled state is memory-only and ends with the session.
+	enrolled      bool
+	enrolledKeyID []byte
+	enroll        pendingEnrollment
+}
+
+type pendingEnrollment struct {
+	active    bool
+	challenge string
+	keyID     []byte
+	issued    int64
 }
 
 type postureSnapshot struct {
@@ -88,6 +115,9 @@ type postureSnapshot struct {
 	cdhash       string
 	hasCDHash    bool
 	attestations map[string]string
+	assurances   map[string]string
+	enrolled     bool
+	enrolledKey  []byte
 	issuedAt     int64
 }
 
@@ -144,7 +174,19 @@ func NewPrivacyAuthority(store *Store, cfg config.PrivacyClassConfig, identityPi
 	if quarantine <= 0 {
 		quarantine = 86400
 	}
+	codeBoundRoot, rootErr := appattest.AppleRoot()
+	if rootErr != nil {
+		codeBoundRoot = nil
+	}
+	maxEnrollments := cfg.CodeBound.MaxEnrollmentsPerProviderPerDay
+	if maxEnrollments <= 0 {
+		maxEnrollments = 3
+	}
 	return &PrivacyAuthority{
+		codeBound:       cfg.CodeBound.Enabled,
+		teamID:          cfg.CodeBound.TeamID,
+		maxEnrollments:  maxEnrollments,
+		appAttestRoot:   codeBoundRoot,
 		store:           store,
 		sePins:          sePins,
 		identity:        identity,
@@ -248,6 +290,20 @@ func (a *PrivacyAuthority) AcceptPrivacyKeys(ctx context.Context, providerID, se
 		digest := sha256.Sum256(framing)
 		verified = append(verified, accepted{record: rec, immutableDigest: base64.RawURLEncoding.EncodeToString(digest[:])})
 	}
+	// SPEC-049-R032: drop code-bound records outside the enrolled state;
+	// a Beta record inside it is an assurance regression.
+	enrolled := a.sessionEnrolled(id)
+	kept := verified[:0]
+	for _, item := range verified {
+		switch {
+		case item.record.Attestation.Assurance == PrivacyAssuranceCodeBound && !enrolled:
+			continue
+		case item.record.Attestation.Assurance != PrivacyAssuranceCodeBound && enrolled:
+			return a.failQuarantine(ctx, providerID, now, ReasonAssuranceRegression)
+		}
+		kept = append(kept, item)
+	}
+	verified = kept
 	postureCD, hasPosture := a.verifiedCDHash(id)
 	for _, item := range verified {
 		if !a.codeApproved(item.record.Attestation.CodeCDHash, "", item.record.Attestation.BinaryVersion, now, false) {
@@ -268,14 +324,16 @@ func (a *PrivacyAuthority) AcceptPrivacyKeys(ctx context.Context, providerID, se
 	}
 	kids := make([]string, 0, len(verified))
 	attestations := make(map[string]string, len(verified))
+	assurances := make(map[string]string, len(verified))
 	for _, item := range verified {
 		kids = append(kids, item.record.KeyRecord.KID)
 		attestations[item.record.KeyRecord.KeyRecordDigest] = item.record.Attestation.CodeCDHash
+		assurances[item.record.KeyRecord.KeyRecordDigest] = item.record.Attestation.Assurance
 	}
 	if err := a.store.RevokeMissingKeys(ctx, providerID, kids, now, a.replayRetention, KeyClassPrivacy); err != nil {
 		return err
 	}
-	a.storeAttestations(id, attestations)
+	a.storeAttestations(id, attestations, assurances)
 	return nil
 }
 
@@ -339,6 +397,9 @@ func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, sessio
 		return ErrStoreUnavailable
 	}
 	ctx = privacyCtx(ctx)
+	if len(raw) > 0 && len(raw) <= MaxPrivacyPostureV2ResponseBytes && privacyPostureWireVersion(raw) == 2 {
+		return a.verifyPostureV2(ctx, providerID, session, nonce, raw, sessionSEKey, now)
+	}
 	if len(raw) == 0 || len(raw) > MaxPrivacyPostureResponseBytes {
 		return privacyReject("posture_closed")
 	}
@@ -370,10 +431,27 @@ func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, sessio
 	if statement.ProviderID != providerID || statement.AssignedSession != session {
 		return privacyReject("posture_session_binding")
 	}
-	reason := a.policyFailure(statement, snap, sessionSEKey, sePin, now)
+	if snap.enrolled {
+		// SPEC-049-R030: a version 1 posture after enrolled.
+		return a.failQuarantine(ctx, providerID, now, ReasonAssuranceRegression)
+	}
+	reason := a.policyFailure(statement, snap, sessionSEKey, sePin, now, PrivacyAssurance)
 	if reason != "" {
 		return a.failQuarantine(ctx, providerID, now, reason)
 	}
+	if err := a.postureLiveness(ctx, providerID, session, statement, snap, now); err != nil {
+		return err
+	}
+	if !a.commitPosture(id, snap, statement, PrivacyAssurance, now) {
+		return privacyReject("posture_closed")
+	}
+	return nil
+}
+
+// postureLiveness applies the clock, backend, timeout, kill-switch, and
+// quarantine checks shared by both posture versions. Failures make the
+// session ineligible without quarantine.
+func (a *PrivacyAuthority) postureLiveness(ctx context.Context, providerID, session string, statement PostureStatement, snap postureSnapshot, now time.Time) error {
 	skewed := abs64(now.Unix()-statement.IssuedAtUnix) > privacyClockSkewSeconds
 	late := a.late(now.Unix(), snap.issuedAt)
 	backendOK := a.backendAllowed(statement.SEKeyBackend)
@@ -407,47 +485,76 @@ func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, sessio
 		a.NoteChallengeTimeout(providerID, session)
 		return ErrPrivacyQuarantined
 	}
-	if !a.commitPosture(id, snap, statement, now) {
-		return privacyReject("posture_closed")
-	}
 	return nil
 }
 
 func (a *PrivacyAuthority) Eligible(providerID, session, keyDigest string, now time.Time) (time.Time, bool) {
+	verifiedAt, _, ok := a.EligibleAssurance(providerID, session, keyDigest, now)
+	return verifiedAt, ok
+}
+
+// EligibleAssurance is Eligible plus the assurance label the session is
+// granted for keyDigest (SPEC-049-R024). The label comes only from what the
+// coordinator verified, never from an unverified provider field.
+func (a *PrivacyAuthority) EligibleAssurance(providerID, session, keyDigest string, now time.Time) (time.Time, string, bool) {
 	if a == nil || a.store == nil || keyDigest == "" {
-		return time.Time{}, false
+		return time.Time{}, "", false
 	}
 	id := privacySessionID{providerID: providerID, session: session}
 	a.mu.Lock()
 	entry := a.sessions[id]
 	if entry == nil || !entry.verified {
 		a.mu.Unlock()
-		return time.Time{}, false
+		return time.Time{}, "", false
 	}
 	verifiedAt := entry.verifiedAt
 	teamID, signingID, cdhash, binary := entry.teamID, entry.signingID, entry.cdhash, entry.binary
 	_, listed := entry.digests[keyDigest]
+	label, enrolled := entry.label, entry.enrolled
+	enrolledKey := append([]byte(nil), entry.enrolledKeyID...)
+	recordLabel := entry.assurances[keyDigest]
 	a.mu.Unlock()
 	if !listed || now.Sub(verifiedAt) > time.Duration(a.maxAge)*time.Second {
-		return time.Time{}, false
+		return time.Time{}, "", false
 	}
+	if !ValidPrivacyAssurance(label) || recordLabel != label {
+		return time.Time{}, "", false
+	}
+	switch label {
+	case PrivacyAssurance:
+		if enrolled {
+			return time.Time{}, "", false
+		}
+	case PrivacyAssuranceCodeBound:
+		if !enrolled || !a.enrolledKeyUsable(providerID, enrolledKey) {
+			return time.Time{}, "", false
+		}
+	}
+	if !a.eligibleCommon(providerID, session, keyDigest, teamID, signingID, cdhash, binary, now) {
+		return time.Time{}, "", false
+	}
+	return verifiedAt, label, true
+}
+
+// eligibleCommon is the v0.1 SPEC-049-R013 gate shared by both labels.
+func (a *PrivacyAuthority) eligibleCommon(providerID, session, keyDigest, teamID, signingID, cdhash, binary string, now time.Time) bool {
 	if !a.identityMatches(teamID, signingID, cdhash, binary, now) {
-		return time.Time{}, false
+		return false
 	}
 	ctx := context.Background()
 	disabled, err := a.store.PrivacyDisabled(ctx)
 	if err != nil || disabled {
-		return time.Time{}, false
+		return false
 	}
 	quarantined, err := a.store.IsQuarantined(ctx, providerID, now)
 	if err != nil || quarantined {
-		return time.Time{}, false
+		return false
 	}
 	fresh, err := a.store.PrivacyKeyFresh(ctx, providerID, session, keyDigest, now)
 	if err != nil || !fresh {
-		return time.Time{}, false
+		return false
 	}
-	return verifiedAt, true
+	return true
 }
 
 func (a *PrivacyAuthority) identityMatches(teamID, signingID, cdhash, binary string, now time.Time) bool {
@@ -482,7 +589,7 @@ func (a *PrivacyAuthority) codeApproved(cdhash, teamID, binary string, now time.
 	return false
 }
 
-func (a *PrivacyAuthority) policyFailure(statement PostureStatement, snap postureSnapshot, sessionSEKey, sePin []byte, now time.Time) string {
+func (a *PrivacyAuthority) policyFailure(statement PostureStatement, snap postureSnapshot, sessionSEKey, sePin []byte, now time.Time, label string) string {
 	if !a.identityMatches(statement.TeamID, statement.SigningIdentifier, statement.CodeCDHash, statement.BinaryVersion, now) {
 		return "posture_unapproved_code_identity"
 	}
@@ -502,6 +609,12 @@ func (a *PrivacyAuthority) policyFailure(statement PostureStatement, snap postur
 	}
 	if seKeyMismatch(sessionSEKey, sePin) {
 		return "posture_se_key_mismatch"
+	}
+	// SPEC-049-R032: a posture may list only records of its own label.
+	for _, digest := range statement.PrivacyKeyRecordDigests {
+		if attested, ok := snap.assurances[digest]; ok && attested != label {
+			return ReasonAssuranceMismatch
+		}
 	}
 	return ""
 }
@@ -536,8 +649,13 @@ func (a *PrivacyAuthority) recordQuarantine(ctx context.Context, providerID stri
 		entry.verified = false
 		entry.digests = nil
 		entry.attestations = nil
+		entry.assurances = nil
 		entry.hasNonce = false
 		entry.nonce = ""
+		entry.label = ""
+		entry.enrolled = false
+		entry.enrolledKeyID = nil
+		entry.enroll = pendingEnrollment{}
 	}
 	a.mu.Unlock()
 	return writeErr
@@ -559,6 +677,9 @@ func (a *PrivacyAuthority) consumeChallenge(id privacySessionID, nonce, statemen
 		cdhash:       entry.cdhash,
 		hasCDHash:    entry.hasCDHash,
 		attestations: copyAttestations(entry.attestations),
+		assurances:   copyAttestations(entry.assurances),
+		enrolled:     entry.enrolled,
+		enrolledKey:  append([]byte(nil), entry.enrolledKeyID...),
 		issuedAt:     entry.nonceIssued,
 	}
 	entry.hasNonce = false
@@ -566,7 +687,7 @@ func (a *PrivacyAuthority) consumeChallenge(id privacySessionID, nonce, statemen
 	return snap, true
 }
 
-func (a *PrivacyAuthority) commitPosture(id privacySessionID, snap postureSnapshot, statement PostureStatement, now time.Time) bool {
+func (a *PrivacyAuthority) commitPosture(id privacySessionID, snap postureSnapshot, statement PostureStatement, label string, now time.Time) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	entry := a.sessions[id]
@@ -576,6 +697,10 @@ func (a *PrivacyAuthority) commitPosture(id privacySessionID, snap postureSnapsh
 	if a.epochs[id.providerID] != snap.epoch || a.closedGen[id] != snap.boundGen {
 		return false
 	}
+	if entry.enrolled != (label == PrivacyAssuranceCodeBound) {
+		return false
+	}
+	entry.label = label
 	entry.verified = true
 	entry.verifiedAt = now
 	entry.cdhash = statement.CodeCDHash
@@ -603,11 +728,12 @@ func (a *PrivacyAuthority) verifiedCDHash(id privacySessionID) (string, bool) {
 	return entry.cdhash, true
 }
 
-func (a *PrivacyAuthority) storeAttestations(id privacySessionID, attestations map[string]string) {
+func (a *PrivacyAuthority) storeAttestations(id privacySessionID, attestations, assurances map[string]string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	entry := a.ensureLocked(id)
 	entry.attestations = attestations
+	entry.assurances = assurances
 }
 
 func (a *PrivacyAuthority) forgetAdvertisement(id privacySessionID) {
@@ -618,6 +744,7 @@ func (a *PrivacyAuthority) forgetAdvertisement(id privacySessionID) {
 		return
 	}
 	entry.attestations = nil
+	entry.assurances = nil
 	entry.verified = false
 	entry.digests = nil
 	entry.hasNonce = false

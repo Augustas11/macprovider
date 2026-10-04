@@ -536,7 +536,12 @@ func WithRelayBlindKeySink(sink RelayBlindKeySink) Option {
 // WithPrivacyAuthority wires SPEC-049 posture verification. A nil authority
 // leaves privacy-class challenges and key acceptance off.
 func WithPrivacyAuthority(authority *relayblind.PrivacyAuthority) Option {
-	return func(s *Server) { s.privacyAuthority = authority }
+	return func(s *Server) {
+		s.privacyAuthority = authority
+		if authority != nil {
+			authority.SetAppAttestNotifier(s.sendAppAttestResult)
+		}
+	}
 }
 
 // WithCatalog injects a specific tier2.Catalog instance for this server.
@@ -4575,6 +4580,10 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 		s.handleSELivenessResponse(providerID, assignedID, payload)
 	case "privacy_posture_response":
 		s.handlePrivacyPostureResponse(providerID, assignedID, payload)
+	case privacyAppAttestEnrollRequestType:
+		s.handlePrivacyAppAttestEnrollRequest(providerID, assignedID, payload)
+	case privacyAppAttestEnrollmentType:
+		s.handlePrivacyAppAttestEnrollment(providerID, assignedID, payload)
 	case "native_mtp_tuple_offer_v1":
 		s.handleNativeMTPTupleOffer(providerID, assignedID, payload)
 	case "native_mtp_canary_result_v1":

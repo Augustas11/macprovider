@@ -18,6 +18,10 @@ import (
 const (
 	privacyClassHeader             = "X-MacProvider-Privacy-Class"
 	privacyPostureVerifiedAtHeader = "X-MacProvider-Privacy-Posture-Verified-At"
+	// SPEC-049 v0.2 (§4.2): the buyer requirement, reservation only, and
+	// the label the coordinator served a successful chat under.
+	privacyAssuranceRequiredHeader = "X-MacProvider-Privacy-Assurance-Required"
+	privacyAssuranceHeader         = "X-MacProvider-Privacy-Assurance"
 
 	privacyClassDisabled    = "privacy_class_disabled"
 	privacyClassUnavailable = "privacy_class_unavailable"
@@ -48,6 +52,33 @@ func privacyRequested(r *http.Request) (present, valid bool) {
 		return true, false
 	}
 	return true, value == relayblind.PrivacyClassV1
+}
+
+// privacyAssuranceRequired reads X-MacProvider-Privacy-Assurance-Required.
+// The only valid value is code_bound_attested; a repeated header, a list
+// value, or any other token is present and invalid.
+func privacyAssuranceRequired(r *http.Request) (present, valid bool) {
+	if r == nil {
+		return false, false
+	}
+	values := r.Header.Values(privacyAssuranceRequiredHeader)
+	if len(values) == 0 {
+		return false, false
+	}
+	if len(values) != 1 {
+		return true, false
+	}
+	value := strings.TrimSpace(values[0])
+	return true, value == relayblind.PrivacyAssuranceCodeBound
+}
+
+// reservationAssurance is the label a privacy reservation was granted.
+// Rows written before v0.2 carry no label and were Beta.
+func reservationAssurance(r relayblind.Reservation) string {
+	if r.PrivacyAssurance == "" {
+		return relayblind.PrivacyAssurance
+	}
+	return r.PrivacyAssurance
 }
 
 func privacyErrorMessage(code string) string {
@@ -97,27 +128,32 @@ func privacyObservedCode(code string, beforeConsume bool) string {
 }
 
 // privacyGate re-checks the SPEC-049 conditions for one live session. It
-// does not select a different provider.
-func (s *Server) privacyGate(ctx context.Context, provider pool.Provider, keyDigest string) (time.Time, string) {
+// does not select a different provider. A non-empty wantAssurance also
+// requires the session's current label to equal it (SPEC-049-R032); the
+// returned label is the one the coordinator verified.
+func (s *Server) privacyGate(ctx context.Context, provider pool.Provider, keyDigest, wantAssurance string) (time.Time, string, string) {
 	if s.privacyDisabledNow(ctx) {
-		return time.Time{}, privacyClassDisabled
+		return time.Time{}, "", privacyClassDisabled
 	}
 	if !s.relayBlindAvailable() {
-		return time.Time{}, privacyClassUnavailable
+		return time.Time{}, "", privacyClassUnavailable
 	}
 	current, live := s.pool.Resolve(provider.ProviderID, provider.AssignedID)
 	if !live || current.ProviderID == "" || current.AssignedID == "" || !current.IsWSTunneled() || !current.ServingCapable() {
-		return time.Time{}, privacyClassUnavailable
+		return time.Time{}, "", privacyClassUnavailable
 	}
 	quarantined, err := s.relayBlind.store.IsQuarantined(ctx, current.ProviderID, s.now())
 	if err != nil || quarantined {
-		return time.Time{}, privacyClassUnavailable
+		return time.Time{}, "", privacyClassUnavailable
 	}
-	verifiedAt, ok := s.privacyAuthority.Eligible(current.ProviderID, current.AssignedID, keyDigest, s.now())
-	if !ok || verifiedAt.Unix() <= 0 {
-		return time.Time{}, privacyClassUnavailable
+	verifiedAt, label, ok := s.privacyAuthority.EligibleAssurance(current.ProviderID, current.AssignedID, keyDigest, s.now())
+	if !ok || verifiedAt.Unix() <= 0 || !relayblind.ValidPrivacyAssurance(label) {
+		return time.Time{}, "", privacyClassUnavailable
 	}
-	return verifiedAt, ""
+	if wantAssurance != "" && label != wantAssurance {
+		return time.Time{}, "", privacyClassUnavailable
+	}
+	return verifiedAt, label, ""
 }
 
 type privacySelection struct {
@@ -126,12 +162,13 @@ type privacySelection struct {
 	attestation relayblind.PrivacyKeyAttestation
 	signature   string
 	verifiedAt  time.Time
+	assurance   string
 }
 
 // selectPrivacyProvider walks serving sessions and keeps only a fresh privacy
 // key whose posture gate and stored attestation both pass. It never returns a
 // relay-blind key.
-func (s *Server) selectPrivacyProvider(ctx context.Context, model string, encryptedBytes int64) (privacySelection, string) {
+func (s *Server) selectPrivacyProvider(ctx context.Context, model string, encryptedBytes int64, wantAssurance string) (privacySelection, string) {
 	if s.privacyDisabledNow(ctx) {
 		return privacySelection{}, privacyClassDisabled
 	}
@@ -149,21 +186,21 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, model string, encryp
 			continue
 		}
 		for _, record := range records {
-			verifiedAt, code := s.privacyGate(ctx, provider, record.KeyRecordDigest)
+			verifiedAt, label, code := s.privacyGate(ctx, provider, record.KeyRecordDigest, wantAssurance)
 			if code != "" {
 				continue
 			}
 			attestation, signature, err := s.relayBlind.store.LookupPrivacyAttestation(ctx, provider.ProviderID, record.KID, record.KeyRecordDigest)
-			if err != nil || attestation.KeyRecordDigest != record.KeyRecordDigest || attestation.NotBeforeUnix != record.NotBeforeUnix || attestation.ExpiresAtUnix != record.ExpiresAtUnix {
+			if err != nil || attestation.KeyRecordDigest != record.KeyRecordDigest || attestation.NotBeforeUnix != record.NotBeforeUnix || attestation.ExpiresAtUnix != record.ExpiresAtUnix || attestation.Assurance != label {
 				continue
 			}
-			return privacySelection{provider: provider, key: record, attestation: attestation, signature: signature, verifiedAt: verifiedAt}, ""
+			return privacySelection{provider: provider, key: record, attestation: attestation, signature: signature, verifiedAt: verifiedAt, assurance: label}, ""
 		}
 	}
 	return privacySelection{}, privacyClassUnavailable
 }
 
-func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Request, accountID, walletSession string) {
+func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Request, accountID, walletSession, wantAssurance string) {
 	if s.privacyDisabledNow(r.Context()) {
 		writePrivacyClassError(w, privacyClassDisabled, "")
 		return
@@ -186,20 +223,20 @@ func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Re
 		writeRelayBlindError(w, "relay_blind_route_reservation_invalid", "Invalid route reservation")
 		return
 	}
-	selected, code := s.selectPrivacyProvider(r.Context(), request.Model, request.EncryptedRequestBytes)
+	selected, code := s.selectPrivacyProvider(r.Context(), request.Model, request.EncryptedRequestBytes, wantAssurance)
 	if code != "" {
 		writePrivacyClassError(w, privacyObservedCode(code, true), "")
 		return
 	}
-	// One more gate immediately before the row is written. A failure here
-	// does not try another provider.
-	verifiedAt, code := s.privacyGate(r.Context(), selected.provider, selected.key.KeyRecordDigest)
+	// One more gate immediately before the row is written, holding the
+	// selected label. A failure here does not try another provider.
+	verifiedAt, _, code := s.privacyGate(r.Context(), selected.provider, selected.key.KeyRecordDigest, selected.assurance)
 	if code != "" {
 		writePrivacyClassError(w, privacyObservedCode(code, true), "")
 		return
 	}
 	attestation, signature, err := s.relayBlind.store.LookupPrivacyAttestation(r.Context(), selected.provider.ProviderID, selected.key.KID, selected.key.KeyRecordDigest)
-	if err != nil || attestation.KeyRecordDigest != selected.key.KeyRecordDigest || attestation.NotBeforeUnix != selected.key.NotBeforeUnix || attestation.ExpiresAtUnix != selected.key.ExpiresAtUnix || verifiedAt.Unix() <= 0 {
+	if err != nil || attestation.KeyRecordDigest != selected.key.KeyRecordDigest || attestation.NotBeforeUnix != selected.key.NotBeforeUnix || attestation.ExpiresAtUnix != selected.key.ExpiresAtUnix || attestation.Assurance != selected.assurance || verifiedAt.Unix() <= 0 {
 		writePrivacyClassError(w, privacyClassUnavailable, "")
 		return
 	}
@@ -213,6 +250,7 @@ func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Re
 		MaxEncryptedRequestBytes: request.EncryptedRequestBytes, MaxOutputTokens: request.MaxOutputTokens,
 		InputTokenUpperBound: request.InputTokenUpperBound, ExpiresAtUnix: expires, MaxActive: s.relayBlind.cfg.MaxActiveReservations,
 		ReplayRetention: time.Duration(s.relayBlind.cfg.ReplayRetentionSeconds) * time.Second, PrivacyClass: true,
+		PrivacyAssurance: selected.assurance,
 	}, s.now())
 	if err != nil {
 		if errors.Is(err, relayblind.ErrCapacity) {
@@ -229,7 +267,7 @@ func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Re
 		MaxOutputTokens: request.MaxOutputTokens, InputTokenUpperBound: request.InputTokenUpperBound,
 		ReservationTokenCap: request.InputTokenUpperBound + request.MaxOutputTokens, ExpiresAtUnix: expires,
 		CachePolicy: relayblind.CachePolicyNoStore, FailoverPolicy: relayblind.FailoverPolicyDisabled,
-		PrivacyClass: relayblind.PrivacyClassV1, PrivacyAssurance: relayblind.PrivacyAssurance,
+		PrivacyClass: relayblind.PrivacyClassV1, PrivacyAssurance: selected.assurance,
 		PrivacyKeyAttestation: &attestation, PrivacyKeyAttestationSignature: signature, PrivacyPostureVerifiedAtUnix: verifiedAt.Unix(),
 	}
 	w.Header().Set("Content-Type", "application/json")

@@ -17,10 +17,10 @@ const privacyQuarantineMaxSeconds = 86400 * 30
 
 func privacyClassCommand(args []string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("privacy-class requires status, disable, enable, quarantine, or unquarantine")
+		return errors.New("privacy-class requires status, disable, enable, quarantine, unquarantine, or revoke-app-attest-key")
 	}
 	switch args[0] {
-	case "status", "disable", "enable", "quarantine", "unquarantine":
+	case "status", "disable", "enable", "quarantine", "unquarantine", "revoke-app-attest-key":
 		return runPrivacyClass(args[0], args[1:], stdout)
 	default:
 		return errors.New("unknown privacy-class subcommand")
@@ -85,6 +85,23 @@ func runPrivacyClass(action string, args []string, stdout io.Writer) error {
 			return err
 		}
 		return writePrivacyClassStatus(ctx, store, stdout, now)
+	case "revoke-app-attest-key":
+		// SPEC-049-R033: the stored reason is always operator_revoked; the
+		// operator reason is required but not stored on the key row.
+		if err := privacyCLIProviderID(*providerID); err != nil {
+			return err
+		}
+		if err := privacyCLIReason(*reason); err != nil {
+			return err
+		}
+		revoked, err := store.RevokeActiveAppAttestKey(ctx, strings.TrimSpace(*providerID), relayblind.ReasonOperatorRevoked, now)
+		if err != nil {
+			return err
+		}
+		if !revoked {
+			return errors.New("provider has no active app attest key")
+		}
+		return writePrivacyClassStatus(ctx, store, stdout, now)
 	default:
 		return errors.New("unknown privacy-class subcommand")
 	}
@@ -124,6 +141,19 @@ func writePrivacyClassStatus(ctx context.Context, store *relayblind.Store, stdou
 	}
 	for _, item := range quarantines {
 		if _, err := fmt.Fprintf(stdout, "quarantine.provider_id=%s\nquarantine.reason=%s\nquarantine.quarantined_at_unix=%d\nquarantine.expires_at_unix=%d\n", item.ProviderID, item.Reason, item.QuarantinedAtUnix, item.ExpiresAtUnix); err != nil {
+			return err
+		}
+	}
+	// App Attest keys: public keyId, state, counter, and reason only.
+	keys, err := store.ListAppAttestKeys(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(stdout, "app_attest_key_count=%d\n", len(keys)); err != nil {
+		return err
+	}
+	for _, key := range keys {
+		if _, err := fmt.Fprintf(stdout, "app_attest_key.provider_id=%s\napp_attest_key.key_id=%s\napp_attest_key.state=%s\napp_attest_key.last_counter=%d\napp_attest_key.revoked_reason=%s\n", key.ProviderID, key.KeyID, key.State, key.LastCounter, key.RevokedReason); err != nil {
 			return err
 		}
 	}

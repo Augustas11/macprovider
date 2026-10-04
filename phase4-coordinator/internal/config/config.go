@@ -1058,6 +1058,16 @@ type PrivacyClassConfig struct {
 	PostureMaxAgeSeconds            int                    `yaml:"posture_max_age_seconds"`
 	PostureResponseTimeoutSeconds   int                    `yaml:"posture_response_timeout_seconds"`
 	QuarantineSeconds               int                    `yaml:"quarantine_seconds"`
+	CodeBound                       PrivacyCodeBoundConfig `yaml:"code_bound"`
+}
+
+// PrivacyCodeBoundConfig is the default-off SPEC-049-R034 code_bound_attested
+// switch. The Apple root, aclBlob, aaguid, bundle identifier, and child
+// signing identifier are compiled constants, never configuration.
+type PrivacyCodeBoundConfig struct {
+	Enabled                         bool   `yaml:"enabled"`
+	TeamID                          string `yaml:"team_id"`
+	MaxEnrollmentsPerProviderPerDay int    `yaml:"max_enrollments_per_provider_per_day"`
 }
 
 type AdmissionConfig struct {
@@ -1622,6 +1632,10 @@ func Default() Config {
 			PostureMaxAgeSeconds:            150,
 			PostureResponseTimeoutSeconds:   10,
 			QuarantineSeconds:               86400,
+			CodeBound: PrivacyCodeBoundConfig{
+				Enabled:                         false,
+				MaxEnrollmentsPerProviderPerDay: 3,
+			},
 		},
 		Admission: AdmissionConfig{
 			PinnedOnly:                      false,
@@ -4211,6 +4225,9 @@ func (c Config) validatePrivacyClass() error {
 			live++
 		}
 	}
+	if err := pc.validateCodeBound(); err != nil {
+		return err
+	}
 	if !pc.Enabled {
 		return nil
 	}
@@ -4222,6 +4239,25 @@ func (c Config) validatePrivacyClass() error {
 	}
 	if live == 0 {
 		return fmt.Errorf("privacy_class.approved_code_identities must contain an unexpired identity when enabled")
+	}
+	return nil
+}
+
+// validateCodeBound applies SPEC-049-R034. A disabled block is not
+// otherwise constrained, so older literal configs stay valid.
+func (pc PrivacyClassConfig) validateCodeBound() error {
+	cb := pc.CodeBound
+	if !cb.Enabled {
+		return nil
+	}
+	if !pc.Enabled {
+		return fmt.Errorf("privacy_class.code_bound.enabled requires privacy_class.enabled")
+	}
+	if !privacyTeamID(cb.TeamID) {
+		return fmt.Errorf("privacy_class.code_bound.team_id must be 10 characters from A-Z and 0-9")
+	}
+	if cb.MaxEnrollmentsPerProviderPerDay < 1 || cb.MaxEnrollmentsPerProviderPerDay > 10 {
+		return fmt.Errorf("privacy_class.code_bound.max_enrollments_per_provider_per_day must be in [1,10]")
 	}
 	return nil
 }

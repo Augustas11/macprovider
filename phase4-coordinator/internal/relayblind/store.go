@@ -73,6 +73,9 @@ type Reservation struct {
 	CompletionTokens         *int64
 	PrivacyClass             bool
 	TerminalCode             string
+	// PrivacyAssurance is the SPEC-049 label granted at reservation; empty
+	// for non-privacy rows and for privacy rows written before v0.2.
+	PrivacyAssurance string
 }
 
 // KeySession is one provider session that currently holds a fresh key of a class.
@@ -97,6 +100,7 @@ type ReservationCreate struct {
 	MaxActive                int
 	ReplayRetention          time.Duration
 	PrivacyClass             bool
+	PrivacyAssurance         string
 }
 
 type ConsumeInput struct {
@@ -478,7 +482,7 @@ func (s *Store) CreateReservation(ctx context.Context, in ReservationCreate, now
 		}
 	}
 	cap := in.InputTokenUpperBound + in.MaxOutputTokens
-	_, err = tx.ExecContext(ctx, `INSERT INTO relay_blind_reservations(provider_binding,buyer_binding,account_id,wallet_session,provider_id,assigned_session,key_record_digest,kid,model,provider_model,stream,max_encrypted_request_bytes,max_output_tokens,input_token_upper_bound,reservation_token_cap,expires_at_unix,state,created_at_unix,privacy_class) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, providerBinding, buyerBinding, in.AccountID, in.WalletSession, in.ProviderID, in.AssignedSession, in.KeyRecord.KeyRecordDigest, in.KeyRecord.KID, in.Model, in.ProviderModel, boolInt(in.Stream), in.MaxEncryptedRequestBytes, in.MaxOutputTokens, in.InputTokenUpperBound, cap, in.ExpiresAtUnix, ReservationStateReserved, now.Unix(), boolInt(in.PrivacyClass))
+	_, err = tx.ExecContext(ctx, `INSERT INTO relay_blind_reservations(provider_binding,buyer_binding,account_id,wallet_session,provider_id,assigned_session,key_record_digest,kid,model,provider_model,stream,max_encrypted_request_bytes,max_output_tokens,input_token_upper_bound,reservation_token_cap,expires_at_unix,state,created_at_unix,privacy_class,privacy_assurance) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, providerBinding, buyerBinding, in.AccountID, in.WalletSession, in.ProviderID, in.AssignedSession, in.KeyRecord.KeyRecordDigest, in.KeyRecord.KID, in.Model, in.ProviderModel, boolInt(in.Stream), in.MaxEncryptedRequestBytes, in.MaxOutputTokens, in.InputTokenUpperBound, cap, in.ExpiresAtUnix, ReservationStateReserved, now.Unix(), boolInt(in.PrivacyClass), in.PrivacyAssurance)
 	if err != nil {
 		return Reservation{}, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
@@ -825,7 +829,7 @@ func (s *Store) RecoverUncertain(ctx context.Context, now time.Time) (int64, err
 	return res.RowsAffected()
 }
 
-const reservationSelect = `SELECT provider_binding,buyer_binding,account_id,wallet_session,provider_id,assigned_session,key_record_digest,kid,model,provider_model,stream,max_encrypted_request_bytes,max_output_tokens,input_token_upper_bound,reservation_token_cap,expires_at_unix,state,COALESCE(envelope_digest,''),COALESCE(execution_auth_digest,''),COALESCE(request_id,''),validated_input_tokens,effective_privacy_outcome,COALESCE(internal_request_id,''),completion_tokens,privacy_class,COALESCE(terminal_code,'') FROM relay_blind_reservations`
+const reservationSelect = `SELECT provider_binding,buyer_binding,account_id,wallet_session,provider_id,assigned_session,key_record_digest,kid,model,provider_model,stream,max_encrypted_request_bytes,max_output_tokens,input_token_upper_bound,reservation_token_cap,expires_at_unix,state,COALESCE(envelope_digest,''),COALESCE(execution_auth_digest,''),COALESCE(request_id,''),validated_input_tokens,effective_privacy_outcome,COALESCE(internal_request_id,''),completion_tokens,privacy_class,COALESCE(terminal_code,''),privacy_assurance FROM relay_blind_reservations`
 
 type reservationRow struct {
 	Reservation
@@ -837,7 +841,7 @@ type rowScanner interface{ Scan(...any) error }
 func scanReservation(row rowScanner) (reservationRow, error) {
 	var r reservationRow
 	var stream, privacyClass int
-	err := row.Scan(&r.ProviderBinding, &r.BuyerBinding, &r.AccountID, &r.WalletSession, &r.ProviderID, &r.AssignedSession, &r.KeyRecordDigest, &r.KID, &r.Model, &r.ProviderModel, &stream, &r.MaxEncryptedRequestBytes, &r.MaxOutputTokens, &r.InputTokenUpperBound, &r.ReservationTokenCap, &r.ExpiresAtUnix, &r.State, &r.EnvelopeDigest, &r.ExecutionAuthDigest, &r.RequestID, &r.ValidatedInputTokens, &r.EffectivePrivacyOutcome, &r.InternalRequestID, &r.CompletionTokens, &privacyClass, &r.TerminalCode)
+	err := row.Scan(&r.ProviderBinding, &r.BuyerBinding, &r.AccountID, &r.WalletSession, &r.ProviderID, &r.AssignedSession, &r.KeyRecordDigest, &r.KID, &r.Model, &r.ProviderModel, &stream, &r.MaxEncryptedRequestBytes, &r.MaxOutputTokens, &r.InputTokenUpperBound, &r.ReservationTokenCap, &r.ExpiresAtUnix, &r.State, &r.EnvelopeDigest, &r.ExecutionAuthDigest, &r.RequestID, &r.ValidatedInputTokens, &r.EffectivePrivacyOutcome, &r.InternalRequestID, &r.CompletionTokens, &privacyClass, &r.TerminalCode, &r.PrivacyAssurance)
 	r.Stream = stream == 1
 	r.PrivacyClass = privacyClass != 0
 	if r.ValidatedInputTokens.Valid {
@@ -944,7 +948,7 @@ CREATE TABLE IF NOT EXISTS privacy_class_control (
 	if err != nil {
 		return fmt.Errorf("%w: migrate privacy class: %v", ErrStoreUnavailable, err)
 	}
-	return nil
+	return s.ensureAppAttestSchema(ctx)
 }
 
 func (s *Store) addColumnIfMissing(ctx context.Context, table, column, alter string) error {
@@ -1073,6 +1077,13 @@ func (s *Store) QuarantineAndRevokePrivacy(ctx context.Context, providerID, reas
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE relay_blind_reservations SET state='rejected',terminal_code='relay_blind_key_expired',terminal_at_unix=? WHERE provider_id=? AND privacy_class=1 AND state IN ('reserved','consumed_predispatch')`, now.Unix(), providerID); err != nil {
 		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	// SPEC-049-R033: a §4.12 quarantine reason also revokes the provider's
+	// active App Attest key with that reason, in the same transaction.
+	if quarantines, _ := AppAttestReasonQuarantines(reason); quarantines {
+		if _, err := tx.ExecContext(ctx, `UPDATE privacy_app_attest_keys SET state='revoked',revoked_reason=?,revoked_at_unix=? WHERE provider_id=? AND state='active'`, reason, now.Unix(), providerID); err != nil {
+			return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)

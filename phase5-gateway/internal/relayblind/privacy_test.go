@@ -883,3 +883,35 @@ func TestPrivacyResponseShapeRejectsClearContent(t *testing.T) {
 		t.Fatal("content-bearing usage chunk accepted")
 	}
 }
+
+// SPEC-049 v0.2.0: a reservation may carry either label, but its
+// privacy_assurance must equal the signed key attestation's assurance.
+func TestPrivacyReservationAssuranceLabels(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	reservation, pin, identity := testPrivacyReservation(t, now)
+	codeBound := *reservation.PrivacyKeyAttestation
+	codeBound.Assurance = PrivacyAssuranceCodeBound
+	signature := signAttestation(t, identity, codeBound)
+	if err := codeBound.Verify(pin, signature, reservation.KeyRecord); err != nil {
+		t.Fatalf("code-bound attestation: %v", err)
+	}
+	reservation.PrivacyKeyAttestation = &codeBound
+	reservation.PrivacyKeyAttestationSignature = signature
+	reservation.PrivacyAssurance = PrivacyAssuranceCodeBound
+	if _, err := ParseReservationResponse(mustJSON(t, reservation)); err != nil {
+		t.Fatalf("code-bound reservation: %v", err)
+	}
+	mismatch := reservation
+	mismatch.PrivacyAssurance = PrivacyAssurance
+	if _, err := ParseReservationResponse(mustJSON(t, mismatch)); err == nil {
+		t.Fatal("reservation label differing from its attestation accepted")
+	}
+	unknown := codeBound
+	unknown.Assurance = "code_bound_attested_v2"
+	if _, err := unknown.Framing(); err == nil {
+		t.Fatal("unknown assurance label accepted")
+	}
+	if !ValidPrivacyAssurance(PrivacyAssurance) || !ValidPrivacyAssurance(PrivacyAssuranceCodeBound) || ValidPrivacyAssurance("") {
+		t.Fatal("ValidPrivacyAssurance")
+	}
+}

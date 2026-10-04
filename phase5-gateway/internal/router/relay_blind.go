@@ -112,6 +112,17 @@ func (s *Server) handleRelayBlindRouteReservations(w http.ResponseWriter, r *htt
 		writePrivacyClassError(w, privacyClassDisabled, "")
 		return
 	}
+	// SPEC-049 §4.2/R032: the assurance requirement is valid only as
+	// code_bound_attested and only beside the class marker.
+	requirePresent, requireValid := privacyAssuranceRequired(r)
+	if requirePresent && (!present || !requireValid) {
+		writePrivacyClassError(w, privacyClassDowngrade, "")
+		return
+	}
+	requireAssurance := ""
+	if requirePresent {
+		requireAssurance = privacyAssuranceCodeBound
+	}
 	req, err := decodeRelayBlindRouteReservation(body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "relay_blind_route_reservation_invalid", "Invalid relay-blind route reservation")
@@ -148,7 +159,7 @@ func (s *Server) handleRelayBlindRouteReservations(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusServiceUnavailable, "api_error", "relay_blind_disabled", "Relay-blind request encryption is disabled")
 		return
 	}
-	s.reserveRelayBlindRoute(w, r, authn, req, present)
+	s.reserveRelayBlindRoute(w, r, authn, req, present, requireAssurance)
 }
 
 func decodeRelayBlindRouteReservation(body []byte) (relayBlindRouteReservationRequest, error) {

@@ -32,6 +32,7 @@ const (
 	privacyClassHeader              = "X-MacProvider-Privacy-Class"
 	privacyAssuranceHeader          = "X-MacProvider-Privacy-Assurance"
 	privacyResponseEncryptionHeader = "X-MacProvider-Response-Encryption"
+	privacyAssuranceRequiredHeader  = "X-MacProvider-Privacy-Assurance-Required"
 	// maxPrivacyResponseBytes bounds the buyer-side buffer. Plaintext is
 	// held until the final frame, usage, and headers all verify.
 	maxPrivacyResponseBytes = 16 << 20
@@ -41,6 +42,64 @@ const (
 // SPEC-049-R020 disclosure. These strings are fixed; the client prints them
 // and rejects a response whose usage.macprovider.privacy object differs.
 const privacyScope = "request_and_response_content_hidden_from_relays; provider_runtime_reads_plaintext; ordinary_operator_access_paths_constrained_on_approved_signed_runtime; posture_self_attested_device_bound_not_code_bound"
+
+// SPEC-049-R020 strings for code_bound_attested (v0.2).
+const privacyCodeBoundScope = "request_and_response_content_hidden_from_relays; provider_runtime_reads_plaintext; ordinary_operator_access_paths_constrained_on_approved_signed_runtime; posture_signed_by_apple_attested_malibu_app_key; runtime_code_identity_checked_by_attested_app_not_by_apple; sip_and_full_security_attested_at_enrollment; label_verified_by_coordinator_not_by_buyer"
+
+var privacyCodeBoundProtects = []string{
+	"request_content_from_gateway_and_coordinator",
+	"response_content_from_gateway_and_coordinator",
+	"debugger_attach_to_approved_signed_runtime",
+	"core_dumps_of_approved_signed_runtime",
+	"prompt_and_completion_in_provider_logs_traces_receipts_and_telemetry",
+	"prompt_and_completion_in_provider_disk_and_conversation_caches",
+	"plaintext_proxy_or_subprocess_runtime_hop",
+	"dev_debug_unsigned_or_unapproved_builds_refused_by_routing",
+	"sip_disabled_hosts_refused_by_routing",
+	"modified_or_resigned_runtime_binary_refused_by_attested_app_check",
+	"modified_or_resigned_malibu_app_cannot_sign_posture",
+	"posture_replay_refused_by_attested_counter",
+}
+
+var privacyCodeBoundDoesNotProtect = []string{
+	"provider_runtime_reads_plaintext_to_infer",
+	"request_metadata_visible_to_relays",
+	"confidential_compute_or_hardware_enclave_execution",
+	"end_to_end_encryption_excluding_the_provider",
+	"pool_scoped_requests",
+	"kernel_or_firmware_compromise_with_sip_on",
+	"compromised_team_signing_key",
+}
+
+var privacyCodeBoundResidualRisks = []string{
+	"kernel_or_firmware_compromise_with_sip_on",
+	"physical_or_hardware_attack",
+	"gpu_and_unified_memory_residue",
+	"encrypted_swap_and_hibernation_images",
+	"compromise_of_the_live_runtime_process",
+	"malicious_signed_release_or_supply_chain",
+	"compromised_team_signing_key",
+	"apple_is_root_of_trust_for_app_attest",
+	"sip_and_full_security_attested_at_enrollment_only",
+	"label_verified_by_coordinator_not_by_buyer",
+	"crash_report_register_and_stack_residue",
+	"immutable_prompt_strings_not_zeroized",
+	"relays_observe_sizes_timing_and_token_counts",
+}
+
+// privacyStrings is one SPEC-049-R020 string set.
+type privacyStrings struct {
+	scope                                   string
+	protects, doesNotProtect, residualRisks []string
+}
+
+// privacyStringsFor returns the string set for a verified label.
+func privacyStringsFor(assurance string) privacyStrings {
+	if assurance == relayblind.PrivacyAssuranceCodeBound {
+		return privacyStrings{privacyCodeBoundScope, privacyCodeBoundProtects, privacyCodeBoundDoesNotProtect, privacyCodeBoundResidualRisks}
+	}
+	return privacyStrings{privacyScope, privacyProtects, privacyDoesNotProtect, privacyResidualRisks}
+}
 
 var privacyProtects = []string{
 	"request_content_from_gateway_and_coordinator",
@@ -82,6 +141,8 @@ type options struct {
 	maxOutputTokens, inputTokenUpperBound                                               int64
 	stream, privacyClass                                                                bool
 	timeout                                                                             time.Duration
+	// privacyAssuranceRequired is empty or code_bound_attested.
+	privacyAssuranceRequired string
 }
 
 func main() {
@@ -94,11 +155,20 @@ func main() {
 	flag.Int64Var(&opts.inputTokenUpperBound, "input-token-upper-bound", 0, "declared input token upper bound")
 	flag.BoolVar(&opts.stream, "stream", false, "request streaming response")
 	flag.BoolVar(&opts.privacyClass, "privacy-class", false, "request operator_constrained_beta_v1 and decrypt the provider response")
+	flag.StringVar(&opts.privacyAssuranceRequired, "privacy-assurance-required", "", "with --privacy-class, require this assurance label (only code_bound_attested)")
+	requireCodeBound := flag.Bool("require-code-bound", false, "shorthand for --privacy-assurance-required code_bound_attested")
 	flag.StringVar(&opts.apiKeyEnv, "api-key-env", "MACPROVIDER_API_KEY", "environment variable containing the bearer credential")
 	flag.StringVar(&opts.walletSessionID, "wallet-session-id", "", "optional SPEC-040 wallet session ID")
 	flag.StringVar(&opts.walletSessionKeyEnv, "wallet-session-key-env", "MACPROVIDER_WALLET_SESSION_PRIVATE_KEY", "environment variable containing an optional Ed25519 wallet-session private key")
 	flag.DurationVar(&opts.timeout, "timeout", 5*time.Minute, "whole-command timeout")
 	flag.Parse()
+	if *requireCodeBound {
+		if opts.privacyAssuranceRequired != "" && opts.privacyAssuranceRequired != relayblind.PrivacyAssuranceCodeBound {
+			fmt.Fprintln(os.Stderr, "relay-blind-client: --require-code-bound conflicts with --privacy-assurance-required")
+			os.Exit(1)
+		}
+		opts.privacyAssuranceRequired = relayblind.PrivacyAssuranceCodeBound
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
 	defer cancel()
@@ -109,6 +179,9 @@ func main() {
 }
 
 func run(ctx context.Context, opts options, stdin io.Reader, stdout, stderr io.Writer, getenv func(string) string) error {
+	if opts.privacyAssuranceRequired != "" && (!opts.privacyClass || opts.privacyAssuranceRequired != relayblind.PrivacyAssuranceCodeBound) {
+		return errors.New("--privacy-assurance-required accepts only code_bound_attested and requires --privacy-class")
+	}
 	base, err := validateBaseURL(opts.baseURL)
 	if err != nil {
 		return err
@@ -158,7 +231,7 @@ func run(ctx context.Context, opts options, stdin io.Reader, stdout, stderr io.W
 	if err != nil {
 		return err
 	}
-	reservationRaw, err := doJSON(ctx, base, "/v1/relay-blind/route-reservations", bearer, opts.walletSessionID, sessionKey, reservationRequestID, reservationBody, opts.privacyClass)
+	reservationRaw, err := doJSON(ctx, base, "/v1/relay-blind/route-reservations", bearer, opts.walletSessionID, sessionKey, reservationRequestID, reservationBody, opts.privacyClass, opts.privacyAssuranceRequired)
 	if err != nil {
 		return fmt.Errorf("route reservation failed: %w", err)
 	}
@@ -177,7 +250,7 @@ func run(ctx context.Context, opts options, stdin io.Reader, stdout, stderr io.W
 		return fmt.Errorf("provider key record rejected: %w", err)
 	}
 	if opts.privacyClass {
-		if err := requirePrivacyReservation(reservation, pin); err != nil {
+		if err := requirePrivacyReservation(reservation, pin, opts.privacyAssuranceRequired); err != nil {
 			return err
 		}
 	} else if reservation.Version != relayblind.ReservationVersion {
@@ -230,7 +303,7 @@ func run(ctx context.Context, opts options, stdin io.Reader, stdout, stderr io.W
 	}
 	zeroBytes(buyerKey)
 
-	request, err := newSignedRequest(ctx, base, "/v1/chat/completions", bearer, opts.walletSessionID, sessionKey, inferenceRequestID, envelopeBody, opts.privacyClass)
+	request, err := newSignedRequest(ctx, base, "/v1/chat/completions", bearer, opts.walletSessionID, sessionKey, inferenceRequestID, envelopeBody, opts.privacyClass, "")
 	if err != nil {
 		return err
 	}
@@ -243,11 +316,11 @@ func run(ctx context.Context, opts options, stdin io.Reader, stdout, stderr io.W
 	}
 	defer response.Body.Close()
 	if opts.privacyClass {
-		if err := copyPrivacyResponse(response, envelope.Stream, responseKeys, envelopeDigest, envelope.KID, envelope.RequestID, reservation.InputTokenUpperBound, reservation.MaxOutputTokens, stdout); err != nil {
+		if err := copyPrivacyResponse(response, envelope.Stream, responseKeys, envelopeDigest, envelope.KID, envelope.RequestID, reservation.InputTokenUpperBound, reservation.MaxOutputTokens, reservation.PrivacyAssurance, stdout); err != nil {
 			return err
 		}
 		zeroResponseKeys(&responseKeys)
-		writePrivacySuccess(stderr, pin.Fingerprint)
+		writePrivacySuccess(stderr, pin.Fingerprint, reservation.PrivacyAssurance)
 		return nil
 	}
 	if err := copyVerifiedResponse(response, opts.stream, stdout); err != nil {
@@ -341,13 +414,16 @@ func copyVerifiedResponse(response *http.Response, stream bool, stdout io.Writer
 	return nil
 }
 
-func requirePrivacyReservation(reservation relayblind.ReservationResponse, pin relayblind.IdentityPin) error {
+func requirePrivacyReservation(reservation relayblind.ReservationResponse, pin relayblind.IdentityPin, required string) error {
 	if reservation.Version != relayblind.PrivacyReservationVersion {
 		return errors.New("privacy class reservation rejected")
 	}
 	attestation := reservation.PrivacyKeyAttestation
-	if reservation.PrivacyClass != relayblind.PrivacyClassV1 || reservation.PrivacyAssurance != relayblind.PrivacyAssurance || attestation == nil || attestation.Assurance != relayblind.PrivacyAssurance {
+	if reservation.PrivacyClass != relayblind.PrivacyClassV1 || !relayblind.ValidPrivacyAssurance(reservation.PrivacyAssurance) || attestation == nil || attestation.Assurance != reservation.PrivacyAssurance {
 		return errors.New("privacy assurance rejected")
+	}
+	if required != "" && reservation.PrivacyAssurance != required {
+		return errors.New("privacy assurance requirement not met")
 	}
 	if err := attestation.Verify(pin, reservation.PrivacyKeyAttestationSignature, reservation.KeyRecord); err != nil {
 		return fmt.Errorf("privacy key attestation rejected: %w", err)
@@ -355,21 +431,21 @@ func requirePrivacyReservation(reservation relayblind.ReservationResponse, pin r
 	return nil
 }
 
-func copyPrivacyResponse(response *http.Response, stream bool, keys relayblind.ResponseKeys, envelopeDigest, kid, requestID string, inputCap, outputCap int64, stdout io.Writer) error {
+func copyPrivacyResponse(response *http.Response, stream bool, keys relayblind.ResponseKeys, envelopeDigest, kid, requestID string, inputCap, outputCap int64, assurance string, stdout io.Writer) error {
 	defer zeroResponseKeys(&keys)
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return privacyDoNotResubmit(fmt.Sprintf("encrypted request returned HTTP %d", response.StatusCode))
 	}
-	if err := requirePrivacyResponseHeaders(response.Header); err != nil {
+	if err := requirePrivacyResponseHeaders(response.Header, assurance); err != nil {
 		return err
 	}
 	if stream {
-		return copyPrivacyStream(response.Body, keys, envelopeDigest, kid, requestID, inputCap, outputCap, stdout)
+		return copyPrivacyStream(response.Body, keys, envelopeDigest, kid, requestID, inputCap, outputCap, assurance, stdout)
 	}
-	return copyPrivacyNonStream(response.Body, keys, envelopeDigest, kid, requestID, inputCap, outputCap, stdout)
+	return copyPrivacyNonStream(response.Body, keys, envelopeDigest, kid, requestID, inputCap, outputCap, assurance, stdout)
 }
 
-func requirePrivacyResponseHeaders(h http.Header) error {
+func requirePrivacyResponseHeaders(h http.Header, assurance string) error {
 	checks := []struct {
 		name string
 		want string
@@ -377,7 +453,7 @@ func requirePrivacyResponseHeaders(h http.Header) error {
 		{"X-MacProvider-Requested-Privacy-Mode", "relay_blind_required"},
 		{"X-MacProvider-Effective-Privacy-Outcome", "relay_blind_satisfied"},
 		{privacyClassHeader, relayblind.PrivacyClassV1},
-		{privacyAssuranceHeader, relayblind.PrivacyAssurance},
+		{privacyAssuranceHeader, assurance},
 		{privacyResponseEncryptionHeader, relayblind.PrivacyResponseEncryption},
 	}
 	for _, check := range checks {
@@ -389,7 +465,7 @@ func requirePrivacyResponseHeaders(h http.Header) error {
 	return nil
 }
 
-func copyPrivacyNonStream(body io.Reader, keys relayblind.ResponseKeys, envelopeDigest, kid, requestID string, inputCap, outputCap int64, stdout io.Writer) error {
+func copyPrivacyNonStream(body io.Reader, keys relayblind.ResponseKeys, envelopeDigest, kid, requestID string, inputCap, outputCap int64, assurance string, stdout io.Writer) error {
 	raw, err := io.ReadAll(io.LimitReader(body, maxPrivacyResponseBytes+1))
 	if err != nil {
 		return privacyDoNotResubmit("incomplete privacy response")
@@ -405,7 +481,7 @@ func copyPrivacyNonStream(body io.Reader, keys relayblind.ResponseKeys, envelope
 	if err != nil {
 		return err
 	}
-	return commitPrivacyPlaintext(plaintexts, finalRaw, usage, inputCap, outputCap, stdout)
+	return commitPrivacyPlaintext(plaintexts, finalRaw, usage, inputCap, outputCap, assurance, stdout)
 }
 
 func parsePrivacyResponse(raw []byte) ([]relayblind.PrivacyFrame, json.RawMessage, error) {
@@ -440,7 +516,7 @@ func parsePrivacyResponse(raw []byte) ([]relayblind.PrivacyFrame, json.RawMessag
 	return frames, body.Usage, nil
 }
 
-func copyPrivacyStream(body io.Reader, keys relayblind.ResponseKeys, envelopeDigest, kid, requestID string, inputCap, outputCap int64, stdout io.Writer) error {
+func copyPrivacyStream(body io.Reader, keys relayblind.ResponseKeys, envelopeDigest, kid, requestID string, inputCap, outputCap int64, assurance string, stdout io.Writer) error {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 4096), maxPrivacyStreamLine)
 	var frames []relayblind.PrivacyFrame
@@ -514,7 +590,7 @@ func copyPrivacyStream(body io.Reader, keys relayblind.ResponseKeys, envelopeDig
 	if err != nil {
 		return err
 	}
-	return commitPrivacyPlaintext(plaintexts, finalRaw, usage, inputCap, outputCap, stdout)
+	return commitPrivacyPlaintext(plaintexts, finalRaw, usage, inputCap, outputCap, assurance, stdout)
 }
 
 func privacyFramePayload(data string) bool {
@@ -577,7 +653,7 @@ func openPrivacyFrames(keys relayblind.ResponseKeys, envelopeDigest, kid, reques
 	return plaintexts, finalRaw, nil
 }
 
-func commitPrivacyPlaintext(plaintexts [][]byte, finalRaw []byte, usage json.RawMessage, inputCap, outputCap int64, stdout io.Writer) error {
+func commitPrivacyPlaintext(plaintexts [][]byte, finalRaw []byte, usage json.RawMessage, inputCap, outputCap int64, assurance string, stdout io.Writer) error {
 	final, err := relayblind.ParsePrivacyFinal(finalRaw)
 	zeroBytes(finalRaw)
 	if err != nil {
@@ -588,7 +664,7 @@ func commitPrivacyPlaintext(plaintexts [][]byte, finalRaw []byte, usage json.Raw
 		zeroSlices(plaintexts)
 		return privacyDoNotResubmit("privacy response was not complete")
 	}
-	if err := privacyUsageAgrees(usage, final, inputCap, outputCap); err != nil {
+	if err := privacyUsageAgrees(usage, final, inputCap, outputCap, assurance); err != nil {
 		zeroSlices(plaintexts)
 		return err
 	}
@@ -605,7 +681,7 @@ func commitPrivacyPlaintext(plaintexts [][]byte, finalRaw []byte, usage json.Raw
 	return nil
 }
 
-func privacyUsageAgrees(raw json.RawMessage, final relayblind.PrivacyFinal, inputCap, outputCap int64) error {
+func privacyUsageAgrees(raw json.RawMessage, final relayblind.PrivacyFinal, inputCap, outputCap int64, assurance string) error {
 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) || rejectDuplicateKeys(raw) != nil {
 		return privacyDoNotResubmit("privacy usage mismatch")
 	}
@@ -632,10 +708,10 @@ func privacyUsageAgrees(raw json.RawMessage, final relayblind.PrivacyFinal, inpu
 	if *usage.PromptTokens != prompt || *usage.CompletionTokens != completion || *usage.TotalTokens != prompt+completion {
 		return privacyDoNotResubmit("privacy usage mismatch")
 	}
-	return privacyMetadataAgrees(usage.Macprovider)
+	return privacyMetadataAgrees(usage.Macprovider, assurance)
 }
 
-func privacyMetadataAgrees(raw json.RawMessage) error {
+func privacyMetadataAgrees(raw json.RawMessage, assurance string) error {
 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) || rejectDuplicateKeys(raw) != nil {
 		return privacyDoNotResubmit("missing successful privacy usage metadata")
 	}
@@ -652,7 +728,7 @@ func privacyMetadataAgrees(raw json.RawMessage) error {
 	if json.Unmarshal(raw, &meta) != nil || meta.Requested != "relay_blind_required" || meta.Effective != "relay_blind_satisfied" || meta.Scope != requestScope || meta.Settlement.Verified != "unavailable_for_relay_blind_request" || meta.Settlement.Usage != "standard_usage_settlement_and_clear_cap_enforcement_still_apply" {
 		return privacyDoNotResubmit("missing successful privacy usage metadata")
 	}
-	return privacyDisclosureAgrees(meta.Privacy)
+	return privacyDisclosureAgrees(meta.Privacy, assurance)
 }
 
 type privacyDisclosure struct {
@@ -665,7 +741,7 @@ type privacyDisclosure struct {
 	PostureVerifiedAtUnix int64    `json:"posture_verified_at_unix"`
 }
 
-func privacyDisclosureAgrees(raw json.RawMessage) error {
+func privacyDisclosureAgrees(raw json.RawMessage, assurance string) error {
 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) || rejectDuplicateKeys(raw) != nil {
 		return privacyDoNotResubmit("privacy class disclosure rejected")
 	}
@@ -678,15 +754,17 @@ func privacyDisclosureAgrees(raw json.RawMessage) error {
 	if err := dec.Decode(&struct{}{}); err != io.EOF {
 		return privacyDoNotResubmit("privacy class disclosure rejected")
 	}
-	if got.Class != relayblind.PrivacyClassV1 || got.Assurance != relayblind.PrivacyAssurance || got.Scope != privacyScope || got.PostureVerifiedAtUnix <= 0 || !stringSlicesEqual(got.Protects, privacyProtects) || !stringSlicesEqual(got.DoesNotProtect, privacyDoesNotProtect) || !stringSlicesEqual(got.ResidualRisks, privacyResidualRisks) {
+	want := privacyStringsFor(assurance)
+	if !relayblind.ValidPrivacyAssurance(assurance) || got.Class != relayblind.PrivacyClassV1 || got.Assurance != assurance || got.Scope != want.scope || got.PostureVerifiedAtUnix <= 0 || !stringSlicesEqual(got.Protects, want.protects) || !stringSlicesEqual(got.DoesNotProtect, want.doesNotProtect) || !stringSlicesEqual(got.ResidualRisks, want.residualRisks) {
 		return privacyDoNotResubmit("privacy class disclosure rejected")
 	}
 	return nil
 }
 
-func writePrivacySuccess(stderr io.Writer, fingerprint string) {
-	fmt.Fprintf(stderr, "privacy class satisfied; identity fingerprint=%s\nprivacy_class: %s\nassurance: %s\nscope: %s\n", fingerprint, relayblind.PrivacyClassV1, relayblind.PrivacyAssurance, privacyScope)
-	for _, risk := range privacyResidualRisks {
+func writePrivacySuccess(stderr io.Writer, fingerprint, assurance string) {
+	set := privacyStringsFor(assurance)
+	fmt.Fprintf(stderr, "privacy class satisfied; identity fingerprint=%s\nprivacy_class: %s\nassurance: %s\nscope: %s\n", fingerprint, relayblind.PrivacyClassV1, assurance, set.scope)
+	for _, risk := range set.residualRisks {
 		fmt.Fprintf(stderr, "residual_risks: %s\n", risk)
 	}
 	fmt.Fprintf(stderr, "verified_model_settlement: unavailable_for_relay_blind_request\nusage_settlement: standard_usage_settlement_and_clear_cap_enforcement_still_apply\n")
@@ -728,8 +806,8 @@ func stringSlicesEqual(a, b []string) bool {
 	return true
 }
 
-func doJSON(ctx context.Context, base *url.URL, path, bearer, sessionID string, sessionKey ed25519.PrivateKey, requestID string, body []byte, privacy bool) ([]byte, error) {
-	request, err := newSignedRequest(ctx, base, path, bearer, sessionID, sessionKey, requestID, body, privacy)
+func doJSON(ctx context.Context, base *url.URL, path, bearer, sessionID string, sessionKey ed25519.PrivateKey, requestID string, body []byte, privacy bool, requireAssurance string) ([]byte, error) {
+	request, err := newSignedRequest(ctx, base, path, bearer, sessionID, sessionKey, requestID, body, privacy, requireAssurance)
 	if err != nil {
 		return nil, err
 	}
@@ -751,7 +829,7 @@ func doJSON(ctx context.Context, base *url.URL, path, bearer, sessionID string, 
 	return raw, nil
 }
 
-func newSignedRequest(ctx context.Context, base *url.URL, path, bearer, sessionID string, sessionKey ed25519.PrivateKey, requestID string, body []byte, privacy bool) (*http.Request, error) {
+func newSignedRequest(ctx context.Context, base *url.URL, path, bearer, sessionID string, sessionKey ed25519.PrivateKey, requestID string, body []byte, privacy bool, requireAssurance string) (*http.Request, error) {
 	target := *base
 	target.Path = strings.TrimRight(target.Path, "/") + path
 	target.RawPath = ""
@@ -767,6 +845,9 @@ func newSignedRequest(ctx context.Context, base *url.URL, path, bearer, sessionI
 		// Wallet profiles do not list this header. Set it before signing so
 		// a profile that names it covers the marker; today the hash is unchanged.
 		request.Header.Set(privacyClassHeader, relayblind.PrivacyClassV1)
+		if requireAssurance != "" {
+			request.Header.Set(privacyAssuranceRequiredHeader, requireAssurance)
+		}
 	}
 	if len(sessionKey) == 0 {
 		return request, nil

@@ -86,7 +86,7 @@ func relayBlindPoolSelected(r *http.Request) bool {
 
 // Internal requests are built from an empty header set: browser-supplied routing,
 // wallet identity, execution authority, and credentials cannot cross this boundary.
-func (s *Server) relayBlindUpstream(r *http.Request, method, path, account, session string, body []byte, privacy bool) (*http.Response, error) {
+func (s *Server) relayBlindUpstream(r *http.Request, method, path, account, session string, body []byte, privacy bool, requireAssurance string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(r.Context(), method, strings.TrimRight(s.coordinatorBuyerURL(), "/")+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -100,6 +100,11 @@ func (s *Server) relayBlindUpstream(r *http.Request, method, path, account, sess
 	}
 	if privacy {
 		req.Header.Set(privacyClassHeader, privacyClassV1)
+	}
+	// SPEC-049 §4.2: the validated requirement is re-set on the upstream
+	// reservation only; buyer copies never cross this empty header set.
+	if privacy && requireAssurance != "" {
+		req.Header.Set(privacyAssuranceRequiredHeader, requireAssurance)
 	}
 	client := *s.client
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -133,7 +138,7 @@ func writeRelayBlindUpstreamError(w http.ResponseWriter, resp *http.Response, bo
 	}
 	writeError(w, http.StatusServiceUnavailable, "api_error", "relay_blind_required_unavailable", "Relay-blind transaction is unavailable")
 }
-func (s *Server) reserveRelayBlindRoute(w http.ResponseWriter, r *http.Request, authn authResult, req relayBlindRouteReservationRequest, privacy bool) {
+func (s *Server) reserveRelayBlindRoute(w http.ResponseWriter, r *http.Request, authn authResult, req relayBlindRouteReservationRequest, privacy bool, requireAssurance string) {
 	accountID := relayBlindAccountID(authn)
 	if privacy && privacyBuyerIntentDenied(r, accountID, authn.Demo) {
 		writePrivacyClassError(w, privacyClassDowngrade, privacyIntentDowngradeMessage(r, accountID, authn.Demo))
@@ -151,7 +156,7 @@ func (s *Server) reserveRelayBlindRoute(w http.ResponseWriter, r *http.Request, 
 	if authn.WalletSession != nil {
 		session = authn.WalletSession.Session.SessionID
 	}
-	resp, err := s.relayBlindUpstream(r, http.MethodPost, "/v1/relay-blind/route-reservations", relayBlindAccountID(authn), session, body, privacy)
+	resp, err := s.relayBlindUpstream(r, http.MethodPost, "/v1/relay-blind/route-reservations", relayBlindAccountID(authn), session, body, privacy, requireAssurance)
 	if err != nil {
 		writeError(w, 503, "api_error", "relay_blind_required_unavailable", "Relay-blind route reservation is unavailable")
 		return
@@ -171,6 +176,10 @@ func (s *Server) reserveRelayBlindRoute(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	if privacy != (reservation.Version == relayblind.PrivacyReservationVersion) {
+		writePrivacyClassError(w, privacyClassUnavailable, "")
+		return
+	}
+	if privacy && requireAssurance != "" && reservation.PrivacyAssurance != requireAssurance {
 		writePrivacyClassError(w, privacyClassUnavailable, "")
 		return
 	}
@@ -214,7 +223,7 @@ func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, 
 		session = sessionAuth.Session.SessionID
 	}
 	w.Header().Set("X-MacProvider-Relay-Blind-Retry-Action", "new_reservation_and_envelope")
-	resp, err := s.relayBlindUpstream(r, http.MethodPost, "/v1/relay-blind/consume", account, session, raw, privacy)
+	resp, err := s.relayBlindUpstream(r, http.MethodPost, "/v1/relay-blind/consume", account, session, raw, privacy, "")
 	if err != nil {
 		writeError(w, 503, "api_error", "relay_blind_required_unavailable", "Relay-blind consumption is unavailable; do not reuse the envelope")
 		return
@@ -396,12 +405,16 @@ func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, 
 		// that landed on a different gateway than the reservation. Do not
 		// read or forward the body.
 		verifiedAt, postureOK := privacyPostureVerifiedAt(resp.Header)
-		if !privacyEchoConfirmed(resp.Header) || !postureOK {
+		assurance, assuranceOK := privacyCoordinatorAssurance(resp.Header)
+		if !privacyEchoConfirmed(resp.Header) || !postureOK || !assuranceOK {
 			writePrivacyClassError(w, privacyClassUnconfirmed, "")
 			return
 		}
-		execution.Privacy = &privacyUsageContext{PostureVerifiedAtUnix: verifiedAt}
+		execution.Privacy = &privacyUsageContext{PostureVerifiedAtUnix: verifiedAt, Assurance: assurance}
 	}
+	// The label is re-set from the validated value by
+	// maybeSetPrivacySuccessHeaders; the upstream copy is never forwarded.
+	resp.Header.Del(privacyAssuranceHeader)
 	// Keep ordinary provider-leg encryption disclosure separate; never publish
 	// stable peer attribution, a plaintext receipt, or the internal posture
 	// timestamp. The buyer sees that timestamp only inside usage metadata.
@@ -462,7 +475,7 @@ func relayBlindUsageMetadataBody(r *http.Request, body []byte) []byte {
 	relayBlindHeaders(h, execution.Metadata.EffectivePrivacyOutcome == "relay_blind_satisfied")
 	meta := relayBlindOutcomeMetadata(h, "")
 	if execution.Privacy != nil && meta != nil {
-		meta["privacy"] = privacyUsageMetadata(execution.Privacy.PostureVerifiedAtUnix)
+		meta["privacy"] = privacyUsageMetadata(execution.Privacy.PostureVerifiedAtUnix, execution.Privacy.Assurance)
 	}
 	usage["macprovider"], _ = json.Marshal(meta)
 	root["usage"], _ = json.Marshal(usage)
@@ -487,7 +500,7 @@ func (s *Server) reconcileRelayBlindReservation(ctx context.Context, reservation
 	meta := reservation.RelayBlind
 	body, _ := json.Marshal(map[string]string{"provider_binding_digest": meta.ProviderBindingDigest, "envelope_digest": meta.EnvelopeDigest})
 	r, _ := http.NewRequestWithContext(context.WithValue(ctx, requestIDKey{}, reservation.RequestID), http.MethodPost, "http://localhost/", nil)
-	resp, err := s.relayBlindUpstream(r, http.MethodPost, "/v1/relay-blind/status", reservation.AccountID, reservation.WalletSessionID, body, false)
+	resp, err := s.relayBlindUpstream(r, http.MethodPost, "/v1/relay-blind/status", reservation.AccountID, reservation.WalletSessionID, body, false, "")
 	if err != nil {
 		return "held", nil
 	}
@@ -546,7 +559,7 @@ func (s *Server) applyRelayBlindModelsDisclosure(ctx context.Context, body map[s
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	r, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost/", nil)
-	resp, err := s.relayBlindUpstream(r, http.MethodGet, "/v1/relay-blind/capabilities", "", "", nil, false)
+	resp, err := s.relayBlindUpstream(r, http.MethodGet, "/v1/relay-blind/capabilities", "", "", nil, false, "")
 	if err != nil {
 		return
 	}

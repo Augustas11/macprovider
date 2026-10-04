@@ -18,6 +18,7 @@ import (
 const (
 	PrivacyClassV1                  = "operator_constrained_beta_v1"
 	PrivacyAssurance                = "device_bound_self_attested_beta"
+	PrivacyAssuranceCodeBound       = "code_bound_attested"
 	PrivacyResponseEncryption       = "buyer_provider_aead_v1"
 	PrivacyReservationVersion       = "privacy-class-reservation-v1"
 	PrivacyResponseVersion          = "privacy-response-v1"
@@ -532,8 +533,14 @@ func (a PrivacyKeyAttestation) Verify(pin IdentityPin, signatureB64 string, reco
 	return nil
 }
 
+// ValidPrivacyAssurance reports whether value is one of the two SPEC-049
+// assurance labels.
+func ValidPrivacyAssurance(value string) bool {
+	return value == PrivacyAssurance || value == PrivacyAssuranceCodeBound
+}
+
 func (a PrivacyKeyAttestation) validate() error {
-	if a.Version != PrivacyKeyAttestationVersion || a.PrivacyClass != PrivacyClassV1 || a.Assurance != PrivacyAssurance {
+	if a.Version != PrivacyKeyAttestationVersion || a.PrivacyClass != PrivacyClassV1 || !ValidPrivacyAssurance(a.Assurance) {
 		return fmt.Errorf("%w: key attestation", ErrInvalidPrivacy)
 	}
 	if _, err := decodeBase64URLFixed(a.KeyRecordDigest, sha256.Size); err != nil {
@@ -612,41 +619,47 @@ func (s PostureStatement) Framing() ([]byte, error) {
 	if err := s.validate(); err != nil {
 		return nil, err
 	}
-	nonce, err := decodeBase64URLFixed(s.Nonce, 32)
-	if err != nil {
-		return nil, err
-	}
 	var framed bytes.Buffer
-	for _, value := range []string{PrivacyPostureDomain, s.Version, s.PrivacyClass, s.ProviderID, s.AssignedSession} {
-		if err := writeFrame(&framed, []byte(value)); err != nil {
-			return nil, err
-		}
-	}
-	if err := writeFrame(&framed, nonce); err != nil {
-		return nil, err
-	}
-	writeU64(&framed, s.Sequence)
-	writeI64(&framed, s.IssuedAtUnix)
-	for _, value := range []string{s.BinaryVersion, s.CodeCDHash, s.TeamID, s.SigningIdentifier} {
-		if err := writeFrame(&framed, []byte(value)); err != nil {
-			return nil, err
-		}
-	}
-	for _, value := range []bool{s.HardenedRuntime, s.LibraryValidation, s.GetTaskAllow, s.CSDebugged, s.PTraced, s.PTDenyAttachApplied, s.CoreDumpsDisabled, s.SIPEnabled} {
-		writeBool(&framed, value)
-	}
-	if err := writeFrame(&framed, []byte(s.RuntimeSource)); err != nil {
-		return nil, err
-	}
-	writeBool(&framed, s.DiagnosticEnvClear)
-	writeBool(&framed, s.KVDiskTierDisabled)
-	if err := writeFrame(&framed, []byte(s.SEKeyBackend)); err != nil {
-		return nil, err
-	}
-	if err := writeArray(&framed, s.PrivacyKeyRecordDigests); err != nil {
+	if err := s.writeFraming(&framed, PrivacyPostureDomain); err != nil {
 		return nil, err
 	}
 	return framed.Bytes(), nil
+}
+
+// writeFraming writes domain and fields 1..24 of §4.3. The v2 posture
+// shares these fields under its own domain and version.
+func (s PostureStatement) writeFraming(framed *bytes.Buffer, domain string) error {
+	nonce, err := decodeBase64URLFixed(s.Nonce, 32)
+	if err != nil {
+		return err
+	}
+	for _, value := range []string{domain, s.Version, s.PrivacyClass, s.ProviderID, s.AssignedSession} {
+		if err := writeFrame(framed, []byte(value)); err != nil {
+			return err
+		}
+	}
+	if err := writeFrame(framed, nonce); err != nil {
+		return err
+	}
+	writeU64(framed, s.Sequence)
+	writeI64(framed, s.IssuedAtUnix)
+	for _, value := range []string{s.BinaryVersion, s.CodeCDHash, s.TeamID, s.SigningIdentifier} {
+		if err := writeFrame(framed, []byte(value)); err != nil {
+			return err
+		}
+	}
+	for _, value := range []bool{s.HardenedRuntime, s.LibraryValidation, s.GetTaskAllow, s.CSDebugged, s.PTraced, s.PTDenyAttachApplied, s.CoreDumpsDisabled, s.SIPEnabled} {
+		writeBool(framed, value)
+	}
+	if err := writeFrame(framed, []byte(s.RuntimeSource)); err != nil {
+		return err
+	}
+	writeBool(framed, s.DiagnosticEnvClear)
+	writeBool(framed, s.KVDiskTierDisabled)
+	if err := writeFrame(framed, []byte(s.SEKeyBackend)); err != nil {
+		return err
+	}
+	return writeArray(framed, s.PrivacyKeyRecordDigests)
 }
 
 func ParsePostureStatement(raw []byte) (PostureStatement, error) {
@@ -670,7 +683,15 @@ func ParsePostureStatement(raw []byte) (PostureStatement, error) {
 }
 
 func (s PostureStatement) validate() error {
-	if s.Version != PrivacyPostureVersion || s.PrivacyClass != PrivacyClassV1 || s.RuntimeSource != PrivacyRuntimeSource {
+	if s.Version != PrivacyPostureVersion {
+		return fmt.Errorf("%w: posture identity", ErrInvalidPrivacy)
+	}
+	return s.validateFields()
+}
+
+// validateFields checks fields 2..24 of §4.3, shared by both posture versions.
+func (s PostureStatement) validateFields() error {
+	if s.PrivacyClass != PrivacyClassV1 || s.RuntimeSource != PrivacyRuntimeSource {
 		return fmt.Errorf("%w: posture identity", ErrInvalidPrivacy)
 	}
 	if !visibleASCII(s.ProviderID, MaxIdentifierBytes) || !visibleASCII(s.AssignedSession, MaxIdentifierBytes) {
@@ -734,14 +755,14 @@ func (r ReservationResponse) privacyExtensionPresent() bool {
 }
 
 func (r ReservationResponse) validatePrivacyExtension() error {
-	if r.PrivacyClass != PrivacyClassV1 || r.PrivacyAssurance != PrivacyAssurance || r.PrivacyKeyAttestation == nil || r.PrivacyPostureVerifiedAtUnix <= 0 {
+	if r.PrivacyClass != PrivacyClassV1 || !ValidPrivacyAssurance(r.PrivacyAssurance) || r.PrivacyKeyAttestation == nil || r.PrivacyPostureVerifiedAtUnix <= 0 {
 		return ErrInvalidReservation
 	}
 	if _, err := decodeBase64URLFixed(r.PrivacyKeyAttestationSignature, ed25519.SignatureSize); err != nil {
 		return ErrInvalidReservation
 	}
 	attestation := *r.PrivacyKeyAttestation
-	if err := attestation.validate(); err != nil {
+	if err := attestation.validate(); err != nil || attestation.Assurance != r.PrivacyAssurance {
 		return ErrInvalidReservation
 	}
 	if attestation.KeyRecordDigest != r.KeyRecordDigest || attestation.KeyRecordDigest != r.KeyRecord.KeyRecordDigest || attestation.NotBeforeUnix != r.KeyRecord.NotBeforeUnix || attestation.ExpiresAtUnix != r.KeyRecord.ExpiresAtUnix {

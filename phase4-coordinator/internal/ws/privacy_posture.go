@@ -106,7 +106,7 @@ func (s *Server) runPrivacyPostureProbe(provider pool.Provider) {
 }
 
 func (s *Server) handlePrivacyPostureResponse(providerID, assignedID string, payload []byte) {
-	if len(payload) == 0 || len(payload) > relayblind.MaxPrivacyPostureResponseBytes {
+	if len(payload) == 0 || len(payload) > relayblind.MaxPrivacyPostureV2ResponseBytes {
 		s.log.Warn().Str("provider_id", providerID).Msg("privacy posture: response size rejected")
 		return
 	}

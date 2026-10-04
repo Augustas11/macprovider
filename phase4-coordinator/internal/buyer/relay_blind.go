@@ -94,6 +94,7 @@ func writeRelayBlindError(w http.ResponseWriter, code, message string) {
 	status, body := relayBlindErrorBody(w, code, message)
 	w.Header().Del(privacyClassHeader)
 	w.Header().Del(privacyPostureVerifiedAtHeader)
+	w.Header().Del(privacyAssuranceHeader)
 	setRelayBlindNoStore(w)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -227,8 +228,19 @@ func (s *Server) handleRelayBlindReservation(w http.ResponseWriter, r *http.Requ
 		writePrivacyClassError(w, privacyClassDowngrade, "")
 		return
 	}
+	// SPEC-049-R032: the assurance requirement is valid only with the class
+	// marker and only as code_bound_attested.
+	requirePresent, requireValid := privacyAssuranceRequired(r)
+	if requirePresent && (!present || !requireValid) {
+		writePrivacyClassError(w, privacyClassDowngrade, "")
+		return
+	}
 	if present {
-		s.handlePrivacyClassReservation(w, r, account.ID(), walletSession)
+		wantAssurance := ""
+		if requirePresent {
+			wantAssurance = relayblind.PrivacyAssuranceCodeBound
+		}
+		s.handlePrivacyClassReservation(w, r, account.ID(), walletSession, wantAssurance)
 		return
 	}
 	if s.relayBlind == nil || !s.relayBlind.cfg.Enabled {
@@ -399,7 +411,7 @@ func (s *Server) handleRelayBlindConsume(w http.ResponseWriter, r *http.Request)
 	}
 	if reservation.PrivacyClass {
 		provider, _ := s.pool.Resolve(reservation.ProviderID, reservation.AssignedSession)
-		if _, code := s.privacyGate(r.Context(), provider, reservation.KeyRecordDigest); code != "" {
+		if _, _, code := s.privacyGate(r.Context(), provider, reservation.KeyRecordDigest, reservationAssurance(reservation)); code != "" {
 			observed := privacyObservedCode(code, false)
 			_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, observed, s.now())
 			writePrivacyClassError(w, observed, "")
@@ -595,7 +607,7 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 	var privacyVerifiedAt time.Time
 	if reservation.PrivacyClass {
 		relayContext.PrivacyClass = relayblind.PrivacyClassV1
-		verifiedAt, code := s.privacyGate(r.Context(), provider, reservation.KeyRecordDigest)
+		verifiedAt, _, code := s.privacyGate(r.Context(), provider, reservation.KeyRecordDigest, reservationAssurance(reservation))
 		if code != "" {
 			observed := privacyObservedCode(code, false)
 			_ = s.relayBlind.store.RejectArmedPredispatch(r.Context(), reservation.ProviderBinding, observed, s.now())
@@ -661,6 +673,7 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		// verification time is coordinator-to-gateway only.
 		w.Header().Set(privacyClassHeader, relayblind.PrivacyClassV1)
 		w.Header().Set(privacyPostureVerifiedAtHeader, strconv.FormatInt(privacyVerifiedAt.Unix(), 10))
+		w.Header().Set(privacyAssuranceHeader, reservationAssurance(reservation))
 	}
 	if envelope.Stream {
 		s.forwardRelayBlindStreaming(w, r, rec, provider, reservation, relay, validation.InputTokens)

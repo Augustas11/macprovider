@@ -92,11 +92,12 @@ const privacyCoordinatorVerifiedAt int64 = 1_700_000_001
 func setPrivacyChatEcho(w http.ResponseWriter, verifiedAt int64) {
 	w.Header().Set(privacyClassHeader, privacyClassV1)
 	w.Header().Set(privacyPostureVerifiedAtHeader, strconv.FormatInt(verifiedAt, 10))
+	w.Header().Set(privacyAssuranceHeader, privacyAssuranceV1)
 }
 
 type privacyHop struct {
-	path, account, exec, assurance, providerID, engine, posture string
-	privacy                                                     []string
+	path, account, exec, assurance, providerID, engine, posture, required string
+	privacy                                                               []string
 }
 
 type privacyHopLog struct {
@@ -111,7 +112,7 @@ func (l *privacyHopLog) add(r *http.Request) {
 		path: r.URL.Path, account: r.Header.Get("X-MacProvider-Account"),
 		exec: r.Header.Get(relayBlindExecutionHeader), assurance: r.Header.Get(privacyAssuranceHeader),
 		providerID: r.Header.Get("X-Provider-Id"), engine: r.Header.Get("X-MacProvider-Internal-Engine"),
-		posture: r.Header.Get(privacyPostureVerifiedAtHeader),
+		posture: r.Header.Get(privacyPostureVerifiedAtHeader), required: r.Header.Get(privacyAssuranceRequiredHeader),
 		privacy: append([]string(nil), r.Header.Values(privacyClassHeader)...),
 	})
 }
@@ -219,7 +220,7 @@ func TestPrivacyClassConstantsMatchSharedPackage(t *testing.T) {
 	if len(privacyProtects) != 9 || len(privacyDoesNotProtect) != 6 || len(privacyResidualRisks) != 11 {
 		t.Fatalf("list lengths protects=%d does_not=%d residual=%d", len(privacyProtects), len(privacyDoesNotProtect), len(privacyResidualRisks))
 	}
-	copied := privacyUsageMetadata(7)
+	copied := privacyUsageMetadata(7, privacyAssuranceV1)
 	copied.Protects[0] = "mutated"
 	if privacyProtects[0] == "mutated" {
 		t.Fatal("usage lists alias the package slices")
@@ -669,7 +670,7 @@ func TestPrivacyUsageMetadataExactStrings(t *testing.T) {
 			if parsed.Usage.Macprovider.Scope != relayBlindScope {
 				t.Fatalf("outer scope replaced: %s", parsed.Usage.Macprovider.Scope)
 			}
-			want := privacyUsageMetadata(privacyCoordinatorVerifiedAt)
+			want := privacyUsageMetadata(privacyCoordinatorVerifiedAt, privacyAssuranceV1)
 			if !reflect.DeepEqual(parsed.Usage.Macprovider.Privacy, want) || parsed.Usage.Macprovider.Privacy.PostureVerifiedAtUnix == res.PrivacyPostureVerifiedAtUnix {
 				t.Fatalf("privacy usage %+v want %+v reservation %d", parsed.Usage.Macprovider.Privacy, want, res.PrivacyPostureVerifiedAtUnix)
 			}

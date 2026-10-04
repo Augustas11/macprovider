@@ -116,3 +116,51 @@ func privacyCLIReservation(kid, digest string, privacy bool, now time.Time) rela
 func quoteYAML(value string) string {
 	return `"` + value + `"`
 }
+
+func TestPrivacyClassCLIRevokeAppAttestKey(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "relay-blind.sqlite")
+	cfgPath := filepath.Join(dir, "coordinator.yaml")
+	yaml := "auth:\n  operator_key: 0123456789abcdefABCDEFghijklmnop\n  gateway_service_token: fedcba9876543210PONMLKJIHGFEDCBA\nrelay_blind:\n  sqlite_path: " + quoteYAML(dbPath) + "\n"
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := relayblind.OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyID := bytes.Repeat([]byte{7}, 32)
+	if err := store.EnrollAppAttestKey(context.Background(), relayblind.AppAttestKey{
+		KeyID: keyID, ProviderID: "provider-a", PublicKey: append([]byte{4}, bytes.Repeat([]byte{1}, 64)...), TeamID: "AB12CD34EF",
+		SEPublicKeySHA256: bytes.Repeat([]byte{2}, 32), IdentityPublicKeySHA256: bytes.Repeat([]byte{3}, 32),
+	}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvanceAppAttestCounter(context.Background(), "provider-a", keyID, 4); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := privacyClassCommand([]string{"status", "-config", cfgPath}, &out); err != nil {
+		t.Fatal(err)
+	}
+	want := "app_attest_key_count=1\napp_attest_key.provider_id=provider-a\napp_attest_key.key_id=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc\napp_attest_key.state=active\napp_attest_key.last_counter=4\napp_attest_key.revoked_reason=\n"
+	if !strings.Contains(out.String(), want) || strings.Contains(out.String(), "public_key") {
+		t.Fatalf("status: %s", out.String())
+	}
+	if err := privacyClassCommand([]string{"revoke-app-attest-key", "-config", cfgPath, "--provider", "provider-a"}, &out); err == nil {
+		t.Fatal("revoke without reason succeeded")
+	}
+	out.Reset()
+	if err := privacyClassCommand([]string{"revoke-app-attest-key", "-config", cfgPath, "--provider", "provider-a", "--reason", "device lost"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "app_attest_key.state=revoked\n") || !strings.Contains(out.String(), "app_attest_key.revoked_reason=operator_revoked\n") {
+		t.Fatalf("revoke status: %s", out.String())
+	}
+	if err := privacyClassCommand([]string{"revoke-app-attest-key", "-config", cfgPath, "--provider", "provider-a", "--reason", "again"}, &out); err == nil {
+		t.Fatal("second revoke succeeded")
+	}
+}

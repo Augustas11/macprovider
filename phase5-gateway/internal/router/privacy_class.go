@@ -14,6 +14,7 @@ const (
 	privacyAssuranceHeader          = "X-MacProvider-Privacy-Assurance"
 	privacyResponseEncryptionHeader = "X-MacProvider-Response-Encryption"
 	privacyPostureVerifiedAtHeader  = "X-MacProvider-Privacy-Posture-Verified-At"
+	privacyAssuranceRequiredHeader  = "X-MacProvider-Privacy-Assurance-Required"
 
 	privacyClassDisabled    = "privacy_class_disabled"
 	privacyClassUnavailable = "privacy_class_unavailable"
@@ -25,6 +26,7 @@ const (
 	// shared relayblind constants; tests pin that.
 	privacyClassV1                = "operator_constrained_beta_v1"
 	privacyAssuranceV1            = "device_bound_self_attested_beta"
+	privacyAssuranceCodeBound     = "code_bound_attested"
 	privacyResponseEncryptionV1   = "buyer_provider_aead_v1"
 	privacyDisclosureVersion      = "privacy-class-disclosure-v1"
 	privacyScope                  = "request_and_response_content_hidden_from_relays; provider_runtime_reads_plaintext; ordinary_operator_access_paths_constrained_on_approved_signed_runtime; posture_self_attested_device_bound_not_code_bound"
@@ -32,6 +34,50 @@ const (
 	privacyPoolDowngradeText      = "Privacy class does not accept pool-scoped requests"
 	privacyDemoDowngradeText      = "Privacy class does not accept demo requests"
 )
+
+// SPEC-049-R020 strings for code_bound_attested (v0.2), copied verbatim.
+const privacyCodeBoundScope = "request_and_response_content_hidden_from_relays; provider_runtime_reads_plaintext; ordinary_operator_access_paths_constrained_on_approved_signed_runtime; posture_signed_by_apple_attested_malibu_app_key; runtime_code_identity_checked_by_attested_app_not_by_apple; sip_and_full_security_attested_at_enrollment; label_verified_by_coordinator_not_by_buyer"
+
+var privacyCodeBoundProtects = []string{
+	"request_content_from_gateway_and_coordinator",
+	"response_content_from_gateway_and_coordinator",
+	"debugger_attach_to_approved_signed_runtime",
+	"core_dumps_of_approved_signed_runtime",
+	"prompt_and_completion_in_provider_logs_traces_receipts_and_telemetry",
+	"prompt_and_completion_in_provider_disk_and_conversation_caches",
+	"plaintext_proxy_or_subprocess_runtime_hop",
+	"dev_debug_unsigned_or_unapproved_builds_refused_by_routing",
+	"sip_disabled_hosts_refused_by_routing",
+	"modified_or_resigned_runtime_binary_refused_by_attested_app_check",
+	"modified_or_resigned_malibu_app_cannot_sign_posture",
+	"posture_replay_refused_by_attested_counter",
+}
+
+var privacyCodeBoundDoesNotProtect = []string{
+	"provider_runtime_reads_plaintext_to_infer",
+	"request_metadata_visible_to_relays",
+	"confidential_compute_or_hardware_enclave_execution",
+	"end_to_end_encryption_excluding_the_provider",
+	"pool_scoped_requests",
+	"kernel_or_firmware_compromise_with_sip_on",
+	"compromised_team_signing_key",
+}
+
+var privacyCodeBoundResidualRisks = []string{
+	"kernel_or_firmware_compromise_with_sip_on",
+	"physical_or_hardware_attack",
+	"gpu_and_unified_memory_residue",
+	"encrypted_swap_and_hibernation_images",
+	"compromise_of_the_live_runtime_process",
+	"malicious_signed_release_or_supply_chain",
+	"compromised_team_signing_key",
+	"apple_is_root_of_trust_for_app_attest",
+	"sip_and_full_security_attested_at_enrollment_only",
+	"label_verified_by_coordinator_not_by_buyer",
+	"crash_report_register_and_stack_residue",
+	"immutable_prompt_strings_not_zeroized",
+	"relays_observe_sizes_timing_and_token_counts",
+}
 
 var privacyProtects = []string{
 	"request_content_from_gateway_and_coordinator",
@@ -72,6 +118,8 @@ var privacyResidualRisks = []string{
 // It carries the reservation timestamp, never ciphertext or prompts.
 type privacyUsageContext struct {
 	PostureVerifiedAtUnix int64
+	// Assurance is the coordinator-verified label of this chat.
+	Assurance string
 }
 
 // privacyUsageObject is the closed SPEC-049-R020 usage.macprovider.privacy
@@ -125,6 +173,40 @@ func privacyRequested(r *http.Request) (present, valid bool) {
 		return true, false
 	}
 	return true, value == privacyClassV1
+}
+
+// privacyAssuranceRequired validates the buyer's reservation requirement
+// (SPEC-049 §4.2). The only valid value is code_bound_attested.
+func privacyAssuranceRequired(r *http.Request) (present, valid bool) {
+	if r == nil {
+		return false, false
+	}
+	values := r.Header.Values(privacyAssuranceRequiredHeader)
+	if len(values) == 0 {
+		return false, false
+	}
+	if len(values) != 1 {
+		return true, false
+	}
+	return true, strings.TrimSpace(values[0]) == privacyAssuranceCodeBound
+}
+
+// privacyCoordinatorAssurance accepts exactly one coordinator label that is
+// one of the two SPEC-049 assurance values.
+func privacyCoordinatorAssurance(h http.Header) (string, bool) {
+	if h == nil {
+		return "", false
+	}
+	values := h.Values(privacyAssuranceHeader)
+	if len(values) != 1 {
+		return "", false
+	}
+	switch values[0] {
+	case privacyAssuranceV1, privacyAssuranceCodeBound:
+		return values[0], true
+	default:
+		return "", false
+	}
 }
 
 func privacyErrorMessage(code string) string {
@@ -250,7 +332,21 @@ func privacyPostureVerifiedAt(h http.Header) (int64, bool) {
 	return parsed, true
 }
 
-func privacyUsageMetadata(verifiedAt int64) privacyUsageObject {
+// privacyUsageMetadata selects the SPEC-049-R020 string set for the label
+// the chat was served under. Any value other than code_bound_attested gets
+// the Beta strings; the caller only passes validated labels.
+func privacyUsageMetadata(verifiedAt int64, assurance string) privacyUsageObject {
+	if assurance == privacyAssuranceCodeBound {
+		return privacyUsageObject{
+			Class:                 privacyClassV1,
+			Assurance:             privacyAssuranceCodeBound,
+			Scope:                 privacyCodeBoundScope,
+			Protects:              append([]string(nil), privacyCodeBoundProtects...),
+			DoesNotProtect:        append([]string(nil), privacyCodeBoundDoesNotProtect...),
+			ResidualRisks:         append([]string(nil), privacyCodeBoundResidualRisks...),
+			PostureVerifiedAtUnix: verifiedAt,
+		}
+	}
 	return privacyUsageObject{
 		Class:                 privacyClassV1,
 		Assurance:             privacyAssuranceV1,
@@ -280,7 +376,11 @@ func maybeSetPrivacySuccessHeaders(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Del(privacyPostureVerifiedAtHeader)
 	w.Header().Set(privacyClassHeader, privacyClassV1)
-	w.Header().Set(privacyAssuranceHeader, privacyAssuranceV1)
+	assurance := privacyAssuranceV1
+	if execution.Privacy.Assurance == privacyAssuranceCodeBound {
+		assurance = privacyAssuranceCodeBound
+	}
+	w.Header().Set(privacyAssuranceHeader, assurance)
 	w.Header().Set(privacyResponseEncryptionHeader, privacyResponseEncryptionV1)
 }
 
