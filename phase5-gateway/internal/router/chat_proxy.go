@@ -1184,6 +1184,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	emitProviderAttribution(w.Header(), resp.Header)
 	copyReceiptEligibleHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
+	maybeSetPrivacySuccessHeaders(w, r)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
 }
@@ -1294,6 +1295,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	// the existing SSE-specific guarantees; we prepend no-store.
 	w.Header().Set("Cache-Control", "no-store, no-cache, no-transform")
 	w.Header().Set("X-Accel-Buffering", "no")
+	maybeSetPrivacySuccessHeaders(w, r)
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
 	wholesale := s.isWholesaleAccount(subject.AccountID)
@@ -1619,6 +1621,20 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					completion := gatewayContentEstimatedCompletion()
 					s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_malformed", reservationWindow, resp)
 					return false
+				}
+				// Privacy frames have no choices and no clear usage. Forward the
+				// original line and skip the metadata ceiling; ciphertext is not logged.
+				if relayBlindExecutionFor(r) != nil && privacyOpaqueStreamFrame(data) {
+					if _, err := w.Write(line); err != nil {
+						slog.Warn("streaming buyer write failed", "request_id", requestID(r), "error", err)
+						poisonDedupeCapture(w)
+						settleCancelled()
+						return false
+					}
+					if flusher != nil {
+						flusher.Flush()
+					}
+					return true
 				}
 				if relayBlindExecutionFor(r) != nil {
 					data = string(relayBlindUsageMetadataBody(r, []byte(data)))

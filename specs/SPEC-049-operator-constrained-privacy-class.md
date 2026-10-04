@@ -146,7 +146,7 @@ All encodings follow SPEC-041 §3: canonical unpadded base64url; u32-length-pref
 
 ### 4.2 Header marker
 
-`X-MacProvider-Privacy-Class: operator_constrained_beta_v1`. Any other value, repeated header, or list value is invalid. The buyer sends it on the reservation and the chat request. The gateway strips every buyer-supplied copy at ingress and re-sets exactly one trusted copy on each upstream coordinator request (reservation, consume, chat) after validating the buyer's value. The coordinator echoes it on a successful privacy-class chat response.
+`X-MacProvider-Privacy-Class: operator_constrained_beta_v1`. Any other value, repeated header, or list value is invalid. The buyer sends it on the reservation and the chat request. The gateway strips every buyer-supplied copy at ingress and re-sets exactly one trusted copy on each upstream coordinator request (reservation, consume, chat) after validating the buyer's value. The coordinator echoes it on a successful privacy-class chat response. On that same response the coordinator sets exactly one `X-MacProvider-Privacy-Posture-Verified-At` header to the decimal Unix seconds of the posture verification time used by the dispatch-time gate; the gateway strips any buyer-supplied copy, requires exactly one positive integer value or returns `privacy_class_unconfirmed` without writing the body, copies the value into `usage.macprovider.privacy.posture_verified_at_unix`, and does not forward the header to the buyer.
 
 ### 4.3 `privacy-posture-v1` statement
 
@@ -301,7 +301,7 @@ All errors use SPEC-006-compatible envelopes with bounded `error.macprovider` me
 | `privacy_class_unavailable` | 503 | no | `none` | no eligible provider, quarantined provider, unapproved code identity, or reservation-version mismatch before consume |
 | `privacy_class_downgrade_rejected` | 400 | no | `none` | invalid header value, header on a plaintext body, header/reservation mismatch, marker mismatch at the provider, or pool-scoped privacy request |
 | `privacy_class_posture_stale` | 503 | yes | `new_reservation_and_envelope` | posture expired or session changed between reservation and dispatch, or the provider pre-decrypt recheck failed with bound rejection evidence |
-| `privacy_class_unconfirmed` | 500 | no | `do_not_resubmit` | a dispatched privacy request returned without the coordinator privacy echo, or privacy completion cannot be confirmed |
+| `privacy_class_unconfirmed` | 500 | no | `do_not_resubmit` | a dispatched privacy request returned without exactly one privacy-class echo and exactly one positive `X-MacProvider-Privacy-Posture-Verified-At` value, or privacy completion cannot be confirmed |
 
 `do_not_resubmit` overrides every predispatch action when postdispatch uncertainty exists, exactly as in SPEC-041-R006. SPEC-041-R007 codes continue to apply to the relay-blind layer of the same request.
 
@@ -376,7 +376,7 @@ The provider MUST seal every privacy-class response exactly as §4.8 specifies: 
 
 ### SPEC-049-R015 - Opaque relay of responses
 
-The coordinator and gateway MUST forward privacy frames byte-for-byte, MUST NOT decode, parse, or log ciphertext, and MUST NOT treat a missing `choices` field in a privacy frame as an error. They MAY bound and annotate only the clear usage chunk or non-stream `usage` object. Settlement uses the clear usage bounded by the SPEC-041-R006 caps. On `unknown_postdispatch` the coordinator MUST settle known input only and MUST record a delivered-output estimate of 0, because it cannot count output from ciphertext. After a 200 response for a privacy-class request without the coordinator's privacy echo header, the gateway MUST return `privacy_class_unconfirmed` without streaming the body.
+The coordinator and gateway MUST forward privacy frames byte-for-byte, MUST NOT decode, parse, or log ciphertext, and MUST NOT treat a missing `choices` field in a privacy frame as an error. They MAY bound and annotate only the clear usage chunk or non-stream `usage` object. Settlement uses the clear usage bounded by the SPEC-041-R006 caps. On `unknown_postdispatch` the coordinator MUST settle known input only and MUST record a delivered-output estimate of 0, because it cannot count output from ciphertext. After a 200 response for a privacy-class request without exactly one coordinator privacy-class echo and exactly one positive `X-MacProvider-Privacy-Posture-Verified-At` value (§4.2), the gateway MUST return `privacy_class_unconfirmed` without writing the body.
 
 ### SPEC-049-R016 - Buyer verification
 
@@ -404,7 +404,7 @@ X-MacProvider-Privacy-Assurance: device_bound_self_attested_beta
 X-MacProvider-Response-Encryption: buyer_provider_aead_v1
 ```
 
-`usage.macprovider.privacy` (non-stream `usage` object and stream clear usage chunk) MUST be the closed object `{class, assurance, scope, protects, does_not_protect, residual_risks, posture_verified_at_unix}` with `class` and `assurance` as above, `posture_verified_at_unix` from the reservation, and these exact values in this order.
+`usage.macprovider.privacy` (non-stream `usage` object and stream clear usage chunk) MUST be the closed object `{class, assurance, scope, protects, does_not_protect, residual_risks, posture_verified_at_unix}` with `class` and `assurance` as above, `posture_verified_at_unix` from the coordinator's `X-MacProvider-Privacy-Posture-Verified-At` header on that chat response (§4.2), and these exact values in this order.
 
 `scope`:
 
@@ -484,3 +484,4 @@ No evidence is attached. Physical evidence requires a signed `JOURNEY-PRIVACY-CL
 ## 10. Changelog and history
 
 - 0.1.0 - Initial default-off Beta contract: exact claim and non-claims; threat model with device-bound, not code-bound, self-attested posture; closed posture statement, key attestation, reservation, dispatch marker, and response AEAD schemas; routing gate with no failover or downgrade; quarantine and durable kill switch; shared error inventory; exact disclosure strings; redaction proof; promotion gate. Carries forward the Product Build 2/Build 4 decisions (#1643, #1645, PR #1471) and keeps SPEC-042-R009.
+- 0.1.0 - Successful privacy-class chat responses carry `X-MacProvider-Privacy-Posture-Verified-At` from the dispatch-time gate for the gateway. The gateway does not store that timestamp, and the header is not a buyer response header.

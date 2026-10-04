@@ -66,6 +66,34 @@ func TestWalletSessionsDefaultOffDoesNotRequireSecrets(t *testing.T) {
 	}
 }
 
+func TestPrivacyClassDefaultOff(t *testing.T) {
+	cfg := Default()
+	if cfg.Features.PrivacyClass.Enabled {
+		t.Fatal("privacy class defaulted on")
+	}
+	cfg = validTestConfig()
+	if cfg.Features.PrivacyClass.Enabled {
+		t.Fatal("valid test config enabled privacy class")
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() rejected default-off privacy class: %v", err)
+	}
+}
+
+func TestPrivacyClassEnabledRequiresRelayBlind(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Features.PrivacyClass.Enabled = true
+	cfg.Features.RelayBlindRequests.Enabled = false
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "features.privacy_class.enabled requires features.relay_blind_requests.enabled") {
+		t.Fatalf("Validate() error=%v", err)
+	}
+	cfg.Features.RelayBlindRequests.Enabled = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("privacy class with relay-blind enabled: %v", err)
+	}
+}
+
 func TestRelayBlindRequestsDefaultOffDoesNotRequireBounds(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.Features.RelayBlindRequests = RelayBlindRequestsConfig{

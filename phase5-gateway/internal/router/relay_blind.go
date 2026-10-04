@@ -98,6 +98,20 @@ func (s *Server) handleRelayBlindRouteReservations(w http.ResponseWriter, r *htt
 	if authn.WalletSession != nil && !s.admitRelayBlindWalletMetadata(w, r, authn.WalletSession, body) {
 		return
 	}
+	present, valid := privacyRequested(r)
+	accountID := relayBlindAccountID(authn)
+	if present && privacyBuyerIntentDenied(r, accountID, authn.Demo) {
+		writePrivacyClassError(w, privacyClassDowngrade, privacyIntentDowngradeMessage(r, accountID, authn.Demo))
+		return
+	}
+	if present && !valid {
+		writePrivacyClassError(w, privacyClassDowngrade, "")
+		return
+	}
+	if present && !s.privacyClassEnabled() {
+		writePrivacyClassError(w, privacyClassDisabled, "")
+		return
+	}
 	req, err := decodeRelayBlindRouteReservation(body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "relay_blind_route_reservation_invalid", "Invalid relay-blind route reservation")
@@ -134,7 +148,7 @@ func (s *Server) handleRelayBlindRouteReservations(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusServiceUnavailable, "api_error", "relay_blind_disabled", "Relay-blind request encryption is disabled")
 		return
 	}
-	s.reserveRelayBlindRoute(w, r, authn, req)
+	s.reserveRelayBlindRoute(w, r, authn, req, present)
 }
 
 func decodeRelayBlindRouteReservation(body []byte) (relayBlindRouteReservationRequest, error) {
@@ -157,7 +171,24 @@ func decodeRelayBlindRouteReservation(body []byte) (relayBlindRouteReservationRe
 }
 
 func (s *Server) rejectRelayBlindEnvelopeIfRequired(w http.ResponseWriter, r *http.Request, body []byte, accountID string, walletSession *walletSessionAuth) bool {
+	present, valid := privacyRequested(r)
+	if present && privacyBuyerIntentDenied(r, accountID, false) {
+		writePrivacyClassError(w, privacyClassDowngrade, privacyIntentDowngradeMessage(r, accountID, false))
+		return true
+	}
+	if present && !valid {
+		writePrivacyClassError(w, privacyClassDowngrade, "")
+		return true
+	}
 	probe, ok, malformed := parseRelayBlindEnvelopeProbe(body)
+	if present && valid && !ok && !malformed {
+		writePrivacyClassError(w, privacyClassDowngrade, privacyPlaintextDowngradeText)
+		return true
+	}
+	if present && valid && !s.privacyClassEnabled() {
+		writePrivacyClassError(w, privacyClassDisabled, "")
+		return true
+	}
 	if !ok && !malformed {
 		return false
 	}

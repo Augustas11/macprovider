@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -387,9 +388,14 @@ func TestPrivacyReservationRequiresEligibleProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if response.Header().Get(privacyPostureVerifiedAtHeader) != "" {
+		t.Fatalf("consume leaked posture header %q", response.Header().Get(privacyPostureVerifiedAtHeader))
+	}
 	response = h.privacyRequest(t, http.MethodPost, "/v1/chat/completions", raw, consume.ExecutionAuthorization, nil)
-	if response.Code != http.StatusOK || response.Body.String() != body || response.Header().Get(privacyClassHeader) != relayblind.PrivacyClassV1 {
-		t.Fatalf("chat status=%d header=%q body=%s", response.Code, response.Header().Get(privacyClassHeader), response.Body.String())
+	verifiedAt, eligible := h.authority.Eligible(h.provider.ProviderID, h.provider.AssignedID, h.privacyKey.KeyRecordDigest, h.clock.Now())
+	wantPosture := strconv.FormatInt(verifiedAt.Unix(), 10)
+	if !eligible || response.Code != http.StatusOK || response.Body.String() != body || response.Header().Get(privacyClassHeader) != relayblind.PrivacyClassV1 || len(response.Header().Values(privacyPostureVerifiedAtHeader)) != 1 || response.Header().Get(privacyPostureVerifiedAtHeader) != wantPosture || response.Header().Get(privacyPostureVerifiedAtHeader) != strconv.FormatInt(reservation.PrivacyPostureVerifiedAtUnix, 10) {
+		t.Fatalf("chat status=%d class=%q posture=%v want %s body=%s", response.Code, response.Header().Get(privacyClassHeader), response.Header().Values(privacyPostureVerifiedAtHeader), wantPosture, response.Body.String())
 	}
 	if gotClass.Load() != relayblind.PrivacyClassV1 || dispatches.Load() != 1 {
 		t.Fatalf("class=%v dispatches=%d", gotClass.Load(), dispatches.Load())
@@ -530,8 +536,8 @@ func TestStalePostureBetweenConsumeAndDispatchRejectsAndRefunds(t *testing.T) {
 		t.Fatal("posture still eligible at dispatch")
 	}
 	response = h.privacyRequest(t, http.MethodPost, "/v1/chat/completions", raw, consume.ExecutionAuthorization, nil)
-	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"privacy_class_posture_stale"`) || !strings.Contains(response.Body.String(), `"retryable":true`) {
-		t.Fatalf("chat status=%d body=%s", response.Code, response.Body.String())
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"privacy_class_posture_stale"`) || !strings.Contains(response.Body.String(), `"retryable":true`) || response.Header().Get(privacyPostureVerifiedAtHeader) != "" {
+		t.Fatalf("chat status=%d posture=%q body=%s", response.Code, response.Header().Get(privacyPostureVerifiedAtHeader), response.Body.String())
 	}
 	row, err := h.store.LookupReservation(context.Background(), reservation.ProviderBinding)
 	if err != nil || row.State != relayblind.ReservationStateRejected {

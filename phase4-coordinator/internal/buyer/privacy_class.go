@@ -15,7 +15,8 @@ import (
 )
 
 const (
-	privacyClassHeader = "X-MacProvider-Privacy-Class"
+	privacyClassHeader             = "X-MacProvider-Privacy-Class"
+	privacyPostureVerifiedAtHeader = "X-MacProvider-Privacy-Posture-Verified-At"
 
 	privacyClassDisabled    = "privacy_class_disabled"
 	privacyClassUnavailable = "privacy_class_unavailable"

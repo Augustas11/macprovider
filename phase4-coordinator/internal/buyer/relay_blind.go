@@ -101,6 +101,7 @@ func writeRelayBlindError(w http.ResponseWriter, code, message string) {
 		effectiveOutcome = "relay_blind_satisfied"
 	}
 	w.Header().Del(privacyClassHeader)
+	w.Header().Del(privacyPostureVerifiedAtHeader)
 	setRelayBlindNoStore(w)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(shape.Status)
@@ -534,9 +535,11 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		AssignedSession: reservation.AssignedSession, RequestID: reservation.RequestID,
 		InputTokenUpperBound: reservation.InputTokenUpperBound, MaxOutputTokens: reservation.MaxOutputTokens,
 	}
+	var privacyVerifiedAt time.Time
 	if reservation.PrivacyClass {
 		relayContext.PrivacyClass = relayblind.PrivacyClassV1
-		if _, code := s.privacyGate(r.Context(), provider, reservation.KeyRecordDigest); code != "" {
+		verifiedAt, code := s.privacyGate(r.Context(), provider, reservation.KeyRecordDigest)
+		if code != "" {
 			observed := privacyObservedCode(code, false)
 			_ = s.relayBlind.store.RejectArmedPredispatch(r.Context(), reservation.ProviderBinding, observed, s.now())
 			if quotaMetered {
@@ -545,6 +548,7 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 			writePrivacyClassError(w, observed, "")
 			return
 		}
+		privacyVerifiedAt = verifiedAt
 	}
 	relay, err := s.relayBlind.relay(ctx, provider, envelope.RequestID, body, envelope.Stream, relayContext)
 	if err != nil {
@@ -592,7 +596,10 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 	w.Header().Set(relayBlindValidatedHeader, reservation.EnvelopeDigest)
 	w.Header().Set(relayBlindInputTokensHeader, strconv.FormatInt(validation.InputTokens, 10))
 	if reservation.PrivacyClass {
+		// Gateway instances do not share memory. This dispatch-time
+		// verification time is coordinator-to-gateway only.
 		w.Header().Set(privacyClassHeader, relayblind.PrivacyClassV1)
+		w.Header().Set(privacyPostureVerifiedAtHeader, strconv.FormatInt(privacyVerifiedAt.Unix(), 10))
 	}
 	if envelope.Stream {
 		s.forwardRelayBlindStreaming(w, r, rec, provider, reservation, relay, validation.InputTokens)
