@@ -26,7 +26,7 @@ import (
 )
 
 func TestPrivacyPostureProbeRoundTrip(t *testing.T) {
-	clock := time.Now().UTC()
+	clock := time.Unix(1_800_000_000, 0).UTC()
 	material := newWSPrivacyMaterial(t, clock)
 	reg := pool.NewRegistry(nil)
 	provider := pool.Provider{

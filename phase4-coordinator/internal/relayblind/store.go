@@ -2,6 +2,7 @@ package relayblind
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -896,6 +897,15 @@ func (s *Store) ensurePrivacySchema(ctx context.Context) error {
 	if err := s.addColumnIfMissing(ctx, "relay_blind_reservations", "privacy_class", `ALTER TABLE relay_blind_reservations ADD COLUMN privacy_class INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
+	// Attestation bytes stay on the key row. The in-memory authority only
+	// keeps the cdhash, and a reservation response has to echo the signed
+	// attestation without reading provider traffic.
+	if err := s.addColumnIfMissing(ctx, "relay_blind_key_records", "privacy_attestation_json", `ALTER TABLE relay_blind_key_records ADD COLUMN privacy_attestation_json TEXT NULL`); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing(ctx, "relay_blind_key_records", "privacy_attestation_signature", `ALTER TABLE relay_blind_key_records ADD COLUMN privacy_attestation_signature TEXT NULL`); err != nil {
+		return err
+	}
 	_, err := s.db.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS privacy_class_quarantine (
   provider_id TEXT PRIMARY KEY,
@@ -1079,6 +1089,153 @@ func (s *Store) FreshKeySessions(ctx context.Context, now time.Time, class strin
 		out = append(out, item)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) StorePrivacyAttestation(ctx context.Context, providerID, kid, digest string, attestation PrivacyKeyAttestation, signature string) error {
+	if s == nil || s.db == nil {
+		return ErrStoreUnavailable
+	}
+	if err := attestation.validate(); err != nil {
+		return err
+	}
+	if attestation.KeyRecordDigest != digest {
+		return fmt.Errorf("%w: key attestation binding", ErrInvalidPrivacy)
+	}
+	if _, err := decodeBase64URLFixed(signature, ed25519.SignatureSize); err != nil {
+		return fmt.Errorf("%w: key attestation signature", ErrInvalidPrivacy)
+	}
+	raw, err := json.Marshal(attestation)
+	if err != nil {
+		return fmt.Errorf("%w: privacy attestation", ErrStoreUnavailable)
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE relay_blind_key_records SET privacy_attestation_json=?,privacy_attestation_signature=? WHERE provider_id=? AND kid=? AND key_record_digest=? AND key_class=? AND revoked_at_unix IS NULL`, string(raw), signature, providerID, kid, digest, KeyClassPrivacy)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	if changed != 1 {
+		return fmt.Errorf("%w: privacy attestation", ErrStoreUnavailable)
+	}
+	return nil
+}
+
+func (s *Store) LookupPrivacyAttestation(ctx context.Context, providerID, kid, digest string) (PrivacyKeyAttestation, string, error) {
+	if s == nil || s.db == nil {
+		return PrivacyKeyAttestation{}, "", ErrStoreUnavailable
+	}
+	var raw, signature sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT privacy_attestation_json,privacy_attestation_signature FROM relay_blind_key_records WHERE provider_id=? AND kid=? AND key_record_digest=? AND key_class=? AND revoked_at_unix IS NULL`, providerID, kid, digest, KeyClassPrivacy).Scan(&raw, &signature)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return PrivacyKeyAttestation{}, "", fmt.Errorf("%w: privacy attestation", ErrInvalidPrivacy)
+		}
+		return PrivacyKeyAttestation{}, "", fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	if !raw.Valid || !signature.Valid || raw.String == "" || signature.String == "" {
+		return PrivacyKeyAttestation{}, "", fmt.Errorf("%w: privacy attestation", ErrInvalidPrivacy)
+	}
+	var attestation PrivacyKeyAttestation
+	if err := decodeClosed([]byte(raw.String), &attestation, []string{"version", "key_record_digest", "privacy_class", "assurance", "binary_version", "code_cdhash", "not_before_unix", "expires_at_unix"}); err != nil {
+		return PrivacyKeyAttestation{}, "", fmt.Errorf("%w: privacy attestation", ErrInvalidPrivacy)
+	}
+	if err := attestation.validate(); err != nil {
+		return PrivacyKeyAttestation{}, "", err
+	}
+	if attestation.KeyRecordDigest != digest {
+		return PrivacyKeyAttestation{}, "", fmt.Errorf("%w: key attestation binding", ErrInvalidPrivacy)
+	}
+	if _, err := decodeBase64URLFixed(signature.String, ed25519.SignatureSize); err != nil {
+		return PrivacyKeyAttestation{}, "", fmt.Errorf("%w: key attestation signature", ErrInvalidPrivacy)
+	}
+	return attestation, signature.String, nil
+}
+
+// PeekAuthorization reads a reservation by execution-authorization digest in
+// any state. It does not change the row and does not weaken the consumed-only
+// check in LookupConsumedAuthorization.
+func (s *Store) PeekAuthorization(ctx context.Context, accountID, walletSession, authorization string) (Reservation, error) {
+	if s == nil || s.db == nil || strings.TrimSpace(authorization) == "" {
+		return Reservation{}, ErrReservationMismatch
+	}
+	row, err := scanReservation(s.db.QueryRowContext(ctx, reservationSelect+` WHERE execution_auth_digest=?`, digestText(authorization)))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Reservation{}, ErrReservationMismatch
+		}
+		return Reservation{}, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	if row.AccountID != accountID || row.WalletSession != walletSession {
+		return Reservation{}, ErrReservationMismatch
+	}
+	return row.Reservation, nil
+}
+
+// PrivacyControlStatus is the durable kill-switch row. Present is false when
+// the operator has never written the control row.
+type PrivacyControlStatus struct {
+	Present       bool
+	Disabled      bool
+	Reason        string
+	UpdatedAtUnix int64
+}
+
+func (s *Store) PrivacyControl(ctx context.Context) (PrivacyControlStatus, error) {
+	if s == nil || s.db == nil {
+		return PrivacyControlStatus{}, ErrStoreUnavailable
+	}
+	var disabled int
+	var reason string
+	var updated int64
+	err := s.db.QueryRowContext(ctx, `SELECT disabled,reason,updated_at_unix FROM privacy_class_control WHERE id=1`).Scan(&disabled, &reason, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return PrivacyControlStatus{}, nil
+	}
+	if err != nil {
+		return PrivacyControlStatus{}, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	return PrivacyControlStatus{Present: true, Disabled: disabled != 0, Reason: reason, UpdatedAtUnix: updated}, nil
+}
+
+// PrivacyQuarantine is one unexpired provider quarantine row.
+type PrivacyQuarantine struct {
+	ProviderID        string
+	Reason            string
+	QuarantinedAtUnix int64
+	ExpiresAtUnix     int64
+}
+
+func (s *Store) ListPrivacyQuarantines(ctx context.Context, now time.Time) ([]PrivacyQuarantine, error) {
+	if s == nil || s.db == nil {
+		return nil, ErrStoreUnavailable
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT provider_id,reason,quarantined_at_unix,expires_at_unix FROM privacy_class_quarantine WHERE expires_at_unix>? ORDER BY provider_id`, now.Unix())
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	defer rows.Close()
+	var out []PrivacyQuarantine
+	for rows.Next() {
+		var item PrivacyQuarantine
+		if err := rows.Scan(&item.ProviderID, &item.Reason, &item.QuarantinedAtUnix, &item.ExpiresAtUnix); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) CountReservations(ctx context.Context) (int, error) {
+	if s == nil || s.db == nil {
+		return 0, ErrStoreUnavailable
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM relay_blind_reservations`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	return count, nil
 }
 
 func (s *Store) PrivacyKeyFresh(ctx context.Context, providerID, assignedSession, digest string, now time.Time) (bool, error) {

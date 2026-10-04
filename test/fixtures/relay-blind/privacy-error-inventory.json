@@ -1,0 +1,35 @@
+{
+  "version": "privacy-error-inventory-v1",
+  "codes": [
+    {
+      "code": "privacy_class_disabled",
+      "http_status": 503,
+      "retryable": false,
+      "retry_action": "none"
+    },
+    {
+      "code": "privacy_class_unavailable",
+      "http_status": 503,
+      "retryable": false,
+      "retry_action": "none"
+    },
+    {
+      "code": "privacy_class_downgrade_rejected",
+      "http_status": 400,
+      "retryable": false,
+      "retry_action": "none"
+    },
+    {
+      "code": "privacy_class_posture_stale",
+      "http_status": 503,
+      "retryable": true,
+      "retry_action": "new_reservation_and_envelope"
+    },
+    {
+      "code": "privacy_class_unconfirmed",
+      "http_status": 500,
+      "retryable": false,
+      "retry_action": "do_not_resubmit"
+    }
+  ]
+}

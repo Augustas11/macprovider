@@ -262,6 +262,9 @@ func (a *PrivacyAuthority) AcceptPrivacyKeys(ctx context.Context, providerID, se
 		if err := a.store.UpsertKeyRecordClass(ctx, providerID, session, item.record.KeyRecord, item.immutableDigest, now, a.maxRecords, a.replayRetention, KeyClassPrivacy); err != nil {
 			return err
 		}
+		if err := a.store.StorePrivacyAttestation(ctx, providerID, item.record.KeyRecord.KID, item.record.KeyRecord.KeyRecordDigest, item.record.Attestation, item.record.Signature); err != nil {
+			return err
+		}
 	}
 	kids := make([]string, 0, len(verified))
 	attestations := make(map[string]string, len(verified))

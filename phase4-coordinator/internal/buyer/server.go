@@ -2432,6 +2432,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeRelayBlindError(w, "relay_blind_downgrade_rejected", "Relay-blind execution authorization is required")
 		return
 	}
+	if present, _ := privacyRequested(r); present {
+		rec.logBuyerFailure(http.StatusBadRequest, "Privacy class marker is not valid for a plaintext request")
+		writePrivacyClassError(w, privacyClassDowngrade, "Privacy class marker is not valid for a plaintext request")
+		return
+	}
 	req, status, code, msg, param := validateChatRequestDetailed(body)
 	if status != 0 {
 		rec.logBuyerFailure(status, msg)

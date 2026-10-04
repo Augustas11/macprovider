@@ -83,6 +83,11 @@ var relayBlindErrors = map[string]relayBlindErrorShape{
 	"relay_blind_committed_failed":          {http.StatusInternalServerError, false, "do_not_resubmit"},
 	"relay_blind_provider_unsupported":      {http.StatusServiceUnavailable, true, "new_reservation_and_envelope"},
 	"unsupported_sampling_penalty":          {http.StatusBadRequest, false, "none"},
+	privacyClassDisabled:                    {http.StatusServiceUnavailable, false, "none"},
+	privacyClassUnavailable:                 {http.StatusServiceUnavailable, false, "none"},
+	privacyClassDowngrade:                   {http.StatusBadRequest, false, "none"},
+	privacyClassStale:                       {http.StatusServiceUnavailable, true, "new_reservation_and_envelope"},
+	privacyClassUnconfirmed:                 {http.StatusInternalServerError, false, "do_not_resubmit"},
 }
 
 func writeRelayBlindError(w http.ResponseWriter, code, message string) {
@@ -95,6 +100,7 @@ func writeRelayBlindError(w http.ResponseWriter, code, message string) {
 	if strings.TrimSpace(w.Header().Get(relayBlindValidatedHeader)) != "" {
 		effectiveOutcome = "relay_blind_satisfied"
 	}
+	w.Header().Del(privacyClassHeader)
 	setRelayBlindNoStore(w)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(shape.Status)
@@ -187,8 +193,25 @@ func (s *Server) handleRelayBlindReservation(w http.ResponseWriter, r *http.Requ
 	setRelayBlindNoStore(w)
 	account, ok := authenticatedAccountFromContext(r.Context())
 	walletSession, validSession := relayBlindWalletSession(r)
-	if !ok || !validSession || relayBlindPoolIntent(r) {
+	present, valid := privacyRequested(r)
+	if !ok || !validSession {
 		writeRelayBlindError(w, "relay_blind_downgrade_rejected", "Relay-blind requests require the global pool and trusted account context")
+		return
+	}
+	if present && relayBlindPoolIntent(r) {
+		writePrivacyClassError(w, privacyClassDowngrade, "Privacy class does not accept pool-scoped requests")
+		return
+	}
+	if relayBlindPoolIntent(r) {
+		writeRelayBlindError(w, "relay_blind_downgrade_rejected", "Relay-blind requests require the global pool and trusted account context")
+		return
+	}
+	if present && !valid {
+		writePrivacyClassError(w, privacyClassDowngrade, "")
+		return
+	}
+	if present {
+		s.handlePrivacyClassReservation(w, r, account.ID(), walletSession)
 		return
 	}
 	if s.relayBlind == nil || !s.relayBlind.cfg.Enabled {
@@ -213,7 +236,7 @@ func (s *Server) handleRelayBlindReservation(w http.ResponseWriter, r *http.Requ
 		writeRelayBlindError(w, "relay_blind_route_reservation_invalid", "Invalid route reservation")
 		return
 	}
-	provider, key, found := s.selectRelayBlindProvider(r.Context(), request.Model, request.EncryptedRequestBytes, false)
+	provider, key, found := s.selectRelayBlindProvider(r.Context(), request.Model, request.EncryptedRequestBytes, false, relayblind.KeyClassRelayBlind)
 	if !found {
 		writeRelayBlindError(w, "relay_blind_provider_unsupported", "No relay-blind provider is available")
 		return
@@ -249,7 +272,7 @@ func (s *Server) handleRelayBlindReservation(w http.ResponseWriter, r *http.Requ
 	_ = json.NewEncoder(w).Encode(response)
 }
 
-func (s *Server) selectRelayBlindProvider(ctx context.Context, model string, encryptedBytes int64, requireFree bool) (pool.Provider, relayblind.KeyRecord, bool) {
+func (s *Server) selectRelayBlindProvider(ctx context.Context, model string, encryptedBytes int64, requireFree bool, class string) (pool.Provider, relayblind.KeyRecord, bool) {
 	providers := s.pool.Snapshot()
 	sort.Slice(providers, func(i, j int) bool { return providers[i].AssignedID < providers[j].AssignedID })
 	for _, provider := range providers {
@@ -260,7 +283,7 @@ func (s *Server) selectRelayBlindProvider(ctx context.Context, model string, enc
 		if !eligible || !provider.IsWSTunneled() || !modelIDEqual(provider.ModelID, model) {
 			continue
 		}
-		records, err := s.relayBlind.store.FreshKeyRecords(ctx, provider.ProviderID, provider.AssignedID, model, encryptedBytes, s.now(), relayblind.KeyClassRelayBlind)
+		records, err := s.relayBlind.store.FreshKeyRecords(ctx, provider.ProviderID, provider.AssignedID, model, encryptedBytes, s.now(), class)
 		if err == nil && len(records) > 0 {
 			return provider, records[0], true
 		}
@@ -272,11 +295,28 @@ func (s *Server) handleRelayBlindConsume(w http.ResponseWriter, r *http.Request)
 	setRelayBlindNoStore(w)
 	account, ok := authenticatedAccountFromContext(r.Context())
 	walletSession, validSession := relayBlindWalletSession(r)
-	if !ok || !validSession || relayBlindPoolIntent(r) {
+	present, valid := privacyRequested(r)
+	if !ok || !validSession {
+		writeRelayBlindError(w, "relay_blind_downgrade_rejected", "Relay-blind requests require trusted global-pool context")
+		return
+	}
+	if present && relayBlindPoolIntent(r) {
+		writePrivacyClassError(w, privacyClassDowngrade, "Privacy class does not accept pool-scoped requests")
+		return
+	}
+	if relayBlindPoolIntent(r) {
 		writeRelayBlindError(w, "relay_blind_downgrade_rejected", "Relay-blind requests require trusted global-pool context")
 		return
 	}
 	if s.relayBlind == nil || s.relayBlind.store == nil {
+		if present {
+			if !valid {
+				writePrivacyClassError(w, privacyClassDowngrade, "")
+				return
+			}
+			writePrivacyClassError(w, privacyClassDisabled, "")
+			return
+		}
 		writeRelayBlindError(w, "relay_blind_disabled", "Relay-blind requests are disabled")
 		return
 	}
@@ -295,6 +335,14 @@ func (s *Server) handleRelayBlindConsume(w http.ResponseWriter, r *http.Request)
 		writeRelayBlindError(w, "relay_blind_envelope_invalid", "Invalid relay-blind envelope")
 		return
 	}
+	held, heldErr := s.relayBlind.store.LookupReservation(r.Context(), envelope.ProviderBinding)
+	if code, reject := s.privacyClassConflict(r.Context(), held, heldErr == nil, present, valid); code != "" {
+		if reject {
+			_ = s.relayBlind.store.RejectPredispatch(r.Context(), held.ProviderBinding, code, s.now())
+		}
+		writePrivacyClassError(w, code, "")
+		return
+	}
 	response, err := s.relayBlind.store.Consume(r.Context(), relayblind.ConsumeInput{AccountID: account.ID(), WalletSession: walletSession, Envelope: envelope, EnvelopeDigest: digest, Now: s.now()})
 	if err != nil {
 		code := "relay_blind_route_reservation_invalid"
@@ -307,6 +355,23 @@ func (s *Server) handleRelayBlindConsume(w http.ResponseWriter, r *http.Request)
 		writeRelayBlindError(w, code, "Relay-blind reservation could not be consumed")
 		return
 	}
+	reservation, err := s.relayBlind.store.LookupReservation(r.Context(), envelope.ProviderBinding)
+	if err != nil {
+		writeRelayBlindError(w, "relay_blind_required_unavailable", "Relay-blind state is unavailable")
+		return
+	}
+	if reservation.PrivacyClass {
+		provider, _ := s.pool.Resolve(reservation.ProviderID, reservation.AssignedSession)
+		if _, code := s.privacyGate(r.Context(), provider, reservation.KeyRecordDigest); code != "" {
+			observed := privacyObservedCode(code, false)
+			_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, observed, s.now())
+			writePrivacyClassError(w, observed, "")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(response)
+		return
+	}
 	if !s.relayBlind.cfg.Enabled {
 		_ = s.relayBlind.store.RejectPredispatch(r.Context(), envelope.ProviderBinding, "relay_blind_disabled", s.now())
 		writeRelayBlindError(w, "relay_blind_disabled", "Relay-blind requests are disabled")
@@ -315,11 +380,6 @@ func (s *Server) handleRelayBlindConsume(w http.ResponseWriter, r *http.Request)
 	if !s.relayBlindAvailable() {
 		_ = s.relayBlind.store.RejectPredispatch(r.Context(), envelope.ProviderBinding, "relay_blind_required_unavailable", s.now())
 		writeRelayBlindError(w, "relay_blind_required_unavailable", "Relay-blind requests are unavailable")
-		return
-	}
-	reservation, err := s.relayBlind.store.LookupReservation(r.Context(), envelope.ProviderBinding)
-	if err != nil {
-		writeRelayBlindError(w, "relay_blind_required_unavailable", "Relay-blind state is unavailable")
 		return
 	}
 	provider, live := s.pool.Resolve(reservation.ProviderID, reservation.AssignedSession)
@@ -345,11 +405,28 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 	account, ok := authenticatedAccountFromContext(r.Context())
 	walletSession, validSession := relayBlindWalletSession(r)
 	authorization := strings.TrimSpace(r.Header.Get(relayBlindExecutionAuthorizationHeader))
-	if !ok || !validSession || relayBlindPoolIntent(r) || authorization == "" {
+	present, valid := privacyRequested(r)
+	if !ok || !validSession || authorization == "" {
+		writeRelayBlindError(w, "relay_blind_downgrade_rejected", "Relay-blind execution requires trusted global-pool context")
+		return
+	}
+	if present && relayBlindPoolIntent(r) {
+		writePrivacyClassError(w, privacyClassDowngrade, "Privacy class does not accept pool-scoped requests")
+		return
+	}
+	if relayBlindPoolIntent(r) {
 		writeRelayBlindError(w, "relay_blind_downgrade_rejected", "Relay-blind execution requires trusted global-pool context")
 		return
 	}
 	if s.relayBlind == nil || s.relayBlind.store == nil {
+		if present {
+			if !valid {
+				writePrivacyClassError(w, privacyClassDowngrade, "")
+				return
+			}
+			writePrivacyClassError(w, privacyClassDisabled, "")
+			return
+		}
 		writeRelayBlindError(w, "relay_blind_disabled", "Relay-blind execution is disabled")
 		return
 	}
@@ -372,8 +449,22 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		writeRelayBlindError(w, "relay_blind_envelope_invalid", "Invalid relay-blind envelope")
 		return
 	}
+	held, heldErr := s.relayBlind.store.LookupReservation(r.Context(), envelope.ProviderBinding)
+	if code, reject := s.privacyClassConflict(r.Context(), held, heldErr == nil, present, valid); code != "" {
+		if reject {
+			_ = s.relayBlind.store.RejectPredispatch(r.Context(), held.ProviderBinding, code, s.now())
+		}
+		writePrivacyClassError(w, code, "")
+		return
+	}
 	reservation, err := s.relayBlind.store.LookupConsumedAuthorization(r.Context(), account.ID(), walletSession, authorization, s.now())
 	if err != nil || subtle.ConstantTimeCompare([]byte(reservation.EnvelopeDigest), []byte(digest)) != 1 || reservation.RequestID != envelope.RequestID {
+		if errors.Is(err, relayblind.ErrReplay) {
+			if peeked, peekErr := s.relayBlind.store.PeekAuthorization(r.Context(), account.ID(), walletSession, authorization); peekErr == nil && peeked.PrivacyClass && s.privacyDisabledNow(r.Context()) {
+				writePrivacyClassError(w, privacyClassDisabled, "")
+				return
+			}
+		}
 		code := "relay_blind_route_reservation_invalid"
 		if errors.Is(err, relayblind.ErrReplay) {
 			code = "relay_blind_replay"
@@ -381,22 +472,35 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		writeRelayBlindError(w, code, "Relay-blind execution authorization is invalid")
 		return
 	}
-	if !s.relayBlind.cfg.Enabled {
-		_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, "relay_blind_disabled", s.now())
-		writeRelayBlindError(w, "relay_blind_disabled", "Relay-blind execution is disabled")
-		return
-	}
-	if !s.relayBlindAvailable() {
-		_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, "relay_blind_required_unavailable", s.now())
-		writeRelayBlindError(w, "relay_blind_required_unavailable", "Relay-blind execution is unavailable")
-		return
-	}
 	provider, live := s.pool.Resolve(reservation.ProviderID, reservation.AssignedSession)
 	_, keyErr := s.relayBlind.store.LookupKeyRecord(r.Context(), reservation.ProviderID, reservation.AssignedSession, reservation.KID, reservation.KeyRecordDigest, s.now())
-	if !live || !provider.RoutingEligible() || !provider.IsWSTunneled() || keyErr != nil {
-		_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, "relay_blind_key_expired", s.now())
-		writeRelayBlindError(w, "relay_blind_key_expired", "Relay-blind provider session or key expired")
-		return
+	if reservation.PrivacyClass {
+		if s.privacyDisabledNow(r.Context()) {
+			_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, privacyClassDisabled, s.now())
+			writePrivacyClassError(w, privacyClassDisabled, "")
+			return
+		}
+		if !s.relayBlindAvailable() || !live || !provider.RoutingEligible() || !provider.IsWSTunneled() || keyErr != nil {
+			_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, privacyClassStale, s.now())
+			writePrivacyClassError(w, privacyClassStale, "")
+			return
+		}
+	} else {
+		if !s.relayBlind.cfg.Enabled {
+			_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, "relay_blind_disabled", s.now())
+			writeRelayBlindError(w, "relay_blind_disabled", "Relay-blind execution is disabled")
+			return
+		}
+		if !s.relayBlindAvailable() {
+			_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, "relay_blind_required_unavailable", s.now())
+			writeRelayBlindError(w, "relay_blind_required_unavailable", "Relay-blind execution is unavailable")
+			return
+		}
+		if !live || !provider.RoutingEligible() || !provider.IsWSTunneled() || keyErr != nil {
+			_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, "relay_blind_key_expired", s.now())
+			writeRelayBlindError(w, "relay_blind_key_expired", "Relay-blind provider session or key expired")
+			return
+		}
 	}
 	quotaMetered := false
 	if s.admission != nil {
@@ -430,6 +534,18 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		AssignedSession: reservation.AssignedSession, RequestID: reservation.RequestID,
 		InputTokenUpperBound: reservation.InputTokenUpperBound, MaxOutputTokens: reservation.MaxOutputTokens,
 	}
+	if reservation.PrivacyClass {
+		relayContext.PrivacyClass = relayblind.PrivacyClassV1
+		if _, code := s.privacyGate(r.Context(), provider, reservation.KeyRecordDigest); code != "" {
+			observed := privacyObservedCode(code, false)
+			_ = s.relayBlind.store.RejectArmedPredispatch(r.Context(), reservation.ProviderBinding, observed, s.now())
+			if quotaMetered {
+				s.admission.RefundRequest(provider)
+			}
+			writePrivacyClassError(w, observed, "")
+			return
+		}
+	}
 	relay, err := s.relayBlind.relay(ctx, provider, envelope.RequestID, body, envelope.Stream, relayContext)
 	if err != nil {
 		_ = s.relayBlind.store.RejectArmedPredispatch(r.Context(), reservation.ProviderBinding, "relay_blind_provider_unsupported", s.now())
@@ -446,19 +562,19 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 	case err = <-relay.Errors:
 		_ = err
 		_ = s.relayBlind.store.MarkUnknownPostdispatch(r.Context(), reservation.ProviderBinding, "relay_blind_execution_uncertain", s.now())
-		s.recordRelayBlindUnknown(rec, provider, nil, nil, http.StatusInternalServerError, "Provider validation evidence was not accepted")
+		s.recordRelayBlindUnknown(rec, provider, nil, nil, http.StatusInternalServerError, "Provider validation evidence was not accepted", reservation.PrivacyClass)
 		writeRelayBlindError(w, "relay_blind_committed_failed", "Provider validation evidence was not accepted")
 		return
 	case <-ctx.Done():
 		_ = s.relayBlind.store.MarkUnknownPostdispatch(context.Background(), reservation.ProviderBinding, "relay_blind_execution_uncertain", s.now())
-		s.recordRelayBlindUnknown(rec, provider, nil, nil, http.StatusInternalServerError, "Provider validation evidence timed out")
+		s.recordRelayBlindUnknown(rec, provider, nil, nil, http.StatusInternalServerError, "Provider validation evidence timed out", reservation.PrivacyClass)
 		writeRelayBlindError(w, "relay_blind_committed_failed", "Provider validation evidence timed out")
 		return
 	}
 	evidence := relayBlindEvidence(validation)
 	if _, err := s.relayBlind.store.PersistEvidence(r.Context(), provider.ProviderID, provider.AssignedID, evidence, "", s.now()); err != nil {
 		_ = s.relayBlind.store.MarkUnknownPostdispatch(r.Context(), reservation.ProviderBinding, "relay_blind_execution_uncertain", s.now())
-		s.recordRelayBlindUnknown(rec, provider, nil, nil, http.StatusInternalServerError, "Provider validation evidence was not accepted")
+		s.recordRelayBlindUnknown(rec, provider, nil, nil, http.StatusInternalServerError, "Provider validation evidence was not accepted", reservation.PrivacyClass)
 		writeRelayBlindError(w, "relay_blind_committed_failed", "Provider validation evidence was not accepted")
 		return
 	}
@@ -475,6 +591,9 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 	rec.relayBlind.Outcome = "relay_blind_satisfied"
 	w.Header().Set(relayBlindValidatedHeader, reservation.EnvelopeDigest)
 	w.Header().Set(relayBlindInputTokensHeader, strconv.FormatInt(validation.InputTokens, 10))
+	if reservation.PrivacyClass {
+		w.Header().Set(privacyClassHeader, relayblind.PrivacyClassV1)
+	}
 	if envelope.Stream {
 		s.forwardRelayBlindStreaming(w, r, rec, provider, reservation, relay, validation.InputTokens)
 		return
@@ -505,14 +624,14 @@ func (s *Server) forwardRelayBlindNonStreaming(w http.ResponseWriter, r *http.Re
 		case end := <-relay.Done:
 			if end.RelayBlindValidation == nil {
 				_ = s.relayBlind.store.MarkUnknownPostdispatch(r.Context(), reservation.ProviderBinding, "relay_blind_execution_uncertain", s.now())
-				s.recordRelayBlindUnknown(rec, provider, &inputTokens, nil, http.StatusInternalServerError, "Terminal provider evidence was missing")
+				s.recordRelayBlindUnknown(rec, provider, &inputTokens, nil, http.StatusInternalServerError, "Terminal provider evidence was missing", reservation.PrivacyClass)
 				writeRelayBlindError(w, "relay_blind_committed_failed", "Terminal provider evidence was missing")
 				return
 			}
 			completion, valid := boundedRelayBlindCompletion(end.Usage, reservation.MaxOutputTokens)
 			if !valid {
 				_ = s.relayBlind.store.MarkUnknownPostdispatch(r.Context(), reservation.ProviderBinding, "relay_blind_committed_failed", s.now())
-				s.recordRelayBlindUnknown(rec, provider, &inputTokens, nil, http.StatusInternalServerError, "Terminal provider usage was invalid")
+				s.recordRelayBlindUnknown(rec, provider, &inputTokens, nil, http.StatusInternalServerError, "Terminal provider usage was invalid", reservation.PrivacyClass)
 				writeRelayBlindError(w, "relay_blind_committed_failed", "Terminal provider usage was invalid")
 				return
 			}
@@ -526,14 +645,20 @@ func (s *Server) forwardRelayBlindNonStreaming(w http.ResponseWriter, r *http.Re
 			}
 			if _, err := s.relayBlind.store.PersistEvidence(r.Context(), provider.ProviderID, provider.AssignedID, terminal, code, s.now()); err != nil {
 				_ = s.relayBlind.store.MarkUnknownPostdispatch(r.Context(), reservation.ProviderBinding, "relay_blind_execution_uncertain", s.now())
-				s.recordRelayBlindUnknown(rec, provider, &inputTokens, nil, http.StatusInternalServerError, "Terminal provider evidence was not accepted")
+				s.recordRelayBlindUnknown(rec, provider, &inputTokens, nil, http.StatusInternalServerError, "Terminal provider evidence was not accepted", reservation.PrivacyClass)
 				writeRelayBlindError(w, "relay_blind_committed_failed", "Terminal provider evidence was not accepted")
 				return
 			}
 			prompt, complete := inputTokens, completion
-			settlementOutput, validOutput := settlementOutputFromChatResponseAt(output.Bytes(), terminalStateFromAttempt(status, end.Error, code), s.now().UnixMilli())
-			if !validOutput {
+			var settlementOutput *billing.SettlementOutput
+			if reservation.PrivacyClass {
 				settlementOutput = settlementOutputUnavailableFor(terminalStateFromAttempt(status, end.Error, code))
+			} else {
+				var validOutput bool
+				settlementOutput, validOutput = settlementOutputFromChatResponseAt(output.Bytes(), terminalStateFromAttempt(status, end.Error, code), s.now().UnixMilli())
+				if !validOutput {
+					settlementOutput = settlementOutputUnavailableFor(terminalStateFromAttempt(status, end.Error, code))
+				}
 			}
 			if err := rec.logProviderRowWithEstimateAndOutput(provider, status, &prompt, &complete, end.Error, code, 0, nil, settlementOutput); err != nil {
 				writeRelayBlindError(w, "relay_blind_committed_failed", "Could not durably record relay-blind execution")
@@ -549,12 +674,12 @@ func (s *Server) forwardRelayBlindNonStreaming(w http.ResponseWriter, r *http.Re
 			return
 		case <-relay.Errors:
 			_ = s.relayBlind.store.MarkUnknownPostdispatch(r.Context(), reservation.ProviderBinding, "relay_blind_execution_uncertain", s.now())
-			s.recordRelayBlindUnknown(rec, provider, &inputTokens, nil, http.StatusInternalServerError, "Provider relay failed after commit")
+			s.recordRelayBlindUnknown(rec, provider, &inputTokens, nil, http.StatusInternalServerError, "Provider relay failed after commit", reservation.PrivacyClass)
 			writeRelayBlindError(w, "relay_blind_committed_failed", "Provider relay failed after commit")
 			return
 		case <-r.Context().Done():
 			_ = s.relayBlind.store.MarkUnknownPostdispatch(context.Background(), reservation.ProviderBinding, "relay_blind_execution_uncertain", s.now())
-			s.recordRelayBlindUnknown(rec, provider, &inputTokens, nil, http.StatusInternalServerError, "Buyer disconnected during request")
+			s.recordRelayBlindUnknown(rec, provider, &inputTokens, nil, http.StatusInternalServerError, "Buyer disconnected during request", reservation.PrivacyClass)
 			return
 		}
 	}
@@ -574,17 +699,17 @@ func (s *Server) forwardRelayBlindStreaming(w http.ResponseWriter, r *http.Reque
 				if streamedBytes > maxUpstreamResponseBodyBytes {
 					relay.Cancel("response_byte_cap_exceeded")
 					_ = s.relayBlind.store.MarkUnknownPostdispatch(context.Background(), reservation.ProviderBinding, "relay_blind_committed_failed", s.now())
-					s.recordRelayBlindUnknown(rec, provider, &inputTokens, tracker.output(billing.TerminalStateProviderError), http.StatusOK, "Provider response exceeded coordinator limit")
+					s.recordRelayBlindUnknown(rec, provider, &inputTokens, tracker.output(billing.TerminalStateProviderError), http.StatusOK, "Provider response exceeded coordinator limit", reservation.PrivacyClass)
 					return
 				}
 				n, writeErr := io.WriteString(w, chunk.Data)
-				if n > 0 {
+				if n > 0 && !reservation.PrivacyClass {
 					_ = tracker.observeBlock([]byte(chunk.Data[:n]))
 				}
 				if writeErr != nil {
 					relay.Cancel("buyer_disconnected")
 					_ = s.relayBlind.store.MarkUnknownPostdispatch(context.Background(), reservation.ProviderBinding, "relay_blind_execution_uncertain", s.now())
-					s.recordRelayBlindUnknown(rec, provider, &inputTokens, tracker.output(billing.TerminalStateBuyerCancel), http.StatusOK, "Buyer disconnected during streaming")
+					s.recordRelayBlindUnknown(rec, provider, &inputTokens, tracker.output(billing.TerminalStateBuyerCancel), http.StatusOK, "Buyer disconnected during streaming", reservation.PrivacyClass)
 					return
 				}
 				if flusher != nil {
@@ -594,13 +719,13 @@ func (s *Server) forwardRelayBlindStreaming(w http.ResponseWriter, r *http.Reque
 		case end := <-relay.Done:
 			if end.RelayBlindValidation == nil {
 				_ = s.relayBlind.store.MarkUnknownPostdispatch(context.Background(), reservation.ProviderBinding, "relay_blind_execution_uncertain", s.now())
-				s.recordRelayBlindUnknown(rec, provider, &inputTokens, tracker.output(billing.TerminalStateProviderError), http.StatusOK, "Terminal provider evidence was missing")
+				s.recordRelayBlindUnknown(rec, provider, &inputTokens, tracker.output(billing.TerminalStateProviderError), http.StatusOK, "Terminal provider evidence was missing", reservation.PrivacyClass)
 				return
 			}
 			completion, valid := boundedRelayBlindCompletion(end.Usage, reservation.MaxOutputTokens)
 			if !valid {
 				_ = s.relayBlind.store.MarkUnknownPostdispatch(context.Background(), reservation.ProviderBinding, "relay_blind_committed_failed", s.now())
-				s.recordRelayBlindUnknown(rec, provider, &inputTokens, tracker.output(billing.TerminalStateProviderError), http.StatusOK, "Terminal provider usage was invalid")
+				s.recordRelayBlindUnknown(rec, provider, &inputTokens, tracker.output(billing.TerminalStateProviderError), http.StatusOK, "Terminal provider usage was invalid", reservation.PrivacyClass)
 				return
 			}
 			terminal := relayBlindEvidence(*end.RelayBlindValidation)
@@ -612,28 +737,42 @@ func (s *Server) forwardRelayBlindStreaming(w http.ResponseWriter, r *http.Reque
 			}
 			if _, err := s.relayBlind.store.PersistEvidence(context.Background(), provider.ProviderID, provider.AssignedID, terminal, code, s.now()); err != nil {
 				_ = s.relayBlind.store.MarkUnknownPostdispatch(context.Background(), reservation.ProviderBinding, "relay_blind_execution_uncertain", s.now())
-				s.recordRelayBlindUnknown(rec, provider, &inputTokens, tracker.output(billing.TerminalStateProviderError), http.StatusOK, "Terminal provider evidence was not accepted")
+				s.recordRelayBlindUnknown(rec, provider, &inputTokens, tracker.output(billing.TerminalStateProviderError), http.StatusOK, "Terminal provider evidence was not accepted", reservation.PrivacyClass)
 				return
 			}
 			prompt, complete := inputTokens, completion
-			_ = rec.logProviderRowWithEstimateAndOutput(provider, status, &prompt, &complete, end.Error, code, 0, nil, tracker.output(terminalStateFromAttempt(status, end.Error, code)))
+			settlementOutput := tracker.output(terminalStateFromAttempt(status, end.Error, code))
+			if reservation.PrivacyClass {
+				settlementOutput = settlementOutputUnavailableFor(terminalStateFromAttempt(status, end.Error, code))
+			}
+			_ = rec.logProviderRowWithEstimateAndOutput(provider, status, &prompt, &complete, end.Error, code, 0, nil, settlementOutput)
 			return
 		case <-relay.Errors:
 			_ = s.relayBlind.store.MarkUnknownPostdispatch(context.Background(), reservation.ProviderBinding, "relay_blind_execution_uncertain", s.now())
-			s.recordRelayBlindUnknown(rec, provider, &inputTokens, tracker.output(billing.TerminalStateProviderError), http.StatusOK, "Provider relay failed after commit")
+			s.recordRelayBlindUnknown(rec, provider, &inputTokens, tracker.output(billing.TerminalStateProviderError), http.StatusOK, "Provider relay failed after commit", reservation.PrivacyClass)
 			return
 		case <-r.Context().Done():
 			relay.Cancel("buyer_disconnected")
 			_ = s.relayBlind.store.MarkUnknownPostdispatch(context.Background(), reservation.ProviderBinding, "relay_blind_execution_uncertain", s.now())
-			s.recordRelayBlindUnknown(rec, provider, &inputTokens, tracker.output(billing.TerminalStateBuyerCancel), http.StatusOK, "Buyer disconnected during streaming")
+			s.recordRelayBlindUnknown(rec, provider, &inputTokens, tracker.output(billing.TerminalStateBuyerCancel), http.StatusOK, "Buyer disconnected during streaming", reservation.PrivacyClass)
 			return
 		}
 	}
 }
 
-func (s *Server) recordRelayBlindUnknown(rec *billingRecorder, provider pool.Provider, inputTokens *int64, output *billing.SettlementOutput, status int, message string) {
+func (s *Server) recordRelayBlindUnknown(rec *billingRecorder, provider pool.Provider, inputTokens *int64, output *billing.SettlementOutput, status int, message string, privacy bool) {
 	var estimate *int64
-	if output != nil && output.Available {
+	if privacy {
+		// Privacy ciphertext is not a completion estimate. Bill the known
+		// input and record a delivered-output estimate of zero.
+		zero := int64(0)
+		estimate = &zero
+		terminal := billing.TerminalStateProviderError
+		if output != nil && output.TerminalState != "" {
+			terminal = output.TerminalState
+		}
+		output = settlementOutputUnavailableFor(terminal)
+	} else if output != nil && output.Available {
 		delivered := output.OutputPrefixEndByte - output.OutputPrefixStartByte
 		estimate = s.estimatedCompletionTokensFromBytes(int(delivered))
 		if estimate != nil && rec != nil && rec.relayBlind != nil && *estimate > rec.relayBlind.MaxOutputTokens {
@@ -719,6 +858,14 @@ func (s *Server) handleRelayBlindCapabilities(w http.ResponseWriter, r *http.Req
 		}
 		models[provider.ModelID] = value
 	}
+	enabled, privacyModels := s.privacyCapabilityModels(r.Context())
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"version": "relay-blind-capabilities-v1", "models": models})
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"version": "relay-blind-capabilities-v1",
+		"models":  models,
+		"privacy_class": map[string]any{
+			"enabled": enabled,
+			"models":  privacyModels,
+		},
+	})
 }

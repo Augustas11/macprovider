@@ -284,6 +284,7 @@ type encryptedInferencePlaintext struct {
 	ConversationKey   string                     `json:"conversation_key,omitempty"`
 	BodyEncoding      string                     `json:"body_encoding,omitempty"`
 	RelayBlindContext *RelayBlindDispatchContext `json:"relay_blind_context,omitempty"`
+	PrivacyClass      string                     `json:"privacy_class,omitempty"`
 }
 
 type encryptedInferenceResponseChunk struct {
@@ -719,6 +720,7 @@ func (ps *providerSession) sealInferenceRequestWithRelayBlind(provider pool.Prov
 			ConversationKey:   conversationKey,
 			BodyEncoding:      relayBlindBodyEncoding(relayBlind),
 			RelayBlindContext: relayBlind,
+			PrivacyClass:      relayBlindPrivacyClass(relayBlind),
 		}
 		return json.Marshal(msg)
 	}
@@ -743,6 +745,7 @@ func (ps *providerSession) sealInferenceRequestWithRelayBlind(provider pool.Prov
 		ConversationKey:   strings.TrimSpace(conversationKey),
 		BodyEncoding:      relayBlindBodyEncoding(relayBlind),
 		RelayBlindContext: relayBlind,
+		PrivacyClass:      relayBlindPrivacyClass(relayBlind),
 	})
 	if err != nil {
 		return nil, err
@@ -767,6 +770,13 @@ func relayBlindBodyEncoding(context *RelayBlindDispatchContext) string {
 		return ""
 	}
 	return "relay-blind-request-v1"
+}
+
+func relayBlindPrivacyClass(context *RelayBlindDispatchContext) string {
+	if context == nil {
+		return ""
+	}
+	return context.PrivacyClass
 }
 
 func (ps *providerSession) openInferenceChunk(providerID, assignedID string, active *relayActive, aad tier2.AEADFrameAAD, envelope tier2.AEADEnvelope) (InferenceResponseChunk, error) {
