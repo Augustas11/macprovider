@@ -129,6 +129,22 @@ func (s *Server) deliverPrivacyPostureResponse(providerID, assignedID string, pa
 	}
 }
 
+// acceptHeartbeatPrivacyKeys applies a heartbeat's privacy_key_records
+// before session state changes. An absent field leaves records nil and is
+// a no-op. An empty array revokes. Parse or state failures do not touch
+// the authority, matching the gate that used to sit beside relay-blind
+// key acceptance.
+func (s *Server) acceptHeartbeatPrivacyKeys(providerID, assignedID string, payload []byte) {
+	hb, _, _, err := ParseHeartbeat(payload)
+	if err != nil {
+		return
+	}
+	if !validState(pool.State(hb.Status)) {
+		return
+	}
+	s.acceptPrivacyKeyRecords(providerID, assignedID, hb.PrivacyKeyRecords)
+}
+
 func (s *Server) acceptPrivacyKeyRecords(providerID, assignedID string, records []relayblind.PrivacyKeyRecord) {
 	if s == nil || s.privacyAuthority == nil || records == nil {
 		return

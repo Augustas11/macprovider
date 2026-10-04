@@ -4545,6 +4545,9 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 	s.pool.Touch(providerID, assignedID, s.now())
 	switch envelope.Type {
 	case "heartbeat":
+		// Privacy keys are accepted before handleHeartbeat updates session
+		// state. handleHeartbeat itself stays the frozen SPEC-047 fragment.
+		s.acceptHeartbeatPrivacyKeys(providerID, assignedID, payload)
 		s.handleHeartbeat(conn, providerID, assignedID, payload)
 	case "diagnostic_status":
 		s.handleDiagnosticStatus(conn, providerID, assignedID, payload)
@@ -6048,7 +6051,6 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		return
 	}
 	s.acceptRelayBlindKeyRecords(providerID, assignedID, hb.RelayBlindKeyRecords)
-	s.acceptPrivacyKeyRecords(providerID, assignedID, hb.PrivacyKeyRecords)
 	// #1354 / SPEC-002 v1.6.0: the warm-up probe is observe-only and fail-open,
 	// so a heartbeat `ready` is no longer clamped to `degraded` while a probe is
 	// in flight — that clamp was part of the blocking gate that deadlocked

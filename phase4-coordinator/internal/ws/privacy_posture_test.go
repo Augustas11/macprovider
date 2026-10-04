@@ -131,6 +131,64 @@ func TestPrivacyKeyRecordsParseBound(t *testing.T) {
 	}
 }
 
+func TestHandleMessageAcceptsHeartbeatPrivacyKeys(t *testing.T) {
+	clock := time.Unix(1_800_000_000, 0).UTC()
+	record, identity := wsPrivacyIdentity(t, clock)
+	auth := openWSPrivacyAuthority(t, clock, identity)
+	server := &Server{
+		pool:             pool.NewRegistry(nil),
+		log:              zerolog.Nop(),
+		now:              func() time.Time { return clock },
+		privacyAuthority: auth,
+	}
+	server.handleMessage(nil, "provider-a", "session-a", privacyHeartbeat(t, "ready", nil))
+	if n := privacyKeySessions(t, auth, clock); n != 0 {
+		t.Fatalf("absent field sessions = %d", n)
+	}
+	server.handleMessage(nil, "provider-a", "session-a", privacyHeartbeat(t, "ready", []relayblind.PrivacyKeyRecord{record}))
+	if n := privacyKeySessions(t, auth, clock); n != 1 {
+		t.Fatalf("advertised sessions = %d", n)
+	}
+	server.handleMessage(nil, "provider-a", "session-a", privacyHeartbeat(t, "ready", nil))
+	if n := privacyKeySessions(t, auth, clock); n != 1 {
+		t.Fatalf("later absent field sessions = %d", n)
+	}
+	server.handleMessage(nil, "provider-a", "session-a", privacyHeartbeat(t, "nope", []relayblind.PrivacyKeyRecord{}))
+	if n := privacyKeySessions(t, auth, clock); n != 1 {
+		t.Fatalf("invalid heartbeat sessions = %d", n)
+	}
+	server.handleMessage(nil, "provider-a", "session-a", privacyHeartbeat(t, "ready", []relayblind.PrivacyKeyRecord{}))
+	if n := privacyKeySessions(t, auth, clock); n != 0 {
+		t.Fatalf("empty array sessions = %d", n)
+	}
+}
+
+func privacyKeySessions(t *testing.T, auth *relayblind.PrivacyAuthority, now time.Time) int {
+	t.Helper()
+	sessions, err := auth.CandidateSessions(context.Background(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(sessions)
+}
+
+func privacyHeartbeat(t *testing.T, status string, records []relayblind.PrivacyKeyRecord) []byte {
+	t.Helper()
+	body := map[string]any{
+		"type": "heartbeat", "status": status, "model_id": "model-a", "model_params_b": 7,
+		"ram_gb": 16, "max_context_tokens": 4096, "max_concurrency": 1, "slots_free": 1, "slots_total": 1,
+		"throughput_tps_estimate": 10, "requests_served_since_last": 0, "avg_latency_ms_since_last": 1, "throughput_tps_since_last": 1,
+	}
+	if records != nil {
+		body["privacy_key_records"] = records
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
 type wsPrivacyMaterial struct {
 	auth     *relayblind.PrivacyAuthority
 	identity ed25519.PrivateKey
@@ -138,6 +196,38 @@ type wsPrivacyMaterial struct {
 	seRaw    []byte
 	digest   string
 	record   relayblind.PrivacyKeyRecord
+}
+
+func openWSPrivacyAuthority(t *testing.T, now time.Time, identity ed25519.PrivateKey) *relayblind.PrivacyAuthority {
+	t.Helper()
+	se, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seRaw := make([]byte, 64)
+	se.X.FillBytes(seRaw[:32])
+	se.Y.FillBytes(seRaw[32:])
+	cfg := config.PrivacyClassConfig{
+		Enabled:                         true,
+		ProviderSEPublicKeys:            map[string]string{"provider-a": base64.StdEncoding.EncodeToString(seRaw)},
+		ApprovedCodeIdentities:          []config.ApprovedCodeIdentity{wsApproved("0123456789abcdef0123456789abcdef01234567", now.Add(24*time.Hour))},
+		AllowedSEKeyBackends:            []string{"file", "keychain"},
+		PostureChallengeIntervalSeconds: 60,
+		PostureMaxAgeSeconds:            150,
+		PostureResponseTimeoutSeconds:   10,
+		QuarantineSeconds:               86400,
+	}
+	store, err := relayblind.OpenStore(filepath.Join(t.TempDir(), "privacy.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	public := identity.Public().(ed25519.PublicKey)
+	auth, err := relayblind.NewPrivacyAuthority(store, cfg, map[string]string{"provider-a": base64.RawURLEncoding.EncodeToString(public)}, 8, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return auth
 }
 
 func newWSPrivacyMaterial(t *testing.T, now time.Time) wsPrivacyMaterial {
