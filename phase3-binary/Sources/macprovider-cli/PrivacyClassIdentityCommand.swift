@@ -72,6 +72,7 @@ struct PrivacyClassIdentityCommand: ParsableCommand {
     }
 
     private static func loadSecureEnclave() throws -> (publicKey: String, backend: String) {
+        #if arch(arm64)
         do {
             let identity = try SecureEnclaveIdentity.loadOrCreate(quiet: true)
             let backend = identity.backendName
@@ -87,6 +88,11 @@ struct PrivacyClassIdentityCommand: ParsableCommand {
         } catch {
             try fail("se_identity")
         }
+        #else
+        // SecureEnclaveIdentity is arm64-only; the universal build's x86_64
+        // slice has no Secure Enclave to report.
+        try fail("se_unavailable")
+        #endif
     }
 
     private static func isAbsoluteDirectory(_ path: String) -> Bool {
