@@ -81,10 +81,18 @@ for key, value in kept.items():
     # Apple spells it both ways: appattest-environment and app-attest-opt-in.
     if "appattest" not in str(key).lower().replace("-", ""):
         continue
-    if not isinstance(value, str) or value.strip() == "":
+    # The profile may carry a string (appattest-environment) or an array of
+    # strings (app-attest-opt-in = ["CDhash"]); the signed value is copied as-is.
+    if isinstance(value, str):
+        shown = value.strip()
+    elif isinstance(value, list) and value and all(isinstance(v, str) and v.strip() for v in value):
+        shown = ",".join(v.strip() for v in value)
+    else:
+        shown = ""
+    if shown == "":
         print(f"appattest entitlement {key} is present but empty", file=sys.stderr)
         sys.exit(1)
-    attest.append((str(key), value.strip()))
+    attest.append((str(key), shown))
 if not attest:
     print(
         "profile has no com.apple.developer.devicecheck.*appattest* entitlement; refusing to sign",
@@ -111,6 +119,11 @@ if isinstance(teams, list) and team not in teams:
     print(f"profile TeamIdentifier does not contain the requested team", file=sys.stderr)
     sys.exit(1)
 
+# A profile grants keychain groups as a wildcard; the signed binary must name
+# a concrete group inside that grant.
+groups = kept.get("keychain-access-groups")
+if isinstance(groups, list) and any("*" in str(g) for g in groups):
+    kept["keychain-access-groups"] = [f"{team}.{bundle}"]
 with open(entitlements_path, "wb") as handle:
     plistlib.dump(kept, handle, fmt=plistlib.FMT_XML)
 with open(environment_path, "w", encoding="utf-8") as handle:
