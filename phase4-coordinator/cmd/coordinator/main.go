@@ -1031,6 +1031,7 @@ func main() {
 			Msg("Phase 3 live MDA service wired (observe mode)")
 	}
 	var relayBlindStore *relayblind.Store
+	var privacyAuthority *relayblind.PrivacyAuthority
 	if strings.TrimSpace(cfg.RelayBlind.SQLitePath) != "" {
 		relayBlindStore, err = relayblind.OpenStore(cfg.RelayBlind.SQLitePath)
 		if err != nil {
@@ -1049,6 +1050,16 @@ func main() {
 			}
 			wsOpts = append(wsOpts, providerws.WithRelayBlindKeySink(relayBlindAuthority))
 		}
+		if cfg.PrivacyClass.Enabled {
+			privacyAuthority, err = relayblind.NewPrivacyAuthority(relayBlindStore, cfg.PrivacyClass, cfg.RelayBlind.IdentityPublicKeys, cfg.RelayBlind.MaxKeyRecordsPerProvider, time.Duration(cfg.RelayBlind.ReplayRetentionSeconds)*time.Second)
+			if err != nil {
+				logger.Fatal().Err(err).Msg("privacy class authority rejected")
+			}
+			wsOpts = append(wsOpts, providerws.WithPrivacyAuthority(privacyAuthority))
+		}
+	}
+	if cfg.PrivacyClass.Enabled && privacyAuthority == nil {
+		logger.Fatal().Msg("privacy class enabled requires the relay-blind store")
 	}
 	wsServer := providerws.NewServer(cfg, registry, logger, wsOpts...)
 	// SPEC-047-R001 v0.1.5: the SIGHUP reload's Tier-2 material is staged and
@@ -1182,6 +1193,9 @@ func main() {
 	// SPEC-022-R012.8: runs whether or not the trusted-pool feature is on,
 	// because disabling it is one way to stop pool traffic before a rollback.
 	startPoolSettlementExpirySweeper(shutdownCtx, billingStore, moneySQLiteActivity, logger)
+	if privacyAuthority != nil {
+		buyerOpts = append(buyerOpts, buyer.WithPrivacyAuthority(privacyAuthority))
+	}
 	buyerServer := buyer.NewServer(registry, logger, startedAt, buyerOpts...)
 	wsServer.SetCatalogMaterialRoutingGate(buyerServer.CatalogMaterialMissingUnderEnforce)
 	providerAddr := listenAddress(cfg.Listen.BindAddress, cfg.Listen.ProviderPort)
