@@ -25,6 +25,9 @@ const (
 	ReservationStateTerminal            = "terminal"
 	ReservationStateRejected            = "rejected"
 	ReservationStateUnknownPostdispatch = "unknown_postdispatch"
+
+	KeyClassRelayBlind = "relay_blind"
+	KeyClassPrivacy    = "privacy"
 )
 
 var (
@@ -67,6 +70,13 @@ type Reservation struct {
 	EffectivePrivacyOutcome  string
 	InternalRequestID        string
 	CompletionTokens         *int64
+	PrivacyClass             bool
+}
+
+// KeySession is one provider session that currently holds a fresh key of a class.
+type KeySession struct {
+	ProviderID      string
+	AssignedSession string
 }
 
 type ReservationCreate struct {
@@ -84,6 +94,7 @@ type ReservationCreate struct {
 	ExpiresAtUnix            int64
 	MaxActive                int
 	ReplayRetention          time.Duration
+	PrivacyClass             bool
 }
 
 type ConsumeInput struct {
@@ -170,6 +181,7 @@ CREATE TABLE IF NOT EXISTS relay_blind_key_records (
   accepted_at_unix INTEGER NOT NULL,
   revoked_at_unix INTEGER NULL,
   revocation_retained_until_unix INTEGER NULL,
+  key_class TEXT NOT NULL DEFAULT 'relay_blind',
   PRIMARY KEY(provider_id,kid)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_relay_blind_key_digest ON relay_blind_key_records(provider_id,key_record_digest);
@@ -205,7 +217,8 @@ CREATE TABLE IF NOT EXISTS relay_blind_reservations (
   consumed_at_unix INTEGER NULL,
   dispatched_at_unix INTEGER NULL,
   validated_at_unix INTEGER NULL,
-  terminal_at_unix INTEGER NULL
+  terminal_at_unix INTEGER NULL,
+  privacy_class INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_relay_blind_reservation_expiry ON relay_blind_reservations(state,expires_at_unix);
 CREATE INDEX IF NOT EXISTS idx_relay_blind_reservation_session ON relay_blind_reservations(provider_id,assigned_session,state);
@@ -214,10 +227,17 @@ CREATE INDEX IF NOT EXISTS idx_relay_blind_reservation_account ON relay_blind_re
 	if err != nil {
 		return fmt.Errorf("%w: migrate: %v", ErrStoreUnavailable, err)
 	}
-	return nil
+	return s.ensurePrivacySchema(ctx)
 }
 
 func (s *Store) UpsertKeyRecord(ctx context.Context, providerID, assignedSession string, record KeyRecord, immutableDigest string, now time.Time, maxRecords int, replayRetention time.Duration) error {
+	return s.UpsertKeyRecordClass(ctx, providerID, assignedSession, record, immutableDigest, now, maxRecords, replayRetention, KeyClassRelayBlind)
+}
+
+func (s *Store) UpsertKeyRecordClass(ctx context.Context, providerID, assignedSession string, record KeyRecord, immutableDigest string, now time.Time, maxRecords int, replayRetention time.Duration, class string) error {
+	if err := validKeyClass(class); err != nil {
+		return err
+	}
 	if s == nil || s.db == nil {
 		return ErrStoreUnavailable
 	}
@@ -264,16 +284,16 @@ WHERE ((keys.revoked_at_unix IS NOT NULL AND COALESCE(keys.revocation_retained_u
 		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	} else {
 		var count int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM relay_blind_key_records WHERE provider_id=? AND expires_at_unix>?`, providerID, now.Unix()).Scan(&count); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM relay_blind_key_records WHERE provider_id=? AND expires_at_unix>? AND key_class=?`, providerID, now.Unix(), class).Scan(&count); err != nil {
 			return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 		}
 		if maxRecords > 0 && count >= maxRecords {
 			return ErrCapacity
 		}
 	}
-	result, err := tx.ExecContext(ctx, `INSERT INTO relay_blind_key_records(provider_id,kid,assigned_session,record_json,key_record_digest,immutable_digest,not_before_unix,expires_at_unix,accepted_at_unix)
-VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(provider_id,kid) DO UPDATE SET assigned_session=excluded.assigned_session,record_json=excluded.record_json,key_record_digest=excluded.key_record_digest,not_before_unix=excluded.not_before_unix,expires_at_unix=excluded.expires_at_unix,accepted_at_unix=excluded.accepted_at_unix
-WHERE relay_blind_key_records.revoked_at_unix IS NULL`, providerID, record.KID, assignedSession, raw, record.KeyRecordDigest, immutableDigest, record.NotBeforeUnix, record.ExpiresAtUnix, now.Unix())
+	result, err := tx.ExecContext(ctx, `INSERT INTO relay_blind_key_records(provider_id,kid,assigned_session,record_json,key_record_digest,immutable_digest,not_before_unix,expires_at_unix,accepted_at_unix,key_class)
+VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(provider_id,kid) DO UPDATE SET assigned_session=excluded.assigned_session,record_json=excluded.record_json,key_record_digest=excluded.key_record_digest,not_before_unix=excluded.not_before_unix,expires_at_unix=excluded.expires_at_unix,accepted_at_unix=excluded.accepted_at_unix,key_class=excluded.key_class
+WHERE relay_blind_key_records.revoked_at_unix IS NULL`, providerID, record.KID, assignedSession, raw, record.KeyRecordDigest, immutableDigest, record.NotBeforeUnix, record.ExpiresAtUnix, now.Unix(), class)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
@@ -317,7 +337,13 @@ func (s *Store) RevokeKey(ctx context.Context, providerID, kid string, now time.
 // complete active key set. This makes the provider's durable local revoke
 // command effective at the coordinator on its next hello or heartbeat,
 // including an explicitly advertised empty array.
-func (s *Store) RevokeMissingKeys(ctx context.Context, providerID string, activeKids []string, now time.Time, replayRetention time.Duration) error {
+func (s *Store) RevokeMissingKeys(ctx context.Context, providerID string, activeKids []string, now time.Time, replayRetention time.Duration, class string) error {
+	if err := validKeyClass(class); err != nil {
+		return err
+	}
+	if s == nil || s.db == nil {
+		return ErrStoreUnavailable
+	}
 	active := make(map[string]struct{}, len(activeKids))
 	for _, kid := range activeKids {
 		active[kid] = struct{}{}
@@ -327,7 +353,7 @@ func (s *Store) RevokeMissingKeys(ctx context.Context, providerID string, active
 		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT kid,expires_at_unix FROM relay_blind_key_records WHERE provider_id=? AND revoked_at_unix IS NULL`, providerID)
+	rows, err := tx.QueryContext(ctx, `SELECT kid,expires_at_unix FROM relay_blind_key_records WHERE provider_id=? AND revoked_at_unix IS NULL AND key_class=?`, providerID, class)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
@@ -367,8 +393,14 @@ func (s *Store) RevokeMissingKeys(ctx context.Context, providerID string, active
 	return nil
 }
 
-func (s *Store) FreshKeyRecords(ctx context.Context, providerID, assignedSession, model string, encryptedBytes int64, now time.Time) ([]KeyRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT record_json FROM relay_blind_key_records WHERE provider_id=? AND assigned_session=? AND revoked_at_unix IS NULL AND not_before_unix<=? AND expires_at_unix>? ORDER BY expires_at_unix DESC,kid`, providerID, assignedSession, now.Unix(), now.Unix())
+func (s *Store) FreshKeyRecords(ctx context.Context, providerID, assignedSession, model string, encryptedBytes int64, now time.Time, class string) ([]KeyRecord, error) {
+	if err := validKeyClass(class); err != nil {
+		return nil, err
+	}
+	if s == nil || s.db == nil {
+		return nil, ErrStoreUnavailable
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT record_json FROM relay_blind_key_records WHERE provider_id=? AND assigned_session=? AND revoked_at_unix IS NULL AND not_before_unix<=? AND expires_at_unix>? AND key_class=? ORDER BY expires_at_unix DESC,kid`, providerID, assignedSession, now.Unix(), now.Unix(), class)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
@@ -441,14 +473,14 @@ func (s *Store) CreateReservation(ctx context.Context, in ReservationCreate, now
 		}
 	}
 	cap := in.InputTokenUpperBound + in.MaxOutputTokens
-	_, err = tx.ExecContext(ctx, `INSERT INTO relay_blind_reservations(provider_binding,buyer_binding,account_id,wallet_session,provider_id,assigned_session,key_record_digest,kid,model,provider_model,stream,max_encrypted_request_bytes,max_output_tokens,input_token_upper_bound,reservation_token_cap,expires_at_unix,state,created_at_unix) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, providerBinding, buyerBinding, in.AccountID, in.WalletSession, in.ProviderID, in.AssignedSession, in.KeyRecord.KeyRecordDigest, in.KeyRecord.KID, in.Model, in.ProviderModel, boolInt(in.Stream), in.MaxEncryptedRequestBytes, in.MaxOutputTokens, in.InputTokenUpperBound, cap, in.ExpiresAtUnix, ReservationStateReserved, now.Unix())
+	_, err = tx.ExecContext(ctx, `INSERT INTO relay_blind_reservations(provider_binding,buyer_binding,account_id,wallet_session,provider_id,assigned_session,key_record_digest,kid,model,provider_model,stream,max_encrypted_request_bytes,max_output_tokens,input_token_upper_bound,reservation_token_cap,expires_at_unix,state,created_at_unix,privacy_class) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, providerBinding, buyerBinding, in.AccountID, in.WalletSession, in.ProviderID, in.AssignedSession, in.KeyRecord.KeyRecordDigest, in.KeyRecord.KID, in.Model, in.ProviderModel, boolInt(in.Stream), in.MaxEncryptedRequestBytes, in.MaxOutputTokens, in.InputTokenUpperBound, cap, in.ExpiresAtUnix, ReservationStateReserved, now.Unix(), boolInt(in.PrivacyClass))
 	if err != nil {
 		return Reservation{}, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return Reservation{}, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
-	return Reservation{ProviderBinding: providerBinding, BuyerBinding: buyerBinding, AccountID: in.AccountID, WalletSession: in.WalletSession, ProviderID: in.ProviderID, AssignedSession: in.AssignedSession, KeyRecordDigest: in.KeyRecord.KeyRecordDigest, KID: in.KeyRecord.KID, Model: in.Model, ProviderModel: in.ProviderModel, Stream: in.Stream, MaxEncryptedRequestBytes: in.MaxEncryptedRequestBytes, MaxOutputTokens: in.MaxOutputTokens, InputTokenUpperBound: in.InputTokenUpperBound, ReservationTokenCap: cap, ExpiresAtUnix: in.ExpiresAtUnix, State: ReservationStateReserved}, nil
+	return Reservation{ProviderBinding: providerBinding, BuyerBinding: buyerBinding, AccountID: in.AccountID, WalletSession: in.WalletSession, ProviderID: in.ProviderID, AssignedSession: in.AssignedSession, KeyRecordDigest: in.KeyRecord.KeyRecordDigest, KID: in.KeyRecord.KID, Model: in.Model, ProviderModel: in.ProviderModel, Stream: in.Stream, MaxEncryptedRequestBytes: in.MaxEncryptedRequestBytes, MaxOutputTokens: in.MaxOutputTokens, InputTokenUpperBound: in.InputTokenUpperBound, ReservationTokenCap: cap, ExpiresAtUnix: in.ExpiresAtUnix, State: ReservationStateReserved, PrivacyClass: in.PrivacyClass}, nil
 }
 
 func (s *Store) Consume(ctx context.Context, in ConsumeInput) (ConsumeResponse, error) {
@@ -623,7 +655,7 @@ func (s *Store) LookupKeyRecord(ctx context.Context, providerID, assignedSession
 }
 
 func (s *Store) ActiveKeyModels(ctx context.Context, now time.Time) (map[string]map[string]map[string]struct{}, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT provider_id,assigned_session,record_json FROM relay_blind_key_records WHERE revoked_at_unix IS NULL AND not_before_unix<=? AND expires_at_unix>?`, now.Unix(), now.Unix())
+	rows, err := s.db.QueryContext(ctx, `SELECT provider_id,assigned_session,record_json FROM relay_blind_key_records WHERE revoked_at_unix IS NULL AND not_before_unix<=? AND expires_at_unix>? AND key_class=?`, now.Unix(), now.Unix(), KeyClassRelayBlind)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
@@ -788,7 +820,7 @@ func (s *Store) RecoverUncertain(ctx context.Context, now time.Time) (int64, err
 	return res.RowsAffected()
 }
 
-const reservationSelect = `SELECT provider_binding,buyer_binding,account_id,wallet_session,provider_id,assigned_session,key_record_digest,kid,model,provider_model,stream,max_encrypted_request_bytes,max_output_tokens,input_token_upper_bound,reservation_token_cap,expires_at_unix,state,COALESCE(envelope_digest,''),COALESCE(execution_auth_digest,''),COALESCE(request_id,''),validated_input_tokens,effective_privacy_outcome,COALESCE(internal_request_id,''),completion_tokens FROM relay_blind_reservations`
+const reservationSelect = `SELECT provider_binding,buyer_binding,account_id,wallet_session,provider_id,assigned_session,key_record_digest,kid,model,provider_model,stream,max_encrypted_request_bytes,max_output_tokens,input_token_upper_bound,reservation_token_cap,expires_at_unix,state,COALESCE(envelope_digest,''),COALESCE(execution_auth_digest,''),COALESCE(request_id,''),validated_input_tokens,effective_privacy_outcome,COALESCE(internal_request_id,''),completion_tokens,privacy_class FROM relay_blind_reservations`
 
 type reservationRow struct {
 	Reservation
@@ -799,9 +831,10 @@ type rowScanner interface{ Scan(...any) error }
 
 func scanReservation(row rowScanner) (reservationRow, error) {
 	var r reservationRow
-	var stream int
-	err := row.Scan(&r.ProviderBinding, &r.BuyerBinding, &r.AccountID, &r.WalletSession, &r.ProviderID, &r.AssignedSession, &r.KeyRecordDigest, &r.KID, &r.Model, &r.ProviderModel, &stream, &r.MaxEncryptedRequestBytes, &r.MaxOutputTokens, &r.InputTokenUpperBound, &r.ReservationTokenCap, &r.ExpiresAtUnix, &r.State, &r.EnvelopeDigest, &r.ExecutionAuthDigest, &r.RequestID, &r.ValidatedInputTokens, &r.EffectivePrivacyOutcome, &r.InternalRequestID, &r.CompletionTokens)
+	var stream, privacyClass int
+	err := row.Scan(&r.ProviderBinding, &r.BuyerBinding, &r.AccountID, &r.WalletSession, &r.ProviderID, &r.AssignedSession, &r.KeyRecordDigest, &r.KID, &r.Model, &r.ProviderModel, &stream, &r.MaxEncryptedRequestBytes, &r.MaxOutputTokens, &r.InputTokenUpperBound, &r.ReservationTokenCap, &r.ExpiresAtUnix, &r.State, &r.EnvelopeDigest, &r.ExecutionAuthDigest, &r.RequestID, &r.ValidatedInputTokens, &r.EffectivePrivacyOutcome, &r.InternalRequestID, &r.CompletionTokens, &privacyClass)
 	r.Stream = stream == 1
+	r.PrivacyClass = privacyClass != 0
 	if r.ValidatedInputTokens.Valid {
 		v := r.ValidatedInputTokens.Int64
 		r.Reservation.ValidatedInputTokens = &v
@@ -847,4 +880,215 @@ func nullString(v string) any {
 		return nil
 	}
 	return v
+}
+
+func validKeyClass(class string) error {
+	if class != KeyClassRelayBlind && class != KeyClassPrivacy {
+		return fmt.Errorf("%w: key class", ErrInvalidKeyRecord)
+	}
+	return nil
+}
+
+func (s *Store) ensurePrivacySchema(ctx context.Context) error {
+	if err := s.addColumnIfMissing(ctx, "relay_blind_key_records", "key_class", `ALTER TABLE relay_blind_key_records ADD COLUMN key_class TEXT NOT NULL DEFAULT 'relay_blind'`); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing(ctx, "relay_blind_reservations", "privacy_class", `ALTER TABLE relay_blind_reservations ADD COLUMN privacy_class INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS privacy_class_quarantine (
+  provider_id TEXT PRIMARY KEY,
+  reason TEXT NOT NULL,
+  quarantined_at_unix INTEGER NOT NULL,
+  expires_at_unix INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS privacy_class_control (
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  disabled INTEGER NOT NULL,
+  reason TEXT NOT NULL,
+  updated_at_unix INTEGER NOT NULL
+);`)
+	if err != nil {
+		return fmt.Errorf("%w: migrate privacy class: %v", ErrStoreUnavailable, err)
+	}
+	return nil
+}
+
+func (s *Store) addColumnIfMissing(ctx context.Context, table, column, alter string) error {
+	exists, err := s.columnExists(ctx, table, column)
+	if err != nil || exists {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, alter); err != nil {
+		return fmt.Errorf("%w: add %s.%s: %v", ErrStoreUnavailable, table, column, err)
+	}
+	return nil
+}
+
+func (s *Store) columnExists(ctx context.Context, table, column string) (bool, error) {
+	var query string
+	switch table {
+	case "relay_blind_key_records":
+		query = `PRAGMA table_info(relay_blind_key_records)`
+	case "relay_blind_reservations":
+		query = `PRAGMA table_info(relay_blind_reservations)`
+	default:
+		return false, fmt.Errorf("%w: unknown table", ErrStoreUnavailable)
+	}
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return false, fmt.Errorf("%w: table info: %v", ErrStoreUnavailable, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return false, fmt.Errorf("%w: table info: %v", ErrStoreUnavailable, err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+func boundPrivacyReason(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" || len(reason) > 128 {
+		return "unspecified"
+	}
+	for i := 0; i < len(reason); i++ {
+		if reason[i] < 0x20 || reason[i] > 0x7e {
+			return "unspecified"
+		}
+	}
+	return reason
+}
+
+func (s *Store) Quarantine(ctx context.Context, providerID, reason string, now time.Time, dur time.Duration) error {
+	if s == nil || s.db == nil {
+		return ErrStoreUnavailable
+	}
+	if strings.TrimSpace(providerID) == "" {
+		return fmt.Errorf("%w: provider id", ErrInvalidKeyRecord)
+	}
+	if dur <= 0 {
+		dur = 86400 * time.Second
+	}
+	reason = boundPrivacyReason(reason)
+	expires := now.Add(dur).Unix()
+	_, err := s.db.ExecContext(ctx, `INSERT INTO privacy_class_quarantine(provider_id,reason,quarantined_at_unix,expires_at_unix) VALUES(?,?,?,?) ON CONFLICT(provider_id) DO UPDATE SET reason=excluded.reason, quarantined_at_unix=excluded.quarantined_at_unix, expires_at_unix=excluded.expires_at_unix`, providerID, reason, now.Unix(), expires)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	return nil
+}
+
+func (s *Store) IsQuarantined(ctx context.Context, providerID string, now time.Time) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, ErrStoreUnavailable
+	}
+	var expires int64
+	err := s.db.QueryRowContext(ctx, `SELECT expires_at_unix FROM privacy_class_quarantine WHERE provider_id=?`, providerID).Scan(&expires)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	return expires > now.Unix(), nil
+}
+
+func (s *Store) Unquarantine(ctx context.Context, providerID string) error {
+	if s == nil || s.db == nil {
+		return ErrStoreUnavailable
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM privacy_class_quarantine WHERE provider_id=?`, providerID)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	return nil
+}
+
+func (s *Store) SetPrivacyDisabled(ctx context.Context, disabled bool, reason string, now time.Time) error {
+	if s == nil || s.db == nil {
+		return ErrStoreUnavailable
+	}
+	reason = boundPrivacyReason(reason)
+	flag := 0
+	if disabled {
+		flag = 1
+	} else if reason == "unspecified" {
+		reason = "enabled"
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO privacy_class_control(id,disabled,reason,updated_at_unix) VALUES(1,?,?,?) ON CONFLICT(id) DO UPDATE SET disabled=excluded.disabled, reason=excluded.reason, updated_at_unix=excluded.updated_at_unix`, flag, reason, now.Unix())
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	return nil
+}
+
+func (s *Store) PrivacyDisabled(ctx context.Context) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, ErrStoreUnavailable
+	}
+	var disabled int
+	err := s.db.QueryRowContext(ctx, `SELECT disabled FROM privacy_class_control WHERE id=1`).Scan(&disabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	return disabled != 0, nil
+}
+
+func (s *Store) RejectHeldPrivacyPredispatch(ctx context.Context, code string, now time.Time) error {
+	if s == nil || s.db == nil {
+		return ErrStoreUnavailable
+	}
+	code = boundPrivacyReason(code)
+	_, err := s.db.ExecContext(ctx, `UPDATE relay_blind_reservations SET state='rejected',terminal_code=?,terminal_at_unix=? WHERE privacy_class=1 AND state IN ('reserved','consumed_predispatch')`, code, now.Unix())
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	return nil
+}
+
+func (s *Store) FreshKeySessions(ctx context.Context, now time.Time, class string) ([]KeySession, error) {
+	if err := validKeyClass(class); err != nil {
+		return nil, err
+	}
+	if s == nil || s.db == nil {
+		return nil, ErrStoreUnavailable
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT provider_id,assigned_session FROM relay_blind_key_records WHERE key_class=? AND revoked_at_unix IS NULL AND not_before_unix<=? AND expires_at_unix>?`, class, now.Unix(), now.Unix())
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	defer rows.Close()
+	var out []KeySession
+	for rows.Next() {
+		var item KeySession
+		if err := rows.Scan(&item.ProviderID, &item.AssignedSession); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) PrivacyKeyFresh(ctx context.Context, providerID, assignedSession, digest string, now time.Time) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, ErrStoreUnavailable
+	}
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM relay_blind_key_records WHERE provider_id=? AND assigned_session=? AND key_record_digest=? AND key_class=? AND revoked_at_unix IS NULL AND not_before_unix<=? AND expires_at_unix>?`, providerID, assignedSession, digest, KeyClassPrivacy, now.Unix(), now.Unix()).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	return count > 0, nil
 }

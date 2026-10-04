@@ -250,6 +250,12 @@ type Server struct {
 	seLivenessChans    sync.Map
 	seLivenessInFlight sync.Map
 
+	// Privacy posture (SPEC-049). Nil authority leaves the class off.
+	// Response channels carry the original frame; the authority re-parses it.
+	privacyAuthority       *relayblind.PrivacyAuthority
+	privacyPostureChans    sync.Map
+	privacyPostureInFlight sync.Map
+
 	// Trust-revalidation sweep failure accounting (issue #582 FIX C). Bounds the
 	// remaining fail-open: a single transient sweep DB error is skipped, but N
 	// consecutive failures escalate to a degraded trust-authority signal + a
@@ -525,6 +531,12 @@ type RelayBlindKeySink interface {
 
 func WithRelayBlindKeySink(sink RelayBlindKeySink) Option {
 	return func(s *Server) { s.relayBlindKeys = sink }
+}
+
+// WithPrivacyAuthority wires SPEC-049 posture verification. A nil authority
+// leaves privacy-class challenges and key acceptance off.
+func WithPrivacyAuthority(authority *relayblind.PrivacyAuthority) Option {
+	return func(s *Server) { s.privacyAuthority = authority }
 }
 
 // WithCatalog injects a specific tier2.Catalog instance for this server.
@@ -1269,6 +1281,9 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 	}
 	if registry != nil {
 		go s.runSELivenessLoop()
+	}
+	if s.privacyAuthority != nil && registry != nil {
+		go s.runPrivacyPostureLoop()
 	}
 	if cfg.Pool.LosslessnessProbe.Enabled && registry != nil {
 		go s.runLosslessnessProbeLoop()
@@ -2446,6 +2461,7 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	}
 	registered = true
 	s.acceptRelayBlindKeyRecords(entry.ProviderID, entry.AssignedID, hello.RelayBlindKeyRecords)
+	s.acceptPrivacyKeyRecords(entry.ProviderID, entry.AssignedID, hello.PrivacyKeyRecords)
 	if reservedAdmission && entry.Tier == pool.TierProvisional {
 		s.admission.ReleasePendingProvisional()
 	}
@@ -3041,6 +3057,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	}
 	registered = true
 	s.acceptRelayBlindKeyRecords(entry.ProviderID, entry.AssignedID, initial.RelayBlindKeyRecords)
+	s.acceptPrivacyKeyRecords(entry.ProviderID, entry.AssignedID, initial.PrivacyKeyRecords)
 	// Phase 3 observe-mode: trigger live MDA upgrade asynchronously after
 	// SE attestation auth. Never blocks auth. Serial comes from the SE
 	// attestation blob when present (MicroMDM device lookup).
@@ -4553,6 +4570,8 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 		s.handleDrainStatus(conn, providerID, assignedID, payload)
 	case "se_liveness_response":
 		s.handleSELivenessResponse(providerID, assignedID, payload)
+	case "privacy_posture_response":
+		s.handlePrivacyPostureResponse(providerID, assignedID, payload)
 	case "native_mtp_tuple_offer_v1":
 		s.handleNativeMTPTupleOffer(providerID, assignedID, payload)
 	case "native_mtp_canary_result_v1":
@@ -5902,6 +5921,7 @@ func (s *Server) CloseAllProviderSessions(reason string) {
 		if !ok || session == nil {
 			return true
 		}
+		s.dropPrivacyPosture(session.providerID, session.assignedID)
 		s.log.Info().
 			Str("provider_id", session.providerID).
 			Str("reason", reason).
@@ -6028,6 +6048,7 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		return
 	}
 	s.acceptRelayBlindKeyRecords(providerID, assignedID, hb.RelayBlindKeyRecords)
+	s.acceptPrivacyKeyRecords(providerID, assignedID, hb.PrivacyKeyRecords)
 	// #1354 / SPEC-002 v1.6.0: the warm-up probe is observe-only and fail-open,
 	// so a heartbeat `ready` is no longer clamped to `degraded` while a probe is
 	// in flight — that clamp was part of the blocking gate that deadlocked
@@ -6687,6 +6708,7 @@ func (s *Server) markDegradedForWarmup(providerID, assignedID string) {
 }
 
 func (s *Server) handleDisconnect(providerID, assignedID string) {
+	s.dropPrivacyPosture(providerID, assignedID)
 	s.clearModelAdmissionBindingOnDisconnect(providerID, assignedID)
 	s.clearWarmupGate(providerID, assignedID)
 	s.clearRewardsTrustLookupFailure(providerID, assignedID)
@@ -6739,6 +6761,7 @@ func (s *Server) handleProviderWriteFailure(session *providerSession, err error)
 	if session == nil {
 		return
 	}
+	s.dropPrivacyPosture(session.providerID, session.assignedID)
 	session.rekeyMu.Lock()
 	exchange := session.rekey
 	session.rekeyMu.Unlock()

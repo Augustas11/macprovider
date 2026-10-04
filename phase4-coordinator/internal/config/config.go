@@ -2,6 +2,7 @@ package config
 
 import (
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -9,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"math/big"
 	"net/netip"
 	"net/url"
 	"os"
@@ -74,6 +76,7 @@ type Config struct {
 	WS                           WSConfig                     `yaml:"ws"`
 	Relay                        RelayConfig                  `yaml:"relay"`
 	RelayBlind                   RelayBlindConfig             `yaml:"relay_blind"`
+	PrivacyClass                 PrivacyClassConfig           `yaml:"privacy_class"`
 	Admission                    AdmissionConfig              `yaml:"admission"`
 	Tier2                        Tier2Config                  `yaml:"tier2"`
 	CoordinatorAdvertisedVersion CoordinatorAdvertisedVersion `yaml:"coordinator_advertised_version"`
@@ -1032,6 +1035,31 @@ type RelayBlindConfig struct {
 	MetadataRequestsPerMinute int               `yaml:"metadata_requests_per_minute"`
 }
 
+// ApprovedCodeIdentity is one operator-approved privacy-class code identity.
+// BinaryVersion is optional; when set, the posture binary_version must match.
+// ExpiresAt is exclusive: a posture at that instant is expired.
+type ApprovedCodeIdentity struct {
+	TeamID            string    `yaml:"team_id"`
+	SigningIdentifier string    `yaml:"signing_identifier"`
+	CDHash            string    `yaml:"code_cdhash"`
+	BinaryVersion     string    `yaml:"binary_version"`
+	ExpiresAt         time.Time `yaml:"expires_at"`
+}
+
+// PrivacyClassConfig is the default-off SPEC-049 coordinator gate.
+// ProviderSEPublicKeys maps provider_id to a standard-base64 raw 64-byte
+// P-256 X||Y point. Identity pins stay on RelayBlindConfig.
+type PrivacyClassConfig struct {
+	Enabled                         bool                   `yaml:"enabled"`
+	ProviderSEPublicKeys            map[string]string      `yaml:"provider_se_public_keys"`
+	ApprovedCodeIdentities          []ApprovedCodeIdentity `yaml:"approved_code_identities"`
+	AllowedSEKeyBackends            []string               `yaml:"allowed_se_key_backends"`
+	PostureChallengeIntervalSeconds int                    `yaml:"posture_challenge_interval_seconds"`
+	PostureMaxAgeSeconds            int                    `yaml:"posture_max_age_seconds"`
+	PostureResponseTimeoutSeconds   int                    `yaml:"posture_response_timeout_seconds"`
+	QuarantineSeconds               int                    `yaml:"quarantine_seconds"`
+}
+
 type AdmissionConfig struct {
 	PinnedOnly                      bool    `yaml:"pinned_only"`
 	ProvisionalAdmissionRatePerHour int     `yaml:"provisional_admission_rate_per_hour"`
@@ -1585,6 +1613,15 @@ func Default() Config {
 			MaxActiveReservations:     10000,
 			MaxKeyRecordsPerProvider:  8,
 			MetadataRequestsPerMinute: 60,
+		},
+		PrivacyClass: PrivacyClassConfig{
+			Enabled:                         false,
+			ProviderSEPublicKeys:            map[string]string{},
+			AllowedSEKeyBackends:            []string{"file", "keychain"},
+			PostureChallengeIntervalSeconds: 60,
+			PostureMaxAgeSeconds:            150,
+			PostureResponseTimeoutSeconds:   10,
+			QuarantineSeconds:               86400,
 		},
 		Admission: AdmissionConfig{
 			PinnedOnly:                      false,
@@ -2603,6 +2640,9 @@ func (c Config) Validate() error {
 	}
 	if c.RelayBlind.MaxActiveReservations < 1 || c.RelayBlind.MaxKeyRecordsPerProvider < 1 || c.RelayBlind.MetadataRequestsPerMinute < 1 {
 		return fmt.Errorf("relay_blind admission limits must be > 0")
+	}
+	if err := c.validatePrivacyClass(); err != nil {
+		return err
 	}
 	if c.Routing.PreflightTimeoutS <= 0 || c.Routing.RequestTimeoutS <= 0 || c.Routing.FailoverTimeoutS <= 0 {
 		return fmt.Errorf("routing timeouts must be > 0")
@@ -4101,6 +4141,127 @@ func validatePayoutRPCURL(name, raw string) (*url.URL, error) {
 		}
 	}
 	return u, nil
+}
+
+func (c Config) validatePrivacyClass() error {
+	pc := c.PrivacyClass
+	if pc.PostureChallengeIntervalSeconds < 15 || pc.PostureChallengeIntervalSeconds > 300 {
+		return fmt.Errorf("privacy_class.posture_challenge_interval_seconds must be in [15,300]")
+	}
+	if pc.PostureResponseTimeoutSeconds <= 0 {
+		return fmt.Errorf("privacy_class.posture_response_timeout_seconds must be > 0")
+	}
+	if pc.QuarantineSeconds <= 0 {
+		return fmt.Errorf("privacy_class.quarantine_seconds must be > 0")
+	}
+	minAge := pc.PostureChallengeIntervalSeconds + pc.PostureResponseTimeoutSeconds
+	if pc.PostureMaxAgeSeconds < minAge || pc.PostureMaxAgeSeconds > 600 {
+		return fmt.Errorf("privacy_class.posture_max_age_seconds must be in [%d,600]", minAge)
+	}
+	if len(pc.AllowedSEKeyBackends) == 0 {
+		if pc.Enabled {
+			return fmt.Errorf("privacy_class.allowed_se_key_backends must be a non-empty subset of file and keychain")
+		}
+	} else {
+		seenBackend := make(map[string]struct{}, len(pc.AllowedSEKeyBackends))
+		for _, backend := range pc.AllowedSEKeyBackends {
+			if backend != "file" && backend != "keychain" {
+				return fmt.Errorf("privacy_class.allowed_se_key_backends contains unknown backend %q", backend)
+			}
+			if _, dup := seenBackend[backend]; dup {
+				return fmt.Errorf("privacy_class.allowed_se_key_backends contains duplicate backend %q", backend)
+			}
+			seenBackend[backend] = struct{}{}
+		}
+	}
+	for providerID, encoded := range pc.ProviderSEPublicKeys {
+		if err := ValidateProviderID(providerID); err != nil {
+			return fmt.Errorf("privacy_class.provider_se_public_keys: %w", err)
+		}
+		decoded, err := base64.StdEncoding.Strict().DecodeString(encoded)
+		if err != nil || base64.StdEncoding.EncodeToString(decoded) != encoded || len(decoded) != 64 {
+			return fmt.Errorf("privacy_class.provider_se_public_keys.%s must be canonical standard base64 of a 64-byte P-256 point", providerID)
+		}
+		x := new(big.Int).SetBytes(decoded[:32])
+		y := new(big.Int).SetBytes(decoded[32:])
+		if !elliptic.P256().IsOnCurve(x, y) {
+			return fmt.Errorf("privacy_class.provider_se_public_keys.%s must be a P-256 point", providerID)
+		}
+	}
+	live := 0
+	now := time.Now()
+	for i, identity := range pc.ApprovedCodeIdentities {
+		field := fmt.Sprintf("privacy_class.approved_code_identities[%d]", i)
+		if !privacyTeamID(identity.TeamID) {
+			return fmt.Errorf("%s.team_id must be 10 characters from A-Z and 0-9", field)
+		}
+		if !privacyCDHash(identity.CDHash) {
+			return fmt.Errorf("%s.code_cdhash must be 40 lowercase hex characters", field)
+		}
+		if !privacyVisibleASCII(identity.SigningIdentifier, 128) {
+			return fmt.Errorf("%s.signing_identifier must be visible ASCII", field)
+		}
+		if identity.BinaryVersion != "" && !privacyVisibleASCII(identity.BinaryVersion, 128) {
+			return fmt.Errorf("%s.binary_version must be visible ASCII", field)
+		}
+		if identity.ExpiresAt.IsZero() {
+			return fmt.Errorf("%s.expires_at must be set", field)
+		}
+		if identity.ExpiresAt.After(now) {
+			live++
+		}
+	}
+	if !pc.Enabled {
+		return nil
+	}
+	if !c.RelayBlind.Enabled {
+		return fmt.Errorf("privacy_class.enabled requires relay_blind.enabled")
+	}
+	if len(pc.ProviderSEPublicKeys) == 0 {
+		return fmt.Errorf("privacy_class.provider_se_public_keys must contain at least one pin when enabled")
+	}
+	if live == 0 {
+		return fmt.Errorf("privacy_class.approved_code_identities must contain an unexpired identity when enabled")
+	}
+	return nil
+}
+
+func privacyTeamID(value string) bool {
+	if len(value) != 10 {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func privacyCDHash(value string) bool {
+	if len(value) != 40 {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func privacyVisibleASCII(value string, max int) bool {
+	if len(value) == 0 || len(value) > max {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < 0x21 || value[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 func ValidateEndpointURL(endpoint string) error {

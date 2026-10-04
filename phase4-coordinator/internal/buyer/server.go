@@ -31,6 +31,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
+	"github.com/augstar/macprovider-coordinator/internal/relayblind"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/routing"
 	"github.com/augstar/macprovider-coordinator/internal/routing/sticky"
@@ -324,6 +325,7 @@ type Server struct {
 	// reachable because the arbiter is owned by a request-scoped recorder.
 	terminalObserver                 func(*requestTerminal)
 	relayBlind                       *relayBlindService
+	privacyAuthority                 *relayblind.PrivacyAuthority
 	settlementReceiptRecoveryMu      sync.Mutex
 	settlementReceiptRecoveryPending []settlementReceiptRecoveryItem
 	settlementReceiptRecoveryKeys    map[string]struct{}

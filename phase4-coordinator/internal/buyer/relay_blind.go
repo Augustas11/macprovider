@@ -45,6 +45,14 @@ func WithRelayBlind(cfg config.RelayBlindConfig, store *relayblind.Store, relay 
 	}
 }
 
+// WithPrivacyAuthority stores the SPEC-049 posture authority for the buyer
+// routing gate. Nil leaves privacy-class routing unchanged.
+func WithPrivacyAuthority(authority *relayblind.PrivacyAuthority) Option {
+	return func(s *Server) {
+		s.privacyAuthority = authority
+	}
+}
+
 func (s *Server) relayBlindAvailable() bool {
 	return s != nil && s.relayBlind != nil && s.relayBlind.cfg.Enabled && s.relayBlind.store != nil && s.relayBlind.relay != nil && !s.settlementEnforceMode()
 }
@@ -252,7 +260,7 @@ func (s *Server) selectRelayBlindProvider(ctx context.Context, model string, enc
 		if !eligible || !provider.IsWSTunneled() || !modelIDEqual(provider.ModelID, model) {
 			continue
 		}
-		records, err := s.relayBlind.store.FreshKeyRecords(ctx, provider.ProviderID, provider.AssignedID, model, encryptedBytes, s.now())
+		records, err := s.relayBlind.store.FreshKeyRecords(ctx, provider.ProviderID, provider.AssignedID, model, encryptedBytes, s.now(), relayblind.KeyClassRelayBlind)
 		if err == nil && len(records) > 0 {
 			return provider, records[0], true
 		}
