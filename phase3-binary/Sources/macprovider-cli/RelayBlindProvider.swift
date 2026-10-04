@@ -374,6 +374,10 @@ final class RelayBlindProviderRuntime: @unchecked Sendable {
         try keyManager.currentRecords(now: now)
     }
 
+    func identitySignatureBase64URL(for message: Data) throws -> String {
+        try keyManager.identitySignatureBase64URL(for: message)
+    }
+
     func open(
         envelopeBody: String,
         outerRequestID: String,
@@ -567,6 +571,11 @@ final class RelayBlindKeyManager: @unchecked Sendable {
 
     func identityFingerprintBase64URL() -> String {
         RelayBlindBase64URL.encode(Data(SHA256.hash(data: identityKey.publicKey.rawRepresentation)))
+    }
+
+    /// Raw Ed25519 over `message`. SPEC-049 signs posture and key-attestation framing directly.
+    func identitySignatureBase64URL(for message: Data) throws -> String {
+        RelayBlindBase64URL.encode(try identityKey.signature(for: message))
     }
 
     func currentRecord(now: Date = Date()) throws -> RelayBlindKeyRecord {
