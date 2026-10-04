@@ -400,7 +400,8 @@ func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, 
 			writePrivacyClassError(w, privacyClassUnconfirmed, "")
 			return
 		}
-		execution.Privacy = &privacyUsageContext{PostureVerifiedAtUnix: verifiedAt}
+		// Consume bound env.Model to the reservation's canonical model.
+		execution.Privacy = &privacyUsageContext{PostureVerifiedAtUnix: verifiedAt, Model: env.Model}
 	}
 	// Keep ordinary provider-leg encryption disclosure separate; never publish
 	// stable peer attribution, a plaintext receipt, or the internal posture

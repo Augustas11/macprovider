@@ -83,6 +83,18 @@ func TestPrivacyPostureProbeRoundTrip(t *testing.T) {
 	if _, ok := material.auth.Eligible(provider.ProviderID, provider.AssignedID, material.digest, clock); !ok {
 		t.Fatal("probe did not make the privacy key eligible")
 	}
+
+	// A provider whose posture latched a failure after advertising sends an
+	// explicit empty privacy_key_records. Eligibility drops on that heartbeat,
+	// well inside the posture max-age; an absent field leaves it unchanged.
+	s.handleMessage(nil, provider.ProviderID, provider.AssignedID, privacyHeartbeat(t, "ready", nil))
+	if _, ok := material.auth.Eligible(provider.ProviderID, provider.AssignedID, material.digest, clock); !ok {
+		t.Fatal("absent privacy_key_records revoked eligibility")
+	}
+	s.handleMessage(nil, provider.ProviderID, provider.AssignedID, privacyHeartbeat(t, "ready", []relayblind.PrivacyKeyRecord{}))
+	if _, ok := material.auth.Eligible(provider.ProviderID, provider.AssignedID, material.digest, clock.Add(time.Second)); ok {
+		t.Fatal("explicit empty privacy_key_records kept the privacy key eligible")
+	}
 }
 
 func TestPrivacyKeyRecordsParseBound(t *testing.T) {

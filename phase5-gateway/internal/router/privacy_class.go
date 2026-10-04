@@ -69,9 +69,11 @@ var privacyResidualRisks = []string{
 }
 
 // privacyUsageContext is the only privacy state attached to a chat execution.
-// It carries the reservation timestamp, never ciphertext or prompts.
+// It carries the reservation timestamp and the consumed envelope's canonical
+// model, never ciphertext or prompts.
 type privacyUsageContext struct {
 	PostureVerifiedAtUnix int64
+	Model                 string
 }
 
 // privacyUsageObject is the closed SPEC-049-R020 usage.macprovider.privacy

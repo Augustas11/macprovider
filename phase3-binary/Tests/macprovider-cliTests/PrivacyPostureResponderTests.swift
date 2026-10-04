@@ -71,6 +71,36 @@ final class PrivacyPostureResponderTests: XCTestCase {
         XCTAssertNotNil(try fresh.respond(to: postureChallenge(), assignedSession: "session-1"))
     }
 
+    func testLatchedFailureAfterAdvertisingSendsExplicitEmptyRecords() throws {
+        defer { PrivacyRuntimeHardening.resetDecryptRecheckForTest() }
+        let root = try makeStateRoot()
+        let runtime = try makeRuntime(directory: root, models: ["model-a"])
+        let probe = MutablePrivacyPostureProbe(greenPrivacyObservation())
+        let responder = makeResponder(runtime: runtime, signer: try SELivenessTestSigning.generate(), probe: probe)
+        XCTAssertFalse(try XCTUnwrap(responder.privacyKeyRecords()).isEmpty)
+
+        probe.observation.pTraced = true
+        probe.observation.failureReasons = ["p_traced"]
+        probe.traced = true
+        XCTAssertEqual(try XCTUnwrap(responder.privacyKeyRecords()).count, 0)
+        probe.observation = greenPrivacyObservation()
+        probe.traced = false
+        XCTAssertEqual(try XCTUnwrap(responder.privacyKeyRecords()).count, 0)
+        XCTAssertNil(try responder.respond(to: postureChallenge(), assignedSession: "session-1"))
+
+        let decryptRoot = try makeStateRoot()
+        let decrypt = makeResponder(
+            runtime: try makeRuntime(directory: decryptRoot, models: ["model-a"]),
+            signer: try SELivenessTestSigning.generate(),
+            probe: MutablePrivacyPostureProbe(greenPrivacyObservation())
+        )
+        XCTAssertFalse(try XCTUnwrap(decrypt.privacyKeyRecords()).isEmpty)
+        PrivacyRuntimeHardening.noteDecryptRecheckFailed()
+        XCTAssertEqual(try XCTUnwrap(decrypt.privacyKeyRecords()).count, 0)
+        PrivacyRuntimeHardening.resetDecryptRecheckForTest()
+        XCTAssertEqual(try XCTUnwrap(decrypt.privacyKeyRecords()).count, 0)
+    }
+
     func testHeartbeatCarriesPrivacyRecordsNotRelayBlind() async throws {
         let root = try makeStateRoot()
         let probe = MutablePrivacyPostureProbe(greenPrivacyObservation())
@@ -133,6 +163,17 @@ final class PrivacyPostureResponderTests: XCTestCase {
         XCTAssertEqual(try wireUInt64(statement["sequence"]), 1)
         XCTAssertEqual(statement["provider_id"] as? String, "provider-test")
         XCTAssertEqual(statement["assigned_session"] as? String, "session-accepted")
+
+        // A latched posture failure after advertising withdraws the keys explicitly.
+        probe.observation.pTraced = true
+        probe.observation.failureReasons = ["p_traced"]
+        probe.traced = true
+        try await client.sendHeartbeatForTest()
+        let afterWithdrawal = await recorder.frames()
+        let withdrawn = try XCTUnwrap(afterWithdrawal.last)
+        XCTAssertEqual(withdrawn["type"] as? String, "heartbeat")
+        XCTAssertNil(withdrawn["relay_blind_key_records"])
+        XCTAssertEqual(try XCTUnwrap(withdrawn["privacy_key_records"] as? [[String: Any]]).count, 0)
     }
 
     func testStatementListsExactlyAdvertisedDigests() throws {

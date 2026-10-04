@@ -373,13 +373,16 @@ final class RelayBlindProviderRuntime: @unchecked Sendable {
         self.assignedSessionValue = assignedSession
     }
 
+    #if MACPROVIDER_TEST_FIXTURES
     /// The privacy fixture keeps its X25519 agreement key in memory, so the
     /// integration harness adopts the coordinator assignment without a restart.
+    /// Debug/test builds only.
     func adoptAssignedSession(_ session: String) {
         assignedSessionLock.lock()
         assignedSessionValue = session
         assignedSessionLock.unlock()
     }
+    #endif
 
     func advertisedRecord(now: Date = Date()) throws -> RelayBlindKeyRecord {
         try keyManager.currentRecord(now: now)

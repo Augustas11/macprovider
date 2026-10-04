@@ -112,6 +112,7 @@ func TestPrivacyRelayRefusesClearStreamContent(t *testing.T) {
 		{name: "valid split across chunks", chunks: []string{frame0[:20], frame0[20:] + frame1[:7], frame1[7:] + privacyTestUsageEvent + "data: [DONE]\n\n"}, forward: []string{frame0, frame1, privacyTestUsageEvent, "data: [DONE]\n\n"}},
 		{name: "clear content chunk", chunks: []string{frame0, "data: {\"choices\":[{\"delta\":{\"content\":\"CANARY-PRIVACY-CLEAR\"}}]}\n\n", frame1, privacyTestUsageEvent, "data: [DONE]\n\n"}, refused: true, forward: []string{frame0}},
 		{name: "clear tool call chunk", chunks: []string{frame0, frame1, "data: {\"object\":\"chat.completion.chunk\",\"model\":\"model-a\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"CANARY\"}}]}}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":3,\"total_tokens\":14}}\n\n", "data: [DONE]\n\n"}, refused: true, forward: []string{frame0, frame1}},
+		{name: "usage model not reserved model", chunks: []string{frame0, frame1, strings.Replace(privacyTestUsageEvent, `"model":"model-a"`, `"model":"model-b"`, 1), "data: [DONE]\n\n"}, refused: true, forward: []string{frame0, frame1}},
 		{name: "missing final usage and done", chunks: []string{frame0}, refused: true, forward: []string{frame0}},
 		{name: "non data line", chunks: []string{frame0, ": CANARY comment\n\n"}, refused: true, forward: []string{frame0}},
 	} {

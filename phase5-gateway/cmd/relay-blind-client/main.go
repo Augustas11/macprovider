@@ -243,7 +243,7 @@ func run(ctx context.Context, opts options, stdin io.Reader, stdout, stderr io.W
 	}
 	defer response.Body.Close()
 	if opts.privacyClass {
-		if err := copyPrivacyResponse(response, envelope.Stream, responseKeys, envelopeDigest, envelope.KID, envelope.RequestID, reservation.InputTokenUpperBound, reservation.MaxOutputTokens, stdout); err != nil {
+		if err := copyPrivacyResponse(response, envelope.Stream, responseKeys, envelopeDigest, envelope.KID, envelope.RequestID, envelope.Model, reservation.InputTokenUpperBound, reservation.MaxOutputTokens, stdout); err != nil {
 			return err
 		}
 		zeroResponseKeys(&responseKeys)
@@ -355,7 +355,7 @@ func requirePrivacyReservation(reservation relayblind.ReservationResponse, pin r
 	return nil
 }
 
-func copyPrivacyResponse(response *http.Response, stream bool, keys relayblind.ResponseKeys, envelopeDigest, kid, requestID string, inputCap, outputCap int64, stdout io.Writer) error {
+func copyPrivacyResponse(response *http.Response, stream bool, keys relayblind.ResponseKeys, envelopeDigest, kid, requestID, model string, inputCap, outputCap int64, stdout io.Writer) error {
 	defer zeroResponseKeys(&keys)
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return privacyDoNotResubmit(fmt.Sprintf("encrypted request returned HTTP %d", response.StatusCode))
@@ -364,7 +364,7 @@ func copyPrivacyResponse(response *http.Response, stream bool, keys relayblind.R
 		return err
 	}
 	if stream {
-		return copyPrivacyStream(response.Body, keys, envelopeDigest, kid, requestID, inputCap, outputCap, stdout)
+		return copyPrivacyStream(response.Body, keys, envelopeDigest, kid, requestID, model, inputCap, outputCap, stdout)
 	}
 	return copyPrivacyNonStream(response.Body, keys, envelopeDigest, kid, requestID, inputCap, outputCap, stdout)
 }
@@ -440,7 +440,7 @@ func parsePrivacyResponse(raw []byte) ([]relayblind.PrivacyFrame, json.RawMessag
 	return frames, body.Usage, nil
 }
 
-func copyPrivacyStream(body io.Reader, keys relayblind.ResponseKeys, envelopeDigest, kid, requestID string, inputCap, outputCap int64, stdout io.Writer) error {
+func copyPrivacyStream(body io.Reader, keys relayblind.ResponseKeys, envelopeDigest, kid, requestID, model string, inputCap, outputCap int64, stdout io.Writer) error {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 4096), maxPrivacyStreamLine)
 	var frames []relayblind.PrivacyFrame
@@ -498,7 +498,7 @@ func copyPrivacyStream(body io.Reader, keys relayblind.ResponseKeys, envelopeDig
 		if len(usage) != 0 {
 			return privacyDoNotResubmit("invalid privacy response")
 		}
-		eventUsage, err := streamEventUsage([]byte(data))
+		eventUsage, err := streamEventUsage([]byte(data), model)
 		if err != nil {
 			return privacyDoNotResubmit("invalid privacy response")
 		}
@@ -527,13 +527,26 @@ func privacyFramePayload(data string) bool {
 	return probe.Object == relayblind.PrivacyFrameObject
 }
 
-func streamEventUsage(raw []byte) (json.RawMessage, error) {
+// streamEventUsage accepts only the closed SPEC-049 §4.8 clear usage chunk
+// {object, model, choices: [], usage} for the requested model, and returns
+// its usage object. Keys match exactly; encoding/json would fold case.
+func streamEventUsage(raw []byte, model string) (json.RawMessage, error) {
 	if err := rejectDuplicateKeys(raw); err != nil {
 		return nil, err
 	}
 	var event map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &event); err != nil || event == nil {
-		return nil, errors.New("usage")
+	if err := json.Unmarshal(raw, &event); err != nil || len(event) != 4 {
+		return nil, errors.New("usage chunk")
+	}
+	var object, eventModel string
+	if json.Unmarshal(event["object"], &object) != nil || object != "chat.completion.chunk" {
+		return nil, errors.New("usage chunk")
+	}
+	if json.Unmarshal(event["model"], &eventModel) != nil || eventModel == "" || eventModel != model {
+		return nil, errors.New("usage chunk model")
+	}
+	if !bytes.Equal(bytes.TrimSpace(event["choices"]), []byte("[]")) {
+		return nil, errors.New("usage chunk")
 	}
 	usage := event["usage"]
 	if len(usage) == 0 || bytes.Equal(usage, []byte("null")) {

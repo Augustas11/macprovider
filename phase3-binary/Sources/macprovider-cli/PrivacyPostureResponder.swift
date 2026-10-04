@@ -45,6 +45,7 @@ final class PrivacyPostureResponder: @unchecked Sendable {
     private var sequence: UInt64 = 0
     private var advertisingDisabled = false
     private var decryptFailureLatched = false
+    private var hasAdvertisedKeys = false
 
     init(
         probe: any PrivacyPostureProbe,
@@ -70,15 +71,18 @@ final class PrivacyPostureResponder: @unchecked Sendable {
     }
 
     /// Nil means omit `privacy_key_records`. An empty array is an honest empty advertisement.
+    /// Once a failure latches after keys were advertised, this returns an explicit empty array so the
+    /// coordinator revokes eligibility now rather than at posture max-age.
     func privacyKeyRecords(now: Date = Date()) -> [[String: Any]]? {
         lock.lock()
         defer { lock.unlock() }
-        guard let observation = healthyObservationLocked() else { return nil }
+        guard let observation = healthyObservationLocked() else { return latchedWithdrawalLocked() }
         do {
             switch try buildRecordsLocked(observation: observation, now: now) {
             case .disabled:
-                return nil
+                return latchedWithdrawalLocked()
             case .ready(let records, _):
+                hasAdvertisedKeys = true
                 return records
             }
         } catch {
@@ -146,6 +150,10 @@ final class PrivacyPostureResponder: @unchecked Sendable {
         let encoded = try JSONSerialization.data(withJSONObject: response, options: [.withoutEscapingSlashes])
         guard encoded.count <= maxPrivacyPostureResponseBytes else { throw PrivacyClassError.invalidMaterial }
         return response
+    }
+
+    private func latchedWithdrawalLocked() -> [[String: Any]]? {
+        advertisingDisabled && hasAdvertisedKeys ? [] : nil
     }
 
     private func noteDecryptRecheckLocked() {
@@ -235,6 +243,21 @@ final class PrivacyPostureResponder: @unchecked Sendable {
     }
 }
 
+private func privacyVisibleASCII(_ value: String, maxBytes: Int) -> Bool {
+    let bytes = Array(value.utf8)
+    return !bytes.isEmpty && bytes.count <= maxBytes && bytes.allSatisfy { $0 >= 0x21 && $0 <= 0x7e }
+}
+
+private func strictJSONInt64(_ value: Any?) -> Int64? {
+    guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+    let text = number.stringValue
+    guard !text.contains("."), !text.lowercased().contains("e") else { return nil }
+    return Int64(text)
+}
+
+#if MACPROVIDER_TEST_FIXTURES
+// SPEC-049 fixture seams: debug/test builds only. A release CLI cannot reach them.
+
 /// All-green fixture probe. `codeCDHash` defaults to a 40-hex stand-in for the plan token `f1x7`,
 /// which is not lowercase hex and cannot be signed under SPEC-049 §4.3.
 struct FixturePrivacyPostureProbe: PrivacyPostureProbe {
@@ -301,22 +324,10 @@ private enum PrivacySEFileError: Error {
     case alreadyExists
 }
 
-private func privacyVisibleASCII(_ value: String, maxBytes: Int) -> Bool {
-    let bytes = Array(value.utf8)
-    return !bytes.isEmpty && bytes.count <= maxBytes && bytes.allSatisfy { $0 >= 0x21 && $0 <= 0x7e }
-}
-
 func privacyFixtureCDHash(_ value: String) -> Bool {
     let bytes = Array(value.utf8)
     guard bytes.count == 40 else { return false }
     return bytes.allSatisfy { ($0 >= 0x30 && $0 <= 0x39) || ($0 >= 0x61 && $0 <= 0x66) }
-}
-
-private func strictJSONInt64(_ value: Any?) -> Int64? {
-    guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
-    let text = number.stringValue
-    guard !text.contains("."), !text.lowercased().contains("e") else { return nil }
-    return Int64(text)
 }
 
 private func readSEBlob(_ url: URL) throws -> Data? {
@@ -373,3 +384,4 @@ private func writeExclusiveSEBlob(_ url: URL, data: Data) throws {
     }
     success = true
 }
+#endif

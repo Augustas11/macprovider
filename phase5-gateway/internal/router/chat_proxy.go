@@ -1350,6 +1350,9 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	var serializedEmitted int64
 	var reported *tokenUsage
 	var privacyStream relayblind.PrivacyStreamGate
+	if exec := relayBlindExecutionFor(r); exec != nil && exec.Privacy != nil {
+		privacyStream.Model = exec.Privacy.Model
+	}
 	invalidReportedUsage := false
 	forwardedUsage := false
 	terminalStructuredErrorCode := ""
