@@ -255,6 +255,9 @@ type Server struct {
 	privacyAuthority       *relayblind.PrivacyAuthority
 	privacyPostureChans    sync.Map
 	privacyPostureInFlight sync.Map
+	// beforeHandshakeAckSend is a test seam run just before hello_ack /
+	// auth_response v2 is enqueued. Nil in production.
+	beforeHandshakeAckSend func()
 
 	// Trust-revalidation sweep failure accounting (issue #582 FIX C). Bounds the
 	// remaining fail-open: a single transient sweep DB error is skipped, but N
@@ -2461,7 +2464,6 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	}
 	registered = true
 	s.acceptRelayBlindKeyRecords(entry.ProviderID, entry.AssignedID, hello.RelayBlindKeyRecords)
-	s.acceptPrivacyKeyRecords(entry.ProviderID, entry.AssignedID, hello.PrivacyKeyRecords)
 	if reservedAdmission && entry.Tier == pool.TierProvisional {
 		s.admission.ReleasePendingProvisional()
 	}
@@ -2493,10 +2495,17 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		s.closeSession(session, CloseInvalidHello, "invalid_hello: ack")
 		return "", ""
 	}
+	if s.beforeHandshakeAckSend != nil {
+		s.beforeHandshakeAckSend()
+	}
 	if err := session.send(b); err != nil {
 		s.log.Warn().Err(err).Str("provider_id", hello.ProviderID).Msg("hello_ack write failed")
 		return "", ""
 	}
+	// Privacy key acceptance schedules a posture challenge on this session's
+	// FIFO writer. The provider requires hello_ack as the next frame, so the
+	// challenge may only be enqueued after the ack (SPEC-049).
+	s.acceptPrivacyKeyRecords(entry.ProviderID, entry.AssignedID, hello.PrivacyKeyRecords)
 	if s.cfg.Pool.WarmupGateEnabled {
 		s.startWarmupGate(*entry)
 	}
@@ -3057,7 +3066,6 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	}
 	registered = true
 	s.acceptRelayBlindKeyRecords(entry.ProviderID, entry.AssignedID, initial.RelayBlindKeyRecords)
-	s.acceptPrivacyKeyRecords(entry.ProviderID, entry.AssignedID, initial.PrivacyKeyRecords)
 	// Phase 3 observe-mode: trigger live MDA upgrade asynchronously after
 	// SE attestation auth. Never blocks auth. Serial comes from the SE
 	// attestation blob when present (MicroMDM device lookup).
@@ -3124,10 +3132,15 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		s.closeSession(session, CloseInvalidHello, "invalid_auth_response")
 		return "", ""
 	}
+	if s.beforeHandshakeAckSend != nil {
+		s.beforeHandshakeAckSend()
+	}
 	if err := session.send(rawResponse); err != nil {
 		s.log.Warn().Err(err).Str("provider_id", initial.ProviderID).Msg("auth_response write failed")
 		return "", ""
 	}
+	// See handleV1Conn: the posture challenge must follow auth_response v2.
+	s.acceptPrivacyKeyRecords(entry.ProviderID, entry.AssignedID, initial.PrivacyKeyRecords)
 	if s.cfg.Pool.WarmupGateEnabled {
 		s.startWarmupGate(*entry)
 	}
