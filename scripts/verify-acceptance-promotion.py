@@ -11,7 +11,6 @@ import pathlib
 import re
 import stat
 import subprocess
-import tarfile
 
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
@@ -59,21 +58,29 @@ def sha256(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
-def verify_provider_code_identity(root: pathlib.Path, pearl: dict, tag: str, provider_cli_version: str) -> None:
-    """Issue #1842: the signed code identity must describe the accepted CLI bytes.
-
-    Present-then-strict (SPEC-025 §6.2.1): a candidate signed before #1842 has
-    no field and is accepted with a notice; a present field is fully validated.
-    """
-    if "provider_code_identity" not in pearl:
-        print("verify-acceptance-promotion: provider_code_identity: absent (pre-#1842 release)")
-        return
+def load_code_identity_contract():
     script = pathlib.Path(__file__).resolve().with_name("provider-code-identity.py")
     spec = importlib.util.spec_from_file_location("provider_code_identity", script)
     if spec is None or spec.loader is None:
         fail("provider code identity contract is unavailable")
     producer = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(producer)
+    return producer
+
+
+def verify_provider_code_identity(root: pathlib.Path, pearl: dict, tag: str, provider_cli_version: str) -> None:
+    """Issue #1842: the signed code identity must describe the accepted CLI bytes.
+
+    Present-then-strict with a fixed cutoff (SPEC-025 §6.2.1): only a provider
+    CLI version at or below 1.8.213 (from the signed compatibility manifest) may
+    omit the field, with a notice; a present field is always fully validated.
+    """
+    producer = load_code_identity_contract()
+    if "provider_code_identity" not in pearl:
+        if producer.identity_required(provider_cli_version):
+            fail(f"Pearl metadata lacks provider_code_identity required for provider CLI {provider_cli_version}")
+        print("verify-acceptance-promotion: provider_code_identity: absent (pre-#1842 release)")
+        return
     try:
         identity = producer.validate_identity(
             pearl.get("provider_code_identity"),
@@ -85,21 +92,10 @@ def verify_provider_code_identity(root: pathlib.Path, pearl: dict, tag: str, pro
     tarball = root / identity["asset"]
     regular(tarball, "accepted provider CLI tarball")
     try:
-        with tarfile.open(tarball, "r:gz") as archive:
-            members = [
-                member
-                for member in archive.getmembers()
-                if tuple(p for p in pathlib.PurePosixPath(member.name).parts if p not in ("", ".")) == (identity["member"],)
-            ]
-            if len(members) != 1 or not members[0].isfile():
-                fail("accepted provider CLI tarball must hold exactly one regular macprovider-cli")
-            source = archive.extractfile(members[0])
-            digest = hashlib.sha256()
-            for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                digest.update(chunk)
-    except (OSError, tarfile.TarError) as exc:
-        fail(f"accepted provider CLI tarball is unreadable: {exc}")
-    if digest.hexdigest() != identity["binary_sha256"]:
+        digest = producer.member_sha256(tarball, identity["member"])
+    except producer.IdentityError as exc:
+        fail(f"accepted provider CLI {exc}")
+    if digest != identity["binary_sha256"]:
         fail("Pearl provider_code_identity binary_sha256 differs from the accepted CLI bytes")
 
 

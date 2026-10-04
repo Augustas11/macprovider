@@ -544,6 +544,38 @@ if grep -qF 'provider_code_identity: absent' "$work/code-identity-present.out"; 
   fail "a candidate carrying provider_code_identity printed the absence notice"
 fi
 
+# SPEC-025 §6.2.1 cutoff in the promotion verifier itself: the provider CLI
+# version comes from the signed compatibility manifest, so only <= 1.8.213 may
+# omit the field. The fixture above is 1.8.48 (legacy); drive 1.8.213/1.8.214
+# through the verifier's own code path.
+python3 - "$verifier" "$accepted" <<'PY'
+import contextlib
+import importlib.util
+import io
+import pathlib
+import sys
+
+spec = importlib.util.spec_from_file_location("verify_acceptance_promotion", sys.argv[1])
+verifier = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(verifier)
+root = pathlib.Path(sys.argv[2])
+
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    verifier.verify_provider_code_identity(root, {}, "v1.8.213", "1.8.213")
+if "provider_code_identity: absent (pre-#1842 release)" not in out.getvalue():
+    raise SystemExit("legacy 1.8.213 absence was accepted without the notice")
+
+for version in ("1.8.214", "1.9.0", "2.0.0", "garbage"):
+    try:
+        verifier.verify_provider_code_identity(root, {}, f"v{version}", version)
+    except SystemExit as exc:
+        if "lacks provider_code_identity required for provider CLI" not in str(exc):
+            raise SystemExit(f"post-cutoff {version} absence failed for the wrong reason: {exc}")
+    else:
+        raise SystemExit(f"post-cutoff {version} absence was accepted")
+PY
+
 expect_reject wrong-checksums-digest \
   python3 "$verifier" verify-directory \
   --directory "$accepted" \

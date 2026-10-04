@@ -799,4 +799,82 @@ fi
 grep -q 'checksums.txt omits the provider CLI asset bound by provider_code_identity' \
   "$work/code-identity-unlisted.out"
 
+# A present identity requires the bound tarball itself, not just its checksum row.
+make_release_dir "$work/release-code-identity-no-tarball" v1.8.66 "$second"
+rm "$work/release-code-identity-no-tarball/macprovider-cli-v1.8.66-darwin-arm64.tar.gz"
+if bash "$guard" --tag v1.8.66 --expected-commit "$second" \
+  --remote "$work/remote.git" --release-dir "$work/release-code-identity-no-tarball" \
+  >"$work/code-identity-no-tarball.out" 2>&1; then
+  fail "accepted provider_code_identity without the bound provider CLI tarball"
+fi
+grep -q 'missing provider CLI asset bound by provider_code_identity: macprovider-cli-v1.8.66-darwin-arm64.tar.gz' \
+  "$work/code-identity-no-tarball.out"
+
+# SPEC-025 §6.2.1 cutoff: 1.8.214 and later MUST carry the field.
+git -C "$work/source" tag v1.8.214 "$second"
+git -C "$work/source" push -q origin refs/tags/v1.8.214
+make_release_dir "$work/release-code-identity-post-cutoff" v1.8.214 "$second"
+bash "$guard" --tag v1.8.214 --expected-commit "$second" \
+  --remote "$work/remote.git" --release-dir "$work/release-code-identity-post-cutoff" |
+  grep -q 'ok: v1.8.214 has Pearl runtime assets'
+mutate_code_identity "$work/release-code-identity-post-cutoff" missing
+if bash "$guard" --tag v1.8.214 --expected-commit "$second" \
+  --remote "$work/remote.git" --release-dir "$work/release-code-identity-post-cutoff" \
+  >"$work/code-identity-post-cutoff.out" 2>&1; then
+  fail "accepted a post-cutoff (1.8.214) release without provider_code_identity"
+fi
+grep -q 'pearl-release.json lacks provider_code_identity required for provider CLI 1.8.214' \
+  "$work/code-identity-post-cutoff.out"
+if grep -qF 'absent (pre-#1842 release)' "$work/code-identity-post-cutoff.out"; then
+  fail "post-cutoff absence printed the legacy notice"
+fi
+
+# GitHub mode: a present identity makes the verifier download the provider
+# tarball and bind binary_sha256 to the extracted macprovider-cli.
+make_release_dir "$work/release-github-code-identity" v1.8.214 "$second"
+FAKE_GH_RELEASE_DIR="$work/release-github-code-identity" PATH="$fake_gh_dir:$PATH" \
+  bash "$guard" --tag v1.8.214 --expected-commit "$second" \
+    --remote "$work/remote.git" |
+  grep -q 'ok: v1.8.214 has Pearl runtime assets'
+
+make_release_dir "$work/release-github-code-identity-swapped" v1.8.214 "$second"
+python3 - "$work/release-github-code-identity-swapped" <<'PY'
+import hashlib
+import io
+import pathlib
+import sys
+import tarfile
+
+directory = pathlib.Path(sys.argv[1])
+cli = b"different macprovider-cli bytes\n"
+with tarfile.open(directory / "macprovider-cli-v1.8.214-darwin-arm64.tar.gz", "w:gz") as archive:
+    info = tarfile.TarInfo("macprovider-cli")
+    info.size = len(cli)
+    archive.addfile(info, io.BytesIO(cli))
+# checksums.txt still covers the swapped tarball, so only the binary_sha256
+# binding (which needs the downloaded tarball) can catch it.
+rows = []
+for item in sorted(directory.iterdir()):
+    if item.name != "checksums.txt":
+        rows.append(f"{hashlib.sha256(item.read_bytes()).hexdigest()}  {item.name}\n")
+(directory / "checksums.txt").write_text("".join(rows), encoding="utf-8")
+PY
+if FAKE_GH_RELEASE_DIR="$work/release-github-code-identity-swapped" PATH="$fake_gh_dir:$PATH" \
+  bash "$guard" --tag v1.8.214 --expected-commit "$second" \
+    --remote "$work/remote.git" >"$work/github-code-identity-swapped.out" 2>&1; then
+  fail "GitHub mode accepted a provider tarball whose CLI differs from binary_sha256"
+fi
+grep -q 'provider_code_identity binary_sha256 does not match the shipped macprovider-cli' \
+  "$work/github-code-identity-swapped.out"
+
+make_release_dir "$work/release-github-code-identity-unpublished" v1.8.214 "$second"
+rm "$work/release-github-code-identity-unpublished/macprovider-cli-v1.8.214-darwin-arm64.tar.gz"
+if FAKE_GH_RELEASE_DIR="$work/release-github-code-identity-unpublished" PATH="$fake_gh_dir:$PATH" \
+  bash "$guard" --tag v1.8.214 --expected-commit "$second" \
+    --remote "$work/remote.git" >"$work/github-code-identity-unpublished.out" 2>&1; then
+  fail "GitHub mode accepted provider_code_identity without a published provider tarball"
+fi
+grep -q 'missing provider CLI asset bound by provider_code_identity: macprovider-cli-v1.8.214-darwin-arm64.tar.gz' \
+  "$work/github-code-identity-unpublished.out"
+
 echo "PASS: Pearl runtime release preflight fails closed on missing assets and source drift"

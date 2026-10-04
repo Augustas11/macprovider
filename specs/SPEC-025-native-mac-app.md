@@ -10,8 +10,10 @@ tarball bytes, so SPEC-049 `privacy_class.approved_code_identities` can be
 filled from signed release metadata instead of by hand. `compatibility-set.json`
 and the `compatibility-artifact-index.json` role set are unchanged.
 Verifiers are present-then-strict: they fully validate the field when present
-and accept its absence, with an explicit notice, only for releases that predate
-it, so already-signed candidates and rollback targets stay verifiable.
+and accept its absence, with an explicit notice, only for provider CLI versions
+at or below 1.8.213, so already-signed candidates and rollback targets stay
+verifiable; 1.8.214 and later fail without it. A present field always binds the
+shipped tarball, including in the GitHub download path.
 
 **Change log v0.29 (2026-09-08, issue #1445 frozen-Sparkle-bridge confinement).**
 Restores the code and this spec to DECISION_CRITERIA Entry 156/158: the frozen
@@ -1284,15 +1286,21 @@ tarball before `pearl-release.json` is signed, read `CDHash=`,
 binary is exact arm64, the Identifier is `live.malibu.provider.cli`, and the
 TeamIdentifier equals the release Team ID. The runtime-only lane
 (`pearl_runtime`) ships no CLI and MUST NOT carry the field. Every
-CLI-shipping release cut after SPEC-025 v0.30 MUST carry the field; producers
-never omit it. Verifiers (`scripts/verify-pearl-runtime-release.sh`,
+CLI-shipping release with provider CLI version 1.8.214 or later MUST carry the
+field; producers never omit it. Verifiers (`scripts/verify-pearl-runtime-release.sh`,
 `scripts/verify-acceptance-promotion.py`) are present-then-strict: when the
 field is present they MUST reject it if malformed, if `checksums.txt` does not
-list its `asset`, or if `binary_sha256` differs from the CLI in the tarball
-when they hold the tarball. They MUST accept its absence only for releases
-that predate it, and MUST then print the explicit notice
+list its `asset`, if the bound tarball is missing (the GitHub path MUST
+download it), if its bytes differ from `checksums.txt`, or if `binary_sha256`
+differs from the `macprovider-cli` extracted from it. They MUST accept its
+absence only when the provider CLI version they already hold from signed
+metadata (the verified release tag, or the signed compatibility manifest's
+`provider_cli.version`) is at or below 1.8.213, using the single cutoff
+predicate `identity_required()` in `scripts/provider-code-identity.py`; they
+MUST then print the explicit notice
 `provider_code_identity: absent (pre-#1842 release)` so a missing field is
-never silent. An absent field cannot be used to fill SPEC-049 approvals. Operators fill
+never silent. For 1.8.214 and later, or any version that does not parse as
+X.Y.Z, a missing field MUST fail. An absent field cannot be used to fill SPEC-049 approvals. Operators fill
 SPEC-049 `privacy_class.approved_code_identities` from this verified field
 (`scripts/provider-code-identity.py --emit-approved-identity`); the field is
 not a new release asset and does not change `compatibility-set.json` or the

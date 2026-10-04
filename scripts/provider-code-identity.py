@@ -50,6 +50,10 @@ TEAM_ID = re.compile(r"^[A-Z0-9]{10}$")
 RFC3339 = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$")
 CODESIGN_KEYS = ("CDHash", "TeamIdentifier", "Identifier")
 MAX_MEMBER_BYTES = 1024 * 1024 * 1024
+CHUNK_BYTES = 1024 * 1024
+# Last provider CLI version released before #1842; later releases MUST carry
+# provider_code_identity (SPEC-025 §6.2.1).
+LEGACY_OPTIONAL_THROUGH = (1, 8, 213)
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEFAULT_PUBLIC_KEY = REPO_ROOT / "ops" / "pearl-updater" / "release-signing-public.pem"
 
@@ -114,7 +118,13 @@ def run_tool(arguments: list[str], label: str) -> str:
     return (result.stdout + result.stderr).decode("utf-8", errors="replace")
 
 
-def extract_member(tarball: pathlib.Path, member_name: str, destination: pathlib.Path) -> bytes:
+def member_sha256(tarball: pathlib.Path, member_name: str = MEMBER, destination: pathlib.Path | None = None) -> str:
+    """Stream the single regular member's bytes, enforcing the size cap while reading.
+
+    Returns its sha256 and, when `destination` is given, writes the bytes there.
+    """
+    digest = hashlib.sha256()
+    handle = None
     try:
         with tarfile.open(tarball, "r:gz") as archive:
             matches = []
@@ -130,13 +140,34 @@ def extract_member(tarball: pathlib.Path, member_name: str, destination: pathlib
             source = archive.extractfile(member)
             if source is None:
                 fail(f"tarball {member_name} member is unreadable")
-            data = source.read()
+            if destination is not None:
+                handle = os.fdopen(os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700), "wb")
+            total = 0
+            for chunk in iter(lambda: source.read(CHUNK_BYTES), b""):
+                total += len(chunk)
+                if total > MAX_MEMBER_BYTES:
+                    fail(f"tarball {member_name} member exceeds the size cap")
+                digest.update(chunk)
+                if handle is not None:
+                    handle.write(chunk)
     except (OSError, tarfile.TarError) as exc:
         fail(f"tarball is not a readable gzip tar: {exc}")
-    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
-    with os.fdopen(descriptor, "wb") as handle:
-        handle.write(data)
-    return data
+    finally:
+        if handle is not None:
+            handle.close()
+    return digest.hexdigest()
+
+
+def identity_required(provider_version: object) -> bool:
+    """SPEC-025 §6.2.1 cutoff: provider CLI releases after 1.8.213 MUST carry the field.
+
+    Verifiers pass the provider version already bound by signed metadata (the
+    release tag or the signed compatibility manifest). Anything that is not a
+    plain X.Y.Z fails closed as "required".
+    """
+    if not isinstance(provider_version, str) or not SEMVER.fullmatch(provider_version):
+        return True
+    return tuple(int(part) for part in provider_version.split(".")) > LEGACY_OPTIONAL_THROUGH
 
 
 def codesign_fields(binary: pathlib.Path, arch: str) -> dict[str, str]:
@@ -169,8 +200,7 @@ def derive(args: argparse.Namespace) -> dict:
         fail("--expect-sha256 must be 64 lowercase hex")
     with tempfile.TemporaryDirectory(prefix="provider-code-identity.") as work:
         binary = pathlib.Path(work) / MEMBER
-        data = extract_member(tarball, args.member, binary)
-        binary_sha256 = hashlib.sha256(data).hexdigest()
+        binary_sha256 = member_sha256(tarball, args.member, binary)
         if args.expect_sha256 is not None and binary_sha256 != args.expect_sha256:
             fail("extracted macprovider-cli sha256 differs from --expect-sha256")
         arches = tuple(run_tool(["lipo", "-archs", str(binary)], "lipo -archs").split())

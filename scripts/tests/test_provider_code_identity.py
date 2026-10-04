@@ -338,5 +338,55 @@ class EmitApprovedIdentityTest(unittest.TestCase):
                 self.assertIn(message, result.stderr)
 
 
+
+def load_producer():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("provider_code_identity_under_test", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class SharedContractTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.producer = load_producer()
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.temp.name)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def test_identity_required_cutoff_is_after_1_8_213(self) -> None:
+        for version in ("1.8.213", "1.8.48", "1.7.999", "0.0.1"):
+            with self.subTest(version=version):
+                self.assertFalse(self.producer.identity_required(version))
+        for version in ("1.8.214", "1.8.1000", "1.9.0", "2.0.0", "v1.8.214", "1.8", "", None, "1.8.213-rc1"):
+            with self.subTest(version=version):
+                self.assertTrue(self.producer.identity_required(version))
+
+    def make_tarball(self, data: bytes) -> pathlib.Path:
+        path = self.root / ASSET
+        with tarfile.open(path, "w:gz") as archive:
+            info = tarfile.TarInfo("macprovider-cli")
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+        return path
+
+    def test_member_sha256_streams_and_writes_exact_bytes(self) -> None:
+        data = os.urandom(3 * self.producer.CHUNK_BYTES + 17)
+        tarball = self.make_tarball(data)
+        destination = self.root / "out"
+        self.assertEqual(self.producer.member_sha256(tarball, "macprovider-cli", destination), hashlib.sha256(data).hexdigest())
+        self.assertEqual(destination.read_bytes(), data)
+        self.assertEqual(self.producer.member_sha256(tarball), hashlib.sha256(data).hexdigest())
+
+    def test_member_size_cap_is_enforced(self) -> None:
+        tarball = self.make_tarball(b"x" * 4096)
+        self.producer.MAX_MEMBER_BYTES = 1024
+        with self.assertRaises(self.producer.IdentityError):
+            self.producer.member_sha256(tarball)
+
+
 if __name__ == "__main__":
     unittest.main()
