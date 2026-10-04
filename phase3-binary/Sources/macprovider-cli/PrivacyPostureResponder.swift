@@ -239,7 +239,8 @@ final class PrivacyPostureResponder: @unchecked Sendable {
 /// which is not lowercase hex and cannot be signed under SPEC-049 §4.3.
 struct FixturePrivacyPostureProbe: PrivacyPostureProbe {
     static let defaultCodeCDHash = "f1a7" + String(repeating: "0", count: 36)
-    static let teamID = "FIXTURE0001"
+    // SPEC-049 team ids are exactly 10 of A-Z and 0-9. "FIXTURE0001" is 11.
+    static let teamID = "FIXTURE001"
     static let signingIdentifier = "live.malibu.provider.cli"
 
     var traced: Bool

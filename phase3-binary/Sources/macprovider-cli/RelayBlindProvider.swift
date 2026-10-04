@@ -358,12 +358,27 @@ final class RelayBlindProviderRuntime: @unchecked Sendable {
 
     let keyManager: RelayBlindKeyManager
     let journal: RelayBlindExecutionJournal
-    let assignedSession: String?
+    private let assignedSessionLock = NSLock()
+    private var assignedSessionValue: String?
+
+    var assignedSession: String? {
+        assignedSessionLock.lock()
+        defer { assignedSessionLock.unlock() }
+        return assignedSessionValue
+    }
 
     init(keyManager: RelayBlindKeyManager, journal: RelayBlindExecutionJournal, assignedSession: String? = nil) {
         self.keyManager = keyManager
         self.journal = journal
-        self.assignedSession = assignedSession
+        self.assignedSessionValue = assignedSession
+    }
+
+    /// The privacy fixture keeps its X25519 agreement key in memory, so the
+    /// integration harness adopts the coordinator assignment without a restart.
+    func adoptAssignedSession(_ session: String) {
+        assignedSessionLock.lock()
+        assignedSessionValue = session
+        assignedSessionLock.unlock()
     }
 
     func advertisedRecord(now: Date = Date()) throws -> RelayBlindKeyRecord {

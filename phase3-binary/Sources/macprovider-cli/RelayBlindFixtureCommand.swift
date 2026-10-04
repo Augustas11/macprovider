@@ -40,6 +40,9 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
     @Option(name: .customLong("provider-id"), help: "Provider id carried in privacy posture statements.")
     var privacyProviderID: String = "privacy-fixture-provider"
 
+    @Option(name: .customLong("privacy-fixture-completion"), help: "Deterministic completion text for a privacy fixture. Token counts stay 5 and 4.")
+    var privacyFixtureCompletion: String?
+
     mutating func run() async throws {
         guard ProcessInfo.processInfo.environment["MACPROVIDER_ALLOW_TEST_FIXTURES"] == "1" else {
             throw ValidationError("relay-blind fixture requires MACPROVIDER_ALLOW_TEST_FIXTURES=1")
@@ -53,11 +56,14 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
         if privacyClass && continuousBatchReplay {
             throw ValidationError("--privacy-class cannot be combined with --continuous-batch-replay")
         }
-        if !privacyClass && (privacyFixtureCDHash != nil || privacyFixtureTraced) {
-            throw ValidationError("--privacy-fixture-cdhash and --privacy-fixture-traced require --privacy-class")
+        if !privacyClass && (privacyFixtureCDHash != nil || privacyFixtureTraced || privacyFixtureCompletion != nil) {
+            throw ValidationError("--privacy-fixture-cdhash, --privacy-fixture-traced, and --privacy-fixture-completion require --privacy-class")
         }
         if let privacyFixtureCDHash, !privacyFixtureCDHashIsHex(privacyFixtureCDHash) {
             throw ValidationError("--privacy-fixture-cdhash must be 40 lowercase hex characters")
+        }
+        if let privacyFixtureCompletion, !privacyFixtureCompletionText(privacyFixtureCompletion) {
+            throw ValidationError("--privacy-fixture-completion must be 1...256 bytes of printable text without a newline")
         }
         guard privacyProviderIdentifier(privacyProviderID) else {
             throw ValidationError("--provider-id must be 1...128 printable ASCII characters")
@@ -123,7 +129,7 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
             receiptProviderID = configured.providerID
             modelHash = configured.modelHash
         } else {
-            fixtureRuntime = RelayBlindFixtureRuntime(model: model, streamDelayMs: streamDelayMs)
+            fixtureRuntime = RelayBlindFixtureRuntime(model: model, streamDelayMs: streamDelayMs, completionText: privacyFixtureCompletion)
             replayObserver = nil
             receiptBuilder = nil
             receiptProviderID = nil
@@ -195,6 +201,24 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
                 guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                     throw RelayBlindProviderError.invalidEnvelope
                 }
+                if object["type"] as? String == "relay_fixture_assigned_session" {
+                    guard privacyClass,
+                          let session = object["assigned_session"] as? String,
+                          privacyProviderIdentifier(session) else {
+                        try await writer.write([
+                            "type": "relay_blind_fixture_error",
+                            "code": "fixture_input_invalid",
+                        ])
+                        continue
+                    }
+                    assignedSession = session
+                    providerRuntime.adoptAssignedSession(session)
+                    try await writer.write([
+                        "type": "relay_fixture_assigned_session_ack",
+                        "assigned_session": session,
+                    ])
+                    continue
+                }
                 if object["type"] as? String == "privacy_posture_challenge" {
                     guard let privacyResponder else {
                         try await writer.write([
@@ -246,6 +270,11 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
 
 private func privacyFixtureCDHashIsHex(_ value: String) -> Bool {
     privacyFixtureCDHash(value)
+}
+
+private func privacyFixtureCompletionText(_ value: String) -> Bool {
+    let bytes = Array(value.utf8)
+    return !bytes.isEmpty && bytes.count <= 256 && bytes.allSatisfy { $0 >= 0x20 && $0 != 0x7f }
 }
 
 private func privacyProviderIdentifier(_ value: String) -> Bool {
@@ -473,10 +502,12 @@ actor RelayBlindFixtureRuntime: ModelRuntimeServing {
     private let model: String
     private let promptTokens = 5
     private let streamDelayNanoseconds: UInt64
+    private let completionText: String
 
-    init(model: String, streamDelayMs: Int) {
+    init(model: String, streamDelayMs: Int, completionText: String? = nil) {
         self.model = model
         self.streamDelayNanoseconds = UInt64(streamDelayMs) * 1_000_000
+        self.completionText = completionText ?? "relay-blind fixture response"
     }
 
     var loadedModelHash: String? { nil }
@@ -501,7 +532,7 @@ actor RelayBlindFixtureRuntime: ModelRuntimeServing {
     ) async throws -> CompletionResult {
         if shouldCancel() { throw CancellationError() }
         return CompletionResult(
-            content: "relay-blind fixture response",
+            content: completionText,
             finishReason: "stop",
             promptTokens: promptTokens,
             completionTokens: 4,
@@ -526,14 +557,17 @@ actor RelayBlindFixtureRuntime: ModelRuntimeServing {
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
         if shouldCancel() { throw CancellationError() }
-        onChunk(.content("relay-blind "))
+        let chunks = fixtureCompletionChunks(completionText)
+        onChunk(.content(chunks.0))
         if streamDelayNanoseconds > 0 {
             try await Task.sleep(nanoseconds: streamDelayNanoseconds)
         }
         if shouldCancel() { throw CancellationError() }
-        onChunk(.content("fixture response"))
+        if !chunks.1.isEmpty {
+            onChunk(.content(chunks.1))
+        }
         return CompletionResult(
-            content: "relay-blind fixture response",
+            content: completionText,
             finishReason: "stop",
             promptTokens: promptTokens,
             completionTokens: 4,
@@ -542,4 +576,13 @@ actor RelayBlindFixtureRuntime: ModelRuntimeServing {
     }
 
     func unregisterInFlight(_ id: Int) {}
+}
+
+private func fixtureCompletionChunks(_ text: String) -> (String, String) {
+    if text == "relay-blind fixture response" {
+        return ("relay-blind ", "fixture response")
+    }
+    let characters = Array(text)
+    let mid = max(1, characters.count / 2)
+    return (String(characters[..<mid]), String(characters[mid...]))
 }

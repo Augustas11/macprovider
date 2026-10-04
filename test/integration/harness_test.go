@@ -313,6 +313,28 @@ type scenarioOpts struct {
 	// Optional coordinator trust pins. If omitted for an enabled scenario,
 	// the harness creates public-only keys for its configured providers.
 	relayBlindIdentityPublicKeys map[string]string
+	// coordinatorPrivacyClass pins the fixture SE key and one approved code
+	// identity. Nil leaves privacy_class at the coordinator default (off).
+	coordinatorPrivacyClass *coordinatorPrivacyClassOpts
+	// gatewayPrivacyClass turns on features.privacy_class. Relay-blind must
+	// already be enabled or the gateway rejects the config.
+	gatewayPrivacyClass bool
+}
+
+// coordinatorPrivacyClassOpts is the SPEC-049 pin block for one fixture.
+// Zero durations use the integration defaults: interval 15s, response
+// timeout 5s, max age 20s. Max age stays inside the gateway's 30s
+// reservation-expiry ceiling so a stale-posture wait can expire posture
+// without expiring the reservation.
+type coordinatorPrivacyClassOpts struct {
+	SEPublicKey       string
+	TeamID            string
+	SigningIdentifier string
+	CDHash            string
+	IntervalSeconds   int
+	MaxAgeSeconds     int
+	TimeoutSeconds    int
+	QuarantineSeconds int
 }
 
 type settlementCatalogFixture struct {
@@ -442,13 +464,13 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 			relayBlindIdentityPublicKeys[slot.ID] = base64.RawURLEncoding.EncodeToString(pub)
 		}
 	}
-	s.writeCoordinatorYAML(buyerPort, provPort, opts.stickyEnabled, coordServiceTok, providerCfgs, settlementCatalog, opts.settlementEnforceMode, opts.pendingDeadlineSeconds, opts.coordinatorRelayBlindEnabled, relayBlindIdentityPublicKeys)
+	s.writeCoordinatorYAML(buyerPort, provPort, opts.stickyEnabled, coordServiceTok, providerCfgs, settlementCatalog, opts.settlementEnforceMode, opts.pendingDeadlineSeconds, opts.coordinatorRelayBlindEnabled, relayBlindIdentityPublicKeys, opts.coordinatorPrivacyClass)
 
 	gwServiceTok := s.serviceToken
 	if opts.gatewayServiceToken != nil {
 		gwServiceTok = *opts.gatewayServiceToken
 	}
-	s.writeGatewayYAML(gwPort, opts.stickyEnabled, gwServiceTok, opts.settlementReconcileIntervalSeconds, opts.gatewayRelayBlindEnabled)
+	s.writeGatewayYAML(gwPort, opts.stickyEnabled, gwServiceTok, opts.settlementReconcileIntervalSeconds, opts.gatewayRelayBlindEnabled, opts.gatewayPrivacyClass)
 
 	if opts.seedAccount {
 		s.apiKey = s.seedGatewayAccountAndKey()
@@ -557,7 +579,7 @@ func secretEntropyBitsPerByte(s string) float64 {
 // the audit fixture: we want a clean room for testing the GATEWAY ↔
 // COORDINATOR boundary, not the provider auth gate which has its own
 // dedicated tests in phase4-coordinator/internal/ws).
-func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled bool, gatewayServiceToken string, providers []map[string]any, settlementCatalog settlementCatalogFixture, settlementEnforceMode bool, pendingDeadlineSeconds int, relayBlindEnabled bool, relayBlindIdentityPublicKeys map[string]string) {
+func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled bool, gatewayServiceToken string, providers []map[string]any, settlementCatalog settlementCatalogFixture, settlementEnforceMode bool, pendingDeadlineSeconds int, relayBlindEnabled bool, relayBlindIdentityPublicKeys map[string]string, privacy *coordinatorPrivacyClassOpts) {
 	s.t.Helper()
 	tier2Cfg := map[string]any{
 		"observe_enabled":                    false,
@@ -639,6 +661,7 @@ func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled b
 			"max_key_records_per_provider": 8,
 			"metadata_requests_per_minute": 120,
 		},
+		"privacy_class": coordinatorPrivacyClassYAML(s.providerID, privacy),
 		"admission": map[string]any{
 			"pinned_only":                         false,
 			"provisional_admission_rate_per_hour": 1000,
@@ -711,6 +734,45 @@ func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled b
 	}
 	if err := os.WriteFile(s.coordYAML, b, 0o600); err != nil {
 		s.t.Fatalf("write coordinator yaml: %v", err)
+	}
+}
+
+func coordinatorPrivacyClassYAML(providerID string, privacy *coordinatorPrivacyClassOpts) map[string]any {
+	if privacy == nil {
+		return map[string]any{"enabled": false}
+	}
+	interval := privacy.IntervalSeconds
+	if interval == 0 {
+		interval = 15
+	}
+	timeout := privacy.TimeoutSeconds
+	if timeout == 0 {
+		timeout = 5
+	}
+	maxAge := privacy.MaxAgeSeconds
+	if maxAge == 0 {
+		maxAge = 20
+	}
+	quarantine := privacy.QuarantineSeconds
+	if quarantine == 0 {
+		quarantine = 86400
+	}
+	return map[string]any{
+		"enabled": true,
+		"provider_se_public_keys": map[string]string{
+			providerID: privacy.SEPublicKey,
+		},
+		"approved_code_identities": []map[string]any{{
+			"team_id":            privacy.TeamID,
+			"signing_identifier": privacy.SigningIdentifier,
+			"code_cdhash":        privacy.CDHash,
+			"expires_at":         time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
+		}},
+		"allowed_se_key_backends":            []string{"file", "keychain"},
+		"posture_challenge_interval_seconds": interval,
+		"posture_max_age_seconds":            maxAge,
+		"posture_response_timeout_seconds":   timeout,
+		"quarantine_seconds":                 quarantine,
 	}
 }
 
@@ -951,7 +1013,7 @@ type settlementCatalogFile struct {
 	Version   int                        `json:"version"`
 }
 
-func (s *scenario) writeGatewayYAML(gwPort int, stickyEnabled bool, serviceToken string, settlementReconcileIntervalSeconds int, relayBlindEnabled bool) {
+func (s *scenario) writeGatewayYAML(gwPort int, stickyEnabled bool, serviceToken string, settlementReconcileIntervalSeconds int, relayBlindEnabled bool, privacyClass bool) {
 	s.t.Helper()
 	cfg := map[string]any{
 		"listen": map[string]any{
@@ -1043,6 +1105,9 @@ func (s *scenario) writeGatewayYAML(gwPort int, stickyEnabled bool, serviceToken
 				"replay_max_rows_per_account":   10000,
 				"replay_max_bytes_per_account":  4194304,
 				"algorithms":                    []string{"x25519-hkdf-sha256-a256gcm-v1"},
+			},
+			"privacy_class": map[string]any{
+				"enabled": privacyClass,
 			},
 		},
 		"explorer": map[string]any{
