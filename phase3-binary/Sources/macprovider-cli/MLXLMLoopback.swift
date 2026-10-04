@@ -305,6 +305,46 @@ extension BYOMModelAdmissionRuntime {
         evaluationDigestSHA256: String?,
         requestedDisclosureClass: String
     ) async throws -> BYOMAdmissionStatusWire {
+        try await submitMLXLMOfferDetailed(
+            providerID: providerID,
+            target: target,
+            evaluationDigestSHA256: evaluationDigestSHA256,
+            requestedDisclosureClass: requestedDisclosureClass
+        ).status
+    }
+
+    /// #1816 `models propose` without submitting: the candidate and its
+    /// snapshot-manifest pair, computed over the declared snapshot exactly as
+    /// the offer computes it.
+    func mlxSnapshotProposalArtifact(
+        target: String
+    ) async throws -> (candidate: BYOMDiscoveryWire.Candidate, artifactHashes: [String: String]) {
+        BYOMDiscoveryNamespaceStore().provisionNamespaceIfMissing(at: environment.namespaceURL)
+        guard let found = await mlxSnapshotCandidate(target: target) else {
+            throw BYOMModelAdmissionError.candidateNotFound
+        }
+        let snapshot: MLXSnapshotIdentity
+        do {
+            snapshot = try MLXSnapshotIdentity.compute(
+                directory: found.directory,
+                deadline: Date().addingTimeInterval(Self.artifactHashBudgetSeconds)
+            )
+        } catch AutotuneContextCalibrationError.deadlineExceeded {
+            throw BYOMModelAdmissionError.artifactHashingTimedOut
+        } catch {
+            throw BYOMModelAdmissionError.artifactIdentityChanged
+        }
+        return (found.candidate, [snapshot.algorithm: snapshot.digest])
+    }
+
+    /// `submitMLXLMOffer`, also returning the candidate and the exact
+    /// snapshot-manifest pair the signed offer carried.
+    func submitMLXLMOfferDetailed(
+        providerID: String,
+        target: String,
+        evaluationDigestSHA256: String?,
+        requestedDisclosureClass: String
+    ) async throws -> (status: BYOMAdmissionStatusWire, candidate: BYOMDiscoveryWire.Candidate, artifactHashes: [String: String]) {
         guard let client else {
             throw BYOMModelAdmissionError.missingCoordinatorURL
         }
@@ -346,6 +386,7 @@ extension BYOMModelAdmissionRuntime {
         else {
             throw BYOMModelAdmissionError.artifactIdentityChanged
         }
-        return try await client.submitOffer(package, bearerToken: bearer)
+        let status = try await client.submitOffer(package, bearerToken: bearer)
+        return (status, candidate, [snapshot.algorithm: snapshot.digest])
     }
 }

@@ -1089,3 +1089,15 @@ retry_503:
 	}
 	return path
 }
+
+func TestShouldRefundLegacyPreStreamProvider502IncludesGatewayProviderErrorCode(t *testing.T) {
+	body := []byte(`{"error":{"message":"provider failed","type":"api_error","code":"upstream_provider_error"}}`)
+	if !shouldRefundLegacyPreStreamProvider502(http.StatusBadGateway, body, http.Header{}) {
+		t.Fatal("legacy 502 upstream_provider_error should refund instead of prompt-settling")
+	}
+	h := http.Header{}
+	h.Set(settlementModeHeader, "legacy")
+	if shouldRefundLegacyPreStreamProvider502(http.StatusBadGateway, body, h) {
+		t.Fatal("coordinator settlement finality headers must remain authoritative")
+	}
+}

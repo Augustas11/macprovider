@@ -584,6 +584,8 @@ cp "$root/phase3-binary/catalog/autotune/release.json" \
   "$root/phase3-binary/dist/static/rate-card.json.sig" \
   "$root/phase3-binary/dist/static/continuous-batching-policy.json" \
   "$root/phase3-binary/dist/static/continuous-batching-policy.json.sig" \
+  "$root/phase3-binary/dist/static/autotune-artifacts.json" \
+  "$root/phase3-binary/dist/static/autotune-artifacts.json.sig" \
   "$work/pearl-catalog/"
 cat > "$work/pearl-compatibility.json.tmp" <<EOF
 {"schema_version":"macprovider.compatibility-set-envelope.v1","signatures":[{"algorithm":"fixture"}],"signed":{"compatibility_set_id":"Augustas11/macprovider:${tag}@${candidate_commit}","components":{"provider_cli":{"version":"1.8.31"}},"release":{"commit":"${candidate_commit}","repository":"Augustas11/macprovider","tag":"${tag}","version":"1.8.33"}}}

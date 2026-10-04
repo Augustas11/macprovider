@@ -1845,7 +1845,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             if let settlementMetadata {
                 guard let requestID, settlementMetadata.requestID == requestID,
                       settlementMetadata.providerID == providerID,
-                      settlementMetadata.modelID == request.model,
+                      settlementMetadata.servedModelID == request.model,
                       case .captured(let modelHash) = modelHashSource else {
                     return .omitted(.constructionFailed)
                 }

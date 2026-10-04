@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -1689,6 +1690,14 @@ func (h *adminHandler) writeRequestMutationError(w http.ResponseWriter, err erro
 }
 
 func (h *adminHandler) writeMutationErrorResponse(w http.ResponseWriter, err error) {
+	// #1816 F4: a manifest refused for its R015/R016 extensions answers its
+	// closed reason, never the opaque invalid_event.
+	var rejection *PoolModelEntryRejectionError
+	if errors.As(err, &rejection) && rejection.Code != "" {
+		slog.Warn("trust pool manifest refused", "event", "trusted_pool_manifest_rejected", "code", rejection.Code, "reason", err.Error())
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": rejection.Code}})
+		return
+	}
 	switch {
 	case errors.Is(err, ErrConflictingOperationID):
 		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "operation_conflict"}})
@@ -2158,20 +2167,66 @@ type adminPoolState struct {
 	RuntimeAllowlist               []string `json:"runtime_allowlist"`
 	RuntimeScope                   string   `json:"runtime_scope,omitempty"`
 	SettlementMode                 string   `json:"settlement_mode,omitempty"`
-	Members                        []string `json:"members"`
-	Revoked                        []string `json:"revoked"`
-	BuyerAccounts                  []string `json:"buyer_accounts"`
-	Generation                     uint64   `json:"generation"`
-	RouteableGeneration            uint64   `json:"routeable_generation"`
-	PubliclyAnnounced              bool     `json:"publicly_announced"`
-	PublicVisibilityGeneration     uint64   `json:"public_visibility_generation"`
-	PublicAnnouncementApprovalID   string   `json:"public_announcement_approval_id,omitempty"`
-	PublicReviewedArtifactDigest   string   `json:"public_reviewed_distribution_artifact_digest,omitempty"`
-	LastEventAtUTC                 string   `json:"last_event_at_utc,omitempty"`
-	Routeable                      bool     `json:"routeable"`
-	CreatorGateReason              string   `json:"creator_gate_reason,omitempty"`
-	CreatorGateExpiresAtUTC        string   `json:"creator_gate_expires_at_utc,omitempty"`
-	RouteGateCheckedAtUTC          string   `json:"route_gate_checked_at_utc,omitempty"`
+	// ModelEntries and AttestedMembers read back the same accepted core's
+	// SPEC-042-R015/R016 extensions (#1816 F5): null before any accepted
+	// core, [] when it carries none. Admin surface only.
+	ModelEntries                 []adminPoolModelEntry     `json:"model_entries"`
+	AttestedMembers              []adminPoolAttestedMember `json:"attested_members"`
+	Members                      []string                  `json:"members"`
+	Revoked                      []string                  `json:"revoked"`
+	BuyerAccounts                []string                  `json:"buyer_accounts"`
+	Generation                   uint64                    `json:"generation"`
+	RouteableGeneration          uint64                    `json:"routeable_generation"`
+	PubliclyAnnounced            bool                      `json:"publicly_announced"`
+	PublicVisibilityGeneration   uint64                    `json:"public_visibility_generation"`
+	PublicAnnouncementApprovalID string                    `json:"public_announcement_approval_id,omitempty"`
+	PublicReviewedArtifactDigest string                    `json:"public_reviewed_distribution_artifact_digest,omitempty"`
+	LastEventAtUTC               string                    `json:"last_event_at_utc,omitempty"`
+	Routeable                    bool                      `json:"routeable"`
+	CreatorGateReason            string                    `json:"creator_gate_reason,omitempty"`
+	CreatorGateExpiresAtUTC      string                    `json:"creator_gate_expires_at_utc,omitempty"`
+	RouteGateCheckedAtUTC        string                    `json:"route_gate_checked_at_utc,omitempty"`
+}
+
+// adminPoolModelEntry is one SPEC-042-R015 entry as the admin surface reads
+// it back.
+type adminPoolModelEntry struct {
+	PoolModelID               string   `json:"pool_model_id"`
+	ArtifactHashAlgorithm     string   `json:"artifact_hash_algorithm"`
+	ArtifactHash              string   `json:"artifact_hash"`
+	AllowedRuntimeSources     []string `json:"allowed_runtime_sources"`
+	License                   string   `json:"license"`
+	PaidServingAttested       bool     `json:"paid_serving_attested"`
+	PromptRatePerMtok         uint64   `json:"prompt_rate_per_mtok"`
+	PromptCacheHitRatePerMtok uint64   `json:"prompt_cache_hit_rate_per_mtok"`
+	CompletionRatePerMtok     uint64   `json:"completion_rate_per_mtok"`
+	DisclosureClass           string   `json:"disclosure_class"`
+	MaxContextTokens          uint64   `json:"max_context_tokens"`
+}
+
+// adminPoolAttestedMember is one SPEC-042-R016 attestation as the admin
+// surface reads it back.
+type adminPoolAttestedMember struct {
+	ProviderAccountID string   `json:"provider_account_id"`
+	RuntimeClasses    []string `json:"runtime_classes"`
+}
+
+func adminPoolExtensions(p *ReconstructedPoolState) ([]adminPoolModelEntry, []adminPoolAttestedMember) {
+	entries := []adminPoolModelEntry{}
+	for _, m := range policyModelEntries(p) {
+		entries = append(entries, adminPoolModelEntry{
+			PoolModelID: m.PoolModelID, ArtifactHashAlgorithm: m.ArtifactHashAlgorithm, ArtifactHash: m.ArtifactHash,
+			AllowedRuntimeSources: append([]string{}, m.AllowedRuntimeSources...), License: m.License,
+			PaidServingAttested: m.PaidServingAttested, PromptRatePerMtok: m.Pricing.PromptRatePerMtok,
+			PromptCacheHitRatePerMtok: m.Pricing.PromptCacheHitRatePerMtok, CompletionRatePerMtok: m.Pricing.CompletionRatePerMtok,
+			DisclosureClass: m.DisclosureClass, MaxContextTokens: m.MaxContextTokens,
+		})
+	}
+	members := []adminPoolAttestedMember{}
+	for _, a := range policyAttestedMembers(p) {
+		members = append(members, adminPoolAttestedMember{ProviderAccountID: a.ProviderAccountID, RuntimeClasses: append([]string{}, a.RuntimeClasses...)})
+	}
+	return entries, members
 }
 
 func adminPoolResponse(p *ReconstructedPoolState, routeGateCheckedAt time.Time) adminPoolState {
@@ -2199,8 +2254,11 @@ func adminPoolResponse(p *ReconstructedPoolState, routeGateCheckedAt time.Time) 
 	// accepted core), its SPEC-043-R013 scope, and the settlement mode
 	// routing applies.
 	var runtimeAllowlist []string
+	var modelEntries []adminPoolModelEntry
+	var attestedMembers []adminPoolAttestedMember
 	runtimeScope, settlementMode := "", ""
 	if p.ManifestVersion > 0 {
+		modelEntries, attestedMembers = adminPoolExtensions(p)
 		runtimeAllowlist = policyRuntimeAllowlist(p)
 		if runtimeAllowlist == nil {
 			runtimeAllowlist = []string{}
@@ -2224,6 +2282,8 @@ func adminPoolResponse(p *ReconstructedPoolState, routeGateCheckedAt time.Time) 
 		RuntimeAllowlist:               runtimeAllowlist,
 		RuntimeScope:                   runtimeScope,
 		SettlementMode:                 settlementMode,
+		ModelEntries:                   modelEntries,
+		AttestedMembers:                attestedMembers,
 		Members:                        members,
 		Revoked:                        revoked,
 		BuyerAccounts:                  buyers,

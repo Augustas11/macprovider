@@ -138,3 +138,36 @@ func TestAutotuneFeedsObserverReceivesEachRuntimePublish(t *testing.T) {
 		t.Fatalf("a rate-card-bound publish yields no index: %v", observed)
 	}
 }
+
+// Freeze audit R1 (#1816) SECURITY H4: every artifact of a blocked row, the
+// non-primary GGUF included, stays in the index as a deny pair (never a
+// member), so pool admission can refuse it.
+func TestBuildArtifactIdentityIndexKeepsBlockedRowArtifactsAsDenyPairs(t *testing.T) {
+	t.Parallel()
+	publicKey, privateKey := testSigningKey(t)
+	ggufHash := strings.Repeat("4", 64)
+	fixture := artifactBoundFeedSet(t, func(candidateSHA string) []byte {
+		return catalogArtifactsFeedWithModels("test-release", "2026-07-10T00:00:00Z", "autotune-policy-v1", candidateSHA, `"test-model":`+artifactModelJSON(ggufArtifactJSON(ggufHash, "sha256:"+ggufHash)))
+	}, privateKey, "test-key", map[string]ed25519.PublicKey{"test-key": publicKey}, privateKey)
+	feeds, err := buyer.LoadAutotuneFeeds(fixture.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The same release with test-model blocked (the builder trusts the
+	// already-verified bytes; only the row status changes here).
+	blockedJSON := strings.Replace(string(feeds.AutotuneCandidatesJSON), `"runtime_status":"recommendable"`, `"runtime_status":"blocked"`, 1)
+	if blockedJSON == string(feeds.AutotuneCandidatesJSON) {
+		t.Fatal("fixture has no recommendable row to block")
+	}
+	feeds.AutotuneCandidatesJSON = []byte(blockedJSON)
+	index, err := buyer.BuildArtifactIdentityIndex(feeds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := index.Resolve(modelidentity.GGUFFileV1, ggufHash); ok {
+		t.Fatal("a blocked row's artifact resolved as an identity")
+	}
+	if !index.Blocked(modelidentity.GGUFFileV1, ggufHash) || !index.Blocked(modelidentity.SnapshotManifestV1, strings.Repeat("2", 64)) {
+		t.Fatal("blocked row artifacts (declared GGUF and primary) are not deny pairs")
+	}
+}

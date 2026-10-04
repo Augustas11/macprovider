@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/billing"
 )
 
 const (
@@ -265,7 +267,8 @@ func (w *noPriorDispatchResponseWriter) stampNoChargeMarker(code int) {
 	if w.rec.providerCredited {
 		return
 	}
-	if w.rec.dispatchedThisAttempt && code != http.StatusServiceUnavailable {
+	if w.rec.dispatchedThisAttempt && code != http.StatusServiceUnavailable &&
+		w.rec.dispatchedThisAttemptFaultFlag != billing.FaultBreakerQualifying {
 		return
 	}
 	w.Header().Set(settlementNoPriorDispatchHeader, "1")

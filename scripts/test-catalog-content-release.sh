@@ -1116,6 +1116,13 @@ setup_env; printf 'tier2: {}\n' >"$CCR_FAKE/etc/macprovider/coordinator.pearl-ov
 setup_env; rm -f "$CCR_FAKE/run/macprovider/coordinator-applied-config.json"; expect_no_go "applied-config record missing" config_applied
 grep -q 'applied identity unknown' "$T/out" || fail "a missing applied-config record must say the applied identity is unknown"
 setup_env
+grep -v 'catalog_artifacts' "$CCR_FAKE/opt/macprovider/coordinator.yaml" >"$T/unbound-config.yaml"
+cat "$T/unbound-config.yaml" >"$CCR_FAKE/opt/macprovider/coordinator.yaml"
+expect_no_go "bound release under a config without the artifact-feed pair" artifact_feed_config
+setup_env
+printf 'autotune:\n  catalog_artifacts_path: /elsewhere/autotune-artifacts.json\n' >"$CCR_FAKE/etc/macprovider/coordinator.pearl-overlays.yaml"
+expect_no_go "overlay redirects the artifact feed" artifact_feed_config
+setup_env
 printf '# local edit\n' >>"$R/scripts/lib/catalog-canary-token.sh"
 expect_no_go "working tree vs commit" tooling_matches_commit
 git -C "$R" checkout -q -- scripts/lib/catalog-canary-token.sh

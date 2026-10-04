@@ -96,7 +96,16 @@ import sys
 from pathlib import Path
 
 ids = [item.strip() for item in sys.argv[1].split(",") if item.strip()]
-stale_selector_ids = {"SPEC-046-R001", "SPEC-046-R008"}
+stale_selector_ids = {
+    "SPEC-046-R001",
+    # #1816 pool-scoped model changes moved these mapped selectors.
+    "SPEC-046-R003",
+    "SPEC-046-R004",
+    "SPEC-046-R005",
+    "SPEC-046-R006",
+    "SPEC-046-R007",
+    "SPEC-046-R008",
+}
 conformance = json.loads(Path("specs/CONFORMANCE.json").read_text(encoding="utf-8"))
 rows = {
     row["requirement_id"]: row

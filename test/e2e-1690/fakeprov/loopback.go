@@ -103,7 +103,10 @@ func runOffer(args []string) int {
 	runtimeSource := fs.String("runtime-source", "llamacpp_loopback", "runtime_source")
 	servedRef := fs.String("served-model-ref", "llamacpp:qwen2.5-0.5b-instruct-q4_k_m", "served_model_ref")
 	catalogKey := fs.String("catalog-key", "", "catalog_model_key")
-	ggufSHA := fs.String("gguf-sha256", "", "macprovider.gguf-file.v1 artifact hash")
+	ggufSHA := fs.String("gguf-sha256", "", "macprovider.gguf-file.v1 artifact hash (alias of -artifact-hash)")
+	artifactHash := fs.String("artifact-hash", "", "#1816: offered artifact hash (64 hex)")
+	artifactAlg := fs.String("artifact-hash-algorithm", "macprovider.gguf-file.v1", "#1816: artifact hash algorithm (macprovider.snapshot-manifest.v1 for a native mlx_cache offer)")
+	disclosure := fs.String("requested-disclosure-class", "catalog_binding_requested", "requested_disclosure_class")
 	out := fs.String("out", "", "write the coordinator response here")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -111,6 +114,9 @@ func runOffer(args []string) int {
 	fail := func(format string, a ...any) int {
 		fmt.Fprintf(os.Stderr, "fakeprov offer: "+format+"\n", a...)
 		return 1
+	}
+	if *artifactHash == "" {
+		artifactHash = ggufSHA
 	}
 	tok, err := os.ReadFile(*tokenFile)
 	if err != nil {
@@ -122,7 +128,7 @@ func runOffer(args []string) int {
 	}
 	pub := priv.Public().(ed25519.PublicKey)
 	digest := sha256.Sum256(pub)
-	cand := sha256.Sum256([]byte(*providerID + "|" + *servedRef + "|" + *ggufSHA))
+	cand := sha256.Sum256([]byte(*providerID + "|" + *servedRef + "|" + *artifactHash))
 	candidateID := "byom_" + strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(cand[:]))
 	disc := sha256.Sum256([]byte("e2e-1690 discovery " + candidateID))
 	eval := sha256.Sum256([]byte("e2e-1690 evaluation " + candidateID))
@@ -136,7 +142,7 @@ func runOffer(args []string) int {
 		"catalog_model_key":        *catalogKey,
 		"discovery_digest_sha256":  hex.EncodeToString(disc[:]),
 		"evaluation_digest_sha256": hex.EncodeToString(eval[:]),
-		"artifact_hashes":          map[string]any{"macprovider.gguf-file.v1": *ggufSHA},
+		"artifact_hashes":          map[string]any{*artifactAlg: *artifactHash},
 		"advisory_capabilities": map[string]any{
 			"chat_completions": true, "streaming": true, "tool_call_passthrough": nil,
 			"structured_output_passthrough": nil, "json_mode": nil, "usage_reporting": true,
@@ -144,7 +150,7 @@ func runOffer(args []string) int {
 		},
 		"fit_evidence_source":        "local_discovery",
 		"local_readiness":            "ready",
-		"requested_disclosure_class": "catalog_binding_requested",
+		"requested_disclosure_class": *disclosure,
 		"timestamp":                  stamp.Format(time.RFC3339Nano),
 		"nonce":                      fmt.Sprintf("e2e-nonce-%d", stamp.UnixNano()),
 		"idempotency_key":            fmt.Sprintf("e2e-offer-%d", stamp.UnixNano()),

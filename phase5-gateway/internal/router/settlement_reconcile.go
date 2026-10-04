@@ -27,6 +27,10 @@ const maxSettlementReconcileNudgeAttempts = 4
 const maxSettlementReconcileOverflowCatchupPasses = maxSettlementReconcileNudgeQueue/maxSettlementReconcileLimit + 2
 const settlementCoordinator404OperatorReviewAge = time.Hour
 
+// settlementStartupCatchupHorizon is the "now" the startup catch-up lists
+// due holds at: past every backoff and deadline.
+var settlementStartupCatchupHorizon = time.Date(9999, time.December, 31, 0, 0, 0, 0, time.UTC)
+
 type settlementReconcileNudge struct {
 	reservation storage.ActiveReservation
 	attempt     int
@@ -190,8 +194,11 @@ func (s *Server) CatchUpSettlementHolds(ctx context.Context, limit int) (Settlem
 	if limit > maxSettlementReconcileLimit {
 		limit = maxSettlementReconcileLimit
 	}
-	now := s.now()
-	reservations, err := s.store.ListDueSettlementHeldReservations(ctx, limit, now)
+	// Startup re-checks every non-review hold once, ignoring the backoff: a
+	// hold an older gateway binary kept answering "held" (a policy version
+	// it did not know, #1816 VM A-1) may be final for this one, and the older
+	// binary's backoff can be hours long.
+	reservations, err := s.store.ListDueSettlementHeldReservations(ctx, limit, settlementStartupCatchupHorizon)
 	if err != nil {
 		return SettlementReconcileSummary{}, err
 	}
@@ -709,7 +716,7 @@ func (s *Server) markSettlementHoldOperatorReview(ctx context.Context, reservati
 // Older coordinators omit the completeness flag and remain fail-closed.
 func coordinatorObserveFallbackAllowed(finality coordinatorRequestSettlementFinality) bool {
 	if !finality.ModeScopeComplete || finality.RequestID == "" || strings.TrimSpace(finality.RequiredInternalRequestID) == "" || finality.Mode != "observe" ||
-		(finality.PolicyVersion != settlementPolicyVersion && finality.PolicyVersion != legacySettlementPolicyVersion) ||
+		!knownSettlementPolicyVersion(finality.PolicyVersion) ||
 		finality.Reason == "mixed_settlement_policy_snapshot" || finality.Reason == "missing_current_settlement_finality" {
 		return false
 	}

@@ -217,6 +217,11 @@ type Provider struct {
 	ModelAdmissionCatalogRowStatus           string `json:"-"`
 	ModelAdmissionValidatedReleaseGeneration uint64 `json:"-"`
 	ModelAdmissionBindingGeneration          uint64 `json:"-"`
+	// ModelAdmissionPoolID and ModelAdmissionPoolModelID name the pool and
+	// SPEC-042-R015 entry of a SPEC-047-R011 pool-scoped binding ("" for a
+	// global binding). They are coordinator-derived and never wire-exported.
+	ModelAdmissionPoolID      string `json:"-"`
+	ModelAdmissionPoolModelID string `json:"-"`
 	// ModelAdmissionSessionEpoch is a per-provider monotonic counter the
 	// registry advances on every session replacement and on every change of
 	// the session's identity facts (model id, reported pair, verdict, pin,
@@ -1454,6 +1459,9 @@ type ModelAdmissionBinding struct {
 	CatalogModelKey            string
 	CatalogRowStatus           string
 	ValidatedReleaseGeneration uint64
+	// PoolID and PoolModelID are set only for a SPEC-047-R011 pool binding.
+	PoolID      string
+	PoolModelID string
 }
 
 // ModelAdmissionBinding returns the session's current binding, if any.
@@ -1468,6 +1476,8 @@ func (p Provider) ModelAdmissionBinding() (ModelAdmissionBinding, bool) {
 		CatalogModelKey:            p.ModelAdmissionCatalogModelKey,
 		CatalogRowStatus:           p.ModelAdmissionCatalogRowStatus,
 		ValidatedReleaseGeneration: p.ModelAdmissionValidatedReleaseGeneration,
+		PoolID:                     p.ModelAdmissionPoolID,
+		PoolModelID:                p.ModelAdmissionPoolModelID,
 	}, true
 }
 
@@ -1504,6 +1514,8 @@ func clearModelAdmissionBinding(p *Provider) {
 	p.ModelAdmissionEvaluationDigestSHA256 = ""
 	p.ModelAdmissionCatalogRowStatus = ""
 	p.ModelAdmissionValidatedReleaseGeneration = 0
+	p.ModelAdmissionPoolID = ""
+	p.ModelAdmissionPoolModelID = ""
 }
 
 // SetModelAdmissionBinding installs (or, with a nil binding, clears) the
@@ -1526,6 +1538,8 @@ func (r *Registry) SetModelAdmissionBinding(providerID string, binding *ModelAdm
 		p.ModelAdmissionCatalogModelKey = binding.CatalogModelKey
 		p.ModelAdmissionCatalogRowStatus = binding.CatalogRowStatus
 		p.ModelAdmissionValidatedReleaseGeneration = binding.ValidatedReleaseGeneration
+		p.ModelAdmissionPoolID = binding.PoolID
+		p.ModelAdmissionPoolModelID = binding.PoolModelID
 	}
 	p.ModelAdmissionBindingGeneration = bindingGeneration
 	return true

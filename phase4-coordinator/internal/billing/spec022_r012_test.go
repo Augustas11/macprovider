@@ -29,6 +29,25 @@ func (f *fakePoolAttestationAuthority) VerifyPoolOperatorAttestation(_ context.C
 	return f.err
 }
 
+// holdingFenceAuthority adds a durable route fence that holds to an
+// authority that only re-verifies R-12.
+type holdingFenceAuthority struct {
+	PoolOperatorAttestationAuthority
+}
+
+func (holdingFenceAuthority) PoolRouteFenceHolds(context.Context, PoolFenceQueryer, PoolOperatorAttestationClaim) error {
+	return nil
+}
+
+// setHoldingPoolRoute wires authority with a holding durable route fence and
+// the live generation-2 label of pool-abc.
+func setHoldingPoolRoute(store *Store, authority PoolOperatorAttestationAuthority) {
+	store.SetPoolOperatorAttestationAuthority(holdingFenceAuthority{authority})
+	store.SetSettlementPoolLabelSource(func(poolID string) (uint64, string, bool) {
+		return 2, strings.Repeat("d", 64), poolID == "pool-abc"
+	})
+}
+
 func r012SettlementInput(t *testing.T, terminal string, external bool) SettlementVerifyInput {
 	t.Helper()
 	fixtures := loadSettlementVerifierFixtures(t)
@@ -73,6 +92,11 @@ func runR012Settlement(t *testing.T, input SettlementVerifyInput, source string,
 	_, store := newRequestAndBillingStores(t)
 	createSettlementReceiptAuditLog(t, store.db)
 	if authority != nil {
+		// Final settlement also re-reads the durable route fence in the
+		// verdict transaction; these cases keep it holding.
+		if _, ok := authority.(PoolRouteFenceSource); !ok {
+			authority = holdingFenceAuthority{authority}
+		}
 		store.SetPoolOperatorAttestationAuthority(authority)
 	}
 	seedSettlementReceiptEvidence(t, store, input)
@@ -87,6 +111,10 @@ func runR012Settlement(t *testing.T, input SettlementVerifyInput, source string,
 	var poolLabels *SettlementPoolLabels
 	if labels != nil {
 		poolLabels = labels(routeHash)
+		live := *poolLabels
+		store.SetSettlementPoolLabelSource(func(poolID string) (uint64, string, bool) {
+			return live.ManifestVersion, live.ManifestCoreDigest, poolID == live.PoolID
+		})
 	}
 	state, err := store.IngestPoolSettlementReceipt(context.Background(), SettlementReceiptIngestionInput{
 		SettlementReceiptIdentity: settlementIdentityFromInput(input),
@@ -133,7 +161,8 @@ func TestSPEC022R012PoolOperatorAttestedSettlesOnlyWhenR012Holds(t *testing.T) {
 func TestSPEC022R012FailClosedSet(t *testing.T) {
 	disputed := func(routeHash string) *SettlementPoolLabels {
 		labels := matchingR012Labels(routeHash)
-		labels.ManifestVersion = 3
+		// Same generation, other core: a real dispute (a later generation
+		// is ordinary rotation, #1816 F2).
 		labels.ManifestCoreDigest = strings.Repeat("e", 64)
 		return labels
 	}
@@ -303,5 +332,21 @@ func TestSPEC022R012GenericIngestionRejectsPoolOperatorAttested(t *testing.T) {
 	}
 	if state.SettlementOutcome == SettlementOutcomeVerified {
 		t.Fatalf("generic ingestion verified a pool_operator_attested attempt: %+v", state)
+	}
+}
+
+// #1816 F2: a receipt ingested after an ordinary manifest rotation still
+// cross-checks against its immutable route snapshot.
+func TestSPEC022R012PoolOperatorAttestedSettlesAcrossRotation(t *testing.T) {
+	input := r012SettlementInput(t, "receipt_tuple_v4_normal_done", true)
+	rotated := func(routeHash string) *SettlementPoolLabels {
+		labels := matchingR012Labels(routeHash)
+		labels.ManifestVersion = 3
+		labels.ManifestCoreDigest = strings.Repeat("e", 64)
+		return labels
+	}
+	run := runR012Settlement(t, input, UsageSourcePoolOperatorAttested, &fakePoolAttestationAuthority{}, rotated)
+	if run.state.SettlementOutcome != SettlementOutcomeVerified || run.finality.TokenSource != UsageSourcePoolOperatorAttested {
+		t.Fatalf("attested attempt after a rotation outcome=%s reason=%s finality=%+v, want verified", run.state.SettlementOutcome, run.state.Reason, run.finality)
 	}
 }

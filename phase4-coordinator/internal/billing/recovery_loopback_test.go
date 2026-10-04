@@ -136,7 +136,7 @@ func movedPoolLabels(poolID string) (uint64, string, bool) {
 // unchanged.
 func TestRecoverLedger_AppliesLoopbackZeroBillRule(t *testing.T) {
 	rejects := func() PoolOperatorAttestationAuthority {
-		return &fencedPoolAuthority{fakePoolAttestationAuthority: fakePoolAttestationAuthority{err: fmt.Errorf("%w: revoked", ErrPoolOperatorAttestationRejected)}, highWaters: []int64{7}}
+		return &fencedPoolAuthority{fakePoolAttestationAuthority: fakePoolAttestationAuthority{err: fmt.Errorf("%w: revoked", ErrPoolOperatorAttestationRejected)}, results: []error{nil}}
 	}
 	attested := func(runtime string) recoveryLoopbackCase {
 		return recoveryLoopbackCase{runtimeSource: runtime, recordRuntime: true, snapshot: attestedPoolSnapshot, authority: stableFencedAuthority(), labels: matchingPoolLabels, attestedOutput: true}
@@ -163,8 +163,15 @@ func TestRecoverLedger_AppliesLoopbackZeroBillRule(t *testing.T) {
 		// Audit R1 SECURITY M2 / ARCH HIGH: durable R-12.3 and the R006 label.
 		"durable authority rejects is zero": {func() recoveryLoopbackCase { c := attested("llamacpp_loopback"); c.authority = rejects(); return c }(), false},
 		"no durable authority is zero":      {func() recoveryLoopbackCase { c := attested("llamacpp_loopback"); c.authority = nil; return c }(), false},
-		"moved pool label is zero":          {func() recoveryLoopbackCase { c := attested("llamacpp_loopback"); c.labels = movedPoolLabels; return c }(), false},
-		"no label view is zero":             {func() recoveryLoopbackCase { c := attested("llamacpp_loopback"); c.labels = nil; return c }(), false},
+		// #1816 F2: a later generation is ordinary rotation; an earlier one
+		// is a rollback or a forged label.
+		"rotated pool label is priced": {func() recoveryLoopbackCase { c := attested("llamacpp_loopback"); c.labels = movedPoolLabels; return c }(), true},
+		"rolled-back pool label is zero": {func() recoveryLoopbackCase {
+			c := attested("llamacpp_loopback")
+			c.labels = labelsMovingTo(0, 1, strings.Repeat("f", 64))
+			return c
+		}(), false},
+		"no label view is zero": {func() recoveryLoopbackCase { c := attested("llamacpp_loopback"); c.labels = nil; return c }(), false},
 		// Independent review HIGH: loopback usage is billable only behind a
 		// bound receipt, evidenced as a pool_operator_attested attempt output.
 		"no receipt-backed attempt output is zero": {func() recoveryLoopbackCase {
@@ -172,16 +179,22 @@ func TestRecoverLedger_AppliesLoopbackZeroBillRule(t *testing.T) {
 			c.attestedOutput = false
 			return c
 		}(), false},
-		// Audit R2: the pre-read decision is fenced inside the recovery
-		// transaction; a pool change in between zero-bills the row.
-		"pool event between pre-read and commit is zero": {func() recoveryLoopbackCase {
+		// Audit R2 / #1816 F2: the pre-read decision is fenced inside the
+		// recovery transaction; a revocation in between zero-bills the row,
+		// a manifest rotation in between does not.
+		"revocation between pre-read and commit is zero": {func() recoveryLoopbackCase {
 			c := attested("llamacpp_loopback")
-			c.authority = &fencedPoolAuthority{highWaters: []int64{7, 8}}
+			c.authority = &fencedPoolAuthority{results: []error{nil, fmt.Errorf("%w: revoked", ErrPoolOperatorAttestationRejected)}}
 			return c
 		}(), false},
-		"label moved between pre-read and commit is zero": {func() recoveryLoopbackCase {
+		"rotation between pre-read and commit is priced": {func() recoveryLoopbackCase {
 			c := attested("llamacpp_loopback")
 			c.labels = labelsChangingAfter(2)
+			return c
+		}(), true},
+		"rollback between pre-read and commit is zero": {func() recoveryLoopbackCase {
+			c := attested("llamacpp_loopback")
+			c.labels = labelsMovingTo(2, 1, strings.Repeat("f", 64))
 			return c
 		}(), false},
 	} {

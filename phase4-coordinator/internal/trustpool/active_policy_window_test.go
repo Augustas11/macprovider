@@ -3,6 +3,8 @@ package trustpool
 import (
 	"testing"
 	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 )
 
 // SPEC-042-R001: routing projects the policy core ACTIVE at the route-gate
@@ -68,4 +70,159 @@ func TestRouteableSnapshotsUseActivePolicyWindow(t *testing.T) {
 	if after := state(v2End.Add(time.Minute)).RouteableSnapshots(); after[0].Routeable {
 		t.Fatalf("after v2 expiry: routeable, want pool_policy_stale")
 	}
+}
+
+// #1816 S5: a routeable snapshot published shortly before a window-only
+// rotation must not expire at the old core boundary before the registry refresh
+// can publish the newly active manifest. Same-terms adjacent windows are the
+// safe case: the terms digest excludes only version/prev/window fields, so no
+// entry, price, attestation, allowlist, or settlement semantics changed.
+func TestRouteableSnapshotsExtendSameTermsAdjacentPolicyWindow(t *testing.T) {
+	v1Start := time.Unix(1_000, 0).UTC()
+	v1End := time.Unix(2_000, 0).UTC()
+	v2End := time.Unix(3_000, 0).UTC()
+
+	snaps := sameTermsRolloverState(v1Start.Add(time.Minute), "terms-same").RouteableSnapshots()
+	if len(snaps) != 1 || !snaps[0].Routeable {
+		t.Fatalf("snapshot = %+v, want routeable active v1", snaps)
+	}
+	if got := snaps[0]; got.ManifestVersion != 1 || got.ManifestCoreDigest != "digest-v1" {
+		t.Fatalf("manifest labels = %d/%s, want active v1", got.ManifestVersion, got.ManifestCoreDigest)
+	}
+	if !snaps[0].RouteableUntilUTC.Equal(v2End) {
+		t.Fatalf("routeable_until=%s, want extended through adjacent same-terms v2 expiry %s", snaps[0].RouteableUntilUTC, v2End)
+	}
+	if snaps[0].RouteableUntilUTC.Equal(v1End) {
+		t.Fatalf("routeable_until stopped at old boundary %s", v1End)
+	}
+}
+
+func TestRouteableSnapshotsDoNotExtendChangedTermsAdjacentPolicyWindow(t *testing.T) {
+	v1Start := time.Unix(1_000, 0).UTC()
+	v1End := time.Unix(2_000, 0).UTC()
+
+	snaps := sameTermsRolloverState(v1Start.Add(time.Minute), "terms-changed").RouteableSnapshots()
+	if len(snaps) != 1 || !snaps[0].Routeable {
+		t.Fatalf("snapshot = %+v, want routeable active v1", snaps)
+	}
+	if !snaps[0].RouteableUntilUTC.Equal(v1End) {
+		t.Fatalf("changed-terms routeable_until=%s, want old boundary %s", snaps[0].RouteableUntilUTC, v1End)
+	}
+}
+
+func TestRouteableSnapshotsDoNotExtendLegacyCoreDelegationAcrossSameTermsWindow(t *testing.T) {
+	v1Start := time.Unix(1_000, 0).UTC()
+	v1End := time.Unix(2_000, 0).UTC()
+	state := sameTermsRolloverState(v1Start.Add(time.Minute), "terms-same")
+	addDelegatedMemberForWindowTest(state, "provider-legacy", delegationRecord{
+		PoolID:             "QpsclmzwdJaWJTk3zowcXQ",
+		ProviderID:         "provider-legacy",
+		DelegationID:       "del-legacy",
+		ManifestCoreDigest: "digest-v1",
+		ExpiresAt:          time.Unix(10_000, 0).UTC(),
+	})
+
+	snaps := state.RouteableSnapshots()
+	if len(snaps) != 1 || !snaps[0].Routeable {
+		t.Fatalf("snapshot = %+v, want routeable active v1", snaps)
+	}
+	if !snaps[0].RouteableUntilUTC.Equal(v1End) {
+		t.Fatalf("legacy core-bound delegation routeable_until=%s, want old boundary %s", snaps[0].RouteableUntilUTC, v1End)
+	}
+	if !snapshotHasMember(snaps[0], "provider-legacy") {
+		t.Fatalf("legacy member disappeared before its exact core expired: %+v", snaps[0].Members)
+	}
+}
+
+func TestRouteableSnapshotsExtendTermsDelegationAcrossSameTermsWindow(t *testing.T) {
+	v1Start := time.Unix(1_000, 0).UTC()
+	v2End := time.Unix(3_000, 0).UTC()
+	state := sameTermsRolloverState(v1Start.Add(time.Minute), "terms-same")
+	addDelegatedMemberForWindowTest(state, "provider-terms", delegationRecord{
+		PoolID:              "QpsclmzwdJaWJTk3zowcXQ",
+		ProviderID:          "provider-terms",
+		DelegationID:        "del-terms",
+		ManifestTermsDigest: "terms-same",
+		ExpiresAt:           time.Unix(10_000, 0).UTC(),
+	})
+
+	snaps := state.RouteableSnapshots()
+	if len(snaps) != 1 || !snaps[0].Routeable {
+		t.Fatalf("snapshot = %+v, want routeable active v1", snaps)
+	}
+	if !snaps[0].RouteableUntilUTC.Equal(v2End) {
+		t.Fatalf("terms-bound delegation routeable_until=%s, want extended through v2 expiry %s", snaps[0].RouteableUntilUTC, v2End)
+	}
+	if !snapshotHasMember(snaps[0], "provider-terms") {
+		t.Fatalf("terms-bound member missing: %+v", snaps[0].Members)
+	}
+}
+
+func sameTermsRolloverState(at time.Time, v2TermsDigest string) *ReconstructedState {
+	v1Start := time.Unix(1_000, 0).UTC()
+	v1End := time.Unix(2_000, 0).UTC()
+	v2End := time.Unix(3_000, 0).UTC()
+	entries := []poolmanifest.PoolModelEntry{{
+		PoolModelID:           "pool/QpsclmzwdJaWJTk3zowcXQ/gguf-g",
+		ArtifactHashAlgorithm: poolmanifest.ArtifactHashAlgorithmGGUFFileV1,
+		ArtifactHash:          "1111111111111111111111111111111111111111111111111111111111111111",
+		AllowedRuntimeSources: []string{poolmanifest.RuntimeSourceLlamacppLoopback},
+		License:               "Apache-2.0",
+		PaidServingAttested:   true,
+		Pricing:               poolmanifest.PoolModelPricing{PromptRatePerMtok: 10, PromptCacheHitRatePerMtok: 5, CompletionRatePerMtok: 20},
+		DisclosureClass:       poolmanifest.PoolModelDisclosureClass,
+		MaxContextTokens:      4096,
+	}}
+	p := &ReconstructedPoolState{
+		PoolID:                     "QpsclmzwdJaWJTk3zowcXQ",
+		Lifecycle:                  LifecycleActive,
+		Generation:                 5,
+		Members:                    map[string]bool{"provider-a": true},
+		Revoked:                    map[string]bool{},
+		BuyerAccounts:              map[string]bool{"acct": true},
+		MemberDelegationIDs:        map[string]string{},
+		MemberDelegationExpiresUTC: map[string]time.Time{},
+		ManifestVersion:            2,
+		ManifestCoreDigest:         "digest-v2",
+		ManifestTermsDigest:        v2TermsDigest,
+		ManifestSettlementMode:     "enforce",
+		ManifestPolicyCoreV2:       true,
+		ManifestRuntimeAllowlist:   []string{poolmanifest.RuntimeSourceLlamacppLoopback},
+		ManifestModelEntries:       entries,
+		ManifestRetentionPolicyID:  "standard",
+		ManifestPolicies: []manifestPolicyWindow{
+			{
+				Version: 1, CoreDigest: "digest-v1", TermsDigest: "terms-same",
+				NotBeforeUnix: uint64(v1Start.Unix()), ExpiresAtUnix: uint64(v1End.Unix()),
+				SettlementMode: "enforce", PolicyCoreV2: true, RuntimeAllowlist: []string{poolmanifest.RuntimeSourceLlamacppLoopback},
+				ModelEntries: entries, RetentionPolicyID: "standard",
+			},
+			{
+				Version: 2, CoreDigest: "digest-v2", TermsDigest: v2TermsDigest,
+				NotBeforeUnix: uint64(v1End.Unix()), ExpiresAtUnix: uint64(v2End.Unix()),
+				SettlementMode: "enforce", PolicyCoreV2: true, RuntimeAllowlist: []string{poolmanifest.RuntimeSourceLlamacppLoopback},
+				ModelEntries: entries, RetentionPolicyID: "standard",
+			},
+		},
+	}
+	return &ReconstructedState{Pools: map[string]*ReconstructedPoolState{p.PoolID: p}, RouteGateCheckedAt: at}
+}
+
+func addDelegatedMemberForWindowTest(state *ReconstructedState, providerID string, rec delegationRecord) {
+	p := state.Pools["QpsclmzwdJaWJTk3zowcXQ"]
+	p.Members[providerID] = true
+	p.MemberDelegationIDs[providerID] = rec.DelegationID
+	p.MemberDelegationExpiresUTC[providerID] = rec.ExpiresAt
+	state.ensureDelegationMaps()
+	state.delegations[delegationLedgerKey{PoolID: p.PoolID, DelegationID: rec.DelegationID}] = rec
+	state.activeProviderDelegations[poolProviderKey{PoolID: p.PoolID, ProviderID: providerID}] = rec.DelegationID
+}
+
+func snapshotHasMember(s RouteableSnapshot, providerID string) bool {
+	for _, got := range s.Members {
+		if got == providerID {
+			return true
+		}
+	}
+	return false
 }

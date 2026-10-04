@@ -7,6 +7,7 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 )
 
 // forwardState collects the per-request state that the three transport
@@ -77,17 +78,32 @@ type forwardState struct {
 	// routing-time labels of the manifest that authorized this route.
 	poolManifestVersion    uint64
 	poolManifestCoreDigest string
+	// poolPriorManifestVersion/CoreDigest: the prior generation, set only
+	// when it carries the requested pool model entry unchanged (#1816 F3).
+	poolPriorManifestVersion    uint64
+	poolPriorManifestCoreDigest string
 	// SPEC-042-R004 external-runtime predicate inputs, captured from the same
 	// consistent snapshot: the signed runtime allowlist, the pool creator's
 	// account, and the creator-owned members.
 	poolRuntimeAllowlist    []string
 	poolCreatorAccountID    string
 	poolCreatorOwnedMembers map[string]bool
+	// SPEC-042-R015/R016 inputs of the same snapshot: the requested pool
+	// model entry (nil unless the request names a pool/ id of this pool),
+	// the creator's member attestations, and the members' recorded owner
+	// accounts.
+	poolModelEntry          *poolmanifest.PoolModelEntry
+	poolAttestedMembers     []poolmanifest.AttestedMember
+	poolMemberOwnerAccounts map[string]string
 	// settlementTrailersNegotiated mirrors the recorder: the gateway
 	// advertised signed settlement finality under the service token. A pool
 	// route selects an external-runtime member only when it is set
 	// (SPEC-022 R-12.8, E2E-F10).
 	settlementTrailersNegotiated bool
+	// routeSnapshotV2Negotiated: the gateway also settles route_snapshot_v2
+	// finality. A pool-model route and an R016 attested member are pinned
+	// to v2 and need it (#1816 VM A-1).
+	routeSnapshotV2Negotiated bool
 	// engineClass is the SPEC-042-R014 buyer engine selection, captured at
 	// selection so the slot-queue poll re-applies it. "" means none.
 	engineClass string

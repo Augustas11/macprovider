@@ -248,6 +248,27 @@ storage:
   request_log_prune_on_startup: true
   audit_log_prune_on_startup: true
 
+# trusted_pools is not configured here (pools stay disabled). SPEC-005-R015 /
+# SPEC-042-R015 (#1816): a pool that admits pool_model_entries/v1 needs
+# inclusive per-rate bounds (credits per Mtok, int64, min <= max) in the live
+# config; entries outside them, or any entry while they are absent, are
+# refused. They are coordinator config, not a rate-card field. Proposed values:
+# docs/runbooks/pool-scoped-model-admission.md section 1 (rate values stay out
+# of this file outside rewards.rate_card).
+# trusted_pools:
+#   pool_model_pricing_bounds:
+#     min_prompt_rate_per_mtok: <int>
+#     max_prompt_rate_per_mtok: <int>
+#     min_prompt_cache_hit_rate_per_mtok: <int>
+#     max_prompt_cache_hit_rate_per_mtok: <int>
+#     min_completion_rate_per_mtok: <int>
+#     max_completion_rate_per_mtok: <int>
+#   # SPEC-042-R016: owner account -> provider ids. Only needed for a
+#   # non-creator member named in a pool_attested_members/v1 extension; a
+#   # provider may be listed under one account only.
+#   provider_owner_account_ids:
+#     <owner-account-id>: [<provider-id>]
+
 logging:
   level: "info"
   format: "json"
@@ -272,6 +293,13 @@ autotune:
   autotune_candidates_sig_path: "/opt/macprovider/autotune/current/autotune-candidates.json.sig"
   continuous_batching_policy_path: "/opt/macprovider/autotune/current/continuous-batching-policy.json"
   continuous_batching_policy_sig_path: "/opt/macprovider/autotune/current/continuous-batching-policy.json.sig"
+  # SPEC-023 §3.7 artifact feed (/v1/catalog-artifacts + .sig). Release-bound:
+  # set exactly when the installed release.json binds autotune-artifacts.json.
+  # A configured path whose file is missing fails startup closed. The Pearl
+  # updater sets or removes this pair with each catalog release; deploy-pearl-vps.sh
+  # refuses an effective config that disagrees with the release binding.
+  catalog_artifacts_path: "/opt/macprovider/autotune/current/autotune-artifacts.json"
+  catalog_artifacts_sig_path: "/opt/macprovider/autotune/current/autotune-artifacts.json.sig"
 
 rewards:
   global_multiplier: 1.0

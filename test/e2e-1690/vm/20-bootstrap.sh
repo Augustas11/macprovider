@@ -108,14 +108,15 @@ log "old coordinator"
 coord_install old
 log "provider tokens"
 for p in e2e-prov-1 e2e-prov-2 e2e-prov-3; do
-  out="$(/opt/macprovider/coordinator-cli issue-token -db $CDB -provider-id $p -provider-name $p)"
+  # the just-started coordinator may still hold the write lock (SQLITE_BUSY)
+  for t in 1 2 3 4 5 6 7 8 9 10; do out="$(/opt/macprovider/coordinator-cli issue-token -db $CDB -provider-id $p -provider-name $p 2>&1)" && break; sleep 3; done
   printf '%s\n' "$out" | sed -n 's/^token=//p' >/root/e2e/token-$p; chmod 600 /root/e2e/token-$p
   [ -s /root/e2e/token-$p ] || die "issue-token $p failed: $out"
 done
 chown -R macprovider:macprovider /var/lib/macprovider
 
 log "old gateway via the real deploy-pearl-vps.sh (first deploy: FORCE_RESTART=1, no live gateway yet)"
-install -o macprovider -g macprovider -m 0640 $E2E_H/lib/gateway.yaml /opt/macprovider/gateway.yaml
+install -o root -g macprovider -m 0640 $E2E_H/lib/gateway.yaml /opt/macprovider/gateway.yaml
 FORCE_RESTART=1 gw_deploy old first || die "first gateway deploy failed"
 for i in $(seq 1 30); do gwsql "select 1 from sqlite_master where name='api_keys'" 2>/dev/null | grep -q 1 && break; sleep 2; done
 python3 $E2E_H/lib/seed-buyer.py $GWDB "$(cat $K/key_hash_secret)" >/root/e2e/buyer-api-key; chmod 600 /root/e2e/buyer-api-key

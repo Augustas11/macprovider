@@ -466,6 +466,9 @@ actor CoordinatorClient {
     private let maxActiveRequests: Int
     private let supportedModels: [String]?
     private let catalogModelIDForCoordinator: String?
+    /// #1816: the configured SPEC-042-R015 `pool_model_id`. A relay request
+    /// alias only; never advertised as the hello model id.
+    private let poolModelIDAlias: String?
     private let publishesSupportedModels: Bool
     private let warmSwapEnabled: Bool
     private let hardwareSummary: [String: Any]?
@@ -883,6 +886,7 @@ actor CoordinatorClient {
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? nil : trimmed
         }
+        self.poolModelIDAlias = try? PoolModelServe.validatedPoolModelID(config)
         self.publishesSupportedModels = config.publishesSupportedModels
         self.warmSwapEnabled = config.enableWarmSwap
         self.hardwareSummary = ProviderHardwareSummary.liveWireObject()
@@ -2161,7 +2165,10 @@ actor CoordinatorClient {
             modelRuntime: modelRuntime,
             providerStatus: providerStatus,
             loadedModelID: loadedModelID,
-            catalogModelIDAlias: catalogModelIDForCoordinator,
+            catalogModelIDAlias: PoolModelServe.requestAlias(
+                catalogModelID: catalogModelIDForCoordinator,
+                poolModelID: poolModelIDAlias
+            ),
             warmSwapEnabled: warmSwapEnabled,
             maxActiveRequests: maxActiveRequests,
             maxBodyBytes: maxBodyBytes,
@@ -4208,7 +4215,12 @@ actor CoordinatorClient {
         }
         var buyerServingHeldForAdmission = false
         if lifecycleOperationID != nil {
-            if CoordinatorClient.isBYOMLoopbackRuntimeSource(runtimeSource) {
+            // #1816: a native pool-entry session has no catalog envelope by
+            // design, exactly like a loopback one, so it is held the same way
+            // instead of flapping on the catalog readiness gate. The
+            // coordinator's pool binding, not this client, decides whether it
+            // serves.
+            if CoordinatorClient.isBYOMLoopbackRuntimeSource(runtimeSource) || poolModelIDAlias != nil {
                 // SPEC-046/047 (#1569 serve-flap fix): a BYOM loopback runtime
                 // serves a non-catalog model and is non-buyer-serving by
                 // design. It has no signed catalog envelope
@@ -4238,7 +4250,9 @@ actor CoordinatorClient {
                 // marker (or no marker) stays .pendingRollback / .noPendingUpdate.
                 // Connect+auth+hold alone never retires rollback.
                 await finalizeAdmissionBoundaryAfterServingProof(
-                    successReason: "byom_loopback_session_held",
+                    successReason: CoordinatorClient.isBYOMLoopbackRuntimeSource(runtimeSource)
+                        ? "byom_loopback_session_held"
+                        : "pool_model_session_held",
                     servingConfirmed: false
                 )
             } else {

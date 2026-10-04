@@ -2116,6 +2116,20 @@ func (s *Store) ListSettlementHeldReservations(ctx context.Context, limit int) (
 	return out, rows.Err()
 }
 
+// settlementHoldDuePredicate (two "now" arguments) is when an active hold is
+// due for reconciliation: its backoff elapsed, or its expiry, the receipt or
+// local fallback deadline the gateway clamped it to, passed with no attempt
+// since. The backoff doubles on every "held" answer (the request-scoped
+// nudges alone reach 40 minutes), so without the deadline term a hold that
+// becomes final only at its deadline, or that an older gateway binary held
+// for a policy version it did not know, waited up to hours past it and
+// blocked the rollback drain (#1816 VM A-1, A-3, A-9). One attempt after the
+// deadline re-arms the backoff, so a hold still pending is not re-queried on
+// every sweep.
+const settlementHoldDuePredicate = `(COALESCE(sra.next_attempt_after, '') = '' OR sra.next_attempt_after <= ?
+				OR (julianday(qr.expires_at) <= julianday(?)
+					AND (sra.last_attempt_at = '' OR julianday(sra.last_attempt_at) < julianday(qr.expires_at))))`
+
 func (s *Store) ListDueSettlementHeldReservations(ctx context.Context, limit int, now time.Time) ([]storage.ActiveReservation, error) {
 	if limit <= 0 {
 		limit = 100
@@ -2136,9 +2150,9 @@ func (s *Store) ListDueSettlementHeldReservations(ctx context.Context, limit int
 			ON sra.account_id = qr.account_id AND sra.request_id = qr.request_id AND sra.reservation_created_at = qr.created_at
 		WHERE qr.status = 'active' AND qr.settlement_hold = 1
 			AND COALESCE(sra.operator_review, 0) = 0
-			AND (COALESCE(sra.next_attempt_after, '') = '' OR sra.next_attempt_after <= ?)
+			AND `+settlementHoldDuePredicate+`
 		ORDER BY COALESCE(sra.attempt_sequence, 0) ASC, qr.expires_at ASC, qr.created_at ASC
-		LIMIT ?`, encodeTime(now.UTC()), limit)
+		LIMIT ?`, encodeTime(now.UTC()), encodeTime(now.UTC()), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -2326,14 +2340,14 @@ func (s *Store) SettlementHoldBacklogStats(ctx context.Context, now time.Time) (
 			COUNT(*),
 			COALESCE(MIN(qr.created_at), ''),
 			COALESCE(SUM(CASE WHEN COALESCE(sra.operator_review, 0) = 0
-				AND (COALESCE(sra.next_attempt_after, '') = '' OR sra.next_attempt_after <= ?) THEN 1 ELSE 0 END), 0),
+				AND `+settlementHoldDuePredicate+` THEN 1 ELSE 0 END), 0),
 			COALESCE(MIN(CASE WHEN COALESCE(sra.operator_review, 0) = 0
-				AND (COALESCE(sra.next_attempt_after, '') = '' OR sra.next_attempt_after <= ?) THEN qr.created_at END), '')
+				AND `+settlementHoldDuePredicate+` THEN qr.created_at END), '')
 		FROM quota_reservations qr
 		LEFT JOIN settlement_reconcile_attempts sra
 			ON sra.account_id = qr.account_id AND sra.request_id = qr.request_id AND sra.reservation_created_at = qr.created_at
 		WHERE qr.status = 'active' AND qr.settlement_hold = 1`,
-		encodeTime(now.UTC()), encodeTime(now.UTC())).
+		encodeTime(now.UTC()), encodeTime(now.UTC()), encodeTime(now.UTC()), encodeTime(now.UTC())).
 		Scan(&stats.TotalActiveHeld, &oldestActive, &stats.DueActiveHeld, &oldestDue)
 	if err != nil {
 		return storage.SettlementHoldBacklogStats{}, err

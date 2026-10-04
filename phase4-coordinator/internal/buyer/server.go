@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -30,6 +31,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/computeintegrity"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/routing"
@@ -208,6 +210,9 @@ type Server struct {
 	// closed so pool-selected traffic cannot downgrade to global routing.
 	trustPools           *trustpool.Registry
 	trustPoolStatusStore *trustpool.Store
+	// poolModelPricingBounds is the SPEC-005-R015 configured pool-model
+	// pricing bounds source; nil fails every pool model closed.
+	poolModelPricingBounds func() *poolmanifest.PoolModelPricingBounds
 	// poolRejectionTimingFloor is the SPEC-043-R007 active minimum for
 	// pool_unavailable rejection paths. Zero defaults to 50 ms.
 	poolRejectionTimingFloor       time.Duration
@@ -329,6 +334,10 @@ type Server struct {
 	settlementReceiptRecoveryKeys    map[string]struct{}
 	settlementReceiptRecoveryWorkers int
 	settlementReceiptPersist         settlementReceiptPersistFunc
+	// settlementPoolLabelRecord stamps SPEC-042 R006 labels (a test seam);
+	// settlementPoolLabelRetries counts background label retries in flight.
+	settlementPoolLabelRecord  settlementPoolLabelRecordFunc
+	settlementPoolLabelRetries atomic.Int32
 }
 
 type receiptKeysBucket struct {
@@ -876,6 +885,7 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		version:                       "dev",
 		settlementReceiptRecoveryKeys: make(map[string]struct{}),
 		settlementReceiptPersist:      persistSettlementReceiptDirect,
+		settlementPoolLabelRecord:     recordSettlementPoolLabelsDirect,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -1173,9 +1183,11 @@ func (s *Server) authorizeTrustPoolFromDurableState(ctx context.Context, poolID,
 	}
 	state, err := s.trustPoolStatusStore.Reconstruct(ctx)
 	if err != nil {
-		if s.trustPools != nil {
-			s.trustPools.Disable()
-		}
+		// Only malformed durable state disables routing. A transient replay
+		// failure (a timeout on a busy connection) fails this request closed:
+		// every request replays, so nothing stale is authorized (#1816 VM
+		// acceptance A-8).
+		s.disableTrustPoolsOnMalformedDurableState(err)
 		return trustpool.Snapshot{}, false, err
 	}
 	return s.trustPools.AuthorizeAtDurableRevision(state.Revision, state.RouteableSnapshots(), poolID, accountID)
@@ -2154,6 +2166,9 @@ type modelEntry struct {
 	ComputeIntegrity modelComputeIntegrityStatus `json:"compute_integrity"`
 	HashVerified     interface{}                 `json:"hash_verified,omitempty"`
 	HashVerification *hashVerification           `json:"hash_verification,omitempty"`
+	// PoolModel is the SPEC-006-R018 closed macprovider_pool_model object,
+	// present only in an authorized pool view.
+	PoolModel *poolModelListEntry `json:"macprovider_pool_model,omitempty"`
 }
 
 type modelComputeIntegrityStatus struct {
@@ -2229,6 +2244,17 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	data := make([]modelEntry, 0, len(models))
 	for _, entry := range models {
 		data = append(data, entry)
+	}
+	// SPEC-006-R018: an authenticated request carrying an authorized pool
+	// selection also lists that pool's signed model entries; the default
+	// list never does, and an unauthorized selection fails closed.
+	if strings.TrimSpace(r.Header.Get("X-MacProvider-Pool")) != "" {
+		poolModels, err := s.poolModelListEntries(r)
+		if err != nil {
+			s.writePoolUnavailable(w, s.now())
+			return
+		}
+		data = append(data, poolModels...)
 	}
 	for name, class := range s.snapshotModelClasses() {
 		data = append(data, modelEntry{
@@ -2386,6 +2412,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	rec := s.newBillingRecorder(r, state, startedAt, originalRequestID, externalRequestID, accountID, authenticatedAccount, hasAuthenticatedAccount)
 	rec.settlementTrailersNegotiated = s.gatewayNegotiatedSettlementTrailers(r.Header) && rec.accountID != ""
 	state.settlementTrailersNegotiated = rec.settlementTrailersNegotiated
+	state.routeSnapshotV2Negotiated = rec.settlementTrailersNegotiated && s.gatewayNegotiatedRouteSnapshotV2(r.Header)
 	// Runs before net/http sends the trailers (settlement_trailers.go).
 	defer finalizeNegotiatedSettlementFinality(w.Header(), rec)
 	// #766 single-terminal-wins arbiter (observe-only). Deferred here so the
@@ -2567,7 +2594,23 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// the intake aggregator — whether or not a provider serves it. The
 	// aggregator retains neither the string nor the account.
 	s.observeUnmatchedModel(req.Model, accountID, hasAuthenticatedAccount)
-	if !s.pool.ModelKnown(req.Model) && s.resolveModelClass(req.Model) == nil {
+	// SPEC-006-R018 / SPEC-042-R015: a pool/ model id exists only on its own
+	// authorized pool route; anywhere else it answers as an unknown model.
+	poolModelRequested := false
+	if poolmanifest.IsPoolModelID(req.Model) {
+		if _, ok := requestedPoolModelEntry(req.Model, req.poolID, req.poolSnapshot); !ok || !req.poolSnapshotSet {
+			rec.setModel("")
+			rec.logBuyerFailure(http.StatusNotFound, "No provider has advertised the requested model")
+			writeError(w, http.StatusNotFound, "model_not_found", "No provider has advertised the requested model")
+			return
+		}
+		poolModelRequested = true
+		// SPEC-006-R018: every response for a pool model discloses its
+		// pool-attested status and the authorizing core digest (selection
+		// re-reads this same snapshot).
+		setPoolModelResponseHeaders(w, req.poolSnapshot.ManifestCoreDigest)
+	}
+	if !poolModelRequested && !s.pool.ModelKnown(req.Model) && s.resolveModelClass(req.Model) == nil {
 		// The buyer-supplied string of an unserved model is never persisted:
 		// the request-log row carries a blank model and a constant message.
 		rec.setModel("")
@@ -7342,6 +7385,8 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	poolRuntimeAllowlistWithheld := false
 	var poolCreatorAccountID string
 	var poolCreatorOwned map[string]bool
+	var poolSnap trustpool.Snapshot
+	var poolModelEntry *poolmanifest.PoolModelEntry
 	poolActive := s.trustPools != nil && req.poolID != ""
 	if poolActive {
 		snap := req.poolSnapshot
@@ -7385,16 +7430,44 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		}
 		poolCreatorAccountID = snap.CreatorAccountID
 		poolCreatorOwned = snap.CreatorOwnedMembers
+		poolSnap = snap
+		// #1816 VM A-1: a pool-model attempt and an R016 attested member's
+		// attempt are pinned to route_snapshot_v2. A gateway that did not
+		// negotiate v2 cannot settle that finality: it would deliver the
+		// 200, hold the buyer forever and leave the provider credit
+		// payable. Attestations are withheld for such a request (no R016
+		// member is selectable) and a pool-model request is refused below,
+		// before dispatch.
+		gatewayV2 := state != nil && state.routeSnapshotV2Negotiated
+		if !gatewayV2 {
+			snap.AttestedMembers = nil
+		}
+		// SPEC-042-R015: a pool/ model id of this pool's active core is
+		// authorized by the signed entry itself (it is part of the pool's
+		// model set), and selects only sessions bound to that entry.
+		if entry, ok := requestedPoolModelEntry(req.Model, req.poolID, snap); ok {
+			if !gatewayV2 {
+				return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_model_requires_gateway_upgrade", message: "Pool models are served only through a gateway that settles route_snapshot_v2 finality"}
+			}
+			poolModelEntry = &entry
+			poolModelAllowlist = append(append([]string(nil), snap.ModelAllowlist...), entry.PoolModelID)
+		} else if poolmanifest.IsPoolModelID(req.Model) {
+			return pool.Provider{}, &routeError{status: http.StatusNotFound, code: "model_not_found", message: "No provider has advertised the requested model"}
+		}
 		if state != nil {
 			state.poolID = req.poolID
 			state.poolMembers = snap.Members
 			state.poolGeneration = snap.Generation
 			state.poolMinBinaryVersion = snap.MinBinaryVersion
-			state.poolModelAllowlist = append([]string(nil), snap.ModelAllowlist...)
+			state.poolModelAllowlist = append([]string(nil), poolModelAllowlist...)
+			state.poolModelEntry = poolModelEntry
+			state.poolAttestedMembers = snap.AttestedMembers
+			state.poolMemberOwnerAccounts = snap.MemberOwnerAccounts
 			state.poolModelClass = poolModelClass
 			state.poolRequiresSettlementEnforce = poolRequiresSettlementEnforce
 			state.poolManifestVersion = snap.ManifestVersion
 			state.poolManifestCoreDigest = snap.ManifestCoreDigest
+			state.poolPriorManifestVersion, state.poolPriorManifestCoreDigest = poolModelPriorGeneration(snap, poolModelEntry)
 			state.poolRuntimeAllowlist = append([]string(nil), poolRuntimeAllowlist...)
 			state.poolCreatorAccountID = snap.CreatorAccountID
 			state.poolCreatorOwnedMembers = snap.CreatorOwnedMembers
@@ -7554,12 +7627,18 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		checker.poolModelClass = poolModelClass
 		checker.settlementEnforce = checker.settlementEnforce || poolRequiresSettlementEnforce
 		checker.poolView = poolRouteView{
-			poolID:           req.poolID,
-			members:          poolMembers,
-			runtimeAllowlist: poolRuntimeAllowlist,
-			creatorAccountID: poolCreatorAccountID,
-			creatorOwned:     poolCreatorOwned,
+			poolID:              req.poolID,
+			members:             poolMembers,
+			runtimeAllowlist:    poolRuntimeAllowlist,
+			creatorAccountID:    poolCreatorAccountID,
+			creatorOwned:        poolCreatorOwned,
+			attestedMembers:     poolSnap.AttestedMembers,
+			memberOwnerAccounts: poolSnap.MemberOwnerAccounts,
+			manifestVersion:     poolSnap.ManifestVersion,
+			manifestCoreDigest:  poolSnap.ManifestCoreDigest,
+			poolModel:           poolModelEntry,
 		}
+		checker.poolView.priorManifestVersion, checker.poolView.priorManifestCoreDigest = poolModelPriorGeneration(poolSnap, poolModelEntry)
 		checker.routeAdmissionCtx = withPoolRouteView(admissionCtx, checker.poolView)
 	}
 	result := s.eligibleCandidates(providers, exSet, checker)
@@ -7929,6 +8008,11 @@ func (s *Server) classForRequestWithBYOMContext(model string, providers []pool.P
 }
 
 func (s *Server) providerMatchesRequest(provider pool.Provider, model string, class *config.ModelClassConfig) bool {
+	// A pool/ model id matches only a session bound (SPEC-047-R011) to
+	// exactly that entry; no served-model-name equivalence applies.
+	if poolmanifest.IsPoolModelID(model) {
+		return class == nil && provider.ModelAdmissionPoolModelID != "" && provider.ModelAdmissionPoolModelID == model
+	}
 	if class == nil {
 		return modelIDEqual(provider.ModelID, model)
 	}
@@ -8572,7 +8656,7 @@ func (s *Server) validatePinnedProviderForRequestWithState(p pool.Provider, mode
 	if s.slotQueue != nil && s.slotQueue.blocksProvider(p.ProviderID, p.SlotsFree) {
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: unavailableMessage}
 	}
-	if s.tier2ProviderExcluded(p) {
+	if s.tier2ProviderExcludedForRoute(p, poolView) {
 		return pool.Provider{}, &routeError{
 			status:  http.StatusBadRequest,
 			code:    "tier2_hard_pin_predicate_failed",
@@ -8790,7 +8874,7 @@ func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slot
 		// candidate and pinned paths use, so a valid external-runtime member
 		// can recover a seat through the queue.
 		routeProvider := providerForRoute(provider, state.poolRouteView())
-		if !routeProvider.CapacityEligible() || s.tier2ProviderExcluded(provider) || !s.checkQuota(provider) {
+		if !routeProvider.CapacityEligible() || s.tier2ProviderExcludedForRoute(provider, state.poolRouteView()) || !s.checkQuota(provider) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
 		if !routeProvider.RoutingEligible() {
@@ -9269,6 +9353,11 @@ func (c *eligibilityCtx) ProviderContextSufficient(p pool.Provider) bool {
 // audit trail does not regress.
 func (c *eligibilityCtx) Tier2Decision(p pool.Provider) (routing.RejectionReason, pool.HashStatus) {
 	hashStatus := c.s.effectiveHashStatus(p, c.tier2Cfg)
+	// A pool-model candidate's identity is its SPEC-047-R011 binding, so an
+	// uncatalogued status does not exclude it on that pool's route.
+	if c.poolView.poolModelCandidate(p) && (hashStatus == pool.HashStatusUncatalogued || hashStatus == pool.HashStatusCatalogUnavailable) {
+		hashStatus = pool.HashStatusVerified
+	}
 	if c.s.tier2ProviderExcludedStatus(hashStatus, c.tier2Cfg) {
 		if hashStatus == pool.HashStatusMismatch || hashStatus == pool.HashStatusInvalid {
 			return routing.ReasonTier2HashMismatch, hashStatus

@@ -22,6 +22,36 @@ line_of() {
   printf '%s' "$n"
 }
 
+run_sign_catalog() {
+  local label="$1"
+  shift
+  local log="$TMP/sign-catalog-${label}.log"
+  local attempt rc
+  : > "$log"
+  for attempt in 1 2 3; do
+    if go run "$REPO_ROOT/scripts/sign-catalog.go" "$@" > "$TMP/sign-catalog-attempt.log" 2>&1; then
+      if [ "$attempt" != 1 ]; then
+        {
+          printf 'attempt %s succeeded: go run scripts/sign-catalog.go %s\n' "$attempt" "$*"
+          cat "$TMP/sign-catalog-attempt.log"
+        } >> "$log"
+      fi
+      rm -f "$TMP/sign-catalog-attempt.log"
+      return 0
+    else
+      rc=$?
+    fi
+    {
+      printf 'attempt %s failed with rc=%s: go run scripts/sign-catalog.go %s\n' "$attempt" "$rc" "$*"
+      cat "$TMP/sign-catalog-attempt.log"
+    } >> "$log"
+    [ "$attempt" = 3 ] || sleep "$attempt"
+  done
+  printf 'sign-catalog %s failed after 3 attempts; captured output follows:\n' "$label" >&2
+  tail -n 120 "$log" >&2
+  return "$rc"
+}
+
 # --- Static placement pins -------------------------------------------------
 compare_line="$(line_of 'catalog-release.py compare-live --incoming')"
 live_verify_line="$(line_of 'verify-directory --directory /opt/macprovider/autotune/\$_live')"
@@ -75,7 +105,7 @@ grep -q 'cwo_override_remote_command' "$TMP/append-helper.sh" || fail "could not
 # --- Fake Pearl --------------------------------------------------------------
 BASE_FILES="demand-rank.json demand-rank.json.sig autotune-candidates.json autotune-candidates.json.sig rate-card.json rate-card.json.sig continuous-batching-policy.json continuous-batching-policy.json.sig tier2-catalog.json release.json trusted-keys.json"
 BOUND_FILES="$BASE_FILES autotune-artifacts.json autotune-artifacts.json.sig"
-COMMITTED_ID="published-2026-09-25-artifact-hash-correction-v1"
+COMMITTED_ID="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["release_id"])' "$REPO_ROOT/phase3-binary/catalog/autotune/release.json")"
 BOUND_ID="published-2026-09-30-artifact-bound-v1"
 # BOUND=1 switches every fixture to the artifact-bound (thirteen-file) release.
 BOUND=0
@@ -90,7 +120,19 @@ assemble() {
       *) cp "$REPO_ROOT/phase3-binary/dist/static/$name" "$1/$name" ;;
     esac
   done
+  unbind_release "$1"
   [ "$BOUND" = 0 ] || bind_release "$1"
+}
+# The committed release is the artifact-feed activation release. The unbound
+# fixture is that release without its artifact pair: its other feeds still
+# reverse to the preceding (unbound) ledger row and keep their real signatures.
+unbind_release() {
+  python3 - "$1/release.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+if m["feeds"].pop("autotune-artifacts.json", None) is not None:
+    open(sys.argv[1], "w").write(json.dumps(m, indent=2, sort_keys=True) + "\n")
+PY
 }
 # The committed release re-cut as artifact-bound release $BOUND_ID: an (empty)
 # artifact feed plus its release.json binding. Unsigned, so the harness stubs
@@ -359,13 +401,13 @@ grep -q '^VERDICT=regression$' "$TMP/out" || fail "override must still report th
 log="$VAR/catalog-window-overrides.jsonl"
 [ -f "$log" ] || fail "override must append to catalog-window-overrides.jsonl"
 [ "$(stat -c %a "$log" 2>/dev/null || stat -f %Lp "$log")" = "600" ] || fail "override log must be 0600"
-python3 - "$log" "$reason" "$INCOMING_DIR" <<'PY' || fail "override record is wrong"
+python3 - "$log" "$reason" "$INCOMING_DIR" "$COMMITTED_ID" <<'PY' || fail "override record is wrong"
 import json, sys
 lines = open(sys.argv[1]).read().splitlines()
 assert len(lines) == 1, lines
 r = json.loads(lines[0])
 assert r["reason"] == sys.argv[2] and r["incoming"] == sys.argv[3], r
-assert r["live"] == {"target": "releases/newer-live", "release_id": "published-2026-09-25-artifact-hash-correction-v1"}, r
+assert r["live"] == {"target": "releases/newer-live", "release_id": sys.argv[4]}, r
 assert r["tag"] == "v9.9.9" and r["commit"].startswith("0123"), r
 assert set(r) == {"ts", "reason", "incoming", "live", "tag", "commit"}, r
 PY
@@ -436,6 +478,11 @@ grep -qF -- "--tier2-coordinator-config $ROOT/coordinator.yaml --tier2-coordinat
 # Real verifier: pristine committed live verifies (control), a corrupt live
 # sidecar or keyring aborts before any staging, swap, window, or override.
 VERIFY_MODE=real
+EXPIRED_TIER2_TTL_SECONDS="${DEPLOY_COMPARE_EXPIRED_TIER2_TTL_SECONDS:-2}"
+case "$EXPIRED_TIER2_TTL_SECONDS" in
+  ''|*[!0-9]*) fail "DEPLOY_COMPARE_EXPIRED_TIER2_TTL_SECONDS must be a positive integer" ;;
+esac
+[ "$EXPIRED_TIER2_TTL_SECONDS" -gt 0 ] || fail "DEPLOY_COMPARE_EXPIRED_TIER2_TTL_SECONDS must be a positive integer"
 reset
 live_release committed-live
 if run_deploy_slice ""; then
@@ -466,7 +513,7 @@ PY
   # $1 = seconds until the live Tier-2 expires.
   resign_live_tier2() {
     local d="$ROOT/autotune/releases/committed-live"
-    [ -s "$TMP/t2.pub" ] || go run "$REPO_ROOT/scripts/sign-catalog.go" keygen -public-out "$TMP/t2.pub" -private-out "$TMP/t2.priv" >/dev/null 2>&1 ||
+    [ -s "$TMP/t2.pub" ] || run_sign_catalog keygen keygen -public-out "$TMP/t2.pub" -private-out "$TMP/t2.priv" ||
       fail "cannot generate a Tier-2 test key"
     python3 - "$d/tier2-catalog.json" "$TMP/t2-unsigned.json" "$1" <<'PY'
 import datetime, json, sys
@@ -477,7 +524,7 @@ o["issued_at"] = (now - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S
 o["expires_at"] = (now + datetime.timedelta(seconds=int(sys.argv[3]))).strftime("%Y-%m-%dT%H:%M:%SZ")
 open(sys.argv[2], "w").write(json.dumps(o, indent=2))
 PY
-    go run "$REPO_ROOT/scripts/sign-catalog.go" sign -key "$TMP/t2.priv" -key-id rotated-test -out "$d/tier2-catalog.json" "$TMP/t2-unsigned.json" >/dev/null 2>&1 ||
+    run_sign_catalog sign sign -key "$TMP/t2.priv" -key-id rotated-test -out "$d/tier2-catalog.json" "$TMP/t2-unsigned.json" ||
       fail "cannot sign the live Tier-2 test catalog"
     python3 - "$CR_PY" "$d" "$(cat "$TMP/t2.pub")" <<'PY'
 import importlib.util, json, pathlib, sys
@@ -503,8 +550,8 @@ PY
   # Expired live Tier-2: still signature-verified, not refused for expiry.
   reset
   live_release committed-live
-  resign_live_tier2 2
-  sleep 3
+  resign_live_tier2 "$EXPIRED_TIER2_TTL_SECONDS"
+  sleep $((EXPIRED_TIER2_TTL_SECONDS + 1))
   run_deploy_slice "" || true
   grep -q 'LIVE catalog release autotune/current failed verify-directory' "$TMP/out" &&
     { cat "$TMP/out" >&2; fail "an EXPIRED live Tier-2 must not abort the live verify"; }

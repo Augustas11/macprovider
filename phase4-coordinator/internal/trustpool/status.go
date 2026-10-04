@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/billing"
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
 )
 
@@ -559,6 +561,24 @@ func policyModelAllowlist(p *ReconstructedPoolState) []string {
 		return nil
 	}
 	return append([]string(nil), p.ManifestModelAllowlist...)
+}
+
+// policyModelEntries is the active core's SPEC-042-R015 pool_model_entries.
+// Acceptance only admits entries under an enforce-mode v2 core, so every
+// other pool yields none.
+func policyModelEntries(p *ReconstructedPoolState) []poolmanifest.PoolModelEntry {
+	if p == nil || !p.ManifestPolicyCoreV2 || p.ManifestSettlementMode != billing.RouteSnapshotModeEnforce {
+		return nil
+	}
+	return poolmanifest.ClonePoolModelEntries(p.ManifestModelEntries)
+}
+
+// policyAttestedMembers is the active core's SPEC-042-R016 attestations.
+func policyAttestedMembers(p *ReconstructedPoolState) []poolmanifest.AttestedMember {
+	if p == nil || !p.ManifestPolicyCoreV2 {
+		return nil
+	}
+	return poolmanifest.CloneAttestedMembers(p.ManifestAttestedMembers)
 }
 
 // policyRuntimeAllowlist is the external runtime_source set the accepted core

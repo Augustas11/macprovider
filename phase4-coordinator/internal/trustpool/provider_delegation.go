@@ -37,12 +37,16 @@ type poolProviderKey struct {
 }
 
 type delegationRecord struct {
-	PoolID                  string
-	CreatorAccountID        string
-	ProviderID              string
-	DelegationID            string
-	DelegationOperationID   string
+	PoolID                string
+	CreatorAccountID      string
+	ProviderID            string
+	DelegationID          string
+	DelegationOperationID string
+	// Exactly one of ManifestCoreDigest (a legacy grant bound to one exact
+	// core) and ManifestTermsDigest (a SPEC-043-R006 policy-terms grant that
+	// survives window/version/chain-only rotation) is set.
 	ManifestCoreDigest      string
+	ManifestTermsDigest     string
 	EnvironmentNetworkID    string
 	CoordinatorAudience     string
 	ProviderOwnerKeyID      string
@@ -61,6 +65,64 @@ func CoordinatorAudienceForEnvironment(environment string) string {
 	return "macprovider/spec043/coordinator-audience/v1/" + environment
 }
 
+// delegationNamesOneManifestBinding reports whether a delegation event names
+// exactly one manifest binding: the legacy full core digest or the
+// SPEC-043-R006 policy-terms digest. Naming both is ambiguous and rejected.
+func delegationNamesOneManifestBinding(e DurableEvent) bool {
+	return (e.ManifestCoreDigest == "") != (e.ManifestTermsDigest == "")
+}
+
+// delegationManifestBindingField returns the signed field name and lower-hex
+// digest of the event's manifest binding. The field name is part of the
+// signed preimage, so a legacy core-bound signature never verifies as a
+// terms-bound grant and cannot be widened by relabeling.
+func delegationManifestBindingField(e DurableEvent) (string, string, error) {
+	if !delegationNamesOneManifestBinding(e) {
+		return "", "", ErrProviderDelegation
+	}
+	name, digest := "manifest_core_digest", e.ManifestCoreDigest
+	if e.ManifestTermsDigest != "" {
+		name, digest = "manifest_terms_digest", e.ManifestTermsDigest
+	}
+	if err := requireLowerHex64(digest); err != nil {
+		return "", "", ErrProviderDelegation
+	}
+	return name, digest, nil
+}
+
+// boundToManifest reports whether the grant binds under p's core (the newest
+// accepted core at admission, the active core at route time): a terms grant
+// while the policy terms are unchanged, a legacy grant only under the exact
+// core it names.
+func (rec delegationRecord) boundToManifest(p *ReconstructedPoolState) bool {
+	if p == nil {
+		return false
+	}
+	if rec.ManifestTermsDigest != "" {
+		return rec.ManifestCoreDigest == "" && p.ManifestTermsDigest != "" && rec.ManifestTermsDigest == p.ManifestTermsDigest
+	}
+	return rec.ManifestCoreDigest != "" && rec.ManifestCoreDigest == p.ManifestCoreDigest
+}
+
+// ManifestPolicyTermsDigest returns the lower-hex SPEC-043-R006 policy-terms
+// digest of a manifest_accepted event's core (the newest policy in its
+// snapshot, checked against the event's version and core digest). A provider
+// owner signs a new ProviderPoolDelegationV1 grant over this value.
+func ManifestPolicyTermsDigest(e DurableEvent) (string, error) {
+	if e.EventType != EventManifestAccepted {
+		return "", fmt.Errorf("trustpool: policy terms digest needs a %s event", EventManifestAccepted)
+	}
+	core, err := acceptedPolicyCoreFromManifestSnapshot(e)
+	if err != nil {
+		return "", err
+	}
+	digest, err := core.PolicyTermsDigest()
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(digest), nil
+}
+
 func ProviderPoolDelegationSigningMessage(fields map[string]any) ([]byte, error) {
 	return taggedCanonicalJSON(providerPoolDelegationSignatureTag, fields)
 }
@@ -70,8 +132,9 @@ func ProviderPoolDelegationRevocationSigningMessage(fields map[string]any) ([]by
 }
 
 func delegationSignedFieldsFromEvent(e DurableEvent) (map[string]any, error) {
-	if err := requireLowerHex64(e.ManifestCoreDigest); err != nil {
-		return nil, ErrProviderDelegation
+	bindingField, bindingDigest, err := delegationManifestBindingField(e)
+	if err != nil {
+		return nil, err
 	}
 	pub, err := canonicalBase64(e.ProviderOwnerPublicKey)
 	if err != nil || len(pub) != ed25519.PublicKeySize {
@@ -84,7 +147,7 @@ func delegationSignedFieldsFromEvent(e DurableEvent) (map[string]any, error) {
 		"provider_identity":          e.ProviderID,
 		"delegation_id":              e.DelegationID,
 		"operation_id":               e.DelegationOperationID,
-		"manifest_core_digest":       e.ManifestCoreDigest,
+		bindingField:                 bindingDigest,
 		"environment_network_id":     e.EnvironmentNetworkID,
 		"coordinator_audience":       e.CoordinatorAudience,
 		"provider_owner_key_id":      e.ProviderOwnerKeyID,
@@ -97,8 +160,9 @@ func delegationSignedFieldsFromEvent(e DurableEvent) (map[string]any, error) {
 }
 
 func delegationRevocationSignedFieldsFromEvent(e DurableEvent, rec delegationRecord) (map[string]any, error) {
-	if err := requireLowerHex64(e.ManifestCoreDigest); err != nil {
-		return nil, ErrProviderDelegation
+	bindingField, bindingDigest, err := delegationManifestBindingField(e)
+	if err != nil {
+		return nil, err
 	}
 	return map[string]any{
 		"schema_version":             ProviderPoolDelegationRevocationSchemaVersion,
@@ -107,7 +171,7 @@ func delegationRevocationSignedFieldsFromEvent(e DurableEvent, rec delegationRec
 		"provider_identity":          e.ProviderID,
 		"delegation_id":              e.DelegationID,
 		"operation_id":               e.DelegationOperationID,
-		"manifest_core_digest":       e.ManifestCoreDigest,
+		bindingField:                 bindingDigest,
 		"environment_network_id":     e.EnvironmentNetworkID,
 		"coordinator_audience":       e.CoordinatorAudience,
 		"provider_owner_key_id":      e.ProviderOwnerKeyID,
@@ -155,7 +219,16 @@ func validateDelegationGrantEvent(e DurableEvent, p *ReconstructedPoolState, at 
 	if e.CreatorAccountID != p.CreatorAccountID {
 		return zero, ErrProviderDelegation
 	}
-	if e.ManifestCoreDigest != p.ManifestCoreDigest {
+	// SPEC-043-R006: a new grant names the newest core's policy-terms digest;
+	// a legacy grant names its exact core digest.
+	if !delegationNamesOneManifestBinding(e) {
+		return zero, ErrProviderDelegation
+	}
+	if e.ManifestTermsDigest != "" {
+		if p.ManifestTermsDigest == "" || e.ManifestTermsDigest != p.ManifestTermsDigest {
+			return zero, ErrProviderDelegation
+		}
+	} else if e.ManifestCoreDigest != p.ManifestCoreDigest {
 		return zero, ErrProviderDelegation
 	}
 	expectedAudience := CoordinatorAudienceForEnvironment(p.RootIssuer.LaunchEnvironment)
@@ -199,6 +272,7 @@ func validateDelegationGrantEvent(e DurableEvent, p *ReconstructedPoolState, at 
 		DelegationID:            e.DelegationID,
 		DelegationOperationID:   e.DelegationOperationID,
 		ManifestCoreDigest:      e.ManifestCoreDigest,
+		ManifestTermsDigest:     e.ManifestTermsDigest,
 		EnvironmentNetworkID:    e.EnvironmentNetworkID,
 		CoordinatorAudience:     e.CoordinatorAudience,
 		ProviderOwnerKeyID:      e.ProviderOwnerKeyID,
@@ -227,7 +301,8 @@ func validateDelegationRevocationEvent(e DurableEvent, rec delegationRecord, at 
 		e.ProviderOwnerKeyVersion != rec.ProviderOwnerKeyVersion {
 		return ErrProviderDelegation
 	}
-	if e.ManifestCoreDigest != rec.ManifestCoreDigest {
+	// The revocation names the same manifest binding as the grant it revokes.
+	if e.ManifestCoreDigest != rec.ManifestCoreDigest || e.ManifestTermsDigest != rec.ManifestTermsDigest {
 		return ErrProviderDelegation
 	}
 	if e.CoordinatorAudience != rec.CoordinatorAudience || e.EnvironmentNetworkID != rec.EnvironmentNetworkID {
@@ -292,10 +367,7 @@ func (s *ReconstructedState) delegationEligible(p *ReconstructedPoolState, provi
 	if !at.Before(rec.ExpiresAt) {
 		return false
 	}
-	if rec.ManifestCoreDigest != p.ManifestCoreDigest {
-		return false
-	}
-	return true
+	return rec.boundToManifest(p)
 }
 
 func SignProviderPoolDelegation(privateKey ed25519.PrivateKey, signed map[string]any) (string, error) {

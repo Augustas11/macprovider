@@ -1576,6 +1576,54 @@ final class InferenceRelayTests: XCTestCase {
         }
     }
 
+    /// #1816: a pool-route request naming the signed pool entry
+    /// (`pool/<pool_id>/<slug>`, the serve request alias) on a loopback
+    /// runtime signs the pool-authorized receipt bound to the entry's artifact
+    /// hash, and still signs nothing without a matching authorization.
+    func testPoolEntryModelIDOnLoopbackSignsOnlyWithPoolAuthorization() async throws {
+        let poolModelID = "pool/AbCdEfGhIjKlMnOpQrStUv/gemma3-270m"
+        let alias = PoolModelServe.requestAlias(catalogModelID: nil, poolModelID: poolModelID)
+        let loopback = try ReceiptEligibilityFixtures.makeOllamaLoopbackRuntime(testCase: self, catalogModelIDAlias: alias)
+        let providerID = "provider-relay-test"
+        for stream in [false, true] {
+            let requestID = "req-pool-entry-\(stream ? "stream" : "complete")"
+            let authorization = ReceiptEligibilityFixtures.poolRuntimeAuthorizationWire(
+                runtimeSource: OllamaLoopbackServeModel.runtimeSource,
+                requestID: requestID,
+                providerID: providerID,
+                attemptN: 0,
+                routeSnapshotDigest: String(repeating: "3", count: 64)
+            )
+            let authorized = try await relayReceiptRoundTrip(
+                runtime: loopback.runtime,
+                model: ReceiptEligibilityFixtures.ollamaServedRef,
+                expectedModelHash: loopback.digest,
+                requestID: requestID,
+                stream: stream,
+                providerID: providerID,
+                settlementExtras: [PoolRuntimeAuthorization.wireKey: authorization],
+                requestModel: poolModelID,
+                catalogModelIDAlias: alias
+            )
+            XCTAssertEqual(authorized.endFrame["status"] as? String, "complete", "stream=\(stream)")
+            XCTAssertNotNil(authorized.endFrame["receipt"], "stream=\(stream)")
+            XCTAssertEqual(authorized.omittedReasons, [], "stream=\(stream)")
+
+            let unauthorized = try await relayReceiptRoundTrip(
+                runtime: loopback.runtime,
+                model: ReceiptEligibilityFixtures.ollamaServedRef,
+                expectedModelHash: loopback.digest,
+                requestID: requestID,
+                stream: stream,
+                providerID: providerID,
+                requestModel: poolModelID,
+                catalogModelIDAlias: alias
+            )
+            XCTAssertNil(unauthorized.endFrame["receipt"], "stream=\(stream)")
+            XCTAssertEqual(unauthorized.omittedReasons, ["runtime_not_settlement_eligible"], "stream=\(stream)")
+        }
+    }
+
     private func relayReceiptRoundTrip(
         runtime: any ModelRuntimeServing,
         model: String,
@@ -1587,7 +1635,9 @@ final class InferenceRelayTests: XCTestCase {
         ),
         providerID: String? = "provider-relay-test",
         attachSettlement: Bool = true,
-        settlementExtras: [String: Any] = [:]
+        settlementExtras: [String: Any] = [:],
+        requestModel: String? = nil,
+        catalogModelIDAlias: String? = nil
     ) async throws -> (endFrame: [String: Any], omittedReasons: [String]) {
         let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
         let recorder = FrameRecorder()
@@ -1600,6 +1650,7 @@ final class InferenceRelayTests: XCTestCase {
                 capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
             ),
             loadedModelID: model,
+            catalogModelIDAlias: catalogModelIDAlias,
             warmSwapEnabled: true,
             maxActiveRequests: 1,
             maxBodyBytes: 4096,
@@ -1610,7 +1661,7 @@ final class InferenceRelayTests: XCTestCase {
             }
         )
         let body = try JSONSerialization.data(withJSONObject: [
-            "model": model,
+            "model": requestModel ?? model,
             "stream": stream,
             "messages": [["role": "user", "content": "hello"]],
         ] as [String: Any])
@@ -1624,7 +1675,7 @@ final class InferenceRelayTests: XCTestCase {
             frame["settlement"] = ReceiptEligibilityFixtures.settlementMetadataWire(
                 requestID: requestID,
                 providerID: providerID ?? "provider-relay-test",
-                modelID: model,
+                modelID: requestModel ?? model,
                 receiptKeyID: ReceiptEligibilityFixtures.receiptKeyID(key.publicKey.rawRepresentation),
                 expectedModelHash: expectedModelHash
             ).merging(settlementExtras) { _, extra in extra }

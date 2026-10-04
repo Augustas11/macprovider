@@ -83,6 +83,15 @@ type Server struct {
 	// (true = excluded), injected at wiring time because ws cannot import buyer.
 	catalogMaterialRoutingGate atomic.Pointer[func(pool.Provider) bool]
 
+	// poolModels is the SPEC-047-R011 pool-manifest binding input (the
+	// trust-pool registry and the configured pricing bounds), nil when
+	// trusted pools are off.
+	poolModels atomic.Pointer[poolModelWiring]
+	// poolSweepKick wakes RunPoolManifestBindingSweep the moment a new
+	// accepted generation becomes active (#1816 F3), not only on its timer.
+	poolSweepKickOnce sync.Once
+	poolSweepKick     chan struct{}
+
 	proofOfWeightsAdmissionMu sync.RWMutex
 	proofOfWeightsMu          sync.RWMutex
 	proofOfWeights            config.ProofOfWeightsConfig
@@ -3592,6 +3601,25 @@ func (s *Server) checkAutotuneHelloGateWithCatalog(conn net.Conn, hello Hello, c
 			Msg("autotune hello gate exempted a BYOM loopback runtime as a non-earning sandbox (SPEC-032 FR-HG8)")
 		return autotuneAdmissionObservation{Sandboxed: true}, true
 	}
+	// SPEC-032-R004 pool-entry exemption (#1816): a native session whose
+	// uncatalogued model is the exact snapshot-manifest pair of a current
+	// SPEC-042-R015 entry listing mlx_cache, in a pool the provider is a member
+	// of, is admitted `admission_sandboxed` so it can serve that pool's routes
+	// only (the buyer pool predicate is the sole path that selects it). Every
+	// other uncatalogued native hello stays closed below.
+	if requireGate && modelAdmissionRuntimeClass(hello.RuntimeSource) == modelAdmissionRuntimeSourceMLXCache {
+		if _, _, catalogued := catalog.HighestClaimedTier(hello.ModelID); !catalogued {
+			if poolID, ok := s.poolEntryForSession(hello.ProviderID, hello.RuntimeSource, hello.ModelHashAlgorithm, hello.ModelHash); ok {
+				s.log.Info().
+					Str("provider_id", hello.ProviderID).
+					Str("event", "autotune_pool_entry_native_sandboxed").
+					Str("model_id", hello.ModelID).
+					Str("pool_id", poolID).
+					Msg("autotune hello gate admitted a native pool-entry session as pool-only sandbox (SPEC-032-R004)")
+				return autotuneAdmissionObservation{Sandboxed: true}, true
+			}
+		}
+	}
 	ttl := time.Duration(powCfg.AutotuneEvidenceTTLDays) * 24 * time.Hour
 	ctx, cancel := context.WithTimeout(context.Background(), autotuneEvidenceLookupTimeout)
 	defer cancel()
@@ -3700,10 +3728,23 @@ func (s *Server) catalogAdmissionWithCatalog(hello Hello, catalog *autotune.Cata
 			present++
 		}
 	}
+	// SPEC-032-R004 / SPEC-042-R015 (#1816): a session whose exact pair and
+	// runtime class are a current pool entry of a pool it is a member of is
+	// admitted in the pool_entry mode, whatever catalog row its model id
+	// lacks; it can serve only that pool's routes.
+	poolEntry := false
+	if _, ok := s.poolEntryForSession(hello.ProviderID, hello.RuntimeSource, hello.ModelHashAlgorithm, hello.ModelHash); ok {
+		if _, _, catalogued := catalog.HighestClaimedTier(hello.ModelID); !catalogued {
+			poolEntry = true
+		}
+	}
 	// Bridge window: pre-catalog-handshake binaries are admitted through the
 	// existing signed-catalog model/evidence gates. Once a client sends any
 	// catalog metadata it must send and match the complete release envelope.
 	if present == 0 {
+		if poolEntry {
+			return catalogAdmissionPoolEntry, true
+		}
 		if s.autotuneCatalogBridgeActive() {
 			return "legacy_bridge", true
 		}
@@ -3736,6 +3777,9 @@ func (s *Server) catalogAdmissionWithCatalog(hello Hello, catalog *autotune.Cata
 	}
 	key, _, ok := providerCatalog.HighestClaimedTier(hello.ModelID)
 	if !ok {
+		if poolEntry {
+			return catalogAdmissionPoolEntry, true
+		}
 		return "", false
 	}
 	providerRowIdentity, ok := providerCatalog.RowIdentity(key)

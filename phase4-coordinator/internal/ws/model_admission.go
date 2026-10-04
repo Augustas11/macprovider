@@ -168,6 +168,39 @@ type ModelAdmissionEvent struct {
 	// excluded from the event-id and replay-key digests so probe replay stays
 	// idempotent; it is provider-reported and non-earning (never billing input).
 	SyntheticProbeCompletionTokens int
+	// OfferedArtifactHashes is the offer's provider-signed artifact_hashes
+	// (offer events only), kept so a pool entry accepted after the offer can
+	// still be matched exactly (SPEC-047-R011). Never an identity by itself.
+	OfferedArtifactHashes map[string]string
+	// SPEC-047-R011 (#1816) closed pool_binding object, carried only by a
+	// pool-scoped bind/rebind event and the revocation derived from it.
+	// BindingScope is "" (global, every pre-existing event) or "pool". The
+	// expected artifact pair is ExpectedCatalogModelHash/Algorithm; the
+	// runtime class is RuntimeSource; CatalogModelKey stays empty.
+	BindingScope                  string
+	PoolID                        string
+	PoolModelID                   string
+	PoolManifestVersion           uint64
+	PoolManifestCoreDigest        string
+	PoolPromptRatePerMtok         int64
+	PoolPromptCacheHitRatePerMtok int64
+	PoolCompletionRatePerMtok     int64
+	PoolDisclosureClass           string
+	PoolMaxContextTokens          uint64
+	PoolProviderAccountID         string
+	PoolProbeEvidenceDigest       string
+	// PoolObservedCatalogModelKey is the candidate or listed catalog row
+	// the pair resolved to when the event was appended (audit only; never a
+	// catalog identity, price, or route).
+	PoolObservedCatalogModelKey string
+}
+
+// ModelAdmissionBindingScopePool marks a SPEC-047-R011 pool-manifest binding.
+const ModelAdmissionBindingScopePool = "pool"
+
+// PoolScoped reports whether the event carries a SPEC-047-R011 binding.
+func (e ModelAdmissionEvent) PoolScoped() bool {
+	return e.BindingScope == ModelAdmissionBindingScopePool
 }
 
 // ModelAdmissionCatalogMember is one recorded, admissible member of the
@@ -428,18 +461,9 @@ func (s *memoryModelAdmissionStore) appendCoordinatorModelAdmissionEvent(event M
 	if expectedHead != "" && previous.CoordinatorEventID != expectedHead {
 		return ModelAdmissionEvent{}, false, errModelAdmissionStaleHead
 	}
-	if !modelAdmissionCoordinatorTransitionAllowed(previous.State, event.State) {
-		return ModelAdmissionEvent{}, false, errModelAdmissionReplayConflict
-	}
-	if modelAdmissionTransitionRequiresCatalogAuthority(event.State) && !modelAdmissionEventHasTrustedCatalogAuthority(event) {
-		return ModelAdmissionEvent{}, false, errModelAdmissionReplayConflict
-	}
-	if modelAdmissionTransitionReasonRequired(previous.State, event.State) && strings.TrimSpace(event.ReasonCode) == "" {
-		return ModelAdmissionEvent{}, false, errModelAdmissionReplayConflict
-	}
-	actor := modelAdmissionActorCoordinator
-	if strings.HasPrefix(event.Actor, "operator:") {
-		actor = event.Actor
+	actor, err := coordinatorModelAdmissionAppendActor(previous, event)
+	if err != nil {
+		return ModelAdmissionEvent{}, false, err
 	}
 	event = prepareModelAdmissionTransition(event, previous.State, actor, event.State)
 	s.events = append(s.events, event)
@@ -731,6 +755,21 @@ func ensureSQLiteModelAdmissionColumns(db *sql.DB) error {
 		{name: "evaluated_release_generation", sql: `ALTER TABLE model_admission_events ADD COLUMN evaluated_release_generation INTEGER NOT NULL DEFAULT 0`},
 		// SPEC-047-R008 v0.1.6 integer token evidence for a passed synthetic probe.
 		{name: "synthetic_probe_completion_tokens", sql: `ALTER TABLE model_admission_events ADD COLUMN synthetic_probe_completion_tokens INTEGER NOT NULL DEFAULT 0`},
+		// SPEC-047-R011 (#1816) offered pairs and the closed pool_binding object.
+		{name: "offered_artifact_hashes_json", sql: `ALTER TABLE model_admission_events ADD COLUMN offered_artifact_hashes_json TEXT NOT NULL DEFAULT ''`},
+		{name: "binding_scope", sql: `ALTER TABLE model_admission_events ADD COLUMN binding_scope TEXT NOT NULL DEFAULT ''`},
+		{name: "pool_id", sql: `ALTER TABLE model_admission_events ADD COLUMN pool_id TEXT NOT NULL DEFAULT ''`},
+		{name: "pool_model_id", sql: `ALTER TABLE model_admission_events ADD COLUMN pool_model_id TEXT NOT NULL DEFAULT ''`},
+		{name: "pool_manifest_version", sql: `ALTER TABLE model_admission_events ADD COLUMN pool_manifest_version INTEGER NOT NULL DEFAULT 0`},
+		{name: "pool_manifest_core_digest", sql: `ALTER TABLE model_admission_events ADD COLUMN pool_manifest_core_digest TEXT NOT NULL DEFAULT ''`},
+		{name: "pool_prompt_rate_per_mtok", sql: `ALTER TABLE model_admission_events ADD COLUMN pool_prompt_rate_per_mtok INTEGER NOT NULL DEFAULT 0`},
+		{name: "pool_prompt_cache_hit_rate_per_mtok", sql: `ALTER TABLE model_admission_events ADD COLUMN pool_prompt_cache_hit_rate_per_mtok INTEGER NOT NULL DEFAULT 0`},
+		{name: "pool_completion_rate_per_mtok", sql: `ALTER TABLE model_admission_events ADD COLUMN pool_completion_rate_per_mtok INTEGER NOT NULL DEFAULT 0`},
+		{name: "pool_disclosure_class", sql: `ALTER TABLE model_admission_events ADD COLUMN pool_disclosure_class TEXT NOT NULL DEFAULT ''`},
+		{name: "pool_max_context_tokens", sql: `ALTER TABLE model_admission_events ADD COLUMN pool_max_context_tokens INTEGER NOT NULL DEFAULT 0`},
+		{name: "pool_provider_account_id", sql: `ALTER TABLE model_admission_events ADD COLUMN pool_provider_account_id TEXT NOT NULL DEFAULT ''`},
+		{name: "pool_probe_evidence_digest", sql: `ALTER TABLE model_admission_events ADD COLUMN pool_probe_evidence_digest TEXT NOT NULL DEFAULT ''`},
+		{name: "pool_observed_catalog_model_key", sql: `ALTER TABLE model_admission_events ADD COLUMN pool_observed_catalog_model_key TEXT NOT NULL DEFAULT ''`},
 	} {
 		if columns[column.name] {
 			continue
@@ -902,68 +941,7 @@ SELECT COUNT(DISTINCT candidate_id) FROM model_admission_events WHERE provider_i
 		}
 		event = prepareModelAdmissionTransition(event, previousState, modelAdmissionActorProvider, nextState)
 		s.hasEvents.Store(true)
-		if _, err := conn.ExecContext(txCtx, `
-INSERT INTO model_admission_events(
-    provider_id, candidate_id, served_model_ref, catalog_model_key,
-    catalog_id, catalog_body_digest, catalog_signature_key_id,
-    catalog_signature_pubkey_fingerprint, expected_catalog_model_hash,
-    expected_catalog_model_hash_algorithm,
-    discovery_digest_sha256, evaluation_digest_sha256, requested_disclosure_class,
-    previous_state, state, next_state, actor, coordinator_event_id,
-    reason_code, request_id, nonce, payload_digest_sha256,
-    signature_digest_sha256, created_at_utc,
-    runtime_source, catalog_match_state, catalog_match_reason,
-    catalog_row_model_id, catalog_row_model_sha256, catalog_release_id,
-    catalog_candidate_sha256, catalog_signer_key_id, catalog_members_json,
-    artifact_feed_sha256, artifact_id, artifact_hash, artifact_hash_algorithm,
-    artifact_feed_signer_key_id, artifact_candidate_catalog_sha256,
-    bound_member_source, evaluated_release_generation, intake_model_key,
-    synthetic_probe_completion_tokens
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			event.ProviderID,
-			event.CandidateID,
-			event.ServedModelRef,
-			event.CatalogModelKey,
-			event.CatalogID,
-			event.CatalogBodyDigest,
-			event.CatalogSignatureKeyID,
-			event.CatalogSignaturePubkeyFingerprint,
-			event.ExpectedCatalogModelHash,
-			event.ExpectedCatalogModelHashAlgorithm,
-			event.DiscoveryDigestSHA256,
-			event.EvaluationDigestSHA256,
-			event.RequestedDisclosureClass,
-			event.PreviousState,
-			event.State,
-			event.NextState,
-			event.Actor,
-			event.CoordinatorEventID,
-			event.ReasonCode,
-			event.RequestID,
-			event.Nonce,
-			event.PayloadDigestSHA256,
-			event.SignatureDigestSHA256,
-			event.CreatedAt.Format(time.RFC3339Nano),
-			event.RuntimeSource,
-			event.CatalogMatchState,
-			event.CatalogMatchReason,
-			event.CatalogRowModelID,
-			event.CatalogRowModelSHA256,
-			event.CatalogReleaseID,
-			event.CatalogCandidateSHA256,
-			event.CatalogSignerKeyID,
-			encodeModelAdmissionCatalogMembers(event.CatalogMembers),
-			event.ArtifactFeedSHA256,
-			event.ArtifactID,
-			event.ArtifactHash,
-			event.ArtifactHashAlgorithm,
-			event.ArtifactFeedSignerKeyID,
-			event.ArtifactCandidateCatalogSHA256,
-			event.BoundMemberSource,
-			int64(event.EvaluatedReleaseGeneration),
-			event.IntakeModelKey,
-			int64(event.SyntheticProbeCompletionTokens),
-		); err != nil {
+		if err := insertModelAdmissionEventRow(txCtx, conn, event); err != nil {
 			return err
 		}
 		stored = event
@@ -1074,22 +1052,31 @@ func (s *SQLiteModelAdmissionStore) appendCoordinatorModelAdmissionEventCAS(ctx 
 		if expectedHead != "" && previous.CoordinatorEventID != expectedHead {
 			return errModelAdmissionStaleHead
 		}
-		if !modelAdmissionCoordinatorTransitionAllowed(previous.State, event.State) {
-			return errModelAdmissionReplayConflict
-		}
-		if modelAdmissionTransitionRequiresCatalogAuthority(event.State) && !modelAdmissionEventHasTrustedCatalogAuthority(event) {
-			return errModelAdmissionReplayConflict
-		}
-		if modelAdmissionTransitionReasonRequired(previous.State, event.State) && strings.TrimSpace(event.ReasonCode) == "" {
-			return errModelAdmissionReplayConflict
-		}
-		actor := modelAdmissionActorCoordinator
-		if strings.HasPrefix(event.Actor, "operator:") {
-			actor = event.Actor
+		actor, err := coordinatorModelAdmissionAppendActor(previous, event)
+		if err != nil {
+			return err
 		}
 		event = prepareModelAdmissionTransition(event, previous.State, actor, event.State)
 		s.hasEvents.Store(true)
-		if _, err := conn.ExecContext(txCtx, `
+		if err := insertModelAdmissionEventRow(txCtx, conn, event); err != nil {
+			return err
+		}
+		stored = event
+		if err := invalidateSQLitePendingModelAdmissionDecisions(txCtx, conn, event.ProviderID, event.CandidateID); err != nil {
+			return err
+		}
+		if approval != nil {
+			return consumeSQLitePendingModelAdmissionDecision(txCtx, conn, *approval, event)
+		}
+		return nil
+	})
+	return stored, replay, err
+}
+
+// insertModelAdmissionEventRow writes one prepared event (provider and
+// coordinator appends share it so a new column is never written by only one).
+func insertModelAdmissionEventRow(ctx context.Context, conn *sql.Conn, event ModelAdmissionEvent) error {
+	_, err := conn.ExecContext(ctx, `
 INSERT INTO model_admission_events(
     provider_id, candidate_id, served_model_ref, catalog_model_key,
     catalog_id, catalog_body_digest, catalog_signature_key_id,
@@ -1105,64 +1092,94 @@ INSERT INTO model_admission_events(
     artifact_feed_sha256, artifact_id, artifact_hash, artifact_hash_algorithm,
     artifact_feed_signer_key_id, artifact_candidate_catalog_sha256,
     bound_member_source, evaluated_release_generation, intake_model_key,
-    synthetic_probe_completion_tokens
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			event.ProviderID,
-			event.CandidateID,
-			event.ServedModelRef,
-			event.CatalogModelKey,
-			event.CatalogID,
-			event.CatalogBodyDigest,
-			event.CatalogSignatureKeyID,
-			event.CatalogSignaturePubkeyFingerprint,
-			event.ExpectedCatalogModelHash,
-			event.ExpectedCatalogModelHashAlgorithm,
-			event.DiscoveryDigestSHA256,
-			event.EvaluationDigestSHA256,
-			event.RequestedDisclosureClass,
-			event.PreviousState,
-			event.State,
-			event.NextState,
-			event.Actor,
-			event.CoordinatorEventID,
-			event.ReasonCode,
-			event.RequestID,
-			event.Nonce,
-			event.PayloadDigestSHA256,
-			event.SignatureDigestSHA256,
-			event.CreatedAt.Format(time.RFC3339Nano),
-			event.RuntimeSource,
-			event.CatalogMatchState,
-			event.CatalogMatchReason,
-			event.CatalogRowModelID,
-			event.CatalogRowModelSHA256,
-			event.CatalogReleaseID,
-			event.CatalogCandidateSHA256,
-			event.CatalogSignerKeyID,
-			encodeModelAdmissionCatalogMembers(event.CatalogMembers),
-			event.ArtifactFeedSHA256,
-			event.ArtifactID,
-			event.ArtifactHash,
-			event.ArtifactHashAlgorithm,
-			event.ArtifactFeedSignerKeyID,
-			event.ArtifactCandidateCatalogSHA256,
-			event.BoundMemberSource,
-			int64(event.EvaluatedReleaseGeneration),
-			event.IntakeModelKey,
-			int64(event.SyntheticProbeCompletionTokens),
-		); err != nil {
-			return err
-		}
-		stored = event
-		if err := invalidateSQLitePendingModelAdmissionDecisions(txCtx, conn, event.ProviderID, event.CandidateID); err != nil {
-			return err
-		}
-		if approval != nil {
-			return consumeSQLitePendingModelAdmissionDecision(txCtx, conn, *approval, event)
-		}
-		return nil
-	})
-	return stored, replay, err
+    synthetic_probe_completion_tokens, offered_artifact_hashes_json,
+    binding_scope, pool_id, pool_model_id, pool_manifest_version,
+    pool_manifest_core_digest, pool_prompt_rate_per_mtok,
+    pool_prompt_cache_hit_rate_per_mtok, pool_completion_rate_per_mtok,
+    pool_disclosure_class, pool_max_context_tokens, pool_provider_account_id,
+    pool_probe_evidence_digest, pool_observed_catalog_model_key
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		event.ProviderID,
+		event.CandidateID,
+		event.ServedModelRef,
+		event.CatalogModelKey,
+		event.CatalogID,
+		event.CatalogBodyDigest,
+		event.CatalogSignatureKeyID,
+		event.CatalogSignaturePubkeyFingerprint,
+		event.ExpectedCatalogModelHash,
+		event.ExpectedCatalogModelHashAlgorithm,
+		event.DiscoveryDigestSHA256,
+		event.EvaluationDigestSHA256,
+		event.RequestedDisclosureClass,
+		event.PreviousState,
+		event.State,
+		event.NextState,
+		event.Actor,
+		event.CoordinatorEventID,
+		event.ReasonCode,
+		event.RequestID,
+		event.Nonce,
+		event.PayloadDigestSHA256,
+		event.SignatureDigestSHA256,
+		event.CreatedAt.Format(time.RFC3339Nano),
+		event.RuntimeSource,
+		event.CatalogMatchState,
+		event.CatalogMatchReason,
+		event.CatalogRowModelID,
+		event.CatalogRowModelSHA256,
+		event.CatalogReleaseID,
+		event.CatalogCandidateSHA256,
+		event.CatalogSignerKeyID,
+		encodeModelAdmissionCatalogMembers(event.CatalogMembers),
+		event.ArtifactFeedSHA256,
+		event.ArtifactID,
+		event.ArtifactHash,
+		event.ArtifactHashAlgorithm,
+		event.ArtifactFeedSignerKeyID,
+		event.ArtifactCandidateCatalogSHA256,
+		event.BoundMemberSource,
+		int64(event.EvaluatedReleaseGeneration),
+		event.IntakeModelKey,
+		int64(event.SyntheticProbeCompletionTokens),
+		encodeModelAdmissionOfferedArtifactHashes(event.OfferedArtifactHashes),
+		event.BindingScope,
+		event.PoolID,
+		event.PoolModelID,
+		int64(event.PoolManifestVersion),
+		event.PoolManifestCoreDigest,
+		event.PoolPromptRatePerMtok,
+		event.PoolPromptCacheHitRatePerMtok,
+		event.PoolCompletionRatePerMtok,
+		event.PoolDisclosureClass,
+		int64(event.PoolMaxContextTokens),
+		event.PoolProviderAccountID,
+		event.PoolProbeEvidenceDigest,
+		event.PoolObservedCatalogModelKey,
+	)
+	return err
+}
+
+func encodeModelAdmissionOfferedArtifactHashes(hashes map[string]string) string {
+	if len(hashes) == 0 {
+		return ""
+	}
+	raw, err := json.Marshal(hashes)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+func decodeModelAdmissionOfferedArtifactHashes(raw string) (map[string]string, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	var hashes map[string]string
+	if err := json.Unmarshal([]byte(raw), &hashes); err != nil {
+		return nil, err
+	}
+	return hashes, nil
 }
 
 func (s *SQLiteModelAdmissionStore) LatestModelAdmissionStatus(ctx context.Context, providerID, candidateID string) (ModelAdmissionEvent, bool, error) {
@@ -1319,9 +1336,10 @@ func scanModelAdmissionEvent(ctx context.Context, q modelAdmissionQueryer, query
 
 func scanModelAdmissionEventRow(row modelAdmissionScanner) (ModelAdmissionEvent, error) {
 	var event ModelAdmissionEvent
-	var createdAt, membersJSON string
+	var createdAt, membersJSON, offeredJSON string
 	var evaluatedGeneration int64
 	var syntheticProbeCompletionTokens int64
+	var poolManifestVersion, poolMaxContextTokens int64
 	err := row.Scan(
 		&event.CoordinatorEventID,
 		&event.Actor,
@@ -1366,10 +1384,29 @@ func scanModelAdmissionEventRow(row modelAdmissionScanner) (ModelAdmissionEvent,
 		&evaluatedGeneration,
 		&event.IntakeModelKey,
 		&syntheticProbeCompletionTokens,
+		&offeredJSON,
+		&event.BindingScope,
+		&event.PoolID,
+		&event.PoolModelID,
+		&poolManifestVersion,
+		&event.PoolManifestCoreDigest,
+		&event.PoolPromptRatePerMtok,
+		&event.PoolPromptCacheHitRatePerMtok,
+		&event.PoolCompletionRatePerMtok,
+		&event.PoolDisclosureClass,
+		&poolMaxContextTokens,
+		&event.PoolProviderAccountID,
+		&event.PoolProbeEvidenceDigest,
+		&event.PoolObservedCatalogModelKey,
 	)
 	if err != nil {
 		return ModelAdmissionEvent{}, err
 	}
+	if event.OfferedArtifactHashes, err = decodeModelAdmissionOfferedArtifactHashes(offeredJSON); err != nil {
+		return ModelAdmissionEvent{}, err
+	}
+	event.PoolManifestVersion = uint64(poolManifestVersion)
+	event.PoolMaxContextTokens = uint64(poolMaxContextTokens)
 	members, err := decodeModelAdmissionCatalogMembers(membersJSON)
 	if err != nil {
 		return ModelAdmissionEvent{}, err
@@ -1398,7 +1435,12 @@ func modelAdmissionEventSelect(tail string) string {
        artifact_feed_sha256, artifact_id, artifact_hash, artifact_hash_algorithm,
        artifact_feed_signer_key_id, artifact_candidate_catalog_sha256,
        bound_member_source, evaluated_release_generation, intake_model_key,
-       synthetic_probe_completion_tokens` + tail
+       synthetic_probe_completion_tokens, offered_artifact_hashes_json,
+       binding_scope, pool_id, pool_model_id, pool_manifest_version,
+       pool_manifest_core_digest, pool_prompt_rate_per_mtok,
+       pool_prompt_cache_hit_rate_per_mtok, pool_completion_rate_per_mtok,
+       pool_disclosure_class, pool_max_context_tokens, pool_provider_account_id,
+       pool_probe_evidence_digest, pool_observed_catalog_model_key` + tail
 }
 
 func scanModelAdmissionEvents(ctx context.Context, q interface {
@@ -1473,6 +1515,43 @@ func modelAdmissionTransitionReasonRequired(previousState, nextState string) boo
 	}
 }
 
+// coordinatorModelAdmissionAppendActor validates a coordinator-origin append
+// against the candidate's head and returns the event actor. Every catalog
+// rule is unchanged; the SPEC-047-R011 signed pool manifest actor owns
+// exactly two pool-scoped edges (bind offer_submitted -> catalog_priced and
+// rebind catalog_priced -> catalog_priced), a pool-scoped binding never
+// reaches settlement_capable, and a pool-scoped head leaves catalog_priced
+// only by revocation or withdrawal.
+func coordinatorModelAdmissionAppendActor(previous, event ModelAdmissionEvent) (string, error) {
+	poolEdge := modelAdmissionPoolEdge(previous, event)
+	switch {
+	case poolEdge:
+		if !modelAdmissionEventHasPoolAuthority(event) {
+			return "", errModelAdmissionReplayConflict
+		}
+	case !modelAdmissionCoordinatorTransitionAllowed(previous.State, event.State):
+		return "", errModelAdmissionReplayConflict
+	case event.PoolScoped() && event.State != modelAdmissionRevoked:
+		return "", errModelAdmissionReplayConflict
+	case modelAdmissionTransitionRequiresCatalogAuthority(event.State) && !modelAdmissionEventHasTrustedCatalogAuthority(event):
+		return "", errModelAdmissionReplayConflict
+	}
+	if (previous.PoolScoped() || event.PoolScoped()) && event.State == "settlement_capable" {
+		return "", errModelAdmissionReplayConflict
+	}
+	if modelAdmissionTransitionReasonRequired(previous.State, event.State) && strings.TrimSpace(event.ReasonCode) == "" {
+		return "", errModelAdmissionReplayConflict
+	}
+	actor := modelAdmissionActorCoordinator
+	switch {
+	case poolEdge:
+		actor = event.Actor
+	case strings.HasPrefix(event.Actor, "operator:"):
+		actor = event.Actor
+	}
+	return actor, nil
+}
+
 func modelAdmissionTransitionRequiresCatalogAuthority(nextState string) bool {
 	return nextState == "catalog_priced" || nextState == "settlement_capable"
 }
@@ -1503,6 +1582,36 @@ func modelAdmissionEventWithPriorEvidence(event, previous ModelAdmissionEvent) M
 	event.EvaluationDigestSHA256 = previous.EvaluationDigestSHA256
 	event.RequestedDisclosureClass = previous.RequestedDisclosureClass
 	return event
+}
+
+// modelAdmissionOfferRepeatsHead reports whether a provider offer repeats
+// the content of the candidate's live (non-terminal) head: same candidate,
+// served ref, runtime class, evidence digests, disclosure class, and
+// artifact pair (the offered pair, or the pair a pool binding recorded).
+// Such an offer is idempotent; a re-offer from a terminal head still needs
+// refreshed evidence.
+func modelAdmissionOfferRepeatsHead(head, offer ModelAdmissionEvent) bool {
+	if modelAdmissionStateTerminal(head.State) || !sameModelAdmissionTuple(head, offer) ||
+		modelAdmissionRuntimeClass(head.RuntimeSource) != modelAdmissionRuntimeClass(offer.RuntimeSource) ||
+		modelAdmissionEvidenceRefreshed(head, offer) || head.RequestedDisclosureClass != offer.RequestedDisclosureClass {
+		return false
+	}
+	if len(head.OfferedArtifactHashes) > 0 {
+		if len(head.OfferedArtifactHashes) != len(offer.OfferedArtifactHashes) {
+			return false
+		}
+		for algorithm, hash := range head.OfferedArtifactHashes {
+			if !strings.EqualFold(strings.TrimSpace(offer.OfferedArtifactHashes[algorithm]), strings.TrimSpace(hash)) {
+				return false
+			}
+		}
+		return true
+	}
+	if head.PoolScoped() {
+		algorithm, hash, ok := offeredPoolPair(offer)
+		return ok && algorithm == head.ExpectedCatalogModelHashAlgorithm && hash == head.ExpectedCatalogModelHash
+	}
+	return false
 }
 
 func modelAdmissionRequiresRefreshedEvidence(previousState string) bool {
@@ -1542,6 +1651,28 @@ func prepareModelAdmissionTransition(event ModelAdmissionEvent, previousState, a
 		event.ExpectedCatalogModelHashAlgorithm,
 	}, "\x00")))
 	event.CoordinatorEventID = hex.EncodeToString(sum[:])
+	if event.PoolScoped() {
+		// The closed pool_binding object is covered by the event's own id
+		// (SPEC-047-R011); global event ids are unchanged.
+		poolSum := sha256.Sum256([]byte(strings.Join([]string{
+			event.CoordinatorEventID,
+			event.BindingScope,
+			event.PoolID,
+			event.PoolModelID,
+			strconv.FormatUint(event.PoolManifestVersion, 10),
+			event.PoolManifestCoreDigest,
+			event.RuntimeSource,
+			strconv.FormatInt(event.PoolPromptRatePerMtok, 10),
+			strconv.FormatInt(event.PoolPromptCacheHitRatePerMtok, 10),
+			strconv.FormatInt(event.PoolCompletionRatePerMtok, 10),
+			event.PoolDisclosureClass,
+			strconv.FormatUint(event.PoolMaxContextTokens, 10),
+			event.PoolProviderAccountID,
+			event.PoolProbeEvidenceDigest,
+			event.PoolObservedCatalogModelKey,
+		}, "\x00")))
+		event.CoordinatorEventID = hex.EncodeToString(poolSum[:])
+	}
 	return event
 }
 
@@ -1964,6 +2095,19 @@ func (s *Server) handleProviderModelAdmissionOffer(w http.ResponseWriter, r *htt
 	stored, replay, err := s.appendModelAdmissionEventInSection(r.Context(), providerID, func(ctx context.Context) (ModelAdmissionEvent, bool, error) {
 		return s.modelAdmissions.AppendModelAdmissionOffer(ctx, event)
 	})
+	if errors.Is(err, errModelAdmissionReplayConflict) {
+		// #1816 VM acceptance A-5: the identical offer for a live candidate
+		// (runbook "submits (or keeps) its offer") answers its current
+		// status, after the pool-manifest binding re-evaluates it.
+		if head, found, headErr := s.modelAdmissions.LatestModelAdmissionStatus(r.Context(), providerID, event.CandidateID); headErr == nil && found && modelAdmissionOfferRepeatsHead(head, event) {
+			s.reevaluatePoolManifestBindings(r.Context(), providerID)
+			if current, ok, err := s.modelAdmissions.LatestModelAdmissionStatus(r.Context(), providerID, event.CandidateID); err == nil && ok {
+				head = current
+			}
+			writeJSON(w, http.StatusOK, s.modelAdmissionStatusResponseFromEvent(head, true))
+			return
+		}
+	}
 	if err != nil {
 		status := http.StatusInternalServerError
 		code := "model_admission_store_error"
@@ -1977,6 +2121,15 @@ func (s *Server) handleProviderModelAdmissionOffer(w http.ResponseWriter, r *htt
 		}
 		writeJSON(w, status, modelAdmissionError(code, "model admission offer rejected"))
 		return
+	}
+	// SPEC-047-R011: an offer whose exact pair matches one current pool entry
+	// binds under the signed pool manifest actor before any generic probe.
+	if !replay {
+		s.reevaluatePoolManifestBindings(r.Context(), providerID)
+		if head, found, err := s.modelAdmissions.LatestModelAdmissionStatus(r.Context(), providerID, stored.CandidateID); err == nil && found && head.PoolScoped() {
+			writeJSON(w, http.StatusOK, s.modelAdmissionStatusResponseFromEvent(head, replay))
+			return
+		}
 	}
 	probeCtx, cancel := modelAdmissionOfferProbeContext(r.Context())
 	defer cancel()
@@ -2564,7 +2717,7 @@ func validateModelAdmissionWithdrawalPayload(payload modelAdmissionWithdrawReque
 }
 
 func (s *Server) modelAdmissionStatusResponseFromEvent(event ModelAdmissionEvent, _ bool) map[string]any {
-	return map[string]any{
+	response := map[string]any{
 		"schema":                 modelAdmissionStatusSchema,
 		"generated_at":           s.now().UTC().Format(time.RFC3339Nano),
 		"cli_version":            s.version,
@@ -2577,9 +2730,34 @@ func (s *Server) modelAdmissionStatusResponseFromEvent(event ModelAdmissionEvent
 		"coordinator_event_id":   nullString(event.CoordinatorEventID),
 		"state_observed_at":      event.CreatedAt.UTC().Format(time.RFC3339Nano),
 		"provider_guidance":      modelAdmissionProviderGuidance(event),
-		"allowed_next_states":    modelAdmissionAllowedNextStates(event.State),
+		"allowed_next_states":    modelAdmissionAllowedNextStatesForEvent(event),
 		"warnings":               []string{},
 	}
+	// SPEC-047-R011: the closed pool_binding object rides only a pool-scoped
+	// status, so every global status keeps its bytes.
+	if binding := modelAdmissionPoolBindingObject(event); binding != nil {
+		response["pool_binding"] = binding
+	}
+	// SPEC-047-R002/R010: pool_attested_earning is claimed only while the
+	// current pool predicate holds; a binding the sweep has not yet revoked
+	// (or cannot revoke) reports the non-earning value instead.
+	if event.PoolScoped() && event.State == "catalog_priced" &&
+		!poolBindingEarningNow(s.poolModels.Load(), event.ProviderID, event, s.classifyCatalogPair, s.now()) {
+		guidance := response["provider_guidance"].(map[string]any)
+		guidance["next_action"] = "wait_for_coordinator"
+		guidance["earning_path_class"] = modelAdmissionNonSettlementEarningPath("")
+	}
+	return response
+}
+
+// modelAdmissionAllowedNextStatesForEvent narrows a pool-scoped
+// catalog_priced head to its R011 edges: the signed-manifest rebind,
+// withdrawal, and revocation (never settlement_capable).
+func modelAdmissionAllowedNextStatesForEvent(event ModelAdmissionEvent) []string {
+	if event.PoolScoped() && event.State == "catalog_priced" {
+		return []string{"catalog_priced", "withdrawn", "revoked"}
+	}
+	return modelAdmissionAllowedNextStates(event.State)
 }
 
 func (s *Server) modelAdmissionWithdrawalResponseFromEvent(event ModelAdmissionEvent, _ bool) map[string]any {
@@ -2621,6 +2799,11 @@ func modelAdmissionProviderGuidance(event ModelAdmissionEvent) map[string]any {
 	case "sandbox_probe_only", "network_visible_unpriced", "network_admitted_unsettled", "catalog_priced":
 		nextAction = "withdraw"
 		earningPath = modelAdmissionNonSettlementEarningPath(event.CatalogModelKey)
+		if event.PoolScoped() && event.State == "catalog_priced" {
+			// SPEC-047-R002/R010: pool-qualified earning on this pool only.
+			nextAction = "maintain_runtime"
+			earningPath = "pool_attested_earning"
+		}
 		if modelAdmissionDemotionRequiresReason(event) {
 			transitionReason = event.ReasonCode
 		}

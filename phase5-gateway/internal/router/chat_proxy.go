@@ -102,8 +102,13 @@ const (
 	// from 30s to 300s (SPEC-022). legacySettlementPolicyVersion is kept
 	// accepted below so rows/receipts pinned to the prior version during
 	// the rollout window keep settling instead of holding indefinitely.
-	settlementPolicyVersion           = "spec022-prereq-v1"
-	legacySettlementPolicyVersion     = "spec022-prereq-v0"
+	settlementPolicyVersion       = "spec022-prereq-v1"
+	legacySettlementPolicyVersion = "spec022-prereq-v0"
+	// settlementPolicyVersionV2 is billing.RouteSnapshotPolicyVersionV2: the
+	// SPEC-015 §N.2 route_snapshot_v2 preimage a #1816 pool-provenance route
+	// (a pool model, or a SPEC-042-R016 attested member) is pinned to. It
+	// settles under the same finality rules as v1.
+	settlementPolicyVersionV2         = "spec022-route-snapshot-v2"
 	settlementHoldFallbackTTL         = 5 * time.Minute
 	maxStreamingFallbackMetadataBytes = int64(64 << 10)
 	// streamingFallbackMetadataBytesPerToken widens the serialized-metadata
@@ -2158,7 +2163,7 @@ func shouldRefundLegacyPreStreamProvider502(status int, body []byte, h http.Head
 		return false
 	}
 	switch openAIErrorCode(body) {
-	case "provider_error", "provider_failed", "provider_disconnected":
+	case "provider_error", "provider_failed", "provider_disconnected", "upstream_provider_error":
 		return true
 	default:
 		return false
@@ -2723,11 +2728,17 @@ func (s *Server) resolveMissingFinalityAsObserve(r *http.Request, subject usageS
 	return coordinatorObserveFallbackAllowed(finality)
 }
 
+// knownSettlementPolicyVersion reports whether a coordinator route-snapshot
+// policy version is one this gateway settles.
+func knownSettlementPolicyVersion(version string) bool {
+	return version == settlementPolicyVersion || version == legacySettlementPolicyVersion || version == settlementPolicyVersionV2
+}
+
 func coordinatorHeadersPermitObserveFallback(h http.Header) bool {
 	mode := strings.TrimSpace(h.Get(settlementModeHeader))
 	policy := strings.TrimSpace(h.Get(settlementPolicyVersionHeader))
 	return (mode == "" || mode == "observe") &&
-		(policy == "" || policy == settlementPolicyVersion || policy == legacySettlementPolicyVersion)
+		(policy == "" || knownSettlementPolicyVersion(policy))
 }
 
 func (s *Server) markStreamingSettlementHoldForReconciliation(r *http.Request, subject usageSubject, finality coordinatorSettlementFinality,
@@ -2959,7 +2970,7 @@ func coordinatorSettlementFinalityFromHeaders(h http.Header) coordinatorSettleme
 		return coordinatorSettlementFinality{Action: settlementFinalityHold, Reason: "invalid_settlement_mode"}
 	}
 	policyVersion := strings.TrimSpace(h.Get(settlementPolicyVersionHeader))
-	if policyVersion != settlementPolicyVersion && policyVersion != legacySettlementPolicyVersion {
+	if !knownSettlementPolicyVersion(policyVersion) {
 		return coordinatorSettlementFinality{Action: settlementFinalityHold, Reason: "invalid_settlement_policy_version"}
 	}
 	outcome := strings.TrimSpace(h.Get(settlementOutcomeHeader))
