@@ -31,6 +31,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
+	"github.com/augstar/macprovider-coordinator/internal/relayblind"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/routing"
 	"github.com/augstar/macprovider-coordinator/internal/routing/sticky"
@@ -324,6 +325,7 @@ type Server struct {
 	// reachable because the arbiter is owned by a request-scoped recorder.
 	terminalObserver                 func(*requestTerminal)
 	relayBlind                       *relayBlindService
+	privacyAuthority                 *relayblind.PrivacyAuthority
 	settlementReceiptRecoveryMu      sync.Mutex
 	settlementReceiptRecoveryPending []settlementReceiptRecoveryItem
 	settlementReceiptRecoveryKeys    map[string]struct{}
@@ -2428,6 +2430,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if relayBlindEnvelopeNamespace(body) {
 		rec.logBuyerFailure(http.StatusBadRequest, "Relay-blind execution authorization is required")
 		writeRelayBlindError(w, "relay_blind_downgrade_rejected", "Relay-blind execution authorization is required")
+		return
+	}
+	if present, _ := privacyRequested(r); present {
+		rec.logBuyerFailure(http.StatusBadRequest, "Privacy class marker is not valid for a plaintext request")
+		writePrivacyClassError(w, privacyClassDowngrade, "Privacy class marker is not valid for a plaintext request")
 		return
 	}
 	req, status, code, msg, param := validateChatRequestDetailed(body)

@@ -1,0 +1,117 @@
+{
+  "version": "privacy-response-v1",
+  "source_fixture": "golden-v1.json",
+  "envelope_digest": "6-kz0dqBcUNyX6MMtKEMPStNYAzOAgCOz3-EH87wS8A",
+  "response_key": "DPup8pbjOy0UeOFALwYb5JWrKsgSZVYcD78hCQeqP6M",
+  "nonce_prefix": "u95D5g",
+  "request_id": "018f7b7b-7c35-4cf0-8d4e-3f0ab1c2d928",
+  "kid": "90GoEdLtAJNEnT6c8aYRmg",
+  "stream": false,
+  "frames": [
+    {
+      "plaintext_utf8": "{\"id\":\"fixture\",\"object\":\"chat.completion\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}]}",
+      "aad_hex": "00000013707269766163792d726573706f6e73652d76310000002b362d6b7a3064714263554e7958364d4d744b454d5053744e59417a4f4167434f7a332d4548383777533841000000163930476f45644c74414a4e456e543663386159526d670000002430313866376237622d376333352d346366302d386434652d336630616231633264393238000000000000000000000000000000000000000000000000",
+      "frame": {
+        "object": "macprovider.privacy_frame",
+        "version": "privacy-response-v1",
+        "seq": 0,
+        "final": false,
+        "ciphertext": "NjJUcbMAfmSr3ptpQR1GcYYYZqE6_0oMWemNTOhORiVO2WIeHicHZuHyV5UPaYYLUxAEjoIrQPCugZWZQiZCOwbTXQX4HoKaCKpMc0Gr1_ma_SjChYvPyDyXop5wAcsgSfD_VmaDpVtlhkabxoXslMqmBlWWDiI"
+      }
+    },
+    {
+      "plaintext_utf8": "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+      "aad_hex": "00000013707269766163792d726573706f6e73652d76310000002b362d6b7a3064714263554e7958364d4d744b454d5053744e59417a4f4167434f7a332d4548383777533841000000163930476f45644c74414a4e456e543663386159526d670000002430313866376237622d376333352d346366302d386434652d336630616231633264393238000000000000000000000000000000010000000000000000",
+      "frame": {
+        "object": "macprovider.privacy_frame",
+        "version": "privacy-response-v1",
+        "seq": 1,
+        "final": false,
+        "ciphertext": "DMDVoMe96dsdzfZkxDYk6w0z_-eWFY5hhnvn7GKJ8QA6a23HRsU_jpt8iZkG2IfgIFGOdmUqKM6xGlzq2BGIw7eOSRbs3qRs6mqnb89YfM0Mmvaix0uj7JqnvCtP6wnHbg"
+      }
+    },
+    {
+      "plaintext_utf8": "{\"version\":\"privacy-response-final-v1\",\"status\":\"complete\",\"prompt_tokens\":4,\"completion_tokens\":8}",
+      "aad_hex": "00000013707269766163792d726573706f6e73652d76310000002b362d6b7a3064714263554e7958364d4d744b454d5053744e59417a4f4167434f7a332d4548383777533841000000163930476f45644c74414a4e456e543663386159526d670000002430313866376237622d376333352d346366302d386434652d336630616231633264393238000000000000000000000000000000020000000000000001",
+      "frame": {
+        "object": "macprovider.privacy_frame",
+        "version": "privacy-response-v1",
+        "seq": 2,
+        "final": true,
+        "ciphertext": "4E1r7sPRMUITokMZhbFxkoexWs5dOThb7MUe4Y62UNkPEbk19NgYM5jJ7GXdcQGpioSIobLVNeG9sk6kzdlcNe1v7f99mhE_T4I97j_0kbun_jnDE66wlg-uOBXab-mi87ig9kz0cJOXTrXgSlxNfsUrXw"
+      }
+    }
+  ],
+  "posture": {
+    "version": "privacy-posture-v1",
+    "privacy_class": "operator_constrained_beta_v1",
+    "provider_id": "provider-fixture",
+    "assigned_session": "session-fixture",
+    "nonce": "WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo",
+    "sequence": 1,
+    "issued_at_unix": 1700000000,
+    "binary_version": "0.0.0-fixture",
+    "code_cdhash": "0123456789abcdef0123456789abcdef01234567",
+    "team_id": "AB12CD34EF",
+    "signing_identifier": "live.malibu.provider.cli",
+    "hardened_runtime": true,
+    "library_validation": true,
+    "get_task_allow": false,
+    "cs_debugged": false,
+    "p_traced": false,
+    "pt_deny_attach_applied": true,
+    "core_dumps_disabled": true,
+    "sip_enabled": true,
+    "runtime_source": "native_mlx",
+    "diagnostic_env_clear": true,
+    "kv_disk_tier_disabled": true,
+    "se_key_backend": "file",
+    "privacy_key_record_digests": [
+      "xPyccfRu3euY3JtLkfdfzUDzeikEDtgp182QWoPyJ28"
+    ]
+  },
+  "posture_framing_hex": "0000001e6d616370726f76696465722f737065633034392f706f73747572652f763100000012707269766163792d706f73747572652d76310000001c6f70657261746f725f636f6e73747261696e65645f626574615f76310000001070726f76696465722d666978747572650000000f73657373696f6e2d66697874757265000000205a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a0000000000000001000000006553f1000000000d302e302e302d6669787475726500000028303132333435363738396162636465663031323334353637383961626364656630313233343536370000000a41423132434433344546000000186c6976652e6d616c6962752e70726f76696465722e636c69000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000001000000000000000100000000000000010000000a6e61746976655f6d6c78000000000000000100000000000000010000000466696c65000000010000002b785079636366527533657559334a744c6b6664667a55447a65696b454474677031383251576f50794a3238",
+  "key_attestation": {
+    "version": "privacy-key-attestation-v1",
+    "key_record_digest": "xPyccfRu3euY3JtLkfdfzUDzeikEDtgp182QWoPyJ28",
+    "privacy_class": "operator_constrained_beta_v1",
+    "assurance": "device_bound_self_attested_beta",
+    "binary_version": "0.0.0-fixture",
+    "code_cdhash": "0123456789abcdef0123456789abcdef01234567",
+    "not_before_unix": 1699999940,
+    "expires_at_unix": 1700003540
+  },
+  "key_attestation_framing_hex": "000000266d616370726f76696465722f737065633034392f6b65792d6174746573746174696f6e2f76310000001a707269766163792d6b65792d6174746573746174696f6e2d76310000002b785079636366527533657559334a744c6b6664667a55447a65696b454474677031383251576f50794a32380000001c6f70657261746f725f636f6e73747261696e65645f626574615f76310000001f6465766963655f626f756e645f73656c665f61747465737465645f626574610000000d302e302e302d666978747572650000002830313233343536373839616263646566303132333435363738396162636465663031323334353637000000006553f0c4000000006553fed4",
+  "key_attestation_signature": "LxP-Mk-ZSNbnlut7CueZI14W-IfEacuRlfARYvr7hWNNgrq8Q_bB4OOoeOxL9_w1FfdfAMJHkUKgH31F1jPXCg",
+  "privacy_key_record": {
+    "key_record": {
+      "alg": "x25519-hkdf-sha256-a256gcm-v1",
+      "public_key": "e06Qm75__kTEZaIgA31gjuNYl9Me-XLwf3SJLLD3PxM",
+      "identity_fingerprint": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+      "models": [
+        "model-a"
+      ],
+      "max_encrypted_request_bytes": 4096,
+      "endpoint_families": [
+        "chat_completions"
+      ],
+      "signature_algorithm": "ed25519",
+      "not_before_unix": 1699999940,
+      "expires_at_unix": 1700003540,
+      "kid": "90GoEdLtAJNEnT6c8aYRmg",
+      "key_record_digest": "xPyccfRu3euY3JtLkfdfzUDzeikEDtgp182QWoPyJ28",
+      "signature": "gtbhfpmtHd1HaNcPIVRiUgjTZZm7LjSoz8GuhW58NtDfKAO1-8-DukpeKt4VbbKCsjNpKKIE1F2p9_SwDE-IDQ"
+    },
+    "privacy_key_attestation": {
+      "version": "privacy-key-attestation-v1",
+      "key_record_digest": "xPyccfRu3euY3JtLkfdfzUDzeikEDtgp182QWoPyJ28",
+      "privacy_class": "operator_constrained_beta_v1",
+      "assurance": "device_bound_self_attested_beta",
+      "binary_version": "0.0.0-fixture",
+      "code_cdhash": "0123456789abcdef0123456789abcdef01234567",
+      "not_before_unix": 1699999940,
+      "expires_at_unix": 1700003540
+    },
+    "signature": "LxP-Mk-ZSNbnlut7CueZI14W-IfEacuRlfARYvr7hWNNgrq8Q_bB4OOoeOxL9_w1FfdfAMJHkUKgH31F1jPXCg"
+  }
+}

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-gateway/internal/config"
+	"github.com/augstar/macprovider-gateway/internal/relayblind"
 	"github.com/augstar/macprovider-gateway/internal/settlement/journal"
 	"github.com/augstar/macprovider-gateway/internal/storage"
 )
@@ -1121,6 +1122,18 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 		}
 		return s.settleBeforeResponseWithFinality(w, r, subject, prompt, completion, maxUsageTokens, source, outcome, finality, resp.Header, false)
 	}
+	// SPEC-049 §4.8/R015: a confirmed privacy response may only be the closed
+	// envelope. Clear completion content is postdispatch uncertainty: bill
+	// known input only and never write the body.
+	if exec := relayBlindExecutionFor(r); exec != nil && exec.Privacy != nil {
+		if err := relayblind.ValidatePrivacyResponseBody(body); err != nil {
+			if !settleWithFinality(promptEstimate, 0, "gateway_estimated", "invalid_provider_response") {
+				return
+			}
+			writePrivacyClassError(w, privacyClassUnconfirmed, "")
+			return
+		}
+	}
 	anthropicDuplicateProviderResponse := false
 	if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && !adapter.stream && anthropicRawHasDuplicateKeys(body) {
 		anthropicDuplicateProviderResponse = true
@@ -1184,6 +1197,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	emitProviderAttribution(w.Header(), resp.Header)
 	copyReceiptEligibleHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
+	maybeSetPrivacySuccessHeaders(w, r)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
 }
@@ -1294,6 +1308,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	// the existing SSE-specific guarantees; we prepend no-store.
 	w.Header().Set("Cache-Control", "no-store, no-cache, no-transform")
 	w.Header().Set("X-Accel-Buffering", "no")
+	maybeSetPrivacySuccessHeaders(w, r)
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
 	wholesale := s.isWholesaleAccount(subject.AccountID)
@@ -1334,6 +1349,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	var emitted int64
 	var serializedEmitted int64
 	var reported *tokenUsage
+	var privacyStream relayblind.PrivacyStreamGate
 	invalidReportedUsage := false
 	forwardedUsage := false
 	terminalStructuredErrorCode := ""
@@ -1483,6 +1499,17 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		}
 		settleObservedContent("provider_timeout")
 	}
+	// SPEC-049 §4.8/R015: a privacy stream carries only opaque frames, the
+	// final frame, one clear usage chunk, and [DONE]. Anything else is
+	// postdispatch uncertainty; the offending line is never written.
+	refusePrivacyStream := func() {
+		writePrivacyClassStreamError(w, privacyClassUnconfirmed, "")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		cancelCoordinator()
+		s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "invalid_provider_response", reservationWindow, resp)
+	}
 	forwardLine := func(line []byte) bool {
 		select {
 		case <-r.Context().Done():
@@ -1491,6 +1518,30 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		default:
 		}
 		text := strings.TrimRight(string(line), "\r\n")
+		if exec := relayBlindExecutionFor(r); exec != nil && exec.Privacy != nil && strings.TrimSpace(text) != "" {
+			data, ok := sseDataValue(text)
+			if !ok {
+				refusePrivacyStream()
+				return false
+			}
+			kind, err := privacyStream.Observe(data)
+			if err != nil {
+				refusePrivacyStream()
+				return false
+			}
+			if kind == relayblind.PrivacyStreamFrame {
+				if _, err := w.Write(line); err != nil {
+					slog.Warn("streaming buyer write failed", "request_id", requestID(r), "error", err)
+					poisonDedupeCapture(w)
+					settleCancelled()
+					return false
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+				return true
+			}
+		}
 		if data, ok := sseDataValue(text); ok {
 			if data == "[DONE]" {
 				if wholesale {
@@ -1619,6 +1670,20 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					completion := gatewayContentEstimatedCompletion()
 					s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_malformed", reservationWindow, resp)
 					return false
+				}
+				// Privacy frames have no choices and no clear usage. Forward the
+				// original line and skip the metadata ceiling; ciphertext is not logged.
+				if relayBlindExecutionFor(r) != nil && privacyOpaqueStreamFrame(data) {
+					if _, err := w.Write(line); err != nil {
+						slog.Warn("streaming buyer write failed", "request_id", requestID(r), "error", err)
+						poisonDedupeCapture(w)
+						settleCancelled()
+						return false
+					}
+					if flusher != nil {
+						flusher.Flush()
+					}
+					return true
 				}
 				if relayBlindExecutionFor(r) != nil {
 					data = string(relayBlindUsageMetadataBody(r, []byte(data)))
@@ -1887,6 +1952,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			settleCancelled()
 			return
 		}
+	}
+	if exec := relayBlindExecutionFor(r); exec != nil && exec.Privacy != nil && privacyStream.Complete() != nil {
+		refusePrivacyStream()
+		return
 	}
 	if reported != nil && !invalidReportedUsage {
 		outcome := "ok"

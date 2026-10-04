@@ -22,6 +22,10 @@ final class Tier2ProviderSession: @unchecked Sendable {
         let conversationKey: String?
         let bodyEncoding: String?
         let relayBlindContext: [String: Any]?
+        /// SPEC-049 §4.7. The field lives inside the SPEC-008 plaintext envelope.
+        let privacyClass: String?
+        /// True when `privacy_class` is present and not a string.
+        let privacyClassMalformed: Bool
     }
 
     struct LosslessnessProbePayload {
@@ -222,12 +226,28 @@ final class Tier2ProviderSession: @unchecked Sendable {
         } else {
             maxOutputTokens = nil
         }
+        let privacyClass: String?
+        let privacyClassMalformed: Bool
+        if envelope.keys.contains("privacy_class") {
+            if let value = envelope["privacy_class"] as? String {
+                privacyClass = value
+                privacyClassMalformed = false
+            } else {
+                privacyClass = nil
+                privacyClassMalformed = true
+            }
+        } else {
+            privacyClass = nil
+            privacyClassMalformed = false
+        }
         return RequestPayload(
             body: envelopeBody,
             maxOutputTokens: maxOutputTokens,
             conversationKey: conversationKey?.isEmpty == false ? conversationKey : nil,
             bodyEncoding: envelope["body_encoding"] as? String,
-            relayBlindContext: envelope["relay_blind_context"] as? [String: Any]
+            relayBlindContext: envelope["relay_blind_context"] as? [String: Any],
+            privacyClass: privacyClass,
+            privacyClassMalformed: privacyClassMalformed
         )
     }
 
@@ -411,6 +431,7 @@ final class Tier2ProviderSession: @unchecked Sendable {
         conversationKey: String? = nil,
         bodyEncoding: String? = nil,
         relayBlindContext: [String: Any]? = nil,
+        privacyClass: String? = nil,
         seq: UInt64 = 0
     ) throws -> [String: Any] {
         let aad = Tier2FrameAAD(
@@ -432,6 +453,7 @@ final class Tier2ProviderSession: @unchecked Sendable {
         }
         if let bodyEncoding { plaintextEnvelope["body_encoding"] = bodyEncoding }
         if let relayBlindContext { plaintextEnvelope["relay_blind_context"] = relayBlindContext }
+        if let privacyClass { plaintextEnvelope["privacy_class"] = privacyClass }
         let plaintextData = try JSONSerialization.data(withJSONObject: plaintextEnvelope, options: [.sortedKeys])
         let enc = try sealEnvelope(
             plaintextData,

@@ -103,23 +103,28 @@ type ReservationRequest struct {
 }
 
 type ReservationResponse struct {
-	Version                  string    `json:"version"`
-	ProviderBinding          string    `json:"provider_binding"`
-	BuyerBinding             string    `json:"buyer_binding"`
-	KeyRecordDigest          string    `json:"key_record_digest"`
-	KeyRecord                KeyRecord `json:"key_record"`
-	KID                      string    `json:"kid"`
-	EndpointFamily           string    `json:"endpoint_family"`
-	Model                    string    `json:"model"`
-	ProviderModel            string    `json:"provider_model"`
-	Stream                   bool      `json:"stream"`
-	MaxEncryptedRequestBytes uint64    `json:"max_encrypted_request_bytes"`
-	MaxOutputTokens          int64     `json:"max_output_tokens"`
-	InputTokenUpperBound     int64     `json:"input_token_upper_bound"`
-	ReservationTokenCap      int64     `json:"reservation_token_cap"`
-	ExpiresAtUnix            int64     `json:"expires_at_unix"`
-	CachePolicy              string    `json:"cache_policy"`
-	FailoverPolicy           string    `json:"failover_policy"`
+	Version                        string                 `json:"version"`
+	ProviderBinding                string                 `json:"provider_binding"`
+	BuyerBinding                   string                 `json:"buyer_binding"`
+	KeyRecordDigest                string                 `json:"key_record_digest"`
+	KeyRecord                      KeyRecord              `json:"key_record"`
+	KID                            string                 `json:"kid"`
+	EndpointFamily                 string                 `json:"endpoint_family"`
+	Model                          string                 `json:"model"`
+	ProviderModel                  string                 `json:"provider_model"`
+	Stream                         bool                   `json:"stream"`
+	MaxEncryptedRequestBytes       uint64                 `json:"max_encrypted_request_bytes"`
+	MaxOutputTokens                int64                  `json:"max_output_tokens"`
+	InputTokenUpperBound           int64                  `json:"input_token_upper_bound"`
+	ReservationTokenCap            int64                  `json:"reservation_token_cap"`
+	ExpiresAtUnix                  int64                  `json:"expires_at_unix"`
+	CachePolicy                    string                 `json:"cache_policy"`
+	FailoverPolicy                 string                 `json:"failover_policy"`
+	PrivacyClass                   string                 `json:"privacy_class,omitempty"`
+	PrivacyAssurance               string                 `json:"privacy_assurance,omitempty"`
+	PrivacyKeyAttestation          *PrivacyKeyAttestation `json:"privacy_key_attestation,omitempty"`
+	PrivacyKeyAttestationSignature string                 `json:"privacy_key_attestation_signature,omitempty"`
+	PrivacyPostureVerifiedAtUnix   int64                  `json:"privacy_posture_verified_at_unix,omitempty"`
 }
 
 type ConsumeResponse struct {
@@ -193,14 +198,78 @@ func ParseReservationRequest(raw []byte) (ReservationRequest, error) {
 }
 
 func ParseReservationResponse(raw []byte) (ReservationResponse, error) {
+	version, err := closedObjectVersion(raw)
+	if err != nil {
+		return ReservationResponse{}, fmt.Errorf("%w: %v", ErrInvalidReservation, err)
+	}
+	fields := []string{"version", "provider_binding", "buyer_binding", "key_record_digest", "key_record", "kid", "endpoint_family", "model", "provider_model", "stream", "max_encrypted_request_bytes", "max_output_tokens", "input_token_upper_bound", "reservation_token_cap", "expires_at_unix", "cache_policy", "failover_policy"}
+	switch version {
+	case ReservationVersion:
+	case PrivacyReservationVersion:
+		fields = append(append([]string{}, fields...), "privacy_class", "privacy_assurance", "privacy_key_attestation", "privacy_key_attestation_signature", "privacy_posture_verified_at_unix")
+	default:
+		return ReservationResponse{}, ErrInvalidReservation
+	}
 	var value ReservationResponse
-	if err := decodeClosed(raw, &value, []string{"version", "provider_binding", "buyer_binding", "key_record_digest", "key_record", "kid", "endpoint_family", "model", "provider_model", "stream", "max_encrypted_request_bytes", "max_output_tokens", "input_token_upper_bound", "reservation_token_cap", "expires_at_unix", "cache_policy", "failover_policy"}); err != nil {
+	if err := decodeClosed(raw, &value, fields); err != nil {
 		return value, fmt.Errorf("%w: %v", ErrInvalidReservation, err)
 	}
 	if err := value.Validate(); err != nil {
 		return value, err
 	}
 	return value, nil
+}
+
+func closedObjectVersion(raw []byte) (string, error) {
+	if len(raw) == 0 {
+		return "", ErrInvalidJSON
+	}
+	if err := rejectDuplicateJSONKeys(raw); err != nil {
+		return "", err
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	tok, err := dec.Token()
+	if err != nil || tok != json.Delim('{') {
+		return "", ErrInvalidJSON
+	}
+	var version string
+	var saw bool
+	for dec.More() {
+		tok, err = dec.Token()
+		if err != nil {
+			return "", ErrInvalidJSON
+		}
+		name, ok := tok.(string)
+		if !ok {
+			return "", ErrInvalidJSON
+		}
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return "", ErrInvalidJSON
+		}
+		if name != "version" {
+			continue
+		}
+		if saw || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return "", ErrInvalidJSON
+		}
+		saw = true
+		if err := json.Unmarshal(value, &version); err != nil || version == "" {
+			return "", ErrInvalidJSON
+		}
+	}
+	end, err := dec.Token()
+	if err != nil || end != json.Delim('}') {
+		return "", ErrInvalidJSON
+	}
+	if tok, err := dec.Token(); err != io.EOF || tok != nil {
+		return "", ErrInvalidJSON
+	}
+	if !saw {
+		return "", ErrInvalidJSON
+	}
+	return version, nil
 }
 
 func ParseConsumeResponse(raw []byte) (ConsumeResponse, error) {
@@ -246,7 +315,19 @@ func (r ReservationRequest) Validate() error {
 }
 
 func (r ReservationResponse) Validate() error {
-	if r.Version != ReservationVersion || r.EndpointFamily != EndpointChatCompletions || !validModelID(r.Model) || !validModelID(r.ProviderModel) || r.KID != r.KeyRecord.KID || r.KeyRecordDigest != r.KeyRecord.KeyRecordDigest || r.MaxEncryptedRequestBytes == 0 || r.MaxEncryptedRequestBytes > r.KeyRecord.MaxEncryptedRequestBytes || r.ExpiresAtUnix <= 0 || r.CachePolicy != CachePolicyNoStore || r.FailoverPolicy != FailoverPolicyDisabled {
+	switch r.Version {
+	case ReservationVersion:
+		if r.privacyExtensionPresent() {
+			return ErrInvalidReservation
+		}
+	case PrivacyReservationVersion:
+		if err := r.validatePrivacyExtension(); err != nil {
+			return err
+		}
+	default:
+		return ErrInvalidReservation
+	}
+	if r.EndpointFamily != EndpointChatCompletions || !validModelID(r.Model) || !validModelID(r.ProviderModel) || r.KID != r.KeyRecord.KID || r.KeyRecordDigest != r.KeyRecord.KeyRecordDigest || r.MaxEncryptedRequestBytes == 0 || r.MaxEncryptedRequestBytes > r.KeyRecord.MaxEncryptedRequestBytes || r.ExpiresAtUnix <= 0 || r.CachePolicy != CachePolicyNoStore || r.FailoverPolicy != FailoverPolicyDisabled {
 		return ErrInvalidReservation
 	}
 	if _, err := decodeBase64URLFixed(r.ProviderBinding, 32); err != nil {

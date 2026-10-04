@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,19 +33,25 @@ var (
 )
 
 type swiftRelayDescriptor struct {
-	Type                  string         `json:"type"`
-	Version               string         `json:"version"`
-	BodyEncoding          string         `json:"body_encoding"`
-	AssignedSession       string         `json:"assigned_session"`
-	IdentityPublicKey     string         `json:"identity_public_key"`
-	KeyRecord             map[string]any `json:"relay_blind_key_record"`
-	ContinuousBatchReplay bool           `json:"continuous_batch_replay"`
-	ProviderID            string         `json:"provider_id"`
-	ModelID               string         `json:"model_id"`
-	ModelHash             string         `json:"model_hash"`
-	ReceiptPublicKey      string         `json:"provider_receipt_public_key"`
-	ReceiptKeyID          string         `json:"provider_receipt_key_id"`
-	ReplayStore           string         `json:"replay_store"`
+	Type                  string            `json:"type"`
+	Version               string            `json:"version"`
+	BodyEncoding          string            `json:"body_encoding"`
+	AssignedSession       string            `json:"assigned_session"`
+	IdentityPublicKey     string            `json:"identity_public_key"`
+	KeyRecord             map[string]any    `json:"relay_blind_key_record"`
+	ContinuousBatchReplay bool              `json:"continuous_batch_replay"`
+	ProviderID            string            `json:"provider_id"`
+	ModelID               string            `json:"model_id"`
+	ModelHash             string            `json:"model_hash"`
+	ReceiptPublicKey      string            `json:"provider_receipt_public_key"`
+	ReceiptKeyID          string            `json:"provider_receipt_key_id"`
+	ReplayStore           string            `json:"replay_store"`
+	SEPublicKey           string            `json:"se_public_key"`
+	CodeCDHash            string            `json:"code_cdhash"`
+	TeamID                string            `json:"team_id"`
+	SigningIdentifier     string            `json:"signing_identifier"`
+	BinaryVersion         string            `json:"binary_version"`
+	PrivacyKeyRecords     []json.RawMessage `json:"privacy_key_records"`
 }
 
 type swiftRelayFixture struct {
@@ -58,6 +65,18 @@ type swiftRelayFixture struct {
 	model             string
 	streamDelayMS     int
 	crashReplayResult chan error
+	privacyClass      bool
+	privacyProviderID string
+	privacyCDHash     string
+	privacyTraced     bool
+	privacyCompletion string
+	omitPrivacyKeys   bool
+	holdPosture       atomic.Bool
+	dispatches        atomic.Int32
+	postureReady      chan struct{}
+	postureOnce       sync.Once
+	stdoutLog         *logBuffer
+	stderrLog         *logBuffer
 }
 
 func buildSwiftRelayBinary(t *testing.T) string {
@@ -113,6 +132,35 @@ func startSwiftRelayFixtureWithDelay(t *testing.T, stateDir, model string, strea
 	return fixture
 }
 
+func startSwiftPrivacyFixture(t *testing.T, stateDir, model string, privacy swiftPrivacyFixtureOpts) *swiftRelayFixture {
+	t.Helper()
+	fixture := &swiftRelayFixture{
+		t:                 t,
+		stateDir:          stateDir,
+		model:             model,
+		privacyClass:      true,
+		privacyProviderID: privacy.ProviderID,
+		privacyCDHash:     privacy.CDHash,
+		privacyTraced:     privacy.Traced,
+		privacyCompletion: privacy.Completion,
+		omitPrivacyKeys:   privacy.OmitKeys,
+		postureReady:      make(chan struct{}),
+		stdoutLog:         newLogBuffer(),
+		stderrLog:         newLogBuffer(),
+	}
+	fixture.start("")
+	t.Cleanup(fixture.stop)
+	return fixture
+}
+
+type swiftPrivacyFixtureOpts struct {
+	ProviderID string
+	CDHash     string
+	Traced     bool
+	Completion string
+	OmitKeys   bool
+}
+
 func startSwiftContinuousBatchReplayFixture(t *testing.T, stateDir, model string) *swiftRelayFixture {
 	t.Helper()
 	fixture := &swiftRelayFixture{t: t, stateDir: stateDir, model: model}
@@ -137,6 +185,18 @@ func (f *swiftRelayFixture) startWithMode(assignedSession string, continuousBatc
 	if continuousBatchReplay {
 		args = append(args, "--continuous-batch-replay")
 	}
+	if f.privacyClass {
+		args = append(args, "--privacy-class", "--provider-id", f.privacyProviderID)
+		if f.privacyCDHash != "" {
+			args = append(args, "--privacy-fixture-cdhash", f.privacyCDHash)
+		}
+		if f.privacyTraced {
+			args = append(args, "--privacy-fixture-traced")
+		}
+		if f.privacyCompletion != "" {
+			args = append(args, "--privacy-fixture-completion", f.privacyCompletion)
+		}
+	}
 	cmd := exec.Command(buildSwiftRelayBinary(f.t), args...)
 	cmd.Env = append(os.Environ(), "MACPROVIDER_ALLOW_TEST_FIXTURES=1")
 	stdin, err := cmd.StdinPipe()
@@ -154,26 +214,116 @@ func (f *swiftRelayFixture) startWithMode(assignedSession string, continuousBatc
 	if err := cmd.Start(); err != nil {
 		f.t.Fatalf("start Swift relay fixture: %v", err)
 	}
-	go pumpLogs(f.t, "swift-relay.err", stderr, nil)
+	if f.stderrLog == nil {
+		f.stderrLog = newLogBuffer()
+	}
+	go pumpLogs(f.t, "swift-relay.err", stderr, f.stderrLog)
 	scanner := bufio.NewScanner(stdoutPipe)
 	scanner.Buffer(make([]byte, 64<<10), 2<<20)
 	if !scanner.Scan() {
 		_ = cmd.Process.Kill()
 		f.t.Fatalf("Swift relay fixture produced no descriptor: %v", scanner.Err())
 	}
+	descriptorLine := append([]byte(nil), scanner.Bytes()...)
+	f.noteStdout(descriptorLine)
 	var descriptor swiftRelayDescriptor
-	if err := json.Unmarshal(scanner.Bytes(), &descriptor); err != nil {
+	if err := json.Unmarshal(descriptorLine, &descriptor); err != nil {
 		_ = cmd.Process.Kill()
-		f.t.Fatalf("decode Swift relay descriptor: %v: %s", err, scanner.Bytes())
+		f.t.Fatalf("decode Swift relay descriptor: %v", err)
 	}
 	if descriptor.Type != "relay_blind_fixture_descriptor" || descriptor.Version != "relay-blind-request-v1" || descriptor.BodyEncoding != "relay-blind-request-v1" || descriptor.AssignedSession == "" || descriptor.IdentityPublicKey == "" || len(descriptor.KeyRecord) == 0 {
 		_ = cmd.Process.Kill()
-		f.t.Fatalf("invalid Swift relay descriptor: %+v", descriptor)
+		f.t.Fatal("invalid Swift relay descriptor")
+	}
+	if f.privacyClass && (descriptor.SEPublicKey == "" || descriptor.CodeCDHash == "" || descriptor.TeamID == "" || descriptor.SigningIdentifier == "" || descriptor.ProviderID != f.privacyProviderID) {
+		_ = cmd.Process.Kill()
+		f.t.Fatal("invalid Swift privacy fixture descriptor")
+	}
+	if f.privacyClass && !f.privacyTraced && !f.omitPrivacyKeys && len(descriptor.PrivacyKeyRecords) == 0 {
+		_ = cmd.Process.Kill()
+		f.t.Fatal("Swift privacy fixture advertised no privacy key records")
 	}
 	f.cmd = cmd
 	f.stdin = stdin
 	f.stdout = scanner
 	f.descriptor = descriptor
+}
+
+func (f *swiftRelayFixture) noteStdout(line []byte) {
+	if f.stdoutLog == nil {
+		f.stdoutLog = newLogBuffer()
+	}
+	f.stdoutLog.append(string(line))
+}
+
+func (f *swiftRelayFixture) notePosture() {
+	if f.postureReady == nil {
+		return
+	}
+	f.postureOnce.Do(func() { close(f.postureReady) })
+}
+
+func (f *swiftRelayFixture) waitPosture(timeout time.Duration) {
+	f.t.Helper()
+	if f.postureReady == nil {
+		f.t.Fatal("privacy posture was not armed")
+	}
+	select {
+	case <-f.postureReady:
+	case <-time.After(timeout):
+		f.t.Fatal("timed out waiting for a verified privacy posture")
+	}
+}
+
+func (f *swiftRelayFixture) privacyKeyRecords() []any {
+	if !f.privacyClass || f.omitPrivacyKeys || len(f.descriptor.PrivacyKeyRecords) == 0 {
+		return nil
+	}
+	out := make([]any, 0, len(f.descriptor.PrivacyKeyRecords))
+	for _, raw := range f.descriptor.PrivacyKeyRecords {
+		var value any
+		if err := json.Unmarshal(raw, &value); err != nil {
+			f.t.Fatalf("decode privacy key record: %v", err)
+		}
+		out = append(out, value)
+	}
+	return out
+}
+
+func (f *swiftRelayFixture) exchangeLine(raw []byte) ([]byte, error) {
+	f.inputMu.Lock()
+	defer f.inputMu.Unlock()
+	if _, err := f.stdin.Write(append(append([]byte(nil), raw...), '\n')); err != nil {
+		return nil, err
+	}
+	if !f.stdout.Scan() {
+		return nil, fmt.Errorf("Swift relay fixture output closed: %v", f.stdout.Err())
+	}
+	line := append([]byte(nil), f.stdout.Bytes()...)
+	f.noteStdout(line)
+	return line, nil
+}
+
+func (f *swiftRelayFixture) adoptAssignedSession(session string) {
+	f.t.Helper()
+	raw, err := json.Marshal(map[string]any{
+		"type":             "relay_fixture_assigned_session",
+		"assigned_session": session,
+	})
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	line, err := f.exchangeLine(raw)
+	if err != nil {
+		f.t.Fatalf("adopt Swift privacy assigned session: %v", err)
+	}
+	var ack struct {
+		Type            string `json:"type"`
+		AssignedSession string `json:"assigned_session"`
+	}
+	if err := json.Unmarshal(line, &ack); err != nil || ack.Type != "relay_fixture_assigned_session_ack" || ack.AssignedSession != session {
+		f.t.Fatal("Swift privacy fixture rejected the assigned session")
+	}
 }
 
 func (f *swiftRelayFixture) reconnectRelayBoundary() {
@@ -468,6 +618,7 @@ func (f *swiftRelayFixture) serveFrameUntil(raw []byte, send func([]byte) error,
 	}
 	for f.stdout.Scan() {
 		line := append([]byte(nil), f.stdout.Bytes()...)
+		f.noteStdout(line)
 		var header struct {
 			Type string `json:"type"`
 		}
@@ -537,25 +688,41 @@ func connectSwiftRelayProviderWithFaultSignal(t *testing.T, ctx context.Context,
 		"throughput_tps_estimate": 20.0,
 		"binary_version":          "relay-blind-local-fixture",
 		"attestation":             nil,
-		"relay_blind_key_records": []any{fixture.descriptor.KeyRecord},
+	}
+	if records := fixture.privacyKeyRecords(); len(records) > 0 {
+		// The same kid cannot be relay-blind and privacy. Production privacy
+		// mode omits relay_blind_key_records; a second class is rejected.
+		hello["privacy_key_records"] = records
+	} else {
+		hello["relay_blind_key_records"] = []any{fixture.descriptor.KeyRecord}
 	}
 	rawHello, _ := json.Marshal(hello)
 	if err := send(rawHello); err != nil {
 		t.Fatalf("send Swift provider hello: %v", err)
 	}
-	ackRaw, _, err := wsutil.ReadServerData(conn)
-	if err != nil {
-		t.Fatalf("read Swift provider hello ack: %v", err)
-	}
+	ackRaw, challenges := readSwiftProviderHello(t, conn, fixture.privacyClass)
 	var ack struct {
 		AssignedID string `json:"assigned_id"`
 	}
 	if err := json.Unmarshal(ackRaw, &ack); err != nil || ack.AssignedID == "" {
-		t.Fatalf("decode Swift provider hello ack: %v: %s", err, ackRaw)
+		t.Fatal("decode Swift provider hello ack")
 	}
-	fixture.restartForAssignedSession(ack.AssignedID)
+	if fixture.privacyClass {
+		fixture.adoptAssignedSession(ack.AssignedID)
+		for _, challenge := range challenges {
+			if err := answerSwiftPrivacyChallenge(fixture, challenge, send); err != nil {
+				t.Fatalf("Swift privacy posture exchange: %v", err)
+			}
+		}
+	} else {
+		fixture.restartForAssignedSession(ack.AssignedID)
+	}
 	ready := readyStateUpdate(defaultFakeModelID, "")
-	ready["relay_blind_key_records"] = []any{fixture.descriptor.KeyRecord}
+	if records := fixture.privacyKeyRecords(); len(records) > 0 {
+		ready["privacy_key_records"] = records
+	} else {
+		ready["relay_blind_key_records"] = []any{fixture.descriptor.KeyRecord}
+	}
 	rawReady, _ := json.Marshal(ready)
 	if err := send(rawReady); err != nil {
 		t.Fatalf("send Swift provider ready: %v", err)
@@ -570,9 +737,23 @@ func connectSwiftRelayProviderWithFaultSignal(t *testing.T, ctx context.Context,
 			var header struct {
 				Type string `json:"type"`
 			}
-			if json.Unmarshal(raw, &header) != nil || header.Type != "inference_request" {
+			if json.Unmarshal(raw, &header) != nil {
 				continue
 			}
+			if header.Type == "privacy_posture_challenge" && fixture.privacyClass {
+				if fixture.holdPosture.Load() {
+					continue
+				}
+				if err := answerSwiftPrivacyChallenge(fixture, raw, send); err != nil && ctx.Err() == nil {
+					t.Errorf("Swift privacy posture exchange: %v", err)
+					return
+				}
+				continue
+			}
+			if header.Type != "inference_request" {
+				continue
+			}
+			fixture.dispatches.Add(1)
 			if fault == "disconnect_before_dispatch" {
 				_ = conn.Close()
 				return
@@ -627,7 +808,11 @@ func connectSwiftRelayProviderWithFaultSignal(t *testing.T, ctx context.Context,
 					"max_concurrency": 1, "slots_free": 1, "slots_total": 1,
 					"throughput_tps_estimate": 20.0, "requests_served_since_last": 0,
 					"avg_latency_ms_since_last": 0.0, "throughput_tps_since_last": 0.0,
-					"relay_blind_key_records": []any{fixture.descriptor.KeyRecord},
+				}
+				if records := fixture.privacyKeyRecords(); len(records) > 0 {
+					hb["privacy_key_records"] = records
+				} else {
+					hb["relay_blind_key_records"] = []any{fixture.descriptor.KeyRecord}
 				}
 				raw, _ := json.Marshal(hb)
 				if send(raw) != nil {
@@ -637,6 +822,59 @@ func connectSwiftRelayProviderWithFaultSignal(t *testing.T, ctx context.Context,
 		}
 	}()
 	return func() { _ = conn.Close() }
+}
+
+func readSwiftProviderHello(t *testing.T, conn net.Conn, bufferChallenges bool) ([]byte, [][]byte) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	var challenges [][]byte
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			t.Fatal("timed out waiting for Swift provider hello ack")
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(remaining))
+		raw, _, err := wsutil.ReadServerData(conn)
+		_ = conn.SetReadDeadline(time.Time{})
+		if err != nil {
+			t.Fatalf("read Swift provider hello ack: %v", err)
+		}
+		var header struct {
+			Type       string `json:"type"`
+			AssignedID string `json:"assigned_id"`
+		}
+		if json.Unmarshal(raw, &header) != nil {
+			t.Fatal("decode Swift provider frame before hello ack")
+		}
+		if header.Type == "hello_ack" || header.AssignedID != "" {
+			return append([]byte(nil), raw...), challenges
+		}
+		if bufferChallenges && header.Type == "privacy_posture_challenge" {
+			challenges = append(challenges, append([]byte(nil), raw...))
+			continue
+		}
+		t.Fatalf("unexpected Swift provider frame before hello ack: %s", header.Type)
+	}
+}
+
+func answerSwiftPrivacyChallenge(fixture *swiftRelayFixture, raw []byte, send func([]byte) error) error {
+	if fixture.holdPosture.Load() {
+		return nil
+	}
+	line, err := fixture.exchangeLine(raw)
+	if err != nil {
+		return err
+	}
+	if err := send(line); err != nil {
+		return err
+	}
+	var header struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(line, &header) == nil && header.Type == "privacy_posture_response" {
+		fixture.notePosture()
+	}
+	return nil
 }
 
 func validateSwiftCrashReplay(frames [][]byte) error {

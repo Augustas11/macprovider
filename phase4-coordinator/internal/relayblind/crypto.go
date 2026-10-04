@@ -336,6 +336,10 @@ func (e Envelope) Decrypt(providerPrivateKey []byte) ([]byte, error) {
 	return plaintext, nil
 }
 
+func transcriptDigest(aad []byte) [32]byte {
+	return sha256.Sum256(append([]byte(transcriptDomain), aad...))
+}
+
 func deriveAEAD(privateKey *ecdh.PrivateKey, peer *ecdh.PublicKey, aad []byte) (cipher.AEAD, []byte, error) {
 	shared, err := privateKey.ECDH(peer)
 	if err != nil {
@@ -345,8 +349,7 @@ func deriveAEAD(privateKey *ecdh.PrivateKey, peer *ecdh.PublicKey, aad []byte) (
 	if len(shared) != len(zero) || subtle.ConstantTimeCompare(shared, zero[:]) == 1 {
 		return nil, nil, fmt.Errorf("%w: all-zero X25519 shared secret", ErrInvalidEnvelope)
 	}
-	transcriptInput := append([]byte(transcriptDomain), aad...)
-	transcript := sha256.Sum256(transcriptInput)
+	transcript := transcriptDigest(aad)
 	key, err := hkdf.Key(sha256.New, shared, transcript[:], requestKeyInfo, 32)
 	if err != nil {
 		return nil, nil, err

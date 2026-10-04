@@ -239,6 +239,10 @@ public struct AppConfig: Equatable, Sendable {
     public var enableWarmSwap: Bool
     public var enableReceipts: Bool
     public var relayBlindEnabled: Bool
+    /// SPEC-049-R001. Default off. YAML `privacy_class_beta`, env
+    /// `MACPROVIDER_PRIVACY_CLASS_BETA`, CLI `--privacy-class-beta`.
+    /// On while relay-blind is off fails configuration validation.
+    public var privacyClassBeta: Bool
     public var relayBlindStateDirectory: String?
     public var swapDrainTimeoutSeconds: Int
     public var ctlSocketPath: String?
@@ -382,6 +386,7 @@ public struct AppConfig: Equatable, Sendable {
             enableWarmSwap: false,
             enableReceipts: false,
             relayBlindEnabled: false,
+            privacyClassBeta: false,
             relayBlindStateDirectory: nil,
             swapDrainTimeoutSeconds: 30,
             ctlSocketPath: nil,
@@ -433,6 +438,7 @@ public struct CLIOverrides: Equatable, Sendable {
     public var enableWarmSwap: Bool?
     public var enableReceipts: Bool?
     public var relayBlindEnabled: Bool?
+    public var privacyClassBeta: Bool?
     public var relayBlindStateDirectory: String?
     public var swapDrainTimeoutSeconds: Int?
     public var ctlSocketPath: String?
@@ -485,6 +491,7 @@ public struct CLIOverrides: Equatable, Sendable {
         enableWarmSwap: Bool? = nil,
         enableReceipts: Bool? = nil,
         relayBlindEnabled: Bool? = nil,
+        privacyClassBeta: Bool? = nil,
         relayBlindStateDirectory: String? = nil,
         swapDrainTimeoutSeconds: Int? = nil,
         ctlSocketPath: String? = nil,
@@ -531,6 +538,7 @@ public struct CLIOverrides: Equatable, Sendable {
         self.enableWarmSwap = enableWarmSwap
         self.enableReceipts = enableReceipts
         self.relayBlindEnabled = relayBlindEnabled
+        self.privacyClassBeta = privacyClassBeta
         self.relayBlindStateDirectory = relayBlindStateDirectory
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.ctlSocketPath = ctlSocketPath
@@ -578,11 +586,16 @@ public enum ConfigError: Error, CustomStringConvertible, Equatable {
 }
 
 public enum ConfigLoader {
+    /// `resolveCredentials: false` is the SPEC-049-R007 non-secret bootstrap:
+    /// it resolves every other key with the same precedence but never assigns
+    /// `providerToken` from YAML `provider_token`, `MACPROVIDER_PROVIDER_TOKEN`,
+    /// or `--token-file`, and never opens the token file.
     public static func load(
         cli: CLIOverrides,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: expandTilde($0)) },
-        readFile: (String) throws -> String = { try String(contentsOfFile: expandTilde($0), encoding: .utf8) }
+        readFile: (String) throws -> String = { try String(contentsOfFile: expandTilde($0), encoding: .utf8) },
+        resolveCredentials: Bool = true
     ) throws -> AppConfig {
         let configPath = cli.configPath
             ?? environment["MACPROVIDER_CONFIG"]
@@ -591,13 +604,13 @@ public enum ConfigLoader {
 
         var config = AppConfig.defaults(configPath: configPath)
         if fileExists(configPath) {
-            config = try applyYAMLConfig(config, path: configPath, readFile: readFile)
+            config = try applyYAMLConfig(config, path: configPath, readFile: readFile, resolveCredentials: resolveCredentials)
         } else if explicitConfigPath {
             throw ConfigError.unreadableConfig(path: configPath, underlying: "file does not exist")
         }
 
-        config = try applyEnvironment(config, environment: environment)
-        config = try applyCLI(config, cli: cli)
+        config = try applyEnvironment(config, environment: environment, resolveCredentials: resolveCredentials)
+        config = try applyCLI(config, cli: cli, resolveCredentials: resolveCredentials)
         config.configPath = configPath
         try validateIdlePrewarm(config)
 
@@ -635,8 +648,21 @@ public enum ConfigLoader {
             config.pagedKV.enabled = false
             config.pagedKV.errors.append("invalid paged_kv=<redacted>; expected map; paged_kv disabled")
         }
-
+        try validatePrivacyClass(config)
         return config
+    }
+
+    /// SPEC-049-R001. Privacy class on with relay-blind off is a configuration
+    /// error. The hardening probe refuses the same combination again before
+    /// any network, with a bounded reason code.
+    private static func validatePrivacyClass(_ config: AppConfig) throws {
+        if config.privacyClassBeta && !config.relayBlindEnabled {
+            throw ConfigError.invalidValue(
+                key: "privacy_class_beta",
+                value: "true",
+                expected: "relay_blind_enabled true"
+            )
+        }
     }
 
     public static func expandTilde(_ path: String) -> String {
@@ -653,7 +679,8 @@ public enum ConfigLoader {
     private static func applyYAMLConfig(
         _ base: AppConfig,
         path: String,
-        readFile: (String) throws -> String
+        readFile: (String) throws -> String,
+        resolveCredentials: Bool
     ) throws -> AppConfig {
         let text: String
         do {
@@ -737,6 +764,7 @@ public enum ConfigLoader {
         try assign(&config.enableWarmSwap, from: dict, key: "enable_warm_swap", expected: "boolean")
         try assign(&config.enableReceipts, from: dict, key: "enable_receipts", expected: "boolean")
         try assign(&config.relayBlindEnabled, from: dict, key: "relay_blind_enabled", expected: "boolean")
+        try assign(&config.privacyClassBeta, from: dict, key: "privacy_class_beta", expected: "boolean")
         try assign(&config.relayBlindStateDirectory, from: dict, key: "relay_blind_state_directory", expected: "absolute string")
         try assign(&config.swapDrainTimeoutSeconds, from: dict, key: "swap_drain_timeout_s", expected: "integer")
         try assign(&config.ctlSocketPath, from: dict, key: "ctl_socket_path", expected: "string")
@@ -750,7 +778,9 @@ public enum ConfigLoader {
             try assign(&config.idlePrewarmPrompt, from: nested, key: "prompt", expected: "string")
             try assign(&config.idlePrewarmRunOnBattery, from: nested, key: "run_on_battery", expected: "boolean")
         }
-        try assign(&config.providerToken, from: dict, key: "provider_token", expected: "string")
+        if resolveCredentials {
+            try assign(&config.providerToken, from: dict, key: "provider_token", expected: "string")
+        }
         if dict["credential_store"] != nil {
             guard let raw = rawNode?["credential_store"]?.scalar?.string,
                   let kind = ProviderCredentialStoreKind(rawValue: raw.lowercased()) else {
@@ -916,7 +946,8 @@ public enum ConfigLoader {
 
     private static func applyEnvironment(
         _ base: AppConfig,
-        environment: [String: String]
+        environment: [String: String],
+        resolveCredentials: Bool
     ) throws -> AppConfig {
         var config = base
         try assign(&config.port, from: environment, env: "MACPROVIDER_PORT", expected: "integer")
@@ -956,6 +987,7 @@ public enum ConfigLoader {
         try assign(&config.enableWarmSwap, from: environment, env: "MACPROVIDER_ENABLE_WARM_SWAP", expected: "boolean")
         try assign(&config.enableReceipts, from: environment, env: "MACPROVIDER_ENABLE_RECEIPTS", expected: "boolean")
         try assign(&config.relayBlindEnabled, from: environment, env: "MACPROVIDER_RELAY_BLIND_ENABLED", expected: "boolean")
+        try assign(&config.privacyClassBeta, from: environment, env: "MACPROVIDER_PRIVACY_CLASS_BETA", expected: "boolean")
         try assign(&config.relayBlindStateDirectory, from: environment, env: "MACPROVIDER_RELAY_BLIND_STATE_DIRECTORY", expected: "absolute string")
         try assign(&config.swapDrainTimeoutSeconds, from: environment, env: "MACPROVIDER_SWAP_DRAIN_TIMEOUT_S", expected: "integer")
         try assign(&config.ctlSocketPath, from: environment, env: "MACPROVIDER_CTL_SOCKET_PATH", expected: "string")
@@ -967,7 +999,9 @@ public enum ConfigLoader {
         try assign(&config.idlePrewarmMaxTokens, from: environment, env: "MACPROVIDER_IDLE_PREWARM_MAX_TOKENS", expected: "integer")
         try assign(&config.idlePrewarmPrompt, from: environment, env: "MACPROVIDER_IDLE_PREWARM_PROMPT", expected: "string")
         try assign(&config.idlePrewarmRunOnBattery, from: environment, env: "MACPROVIDER_IDLE_PREWARM_ON_BATTERY", expected: "boolean")
-        try assign(&config.providerToken, from: environment, env: "MACPROVIDER_PROVIDER_TOKEN", expected: "string")
+        if resolveCredentials {
+            try assign(&config.providerToken, from: environment, env: "MACPROVIDER_PROVIDER_TOKEN", expected: "string")
+        }
         if let raw = environment["MACPROVIDER_CREDENTIAL_STORE"] {
             guard let kind = ProviderCredentialStoreKind(rawValue: raw.lowercased()) else {
                 throw ConfigError.invalidValue(
@@ -1008,7 +1042,7 @@ public enum ConfigLoader {
         return config
     }
 
-    private static func applyCLI(_ base: AppConfig, cli: CLIOverrides) throws -> AppConfig {
+    private static func applyCLI(_ base: AppConfig, cli: CLIOverrides, resolveCredentials: Bool) throws -> AppConfig {
         var config = base
         if let port = cli.port {
             config.port = port
@@ -1109,6 +1143,9 @@ public enum ConfigLoader {
         if let relayBlindEnabled = cli.relayBlindEnabled {
             config.relayBlindEnabled = relayBlindEnabled
         }
+        if let privacyClassBeta = cli.privacyClassBeta {
+            config.privacyClassBeta = privacyClassBeta
+        }
         if let relayBlindStateDirectory = cli.relayBlindStateDirectory {
             config.relayBlindStateDirectory = relayBlindStateDirectory
         }
@@ -1128,7 +1165,7 @@ public enum ConfigLoader {
                 expected: "use MACPROVIDER_PROVIDER_TOKEN, provider_token in a 0600 config file, or --token-file"
             )
         }
-        if let providerTokenFile = cli.providerTokenFile {
+        if resolveCredentials, let providerTokenFile = cli.providerTokenFile {
             config.providerToken = try readProviderTokenFile(providerTokenFile)
         }
         if let raw = cli.credentialStore {

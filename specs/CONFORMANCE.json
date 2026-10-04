@@ -1204,7 +1204,7 @@
     {
       "spec_id": "SPEC-041",
       "title": "Relay-Blind Request Encryption",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "path": "specs/SPEC-041-relay-blind-request-encryption.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1233,7 +1233,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/928",
-        "rationale": "The complete default-off global-pool pilot contract is reconciled in SPEC-041 v0.2.0. Existing gateway admission-only implementation remains partial; provider identity/key lifecycle, buyer pins, reservations/consume, opaque dispatch, provider execution journal, ordinary settlement integration, truthful success disclosure, recovery, signed journeys, and five-lane audit remain pending. No conformance or production promotion is made by this amendment."
+        "rationale": "The default-off global-pool pilot is implemented locally across provider, coordinator, gateway, and reference client with mapped unit and integration tests (see audits/privacy-pool-v01-implementation.md). Independently trusted signed deployment journey evidence and readiness reconciliation remain pending; every requirement stays pending. Ephemeral local test signatures do not promote conformance, and production remains disabled."
       }
     },
     {
@@ -1515,6 +1515,40 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
         "rationale": "Issue #1770 requires a native target-local MTP path, independent MXFP8 qualification, multi-row serving semantics, signed admission evidence, and real Apple-Silicon validation. No production implementation or signed journey evidence exists yet."
+      }
+    },
+    {
+      "spec_id": "SPEC-049",
+      "title": "Operator-Constrained Privacy Class",
+      "version": "0.1.0",
+      "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "operator-constrained-privacy-class"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-002",
+        "SPEC-006",
+        "SPEC-008",
+        "SPEC-015",
+        "SPEC-022",
+        "SPEC-041",
+        "SPEC-042"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "not-deployed",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "complete",
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "SPEC-049 v0.1.0 defines the default-off Beta operator-constrained privacy class. It is implemented locally, default-off in every component, with unit and integration tests. The signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence (SPEC-049-R023), the staged canary, and promotion remain pending; every requirement stays pending. No conformance or production promotion is made."
       }
     }
   ],
@@ -10372,6 +10406,553 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
         "rationale": "No signed native-path greedy integrity challenge or fail-closed canary adapter exists."
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R001",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/config/config.go:PrivacyClassConfig",
+        "phase4-coordinator/internal/config/config.go:validatePrivacyClass",
+        "phase5-gateway/internal/config/config.go:PrivacyClassConfig",
+        "phase5-gateway/internal/config/config.go:validatePrivacyClassConfig",
+        "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:privacyClassBeta"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/config/privacy_class_test.go:TestPrivacyClassDefaultOff",
+        "phase5-gateway/internal/config/config_test.go:TestPrivacyClassDefaultOff",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testDefaultsOff"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R002",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/cmd/relay-blind-client/main.go:privacyScope",
+        "phase5-gateway/cmd/relay-blind-client/main.go:privacyResidualRisks",
+        "phase5-gateway/internal/router/privacy_class.go:privacyScope",
+        "phase5-gateway/internal/router/privacy_class.go:privacyResidualRisks"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/privacy_class_test.go:TestPrivacyUsageMetadataExactStrings",
+        "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientDecryptsStreamAndNonStream",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testIdentityDocumentIsPublicMaterialOnly"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R003",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/relayblind/privacy.go:PostureStatement",
+        "phase4-coordinator/internal/relayblind/privacy.go:ParsePostureStatement",
+        "phase3-binary/Sources/macprovider-cli/PrivacyClass.swift:PrivacyPostureStatement"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyClassCryptoTests.swift:testPostureFramingMatchesGo",
+        "phase4-coordinator/internal/ws/privacy_posture_test.go:TestPrivacyPostureProbeRoundTrip"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R004",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:VerifyPosture",
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:verifySEPosture",
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:verifyIdentityPosture"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/relayblind/privacy_test.go:TestPrivacyKeyAttestationBindsDigest",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyClassCryptoTests.swift:testKeyAttestationMatchesGo"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R005",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/ws/privacy_posture.go:runPrivacyPostureProbe",
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:BeginChallenge",
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:NoteChallengeTimeout",
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:Eligible"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/ws/privacy_posture_test.go:TestPrivacyPostureProbeRoundTrip"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R006",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:identityMatches",
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:codeApproved",
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:requiredPosture"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/config/privacy_class_test.go:TestPrivacyClassValidation",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testEachRequiredFlagFalseFailsWithReason",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testUnsignedBuildFailsCodeIdentity"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R007",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/PrivacyRuntimeHardening.swift:PrivacyRuntimeHardening"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testFakeProbeAllGreenPasses",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testTraceEnvRefused",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testLoopbackAndDiskTierRefused"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R008",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:AcceptPrivacyKeys",
+        "phase4-coordinator/internal/relayblind/privacy.go:PrivacyKeyAttestation",
+        "phase3-binary/Sources/macprovider-cli/RelayBlindProvider.swift:RelayBlindKeyManager"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/relayblind/privacy_test.go:TestPrivacyKeyAttestationBindsDigest",
+        "phase4-coordinator/internal/buyer/privacy_class_test.go:TestPrivacyReservationNeverSelectsRelayBlindKey",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyClassCryptoTests.swift:testMemoryOnlyKeyManagerWritesNoAgreementKey"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R009",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:emitPrivacyClosing"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/InferenceRelayPrivacyTests.swift:testPrivacyStreamFramesDecryptWithGoldenBuyerKeyAndEndWithFinalThenClearUsage",
+        "phase3-binary/Tests/macprovider-cliTests/InferenceRelayPrivacyTests.swift:testPrivacyNonStreamResponseShape"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R010",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/KVDiskTier.swift:persists",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:allowsConversationCacheLease"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/InferenceRelayPrivacyTests.swift:testNoReceiptNoTelemetryNoConversationCache",
+        "test/integration/privacy_class_integration_test.go:TestPrivacyClassRedactionNoCanaryInAnyArtifact"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R011",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/cmd/relay-blind-client/main.go:zeroBytes",
+        "phase3-binary/Sources/macprovider-cli/PrivacyClass.swift:derive",
+        "phase3-binary/Sources/macprovider-cli/PrivacyClass.swift:seal"
+      ],
+      "tests": [
+        "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientDecryptsStreamAndNonStream",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyClassCryptoTests.swift:testSealerSequenceAndFinal"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R012",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/buyer/privacy_class.go:privacyRequested",
+        "phase5-gateway/internal/router/privacy_class.go:privacyRequested",
+        "phase5-gateway/internal/router/relay_blind.go:rejectRelayBlindEnvelopeIfRequired"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/privacy_class_test.go:TestPrivacyHeaderWithPlaintextBodyRejected",
+        "phase4-coordinator/internal/buyer/privacy_class_test.go:TestPrivacyHeaderStrippedAtConsumeIsDowngrade",
+        "phase4-coordinator/internal/buyer/privacy_class_test.go:TestPrivacyHeaderInjectedOnRelayBlindIsDowngrade",
+        "test/integration/privacy_class_integration_test.go:TestPrivacyClassAdversarial"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R013",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/buyer/privacy_class.go:privacyGate",
+        "phase4-coordinator/internal/buyer/privacy_class.go:selectPrivacyProvider",
+        "phase4-coordinator/internal/buyer/privacy_class.go:handlePrivacyClassReservation"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/privacy_class_test.go:TestPrivacyReservationRequiresEligibleProvider",
+        "test/integration/privacy_class_integration_test.go:TestPrivacyClassSwiftProviderStreamEndToEnd",
+        "test/integration/privacy_class_integration_test.go:TestPrivacyClassSwiftProviderNonstreamEndToEnd"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R014",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/relayblind/privacy.go:SealFrame",
+        "phase4-coordinator/internal/relayblind/privacy.go:OpenFrame",
+        "phase5-gateway/internal/relayblind/privacy.go:SealFrame",
+        "phase5-gateway/internal/relayblind/privacy.go:OpenFrame"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/relayblind/privacy_test.go:TestPrivacyFrameTamperSeqReorderTruncate",
+        "phase5-gateway/internal/relayblind/privacy_test.go:TestPrivacyFrameTamperSeqReorderTruncate"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R015",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/router/relay_blind_success.go:dispatchRelayBlindChat"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/privacy_class_test.go:TestPrivacyFramesPassThroughVerbatimStreamAndNonStream"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R016",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/cmd/relay-blind-client/main.go:copyPrivacyResponse",
+        "phase5-gateway/cmd/relay-blind-client/main.go:requirePrivacyReservation"
+      ],
+      "tests": [
+        "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientDecryptsStreamAndNonStream",
+        "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientRejectsTruncatedMissingFinal",
+        "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientRejectsSeqGapReorderTamperAfterFinal"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R017",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/cmd/coordinator-cli/privacy_class.go:privacyClassCommand",
+        "phase4-coordinator/internal/relayblind/store.go:Quarantine",
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:failQuarantine"
+      ],
+      "tests": [
+        "phase4-coordinator/cmd/coordinator-cli/privacy_class_test.go:TestPrivacyClassCLI",
+        "test/integration/privacy_class_integration_test.go:TestPrivacyClassAdversarial"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R018",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/relayblind/store.go:SetPrivacyDisabled",
+        "phase4-coordinator/internal/relayblind/store.go:RejectHeldPrivacyPredispatch"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/privacy_class_test.go:TestKillSwitchBlocksAllPhases",
+        "phase4-coordinator/internal/relayblind/privacy_authority_test.go:TestKillSwitchStoreErrorFailsClosed",
+        "test/integration/privacy_class_integration_test.go:TestPrivacyClassAdversarial"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R019",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/buyer/privacy_class.go:writePrivacyClassError",
+        "phase5-gateway/internal/router/privacy_class.go:writePrivacyClassError"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/privacy_class_test.go:TestPrivacyErrorInventoryComplete",
+        "phase5-gateway/internal/router/privacy_class_test.go:TestPrivacyErrorCodesMatchCoordinatorInventory"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R020",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/cmd/relay-blind-client/main.go:privacyDisclosureAgrees",
+        "phase5-gateway/cmd/relay-blind-client/main.go:privacyResidualRisks",
+        "phase5-gateway/internal/router/privacy_class.go:privacyUsageObject"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/privacy_class_test.go:TestPrivacyUsageMetadataExactStrings",
+        "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientRejectsMissingR020Headers"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R021",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/RelayBlindFixtureCommand.swift:privacyFixtureCompletionText",
+        "phase5-gateway/cmd/relay-blind-client/main.go:commitPrivacyPlaintext"
+      ],
+      "tests": [
+        "test/integration/privacy_class_integration_test.go:TestPrivacyClassRedactionNoCanaryInAnyArtifact",
+        "test/integration/privacy_class_integration_test.go:TestPrivacyClassAdversarial"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R022",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/router/privacy_class.go:privacyBuyerIntentDenied",
+        "phase4-coordinator/internal/buyer/privacy_class.go:handlePrivacyClassReservation"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/privacy_class_test.go:TestPrivacyPoolIntentRejected",
+        "phase5-gateway/internal/router/privacy_class_test.go:TestPrivacyPoolAndDemoDowngradeRejected",
+        "test/integration/relay_blind_integration_test.go:TestRelayBlindReservationRejectsPoolSelectionBeforeQuota"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R023",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "SPEC-049 v0.1.0 (SPEC-049-R023): draft/not-deployed promotion gate is specified for the default-off Beta privacy class but not implemented, tested, or evidenced; it remains pending until implementation, automated tests, and a signed JOURNEY-PRIVACY-CLASS-BETA hardware result exist. The journey result is one input; staged canary and three-lane audits are also required."
       }
     }
   ]

@@ -522,6 +522,8 @@ actor CoordinatorClient {
 
     private var inferenceRelay: InferenceRelay?
     private let relayBlindRuntime: RelayBlindProviderRuntime?
+    private let privacyPostureProbe: (any PrivacyPostureProbe)?
+    private let privacyPostureResponder: PrivacyPostureResponder?
     private var tier2Session: Tier2ProviderSession?
     private var pendingAEADRekey: PendingAEADRekey?
     private var preparingAEADRekeyID: String?
@@ -740,6 +742,8 @@ actor CoordinatorClient {
             return ManagedDeviceAttestationGenerator()
         }(),
         seLivenessSignerOverride: (any SELivenessSigning)? = nil,
+        privacyPostureProbeOverride: (any PrivacyPostureProbe)? = nil,
+        privacySESignerOverride: (any SEBlobSigner)? = nil,
         webSocketFactory: @escaping @Sendable (URLRequest) -> ProviderWebSocketTask = { providerWebSocketSession.webSocketTask(with: $0) },
         sleepAssertionFactory: @escaping @Sendable () -> ProviderSleepAssertion? = { CaffeinateSleepAssertion.start() },
         pairingController: PairingController? = nil,
@@ -848,6 +852,10 @@ actor CoordinatorClient {
         // we fall back to a per-instance UUID (dev/test only — production coordinators
         // will reject with close code 4002 unknown_provider_id).
         self.providerID = config.providerID ?? UUID().uuidString
+        if config.privacyClassBeta && !config.relayBlindEnabled {
+            FileHandle.standardError.write(Data("FATAL privacy_class_requires_relay_blind\n".utf8))
+            return nil
+        }
         if config.relayBlindEnabled {
             guard let statePath = config.relayBlindStateDirectory,
                   statePath.hasPrefix("/") else {
@@ -855,21 +863,54 @@ actor CoordinatorClient {
                 return nil
             }
             let modelScope = config.supportedModels ?? [config.modelCatalogModelID ?? config.model].compactMap { $0 }
+            let runtime: RelayBlindProviderRuntime
             do {
                 let root = URL(fileURLWithPath: statePath, isDirectory: true)
                 let keys = try RelayBlindKeyManager(
                     directory: root,
                     models: modelScope,
-                    maxEncryptedRequestBytes: UInt64(min(config.maxRequestBodyBytes, 1_048_576))
+                    maxEncryptedRequestBytes: UInt64(min(config.maxRequestBodyBytes, 1_048_576)),
+                    persistAgreementKey: !config.privacyClassBeta
                 )
-                let journal = try RelayBlindExecutionJournal(directory: root.appendingPathComponent("execution-journal", isDirectory: true))
-                self.relayBlindRuntime = RelayBlindProviderRuntime(keyManager: keys, journal: journal)
+                let journalDirectory = config.privacyClassBeta
+                    ? try PrivacyStateDirectory.executionJournal(stateRoot: root)
+                    : root.appendingPathComponent("execution-journal", isDirectory: true)
+                let journal = try RelayBlindExecutionJournal(directory: journalDirectory)
+                runtime = RelayBlindProviderRuntime(keyManager: keys, journal: journal)
             } catch {
                 FileHandle.standardError.write(Data("FATAL relay-blind provider state failed closed\n".utf8))
                 return nil
             }
+            self.relayBlindRuntime = runtime
+            if config.privacyClassBeta {
+                let signer: any SEBlobSigner
+                let backend: String
+                if let privacySESignerOverride {
+                    signer = privacySESignerOverride
+                    backend = Self.privacySEBackend(privacySESignerOverride)
+                } else {
+                    let production = Self.loadPrivacySEIdentity()
+                    signer = production.signer
+                    backend = production.backend
+                }
+                let probe = privacyPostureProbeOverride ?? SystemPrivacyPostureProbe()
+                self.privacyPostureProbe = probe
+                self.privacyPostureResponder = PrivacyPostureResponder(
+                    probe: probe,
+                    seSigner: signer,
+                    seKeyBackend: backend,
+                    relayBlindRuntime: runtime,
+                    providerID: self.providerID,
+                    binaryVersion: Self.binaryVersion
+                )
+            } else {
+                self.privacyPostureProbe = nil
+                self.privacyPostureResponder = nil
+            }
         } else {
             self.relayBlindRuntime = nil
+            self.privacyPostureProbe = nil
+            self.privacyPostureResponder = nil
         }
         self.endpointURL = config.endpointURL?.isEmpty == false ? config.endpointURL : nil
         self.wsTunneledMode = self.endpointURL == nil && (config.wsTunneledMode ?? true)
@@ -2173,6 +2214,8 @@ actor CoordinatorClient {
             demoteAutoupdateTrust: { [weak self] reason in
                 await self?.markAutoupdateTrustDemoted(reason: reason)
             },
+            privacyClassBeta: appConfig.privacyClassBeta,
+            postureProbe: privacyPostureProbe,
             sendFrame: sendFrame
         )
     }
@@ -2555,6 +2598,8 @@ actor CoordinatorClient {
             try await sendStateUpdate(state: .ready, reason: "warm_up complete")
         case "se_liveness_challenge":
             try await handleSELivenessChallenge(dict)
+        case "privacy_posture_challenge":
+            try await handlePrivacyPostureChallenge(dict)
         case "native_mtp_canary_request_v1":
             try await handleNativeMTPCanaryRequest(dict)
         case "native_mtp_tuple_disable_v1":
@@ -3524,6 +3569,12 @@ actor CoordinatorClient {
 
     func sendHeartbeatForTest() async throws {
         try await sendHeartbeat()
+    }
+
+    /// Marks the session accepted without starting the heartbeat task.
+    func acceptAssignedSessionForTest(assignedID: String) {
+        coordinatorSessionAccepted = true
+        acceptedAssignedProviderID = assignedID
     }
 
     // Test seam — the sleep assertion is held for the whole serving lifetime
@@ -6622,10 +6673,8 @@ actor CoordinatorClient {
         if let hardwareSummary {
             payload["hardware_summary"] = hardwareSummary
         }
-        if let relayBlindRuntime,
-           let records = try? relayBlindRuntime.advertisedRecords() {
-            payload["relay_blind_key_records"] = records.map(\.wireObject)
-        }
+        appendRelayBlindKeyRecords(to: &payload)
+        appendPrivacyKeyRecords(to: &payload)
         var specDecodeTelemetryMatchesRuntime = true
         var specDecodeTelemetryRuntimeEligible = true
         if warmSwapEnabled {
@@ -7196,10 +7245,8 @@ actor CoordinatorClient {
             resolvedCatalog = [wireModelID]
         }
         message["supported_models"] = resolvedCatalog
-        if let relayBlindRuntime,
-           let records = try? relayBlindRuntime.advertisedRecords() {
-            message["relay_blind_key_records"] = records.map(\.wireObject)
-        }
+        appendRelayBlindKeyRecords(to: &message)
+        appendPrivacyKeyRecords(to: &message)
         if publishesSupportedModels {
             message["publishes_supported_models"] = true
         }
@@ -7332,7 +7379,70 @@ actor CoordinatorClient {
         if let runtimeSource {
             message["runtime_source"] = runtimeSource
         }
+        appendPrivacyKeyRecords(to: &message)
         return message
+    }
+
+    /// Privacy mode never also advertises those keys as `relay_blind_key_records`.
+    private func appendRelayBlindKeyRecords(to message: inout [String: Any]) {
+        guard !appConfig.privacyClassBeta,
+              let relayBlindRuntime,
+              let records = try? relayBlindRuntime.advertisedRecords() else {
+            return
+        }
+        message["relay_blind_key_records"] = records.map(\.wireObject)
+    }
+
+    /// Nil from the responder omits the field. An empty array is sent as an empty advertisement.
+    private func appendPrivacyKeyRecords(to message: inout [String: Any]) {
+        guard appConfig.privacyClassBeta,
+              let privacyPostureResponder,
+              let records = privacyPostureResponder.privacyKeyRecords() else {
+            return
+        }
+        message["privacy_key_records"] = records
+    }
+
+    /// Production SE failure exits. `CoordinatorClient.init` returning nil does not stop `serve`.
+    private static func loadPrivacySEIdentity() -> (signer: any SEBlobSigner, backend: String) {
+        #if arch(arm64)
+        do {
+            let identity = try SecureEnclaveIdentity.loadOrCreate(quiet: true)
+            return (identity, identity.backendName)
+        } catch {
+            FileHandle.standardError.write(Data("FATAL privacy_class_se_identity_failed\n".utf8))
+            Darwin.exit(78)
+        }
+        #else
+        FileHandle.standardError.write(Data("FATAL privacy_class_se_identity_failed\n".utf8))
+        Darwin.exit(78)
+        #endif
+    }
+
+    private static func privacySEBackend(_ signer: any SEBlobSigner) -> String {
+        #if arch(arm64)
+        if let identity = signer as? SecureEnclaveIdentity {
+            return identity.backendName
+        }
+        #endif
+        return PrivacyClassConstants.seBackendFile
+    }
+
+    private func handlePrivacyPostureChallenge(_ dict: [String: Any]) async throws {
+        guard appConfig.privacyClassBeta, let privacyPostureResponder else { return }
+        guard coordinatorSessionAccepted,
+              let assigned = acceptedAssignedProviderID,
+              !assigned.isEmpty else {
+            return
+        }
+        let response: [String: Any]?
+        do {
+            response = try privacyPostureResponder.respond(to: dict, assignedSession: assigned)
+        } catch {
+            return
+        }
+        guard let response else { return }
+        try await send(response)
     }
 
     /// Runs the injected refresher at most once per minimum interval and stages

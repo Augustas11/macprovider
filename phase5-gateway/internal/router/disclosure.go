@@ -19,6 +19,7 @@ type tier1Disclosure struct {
 	StickyAffinity              *stickyAffinityDisclosure              `json:"sticky_affinity"`
 	PrefixCache                 *prefixCacheDisclosure                 `json:"prefix_cache"`
 	RelayBlindRequestEncryption *relayBlindRequestEncryptionDisclosure `json:"relay_blind_request_encryption,omitempty"`
+	OperatorConstrainedPrivacy  *operatorConstrainedPrivacyDisclosure  `json:"operator_constrained_privacy,omitempty"`
 	ModelVerificationLimit      string                                 `json:"model_verification_limit"`
 	VerifiedModelSettlement     verifiedModelSettlementDisclosure      `json:"verified_model_settlement"`
 	ComputeIntegrity            computeIntegrityDisclosure             `json:"compute_integrity"`

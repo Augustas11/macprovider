@@ -34,6 +34,8 @@ actor InferenceRelay {
     private let receiptProviderID: String?
     private let demoteAutoupdateTrust: TrustDemotion?
     private let relayBlindRuntime: RelayBlindProviderRuntime?
+    private let privacyClassBeta: Bool
+    private let postureProbe: (any PrivacyPostureProbe)?
     // T3-01: number of content-token deltas to accumulate per WS frame.
     // 1 = one frame per token (default, current behaviour).
     nonisolated let streamInterval: Int
@@ -53,6 +55,8 @@ actor InferenceRelay {
         streamInterval: Int = 1,
         relayBlindRuntime: RelayBlindProviderRuntime? = nil,
         demoteAutoupdateTrust: TrustDemotion? = nil,
+        privacyClassBeta: Bool = false,
+        postureProbe: (any PrivacyPostureProbe)? = nil,
         sendFrame: @escaping SendFrame
     ) {
         self.modelRuntime = modelRuntime
@@ -68,6 +72,8 @@ actor InferenceRelay {
         self.streamInterval = max(1, streamInterval)
         self.relayBlindRuntime = relayBlindRuntime
         self.demoteAutoupdateTrust = demoteAutoupdateTrust
+        self.privacyClassBeta = privacyClassBeta
+        self.postureProbe = postureProbe
         self.sendFrame = sendFrame
     }
 
@@ -88,6 +94,8 @@ actor InferenceRelay {
         let decryptedConversationKey: String?
         let bodyEncoding: String?
         let relayBlindContextObject: [String: Any]?
+        var requestPrivacyClass: String?
+        var requestPrivacyMalformed = false
         if let tier2Session {
             guard message["encrypted"] as? Bool == true else {
                 try await sendNAK(inReplyTo: requestID, code: "tier2_encrypted_frame_required", message: "Tier-2 session requires encrypted inference_request frames")
@@ -100,6 +108,8 @@ actor InferenceRelay {
                 decryptedConversationKey = payload.conversationKey
                 bodyEncoding = payload.bodyEncoding
                 relayBlindContextObject = payload.relayBlindContext
+                requestPrivacyClass = payload.privacyClass
+                requestPrivacyMalformed = payload.privacyClassMalformed
             } catch {
                 await demoteAutoupdateTrust?("encrypted_leg_invalidated")
                 try await sendNAK(inReplyTo: requestID, code: "tier2_aead_decrypt_failed", message: "Encrypted inference_request failed authentication")
@@ -123,9 +133,42 @@ actor InferenceRelay {
             try await sendNAK(inReplyTo: "inference_request", code: "invalid_message", message: "inference_request requires request_id, stream, and body")
             return
         }
+        if tier2Session == nil {
+            switch Self.privacyMarker(message["privacy_class"], present: message.keys.contains("privacy_class")) {
+            case .absent:
+                break
+            case .value(let value):
+                requestPrivacyClass = value
+            case .invalid:
+                requestPrivacyMalformed = true
+            }
+        } else if message.keys.contains("privacy_class") {
+            // SPEC-049 §4.7 puts the field inside the protected payload. A clear
+            // outer copy must agree with that inner value.
+            switch Self.privacyMarker(message["privacy_class"], present: true) {
+            case .value(let value) where value == requestPrivacyClass && !requestPrivacyMalformed:
+                break
+            default:
+                requestPrivacyMalformed = true
+                requestPrivacyClass = nil
+            }
+        }
+        let requestMarker: PrivacyMarker = requestPrivacyMalformed
+            ? .invalid
+            : (requestPrivacyClass.map(PrivacyMarker.value) ?? .absent)
+        let isRelayBlind = bodyEncoding == RelayBlindEnvelope.version
+        let privacyPath = Self.privacyDispatchPath(
+            mode: privacyClassBeta,
+            request: requestMarker,
+            context: Self.privacyMarker(
+                relayBlindContextObject?["privacy_class"],
+                present: relayBlindContextObject?.keys.contains("privacy_class") == true
+            ),
+            relayBlind: isRelayBlind
+        )
 
         let relayBlindOpened: RelayBlindProviderRuntime.OpenedRequest?
-        if bodyEncoding == RelayBlindEnvelope.version {
+        if isRelayBlind {
             guard let relayBlindRuntime else {
                 try await sendRelayBlindFailure(requestID: requestID, stream: stream, code: RelayBlindProviderError.disabled.code)
                 return
@@ -134,13 +177,36 @@ actor InferenceRelay {
                 try await sendRelayBlindFailure(requestID: requestID, stream: stream, code: RelayBlindProviderError.invalidEnvelope.code)
                 return
             }
+            if privacyPath == .downgrade {
+                try await sendPrivacyBoundRejection(
+                    contextObject: relayBlindContextObject,
+                    requestID: requestID,
+                    stream: stream,
+                    code: PrivacyClassConstants.downgradeRejected
+                )
+                return
+            }
+            if privacyPath == .privacy {
+                let fresh = postureProbe.map { PrivacyRuntimeHardening.recheckBeforeDecrypt(probe: $0) } ?? false
+                if !fresh || PrivacyRuntimeHardening.decryptRecheckFailed {
+                    PrivacyRuntimeHardening.noteDecryptRecheckFailed()
+                    try await sendPrivacyBoundRejection(
+                        contextObject: relayBlindContextObject,
+                        requestID: requestID,
+                        stream: stream,
+                        code: PrivacyClassConstants.postureStale
+                    )
+                    return
+                }
+            }
             do {
                 relayBlindOpened = try relayBlindRuntime.open(
                     envelopeBody: body,
                     outerRequestID: requestID,
                     outerStream: stream,
                     contextObject: relayBlindContextObject,
-                    expectedAssignedSession: tier2Session?.assignedID
+                    expectedAssignedSession: tier2Session?.assignedID,
+                    privacyClass: privacyPath == .privacy
                 )
             } catch let rejection as RelayBlindProviderRejection {
                 try await sendRelayBlindRejection(
@@ -157,6 +223,12 @@ actor InferenceRelay {
                 try await sendRelayBlindFailure(requestID: requestID, stream: stream, code: RelayBlindProviderError.decryptFailed.code)
                 return
             }
+        } else if privacyPath == .downgrade {
+            // A marker on a non-envelope has no dispatch context to bind.
+            try await sendRelayBlindFailure(
+                requestID: requestID, stream: stream, code: PrivacyClassConstants.downgradeRejected
+            )
+            return
         } else if let bodyEncoding, bodyEncoding.hasPrefix("relay-blind-request-") {
             try await sendRelayBlindFailure(requestID: requestID, stream: stream, code: RelayBlindProviderError.invalidEnvelope.code)
             return
@@ -413,6 +485,42 @@ actor InferenceRelay {
         ], requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame)
     }
 
+    /// SPEC-041-R005 bound rejection for a privacy code. Parsing the context
+    /// does not decrypt. When the context itself cannot be bound, the same
+    /// code is sent without evidence.
+    private func sendPrivacyBoundRejection(
+        contextObject: [String: Any],
+        requestID: String,
+        stream: Bool,
+        code: String
+    ) async throws {
+        let context: RelayBlindDispatchContext
+        do {
+            context = try RelayBlindDispatchContext.parse(contextObject)
+        } catch {
+            try await sendRelayBlindFailure(requestID: requestID, stream: stream, code: code)
+            return
+        }
+        let evidence = RelayBlindValidationEvidence(
+            context: context, inputTokens: 0, state: "rejected", errorCode: code
+        )
+        try await Self.sendValidationFrame(
+            evidence,
+            requestID: requestID,
+            stream: stream,
+            tier2Session: tier2Session,
+            sendFrame: sendFrame
+        )
+        try await Self.sendEndFrame([
+            "type": "inference_response_end",
+            "request_id": requestID,
+            "status": code,
+            "chunks_sent": 0,
+            "error": code,
+            "relay_blind_validation": evidence.wireObject,
+        ], requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame)
+    }
+
     private static func process(
         requestID: String,
         body: String,
@@ -440,6 +548,8 @@ actor InferenceRelay {
         var telemetryModelID = loadedModelID ?? ""
         var relayBlindEvidence: RelayBlindValidationEvidence?
         var relayBlindPrepared: RelayBlindPreparedRequest?
+        let privacySealer = relayBlindOpened?.responseSealer.map { PrivacyResponseSealerBox($0) }
+        let privacyModel = relayBlindOpened?.request.model ?? loadedModelID ?? ""
 
         do {
             let requestData = Data(body.utf8)
@@ -450,6 +560,9 @@ actor InferenceRelay {
             var request: ChatCompletionRequest
             if let relayBlindOpened {
                 request = relayBlindOpened.request.withRequestID(requestID)
+                if privacySealer != nil {
+                    request = request.withConversationKey(nil)
+                }
             } else {
                 request = try ChatCompletionRequest.parse(data: requestData)
                     .withConversationKey(conversationKey)
@@ -519,16 +632,15 @@ actor InferenceRelay {
                 try request.validateModelMatches(validationModelID, aliases: relayAliases)
             }
         if stream {
-            let trace = EgressPerfTrace()
-            completionResult = try await EgressPerfTraceKey.$current.withValue(trace) {
-                try await processStreaming(
+            if privacySealer != nil {
+                completionResult = try await processStreaming(
                     requestID: requestID,
                     request: request,
                     state: state,
                     modelRuntime: modelRuntime,
                     warmSwapEnabled: warmSwapEnabled,
                     tier2Session: tier2Session,
-                    receiptBuilder: relayBlindOpened == nil ? receiptBuilder : nil,
+                    receiptBuilder: nil,
                     receiptProviderID: receiptProviderID,
                     settlementMetadata: settlementMetadata,
                     streamInterval: streamInterval,
@@ -536,32 +648,68 @@ actor InferenceRelay {
                     relayBlindRuntime: relayBlindRuntime,
                     relayBlindClaim: relayBlindOpened?.claim,
                     preparedHandle: relayBlindPrepared?.handle,
+                    privacySealer: privacySealer,
                     sendFrame: sendFrame
                 )
+            } else {
+                let trace = EgressPerfTrace()
+                completionResult = try await EgressPerfTraceKey.$current.withValue(trace) {
+                    try await processStreaming(
+                        requestID: requestID,
+                        request: request,
+                        state: state,
+                        modelRuntime: modelRuntime,
+                        warmSwapEnabled: warmSwapEnabled,
+                        tier2Session: tier2Session,
+                        receiptBuilder: relayBlindOpened == nil ? receiptBuilder : nil,
+                        receiptProviderID: receiptProviderID,
+                        settlementMetadata: settlementMetadata,
+                        streamInterval: streamInterval,
+                        relayBlindEvidence: relayBlindEvidence,
+                        relayBlindRuntime: relayBlindRuntime,
+                        relayBlindClaim: relayBlindOpened?.claim,
+                        preparedHandle: relayBlindPrepared?.handle,
+                        privacySealer: nil,
+                        sendFrame: sendFrame
+                    )
+                }
+                trace.printSummary(requestID: requestID, completionTokens: completionResult?.completionTokens ?? 0)
             }
-            trace.printSummary(requestID: requestID, completionTokens: completionResult?.completionTokens ?? 0)
         } else {
-                completionResult = try await processNonStreaming(
-                    requestID: requestID,
-                    request: request,
-                    state: state,
-                    modelRuntime: modelRuntime,
-                    tier2Session: tier2Session,
-                    receiptBuilder: relayBlindOpened == nil ? receiptBuilder : nil,
-                    receiptProviderID: receiptProviderID,
-                    settlementMetadata: settlementMetadata,
-                    startedAt: startedAt,
-                    warmSwapEnabled: warmSwapEnabled,
-                    relayBlindEvidence: relayBlindEvidence,
-                    relayBlindRuntime: relayBlindRuntime,
-                    relayBlindClaim: relayBlindOpened?.claim,
-                    preparedHandle: relayBlindPrepared?.handle,
-                    sendFrame: sendFrame
-                )
-            }
+            completionResult = try await processNonStreaming(
+                requestID: requestID,
+                request: request,
+                state: state,
+                modelRuntime: modelRuntime,
+                tier2Session: tier2Session,
+                receiptBuilder: relayBlindOpened == nil ? receiptBuilder : nil,
+                receiptProviderID: receiptProviderID,
+                settlementMetadata: settlementMetadata,
+                startedAt: startedAt,
+                warmSwapEnabled: warmSwapEnabled,
+                relayBlindEvidence: relayBlindEvidence,
+                relayBlindRuntime: relayBlindRuntime,
+                relayBlindClaim: relayBlindOpened?.claim,
+                preparedHandle: relayBlindPrepared?.handle,
+                privacySealer: privacySealer,
+                sendFrame: sendFrame
+            )
+        }
         } catch is RelayCancellationAcknowledged {
         } catch is CancellationError {
             if state.markTerminalSent() {
+                await emitPrivacyClosing(
+                    sealer: privacySealer,
+                    stream: stream,
+                    status: PrivacyClassConstants.finalStatusCancelled,
+                    promptTokens: privacyTokenCount(state.usage, key: "prompt_tokens"),
+                    completionTokens: privacyTokenCount(state.usage, key: "completion_tokens"),
+                    model: privacyModel,
+                    requestID: requestID,
+                    state: state,
+                    tier2Session: tier2Session,
+                    sendFrame: sendFrame
+                )
                 var endFrame: [String: Any] = [
                     "type": "inference_response_end",
                     "request_id": requestID,
@@ -593,6 +741,18 @@ actor InferenceRelay {
                 try? relayBlindRuntime.journal.markTerminal(opened.claim)
             }
             if state.markTerminalSent() {
+                await emitPrivacyClosing(
+                    sealer: privacySealer,
+                    stream: stream,
+                    status: PrivacyClassConstants.finalStatusError,
+                    promptTokens: privacyTokenCount(state.usage, key: "prompt_tokens"),
+                    completionTokens: privacyTokenCount(state.usage, key: "completion_tokens"),
+                    model: privacyModel,
+                    requestID: requestID,
+                    state: state,
+                    tier2Session: tier2Session,
+                    sendFrame: sendFrame
+                )
                 var endFrame: [String: Any] = [
                     "type": "inference_response_end",
                     "request_id": requestID,
@@ -606,6 +766,18 @@ actor InferenceRelay {
         } catch let error as APIError {
             failed = true
             if state.markTerminalSent() {
+                await emitPrivacyClosing(
+                    sealer: privacySealer,
+                    stream: stream,
+                    status: PrivacyClassConstants.finalStatusError,
+                    promptTokens: privacyTokenCount(state.usage, key: "prompt_tokens"),
+                    completionTokens: privacyTokenCount(state.usage, key: "completion_tokens"),
+                    model: privacyModel,
+                    requestID: requestID,
+                    state: state,
+                    tier2Session: tier2Session,
+                    sendFrame: sendFrame
+                )
                 var endFrame = relayBlindOpened == nil
                     ? errorEndFrame(requestID: requestID, error: error, chunksSent: state.chunksSent)
                     : [
@@ -623,6 +795,18 @@ actor InferenceRelay {
         } catch {
             failed = true
             if state.markTerminalSent() {
+                await emitPrivacyClosing(
+                    sealer: privacySealer,
+                    stream: stream,
+                    status: PrivacyClassConstants.finalStatusError,
+                    promptTokens: privacyTokenCount(state.usage, key: "prompt_tokens"),
+                    completionTokens: privacyTokenCount(state.usage, key: "completion_tokens"),
+                    model: privacyModel,
+                    requestID: requestID,
+                    state: state,
+                    tier2Session: tier2Session,
+                    sendFrame: sendFrame
+                )
                 var endFrame: [String: Any] = [
                     "type": "inference_response_end",
                     "request_id": requestID,
@@ -672,6 +856,7 @@ actor InferenceRelay {
         relayBlindRuntime: RelayBlindProviderRuntime?,
         relayBlindClaim: RelayBlindExecutionJournal.Claim?,
         preparedHandle: RequestHandle?,
+        privacySealer: PrivacyResponseSealerBox?,
         sendFrame: @escaping SendFrame
     ) async throws -> CompletionResult {
         // SPEC-015 §M.2.2 atomic-read invariant — bind the receipt
@@ -697,6 +882,19 @@ actor InferenceRelay {
         state.setUsage(completion)
         if state.isCancelled {
             if state.markTerminalSent() {
+                let counts = privacyCounts(completion)
+                await emitPrivacyClosing(
+                    sealer: privacySealer,
+                    stream: false,
+                    status: PrivacyClassConstants.finalStatusCancelled,
+                    promptTokens: counts.prompt,
+                    completionTokens: counts.completion,
+                    model: request.model,
+                    requestID: requestID,
+                    state: state,
+                    tier2Session: tier2Session,
+                    sendFrame: sendFrame
+                )
                 let terminalStateTSUnixMS = Int64(Date().timeIntervalSince1970 * 1000)
                 // A cancelled non-streaming request delivered no output. The
                 // buyer_cancel receipt binds the empty delivered prefix with
@@ -747,7 +945,25 @@ actor InferenceRelay {
         guard !state.terminalSent else {
             return completion
         }
-        let response = try jsonString(chatCompletionResponse(request: request, completion: completion))
+        let ordinary = try jsonString(chatCompletionResponse(request: request, completion: completion))
+        let response: String
+        if let privacySealer {
+            let counts = privacyCounts(completion)
+            let bodyFrame = try privacySealer.seal(plaintext: ordinary, final: false)
+            let finalFrame = try privacySealer.seal(
+                plaintext: privacyFinalPlaintext(
+                    status: PrivacyClassConstants.finalStatusComplete,
+                    prompt: counts.prompt,
+                    completion: counts.completion
+                ),
+                final: true
+            )
+            response = try privacyResponseJSON(
+                frames: [bodyFrame, finalFrame], prompt: counts.prompt, completion: counts.completion
+            )
+        } else {
+            response = ordinary
+        }
         let seq = state.nextSeq()
         try await sendChunk(requestID: requestID, stream: false, seq: seq, data: response, tier2Session: tier2Session, sendFrame: sendFrame)
         let ttftMs = completion.ttftMilliseconds ?? Self.elapsedMilliseconds(since: startedAt)
@@ -1057,6 +1273,7 @@ actor InferenceRelay {
         relayBlindRuntime: RelayBlindProviderRuntime?,
         relayBlindClaim: RelayBlindExecutionJournal.Claim?,
         preparedHandle: RequestHandle?,
+        privacySealer: PrivacyResponseSealerBox?,
         sendFrame: @escaping SendFrame
     ) async throws -> CompletionResult {
         let created = Int(Date().timeIntervalSince1970)
@@ -1079,7 +1296,15 @@ actor InferenceRelay {
                     continue
                 }
                 let seq = state.nextSeq()
-                try await sendChunk(requestID: requestID, stream: true, seq: seq, data: data, tier2Session: tier2Session, sendFrame: sendFrame)
+                try await sendChunk(
+                    requestID: requestID,
+                    stream: true,
+                    seq: seq,
+                    data: data,
+                    tier2Session: tier2Session,
+                    privacySealer: privacySealer,
+                    sendFrame: sendFrame
+                )
             }
             return state.chunksSent
         }
@@ -1133,6 +1358,19 @@ actor InferenceRelay {
                 // only (#1690 E2E-F3); native completions are unchanged.
                 let cancelled = completion.cancelledPrefixUsage(deliveredContent: deliveredContent)
                 if state.markTerminalSent() {
+                    let counts = privacyCounts(cancelled)
+                    await emitPrivacyClosing(
+                        sealer: privacySealer,
+                        stream: true,
+                        status: PrivacyClassConstants.finalStatusCancelled,
+                        promptTokens: counts.prompt,
+                        completionTokens: counts.completion,
+                        model: request.model,
+                        requestID: requestID,
+                        state: state,
+                        tier2Session: tier2Session,
+                        sendFrame: sendFrame
+                    )
                     let terminalStateTSUnixMS = Int64(Date().timeIntervalSince1970 * 1000)
                     let modelHashSource = RouterHandler.resolveModelHashSource(
                         warmSwapEnabled: warmSwapEnabled,
@@ -1160,7 +1398,7 @@ actor InferenceRelay {
                         "type": "inference_response_end",
                         "request_id": requestID,
                         "status": "cancelled",
-                        "chunks_sent": chunksSent,
+                        "chunks_sent": privacySealer == nil ? chunksSent : state.chunksSent,
                         "usage": usage(cancelled),
                         "terminal_state_ts_unix_ms": terminalStateTSUnixMS,
                     ]
@@ -1207,13 +1445,26 @@ actor InferenceRelay {
             buffer.finish()
 
             let chunksSent = try await consumer.value
+            let counts = privacyCounts(completion)
+            await emitPrivacyClosing(
+                sealer: privacySealer,
+                stream: true,
+                status: PrivacyClassConstants.finalStatusComplete,
+                promptTokens: counts.prompt,
+                completionTokens: counts.completion,
+                model: request.model,
+                requestID: requestID,
+                state: state,
+                tier2Session: tier2Session,
+                sendFrame: sendFrame
+            )
             if state.markTerminalSent() {
                 let terminalStateTSUnixMS = Int64(Date().timeIntervalSince1970 * 1000)
                 var endFrame: [String: Any] = [
                     "type": "inference_response_end",
                     "request_id": requestID,
                     "status": "complete",
-                    "chunks_sent": chunksSent,
+                    "chunks_sent": privacySealer == nil ? chunksSent : state.chunksSent,
                     "usage": usage(completion),
                     "terminal_state_ts_unix_ms": terminalStateTSUnixMS,
                 ]
@@ -1261,11 +1512,23 @@ actor InferenceRelay {
             if error is CancellationError {
                 let chunksSent = (try? await consumer.value) ?? state.chunksSent
                 if state.markTerminalSent() {
+                    await emitPrivacyClosing(
+                        sealer: privacySealer,
+                        stream: true,
+                        status: PrivacyClassConstants.finalStatusCancelled,
+                        promptTokens: privacyTokenCount(state.usage, key: "prompt_tokens"),
+                        completionTokens: privacyTokenCount(state.usage, key: "completion_tokens"),
+                        model: request.model,
+                        requestID: requestID,
+                        state: state,
+                        tier2Session: tier2Session,
+                        sendFrame: sendFrame
+                    )
                     var endFrame: [String: Any] = [
                         "type": "inference_response_end",
                         "request_id": requestID,
                         "status": "cancelled",
-                        "chunks_sent": chunksSent,
+                        "chunks_sent": privacySealer == nil ? chunksSent : state.chunksSent,
                         "usage": state.usage ?? zeroUsage(),
                     ]
                     try? attachRelayBlindTerminal(
@@ -1333,11 +1596,19 @@ actor InferenceRelay {
         seq: Int,
         data: String,
         tier2Session: Tier2ProviderSession?,
+        privacySealer: PrivacyResponseSealerBox? = nil,
         sendFrame: @escaping SendFrame
     ) async throws {
+        let wire: String
+        if let privacySealer {
+            let frame = try privacySealer.seal(plaintext: data, final: false)
+            wire = try privacyFrameSSE(frame)
+        } else {
+            wire = data
+        }
         if let tier2Session {
             let sealStart = clockMonotonicMicros()
-            let sealed = try tier2Session.sealResponseChunk(requestID: requestID, stream: stream, seq: seq, plaintext: data)
+            let sealed = try tier2Session.sealResponseChunk(requestID: requestID, stream: stream, seq: seq, plaintext: wire)
             EgressPerfTraceKey.current?.recordSeal(durationMicros: clockMonotonicMicros() &- sealStart)
             try await sendFrame(sealed)
             return
@@ -1346,7 +1617,7 @@ actor InferenceRelay {
             "type": "inference_response_chunk",
             "request_id": requestID,
             "seq": seq,
-            "data": data,
+            "data": wire,
         ])
     }
 
@@ -1497,6 +1768,188 @@ actor InferenceRelay {
         ]
     }
 
+    private enum PrivacyMarker: Equatable {
+        case absent
+        case value(String)
+        case invalid
+    }
+
+    private enum PrivacyPath: Equatable {
+        case ordinary
+        case privacy
+        case downgrade
+    }
+
+    /// SPEC-049-R001 leaves ordinary traffic unchanged when privacy mode is on.
+    /// SPEC-049-R012 binds the marker only for relay-blind dispatch: privacy mode
+    /// rejects a relay-blind request that lacks `operator_constrained_beta_v1`
+    /// on both the request and the dispatch context, and a provider that is not
+    /// in privacy mode rejects a relay-blind request that carries the marker.
+    /// A marker on a non-envelope is `privacy_class_downgrade_rejected` as well.
+    private static func privacyDispatchPath(
+        mode: Bool,
+        request: PrivacyMarker,
+        context: PrivacyMarker,
+        relayBlind: Bool
+    ) -> PrivacyPath {
+        let agreed = PrivacyMarker.value(PrivacyClassConstants.v1)
+        if !relayBlind {
+            return request == .absent ? .ordinary : .downgrade
+        }
+        if mode {
+            return request == agreed && context == agreed ? .privacy : .downgrade
+        }
+        return request == .absent && context == .absent ? .ordinary : .downgrade
+    }
+
+    private static func privacyMarker(_ value: Any?, present: Bool) -> PrivacyMarker {
+        guard present else { return .absent }
+        guard let value = value as? String else { return .invalid }
+        return .value(value)
+    }
+
+    private static func privacyCounts(_ completion: CompletionResult) -> (prompt: Int, completion: Int) {
+        (max(0, completion.promptTokens), max(0, completion.completionTokens))
+    }
+
+    private static func privacyTokenCount(_ usage: [String: Any]?, key: String) -> Int {
+        if let value = usage?[key] as? Int { return max(0, value) }
+        if let value = usage?[key] as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID() {
+            return max(0, value.intValue)
+        }
+        return 0
+    }
+
+    /// Stream: final frame, then the clear usage chunk and clear `[DONE]`.
+    /// Non-stream cancel/error: one `privacy_response` whose only frame is the
+    /// final frame, plus clear usage. A failed seal still lets the caller send
+    /// the bounded end frame.
+    private static func emitPrivacyClosing(
+        sealer: PrivacyResponseSealerBox?,
+        stream: Bool,
+        status: String,
+        promptTokens: Int,
+        completionTokens: Int,
+        model: String,
+        requestID: String,
+        state: RelayRequestState,
+        tier2Session: Tier2ProviderSession?,
+        sendFrame: @escaping SendFrame
+    ) async {
+        guard let sealer, !sealer.hasEmittedFinal else { return }
+        let prompt = max(0, promptTokens)
+        let completion = max(0, completionTokens)
+        do {
+            let finalFrame = try sealer.seal(
+                plaintext: privacyFinalPlaintext(status: status, prompt: prompt, completion: completion),
+                final: true
+            )
+            if stream {
+                try await sendCountedChunk(
+                    requestID: requestID, stream: true, state: state,
+                    data: try privacyFrameSSE(finalFrame), tier2Session: tier2Session, sendFrame: sendFrame
+                )
+                try await sendCountedChunk(
+                    requestID: requestID, stream: true, state: state,
+                    data: privacyClearUsageSSE(model: model, prompt: prompt, completion: completion),
+                    tier2Session: tier2Session, sendFrame: sendFrame
+                )
+                try await sendCountedChunk(
+                    requestID: requestID, stream: true, state: state,
+                    data: "data: [DONE]\n\n", tier2Session: tier2Session, sendFrame: sendFrame
+                )
+            } else {
+                try await sendCountedChunk(
+                    requestID: requestID, stream: false, state: state,
+                    data: try privacyResponseJSON(frames: [finalFrame], prompt: prompt, completion: completion),
+                    tier2Session: tier2Session, sendFrame: sendFrame
+                )
+            }
+        } catch {
+            return
+        }
+    }
+
+    private static func sendCountedChunk(
+        requestID: String,
+        stream: Bool,
+        state: RelayRequestState,
+        data: String,
+        tier2Session: Tier2ProviderSession?,
+        sendFrame: @escaping SendFrame
+    ) async throws {
+        let seq = state.nextSeq()
+        try await sendChunk(
+            requestID: requestID, stream: stream, seq: seq, data: data,
+            tier2Session: tier2Session, sendFrame: sendFrame
+        )
+    }
+
+    private static func privacyFinalPlaintext(status: String, prompt: Int, completion: Int) -> String {
+        "{\"version\":\(privacyJSONString(PrivacyClassConstants.finalVersion)),\"status\":\(privacyJSONString(status)),\"prompt_tokens\":\(prompt),\"completion_tokens\":\(completion)}"
+    }
+
+    private static func privacyFrameSSE(_ frame: [String: Any]) throws -> String {
+        "data: \(try privacyFrameWire(frame))\n\n"
+    }
+
+    private static func privacyFrameWire(_ frame: [String: Any]) throws -> String {
+        let final: Bool
+        if let value = frame["final"] as? Bool {
+            final = value
+        } else if let value = frame["final"] as? NSNumber, CFGetTypeID(value) == CFBooleanGetTypeID() {
+            final = value.boolValue
+        } else {
+            throw PrivacyClassError.invalidMaterial
+        }
+        guard let object = frame["object"] as? String,
+              let version = frame["version"] as? String,
+              let seq = privacyJSONInteger(frame["seq"]),
+              let ciphertext = frame["ciphertext"] as? String else {
+            throw PrivacyClassError.invalidMaterial
+        }
+        return "{\"object\":\(privacyJSONString(object)),\"version\":\(privacyJSONString(version)),\"seq\":\(seq),\"final\":\(final ? "true" : "false"),\"ciphertext\":\(privacyJSONString(ciphertext))}"
+    }
+
+    private static func privacyResponseJSON(frames: [[String: Any]], prompt: Int, completion: Int) throws -> String {
+        let encoded = try frames.map { try privacyFrameWire($0) }.joined(separator: ",")
+        let total = prompt + completion
+        return "{\"object\":\(privacyJSONString(PrivacyClassConstants.responseObject)),\"version\":\(privacyJSONString(PrivacyClassConstants.responseVersion)),\"frames\":[\(encoded)],\"usage\":{\"prompt_tokens\":\(prompt),\"completion_tokens\":\(completion),\"total_tokens\":\(total)}}"
+    }
+
+    private static func privacyClearUsageSSE(model: String, prompt: Int, completion: Int) -> String {
+        let total = prompt + completion
+        return "data: {\"object\":\"chat.completion.chunk\",\"model\":\(privacyJSONString(model)),\"choices\":[],\"usage\":{\"prompt_tokens\":\(prompt),\"completion_tokens\":\(completion),\"total_tokens\":\(total)}}\n\n"
+    }
+
+    private static func privacyJSONInteger(_ value: Any?) -> Int? {
+        if let value = value as? UInt64 { return Int(exactly: value) }
+        if let value = value as? Int { return value }
+        if let value = value as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID() {
+            return value.intValue
+        }
+        return nil
+    }
+
+    private static func privacyJSONString(_ value: String) -> String {
+        var out = "\""
+        for scalar in value.unicodeScalars {
+            switch scalar.value {
+            case 0x5C: out += "\\\\"
+            case 0x22: out += "\\\""
+            case 0x0A: out += "\\n"
+            case 0x0D: out += "\\r"
+            case 0x09: out += "\\t"
+            case 0..<0x20:
+                out += String(format: "\\u%04x", scalar.value)
+            default:
+                out.unicodeScalars.append(scalar)
+            }
+        }
+        out += "\""
+        return out
+    }
+
     private static func sseEvent(_ body: Any) -> String {
         do {
             return "data: \(try jsonString(body))\n\n"
@@ -1512,6 +1965,38 @@ actor InferenceRelay {
 }
 
 private struct RelayCancellationAcknowledged: Error {}
+
+/// Shares one `PrivacyResponseSealer` across the stream consumer and the
+/// parent task. `finalEmitted` flips only after a successful final seal.
+private final class PrivacyResponseSealerBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var sealer: PrivacyResponseSealer
+    private var finalEmitted = false
+
+    init(_ sealer: PrivacyResponseSealer) {
+        self.sealer = sealer
+    }
+
+    var hasEmittedFinal: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return finalEmitted
+    }
+
+    func seal(plaintext: String, final: Bool) throws -> [String: Any] {
+        var data = Data(plaintext.utf8)
+        return try seal(&data, final: final)
+    }
+
+    func seal(_ data: inout Data, final: Bool) throws -> [String: Any] {
+        lock.lock()
+        defer { lock.unlock() }
+        if final, finalEmitted { throw PrivacyClassError.invalidMaterial }
+        let frame = try sealer.seal(&data, final: final)
+        if final { finalEmitted = true }
+        return frame
+    }
+}
 
 private final class RelayRequestState: @unchecked Sendable {
     private let lock = NSLock()

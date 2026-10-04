@@ -1312,6 +1312,7 @@ var gatewayRetryableByCode = map[string]bool{
 	"relay_blind_key_expired":           true,
 	"relay_blind_decrypt_failed":        true,
 	"relay_blind_provider_unsupported":  true,
+	"privacy_class_posture_stale":       true,
 	// Operator-controlled capacity pauses (M-R2-3 + sweep): the wording on
 	// all three ("paused"/"closed ... while capacity catches up") already
 	// promises the buyer this resolves with time; the code must agree.
@@ -1391,6 +1392,10 @@ var gatewayPermanentCodes = map[string]bool{
 	"relay_blind_required_unavailable":         true,
 	"relay_blind_ciphertext_invalid":           true,
 	"relay_blind_committed_failed":             true,
+	"privacy_class_disabled":                   true,
+	"privacy_class_unavailable":                true,
+	"privacy_class_downgrade_rejected":         true,
+	"privacy_class_unconfirmed":                true,
 	// Round-3 SECURITY MEDIUM revert: round-2 classified these three true
 	// as part of the rate_limit_exceeded family, but unlike
 	// account_request_rate_exceeded/account_concurrency_exceeded/
@@ -1715,7 +1720,9 @@ func isMacProviderHeader(key string) bool {
 
 func isInternalMacProviderHeader(key string) bool {
 	lower := strings.ToLower(key)
-	return lower == "x-macprovider-internal-conv" || strings.HasPrefix(lower, "x-macprovider-internal-")
+	// The posture timestamp is coordinator-to-gateway only. A buyer-supplied
+	// copy is stripped at ingress and is never a source of usage metadata.
+	return lower == "x-macprovider-internal-conv" || strings.HasPrefix(lower, "x-macprovider-internal-") || lower == "x-macprovider-privacy-posture-verified-at"
 }
 
 func setRateLimitHeaders(w http.ResponseWriter, limit, remaining, reset int64) {
