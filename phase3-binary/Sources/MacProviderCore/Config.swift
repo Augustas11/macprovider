@@ -239,6 +239,10 @@ public struct AppConfig: Equatable, Sendable {
     public var enableWarmSwap: Bool
     public var enableReceipts: Bool
     public var relayBlindEnabled: Bool
+    /// SPEC-049-R001. Default off. YAML `privacy_class_beta`, env
+    /// `MACPROVIDER_PRIVACY_CLASS_BETA`, CLI `--privacy-class-beta`.
+    /// On while relay-blind is off fails configuration validation.
+    public var privacyClassBeta: Bool
     public var relayBlindStateDirectory: String?
     public var swapDrainTimeoutSeconds: Int
     public var ctlSocketPath: String?
@@ -382,6 +386,7 @@ public struct AppConfig: Equatable, Sendable {
             enableWarmSwap: false,
             enableReceipts: false,
             relayBlindEnabled: false,
+            privacyClassBeta: false,
             relayBlindStateDirectory: nil,
             swapDrainTimeoutSeconds: 30,
             ctlSocketPath: nil,
@@ -433,6 +438,7 @@ public struct CLIOverrides: Equatable, Sendable {
     public var enableWarmSwap: Bool?
     public var enableReceipts: Bool?
     public var relayBlindEnabled: Bool?
+    public var privacyClassBeta: Bool?
     public var relayBlindStateDirectory: String?
     public var swapDrainTimeoutSeconds: Int?
     public var ctlSocketPath: String?
@@ -485,6 +491,7 @@ public struct CLIOverrides: Equatable, Sendable {
         enableWarmSwap: Bool? = nil,
         enableReceipts: Bool? = nil,
         relayBlindEnabled: Bool? = nil,
+        privacyClassBeta: Bool? = nil,
         relayBlindStateDirectory: String? = nil,
         swapDrainTimeoutSeconds: Int? = nil,
         ctlSocketPath: String? = nil,
@@ -531,6 +538,7 @@ public struct CLIOverrides: Equatable, Sendable {
         self.enableWarmSwap = enableWarmSwap
         self.enableReceipts = enableReceipts
         self.relayBlindEnabled = relayBlindEnabled
+        self.privacyClassBeta = privacyClassBeta
         self.relayBlindStateDirectory = relayBlindStateDirectory
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.ctlSocketPath = ctlSocketPath
@@ -635,8 +643,21 @@ public enum ConfigLoader {
             config.pagedKV.enabled = false
             config.pagedKV.errors.append("invalid paged_kv=<redacted>; expected map; paged_kv disabled")
         }
-
+        try validatePrivacyClass(config)
         return config
+    }
+
+    /// SPEC-049-R001. Privacy class on with relay-blind off is a configuration
+    /// error. The hardening probe refuses the same combination again before
+    /// any network, with a bounded reason code.
+    private static func validatePrivacyClass(_ config: AppConfig) throws {
+        if config.privacyClassBeta && !config.relayBlindEnabled {
+            throw ConfigError.invalidValue(
+                key: "privacy_class_beta",
+                value: "true",
+                expected: "relay_blind_enabled true"
+            )
+        }
     }
 
     public static func expandTilde(_ path: String) -> String {
@@ -737,6 +758,7 @@ public enum ConfigLoader {
         try assign(&config.enableWarmSwap, from: dict, key: "enable_warm_swap", expected: "boolean")
         try assign(&config.enableReceipts, from: dict, key: "enable_receipts", expected: "boolean")
         try assign(&config.relayBlindEnabled, from: dict, key: "relay_blind_enabled", expected: "boolean")
+        try assign(&config.privacyClassBeta, from: dict, key: "privacy_class_beta", expected: "boolean")
         try assign(&config.relayBlindStateDirectory, from: dict, key: "relay_blind_state_directory", expected: "absolute string")
         try assign(&config.swapDrainTimeoutSeconds, from: dict, key: "swap_drain_timeout_s", expected: "integer")
         try assign(&config.ctlSocketPath, from: dict, key: "ctl_socket_path", expected: "string")
@@ -956,6 +978,7 @@ public enum ConfigLoader {
         try assign(&config.enableWarmSwap, from: environment, env: "MACPROVIDER_ENABLE_WARM_SWAP", expected: "boolean")
         try assign(&config.enableReceipts, from: environment, env: "MACPROVIDER_ENABLE_RECEIPTS", expected: "boolean")
         try assign(&config.relayBlindEnabled, from: environment, env: "MACPROVIDER_RELAY_BLIND_ENABLED", expected: "boolean")
+        try assign(&config.privacyClassBeta, from: environment, env: "MACPROVIDER_PRIVACY_CLASS_BETA", expected: "boolean")
         try assign(&config.relayBlindStateDirectory, from: environment, env: "MACPROVIDER_RELAY_BLIND_STATE_DIRECTORY", expected: "absolute string")
         try assign(&config.swapDrainTimeoutSeconds, from: environment, env: "MACPROVIDER_SWAP_DRAIN_TIMEOUT_S", expected: "integer")
         try assign(&config.ctlSocketPath, from: environment, env: "MACPROVIDER_CTL_SOCKET_PATH", expected: "string")
@@ -1108,6 +1131,9 @@ public enum ConfigLoader {
         }
         if let relayBlindEnabled = cli.relayBlindEnabled {
             config.relayBlindEnabled = relayBlindEnabled
+        }
+        if let privacyClassBeta = cli.privacyClassBeta {
+            config.privacyClassBeta = privacyClassBeta
         }
         if let relayBlindStateDirectory = cli.relayBlindStateDirectory {
             config.relayBlindStateDirectory = relayBlindStateDirectory

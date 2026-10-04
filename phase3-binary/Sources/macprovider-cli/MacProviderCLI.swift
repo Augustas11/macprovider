@@ -40,7 +40,7 @@ struct MacProviderCLI: AsyncParsableCommand {
         commandName: "malibu-cli",
         abstract: "OpenAI-compatible Malibu (Mac Provider) inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ProviderCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self] + labSubcommands() + [MSBThroughputCommand.self, MSBLoopbackCommand.self, MSBPerplexityCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self, RelayBlindKeyCommand.self, RelayBlindFixtureCommand.self],
+        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ProviderCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self] + labSubcommands() + [MSBThroughputCommand.self, MSBLoopbackCommand.self, MSBPerplexityCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self, RelayBlindKeyCommand.self, RelayBlindFixtureCommand.self, PrivacyClassCommand.self],
         defaultSubcommand: ServeCommand.self
     )
 
@@ -341,6 +341,9 @@ struct ServeCommand: AsyncParsableCommand {
 
     @Flag(name: .customLong("relay-blind-enabled"), inversion: .prefixedNo, help: "Opt into the default-off relay-blind request encryption pilot.")
     var relayBlindEnabled: Bool?
+
+    @Flag(name: .customLong("privacy-class-beta"), inversion: .prefixedNo, help: "Opt into the default-off operator-constrained privacy class. Requires relay-blind. Overrides MACPROVIDER_PRIVACY_CLASS_BETA and config key privacy_class_beta.")
+    var privacyClassBeta: Bool?
 
     @Option(name: .customLong("relay-blind-state-directory"), help: "Absolute operator-owned 0700 directory outside the repository for relay-blind keys and execution journal.")
     var relayBlindStateDirectory: String?
@@ -1965,6 +1968,7 @@ struct ServeCommand: AsyncParsableCommand {
                 enableWarmSwap: enableWarmSwap,
                 enableReceipts: enableReceipts,
                 relayBlindEnabled: relayBlindEnabled,
+                privacyClassBeta: privacyClassBeta,
                 relayBlindStateDirectory: relayBlindStateDirectory,
                 swapDrainTimeoutSeconds: swapDrainTimeoutSeconds,
                 ctlSocketPath: ctlSocketPath,
@@ -2008,6 +2012,21 @@ struct ServeCommand: AsyncParsableCommand {
            let launched = Bundle.main.executableURL?.standardizedFileURL,
            launched.path != canonical.standardizedFileURL.path {
             try execCanonicalInstall(canonical)
+        }
+
+        // SPEC-049-R007: after canonical re-exec, before credentials, model
+        // load, HTTPServer, or CoordinatorClient. The live probe calls
+        // ptrace(PT_DENY_ATTACH); tests inject a probe and never do.
+        if resolved.privacyClassBeta {
+            if case .failure(let reasons) = PrivacyRuntimeHardening.apply(
+                probe: SystemPrivacyPostureProbe(),
+                config: resolved
+            ) {
+                let line = PrivacyRuntimeHardening.fatalLine(reasons: reasons)
+                FileHandle.standardError.write(Data(line.utf8))
+                try? FileHandle.standardError.synchronize()
+                throw ExitCode(78)
+            }
         }
 
         // v1.8.53 can leave its one-shot reload helper alive long enough to
@@ -4175,6 +4194,7 @@ private func printResolvedConfiguration(_ config: AppConfig) {
     print("  continuous_batching_cached_turns: \(config.continuousBatchingCachedTurns)")
     print("  enable_receipts: \(config.enableReceipts)")
     print("  relay_blind_enabled: \(config.relayBlindEnabled)")
+    print("  privacy_class_beta: \(config.privacyClassBeta)")
     print("  idle_prewarm.enabled: \(config.idlePrewarmEnabled)")
     print("  idle_prewarm.idle_threshold_seconds: \(config.idlePrewarmIdleThresholdSeconds)")
     print("  idle_prewarm.tick_seconds: \(config.idlePrewarmTickSeconds)")
