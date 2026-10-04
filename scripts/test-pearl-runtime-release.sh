@@ -796,8 +796,39 @@ if bash "$guard" --tag v1.8.66 --expected-commit "$second" \
   >"$work/code-identity-unlisted.out" 2>&1; then
   fail "accepted provider_code_identity for a CLI asset checksums.txt does not list"
 fi
-grep -q 'checksums.txt omits the provider CLI asset bound by provider_code_identity' \
+grep -q 'provider CLI asset bound by provider_code_identity: checksums.txt has no row for macprovider-cli-v1.8.66-darwin-arm64.tar.gz' \
   "$work/code-identity-unlisted.out"
+
+# The provider tarball needs exactly one checksums.txt row whose digest is the
+# full tarball sha256 (shared require_checksum_row()).
+for checksum_case in duplicate mismatch; do
+  make_release_dir "$work/release-code-identity-row-$checksum_case" v1.8.66 "$second"
+  python3 - "$work/release-code-identity-row-$checksum_case/checksums.txt" "$checksum_case" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+case = sys.argv[2]
+rows = path.read_text(encoding="utf-8").splitlines()
+row = next(line for line in rows if line.endswith("macprovider-cli-v1.8.66-darwin-arm64.tar.gz"))
+if case == "duplicate":
+    rows.append(row)
+else:
+    rows[rows.index(row)] = "0" * 64 + "  macprovider-cli-v1.8.66-darwin-arm64.tar.gz"
+path.write_text("".join(line + "\n" for line in rows), encoding="utf-8")
+PY
+  if bash "$guard" --tag v1.8.66 --expected-commit "$second" \
+    --remote "$work/remote.git" --release-dir "$work/release-code-identity-row-$checksum_case" \
+    >"$work/code-identity-row-$checksum_case.out" 2>&1; then
+    fail "accepted a provider CLI checksums.txt row case: $checksum_case"
+  fi
+  case "$checksum_case" in
+    duplicate) expected='checksums.txt has duplicate rows for macprovider-cli-v1.8.66-darwin-arm64.tar.gz' ;;
+    mismatch) expected='checksums.txt digest mismatch for macprovider-cli-v1.8.66-darwin-arm64.tar.gz' ;;
+  esac
+  grep -qF -- "$expected" "$work/code-identity-row-$checksum_case.out" ||
+    fail "checksum row case $checksum_case failed for the wrong reason: $(cat "$work/code-identity-row-$checksum_case.out")"
+done
 
 # A present identity requires the bound tarball itself, not just its checksum row.
 make_release_dir "$work/release-code-identity-no-tarball" v1.8.66 "$second"
@@ -807,7 +838,7 @@ if bash "$guard" --tag v1.8.66 --expected-commit "$second" \
   >"$work/code-identity-no-tarball.out" 2>&1; then
   fail "accepted provider_code_identity without the bound provider CLI tarball"
 fi
-grep -q 'missing provider CLI asset bound by provider_code_identity: macprovider-cli-v1.8.66-darwin-arm64.tar.gz' \
+grep -q 'provider CLI asset bound by provider_code_identity: missing asset bound by checksums.txt: macprovider-cli-v1.8.66-darwin-arm64.tar.gz' \
   "$work/code-identity-no-tarball.out"
 
 # SPEC-025 §6.2.1 cutoff: 1.8.214 and later MUST carry the field.

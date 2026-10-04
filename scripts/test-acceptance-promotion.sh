@@ -330,7 +330,11 @@ sign_pearl() {
     -out "$accepted/pearl-release.json.sig" "$accepted/pearl-release.json"
 }
 sign_pearl
-printf 'fixture checksums\n' > "$accepted/checksums.txt"
+# Real rows for every release asset (build-checksums format), so the provider
+# CLI tarball has the one checksums.txt row provider_code_identity requires.
+(cd "$accepted" && for name in "${release_names[@]}"; do
+  printf '%s  %s\n' "$(shasum -a 256 "$name" | awk '{print $1}')" "$name"
+done) > "$accepted/checksums.txt"
 checksums_sha="$(shasum -a 256 "$accepted/checksums.txt" | awk '{print $1}')"
 
 cat > "$work/run.json" <<EOF
@@ -574,6 +578,49 @@ for version in ("1.8.214", "1.9.0", "2.0.0", "garbage"):
             raise SystemExit(f"post-cutoff {version} absence failed for the wrong reason: {exc}")
     else:
         raise SystemExit(f"post-cutoff {version} absence was accepted")
+PY
+
+# The accepted CLI tarball needs exactly one checksums.txt row equal to its full
+# sha256 (shared require_checksum_row()). Drive the verifier on a copy of the
+# accepted set so the signed-checksums digest pin above stays untouched.
+python3 - "$verifier" "$accepted" "$work/checksum-rows" <<'PY'
+import contextlib
+import importlib.util
+import io
+import json
+import pathlib
+import shutil
+import sys
+
+spec = importlib.util.spec_from_file_location("verify_acceptance_promotion", sys.argv[1])
+verifier = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(verifier)
+accepted = pathlib.Path(sys.argv[2])
+root = pathlib.Path(sys.argv[3])
+asset = "macprovider-cli-v1.8.48-darwin-arm64.tar.gz"
+pearl = json.loads((accepted / "pearl-release.json").read_text())
+rows = (accepted / "checksums.txt").read_text().splitlines()
+row = next(line for line in rows if line.endswith("  " + asset))
+cases = {
+    "valid": (rows, None),
+    "missing": ([line for line in rows if line != row], f"checksums.txt has no row for {asset}"),
+    "duplicate": (rows + [row], f"checksums.txt has duplicate rows for {asset}"),
+    "mismatch": ([("0" * 64 + "  " + asset) if line == row else line for line in rows], f"checksums.txt digest mismatch for {asset}"),
+}
+for case, (lines, expected) in cases.items():
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir()
+    shutil.copyfile(accepted / asset, root / asset)
+    (root / "checksums.txt").write_text("".join(line + "\n" for line in lines))
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            verifier.verify_provider_code_identity(root, pearl, "v1.8.48", "1.8.48")
+    except SystemExit as exc:
+        if expected is None or expected not in str(exc):
+            raise SystemExit(f"checksum row case {case} failed for the wrong reason: {exc}")
+    else:
+        if expected is not None:
+            raise SystemExit(f"checksum row case {case} was accepted")
 PY
 
 expect_reject wrong-checksums-digest \

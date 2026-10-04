@@ -1290,7 +1290,8 @@ CLI-shipping release with provider CLI version 1.8.214 or later MUST carry the
 field; producers never omit it. Verifiers (`scripts/verify-pearl-runtime-release.sh`,
 `scripts/verify-acceptance-promotion.py`) are present-then-strict: when the
 field is present they MUST reject it if malformed, if `checksums.txt` does not
-list its `asset`, if the bound tarball is missing (the GitHub path MUST
+hold exactly one well-formed row for its `asset` (shared helper
+`require_checksum_row()`), if the bound tarball is missing (the GitHub path MUST
 download it), if its bytes differ from `checksums.txt`, or if `binary_sha256`
 differs from the `macprovider-cli` extracted from it. They MUST accept its
 absence only when the provider CLI version they already hold from signed

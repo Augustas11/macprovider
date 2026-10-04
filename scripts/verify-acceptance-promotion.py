@@ -92,6 +92,10 @@ def verify_provider_code_identity(root: pathlib.Path, pearl: dict, tag: str, pro
     tarball = root / identity["asset"]
     regular(tarball, "accepted provider CLI tarball")
     try:
+        producer.require_checksum_row(root / "checksums.txt", identity["asset"], tarball)
+    except producer.IdentityError as exc:
+        fail(f"accepted provider CLI tarball: {exc}")
+    try:
         digest = producer.member_sha256(tarball, identity["member"])
     except producer.IdentityError as exc:
         fail(f"accepted provider CLI {exc}")

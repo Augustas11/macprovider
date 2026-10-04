@@ -381,6 +381,31 @@ class SharedContractTest(unittest.TestCase):
         self.assertEqual(destination.read_bytes(), data)
         self.assertEqual(self.producer.member_sha256(tarball), hashlib.sha256(data).hexdigest())
 
+    def test_require_checksum_row_is_exact(self) -> None:
+        tarball = self.make_tarball(b"cli")
+        digest = hashlib.sha256(tarball.read_bytes()).hexdigest()
+        checksums = self.root / "checksums.txt"
+        other = f"{'1' * 64}  other.json\n"
+        row = f"{digest}  {ASSET}\n"
+        checksums.write_text(other + row)
+        self.assertEqual(self.producer.require_checksum_row(checksums, ASSET, tarball), digest)
+        checksums.write_text(other + f"{digest} *{ASSET}\n")
+        self.assertEqual(self.producer.require_checksum_row(checksums, ASSET, tarball), digest)
+        cases = {
+            "no row for": other,
+            "duplicate rows for": other + row + row,
+            "digest mismatch for": other + f"{'0' * 64}  {ASSET}\n",
+            "is not a lowercase sha256": other + f"{digest.upper()}  {ASSET}\n",
+        }
+        for message, body in cases.items():
+            with self.subTest(message=message):
+                checksums.write_text(body)
+                with self.assertRaisesRegex(self.producer.IdentityError, message):
+                    self.producer.require_checksum_row(checksums, ASSET, tarball)
+        checksums.write_text(other + row)
+        with self.assertRaisesRegex(self.producer.IdentityError, "missing asset bound by checksums.txt"):
+            self.producer.require_checksum_row(checksums, ASSET, self.root / "absent.tar.gz")
+
     def test_member_size_cap_is_enforced(self) -> None:
         tarball = self.make_tarball(b"x" * 4096)
         self.producer.MAX_MEMBER_BYTES = 1024

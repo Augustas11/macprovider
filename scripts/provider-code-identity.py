@@ -118,6 +118,40 @@ def run_tool(arguments: list[str], label: str) -> str:
     return (result.stdout + result.stderr).decode("utf-8", errors="replace")
 
 
+def require_checksum_row(checksums_path: pathlib.Path, asset: str, path: pathlib.Path) -> str:
+    """Bind `path` to exactly one well-formed `checksums.txt` row for `asset`.
+
+    Fails unless checksums.txt has exactly one `<64 hex>  <asset>` row (an
+    optional binary-mode `*` prefix on the name is accepted), the asset file is
+    a regular non-symlink file, and its streamed sha256 equals that row.
+    Returns the digest.
+    """
+    try:
+        lines = checksums_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        fail(f"checksums.txt is unreadable: {exc}")
+    digests = []
+    for line in lines:
+        fields = line.split()
+        if len(fields) == 2 and fields[1].removeprefix("*") == asset:
+            digests.append(fields[0])
+    if not digests:
+        fail(f"checksums.txt has no row for {asset}")
+    if len(digests) != 1:
+        fail(f"checksums.txt has duplicate rows for {asset}")
+    if not HEX64.fullmatch(digests[0]):
+        fail(f"checksums.txt row for {asset} is not a lowercase sha256")
+    if path.is_symlink() or not path.is_file():
+        fail(f"missing asset bound by checksums.txt: {asset}")
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(CHUNK_BYTES), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != digests[0]:
+        fail(f"checksums.txt digest mismatch for {asset}")
+    return digests[0]
+
+
 def member_sha256(tarball: pathlib.Path, member_name: str = MEMBER, destination: pathlib.Path | None = None) -> str:
     """Stream the single regular member's bytes, enforcing the size cap while reading.
 

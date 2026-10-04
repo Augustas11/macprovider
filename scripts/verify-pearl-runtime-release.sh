@@ -281,18 +281,11 @@ else:
         except producer.IdentityError as exc:
             fail(f"pearl-release.json {exc}")
         provider_asset = identity["asset"]
-        provider_digest = checksums.get(provider_asset)
-        if provider_digest is None:
-            fail(f"checksums.txt omits the provider CLI asset bound by provider_code_identity: {provider_asset}")
         provider_path = directory / provider_asset
-        if not provider_path.is_file() or provider_path.is_symlink():
-            fail(f"missing provider CLI asset bound by provider_code_identity: {provider_asset}")
-        tarball_digest = hashlib.sha256()
-        with provider_path.open("rb") as source:
-            for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                tarball_digest.update(chunk)
-        if tarball_digest.hexdigest() != provider_digest:
-            fail(f"checksums.txt digest mismatch for {provider_asset}")
+        try:
+            producer.require_checksum_row(directory / "checksums.txt", provider_asset, provider_path)
+        except producer.IdentityError as exc:
+            fail(f"provider CLI asset bound by provider_code_identity: {exc}")
         try:
             cli_digest = producer.member_sha256(provider_path, identity["member"])
         except producer.IdentityError as exc:
