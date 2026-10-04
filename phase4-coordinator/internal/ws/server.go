@@ -2457,6 +2457,8 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		entry.Tier = s.commitProviderAdmission(hello, entry.Tier)
 	}
 	entry.AuthState = authState
+	// Unroutable until hello_ack is enqueued (cleared below).
+	entry.HandshakeAckPending = true
 	session, _ := s.registerProviderSession(conn, entry)
 	if session == nil {
 		// Eviction defense fired: bearer-less duplicate tried to
@@ -2500,12 +2502,13 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	if s.beforeHandshakeAckSend != nil {
 		s.beforeHandshakeAckSend()
 	}
-	if err := session.send(b); err != nil {
+	if err := session.sendHandshakeAck(b); err != nil {
 		s.log.Warn().Err(err).Str("provider_id", hello.ProviderID).Msg("hello_ack write failed")
 		// The session is registered: return its IDs so handleConn runs
 		// handleDisconnect for exactly this session.
 		return entry.ProviderID, entry.AssignedID
 	}
+	s.pool.ClearHandshakeAckPending(entry.ProviderID, entry.AssignedID)
 	// Privacy key acceptance schedules a posture challenge on this session's
 	// FIFO writer. The provider requires hello_ack as the next frame, so the
 	// challenge may only be enqueued after the ack (SPEC-049).
@@ -3057,6 +3060,8 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	// committed the token/PairOT/referral above; refusing here would strand a
 	// minted token. The bounded revalidation sweep evicts (never refuses) a
 	// session whose trust lapses after commit.
+	// Unroutable until auth_response v2 is enqueued (cleared below).
+	entry.HandshakeAckPending = true
 	session, refusal := s.registerProviderSession(conn, entry)
 	if session == nil {
 		switch refusal {
@@ -3139,11 +3144,12 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	if s.beforeHandshakeAckSend != nil {
 		s.beforeHandshakeAckSend()
 	}
-	if err := session.send(rawResponse); err != nil {
+	if err := session.sendHandshakeAck(rawResponse); err != nil {
 		s.log.Warn().Err(err).Str("provider_id", initial.ProviderID).Msg("auth_response write failed")
 		// See handleV1Conn: handleConn tears down this registered session.
 		return entry.ProviderID, entry.AssignedID
 	}
+	s.pool.ClearHandshakeAckPending(entry.ProviderID, entry.AssignedID)
 	// See handleV1Conn: the posture challenge must follow auth_response v2.
 	s.acceptPrivacyKeyRecords(entry.ProviderID, entry.AssignedID, initial.PrivacyKeyRecords)
 	if s.cfg.Pool.WarmupGateEnabled {
@@ -4146,6 +4152,7 @@ func (s *Server) registerProviderSessionLocked(conn net.Conn, entry *pool.Provid
 	session.useTier2Session(entry.Tier2Session)
 	session.probeWrites = true
 	session.onWriteFailure = s.handleProviderWriteFailure
+	session.ackPending = entry.HandshakeAckPending
 	s.sessions.Store(sessionKey(entry.ProviderID, entry.AssignedID), session)
 	_ = s.takeCloseEvent(conn) // successful admission: drop pre-auth close metadata
 	s.rememberProviderSnapshot(*entry)

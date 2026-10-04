@@ -303,6 +303,10 @@ type Provider struct {
 	// active release (SPEC-023-R010). It never touches State, so drain,
 	// blacklist, and trust fences keep their own semantics.
 	CatalogRecheckPending bool `json:"-"`
+	// HandshakeAckPending holds a just-registered session out of routing
+	// until its hello_ack / auth_response v2 is enqueued. The provider
+	// aborts a handshake whose next frame is anything other than the ack.
+	HandshakeAckPending bool `json:"-"`
 	// AdmissionSandboxCredentialBypassed is set only for sessions that entered
 	// as sandbox-only and therefore did not receive newly minted durable
 	// provider credentials. Gate-disable reloads must not auto-promote these
@@ -661,7 +665,7 @@ func (p Provider) RoutingEligible() bool {
 	if p.BenchmarkQuarantined {
 		return false
 	}
-	if p.AdmissionCeilingExcluded || p.AdmissionEvidenceStale || p.AdmissionSandboxed || p.CatalogRecheckPending {
+	if p.AdmissionCeilingExcluded || p.AdmissionEvidenceStale || p.AdmissionSandboxed || p.CatalogRecheckPending || p.HandshakeAckPending {
 		return false
 	}
 	return (p.State == StateReady || p.State == StateBusy) && p.SlotsFree > 0 && !p.capacitySafetyHold
@@ -1074,8 +1078,12 @@ func (r *Registry) RegisterAtDetailed(p *Provider, conn net.Conn, now time.Time)
 		// legitimate Bearer-validated session. A legitimate provider
 		// reconnect with a valid Bearer always wins because their
 		// AuthState is AuthBearerValidated.
+		// A proven session still waiting for its handshake ack is protected
+		// too; the ack hold is transient and must not open an eviction window.
+		settled := *existing
+		settled.HandshakeAckPending = false
 		if existing.AuthState == AuthBearerValidated &&
-			existing.RoutingEligible() &&
+			settled.RoutingEligible() &&
 			p.AuthState != AuthBearerValidated {
 			return nil, false, RegisterRefusalBearerDowngrade
 		}
@@ -2347,6 +2355,19 @@ func (r *Registry) ClearCatalogRecheckPending(providerID, assignedID string) boo
 		return false
 	}
 	p.CatalogRecheckPending = false
+	return true
+}
+
+// ClearHandshakeAckPending releases a registered session into routing after
+// its handshake ack was enqueued. Returns true only when the flag changed.
+func (r *Registry) ClearHandshakeAckPending(providerID, assignedID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID || !p.HandshakeAckPending {
+		return false
+	}
+	p.HandshakeAckPending = false
 	return true
 }
 
