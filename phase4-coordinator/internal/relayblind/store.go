@@ -72,6 +72,7 @@ type Reservation struct {
 	InternalRequestID        string
 	CompletionTokens         *int64
 	PrivacyClass             bool
+	TerminalCode             string
 }
 
 // KeySession is one provider session that currently holds a fresh key of a class.
@@ -824,7 +825,7 @@ func (s *Store) RecoverUncertain(ctx context.Context, now time.Time) (int64, err
 	return res.RowsAffected()
 }
 
-const reservationSelect = `SELECT provider_binding,buyer_binding,account_id,wallet_session,provider_id,assigned_session,key_record_digest,kid,model,provider_model,stream,max_encrypted_request_bytes,max_output_tokens,input_token_upper_bound,reservation_token_cap,expires_at_unix,state,COALESCE(envelope_digest,''),COALESCE(execution_auth_digest,''),COALESCE(request_id,''),validated_input_tokens,effective_privacy_outcome,COALESCE(internal_request_id,''),completion_tokens,privacy_class FROM relay_blind_reservations`
+const reservationSelect = `SELECT provider_binding,buyer_binding,account_id,wallet_session,provider_id,assigned_session,key_record_digest,kid,model,provider_model,stream,max_encrypted_request_bytes,max_output_tokens,input_token_upper_bound,reservation_token_cap,expires_at_unix,state,COALESCE(envelope_digest,''),COALESCE(execution_auth_digest,''),COALESCE(request_id,''),validated_input_tokens,effective_privacy_outcome,COALESCE(internal_request_id,''),completion_tokens,privacy_class,COALESCE(terminal_code,'') FROM relay_blind_reservations`
 
 type reservationRow struct {
 	Reservation
@@ -836,7 +837,7 @@ type rowScanner interface{ Scan(...any) error }
 func scanReservation(row rowScanner) (reservationRow, error) {
 	var r reservationRow
 	var stream, privacyClass int
-	err := row.Scan(&r.ProviderBinding, &r.BuyerBinding, &r.AccountID, &r.WalletSession, &r.ProviderID, &r.AssignedSession, &r.KeyRecordDigest, &r.KID, &r.Model, &r.ProviderModel, &stream, &r.MaxEncryptedRequestBytes, &r.MaxOutputTokens, &r.InputTokenUpperBound, &r.ReservationTokenCap, &r.ExpiresAtUnix, &r.State, &r.EnvelopeDigest, &r.ExecutionAuthDigest, &r.RequestID, &r.ValidatedInputTokens, &r.EffectivePrivacyOutcome, &r.InternalRequestID, &r.CompletionTokens, &privacyClass)
+	err := row.Scan(&r.ProviderBinding, &r.BuyerBinding, &r.AccountID, &r.WalletSession, &r.ProviderID, &r.AssignedSession, &r.KeyRecordDigest, &r.KID, &r.Model, &r.ProviderModel, &stream, &r.MaxEncryptedRequestBytes, &r.MaxOutputTokens, &r.InputTokenUpperBound, &r.ReservationTokenCap, &r.ExpiresAtUnix, &r.State, &r.EnvelopeDigest, &r.ExecutionAuthDigest, &r.RequestID, &r.ValidatedInputTokens, &r.EffectivePrivacyOutcome, &r.InternalRequestID, &r.CompletionTokens, &privacyClass, &r.TerminalCode)
 	r.Stream = stream == 1
 	r.PrivacyClass = privacyClass != 0
 	if r.ValidatedInputTokens.Valid {

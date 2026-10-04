@@ -91,6 +91,27 @@ var relayBlindErrors = map[string]relayBlindErrorShape{
 }
 
 func writeRelayBlindError(w http.ResponseWriter, code, message string) {
+	status, body := relayBlindErrorBody(w, code, message)
+	w.Header().Del(privacyClassHeader)
+	w.Header().Del(privacyPostureVerifiedAtHeader)
+	setRelayBlindNoStore(w)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+// writeRelayBlindStreamError ends a relay-blind stream whose 200 headers are
+// already sent with the same typed error envelope, followed by [DONE].
+func writeRelayBlindStreamError(w http.ResponseWriter, code, message string) {
+	_, body := relayBlindErrorBody(w, code, message)
+	raw, _ := json.Marshal(body)
+	_, _ = io.WriteString(w, "data: "+string(raw)+"\n\ndata: [DONE]\n\n")
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func relayBlindErrorBody(w http.ResponseWriter, code, message string) (int, map[string]any) {
 	shape, ok := relayBlindErrors[code]
 	if !ok {
 		shape = relayBlindErrors["relay_blind_required_unavailable"]
@@ -100,12 +121,7 @@ func writeRelayBlindError(w http.ResponseWriter, code, message string) {
 	if strings.TrimSpace(w.Header().Get(relayBlindValidatedHeader)) != "" {
 		effectiveOutcome = "relay_blind_satisfied"
 	}
-	w.Header().Del(privacyClassHeader)
-	w.Header().Del(privacyPostureVerifiedAtHeader)
-	setRelayBlindNoStore(w)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(shape.Status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
+	return shape.Status, map[string]any{"error": map[string]any{
 		"message": message, "type": errorType(shape.Status), "param": nil, "code": code,
 		"retryable": shape.Retryable, "retry_action": shape.RetryAction,
 		"macprovider": map[string]any{
@@ -116,7 +132,7 @@ func writeRelayBlindError(w http.ResponseWriter, code, message string) {
 				"usage_settlement":          "standard_usage_settlement_and_clear_cap_enforcement_still_apply",
 			},
 		},
-	}})
+	}}
 }
 
 func (s *Server) relayBlindMetadataAllowed(key string) bool {
@@ -327,7 +343,21 @@ func (s *Server) handleRelayBlindConsume(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	envelope, err := relayblind.ParseEnvelope(body)
-	if err != nil || envelope.Validate(s.now(), time.Duration(s.relayBlind.cfg.MaxClockSkewSeconds)*time.Second) != nil {
+	envelopeValid := err == nil && envelope.Validate(s.now(), time.Duration(s.relayBlind.cfg.MaxClockSkewSeconds)*time.Second) == nil
+	// SPEC-049 §4.2/R012: classify the privacy marker before the envelope
+	// error. A privacy header on a body outside the relay-blind envelope
+	// namespace, or an invalid header on a body that is not a valid
+	// envelope, is a downgrade. An invalid header on a valid envelope still
+	// reaches privacyClassConflict below, which also burns the reservation.
+	if present && !relayBlindEnvelopeNamespace(body) {
+		writePrivacyClassError(w, privacyClassDowngrade, "Privacy class marker is not valid for a plaintext request")
+		return
+	}
+	if present && !valid && !envelopeValid {
+		writePrivacyClassError(w, privacyClassDowngrade, "")
+		return
+	}
+	if !envelopeValid {
 		writeRelayBlindError(w, "relay_blind_envelope_invalid", "Invalid relay-blind envelope")
 		return
 	}
@@ -346,6 +376,12 @@ func (s *Server) handleRelayBlindConsume(w http.ResponseWriter, r *http.Request)
 	}
 	response, err := s.relayBlind.store.Consume(r.Context(), relayblind.ConsumeInput{AccountID: account.ID(), WalletSession: walletSession, Envelope: envelope, EnvelopeDigest: digest, Now: s.now()})
 	if err != nil {
+		if errors.Is(err, relayblind.ErrReplay) && heldErr == nil && held.AccountID == account.ID() && held.WalletSession == walletSession {
+			if code := privacyInvalidatedCode(held, s.now()); code != "" {
+				writePrivacyClassError(w, code, "")
+				return
+			}
+		}
 		code := "relay_blind_route_reservation_invalid"
 		switch {
 		case errors.Is(err, relayblind.ErrReplay):
@@ -476,6 +512,10 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 				writePrivacyClassError(w, privacyClassDisabled, "")
 				return
 			}
+			if code := s.privacyInvalidatedAuthorization(r.Context(), account.ID(), walletSession, authorization); code != "" {
+				writePrivacyClassError(w, code, "")
+				return
+			}
 		}
 		code := "relay_blind_route_reservation_invalid"
 		if errors.Is(err, relayblind.ErrReplay) {
@@ -527,6 +567,12 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 	if err != nil {
 		if quotaMetered {
 			s.admission.RefundRequest(provider)
+		}
+		if errors.Is(err, relayblind.ErrReplay) {
+			if code := s.privacyInvalidatedAuthorization(r.Context(), account.ID(), walletSession, authorization); code != "" {
+				writePrivacyClassError(w, code, "")
+				return
+			}
 		}
 		writeRelayBlindError(w, "relay_blind_replay", "Relay-blind authorization has already been used")
 		return
@@ -674,6 +720,14 @@ func (s *Server) forwardRelayBlindNonStreaming(w http.ResponseWriter, r *http.Re
 				code = "relay_blind_committed_failed"
 				status = relayBlindErrors[code].Status
 			}
+			// SPEC-049 §4.8/R015: a privacy body is only the closed
+			// privacy-response-v1 envelope. Clear content is never relayed.
+			if reservation.PrivacyClass && status == http.StatusOK && relayblind.ValidatePrivacyResponseBody(output.Bytes()) != nil {
+				_ = s.relayBlind.store.MarkUnknownPostdispatch(r.Context(), reservation.ProviderBinding, privacyClassUnconfirmed, s.now())
+				s.recordRelayBlindUnknown(rec, provider, &inputTokens, nil, http.StatusInternalServerError, "Privacy response shape was not accepted", true)
+				writePrivacyClassError(w, privacyClassUnconfirmed, "")
+				return
+			}
 			if _, err := s.relayBlind.store.PersistEvidence(r.Context(), provider.ProviderID, provider.AssignedID, terminal, code, s.now()); err != nil {
 				_ = s.relayBlind.store.MarkUnknownPostdispatch(r.Context(), reservation.ProviderBinding, "relay_blind_execution_uncertain", s.now())
 				s.recordRelayBlindUnknown(rec, provider, &inputTokens, nil, http.StatusInternalServerError, "Terminal provider evidence was not accepted", reservation.PrivacyClass)
@@ -722,6 +776,16 @@ func (s *Server) forwardRelayBlindStreaming(w http.ResponseWriter, r *http.Reque
 	flusher, _ := w.(http.Flusher)
 	tracker := newSettlementStreamOutputTracker()
 	var streamedBytes int64
+	var privacyStream *privacyStreamRelay
+	if reservation.PrivacyClass {
+		privacyStream = &privacyStreamRelay{}
+	}
+	refusePrivacyStream := func() {
+		relay.Cancel("privacy_response_invalid")
+		_ = s.relayBlind.store.MarkUnknownPostdispatch(context.Background(), reservation.ProviderBinding, privacyClassUnconfirmed, s.now())
+		s.recordRelayBlindUnknown(rec, provider, &inputTokens, tracker.output(billing.TerminalStateProviderError), http.StatusOK, "Privacy response shape was not accepted", true)
+		writeRelayBlindStreamError(w, privacyClassUnconfirmed, privacyErrorMessage(privacyClassUnconfirmed))
+	}
 	for {
 		select {
 		case chunk, ok := <-relay.Chunks:
@@ -733,9 +797,18 @@ func (s *Server) forwardRelayBlindStreaming(w http.ResponseWriter, r *http.Reque
 					s.recordRelayBlindUnknown(rec, provider, &inputTokens, tracker.output(billing.TerminalStateProviderError), http.StatusOK, "Provider response exceeded coordinator limit", reservation.PrivacyClass)
 					return
 				}
-				n, writeErr := io.WriteString(w, chunk.Data)
+				data := chunk.Data
+				if privacyStream != nil {
+					accepted, err := privacyStream.accept(chunk.Data)
+					if err != nil {
+						refusePrivacyStream()
+						return
+					}
+					data = accepted
+				}
+				n, writeErr := io.WriteString(w, data)
 				if n > 0 && !reservation.PrivacyClass {
-					_ = tracker.observeBlock([]byte(chunk.Data[:n]))
+					_ = tracker.observeBlock([]byte(data[:n]))
 				}
 				if writeErr != nil {
 					relay.Cancel("buyer_disconnected")
@@ -765,6 +838,10 @@ func (s *Server) forwardRelayBlindStreaming(w http.ResponseWriter, r *http.Reque
 			status := http.StatusOK
 			if end.Status != "complete" {
 				code, status = "relay_blind_committed_failed", http.StatusInternalServerError
+			}
+			if privacyStream != nil && privacyStream.complete() != nil {
+				refusePrivacyStream()
+				return
 			}
 			if _, err := s.relayBlind.store.PersistEvidence(context.Background(), provider.ProviderID, provider.AssignedID, terminal, code, s.now()); err != nil {
 				_ = s.relayBlind.store.MarkUnknownPostdispatch(context.Background(), reservation.ProviderBinding, "relay_blind_execution_uncertain", s.now())

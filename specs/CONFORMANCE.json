@@ -1233,7 +1233,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/928",
-        "rationale": "The complete default-off global-pool pilot contract is reconciled in SPEC-041 v0.2.0. Existing gateway admission-only implementation remains partial; provider identity/key lifecycle, buyer pins, reservations/consume, opaque dispatch, provider execution journal, ordinary settlement integration, truthful success disclosure, recovery, signed journeys, and five-lane audit remain pending. No conformance or production promotion is made by this amendment."
+        "rationale": "The default-off global-pool pilot is implemented locally across provider, coordinator, gateway, and reference client with mapped unit and integration tests (see audits/privacy-pool-v01-implementation.md). Independently trusted signed deployment journey evidence and readiness reconciliation remain pending; every requirement stays pending. Ephemeral local test signatures do not promote conformance, and production remains disabled."
       }
     },
     {
@@ -1548,7 +1548,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "SPEC-049 v0.1.0 defines the default-off Beta operator-constrained privacy class. No implementation, automated tests, signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence, staged canary, or three-lane audit exists yet. No conformance or production promotion is made by this draft."
+        "rationale": "SPEC-049 v0.1.0 defines the default-off Beta operator-constrained privacy class. It is implemented locally, default-off in every component, with unit and integration tests. The signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence (SPEC-049-R023), the staged canary, and promotion remain pending; every requirement stays pending. No conformance or production promotion is made."
       }
     }
   ],

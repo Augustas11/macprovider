@@ -364,7 +364,7 @@ func privacyCountingRelay(dispatches *atomic.Int32) RelayBlindRelayFunc {
 }
 
 func TestPrivacyReservationRequiresEligibleProvider(t *testing.T) {
-	body := `{"id":"privacy-body","choices":[{"message":{"content":"CANARY-PRIVACY-BODY"}}]}`
+	body := privacyTestResponseBody(t)
 	var gotClass atomic.Value
 	var dispatches atomic.Int32
 	h := newPrivacyHarness(t, privacyHarnessConfig{privacyKey: true, relayKey: true, relay: privacySuccessRelay(body, &gotClass, &dispatches)})

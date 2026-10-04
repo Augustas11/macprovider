@@ -206,6 +206,28 @@ func writePrivacyClassError(w http.ResponseWriter, code, message string) {
 	writeJSON(w, status, map[string]any{"error": payload})
 }
 
+// writePrivacyClassStreamError terminates a privacy stream after the 200
+// headers have already been sent. The offending chunk is not written.
+func writePrivacyClassStreamError(w http.ResponseWriter, code, message string) {
+	if strings.TrimSpace(message) == "" {
+		message = privacyErrorMessage(code)
+	}
+	poisonDedupeCapture(w)
+	_, typ := privacyClassHTTP(code)
+	retryable := gatewayRetryable(code)
+	payload := map[string]any{"message": message, "type": typ, "param": nil, "code": code, "retryable": retryable}
+	if metadata := relayBlindOutcomeMetadata(w.Header(), code); metadata != nil {
+		payload["macprovider"] = metadata
+		if action, _ := metadata["retry_action"].(string); strings.HasPrefix(code, "privacy_class_") && action != "" {
+			payload["retry_action"] = action
+		}
+	}
+	raw, _ := json.Marshal(map[string]any{"error": payload})
+	_, _ = w.Write([]byte("data: "))
+	_, _ = w.Write(raw)
+	_, _ = w.Write([]byte("\n\ndata: [DONE]\n\n"))
+}
+
 // privacyPostureVerifiedAt accepts exactly one canonical positive base-10
 // integer. Repeated headers, signs, leading zeros, and non-integers fail
 // closed so a buyer or a split gateway cannot invent the timestamp.

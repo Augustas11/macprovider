@@ -10,6 +10,7 @@ import (
 	"os"
 	"reflect"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -806,4 +807,79 @@ func mustPublic(t *testing.T, record KeyRecord) []byte {
 		t.Fatal(err)
 	}
 	return public
+}
+
+func privacyOpaqueCiphertext() string {
+	return encodeBase64URL(bytes.Repeat([]byte{0x11}, privacyGCMTagSize))
+}
+
+func privacyOpaqueFrame(seq uint64, final bool) PrivacyFrame {
+	return PrivacyFrame{
+		Object: PrivacyFrameObject, Version: PrivacyResponseVersion,
+		Seq: seq, Final: final, Ciphertext: privacyOpaqueCiphertext(),
+	}
+}
+
+func privacyOpaqueResponse(prompt, completion int64) []byte {
+	frame0, _ := json.Marshal(privacyOpaqueFrame(0, false))
+	frame1, _ := json.Marshal(privacyOpaqueFrame(1, true))
+	return []byte(`{"object":"` + PrivacyResponseObject + `","version":"` + PrivacyResponseVersion + `","frames":[` + string(frame0) + `,` + string(frame1) + `],"usage":{"prompt_tokens":` + strconv.FormatInt(prompt, 10) + `,"completion_tokens":` + strconv.FormatInt(completion, 10) + `,"total_tokens":` + strconv.FormatInt(prompt+completion, 10) + `}}`)
+}
+
+func TestPrivacyResponseShapeRejectsClearContent(t *testing.T) {
+	body := privacyOpaqueResponse(4, 2)
+	if err := ValidatePrivacyResponseBody(body); err != nil {
+		t.Fatal(err)
+	}
+	clear := []byte(`{"object":"chat.completion","choices":[{"message":{"content":"CANARY"}}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`)
+	if err := ValidatePrivacyResponseBody(clear); err == nil {
+		t.Fatal("clear non-stream body accepted")
+	}
+	if err := ValidatePrivacyResponseBody([]byte(`{"object":"` + PrivacyResponseObject + `","version":"` + PrivacyResponseVersion + `","frames":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)); err == nil {
+		t.Fatal("empty frame list accepted")
+	}
+	mismatched := bytes.Replace(body, []byte(`"total_tokens":6`), []byte(`"total_tokens":7`), 1)
+	if err := ValidatePrivacyResponseBody(mismatched); err == nil {
+		t.Fatal("usage total mismatch accepted")
+	}
+
+	var gate PrivacyStreamGate
+	frame0, _ := json.Marshal(privacyOpaqueFrame(0, false))
+	frame1, _ := json.Marshal(privacyOpaqueFrame(1, true))
+	usage := `{"object":"chat.completion.chunk","model":"model-a","choices":[],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`
+	for _, event := range []struct {
+		data string
+		kind PrivacyStreamEvent
+	}{
+		{string(frame0), PrivacyStreamFrame},
+		{string(frame1), PrivacyStreamFrame},
+		{usage, PrivacyStreamUsage},
+		{"[DONE]", PrivacyStreamDone},
+	} {
+		kind, err := gate.Observe(event.data)
+		if err != nil || kind != event.kind {
+			t.Fatalf("observe %s kind=%d err=%v", event.data, kind, err)
+		}
+	}
+	if err := gate.Complete(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gate.Observe(`{"choices":[{"delta":{"content":"CANARY"}}]}`); err == nil {
+		t.Fatal("data after DONE accepted")
+	}
+
+	var refused PrivacyStreamGate
+	if _, err := refused.Observe(`{"choices":[{"delta":{"content":"CANARY","tool_calls":[]}}]}`); err == nil {
+		t.Fatal("clear stream content accepted")
+	}
+	if err := refused.Complete(); err == nil {
+		t.Fatal("incomplete stream completed")
+	}
+	kind, err := refused.Observe(string(frame0))
+	if err != nil || kind != PrivacyStreamFrame {
+		t.Fatalf("frame after refusal kind=%d err=%v", kind, err)
+	}
+	if _, err := refused.Observe(`{"object":"chat.completion.chunk","model":"model-a","choices":[{"delta":{"content":"CANARY"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`); err == nil {
+		t.Fatal("content-bearing usage chunk accepted")
+	}
 }

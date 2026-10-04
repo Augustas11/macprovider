@@ -1946,88 +1946,115 @@ struct ServeCommand: AsyncParsableCommand {
         return host == "localhost" || host == "127.0.0.1" || host == "::1"
     }
 
-    func run() async throws {
-        var resolved = try ConfigLoader.load(
-            cli: CLIOverrides(
-                port: port,
-                model: model,
-                modelArtifactPath: modelArtifactPath,
-                modelArtifactSHA256: modelArtifactSha256,
-                draftModel: draftModel,
-                draftModelArtifactSHA256: draftModelArtifactSha256,
-                numDraftTokens: numDraftTokens,
-                publishesSpecDecodeTelemetry: publishSpecDecodeTelemetry,
-                nativeMTPMode: nativeMTP,
-                coordinatorURL: coordinator,
-                providerID: providerID,
-                endpointURL: endpointURL,
-                configPath: config,
-                logLevel: logLevel,
-                supportedModels: SupportedModels.parseCSV(supportedModels),
-                publishesSupportedModels: publishSupportedModels,
-                enableWarmSwap: enableWarmSwap,
-                enableReceipts: enableReceipts,
-                relayBlindEnabled: relayBlindEnabled,
-                privacyClassBeta: privacyClassBeta,
-                relayBlindStateDirectory: relayBlindStateDirectory,
-                swapDrainTimeoutSeconds: swapDrainTimeoutSeconds,
-                ctlSocketPath: ctlSocketPath,
-                switchStatePath: switchStatePath,
-                providerToken: providerToken,
-                providerTokenFile: tokenFile,
-                credentialStore: credentialStore,
-                managedBy: managedBy,
-                kvBits: kvBits,
-                maxContext: maxContext,
-                maxBatch: maxBatch,
-                idlePrewarmEnabled: idlePrewarm,
-                idlePrewarmIdleThresholdSeconds: idlePrewarmIdleThresholdSeconds,
-                idlePrewarmTickSeconds: idlePrewarmTickSeconds,
-                idlePrewarmMaxTokens: idlePrewarmMaxTokens,
-                idlePrewarmPrompt: idlePrewarmPrompt,
-                idlePrewarmRunOnBattery: idlePrewarmRunOnBattery,
-                streamInterval: streamInterval,
-                prefillStepSize: prefillStepSize,
-                // SPEC-037 FR-KVP11 (MEDIUM-5): forward the KV disk-tier flags so the
-                // triple-source config surface (CLI → env → YAML) is complete.
-                kvDiskCache: kvDiskCacheCLIOverrides,
-                continuousBatching: continuousBatching,
-                continuousBatchQueueLimit: continuousBatchQueueLimit,
-                continuousBatchQueueWaitTimeoutMS: continuousBatchQueueWaitTimeoutMS,
-                continuousBatchPrefillTokensPerIteration: continuousBatchPrefillTokensPerIteration,
-                continuousBatchingCachedTurns: continuousBatchingCachedTurns,
-                pagedKV: pagedKVCLIOverrides
-            )
-        )
-
-        // #616/#610: repair a stale PATH regular-file entrypoint to install
-        // authority, then re-exec into that canonical binary when this process
-        // was launched from a non-canonical path. PATH repair alone does not
-        // replace the already-running stale inode; identity must freeze on the
-        // binary that matches the signed set's provider_cli member.
-        let serveMarkerStore = AutoUpdateMarkerStore()
-        if !autotuneCandidate,
-           resolved.credentialStore != .protectedFile,
-           let canonical = try serveMarkerStore.ensurePathEntrypointMatchesInstallAuthority(),
-           let launched = Bundle.main.executableURL?.standardizedFileURL,
-           launched.path != canonical.standardizedFileURL.path {
-            try execCanonicalInstall(canonical)
-        }
-
-        // SPEC-049-R007: after canonical re-exec, before credentials, model
-        // load, HTTPServer, or CoordinatorClient. The live probe calls
-        // ptrace(PT_DENY_ATTACH); tests inject a probe and never do.
-        if resolved.privacyClassBeta {
-            if case .failure(let reasons) = PrivacyRuntimeHardening.apply(
-                probe: SystemPrivacyPostureProbe(),
-                config: resolved
-            ) {
-                let line = PrivacyRuntimeHardening.fatalLine(reasons: reasons)
-                FileHandle.standardError.write(Data(line.utf8))
-                try? FileHandle.standardError.synchronize()
-                throw ExitCode(78)
+    /// SPEC-049-R007 ordering. Privacy mode is decided from non-secret inputs
+    /// only (flag > `MACPROVIDER_PRIVACY_CLASS_BETA` > `privacy_class_beta`).
+    /// In privacy mode the canonical re-exec decision and hardening run on the
+    /// non-secret bootstrap before any provider credential is resolved.
+    /// Otherwise the order is unchanged: full load, then the re-exec decision.
+    static func resolveServeConfig(
+        load: (_ resolveCredentials: Bool) throws -> AppConfig,
+        canonicalReexec: (AppConfig) throws -> Void,
+        harden: (AppConfig) throws -> Void
+    ) throws -> AppConfig {
+        let bootstrap = try load(false)
+        guard bootstrap.privacyClassBeta else {
+            let resolved = try load(true)
+            try canonicalReexec(resolved)
+            if resolved.privacyClassBeta {
+                try harden(resolved)
             }
+            return resolved
         }
+        try canonicalReexec(bootstrap)
+        try harden(bootstrap)
+        return try load(true)
+    }
+
+    func run() async throws {
+        let cliOverrides = CLIOverrides(
+            port: port,
+            model: model,
+            modelArtifactPath: modelArtifactPath,
+            modelArtifactSHA256: modelArtifactSha256,
+            draftModel: draftModel,
+            draftModelArtifactSHA256: draftModelArtifactSha256,
+            numDraftTokens: numDraftTokens,
+            publishesSpecDecodeTelemetry: publishSpecDecodeTelemetry,
+            nativeMTPMode: nativeMTP,
+            coordinatorURL: coordinator,
+            providerID: providerID,
+            endpointURL: endpointURL,
+            configPath: config,
+            logLevel: logLevel,
+            supportedModels: SupportedModels.parseCSV(supportedModels),
+            publishesSupportedModels: publishSupportedModels,
+            enableWarmSwap: enableWarmSwap,
+            enableReceipts: enableReceipts,
+            relayBlindEnabled: relayBlindEnabled,
+            privacyClassBeta: privacyClassBeta,
+            relayBlindStateDirectory: relayBlindStateDirectory,
+            swapDrainTimeoutSeconds: swapDrainTimeoutSeconds,
+            ctlSocketPath: ctlSocketPath,
+            switchStatePath: switchStatePath,
+            providerToken: providerToken,
+            providerTokenFile: tokenFile,
+            credentialStore: credentialStore,
+            managedBy: managedBy,
+            kvBits: kvBits,
+            maxContext: maxContext,
+            maxBatch: maxBatch,
+            idlePrewarmEnabled: idlePrewarm,
+            idlePrewarmIdleThresholdSeconds: idlePrewarmIdleThresholdSeconds,
+            idlePrewarmTickSeconds: idlePrewarmTickSeconds,
+            idlePrewarmMaxTokens: idlePrewarmMaxTokens,
+            idlePrewarmPrompt: idlePrewarmPrompt,
+            idlePrewarmRunOnBattery: idlePrewarmRunOnBattery,
+            streamInterval: streamInterval,
+            prefillStepSize: prefillStepSize,
+            // SPEC-037 FR-KVP11 (MEDIUM-5): forward the KV disk-tier flags so the
+            // triple-source config surface (CLI → env → YAML) is complete.
+            kvDiskCache: kvDiskCacheCLIOverrides,
+            continuousBatching: continuousBatching,
+            continuousBatchQueueLimit: continuousBatchQueueLimit,
+            continuousBatchQueueWaitTimeoutMS: continuousBatchQueueWaitTimeoutMS,
+            continuousBatchPrefillTokensPerIteration: continuousBatchPrefillTokensPerIteration,
+            continuousBatchingCachedTurns: continuousBatchingCachedTurns,
+            pagedKV: pagedKVCLIOverrides
+        )
+        let serveMarkerStore = AutoUpdateMarkerStore()
+        var resolved = try Self.resolveServeConfig(
+            load: { resolveCredentials in
+                try ConfigLoader.load(cli: cliOverrides, resolveCredentials: resolveCredentials)
+            },
+            canonicalReexec: { loaded in
+                // #616/#610: repair a stale PATH regular-file entrypoint to install
+                // authority, then re-exec into that canonical binary when this process
+                // was launched from a non-canonical path. PATH repair alone does not
+                // replace the already-running stale inode; identity must freeze on the
+                // binary that matches the signed set's provider_cli member.
+                if !autotuneCandidate,
+                   loaded.credentialStore != .protectedFile,
+                   let canonical = try serveMarkerStore.ensurePathEntrypointMatchesInstallAuthority(),
+                   let launched = Bundle.main.executableURL?.standardizedFileURL,
+                   launched.path != canonical.standardizedFileURL.path {
+                    try execCanonicalInstall(canonical)
+                }
+            },
+            harden: { loaded in
+                // SPEC-049-R007: after canonical re-exec, before credentials, model
+                // load, HTTPServer, or CoordinatorClient. The live probe calls
+                // ptrace(PT_DENY_ATTACH); tests inject a probe and never do.
+                if case .failure(let reasons) = PrivacyRuntimeHardening.apply(
+                    probe: SystemPrivacyPostureProbe(),
+                    config: loaded
+                ) {
+                    let line = PrivacyRuntimeHardening.fatalLine(reasons: reasons)
+                    FileHandle.standardError.write(Data(line.utf8))
+                    try? FileHandle.standardError.synchronize()
+                    throw ExitCode(78)
+                }
+            }
+        )
 
         // v1.8.53 can leave its one-shot reload helper alive long enough to
         // restart the newly installed target repeatedly. The target fences that

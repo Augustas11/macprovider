@@ -344,6 +344,112 @@ final class PrivacyRuntimeHardeningTests: XCTestCase {
     private func scripted(_ observation: PrivacyPostureObservation) -> ScriptedPrivacyPostureProbe {
         ScriptedPrivacyPostureProbe(observation: observation)
     }
+
+    // SPEC-049-R007: in privacy mode the token is not resolved before the
+    // canonical re-exec decision and hardening.
+    func testPrivacyModeHardensBeforeResolvingProviderToken() throws {
+        let token = "PRIVACY-TOKEN-CANARY"
+        let yaml = try tempConfig("""
+        relay_blind_enabled: true
+        privacy_class_beta: true
+        relay_blind_state_directory: /tmp/privacy-class-state
+        provider_token: \(token)
+
+        """)
+        defer { try? FileManager.default.removeItem(at: yaml) }
+        let tokenFile = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("privacy-token-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tokenFile) }
+
+        for (name, cli, environment, want) in [
+            ("yaml", CLIOverrides(configPath: yaml.path), [String: String](), token),
+            ("env", CLIOverrides(configPath: yaml.path), ["MACPROVIDER_PROVIDER_TOKEN": "ENV-TOKEN-CANARY"], "ENV-TOKEN-CANARY"),
+            ("token file", CLIOverrides(configPath: yaml.path, providerTokenFile: tokenFile.path), [String: String](), "FILE-TOKEN-CANARY"),
+        ] {
+            try? FileManager.default.removeItem(at: tokenFile)
+            var events: [String] = []
+            let resolved = try ServeCommand.resolveServeConfig(
+                load: { resolveCredentials in
+                    events.append("load:\(resolveCredentials)")
+                    return try ConfigLoader.load(cli: cli, environment: environment, resolveCredentials: resolveCredentials)
+                },
+                canonicalReexec: { config in
+                    events.append("reexec")
+                    XCTAssertNil(config.providerToken, name)
+                },
+                harden: { config in
+                    events.append("harden")
+                    XCTAssertTrue(config.privacyClassBeta, name)
+                    XCTAssertNil(config.providerToken, name)
+                    // The token file does not exist until hardening has run,
+                    // so any earlier read would have thrown.
+                    try Data("FILE-TOKEN-CANARY\n".utf8).write(to: tokenFile)
+                    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tokenFile.path)
+                }
+            )
+            XCTAssertEqual(events, ["load:false", "reexec", "harden", "load:true"], name)
+            XCTAssertEqual(resolved.providerToken, want, name)
+            XCTAssertTrue(resolved.privacyClassBeta, name)
+        }
+    }
+
+    func testHardeningFailureStopsBeforeProviderTokenLoad() throws {
+        let yaml = try tempConfig("""
+        relay_blind_enabled: true
+        relay_blind_state_directory: /tmp/privacy-class-state
+        provider_token: PRIVACY-TOKEN-CANARY
+
+        """)
+        defer { try? FileManager.default.removeItem(at: yaml) }
+        struct Refused: Error {}
+        var credentialLoads = 0
+        XCTAssertThrowsError(try ServeCommand.resolveServeConfig(
+            load: { resolveCredentials in
+                if resolveCredentials { credentialLoads += 1 }
+                return try ConfigLoader.load(
+                    cli: CLIOverrides(configPath: yaml.path),
+                    environment: ["MACPROVIDER_PRIVACY_CLASS_BETA": "true"],
+                    resolveCredentials: resolveCredentials
+                )
+            },
+            canonicalReexec: { _ in },
+            harden: { _ in throw Refused() }
+        )) { error in
+            XCTAssertTrue(error is Refused)
+        }
+        XCTAssertEqual(credentialLoads, 0)
+    }
+
+    func testNonPrivacyServeConfigOrderAndResultUnchanged() throws {
+        let yaml = try tempConfig("""
+        relay_blind_enabled: true
+        privacy_class_beta: true
+        relay_blind_state_directory: /tmp/privacy-class-state
+        provider_token: PLAIN-TOKEN
+
+        """)
+        defer { try? FileManager.default.removeItem(at: yaml) }
+        for (name, cli, environment) in [
+            ("flag off overrides env and yaml", CLIOverrides(configPath: yaml.path, privacyClassBeta: false), ["MACPROVIDER_PRIVACY_CLASS_BETA": "true"]),
+            ("env off overrides yaml", CLIOverrides(configPath: yaml.path), ["MACPROVIDER_PRIVACY_CLASS_BETA": "false"]),
+        ] {
+            var events: [String] = []
+            let resolved = try ServeCommand.resolveServeConfig(
+                load: { resolveCredentials in
+                    events.append("load:\(resolveCredentials)")
+                    return try ConfigLoader.load(cli: cli, environment: environment, resolveCredentials: resolveCredentials)
+                },
+                canonicalReexec: { config in
+                    events.append("reexec")
+                    XCTAssertEqual(config.providerToken, "PLAIN-TOKEN", name)
+                },
+                harden: { _ in events.append("harden") }
+            )
+            XCTAssertEqual(events, ["load:false", "load:true", "reexec"], name)
+            XCTAssertEqual(resolved, try ConfigLoader.load(cli: cli, environment: environment), name)
+            XCTAssertFalse(resolved.privacyClassBeta, name)
+        }
+    }
 }
 
 private struct ScriptedPrivacyPostureProbe: PrivacyPostureProbe {

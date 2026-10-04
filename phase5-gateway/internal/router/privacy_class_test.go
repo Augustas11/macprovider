@@ -376,7 +376,7 @@ func TestPrivacyHeaderForwardedToCoordinatorOnAllHops(t *testing.T) {
 		w.Header().Set(relayBlindValidatedHeader, digestText)
 		setPrivacyChatEcho(w, privacyCoordinatorVerifiedAt)
 		w.Header().Set(settlementModeHeader, "observe")
-		io.WriteString(w, `{"object":"macprovider.privacy_response","frames":[],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`)
+		io.WriteString(w, privacyClosedResponseBody(t))
 	})
 	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(c *config.Config) {
 		enablePrivacy(c)
@@ -420,7 +420,7 @@ func TestBuyerSuppliedInternalHeadersStillStripped(t *testing.T) {
 		w.Header().Set(relayBlindValidatedHeader, digestText)
 		setPrivacyChatEcho(w, privacyCoordinatorVerifiedAt)
 		w.Header().Set(settlementModeHeader, "observe")
-		io.WriteString(w, `{"object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+		io.WriteString(w, privacyClosedResponseBody(t))
 	})
 	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(c *config.Config) {
 		enablePrivacy(c)
@@ -628,7 +628,7 @@ func TestPrivacyUsageMetadataExactStrings(t *testing.T) {
 				w.Header().Set(relayBlindValidatedHeader, digestText)
 				setPrivacyChatEcho(w, privacyCoordinatorVerifiedAt)
 				w.Header().Set(settlementModeHeader, "observe")
-				io.WriteString(w, `{"object":"macprovider.privacy_response","frames":[{"object":"macprovider.privacy_frame","ciphertext":"abc"}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`)
+				io.WriteString(w, privacyClosedResponseBody(t))
 			})
 			h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(c *config.Config) {
 				enablePrivacy(c)

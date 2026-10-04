@@ -586,11 +586,16 @@ public enum ConfigError: Error, CustomStringConvertible, Equatable {
 }
 
 public enum ConfigLoader {
+    /// `resolveCredentials: false` is the SPEC-049-R007 non-secret bootstrap:
+    /// it resolves every other key with the same precedence but never assigns
+    /// `providerToken` from YAML `provider_token`, `MACPROVIDER_PROVIDER_TOKEN`,
+    /// or `--token-file`, and never opens the token file.
     public static func load(
         cli: CLIOverrides,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: expandTilde($0)) },
-        readFile: (String) throws -> String = { try String(contentsOfFile: expandTilde($0), encoding: .utf8) }
+        readFile: (String) throws -> String = { try String(contentsOfFile: expandTilde($0), encoding: .utf8) },
+        resolveCredentials: Bool = true
     ) throws -> AppConfig {
         let configPath = cli.configPath
             ?? environment["MACPROVIDER_CONFIG"]
@@ -599,13 +604,13 @@ public enum ConfigLoader {
 
         var config = AppConfig.defaults(configPath: configPath)
         if fileExists(configPath) {
-            config = try applyYAMLConfig(config, path: configPath, readFile: readFile)
+            config = try applyYAMLConfig(config, path: configPath, readFile: readFile, resolveCredentials: resolveCredentials)
         } else if explicitConfigPath {
             throw ConfigError.unreadableConfig(path: configPath, underlying: "file does not exist")
         }
 
-        config = try applyEnvironment(config, environment: environment)
-        config = try applyCLI(config, cli: cli)
+        config = try applyEnvironment(config, environment: environment, resolveCredentials: resolveCredentials)
+        config = try applyCLI(config, cli: cli, resolveCredentials: resolveCredentials)
         config.configPath = configPath
         try validateIdlePrewarm(config)
 
@@ -674,7 +679,8 @@ public enum ConfigLoader {
     private static func applyYAMLConfig(
         _ base: AppConfig,
         path: String,
-        readFile: (String) throws -> String
+        readFile: (String) throws -> String,
+        resolveCredentials: Bool
     ) throws -> AppConfig {
         let text: String
         do {
@@ -772,7 +778,9 @@ public enum ConfigLoader {
             try assign(&config.idlePrewarmPrompt, from: nested, key: "prompt", expected: "string")
             try assign(&config.idlePrewarmRunOnBattery, from: nested, key: "run_on_battery", expected: "boolean")
         }
-        try assign(&config.providerToken, from: dict, key: "provider_token", expected: "string")
+        if resolveCredentials {
+            try assign(&config.providerToken, from: dict, key: "provider_token", expected: "string")
+        }
         if dict["credential_store"] != nil {
             guard let raw = rawNode?["credential_store"]?.scalar?.string,
                   let kind = ProviderCredentialStoreKind(rawValue: raw.lowercased()) else {
@@ -938,7 +946,8 @@ public enum ConfigLoader {
 
     private static func applyEnvironment(
         _ base: AppConfig,
-        environment: [String: String]
+        environment: [String: String],
+        resolveCredentials: Bool
     ) throws -> AppConfig {
         var config = base
         try assign(&config.port, from: environment, env: "MACPROVIDER_PORT", expected: "integer")
@@ -990,7 +999,9 @@ public enum ConfigLoader {
         try assign(&config.idlePrewarmMaxTokens, from: environment, env: "MACPROVIDER_IDLE_PREWARM_MAX_TOKENS", expected: "integer")
         try assign(&config.idlePrewarmPrompt, from: environment, env: "MACPROVIDER_IDLE_PREWARM_PROMPT", expected: "string")
         try assign(&config.idlePrewarmRunOnBattery, from: environment, env: "MACPROVIDER_IDLE_PREWARM_ON_BATTERY", expected: "boolean")
-        try assign(&config.providerToken, from: environment, env: "MACPROVIDER_PROVIDER_TOKEN", expected: "string")
+        if resolveCredentials {
+            try assign(&config.providerToken, from: environment, env: "MACPROVIDER_PROVIDER_TOKEN", expected: "string")
+        }
         if let raw = environment["MACPROVIDER_CREDENTIAL_STORE"] {
             guard let kind = ProviderCredentialStoreKind(rawValue: raw.lowercased()) else {
                 throw ConfigError.invalidValue(
@@ -1031,7 +1042,7 @@ public enum ConfigLoader {
         return config
     }
 
-    private static func applyCLI(_ base: AppConfig, cli: CLIOverrides) throws -> AppConfig {
+    private static func applyCLI(_ base: AppConfig, cli: CLIOverrides, resolveCredentials: Bool) throws -> AppConfig {
         var config = base
         if let port = cli.port {
             config.port = port
@@ -1154,7 +1165,7 @@ public enum ConfigLoader {
                 expected: "use MACPROVIDER_PROVIDER_TOKEN, provider_token in a 0600 config file, or --token-file"
             )
         }
-        if let providerTokenFile = cli.providerTokenFile {
+        if resolveCredentials, let providerTokenFile = cli.providerTokenFile {
             config.providerToken = try readProviderTokenFile(providerTokenFile)
         }
         if let raw = cli.credentialStore {

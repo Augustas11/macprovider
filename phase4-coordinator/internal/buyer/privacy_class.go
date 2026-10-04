@@ -1,6 +1,7 @@
 package buyer
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -287,4 +288,73 @@ func (s *Server) privacyCapabilityModels(ctx context.Context) (bool, map[string]
 		models[provider.ModelID] = value
 	}
 	return enabled, models
+}
+
+// privacyStreamRelay reassembles provider chunks into whole SSE events and
+// releases only the events the SPEC-049 §4.8 stream gate accepts. Ciphertext
+// is not decrypted, logged, or rewritten.
+type privacyStreamRelay struct {
+	gate    relayblind.PrivacyStreamGate
+	pending []byte
+}
+
+var errPrivacyStreamShape = errors.New("privacy stream event is not one data line")
+
+// accept returns the complete accepted events in data. Any event outside the
+// closed privacy stream shape fails the whole stream.
+func (p *privacyStreamRelay) accept(data string) (string, error) {
+	p.pending = append(p.pending, data...)
+	var out strings.Builder
+	for {
+		idx := bytes.Index(p.pending, []byte("\n\n"))
+		if idx < 0 {
+			return out.String(), nil
+		}
+		event := string(p.pending[:idx])
+		p.pending = p.pending[idx+2:]
+		value, ok := strings.CutPrefix(event, "data: ")
+		if !ok || strings.ContainsAny(value, "\r\n") {
+			return "", errPrivacyStreamShape
+		}
+		if _, err := p.gate.Observe(value); err != nil {
+			return "", err
+		}
+		out.WriteString(event)
+		out.WriteString("\n\n")
+	}
+}
+
+// complete requires no partial event and a finished privacy stream.
+func (p *privacyStreamRelay) complete() error {
+	if len(p.pending) != 0 {
+		return errPrivacyStreamShape
+	}
+	return p.gate.Complete()
+}
+
+// privacyInvalidatedCode maps a privacy reservation that the control plane
+// rejected before dispatch (quarantine, privacy-key revocation or an empty
+// privacy-key advertisement, or the kill switch) to its typed SPEC-049 code.
+// Expired, consumed, dispatched, and terminal reservations stay replays.
+func privacyInvalidatedCode(r relayblind.Reservation, now time.Time) string {
+	if !r.PrivacyClass || r.State != relayblind.ReservationStateRejected || r.ExpiresAtUnix <= now.Unix() {
+		return ""
+	}
+	switch r.TerminalCode {
+	case "relay_blind_key_expired":
+		return privacyClassUnavailable
+	case privacyClassDisabled:
+		return privacyClassDisabled
+	}
+	return ""
+}
+
+// privacyInvalidatedAuthorization is privacyInvalidatedCode for the
+// reservation behind an execution authorization.
+func (s *Server) privacyInvalidatedAuthorization(ctx context.Context, accountID, walletSession, authorization string) string {
+	peeked, err := s.relayBlind.store.PeekAuthorization(ctx, accountID, walletSession, authorization)
+	if err != nil {
+		return ""
+	}
+	return privacyInvalidatedCode(peeked, s.now())
 }

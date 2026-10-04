@@ -234,6 +234,137 @@ func ValidatePrivacyFrameSequence(frames []PrivacyFrame) error {
 	return nil
 }
 
+// privacyUsageTokens is the only clear usage object a relay may forward.
+type privacyUsageTokens struct {
+	PromptTokens     int64 `json:"prompt_tokens"`
+	CompletionTokens int64 `json:"completion_tokens"`
+	TotalTokens      int64 `json:"total_tokens"`
+}
+
+type privacyResponseBody struct {
+	Object  string            `json:"object"`
+	Version string            `json:"version"`
+	Frames  []json.RawMessage `json:"frames"`
+	Usage   json.RawMessage   `json:"usage"`
+}
+
+type privacyClearUsageChunk struct {
+	Object  string          `json:"object"`
+	Model   string          `json:"model"`
+	Choices json.RawMessage `json:"choices"`
+	Usage   json.RawMessage `json:"usage"`
+}
+
+// ValidatePrivacyResponseBody checks the closed non-stream privacy-response-v1
+// envelope. It does not decrypt ciphertext and does not rewrite the body.
+func ValidatePrivacyResponseBody(raw []byte) error {
+	var body privacyResponseBody
+	if err := decodeClosed(raw, &body, []string{"object", "version", "frames", "usage"}); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidPrivacy, err)
+	}
+	if body.Object != PrivacyResponseObject || body.Version != PrivacyResponseVersion {
+		return fmt.Errorf("%w: privacy response", ErrInvalidPrivacy)
+	}
+	frames := make([]PrivacyFrame, len(body.Frames))
+	for i, rawFrame := range body.Frames {
+		frame, err := ParsePrivacyFrame(rawFrame)
+		if err != nil {
+			return err
+		}
+		frames[i] = frame
+	}
+	if err := ValidatePrivacyFrameSequence(frames); err != nil {
+		return err
+	}
+	return validatePrivacyUsageObject(body.Usage)
+}
+
+func validatePrivacyUsageObject(raw []byte) error {
+	var usage privacyUsageTokens
+	if err := decodeClosed(raw, &usage, []string{"prompt_tokens", "completion_tokens", "total_tokens"}); err != nil {
+		return fmt.Errorf("%w: usage", ErrInvalidPrivacy)
+	}
+	if usage.PromptTokens < 0 || usage.CompletionTokens < 0 || usage.TotalTokens < 0 {
+		return fmt.Errorf("%w: usage", ErrInvalidPrivacy)
+	}
+	sum := usage.PromptTokens + usage.CompletionTokens
+	if sum < usage.PromptTokens || sum != usage.TotalTokens {
+		return fmt.Errorf("%w: usage", ErrInvalidPrivacy)
+	}
+	return nil
+}
+
+func validatePrivacyClearUsageChunk(raw []byte) error {
+	var chunk privacyClearUsageChunk
+	if err := decodeClosed(raw, &chunk, []string{"object", "model", "choices", "usage"}); err != nil {
+		return fmt.Errorf("%w: usage chunk", ErrInvalidPrivacy)
+	}
+	if chunk.Object != "chat.completion.chunk" || !validModelID(chunk.Model) || !bytes.Equal(bytes.TrimSpace(chunk.Choices), []byte("[]")) {
+		return fmt.Errorf("%w: usage chunk", ErrInvalidPrivacy)
+	}
+	return validatePrivacyUsageObject(chunk.Usage)
+}
+
+// PrivacyStreamEvent is one accepted SSE data payload on a privacy stream.
+type PrivacyStreamEvent int
+
+const (
+	PrivacyStreamFrame PrivacyStreamEvent = iota + 1
+	PrivacyStreamUsage
+	PrivacyStreamDone
+)
+
+// PrivacyStreamGate checks the SPEC-049 §4.8 stream shape one SSE data
+// payload at a time. It does not decrypt ciphertext or retain it.
+type PrivacyStreamGate struct {
+	count    uint64
+	sawFinal bool
+	sawUsage bool
+	sawDone  bool
+}
+
+// Observe accepts a privacy frame, the one clear usage chunk, or [DONE].
+// Clear completion content and any other payload is refused.
+func (g *PrivacyStreamGate) Observe(data string) (PrivacyStreamEvent, error) {
+	if g == nil || g.sawDone {
+		return 0, fmt.Errorf("%w: privacy stream", ErrInvalidPrivacy)
+	}
+	if data == "[DONE]" {
+		if !g.sawUsage || !g.sawFinal || g.count == 0 {
+			return 0, fmt.Errorf("%w: privacy stream", ErrInvalidPrivacy)
+		}
+		g.sawDone = true
+		return PrivacyStreamDone, nil
+	}
+	if g.sawUsage {
+		return 0, fmt.Errorf("%w: privacy stream", ErrInvalidPrivacy)
+	}
+	if frame, err := ParsePrivacyFrame([]byte(data)); err == nil {
+		if g.sawFinal || frame.Seq != g.count || g.count >= 1<<32 {
+			return 0, fmt.Errorf("%w: privacy stream", ErrInvalidPrivacy)
+		}
+		g.count++
+		g.sawFinal = frame.Final
+		return PrivacyStreamFrame, nil
+	}
+	if !g.sawFinal || g.count == 0 {
+		return 0, fmt.Errorf("%w: privacy stream", ErrInvalidPrivacy)
+	}
+	if err := validatePrivacyClearUsageChunk([]byte(data)); err != nil {
+		return 0, err
+	}
+	g.sawUsage = true
+	return PrivacyStreamUsage, nil
+}
+
+// Complete requires the final frame, the clear usage chunk, and [DONE].
+func (g *PrivacyStreamGate) Complete() error {
+	if g == nil || !g.sawDone {
+		return fmt.Errorf("%w: privacy stream", ErrInvalidPrivacy)
+	}
+	return nil
+}
+
 func validateResponseContext(envelopeDigest, kid, requestID string, seq uint64) error {
 	if _, err := decodeBase64URLFixed(envelopeDigest, sha256.Size); err != nil {
 		return fmt.Errorf("%w: envelope digest", ErrInvalidPrivacy)
