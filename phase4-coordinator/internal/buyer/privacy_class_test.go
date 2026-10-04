@@ -751,3 +751,123 @@ func TestPrivacyErrorInventoryComplete(t *testing.T) {
 		t.Fatalf("disabled capabilities status=%d body=%s", response.Code, response.Body.String())
 	}
 }
+
+func TestRelayBlindRejectionStatusDoesNotReportZero(t *testing.T) {
+	code, status := relayBlindRejectionStatus("not_in_the_inventory")
+	if code != "relay_blind_required_unavailable" || status != http.StatusServiceUnavailable {
+		t.Fatalf("missing code=%s status=%d", code, status)
+	}
+	code, status = relayBlindRejectionStatus(privacyClassStale)
+	if code != privacyClassStale || status != http.StatusServiceUnavailable {
+		t.Fatalf("stale code=%s status=%d", code, status)
+	}
+	code, status = relayBlindRejectionStatus(privacyClassDowngrade)
+	if code != privacyClassDowngrade || status != http.StatusBadRequest {
+		t.Fatalf("downgrade code=%s status=%d", code, status)
+	}
+}
+
+func TestPrivacyBoundRejectionRefundsWithInventorySemantics(t *testing.T) {
+	cases := []struct {
+		name        string
+		code        string
+		status      int
+		retryable   string
+		retryAction string
+		stream      bool
+	}{
+		{name: "stale non-stream", code: privacyClassStale, status: http.StatusServiceUnavailable, retryable: `"retryable":true`, retryAction: `"retry_action":"new_reservation_and_envelope"`, stream: false},
+		{name: "stale stream", code: privacyClassStale, status: http.StatusServiceUnavailable, retryable: `"retryable":true`, retryAction: `"retry_action":"new_reservation_and_envelope"`, stream: true},
+		{name: "downgrade non-stream", code: privacyClassDowngrade, status: http.StatusBadRequest, retryable: `"retryable":false`, retryAction: `"retry_action":"none"`, stream: false},
+		{name: "downgrade stream", code: privacyClassDowngrade, status: http.StatusBadRequest, retryable: `"retryable":false`, retryAction: `"retry_action":"none"`, stream: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code := tc.code
+			var dispatches atomic.Int32
+			h := newPrivacyHarness(t, privacyHarnessConfig{privacyKey: true, quota: 1, relay: func(_ context.Context, _ pool.Provider, requestID string, _ []byte, _ bool, relayContext providerws.RelayBlindDispatchContext) (*providerws.RelayStream, error) {
+				dispatches.Add(1)
+				validations := make(chan providerws.RelayBlindValidation, 1)
+				rejected := relayBlindValidationForContext(relayContext, "rejected", 0)
+				rejected.ErrorCode = code
+				validations <- rejected
+				return &providerws.RelayStream{RequestID: requestID, Chunks: make(chan providerws.InferenceResponseChunk), Done: make(chan providerws.InferenceResponseEnd, 1), Errors: make(chan error, 1), Validations: validations}, nil
+			}})
+			reservation := h.reserveStream(t, tc.stream)
+			raw := h.seal(t, reservation, "privacy-bound-"+strings.ReplaceAll(tc.name, " ", "-"), h.privacyPrivate)
+			response := h.privacyRequest(t, http.MethodPost, "/v1/relay-blind/consume", raw, "", nil)
+			consume, err := relayblind.ParseConsumeResponse(response.Body.Bytes())
+			if response.Code != http.StatusOK || err != nil {
+				t.Fatalf("consume status=%d err=%v body=%s", response.Code, err, response.Body.String())
+			}
+			response = h.privacyRequest(t, http.MethodPost, "/v1/chat/completions", raw, consume.ExecutionAuthorization, nil)
+			if response.Code != tc.status || !strings.Contains(response.Body.String(), `"code":"`+tc.code+`"`) || !strings.Contains(response.Body.String(), tc.retryable) || !strings.Contains(response.Body.String(), tc.retryAction) || strings.Contains(response.Body.String(), `"code":"relay_blind_committed_failed"`) {
+				t.Fatalf("chat status=%d body=%s", response.Code, response.Body.String())
+			}
+			if !strings.Contains(response.Header().Get("Content-Type"), "application/json") || response.Header().Get(privacyPostureVerifiedAtHeader) != "" {
+				t.Fatalf("headers content-type=%q posture=%q", response.Header().Get("Content-Type"), response.Header().Get(privacyPostureVerifiedAtHeader))
+			}
+			row, err := h.store.LookupReservation(context.Background(), reservation.ProviderBinding)
+			if err != nil || row.State != relayblind.ReservationStateRejected || !row.PrivacyClass {
+				t.Fatalf("row=%#v err=%v", row, err)
+			}
+			if dispatches.Load() != 1 {
+				t.Fatalf("dispatches=%d", dispatches.Load())
+			}
+			if !h.admission.CheckQuota(h.provider) || !h.admission.TryReserveRequest(h.provider) {
+				t.Fatal("quota was not refunded")
+			}
+			if h.admission.TryReserveRequest(h.provider) {
+				t.Fatal("refund left more than the hourly quota")
+			}
+		})
+	}
+}
+
+func TestPrivacyHeaderOnChatIsDowngradeBeforeQuota(t *testing.T) {
+	var dispatches atomic.Int32
+	h := newPrivacyHarness(t, privacyHarnessConfig{privacyKey: true, quota: 1, relay: privacyCountingRelay(&dispatches)})
+	reservation := h.reserve(t, true)
+	// Seal first, then move the clock past MaxClockSkewSeconds. An invalid
+	// header on that in-namespace body is a downgrade before Validate. The
+	// same bytes with a valid header stay relay_blind_envelope_invalid.
+	skewed := h.seal(t, reservation, "privacy-header-skew", h.privacyPrivate)
+	h.clock.Advance(61 * time.Second)
+	invalid := h.privacyRequest(t, http.MethodPost, "/v1/chat/completions", skewed, "execution-auth", func(r *http.Request) {
+		r.Header.Set(privacyClassHeader, "not-the-class")
+	})
+	if invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), `"code":"privacy_class_downgrade_rejected"`) || !strings.Contains(invalid.Body.String(), "Privacy class marker does not match the reservation") || strings.Contains(invalid.Body.String(), "relay_blind_envelope_invalid") {
+		t.Fatalf("invalid header status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+	plaintext := h.privacyRequest(t, http.MethodPost, "/v1/chat/completions", []byte(`{"model":"model-a","messages":[{"role":"user","content":"PROMPT-CANARY-7f3a"}]}`), "execution-auth", nil)
+	if plaintext.Code != http.StatusBadRequest || !strings.Contains(plaintext.Body.String(), `"code":"privacy_class_downgrade_rejected"`) || !strings.Contains(plaintext.Body.String(), "Privacy class marker is not valid for a plaintext request") || strings.Contains(plaintext.Body.String(), "PROMPT-CANARY-7f3a") || strings.Contains(plaintext.Body.String(), "relay_blind_envelope_invalid") {
+		t.Fatalf("plaintext status=%d body=%s", plaintext.Code, plaintext.Body.String())
+	}
+	skew := h.privacyRequest(t, http.MethodPost, "/v1/chat/completions", skewed, "execution-auth", nil)
+	if skew.Code != http.StatusBadRequest || !strings.Contains(skew.Body.String(), `"code":"relay_blind_envelope_invalid"`) || strings.Contains(skew.Body.String(), "privacy_class_downgrade_rejected") {
+		t.Fatalf("skew status=%d body=%s", skew.Code, skew.Body.String())
+	}
+	if dispatches.Load() != 0 {
+		t.Fatalf("dispatches=%d", dispatches.Load())
+	}
+	if !h.admission.CheckQuota(h.provider) || !h.admission.TryReserveRequest(h.provider) {
+		t.Fatal("quota was consumed before dispatch")
+	}
+}
+
+func (h *privacyHarness) reserveStream(t *testing.T, stream bool) relayblind.ReservationResponse {
+	t.Helper()
+	raw, _ := json.Marshal(relayblind.ReservationRequest{EndpointFamily: relayblind.EndpointChatCompletions, Model: "model-a", Stream: stream, MaxOutputTokens: 32, InputTokenUpperBound: 96, EncryptedRequestBytes: 2048})
+	response := h.privacyRequest(t, http.MethodPost, "/v1/relay-blind/route-reservations", raw, "", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("reservation status=%d body=%s", response.Code, response.Body.String())
+	}
+	parsed, err := relayblind.ParseReservationResponse(response.Body.Bytes())
+	if err != nil {
+		t.Fatalf("parse reservation: %v body=%s", err, response.Body.String())
+	}
+	if parsed.Stream != stream {
+		t.Fatalf("reservation stream=%v", parsed.Stream)
+	}
+	return parsed
+}

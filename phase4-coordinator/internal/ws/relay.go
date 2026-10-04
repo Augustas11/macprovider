@@ -16,6 +16,7 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/relayblind"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	gobwas "github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
@@ -1723,8 +1724,9 @@ func (s *Server) handleInferenceValidation(providerID, assignedID string, payloa
 	validEvidence := ok && frame.Type == "inference_response_validation" && frame.RequestID == requestID
 	if validEvidence {
 		validation := frame.RelayBlindValidation
+		privacyDispatch := active.relayBlind != nil && active.relayBlind.PrivacyClass == relayblind.PrivacyClassV1
 		validEvidence = (relayBlindValidationMatches(active.relayBlind, validation, "validated") && validation.ErrorCode == "") ||
-			(relayBlindValidationMatches(active.relayBlind, validation, "rejected") && validation.InputTokens == 0 && relayBlindRejectionCode(validation.ErrorCode))
+			(relayBlindValidationMatches(active.relayBlind, validation, "rejected") && validation.InputTokens == 0 && relayBlindRejectionCode(validation.ErrorCode, privacyDispatch))
 	}
 	if !validEvidence {
 		if active, found := session.removeActive(requestID); found {
@@ -1863,10 +1865,12 @@ func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byt
 	s.closeProviderForTier2RekeyIfDrained(session, providerID, assignedID, end.RequestID)
 }
 
-func relayBlindRejectionCode(code string) bool {
+func relayBlindRejectionCode(code string, privacy bool) bool {
 	switch code {
 	case "relay_blind_ciphertext_invalid", "relay_blind_decrypt_failed", "unsupported_sampling_penalty":
 		return true
+	case "privacy_class_posture_stale", "privacy_class_downgrade_rejected":
+		return privacy
 	default:
 		return false
 	}

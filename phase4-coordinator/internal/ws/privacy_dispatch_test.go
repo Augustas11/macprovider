@@ -10,6 +10,23 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 )
 
+func TestRelayBlindRejectionCodeKeepsPrivacyEvidenceOnPrivacyDispatch(t *testing.T) {
+	for _, code := range []string{"privacy_class_posture_stale", "privacy_class_downgrade_rejected"} {
+		if relayBlindRejectionCode(code, false) {
+			t.Fatalf("%s accepted for a relay-blind dispatch", code)
+		}
+		if !relayBlindRejectionCode(code, true) {
+			t.Fatalf("%s dropped for a privacy dispatch", code)
+		}
+	}
+	if !relayBlindRejectionCode("relay_blind_ciphertext_invalid", false) || !relayBlindRejectionCode("unsupported_sampling_penalty", true) {
+		t.Fatal("relay-blind rejection codes changed")
+	}
+	if relayBlindRejectionCode("relay_blind_committed_failed", true) {
+		t.Fatal("unlisted code accepted")
+	}
+}
+
 func TestSealInferenceRequestCopiesPrivacyClass(t *testing.T) {
 	clear := &providerSession{}
 	withClass := &RelayBlindDispatchContext{RequestID: "req-1", AssignedSession: "session-a", PrivacyClass: relayblind.PrivacyClassV1}

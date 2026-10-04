@@ -521,8 +521,9 @@ func (a *PrivacyAuthority) failQuarantine(ctx context.Context, providerID string
 
 func (a *PrivacyAuthority) recordQuarantine(ctx context.Context, providerID string, now time.Time, reason string) error {
 	dur := time.Duration(a.quarantine) * time.Second
-	writeErr := a.store.Quarantine(ctx, providerID, reason, now, dur)
-	revokeErr := a.store.RevokeMissingKeys(ctx, providerID, nil, now, a.replayRetention, KeyClassPrivacy)
+	// The in-memory invalidation runs even when the store write fails, so a
+	// posture failure never leaves the live session eligible.
+	writeErr := a.store.QuarantineAndRevokePrivacy(ctx, providerID, reason, now, dur, a.replayRetention)
 	a.mu.Lock()
 	a.epochs[providerID]++
 	epoch := a.epochs[providerID]
@@ -539,10 +540,7 @@ func (a *PrivacyAuthority) recordQuarantine(ctx context.Context, providerID stri
 		entry.nonce = ""
 	}
 	a.mu.Unlock()
-	if writeErr != nil {
-		return writeErr
-	}
-	return revokeErr
+	return writeErr
 }
 
 func (a *PrivacyAuthority) consumeChallenge(id privacySessionID, nonce, statementNonce string) (postureSnapshot, bool) {

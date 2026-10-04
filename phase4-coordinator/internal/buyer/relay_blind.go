@@ -440,6 +440,17 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		writeRelayBlindError(w, "relay_blind_envelope_invalid", "Invalid relay-blind envelope")
 		return
 	}
+	// SPEC-049 §4.2/R012: an invalid privacy header, or a privacy header on a
+	// body outside the relay-blind envelope namespace, is a downgrade. A
+	// genuine envelope that fails Validate stays relay_blind_envelope_invalid.
+	if present && !valid {
+		writePrivacyClassError(w, privacyClassDowngrade, "")
+		return
+	}
+	if present && !relayBlindEnvelopeNamespace(body) {
+		writePrivacyClassError(w, privacyClassDowngrade, "Privacy class marker is not valid for a plaintext request")
+		return
+	}
 	envelope, err := relayblind.ParseEnvelope(body)
 	if err != nil || envelope.Validate(s.now(), time.Duration(s.relayBlind.cfg.MaxClockSkewSeconds)*time.Second) != nil {
 		writeRelayBlindError(w, "relay_blind_envelope_invalid", "Invalid relay-blind envelope")
@@ -586,10 +597,14 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		if quotaMetered {
 			s.admission.RefundRequest(provider)
 		}
-		status := relayBlindErrors[validation.ErrorCode].Status
+		code, status := relayBlindRejectionStatus(validation.ErrorCode)
 		zero := int64(0)
-		_ = rec.logProviderRowWithEstimateAndOutput(provider, status, &zero, &zero, validation.ErrorCode, validation.ErrorCode, 0, nil, nil)
-		writeRelayBlindError(w, validation.ErrorCode, "Provider rejected the relay-blind ciphertext before generation")
+		_ = rec.logProviderRowWithEstimateAndOutput(provider, status, &zero, &zero, code, code, 0, nil, nil)
+		if code == privacyClassDowngrade || code == privacyClassStale {
+			writePrivacyClassError(w, code, "")
+			return
+		}
+		writeRelayBlindError(w, code, "Provider rejected the relay-blind ciphertext before generation")
 		return
 	}
 	rec.relayBlind.Outcome = "relay_blind_satisfied"
@@ -606,6 +621,15 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		return
 	}
 	s.forwardRelayBlindNonStreaming(w, r, rec, provider, reservation, relay, validation.InputTokens)
+}
+
+func relayBlindRejectionStatus(code string) (string, int) {
+	shape, ok := relayBlindErrors[code]
+	if !ok || shape.Status == 0 {
+		fallback := relayBlindErrors["relay_blind_required_unavailable"]
+		return "relay_blind_required_unavailable", fallback.Status
+	}
+	return code, shape.Status
 }
 
 func relayBlindEvidence(value providerws.RelayBlindValidation) relayblind.Evidence {

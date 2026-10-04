@@ -665,11 +665,10 @@ func TestPrivacyClassAdversarial(t *testing.T) {
 	})
 
 	t.Run("inject_header_relay_blind", func(t *testing.T) {
-		// The store primary key is (provider_id, kid). A privacy advertisement
-		// of the same record replaces key_class, so an ordinary reservation
-		// cannot see it. Production privacy mode never also advertises that
-		// key as relay_blind. This subtest advertises only the relay-blind
-		// record, then the proxy adds the privacy header on the chat.
+		// The store primary key is (provider_id, kid) and key_class is immutable.
+		// Production privacy mode never also advertises that key as relay_blind.
+		// This subtest advertises only the relay-blind record, then the proxy
+		// adds the privacy header on the chat.
 		stack := newPrivacyStack(t, privacyStackOpts{omitKeys: true})
 		base, capture := startPrivacyProxy(t, stack.s.gatewayBaseURL, privacyProxyInjectChatHeader)
 		_, stderr, err := runPrivacyClient(t, stack.s.apiKey, base, stack.pinPath(t), "inject header", false, false)

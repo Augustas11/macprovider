@@ -40,7 +40,7 @@ func runPrivacyClass(action string, args []string, stdout io.Writer) error {
 	if strings.TrimSpace(*configPath) == "" {
 		return errors.New("config is required")
 	}
-	store, err := openPrivacyClassStore(*configPath)
+	store, retention, err := openPrivacyClassStore(*configPath)
 	if err != nil {
 		return err
 	}
@@ -54,10 +54,7 @@ func runPrivacyClass(action string, args []string, stdout io.Writer) error {
 		if err := privacyCLIReason(*reason); err != nil {
 			return err
 		}
-		if err := store.SetPrivacyDisabled(ctx, true, strings.TrimSpace(*reason), now); err != nil {
-			return err
-		}
-		if err := store.RejectHeldPrivacyPredispatch(ctx, "privacy_class_disabled", now); err != nil {
+		if err := store.DisablePrivacyAndRejectPredispatch(ctx, strings.TrimSpace(*reason), now); err != nil {
 			return err
 		}
 		return writePrivacyClassStatus(ctx, store, stdout, now)
@@ -76,7 +73,7 @@ func runPrivacyClass(action string, args []string, stdout io.Writer) error {
 		if *seconds < 1 || *seconds > privacyQuarantineMaxSeconds {
 			return fmt.Errorf("seconds must be from 1 to %d", privacyQuarantineMaxSeconds)
 		}
-		if err := store.Quarantine(ctx, strings.TrimSpace(*providerID), strings.TrimSpace(*reason), now, time.Duration(*seconds)*time.Second); err != nil {
+		if err := store.QuarantineAndRevokePrivacy(ctx, strings.TrimSpace(*providerID), strings.TrimSpace(*reason), now, time.Duration(*seconds)*time.Second, retention); err != nil {
 			return err
 		}
 		return writePrivacyClassStatus(ctx, store, stdout, now)
@@ -93,16 +90,20 @@ func runPrivacyClass(action string, args []string, stdout io.Writer) error {
 	}
 }
 
-func openPrivacyClassStore(path string) (*relayblind.Store, error) {
+func openPrivacyClassStore(path string) (*relayblind.Store, time.Duration, error) {
 	cfg, err := config.Load(path)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	sqlitePath := strings.TrimSpace(cfg.RelayBlind.SQLitePath)
 	if sqlitePath == "" {
-		return nil, errors.New("relay_blind.sqlite_path is required")
+		return nil, 0, errors.New("relay_blind.sqlite_path is required")
 	}
-	return relayblind.OpenStore(sqlitePath)
+	store, err := relayblind.OpenStore(sqlitePath)
+	if err != nil {
+		return nil, 0, err
+	}
+	return store, time.Duration(cfg.RelayBlind.ReplayRetentionSeconds) * time.Second, nil
 }
 
 func writePrivacyClassStatus(ctx context.Context, store *relayblind.Store, stdout io.Writer, now time.Time) error {

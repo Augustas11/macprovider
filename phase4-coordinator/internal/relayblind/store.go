@@ -265,11 +265,13 @@ WHERE ((keys.revoked_at_unix IS NOT NULL AND COALESCE(keys.revocation_retained_u
   )`, int64(replayRetention/time.Second), now.Unix(), int64(replayRetention/time.Second), now.Unix()); err != nil {
 		return fmt.Errorf("%w: purge key records: %v", ErrStoreUnavailable, err)
 	}
-	var existingImmutable, existingDigest string
+	var existingImmutable, existingDigest, existingClass string
 	var existingExpiry int64
-	err = tx.QueryRowContext(ctx, `SELECT immutable_digest,key_record_digest,expires_at_unix FROM relay_blind_key_records WHERE provider_id=? AND kid=?`, providerID, record.KID).Scan(&existingImmutable, &existingDigest, &existingExpiry)
+	err = tx.QueryRowContext(ctx, `SELECT immutable_digest,key_record_digest,expires_at_unix,key_class FROM relay_blind_key_records WHERE provider_id=? AND kid=?`, providerID, record.KID).Scan(&existingImmutable, &existingDigest, &existingExpiry, &existingClass)
 	if err == nil {
-		if existingImmutable != immutableDigest || record.ExpiresAtUnix < existingExpiry {
+		// key_class is immutable on the shared (provider_id, kid) primary key.
+		// A cross-class advertisement must not rewrite the row.
+		if existingClass != class || existingImmutable != immutableDigest || record.ExpiresAtUnix < existingExpiry {
 			return ErrReservationMismatch
 		}
 		if existingDigest != record.KeyRecordDigest {
@@ -293,7 +295,7 @@ WHERE ((keys.revoked_at_unix IS NOT NULL AND COALESCE(keys.revocation_retained_u
 		}
 	}
 	result, err := tx.ExecContext(ctx, `INSERT INTO relay_blind_key_records(provider_id,kid,assigned_session,record_json,key_record_digest,immutable_digest,not_before_unix,expires_at_unix,accepted_at_unix,key_class)
-VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(provider_id,kid) DO UPDATE SET assigned_session=excluded.assigned_session,record_json=excluded.record_json,key_record_digest=excluded.key_record_digest,not_before_unix=excluded.not_before_unix,expires_at_unix=excluded.expires_at_unix,accepted_at_unix=excluded.accepted_at_unix,key_class=excluded.key_class
+VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(provider_id,kid) DO UPDATE SET assigned_session=excluded.assigned_session,record_json=excluded.record_json,key_record_digest=excluded.key_record_digest,not_before_unix=excluded.not_before_unix,expires_at_unix=excluded.expires_at_unix,accepted_at_unix=excluded.accepted_at_unix
 WHERE relay_blind_key_records.revoked_at_unix IS NULL`, providerID, record.KID, assignedSession, raw, record.KeyRecordDigest, immutableDigest, record.NotBeforeUnix, record.ExpiresAtUnix, now.Unix(), class)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
@@ -354,6 +356,7 @@ func (s *Store) RevokeMissingKeys(ctx context.Context, providerID string, active
 		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
 	defer tx.Rollback()
+	privacyFlag := reservationPrivacyFlag(class)
 	rows, err := tx.QueryContext(ctx, `SELECT kid,expires_at_unix FROM relay_blind_key_records WHERE provider_id=? AND revoked_at_unix IS NULL AND key_class=?`, providerID, class)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
@@ -381,10 +384,10 @@ func (s *Store) RevokeMissingKeys(ctx context.Context, providerID string, active
 		if item.expires > retainedUntil {
 			retainedUntil = item.expires
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE relay_blind_key_records SET revoked_at_unix=?,revocation_retained_until_unix=? WHERE provider_id=? AND kid=? AND revoked_at_unix IS NULL`, now.Unix(), retainedUntil, providerID, item.kid); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE relay_blind_key_records SET revoked_at_unix=?,revocation_retained_until_unix=? WHERE provider_id=? AND kid=? AND key_class=? AND revoked_at_unix IS NULL`, now.Unix(), retainedUntil, providerID, item.kid, class); err != nil {
 			return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE relay_blind_reservations SET state='rejected',terminal_code='relay_blind_key_expired',terminal_at_unix=? WHERE provider_id=? AND kid=? AND state IN ('reserved','consumed_predispatch')`, now.Unix(), providerID, item.kid); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE relay_blind_reservations SET state='rejected',terminal_code='relay_blind_key_expired',terminal_at_unix=? WHERE provider_id=? AND kid=? AND privacy_class=? AND state IN ('reserved','consumed_predispatch')`, now.Unix(), providerID, item.kid, privacyFlag); err != nil {
 			return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 		}
 	}
@@ -744,7 +747,7 @@ func (s *Store) PersistEvidence(ctx context.Context, providerID, assignedSession
 		}
 		_, err = tx.ExecContext(ctx, `UPDATE relay_blind_reservations SET state='terminal',completion_tokens=?,effective_privacy_outcome='relay_blind_satisfied',terminal_code=?,terminal_at_unix=? WHERE provider_binding=? AND state='dispatched' AND validated_at_unix IS NOT NULL`, evidence.CompletionTokens, nullString(terminalCode), now.Unix(), r.ProviderBinding)
 	case "rejected":
-		if r.ValidatedInputTokens.Valid || evidence.InputTokens != 0 || (evidence.ErrorCode != "relay_blind_ciphertext_invalid" && evidence.ErrorCode != "relay_blind_decrypt_failed" && evidence.ErrorCode != "unsupported_sampling_penalty") {
+		if r.ValidatedInputTokens.Valid || evidence.InputTokens != 0 || !acceptedBoundRejection(r.PrivacyClass, evidence.ErrorCode) {
 			return Reservation{}, ErrEvidenceMismatch
 		}
 		_, err = tx.ExecContext(ctx, `UPDATE relay_blind_reservations SET state='rejected',effective_privacy_outcome='relay_blind_unavailable',terminal_code=?,terminal_at_unix=? WHERE provider_binding=? AND state='dispatched' AND validated_at_unix IS NULL`, evidence.ErrorCode, now.Unix(), r.ProviderBinding)
@@ -890,6 +893,24 @@ func validKeyClass(class string) error {
 	return nil
 }
 
+func reservationPrivacyFlag(class string) int {
+	if class == KeyClassPrivacy {
+		return 1
+	}
+	return 0
+}
+
+func acceptedBoundRejection(privacy bool, code string) bool {
+	switch code {
+	case "relay_blind_ciphertext_invalid", "relay_blind_decrypt_failed", "unsupported_sampling_penalty":
+		return true
+	case "privacy_class_posture_stale", "privacy_class_downgrade_rejected":
+		return privacy
+	default:
+		return false
+	}
+}
+
 func (s *Store) ensurePrivacySchema(ctx context.Context) error {
 	if err := s.addColumnIfMissing(ctx, "relay_blind_key_records", "key_class", `ALTER TABLE relay_blind_key_records ADD COLUMN key_class TEXT NOT NULL DEFAULT 'relay_blind'`); err != nil {
 		return err
@@ -997,6 +1018,67 @@ func (s *Store) Quarantine(ctx context.Context, providerID, reason string, now t
 	return nil
 }
 
+// QuarantineAndRevokePrivacy writes the quarantine row, revokes every
+// unrevoked privacy-class key, and rejects that provider's predispatch
+// privacy reservations in one transaction. A failure commits none of them.
+func (s *Store) QuarantineAndRevokePrivacy(ctx context.Context, providerID, reason string, now time.Time, dur, replayRetention time.Duration) error {
+	if s == nil || s.db == nil {
+		return ErrStoreUnavailable
+	}
+	if strings.TrimSpace(providerID) == "" {
+		return fmt.Errorf("%w: provider id", ErrInvalidKeyRecord)
+	}
+	if dur <= 0 {
+		dur = 86400 * time.Second
+	}
+	reason = boundPrivacyReason(reason)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	defer tx.Rollback()
+	expires := now.Add(dur).Unix()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO privacy_class_quarantine(provider_id,reason,quarantined_at_unix,expires_at_unix) VALUES(?,?,?,?) ON CONFLICT(provider_id) DO UPDATE SET reason=excluded.reason, quarantined_at_unix=excluded.quarantined_at_unix, expires_at_unix=excluded.expires_at_unix`, providerID, reason, now.Unix(), expires); err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT kid,expires_at_unix FROM relay_blind_key_records WHERE provider_id=? AND revoked_at_unix IS NULL AND key_class=?`, providerID, KeyClassPrivacy)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	type privacyKey struct {
+		kid     string
+		expires int64
+	}
+	var keys []privacyKey
+	for rows.Next() {
+		var item privacyKey
+		if err := rows.Scan(&item.kid, &item.expires); err != nil {
+			rows.Close()
+			return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+		}
+		keys = append(keys, item)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	for _, item := range keys {
+		retainedUntil := now.Add(replayRetention).Unix()
+		if item.expires > retainedUntil {
+			retainedUntil = item.expires
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE relay_blind_key_records SET revoked_at_unix=?,revocation_retained_until_unix=? WHERE provider_id=? AND kid=? AND key_class=? AND revoked_at_unix IS NULL`, now.Unix(), retainedUntil, providerID, item.kid, KeyClassPrivacy); err != nil {
+			return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE relay_blind_reservations SET state='rejected',terminal_code='relay_blind_key_expired',terminal_at_unix=? WHERE provider_id=? AND privacy_class=1 AND state IN ('reserved','consumed_predispatch')`, now.Unix(), providerID); err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	return nil
+}
+
 func (s *Store) IsQuarantined(ctx context.Context, providerID string, now time.Time) (bool, error) {
 	if s == nil || s.db == nil {
 		return false, ErrStoreUnavailable
@@ -1036,6 +1118,31 @@ func (s *Store) SetPrivacyDisabled(ctx context.Context, disabled bool, reason st
 	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO privacy_class_control(id,disabled,reason,updated_at_unix) VALUES(1,?,?,?) ON CONFLICT(id) DO UPDATE SET disabled=excluded.disabled, reason=excluded.reason, updated_at_unix=excluded.updated_at_unix`, flag, reason, now.Unix())
 	if err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	return nil
+}
+
+// DisablePrivacyAndRejectPredispatch sets the kill switch and rejects held
+// privacy reservations in one transaction. Enable stays on SetPrivacyDisabled.
+func (s *Store) DisablePrivacyAndRejectPredispatch(ctx context.Context, reason string, now time.Time) error {
+	if s == nil || s.db == nil {
+		return ErrStoreUnavailable
+	}
+	reason = boundPrivacyReason(reason)
+	code := boundPrivacyReason("privacy_class_disabled")
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO privacy_class_control(id,disabled,reason,updated_at_unix) VALUES(1,?,?,?) ON CONFLICT(id) DO UPDATE SET disabled=excluded.disabled, reason=excluded.reason, updated_at_unix=excluded.updated_at_unix`, 1, reason, now.Unix()); err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE relay_blind_reservations SET state='rejected',terminal_code=?,terminal_at_unix=? WHERE privacy_class=1 AND state IN ('reserved','consumed_predispatch')`, code, now.Unix()); err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
 	return nil

@@ -688,10 +688,13 @@ func connectSwiftRelayProviderWithFaultSignal(t *testing.T, ctx context.Context,
 		"throughput_tps_estimate": 20.0,
 		"binary_version":          "relay-blind-local-fixture",
 		"attestation":             nil,
-		"relay_blind_key_records": []any{fixture.descriptor.KeyRecord},
 	}
 	if records := fixture.privacyKeyRecords(); len(records) > 0 {
+		// The same kid cannot be relay-blind and privacy. Production privacy
+		// mode omits relay_blind_key_records; a second class is rejected.
 		hello["privacy_key_records"] = records
+	} else {
+		hello["relay_blind_key_records"] = []any{fixture.descriptor.KeyRecord}
 	}
 	rawHello, _ := json.Marshal(hello)
 	if err := send(rawHello); err != nil {
@@ -715,9 +718,10 @@ func connectSwiftRelayProviderWithFaultSignal(t *testing.T, ctx context.Context,
 		fixture.restartForAssignedSession(ack.AssignedID)
 	}
 	ready := readyStateUpdate(defaultFakeModelID, "")
-	ready["relay_blind_key_records"] = []any{fixture.descriptor.KeyRecord}
 	if records := fixture.privacyKeyRecords(); len(records) > 0 {
 		ready["privacy_key_records"] = records
+	} else {
+		ready["relay_blind_key_records"] = []any{fixture.descriptor.KeyRecord}
 	}
 	rawReady, _ := json.Marshal(ready)
 	if err := send(rawReady); err != nil {
@@ -804,10 +808,11 @@ func connectSwiftRelayProviderWithFaultSignal(t *testing.T, ctx context.Context,
 					"max_concurrency": 1, "slots_free": 1, "slots_total": 1,
 					"throughput_tps_estimate": 20.0, "requests_served_since_last": 0,
 					"avg_latency_ms_since_last": 0.0, "throughput_tps_since_last": 0.0,
-					"relay_blind_key_records": []any{fixture.descriptor.KeyRecord},
 				}
 				if records := fixture.privacyKeyRecords(); len(records) > 0 {
 					hb["privacy_key_records"] = records
+				} else {
+					hb["relay_blind_key_records"] = []any{fixture.descriptor.KeyRecord}
 				}
 				raw, _ := json.Marshal(hb)
 				if send(raw) != nil {
