@@ -3708,11 +3708,12 @@ type manifestPolicyWindow struct {
 }
 
 // activePolicyView returns a copy of p whose manifest fields are the accepted
-// policy core active at `at`, plus that core's expiry. accepted policy windows
-// never overlap, so at most one matches. ok=false means the pool has accepted
-// policies but none is active at `at` (pool_policy_stale): a future-dated
-// core never routes early and an expired core never keeps routing. A pool with
-// no accepted policy is returned unchanged.
+// policy core active at `at`, plus the instant through which a routeable
+// registry snapshot may remain valid. Accepted policy windows never overlap, so
+// at most one matches. ok=false means the pool has accepted policies but none
+// is active at `at` (pool_policy_stale): a future-dated core never routes
+// early and a core outside any same-terms rollover bridge never keeps routing.
+// A pool with no accepted policy is returned unchanged.
 func (p *ReconstructedPoolState) activePolicyView(at time.Time) (*ReconstructedPoolState, time.Time, bool) {
 	if p == nil || len(p.ManifestPolicies) == 0 {
 		return p, time.Time{}, true
@@ -3739,13 +3740,31 @@ func (p *ReconstructedPoolState) activePolicyView(at time.Time) (*ReconstructedP
 		view.ManifestAttestedMembers = w.AttestedMembers
 		view.ManifestRetentionPolicyID = w.RetentionPolicyID
 		view.ManifestSplitExecutionStatus = w.SplitExecutionStatus
-		var until time.Time
-		if w.ExpiresAtUnix <= uint64(math.MaxInt64) {
-			until = time.Unix(int64(w.ExpiresAtUnix), 0).UTC()
-		}
-		return &view, until, true
+		return &view, p.routeableUntilForPolicyWindow(w), true
 	}
 	return p, time.Time{}, false
+}
+
+func (p *ReconstructedPoolState) routeableUntilForPolicyWindow(active manifestPolicyWindow) time.Time {
+	if active.ExpiresAtUnix > uint64(math.MaxInt64) {
+		return time.Time{}
+	}
+	untilUnix := active.ExpiresAtUnix
+	if active.TermsDigest != "" {
+		for _, next := range p.ManifestPolicies {
+			if next.Version <= active.Version {
+				continue
+			}
+			if next.NotBeforeUnix != untilUnix || next.TermsDigest != active.TermsDigest {
+				break
+			}
+			untilUnix = next.ExpiresAtUnix
+			if untilUnix > uint64(math.MaxInt64) {
+				return time.Time{}
+			}
+		}
+	}
+	return time.Unix(int64(untilUnix), 0).UTC()
 }
 
 // priorPolicyWindow returns the accepted core immediately before version,
