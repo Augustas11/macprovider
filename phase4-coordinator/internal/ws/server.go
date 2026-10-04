@@ -256,8 +256,10 @@ type Server struct {
 	privacyPostureChans    sync.Map
 	privacyPostureInFlight sync.Map
 	// beforeHandshakeAckSend is a test seam run just before hello_ack /
-	// auth_response v2 is enqueued. Nil in production.
-	beforeHandshakeAckSend func()
+	// auth_response v2 is enqueued; privacyPostureChallengeSent runs after a
+	// posture challenge is enqueued. Both nil in production.
+	beforeHandshakeAckSend      func()
+	privacyPostureChallengeSent func()
 
 	// Trust-revalidation sweep failure accounting (issue #582 FIX C). Bounds the
 	// remaining fail-open: a single transient sweep DB error is skipped, but N
@@ -2500,7 +2502,9 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	}
 	if err := session.send(b); err != nil {
 		s.log.Warn().Err(err).Str("provider_id", hello.ProviderID).Msg("hello_ack write failed")
-		return "", ""
+		// The session is registered: return its IDs so handleConn runs
+		// handleDisconnect for exactly this session.
+		return entry.ProviderID, entry.AssignedID
 	}
 	// Privacy key acceptance schedules a posture challenge on this session's
 	// FIFO writer. The provider requires hello_ack as the next frame, so the
@@ -3137,7 +3141,8 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	}
 	if err := session.send(rawResponse); err != nil {
 		s.log.Warn().Err(err).Str("provider_id", initial.ProviderID).Msg("auth_response write failed")
-		return "", ""
+		// See handleV1Conn: handleConn tears down this registered session.
+		return entry.ProviderID, entry.AssignedID
 	}
 	// See handleV1Conn: the posture challenge must follow auth_response v2.
 	s.acceptPrivacyKeyRecords(entry.ProviderID, entry.AssignedID, initial.PrivacyKeyRecords)

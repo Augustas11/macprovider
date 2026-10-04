@@ -92,6 +92,9 @@ func (s *Server) runPrivacyPostureProbe(provider pool.Provider) {
 		s.log.Warn().Err(err).Str("provider_id", provider.ProviderID).Msg("privacy posture: challenge send failed")
 		return
 	}
+	if s.privacyPostureChallengeSent != nil {
+		s.privacyPostureChallengeSent()
+	}
 	timer := time.NewTimer(s.privacyAuthority.ResponseTimeout())
 	defer timer.Stop()
 	select {
@@ -149,15 +152,25 @@ func (s *Server) acceptPrivacyKeyRecords(providerID, assignedID string, records 
 	if s == nil || s.privacyAuthority == nil || records == nil {
 		return
 	}
-	if err := s.privacyAuthority.AcceptPrivacyKeys(context.Background(), providerID, assignedID, records, s.now()); err != nil {
-		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("privacy key advertisement rejected")
-		return
-	}
-	if len(records) == 0 {
-		return
-	}
-	provider, ok := s.pool.Resolve(providerID, assignedID)
-	if !ok {
+	// AcceptPrivacyKeys revokes omitted keys provider-wide, so a replaced
+	// session must not reach it. Session replacement holds the provider
+	// section, so checking the current session inside it is race-free.
+	var (
+		provider pool.Provider
+		accepted bool
+	)
+	s.withProviderSection(providerID, func(*providerSection) {
+		current, ok := s.pool.Resolve(providerID, assignedID)
+		if !ok {
+			return
+		}
+		if err := s.privacyAuthority.AcceptPrivacyKeys(context.Background(), providerID, assignedID, records, s.now()); err != nil {
+			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("privacy key advertisement rejected")
+			return
+		}
+		provider, accepted = current, true
+	})
+	if !accepted || len(records) == 0 {
 		return
 	}
 	s.schedulePrivacyPostureProbe(provider)

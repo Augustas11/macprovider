@@ -10520,7 +10520,9 @@
         "phase4-coordinator/internal/relayblind/privacy_authority.go:Eligible"
       ],
       "tests": [
-        "phase4-coordinator/internal/ws/privacy_posture_test.go:TestPrivacyPostureProbeRoundTrip"
+        "phase4-coordinator/internal/ws/privacy_posture_test.go:TestPrivacyPostureProbeRoundTrip",
+        "phase4-coordinator/internal/ws/privacy_posture_handshake_test.go:TestPrivacyPostureChallengeFollowsHelloAck",
+        "phase4-coordinator/internal/ws/privacy_posture_handshake_test.go:TestPrivacyPostureChallengeFollowsAuthResponseV2"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-BETA"
@@ -10593,6 +10595,7 @@
       "tests": [
         "phase4-coordinator/internal/relayblind/privacy_test.go:TestPrivacyKeyAttestationBindsDigest",
         "phase4-coordinator/internal/buyer/privacy_class_test.go:TestPrivacyReservationNeverSelectsRelayBlindKey",
+        "phase4-coordinator/internal/ws/privacy_posture_test.go:TestReplacedSessionHeartbeatDoesNotRevokePrivacyKeys",
         "phase3-binary/Tests/macprovider-cliTests/PrivacyClassCryptoTests.swift:testMemoryOnlyKeyManagerWritesNoAgreementKey"
       ],
       "journeys": [

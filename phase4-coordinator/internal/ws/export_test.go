@@ -13,3 +13,9 @@ func RemoteIPForUnauthSemaphoreExport(remoteAddr string, header http.Header) str
 func WithBeforeHandshakeAckSendForTest(fn func()) Option {
 	return func(s *Server) { s.beforeHandshakeAckSend = fn }
 }
+
+// WithPrivacyPostureChallengeSentForTest runs fn after each posture
+// challenge is enqueued on a provider session.
+func WithPrivacyPostureChallengeSentForTest(fn func()) Option {
+	return func(s *Server) { s.privacyPostureChallengeSent = fn }
+}

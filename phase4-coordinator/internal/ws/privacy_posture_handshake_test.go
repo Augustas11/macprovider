@@ -28,10 +28,9 @@ import (
 // therefore never be enqueued ahead of the ack.
 func TestPrivacyPostureChallengeFollowsHelloAck(t *testing.T) {
 	record := handshakePrivacyRecord(t)
-	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+	h := newProviderHarnessWithServerOptions(t, nil, append([]providerws.Option{
 		providerws.WithPrivacyAuthority(handshakePrivacyAuthority(t, record)),
-		providerws.WithBeforeHandshakeAckSendForTest(slowHandshakeAck),
-	})
+	}, challengeBeforeAckBarrier()...))
 	defer h.HTTP.Close()
 	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
 	if err != nil {
@@ -53,10 +52,9 @@ func TestPrivacyPostureChallengeFollowsHelloAck(t *testing.T) {
 
 func TestPrivacyPostureChallengeFollowsAuthResponseV2(t *testing.T) {
 	record := handshakePrivacyRecord(t)
-	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+	h := newProviderHarnessWithServerOptions(t, nil, append([]providerws.Option{
 		providerws.WithPrivacyAuthority(handshakePrivacyAuthority(t, record)),
-		providerws.WithBeforeHandshakeAckSendForTest(slowHandshakeAck),
-	}, func(cfg *config.Config) {
+	}, challengeBeforeAckBarrier()...), func(cfg *config.Config) {
 		cfg.Providers[0].EndpointURL = ""
 	})
 	defer h.HTTP.Close()
@@ -80,9 +78,28 @@ func TestPrivacyPostureChallengeFollowsAuthResponseV2(t *testing.T) {
 	}
 }
 
-// slowHandshakeAck widens the ack-build window so a posture challenge
-// scheduled before the ack would deterministically be enqueued first.
-func slowHandshakeAck() { time.Sleep(200 * time.Millisecond) }
+// challengeBeforeAckBarrier holds the handshake ack until a posture challenge
+// has been enqueued, bounded by a timeout. If acceptance schedules the probe
+// before the ack, the challenge is deterministically enqueued first; if it
+// schedules it after, no challenge can exist yet and the ack proceeds once the
+// timeout elapses.
+func challengeBeforeAckBarrier() []providerws.Option {
+	enqueued := make(chan struct{}, 1)
+	return []providerws.Option{
+		providerws.WithPrivacyPostureChallengeSentForTest(func() {
+			select {
+			case enqueued <- struct{}{}:
+			default:
+			}
+		}),
+		providerws.WithBeforeHandshakeAckSendForTest(func() {
+			select {
+			case <-enqueued:
+			case <-time.After(250 * time.Millisecond):
+			}
+		}),
+	}
+}
 
 func readFrameType(t *testing.T, conn net.Conn) string {
 	t.Helper()

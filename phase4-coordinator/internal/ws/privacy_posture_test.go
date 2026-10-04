@@ -147,8 +147,10 @@ func TestHandleMessageAcceptsHeartbeatPrivacyKeys(t *testing.T) {
 	clock := time.Unix(1_800_000_000, 0).UTC()
 	record, identity := wsPrivacyIdentity(t, clock)
 	auth := openWSPrivacyAuthority(t, clock, identity)
+	reg := pool.NewRegistry(nil)
+	registerPrivacyTestSession(t, reg, "session-a", clock)
 	server := &Server{
-		pool:             pool.NewRegistry(nil),
+		pool:             reg,
 		log:              zerolog.Nop(),
 		now:              func() time.Time { return clock },
 		privacyAuthority: auth,
@@ -173,6 +175,48 @@ func TestHandleMessageAcceptsHeartbeatPrivacyKeys(t *testing.T) {
 	if n := privacyKeySessions(t, auth, clock); n != 0 {
 		t.Fatalf("empty array sessions = %d", n)
 	}
+}
+
+// A heartbeat still in flight from a replaced session must not touch the
+// provider's privacy keys: its empty privacy_key_records would otherwise
+// revoke the replacement session's keys provider-wide.
+func TestReplacedSessionHeartbeatDoesNotRevokePrivacyKeys(t *testing.T) {
+	clock := time.Unix(1_800_000_000, 0).UTC()
+	record, identity := wsPrivacyIdentity(t, clock)
+	auth := openWSPrivacyAuthority(t, clock, identity)
+	reg := pool.NewRegistry(nil)
+	server := &Server{
+		pool:             reg,
+		log:              zerolog.Nop(),
+		now:              func() time.Time { return clock },
+		privacyAuthority: auth,
+	}
+	registerPrivacyTestSession(t, reg, "session-a", clock)
+	registerPrivacyTestSession(t, reg, "session-b", clock)
+	server.handleMessage(nil, "provider-a", "session-b", privacyHeartbeat(t, "ready", []relayblind.PrivacyKeyRecord{record}))
+	if n := privacyKeySessions(t, auth, clock); n != 1 {
+		t.Fatalf("current session advertised sessions = %d", n)
+	}
+	server.handleMessage(nil, "provider-a", "session-a", privacyHeartbeat(t, "ready", []relayblind.PrivacyKeyRecord{}))
+	sessions, err := auth.CandidateSessions(context.Background(), clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].AssignedSession != "session-b" {
+		t.Fatalf("replaced-session heartbeat changed privacy keys: %+v", sessions)
+	}
+}
+
+func registerPrivacyTestSession(t *testing.T, reg *pool.Registry, assignedID string, now time.Time) {
+	t.Helper()
+	serverConn, clientConn := net.Pipe()
+	t.Cleanup(func() { clientConn.Close() })
+	t.Cleanup(func() { serverConn.Close() })
+	reg.RegisterAt(&pool.Provider{
+		ProviderID: "provider-a", AssignedID: assignedID, Hostname: "provider.local",
+		ModelID: "model-a", ModelParamsB: 7, RAMGB: 16, MaxContextTokens: 4096, MaxConcurrency: 1,
+		BinaryVersion: "0.0.0-fixture", Tier: pool.TierPinned, State: pool.StateReady,
+	}, serverConn, now)
 }
 
 func privacyKeySessions(t *testing.T, auth *relayblind.PrivacyAuthority, now time.Time) int {
