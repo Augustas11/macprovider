@@ -134,6 +134,7 @@ test-dist:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_classify_benchmark_evidence
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_revenue_benchmark_workload
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_revenue_benchmark_calculator
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_provider_code_identity
 	bash scripts/test-acceptance-candidate-metadata.sh
 	bash scripts/test-acceptance-promotion.sh
 	bash scripts/test-release-toolchain.sh

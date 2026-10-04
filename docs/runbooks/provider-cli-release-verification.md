@@ -70,7 +70,41 @@ flow. Required evidence:
 3. Approve the production-release environment only from the owner account.
 4. After publication, download the immutable assets and verify checksums and
    signatures.
-5. Treat the coordinator rollout as two phases:
+5. Verify the signed provider code identity (issue #1842). The release signs
+   the CLI's `cdhash`, `TeamIdentifier`, and signing `Identifier` into
+   `pearl-release.json` as `provider_code_identity`, derived from the shipped
+   tarball bytes. Check it against the binary you actually downloaded:
+
+```bash
+openssl dgst -sha256 \
+  -verify ops/pearl-updater/release-signing-public.pem \
+  -signature pearl-release.json.sig pearl-release.json
+mkdir cli-check && tar -xzf macprovider-cli-vX.Y.Z-darwin-arm64.tar.gz \
+  -C cli-check macprovider-cli
+shasum -a 256 cli-check/macprovider-cli
+codesign -d --arch arm64 -vvv cli-check/macprovider-cli 2>&1 |
+  grep -E '^(CDHash|TeamIdentifier|Identifier)='
+python3 -c 'import json; print(json.dumps(json.load(open("pearl-release.json"))["provider_code_identity"], indent=2))'
+```
+
+   `binary_sha256` must equal the `shasum` output, `slices[0].code_cdhash`
+   must equal `CDHash=`, `team_id` must equal `TeamIdentifier=`, and
+   `signing_identifier` must equal `Identifier=` (`live.malibu.provider.cli`).
+   Any mismatch means the release is not verified. To fill SPEC-049
+   `privacy_class.approved_code_identities`, emit the entry from the verified
+   metadata instead of copying values by hand:
+
+```bash
+python3 scripts/provider-code-identity.py --emit-approved-identity \
+  --pearl-release-json pearl-release.json \
+  --expires-at 2027-01-31T00:00:00Z
+```
+
+   The command checks the signature against
+   `ops/pearl-updater/release-signing-public.pem` before it prints anything,
+   and prints only public identity values. Drop the `binary_version` line to
+   approve the exact cdhash without pinning the version string.
+6. Treat the coordinator rollout as two phases:
    - before publication, the signed feed bytes, keyring, and coordinator
      health version are checked while the recommendation may remain on the
      previous stable CLI;
@@ -79,7 +113,7 @@ flow. Required evidence:
      dispatch `verify-live-coordinator-release-rollout.yml`. That workflow
      requires the exact post-publication gate before publishing the
      append-only discovery transport.
-6. Verify the Malibu artifact against the standalone provider tarball:
+7. Verify the Malibu artifact against the standalone provider tarball:
 
 ```bash
 bash scripts/verify-malibu-release-artifacts.sh \
@@ -87,7 +121,7 @@ bash scripts/verify-malibu-release-artifacts.sh \
   --provider-tarball macprovider-cli-vX.Y.Z-darwin-arm64.tar.gz
 ```
 
-7. Verify local updater acceptance from the previous stable CLI:
+8. Verify local updater acceptance from the previous stable CLI:
 
 ```bash
 malibu-cli update --check

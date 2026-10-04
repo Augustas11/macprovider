@@ -1445,6 +1445,7 @@ jobs:
         id: assets
         shell: bash
         env:
+          APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
           MACPROVIDER_RELEASE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_RELEASE_SIGNING_KEY_PEM }}
           OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
           PROVIDER_ADMISSION_POLICY_INPUT: ${{ github.event.inputs.provider_admission_policy || 'strict_post_migration' }}
@@ -1505,6 +1506,15 @@ jobs:
           }
           trap cleanup_release_signing_key EXIT
           cp "$src" "$tar_asset"
+          # Issue #1842: derive the signed CLI code identity (cdhash, Team ID,
+          # signing Identifier) from the exact shipped tarball bytes so the
+          # signed pearl-release.json carries it for SPEC-049 approval.
+          provider_code_identity_dir="$(mktemp -d "$RUNNER_TEMP/provider-code-identity.XXXXXX")"
+          provider_code_identity="$provider_code_identity_dir/provider-code-identity.json"
+          python3 scripts/provider-code-identity.py \
+            --tarball "$tar_asset" \
+            --binary-version "${tag#v}" \
+            --output "$provider_code_identity"
           release_assets=("$tar_asset" "$coordinator_asset" "$coordinator_cli_asset" "$gateway_asset")
           cp "$catalog_manifest_src" release.json
           cp "$catalog_keys_src" trusted-keys.json
@@ -1591,12 +1601,14 @@ jobs:
           COORDINATOR_SHA="$coordinator_sha" \
           COORDINATOR_CLI_SHA="$coordinator_cli_sha" \
           GATEWAY_SHA="$gateway_sha" \
+          PROVIDER_CODE_IDENTITY="$provider_code_identity" \
           python3 - <<'PY'
           import json
           import hashlib
           import os
 
           tag = os.environ["RELEASE_TAG"]
+          provider_code_identity = json.load(open(os.environ["PROVIDER_CODE_IDENTITY"], encoding="utf-8"))
           catalog_manifest = json.load(open("release.json", encoding="utf-8"))
           catalog_names = (
               "release.json",
@@ -1641,6 +1653,7 @@ jobs:
               "commit": os.environ["RELEASE_COMMIT"],
               "architecture": "linux-amd64",
               "provider_advertised_version": tag.removeprefix("v"),
+              "provider_code_identity": provider_code_identity,
               "provider_admission_rollout": rollout,
               "components": {
                   "coordinator": {
@@ -1677,6 +1690,7 @@ jobs:
           "$OPENSSL_BIN" dgst -sha256 \
             -verify ops/pearl-updater/release-signing-public.pem \
             -signature "$pearl_metadata_sig" "$pearl_metadata"
+          rm -rf "$provider_code_identity_dir"
           release_assets+=("$pearl_metadata" "$pearl_metadata_sig")
           artifact_index_arguments=(
             --artifact "provider_cli=$tar_asset"

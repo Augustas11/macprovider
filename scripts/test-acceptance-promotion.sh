@@ -225,12 +225,21 @@ cat > "$accepted/compatibility-set.json" <<'EOF'
 EOF
 python3 - "$accepted" <<'PY'
 import hashlib
+import io
 import json
 import pathlib
 import sys
+import tarfile
 
 root = pathlib.Path(sys.argv[1])
 digest = lambda name: hashlib.sha256((root / name).read_bytes()).hexdigest()
+# Issue #1842: the accepted CLI tarball holds the bytes provider_code_identity names.
+cli = b"fixture signed arm64 macprovider-cli\n"
+with tarfile.open(root / "macprovider-cli-v1.8.48-darwin-arm64.tar.gz", "w:gz") as archive:
+    info = tarfile.TarInfo("macprovider-cli")
+    info.size = len(cli)
+    info.mode = 0o755
+    archive.addfile(info, io.BytesIO(cli))
 policy_name = "continuous-batching-policy.json"
 policy = (root / policy_name).read_bytes()
 (root / "release.json").write_text(
@@ -295,6 +304,15 @@ value = {
         "mode": "strict_post_migration",
     },
     "provider_advertised_version": "1.8.48",
+    "provider_code_identity": {
+        "asset": "macprovider-cli-v1.8.48-darwin-arm64.tar.gz",
+        "binary_sha256": hashlib.sha256(cli).hexdigest(),
+        "binary_version": "1.8.48",
+        "member": "macprovider-cli",
+        "signing_identifier": "live.malibu.provider.cli",
+        "slices": [{"arch": "arm64", "code_cdhash": "0123456789abcdef0123456789abcdef01234567"}],
+        "team_id": "ABCDE12345",
+    },
     "release_version": "1.8.48",
     "repository": "Augustas11/macprovider",
     "schema_version": 1,
@@ -312,7 +330,11 @@ sign_pearl() {
     -out "$accepted/pearl-release.json.sig" "$accepted/pearl-release.json"
 }
 sign_pearl
-printf 'fixture checksums\n' > "$accepted/checksums.txt"
+# Real rows for every release asset (build-checksums format), so the provider
+# CLI tarball has the one checksums.txt row provider_code_identity requires.
+(cd "$accepted" && for name in "${release_names[@]}"; do
+  printf '%s  %s\n' "$(shasum -a 256 "$name" | awk '{print $1}')" "$name"
+done) > "$accepted/checksums.txt"
 checksums_sha="$(shasum -a 256 "$accepted/checksums.txt" | awk '{print $1}')"
 
 cat > "$work/run.json" <<EOF
@@ -472,6 +494,134 @@ sign_pearl
 expect_reject admission-mismatch "${directory_verify[@]}"
 mv "$work/pearl" "$accepted/pearl-release.json"
 sign_pearl
+
+# Issue #1842: promotion requires the signed code identity of the accepted CLI.
+for code_identity_case in missing present-but-empty bad-hex wrong-identifier wrong-version wrong-sha; do
+  cp "$accepted/pearl-release.json" "$work/pearl"
+  python3 - "$accepted/pearl-release.json" "$code_identity_case" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+case = sys.argv[2]
+v = json.loads(p.read_text())
+identity = v["provider_code_identity"]
+if case == "missing":
+    v.pop("provider_code_identity")
+elif case == "present-but-empty":
+    v["provider_code_identity"] = {}
+elif case == "bad-hex":
+    identity["slices"][0]["code_cdhash"] = "0123456789abcdef0123456789abcdef0123456"
+elif case == "wrong-identifier":
+    identity["signing_identifier"] = "live.malibu.provider"
+elif case == "wrong-version":
+    identity["binary_version"] = "1.8.47"
+elif case == "wrong-sha":
+    identity["binary_sha256"] = "0" * 64
+p.write_text(json.dumps(v, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+  sign_pearl
+  if [[ "$code_identity_case" == missing ]]; then
+    # Present-then-strict: a pre-#1842 candidate (no field) stays promotable
+    # and the verifier says so explicitly.
+    "${directory_verify[@]}" >"$work/code-identity-missing.out" 2>&1 ||
+      fail "rejected a pre-#1842 candidate without provider_code_identity: $(cat "$work/code-identity-missing.out")"
+    grep -qF 'provider_code_identity: absent (pre-#1842 release)' "$work/code-identity-missing.out" ||
+      fail "absent provider_code_identity was accepted without the explicit notice"
+    mv "$work/pearl" "$accepted/pearl-release.json"
+    sign_pearl
+    continue
+  fi
+  expect_reject "code-identity-$code_identity_case" "${directory_verify[@]}"
+  case "$code_identity_case" in
+    present-but-empty) expected='provider_code_identity fields differ from the supported contract' ;;
+    bad-hex) expected='code_cdhash must be 40 lowercase hex' ;;
+    wrong-identifier) expected='signing_identifier is not live.malibu.provider.cli' ;;
+    wrong-version) expected='binary_version does not match the provider version' ;;
+    wrong-sha) expected='binary_sha256 differs from the accepted CLI bytes' ;;
+  esac
+  grep -qF -- "$expected" "$work/code-identity-$code_identity_case.out" ||
+    fail "code identity case $code_identity_case failed for the wrong reason: $(cat "$work/code-identity-$code_identity_case.out")"
+  mv "$work/pearl" "$accepted/pearl-release.json"
+  sign_pearl
+done
+"${directory_verify[@]}" >"$work/code-identity-present.out" 2>&1
+if grep -qF 'provider_code_identity: absent' "$work/code-identity-present.out"; then
+  fail "a candidate carrying provider_code_identity printed the absence notice"
+fi
+
+# SPEC-025 §6.2.1 cutoff in the promotion verifier itself: the provider CLI
+# version comes from the signed compatibility manifest, so only <= 1.8.213 may
+# omit the field. The fixture above is 1.8.48 (legacy); drive 1.8.213/1.8.214
+# through the verifier's own code path.
+python3 - "$verifier" "$accepted" <<'PY'
+import contextlib
+import importlib.util
+import io
+import pathlib
+import sys
+
+spec = importlib.util.spec_from_file_location("verify_acceptance_promotion", sys.argv[1])
+verifier = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(verifier)
+root = pathlib.Path(sys.argv[2])
+
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    verifier.verify_provider_code_identity(root, {}, "v1.8.213", "1.8.213")
+if "provider_code_identity: absent (pre-#1842 release)" not in out.getvalue():
+    raise SystemExit("legacy 1.8.213 absence was accepted without the notice")
+
+for version in ("1.8.214", "1.9.0", "2.0.0", "garbage"):
+    try:
+        verifier.verify_provider_code_identity(root, {}, f"v{version}", version)
+    except SystemExit as exc:
+        if "lacks provider_code_identity required for provider CLI" not in str(exc):
+            raise SystemExit(f"post-cutoff {version} absence failed for the wrong reason: {exc}")
+    else:
+        raise SystemExit(f"post-cutoff {version} absence was accepted")
+PY
+
+# The accepted CLI tarball needs exactly one checksums.txt row equal to its full
+# sha256 (shared require_checksum_row()). Drive the verifier on a copy of the
+# accepted set so the signed-checksums digest pin above stays untouched.
+python3 - "$verifier" "$accepted" "$work/checksum-rows" <<'PY'
+import contextlib
+import importlib.util
+import io
+import json
+import pathlib
+import shutil
+import sys
+
+spec = importlib.util.spec_from_file_location("verify_acceptance_promotion", sys.argv[1])
+verifier = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(verifier)
+accepted = pathlib.Path(sys.argv[2])
+root = pathlib.Path(sys.argv[3])
+asset = "macprovider-cli-v1.8.48-darwin-arm64.tar.gz"
+pearl = json.loads((accepted / "pearl-release.json").read_text())
+rows = (accepted / "checksums.txt").read_text().splitlines()
+row = next(line for line in rows if line.endswith("  " + asset))
+cases = {
+    "valid": (rows, None),
+    "missing": ([line for line in rows if line != row], f"checksums.txt has no row for {asset}"),
+    "duplicate": (rows + [row], f"checksums.txt has duplicate rows for {asset}"),
+    "mismatch": ([("0" * 64 + "  " + asset) if line == row else line for line in rows], f"checksums.txt digest mismatch for {asset}"),
+}
+for case, (lines, expected) in cases.items():
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir()
+    shutil.copyfile(accepted / asset, root / asset)
+    (root / "checksums.txt").write_text("".join(line + "\n" for line in lines))
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            verifier.verify_provider_code_identity(root, pearl, "v1.8.48", "1.8.48")
+    except SystemExit as exc:
+        if expected is None or expected not in str(exc):
+            raise SystemExit(f"checksum row case {case} failed for the wrong reason: {exc}")
+    else:
+        if expected is not None:
+            raise SystemExit(f"checksum row case {case} was accepted")
+PY
 
 expect_reject wrong-checksums-digest \
   python3 "$verifier" verify-directory \

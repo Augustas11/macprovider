@@ -211,6 +211,24 @@ for value in (
 ):
     if value not in signer:
         raise SystemExit(f"acceptance signer final provider archive validation is incomplete: {value}")
+# Issue #1842: the signed code identity is derived from the final provider
+# tarball bytes and bound into Pearl metadata before that metadata is signed.
+code_identity_position = signer.find('python3 "$code_identity" \\\n  --tarball "$provider_asset"')
+for value in (
+    'code_identity="$root/scripts/provider-code-identity.py"',
+    '--expect-sha256 "$(shasum -a 256 "$cli_work/macprovider-cli" | awk \'{print $1}\')"',
+    '--provider-code-identity "$provider_code_identity"',
+):
+    if value not in signer:
+        raise SystemExit(f"acceptance signer provider code identity contract is incomplete: {value}")
+if (
+    code_identity_position < signer.find('tar -czf "$provider_asset" -C "$cli_work" "${provider_archive_members[@]}"')
+    or signer.find('--provider-code-identity "$provider_code_identity"') < code_identity_position
+    or signer.find('-out "$output_dir/pearl-release.json.sig"') < signer.find('--provider-code-identity "$provider_code_identity"')
+):
+    raise SystemExit("acceptance signer must derive the code identity from the final tarball before signing Pearl metadata")
+if '"$code_identity" "$keychain_helper"' not in signer:
+    raise SystemExit("acceptance signer must treat the code identity producer as a trusted signer input")
 if '"$output_dir/release-assets.txt"' not in signer:
     raise SystemExit("acceptance signer does not export the verifier asset selector")
 if signer.find('release_assets+=("$output_dir/release-provenance.json")') > signer.find('"$output_dir/release-assets.txt"'):
@@ -596,6 +614,31 @@ import sys
 value = json.loads(pathlib.Path(sys.argv[1]).read_text())
 pathlib.Path(sys.argv[2]).write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
 PY
+# Issue #1842: the signer derives this with scripts/provider-code-identity.py
+# from the exact provider tarball; build-pearl binds it into pearl-release.json.
+write_code_identity() {
+  local output="$1"
+  local version="$2"
+  local identifier="$3"
+  python3 - "$output" "$tag" "$version" "$identifier" <<'PY'
+import json
+import pathlib
+import sys
+
+output, tag, version, identifier = sys.argv[1:]
+value = {
+    "asset": f"macprovider-cli-{tag}-darwin-arm64.tar.gz",
+    "member": "macprovider-cli",
+    "binary_version": version,
+    "binary_sha256": "a" * 64,
+    "team_id": "ABCDE12345",
+    "signing_identifier": identifier,
+    "slices": [{"arch": "arm64", "code_cdhash": "0123456789abcdef0123456789abcdef01234567"}],
+}
+pathlib.Path(output).write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+}
+write_code_identity "$work/provider-code-identity.json" 1.8.31 live.malibu.provider.cli
 python3 "$metadata" build-pearl \
   --repository Augustas11/macprovider \
   --tag "$tag" \
@@ -603,17 +646,20 @@ python3 "$metadata" build-pearl \
   --compatibility-manifest "$work/pearl-compatibility.json" \
   --provider-admission-policy strict_post_migration \
   --catalog-directory "$work/pearl-catalog" \
+  --provider-code-identity "$work/provider-code-identity.json" \
   --coordinator "$work/assets/coordinator-linux-amd64" \
   --coordinator-cli "$work/assets/coordinator-cli-linux-amd64" \
   --gateway "$work/assets/gateway-linux-amd64" \
   --output "$work/pearl-release.json"
-python3 - "$work/pearl-catalog/release.json" "$work/pearl-release.json" <<'PY'
+python3 - "$work/pearl-catalog/release.json" "$work/pearl-release.json" "$work/provider-code-identity.json" <<'PY'
 import json
 import pathlib
 import sys
 
 catalog = json.loads(pathlib.Path(sys.argv[1]).read_text())
 pearl = json.loads(pathlib.Path(sys.argv[2]).read_text())
+if pearl.get("provider_code_identity") != json.loads(pathlib.Path(sys.argv[3]).read_text()):
+    raise SystemExit("Pearl metadata did not bind the exact provider code identity")
 if pearl["catalog"]["release_id"] != catalog["release_id"]:
     raise SystemExit("Pearl metadata did not preserve the verified catalog release ID")
 if pearl.get("channel") != "private_acceptance":
@@ -629,6 +675,7 @@ python3 "$metadata" build-pearl \
   --provider-admission-policy strict_post_migration \
   --channel production \
   --catalog-directory "$work/pearl-catalog" \
+  --provider-code-identity "$work/provider-code-identity.json" \
   --coordinator "$work/assets/coordinator-linux-amd64" \
   --coordinator-cli "$work/assets/coordinator-cli-linux-amd64" \
   --gateway "$work/assets/gateway-linux-amd64" \
@@ -642,6 +689,62 @@ pearl = json.loads(pathlib.Path(sys.argv[1]).read_text())
 if pearl.get("channel") != "production":
     raise SystemExit("promotion-ready Pearl metadata did not declare the production channel")
 PY
+# A catalog-bound (CLI-shipping) build must carry a valid code identity.
+if python3 "$metadata" build-pearl \
+  --repository Augustas11/macprovider \
+  --tag "$tag" \
+  --commit "$candidate_commit" \
+  --compatibility-manifest "$work/pearl-compatibility.json" \
+  --provider-admission-policy strict_post_migration \
+  --catalog-directory "$work/pearl-catalog" \
+  --coordinator "$work/assets/coordinator-linux-amd64" \
+  --coordinator-cli "$work/assets/coordinator-cli-linux-amd64" \
+  --gateway "$work/assets/gateway-linux-amd64" \
+  --output "$work/pearl-without-code-identity.json" >"$work/without-code-identity.out" 2>&1; then
+  echo "Pearl metadata builder accepted a CLI release without provider code identity" >&2
+  exit 1
+fi
+grep -q -- '--provider-code-identity is required for catalog-bound releases' "$work/without-code-identity.out"
+for code_identity_case in version identifier; do
+  if [[ "$code_identity_case" == version ]]; then
+    write_code_identity "$work/bad-code-identity-$code_identity_case.json" 1.8.33 live.malibu.provider.cli
+    expected_message='binary_version does not match the provider version'
+  else
+    write_code_identity "$work/bad-code-identity-$code_identity_case.json" 1.8.31 live.malibu.provider.other
+    expected_message='signing_identifier is not live.malibu.provider.cli'
+  fi
+  if python3 "$metadata" build-pearl \
+    --repository Augustas11/macprovider \
+    --tag "$tag" \
+    --commit "$candidate_commit" \
+    --compatibility-manifest "$work/pearl-compatibility.json" \
+    --provider-admission-policy strict_post_migration \
+    --catalog-directory "$work/pearl-catalog" \
+    --provider-code-identity "$work/bad-code-identity-$code_identity_case.json" \
+    --coordinator "$work/assets/coordinator-linux-amd64" \
+    --coordinator-cli "$work/assets/coordinator-cli-linux-amd64" \
+    --gateway "$work/assets/gateway-linux-amd64" \
+    --output "$work/pearl-bad-code-identity-$code_identity_case.json" >"$work/bad-code-identity-$code_identity_case.out" 2>&1; then
+    echo "Pearl metadata builder accepted an invalid provider code identity ($code_identity_case)" >&2
+    exit 1
+  fi
+  grep -q -- "$expected_message" "$work/bad-code-identity-$code_identity_case.out"
+done
+if python3 "$metadata" build-pearl \
+  --repository Augustas11/macprovider \
+  --tag "$tag" \
+  --commit "$candidate_commit" \
+  --provider-admission-policy strict_post_migration \
+  --runtime-only \
+  --provider-code-identity "$work/provider-code-identity.json" \
+  --coordinator "$work/assets/coordinator-linux-amd64" \
+  --coordinator-cli "$work/assets/coordinator-cli-linux-amd64" \
+  --gateway "$work/assets/gateway-linux-amd64" \
+  --output "$work/pearl-runtime-only-with-code-identity.json" >"$work/runtime-only-code-identity.out" 2>&1; then
+  echo "Pearl metadata builder accepted runtime-only provider code identity" >&2
+  exit 1
+fi
+grep -q -- '--runtime-only cannot bind --provider-code-identity' "$work/runtime-only-code-identity.out"
 python3 "$metadata" build-pearl \
   --repository Augustas11/macprovider \
   --tag "$tag" \
@@ -665,6 +768,8 @@ if pearl.get("catalog") is not None:
     raise SystemExit("runtime-only Pearl metadata bound catalog state")
 if "provider_advertised_version" in pearl:
     raise SystemExit("runtime-only Pearl metadata carried provider version authority")
+if "provider_code_identity" in pearl:
+    raise SystemExit("runtime-only Pearl metadata carried a provider code identity")
 PY
 if python3 "$metadata" build-pearl \
   --repository Augustas11/macprovider \
@@ -725,6 +830,7 @@ if python3 "$metadata" build-pearl \
   --compatibility-manifest "$work/pearl-compatibility.json" \
   --provider-admission-policy strict_post_migration \
   --catalog-directory "$work/pearl-catalog" \
+  --provider-code-identity "$work/provider-code-identity.json" \
   --coordinator "$work/assets/coordinator-linux-amd64" \
   --coordinator-cli "$work/assets/coordinator-cli-linux-amd64" \
   --gateway "$work/assets/gateway-linux-amd64" \
