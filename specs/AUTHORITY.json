@@ -19,7 +19,8 @@
         "SPEC-045",
         "SPEC-046",
         "SPEC-047",
-        "SPEC-048"
+        "SPEC-048",
+        "SPEC-049"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -39,7 +40,8 @@
         "SPEC-032",
         "SPEC-042",
         "SPEC-043",
-        "SPEC-047"
+        "SPEC-047",
+        "SPEC-049"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -127,7 +129,8 @@
         "SPEC-042",
         "SPEC-043",
         "SPEC-045",
-        "SPEC-047"
+        "SPEC-047",
+        "SPEC-049"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -154,7 +157,8 @@
         "SPEC-032",
         "SPEC-033",
         "SPEC-042",
-        "SPEC-043"
+        "SPEC-043",
+        "SPEC-049"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -287,7 +291,8 @@
         "SPEC-043",
         "SPEC-045",
         "SPEC-047",
-        "SPEC-048"
+        "SPEC-048",
+        "SPEC-049"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -394,7 +399,8 @@
         "SPEC-042",
         "SPEC-043",
         "SPEC-047",
-        "SPEC-048"
+        "SPEC-048",
+        "SPEC-049"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -674,7 +680,8 @@
       "owner_spec": "SPEC-041",
       "consumers": [
         "SPEC-042",
-        "SPEC-048"
+        "SPEC-048",
+        "SPEC-049"
       ],
       "status": "declared",
       "requires_signed_journey_result": true,
@@ -692,7 +699,8 @@
         "SPEC-032",
         "SPEC-043",
         "SPEC-046",
-        "SPEC-047"
+        "SPEC-047",
+        "SPEC-049"
       ],
       "status": "declared",
       "requires_signed_journey_result": true,
@@ -781,6 +789,18 @@
       "requires_signed_journey_result": true,
       "owner": "@Augustas11",
       "issue": "https://github.com/Augustas11/macprovider/issues/1770"
+    },
+    {
+      "id": "operator-constrained-privacy-class",
+      "owner_spec": "SPEC-049",
+      "consumers": [
+        "SPEC-006",
+        "SPEC-041"
+      ],
+      "status": "declared",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/1749"
     }
   ]
 }

@@ -1,6 +1,6 @@
 # SPEC-041 - Relay-Blind Request Encryption
 
-**Version:** 0.2.0
+**Version:** 0.3.0
 Status: draft
 Owner: @Augustas11
 Issue: https://github.com/Augustas11/macprovider/issues/928
@@ -10,7 +10,7 @@ Audit history: v0.2.0 reconciles the default-off pilot contract before full impl
 {
   "spec_id": "SPEC-041",
   "title": "Relay-Blind Request Encryption",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "path": "specs/SPEC-041-relay-blind-request-encryption.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -58,6 +58,8 @@ SPEC-041 owns relay-blind provider key records, buyer pins, encryption envelopes
 - SPEC-022 owns verified-model settlement. Relay-blind work cannot produce positive verified-model settlement or SPEC-022 verified-work rewards in this pilot; ordinary SPEC-005 provider payment remains in scope.
 - SPEC-040 owns wallet authentication and request signatures. Wallet signatures bind the exact relay-blind transaction.
 - SPEC-042 owns pool selection. Its current R009 requires rejection of every pool-scoped relay-blind request.
+
+SPEC-049 privacy-class extension: R002/R004/R005 closed schemas admit exactly the SPEC-049 additions (`privacy_key_records`, `privacy-class-reservation-v1`, `privacy_class` dispatch key, and the R005 bound-rejection `error_code` values `privacy_class_downgrade_rejected` and `privacy_class_posture_stale`) only when privacy class is requested; SPEC-049 owns them.
 
 ## 3. Canonical primitives
 
@@ -237,5 +239,6 @@ Local implementation and verification evidence is recorded in [the pilot audit](
 
 ## 7. Changelog and history
 
+- 0.3.0 - Admitted the SPEC-049 operator-constrained privacy-class additions to the R002/R004/R005 closed schemas, only when privacy class is requested; SPEC-049 owns them. No other SPEC-041 obligation changes. Status remains draft, pending-reconciliation, and not-deployed.
 - 0.2.0 - Reconciled the complete default-off global-pool pilot: dedicated operator-pinned Ed25519 identity and buyer pin; exact key/envelope framing; opaque buyer binding; reservation/consume state; typed opaque provider wire and journal; observe-mode settlement with receipt/reward exclusion; truthful per-request disclosure; and five-stage implementation/recovery gate. Status remains draft, pending-reconciliation, and not-deployed.
 - 0.1.0 - Initial relay-blind request encryption draft and admission-only gateway slice. That slice remains historical partial implementation and is superseded as an implementation plan by the v0.2.0 five-stage build plan.
