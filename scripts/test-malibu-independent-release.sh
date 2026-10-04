@@ -95,6 +95,20 @@ for forbidden in ("xcodebuild", "codesign --force", "notarytool-submit-with-retr
         raise SystemExit(f"publication must reuse candidate bytes, not run: {forbidden}")
 if sign.count('test "$(shasum -a 256 "$embedded_cli"') != 2:
     raise SystemExit("candidate signer must prove embedded CLI bytes before and after app signing")
+# SPEC-049-R025: Malibu.app embeds the App Attest profile and signs with the
+# derived entitlements; the embedded CLI stays entitlement-free.
+attest_prepare = sign.find("prepare-malibu-app-attest-signing.py prepare")
+attest_codesign = sign.find('--entitlements "$malibu_entitlements"')
+attest_verify = sign.find("prepare-malibu-app-attest-signing.py verify")
+cli_entitlements = sign.find('require-cli-se-entitlements.sh "$embedded_cli"')
+if min(attest_prepare, attest_codesign, attest_verify, cli_entitlements) < 0 or not (
+    attest_prepare < attest_codesign < attest_verify < cli_entitlements
+):
+    raise SystemExit("candidate signer must embed and verify the App Attest profile around the outer codesign")
+if "MALIBU_APP_ATTEST_PROFILE_BASE64: ${{ secrets.MALIBU_APP_ATTEST_PROFILE_BASE64 }}" not in sign:
+    raise SystemExit("candidate signer must receive the App Attest profile secret")
+if "--entitlements phase3-binary/app/Malibu.entitlements" in text:
+    raise SystemExit("Malibu outer codesign must use the profile-derived entitlements, not the bare base")
 if publish.find("Reverify exact accepted bytes") > publish.find("Create and verify draft Malibu release"):
     raise SystemExit("candidate verification must precede draft creation")
 if publish.find("Create and verify draft Malibu release") > publish.find("Publish only the revalidated draft"):

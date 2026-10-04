@@ -275,6 +275,7 @@ jobs:
       - name: Sign, notarize, staple, and package Malibu
         shell: bash
         env:
+          MALIBU_APP_ATTEST_PROFILE_BASE64: ${{ secrets.MALIBU_APP_ATTEST_PROFILE_BASE64 }}
           APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
           APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
           APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
@@ -348,13 +349,32 @@ jobs:
             -exec codesign --force --options runtime --timestamp --sign "$signing_id" {} \;
           codesign --force --options runtime --timestamp --sign "$signing_id" \
             "$app/Contents/MacOS/mlx.metallib"
+          # SPEC-049-R025: embed the App Attest profile and sign with the
+          # entitlements derived from it; the embedded CLI keeps none.
+          test -n "$MALIBU_APP_ATTEST_PROFILE_BASE64"
+          app_attest_profile="$RUNNER_TEMP/malibu-app-attest.provisionprofile"
+          malibu_entitlements="$RUNNER_TEMP/Malibu-release.entitlements"
+          ( umask 077; printf '%s' "$MALIBU_APP_ATTEST_PROFILE_BASE64" | base64 -d > "$app_attest_profile" )
+          python3 scripts/prepare-malibu-app-attest-signing.py prepare \
+            --profile "$app_attest_profile" \
+            --team "$TEAM_ID" \
+            --base phase3-binary/app/Malibu.entitlements \
+            --app "$app" \
+            --out "$malibu_entitlements"
           codesign --force \
             --options runtime \
             --timestamp \
-            --entitlements phase3-binary/app/Malibu.entitlements \
+            --entitlements "$malibu_entitlements" \
             --sign "$signing_id" \
             "$app"
           codesign --verify --strict --verbose=2 --deep "$app"
+          python3 scripts/prepare-malibu-app-attest-signing.py verify \
+            --app "$app" \
+            --team "$TEAM_ID" \
+            --entitlements "$malibu_entitlements" \
+            --profile "$app_attest_profile"
+          rm -f "$app_attest_profile"
+          bash scripts/require-cli-se-entitlements.sh "$embedded_cli"
           codesign -dv --verbose=4 "$app" 2>&1 | grep -qx "TeamIdentifier=$TEAM_ID"
           codesign -dv --verbose=4 "$app" 2>&1 | grep -q '^Runtime Version='
           test "$(shasum -a 256 "$embedded_cli" | awk '{print $1}')" = "$CLI_SHA256"

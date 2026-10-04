@@ -414,6 +414,7 @@ jobs:
           APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
           MACPROVIDER_RELEASE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_RELEASE_SIGNING_KEY_PEM }}
           MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM }}
+          MALIBU_APP_ATTEST_PROFILE_BASE64: ${{ secrets.MALIBU_APP_ATTEST_PROFILE_BASE64 }}
           CANDIDATE_REF: ${{ needs.build_candidate.outputs.candidate_ref }}
           CANDIDATE_COMMIT: ${{ needs.build_candidate.outputs.candidate_commit }}
           CONTROL_COMMIT: ${{ needs.build_candidate.outputs.control_commit }}

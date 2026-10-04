@@ -4,6 +4,8 @@ import Foundation
 enum PrivacyClassConstants {
     static let v1 = "operator_constrained_beta_v1"
     static let assurance = "device_bound_self_attested_beta"
+    /// SPEC-049 v0.2. Attested only in the enrolled state (SPEC-049-R032).
+    static let assuranceCodeBound = "code_bound_attested"
     static let responseEncryption = "buyer_provider_aead_v1"
     static let reservationVersion = "privacy-class-reservation-v1"
     static let responseVersion = "privacy-response-v1"
@@ -296,7 +298,7 @@ struct PrivacyKeyAttestation: Sendable, Equatable {
     private func validate() throws {
         guard version == PrivacyClassConstants.keyAttestationVersion,
               privacyClass == PrivacyClassConstants.v1,
-              assurance == PrivacyClassConstants.assurance,
+              assurance == PrivacyClassConstants.assurance || assurance == PrivacyClassConstants.assuranceCodeBound,
               (try? decodePrivacyFixed(keyRecordDigest, count: 32)) != nil,
               visiblePrivacyASCII(binaryVersion, maxBytes: PrivacyClassConstants.maxIdentifierBytes),
               validPrivacyCDHash(codeCDHash),

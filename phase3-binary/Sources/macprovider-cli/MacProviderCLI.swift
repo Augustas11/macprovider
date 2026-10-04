@@ -345,6 +345,12 @@ struct ServeCommand: AsyncParsableCommand {
     @Flag(name: .customLong("privacy-class-beta"), inversion: .prefixedNo, help: "Opt into the default-off operator-constrained privacy class. Requires relay-blind. Overrides MACPROVIDER_PRIVACY_CLASS_BETA and config key privacy_class_beta.")
     var privacyClassBeta: Bool?
 
+    @Flag(name: .customLong("privacy-code-bound"), help: "SPEC-049 v0.2, default off. Set only by Malibu.app when it supervises this process: request the code_bound_attested label through the supervisor socket. Ignored outside privacy mode.")
+    var privacyCodeBound: Bool = false
+
+    @Option(name: .customLong("privacy-supervisor-socket"), help: "Absolute path of the Malibu.app supervisor socket. Used only with --privacy-code-bound.")
+    var privacySupervisorSocket: String?
+
     @Option(name: .customLong("relay-blind-state-directory"), help: "Absolute operator-owned 0700 directory outside the repository for relay-blind keys and execution journal.")
     var relayBlindStateDirectory: String?
 
@@ -1785,6 +1791,22 @@ struct ServeCommand: AsyncParsableCommand {
         return value
     }
 
+    /// SPEC-049-R025/R034: code-bound needs privacy mode, the default-off flag,
+    /// and the supervisor socket. Anything else keeps the Beta label only.
+    static func privacySupervisorChannel(
+        codeBound: Bool,
+        socketPath: String?,
+        privacyMode: Bool,
+        teamID: () -> String = { PrivacyCodeSignature.readSelf().teamID }
+    ) -> (any PrivacySupervisorChannel)? {
+        guard codeBound else { return nil }
+        guard privacyMode, let socketPath, socketPath.hasPrefix("/") else {
+            FileHandle.standardError.write(Data("privacy_code_bound_inactive\n".utf8))
+            return nil
+        }
+        return PrivacySupervisorSocketClient(path: socketPath, teamID: teamID())
+    }
+
     static func makeCoordinatorClient(
         noJoin: Bool,
         donorMode: Bool = false,
@@ -2032,7 +2054,10 @@ struct ServeCommand: AsyncParsableCommand {
                 // was launched from a non-canonical path. PATH repair alone does not
                 // replace the already-running stale inode; identity must freeze on the
                 // binary that matches the signed set's provider_cli member.
+                // SPEC-049-R026: a supervised code-bound child must stay the
+                // exact executable Malibu.app spawned and checked.
                 if !autotuneCandidate,
+                   !privacyCodeBound,
                    loaded.credentialStore != .protectedFile,
                    let canonical = try serveMarkerStore.ensurePathEntrypointMatchesInstallAuthority(),
                    let launched = Bundle.main.executableURL?.standardizedFileURL,
@@ -2990,6 +3015,11 @@ struct ServeCommand: AsyncParsableCommand {
                     #endif
                     return ManagedDeviceAttestationGenerator(artifactPath: resolved.tier2MDAArtifactPath)
                 }(),
+                privacySupervisorChannel: Self.privacySupervisorChannel(
+                    codeBound: privacyCodeBound,
+                    socketPath: privacySupervisorSocket,
+                    privacyMode: resolved.privacyClassBeta
+                ),
                 providerReceiptPublicKey: providerReceiptPublicKey,
                 providerAdmissionPublicKey: providerAdmissionPublicKey,
                 providerAdmissionNextPublicKey: providerAdmissionNextPublicKey,

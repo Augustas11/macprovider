@@ -22,3 +22,13 @@ the kid stays the same. The envelope digest is SHA-256 of the compact JSON
 encoding produced by `Envelope.Digest`. Regenerate with
 `MACPROVIDER_REGEN_FIXTURES=1 go test ./internal/relayblind -run '^TestPrivacyGoldenVectorGenerate$'`
 from either relay-blind module.
+
+`privacy-code-bound-v2.json` is the SPEC-049 v0.2 framing vector. It locks
+the `privacy-posture-v2` statement framing (fields 1..34) and the
+`privacy-app-attest-enrollment-v1` statement framing, plus the SHA-256 of each,
+which is the `clientDataHash` Malibu.app passes to App Attest. The coordinator
+Go tests, the provider Swift tests, and the Malibu.app supervisor tests all
+frame the same statements and must produce these bytes. It holds no keys,
+attestations, or assertions. Regenerate with
+`MACPROVIDER_REGEN_FIXTURES=1 go test ./internal/relayblind -run '^TestPrivacyCodeBoundVectorGenerate$'`
+from `phase4-coordinator`.

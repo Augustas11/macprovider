@@ -35,6 +35,9 @@ final class MalibuAgent: ObservableObject {
     private var controlSocketPath: String?
 
     private var child: CLIChildProcess?
+    /// SPEC-049 v0.2 supervisor and its supervised CLI child. Nil unless the
+    /// default-off `privacyCodeBound` setting is on and the platform supports it.
+    private var codeBoundHost: PrivacyCodeBoundHost?
     private var control: ControlSocketClient?
     private var metricsPoller: Task<Void, Never>?
     private var eventStreamTask: Task<Void, Never>?
@@ -166,6 +169,10 @@ final class MalibuAgent: ObservableObject {
         guard await ProviderConfig.isConfigured else {
             snapshot.state = .error
             snapshot.lastError = "Not set up yet. Click Launch Provider to activate."
+            return
+        }
+
+        if PrivacyCodeBoundSetting.isEnabled(), await startCodeBoundSupervisedProvider() {
             return
         }
 
@@ -672,6 +679,11 @@ final class MalibuAgent: ObservableObject {
         await repairTask?.value
         monitorsLaunchdProvider = false
         lastRequestsRateSample = nil
+        // The supervised code-bound child belongs to this app, unlike the
+        // launchd provider, so it stops with the app.
+        let supervisedHost = codeBoundHost
+        codeBoundHost = nil
+        await supervisedHost?.stop()
         await control?.close()
         await rewardActivityControl?.close()
         metricsPoller?.cancel(); metricsPoller = nil
@@ -773,8 +785,19 @@ final class MalibuAgent: ObservableObject {
             // coordinator history during that transition.
             clearRewardActivity()
         }
+        let supervisedPID = codeBoundHost?.childPID
         let identityMatched = status.map { fetched in
             guard let expectedProviderID else { return false }
+            if let supervisedPID {
+                // The supervisor checks this child's code before every
+                // attestation and assertion (SPEC-049-R026).
+                return InstalledProviderMonitor.serviceIdentityMatches(
+                    fetched,
+                    expectedProviderID: expectedProviderID,
+                    launchdPID: Int(supervisedPID),
+                    liveCodeMatches: { $0 == supervisedPID }
+                )
+            }
             return InstalledProviderMonitor.serviceIdentityMatches(
                 fetched,
                 expectedProviderID: expectedProviderID,
@@ -1155,7 +1178,8 @@ final class MalibuAgent: ObservableObject {
                     await self.requestReferralStatusIfDue()
                 } else if self.monitorsLaunchdProvider {
                     await MainActor.run {
-                        let pidGone = InstalledProviderMonitor.launchdServicePID() == nil
+                        let pidGone = self.codeBoundHost?.childPID == nil
+                            && InstalledProviderMonitor.launchdServicePID() == nil
                         if self.shouldInvalidateHeldLocalStatus() {
                             self.snapshot.invalidateLocalStatusObservation(clearBuyerServingHold: pidGone)
                             if pidGone {
@@ -2070,6 +2094,60 @@ final class MalibuAgent: ObservableObject {
             return nil
         }
         return ProviderLogDiagnostics.staleLaunchAgentMessage
+    }
+
+    /// SPEC-049 v0.2, default off. Returns true when the supervised path owns
+    /// this start. Returns false to fall back to the launchd provider, which
+    /// can only ever hold the Beta label (SPEC-049-R025).
+    private func startCodeBoundSupervisedProvider() async -> Bool {
+        if codeBoundHost != nil { return true }
+        if let reason = PrivacyCodeBoundLatch.latchedReason {
+            snapshot.state = .error
+            snapshot.lastError = "Code-bound privacy stopped the provider after its integrity check failed (\(reason.rawValue)). Reinstall Malibu, then restart it."
+            return true
+        }
+        guard PrivacyCodeBoundHost.platformSupported() else {
+            logLines.append("Code-bound privacy needs macOS 27 or later with App Attest. The provider keeps the Beta label.")
+            return false
+        }
+        guard InstalledProviderMonitor.launchdServicePID() == nil else {
+            logLines.append("Code-bound privacy needs the launchd provider stopped. The provider keeps the Beta label.")
+            return false
+        }
+        let paths = ProviderPaths.current
+        do {
+            codeBoundHost = try await PrivacyCodeBoundHost.start(
+                configPath: paths.configFile,
+                logFileURL: paths.cliLogFile,
+                paths: paths,
+                onChildExit: { [weak self] code in
+                    Task { @MainActor in await self?.codeBoundChildExited(code) }
+                }
+            )
+        } catch {
+            logLines.append("Code-bound privacy supervisor did not start. The provider keeps the Beta label.")
+            return false
+        }
+        snapshot.state = .starting
+        _ = await monitorInstalledProviderIfPresent()
+        return true
+    }
+
+    private func codeBoundChildExited(_ code: Int32) async {
+        let host = codeBoundHost
+        codeBoundHost = nil
+        await host?.stop()
+        guard !isShuttingDown else { return }
+        invalidateProviderProjectionFreshness()
+        if let reason = PrivacyCodeBoundLatch.latchedReason {
+            // SPEC-049-R026: never respawn a privacy-mode child in this process.
+            snapshot.state = .error
+            snapshot.lastError = "Code-bound privacy stopped the provider after its integrity check failed (\(reason.rawValue)). Reinstall Malibu, then restart it."
+            return
+        }
+        snapshot.state = .reconnecting
+        snapshot.lastError = "The provider exited (status \(code)). Malibu will restart it."
+        await scheduleReconnect()
     }
 
     private func scheduleReconnect() async {

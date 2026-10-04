@@ -79,6 +79,19 @@ relay-blind-client --privacy-class --base-url https://gateway.example --identity
 
 A satisfied run prints `privacy class satisfied` on stderr, then the class, assurance, scope, and each residual risk below. Decrypted text goes to stdout.
 
+### Code-bound provider (SPEC-049 v0.2, default off)
+
+Only a Malibu.app that supervises its own embedded `macprovider-cli` can earn `code_bound_attested`. The launchd provider, the standalone CLI, and any Mac older than macOS 27 stay on `device_bound_self_attested_beta`.
+
+1. The release Malibu.app must carry the Developer ID App Attest profile. CI embeds it from the `MALIBU_APP_ATTEST_PROFILE_BASE64` secret (`scripts/prepare-malibu-app-attest-signing.py`). The embedded CLI is signed with no entitlements.
+2. Keep `privacy_class_beta: true` and relay-blind on in the provider config.
+3. Stop the launchd provider. While it runs, Malibu does not supervise and the provider keeps the Beta label.
+4. Turn the app setting on, then restart Malibu: `defaults write tech.malibu.app privacyCodeBound -bool true`.
+
+Malibu then runs `macprovider-cli serve --privacy-code-bound --privacy-supervisor-socket <socket>` itself. The socket lives in `~/Library/Application Support/Malibu/privacy/` (directory 0700, socket 0600). Before every key request, attestation, and assertion, Malibu checks the child by its kernel audit token: PID and PID version, team, `live.malibu.provider.cli`, the cdhash of the CLI sealed in its own bundle, and the code-signing flags. If that check fails, Malibu stops the child and does not start it again until Malibu itself restarts. Only the keyId is stored on disk, in `~/Library/Application Support/Malibu/privacy/app-attest-key-id`. The key stays in the Secure Enclave.
+
+To go back to Beta, run `defaults delete tech.malibu.app privacyCodeBound`, quit Malibu, and start the launchd provider again.
+
 ## Incident and revocation
 
 The control plane is the relay-blind SQLite file named by `relay_blind.sqlite_path`. `coordinator-cli` opens that file directly. Do not restart the coordinator for these commands. The next reservation, consume, or dispatch reads the new row.

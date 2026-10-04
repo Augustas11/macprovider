@@ -3,6 +3,10 @@ import Foundation
 
 /// SPEC-049 encoded posture response cap. Matches coordinator `MaxPrivacyPostureResponseBytes`.
 private let maxPrivacyPostureResponseBytes = 8192
+/// SPEC-049 v0.2 caps. Match coordinator `MaxPrivacyPostureV2ResponseBytes` and
+/// `MaxPrivacyAppAttestEnrollmentBytes`.
+private let maxPrivacyPostureV2ResponseBytes = 12288
+private let maxPrivacyAppAttestEnrollmentBytes = 32768
 
 /// Creates `<state>/privacy` at mode 0700. `RelayBlindSecureDirectory` creates only the leaf,
 /// so the privacy journal and the fixture SE file need this parent first.
@@ -70,12 +74,13 @@ final class PrivacyPostureResponder: @unchecked Sendable {
     }
 
     /// Nil means omit `privacy_key_records`. An empty array is an honest empty advertisement.
-    func privacyKeyRecords(now: Date = Date()) -> [[String: Any]]? {
+    /// `assurance` is `code_bound_attested` only in the enrolled state (SPEC-049-R032).
+    func privacyKeyRecords(now: Date = Date(), assurance: String = PrivacyClassConstants.assurance) -> [[String: Any]]? {
         lock.lock()
         defer { lock.unlock() }
         guard let observation = healthyObservationLocked() else { return nil }
         do {
-            switch try buildRecordsLocked(observation: observation, now: now) {
+            switch try buildRecordsLocked(observation: observation, now: now, assurance: assurance) {
             case .disabled:
                 return nil
             case .ready(let records, _):
@@ -148,6 +153,164 @@ final class PrivacyPostureResponder: @unchecked Sendable {
         return response
     }
 
+    /// Fields 1..26 of a `privacy-posture-v2` statement for the supervisor to
+    /// complete (SPEC-049-R030). Consumes one sequence number. Nil when the
+    /// posture is unhealthy, exactly like `respond`.
+    func postureV2Draft(
+        to challenge: [String: Any],
+        assignedSession: String,
+        appAttestKeyID: String,
+        now: Date = Date()
+    ) throws -> PrivacyPostureV2Draft? {
+        try parseChallenge(challenge)
+        guard privacyVisibleASCII(assignedSession, maxBytes: PrivacyClassConstants.maxIdentifierBytes),
+              let nonce = challenge["nonce"] as? String else {
+            throw PrivacyClassError.invalidMaterial
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        guard let observation = healthyObservationLocked() else { return nil }
+        let digests: [String]
+        switch try buildRecordsLocked(observation: observation, now: now, assurance: PrivacyClassConstants.assuranceCodeBound) {
+        case .disabled:
+            return nil
+        case .ready(_, let values):
+            digests = values
+        }
+        guard sequence < UInt64.max else { throw PrivacyClassError.invalidMaterial }
+        sequence += 1
+        let draft = PrivacyPostureV2Draft(
+            providerID: providerID,
+            assignedSession: assignedSession,
+            nonce: nonce,
+            sequence: sequence,
+            issuedAtUnix: Int64(now.timeIntervalSince1970),
+            binaryVersion: observation.binaryVersion,
+            codeCDHash: observation.codeCDHash,
+            teamID: observation.teamID,
+            signingIdentifier: observation.signingIdentifier,
+            hardenedRuntime: observation.hardenedRuntime,
+            libraryValidation: observation.libraryValidation,
+            getTaskAllow: observation.getTaskAllow,
+            csDebugged: observation.csDebugged,
+            pTraced: observation.pTraced,
+            ptDenyAttachApplied: observation.ptDenyAttachApplied,
+            coreDumpsDisabled: observation.coreDumpsDisabled,
+            sipEnabled: observation.sipEnabled,
+            runtimeSource: observation.runtimeSource,
+            diagnosticEnvClear: observation.diagnosticEnvClear,
+            kvDiskTierDisabled: observation.kvDiskTierDisabled,
+            seKeyBackend: seKeyBackend,
+            privacyKeyRecordDigests: digests,
+            appAttestKeyID: appAttestKeyID
+        )
+        do {
+            try draft.validate()
+        } catch {
+            throw PrivacyClassError.invalidMaterial
+        }
+        return draft
+    }
+
+    /// Signs a supervisor-completed v2 statement and builds the closed
+    /// `version: 2` response (§4.10). The child recomputes the framing itself
+    /// and refuses a statement whose child-owned fields changed or whose
+    /// supervisor fields would fail the coordinator's child-check rules.
+    func postureV2Response(
+        statement: PrivacyPostureV2Statement,
+        draft: PrivacyPostureV2Draft,
+        assertion: Data
+    ) throws -> [String: Any]? {
+        guard statement.draft == draft,
+              statement.childCheckConsistent,
+              (1...PrivacySupervisorConstants.maxAssertionBytes).contains(assertion.count) else {
+            throw PrivacyClassError.invalidMaterial
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        noteDecryptRecheckLocked()
+        if advertisingDisabled { return nil }
+        let framing: Data
+        do {
+            framing = try statement.framing()
+        } catch {
+            throw PrivacyClassError.invalidMaterial
+        }
+        guard seSigner.publicKeyRaw.count == 64 else { throw PrivacyClassError.invalidMaterial }
+        let response: [String: Any] = [
+            "type": "privacy_posture_response",
+            "version": 2,
+            "statement": statement.wireObject,
+            "se_signature": RelayBlindBase64URL.encode(try seSigner.sign(framing)),
+            "identity_signature": try relayBlindRuntime.identitySignatureBase64URL(for: framing),
+            "app_attest_assertion": RelayBlindBase64URL.encode(assertion),
+        ]
+        let encoded = try JSONSerialization.data(withJSONObject: response, options: [.withoutEscapingSlashes])
+        guard encoded.count <= maxPrivacyPostureV2ResponseBytes else { throw PrivacyClassError.invalidMaterial }
+        return response
+    }
+
+    /// Child-owned enrollment fields (§4.11 fields 1..6, 10, 11). Nil when the
+    /// posture is unhealthy.
+    func enrollmentDraft(challenge: String, assignedSession: String, appAttestKeyID: String) throws -> PrivacyEnrollmentDraft? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard healthyObservationLocked() != nil else { return nil }
+        guard seSigner.publicKeyRaw.count == 64 else { throw PrivacyClassError.invalidMaterial }
+        let draft = PrivacyEnrollmentDraft(
+            providerID: providerID,
+            assignedSession: assignedSession,
+            challenge: challenge,
+            appAttestKeyID: appAttestKeyID,
+            sePublicKey: RelayBlindBase64URL.encode(seSigner.publicKeyRaw),
+            identityPublicKey: relayBlindRuntime.keyManager.identityPublicKeyBase64URL()
+        )
+        do {
+            try draft.validate()
+        } catch {
+            throw PrivacyClassError.invalidMaterial
+        }
+        return draft
+    }
+
+    /// Signs a supervisor-completed enrollment statement and builds the closed
+    /// `privacy_app_attest_enrollment` message (§4.11).
+    func enrollmentMessage(
+        statement: PrivacyEnrollmentStatement,
+        draft: PrivacyEnrollmentDraft,
+        attestation: Data
+    ) throws -> [String: Any]? {
+        guard statement.draft == draft,
+              statement.supervisorConsistent,
+              (1...PrivacySupervisorConstants.maxAttestationBytes).contains(attestation.count) else {
+            throw PrivacyClassError.invalidMaterial
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        guard let observation = healthyObservationLocked() else { return nil }
+        guard statement.supervisor.childCDHash == observation.codeCDHash,
+              statement.supervisor.teamID == observation.teamID else {
+            throw PrivacyClassError.invalidMaterial
+        }
+        let framing: Data
+        do {
+            framing = try statement.framing()
+        } catch {
+            throw PrivacyClassError.invalidMaterial
+        }
+        let message: [String: Any] = [
+            "type": "privacy_app_attest_enrollment",
+            "version": 1,
+            "statement": statement.wireObject,
+            "attestation": RelayBlindBase64URL.encode(attestation),
+            "se_signature": RelayBlindBase64URL.encode(try seSigner.sign(framing)),
+            "identity_signature": try relayBlindRuntime.identitySignatureBase64URL(for: framing),
+        ]
+        let encoded = try JSONSerialization.data(withJSONObject: message, options: [.withoutEscapingSlashes])
+        guard encoded.count <= maxPrivacyAppAttestEnrollmentBytes else { throw PrivacyClassError.invalidMaterial }
+        return message
+    }
+
     private func noteDecryptRecheckLocked() {
         if PrivacyRuntimeHardening.decryptRecheckFailed {
             decryptFailureLatched = true
@@ -188,7 +351,11 @@ final class PrivacyPostureResponder: @unchecked Sendable {
         case disabled
     }
 
-    private func buildRecordsLocked(observation: PrivacyPostureObservation, now: Date) throws -> BuiltRecords {
+    private func buildRecordsLocked(
+        observation: PrivacyPostureObservation,
+        now: Date,
+        assurance: String = PrivacyClassConstants.assurance
+    ) throws -> BuiltRecords {
         let records = try relayBlindRuntime.advertisedRecords(now: now)
         if records.count > PrivacyClassConstants.maxKeyRecordDigests {
             advertisingDisabled = true
@@ -206,7 +373,7 @@ final class PrivacyPostureResponder: @unchecked Sendable {
                 version: PrivacyClassConstants.keyAttestationVersion,
                 keyRecordDigest: record.keyRecordDigest,
                 privacyClass: PrivacyClassConstants.v1,
-                assurance: PrivacyClassConstants.assurance,
+                assurance: assurance,
                 binaryVersion: observation.binaryVersion,
                 codeCDHash: observation.codeCDHash,
                 notBeforeUnix: record.notBeforeUnix,

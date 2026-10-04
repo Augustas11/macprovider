@@ -524,6 +524,10 @@ actor CoordinatorClient {
     private let relayBlindRuntime: RelayBlindProviderRuntime?
     private let privacyPostureProbe: (any PrivacyPostureProbe)?
     private let privacyPostureResponder: PrivacyPostureResponder?
+    /// SPEC-049 v0.2. Both nil unless the provider runs in privacy mode as
+    /// the supervised child of Malibu.app with `--privacy-code-bound`.
+    private let privacySupervisor: (any PrivacySupervisorChannel)?
+    private let privacyCodeBound: PrivacyCodeBoundController?
     private var tier2Session: Tier2ProviderSession?
     private var pendingAEADRekey: PendingAEADRekey?
     private var preparingAEADRekeyID: String?
@@ -744,6 +748,7 @@ actor CoordinatorClient {
         seLivenessSignerOverride: (any SELivenessSigning)? = nil,
         privacyPostureProbeOverride: (any PrivacyPostureProbe)? = nil,
         privacySESignerOverride: (any SEBlobSigner)? = nil,
+        privacySupervisorChannel: (any PrivacySupervisorChannel)? = nil,
         webSocketFactory: @escaping @Sendable (URLRequest) -> ProviderWebSocketTask = { providerWebSocketSession.webSocketTask(with: $0) },
         sleepAssertionFactory: @escaping @Sendable () -> ProviderSleepAssertion? = { CaffeinateSleepAssertion.start() },
         pairingController: PairingController? = nil,
@@ -903,14 +908,20 @@ actor CoordinatorClient {
                     providerID: self.providerID,
                     binaryVersion: Self.binaryVersion
                 )
+                self.privacySupervisor = privacySupervisorChannel
+                self.privacyCodeBound = privacySupervisorChannel == nil ? nil : PrivacyCodeBoundController()
             } else {
                 self.privacyPostureProbe = nil
                 self.privacyPostureResponder = nil
+                self.privacySupervisor = nil
+                self.privacyCodeBound = nil
             }
         } else {
             self.relayBlindRuntime = nil
             self.privacyPostureProbe = nil
             self.privacyPostureResponder = nil
+            self.privacySupervisor = nil
+            self.privacyCodeBound = nil
         }
         self.endpointURL = config.endpointURL?.isEmpty == false ? config.endpointURL : nil
         self.wsTunneledMode = self.endpointURL == nil && (config.wsTunneledMode ?? true)
@@ -2600,6 +2611,10 @@ actor CoordinatorClient {
             try await handleSELivenessChallenge(dict)
         case "privacy_posture_challenge":
             try await handlePrivacyPostureChallenge(dict)
+        case "privacy_app_attest_enroll_challenge":
+            try await handlePrivacyAppAttestChallenge(dict)
+        case "privacy_app_attest_enroll_result":
+            try await handlePrivacyAppAttestResult(dict)
         case "native_mtp_canary_request_v1":
             try await handleNativeMTPCanaryRequest(dict)
         case "native_mtp_tuple_disable_v1":
@@ -7395,12 +7410,27 @@ actor CoordinatorClient {
 
     /// Nil from the responder omits the field. An empty array is sent as an empty advertisement.
     private func appendPrivacyKeyRecords(to message: inout [String: Any]) {
-        guard appConfig.privacyClassBeta,
-              let privacyPostureResponder,
-              let records = privacyPostureResponder.privacyKeyRecords() else {
-            return
+        guard appConfig.privacyClassBeta, let privacyPostureResponder else { return }
+        var assurance = PrivacyClassConstants.assurance
+        if let privacyCodeBound {
+            bindPrivacyCodeBoundSession()
+            guard let current = privacyCodeBound.advertisement.assurance else { return }
+            assurance = current
         }
+        guard let records = privacyPostureResponder.privacyKeyRecords(assurance: assurance) else { return }
         message["privacy_key_records"] = records
+    }
+
+    /// Drops `privacy_key_records` whose label went stale between build and send.
+    private func filterPrivacyKeyRecordsForCurrentLabel(_ message: inout [String: Any]) {
+        guard let privacyCodeBound else { return }
+        bindPrivacyCodeBoundSession()
+        PrivacyRecordSendFilter.apply(&message, advertisement: privacyCodeBound.advertisement)
+    }
+
+    /// SPEC-049-R033: enrolled state belongs to the live assigned session.
+    private func bindPrivacyCodeBoundSession() {
+        privacyCodeBound?.bind(session: coordinatorSessionAccepted ? acceptedAssignedProviderID : nil)
     }
 
     /// Production SE failure exits. `CoordinatorClient.init` returning nil does not stop `serve`.
@@ -7435,14 +7465,144 @@ actor CoordinatorClient {
               !assigned.isEmpty else {
             return
         }
-        let response: [String: Any]?
+        bindPrivacyCodeBoundSession()
+        switch privacyCodeBound?.postureMode ?? .v1 {
+        case .skip:
+            break
+        case .v1:
+            let response: [String: Any]?
+            do {
+                response = try privacyPostureResponder.respond(to: dict, assignedSession: assigned)
+            } catch {
+                return
+            }
+            guard let response else { return }
+            try await send(response)
+        case .v2(let keyID):
+            try await respondPrivacyPostureV2(dict, assignedSession: assigned, keyID: keyID, responder: privacyPostureResponder)
+        }
+        // A challenge means the session accepted our privacy key records,
+        // which SPEC-049-R027 requires before an enrollment request.
+        await beginPrivacyEnrollmentIfDue()
+    }
+
+    /// SPEC-049-R030/R031: the supervisor completes fields 27..34 and asserts
+    /// over the framing it recomputed; this process signs the same framing.
+    /// Any failure answers nothing rather than a `version: 1` posture.
+    private func respondPrivacyPostureV2(
+        _ dict: [String: Any],
+        assignedSession: String,
+        keyID: String,
+        responder: PrivacyPostureResponder
+    ) async throws {
+        guard let privacySupervisor, let privacyCodeBound else { return }
+        let draft: PrivacyPostureV2Draft
         do {
-            response = try privacyPostureResponder.respond(to: dict, assignedSession: assigned)
+            guard let built = try responder.postureV2Draft(to: dict, assignedSession: assignedSession, appAttestKeyID: keyID) else {
+                return
+            }
+            draft = built
         } catch {
             return
         }
-        guard let response else { return }
-        try await send(response)
+        let reply: PrivacySupervisorReply
+        do {
+            reply = try await privacySupervisor.exchange(.assert(draft), timeout: 8)
+        } catch {
+            privacyCodeBound.noteAssertionFailure(nil, keyID: keyID)
+            return
+        }
+        bindPrivacyCodeBoundSession()
+        guard privacyCodeBound.postureMode == .v2(appAttestKeyID: keyID) else { return }
+        switch reply {
+        case .assertion(let statement, let assertion):
+            guard let response = try? responder.postureV2Response(statement: statement, draft: draft, assertion: assertion) else {
+                return
+            }
+            try await send(response)
+        case .error(let reason):
+            privacyCodeBound.noteAssertionFailure(reason, keyID: keyID)
+        case .key, .attestation:
+            return
+        }
+    }
+
+    /// SPEC-049-R027: ask the supervisor for a keyId and send one enrollment
+    /// request. Nothing is sent when the supervisor is absent or failing.
+    private func beginPrivacyEnrollmentIfDue() async {
+        guard let privacySupervisor, let privacyCodeBound,
+              coordinatorSessionAccepted,
+              let discard = privacyCodeBound.beginEnrollmentIfDue(now: Date()) else {
+            return
+        }
+        let reply: PrivacySupervisorReply
+        do {
+            reply = try await privacySupervisor.exchange(.key(discard: discard), timeout: 15)
+        } catch {
+            privacyCodeBound.enrollmentFailedLocally(now: Date())
+            return
+        }
+        guard case .key(let keyID) = reply else {
+            privacyCodeBound.enrollmentFailedLocally(now: Date())
+            return
+        }
+        privacyCodeBound.enrollmentRequested(appAttestKeyID: keyID)
+        do {
+            try await send(PrivacyAppAttestCoordinatorMessage.enrollRequest(appAttestKeyID: keyID))
+        } catch {
+            privacyCodeBound.enrollmentFailedLocally(now: Date())
+        }
+    }
+
+    private func handlePrivacyAppAttestChallenge(_ dict: [String: Any]) async throws {
+        guard appConfig.privacyClassBeta,
+              let privacyPostureResponder, let privacySupervisor, let privacyCodeBound,
+              coordinatorSessionAccepted,
+              let assigned = acceptedAssignedProviderID,
+              !assigned.isEmpty else {
+            return
+        }
+        bindPrivacyCodeBoundSession()
+        guard let challenge = try? PrivacyAppAttestCoordinatorMessage.challenge(dict),
+              privacyCodeBound.takeChallenge(appAttestKeyID: challenge.appAttestKeyID) else {
+            return
+        }
+        guard let draft = try? privacyPostureResponder.enrollmentDraft(
+            challenge: challenge.challenge,
+            assignedSession: assigned,
+            appAttestKeyID: challenge.appAttestKeyID
+        ) else {
+            privacyCodeBound.enrollmentFailedLocally(now: Date())
+            return
+        }
+        let reply: PrivacySupervisorReply
+        do {
+            reply = try await privacySupervisor.exchange(.attest(draft), timeout: 45)
+        } catch {
+            privacyCodeBound.enrollmentFailedLocally(now: Date())
+            return
+        }
+        guard case .attestation(let statement, let attestation) = reply,
+              let message = try? privacyPostureResponder.enrollmentMessage(
+                  statement: statement,
+                  draft: draft,
+                  attestation: attestation
+              ) else {
+            privacyCodeBound.enrollmentFailedLocally(now: Date())
+            return
+        }
+        try await send(message)
+    }
+
+    private func handlePrivacyAppAttestResult(_ dict: [String: Any]) async throws {
+        guard appConfig.privacyClassBeta, privacyPostureResponder != nil, let privacyCodeBound else { return }
+        bindPrivacyCodeBoundSession()
+        guard let result = try? PrivacyAppAttestCoordinatorMessage.result(dict) else { return }
+        if privacyCodeBound.apply(result: result.status, appAttestKeyID: result.appAttestKeyID, now: Date()) == .readvertise {
+            // SPEC-049-R027/R032: replace every advertised record with the
+            // new label before the next posture response.
+            try await sendHeartbeatBounded(resetWindow: false)
+        }
     }
 
     /// Runs the injected refresher at most once per minimum interval and stages
@@ -7531,6 +7691,7 @@ actor CoordinatorClient {
     private func send(_ payload: sending [String: Any]) async throws {
         var outbound = payload
         try applyAdmissionCanaryHeartbeatOverride(to: &outbound)
+        filterPrivacyKeyRecordsForCurrentLabel(&outbound)
         if let sendOverride {
             try await sendOverride(outbound)
             return

@@ -41,6 +41,9 @@ targets:
           # Resources entries. They are packaged as a folder by the
           # "Bundle payout-signer" post-build step instead.
           - "Resources/payout-signer/**"
+      # SPEC-049 v0.2: the supervisor and the CLI child frame statements and
+      # channel messages from this one shared file.
+      - path: ../Sources/macprovider-cli/PrivacySupervisorShared.swift
     resources:
       # payout-signer is deliberately EXCLUDED here and copied as a directory
       # by the "Bundle payout-signer" post-build step below. XcodeGen 2.45.4's
@@ -52,8 +55,12 @@ targets:
       - Sources/Malibu/Resources/Brand
       - Sources/Malibu/Resources/MalibuFeature.xcstrings
       - Sources/Malibu/Resources/MalibuModelCapabilities.json
+    # Local and test builds sign with the empty MalibuLocal.entitlements: an
+    # ad-hoc app that claims App Attest without a profile cannot launch.
+    # Releases sign with Malibu.entitlements plus the Developer ID App Attest
+    # profile (scripts/prepare-malibu-app-attest-signing.py, SPEC-049-R025).
     entitlements:
-      path: Malibu.entitlements
+      path: MalibuLocal.entitlements
     info:
       path: Sources/Malibu/Info.plist
       properties:
@@ -72,7 +79,7 @@ targets:
       base:
         PRODUCT_NAME: Malibu
         PRODUCT_BUNDLE_IDENTIFIER: tech.malibu.app
-        CODE_SIGN_ENTITLEMENTS: Malibu.entitlements
+        CODE_SIGN_ENTITLEMENTS: MalibuLocal.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.utilities"
     postBuildScripts:

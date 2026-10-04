@@ -10983,8 +10983,23 @@
       "requirement_id": "SPEC-049-R025",
       "spec_id": "SPEC-049",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/Privacy/PrivacyCodeBoundSupervisor.swift:PrivacyCodeBoundSupervisor",
+        "phase3-binary/app/Sources/Malibu/Privacy/PrivacyCodeBoundHost.swift:DeviceCheckAppAttestProvider",
+        "phase3-binary/app/Sources/Malibu/Privacy/PrivacyCodeBoundHost.swift:readSupervisorIdentity",
+        "phase3-binary/app/Sources/Malibu/Privacy/PrivacyCodeBoundHost.swift:PrivacyAppAttestKeyIDFile",
+        "phase3-binary/Sources/macprovider-cli/PrivacyCodeBound.swift:PrivacySupervisorSocketClient",
+        "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:privacySupervisorChannel",
+        "scripts/prepare-malibu-app-attest-signing.py:signing_entitlements"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/PrivacyCodeBoundSupervisorTests.swift:testKeyCustodyAndDiscard",
+        "phase3-binary/app/Tests/MalibuTests/PrivacyCodeBoundSupervisorTests.swift:testUnsupportedPlatformRefusesWithoutCheckingTheChild",
+        "phase3-binary/app/Tests/MalibuTests/PrivacyCodeBoundSupervisorTests.swift:testAttestationFillsSupervisorFieldsAndHashesTheFraming",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyCodeBoundTests.swift:testSocketClientRefusesAPeerThatIsNotTheVerifiedParentApp",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyCodeBoundTests.swift:testPrivacyCodeBoundWithoutSupervisorNeverEnrolls",
+        "scripts/tests/test_malibu_app_attest_signing.py::MalibuAppAttestSigningTests"
+      ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-CODE-BOUND"
       ],
@@ -10993,15 +11008,26 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1840",
-        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R025): Malibu.app supervisor-attestor platform and App Attest key custody is specified but not implemented or tested; it remains pending until implementation, real-hardware verifier vectors, a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result, and three-lane audits exist."
+        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R025): Malibu.app supervisor-attestor (App Attest key custody behind a protocol, keyId-only persistence, supervisor-owned statement fields, recomputed framing), the provider supervisor channel client with kernel peer verification, and the release profile embedding with an entitlement-free CLI are implemented locally default-off with unit tests; a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result from a CI-signed Malibu.app on macOS 27, real-hardware verifier vectors, and three-lane audits remain pending."
       }
     },
     {
       "requirement_id": "SPEC-049-R026",
       "spec_id": "SPEC-049",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/Privacy/PrivacyCodeBoundSupervisor.swift:checkChild",
+        "phase3-binary/app/Sources/Malibu/Privacy/PrivacyCodeBoundSupervisor.swift:PrivacyAuditTokenChildInspector",
+        "phase3-binary/app/Sources/Malibu/Privacy/PrivacyCodeBoundHost.swift:serve",
+        "phase3-binary/Sources/macprovider-cli/PrivacySupervisorShared.swift:PrivacySupervisorPeer"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/PrivacyCodeBoundSupervisorTests.swift:testChildCheckFailuresTerminateAndLatch",
+        "phase3-binary/app/Tests/MalibuTests/PrivacyCodeBoundSupervisorTests.swift:testRequirementPinsTeamIdentifierAndApprovedCDHash",
+        "phase3-binary/app/Tests/MalibuTests/PrivacyCodeBoundSupervisorTests.swift:testSocketIsOwnerOnlyAndPeerComesFromTheKernel",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyCodeBoundTests.swift:testChildRequirementTextRejectsInjection",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyCodeBoundTests.swift:testChildCSFlagMasks"
+      ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-CODE-BOUND"
       ],
@@ -11010,7 +11036,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1840",
-        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R026): supervisor dynamic child code-identity check by audit token is specified but not implemented or tested; it remains pending until implementation, real-hardware verifier vectors, a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result, and three-lane audits exist."
+        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R026): the Malibu.app dynamic child check by kernel audit token (PID and PID version, SecCode requirement with team and sealed cdhash, csops flags, terminate and latch on failure) is implemented locally with unit tests; a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result from a CI-signed Malibu.app on macOS 27, real-hardware verifier vectors, and three-lane audits remain pending."
       }
     },
     {
@@ -11022,12 +11048,21 @@
         "phase4-coordinator/internal/relayblind/privacy_authority_code_bound.go:CompleteEnrollment",
         "phase4-coordinator/internal/relayblind/store_app_attest.go:EnrollAppAttestKey",
         "phase4-coordinator/internal/ws/privacy_app_attest.go:handlePrivacyAppAttestEnrollRequest",
-        "phase4-coordinator/internal/ws/privacy_app_attest.go:handlePrivacyAppAttestEnrollment"
+        "phase4-coordinator/internal/ws/privacy_app_attest.go:handlePrivacyAppAttestEnrollment",
+        "phase3-binary/Sources/macprovider-cli/PrivacyCodeBound.swift:PrivacyCodeBoundController",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:beginPrivacyEnrollmentIfDue",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:handlePrivacyAppAttestChallenge",
+        "phase3-binary/Sources/macprovider-cli/PrivacyPostureResponder.swift:enrollmentMessage",
+        "phase3-binary/Sources/macprovider-cli/PrivacySupervisorShared.swift:PrivacyEnrollmentStatement"
       ],
       "tests": [
         "phase4-coordinator/internal/relayblind/privacy_code_bound_test.go:TestCodeBoundEnrollmentReplies",
         "phase4-coordinator/internal/ws/privacy_app_attest_test.go:TestParsePrivacyAppAttestEnrollRequest",
-        "phase4-coordinator/internal/ws/privacy_app_attest_test.go:TestPrivacyAppAttestRequestRepliesUnavailableWhenDisabled"
+        "phase4-coordinator/internal/ws/privacy_app_attest_test.go:TestPrivacyAppAttestRequestRepliesUnavailableWhenDisabled",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyCodeBoundTests.swift:testPrivacyCodeBoundEnrollmentAndPostureV2",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyCodeBoundTests.swift:testControllerEnrollmentLifecycle",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyCodeBoundTests.swift:testPrivacyCodeBoundFramingMatchesGoVector",
+        "phase4-coordinator/internal/relayblind/privacy_code_bound_vector_test.go:TestPrivacyCodeBoundVector"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-CODE-BOUND"
@@ -11037,7 +11072,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1840",
-        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R027): the coordinator, gateway, and reference-client parts are implemented locally default-off with unit tests; the Malibu.app supervisor side, a committed real macOS 27 attestation fixture, a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result, and three-lane audits remain pending."
+        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R027): the coordinator, gateway, and reference-client parts are implemented locally default-off with unit tests; the Malibu.app supervisor and provider parts are implemented locally default-off with unit tests; a committed real macOS 27 attestation fixture, a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result from a CI-signed Malibu.app on macOS 27, and three-lane audits remain pending."
       }
     },
     {
@@ -11095,10 +11130,16 @@
       "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/relayblind/privacy_code_bound.go:ParsePostureStatementV2",
-        "phase4-coordinator/internal/relayblind/privacy_authority_code_bound.go:verifyPostureV2"
+        "phase4-coordinator/internal/relayblind/privacy_authority_code_bound.go:verifyPostureV2",
+        "phase3-binary/Sources/macprovider-cli/PrivacySupervisorShared.swift:PrivacyPostureV2Statement",
+        "phase3-binary/Sources/macprovider-cli/PrivacyPostureResponder.swift:postureV2Response"
       ],
       "tests": [
-        "phase4-coordinator/internal/relayblind/privacy_code_bound_test.go:TestCodeBoundPostureRules"
+        "phase4-coordinator/internal/relayblind/privacy_code_bound_test.go:TestCodeBoundPostureRules",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyCodeBoundTests.swift:testPrivacyCodeBoundFramingMatchesGoVector",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyCodeBoundTests.swift:testPrivacyCodeBoundStatementDecodersAreClosed",
+        "phase4-coordinator/internal/relayblind/privacy_code_bound_vector_test.go:TestPrivacyCodeBoundVector",
+        "phase3-binary/app/Tests/MalibuTests/PrivacyCodeBoundSupervisorTests.swift:testSharedFramingMatchesGoVector"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-CODE-BOUND"
@@ -11108,7 +11149,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1840",
-        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R030): the coordinator, gateway, and reference-client parts are implemented locally default-off with unit tests; the Malibu.app supervisor side, a committed real macOS 27 attestation fixture, a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result, and three-lane audits remain pending."
+        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R030): the coordinator, gateway, and reference-client parts are implemented locally default-off with unit tests; the Malibu.app supervisor and provider parts are implemented locally default-off with unit tests; a committed real macOS 27 attestation fixture, a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result from a CI-signed Malibu.app on macOS 27, and three-lane audits remain pending."
       }
     },
     {
@@ -11117,13 +11158,16 @@
       "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/appattest/assert.go:VerifyAssertion",
-        "phase4-coordinator/internal/relayblind/store_app_attest.go:AdvanceAppAttestCounter"
+        "phase4-coordinator/internal/relayblind/store_app_attest.go:AdvanceAppAttestCounter",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:respondPrivacyPostureV2"
       ],
       "tests": [
         "phase4-coordinator/internal/appattest/verify_test.go:TestAssertionNegativeSingleFieldMutations",
         "phase4-coordinator/internal/appattest/real_macos27_test.go:TestRealMacOS27Attestation",
         "phase4-coordinator/internal/relayblind/privacy_code_bound_test.go:TestCodeBoundPostureRules",
-        "phase4-coordinator/internal/relayblind/privacy_code_bound_test.go:TestAppAttestStore"
+        "phase4-coordinator/internal/relayblind/privacy_code_bound_test.go:TestAppAttestStore",
+        "phase3-binary/app/Tests/MalibuTests/PrivacyCodeBoundSupervisorTests.swift:testAssertionRefusesDraftsThatDisagreeWithObservations",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyCodeBoundTests.swift:testPrivacyCodeBoundEnrollmentAndPostureV2"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-CODE-BOUND"
@@ -11133,7 +11177,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1840",
-        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R031): the coordinator, gateway, and reference-client parts are implemented locally default-off with unit tests; the Malibu.app supervisor side, a committed real macOS 27 attestation fixture, a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result, and three-lane audits remain pending."
+        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R031): the coordinator, gateway, and reference-client parts are implemented locally default-off with unit tests; the Malibu.app supervisor and provider parts are implemented locally default-off with unit tests; a committed real macOS 27 attestation fixture, a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result from a CI-signed Malibu.app on macOS 27, and three-lane audits remain pending."
       }
     },
     {
@@ -11145,7 +11189,9 @@
         "phase4-coordinator/internal/buyer/privacy_class.go:handlePrivacyClassReservation",
         "phase5-gateway/internal/router/privacy_class.go:privacyAssuranceRequired",
         "phase5-gateway/internal/router/privacy_class.go:privacyCoordinatorAssurance",
-        "phase5-gateway/cmd/relay-blind-client/main.go:requirePrivacyReservation"
+        "phase5-gateway/cmd/relay-blind-client/main.go:requirePrivacyReservation",
+        "phase3-binary/Sources/macprovider-cli/PrivacyCodeBound.swift:PrivacyRecordSendFilter",
+        "phase3-binary/Sources/macprovider-cli/PrivacyPostureResponder.swift:privacyKeyRecords"
       ],
       "tests": [
         "phase4-coordinator/internal/buyer/privacy_assurance_test.go:TestPrivacyAssuranceHeaderOnChatMatchesReservation",
@@ -11153,7 +11199,8 @@
         "phase5-gateway/internal/router/privacy_assurance_test.go:TestPrivacyAssuranceRequiredValidation",
         "phase5-gateway/internal/router/privacy_assurance_test.go:TestPrivacyCoordinatorAssuranceValidation",
         "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientCodeBound",
-        "phase4-coordinator/internal/relayblind/privacy_test.go:TestPrivacyReservationAssuranceLabels"
+        "phase4-coordinator/internal/relayblind/privacy_test.go:TestPrivacyReservationAssuranceLabels",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyCodeBoundTests.swift:testSendFilterDropsStaleLabels"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-CODE-BOUND"
@@ -11163,7 +11210,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1840",
-        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R032): the coordinator, gateway, and reference-client parts are implemented locally default-off with unit tests; the Malibu.app supervisor side, a committed real macOS 27 attestation fixture, a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result, and three-lane audits remain pending."
+        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R032): the coordinator, gateway, and reference-client parts are implemented locally default-off with unit tests; the Malibu.app supervisor and provider parts are implemented locally default-off with unit tests; a committed real macOS 27 attestation fixture, a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result from a CI-signed Malibu.app on macOS 27, and three-lane audits remain pending."
       }
     },
     {
@@ -11174,11 +11221,15 @@
         "phase4-coordinator/internal/relayblind/store_app_attest.go:RevokeActiveAppAttestKey",
         "phase4-coordinator/internal/relayblind/store.go:QuarantineAndRevokePrivacy",
         "phase4-coordinator/internal/relayblind/privacy_authority_code_bound.go:endEnrollment",
-        "phase4-coordinator/cmd/coordinator-cli/privacy_class.go:privacyClassCommand"
+        "phase4-coordinator/cmd/coordinator-cli/privacy_class.go:privacyClassCommand",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:handlePrivacyAppAttestResult"
       ],
       "tests": [
         "phase4-coordinator/internal/relayblind/privacy_code_bound_test.go:TestCodeBoundPostureRules",
-        "phase4-coordinator/cmd/coordinator-cli/privacy_class_test.go:TestPrivacyClassCLIRevokeAppAttestKey"
+        "phase4-coordinator/cmd/coordinator-cli/privacy_class_test.go:TestPrivacyClassCLIRevokeAppAttestKey",
+        "phase3-binary/app/Tests/MalibuTests/PrivacyCodeBoundSupervisorTests.swift:testInvalidKeyIsDiscarded",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyCodeBoundTests.swift:testPrivacyCodeBoundFallsBackToBetaWhenSupervisorUnavailable",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyCodeBoundTests.swift:testControllerLocalFailureFallsBackToBeta"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-CODE-BOUND"
@@ -11188,7 +11239,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1840",
-        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R033): the coordinator, gateway, and reference-client parts are implemented locally default-off with unit tests; the Malibu.app supervisor side, a committed real macOS 27 attestation fixture, a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result, and three-lane audits remain pending."
+        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R033): the coordinator, gateway, and reference-client parts are implemented locally default-off with unit tests; the Malibu.app supervisor and provider parts are implemented locally default-off with unit tests; a committed real macOS 27 attestation fixture, a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result from a CI-signed Malibu.app on macOS 27, and three-lane audits remain pending."
       }
     },
     {
@@ -11196,11 +11247,13 @@
       "spec_id": "SPEC-049",
       "state": "pending",
       "implementation": [
-        "phase4-coordinator/internal/config/config.go:validateCodeBound"
+        "phase4-coordinator/internal/config/config.go:validateCodeBound",
+        "phase3-binary/app/Sources/Malibu/Privacy/PrivacyCodeBoundHost.swift:PrivacyCodeBoundSetting"
       ],
       "tests": [
         "phase4-coordinator/internal/config/privacy_code_bound_test.go:TestPrivacyCodeBoundDefaultOff",
-        "phase4-coordinator/internal/config/privacy_code_bound_test.go:TestPrivacyCodeBoundValidation"
+        "phase4-coordinator/internal/config/privacy_code_bound_test.go:TestPrivacyCodeBoundValidation",
+        "phase3-binary/app/Tests/MalibuTests/PrivacyCodeBoundSupervisorTests.swift:testCodeBoundSettingDefaultsOff"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-CODE-BOUND"
@@ -11210,7 +11263,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1840",
-        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R034): the coordinator, gateway, and reference-client parts are implemented locally default-off with unit tests; the Malibu.app supervisor side, a committed real macOS 27 attestation fixture, a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result, and three-lane audits remain pending."
+        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R034): the coordinator, gateway, and reference-client parts are implemented locally default-off with unit tests; the Malibu.app supervisor and provider parts are implemented locally default-off with unit tests; a committed real macOS 27 attestation fixture, a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result from a CI-signed Malibu.app on macOS 27, and three-lane audits remain pending."
       }
     }
   ]

@@ -123,6 +123,7 @@ test-dist:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_pool_rejection_timing_floor
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_journey_result_tools
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_provider_prebeta_payout_posture
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_malibu_app_attest_signing
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_malibu_fleet_ledger
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_openrouter_mlx_candidates
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_openrouter_pricing_engine
