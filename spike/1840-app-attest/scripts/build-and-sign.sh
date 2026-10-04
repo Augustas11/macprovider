@@ -78,7 +78,8 @@ attest = []
 for key, value in kept.items():
     if not str(key).startswith("com.apple.developer.devicecheck."):
         continue
-    if "appattest" not in str(key).lower():
+    # Apple spells it both ways: appattest-environment and app-attest-opt-in.
+    if "appattest" not in str(key).lower().replace("-", ""):
         continue
     if not isinstance(value, str) or value.strip() == "":
         print(f"appattest entitlement {key} is present but empty", file=sys.stderr)
