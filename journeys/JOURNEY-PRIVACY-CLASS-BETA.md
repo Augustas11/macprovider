@@ -32,8 +32,10 @@ audits outside this evidence object.
 
 ## Out of scope
 
-- Code-bound attestation, a Malibu.app-embedded provider, or any assurance
-  label other than `device_bound_self_attested_beta`.
+- Code-bound attestation, a Malibu.app-supervised provider, or any assurance
+  label other than `device_bound_self_attested_beta`. The SPEC-049 v0.2
+  `code_bound_attested` label is proven by
+  `JOURNEY-PRIVACY-CLASS-CODE-BOUND`.
 - MDA SIP/SecureBoot OID evaluation.
 - Trusted Pool or other pool-scoped privacy requests (rejected by SPEC-049-R022).
 - `responses` and `messages` endpoint families.

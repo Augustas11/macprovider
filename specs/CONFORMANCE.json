@@ -1520,7 +1520,7 @@
     {
       "spec_id": "SPEC-049",
       "title": "Operator-Constrained Privacy Class",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1548,7 +1548,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "SPEC-049 v0.1.0 defines the default-off Beta operator-constrained privacy class. It is implemented locally, default-off in every component, with unit and integration tests. The signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence (SPEC-049-R023), the staged canary, and promotion remain pending; every requirement stays pending. No conformance or production promotion is made."
+        "rationale": "SPEC-049 v0.2.0 defines the default-off Beta operator-constrained privacy class and the default-off code_bound_attested assurance label (issue #1840). The v0.1.0 surface is implemented locally, default-off in every component, with unit and integration tests. The v0.2.0 code-bound surface (SPEC-049-R024..SPEC-049-R034) has no implementation yet. Signed JOURNEY-PRIVACY-CLASS-BETA and JOURNEY-PRIVACY-CLASS-CODE-BOUND hardware evidence (SPEC-049-R023), the staged canary, and promotion remain pending; every requirement stays pending. No conformance or production promotion is made."
       }
     }
   ],
@@ -10953,6 +10953,193 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
         "rationale": "SPEC-049 v0.1.0 (SPEC-049-R023): draft/not-deployed promotion gate is specified for the default-off Beta privacy class but not implemented, tested, or evidenced; it remains pending until implementation, automated tests, and a signed JOURNEY-PRIVACY-CLASS-BETA hardware result exist. The journey result is one input; staged canary and three-lane audits are also required."
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R024",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-CODE-BOUND"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1840",
+        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R024): code_bound_attested label grant and re-evaluation is specified but not implemented or tested; it remains pending until implementation, real-hardware verifier vectors, a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result, and three-lane audits exist."
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R025",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-CODE-BOUND"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1840",
+        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R025): Malibu.app supervisor-attestor platform and App Attest key custody is specified but not implemented or tested; it remains pending until implementation, real-hardware verifier vectors, a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result, and three-lane audits exist."
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R026",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-CODE-BOUND"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1840",
+        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R026): supervisor dynamic child code-identity check by audit token is specified but not implemented or tested; it remains pending until implementation, real-hardware verifier vectors, a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result, and three-lane audits exist."
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R027",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-CODE-BOUND"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1840",
+        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R027): App Attest enrollment protocol is specified but not implemented or tested; it remains pending until implementation, real-hardware verifier vectors, a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result, and three-lane audits exist."
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R028",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-CODE-BOUND"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1840",
+        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R028): coordinator App Attest attestation verification (pinned Apple root, nonce, keyId, rpIdHash, aaguid, counter, aclBlob) is specified but not implemented or tested; it remains pending until implementation, real-hardware verifier vectors, a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result, and three-lane audits exist."
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R029",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-CODE-BOUND"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1840",
+        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R029): App Attest key binding to provider_id and the SE/identity pins is specified but not implemented or tested; it remains pending until implementation, real-hardware verifier vectors, a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result, and three-lane audits exist."
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R030",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-CODE-BOUND"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1840",
+        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R030): closed privacy-posture-v2 statement and version 2 response is specified but not implemented or tested; it remains pending until implementation, real-hardware verifier vectors, a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result, and three-lane audits exist."
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R031",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-CODE-BOUND"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1840",
+        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R031): App Attest assertion verification and durable strictly increasing counter is specified but not implemented or tested; it remains pending until implementation, real-hardware verifier vectors, a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result, and three-lane audits exist."
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R032",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-CODE-BOUND"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1840",
+        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R032): assurance propagation, buyer assurance requirement header, and coordinator assurance header is specified but not implemented or tested; it remains pending until implementation, real-hardware verifier vectors, a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result, and three-lane audits exist."
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R033",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-CODE-BOUND"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1840",
+        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R033): App Attest key lifecycle, quarantine reasons, and fail-closed behaviour is specified but not implemented or tested; it remains pending until implementation, real-hardware verifier vectors, a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result, and three-lane audits exist."
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R034",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-CODE-BOUND"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1840",
+        "rationale": "SPEC-049 v0.2.0 (SPEC-049-R034): code-bound configuration, default off is specified but not implemented or tested; it remains pending until implementation, real-hardware verifier vectors, a signed JOURNEY-PRIVACY-CLASS-CODE-BOUND result, and three-lane audits exist."
       }
     }
   ]
