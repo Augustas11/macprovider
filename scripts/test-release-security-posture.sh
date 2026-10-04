@@ -2254,4 +2254,45 @@ if "confined to the one-time v1.8.39 bridge" not in spec_flat:
     raise SystemExit("SPEC-025 must confine the frozen Sparkle anchor to the v1.8.39 bridge")
 PY
 
+# Issue #1842: the signed pearl-release.json carries the provider CLI code
+# identity derived from the exact shipped tarball, in both release lanes.
+python3 - "$workflow" "$root/scripts/acceptance-candidate-metadata.py" \
+  "$root/scripts/provider-code-identity.py" <<'PY'
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+acceptance = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+producer = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
+prepare = text.split("- name: Prepare release assets", 1)[1].split("\n      - name:", 1)[0]
+derive = 'python3 scripts/provider-code-identity.py \\\n            --tarball "$tar_asset"'
+copy_position = prepare.find('cp "$src" "$tar_asset"')
+derive_position = prepare.find(derive)
+bind_position = prepare.find('"provider_code_identity": provider_code_identity,')
+sign_position = prepare.find('-out "$pearl_metadata_sig" "$pearl_metadata"')
+if not 0 <= copy_position < derive_position < bind_position < sign_position:
+    raise SystemExit("release must derive provider_code_identity from the shipped tarball before signing pearl-release.json")
+if "APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}" not in prepare.split("run: |", 1)[0]:
+    raise SystemExit("provider_code_identity must pin the release Team ID from the protected notary secret")
+if "--expected-team-id" in prepare:
+    raise SystemExit("release must pass the Team ID through the environment, not argv")
+if 'PROVIDER_CODE_IDENTITY="$provider_code_identity"' not in prepare:
+    raise SystemExit("release metadata builder does not read the derived provider_code_identity")
+if 'provider_code_identity' in prepare.split('release_assets+=("$pearl_metadata" "$pearl_metadata_sig")', 1)[1]:
+    raise SystemExit("provider_code_identity must not become a separate release asset or index role")
+if 'metadata["provider_code_identity"] = code_identity' not in acceptance:
+    raise SystemExit("acceptance Pearl metadata must carry the same provider_code_identity field")
+for requirement in (
+    '"codesign", "-d", "--arch", arch, "-vvv"',
+    '"lipo", "-archs"',
+    'EXPECTED_ARCHES = ("arm64",)',
+    'SIGNING_IDENTIFIER = "live.malibu.provider.cli"',
+    'CODESIGN_KEYS = ("CDHash", "TeamIdentifier", "Identifier")',
+):
+    if requirement not in producer:
+        raise SystemExit(f"provider code identity producer drifted: {requirement}")
+if "-r-" in producer or "subject.OU" in producer:
+    raise SystemExit("provider code identity producer must not parse codesign requirement display text")
+PY
+
 echo "release security posture regression checks passed"

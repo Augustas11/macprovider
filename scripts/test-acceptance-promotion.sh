@@ -225,12 +225,21 @@ cat > "$accepted/compatibility-set.json" <<'EOF'
 EOF
 python3 - "$accepted" <<'PY'
 import hashlib
+import io
 import json
 import pathlib
 import sys
+import tarfile
 
 root = pathlib.Path(sys.argv[1])
 digest = lambda name: hashlib.sha256((root / name).read_bytes()).hexdigest()
+# Issue #1842: the accepted CLI tarball holds the bytes provider_code_identity names.
+cli = b"fixture signed arm64 macprovider-cli\n"
+with tarfile.open(root / "macprovider-cli-v1.8.48-darwin-arm64.tar.gz", "w:gz") as archive:
+    info = tarfile.TarInfo("macprovider-cli")
+    info.size = len(cli)
+    info.mode = 0o755
+    archive.addfile(info, io.BytesIO(cli))
 policy_name = "continuous-batching-policy.json"
 policy = (root / policy_name).read_bytes()
 (root / "release.json").write_text(
@@ -295,6 +304,15 @@ value = {
         "mode": "strict_post_migration",
     },
     "provider_advertised_version": "1.8.48",
+    "provider_code_identity": {
+        "asset": "macprovider-cli-v1.8.48-darwin-arm64.tar.gz",
+        "binary_sha256": hashlib.sha256(cli).hexdigest(),
+        "binary_version": "1.8.48",
+        "member": "macprovider-cli",
+        "signing_identifier": "live.malibu.provider.cli",
+        "slices": [{"arch": "arm64", "code_cdhash": "0123456789abcdef0123456789abcdef01234567"}],
+        "team_id": "ABCDE12345",
+    },
     "release_version": "1.8.48",
     "repository": "Augustas11/macprovider",
     "schema_version": 1,
@@ -472,6 +490,59 @@ sign_pearl
 expect_reject admission-mismatch "${directory_verify[@]}"
 mv "$work/pearl" "$accepted/pearl-release.json"
 sign_pearl
+
+# Issue #1842: promotion requires the signed code identity of the accepted CLI.
+for code_identity_case in missing present-but-empty bad-hex wrong-identifier wrong-version wrong-sha; do
+  cp "$accepted/pearl-release.json" "$work/pearl"
+  python3 - "$accepted/pearl-release.json" "$code_identity_case" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+case = sys.argv[2]
+v = json.loads(p.read_text())
+identity = v["provider_code_identity"]
+if case == "missing":
+    v.pop("provider_code_identity")
+elif case == "present-but-empty":
+    v["provider_code_identity"] = {}
+elif case == "bad-hex":
+    identity["slices"][0]["code_cdhash"] = "0123456789abcdef0123456789abcdef0123456"
+elif case == "wrong-identifier":
+    identity["signing_identifier"] = "live.malibu.provider"
+elif case == "wrong-version":
+    identity["binary_version"] = "1.8.47"
+elif case == "wrong-sha":
+    identity["binary_sha256"] = "0" * 64
+p.write_text(json.dumps(v, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+  sign_pearl
+  if [[ "$code_identity_case" == missing ]]; then
+    # Present-then-strict: a pre-#1842 candidate (no field) stays promotable
+    # and the verifier says so explicitly.
+    "${directory_verify[@]}" >"$work/code-identity-missing.out" 2>&1 ||
+      fail "rejected a pre-#1842 candidate without provider_code_identity: $(cat "$work/code-identity-missing.out")"
+    grep -qF 'provider_code_identity: absent (pre-#1842 release)' "$work/code-identity-missing.out" ||
+      fail "absent provider_code_identity was accepted without the explicit notice"
+    mv "$work/pearl" "$accepted/pearl-release.json"
+    sign_pearl
+    continue
+  fi
+  expect_reject "code-identity-$code_identity_case" "${directory_verify[@]}"
+  case "$code_identity_case" in
+    present-but-empty) expected='provider_code_identity fields differ from the supported contract' ;;
+    bad-hex) expected='code_cdhash must be 40 lowercase hex' ;;
+    wrong-identifier) expected='signing_identifier is not live.malibu.provider.cli' ;;
+    wrong-version) expected='binary_version does not match the provider version' ;;
+    wrong-sha) expected='binary_sha256 differs from the accepted CLI bytes' ;;
+  esac
+  grep -qF -- "$expected" "$work/code-identity-$code_identity_case.out" ||
+    fail "code identity case $code_identity_case failed for the wrong reason: $(cat "$work/code-identity-$code_identity_case.out")"
+  mv "$work/pearl" "$accepted/pearl-release.json"
+  sign_pearl
+done
+"${directory_verify[@]}" >"$work/code-identity-present.out" 2>&1
+if grep -qF 'provider_code_identity: absent' "$work/code-identity-present.out"; then
+  fail "a candidate carrying provider_code_identity printed the absence notice"
+fi
 
 expect_reject wrong-checksums-digest \
   python3 "$verifier" verify-directory \
