@@ -725,7 +725,7 @@
     {
       "spec_id": "SPEC-025",
       "title": "Native Mac App (signed `.dmg` + menu bar wrapper)",
-      "version": "v0.29",
+      "version": "v0.29.1",
       "path": "specs/SPEC-025-native-mac-app.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1548,7 +1548,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "SPEC-049 v0.2.0 defines the default-off Beta operator-constrained privacy class and the default-off code_bound_attested assurance label (issue #1840). The v0.1.0 surface is implemented locally, default-off in every component, with unit and integration tests. The v0.2.0 code-bound surface (SPEC-049-R024..SPEC-049-R034) has no implementation yet. Signed JOURNEY-PRIVACY-CLASS-BETA and JOURNEY-PRIVACY-CLASS-CODE-BOUND hardware evidence (SPEC-049-R023), the staged canary, and promotion remain pending; every requirement stays pending. No conformance or production promotion is made."
+        "rationale": "SPEC-049 v0.2.0 defines the default-off Beta operator-constrained privacy class and the default-off code_bound_attested assurance label (issue #1840). The v0.1.0 surface is implemented locally, default-off in every component, with unit and integration tests. The v0.2.0 code-bound surface (SPEC-049-R024..SPEC-049-R034) is implemented locally and default-off in the coordinator, the provider, and the Malibu.app supervisor, with unit tests and a shared framing vector. Signed JOURNEY-PRIVACY-CLASS-BETA and JOURNEY-PRIVACY-CLASS-CODE-BOUND hardware evidence (SPEC-049-R023), a committed real macOS 27 attestation fixture, three-lane audits, the staged canary, and promotion remain pending; every requirement stays pending. No conformance or production promotion is made."
       }
     }
   ],

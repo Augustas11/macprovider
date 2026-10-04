@@ -27,7 +27,7 @@ Audit history: v0.1.0 is the initial default-off Beta contract. v0.2.0 adds the 
     "verdict": "DECISION_REQUIRED",
     "owner": "@Augustas11",
     "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-    "rationale": "SPEC-049 v0.2.0 defines the default-off Beta operator-constrained privacy class and the default-off code_bound_attested assurance label (issue #1840). The v0.1.0 surface is implemented locally with tests; the v0.2.0 code-bound surface (SPEC-049-R024..SPEC-049-R034) has no implementation yet. Signed JOURNEY-PRIVACY-CLASS-BETA and JOURNEY-PRIVACY-CLASS-CODE-BOUND hardware evidence, the staged canary, and three-lane audits remain pending. No conformance or production promotion is made by this draft."
+    "rationale": "SPEC-049 v0.2.0 defines the default-off Beta operator-constrained privacy class and the default-off code_bound_attested assurance label (issue #1840). The v0.1.0 surface is implemented locally with tests. The v0.2.0 code-bound surface (SPEC-049-R024..SPEC-049-R034) is implemented locally and default-off in the coordinator, the provider, and the Malibu.app supervisor, with unit tests. Signed JOURNEY-PRIVACY-CLASS-BETA and JOURNEY-PRIVACY-CLASS-CODE-BOUND hardware evidence, a committed real macOS 27 attestation fixture, the staged canary, and three-lane audits remain pending. No conformance or production promotion is made by this draft."
   }
 }
 ```

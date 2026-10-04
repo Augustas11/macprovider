@@ -1,6 +1,15 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.29 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.29.1 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.29.1 (2026-10-04, issue #1840 App Attest entitlements).**
+§6.3 now records the release Malibu.app entitlements required by SPEC-049-R025.
+A release Malibu.app embeds the Developer ID provisioning profile for
+`tech.malibu.app` as `Contents/embedded.provisionprofile` and is signed with
+exactly the App Attest set derived from that profile by
+`scripts/prepare-malibu-app-attest-signing.py`. The embedded and standalone
+`macprovider-cli` keep an empty entitlement set and stay byte-identical. Local
+and test builds sign with the empty `MalibuLocal.entitlements`.
 
 **Change log v0.29 (2026-09-08, issue #1445 frozen-Sparkle-bridge confinement).**
 Restores the code and this spec to DECISION_CRITERIA Entry 156/158: the frozen
@@ -1257,13 +1266,32 @@ Reuse `cleanup_signing_material` trap from the existing job.
 
 ### 6.3 Entitlements (`Malibu.entitlements`)
 
-> **The shipped `Malibu.entitlements` is an EMPTY dictionary (reconciled v0.2).** The
-> build points `CODE_SIGN_ENTITLEMENTS` at `Malibu.entitlements` (`project.yml:46-68`),
-> whose plist has **no keys** (`Malibu.entitlements:1-5`). None of the five entitlements
-> below are in the shipped file. This is consistent with the monitor-only architecture
-> (the app no longer runs MLX inference or spawns/loads the signed CLI in-process — the
-> managed CLI is launchd-owned), so most of the v0.1 rationale is moot. The block below
-> is the v0.1 proposal, retained for provenance; the shipped entitlement set is empty.
+> **Release entitlements (v0.29.1, SPEC-049-R025).** A release Malibu.app is signed
+> with exactly the App Attest entitlement set derived from its Developer ID
+> provisioning profile, and nothing else:
+>
+> - `com.apple.developer.devicecheck.app-attest-opt-in`: the one key that the committed
+>   base `phase3-binary/app/Malibu.entitlements` declares. Its value must equal the
+>   profile's grant;
+> - `com.apple.application-identifier`: `<team>.tech.malibu.app`;
+> - `com.apple.developer.team-identifier`: `<team>`;
+> - `keychain-access-groups`: `[<team>.tech.malibu.app]`, only when the profile grants
+>   that group or the team wildcard.
+>
+> The release signers (`release.yml`, `malibu-release.yml`,
+> `scripts/sign-acceptance-candidate.sh`) decode the profile from the
+> `MALIBU_APP_ATTEST_PROFILE_BASE64` secret. Before the outer codesign,
+> `scripts/prepare-malibu-app-attest-signing.py prepare` checks the profile (App ID,
+> team, Developer ID `ProvisionsAllDevices`, not expired, the opt-in value, no
+> get-task-allow), embeds it as `Contents/embedded.provisionprofile`, and writes the
+> derived set. After the codesign, `verify` requires the signed entitlements to equal
+> that set and the embedded profile bytes to equal the release profile. The embedded
+> `macprovider-cli` is not re-signed. It keeps an **empty** entitlement set, which
+> `scripts/require-cli-se-entitlements.sh` enforces, and it stays byte-identical to
+> the standalone tarball CLI. Local and test builds point `CODE_SIGN_ENTITLEMENTS` at
+> the empty `MalibuLocal.entitlements`, because an ad-hoc app that claims App Attest
+> without a profile cannot launch. None of the five v0.1 entitlements below ships.
+> The block below is the v0.1 proposal, kept for history.
 
 ```xml
 <key>com.apple.security.cs.allow-jit</key><true/>
