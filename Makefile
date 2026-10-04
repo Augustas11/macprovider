@@ -5,7 +5,7 @@
 # keep CI and local on the same targets. CI jobs use the per-service
 # targets below to preserve parallel jobs and failure isolation.
 
-.PHONY: test test-coordinator test-coordinator-integration test-gateway test-integration test-dist \
+.PHONY: test test-coordinator test-coordinator-integration test-gateway test-integration test-dist test-relay-blind-parity \
         test-byom-e2e test-byom-discovery-journey test-openai-wire \
         vet vet-coordinator vet-gateway \
         lint-coordinator \
@@ -260,6 +260,10 @@ test-dist:
 	node --test frontdoor/provider-portal/mining-health.test.mjs
 	bash test/e2e/canary-buyer/run-canary.test.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 test/e2e/aead-rekey-oneshot/test_aead_rekey_oneshot.py
+	bash scripts/test-relay-blind-parity.sh
+
+test-relay-blind-parity:
+	bash scripts/test-relay-blind-parity.sh
 
 vet: vet-coordinator vet-gateway vet-integration
 
