@@ -298,26 +298,36 @@ func VerifyAttestation(in AttestInput) (AttestReport, error) {
 		return report, fmt.Errorf("nonce extension does not match SHA-256(authData || clientDataHash)")
 	}
 
+	// Real macOS 27 Developer ID attestations (2026-10-04, Studio) carry no
+	// authenticator extensions. With --expect-category any that is recorded,
+	// not failed; every other mode still requires the extensions map.
+	if !info.HasExtensions && in.Category.Any {
+		goto acl
+	}
 	if !info.HasExtensions {
 		return report, fmt.Errorf("authenticator data is missing the extensions map")
 	}
-	category, err := validationCategory(info.Extensions)
-	if err != nil {
-		return report, err
+	{
+		category, err := validationCategory(info.Extensions)
+		if err != nil {
+			return report, err
+		}
+		report.ValidationCategory = category
+		report.HasCategory = true
+		version, err := extensionBundleVersion(info.Extensions)
+		if err != nil {
+			return report, err
+		}
+		report.BundleVersion = version
+		if err := checkCategory(category, in.Category); err != nil {
+			return report, err
+		}
+		if in.BundleVersion != "" && version != in.BundleVersion {
+			return report, fmt.Errorf("apple_bundle_version_01 is %q, want %q", version, in.BundleVersion)
+		}
 	}
-	report.ValidationCategory = category
-	report.HasCategory = true
-	version, err := extensionBundleVersion(info.Extensions)
-	if err != nil {
-		return report, err
-	}
-	report.BundleVersion = version
-	if err := checkCategory(category, in.Category); err != nil {
-		return report, err
-	}
-	if in.BundleVersion != "" && version != in.BundleVersion {
-		return report, fmt.Errorf("apple_bundle_version_01 is %q, want %q", version, in.BundleVersion)
-	}
+
+acl:
 
 	if acl, ok := findExtension(leaf, oidAttestACL); ok {
 		report.ACLPresent = true
@@ -436,7 +446,9 @@ func parseAuthData(data []byte) (authInfo, error) {
 		Counter:  binary.BigEndian.Uint32(data[33:37]),
 	}
 	rest := data[37:]
-	if info.Flags&authFlagAT != 0 {
+	// Real macOS 27 assertions keep the AT flag set but carry only the 37-byte
+	// header; attested credential data is parsed only when bytes follow.
+	if info.Flags&authFlagAT != 0 && len(rest) > 0 {
 		if len(rest) < 18 {
 			return authInfo{}, fmt.Errorf("attested credential data is truncated")
 		}
