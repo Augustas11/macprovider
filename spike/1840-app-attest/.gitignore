@@ -1,0 +1,7 @@
+app/MalibuAttestSpike.xcodeproj/
+app/build/
+app/DerivedData/
+out/
+*.xcresult
+.DS_Store
+verifier/appattest-verify
