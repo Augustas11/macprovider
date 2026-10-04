@@ -75,7 +75,9 @@ let package = Package(
                 .copy("Resources/spec028")
             ],
             swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency")
+                .enableExperimentalFeature("StrictConcurrency"),
+                // SPEC-049 privacy fixture seams compile only into debug/test builds.
+                .define("MACPROVIDER_TEST_FIXTURES", .when(configuration: .debug))
             ]
         ),
         .testTarget(

@@ -7,6 +7,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"reflect"
 	"sort"
@@ -843,7 +846,7 @@ func TestPrivacyResponseShapeRejectsClearContent(t *testing.T) {
 		t.Fatal("usage total mismatch accepted")
 	}
 
-	var gate PrivacyStreamGate
+	gate := PrivacyStreamGate{Model: "model-a"}
 	frame0, _ := json.Marshal(privacyOpaqueFrame(0, false))
 	frame1, _ := json.Marshal(privacyOpaqueFrame(1, true))
 	usage := `{"object":"chat.completion.chunk","model":"model-a","choices":[],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`
@@ -868,7 +871,7 @@ func TestPrivacyResponseShapeRejectsClearContent(t *testing.T) {
 		t.Fatal("data after DONE accepted")
 	}
 
-	var refused PrivacyStreamGate
+	refused := PrivacyStreamGate{Model: "model-a"}
 	if _, err := refused.Observe(`{"choices":[{"delta":{"content":"CANARY","tool_calls":[]}}]}`); err == nil {
 		t.Fatal("clear stream content accepted")
 	}
@@ -881,5 +884,127 @@ func TestPrivacyResponseShapeRejectsClearContent(t *testing.T) {
 	}
 	if _, err := refused.Observe(`{"object":"chat.completion.chunk","model":"model-a","choices":[{"delta":{"content":"CANARY"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`); err == nil {
 		t.Fatal("content-bearing usage chunk accepted")
+	}
+}
+
+func TestRelayPrivacyFrameMatchesParserWithoutDecoding(t *testing.T) {
+	keys, digest, kid, requestID, stream := goldenResponseMaterial(t)
+	frame, err := SealFrame(keys, digest, kid, requestID, stream, 0, true, []byte("x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(frame)
+	withCiphertext := func(text string) []byte {
+		return bytes.Replace(raw, []byte(`"ciphertext":"`+frame.Ciphertext+`"`), []byte(`"ciphertext":"`+text+`"`), 1)
+	}
+	tag := bytes.Repeat([]byte{0xff}, privacyGCMTagSize)
+	maxSealed := bytes.Repeat([]byte{0xfe}, MaxPrivacyFramePlaintext+privacyGCMTagSize)
+	candidates := map[string][]byte{
+		"sealed":             raw,
+		"tag only":           withCiphertext(encodeBase64URL(tag)),
+		"tag plus one":       withCiphertext(encodeBase64URL(append(tag, 0x80))),
+		"tag plus two":       withCiphertext(encodeBase64URL(append(tag, 0x80, 0x01))),
+		"max sealed":         withCiphertext(encodeBase64URL(maxSealed)),
+		"over max":           withCiphertext(encodeBase64URL(append(maxSealed, 0))),
+		"under tag":          withCiphertext(encodeBase64URL(tag[1:])),
+		"empty":              withCiphertext(""),
+		"len mod 4 is 1":     withCiphertext(encodeBase64URL(append(tag, 0, 0)) + "A"),
+		"padding":            withCiphertext(encodeBase64URL(append(tag, 0x80)) + "=="),
+		"std alphabet plus":  withCiphertext("+" + encodeBase64URL(tag)[1:]),
+		"std alphabet slash": withCiphertext("/" + encodeBase64URL(tag)[1:]),
+		"space":              withCiphertext(" " + encodeBase64URL(tag)[1:]),
+		"escaped newline":    withCiphertext(`\n` + encodeBase64URL(tag)[2:]),
+		"noncanonical bits2": withCiphertext(encodeBase64URL(tag)[:21] + "B"),
+		"noncanonical bits3": withCiphertext(encodeBase64URL(append(tag, 0x80))[:22] + "B"),
+		"unknown":            bytes.Replace(raw, []byte("{"), []byte(`{"extra":1,`), 1),
+		"object":             bytes.Replace(raw, []byte(PrivacyFrameObject), []byte("chat.completion.chunk"), 1),
+		"seq 2^32":           bytes.Replace(raw, []byte(`"seq":0`), []byte(`"seq":4294967296`), 1),
+	}
+	candidates["null ciphertext"] = bytes.Replace(raw, []byte(`"ciphertext":"`+frame.Ciphertext+`"`), []byte(`"ciphertext":null`), 1)
+	accepted := 0
+	for name, candidate := range candidates {
+		t.Run(name, func(t *testing.T) {
+			parsed, parseErr := ParsePrivacyFrame(candidate)
+			seq, final, relayErr := relayPrivacyFrame(candidate)
+			if (parseErr == nil) != (relayErr == nil) {
+				t.Fatalf("parser err=%v relay err=%v", parseErr, relayErr)
+			}
+			if parseErr == nil {
+				accepted++
+				if seq != parsed.Seq || final != parsed.Final {
+					t.Fatalf("relay seq=%d final=%v parser seq=%d final=%v", seq, final, parsed.Seq, parsed.Final)
+				}
+			}
+		})
+	}
+	if accepted != 5 {
+		t.Fatalf("accepted %d candidates, want 5", accepted)
+	}
+}
+
+// SPEC-049-R015: the relay shape gate must not decode ciphertext. Its call
+// graph stays off every base64 decoder and the full frame parser.
+func TestRelayPrivacyGateDoesNotDecodeCiphertext(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "privacy.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay := map[string]bool{"relayPrivacyFrame": true, "relayCiphertextText": true, "ValidatePrivacyResponseBody": true, "Observe": true, "validatePrivacyClearUsageChunk": true, "validatePrivacyUsageObject": true}
+	forbidden := map[string]bool{"ParsePrivacyFrame": true, "validateStructure": true, "decodeBase64URL": true, "decodeBase64URLFixed": true, "DecodeString": true, "Decode": true, "ValidatePrivacyFrameSequence": true}
+	seen := 0
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || !relay[fn.Name.Name] {
+			continue
+		}
+		seen++
+		ast.Inspect(fn.Body, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			name := ""
+			switch fun := call.Fun.(type) {
+			case *ast.Ident:
+				name = fun.Name
+			case *ast.SelectorExpr:
+				name = fun.Sel.Name
+			}
+			if forbidden[name] {
+				t.Errorf("%s calls %s", fn.Name.Name, name)
+			}
+			return true
+		})
+	}
+	if seen != len(relay) {
+		t.Fatalf("found %d relay functions, want %d", seen, len(relay))
+	}
+}
+
+func TestPrivacyStreamGateBindsUsageModel(t *testing.T) {
+	frame0, _ := json.Marshal(privacyOpaqueFrame(0, true))
+	usage := func(model string) string {
+		return `{"object":"chat.completion.chunk","model":"` + model + `","choices":[],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`
+	}
+	for name, tc := range map[string]struct {
+		gateModel, chunkModel string
+		ok                    bool
+	}{
+		"canonical":     {"model-a", "model-a", true},
+		"other model":   {"model-a", "model-b", false},
+		"case variant":  {"model-a", "Model-A", false},
+		"unbound gate":  {"", "model-a", false},
+		"invalid model": {"model-a", "model a", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			gate := PrivacyStreamGate{Model: tc.gateModel}
+			if _, err := gate.Observe(string(frame0)); err != nil {
+				t.Fatal(err)
+			}
+			kind, err := gate.Observe(usage(tc.chunkModel))
+			if tc.ok != (err == nil) {
+				t.Fatalf("usage model %q against %q: kind=%d err=%v", tc.chunkModel, tc.gateModel, kind, err)
+			}
+		})
 	}
 }

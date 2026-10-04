@@ -28,6 +28,7 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
     @Flag(help: "Exercise cleartext relay replay through the continuous-batching scheduler.")
     var continuousBatchReplay: Bool = false
 
+    #if MACPROVIDER_TEST_FIXTURES
     @Flag(name: .customLong("privacy-class"), help: "Run the SPEC-049 privacy fixture with memory-only agreement keys.")
     var privacyClass: Bool = false
 
@@ -42,6 +43,11 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
 
     @Option(name: .customLong("privacy-fixture-completion"), help: "Deterministic completion text for a privacy fixture. Token counts stay 5 and 4.")
     var privacyFixtureCompletion: String?
+    #else
+    // Release builds carry no SPEC-049 privacy fixture options or seams.
+    private var privacyClass: Bool { false }
+    private var privacyFixtureCompletion: String? { nil }
+    #endif
 
     mutating func run() async throws {
         guard ProcessInfo.processInfo.environment["MACPROVIDER_ALLOW_TEST_FIXTURES"] == "1" else {
@@ -53,6 +59,7 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
         guard (0...10_000).contains(streamDelayMs) else {
             throw ValidationError("--stream-delay-ms must be in 0...10000")
         }
+        #if MACPROVIDER_TEST_FIXTURES
         if privacyClass && continuousBatchReplay {
             throw ValidationError("--privacy-class cannot be combined with --continuous-batch-replay")
         }
@@ -68,6 +75,7 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
         guard privacyProviderIdentifier(privacyProviderID) else {
             throw ValidationError("--provider-id must be 1...128 printable ASCII characters")
         }
+        #endif
 
         let root = URL(fileURLWithPath: stateDir, isDirectory: true)
         let keyManager = try RelayBlindKeyManager(
@@ -85,9 +93,11 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
             journal: journal,
             assignedSession: assignedSession
         )
-        let privacyProbe: FixturePrivacyPostureProbe?
-        let privacySigner: SELivenessTestSigning?
-        let privacyResponder: PrivacyPostureResponder?
+        #if MACPROVIDER_TEST_FIXTURES
+        var privacyProbe: (any PrivacyPostureProbe)?
+        var privacyResponder: PrivacyPostureResponder?
+        var privacySigner: SELivenessTestSigning?
+        var privacyCodeCDHash: String?
         if privacyClass {
             let signer = try FixturePrivacySEKey.loadOrCreate(stateRoot: root)
             let probe = FixturePrivacyPostureProbe(
@@ -97,6 +107,7 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
             )
             privacyProbe = probe
             privacySigner = signer
+            privacyCodeCDHash = probe.codeCDHash
             privacyResponder = PrivacyPostureResponder(
                 probe: probe,
                 seSigner: signer,
@@ -105,11 +116,11 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
                 providerID: privacyProviderID,
                 binaryVersion: CoordinatorClient.binaryVersion
             )
-        } else {
-            privacyProbe = nil
-            privacySigner = nil
-            privacyResponder = nil
         }
+        #else
+        let privacyProbe: (any PrivacyPostureProbe)? = nil
+        let privacyResponder: PrivacyPostureResponder? = nil
+        #endif
         let writer = RelayBlindFixtureWriter()
         let status = ProviderStatus(
             modelID: model,
@@ -180,11 +191,12 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
             descriptor["provider_receipt_key_id"] = replayObserver.receiptKeyID
             descriptor["replay_store"] = root.appendingPathComponent("continuous-batching-replay", isDirectory: true).path
         }
-        if privacyClass, let privacySigner, let privacyProbe {
+        #if MACPROVIDER_TEST_FIXTURES
+        if privacyClass, let privacySigner, let privacyCodeCDHash {
             descriptor["provider_id"] = privacyProviderID
             descriptor["se_public_key"] = privacySigner.publicKeyBase64
             descriptor["se_key_backend"] = PrivacyClassConstants.seBackendFile
-            descriptor["code_cdhash"] = privacyProbe.codeCDHash
+            descriptor["code_cdhash"] = privacyCodeCDHash
             descriptor["team_id"] = FixturePrivacyPostureProbe.teamID
             descriptor["signing_identifier"] = FixturePrivacyPostureProbe.signingIdentifier
             descriptor["binary_version"] = CoordinatorClient.binaryVersion
@@ -192,6 +204,7 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
                 descriptor["privacy_key_records"] = records
             }
         }
+        #endif
         try await writer.write(descriptor)
 
         while let line = readLine(strippingNewline: true) {
@@ -201,6 +214,7 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
                 guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                     throw RelayBlindProviderError.invalidEnvelope
                 }
+                #if MACPROVIDER_TEST_FIXTURES
                 if object["type"] as? String == "relay_fixture_assigned_session" {
                     guard privacyClass,
                           let session = object["assigned_session"] as? String,
@@ -219,6 +233,7 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
                     ])
                     continue
                 }
+                #endif
                 if object["type"] as? String == "privacy_posture_challenge" {
                     guard let privacyResponder else {
                         try await writer.write([
@@ -268,9 +283,11 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
     }
 }
 
+#if MACPROVIDER_TEST_FIXTURES
 private func privacyFixtureCDHashIsHex(_ value: String) -> Bool {
     privacyFixtureCDHash(value)
 }
+#endif
 
 private func privacyFixtureCompletionText(_ value: String) -> Bool {
     let bytes = Array(value.utf8)

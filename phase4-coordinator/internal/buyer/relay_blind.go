@@ -778,7 +778,7 @@ func (s *Server) forwardRelayBlindStreaming(w http.ResponseWriter, r *http.Reque
 	var streamedBytes int64
 	var privacyStream *privacyStreamRelay
 	if reservation.PrivacyClass {
-		privacyStream = &privacyStreamRelay{}
+		privacyStream = &privacyStreamRelay{gate: relayblind.PrivacyStreamGate{Model: reservation.Model}}
 	}
 	refusePrivacyStream := func() {
 		relay.Cancel("privacy_response_invalid")

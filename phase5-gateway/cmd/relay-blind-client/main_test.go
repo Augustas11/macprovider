@@ -503,6 +503,26 @@ func TestPrivacyClientRejectsUsageMismatch(t *testing.T) {
 	}
 }
 
+func TestPrivacyClientRejectsUsageChunkShape(t *testing.T) {
+	for name, alter := range map[string]func(map[string]any) map[string]any{
+		"model_mismatch": func(c map[string]any) map[string]any { c["model"] = "other-model"; return c },
+		"model_case":     func(c map[string]any) map[string]any { c["model"] = strings.ToUpper(c["model"].(string)); return c },
+		"model_missing":  func(c map[string]any) map[string]any { delete(c, "model"); return c },
+		"model_null":     func(c map[string]any) map[string]any { c["model"] = nil; return c },
+		"extra_field":    func(c map[string]any) map[string]any { c["id"] = "chatcmpl-x"; return c },
+		"folded_key":     func(c map[string]any) map[string]any { c["Model"] = c["model"]; delete(c, "model"); return c },
+		"object":         func(c map[string]any) map[string]any { c["object"] = "chat.completion"; return c },
+		"choices":        func(c map[string]any) map[string]any { c["choices"] = []any{map[string]any{"index": 0}}; return c },
+		"choices_null":   func(c map[string]any) map[string]any { c["choices"] = nil; return c },
+	} {
+		t.Run(name, func(t *testing.T) {
+			spec := privacyClientSpec{stream: true, content: privacyContent(true), alterChunk: alter}
+			_, stderr, calls, err := runPrivacyClient(t, spec)
+			assertPrivacyFailure(t, err, stderr, calls, 2)
+		})
+	}
+}
+
 func TestPrivacyClientRejectsNonPrivacyReservation(t *testing.T) {
 	_, stderr, calls, err := runPrivacyClient(t, privacyClientSpec{
 		content: privacyContent(false),
@@ -585,6 +605,7 @@ type privacyClientSpec struct {
 	verifiedAt                   int64
 	totalOverride                *int64
 	alterUsage                   func(map[string]any) map[string]any
+	alterChunk                   func(map[string]any) map[string]any
 	headerHook                   func(http.Header)
 	reservation                  func(relayblind.ReservationResponse) relayblind.ReservationResponse
 }
@@ -730,9 +751,13 @@ func writePrivacyChat(t *testing.T, w http.ResponseWriter, body, inner []byte, p
 			b.Write(raw)
 			b.WriteString("\n\n")
 		}
-		event, err := json.Marshal(map[string]any{
+		chunk := map[string]any{
 			"object": "chat.completion.chunk", "model": env.Model, "choices": []any{}, "usage": usage,
-		})
+		}
+		if spec.alterChunk != nil {
+			chunk = spec.alterChunk(chunk)
+		}
+		event, err := json.Marshal(chunk)
 		if err != nil {
 			t.Fatal(err)
 		}

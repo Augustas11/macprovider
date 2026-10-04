@@ -75,6 +75,7 @@ func TestPrivacyGatewayRefusesClearStreamContent(t *testing.T) {
 	}{
 		{name: "clear content chunk", account: "privacy-clear-delta", upstream: frame0 + "data: {\"choices\":[{\"delta\":{\"content\":\"CANARY_PRIVACY_BODY\"}}]}\n\n" + frame1 + usage + "data: [DONE]\n\n", forwarded: frame0},
 		{name: "content bearing usage chunk", account: "privacy-clear-usage", upstream: frame0 + frame1 + "data: {\"object\":\"chat.completion.chunk\",\"model\":\"test-model\",\"choices\":[{\"delta\":{\"content\":\"CANARY_PRIVACY_BODY\"}}],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2,\"total_tokens\":6}}\n\ndata: [DONE]\n\n", forwarded: frame0 + frame1},
+		{name: "usage model not reserved model", account: "privacy-usage-model", upstream: frame0 + frame1 + strings.Replace(usage, `"model":"test-model"`, `"model":"other-model"`, 1) + "data: [DONE]\n\n", forwarded: frame0 + frame1},
 		{name: "done before final frame", account: "privacy-early-done", upstream: frame0 + "data: [DONE]\n\n", forwarded: frame0},
 		{name: "eof without usage or done", account: "privacy-eof", upstream: frame0 + frame1, forwarded: frame0 + frame1},
 	} {

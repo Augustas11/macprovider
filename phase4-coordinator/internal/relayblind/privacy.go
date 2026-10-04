@@ -149,6 +149,67 @@ func maxPrivacyFrameJSON() int {
 	return (MaxPrivacyFramePlaintext+privacyGCMTagSize)*2 + 256
 }
 
+// relayPrivacyFrame is the relay-side frame check (SPEC-049-R015). It checks
+// the closed outer shape and reads ciphertext only as base64url text, never
+// decoding it. Buyers and providers use ParsePrivacyFrame.
+func relayPrivacyFrame(raw []byte) (seq uint64, final bool, err error) {
+	if len(raw) == 0 || len(raw) > maxPrivacyFrameJSON() {
+		return 0, false, ErrInvalidPrivacy
+	}
+	var value PrivacyFrame
+	if err := decodeClosed(raw, &value, []string{"object", "version", "seq", "final", "ciphertext"}); err != nil {
+		return 0, false, fmt.Errorf("%w: %v", ErrInvalidPrivacy, err)
+	}
+	if value.Object != PrivacyFrameObject || value.Version != PrivacyResponseVersion || value.Seq >= 1<<32 {
+		return 0, false, fmt.Errorf("%w: frame", ErrInvalidPrivacy)
+	}
+	if !relayCiphertextText(value.Ciphertext) {
+		return 0, false, fmt.Errorf("%w: frame ciphertext", ErrInvalidPrivacy)
+	}
+	return value.Seq, value.Final, nil
+}
+
+// relayCiphertextText accepts exactly the texts ParsePrivacyFrame accepts:
+// canonical unpadded base64url whose decoded length is inside the sealed
+// frame bounds. The length follows from the text length, so nothing is
+// decoded.
+func relayCiphertextText(text string) bool {
+	n := len(text)
+	if n%4 == 1 {
+		return false
+	}
+	sealedLen := n/4*3 + max(n%4-1, 0)
+	if sealedLen < privacyGCMTagSize || sealedLen > MaxPrivacyFramePlaintext+privacyGCMTagSize {
+		return false
+	}
+	var last int
+	for i := 0; i < n; i++ {
+		c := text[i]
+		switch {
+		case c >= 'A' && c <= 'Z':
+			last = int(c - 'A')
+		case c >= 'a' && c <= 'z':
+			last = int(c-'a') + 26
+		case c >= '0' && c <= '9':
+			last = int(c-'0') + 52
+		case c == '-':
+			last = 62
+		case c == '_':
+			last = 63
+		default:
+			return false
+		}
+	}
+	// A canonical encoding leaves the unused low bits of the last symbol zero.
+	switch n % 4 {
+	case 2:
+		return last&0x0f == 0
+	case 3:
+		return last&0x03 == 0
+	}
+	return true
+}
+
 // ResponseAAD frames the SPEC-049 frame AAD. envelopeDigest and kid are the
 // canonical base64url texts, not the decoded bytes.
 func ResponseAAD(envelopeDigest, kid, requestID string, stream bool, seq uint64, final bool) []byte {
@@ -256,7 +317,8 @@ type privacyClearUsageChunk struct {
 }
 
 // ValidatePrivacyResponseBody checks the closed non-stream privacy-response-v1
-// envelope. It does not decrypt ciphertext and does not rewrite the body.
+// envelope. It does not decode or decrypt ciphertext and does not rewrite the
+// body.
 func ValidatePrivacyResponseBody(raw []byte) error {
 	var body privacyResponseBody
 	if err := decodeClosed(raw, &body, []string{"object", "version", "frames", "usage"}); err != nil {
@@ -265,16 +327,17 @@ func ValidatePrivacyResponseBody(raw []byte) error {
 	if body.Object != PrivacyResponseObject || body.Version != PrivacyResponseVersion {
 		return fmt.Errorf("%w: privacy response", ErrInvalidPrivacy)
 	}
-	frames := make([]PrivacyFrame, len(body.Frames))
+	if len(body.Frames) == 0 {
+		return fmt.Errorf("%w: frame sequence", ErrInvalidPrivacy)
+	}
 	for i, rawFrame := range body.Frames {
-		frame, err := ParsePrivacyFrame(rawFrame)
+		seq, final, err := relayPrivacyFrame(rawFrame)
 		if err != nil {
 			return err
 		}
-		frames[i] = frame
-	}
-	if err := ValidatePrivacyFrameSequence(frames); err != nil {
-		return err
+		if seq != uint64(i) || final != (i == len(body.Frames)-1) {
+			return fmt.Errorf("%w: frame sequence", ErrInvalidPrivacy)
+		}
 	}
 	return validatePrivacyUsageObject(body.Usage)
 }
@@ -294,12 +357,14 @@ func validatePrivacyUsageObject(raw []byte) error {
 	return nil
 }
 
-func validatePrivacyClearUsageChunk(raw []byte) error {
+// validatePrivacyClearUsageChunk checks the closed clear usage chunk. Its
+// model must be the reservation's canonical model.
+func validatePrivacyClearUsageChunk(raw []byte, model string) error {
 	var chunk privacyClearUsageChunk
 	if err := decodeClosed(raw, &chunk, []string{"object", "model", "choices", "usage"}); err != nil {
 		return fmt.Errorf("%w: usage chunk", ErrInvalidPrivacy)
 	}
-	if chunk.Object != "chat.completion.chunk" || !validModelID(chunk.Model) || !bytes.Equal(bytes.TrimSpace(chunk.Choices), []byte("[]")) {
+	if chunk.Object != "chat.completion.chunk" || !validModelID(chunk.Model) || chunk.Model != model || !bytes.Equal(bytes.TrimSpace(chunk.Choices), []byte("[]")) {
 		return fmt.Errorf("%w: usage chunk", ErrInvalidPrivacy)
 	}
 	return validatePrivacyUsageObject(chunk.Usage)
@@ -315,8 +380,11 @@ const (
 )
 
 // PrivacyStreamGate checks the SPEC-049 §4.8 stream shape one SSE data
-// payload at a time. It does not decrypt ciphertext or retain it.
+// payload at a time. It does not decode, decrypt, or retain ciphertext.
 type PrivacyStreamGate struct {
+	// Model is the reservation's canonical model. The clear usage chunk must
+	// carry exactly this model; an empty Model refuses every usage chunk.
+	Model    string
 	count    uint64
 	sawFinal bool
 	sawUsage bool
@@ -339,18 +407,18 @@ func (g *PrivacyStreamGate) Observe(data string) (PrivacyStreamEvent, error) {
 	if g.sawUsage {
 		return 0, fmt.Errorf("%w: privacy stream", ErrInvalidPrivacy)
 	}
-	if frame, err := ParsePrivacyFrame([]byte(data)); err == nil {
-		if g.sawFinal || frame.Seq != g.count || g.count >= 1<<32 {
+	if seq, final, err := relayPrivacyFrame([]byte(data)); err == nil {
+		if g.sawFinal || seq != g.count || g.count >= 1<<32 {
 			return 0, fmt.Errorf("%w: privacy stream", ErrInvalidPrivacy)
 		}
 		g.count++
-		g.sawFinal = frame.Final
+		g.sawFinal = final
 		return PrivacyStreamFrame, nil
 	}
 	if !g.sawFinal || g.count == 0 {
 		return 0, fmt.Errorf("%w: privacy stream", ErrInvalidPrivacy)
 	}
-	if err := validatePrivacyClearUsageChunk([]byte(data)); err != nil {
+	if err := validatePrivacyClearUsageChunk([]byte(data), g.Model); err != nil {
 		return 0, err
 	}
 	g.sawUsage = true

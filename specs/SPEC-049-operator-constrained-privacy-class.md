@@ -1,6 +1,6 @@
 # SPEC-049 - Operator-Constrained Privacy Class
 
-**Version:** 0.1.0
+**Version:** 0.1.1
 Status: draft
 Owner: @Augustas11
 Issue: https://github.com/Augustas11/macprovider/issues/1749
@@ -10,7 +10,7 @@ Audit history: v0.1.0 is the initial default-off Beta contract. It does not prom
 {
   "spec_id": "SPEC-049",
   "title": "Operator-Constrained Privacy Class",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -333,7 +333,7 @@ A posture MUST be accepted only when `(team_id, signing_identifier, code_cdhash)
 
 ### SPEC-049-R007 - Provider hardening before network
 
-When privacy mode is enabled the provider MUST apply the following sequence after the canonical re-exec decision and before any credential load, model load, local HTTP server, or coordinator connection, and MUST exit non-zero with a bounded reason code on any failure:
+When privacy mode is enabled the provider MUST apply the following sequence after the canonical re-exec decision and before any credential is resolved into the runtime configuration, used, or transmitted, and before any model load, local HTTP server, or coordinator connection, and MUST exit non-zero with a bounded reason code on any failure:
 
 1. set RLIMIT_CORE soft and hard limits to 0;
 2. call `ptrace(PT_DENY_ATTACH)`;
@@ -344,7 +344,7 @@ When privacy mode is enabled the provider MUST apply the following sequence afte
 7. refuse when any `DYLD_*`, `MACPROVIDER_CB_TRACE`, `MACPROVIDER_PERF_TRACE`, `MACPROVIDER_KEEPALIVE_DEBUG`, or `MACPROVIDER_ALLOW_TEST_FIXTURES` environment variable is set;
 8. refuse a loopback runtime, an enabled KV disk tier, relay-blind disabled, or a missing state directory.
 
-Unsigned, ad-hoc-signed, dev, and debug builds therefore cannot start in privacy mode. Immediately before decrypting every privacy-class request the provider MUST re-check P_TRACED and CS_DEBUGGED; on failure it MUST NOT decrypt, MUST send SPEC-041-R005 bound rejection evidence with `error_code: privacy_class_posture_stale`, and MUST permanently stop posture responses and privacy key advertisement for the process lifetime. A test-fixture posture source MAY be injected only in the test fixture binary gated by `MACPROVIDER_ALLOW_TEST_FIXTURES=1`, which by step 7 can never run in production privacy mode.
+Unsigned, ad-hoc-signed, dev, and debug builds therefore cannot start in privacy mode. Reading the provider's own configuration file before this sequence is not a credential resolution. A same-user process that could observe that window is the operator (§2.2), whose own same-user-readable configuration already holds the credential, and same-user Secure Enclave and process access is already in scope of §2.4 and §2.5. Immediately before decrypting every privacy-class request the provider MUST re-check P_TRACED and CS_DEBUGGED; on failure it MUST NOT decrypt, MUST send SPEC-041-R005 bound rejection evidence with `error_code: privacy_class_posture_stale`, and MUST permanently stop posture responses and privacy key advertisement for the process lifetime. A test-fixture posture source MAY be injected only in a debug or test build of the fixture command, gated by `MACPROVIDER_ALLOW_TEST_FIXTURES=1`, which by step 7 can never run in production privacy mode.
 
 ### SPEC-049-R008 - Ephemeral privacy keys and key attestation
 
@@ -485,3 +485,4 @@ No evidence is attached. Physical evidence requires a signed `JOURNEY-PRIVACY-CL
 
 - 0.1.0 - Initial default-off Beta contract: exact claim and non-claims; threat model with device-bound, not code-bound, self-attested posture; closed posture statement, key attestation, reservation, dispatch marker, and response AEAD schemas; routing gate with no failover or downgrade; quarantine and durable kill switch; shared error inventory; exact disclosure strings; redaction proof; promotion gate. Carries forward the Product Build 2/Build 4 decisions (#1643, #1645, PR #1471) and keeps SPEC-042-R009.
 - 0.1.0 - Successful privacy-class chat responses carry `X-MacProvider-Privacy-Posture-Verified-At` from the dispatch-time gate for the gateway. The gateway does not store that timestamp, and the header is not a buyer response header.
+- 0.1.1 - SPEC-049-R007 hardening precedes any credential being resolved into the runtime configuration, used, or transmitted, rather than any credential load; reading the operator's own configuration file earlier is not a credential resolution, and a same-user observer is the operator already in scope. Test-fixture posture sources compile only into debug and test builds. No wire, schema, or routing change.
