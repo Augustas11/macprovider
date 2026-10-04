@@ -796,6 +796,20 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     private func handleChatCompletions(context: ChannelHandlerContext) {
+        // SPEC-049-R009. Privacy-class work arrives only on the coordinator
+        // WebSocket. Reject the header before the body is parsed, and do not
+        // echo the header value.
+        if requestHead?.headers.first(name: "X-MacProvider-Privacy-Class") != nil {
+            writeAPIError(
+                context: context,
+                APIError(
+                    status: 400,
+                    message: PrivacyClassConstants.downgradeRejected,
+                    code: PrivacyClassConstants.downgradeRejected
+                )
+            )
+            return
+        }
         do {
             try Self.validateBrowserRequestHeaders(requestHead?.headers ?? HTTPHeaders())
             try Self.validateJSONContentType(requestHead?.headers.first(name: "Content-Type"))
@@ -837,6 +851,13 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 .withConversationKey(requestHead?.headers.first(name: "X-MacProvider-Provider-Conversation"))
                 .withRequestID(inboundRequestID)
                 .withIngestProvenance(.directHTTP)  // SPEC-037 FR-KVP11: operator direct-HTTP path
+            if request.topLevelKeys.contains("privacy_class") {
+                throw APIError(
+                    status: 400,
+                    message: PrivacyClassConstants.downgradeRejected,
+                    code: PrivacyClassConstants.downgradeRejected
+                )
+            }
             if let maxOutputTokens = try Self.maxOutputTokensLimit(
                 from: requestHead?.headers.first(name: Self.maxOutputTokensHeaderName)
             ) {

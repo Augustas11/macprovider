@@ -7,10 +7,11 @@ import MacProviderCore
 ///      sub-namespace prefix, and
 ///   2. the request arrived over the direct-HTTP operator path.
 /// Coordinator-derived buyer keys carry a base64url HMAC suffix that cannot
-/// contain `:`, so they can never match the sub-namespace; and relay / Tier-2
-/// traffic never persists regardless of key shape (defense in depth against a
-/// buyer crafting the prefix on a non-gateway path). The gate never infers
-/// provenance from key shape alone — both inputs are required.
+/// contain `:`, so they can never match the sub-namespace; and relay / Tier-2 /
+/// privacy-class traffic never persists regardless of key shape (defense in
+/// depth against a buyer crafting the prefix on a non-gateway path).
+/// SPEC-049-R010: `.privacy` is non-persisting, the same as `.relay`. The gate
+/// never infers provenance from key shape alone — both inputs are required.
 enum KVDiskCacheGate {
     static let syntheticPrefix = "conv:kvs-synth:"
 

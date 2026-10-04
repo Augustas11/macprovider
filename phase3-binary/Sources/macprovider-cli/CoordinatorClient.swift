@@ -2173,6 +2173,8 @@ actor CoordinatorClient {
             demoteAutoupdateTrust: { [weak self] reason in
                 await self?.markAutoupdateTrustDemoted(reason: reason)
             },
+            privacyClassBeta: appConfig.privacyClassBeta,
+            postureProbe: appConfig.privacyClassBeta ? SystemPrivacyPostureProbe() : nil,
             sendFrame: sendFrame
         )
     }

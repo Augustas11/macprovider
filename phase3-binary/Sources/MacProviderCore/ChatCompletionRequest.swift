@@ -11,6 +11,9 @@ public enum KVIngestProvenance: String, Sendable, Equatable {
     case relay
     case tier2
     case unknown
+    /// SPEC-049-R010. Same disk-tier refusal as `.relay`, and the conversation
+    /// cache refuses a lease for this provenance.
+    case privacy
 }
 
 public struct ChatCompletionRequest: Sendable {

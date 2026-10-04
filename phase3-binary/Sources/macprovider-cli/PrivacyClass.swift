@@ -22,6 +22,8 @@ enum PrivacyClassConstants {
     static let finalStatusComplete = "complete"
     static let finalStatusError = "error"
     static let finalStatusCancelled = "cancelled"
+    static let downgradeRejected = "privacy_class_downgrade_rejected"
+    static let postureStale = "privacy_class_posture_stale"
     /// SPEC-049-R008. `expires_at_unix - not_before_unix` must stay within this.
     static let maxKeyLifetimeSeconds: Int64 = 3600
     static let maxKeyRecordDigests = 8

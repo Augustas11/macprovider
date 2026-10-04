@@ -256,6 +256,30 @@ enum PrivacyHardeningOutcome: Equatable {
 }
 
 enum PrivacyRuntimeHardening {
+    private static let decryptRecheckLock = NSLock()
+    /// SPEC-049-R007. Set for the process lifetime when a privacy decrypt
+    /// recheck fails. Separate from `recheckBeforeDecrypt`, which stays a pure
+    /// probe read so a later clean probe is still observable.
+    private static var decryptRecheckDidFail = false
+
+    static var decryptRecheckFailed: Bool {
+        decryptRecheckLock.lock()
+        defer { decryptRecheckLock.unlock() }
+        return decryptRecheckDidFail
+    }
+
+    static func noteDecryptRecheckFailed() {
+        decryptRecheckLock.lock()
+        decryptRecheckDidFail = true
+        decryptRecheckLock.unlock()
+    }
+
+    static func resetDecryptRecheckForTest() {
+        decryptRecheckLock.lock()
+        decryptRecheckDidFail = false
+        decryptRecheckLock.unlock()
+    }
+
     static func apply(
         probe: some PrivacyPostureProbe,
         config: AppConfig

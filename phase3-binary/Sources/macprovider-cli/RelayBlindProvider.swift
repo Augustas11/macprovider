@@ -240,9 +240,13 @@ struct RelayBlindDispatchContext: Sendable, Equatable {
     let requestID: String
     let inputTokenUpperBound: UInt64
     let maxOutputTokens: UInt64
+    /// SPEC-049 §4.7. Nil when the key is omitted. Empty when the key is present
+    /// but not a string, so a malformed marker cannot parse as ordinary relay-blind.
+    let privacyClass: String?
 
     static func parse(_ object: [String: Any]) throws -> RelayBlindDispatchContext {
-        guard Set(object.keys) == keys,
+        let allowed = keys.union(["privacy_class"])
+        guard keys.isSubset(of: object.keys), object.keys.allSatisfy(allowed.contains),
               let execution = object["execution_auth_digest"] as? String,
               let envelope = object["envelope_digest"] as? String,
               let provider = object["provider_binding_digest"] as? String,
@@ -261,11 +265,18 @@ struct RelayBlindDispatchContext: Sendable, Equatable {
         try RelayBlindValidation.printableASCII(assigned, maxBytes: 128)
         try RelayBlindValidation.printableASCII(requestID, maxBytes: 128)
         guard inputCap > 0, outputCap > 0 else { throw RelayBlindProviderError.invalidEnvelope }
+        let privacyClass: String?
+        if object.keys.contains("privacy_class") {
+            privacyClass = object["privacy_class"] as? String ?? ""
+        } else {
+            privacyClass = nil
+        }
         return RelayBlindDispatchContext(
             executionAuthDigest: execution, envelopeDigest: envelope,
             providerBindingDigest: provider, buyerBindingDigest: buyer,
             kid: kid, assignedSession: assigned, requestID: requestID,
-            inputTokenUpperBound: inputCap, maxOutputTokens: outputCap
+            inputTokenUpperBound: inputCap, maxOutputTokens: outputCap,
+            privacyClass: privacyClass
         )
     }
 
@@ -434,7 +445,12 @@ final class RelayBlindProviderRuntime: @unchecked Sendable {
             guard plaintext.count <= active.record.maxEncryptedRequestBytes else {
                 throw RelayBlindProviderError.ciphertextInvalid
             }
-            let request = try ChatCompletionRequest.parse(data: plaintext).withIngestProvenance(.relay)
+            let parsed = try ChatCompletionRequest.parse(data: plaintext)
+            // SPEC-049-R010: privacy work is not a conversation-cache key and is
+            // not the direct-HTTP disk-tier provenance. Swift Strings cannot be zeroed.
+            let request = privacyClass
+                ? parsed.withIngestProvenance(.privacy).withConversationKey(nil)
+                : parsed.withIngestProvenance(.relay)
             guard request.model == envelope.model,
                   request.stream == envelope.stream,
                   request.maxTokens == Int(exactly: envelope.maxOutputTokens) else {
