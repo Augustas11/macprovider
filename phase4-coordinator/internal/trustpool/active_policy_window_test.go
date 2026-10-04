@@ -110,6 +110,54 @@ func TestRouteableSnapshotsDoNotExtendChangedTermsAdjacentPolicyWindow(t *testin
 	}
 }
 
+func TestRouteableSnapshotsDoNotExtendLegacyCoreDelegationAcrossSameTermsWindow(t *testing.T) {
+	v1Start := time.Unix(1_000, 0).UTC()
+	v1End := time.Unix(2_000, 0).UTC()
+	state := sameTermsRolloverState(v1Start.Add(time.Minute), "terms-same")
+	addDelegatedMemberForWindowTest(state, "provider-legacy", delegationRecord{
+		PoolID:             "QpsclmzwdJaWJTk3zowcXQ",
+		ProviderID:         "provider-legacy",
+		DelegationID:       "del-legacy",
+		ManifestCoreDigest: "digest-v1",
+		ExpiresAt:          time.Unix(10_000, 0).UTC(),
+	})
+
+	snaps := state.RouteableSnapshots()
+	if len(snaps) != 1 || !snaps[0].Routeable {
+		t.Fatalf("snapshot = %+v, want routeable active v1", snaps)
+	}
+	if !snaps[0].RouteableUntilUTC.Equal(v1End) {
+		t.Fatalf("legacy core-bound delegation routeable_until=%s, want old boundary %s", snaps[0].RouteableUntilUTC, v1End)
+	}
+	if !snapshotHasMember(snaps[0], "provider-legacy") {
+		t.Fatalf("legacy member disappeared before its exact core expired: %+v", snaps[0].Members)
+	}
+}
+
+func TestRouteableSnapshotsExtendTermsDelegationAcrossSameTermsWindow(t *testing.T) {
+	v1Start := time.Unix(1_000, 0).UTC()
+	v2End := time.Unix(3_000, 0).UTC()
+	state := sameTermsRolloverState(v1Start.Add(time.Minute), "terms-same")
+	addDelegatedMemberForWindowTest(state, "provider-terms", delegationRecord{
+		PoolID:              "QpsclmzwdJaWJTk3zowcXQ",
+		ProviderID:          "provider-terms",
+		DelegationID:        "del-terms",
+		ManifestTermsDigest: "terms-same",
+		ExpiresAt:           time.Unix(10_000, 0).UTC(),
+	})
+
+	snaps := state.RouteableSnapshots()
+	if len(snaps) != 1 || !snaps[0].Routeable {
+		t.Fatalf("snapshot = %+v, want routeable active v1", snaps)
+	}
+	if !snaps[0].RouteableUntilUTC.Equal(v2End) {
+		t.Fatalf("terms-bound delegation routeable_until=%s, want extended through v2 expiry %s", snaps[0].RouteableUntilUTC, v2End)
+	}
+	if !snapshotHasMember(snaps[0], "provider-terms") {
+		t.Fatalf("terms-bound member missing: %+v", snaps[0].Members)
+	}
+}
+
 func sameTermsRolloverState(at time.Time, v2TermsDigest string) *ReconstructedState {
 	v1Start := time.Unix(1_000, 0).UTC()
 	v1End := time.Unix(2_000, 0).UTC()
@@ -158,4 +206,23 @@ func sameTermsRolloverState(at time.Time, v2TermsDigest string) *ReconstructedSt
 		},
 	}
 	return &ReconstructedState{Pools: map[string]*ReconstructedPoolState{p.PoolID: p}, RouteGateCheckedAt: at}
+}
+
+func addDelegatedMemberForWindowTest(state *ReconstructedState, providerID string, rec delegationRecord) {
+	p := state.Pools["QpsclmzwdJaWJTk3zowcXQ"]
+	p.Members[providerID] = true
+	p.MemberDelegationIDs[providerID] = rec.DelegationID
+	p.MemberDelegationExpiresUTC[providerID] = rec.ExpiresAt
+	state.ensureDelegationMaps()
+	state.delegations[delegationLedgerKey{PoolID: p.PoolID, DelegationID: rec.DelegationID}] = rec
+	state.activeProviderDelegations[poolProviderKey{PoolID: p.PoolID, ProviderID: providerID}] = rec.DelegationID
+}
+
+func snapshotHasMember(s RouteableSnapshot, providerID string) bool {
+	for _, got := range s.Members {
+		if got == providerID {
+			return true
+		}
+	}
+	return false
 }

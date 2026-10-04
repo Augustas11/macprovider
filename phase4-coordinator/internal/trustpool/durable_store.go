@@ -3708,12 +3708,11 @@ type manifestPolicyWindow struct {
 }
 
 // activePolicyView returns a copy of p whose manifest fields are the accepted
-// policy core active at `at`, plus the instant through which a routeable
-// registry snapshot may remain valid. Accepted policy windows never overlap, so
-// at most one matches. ok=false means the pool has accepted policies but none
-// is active at `at` (pool_policy_stale): a future-dated core never routes
-// early and a core outside any same-terms rollover bridge never keeps routing.
-// A pool with no accepted policy is returned unchanged.
+// policy core active at `at`, plus that core's expiry. accepted policy windows
+// never overlap, so at most one matches. ok=false means the pool has accepted
+// policies but none is active at `at` (pool_policy_stale): a future-dated
+// core never routes early and an expired core never keeps routing. A pool with
+// no accepted policy is returned unchanged.
 func (p *ReconstructedPoolState) activePolicyView(at time.Time) (*ReconstructedPoolState, time.Time, bool) {
 	if p == nil || len(p.ManifestPolicies) == 0 {
 		return p, time.Time{}, true
@@ -3740,12 +3739,20 @@ func (p *ReconstructedPoolState) activePolicyView(at time.Time) (*ReconstructedP
 		view.ManifestAttestedMembers = w.AttestedMembers
 		view.ManifestRetentionPolicyID = w.RetentionPolicyID
 		view.ManifestSplitExecutionStatus = w.SplitExecutionStatus
-		return &view, p.routeableUntilForPolicyWindow(w), true
+		var until time.Time
+		if w.ExpiresAtUnix <= uint64(math.MaxInt64) {
+			until = time.Unix(int64(w.ExpiresAtUnix), 0).UTC()
+		}
+		return &view, until, true
 	}
 	return p, time.Time{}, false
 }
 
-func (p *ReconstructedPoolState) routeableUntilForPolicyWindow(active manifestPolicyWindow) time.Time {
+func (p *ReconstructedPoolState) extendedSameTermsRouteableUntil(version uint64) time.Time {
+	active, ok := p.policyWindow(version)
+	if !ok {
+		return time.Time{}
+	}
 	if active.ExpiresAtUnix > uint64(math.MaxInt64) {
 		return time.Time{}
 	}
@@ -3765,6 +3772,18 @@ func (p *ReconstructedPoolState) routeableUntilForPolicyWindow(active manifestPo
 		}
 	}
 	return time.Unix(int64(untilUnix), 0).UTC()
+}
+
+func (p *ReconstructedPoolState) policyWindow(version uint64) (manifestPolicyWindow, bool) {
+	if p == nil || version == 0 {
+		return manifestPolicyWindow{}, false
+	}
+	for _, w := range p.ManifestPolicies {
+		if w.Version == version {
+			return w, true
+		}
+	}
+	return manifestPolicyWindow{}, false
 }
 
 // priorPolicyWindow returns the accepted core immediately before version,
@@ -3807,10 +3826,6 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 		if pool.Lifecycle == LifecycleActive && !routeable {
 			generation++
 		}
-		routeableUntil := earliestDeadline(p.CreatorGateExpiresAtUTC, p.OnCallReadinessExpiresAtUTC)
-		if routeable {
-			routeableUntil = earliestDeadline(routeableUntil, policyUntil)
-		}
 		members := make([]string, 0, len(p.Members))
 		if routeable {
 			for id := range p.Members {
@@ -3834,6 +3849,13 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 		sort.Strings(members)
 		sort.Strings(revoked)
 		sort.Strings(buyers)
+		routeableUntil := earliestDeadline(p.CreatorGateExpiresAtUTC, p.OnCallReadinessExpiresAtUTC)
+		if routeable {
+			if extended := s.extendedSameTermsRouteableUntil(pool, p, members, at); !extended.IsZero() && policyUntil.Before(extended) {
+				policyUntil = extended
+			}
+			routeableUntil = earliestDeadline(routeableUntil, policyUntil)
+		}
 		memberDelegationExpiry := make(map[string]time.Time, len(members))
 		var delegatedMembers []string
 		for _, memberID := range members {
@@ -3871,6 +3893,40 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 		})
 	}
 	return out
+}
+
+func (s *ReconstructedState) extendedSameTermsRouteableUntil(pool, active *ReconstructedPoolState, members []string, at time.Time) time.Time {
+	if pool == nil || active == nil || len(members) == 0 {
+		return time.Time{}
+	}
+	if !s.routeableMembersSurviveTermsEquivalentRollover(active, members, at) {
+		return time.Time{}
+	}
+	return pool.extendedSameTermsRouteableUntil(active.ManifestVersion)
+}
+
+func (s *ReconstructedState) routeableMembersSurviveTermsEquivalentRollover(p *ReconstructedPoolState, members []string, at time.Time) bool {
+	if s == nil || p == nil {
+		return false
+	}
+	for _, providerID := range members {
+		delegationID := p.MemberDelegationIDs[providerID]
+		if delegationID == "" {
+			continue
+		}
+		activeID, ok := s.activeProviderDelegations[poolProviderKey{PoolID: p.PoolID, ProviderID: providerID}]
+		if !ok || activeID != delegationID {
+			return false
+		}
+		rec, ok := s.delegationRecordFor(p.PoolID, delegationID)
+		if !ok || rec.Revoked || !at.Before(rec.ExpiresAt) {
+			return false
+		}
+		if rec.ManifestTermsDigest == "" || rec.ManifestTermsDigest != p.ManifestTermsDigest {
+			return false
+		}
+	}
+	return true
 }
 
 // earliestDeadline returns the earlier non-zero instant, or zero if both are.
