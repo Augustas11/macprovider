@@ -342,6 +342,7 @@ final class RelayBlindProviderRuntime: @unchecked Sendable {
         let envelope: RelayBlindEnvelope
         let context: RelayBlindDispatchContext
         let claim: RelayBlindExecutionJournal.Claim
+        let responseSealer: PrivacyResponseSealer?
     }
 
     let keyManager: RelayBlindKeyManager
@@ -368,7 +369,8 @@ final class RelayBlindProviderRuntime: @unchecked Sendable {
         outerStream: Bool,
         contextObject: [String: Any],
         expectedAssignedSession: String?,
-        now: Date = Date()
+        now: Date = Date(),
+        privacyClass: Bool = false
     ) throws -> OpenedRequest {
         let envelope = try RelayBlindEnvelope.parse(envelopeBody, nowUnix: Int64(now.timeIntervalSince1970))
         let context = try RelayBlindDispatchContext.parse(contextObject)
@@ -397,7 +399,10 @@ final class RelayBlindProviderRuntime: @unchecked Sendable {
             }
             let peer = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: envelope.buyerEphemeralPublicKey)
             let secret = try active.privateKey.sharedSecretFromKeyAgreement(with: peer)
-            let shared = secret.withUnsafeBytes { Data($0) }
+            // SPEC-049-R011: zero the shared-secret and nonce copies. The CryptoKit
+            // secret itself is zeroed on deallocation. Parsed Swift Strings cannot be zeroed.
+            var shared = secret.withUnsafeBytes { Data($0) }
+            defer { shared.resetBytes(in: 0..<shared.count) }
             guard shared.count == 32, shared.contains(where: { $0 != 0 }) else {
                 throw RelayBlindProviderError.ciphertextInvalid
             }
@@ -414,16 +419,18 @@ final class RelayBlindProviderRuntime: @unchecked Sendable {
                 sharedInfo: Data("macprovider/spec041/request/aead-nonce/v1".utf8),
                 outputByteCount: 12
             )
-            let nonceData = nonceKey.withUnsafeBytes { Data($0) }
+            var nonceData = nonceKey.withUnsafeBytes { Data($0) }
+            defer { nonceData.resetBytes(in: 0..<nonceData.count) }
             let sealed = try AES.GCM.SealedBox(
                 nonce: AES.GCM.Nonce(data: nonceData), ciphertext: envelope.ciphertext, tag: envelope.tag
             )
-            let plaintext: Data
+            var plaintext = Data()
             do {
                 plaintext = try AES.GCM.open(sealed, using: requestKey, authenticating: envelope.aad)
             } catch {
                 throw RelayBlindProviderError.ciphertextInvalid
             }
+            defer { plaintext.resetBytes(in: 0..<plaintext.count) }
             guard plaintext.count <= active.record.maxEncryptedRequestBytes else {
                 throw RelayBlindProviderError.ciphertextInvalid
             }
@@ -433,7 +440,26 @@ final class RelayBlindProviderRuntime: @unchecked Sendable {
                   request.maxTokens == Int(exactly: envelope.maxOutputTokens) else {
                 throw RelayBlindProviderError.ciphertextInvalid
             }
-            return OpenedRequest(request: request, envelope: envelope, context: context, claim: claim)
+            let responseSealer: PrivacyResponseSealer?
+            if privacyClass {
+                responseSealer = try PrivacyResponseSealer(
+                    sharedSecret: secret,
+                    aad: envelope.aad,
+                    envelopeDigest: context.envelopeDigest,
+                    kid: envelope.kid,
+                    requestID: envelope.requestID,
+                    stream: envelope.stream
+                )
+            } else {
+                responseSealer = nil
+            }
+            return OpenedRequest(
+                request: request,
+                envelope: envelope,
+                context: context,
+                claim: claim,
+                responseSealer: responseSealer
+            )
         } catch let error as RelayBlindProviderError {
             try? journal.markTerminal(claim, now: now)
             throw RelayBlindProviderRejection(
@@ -470,16 +496,22 @@ final class RelayBlindKeyManager: @unchecked Sendable {
     private let models: [String]
     private let maxEncryptedRequestBytes: UInt64
     private let lifetimeSeconds: Int64
+    private let persistAgreementKey: Bool
 
     init(
         directory: URL,
         models: [String],
         maxEncryptedRequestBytes: UInt64 = 1_048_576,
         lifetimeSeconds: Int64 = 3_600,
+        persistAgreementKey: Bool = true,
         now: Date = Date()
     ) throws {
         guard directory.path.hasPrefix("/"), lifetimeSeconds > 0, lifetimeSeconds <= 86_400 else {
             throw RelayBlindProviderError.invalidConfiguration("relay-blind state directory and key lifetime are invalid")
+        }
+        // SPEC-049-R008: a privacy agreement key stays in memory and its record window is at most 3600s.
+        if !persistAgreementKey && lifetimeSeconds > PrivacyClassConstants.maxKeyLifetimeSeconds {
+            throw RelayBlindProviderError.invalidConfiguration("privacy agreement key lifetime exceeds 3600s")
         }
         let secureDirectory = try RelayBlindSecureDirectory.openOrCreate(directory)
         try RelayBlindSecureFiles.removeOrphanTemps(
@@ -491,17 +523,24 @@ final class RelayBlindKeyManager: @unchecked Sendable {
         self.models = try RelayBlindValidation.canonicalModels(models)
         self.maxEncryptedRequestBytes = maxEncryptedRequestBytes
         self.lifetimeSeconds = lifetimeSeconds
+        self.persistAgreementKey = persistAgreementKey
         self.identityKey = try RelayBlindSecureFiles.loadOrCreateSigningKey(secureDirectory, name: "identity.ed25519")
-        let loaded = try RelayBlindSecureFiles.loadOrCreateAgreementKey(secureDirectory, name: "encryption.current.x25519")
-        self.encryptionKey = loaded
         let nowUnix = Int64(now.timeIntervalSince1970)
-        if let times = try RelayBlindSecureFiles.loadTimes(secureDirectory, name: "encryption.current.json"), times.0 < times.1, times.1 > nowUnix {
-            self.notBeforeUnix = times.0
-            self.expiresAtUnix = times.1
+        if persistAgreementKey {
+            self.encryptionKey = try RelayBlindSecureFiles.loadOrCreateAgreementKey(secureDirectory, name: "encryption.current.x25519")
+            if let times = try RelayBlindSecureFiles.loadTimes(secureDirectory, name: "encryption.current.json"), times.0 < times.1, times.1 > nowUnix {
+                self.notBeforeUnix = times.0
+                self.expiresAtUnix = times.1
+            } else {
+                self.notBeforeUnix = max(0, nowUnix - 1)
+                self.expiresAtUnix = nowUnix + lifetimeSeconds
+                try RelayBlindSecureFiles.storeTimes(secureDirectory, name: "encryption.current.json", notBefore: self.notBeforeUnix, expiresAt: self.expiresAtUnix)
+            }
         } else {
+            self.encryptionKey = Curve25519.KeyAgreement.PrivateKey()
+            // notBefore is one second behind now, and the window is lifetime, so 3600 still fits.
             self.notBeforeUnix = max(0, nowUnix - 1)
-            self.expiresAtUnix = nowUnix + lifetimeSeconds
-            try RelayBlindSecureFiles.storeTimes(secureDirectory, name: "encryption.current.json", notBefore: self.notBeforeUnix, expiresAt: self.expiresAtUnix)
+            self.expiresAtUnix = self.notBeforeUnix + lifetimeSeconds
         }
         self.revokedKids = try RelayBlindSecureFiles.loadRevocations(secureDirectory, name: "revoked-kids.json")
     }
@@ -582,11 +621,17 @@ final class RelayBlindKeyManager: @unchecked Sendable {
 
     private func rotateLocked(nowUnix: Int64) throws {
         let next = Curve25519.KeyAgreement.PrivateKey()
-        try RelayBlindSecureFiles.replaceSecret(secureDirectory, name: "encryption.current.x25519", data: next.rawRepresentation)
+        if persistAgreementKey {
+            try RelayBlindSecureFiles.replaceSecret(secureDirectory, name: "encryption.current.x25519", data: next.rawRepresentation)
+        }
         encryptionKey = next
         notBeforeUnix = max(0, nowUnix - 1)
-        expiresAtUnix = nowUnix + lifetimeSeconds
-        try RelayBlindSecureFiles.storeTimes(secureDirectory, name: "encryption.current.json", notBefore: notBeforeUnix, expiresAt: expiresAtUnix)
+        if persistAgreementKey {
+            expiresAtUnix = nowUnix + lifetimeSeconds
+            try RelayBlindSecureFiles.storeTimes(secureDirectory, name: "encryption.current.json", notBefore: notBeforeUnix, expiresAt: expiresAtUnix)
+        } else {
+            expiresAtUnix = notBeforeUnix + lifetimeSeconds
+        }
     }
 
     private func reloadRevocationsLocked() throws {
@@ -1295,7 +1340,7 @@ private enum RelayBlindSecureFiles {
     }
 }
 
-private extension Data {
+extension Data {
     mutating func appendUnsigned32(_ value: UInt32) {
         append(contentsOf: [UInt8(value >> 24), UInt8(value >> 16), UInt8(value >> 8), UInt8(value)])
     }
