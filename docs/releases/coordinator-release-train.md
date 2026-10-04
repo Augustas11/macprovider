@@ -182,42 +182,57 @@ around 2026-10-23. The fix takes effect at the next renewal (Wed 2026-09-30
 ## Next coordinator release — tag unassigned, net changes vs v1.8.211
 
 `v1.8.211` was applied through the signed runtime-only updater on 2026-10-02.
+The 24-hour baseline window completed after **2026-10-03 13:12:23 UTC** and was
+closed out on 2026-10-04. Positive-credit payability remained 400/400 in both
+the newest and aged cohorts, the receipt-audit outbox reached zero pending, and
+route-journal durability held. Issue #1775 is therefore closed; the broader
+capacity and datastore migration work remains tracked by #1793.
+
+The October 4 reconciliation error is a historical-rate compatibility defect,
+not evidence of SQLite corruption: internally consistent settled credits were
+compared with the current rate card. Four September 28 probe credits are a
+separate historical evidence gap: recovery recreated their credits from
+`request_log`, but no attempt-output or receipt evidence survived, so they
+remain intentionally nonpayable. Neither residual indicates a fresh-cohort
+payability regression.
+
 The next tag must be selected only after checking the shared coordinator/CLI
-namespace. Do not deploy this train before the current v1.8.211 evidence window
-is captured at **2026-10-03 13:12:23 UTC**, 24 hours after the final successful
-v1.8.211 coordinator start. That boundary supersedes the earlier v1.8.210
-09:15:09 UTC boundary.
+namespace.
 
 | Net change in coordinator / gateway / Pearl assets | Status | PR |
 |---|---|---|
-| Stage 3A money-path evidence journal: provider credit and compact attempt-output evidence commit atomically in SQLite; indexed bounded materialization, poison-safe retention, receipt-time on-demand projection, fail-closed evidence checks, and journal health metrics. | merged `502516d52` 2026-10-03; not live | [#1835](https://github.com/Augustas11/macprovider/pull/1835) |
+| Stage 3B deployment tranche: ship the merged Stage 3A money-path evidence journal so provider credit and compact attempt-output evidence commit atomically in SQLite; initialize indexed bounded materialization, poison-safe retention, receipt-time on-demand projection, fail-closed evidence checks, and journal health metrics on Pearl. | Stage 3A implementation merged as `502516d52` 2026-10-03; Stage 3B deployment not live | [#1835](https://github.com/Augustas11/macprovider/pull/1835) |
 
-### Stage 3A release and next-development sequence
+### Stage 3B deployment and acceptance sequence
 
-1. **Finish the v1.8.211 baseline window first.** At or after
-   2026-10-03 13:12:23 UTC, attach the uninterrupted-window evidence to #1775
-   and #1793: coordinator start identity, hot-path wait/error counters, newest
-   and aged payability cohorts, terminal evidence-loss counts, route-journal
-   health, audit-outbox pending/poison/oldest-age and drain-rate deltas, weekly
-   catch-up status, and rollback-snapshot disk usage. Do not call a merely
-   shrinking backlog steady-state proof.
+Stage 3B names the production deployment and acceptance tranche for the merged
+Stage 3A implementation; it is not a second implementation or a historical
+evidence backfill.
+
+1. **Use the completed v1.8.211 baseline as the comparison point.** Preserve
+   the recorded 400/400 positive-credit cohorts, zero-pending audit outbox,
+   route-journal durability counters, and buyer health. Do not treat the seven
+   historical settled-credit rate mismatches or the four probe-era evidence
+   gaps as fresh Stage 3B regressions.
 2. **Cut one reviewed runtime-only release from current `main`.** Select the
    next unused shared `v1.8.N` tag, reserve it in both release trains, build the
    signed coordinator/gateway pair through `pearl-runtime-release.yml`, obtain
    the protected-environment approval, and run the independent repository
    release verifier. Preserve the live catalog, provider recommendation,
    operator nginx, and normal 60-second updater health setting.
-3. **Apply Stage 3A through the transactional updater.** Record the preflight
+3. **Apply Stage 3B through the transactional updater.** Record the preflight
    disk budget and rollback snapshot, apply once, and prove local/public health,
    provider recovery, buyer serving, schema initialization, updater
    `already_current`, and no armed transaction. Any restart establishes a new
    24-hour acceptance boundary.
-4. **Run the Stage 3A evidence window.** Require zero hot-path write failures,
+4. **Run the Stage 3B evidence window.** Require zero hot-path write failures,
    zero terminal evidence loss or false missing-evidence refunds, bounded
    journal pending age, zero unacknowledged poison growth, materialization that
    keeps pace with arrivals, and an audit outbox whose drain rate exceeds its
-   arrival rate. Also prove settlement catch-up completes and record buyer
-   latency before declaring the SQLite stage complete.
+   arrival rate. Track historical reconciliation compatibility separately so an
+   old settled-credit rate comparison cannot be mistaken for journal failure.
+   Also prove settlement catch-up completes and record buyer latency before
+   declaring the SQLite stage complete.
 5. **Then begin Stage 4 under #1793.** Land the Postgres ledger/evidence schema,
    migration and reconciliation tooling, and async dual-write while SQLite
    remains read-authoritative. No production schema migration, read switch, or
