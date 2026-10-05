@@ -627,10 +627,12 @@ func (s *Server) reconcileRelayBlindEnforceFinality(ctx context.Context, reserva
 	switch coordinatorSettlementFinalityForRequest(finalityHeaders(finality), true).Action {
 	case settlementFinalityDebit:
 		if candidateErr != nil || candidate.RelayBlind == nil || candidate.RelayBlind.EnvelopeDigest != reservation.RelayBlind.EnvelopeDigest ||
-			(candidate.RequiredInternalRequestID != "" && candidate.RequiredInternalRequestID != internalRequestID) {
+			candidate.RequiredInternalRequestID != internalRequestID {
 			// SPEC-022 R-13.7 / R-5.6: the buyer is debited no more completion
-			// than the gateway delivered. Without durable delivery evidence for
-			// this envelope, the delivered completion is 0: debit the verified
+			// than the gateway delivered. Delivery evidence counts only when it
+			// names this envelope and exactly this attempt; a candidate with no
+			// internal request id is not bound to the attempt. Without bound
+			// evidence, the delivered completion is 0: debit the verified
 			// prompt only.
 			candidate.Outcome = bodyReadFailedOutcome
 			candidate.CompletionTokens = 0

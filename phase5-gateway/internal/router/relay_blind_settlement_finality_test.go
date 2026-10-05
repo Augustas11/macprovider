@@ -161,6 +161,13 @@ func TestRelayBlindReconcileFollowsEnforceFinality(t *testing.T) {
 			wantResult: func(s SettlementReconcileSummary) bool { return s.RelayBlindSettled == 1 },
 		},
 		{
+			name:      "a candidate with no internal request id is not delivery evidence",
+			finality:  relayBlindSettledFinality(3, 5),
+			candidate: &relayBlindReconcileCandidate{outcome: "ok", completion: 5, requiredInternalID: ""},
+			wantUsed:  3, wantHeld: 0,
+			wantResult: func(s SettlementReconcileSummary) bool { return s.RelayBlindSettled == 1 },
+		},
+		{
 			name: "quarantined refunds",
 			finality: map[string]any{"relay_blind_settlement_coverage": "enforce", "mode": "enforce", "policy_version": settlementPolicyVersion, "outcome": "quarantined", "receipt_result": "invalid",
 				"reason": "usage_mismatch", "closed": true, "quarantined_attempts": 1, "mode_scope_complete": true},
