@@ -151,17 +151,36 @@ served catalog state and coordinator-train interactions.
 Renew the Tier-2 catalog before 2026-12-25. An expiry-only re-sign stays in
 the freshness lane.
 
-**First artifact-feed activation (GGUF), pending — held.** #1754 put the first
-GGUF catalog artifact in the source: `gguf-q4-k-m` for
-`meta-llama/llama-3.2-3b-instruct`, the verified
-`bartowski/Llama-3.2-3B-Instruct-GGUF@5ab33fa9` Q4_K_M file. It also added the
-17 measured MLX `size_bytes`. `catalog-release.py status` passes every check
-except "current release_id is new". Activation is a **full-provider-app**
-lane cut:
-1. Choose a new `release_id`.
-2. Cut and sign with the operator-held `streamvc-autotune-static-v4` key.
-3. Deploy with `autotune.catalog_artifacts_path` and the additive
-   `/v1/catalog-artifacts` nginx route.
+**First artifact-feed activation (GGUF), cut but not deployed.** #1830 merged
+the signed `published-2026-10-01-artifact-feed-activation-v1` release. It has
+17 model keys and 18 artifacts: the measured MLX primary for every key plus the
+verified `meta-llama/llama-3.2-3b-instruct` / `gguf-q4-k-m` secondary from
+`bartowski/Llama-3.2-3B-Instruct-GGUF@5ab33fa9`, restricted to
+`llamacpp_loopback`. The release is signed by
+`streamvc-autotune-static-v4`, uses the v3 release ledger, and does not change
+the rate card.
+
+Activation is now an operations gate, not a catalog-authoring task:
+
+1. Cut the reviewed coordinator/gateway runtime from a `main` commit that
+   contains #1830. The updater must install the v2-capable gateway while it is
+   stopped, start the #1830 coordinator with that gateway unavailable, then
+   start the new gateway. A #1830 coordinator refuses pool-model dispatch to a
+   gateway that does not negotiate `spec022-route-snapshot-v2`.
+2. Add the exact `/v1/catalog-artifacts` and
+   `/v1/catalog-artifacts.sig` locations additively to Pearl's operator vhost;
+   never replace that vhost with the repository template. Run `nginx -t`
+   before reloading.
+3. Deploy the signed release through the Pearl updater. It writes
+   `autotune.catalog_artifacts_path` and
+   `autotune.catalog_artifacts_sig_path`, verifies the public endpoints serve
+   the exact signed bytes, and rolls back on mismatch. A full
+   `deploy-pearl-vps.sh` activation instead requires both keys to exist in the
+   on-disk coordinator config before the run.
+4. Cut the reviewed signed Malibu.app and standalone CLI from the merged line.
+   This is required for compiled-in artifact identity and the provider-facing
+   propose/withdraw flow, although the deploy canary itself reads the live
+   coordinator release.
 
 A coordinator older than the #1719 build cannot start on a feed that carries
 `file_path`, so every coordinator rollback afterwards needs runbook §9 step 4a.
@@ -174,7 +193,7 @@ canaries no longer compare the canary Mac's CLI-installed `catalog-release/`
 bytes. They require the live process to report the new release loaded from the
 coordinator (`state: live_verified`, `source: coordinator`) and bound to the
 coordinator-admitted envelope, so the cut does not need a CLI baking it on the
-canary. Not started: the user holds Pearl changes.
+canary. Production activation has not started.
 
 The scheduled feed renewal on 2026-09-23 **failed closed**, with no mutation. The
 renewal shipped only `catalog-release.py` to Pearl, so the under-lock
@@ -207,7 +226,54 @@ namespace.
 
 | Net change in coordinator / gateway / Pearl assets | Status | PR |
 |---|---|---|
+| Pool-scoped BYOM: admit, disclose, route and settle non-catalog models inside Trusted Pools; add route-snapshot v2, non-creator member payment, bounded pool pricing, artifact-feed activation, updater rollback/preflight support, and provider proposal surfaces. | Merged as `7b5c2bc6c` on 2026-10-05; accepted on Mac Studio and Lima; not active on Pearl | [#1830](https://github.com/Augustas11/macprovider/pull/1830) / [#1816](https://github.com/Augustas11/macprovider/issues/1816) |
 | Stage 3B deployment tranche: ship the merged Stage 3A money-path evidence journal so provider credit and compact attempt-output evidence commit atomically in SQLite; initialize indexed bounded materialization, poison-safe retention, receipt-time on-demand projection, fail-closed evidence checks, and journal health metrics on Pearl. | Stage 3A implementation merged as `502516d52` 2026-10-03; Stage 3B deployment not live | [#1835](https://github.com/Augustas11/macprovider/pull/1835) |
+
+### #1816 BYOM productionization sequence
+
+#1830 completed the implementation campaign; merge is not production
+activation. Keep #1816 open until the real paid Pearl journey and its rollback
+evidence are complete.
+
+1. **Close the launch gates.** Add tamper-evident Trusted Pool rollback
+   protection, or the normative equivalent required by the SPEC-042 launch
+   gate. Capture fresh signed journey evidence for the new #1830 requirements
+   and the affected SPEC-046/SPEC-047 rows. Resolve or explicitly disposition
+   the two LOW freeze findings: strict embedded-pool-id parsing in the gateway
+   and full `pool_model_id` grammar validation in `phase7-verify`.
+2. **Prepare Pearl without enabling traffic.** Add the artifact-feed nginx
+   locations, configure all six
+   `trusted_pools.pool_model_pricing_bounds` values and required
+   `provider_owner_account_ids`, verify atomic SIGHUP reload, and prepare one
+   creator plus one non-creator canary member. Recompute pricing bounds from
+   the rate card that will be live; do not copy stale example values blindly.
+3. **Cut and apply one reviewed release.** Use the next unused shared tag and
+   include #1830 with the other rows in this train. Apply through the
+   transactional updater using the safe mixed-version sequence above. Run
+   `coordinator pool-rollback-preflight` before any rollback, and keep pools
+   paused until the updater transaction commits.
+4. **Cut the signed provider release.** Ship Malibu.app and the standalone CLI
+   from the reviewed merged line. Never attach an ad-hoc or locally signed
+   provider build to the live coordinator.
+5. **Run the bounded production canary.** Propose and accept one non-catalog
+   GGUF/llama.cpp model and one non-catalog native MLX model. Prove the pool
+   `/v1/models` view and “pool-attested, not network-verified” disclosure,
+   streaming and non-streaming buyer requests, enforce-mode receipt finality,
+   and ledger credit to the member that served each request. Prove neither
+   model is globally routable.
+6. **Exercise failure boundaries before widening.** Rotate and revoke entries
+   with traffic in flight, restart each component in the documented order,
+   reconcile holds, and perform the rollback drill without lost rows or
+   resurrected authority. Observe binding churn, route-fence failures,
+   pool-model 503s, route-snapshot pressure and settlement-hold age. Pass 38's
+   isolated Lima 503 (48/49 rollover requests settled, followed by recovery)
+   was accepted for merge, but a production recurrence must be attributable.
+7. **Widen only after evidence is signed.** Attach the canary evidence to
+   #1816, update CONFORMANCE, and then expand creators/providers. Global catalog
+   graduation remains a separate explicit decision: implement the
+   SPEC-047-R012 aggregate, SPEC-047-R011 probe-evidence record and
+   `macprovider.intake-decision.v2`; permissionless global earning remains out
+   of scope until compute-integrity attestation exists.
 
 ### Stage 3B deployment and acceptance sequence
 
