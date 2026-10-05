@@ -10523,7 +10523,8 @@
         "phase4-coordinator/internal/ws/privacy_posture_test.go:TestPrivacyPostureProbeRoundTrip",
         "phase4-coordinator/internal/ws/privacy_posture_handshake_test.go:TestPrivacyPostureChallengeFollowsHelloAck",
         "phase4-coordinator/internal/ws/privacy_posture_handshake_test.go:TestPrivacyPostureChallengeFollowsAuthResponseV2",
-        "phase4-coordinator/internal/ws/privacy_posture_test.go:TestHeartbeatPrivacyKeysChallengeOnlyOnChange"
+        "phase4-coordinator/internal/ws/privacy_posture_test.go:TestHeartbeatPrivacyKeysChallengeOnlyOnChange",
+        "phase4-coordinator/internal/ws/privacy_posture_test.go:TestPrivacyPostureSweepChallengesUnchangedKeys"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-BETA"

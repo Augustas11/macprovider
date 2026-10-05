@@ -409,10 +409,6 @@ func (s *Server) enqueueLastKnownWithFallback(snap providerevents.LastKnown, for
 }
 
 func lastKnownFromProvider(provider pool.Provider, now time.Time) providerevents.LastKnown {
-	// The admission snapshot is persisted before the handshake ack; record
-	// the session's post-ack routability rather than the transient hold.
-	settled := provider
-	settled.HandshakeAckPending = false
 	snap := providerevents.LastKnown{
 		ProviderID:               provider.ProviderID,
 		AssignedID:               provider.AssignedID,
@@ -423,7 +419,7 @@ func lastKnownFromProvider(provider pool.Provider, now time.Time) providerevents
 		State:                    string(provider.State),
 		AuthState:                string(provider.AuthState),
 		LastSeenAt:               now,
-		RoutingEligible:          settled.RoutingEligible(),
+		RoutingEligible:          provider.RoutingEligible(),
 		Presence:                 "connected",
 		Hostname:                 provider.Hostname,
 		Tier:                     string(provider.Tier),

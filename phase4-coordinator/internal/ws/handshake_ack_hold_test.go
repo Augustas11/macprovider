@@ -2,11 +2,13 @@ package ws_test
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/providerevents"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	gobwas "github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
@@ -129,4 +131,38 @@ func TestAuthResponseV2PrecedesFramesDispatchedBeforeAck(t *testing.T) {
 	if provider, _ := h.Registry.Resolve("m4-anon", challenge.AssignedID); provider.InferencePath != pool.InferencePathWSTunneled {
 		t.Fatalf("inference path = %q", provider.InferencePath)
 	}
+}
+
+// The last-known snapshot written at registration predates the ack, so it
+// must not claim routability; the post-ack re-persist records it.
+func TestLastKnownRoutabilityPersistsOnlyAfterHandshakeAck(t *testing.T) {
+	// providerevents.Open sets busy_timeout, as production does; the bare
+	// test store can lose the synchronous upsert to the async event writer.
+	store, err := providerevents.Open(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatalf("open events store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	window := make(chan bool, 1)
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithConnectionEventStore(store),
+		providerws.WithBeforeHandshakeAckSendForTest(func() {
+			snap, ok, err := store.GetLastKnown(context.Background(), "m4-anon")
+			window <- err == nil && ok && !snap.RoutingEligible
+		}),
+	})
+	defer h.HTTP.Close()
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assertHelloAck(t, conn)
+	if !<-window {
+		t.Fatal("pre-ack last-known snapshot missing or marked routable")
+	}
+	eventually(t, func() bool {
+		snap, ok, err := store.GetLastKnown(context.Background(), "m4-anon")
+		return err == nil && ok && snap.RoutingEligible
+	})
 }

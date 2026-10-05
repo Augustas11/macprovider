@@ -2511,7 +2511,7 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		// handleDisconnect for exactly this session.
 		return entry.ProviderID, entry.AssignedID
 	}
-	s.pool.ClearHandshakeAckPending(entry.ProviderID, entry.AssignedID)
+	s.releaseAckedSession(entry.ProviderID, entry.AssignedID)
 	// Privacy key acceptance schedules a posture challenge on this session's
 	// FIFO writer. The provider requires hello_ack as the next frame, so the
 	// challenge may only be enqueued after the ack (SPEC-049).
@@ -3152,7 +3152,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		// See handleV1Conn: handleConn tears down this registered session.
 		return entry.ProviderID, entry.AssignedID
 	}
-	s.pool.ClearHandshakeAckPending(entry.ProviderID, entry.AssignedID)
+	s.releaseAckedSession(entry.ProviderID, entry.AssignedID)
 	// See handleV1Conn: the posture challenge must follow auth_response v2.
 	s.acceptPrivacyKeyRecords(entry.ProviderID, entry.AssignedID, initial.PrivacyKeyRecords)
 	if s.cfg.Pool.WarmupGateEnabled {
@@ -4171,6 +4171,18 @@ func (s *Server) registerProviderSessionLocked(conn net.Conn, entry *pool.Provid
 	go session.runWriter()
 	go s.monitorHeartbeat(entry.ProviderID, entry.AssignedID, conn)
 	return session, pool.RegisterRefusalNone
+}
+
+// releaseAckedSession lifts the handshake-ack hold once the ack is enqueued
+// and re-persists the last-known snapshot, which registration wrote while
+// the session was still held out of routing.
+func (s *Server) releaseAckedSession(providerID, assignedID string) {
+	if !s.pool.ClearHandshakeAckPending(providerID, assignedID) {
+		return
+	}
+	if provider, ok := s.pool.Resolve(providerID, assignedID); ok {
+		s.rememberProviderSnapshot(provider)
+	}
 }
 
 func (s *Server) readProviderLoop(conn net.Conn, providerID, assignedID string) {

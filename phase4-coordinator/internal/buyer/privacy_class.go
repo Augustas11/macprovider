@@ -106,7 +106,7 @@ func (s *Server) privacyGate(ctx context.Context, provider pool.Provider, keyDig
 		return time.Time{}, privacyClassUnavailable
 	}
 	current, live := s.pool.Resolve(provider.ProviderID, provider.AssignedID)
-	if !live || current.ProviderID == "" || current.AssignedID == "" || !current.IsWSTunneled() || !current.ServingCapable() {
+	if !live || current.ProviderID == "" || current.AssignedID == "" || !current.IsWSTunneled() || !relayBlindBindable(current) {
 		return time.Time{}, privacyClassUnavailable
 	}
 	quarantined, err := s.relayBlind.store.IsQuarantined(ctx, current.ProviderID, s.now())
@@ -141,7 +141,7 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, model string, encryp
 	providers := s.pool.Snapshot()
 	sort.Slice(providers, func(i, j int) bool { return providers[i].AssignedID < providers[j].AssignedID })
 	for _, provider := range providers {
-		if !provider.ServingCapable() || !provider.IsWSTunneled() || !modelIDEqual(provider.ModelID, model) {
+		if !relayBlindBindable(provider) || !provider.IsWSTunneled() || !modelIDEqual(provider.ModelID, model) {
 			continue
 		}
 		records, err := s.relayBlind.store.FreshKeyRecords(ctx, provider.ProviderID, provider.AssignedID, model, encryptedBytes, s.now(), relayblind.KeyClassPrivacy)

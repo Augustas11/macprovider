@@ -326,6 +326,81 @@ func wsPrivacyRecordForKey(t *testing.T, now time.Time, identity ed25519.Private
 	}
 }
 
+// SPEC-049-R005: the sweep challenges a session whose key set is unchanged;
+// an answered challenge makes it eligible, and an unanswered one (here a
+// response arriving after posture_response_timeout_seconds) makes it
+// ineligible without quarantine.
+func TestPrivacyPostureSweepChallengesUnchangedKeys(t *testing.T) {
+	start := time.Unix(1_800_000_000, 0).UTC()
+	material := newWSPrivacyMaterial(t, start)
+	var clockUnix atomic.Int64
+	clockUnix.Store(start.Unix())
+	now := func() time.Time { return time.Unix(clockUnix.Load(), 0).UTC() }
+	reg := pool.NewRegistry(nil)
+	provider := pool.Provider{
+		ProviderID: "provider-a", AssignedID: "session-a", Hostname: "provider.local",
+		ModelID: "model-a", ModelParamsB: 7, RAMGB: 16, MaxContextTokens: 4096, MaxConcurrency: 1,
+		BinaryVersion: "0.0.0-fixture", Tier: pool.TierPinned, State: pool.StateReady,
+		SEPublicKey: append([]byte(nil), material.seRaw...),
+	}
+	serverConn, clientConn := net.Pipe()
+	t.Cleanup(func() { clientConn.Close() })
+	t.Cleanup(func() { serverConn.Close() })
+	reg.RegisterAt(&provider, serverConn, start)
+	s := &Server{pool: reg, log: zerolog.Nop(), now: now, privacyAuthority: material.auth}
+	sess := newProviderSession(provider.ProviderID, provider.AssignedID, serverConn, 64)
+	go sess.runWriter()
+	t.Cleanup(func() { sess.close() })
+	s.sessions.Store(sessionKey(provider.ProviderID, provider.AssignedID), sess)
+	challenges := make(chan PrivacyPostureChallenge, 4)
+	go func() {
+		for {
+			payload, _, err := wsutil.ReadServerData(clientConn)
+			if err != nil {
+				return
+			}
+			var challenge PrivacyPostureChallenge
+			if json.Unmarshal(payload, &challenge) == nil && challenge.Type == "privacy_posture_challenge" {
+				challenges <- challenge
+			}
+		}
+	}()
+	nextChallenge := func() PrivacyPostureChallenge {
+		t.Helper()
+		select {
+		case challenge := <-challenges:
+			return challenge
+		case <-time.After(5 * time.Second):
+			t.Fatal("sweep sent no posture challenge")
+			return PrivacyPostureChallenge{}
+		}
+	}
+	probeDone := func() bool {
+		_, inFlight := s.privacyPostureInFlight.Load(sessionKey(provider.ProviderID, provider.AssignedID))
+		return !inFlight
+	}
+
+	s.runPrivacyPostureSweep()
+	first := nextChallenge()
+	s.handlePrivacyPostureResponse(provider.ProviderID, provider.AssignedID, material.responseSeq(t, first.Nonce, first.IssuedAtUnix, 1))
+	eventually(t, probeDone)
+	if _, ok := material.auth.Eligible(provider.ProviderID, provider.AssignedID, material.digest, now()); !ok {
+		t.Fatal("answered sweep challenge did not make the session eligible")
+	}
+
+	s.runPrivacyPostureSweep()
+	second := nextChallenge()
+	clockUnix.Add(int64(material.auth.ResponseTimeout()/time.Second) + 1)
+	s.handlePrivacyPostureResponse(provider.ProviderID, provider.AssignedID, material.responseSeq(t, second.Nonce, second.IssuedAtUnix, 2))
+	eventually(t, probeDone)
+	if _, ok := material.auth.Eligible(provider.ProviderID, provider.AssignedID, material.digest, now()); ok {
+		t.Fatal("unanswered sweep challenge left the session eligible")
+	}
+	if err := material.auth.AcceptPrivacyKeys(context.Background(), provider.ProviderID, provider.AssignedID, []relayblind.PrivacyKeyRecord{material.record}, now()); err != nil {
+		t.Fatalf("unanswered challenge quarantined the provider: %v", err)
+	}
+}
+
 func registerPrivacyTestSession(t *testing.T, reg *pool.Registry, assignedID string, now time.Time) {
 	t.Helper()
 	serverConn, clientConn := net.Pipe()
@@ -443,9 +518,14 @@ func newWSPrivacyMaterial(t *testing.T, now time.Time) wsPrivacyMaterial {
 
 func (m wsPrivacyMaterial) response(t *testing.T, nonce string, issued int64) []byte {
 	t.Helper()
+	return m.responseSeq(t, nonce, issued, 0)
+}
+
+func (m wsPrivacyMaterial) responseSeq(t *testing.T, nonce string, issued int64, sequence uint64) []byte {
+	t.Helper()
 	statement := relayblind.PostureStatement{
 		Version: relayblind.PrivacyPostureVersion, PrivacyClass: relayblind.PrivacyClassV1,
-		ProviderID: "provider-a", AssignedSession: "session-a", Nonce: nonce, Sequence: 0, IssuedAtUnix: issued,
+		ProviderID: "provider-a", AssignedSession: "session-a", Nonce: nonce, Sequence: sequence, IssuedAtUnix: issued,
 		BinaryVersion: "0.0.0-fixture", CodeCDHash: "0123456789abcdef0123456789abcdef01234567",
 		TeamID: "AB12CD34EF", SigningIdentifier: "live.malibu.provider.cli",
 		HardenedRuntime: true, LibraryValidation: true, PTDenyAttachApplied: true, CoreDumpsDisabled: true,
