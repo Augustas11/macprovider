@@ -153,6 +153,16 @@ func relayBlindFixtureExecute(t *testing.T, f relayBlindSettlementFixture, now t
 	return response.Result(), consume.EnvelopeDigest, response.Code
 }
 
+// SPEC-022 R-13.10: the billing store measures an unrecorded relay-blind
+// attempt's deadline from the same request timeout that bounds the dispatch.
+func TestRelayBlindDispatchTimeoutBoundsUnrecordedAttemptDeadline(t *testing.T) {
+	now := time.Unix(1_780_000_000, 0).UTC()
+	f := newRelayBlindSettlementFixture(t, now, billing.RouteSnapshotModeEnforce, config.RelayBlindSettlementProfileV1, nil, nil, WithRelay(nil, 7*time.Minute))
+	if got := f.billing.RelayBlindAttemptTimeout(); got != 7*time.Minute || got != f.server.requestTimeout {
+		t.Fatalf("billing relay-blind attempt timeout=%s buyer request timeout=%s", got, f.server.requestTimeout)
+	}
+}
+
 func TestRelayBlindAvailabilityUnderEnforceNeedsSettlementProfile(t *testing.T) {
 	now := time.Unix(1_800_200_000, 0).UTC()
 	for _, tc := range []struct {

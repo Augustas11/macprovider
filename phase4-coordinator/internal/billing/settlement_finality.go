@@ -191,11 +191,35 @@ func (s *Store) requestSettlementFinalityForAccount(ctx context.Context, account
 	return finality, true, nil
 }
 
-// relayBlindUnrecordedAttemptGrace bounds how long an enforce relay-blind
-// attempt whose route snapshot exists but which has no credit and no attempt
-// output stays pending before it closes quarantined. The coordinator request
-// timeout ends the attempt long before this.
-const relayBlindUnrecordedAttemptGrace = time.Hour
+// defaultRelayBlindAttemptTimeout is the relay-blind dispatch bound used
+// until SetRelayBlindAttemptTimeout installs the configured buyer request
+// timeout. It is deliberately longer than any configured timeout, so an
+// unconfigured store never closes an attempt that may still be running.
+const defaultRelayBlindAttemptTimeout = time.Hour
+
+// SetRelayBlindAttemptTimeout installs the buyer request timeout that bounds
+// every relay-blind dispatch (SPEC-022 R-13.10). A non-positive value keeps
+// the conservative default.
+func (s *Store) SetRelayBlindAttemptTimeout(timeout time.Duration) {
+	s.relayBlindAttemptTimeoutMS.Store(timeout.Milliseconds())
+}
+
+// RelayBlindAttemptTimeout is the relay-blind dispatch bound in effect.
+func (s *Store) RelayBlindAttemptTimeout() time.Duration {
+	if ms := s.relayBlindAttemptTimeoutMS.Load(); ms > 0 {
+		return time.Duration(ms) * time.Millisecond
+	}
+	return defaultRelayBlindAttemptTimeout
+}
+
+// relayBlindUnrecordedTerminalUnixMS is the latest terminal an enforce
+// relay-blind attempt can have: the dispatch is bounded by the request
+// timeout, and dispatch follows the route decision (SPEC-022 R-13.10). An
+// attempt whose terminal was never recorded is measured from it, so its
+// R-8.3 deadline is this plus pending_deadline_seconds.
+func (s *Store) relayBlindUnrecordedTerminalUnixMS(routeDecisionUnixMS int64) int64 {
+	return routeDecisionUnixMS + s.RelayBlindAttemptTimeout().Milliseconds()
+}
 
 // RelayBlindAttemptUnrecordedReason closes an enforce relay-blind attempt
 // whose snapshot was committed before dispatch but whose credit and attempt
@@ -725,21 +749,16 @@ SELECT rs.attempt_n, rs.provider_id,
 			}
 			row = evidenceRow
 		case row.mode == RouteSnapshotModeEnforce && entrypoint == PaidEntrypointRelayBlindChat:
-			// SPEC-022 R-13.6: an enforce relay-blind snapshot is committed
-			// before dispatch. Without a credit or an attempt output the
-			// attempt is pending, then closed quarantined, never payable.
+			// SPEC-022 R-13.6 / R-13.10: an enforce relay-blind snapshot is
+			// committed before dispatch. Without a credit or an attempt
+			// output the attempt is pending until its deadline, measured from
+			// the latest terminal the dispatch bound allows. Past it the
+			// caller closes the attempt through the missing-receipt writer:
+			// closed quarantined, never payable.
 			row.receiptResult = SettlementReceiptResultInconclusive
-			deadline := routeDecisionUnixMS + pendingDeadlineSeconds*1000 + relayBlindUnrecordedAttemptGrace.Milliseconds()
-			if nowUnixMS <= deadline {
-				row.settlementOutcome = SettlementOutcomePending
-				row.reason = "relay_blind_attempt_pending"
-				row.pendingDeadlineUnixMS = deadline
-			} else {
-				row.settlementOutcome = SettlementOutcomeQuarantined
-				row.reason = RelayBlindAttemptUnrecordedReason
-				row.closed = true
-				row.pendingDeadlineUnixMS = 0
-			}
+			row.settlementOutcome = SettlementOutcomePending
+			row.reason = "relay_blind_attempt_pending"
+			row.pendingDeadlineUnixMS = s.relayBlindUnrecordedTerminalUnixMS(routeDecisionUnixMS) + pendingDeadlineSeconds*1000
 		default:
 			continue
 		}

@@ -897,6 +897,11 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 	// own bound. 1-minute window matches the SPEC-004 §7 operational-
 	// hygiene budget for cross-account refresh warns.
 	s.stickyMismatchLimiter = newStickyMismatchLimiter(time.Minute, s.stickyMaxEntries)
+	// SPEC-022 R-13.10: requestTimeout bounds every relay-blind dispatch, so
+	// the billing store measures an unrecorded attempt's deadline from it.
+	if s.billing != nil {
+		s.billing.SetRelayBlindAttemptTimeout(s.requestTimeout)
+	}
 	return s
 }
 

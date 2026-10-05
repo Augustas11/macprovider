@@ -1710,6 +1710,26 @@ Under R-13.7, a relay-blind debit with no durable buyer-delivery candidate
 for the attempt's envelope and internal id has 0 delivered completion. The
 gateway debits the verified prompt only.
 
+R-13.10. Unrecorded attempt. An enforce relay-blind attempt can have its
+snapshot (committed before dispatch, R-13.3) and no attempt output, no
+credit, and no verdict, for example when the coordinator stops mid-attempt.
+It has no recorded terminal. The buyer request timeout bounds every
+relay-blind dispatch, and dispatch follows the route decision, so the latest
+terminal such an attempt can have is the route decision time plus that
+timeout. Its R-8.3 deadline is measured from that terminal: route decision +
+request timeout + `pending_deadline_seconds`. Until the deadline the attempt
+is pending. Once wall time is strictly later, the coordinator closes it
+quarantined (`relay_blind_attempt_unrecorded`, terminal state
+`upstream_transport_disconnect` at that bound, buyer refunded, no provider
+credit) through the per-row missing-receipt writer, both on a finality read
+and in the R-8.3 bounded background sweep. The writer revalidates the tuple
+inside its transaction and writes nothing when an attempt output, a credit,
+or a verdict exists, or when this process is still persisting an observed
+receipt. The closed verdict is terminal: a receipt, output, or credit that
+arrives later never makes the attempt payable. This applies only to enforce
+relay-blind snapshots; other snapshot-only attempts keep their existing
+finality.
+
 ## Acceptance criteria
 
 - **AC-022-1:** With enforce mode enabled, a provider/model pair whose

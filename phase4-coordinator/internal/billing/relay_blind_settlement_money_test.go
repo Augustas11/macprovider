@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"strings"
 	"testing"
+	"time"
 )
 
 type relayBlindMoneyFixture struct {
@@ -307,12 +308,17 @@ func TestRelayBlindSettlementOutcomeMigrationOnPopulatedDatabase(t *testing.T) {
 	}
 }
 
-// SPEC-022 R-13.6: an enforce relay-blind snapshot committed before dispatch
-// is the coordinator's authority even when the coordinator never wrote the
-// request log, credit, or attempt output. The bound lookup by internal id
-// finds it: pending, then closed quarantined (refund), never payable.
+// SPEC-022 R-13.6 / R-13.10: an enforce relay-blind snapshot committed before
+// dispatch is the coordinator's authority even when the coordinator never
+// wrote the request log, credit, or attempt output. The bound lookup by
+// internal id finds it: pending through the deadline measured from the latest
+// terminal the dispatch timeout allows, then closed quarantined (refund) by
+// the missing-receipt writer, never payable, and a late receipt cannot reopen
+// it.
 func TestRelayBlindSnapshotOnlyAttemptFinality(t *testing.T) {
 	_, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	store.SetRelayBlindAttemptTimeout(15 * time.Minute)
 	ctx := context.Background()
 	accountID := "relay-blind-account"
 	input := relayBlindSignedInputWithSnapshot(t, func(r *RouteSnapshot) { r.AccountScope = AccountScopeForSettlement(accountID) }, nil)
@@ -320,23 +326,149 @@ func TestRelayBlindSnapshotOnlyAttemptFinality(t *testing.T) {
 		t.Fatal(err)
 	}
 	internalID := input.RouteSnapshot.RequestID
-	deadline := input.RouteSnapshot.RouteDecisionTSUnixMS + input.RouteSnapshot.PendingDeadlineSeconds*1000 + relayBlindUnrecordedAttemptGrace.Milliseconds()
+	deadline := input.RouteSnapshot.RouteDecisionTSUnixMS + (15 * time.Minute).Milliseconds() + input.RouteSnapshot.PendingDeadlineSeconds*1000
 
-	finality, found, err := store.RequestSettlementFinalityForAccountBound(ctx, accountID, "gateway-request-id", internalID, deadline-1, input.RouteSnapshot.RequestStartTSUnixMS)
-	if err != nil || !found || finality.Mode != RouteSnapshotModeEnforce || finality.Outcome != SettlementOutcomePending || finality.Closed ||
-		finality.RequestID != "gateway-request-id" || finality.RequiredInternalRequestID != internalID {
-		t.Fatalf("before deadline finality=%+v found=%v err=%v", finality, found, err)
+	for _, now := range []int64{deadline - 1, deadline} {
+		finality, found, err := store.RequestSettlementFinalityForAccountBound(ctx, accountID, "gateway-request-id", internalID, now, input.RouteSnapshot.RequestStartTSUnixMS)
+		if err != nil || !found || finality.Mode != RouteSnapshotModeEnforce || finality.Outcome != SettlementOutcomePending || finality.Closed ||
+			finality.PendingDeadlineUnixMS != deadline || finality.RequestID != "gateway-request-id" || finality.RequiredInternalRequestID != internalID {
+			t.Fatalf("now=deadline%+d finality=%+v found=%v err=%v", now-deadline, finality, found, err)
+		}
 	}
-	finality, found, err = store.RequestSettlementFinalityForAccountBound(ctx, accountID, "gateway-request-id", internalID, deadline+1, input.RouteSnapshot.RequestStartTSUnixMS)
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_receipt_verdicts`); got != 0 {
+		t.Fatalf("verdicts before deadline=%d", got)
+	}
+	finality, found, err := store.RequestSettlementFinalityForAccountBound(ctx, accountID, "gateway-request-id", internalID, deadline+1, input.RouteSnapshot.RequestStartTSUnixMS)
 	if err != nil || !found || finality.Outcome != SettlementOutcomeQuarantined || !finality.Closed || finality.Reason != RelayBlindAttemptUnrecordedReason {
 		t.Fatalf("after deadline finality=%+v found=%v err=%v", finality, found, err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_receipt_verdicts WHERE closed = 1 AND settlement_outcome = 'quarantined' AND reason = ?`, RelayBlindAttemptUnrecordedReason); got != 1 {
+		t.Fatalf("persisted closed verdicts=%d want 1", got)
 	}
 	// A plaintext request id without a request log stays not found.
 	if _, found, err := store.RequestSettlementFinalityForAccountBound(ctx, accountID, "gateway-request-id", "other-internal-id", deadline+1, input.RouteSnapshot.RequestStartTSUnixMS); err != nil || found {
 		t.Fatalf("unknown internal id found=%v err=%v", found, err)
 	}
+	// The closed verdict is terminal: a valid receipt arriving afterwards
+	// does not make the attempt payable.
+	late, err := store.IngestRelayBlindSettlementReceipt(ctx, RelayBlindSettlementReceiptIngestionInput{
+		SettlementReceiptIdentity: SettlementReceiptIdentity{AccountScope: input.RouteSnapshot.AccountScope, RequestID: internalID, AttemptN: input.AttemptN, ProviderID: input.ProviderID},
+		Envelope:                  input.Envelope, ProviderReceiptPubkey: input.ProviderReceiptPubkey, Dispatch: input.Dispatch,
+	}.WithReceivedAt(deadline+2))
+	if err != nil || late.SettlementOutcome != SettlementOutcomeQuarantined || !late.Closed || late.IdempotencyStatus != settlementReceiptIDTerminalNoop {
+		t.Fatalf("late receipt state=%+v err=%v", late, err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_receipt_verdicts WHERE settlement_outcome = 'relay_blind_settled'`); got != 0 {
+		t.Fatalf("relay_blind_settled after closure=%d", got)
+	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM spec022_payable_request_credits`); got != 0 {
 		t.Fatalf("payable=%d", got)
+	}
+}
+
+// SPEC-022 R-8.3 / R-13.10: the bounded background sweep closes an enforce
+// relay-blind attempt that has a snapshot and nothing else, with no finality
+// read, through the missing-receipt writer, strictly after its deadline. It
+// leaves alone an attempt with an attempt output, an observe or ordinary
+// snapshot, and one still inside its deadline, and never closes twice.
+func TestSweepClosesUnrecordedRelayBlindAttempts(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	store.SetRelayBlindAttemptTimeout(15 * time.Minute)
+	ctx := context.Background()
+	base := relayBlindSignedInputWithSnapshot(t, nil, nil)
+	deadline := base.RouteSnapshot.RouteDecisionTSUnixMS + (15 * time.Minute).Milliseconds() + base.RouteSnapshot.PendingDeadlineSeconds*1000
+	insert := func(requestID string, mutate func(*RouteSnapshot)) RouteSnapshot {
+		snapshot := base.RouteSnapshot
+		snapshot.RequestID = requestID
+		if mutate != nil {
+			mutate(&snapshot)
+		}
+		if _, err := store.InsertRouteSnapshot(ctx, snapshot); err != nil {
+			t.Fatalf("insert %s: %v", requestID, err)
+		}
+		return snapshot
+	}
+	unrecorded := insert("unrecorded", nil)
+	later := insert("later", func(r *RouteSnapshot) { r.RouteDecisionTSUnixMS += 60_000; r.RequestStartTSUnixMS += 60_000 })
+	observe := insert("observe", func(r *RouteSnapshot) { r.RouteSnapshotMode = RouteSnapshotModeObserve })
+	withOutput := insert("with-output", nil)
+	sum := sha256.Sum256([]byte(relayBlindVectorNonStreamBody))
+	if _, err := store.InsertSettlementAttemptOutput(ctx, SettlementAttemptOutput{
+		AccountScope: withOutput.AccountScope, RequestID: withOutput.RequestID, AttemptN: withOutput.AttemptN, ProviderID: withOutput.ProviderID,
+		Output: SettlementOutput{Available: true, OutputPrefixEndByte: int64(len(relayBlindVectorNonStreamBody)), TerminalState: TerminalStateNormalDone,
+			TerminalStateTSUnixMS: base.TerminalStateTSUnixMS, RelayBlindResponseSHA256: hex.EncodeToString(sum[:])},
+		OutputAvailable: true, UsageSource: UsageSourceCoordinatorObserved, TerminalStateTSUnixMS: base.TerminalStateTSUnixMS,
+		Usage: SettlementUsage{BillableInputTokens: 37, BillableOutputTokens: 9, ObservedInputTokens: 37, ObservedOutputTokens: 9,
+			DeliveredOutputBytes: int64(len(relayBlindVectorNonStreamBody))},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	verdicts := func(requestID string) int64 {
+		return scalar(t, store.db, `SELECT COUNT(*) FROM settlement_receipt_verdicts WHERE request_id = ?`, requestID)
+	}
+
+	// At the exact deadline nothing closes.
+	if closed, err := store.SweepExpiredSettlementVerdicts(ctx, deadline, 0); err != nil || closed != 0 {
+		t.Fatalf("at deadline closed=%d err=%v", closed, err)
+	}
+	if closed, err := store.SweepExpiredSettlementVerdicts(ctx, deadline+1, 0); err != nil || closed != 1 {
+		t.Fatalf("after deadline closed=%d err=%v", closed, err)
+	}
+	var closedFlag, pendingDeadline int64
+	var outcome, reason, terminal string
+	if err := store.db.QueryRow(`SELECT closed, settlement_outcome, reason, terminal_state, pending_deadline_unix_ms
+  FROM settlement_receipt_verdicts WHERE request_id = ?`, unrecorded.RequestID).Scan(&closedFlag, &outcome, &reason, &terminal, &pendingDeadline); err != nil ||
+		closedFlag != 1 || outcome != SettlementOutcomeQuarantined || reason != RelayBlindAttemptUnrecordedReason ||
+		terminal != TerminalStateUpstreamTransportDisconnect || pendingDeadline != deadline {
+		t.Fatalf("unrecorded verdict closed=%d outcome=%s reason=%s terminal=%s deadline=%d err=%v", closedFlag, outcome, reason, terminal, pendingDeadline, err)
+	}
+	for _, id := range []string{later.RequestID, observe.RequestID, withOutput.RequestID} {
+		if got := verdicts(id); got != 0 {
+			t.Fatalf("%s verdicts=%d want 0", id, got)
+		}
+	}
+	// Repeated passes neither close it again nor write audit rows for it.
+	audits := scalar(t, store.db, `SELECT COUNT(*) FROM audit_log`)
+	if closed, err := store.SweepExpiredSettlementVerdicts(ctx, deadline+2, 0); err != nil || closed != 0 {
+		t.Fatalf("repeat closed=%d err=%v", closed, err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM audit_log`); got != audits {
+		t.Fatalf("repeat pass wrote audit rows: %d -> %d", audits, got)
+	}
+	// The later attempt closes once its own deadline passes.
+	if closed, err := store.SweepExpiredSettlementVerdicts(ctx, deadline+60_001, 0); err != nil || closed != 1 {
+		t.Fatalf("later closed=%d err=%v", closed, err)
+	}
+	if got := verdicts(unrecorded.RequestID) + verdicts(later.RequestID); got != 2 {
+		t.Fatalf("closed verdicts=%d want 2", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM spec022_payable_request_credits`); got != 0 {
+		t.Fatalf("payable=%d", got)
+	}
+}
+
+// The unrecorded pass reads the partial index, never the whole snapshot
+// table, so it stays cheap on a large money database.
+func TestUnrecordedRelayBlindSweepUsesPartialIndex(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	rows, err := store.db.Query(`EXPLAIN QUERY PLAN `+unrecordedRelayBlindSweepSQL, 1, 1, 1, 0, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var plan []string
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, detail)
+	}
+	joined := strings.Join(plan, "; ")
+	if !strings.Contains(joined, "SEARCH rs USING INDEX idx_srs_relay_blind_enforce_decision") || strings.Contains(joined, "SCAN ") {
+		t.Fatalf("plan=%s", joined)
 	}
 }
 

@@ -45,6 +45,10 @@ type Store struct {
 	// failure backoff, carried across passes (pool_settlement_expiry_sweep.go).
 	poolSweepMu sync.Mutex
 	poolSweep   poolSettlementSweepState
+	// relayBlindAttemptTimeoutMS bounds a relay-blind dispatch (the buyer
+	// request timeout), so it bounds the terminal of an attempt whose
+	// terminal was never recorded (SPEC-022 R-13.10). Zero means unset.
+	relayBlindAttemptTimeoutMS atomic.Int64
 	// settlementReceiptRecovery protects a signed receipt already observed by
 	// this process from racing the missing-receipt deadline sweeper while its
 	// bounded persistence retry is in flight. The receipt bytes remain owned by
@@ -635,6 +639,9 @@ CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutio
 		return err
 	}
 	if err := s.ensureRelayBlindSettlementOutcomeVocabulary(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureRelayBlindUnrecordedAttemptIndex(ctx); err != nil {
 		return err
 	}
 	if err := s.normalizeBillingTimeTextColumns(ctx); err != nil {
