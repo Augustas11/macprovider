@@ -265,13 +265,26 @@ CREATE TABLE ledger_request_credits (
     provider_credits INTEGER NOT NULL,
     fault_flag TEXT NOT NULL,
     quarantined INTEGER NOT NULL,
-    settlement_policy_mode TEXT NOT NULL DEFAULT 'legacy'
+    settlement_policy_mode TEXT NOT NULL DEFAULT 'legacy',
+    settlement_account_scope_hash TEXT NULL
 );
 CREATE VIEW spec022_payable_request_credits AS
 SELECT *
   FROM ledger_request_credits
  WHERE quarantined = 0
    AND settlement_policy_mode = 'enforce';
+CREATE TABLE settlement_receipt_verdicts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_scope_hash TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    attempt_n INTEGER NOT NULL,
+    provider_id TEXT NOT NULL,
+    receipt_result TEXT NOT NULL,
+    settlement_outcome TEXT NOT NULL,
+    closed INTEGER NOT NULL
+);
+INSERT INTO settlement_receipt_verdicts (account_scope_hash, request_id, attempt_n, provider_id, receipt_result, settlement_outcome, closed)
+VALUES ('scope-a', 'req-1', 0, 'provider-a', 'valid', 'verified', 1);
 CREATE TABLE provider_tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     token_hash TEXT NOT NULL UNIQUE,
@@ -285,12 +298,12 @@ CREATE TABLE provider_tokens (
 INSERT INTO ledger_request_credits (
     request_id, attempt_n, provider_id, ts_utc, created_at_utc, updated_at_utc,
     prompt_tokens, completion_tokens, estimated_completion_tokens, usage_source,
-    provider_credits, fault_flag, quarantined, settlement_policy_mode
+    provider_credits, fault_flag, quarantined, settlement_policy_mode, settlement_account_scope_hash
 ) VALUES
     ('req-1', 0, 'provider-a', '2026-07-05T08:59:00Z', '2026-07-05T08:59:01Z', NULL,
-     100, 200, NULL, 'provider_reported', 300, 'none', 0, 'enforce'),
+     100, 200, NULL, 'provider_reported', 300, 'none', 0, 'enforce', 'scope-a'),
     ('req-2', 0, 'provider-a', '2026-07-05T09:01:00Z', '2026-07-05T09:01:01Z', '2026-07-05T09:02:00Z',
-     33, NULL, 44, 'byte_estimated', 0, 'none', 1, 'enforce');
+     33, NULL, 44, 'byte_estimated', 0, 'none', 1, 'enforce', 'scope-a');
 INSERT INTO provider_tokens (token_hash, token_prefix, provider_id, provider_name, created_at, last_used_at)
 VALUES ('hash-a', 'hash-a', 'provider-a', 'Provider A', '2026-07-05T08:00:00Z', '2026-07-05T09:00:00Z');
 `); err != nil {
@@ -348,4 +361,76 @@ INSERT INTO ledger_request_credits (
 		t.Fatalf("stat legacy seed sqlite: %v", err)
 	}
 	return path
+}
+
+// SPEC-022 R-10.7: spec022_verified (and its verified audit record) derives
+// only from the literal closed, valid verified verdict and the
+// positive-verification predicate. A payable relay_blind_settled credit, a
+// positive-verification-excluded credit, and a payable credit without a
+// verified verdict all mirror as not verified.
+func TestFetchRequestCreditsVerifiedOnlyFromLiteralVerifiedVerdict(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "request-log.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+CREATE TABLE ledger_request_credits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id TEXT NOT NULL, attempt_n INTEGER NOT NULL, provider_id TEXT NOT NULL,
+    ts_utc TEXT NOT NULL, created_at_utc TEXT NOT NULL, updated_at_utc TEXT NULL,
+    prompt_tokens INTEGER NULL, completion_tokens INTEGER NULL, estimated_completion_tokens INTEGER NULL,
+    usage_source TEXT NOT NULL, provider_credits INTEGER NOT NULL, fault_flag TEXT NOT NULL, quarantined INTEGER NOT NULL,
+    settlement_policy_mode TEXT NOT NULL DEFAULT 'legacy', settlement_account_scope_hash TEXT NULL,
+    positive_verification_excluded INTEGER NOT NULL DEFAULT 0
+);
+CREATE VIEW spec022_payable_request_credits AS
+SELECT * FROM ledger_request_credits WHERE quarantined = 0 AND settlement_policy_mode = 'enforce';
+CREATE TABLE settlement_receipt_verdicts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, account_scope_hash TEXT NOT NULL, request_id TEXT NOT NULL,
+    attempt_n INTEGER NOT NULL, provider_id TEXT NOT NULL, receipt_result TEXT NOT NULL,
+    settlement_outcome TEXT NOT NULL, closed INTEGER NOT NULL
+);
+INSERT INTO ledger_request_credits (request_id, attempt_n, provider_id, ts_utc, created_at_utc, usage_source,
+    provider_credits, fault_flag, quarantined, settlement_policy_mode, settlement_account_scope_hash, positive_verification_excluded)
+VALUES
+    ('req-verified', 0, 'p', '2026-10-05T00:00:00Z', '2026-10-05T00:00:00Z', 'coordinator_observed', 10, 'none', 0, 'enforce', 'scope', 0),
+    ('req-relay-blind', 0, 'p', '2026-10-05T00:00:00Z', '2026-10-05T00:00:00Z', 'coordinator_observed', 10, 'none', 0, 'enforce', 'scope', 1),
+    ('req-relay-blind-unflagged', 0, 'p', '2026-10-05T00:00:00Z', '2026-10-05T00:00:00Z', 'coordinator_observed', 10, 'none', 0, 'enforce', 'scope', 0),
+    ('req-excluded', 0, 'p', '2026-10-05T00:00:00Z', '2026-10-05T00:00:00Z', 'coordinator_observed', 10, 'none', 0, 'enforce', 'scope', 1),
+    ('req-no-verdict', 0, 'p', '2026-10-05T00:00:00Z', '2026-10-05T00:00:00Z', 'coordinator_observed', 10, 'none', 0, 'enforce', 'scope', 0),
+    ('req-other-scope', 0, 'p', '2026-10-05T00:00:00Z', '2026-10-05T00:00:00Z', 'coordinator_observed', 10, 'none', 0, 'enforce', 'scope-other', 0);
+INSERT INTO settlement_receipt_verdicts (account_scope_hash, request_id, attempt_n, provider_id, receipt_result, settlement_outcome, closed)
+VALUES
+    ('scope', 'req-verified', 0, 'p', 'valid', 'verified', 1),
+    ('scope', 'req-relay-blind', 0, 'p', 'valid', 'relay_blind_settled', 1),
+    ('scope', 'req-relay-blind-unflagged', 0, 'p', 'valid', 'relay_blind_settled', 1),
+    ('scope', 'req-excluded', 0, 'p', 'valid', 'verified', 1),
+    ('scope', 'req-other-scope', 0, 'p', 'valid', 'verified', 1);
+`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	source, err := OpenSQLite(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	rows, err := FetchRequestCredits(context.Background(), source, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, row := range rows {
+		got[row.RequestID] = row.Spec022Verified
+	}
+	want := map[string]bool{"req-verified": true, "req-relay-blind": false, "req-relay-blind-unflagged": false,
+		"req-excluded": false, "req-no-verdict": false, "req-other-scope": false}
+	for id, verified := range want {
+		if got[id] != verified {
+			t.Fatalf("%s spec022_verified=%v want %v (all=%v)", id, got[id], verified, got)
+		}
+	}
 }
