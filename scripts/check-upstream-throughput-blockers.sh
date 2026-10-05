@@ -434,9 +434,11 @@ out = {
         ),
         "note": (
             "The previously reviewed Qwen MTP transaction surfaces remain present, "
-            "but the pinned candidate now also includes the exact-envelope Qwen3.6 "
-            "A3B fused-MoE path and is not approved until Studio validation and the "
-            "freeze audits pass; upstream #645 remains the tagged-release replacement tracker"
+            "but the pinned candidate now also includes the exact-layout Qwen3.6 A3B "
+            "fused-MoE path (rows of 1-7 tokens, chunked at any batch size) and is not "
+            "approved until the ordinary-path Studio qualification and the freeze audits "
+            "pass; native-MTP R015 gates only native-tuple activation; upstream #645 "
+            "remains the tagged-release replacement tracker"
         ),
     },
     "native_mtp_immutable_dependency_exception": {
@@ -449,11 +451,11 @@ out = {
         "upstream_base_revision": native_mtp_exception_base,
         "remote_revision_verified": native_mtp_exception_remote_verified,
         "local_pin_matches": native_mtp_exception_pin_matches,
-        "review_status": "candidate_extension_pending_studio_and_freeze_audits",
+        "review_status": "candidate_extension_pending_ordinary_path_qualification_and_freeze_audits",
         "scope": (
             "standalone_qwen_mtp_loading_public_cache_transaction_packed_"
             "verification_strict_continuation_and_packed_recurrent_cache_"
-            "surfaces_plus_exact_qwen36_a3b_fused_moe_v3_t1_through_t7"
+            "surfaces_plus_exact_qwen36_a3b_fused_moe_v3_rows_t1_through_t7_chunked"
         ),
         "removal_trigger": (
             "first reviewed upstream tag with equivalent standalone-checkpoint "
