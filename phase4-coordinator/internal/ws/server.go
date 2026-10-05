@@ -255,6 +255,14 @@ type Server struct {
 	privacyAuthority       *relayblind.PrivacyAuthority
 	privacyPostureChans    sync.Map
 	privacyPostureInFlight sync.Map
+	// privacyAdvertised is the last accepted privacy key digest set per
+	// session, so an unchanged heartbeat re-advertisement does not challenge.
+	privacyAdvertised sync.Map
+	// beforeHandshakeAckSend is a test seam run just before hello_ack /
+	// auth_response v2 is enqueued; privacyPostureChallengeSent runs after a
+	// posture challenge is enqueued. Both nil in production.
+	beforeHandshakeAckSend      func()
+	privacyPostureChallengeSent func()
 
 	// Trust-revalidation sweep failure accounting (issue #582 FIX C). Bounds the
 	// remaining fail-open: a single transient sweep DB error is skipped, but N
@@ -2452,6 +2460,8 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		entry.Tier = s.commitProviderAdmission(hello, entry.Tier)
 	}
 	entry.AuthState = authState
+	// Unroutable until hello_ack is enqueued (cleared below).
+	entry.HandshakeAckPending = true
 	session, _ := s.registerProviderSession(conn, entry)
 	if session == nil {
 		// Eviction defense fired: bearer-less duplicate tried to
@@ -2461,7 +2471,6 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	}
 	registered = true
 	s.acceptRelayBlindKeyRecords(entry.ProviderID, entry.AssignedID, hello.RelayBlindKeyRecords)
-	s.acceptPrivacyKeyRecords(entry.ProviderID, entry.AssignedID, hello.PrivacyKeyRecords)
 	if reservedAdmission && entry.Tier == pool.TierProvisional {
 		s.admission.ReleasePendingProvisional()
 	}
@@ -2493,10 +2502,20 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		s.closeSession(session, CloseInvalidHello, "invalid_hello: ack")
 		return "", ""
 	}
-	if err := session.send(b); err != nil {
-		s.log.Warn().Err(err).Str("provider_id", hello.ProviderID).Msg("hello_ack write failed")
-		return "", ""
+	if s.beforeHandshakeAckSend != nil {
+		s.beforeHandshakeAckSend()
 	}
+	if err := session.sendHandshakeAck(b); err != nil {
+		s.log.Warn().Err(err).Str("provider_id", hello.ProviderID).Msg("hello_ack write failed")
+		// The session is registered: return its IDs so handleConn runs
+		// handleDisconnect for exactly this session.
+		return entry.ProviderID, entry.AssignedID
+	}
+	s.releaseAckedSession(entry.ProviderID, entry.AssignedID)
+	// Privacy key acceptance schedules a posture challenge on this session's
+	// FIFO writer. The provider requires hello_ack as the next frame, so the
+	// challenge may only be enqueued after the ack (SPEC-049).
+	s.acceptPrivacyKeyRecords(entry.ProviderID, entry.AssignedID, hello.PrivacyKeyRecords)
 	if s.cfg.Pool.WarmupGateEnabled {
 		s.startWarmupGate(*entry)
 	}
@@ -3044,6 +3063,8 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	// committed the token/PairOT/referral above; refusing here would strand a
 	// minted token. The bounded revalidation sweep evicts (never refuses) a
 	// session whose trust lapses after commit.
+	// Unroutable until auth_response v2 is enqueued (cleared below).
+	entry.HandshakeAckPending = true
 	session, refusal := s.registerProviderSession(conn, entry)
 	if session == nil {
 		switch refusal {
@@ -3057,7 +3078,6 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	}
 	registered = true
 	s.acceptRelayBlindKeyRecords(entry.ProviderID, entry.AssignedID, initial.RelayBlindKeyRecords)
-	s.acceptPrivacyKeyRecords(entry.ProviderID, entry.AssignedID, initial.PrivacyKeyRecords)
 	// Phase 3 observe-mode: trigger live MDA upgrade asynchronously after
 	// SE attestation auth. Never blocks auth. Serial comes from the SE
 	// attestation blob when present (MicroMDM device lookup).
@@ -3124,10 +3144,17 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		s.closeSession(session, CloseInvalidHello, "invalid_auth_response")
 		return "", ""
 	}
-	if err := session.send(rawResponse); err != nil {
-		s.log.Warn().Err(err).Str("provider_id", initial.ProviderID).Msg("auth_response write failed")
-		return "", ""
+	if s.beforeHandshakeAckSend != nil {
+		s.beforeHandshakeAckSend()
 	}
+	if err := session.sendHandshakeAck(rawResponse); err != nil {
+		s.log.Warn().Err(err).Str("provider_id", initial.ProviderID).Msg("auth_response write failed")
+		// See handleV1Conn: handleConn tears down this registered session.
+		return entry.ProviderID, entry.AssignedID
+	}
+	s.releaseAckedSession(entry.ProviderID, entry.AssignedID)
+	// See handleV1Conn: the posture challenge must follow auth_response v2.
+	s.acceptPrivacyKeyRecords(entry.ProviderID, entry.AssignedID, initial.PrivacyKeyRecords)
 	if s.cfg.Pool.WarmupGateEnabled {
 		s.startWarmupGate(*entry)
 	}
@@ -4128,6 +4155,7 @@ func (s *Server) registerProviderSessionLocked(conn net.Conn, entry *pool.Provid
 	session.useTier2Session(entry.Tier2Session)
 	session.probeWrites = true
 	session.onWriteFailure = s.handleProviderWriteFailure
+	session.ackPending = entry.HandshakeAckPending
 	s.sessions.Store(sessionKey(entry.ProviderID, entry.AssignedID), session)
 	_ = s.takeCloseEvent(conn) // successful admission: drop pre-auth close metadata
 	s.rememberProviderSnapshot(*entry)
@@ -4143,6 +4171,18 @@ func (s *Server) registerProviderSessionLocked(conn net.Conn, entry *pool.Provid
 	go session.runWriter()
 	go s.monitorHeartbeat(entry.ProviderID, entry.AssignedID, conn)
 	return session, pool.RegisterRefusalNone
+}
+
+// releaseAckedSession lifts the handshake-ack hold once the ack is enqueued
+// and re-persists the last-known snapshot, which registration wrote while
+// the session was still held out of routing.
+func (s *Server) releaseAckedSession(providerID, assignedID string) {
+	if !s.pool.ClearHandshakeAckPending(providerID, assignedID) {
+		return
+	}
+	if provider, ok := s.pool.Resolve(providerID, assignedID); ok {
+		s.rememberProviderSnapshot(provider)
+	}
 }
 
 func (s *Server) readProviderLoop(conn net.Conn, providerID, assignedID string) {

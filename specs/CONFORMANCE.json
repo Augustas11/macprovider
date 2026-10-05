@@ -1520,7 +1520,7 @@
     {
       "spec_id": "SPEC-049",
       "title": "Operator-Constrained Privacy Class",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -10520,7 +10520,11 @@
         "phase4-coordinator/internal/relayblind/privacy_authority.go:Eligible"
       ],
       "tests": [
-        "phase4-coordinator/internal/ws/privacy_posture_test.go:TestPrivacyPostureProbeRoundTrip"
+        "phase4-coordinator/internal/ws/privacy_posture_test.go:TestPrivacyPostureProbeRoundTrip",
+        "phase4-coordinator/internal/ws/privacy_posture_handshake_test.go:TestPrivacyPostureChallengeFollowsHelloAck",
+        "phase4-coordinator/internal/ws/privacy_posture_handshake_test.go:TestPrivacyPostureChallengeFollowsAuthResponseV2",
+        "phase4-coordinator/internal/ws/privacy_posture_test.go:TestHeartbeatPrivacyKeysChallengeOnlyOnChange",
+        "phase4-coordinator/internal/ws/privacy_posture_test.go:TestPrivacyPostureSweepChallengesUnchangedKeys"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-BETA"
@@ -10593,6 +10597,7 @@
       "tests": [
         "phase4-coordinator/internal/relayblind/privacy_test.go:TestPrivacyKeyAttestationBindsDigest",
         "phase4-coordinator/internal/buyer/privacy_class_test.go:TestPrivacyReservationNeverSelectsRelayBlindKey",
+        "phase4-coordinator/internal/ws/privacy_posture_test.go:TestReplacedSessionHeartbeatDoesNotRevokePrivacyKeys",
         "phase3-binary/Tests/macprovider-cliTests/PrivacyClassCryptoTests.swift:testMemoryOnlyKeyManagerWritesNoAgreementKey"
       ],
       "journeys": [

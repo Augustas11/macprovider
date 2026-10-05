@@ -247,6 +247,13 @@ type providerSession struct {
 	rekeyMu        sync.Mutex
 	rekey          *tier2RekeyExchange
 	rekeyWaiters   int
+
+	// ackPending holds text frames enqueued before the handshake ack in
+	// preAck; sendHandshakeAck flushes them behind the ack. Raw control
+	// frames (ping, close) pass through: the provider's WebSocket client
+	// never surfaces them as the next message. Both guarded by writeMu.
+	ackPending bool
+	preAck     []providerFrame
 }
 
 // providerFrame is the unit of work consumed by runWriter. Two kinds exist:
@@ -452,6 +459,26 @@ func providerWriteProbeFrame() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// sendHandshakeAck enqueues hello_ack / auth_response v2 ahead of every text
+// frame held while the ack was pending, then lifts the hold.
+func (ps *providerSession) sendHandshakeAck(payload []byte) error {
+	ps.writeMu.Lock()
+	defer ps.writeMu.Unlock()
+	if ps.closed {
+		return ErrRelayClosed
+	}
+	held := append([]providerFrame{{payload: payload}}, ps.preAck...)
+	if len(held) > cap(ps.writeCh)-len(ps.writeCh) {
+		return ErrRelayBackpressure
+	}
+	for _, f := range held {
+		ps.writeCh <- f
+	}
+	ps.ackPending = false
+	ps.preAck = nil
+	return nil
+}
+
 // enqueueRaw queues a pre-baked WS frame (header + body, already assembled by
 // the caller) for runWriter to emit with a single conn.Write. Used by the
 // post-handshake control-frame handler and by server-initiated Close paths so
@@ -466,6 +493,14 @@ func (ps *providerSession) enqueueFrame(f providerFrame) error {
 	defer ps.writeMu.Unlock()
 	if ps.closed {
 		return ErrRelayClosed
+	}
+	if ps.ackPending && !f.raw {
+		// Leave room for the ack itself in writeCh at flush time.
+		if len(ps.preAck) >= cap(ps.writeCh)-1 {
+			return ErrRelayBackpressure
+		}
+		ps.preAck = append(ps.preAck, f)
+		return nil
 	}
 	select {
 	case ps.writeCh <- f:

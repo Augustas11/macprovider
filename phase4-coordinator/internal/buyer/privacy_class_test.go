@@ -410,6 +410,28 @@ func TestPrivacyReservationRequiresEligibleProvider(t *testing.T) {
 	}
 }
 
+// A session still waiting for its handshake ack is neither selected for a
+// privacy reservation nor consumed against.
+func TestPrivacyReservationSkipsPreAckSession(t *testing.T) {
+	var dispatches atomic.Int32
+	h := newPrivacyHarness(t, privacyHarnessConfig{privacyKey: true, relayKey: true, relay: privacyCountingRelay(&dispatches)})
+	raw, _ := json.Marshal(relayblind.ReservationRequest{EndpointFamily: relayblind.EndpointChatCompletions, Model: "model-a", MaxOutputTokens: 32, InputTokenUpperBound: 96, EncryptedRequestBytes: 2048})
+	h.provider.HandshakeAckPending = true
+	if response := h.privacyRequest(t, http.MethodPost, "/v1/relay-blind/route-reservations", raw, "", nil); response.Code == http.StatusOK {
+		t.Fatalf("pre-ack privacy reservation succeeded: %s", response.Body.String())
+	}
+	h.provider.HandshakeAckPending = false
+	reservation := h.reserve(t, true)
+	sealed := h.seal(t, reservation, "privacy-request-pre-ack", h.privacyPrivate)
+	h.provider.HandshakeAckPending = true
+	if response := h.privacyRequest(t, http.MethodPost, "/v1/relay-blind/consume", sealed, "", nil); response.Code == http.StatusOK {
+		t.Fatalf("pre-ack privacy consume succeeded: %s", response.Body.String())
+	}
+	if dispatches.Load() != 0 {
+		t.Fatalf("dispatches=%d", dispatches.Load())
+	}
+}
+
 func TestPrivacyReservationNeverSelectsRelayBlindKey(t *testing.T) {
 	var dispatches atomic.Int32
 	h := newPrivacyHarness(t, privacyHarnessConfig{privacyEnabled: true, relayKey: true, relay: privacyCountingRelay(&dispatches)})

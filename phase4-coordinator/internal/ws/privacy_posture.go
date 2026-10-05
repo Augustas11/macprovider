@@ -3,6 +3,8 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -92,6 +94,9 @@ func (s *Server) runPrivacyPostureProbe(provider pool.Provider) {
 		s.log.Warn().Err(err).Str("provider_id", provider.ProviderID).Msg("privacy posture: challenge send failed")
 		return
 	}
+	if s.privacyPostureChallengeSent != nil {
+		s.privacyPostureChallengeSent()
+	}
 	timer := time.NewTimer(s.privacyAuthority.ResponseTimeout())
 	defer timer.Stop()
 	select {
@@ -133,7 +138,8 @@ func (s *Server) deliverPrivacyPostureResponse(providerID, assignedID string, pa
 // before session state changes. An absent field leaves records nil and is
 // a no-op. An empty array revokes. Parse or state failures do not touch
 // the authority, matching the gate that used to sit beside relay-blind
-// key acceptance.
+// key acceptance. Re-advertising an unchanged key set does not challenge:
+// runPrivacyPostureLoop is the SPEC-049-R005 challenge cadence.
 func (s *Server) acceptHeartbeatPrivacyKeys(providerID, assignedID string, payload []byte) {
 	hb, _, _, err := ParseHeartbeat(payload)
 	if err != nil {
@@ -142,30 +148,69 @@ func (s *Server) acceptHeartbeatPrivacyKeys(providerID, assignedID string, paylo
 	if !validState(pool.State(hb.Status)) {
 		return
 	}
-	s.acceptPrivacyKeyRecords(providerID, assignedID, hb.PrivacyKeyRecords)
+	s.acceptPrivacyKeys(providerID, assignedID, hb.PrivacyKeyRecords, false)
 }
 
+// acceptPrivacyKeyRecords is the handshake path: accepted keys are always
+// challenged once, right away.
 func (s *Server) acceptPrivacyKeyRecords(providerID, assignedID string, records []relayblind.PrivacyKeyRecord) {
+	s.acceptPrivacyKeys(providerID, assignedID, records, true)
+}
+
+func (s *Server) acceptPrivacyKeys(providerID, assignedID string, records []relayblind.PrivacyKeyRecord, alwaysProbe bool) {
 	if s == nil || s.privacyAuthority == nil || records == nil {
 		return
 	}
-	if err := s.privacyAuthority.AcceptPrivacyKeys(context.Background(), providerID, assignedID, records, s.now()); err != nil {
-		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("privacy key advertisement rejected")
+	key := sessionKey(providerID, assignedID)
+	// AcceptPrivacyKeys revokes omitted keys provider-wide, so a replaced
+	// session must not reach it. Session replacement holds the provider
+	// section, so checking the current session inside it is race-free.
+	var (
+		provider pool.Provider
+		accepted bool
+	)
+	s.withProviderSection(providerID, func(*providerSection) {
+		current, ok := s.pool.Resolve(providerID, assignedID)
+		if !ok {
+			return
+		}
+		if err := s.privacyAuthority.AcceptPrivacyKeys(context.Background(), providerID, assignedID, records, s.now()); err != nil {
+			s.privacyAdvertised.Delete(key)
+			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("privacy key advertisement rejected")
+			return
+		}
+		provider, accepted = current, true
+	})
+	if !accepted {
 		return
 	}
 	if len(records) == 0 {
+		s.privacyAdvertised.Delete(key)
 		return
 	}
-	provider, ok := s.pool.Resolve(providerID, assignedID)
-	if !ok {
+	set := privacyKeyDigestSet(records)
+	previous, seen := s.privacyAdvertised.Swap(key, set)
+	if !alwaysProbe && seen && previous == set {
 		return
 	}
 	s.schedulePrivacyPostureProbe(provider)
+}
+
+// privacyKeyDigestSet identifies an advertised key set; a new or rotated
+// record changes its key record digest.
+func privacyKeyDigestSet(records []relayblind.PrivacyKeyRecord) string {
+	digests := make([]string, 0, len(records))
+	for _, record := range records {
+		digests = append(digests, record.KeyRecord.KeyRecordDigest)
+	}
+	sort.Strings(digests)
+	return strings.Join(digests, ",")
 }
 
 func (s *Server) dropPrivacyPosture(providerID, assignedID string) {
 	if s == nil || s.privacyAuthority == nil {
 		return
 	}
+	s.privacyAdvertised.Delete(sessionKey(providerID, assignedID))
 	s.privacyAuthority.DropSession(providerID, assignedID)
 }

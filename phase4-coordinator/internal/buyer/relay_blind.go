@@ -289,11 +289,20 @@ func (s *Server) handleRelayBlindReservation(w http.ResponseWriter, r *http.Requ
 	_ = json.NewEncoder(w).Encode(response)
 }
 
+// relayBlindBindable reports a session a relay-blind or privacy reservation
+// may bind or consume against. A session still waiting for its handshake
+// ack is excluded: its relay-blind keys are accepted at registration, before
+// the ack. ServingCapable itself is left untouched because its body is
+// bound by SPEC-032-R001 conformant commit evidence.
+func relayBlindBindable(p pool.Provider) bool {
+	return p.ServingCapable() && !p.HandshakeAckPending
+}
+
 func (s *Server) selectRelayBlindProvider(ctx context.Context, model string, encryptedBytes int64, requireFree bool, class string) (pool.Provider, relayblind.KeyRecord, bool) {
 	providers := s.pool.Snapshot()
 	sort.Slice(providers, func(i, j int) bool { return providers[i].AssignedID < providers[j].AssignedID })
 	for _, provider := range providers {
-		eligible := provider.ServingCapable()
+		eligible := relayBlindBindable(provider)
 		if requireFree {
 			eligible = provider.RoutingEligible()
 		}
@@ -421,7 +430,7 @@ func (s *Server) handleRelayBlindConsume(w http.ResponseWriter, r *http.Request)
 	}
 	provider, live := s.pool.Resolve(reservation.ProviderID, reservation.AssignedSession)
 	_, keyErr := s.relayBlind.store.LookupKeyRecord(r.Context(), reservation.ProviderID, reservation.AssignedSession, reservation.KID, reservation.KeyRecordDigest, s.now())
-	if !live || !provider.ServingCapable() || !provider.IsWSTunneled() || keyErr != nil {
+	if !live || !relayBlindBindable(provider) || !provider.IsWSTunneled() || keyErr != nil {
 		_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, "relay_blind_key_expired", s.now())
 		writeRelayBlindError(w, "relay_blind_key_expired", "Relay-blind provider session or key expired")
 		return

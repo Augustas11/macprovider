@@ -1,6 +1,6 @@
 # SPEC-049 - Operator-Constrained Privacy Class
 
-**Version:** 0.1.1
+**Version:** 0.1.2
 Status: draft
 Owner: @Augustas11
 Issue: https://github.com/Augustas11/macprovider/issues/1749
@@ -10,7 +10,7 @@ Audit history: v0.1.0 is the initial default-off Beta contract. It does not prom
 {
   "spec_id": "SPEC-049",
   "title": "Operator-Constrained Privacy Class",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -27,7 +27,7 @@ Audit history: v0.1.0 is the initial default-off Beta contract. It does not prom
     "verdict": "DECISION_REQUIRED",
     "owner": "@Augustas11",
     "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-    "rationale": "SPEC-049 v0.1.0 defines the default-off Beta operator-constrained privacy class. No implementation, automated tests, signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence, staged canary, or three-lane audit exists yet. No conformance or production promotion is made by this draft."
+    "rationale": "SPEC-049 defines the default-off Beta operator-constrained privacy class. It is implemented and unit-tested, default-off in every component. Signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence (#1839) and production activation are pending. No conformance or production promotion is made by this draft."
   }
 }
 ```
@@ -325,7 +325,7 @@ The coordinator MUST verify `se_signature` as ECDSA-P256-SHA256 against the oper
 
 ### SPEC-049-R005 - Challenge freshness
 
-The coordinator MUST send each eligible-candidate session (one with accepted privacy key records) a `privacy_posture_challenge` with a fresh 32-byte random nonce every `posture_challenge_interval_seconds` (bounds 15..300, default 60). It MUST accept a response only if: the nonce is an exact echo of the outstanding challenge for that session; it arrives within `posture_response_timeout_seconds` (default 10); `issued_at_unix` is within ±30 seconds of coordinator time; and `sequence` is strictly greater than the last accepted sequence for that session. Each nonce is single-use. Eligibility derived from a verified posture MUST expire `posture_max_age_seconds` (default 150, at least interval plus timeout, at most 600) after coordinator verification. Posture state is in memory only: after a coordinator restart or session close every provider MUST be ineligible until a new posture verifies. A missed or late response makes the provider ineligible without quarantine.
+The coordinator MUST send each eligible-candidate session (one with accepted privacy key records) a `privacy_posture_challenge` with a fresh 32-byte random nonce every `posture_challenge_interval_seconds` (bounds 15..300, default 60). These periodic interval challenges are mandatory for every session with accepted privacy key records. A session whose accepted key set first appears or changes (a new or rotated record) is additionally challenged immediately; a heartbeat re-advertising an unchanged key set MUST NOT trigger an extra challenge. It MUST accept a response only if: the nonce is an exact echo of the outstanding challenge for that session; it arrives within `posture_response_timeout_seconds` (default 10); `issued_at_unix` is within ±30 seconds of coordinator time; and `sequence` is strictly greater than the last accepted sequence for that session. Each nonce is single-use. Eligibility derived from a verified posture MUST expire `posture_max_age_seconds` (default 150, at least interval plus timeout, at most 600) after coordinator verification. Posture state is in memory only: after a coordinator restart or session close every provider MUST be ineligible until a new posture verifies. A missed or late response makes the provider ineligible without quarantine.
 
 ### SPEC-049-R006 - Approved code identity and required posture values
 
@@ -341,7 +341,7 @@ When privacy mode is enabled the provider MUST apply the following sequence afte
 4. read `csops(CS_OPS_STATUS)` and require CS_VALID, CS_HARD, CS_KILL, and CS_RUNTIME, refusing CS_DEBUGGED and CS_GET_TASK_ALLOW;
 5. validate its own code signature (`SecCodeCopySelf`, `SecCodeCheckValidity`), read cdhash and team identifier, and refuse the entitlements `com.apple.security.get-task-allow`, `com.apple.security.cs.disable-library-validation`, and `com.apple.security.cs.allow-dyld-environment-variables`;
 6. require SIP on via `csr_check`, treating an unavailable symbol as SIP off;
-7. refuse when any `DYLD_*`, `MACPROVIDER_CB_TRACE`, `MACPROVIDER_PERF_TRACE`, `MACPROVIDER_KEEPALIVE_DEBUG`, or `MACPROVIDER_ALLOW_TEST_FIXTURES` environment variable is set;
+7. refuse when any `MACPROVIDER_CB_TRACE`, `MACPROVIDER_PERF_TRACE`, `MACPROVIDER_KEEPALIVE_DEBUG`, or `MACPROVIDER_ALLOW_TEST_FIXTURES` environment variable is set, and refuse when any `DYLD_*` environment variable is observed. On a binary that passes items 4 and 5, the hardened runtime without the `com.apple.security.cs.allow-dyld-environment-variables` entitlement prunes `DYLD_*` before `main`, so those variables are inert and the in-process check cannot observe them. The in-process `DYLD_*` refusal remains as defense in depth for a runtime that does not prune them, which items 4 and 5 already refuse. Acceptance evidence for `DYLD_*` is inertness (no injected library is loaded and dyld emits no diagnostic output), not a refusal exit;
 8. refuse a loopback runtime, an enabled KV disk tier, relay-blind disabled, or a missing state directory.
 
 Unsigned, ad-hoc-signed, dev, and debug builds therefore cannot start in privacy mode. Reading the provider's own configuration file before this sequence is not a credential resolution. A same-user process that could observe that window is the operator (§2.2), whose own same-user-readable configuration already holds the credential, and same-user Secure Enclave and process access is already in scope of §2.4 and §2.5. Immediately before decrypting every privacy-class request the provider MUST re-check P_TRACED and CS_DEBUGGED; on failure it MUST NOT decrypt, MUST send SPEC-041-R005 bound rejection evidence with `error_code: privacy_class_posture_stale`, and MUST permanently stop posture responses and privacy key advertisement for the process lifetime. A test-fixture posture source MAY be injected only in a debug or test build of the fixture command, gated by `MACPROVIDER_ALLOW_TEST_FIXTURES=1`, which by step 7 can never run in production privacy mode.
@@ -486,3 +486,4 @@ No evidence is attached. Physical evidence requires a signed `JOURNEY-PRIVACY-CL
 - 0.1.0 - Initial default-off Beta contract: exact claim and non-claims; threat model with device-bound, not code-bound, self-attested posture; closed posture statement, key attestation, reservation, dispatch marker, and response AEAD schemas; routing gate with no failover or downgrade; quarantine and durable kill switch; shared error inventory; exact disclosure strings; redaction proof; promotion gate. Carries forward the Product Build 2/Build 4 decisions (#1643, #1645, PR #1471) and keeps SPEC-042-R009.
 - 0.1.0 - Successful privacy-class chat responses carry `X-MacProvider-Privacy-Posture-Verified-At` from the dispatch-time gate for the gateway. The gateway does not store that timestamp, and the header is not a buyer response header.
 - 0.1.1 - SPEC-049-R007 hardening precedes any credential being resolved into the runtime configuration, used, or transmitted, rather than any credential load; reading the operator's own configuration file earlier is not a credential resolution, and a same-user observer is the operator already in scope. Test-fixture posture sources compile only into debug and test builds. No wire, schema, or routing change.
+- 0.1.2 - SPEC-049-R007 item 7: on a hardened-runtime binary without the allow-dyld-environment-variables entitlement (items 4 and 5), dyld prunes `DYLD_*` before `main`, so the variables are inert and the in-process check cannot see them; the in-process `DYLD_*` refusal stays as defense in depth, and `DYLD_*` acceptance evidence is inertness rather than a refusal exit. `MACPROVIDER_*` diagnostic variables remain refusals. Hardware basis: the #1839 journey on signed 1.8.214, where `DYLD_INSERT_LIBRARIES=/nonexistent.dylib DYLD_PRINT_LIBRARIES=1 macprovider-cli --version` printed only the version and exited 0. SPEC-049-R005: interval challenges every `posture_challenge_interval_seconds` remain mandatory for every session with accepted privacy keys; a new or rotated key set additionally triggers an immediate challenge, and a heartbeat re-advertising an unchanged key set triggers no extra challenge. The embedded gap rationale now records the implementation as unit-tested, with signed hardware evidence (#1839) and production activation pending. No wire, schema, or routing change.

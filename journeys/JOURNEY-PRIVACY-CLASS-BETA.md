@@ -60,9 +60,12 @@ The signed result MUST contain these passing steps:
    attach against the running privacy-mode process; prove both fail and the
    provider stays eligible only while P_TRACED and CS_DEBUGGED stay clear.
 4. `step-04-core-dump-and-env-refused` — Prove RLIMIT_CORE is 0 for the
-   process; prove startup with each refused diagnostic environment variable,
-   the KV disk tier enabled, a loopback runtime, or relay-blind disabled exits
-   non-zero before network with a bounded reason code.
+   process; prove startup with each refused `MACPROVIDER_*` diagnostic
+   environment variable, the KV disk tier enabled, a loopback runtime, or
+   relay-blind disabled exits non-zero before network with a bounded reason
+   code. Prove `DYLD_*` variables are inert on the signed binary: with
+   `DYLD_INSERT_LIBRARIES` and `DYLD_PRINT_LIBRARIES` set, no injected library
+   loads and dyld emits no output (SPEC-049-R007 item 7).
 5. `step-05-unsigned-build-refused` — Prove a locally built debug or ad-hoc
    signed binary, and a re-signed release binary, exit non-zero in privacy mode
    before network.
@@ -145,6 +148,7 @@ The redacted evidence and signed result MUST set these booleans to `true`:
 - `debugger_attach_refused_verified`
 - `core_dumps_disabled_verified`
 - `diagnostic_env_refused_verified`
+- `dyld_env_inert_verified`
 - `unsigned_or_resigned_build_refused_verified`
 - `sip_off_host_refused_verified`
 - `stream_frames_decrypted_and_verified`
