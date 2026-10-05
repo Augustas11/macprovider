@@ -143,6 +143,19 @@ class NativeMTPAdmissionSidecarTests(unittest.TestCase):
         with self.assertRaises(SidecarError):
             build(self.tuple, bad_cdhash)
 
+    def test_proposal_depth_stays_inside_the_fused_row_envelope(self):
+        # SPEC-023-R024 / SPEC-048 0.1.23: a verify row carries depth + 1
+        # tokens and must stay within seven tokens per row.
+        deep = copy.deepcopy(self.tuple)
+        deep["entry"]["proposal_depth"] = 7
+        deep["entry"]["complete_window_bytes_by_depth"] = list(range(1, 9))
+        with self.assertRaisesRegex(SidecarError, "proposal_depth"):
+            build(deep, release_input())
+        edge = copy.deepcopy(self.tuple)
+        edge["entry"]["proposal_depth"] = 6
+        edge["entry"]["complete_window_bytes_by_depth"] = list(range(1, 8))
+        build(edge, release_input())
+
     def test_identity_strings_are_ascii_and_duplicate_keys_fail(self):
         bad = copy.deepcopy(self.tuple)
         bad["entry"]["mtp_family_adapter"] = "qwen3_5_mtp_v1\u00e9"

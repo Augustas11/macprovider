@@ -106,6 +106,7 @@ TOP_KEYS = {
 STATE_CLASSES = {"stageable_rewindable", "hybrid_stageable_rewindable"}
 PROFILES = {"native_mtp_greedy_text_v1", "native_mtp_sampled_text_v1"}
 INT_MAX = (1 << 63) - 1
+MAX_PROPOSAL_DEPTH = 6
 
 
 class SidecarError(ValueError):
@@ -234,7 +235,9 @@ def validate_entry(entry: object, path: str) -> dict:
     if entry["mtp_state_class"] not in STATE_CLASSES:
         fail(f"{path}.mtp_state_class", "unsupported")
     _int(entry["mtp_head_count"], f"{path}.mtp_head_count", 1, 16)
-    depth = _int(entry["proposal_depth"], f"{path}.proposal_depth", 1, 16)
+    # SPEC-023-R024 / SPEC-048 0.1.23: a verify row (depth + 1 tokens) must stay
+    # inside the fused MoE envelope of seven tokens per row.
+    depth = _int(entry["proposal_depth"], f"{path}.proposal_depth", 1, MAX_PROPOSAL_DEPTH)
     slots = _int(entry["qualified_slots"], f"{path}.qualified_slots", 2, 8)
     windows = entry["complete_window_bytes_by_depth"]
     if not isinstance(windows, list) or len(windows) != depth + 1:

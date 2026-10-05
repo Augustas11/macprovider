@@ -148,7 +148,7 @@ native_mtp_required_merges_in_latest_release = all(
     for row in native_mtp_required_merges.values()
 )
 
-native_mtp_exception_revision = "9c1cd900287de58ec6577ec0da7aa3ee61781200"
+native_mtp_exception_revision = "b181102984a4d1875efbd9e0eab3a7dfd1c012c5"
 native_mtp_exception_base = "bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57"
 native_mtp_exception_repo = "Augustas11/mlx-swift-lm"
 native_mtp_exception_review_approved = False
@@ -426,7 +426,7 @@ out = {
         "kvcache_offset_graph_traceable": graph_traceable,
         "native_mtp_required_merges": native_mtp_required_merges,
         "native_mtp_required_merges_in_latest_release": native_mtp_required_merges_in_latest_release,
-        "native_mtp_public_row_mapped_transactions_reviewed": True,
+        "native_mtp_public_row_mapped_transactions_reviewed": native_mtp_exception_approved,
         "native_mtp_status": (
             "qualified_transaction_exception_default_off"
             if native_mtp_exception_approved

@@ -13,7 +13,7 @@ campaign is released, deployed, or activated.
 | Item | Revision / location | Status |
 | --- | --- | --- |
 | MacProvider campaign | PR #1832, `campaign/native-mtp-formal` | Draft; do not merge yet |
-| Fused upstream baseline | `Augustas11/mlx-swift-lm@9c1cd900287de58ec6577ec0da7aa3ee61781200` | Chunked fused envelope (SPEC-048 0.1.23); fused R015 `de99e85c` FAILED 10-03; ordinary-path qualification in progress |
+| Fused upstream baseline | `Augustas11/mlx-swift-lm@b181102984a4d1875efbd9e0eab3a7dfd1c012c5` | Chunked fused envelope (SPEC-048 0.1.23); fused R015 `de99e85c` FAILED 10-03; ordinary-path qualification in progress |
 | Fused MacProvider pin | `3600d7b9f` | Exact pin and fused qualification requirements committed |
 | SwiftPM release lock | `618dbe2d5` | Xcode 16.4 transitive pins restored; fused upstream revision preserved |
 | Operator-pause fix | `0e5e63b0c` | Targeted test passes; published signed CLI needed for live validation |

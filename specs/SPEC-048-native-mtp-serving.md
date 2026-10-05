@@ -354,7 +354,7 @@ be built and tested while the review gate below is pending, but it MUST NOT be
 signed, activated, or treated as production-qualified until that gate closes:
 
 - repository: `https://github.com/Augustas11/mlx-swift-lm.git`;
-- revision: `9c1cd900287de58ec6577ec0da7aa3ee61781200`;
+- revision: `b181102984a4d1875efbd9e0eab3a7dfd1c012c5`;
 - upstream base: `ml-explore/mlx-swift-lm@bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57`
   (`3.31.4`);
 - reviewed surface: `MTPKVCacheStorage`, `MTPKVCacheTransaction`,
@@ -380,7 +380,9 @@ signed, activated, or treated as production-qualified until that gate closes:
   Qwen3.5/3.6 sparse-MoE fused small-token path, including its exact affine
   quantization-layout gate, per-call scratch, overlapping-call safety,
   chunked evaluation of decode- and verify-shaped calls above seven flattened
-  tokens, and stock fallback for rows longer than seven tokens;
+  tokens, stock fallback for rows longer than seven tokens, and exact
+  dtype/shape validation of every packed weight, scale, and bias the fused
+  kernels index (any mismatch keeps the block on the stock path);
 - review date and owner: `2026-10-05`, `@Augustas11`;
 - mandatory exception re-review date: `2026-12-27`;
 - review gate: upstream-focused build-tests, MacProvider qualification and
@@ -1260,7 +1262,8 @@ requests.
 ## 9. Changelog and history
 
 - **0.1.23 (2026-10-05)** — Moves the immutable fork candidate to
-  `9c1cd900287de58ec6577ec0da7aa3ee61781200` (parent `ca29e954…`) and
+  `b181102984a4d1875efbd9e0eab3a7dfd1c012c5` (chunked envelope at
+  `9c1cd900…`, then exact tensor-layout validation; parent `ca29e954…`) and
   qualifies the fused A3B MoE path on the ordinary path, independent of native
   MTP (#1770). The fused-baseline R015 (policy `de99e85c…`, 2026-10-03) failed:
   one-slot throughput lower bounds `+5.18%` to `+10.96%` against the `0.15`
@@ -1276,7 +1279,10 @@ requests.
   both paths, and eight-slot ordinary decode throughput equal to stock. The
   R003 review gate for this pin is the ordinary-path qualification plus the
   frozen-diff audit; native-MTP R015 gates only native-tuple signing and
-  activation, and native MTP stays default-off. Every R015 policy frozen
+  activation, and native MTP stays default-off. Because a native verification
+  row carries `proposal_depth + 1` tokens, SPEC-023-R024 caps
+  `proposal_depth`, and the consumer caps the MTP manifest's
+  `max_proposal_depth` and `adaptation_max_depth`, at `6`. Every R015 policy frozen
   before this change binds the retired envelope and Studio OS build `25E253`;
   the next R015 is frozen on the current build.
 

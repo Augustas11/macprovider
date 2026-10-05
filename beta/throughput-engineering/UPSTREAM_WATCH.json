@@ -393,7 +393,7 @@
       }
     },
     "native_mtp_required_merges_in_latest_release": true,
-    "native_mtp_public_row_mapped_transactions_reviewed": true,
+    "native_mtp_public_row_mapped_transactions_reviewed": false,
     "native_mtp_status": "candidate_fused_moe_revision_pending_review",
     "note": "The previously reviewed Qwen MTP transaction surfaces remain present, but the pinned candidate now also includes the exact-layout Qwen3.6 A3B fused-MoE path (rows of 1-7 tokens, chunked at any batch size) and is not approved until the ordinary-path Studio qualification and the freeze audits pass; native-MTP R015 gates only native-tuple activation; upstream #645 remains the tagged-release replacement tracker"
   },
@@ -403,7 +403,7 @@
     "approved_by": null,
     "review_due_at": "2026-12-27",
     "fork_location": "https://github.com/Augustas11/mlx-swift-lm.git",
-    "fork_revision": "9c1cd900287de58ec6577ec0da7aa3ee61781200",
+    "fork_revision": "b181102984a4d1875efbd9e0eab3a7dfd1c012c5",
     "remote_revision_verified": true,
     "local_pin_matches": true,
     "upstream_base_revision": "bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57",
@@ -416,8 +416,8 @@
   "last_checked_at": "2026-10-03T01:20:31Z",
   "macprovider_pins": {
     "mlx_swift": "0.31.4",
-    "mlx_swift_lm": "9c1cd900287de58ec6577ec0da7aa3ee61781200",
-    "mlx_swift_lm_revision": "9c1cd900287de58ec6577ec0da7aa3ee61781200",
+    "mlx_swift_lm": "b181102984a4d1875efbd9e0eab3a7dfd1c012c5",
+    "mlx_swift_lm_revision": "b181102984a4d1875efbd9e0eab3a7dfd1c012c5",
     "mlx_swift_revision": "dc43e62d7055353c7f99fa071a4e71d29dfddc44",
     "swift_jinja": "2.5.1",
     "swift_jinja_revision": "4588064a20f3fc093c95f2f7d3359999bf30cae5",

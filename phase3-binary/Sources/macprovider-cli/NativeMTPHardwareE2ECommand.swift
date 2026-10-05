@@ -122,7 +122,7 @@ struct NativeMTPHardwareRuntimeFixture: @unchecked Sendable {
 
 final class NativeMTPHardwareE2ERunner {
     static let defaultModelID = nativeMTPHardwareDefaultModelID
-    static let upstreamRevision = "9c1cd900287de58ec6577ec0da7aa3ee61781200"
+    static let upstreamRevision = "b181102984a4d1875efbd9e0eab3a7dfd1c012c5"
     private static let providerRevision = "0123456789abcdef0123456789abcdef01234567"
     private static let liveExecutableCDHash = "456789abcdef0123456789abcdef0123456789ab"
     private static let reproducibleBuildSHA256 = String(repeating: "1", count: 64)

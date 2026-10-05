@@ -14,7 +14,11 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
   for prefill-shaped rows; the v0.22.10 description of a stock fallback above
   seven flattened tokens is retired. The same-setting rule is unchanged, and
   any R024 measurement, R015 result, journey, or release recorded under the
-  earlier envelope cannot authorize or seed a tuple on the new pin. Merge
+  earlier envelope cannot authorize or seed a tuple on the new pin. R024
+  `proposal_depth` narrows from `1..16` to `1..6` so a native verification row
+  (`proposal_depth + 1` tokens) never leaves the fused envelope when the
+  scheduler reduces depth; the consumer applies the same bound to the MTP
+  manifest's `max_proposal_depth` and `adaptation_max_depth`. Merge
   note: this branch drafted its #1770 entries as v0.22.6-v0.22.7 while
   origin/main used those numbers for #1816, so they are renumbered
   v0.22.9-v0.22.10. No content change to those entries.
@@ -3185,7 +3189,8 @@ unsigned JSON integers and never floats.
 | `decode_path` | exactly `"native_mtp"` |
 | `mtp_manifest_sha256` | `sha256` |
 | `mtp_family_adapter`, `mtp_state_class` | `short_string` |
-| `mtp_head_count`, `proposal_depth` | integers `1..16` |
+| `mtp_head_count` | integer `1..16` |
+| `proposal_depth` | integer `1..6`: a native verification row carries `proposal_depth + 1` target tokens and MUST stay inside the SPEC-048 fused MoE envelope of seven tokens per row |
 | `complete_window_bytes_by_depth` | exact array length `proposal_depth + 1`, indexed by proposal depth `0...proposal_depth`; every value is a positive JSON integer no larger than the consumer `Int.max`, values are monotonically nondecreasing, and the last value multiplied by `qualified_slots` MUST fit without integer overflow |
 | `runtime_revision`, `provider_revision` | `short_string` |
 | `source_commit` | full lowercase SHA-1 Git object id, exactly 40 hex characters (a SHA-256 object-format repository needs a consumer amendment first) |

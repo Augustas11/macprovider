@@ -1167,6 +1167,36 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         }
     }
 
+    /// SPEC-023-R024 / SPEC-048 0.1.23: a native verification row carries
+    /// `proposal_depth + 1` tokens and must stay inside the fused MoE envelope
+    /// of seven tokens per row, so every depth bound stops at six.
+    func testProposalDepthBoundsStayInsideTheFusedRowEnvelope() throws {
+        XCTAssertEqual(nativeMTPMaximumProposalDepth, 6)
+        let envelope = try makeReleaseEnvelopeFixture(entryEdit: { entry in
+            entry["proposal_depth"] = 7
+            entry["complete_window_bytes_by_depth"] = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
+        })
+        defer { try? FileManager.default.removeItem(at: envelope.base.root) }
+        XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(envelope),
+            .invalidValue("$.entries[0].proposal_depth")
+        )
+
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        for key in ["max_proposal_depth", "adaptation_max_depth"] {
+            XCTAssertEqual(
+                try rejectedError(fixture.mutatingRoot({ root in
+                    var mtp = root["mtp"] as! [String: Any]
+                    mtp[key] = 7
+                    root["mtp"] = mtp
+                }), fixture: fixture),
+                .invalidValue("$.mtp.\(key)"),
+                key
+            )
+        }
+    }
+
     func testReleaseEnvelopeRejectsLegacySHA256HashAlgorithm() throws {
         let fixture = try makeReleaseEnvelopeFixture(entryEdit: { entry in
             entry["hash_algorithm"] = "sha256"
