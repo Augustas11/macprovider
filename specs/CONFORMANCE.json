@@ -6969,7 +6969,8 @@
         "phase5-gateway/internal/router/relay_blind_success.go:reconcileRelayBlindEnforceFinality",
         "phase4-coordinator/internal/billing/settlement_finality.go:RelayBlindSettlementCoverage",
         "phase4-coordinator/internal/buyer/server.go:handleInternalSettlementFinality",
-        "phase5-gateway/internal/router/settlement_reconcile.go:fetchCoordinatorRelayBlindSettlementFinality"
+        "phase5-gateway/internal/router/settlement_reconcile.go:fetchCoordinatorRelayBlindSettlementFinality",
+        "phase7-verify/internal/verify/settlement.go:VerifySettlementReceipt"
       ],
       "tests": [
         "phase4-coordinator/internal/config/relay_blind_settlement_test.go:TestRelayBlindEnforceRequiresSettlementProfile",
@@ -6987,6 +6988,8 @@
         "phase4-coordinator/internal/billing/relay_blind_settlement_money_test.go:TestRelayBlindSettlementOutcomeMigrationOnPopulatedDatabase",
         "phase4-coordinator/internal/billing/relay_blind_settlement_money_test.go:TestBillingCompatFloorStaysAtTwoWhenRelayBlindMigrationFails",
         "phase4-coordinator/internal/stats/billingmirror/mirror_test.go:TestFetchRequestCreditsVerifiedOnlyFromLiteralVerifiedVerdict",
+        "phase7-verify/internal/verify/settlement_test.go:TestVerifySettlementReceiptQuarantinesV04OnRelayBlindSnapshot",
+        "phase7-verify/internal/verify/settlement_test.go:TestRelayBlindSettlementReceiptIsNeverVerifiedExternally",
         "phase4-coordinator/internal/billing/relay_blind_settlement_money_test.go:TestRelayBlindSnapshotOnlyAttemptFinality",
         "phase5-gateway/internal/storage/sqlite/relay_blind_settlement_dispatch_test.go:TestRelayBlindSettlementDispatchRecordedOnceAndLoaded",
         "phase5-gateway/internal/router/relay_blind_settlement_finality_test.go:TestRelayBlindSettledFinalityDebitsOnlyRelayBlindExecutions",
