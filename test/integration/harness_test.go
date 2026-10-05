@@ -238,11 +238,25 @@ type scenario struct {
 	rateCardVersion        string
 	autotuneCatalogVersion string
 	autotuneCatalogSHA256  string
+	autotunePolicyVersion  string
 	settlementCatalogID    string
 	settlementCatalogKeyID string
+	// coordinatorConfig / gatewayConfig, when set, edit the generated YAML
+	// maps before they are written (scenario-specific feature config).
+	coordinatorConfig func(*scenario, map[string]any)
+	gatewayConfig     func(*scenario, map[string]any)
 }
 
 type scenarioOpts struct {
+	// coordinatorConfig / gatewayConfig edit the generated config maps
+	// before they are written (e.g. trusted pools for #1816).
+	coordinatorConfig func(*scenario, map[string]any)
+	gatewayConfig     func(*scenario, map[string]any)
+	// beforeProviders runs after the coordinator is healthy and before any
+	// fake provider connects (control-plane setup); providerSetup adjusts
+	// each fake provider before it starts.
+	beforeProviders func(*scenario)
+	providerSetup   func(*fakeProvider)
 	// gatewayServiceToken, when non-nil, overrides the gateway's
 	// coordinator.service_token config field. nil = use
 	// scenario.serviceToken. A pointer to the empty string is the only
@@ -313,6 +327,28 @@ type scenarioOpts struct {
 	// Optional coordinator trust pins. If omitted for an enabled scenario,
 	// the harness creates public-only keys for its configured providers.
 	relayBlindIdentityPublicKeys map[string]string
+	// coordinatorPrivacyClass pins the fixture SE key and one approved code
+	// identity. Nil leaves privacy_class at the coordinator default (off).
+	coordinatorPrivacyClass *coordinatorPrivacyClassOpts
+	// gatewayPrivacyClass turns on features.privacy_class. Relay-blind must
+	// already be enabled or the gateway rejects the config.
+	gatewayPrivacyClass bool
+}
+
+// coordinatorPrivacyClassOpts is the SPEC-049 pin block for one fixture.
+// Zero durations use the integration defaults: interval 15s, response
+// timeout 5s, max age 20s. Max age stays inside the gateway's 30s
+// reservation-expiry ceiling so a stale-posture wait can expire posture
+// without expiring the reservation.
+type coordinatorPrivacyClassOpts struct {
+	SEPublicKey       string
+	TeamID            string
+	SigningIdentifier string
+	CDHash            string
+	IntervalSeconds   int
+	MaxAgeSeconds     int
+	TimeoutSeconds    int
+	QuarantineSeconds int
 }
 
 type settlementCatalogFixture struct {
@@ -362,6 +398,8 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 	if opts.providerID != "" {
 		s.providerID = opts.providerID
 	}
+	s.coordinatorConfig = opts.coordinatorConfig
+	s.gatewayConfig = opts.gatewayConfig
 	t.Cleanup(s.shutdown)
 
 	if opts.providerCount == 0 {
@@ -427,6 +465,7 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 		s.rateCardSHA256 = settlementCatalog.rateCardSHA256
 		s.rateCardVersion = settlementCatalog.rateCardVersion
 		s.autotuneCatalogVersion = settlementCatalog.autotuneCatalogVersion
+		s.autotunePolicyVersion = settlementCatalog.autotunePolicyVersion
 		s.autotuneCatalogSHA256 = settlementCatalog.autotuneCatalogSHA256
 		s.settlementCatalogID = settlementCatalog.catalogID
 		s.settlementCatalogKeyID = settlementCatalog.catalogKeyID
@@ -442,13 +481,13 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 			relayBlindIdentityPublicKeys[slot.ID] = base64.RawURLEncoding.EncodeToString(pub)
 		}
 	}
-	s.writeCoordinatorYAML(buyerPort, provPort, opts.stickyEnabled, coordServiceTok, providerCfgs, settlementCatalog, opts.settlementEnforceMode, opts.pendingDeadlineSeconds, opts.coordinatorRelayBlindEnabled, relayBlindIdentityPublicKeys)
+	s.writeCoordinatorYAML(buyerPort, provPort, opts.stickyEnabled, coordServiceTok, providerCfgs, settlementCatalog, opts.settlementEnforceMode, opts.pendingDeadlineSeconds, opts.coordinatorRelayBlindEnabled, relayBlindIdentityPublicKeys, opts.coordinatorPrivacyClass)
 
 	gwServiceTok := s.serviceToken
 	if opts.gatewayServiceToken != nil {
 		gwServiceTok = *opts.gatewayServiceToken
 	}
-	s.writeGatewayYAML(gwPort, opts.stickyEnabled, gwServiceTok, opts.settlementReconcileIntervalSeconds, opts.gatewayRelayBlindEnabled)
+	s.writeGatewayYAML(gwPort, opts.stickyEnabled, gwServiceTok, opts.settlementReconcileIntervalSeconds, opts.gatewayRelayBlindEnabled, opts.gatewayPrivacyClass)
 
 	if opts.seedAccount {
 		s.apiKey = s.seedGatewayAccountAndKey()
@@ -480,6 +519,9 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 	s.waitForHealth(s.coordBuyerURL + "/healthz")
 	s.waitForHealth(s.coordProvURL + "/healthz")
 
+	if opts.beforeProviders != nil {
+		opts.beforeProviders(s)
+	}
 	if !opts.skipProvider && !opts.externalWebSocketProvider {
 		for i, slot := range providerSlots {
 			fp := newFakeProvider(t, slot.ID, slot.Port, s.coordProvURL, providerTokens[i])
@@ -488,6 +530,9 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 			}
 			if opts.settlementReceiptProvider {
 				fp.enableSettlementReceipts(settlementCatalog)
+			}
+			if opts.providerSetup != nil {
+				opts.providerSetup(fp)
 			}
 			fp.start(ctx)
 			s.fakeProvs = append(s.fakeProvs, fp)
@@ -557,7 +602,7 @@ func secretEntropyBitsPerByte(s string) float64 {
 // the audit fixture: we want a clean room for testing the GATEWAY ↔
 // COORDINATOR boundary, not the provider auth gate which has its own
 // dedicated tests in phase4-coordinator/internal/ws).
-func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled bool, gatewayServiceToken string, providers []map[string]any, settlementCatalog settlementCatalogFixture, settlementEnforceMode bool, pendingDeadlineSeconds int, relayBlindEnabled bool, relayBlindIdentityPublicKeys map[string]string) {
+func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled bool, gatewayServiceToken string, providers []map[string]any, settlementCatalog settlementCatalogFixture, settlementEnforceMode bool, pendingDeadlineSeconds int, relayBlindEnabled bool, relayBlindIdentityPublicKeys map[string]string, privacy *coordinatorPrivacyClassOpts) {
 	s.t.Helper()
 	tier2Cfg := map[string]any{
 		"observe_enabled":                    false,
@@ -638,7 +683,11 @@ func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled b
 			"max_active_reservations":      10000,
 			"max_key_records_per_provider": 8,
 			"metadata_requests_per_minute": 120,
+			// SPEC-022 R-14: relay-blind runs under enforce only through the
+			// relay-blind settlement profile.
+			"enforce_settlement_profile": relayBlindEnforceSettlementProfile(relayBlindEnabled, settlementEnforceMode),
 		},
+		"privacy_class": coordinatorPrivacyClassYAML(s.providerID, privacy),
 		"admission": map[string]any{
 			"pinned_only":                         false,
 			"provisional_admission_rate_per_hour": 1000,
@@ -705,12 +754,54 @@ func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled b
 			},
 		}
 	}
+	if s.coordinatorConfig != nil {
+		s.coordinatorConfig(s, cfg)
+	}
 	b, err := yaml.Marshal(cfg)
 	if err != nil {
 		s.t.Fatalf("marshal coordinator yaml: %v", err)
 	}
 	if err := os.WriteFile(s.coordYAML, b, 0o600); err != nil {
 		s.t.Fatalf("write coordinator yaml: %v", err)
+	}
+}
+
+func coordinatorPrivacyClassYAML(providerID string, privacy *coordinatorPrivacyClassOpts) map[string]any {
+	if privacy == nil {
+		return map[string]any{"enabled": false}
+	}
+	interval := privacy.IntervalSeconds
+	if interval == 0 {
+		interval = 15
+	}
+	timeout := privacy.TimeoutSeconds
+	if timeout == 0 {
+		timeout = 5
+	}
+	maxAge := privacy.MaxAgeSeconds
+	if maxAge == 0 {
+		maxAge = 20
+	}
+	quarantine := privacy.QuarantineSeconds
+	if quarantine == 0 {
+		quarantine = 86400
+	}
+	return map[string]any{
+		"enabled": true,
+		"provider_se_public_keys": map[string]string{
+			providerID: privacy.SEPublicKey,
+		},
+		"approved_code_identities": []map[string]any{{
+			"team_id":            privacy.TeamID,
+			"signing_identifier": privacy.SigningIdentifier,
+			"code_cdhash":        privacy.CDHash,
+			"expires_at":         time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
+		}},
+		"allowed_se_key_backends":            []string{"file", "keychain"},
+		"posture_challenge_interval_seconds": interval,
+		"posture_max_age_seconds":            maxAge,
+		"posture_response_timeout_seconds":   timeout,
+		"quarantine_seconds":                 quarantine,
 	}
 }
 
@@ -951,7 +1042,7 @@ type settlementCatalogFile struct {
 	Version   int                        `json:"version"`
 }
 
-func (s *scenario) writeGatewayYAML(gwPort int, stickyEnabled bool, serviceToken string, settlementReconcileIntervalSeconds int, relayBlindEnabled bool) {
+func (s *scenario) writeGatewayYAML(gwPort int, stickyEnabled bool, serviceToken string, settlementReconcileIntervalSeconds int, relayBlindEnabled bool, privacyClass bool) {
 	s.t.Helper()
 	cfg := map[string]any{
 		"listen": map[string]any{
@@ -1044,6 +1135,9 @@ func (s *scenario) writeGatewayYAML(gwPort int, stickyEnabled bool, serviceToken
 				"replay_max_bytes_per_account":  4194304,
 				"algorithms":                    []string{"x25519-hkdf-sha256-a256gcm-v1"},
 			},
+			"privacy_class": map[string]any{
+				"enabled": privacyClass,
+			},
 		},
 		"explorer": map[string]any{
 			"enabled": false,
@@ -1056,6 +1150,9 @@ func (s *scenario) writeGatewayYAML(gwPort int, stickyEnabled bool, serviceToken
 			"reconcile_batch_limit":       100,
 			"reconcile_request_timeout_s": 5,
 		}
+	}
+	if s.gatewayConfig != nil {
+		s.gatewayConfig(s, cfg)
 	}
 	b, err := yaml.Marshal(cfg)
 	if err != nil {
@@ -1518,6 +1615,31 @@ type fakeProvider struct {
 	stopped               chan struct{}
 	hitMu                 sync.Mutex
 	hits                  int // /v1/chat/completions hit count, for sticky verification
+	// #1816 pool-model journey: a loopback runtime class, the artifact
+	// algorithm of modelHash ("" = snapshot manifest), a durable admission
+	// identity key enrolled at v2 auth (signs model admission offers), the
+	// trusted_pool_v1 capability, and no catalog release envelope.
+	runtimeSource      string
+	modelHashAlgorithm string
+	admissionPriv      ed25519.PrivateKey
+	trustedPoolV1      bool
+	omitCatalogRelease bool
+	binaryVersion      string // "" = "1.6.0-fake"
+}
+
+func (p *fakeProvider) binaryVersionOrDefault() string {
+	if p.binaryVersion != "" {
+		return p.binaryVersion
+	}
+	return "1.6.0-fake"
+}
+
+// canonicalIdentity adds the session's canonical model identity to a frame.
+func (p *fakeProvider) canonicalIdentity(msg map[string]any) {
+	addCanonicalModelIdentity(msg, p.modelHash)
+	if p.modelHash != "" && p.modelHashAlgorithm != "" {
+		msg["model_hash_algorithm"] = p.modelHashAlgorithm
+	}
 }
 
 // Hits returns the number of /v1/chat/completions requests this fake
@@ -2280,7 +2402,7 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			"max_context_tokens":          8192,
 			"max_concurrency":             2,
 			"throughput_tps_estimate":     20.0,
-			"binary_version":              "1.6.0-fake",
+			"binary_version":              p.binaryVersionOrDefault(),
 			"endpoint_url":                endpointURL,
 			"provider_ecdh_public_key":    base64.RawURLEncoding.EncodeToString(providerECDH),
 			"provider_receipt_public_key": base64.StdEncoding.EncodeToString(p.receiptPubkey),
@@ -2288,8 +2410,17 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			"publishes_supported_models":  true,
 			"tier2_capabilities":          map[string]any{"encrypted_leg": true, "attestation": false, "aead_suites": []string{"A256GCM"}},
 		}
-		addCanonicalModelIdentity(initial, p.modelHash)
-		if p.catalogReleaseID != "" {
+		p.canonicalIdentity(initial)
+		if p.runtimeSource != "" {
+			initial["runtime_source"] = p.runtimeSource
+		}
+		if p.trustedPoolV1 {
+			initial["tier2_capabilities"].(map[string]any)["trusted_pool_v1"] = true
+		}
+		if p.admissionPriv != nil {
+			initial["provider_admission_public_key"] = base64.StdEncoding.EncodeToString(p.admissionPriv.Public().(ed25519.PublicKey))
+		}
+		if p.catalogReleaseID != "" && !p.omitCatalogRelease {
 			initial["catalog_release_id"] = p.catalogReleaseID
 			initial["catalog_policy_version"] = p.catalogPolicy
 			initial["catalog_candidate_sha256"] = p.catalogSHA256
@@ -2326,6 +2457,40 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			"supported_models":           []string{p.modelID},
 			"publishes_supported_models": true,
 		}
+		if p.admissionPriv != nil {
+			// Enroll the admission identity: sign the challenge-bound tuple
+			// over the canonical initial transcript.
+			initialWire, err := json.Marshal(initial)
+			if err != nil {
+				p.t.Errorf("marshal initial: %v", err)
+				return
+			}
+			var initialDecoded map[string]any
+			if err := json.Unmarshal(initialWire, &initialDecoded); err != nil {
+				p.t.Errorf("decode initial: %v", err)
+				return
+			}
+			initialCanonical, err := spec015CanonicalJSON(initialDecoded)
+			if err != nil {
+				p.t.Errorf("canonical initial transcript: %v", err)
+				return
+			}
+			transcript := sha256.Sum256(initialCanonical)
+			transcriptB64 := base64.StdEncoding.EncodeToString(transcript[:])
+			tuple, err := spec015CanonicalJSON(map[string]any{
+				"auth_attempt_id":          challenge.AuthAttemptID,
+				"provider_id":              p.providerID,
+				"binary_version":           initial["binary_version"],
+				"provider_ecdh_public_key": initial["provider_ecdh_public_key"],
+				"transcript_sha256":        transcriptB64,
+			})
+			if err != nil {
+				p.t.Errorf("canonical identity tuple: %v", err)
+				return
+			}
+			proof["identity_signature"] = base64.StdEncoding.EncodeToString(ed25519.Sign(p.admissionPriv, tuple))
+			proof["identity_signature_transcript_sha256"] = transcriptB64
+		}
 		if err := writeJSONFrame(conn, proof); err != nil {
 			p.t.Errorf("auth proof write: %v", err)
 			return
@@ -2342,7 +2507,9 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			p.t.Errorf("auth_response = %s err=%v", string(responsePayload), err)
 			return
 		}
-		if err := writeJSONFrame(conn, readyStateUpdate(p.modelID, p.modelHash)); err != nil {
+		ready := readyStateUpdate(p.modelID, p.modelHash)
+		p.canonicalIdentity(ready["metrics_snapshot"].(map[string]any))
+		if err := writeJSONFrame(conn, ready); err != nil {
 			p.t.Errorf("state_update write: %v", err)
 			return
 		}
@@ -2421,7 +2588,7 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 				"avg_latency_ms_since_last":  0.0,
 				"throughput_tps_since_last":  0.0,
 			}
-			addCanonicalModelIdentity(hb, p.modelHash)
+			p.canonicalIdentity(hb)
 			if err := writeJSONFrame(conn, hb); err != nil {
 				return
 			}
@@ -2757,4 +2924,11 @@ func (s *scenario) gatewayRequest(method, path string, extraHeaders map[string]s
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, resp.Header, body
+}
+
+func relayBlindEnforceSettlementProfile(relayBlindEnabled, settlementEnforceMode bool) string {
+	if relayBlindEnabled && settlementEnforceMode {
+		return "relay-blind-settlement-v1"
+	}
+	return ""
 }

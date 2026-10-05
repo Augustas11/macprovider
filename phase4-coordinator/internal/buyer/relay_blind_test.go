@@ -353,6 +353,14 @@ func TestRelayBlindDisableAfterConsumeBurnsAuthorizationWithoutDispatch(t *testi
 
 func relayBlindTestServer(t *testing.T, now time.Time, relay RelayBlindRelayFunc) (*Server, relayblind.KeyRecord, *ecdh.PrivateKey, func()) {
 	t.Helper()
+	server, record, providerPrivate, closeStore, _ := relayBlindTestServerWithProvider(t, now, relay)
+	return server, record, providerPrivate, closeStore
+}
+
+// relayBlindTestServerWithProvider also returns the registry-held provider
+// entry, so a test can flip session flags between requests.
+func relayBlindTestServerWithProvider(t *testing.T, now time.Time, relay RelayBlindRelayFunc) (*Server, relayblind.KeyRecord, *ecdh.PrivateKey, func(), *pool.Provider) {
+	t.Helper()
 	store, err := relayblind.OpenStore(filepath.Join(t.TempDir(), "relay-blind.sqlite"))
 	if err != nil {
 		t.Fatal(err)
@@ -394,7 +402,48 @@ func relayBlindTestServer(t *testing.T, now time.Time, relay RelayBlindRelayFunc
 	cfg.MetadataRequestsPerMinute = 100
 	server := NewServer(registry, zerolog.Nop(), now, WithGatewayServiceToken("gateway-token"), WithRequireGatewayContext(true), WithRelayBlind(cfg, store, relay))
 	server.now = func() time.Time { return now }
-	return server, record, providerPrivate, func() { _ = store.Close() }
+	return server, record, providerPrivate, func() { _ = store.Close() }, provider
+}
+
+// A session registered but not yet sent its handshake ack must not be bound
+// by a relay-blind reservation, and a reservation bound before must not be
+// consumed against it.
+func TestRelayBlindDoesNotBindPreAckSession(t *testing.T) {
+	now := time.Unix(1_800_100_300, 0).UTC()
+	server, _, providerPrivate, closeStore, provider := relayBlindTestServerWithProvider(t, now, nil)
+	defer closeStore()
+	reservationRaw, _ := json.Marshal(relayblind.ReservationRequest{EndpointFamily: relayblind.EndpointChatCompletions, Model: "model-a", MaxOutputTokens: 32, InputTokenUpperBound: 96, EncryptedRequestBytes: 1024})
+
+	provider.HandshakeAckPending = true
+	response := relayBlindRequest(t, server, http.MethodPost, "/v1/relay-blind/route-reservations", reservationRaw, "")
+	if response.Code == http.StatusOK || !strings.Contains(response.Body.String(), `"code":"relay_blind_provider_unsupported"`) {
+		t.Fatalf("pre-ack reservation code=%d body=%s", response.Code, response.Body.String())
+	}
+
+	provider.HandshakeAckPending = false
+	response = relayBlindRequest(t, server, http.MethodPost, "/v1/relay-blind/route-reservations", reservationRaw, "")
+	reservation, err := relayblind.ParseReservationResponse(response.Body.Bytes())
+	if response.Code != http.StatusOK || err != nil {
+		t.Fatalf("reservation code=%d err=%v body=%s", response.Code, err, response.Body.String())
+	}
+	envelope, err := reservation.NewEnvelope("external-request-pre-ack", now, bytes.Repeat([]byte{0x55}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	buyerPrivate, err := ecdh.X25519().GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err = envelope.Encrypt([]byte(`{"model":"model-a","messages":[{"role":"user","content":"secret"}]}`), providerPrivate.PublicKey().Bytes(), buyerPrivate.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelopeRaw, _ := json.Marshal(envelope)
+	provider.HandshakeAckPending = true
+	response = relayBlindRequest(t, server, http.MethodPost, "/v1/relay-blind/consume", envelopeRaw, "")
+	if response.Code == http.StatusOK || !strings.Contains(response.Body.String(), `"code":"relay_blind_key_expired"`) {
+		t.Fatalf("pre-ack consume code=%d body=%s", response.Code, response.Body.String())
+	}
 }
 
 func relayBlindRequest(t *testing.T, server *Server, method, path string, body []byte, executionAuthorization string) *httptest.ResponseRecorder {

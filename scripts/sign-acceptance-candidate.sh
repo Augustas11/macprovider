@@ -24,6 +24,7 @@ metadata="$root/scripts/acceptance-candidate-metadata.py"
 compatibility="$root/scripts/compatibility-set-manifest.py"
 artifact_index="$root/scripts/compatibility-artifact-index.py"
 release_discovery="$root/scripts/build-release-discovery-head.py"
+code_identity="$root/scripts/provider-code-identity.py"
 keychain_helper="$root/scripts/acceptance-signing-keychain.sh"
 acceptance_public_key="$root/security/acceptance-candidate-signing-public.pem"
 openssl_bin="${OPENSSL_BIN:-openssl}"
@@ -52,10 +53,10 @@ if [[ "$promotion_ready" == true ]]; then
   release_prerelease=false
 fi
 
-for command in python3 security codesign xcrun ditto hdiutil tar shasum spctl base64 "$openssl_bin"; do
+for command in python3 security codesign lipo xcrun ditto hdiutil tar shasum spctl base64 "$openssl_bin"; do
   command -v "$command" >/dev/null 2>&1 || die "required command is unavailable: $command"
 done
-for path in "$metadata" "$compatibility" "$artifact_index" "$release_discovery" "$keychain_helper" "$acceptance_public_key"; do
+for path in "$metadata" "$compatibility" "$artifact_index" "$release_discovery" "$code_identity" "$keychain_helper" "$acceptance_public_key"; do
   [[ -f "$path" && ! -L "$path" ]] || die "trusted signer input is absent or unsafe: $path"
 done
 [[ -d "$unsigned_dir" && ! -L "$unsigned_dir" ]] || die "unsigned input directory is absent or unsafe"
@@ -361,6 +362,19 @@ done
 [[ "$provider_bundle_count" -gt 0 ]] || die "signed provider payload lacks a SwiftPM resource bundle"
 tar -czf "$provider_asset" -C "$cli_work" "${provider_archive_members[@]}"
 python3 "$metadata" validate-archive --input "$provider_asset" --forbid-links
+# Issue #1842: derive the signed CLI code identity from the exact provider
+# tarball bytes; build-pearl binds it into the signed pearl-release.json.
+provider_cli_version="$(python3 - "$cli_work/compatibility-set.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["signed"]["components"]["provider_cli"]["version"])
+PY
+)"
+provider_code_identity="$signing_tmp/provider-code-identity.json"
+python3 "$code_identity" \
+  --tarball "$provider_asset" \
+  --binary-version "$provider_cli_version" \
+  --expect-sha256 "$(shasum -a 256 "$cli_work/macprovider-cli" | awk '{print $1}')" \
+  --output "$provider_code_identity"
 dmg_stage="$signing_tmp/dmg"
 mkdir "$dmg_stage"
 cp -R "$app" "$dmg_stage/Malibu.app"
@@ -401,6 +415,7 @@ python3 "$metadata" build-pearl \
   --provider-admission-policy "$provider_admission_policy" \
   --channel "$pearl_channel" \
   --catalog-directory "$output_dir" \
+  --provider-code-identity "$provider_code_identity" \
   --coordinator "$output_dir/coordinator-linux-amd64" \
   --coordinator-cli "$output_dir/coordinator-cli-linux-amd64" \
   --gateway "$output_dir/gateway-linux-amd64" \

@@ -12,6 +12,7 @@ struct ModelsCommand: AsyncParsableCommand {
             ModelsDiscoverCommand.self,
             ModelsEvaluateCommand.self,
             ModelsOfferCommand.self,
+            ModelsProposeCommand.self,
             ModelsAdmissionCommand.self,
             ModelsCatalogEconomicsCommand.self,
             ModelsPrepareCommand.self,
@@ -72,12 +73,15 @@ struct ModelsDiscoverCommand: AsyncParsableCommand {
     @Option(help: "Pin the ONE llama.cpp GGUF file that may be hashed (option c). Overrides --llamacpp-model-root; the served model's file stem must match it. Also MACPROVIDER_LLAMACPP_MODEL_PATH.")
     var llamacppModelPath: String?
 
+    @Flag(help: "Match catalog artifacts against the compiled-in artifact feed only; do not read the coordinator's signed live artifact feed.")
+    var offlineArtifactFeed = false
+
     func run() async throws {
         guard emitJSON else {
             writeStderr("models discover is JSON-only in this release; pass --json")
             throw ExitCode(2)
         }
-        let environment = BYOMDiscoveryEnvironment.production(
+        let environment = await BYOMDiscoveryEnvironment.production(
             namespacePath: localDiscoveryNamespacePath,
             mlxCacheDir: mlxCacheDir,
             ollamaOrigin: skipOllama ? nil : ollamaOrigin,
@@ -85,7 +89,7 @@ struct ModelsDiscoverCommand: AsyncParsableCommand {
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
             llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
-        )
+        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try BYOMLiveCatalogMatcher.configuredCoordinatorURL())
         let document = await BYOMDiscoveryRunner(environment: environment).discoverIncludingMLXLM()
         for warning in document.warnings.sorted() {
             writeStderr("models discover warning: \(warning)")
@@ -142,12 +146,15 @@ struct ModelsEvaluateCommand: AsyncParsableCommand {
     @Option(help: "Pin the ONE llama.cpp GGUF file that may be hashed (option c). Overrides --llamacpp-model-root; the served model's file stem must match it. Also MACPROVIDER_LLAMACPP_MODEL_PATH.")
     var llamacppModelPath: String?
 
+    @Flag(help: "Match catalog artifacts against the compiled-in artifact feed only; do not read the coordinator's signed live artifact feed.")
+    var offlineArtifactFeed = false
+
     func run() async throws {
         guard emitJSON else {
             writeStderr("models evaluate is JSON-only in this release; pass --json")
             throw ExitCode(2)
         }
-        let environment = BYOMDiscoveryEnvironment.production(
+        let environment = await BYOMDiscoveryEnvironment.production(
             namespacePath: localDiscoveryNamespacePath,
             mlxCacheDir: mlxCacheDir,
             ollamaOrigin: skipOllama ? nil : ollamaOrigin,
@@ -155,7 +162,7 @@ struct ModelsEvaluateCommand: AsyncParsableCommand {
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
             llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
-        )
+        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try BYOMLiveCatalogMatcher.configuredCoordinatorURL())
         let document = await BYOMEvaluationRunner(target: candidate, environment: environment).evaluateIncludingMLXLM()
         for warning in document.warnings.sorted() {
             writeStderr("models evaluate warning: \(warning)")
@@ -233,6 +240,9 @@ struct ModelsOfferCommand: AsyncParsableCommand {
     @Option(help: "Pin the ONE llama.cpp GGUF file that may be hashed (option c). Overrides --llamacpp-model-root; the served model's file stem must match it. Also MACPROVIDER_LLAMACPP_MODEL_PATH.")
     var llamacppModelPath: String?
 
+    @Flag(help: "Match catalog artifacts against the compiled-in artifact feed only; do not read the coordinator's signed live artifact feed.")
+    var offlineArtifactFeed = false
+
     func run() async throws {
         guard emitJSON else {
             if dryRun {
@@ -242,7 +252,7 @@ struct ModelsOfferCommand: AsyncParsableCommand {
             }
             throw ExitCode(2)
         }
-        let environment = BYOMDiscoveryEnvironment.production(
+        let environment = await BYOMDiscoveryEnvironment.production(
             namespacePath: localDiscoveryNamespacePath,
             mlxCacheDir: mlxCacheDir,
             ollamaOrigin: skipOllama ? nil : ollamaOrigin,
@@ -250,7 +260,7 @@ struct ModelsOfferCommand: AsyncParsableCommand {
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
             llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
-        )
+        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config))
         if dryRun {
             let document = await BYOMOfferDryRunRunner(target: candidate, environment: environment).dryRun()
             for warning in document.warnings.sorted() {
@@ -299,6 +309,274 @@ struct ModelsOfferCommand: AsyncParsableCommand {
         } catch let error as BYOMModelAdmissionError {
             writeStderr(error.description)
             throw ExitCode(2)
+        }
+    }
+}
+
+struct ModelsProposeCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "propose",
+        abstract: "Propose a locally served, uncatalogued model to a Trusted Pool creator.",
+        discussion: """
+        Hashes the served artifact from its file bytes and prints the closed \
+        pool_model_proposal.v1 bundle a pool creator turns into one signed pool \
+        model entry. With --yes it also submits the normal coordinator-backed \
+        offer (the same path as models offer --yes) so the coordinator can bind \
+        the offer once the creator's entry is live, and embeds that offer status.
+
+        pool_model_proposal.v1 (every key present; nullable values are null):
+          schema                 "pool_model_proposal.v1"
+          generated_at           RFC 3339 UTC
+          cli_version            string
+          pool_id                the --pool value
+          provider_id            string or null
+          candidate_id           the BYOM candidate id
+          served_model_ref       e.g. llamacpp:my-model
+          runtime_source         llamacpp_loopback, lmstudio_loopback,
+                                 ollama_loopback, mlx_cache, mlxlm_loopback,
+                                 or omlx_loopback
+          display_name           string
+          catalog_model_key      string or null (string: a catalog path exists)
+          model_entry            the pool entry fields:
+            pool_model_id            pool/<pool_id>/<slug>
+            artifact_hash_algorithm  macprovider.gguf-file.v1 or
+                                     macprovider.snapshot-manifest.v1
+            artifact_hash            64 lowercase hex, hashed by this CLI
+            allowed_runtime_sources  [runtime_source]
+            license                  null; the creator supplies an SPDX id
+                                     or LicenseRef-*
+            paid_serving_attested    null; the creator must sign true
+            pricing                  null, or prompt_rate_per_mtok,
+                                     prompt_cache_hit_rate_per_mtok and
+                                     completion_rate_per_mtok
+            disclosure_class         "pool_attested_unverified"
+            max_context_tokens       1..1048576 or null
+          creator_requirements   closed codes to satisfy before signing
+          evidence               evaluation_digest_sha256 and
+                                 known_answer_probe_evidence_sha256 (the
+                                 coordinator records the probe; null here)
+          offer_status           model_admission_status.v1, or null
+                                 without --yes
+          warnings               sorted closed codes
+
+        Earning stays pool-scoped: a pool entry is pool-attested, not \
+        network-verified.
+        """
+    )
+
+    @Argument(help: "Candidate id, served model reference, or display name from models discover --json.")
+    var candidate: String
+
+    @Option(name: .customLong("pool"), help: "The Trusted Pool id (22 characters) to propose the model to.")
+    var poolID: String
+
+    @Option(help: "Slug for the suggested pool_model_id (pool/<pool_id>/<slug>). Defaults to one derived from the model name.")
+    var slug: String?
+
+    @Flag(name: .customLong("json"), help: "Emit the strict pool_model_proposal.v1 JSON contract.")
+    var emitJSON = false
+
+    @Flag(help: "Also submit the coordinator-backed offer for this candidate (mutates coordinator admission state).")
+    var yes = false
+
+    @Option(help: "Suggested prompt rate, in rate-card units per million tokens. Give all three rates or none.")
+    var promptRatePerMtok: Int64?
+
+    @Option(help: "Suggested prompt cache-hit rate, no higher than the prompt rate.")
+    var promptCacheHitRatePerMtok: Int64?
+
+    @Option(help: "Suggested completion rate, in rate-card units per million tokens.")
+    var completionRatePerMtok: Int64?
+
+    @Option(help: "YAML config path. Overrides MACPROVIDER_CONFIG.")
+    var config: String?
+
+    @Option(help: "Coordinator WebSocket/HTTPS URL. Overrides MACPROVIDER_COORDINATOR_URL and config file coordinator_url.")
+    var coordinatorURL: String?
+
+    @Option(help: "Stable provider identifier. Overrides MACPROVIDER_PROVIDER_ID and config file provider_id.")
+    var providerID: String?
+
+    @Option(help: "Optional 64-character lowercase SHA-256 digest of a local evaluation document.")
+    var evaluationDigestSHA256: String?
+
+    @Option(help: "Requested non-earning disclosure class for the coordinator offer.")
+    var requestedDisclosureClass: String = "non_earning_provider_asserted"
+
+    @Option(help: ArgumentHelp("CLI-owned local discovery namespace path.", visibility: .hidden))
+    var localDiscoveryNamespacePath: String?
+
+    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub.")
+    var mlxCacheDir: String?
+
+    @Option(help: "Ollama-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
+    var ollamaOrigin: String = "http://127.0.0.1:11434"
+
+    @Flag(help: "Skip the Ollama-compatible loopback adapter during candidate lookup.")
+    var skipOllama = false
+
+    @Option(help: "LM Studio loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
+    var lmstudioOrigin: String = BYOMLMStudioDiscovery.defaultOrigin
+
+    @Flag(help: "Skip the LM Studio loopback adapter during candidate lookup.")
+    var skipLmstudio = false
+
+    @Option(help: "llama.cpp llama-server loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
+    var llamacppOrigin: String = BYOMLlamaCppDiscovery.defaultOrigin
+
+    @Flag(help: "Skip the llama.cpp loopback adapter during candidate lookup.")
+    var skipLlamacpp = false
+
+    @Option(help: "Directory llama.cpp GGUF files may be resolved and hashed from (one or two levels deep). Also MACPROVIDER_LLAMACPP_MODEL_ROOT.")
+    var llamacppModelRoot: String?
+
+    @Option(help: "Pin the ONE llama.cpp GGUF file that may be hashed. Overrides --llamacpp-model-root. Also MACPROVIDER_LLAMACPP_MODEL_PATH.")
+    var llamacppModelPath: String?
+
+    @Flag(help: "Match catalog artifacts against the compiled-in artifact feed only; do not read the coordinator's signed live artifact feed.")
+    var offlineArtifactFeed = false
+
+    func run() async throws {
+        guard emitJSON else {
+            writeStderr("models propose is JSON-only in this release; pass --json")
+            throw ExitCode(2)
+        }
+        do {
+            _ = try PoolModelProposalBuilder.validatePoolID(poolID)
+            let pricing = try PoolModelProposalBuilder.pricing(
+                prompt: promptRatePerMtok,
+                cacheHit: promptCacheHitRatePerMtok,
+                completion: completionRatePerMtok
+            )
+            let evaluationDigest = evaluationDigestSHA256?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let evaluationDigest, evaluationDigest.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) == nil {
+                throw BYOMModelAdmissionError.invalidEvaluationDigest
+            }
+            let environment = await BYOMDiscoveryEnvironment.production(
+                namespacePath: localDiscoveryNamespacePath,
+                mlxCacheDir: mlxCacheDir,
+                ollamaOrigin: skipOllama ? nil : ollamaOrigin,
+                openAICompatibleOrigin: nil,
+                lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
+                llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
+                llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
+            ).withCatalogMatcher(
+                offline: offlineArtifactFeed,
+                coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)
+            )
+            let bundle = yes
+                ? try await submitAndPropose(environment: environment, pricing: pricing, evaluationDigest: evaluationDigest)
+                : try await propose(environment: environment, pricing: pricing, evaluationDigest: evaluationDigest)
+            try ModelSwitchingWireCodec.printJSON(bundle)
+        } catch let error as PoolModelProposalError {
+            writeStderr("models propose: \(error.description)")
+            throw ExitCode(2)
+        } catch let error as BYOMModelAdmissionError {
+            writeStderr(error.description)
+            throw ExitCode(2)
+        }
+    }
+
+    /// Read-only: hash and print; no coordinator state changes.
+    private func propose(
+        environment: BYOMDiscoveryEnvironment,
+        pricing: PoolModelProposalWire.Pricing?,
+        evaluationDigest: String?
+    ) async throws -> PoolModelProposalWire {
+        // A config that fails to load (a missing explicit --config, or any
+        // invalid one) is an error, not a proposal without the configured
+        // provider and artifact hints.
+        let config = try ConfigLoader.load(cli: CLIOverrides(
+            coordinatorURL: coordinatorURL,
+            providerID: providerID,
+            configPath: self.config
+        ))
+        let runtime = BYOMModelAdmissionRuntime(environment: environment, client: nil)
+        let resolved: (candidate: BYOMDiscoveryWire.Candidate, artifactHashes: [String: String])
+        if await runtime.mlxlmCandidate(target: candidate) != nil {
+            resolved = try await runtime.mlxSnapshotProposalArtifact(target: candidate)
+        } else {
+            let found = try await runtime.resolveOfferCandidate(candidate)
+            try Self.requirePoolEligible(found)
+            let artifact = try await runtime.offerArtifact(
+                for: found,
+                servedArtifactPath: config.modelArtifactPath,
+                servedModelID: config.model
+            )
+            resolved = (found, artifact.hashes)
+        }
+        return try PoolModelProposalBuilder.makeBundle(
+            poolID: poolID,
+            slug: slug,
+            providerID: config.providerID?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty,
+            candidate: resolved.candidate,
+            artifactHashes: resolved.artifactHashes,
+            pricing: pricing,
+            evaluationDigestSHA256: evaluationDigest,
+            offerStatus: nil
+        )
+    }
+
+    /// `--yes`: submit the coordinator offer, then bind the bundle to the
+    /// exact artifact pair that signed offer carried.
+    private func submitAndPropose(
+        environment: BYOMDiscoveryEnvironment,
+        pricing: PoolModelProposalWire.Pricing?,
+        evaluationDigest: String?
+    ) async throws -> PoolModelProposalWire {
+        let resolved = try loadModelAdmissionConfig(
+            config: config,
+            coordinatorURL: coordinatorURL,
+            providerID: providerID
+        )
+        let client = try BYOMModelAdmissionClient(coordinatorURL: resolved.coordinatorURL)
+        let runtime = BYOMModelAdmissionRuntime(
+            environment: environment,
+            credentialStore: ProviderCredentialStoreFactory.providerStore(for: resolved.config),
+            identityStore: ProviderCredentialStoreFactory.receiptKeyStore(for: resolved.config),
+            client: client
+        )
+        let submitted: (status: BYOMAdmissionStatusWire, candidate: BYOMDiscoveryWire.Candidate, artifactHashes: [String: String])
+        if await runtime.mlxlmCandidate(target: candidate) != nil {
+            submitted = try await runtime.submitMLXLMOfferDetailed(
+                providerID: resolved.providerID,
+                target: candidate,
+                evaluationDigestSHA256: evaluationDigest,
+                requestedDisclosureClass: requestedDisclosureClass
+            )
+        } else {
+            // Refuse before mutating coordinator state for a runtime no pool
+            // entry can name.
+            try Self.requirePoolEligible(try await runtime.resolveOfferCandidate(candidate))
+            submitted = try await runtime.submitOfferDetailed(
+                providerID: resolved.providerID,
+                target: candidate,
+                evaluationDigestSHA256: evaluationDigest,
+                requestedDisclosureClass: requestedDisclosureClass,
+                servedArtifactPath: resolved.config.modelArtifactPath,
+                servedModelID: resolved.config.model
+            )
+        }
+        do {
+            return try PoolModelProposalBuilder.makeBundle(
+                poolID: poolID,
+                slug: slug,
+                providerID: resolved.providerID,
+                candidate: submitted.candidate,
+                artifactHashes: submitted.artifactHashes,
+                pricing: pricing,
+                evaluationDigestSHA256: evaluationDigest,
+                offerStatus: submitted.status
+            )
+        } catch {
+            writeStderr("models propose: the coordinator offer was submitted (coordinator_event_id \(submitted.status.coordinatorEventID ?? "null")), but no proposal bundle could be built")
+            throw error
+        }
+    }
+
+    private static func requirePoolEligible(_ candidate: BYOMDiscoveryWire.Candidate) throws {
+        guard PoolModelProposalBuilder.algorithmByRuntime[candidate.runtimeSource] != nil else {
+            throw PoolModelProposalError.runtimeNotPoolEligible(candidate.runtimeSource)
         }
     }
 }
@@ -376,6 +654,9 @@ struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
     @Option(help: "Pin the ONE llama.cpp GGUF file that may be hashed (option c). Overrides --llamacpp-model-root; the served model's file stem must match it. Also MACPROVIDER_LLAMACPP_MODEL_PATH.")
     var llamacppModelPath: String?
 
+    @Flag(help: "Match catalog artifacts against the compiled-in artifact feed only; do not read the coordinator's signed live artifact feed.")
+    var offlineArtifactFeed = false
+
     func run() async throws {
         guard emitJSON else {
             writeStderr("models admission status is JSON-only in this release; pass --json")
@@ -387,7 +668,7 @@ struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
                 coordinatorURL: coordinatorURL,
                 providerID: providerID
             )
-            let environment = BYOMDiscoveryEnvironment.production(
+            let environment = await BYOMDiscoveryEnvironment.production(
                 namespacePath: localDiscoveryNamespacePath,
                 mlxCacheDir: mlxCacheDir,
                 ollamaOrigin: skipOllama ? nil : ollamaOrigin,
@@ -395,7 +676,7 @@ struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
                 lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
                 llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
                 llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
-            )
+            ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config))
             let client = try resolved.coordinatorURL.map { try BYOMModelAdmissionClient(coordinatorURL: $0) }
             let runtime = BYOMModelAdmissionRuntime(
                 environment: environment,
@@ -404,6 +685,9 @@ struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
                 client: client
             )
             let status = try await runtime.status(providerID: resolved.providerID, target: candidate)
+            if let note = poolBindingNote(status) {
+                writeStderr("models admission status: \(note)")
+            }
             try ModelSwitchingWireCodec.printJSON(status)
         } catch let error as BYOMModelAdmissionError {
             writeStderr(error.description)
@@ -475,6 +759,9 @@ struct ModelsAdmissionWithdrawCommand: AsyncParsableCommand {
     @Option(help: "Pin the ONE llama.cpp GGUF file that may be hashed (option c). Overrides --llamacpp-model-root; the served model's file stem must match it. Also MACPROVIDER_LLAMACPP_MODEL_PATH.")
     var llamacppModelPath: String?
 
+    @Flag(help: "Match catalog artifacts against the compiled-in artifact feed only; do not read the coordinator's signed live artifact feed.")
+    var offlineArtifactFeed = false
+
     func run() async throws {
         guard emitJSON else {
             writeStderr("models admission withdraw is JSON-only in this release; pass --json")
@@ -490,7 +777,7 @@ struct ModelsAdmissionWithdrawCommand: AsyncParsableCommand {
                 coordinatorURL: coordinatorURL,
                 providerID: providerID
             )
-            let environment = BYOMDiscoveryEnvironment.production(
+            let environment = await BYOMDiscoveryEnvironment.production(
                 namespacePath: localDiscoveryNamespacePath,
                 mlxCacheDir: mlxCacheDir,
                 ollamaOrigin: skipOllama ? nil : ollamaOrigin,
@@ -498,7 +785,7 @@ struct ModelsAdmissionWithdrawCommand: AsyncParsableCommand {
                 lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
                 llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
                 llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
-            )
+            ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config))
             let client = try BYOMModelAdmissionClient(coordinatorURL: resolved.coordinatorURL)
             let runtime = BYOMModelAdmissionRuntime(
                 environment: environment,
@@ -585,6 +872,9 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
     @Option(help: "Pin the ONE llama.cpp GGUF file that may be hashed (option c). Overrides --llamacpp-model-root; the served model's file stem must match it. Also MACPROVIDER_LLAMACPP_MODEL_PATH.")
     var llamacppModelPath: String?
 
+    @Flag(help: "Match catalog artifacts against the compiled-in artifact feed only; do not read the coordinator's signed live artifact feed.")
+    var offlineArtifactFeed = false
+
     func run() async throws {
         guard emitJSON else {
             writeStderr("models catalog-economics is JSON-only in this release; pass --json")
@@ -598,7 +888,7 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
             ctlSocketPath: ctlSocketPath
         )
         let currentModelID = await readCurrentModelID(config: modelsConfig)
-        let environment = BYOMDiscoveryEnvironment.production(
+        let environment = await BYOMDiscoveryEnvironment.production(
             namespacePath: localDiscoveryNamespacePath,
             mlxCacheDir: mlxCacheDir,
             ollamaOrigin: skipOllama ? nil : ollamaOrigin,
@@ -606,11 +896,11 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
             llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
-        )
-        // BYOM identity is resolved against the compiled-in release through the
-        // one offline qualified selection (`BYOMCatalogMatcher()`), the same
-        // authority `discover`, `evaluate`, and `offer` use; the live artifact
-        // selection loaded below contributes its §3.7.6 warnings, reported here.
+        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config))
+        // BYOM identity is resolved through the one matcher selection every
+        // admission command shares (#1816): the coordinator's signed live
+        // artifact feed when usable, else the compiled-in release; the
+        // artifact selection loaded below contributes its §3.7.6 warnings.
         let discovery = await BYOMDiscoveryRunner(environment: environment).discover()
         let inputs = await AutotuneStaticInputs().loadRecommendationInputs()
         let admissions = await readAdmissionStatuses(
@@ -704,6 +994,17 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
 /// `admission_state_source: local_default` when coordinator state "is unavailable
 /// or has not been queried". Offer submission and withdrawal mutate coordinator
 /// state and keep requiring a coordinator URL through `loadModelAdmissionConfig`.
+/// SPEC-043-R014 / SPEC-047-R011 wording for a pool-scoped binding: it earns
+/// only on that pool's routes, and only while the coordinator says the pool
+/// predicates hold.
+func poolBindingNote(_ status: BYOMAdmissionStatusWire) -> String? {
+    guard status.isPoolScoped, let binding = status.poolBinding else { return nil }
+    let earning = status.providerGuidance.earningPathClass == "pool_attested_earning"
+        ? "earns only in pool \(binding.poolID)"
+        : "does not earn right now; the pool \(binding.poolID) predicates do not currently hold"
+    return "pool-scoped binding \(binding.poolModelID) (\(binding.runtimeSource)) \(earning). Pool-attested, not network-verified; never a global catalog model."
+}
+
 private func loadModelAdmissionStatusConfig(
     config: String?,
     coordinatorURL: String?,

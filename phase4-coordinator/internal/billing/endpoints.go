@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	statsprewarm "github.com/augstar/macprovider-coordinator/internal/stats/prewarm"
 	"github.com/rs/zerolog"
 )
@@ -211,6 +212,9 @@ type settlementVerdictCounter struct {
 	CatalogMismatchCount    int64  `json:"catalog_mismatch_count"`
 	ModelHashNullCount      int64  `json:"model_hash_null_count"`
 	ReceiptKeyMismatchCount int64  `json:"receipt_key_mismatch_count"`
+	// RelayBlindSettledCount is the SPEC-022 R-11.3 (v0.3.0) counter for
+	// relay_blind_settled rows. It is never added to VerifiedCount.
+	RelayBlindSettledCount int64 `json:"relay_blind_settled_count"`
 }
 
 func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
@@ -1029,6 +1033,17 @@ SELECT rl.request_id, rl.ts_utc, rl.model, COALESCE(rl.provider_assigned_id, '')
 			total += gross
 			continue
 		}
+		// SPEC-005-R015: a pool-model attempt has no rate-card price; its
+		// buyer equivalent is the unquarantined ledger gross priced from
+		// the route snapshot's signed entry (zero when it was not billable).
+		if poolmanifest.IsPoolModelID(s.model) {
+			gross, err := h.unquarantinedLedgerGross(ctx, s.requestID, s.attemptN)
+			if err != nil {
+				return 0, err
+			}
+			total += gross
+			continue
+		}
 		var rewards RewardsConfig
 		var multiplier, share int64
 		configSnapshotID, found, err := h.providerIdentityConfigSnapshotID(ctx, s.requestID, s.attemptN, s.providerAssignedID)
@@ -1068,6 +1083,15 @@ SELECT config_snapshot_id
 		return 0, false, err
 	}
 	return id.Int64, id.Valid, nil
+}
+
+func (h *handler) unquarantinedLedgerGross(ctx context.Context, requestID string, attemptN int) (int64, error) {
+	var gross int64
+	err := h.store.db.QueryRowContext(ctx, `
+SELECT COALESCE(SUM(gross_credits), 0)
+  FROM ledger_request_credits
+ WHERE request_id = ? AND attempt_n = ? AND quarantined = 0`, requestID, attemptN).Scan(&gross)
+	return gross, err
 }
 
 func (h *handler) byteEstimatedLedgerGross(ctx context.Context, requestID string, attemptN int) (int64, bool, error) {
@@ -1391,7 +1415,7 @@ SELECT srv.route_snapshot_policy_version,
        COALESCE(SUM(CASE WHEN srv.settlement_outcome='zero_settled' THEN 1 ELSE 0 END), 0) AS zero_settled_count,
        COALESCE(SUM(CASE
            WHEN srv.reason IN ('unknown_receipt_version', 'legacy_receipt_version')
-             OR (srv.receipt_present=1 AND srv.receipt_version IS NOT NULL AND srv.receipt_version NOT IN ('4', 'spec015-v0.4', 'v0.4'))
+             OR (srv.receipt_present=1 AND srv.receipt_version IS NOT NULL AND srv.receipt_version NOT IN ('4', 'spec015-v0.4', 'v0.4', 'relay-blind-settlement-v1'))
            THEN 1 ELSE 0 END), 0) AS legacy_receipt_count,
        COALESCE(SUM(CASE
            WHEN srv.receipt_present=0 OR srv.reason IN ('missing_receipt', 'missing_receipt_deadline_elapsed')
@@ -1406,7 +1430,8 @@ SELECT srv.route_snapshot_policy_version,
            THEN 1 ELSE 0 END), 0) AS model_hash_null_count,
        COALESCE(SUM(CASE
            WHEN srv.reason IN ('provider_receipt_key_id_invalid', 'provider_receipt_key_id_mismatch', 'receipt_key_mismatch')
-           THEN 1 ELSE 0 END), 0) AS receipt_key_mismatch_count
+           THEN 1 ELSE 0 END), 0) AS receipt_key_mismatch_count,
+       COALESCE(SUM(CASE WHEN srv.settlement_outcome='relay_blind_settled' THEN 1 ELSE 0 END), 0) AS relay_blind_settled_count
   FROM settlement_receipt_verdicts srv
   LEFT JOIN (
       SELECT route_snapshot_digest, MIN(pending_deadline_seconds) AS pending_deadline_seconds
@@ -1438,6 +1463,7 @@ SELECT srv.route_snapshot_policy_version,
 			&counter.CatalogMismatchCount,
 			&counter.ModelHashNullCount,
 			&counter.ReceiptKeyMismatchCount,
+			&counter.RelayBlindSettledCount,
 		); err != nil {
 			return nil, err
 		}

@@ -1,6 +1,19 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.29 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.30 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.30 (2026-10-04, issue #1842 signed provider code identity).**
+Adds §6.2.1: a release that ships the provider CLI signs the CLI's code
+identity (`code_cdhash`, `team_id`, `signing_identifier`) into
+`pearl-release.json` as `provider_code_identity`, derived from the shipped
+tarball bytes, so SPEC-049 `privacy_class.approved_code_identities` can be
+filled from signed release metadata instead of by hand. `compatibility-set.json`
+and the `compatibility-artifact-index.json` role set are unchanged.
+Verifiers are present-then-strict: they fully validate the field when present
+and accept its absence, with an explicit notice, only for provider CLI versions
+at or below 1.8.213, so already-signed candidates and rollback targets stay
+verifiable; 1.8.214 and later fail without it. A present field always binds the
+shipped tarball, including in the GitHub download path.
 
 **Change log v0.29 (2026-09-08, issue #1445 frozen-Sparkle-bridge confinement).**
 Restores the code and this spec to DECISION_CRITERIA Entry 156/158: the frozen
@@ -1254,6 +1267,45 @@ Runs on the same macOS runner as the existing job, after the CLI binary is signe
     update authority.
 
 Reuse `cleanup_signing_material` trap from the existing job.
+
+### 6.2.1 Signed provider code identity (issue #1842)
+
+A release whose signed `pearl-release.json` ships the provider CLI (release
+lane `pearl_runtime_catalog`, from `release.yml` or the acceptance signer) MUST
+carry a top-level `provider_code_identity` object with exactly these fields:
+`asset` (`macprovider-cli-<tag>-darwin-arm64.tar.gz`), `member`
+(`macprovider-cli`), `binary_version` (the provider CLI version the same
+metadata advertises), `binary_sha256` (64 lowercase hex of the extracted CLI
+bytes), `team_id` (`^[A-Z0-9]{10}$`), `signing_identifier`
+(`live.malibu.provider.cli`), and `slices` (exactly
+`[{"arch": "arm64", "code_cdhash": <40 lowercase hex>}]`). The producer
+(`scripts/provider-code-identity.py`) MUST derive it from the final shipped
+tarball before `pearl-release.json` is signed, read `CDHash=`,
+`TeamIdentifier=`, and `Identifier=` from `codesign -d --arch arm64 -vvv`
+(never from designated-requirement display text), and fail closed unless the
+binary is exact arm64, the Identifier is `live.malibu.provider.cli`, and the
+TeamIdentifier equals the release Team ID. The runtime-only lane
+(`pearl_runtime`) ships no CLI and MUST NOT carry the field. Every
+CLI-shipping release with provider CLI version 1.8.214 or later MUST carry the
+field; producers never omit it. Verifiers (`scripts/verify-pearl-runtime-release.sh`,
+`scripts/verify-acceptance-promotion.py`) are present-then-strict: when the
+field is present they MUST reject it if malformed, if `checksums.txt` does not
+hold exactly one well-formed row for its `asset` (shared helper
+`require_checksum_row()`), if the bound tarball is missing (the GitHub path MUST
+download it), if its bytes differ from `checksums.txt`, or if `binary_sha256`
+differs from the `macprovider-cli` extracted from it. They MUST accept its
+absence only when the provider CLI version they already hold from signed
+metadata (the verified release tag, or the signed compatibility manifest's
+`provider_cli.version`) is at or below 1.8.213, using the single cutoff
+predicate `identity_required()` in `scripts/provider-code-identity.py`; they
+MUST then print the explicit notice
+`provider_code_identity: absent (pre-#1842 release)` so a missing field is
+never silent. For 1.8.214 and later, or any version that does not parse as
+X.Y.Z, a missing field MUST fail. An absent field cannot be used to fill SPEC-049 approvals. Operators fill
+SPEC-049 `privacy_class.approved_code_identities` from this verified field
+(`scripts/provider-code-identity.py --emit-approved-identity`); the field is
+not a new release asset and does not change `compatibility-set.json` or the
+`compatibility-artifact-index.json` role set.
 
 ### 6.3 Entitlements (`Malibu.entitlements`)
 

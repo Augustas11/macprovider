@@ -128,6 +128,10 @@ func (s *Store) Ping(ctx context.Context) error {
 //	     unmet, capacity-constrained, and substituted model demand.
 //	v17 — issue #1807: demand rows persist reasoning-token and phase-timing
 //	     fields needed for allocation reporting.
+//	v18 — SPEC-022 R-14 (#1851): quota_reservations record the relay-blind
+//	     settlement dispatch hint and coordinator internal request id; an
+//	     older gateway would settle a relay-blind hold without coordinator
+//	     finality, so it must refuse this database.
 //
 // At Open time the store reads the current applied version; if it
 // exceeds this constant the binary is older than the DB and refuses
@@ -138,7 +142,7 @@ func (s *Store) Ping(ctx context.Context) error {
 // Operators rolling back the gateway binary on a DB at a higher
 // version must restore /var/lib/macprovider/gateway.db from the
 // pre-deploy snapshot (deploy-pearl-vps.sh step 5b writes one).
-const maxKnownSchemaVersion = 17
+const maxKnownSchemaVersion = 18
 
 func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.checkSchemaVersionGate(ctx); err != nil {
@@ -227,6 +231,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.ensureRelayBlindAccountingColumns(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureRelayBlindSettlementDispatchColumns(ctx); err != nil {
+		return err
+	}
 	if err := s.ensureUsageEventsPoolOperatorAttestedSource(ctx); err != nil {
 		return err
 	}
@@ -290,6 +297,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(17, ?)", now); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(18, ?)", now); err != nil {
 		return err
 	}
 	return nil
@@ -620,6 +630,12 @@ func (s *Store) ensureOAuthStateExpiresAtColumn(ctx context.Context) error {
 // a wrong-account row once cross-account request_id duplicates
 // exist. Failing closed at Open is the safe choice.
 func (s *Store) checkSchemaVersionGate(ctx context.Context) error {
+	return s.checkSchemaVersionGateAt(ctx, maxKnownSchemaVersion)
+}
+
+// checkSchemaVersionGateAt is checkSchemaVersionGate for a binary whose
+// max-known version is maxKnown; tests use it to stand in for an older binary.
+func (s *Store) checkSchemaVersionGateAt(ctx context.Context, maxKnown int64) error {
 	// schema_migrations may not exist yet on a brand-new DB; the
 	// follow-up schemaSQL run creates it. Tolerate the missing-table
 	// case here.
@@ -634,9 +650,9 @@ func (s *Store) checkSchemaVersionGate(ctx context.Context) error {
 	if !current.Valid {
 		return nil
 	}
-	if current.Int64 > maxKnownSchemaVersion {
+	if current.Int64 > maxKnown {
 		return fmt.Errorf("gateway DB schema_migrations.version=%d exceeds this binary's max-known version %d — refusing to open (issue #196 rollback safety). Restore from pre-deploy snapshot.",
-			current.Int64, maxKnownSchemaVersion)
+			current.Int64, maxKnown)
 	}
 	return nil
 }
@@ -2092,7 +2108,8 @@ func (s *Store) ListSettlementHeldReservations(ctx context.Context, limit int) (
 			qr.reserved_tokens, qr.expires_at, qr.created_at,
 			qr.requested_privacy_mode, qr.effective_privacy_outcome, qr.relay_blind_envelope_digest,
 			qr.relay_blind_key_record_digest, qr.relay_blind_kid, qr.relay_blind_provider_binding_digest,
-			qr.input_token_upper_bound, qr.max_output_tokens
+			qr.input_token_upper_bound, qr.max_output_tokens,
+			qr.relay_blind_settlement_mode, qr.relay_blind_internal_request_id
 		FROM quota_reservations qr
 		LEFT JOIN wallet_session_request_map wrm
 			ON wrm.account_id = qr.account_id AND wrm.request_id = qr.request_id
@@ -2116,6 +2133,20 @@ func (s *Store) ListSettlementHeldReservations(ctx context.Context, limit int) (
 	return out, rows.Err()
 }
 
+// settlementHoldDuePredicate (two "now" arguments) is when an active hold is
+// due for reconciliation: its backoff elapsed, or its expiry, the receipt or
+// local fallback deadline the gateway clamped it to, passed with no attempt
+// since. The backoff doubles on every "held" answer (the request-scoped
+// nudges alone reach 40 minutes), so without the deadline term a hold that
+// becomes final only at its deadline, or that an older gateway binary held
+// for a policy version it did not know, waited up to hours past it and
+// blocked the rollback drain (#1816 VM A-1, A-3, A-9). One attempt after the
+// deadline re-arms the backoff, so a hold still pending is not re-queried on
+// every sweep.
+const settlementHoldDuePredicate = `(COALESCE(sra.next_attempt_after, '') = '' OR sra.next_attempt_after <= ?
+				OR (julianday(qr.expires_at) <= julianday(?)
+					AND (sra.last_attempt_at = '' OR julianday(sra.last_attempt_at) < julianday(qr.expires_at))))`
+
 func (s *Store) ListDueSettlementHeldReservations(ctx context.Context, limit int, now time.Time) ([]storage.ActiveReservation, error) {
 	if limit <= 0 {
 		limit = 100
@@ -2128,7 +2159,8 @@ func (s *Store) ListDueSettlementHeldReservations(ctx context.Context, limit int
 			qr.reserved_tokens, qr.expires_at, qr.created_at,
 			qr.requested_privacy_mode, qr.effective_privacy_outcome, qr.relay_blind_envelope_digest,
 			qr.relay_blind_key_record_digest, qr.relay_blind_kid, qr.relay_blind_provider_binding_digest,
-			qr.input_token_upper_bound, qr.max_output_tokens
+			qr.input_token_upper_bound, qr.max_output_tokens,
+			qr.relay_blind_settlement_mode, qr.relay_blind_internal_request_id
 		FROM quota_reservations qr
 		LEFT JOIN wallet_session_request_map wrm
 			ON wrm.account_id = qr.account_id AND wrm.request_id = qr.request_id
@@ -2136,9 +2168,9 @@ func (s *Store) ListDueSettlementHeldReservations(ctx context.Context, limit int
 			ON sra.account_id = qr.account_id AND sra.request_id = qr.request_id AND sra.reservation_created_at = qr.created_at
 		WHERE qr.status = 'active' AND qr.settlement_hold = 1
 			AND COALESCE(sra.operator_review, 0) = 0
-			AND (COALESCE(sra.next_attempt_after, '') = '' OR sra.next_attempt_after <= ?)
+			AND `+settlementHoldDuePredicate+`
 		ORDER BY COALESCE(sra.attempt_sequence, 0) ASC, qr.expires_at ASC, qr.created_at ASC
-		LIMIT ?`, encodeTime(now.UTC()), limit)
+		LIMIT ?`, encodeTime(now.UTC()), encodeTime(now.UTC()), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -2170,6 +2202,7 @@ func (s *Store) ListSettlementHeldReservationsForDrain(ctx context.Context, acco
 			qr.requested_privacy_mode, qr.effective_privacy_outcome, qr.relay_blind_envelope_digest,
 			qr.relay_blind_key_record_digest, qr.relay_blind_kid, qr.relay_blind_provider_binding_digest,
 			qr.input_token_upper_bound, qr.max_output_tokens,
+			qr.relay_blind_settlement_mode, qr.relay_blind_internal_request_id,
 			COALESCE(sra.operator_review, 0),
 			CASE WHEN COALESCE(sra.first_not_found_at, '') != '' OR sra.last_result = 'coordinator_404_held' THEN 1 ELSE 0 END
 		FROM quota_reservations qr
@@ -2212,6 +2245,7 @@ func (s *Store) ListSettlementHeldReservationsForDrain(ctx context.Context, acco
 			&reservation.AccountID, &reservation.RequestID, &reservation.WalletSessionID,
 			&reservation.WindowDate, &reservation.ReservedTokens, &expiresAt, &createdAt,
 			&requested, &effective, &envelope, &keyRecord, &kid, &providerBinding, &inputCap, &outputCap,
+			&reservation.RelayBlindSettlementMode, &reservation.RelayBlindInternalRequestID,
 			&operatorReview, &coordinator404,
 		); err != nil {
 			return nil, err
@@ -2232,7 +2266,8 @@ func (s *Store) LookupSettlementHeldReservation(ctx context.Context, accountID, 
 			qr.reserved_tokens, qr.expires_at, qr.created_at,
 			qr.requested_privacy_mode, qr.effective_privacy_outcome, qr.relay_blind_envelope_digest,
 			qr.relay_blind_key_record_digest, qr.relay_blind_kid, qr.relay_blind_provider_binding_digest,
-			qr.input_token_upper_bound, qr.max_output_tokens
+			qr.input_token_upper_bound, qr.max_output_tokens,
+			qr.relay_blind_settlement_mode, qr.relay_blind_internal_request_id
 		FROM quota_reservations qr
 		LEFT JOIN wallet_session_request_map wrm
 			ON wrm.account_id = qr.account_id AND wrm.request_id = qr.request_id
@@ -2258,6 +2293,7 @@ func scanSettlementHeldReservation(row settlementHeldReservationScanner) (storag
 		&reservation.AccountID, &reservation.RequestID, &reservation.WalletSessionID,
 		&reservation.WindowDate, &reservation.ReservedTokens, &expiresAt, &createdAt,
 		&requested, &effective, &envelope, &keyRecord, &kid, &providerBinding, &inputCap, &outputCap,
+		&reservation.RelayBlindSettlementMode, &reservation.RelayBlindInternalRequestID,
 	); err != nil {
 		return storage.ActiveReservation{}, err
 	}
@@ -2326,14 +2362,14 @@ func (s *Store) SettlementHoldBacklogStats(ctx context.Context, now time.Time) (
 			COUNT(*),
 			COALESCE(MIN(qr.created_at), ''),
 			COALESCE(SUM(CASE WHEN COALESCE(sra.operator_review, 0) = 0
-				AND (COALESCE(sra.next_attempt_after, '') = '' OR sra.next_attempt_after <= ?) THEN 1 ELSE 0 END), 0),
+				AND `+settlementHoldDuePredicate+` THEN 1 ELSE 0 END), 0),
 			COALESCE(MIN(CASE WHEN COALESCE(sra.operator_review, 0) = 0
-				AND (COALESCE(sra.next_attempt_after, '') = '' OR sra.next_attempt_after <= ?) THEN qr.created_at END), '')
+				AND `+settlementHoldDuePredicate+` THEN qr.created_at END), '')
 		FROM quota_reservations qr
 		LEFT JOIN settlement_reconcile_attempts sra
 			ON sra.account_id = qr.account_id AND sra.request_id = qr.request_id AND sra.reservation_created_at = qr.created_at
 		WHERE qr.status = 'active' AND qr.settlement_hold = 1`,
-		encodeTime(now.UTC()), encodeTime(now.UTC())).
+		encodeTime(now.UTC()), encodeTime(now.UTC()), encodeTime(now.UTC()), encodeTime(now.UTC())).
 		Scan(&stats.TotalActiveHeld, &oldestActive, &stats.DueActiveHeld, &oldestDue)
 	if err != nil {
 		return storage.SettlementHoldBacklogStats{}, err

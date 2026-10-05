@@ -83,6 +83,15 @@ type Server struct {
 	// (true = excluded), injected at wiring time because ws cannot import buyer.
 	catalogMaterialRoutingGate atomic.Pointer[func(pool.Provider) bool]
 
+	// poolModels is the SPEC-047-R011 pool-manifest binding input (the
+	// trust-pool registry and the configured pricing bounds), nil when
+	// trusted pools are off.
+	poolModels atomic.Pointer[poolModelWiring]
+	// poolSweepKick wakes RunPoolManifestBindingSweep the moment a new
+	// accepted generation becomes active (#1816 F3), not only on its timer.
+	poolSweepKickOnce sync.Once
+	poolSweepKick     chan struct{}
+
 	proofOfWeightsAdmissionMu sync.RWMutex
 	proofOfWeightsMu          sync.RWMutex
 	proofOfWeights            config.ProofOfWeightsConfig
@@ -249,6 +258,20 @@ type Server struct {
 	// seLivenessInFlight guards against concurrent probes for the same session.
 	seLivenessChans    sync.Map
 	seLivenessInFlight sync.Map
+
+	// Privacy posture (SPEC-049). Nil authority leaves the class off.
+	// Response channels carry the original frame; the authority re-parses it.
+	privacyAuthority       *relayblind.PrivacyAuthority
+	privacyPostureChans    sync.Map
+	privacyPostureInFlight sync.Map
+	// privacyAdvertised is the last accepted privacy key digest set per
+	// session, so an unchanged heartbeat re-advertisement does not challenge.
+	privacyAdvertised sync.Map
+	// beforeHandshakeAckSend is a test seam run just before hello_ack /
+	// auth_response v2 is enqueued; privacyPostureChallengeSent runs after a
+	// posture challenge is enqueued. Both nil in production.
+	beforeHandshakeAckSend      func()
+	privacyPostureChallengeSent func()
 
 	// Trust-revalidation sweep failure accounting (issue #582 FIX C). Bounds the
 	// remaining fail-open: a single transient sweep DB error is skipped, but N
@@ -525,6 +548,12 @@ type RelayBlindKeySink interface {
 
 func WithRelayBlindKeySink(sink RelayBlindKeySink) Option {
 	return func(s *Server) { s.relayBlindKeys = sink }
+}
+
+// WithPrivacyAuthority wires SPEC-049 posture verification. A nil authority
+// leaves privacy-class challenges and key acceptance off.
+func WithPrivacyAuthority(authority *relayblind.PrivacyAuthority) Option {
+	return func(s *Server) { s.privacyAuthority = authority }
 }
 
 // WithCatalog injects a specific tier2.Catalog instance for this server.
@@ -1269,6 +1298,9 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 	}
 	if registry != nil {
 		go s.runSELivenessLoop()
+	}
+	if s.privacyAuthority != nil && registry != nil {
+		go s.runPrivacyPostureLoop()
 	}
 	if cfg.Pool.LosslessnessProbe.Enabled && registry != nil {
 		go s.runLosslessnessProbeLoop()
@@ -2437,6 +2469,8 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		entry.Tier = s.commitProviderAdmission(hello, entry.Tier)
 	}
 	entry.AuthState = authState
+	// Unroutable until hello_ack is enqueued (cleared below).
+	entry.HandshakeAckPending = true
 	session, _ := s.registerProviderSession(conn, entry)
 	if session == nil {
 		// Eviction defense fired: bearer-less duplicate tried to
@@ -2477,10 +2511,20 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		s.closeSession(session, CloseInvalidHello, "invalid_hello: ack")
 		return "", ""
 	}
-	if err := session.send(b); err != nil {
-		s.log.Warn().Err(err).Str("provider_id", hello.ProviderID).Msg("hello_ack write failed")
-		return "", ""
+	if s.beforeHandshakeAckSend != nil {
+		s.beforeHandshakeAckSend()
 	}
+	if err := session.sendHandshakeAck(b); err != nil {
+		s.log.Warn().Err(err).Str("provider_id", hello.ProviderID).Msg("hello_ack write failed")
+		// The session is registered: return its IDs so handleConn runs
+		// handleDisconnect for exactly this session.
+		return entry.ProviderID, entry.AssignedID
+	}
+	s.releaseAckedSession(entry.ProviderID, entry.AssignedID)
+	// Privacy key acceptance schedules a posture challenge on this session's
+	// FIFO writer. The provider requires hello_ack as the next frame, so the
+	// challenge may only be enqueued after the ack (SPEC-049).
+	s.acceptPrivacyKeyRecords(entry.ProviderID, entry.AssignedID, hello.PrivacyKeyRecords)
 	if s.cfg.Pool.WarmupGateEnabled {
 		s.startWarmupGate(*entry)
 	}
@@ -2821,6 +2865,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	entry.EncryptedLeg = true
 	entry.TrustedPoolV1 = initial.Tier2Capabilities.TrustedPoolV1
 	entry.CatalogMaterialHoldV1 = initial.Tier2Capabilities.CatalogMaterialHoldV1
+	entry.RelayBlindSettlementReceiptV1 = initial.Tier2Capabilities.RelayBlindSettlementReceiptV1
 	entry.AttestationStatus = attestationStatus
 	if attestResult.SEResult != nil {
 		entry.SEPublicKey = append([]byte(nil), attestResult.SEResult.SEPublicKey...)
@@ -3028,6 +3073,8 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	// committed the token/PairOT/referral above; refusing here would strand a
 	// minted token. The bounded revalidation sweep evicts (never refuses) a
 	// session whose trust lapses after commit.
+	// Unroutable until auth_response v2 is enqueued (cleared below).
+	entry.HandshakeAckPending = true
 	session, refusal := s.registerProviderSession(conn, entry)
 	if session == nil {
 		switch refusal {
@@ -3107,10 +3154,17 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		s.closeSession(session, CloseInvalidHello, "invalid_auth_response")
 		return "", ""
 	}
-	if err := session.send(rawResponse); err != nil {
-		s.log.Warn().Err(err).Str("provider_id", initial.ProviderID).Msg("auth_response write failed")
-		return "", ""
+	if s.beforeHandshakeAckSend != nil {
+		s.beforeHandshakeAckSend()
 	}
+	if err := session.sendHandshakeAck(rawResponse); err != nil {
+		s.log.Warn().Err(err).Str("provider_id", initial.ProviderID).Msg("auth_response write failed")
+		// See handleV1Conn: handleConn tears down this registered session.
+		return entry.ProviderID, entry.AssignedID
+	}
+	s.releaseAckedSession(entry.ProviderID, entry.AssignedID)
+	// See handleV1Conn: the posture challenge must follow auth_response v2.
+	s.acceptPrivacyKeyRecords(entry.ProviderID, entry.AssignedID, initial.PrivacyKeyRecords)
 	if s.cfg.Pool.WarmupGateEnabled {
 		s.startWarmupGate(*entry)
 	}
@@ -3592,6 +3646,25 @@ func (s *Server) checkAutotuneHelloGateWithCatalog(conn net.Conn, hello Hello, c
 			Msg("autotune hello gate exempted a BYOM loopback runtime as a non-earning sandbox (SPEC-032 FR-HG8)")
 		return autotuneAdmissionObservation{Sandboxed: true}, true
 	}
+	// SPEC-032-R004 pool-entry exemption (#1816): a native session whose
+	// uncatalogued model is the exact snapshot-manifest pair of a current
+	// SPEC-042-R015 entry listing mlx_cache, in a pool the provider is a member
+	// of, is admitted `admission_sandboxed` so it can serve that pool's routes
+	// only (the buyer pool predicate is the sole path that selects it). Every
+	// other uncatalogued native hello stays closed below.
+	if requireGate && modelAdmissionRuntimeClass(hello.RuntimeSource) == modelAdmissionRuntimeSourceMLXCache {
+		if _, _, catalogued := catalog.HighestClaimedTier(hello.ModelID); !catalogued {
+			if poolID, ok := s.poolEntryForSession(hello.ProviderID, hello.RuntimeSource, hello.ModelHashAlgorithm, hello.ModelHash); ok {
+				s.log.Info().
+					Str("provider_id", hello.ProviderID).
+					Str("event", "autotune_pool_entry_native_sandboxed").
+					Str("model_id", hello.ModelID).
+					Str("pool_id", poolID).
+					Msg("autotune hello gate admitted a native pool-entry session as pool-only sandbox (SPEC-032-R004)")
+				return autotuneAdmissionObservation{Sandboxed: true}, true
+			}
+		}
+	}
 	ttl := time.Duration(powCfg.AutotuneEvidenceTTLDays) * 24 * time.Hour
 	ctx, cancel := context.WithTimeout(context.Background(), autotuneEvidenceLookupTimeout)
 	defer cancel()
@@ -3700,10 +3773,23 @@ func (s *Server) catalogAdmissionWithCatalog(hello Hello, catalog *autotune.Cata
 			present++
 		}
 	}
+	// SPEC-032-R004 / SPEC-042-R015 (#1816): a session whose exact pair and
+	// runtime class are a current pool entry of a pool it is a member of is
+	// admitted in the pool_entry mode, whatever catalog row its model id
+	// lacks; it can serve only that pool's routes.
+	poolEntry := false
+	if _, ok := s.poolEntryForSession(hello.ProviderID, hello.RuntimeSource, hello.ModelHashAlgorithm, hello.ModelHash); ok {
+		if _, _, catalogued := catalog.HighestClaimedTier(hello.ModelID); !catalogued {
+			poolEntry = true
+		}
+	}
 	// Bridge window: pre-catalog-handshake binaries are admitted through the
 	// existing signed-catalog model/evidence gates. Once a client sends any
 	// catalog metadata it must send and match the complete release envelope.
 	if present == 0 {
+		if poolEntry {
+			return catalogAdmissionPoolEntry, true
+		}
 		if s.autotuneCatalogBridgeActive() {
 			return "legacy_bridge", true
 		}
@@ -3736,6 +3822,9 @@ func (s *Server) catalogAdmissionWithCatalog(hello Hello, catalog *autotune.Cata
 	}
 	key, _, ok := providerCatalog.HighestClaimedTier(hello.ModelID)
 	if !ok {
+		if poolEntry {
+			return catalogAdmissionPoolEntry, true
+		}
 		return "", false
 	}
 	providerRowIdentity, ok := providerCatalog.RowIdentity(key)
@@ -4111,6 +4200,7 @@ func (s *Server) registerProviderSessionLocked(conn net.Conn, entry *pool.Provid
 	session.useTier2Session(entry.Tier2Session)
 	session.probeWrites = true
 	session.onWriteFailure = s.handleProviderWriteFailure
+	session.ackPending = entry.HandshakeAckPending
 	s.sessions.Store(sessionKey(entry.ProviderID, entry.AssignedID), session)
 	_ = s.takeCloseEvent(conn) // successful admission: drop pre-auth close metadata
 	s.rememberProviderSnapshot(*entry)
@@ -4126,6 +4216,18 @@ func (s *Server) registerProviderSessionLocked(conn net.Conn, entry *pool.Provid
 	go session.runWriter()
 	go s.monitorHeartbeat(entry.ProviderID, entry.AssignedID, conn)
 	return session, pool.RegisterRefusalNone
+}
+
+// releaseAckedSession lifts the handshake-ack hold once the ack is enqueued
+// and re-persists the last-known snapshot, which registration wrote while
+// the session was still held out of routing.
+func (s *Server) releaseAckedSession(providerID, assignedID string) {
+	if !s.pool.ClearHandshakeAckPending(providerID, assignedID) {
+		return
+	}
+	if provider, ok := s.pool.Resolve(providerID, assignedID); ok {
+		s.rememberProviderSnapshot(provider)
+	}
 }
 
 func (s *Server) readProviderLoop(conn net.Conn, providerID, assignedID string) {
@@ -4528,6 +4630,9 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 	s.pool.Touch(providerID, assignedID, s.now())
 	switch envelope.Type {
 	case "heartbeat":
+		// Privacy keys are accepted before handleHeartbeat updates session
+		// state. handleHeartbeat itself stays the frozen SPEC-047 fragment.
+		s.acceptHeartbeatPrivacyKeys(providerID, assignedID, payload)
 		s.handleHeartbeat(conn, providerID, assignedID, payload)
 	case "diagnostic_status":
 		s.handleDiagnosticStatus(conn, providerID, assignedID, payload)
@@ -4553,6 +4658,8 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 		s.handleDrainStatus(conn, providerID, assignedID, payload)
 	case "se_liveness_response":
 		s.handleSELivenessResponse(providerID, assignedID, payload)
+	case "privacy_posture_response":
+		s.handlePrivacyPostureResponse(providerID, assignedID, payload)
 	case "native_mtp_tuple_offer_v1":
 		s.handleNativeMTPTupleOffer(providerID, assignedID, payload)
 	case "native_mtp_canary_result_v1":
@@ -5902,6 +6009,7 @@ func (s *Server) CloseAllProviderSessions(reason string) {
 		if !ok || session == nil {
 			return true
 		}
+		s.dropPrivacyPosture(session.providerID, session.assignedID)
 		s.log.Info().
 			Str("provider_id", session.providerID).
 			Str("reason", reason).
@@ -6687,6 +6795,7 @@ func (s *Server) markDegradedForWarmup(providerID, assignedID string) {
 }
 
 func (s *Server) handleDisconnect(providerID, assignedID string) {
+	s.dropPrivacyPosture(providerID, assignedID)
 	s.clearModelAdmissionBindingOnDisconnect(providerID, assignedID)
 	s.clearWarmupGate(providerID, assignedID)
 	s.clearRewardsTrustLookupFailure(providerID, assignedID)
@@ -6739,6 +6848,7 @@ func (s *Server) handleProviderWriteFailure(session *providerSession, err error)
 	if session == nil {
 		return
 	}
+	s.dropPrivacyPosture(session.providerID, session.assignedID)
 	session.rekeyMu.Lock()
 	exchange := session.rekey
 	session.rekeyMu.Unlock()

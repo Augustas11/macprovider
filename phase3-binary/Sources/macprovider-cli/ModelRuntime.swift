@@ -6030,6 +6030,12 @@ actor ModelRuntime: ModelRuntimeServing {
         )
     }
 
+    /// SPEC-049-R010. Privacy-class requests never begin a conversation-cache
+    /// lease or lookup. A nil lease does not take the serial-route fence.
+    static func allowsConversationCacheLease(provenance: KVIngestProvenance, nativeAllows: Bool) -> Bool {
+        nativeAllows && provenance != .privacy
+    }
+
     private func serialRouteCanaryCachedHitMissingRetainedHandoff(
         _ lease: ConversationCacheLease?,
         capability: ContinuousBatchingCapability,
@@ -6235,7 +6241,11 @@ actor ModelRuntime: ModelRuntimeServing {
             configured: kvBitsOverride,
             conversationKey: request.conversationKey
         )
-        let lease = nativeMTPAdmission.allowsConversationCacheLease
+        let conversationCacheAllowed = Self.allowsConversationCacheLease(
+            provenance: request.ingestProvenance,
+            nativeAllows: nativeMTPAdmission.allowsConversationCacheLease
+        )
+        let lease = conversationCacheAllowed
             ? await conversationCache.begin(
                 conversationKey: request.conversationKey,
                 incomingTokens: preparedPromptTokenIDs,
@@ -6245,7 +6255,7 @@ actor ModelRuntime: ModelRuntimeServing {
             )
             : nil
         CBTrace.log(schedulerRequestID, "rt_cb_lease cached=\(lease?.cachedPromptTokens ?? -1)")
-        if nativeMTPAdmission.allowsConversationCacheLease,
+        if conversationCacheAllowed,
            try await serialRouteCanaryCachedHitMissingRetainedHandoff(
             lease,
             capability: capability,
@@ -6547,7 +6557,11 @@ actor ModelRuntime: ModelRuntimeServing {
             configured: kvBitsOverride,
             conversationKey: request.conversationKey
         )
-        let lease = nativeMTPAdmission.allowsConversationCacheLease
+        let conversationCacheAllowed = Self.allowsConversationCacheLease(
+            provenance: request.ingestProvenance,
+            nativeAllows: nativeMTPAdmission.allowsConversationCacheLease
+        )
+        let lease = conversationCacheAllowed
             ? await conversationCache.begin(
                 conversationKey: request.conversationKey,
                 incomingTokens: preparedPromptTokenIDs,
@@ -6556,7 +6570,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 allowRetainedPagedKVHandoff: true
             )
             : nil
-        if nativeMTPAdmission.allowsConversationCacheLease,
+        if conversationCacheAllowed,
            try await serialRouteCanaryCachedHitMissingRetainedHandoff(
             lease,
             capability: capability,
@@ -7054,7 +7068,11 @@ actor ModelRuntime: ModelRuntimeServing {
                             Self.logSpeculativeFallback(error)
                         }
                     }
-                    let lease = nativeMTPAdmission.allowsConversationCacheLease
+                    let conversationCacheAllowed = Self.allowsConversationCacheLease(
+                        provenance: request.ingestProvenance,
+                        nativeAllows: nativeMTPAdmission.allowsConversationCacheLease
+                    )
+                    let lease = conversationCacheAllowed
                         ? await conversationCache.begin(
                             conversationKey: request.conversationKey,
                             incomingTokens: promptTokenIds,
@@ -7729,7 +7747,11 @@ actor ModelRuntime: ModelRuntimeServing {
                         )
                     }
 
-                    let lease = nativeMTPAdmission.allowsConversationCacheLease
+                    let conversationCacheAllowed = Self.allowsConversationCacheLease(
+                        provenance: request.ingestProvenance,
+                        nativeAllows: nativeMTPAdmission.allowsConversationCacheLease
+                    )
+                    let lease = conversationCacheAllowed
                         ? await conversationCache.begin(
                             conversationKey: request.conversationKey,
                             incomingTokens: promptTokenIds,

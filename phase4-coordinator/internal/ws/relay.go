@@ -16,6 +16,7 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/relayblind"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	gobwas "github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
@@ -246,6 +247,13 @@ type providerSession struct {
 	rekeyMu        sync.Mutex
 	rekey          *tier2RekeyExchange
 	rekeyWaiters   int
+
+	// ackPending holds text frames enqueued before the handshake ack in
+	// preAck; sendHandshakeAck flushes them behind the ack. Raw control
+	// frames (ping, close) pass through: the provider's WebSocket client
+	// never surfaces them as the next message. Both guarded by writeMu.
+	ackPending bool
+	preAck     []providerFrame
 }
 
 // providerFrame is the unit of work consumed by runWriter. Two kinds exist:
@@ -284,6 +292,9 @@ type encryptedInferencePlaintext struct {
 	ConversationKey   string                     `json:"conversation_key,omitempty"`
 	BodyEncoding      string                     `json:"body_encoding,omitempty"`
 	RelayBlindContext *RelayBlindDispatchContext `json:"relay_blind_context,omitempty"`
+	PrivacyClass      string                     `json:"privacy_class,omitempty"`
+	// RelayBlindSettlement is inside the SPEC-008 authenticated payload.
+	RelayBlindSettlement *RelayBlindSettlementMetadata `json:"relay_blind_settlement,omitempty"`
 }
 
 type encryptedInferenceResponseChunk struct {
@@ -450,6 +461,26 @@ func providerWriteProbeFrame() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// sendHandshakeAck enqueues hello_ack / auth_response v2 ahead of every text
+// frame held while the ack was pending, then lifts the hold.
+func (ps *providerSession) sendHandshakeAck(payload []byte) error {
+	ps.writeMu.Lock()
+	defer ps.writeMu.Unlock()
+	if ps.closed {
+		return ErrRelayClosed
+	}
+	held := append([]providerFrame{{payload: payload}}, ps.preAck...)
+	if len(held) > cap(ps.writeCh)-len(ps.writeCh) {
+		return ErrRelayBackpressure
+	}
+	for _, f := range held {
+		ps.writeCh <- f
+	}
+	ps.ackPending = false
+	ps.preAck = nil
+	return nil
+}
+
 // enqueueRaw queues a pre-baked WS frame (header + body, already assembled by
 // the caller) for runWriter to emit with a single conn.Write. Used by the
 // post-handshake control-frame handler and by server-initiated Close paths so
@@ -464,6 +495,14 @@ func (ps *providerSession) enqueueFrame(f providerFrame) error {
 	defer ps.writeMu.Unlock()
 	if ps.closed {
 		return ErrRelayClosed
+	}
+	if ps.ackPending && !f.raw {
+		// Leave room for the ack itself in writeCh at flush time.
+		if len(ps.preAck) >= cap(ps.writeCh)-1 {
+			return ErrRelayBackpressure
+		}
+		ps.preAck = append(ps.preAck, f)
+		return nil
 	}
 	select {
 	case ps.writeCh <- f:
@@ -710,15 +749,17 @@ func (ps *providerSession) sealInferenceRequestWithRelayBlind(provider pool.Prov
 	if session == nil {
 		ps.tier2Mu.Unlock()
 		msg := InferenceRequest{
-			Type:              "inference_request",
-			RequestID:         requestID,
-			Stream:            stream,
-			Body:              string(body),
-			MaxOutputTokens:   maxOutputTokens,
-			Settlement:        settlement,
-			ConversationKey:   conversationKey,
-			BodyEncoding:      relayBlindBodyEncoding(relayBlind),
-			RelayBlindContext: relayBlind,
+			Type:                 "inference_request",
+			RequestID:            requestID,
+			Stream:               stream,
+			Body:                 string(body),
+			MaxOutputTokens:      maxOutputTokens,
+			Settlement:           settlement,
+			ConversationKey:      conversationKey,
+			BodyEncoding:         relayBlindBodyEncoding(relayBlind),
+			RelayBlindContext:    relayBlind,
+			PrivacyClass:         relayBlindPrivacyClass(relayBlind),
+			RelayBlindSettlement: relayBlindSettlementMetadata(relayBlind),
 		}
 		return json.Marshal(msg)
 	}
@@ -737,12 +778,14 @@ func (ps *providerSession) sealInferenceRequestWithRelayBlind(provider pool.Prov
 		Seq:        seq,
 	}
 	plaintext, err := json.Marshal(encryptedInferencePlaintext{
-		Type:              "inference_request_plaintext",
-		Body:              string(body),
-		MaxOutputTokens:   maxOutputTokens,
-		ConversationKey:   strings.TrimSpace(conversationKey),
-		BodyEncoding:      relayBlindBodyEncoding(relayBlind),
-		RelayBlindContext: relayBlind,
+		Type:                 "inference_request_plaintext",
+		Body:                 string(body),
+		MaxOutputTokens:      maxOutputTokens,
+		ConversationKey:      strings.TrimSpace(conversationKey),
+		BodyEncoding:         relayBlindBodyEncoding(relayBlind),
+		RelayBlindContext:    relayBlind,
+		PrivacyClass:         relayBlindPrivacyClass(relayBlind),
+		RelayBlindSettlement: relayBlindSettlementMetadata(relayBlind),
 	})
 	if err != nil {
 		return nil, err
@@ -767,6 +810,22 @@ func relayBlindBodyEncoding(context *RelayBlindDispatchContext) string {
 		return ""
 	}
 	return "relay-blind-request-v1"
+}
+
+// relayBlindSettlementMetadata is the SPEC-001-R005 member for a relay-blind
+// dispatch that has an R-14 route snapshot; nil on every other frame.
+func relayBlindSettlementMetadata(context *RelayBlindDispatchContext) *RelayBlindSettlementMetadata {
+	if context == nil {
+		return nil
+	}
+	return context.Settlement
+}
+
+func relayBlindPrivacyClass(context *RelayBlindDispatchContext) string {
+	if context == nil {
+		return ""
+	}
+	return context.PrivacyClass
 }
 
 func (ps *providerSession) openInferenceChunk(providerID, assignedID string, active *relayActive, aad tier2.AEADFrameAAD, envelope tier2.AEADEnvelope) (InferenceResponseChunk, error) {
@@ -1713,8 +1772,9 @@ func (s *Server) handleInferenceValidation(providerID, assignedID string, payloa
 	validEvidence := ok && frame.Type == "inference_response_validation" && frame.RequestID == requestID
 	if validEvidence {
 		validation := frame.RelayBlindValidation
+		privacyDispatch := active.relayBlind != nil && active.relayBlind.PrivacyClass == relayblind.PrivacyClassV1
 		validEvidence = (relayBlindValidationMatches(active.relayBlind, validation, "validated") && validation.ErrorCode == "") ||
-			(relayBlindValidationMatches(active.relayBlind, validation, "rejected") && validation.InputTokens == 0 && relayBlindRejectionCode(validation.ErrorCode))
+			(relayBlindValidationMatches(active.relayBlind, validation, "rejected") && validation.InputTokens == 0 && relayBlindRejectionCode(validation.ErrorCode, privacyDispatch))
 	}
 	if !validEvidence {
 		if active, found := session.removeActive(requestID); found {
@@ -1848,15 +1908,32 @@ func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byt
 		s.log.Warn().Str("provider_id", providerID).Str("request_id", end.RequestID).Msg("unknown inference_response_end request_id")
 		return
 	}
+	end = relayBlindTerminalReceipts(active.relayBlind, end)
 	active.done <- end
 	close(active.chunks)
 	s.closeProviderForTier2RekeyIfDrained(session, providerID, assignedID, end.RequestID)
 }
 
-func relayBlindRejectionCode(code string) bool {
+// relayBlindTerminalReceipts applies SPEC-001-R005 to a terminal frame. A
+// relay-blind terminal never carries a v0.4 receipt, so the receipt member is
+// dropped; the relay-blind settlement receipt counts only on a relay-blind
+// dispatch that carried relay_blind_settlement metadata.
+func relayBlindTerminalReceipts(context *RelayBlindDispatchContext, end InferenceResponseEnd) InferenceResponseEnd {
+	if context != nil {
+		end.Receipt = ""
+	}
+	if context == nil || context.Settlement == nil {
+		end.RelayBlindSettlementReceipt = ""
+	}
+	return end
+}
+
+func relayBlindRejectionCode(code string, privacy bool) bool {
 	switch code {
 	case "relay_blind_ciphertext_invalid", "relay_blind_decrypt_failed", "unsupported_sampling_penalty":
 		return true
+	case "privacy_class_posture_stale", "privacy_class_downgrade_rejected":
+		return privacy
 	default:
 		return false
 	}

@@ -5,7 +5,7 @@
 # keep CI and local on the same targets. CI jobs use the per-service
 # targets below to preserve parallel jobs and failure isolation.
 
-.PHONY: test test-coordinator test-coordinator-integration test-gateway test-integration test-dist \
+.PHONY: test test-coordinator test-coordinator-integration test-gateway test-integration test-dist test-relay-blind-parity \
         test-byom-e2e test-byom-discovery-journey test-openai-wire \
         vet vet-coordinator vet-gateway \
         lint-coordinator \
@@ -135,6 +135,7 @@ test-dist:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_classify_benchmark_evidence
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_revenue_benchmark_workload
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_revenue_benchmark_calculator
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_provider_code_identity
 	bash scripts/test-acceptance-candidate-metadata.sh
 	bash scripts/test-acceptance-promotion.sh
 	bash scripts/test-release-toolchain.sh
@@ -213,7 +214,7 @@ test-dist:
 	bash phase4-coordinator/dist/test/coordinator_deploy_recovery.test.sh
 	bash phase4-coordinator/dist/test/coordinator_pricing_recover.test.sh
 	bash phase4-coordinator/dist/test/deploy_pricing_runtime_floor.test.sh
-	bash phase4-coordinator/dist/test/deploy_canary_byte_proof_names.test.sh
+	bash phase4-coordinator/dist/test/deploy_canary_live_catalog_proof.test.sh
 	bash phase4-coordinator/dist/test/coordinator_archive_rotate.test.sh
 	bash phase4-coordinator/dist/test/coordinator_sqlite_relief.test.sh
 	bash phase4-coordinator/dist/test/coord_deploy_smoke_probe.test.sh
@@ -261,6 +262,10 @@ test-dist:
 	node --test frontdoor/provider-portal/mining-health.test.mjs
 	bash test/e2e/canary-buyer/run-canary.test.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 test/e2e/aead-rekey-oneshot/test_aead_rekey_oneshot.py
+	bash scripts/test-relay-blind-parity.sh
+
+test-relay-blind-parity:
+	bash scripts/test-relay-blind-parity.sh
 
 vet: vet-coordinator vet-gateway vet-integration
 

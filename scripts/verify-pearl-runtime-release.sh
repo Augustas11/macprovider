@@ -130,8 +130,10 @@ validate_release_dir() {
   PEARL_RELEASE_REPOSITORY="$repository" \
   PEARL_RELEASE_REQUIRED_ASSETS="$(printf '%s\n' "${required_assets[@]}")" \
   PEARL_RELEASE_REQUIRE_STATS_SIDECARS="$([[ -n "$deploy_artifacts_dir" ]] && echo 1 || echo 0)" \
+  PEARL_RELEASE_CODE_IDENTITY_SCRIPT="$root/scripts/provider-code-identity.py" \
     python3 - <<'PY'
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -252,6 +254,44 @@ for raw in (directory / "checksums.txt").read_text(encoding="utf-8").splitlines(
     name = name.removeprefix("*")
     if sha_re.fullmatch(digest):
         checksums[name] = digest
+
+# Issue #1842: the lane that ships the provider CLI signs its code identity
+# (cdhash, Team ID, signing Identifier); the runtime-only lane ships no CLI.
+if lane == "pearl_runtime":
+    if "provider_code_identity" in metadata:
+        fail("pearl-release.json runtime-only lane must not carry provider_code_identity")
+else:
+    spec = importlib.util.spec_from_file_location(
+        "provider_code_identity", os.environ["PEARL_RELEASE_CODE_IDENTITY_SCRIPT"]
+    )
+    producer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(producer)
+    if "provider_code_identity" not in metadata:
+        # SPEC-025 §6.2.1 cutoff, keyed on the verified tag version (equal to
+        # the signed provider_advertised_version checked above): only releases
+        # at or below 1.8.213 predate the field and stay verifiable for rollback.
+        if producer.identity_required(version):
+            fail(f"pearl-release.json lacks provider_code_identity required for provider CLI {version}")
+        print("[verify-pearl-runtime-release] provider_code_identity: absent (pre-#1842 release)")
+    else:
+        try:
+            identity = producer.validate_identity(
+                metadata["provider_code_identity"], tag=tag, binary_version=version
+            )
+        except producer.IdentityError as exc:
+            fail(f"pearl-release.json {exc}")
+        provider_asset = identity["asset"]
+        provider_path = directory / provider_asset
+        try:
+            producer.require_checksum_row(directory / "checksums.txt", provider_asset, provider_path)
+        except producer.IdentityError as exc:
+            fail(f"provider CLI asset bound by provider_code_identity: {exc}")
+        try:
+            cli_digest = producer.member_sha256(provider_path, identity["member"])
+        except producer.IdentityError as exc:
+            fail(f"{provider_asset}: {exc}")
+        if cli_digest != identity["binary_sha256"]:
+            fail("provider_code_identity binary_sha256 does not match the shipped macprovider-cli")
 
 for asset in required_assets:
     if asset in {"checksums.txt", "checksums.txt.sig"}:
@@ -441,6 +481,40 @@ PY
 )"
 
 if [[ "$lane" = "pearl_runtime_catalog" ]]; then
+  # Issue #1842: a signed provider_code_identity binds the shipped CLI bytes, so
+  # fetch the provider tarball it names; the local validator then checks its
+  # checksum and the extracted macprovider-cli sha256 (and fails if absent).
+  code_identity_state="$(python3 - "$work/assets/pearl-release.json" <<'PY'
+import json, sys
+try:
+    metadata = json.load(open(sys.argv[1], encoding="utf-8"))
+    print("present" if isinstance(metadata, dict) and "provider_code_identity" in metadata else "absent")
+except Exception:
+    print("absent")
+PY
+)"
+  if [[ "$code_identity_state" == present ]]; then
+    provider_cli_asset="macprovider-cli-${tag}-darwin-arm64.tar.gz"
+    PEARL_RELEASE_VIEW="$work/release.json" \
+    PEARL_RELEASE_PROVIDER_ASSET="$provider_cli_asset" \
+      python3 - <<'PY'
+import json
+import os
+import sys
+
+payload = json.loads(open(os.environ["PEARL_RELEASE_VIEW"], encoding="utf-8").read())
+names = {row.get("name") for row in payload.get("assets") if isinstance(row, dict)}
+if os.environ["PEARL_RELEASE_PROVIDER_ASSET"] not in names:
+    print(
+        "[verify-pearl-runtime-release] ERROR: missing provider CLI asset bound by provider_code_identity: "
+        + os.environ["PEARL_RELEASE_PROVIDER_ASSET"],
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
+    gh release download "$tag" --repo "$repository" --dir "$work/assets" \
+      --pattern "$provider_cli_asset" --clobber >/dev/null
+  fi
   catalog_assets=(
     release.json
     trusted-keys.json

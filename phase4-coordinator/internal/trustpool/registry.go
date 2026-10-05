@@ -14,6 +14,8 @@
 package trustpool
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
@@ -41,6 +43,12 @@ type Registry struct {
 	// (trusted_pools.production_activation configured): a pool whose root
 	// launch_environment is candidate is never routeable there.
 	rejectCandidateLaunch bool
+	// providerOwnerAccounts is the operator-configured SPEC-003 owner
+	// account per provider id (SPEC-042-R016 match input only).
+	providerOwnerAccounts map[string]string
+	// manifestActivated is called, without blocking, whenever a load makes a
+	// different accepted generation active for any pool (#1816 F3).
+	manifestActivated func()
 }
 
 type poolState struct {
@@ -71,6 +79,10 @@ type poolState struct {
 	// runtimeAllowlist is the accepted v2 core's signed runtime_allowlist
 	// (SPEC-042-R001). Empty (or a v1 core) means native MLX only.
 	runtimeAllowlist []string
+	// modelEntries and attestedMembers are the active core's SPEC-042-R015
+	// pool_model_entries and R016 pool_attested_members.
+	modelEntries    []poolmanifest.PoolModelEntry
+	attestedMembers []poolmanifest.AttestedMember
 	// delegatedMembers are members admitted through a ProviderPoolDelegationV1
 	// grant; they are never creator-owned (SPEC-042-R006 condition 4).
 	delegatedMembers map[string]struct{}
@@ -90,6 +102,12 @@ type poolState struct {
 	manifestVersion    uint64
 	manifestCoreDigest string
 	launchEnvironment  string
+	// priorManifestVersion, priorManifestCoreDigest, and priorModelEntries
+	// are the accepted core immediately before the active one (#1816 F3),
+	// so a binding not yet rebound stays routable for an unchanged entry.
+	priorManifestVersion    uint64
+	priorManifestCoreDigest string
+	priorModelEntries       []poolmanifest.PoolModelEntry
 }
 
 // Snapshot is a single consistent read of a pool's routable membership and
@@ -109,6 +127,15 @@ type Snapshot struct {
 	// RuntimeAllowlist is the accepted core's signed runtime_allowlist,
 	// read from the same consistent snapshot as Members (SPEC-042-R004).
 	RuntimeAllowlist []string
+	// ModelEntries are the active core's SPEC-042-R015 pool model entries and
+	// AttestedMembers its R016 member-account attestations, read from the
+	// same consistent snapshot as Members.
+	ModelEntries    []poolmanifest.PoolModelEntry
+	AttestedMembers []poolmanifest.AttestedMember
+	// MemberOwnerAccounts maps a route member to its coordinator-recorded
+	// SPEC-003 owner account (operator-configured), used only to match R016
+	// attestations. A member absent here has no recorded owner account.
+	MemberOwnerAccounts map[string]string
 	// CreatorAccountID is the pool creator's account from the durable
 	// pool-creation record.
 	CreatorAccountID string
@@ -126,6 +153,12 @@ type Snapshot struct {
 	// authorizes routing (SPEC-042 R006). Zero/empty for seed-only pools.
 	ManifestVersion    uint64
 	ManifestCoreDigest string
+	// PriorManifestVersion, PriorManifestCoreDigest, and PriorModelEntries
+	// are the accepted core immediately before the active one; zero/empty
+	// when there is none (SPEC-047-R011 rotation without a routing gap).
+	PriorManifestVersion    uint64
+	PriorManifestCoreDigest string
+	PriorModelEntries       []poolmanifest.PoolModelEntry
 }
 
 // RouteableSnapshot is a durable reconstruction input: one coherent pool state
@@ -142,6 +175,8 @@ type RouteableSnapshot struct {
 	MinBinaryVersion          string
 	ModelAllowlist            []string
 	RuntimeAllowlist          []string
+	ModelEntries              []poolmanifest.PoolModelEntry
+	AttestedMembers           []poolmanifest.AttestedMember
 	DelegatedMembers          []string
 	SettlementMode            string
 	Routeable                 bool
@@ -151,6 +186,9 @@ type RouteableSnapshot struct {
 	ManifestVersion           uint64
 	ManifestCoreDigest        string
 	LaunchEnvironment         string
+	PriorManifestVersion      uint64
+	PriorManifestCoreDigest   string
+	PriorModelEntries         []poolmanifest.PoolModelEntry
 }
 
 // NewRegistry returns an empty registry.
@@ -451,6 +489,8 @@ func (r *Registry) LoadRouteableSnapshot(s RouteableSnapshot) error {
 		minBinaryVersion:   s.MinBinaryVersion,
 		modelAllowlist:     modelAllowlist,
 		runtimeAllowlist:   runtimeAllowlist,
+		modelEntries:       poolmanifest.ClonePoolModelEntries(s.ModelEntries),
+		attestedMembers:    poolmanifest.CloneAttestedMembers(s.AttestedMembers),
 		delegatedMembers:   stringSet(s.DelegatedMembers),
 		settlementMode:     canonicalPoolSettlementMode(s.SettlementMode),
 		generation:         s.Generation,
@@ -459,6 +499,10 @@ func (r *Registry) LoadRouteableSnapshot(s RouteableSnapshot) error {
 		manifestVersion:    s.ManifestVersion,
 		manifestCoreDigest: s.ManifestCoreDigest,
 		launchEnvironment:  s.LaunchEnvironment,
+
+		priorManifestVersion:    s.PriorManifestVersion,
+		priorManifestCoreDigest: s.PriorManifestCoreDigest,
+		priorModelEntries:       poolmanifest.ClonePoolModelEntries(s.PriorModelEntries),
 	}
 	r.notifyRevokedWatchersForPoolsLocked(map[string]*poolState{s.PoolID: r.pools[s.PoolID]})
 	return nil
@@ -524,6 +568,21 @@ func (r *Registry) RepublishRouteGatesAtRevision(revision uint64, snapshots []Ro
 // Event/approval mutation publishers should keep using LoadRouteableSnapshotsAtRevision.
 func (r *Registry) RefreshRouteableSnapshotsAtRevision(revision uint64, snapshots []RouteableSnapshot) (bool, error) {
 	return r.loadRouteableSnapshots(revision, snapshots, true, true)
+}
+
+// PoolIDs returns every pool id the registry holds, sorted.
+func (r *Registry) PoolIDs() []string {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	ids := make([]string, 0, len(r.pools))
+	for id := range r.pools {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func (r *Registry) Revision() uint64 {
@@ -766,6 +825,8 @@ func buildRouteablePoolStates(snapshots []RouteableSnapshot) (map[string]*poolSt
 			minBinaryVersion:        s.MinBinaryVersion,
 			modelAllowlist:          modelAllowlist,
 			runtimeAllowlist:        runtimeAllowlist,
+			modelEntries:            poolmanifest.ClonePoolModelEntries(s.ModelEntries),
+			attestedMembers:         poolmanifest.CloneAttestedMembers(s.AttestedMembers),
 			delegatedMembers:        stringSet(s.DelegatedMembers),
 			settlementMode:          canonicalPoolSettlementMode(s.SettlementMode),
 			generation:              s.Generation,
@@ -774,6 +835,9 @@ func buildRouteablePoolStates(snapshots []RouteableSnapshot) (map[string]*poolSt
 			manifestVersion:         s.ManifestVersion,
 			manifestCoreDigest:      s.ManifestCoreDigest,
 			launchEnvironment:       s.LaunchEnvironment,
+			priorManifestVersion:    s.PriorManifestVersion,
+			priorManifestCoreDigest: s.PriorManifestCoreDigest,
+			priorModelEntries:       poolmanifest.ClonePoolModelEntries(s.PriorModelEntries),
 		}
 	}
 	return next, nil
@@ -796,6 +860,7 @@ func (r *Registry) applyRouteablePoolStatesLocked(revision uint64, next map[stri
 		}
 	}
 	changed := r.revision != revision || !poolStateMapsEqual(r.pools, next)
+	activated := manifestGenerationChanged(r.pools, next)
 	r.pools = next
 	if enforceRevision {
 		r.revision = revision
@@ -803,7 +868,39 @@ func (r *Registry) applyRouteablePoolStatesLocked(revision uint64, next map[stri
 	if changed {
 		r.notifyRevokedWatchersForPoolsLocked(next)
 	}
+	if activated && r.manifestActivated != nil {
+		r.manifestActivated()
+	}
 	return changed, nil
+}
+
+// manifestGenerationChanged reports whether any pool in next has a
+// different active accepted generation than in prev, or became routeable
+// with one. The binding sweep skips an unrouteable pool, so a generation
+// that activates across a routeability gap (a window boundary) must kick it
+// again when the pool routes (#1816 VM acceptance A-5).
+func manifestGenerationChanged(prev, next map[string]*poolState) bool {
+	for poolID, ps := range next {
+		old := prev[poolID]
+		if ps.manifestVersion != 0 && (old == nil || old.manifestVersion != ps.manifestVersion || old.manifestCoreDigest != ps.manifestCoreDigest ||
+			(ps.routeable && !old.routeable)) {
+			return true
+		}
+	}
+	return false
+}
+
+// SetManifestActivationHook registers fn to run whenever a registry load
+// makes a different accepted generation active for any pool (SPEC-047-R011
+// rebind at activation time, #1816 F3). fn runs under the registry lock and
+// MUST NOT block or call back into the registry.
+func (r *Registry) SetManifestActivationHook(fn func()) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.manifestActivated = fn
 }
 
 const revocationWatchSep = "\x00"
@@ -885,6 +982,8 @@ func poolStatesEqual(a, b *poolState) bool {
 		a.routeableExpired == b.routeableExpired &&
 		a.manifestVersion == b.manifestVersion &&
 		a.manifestCoreDigest == b.manifestCoreDigest &&
+		a.priorManifestVersion == b.priorManifestVersion &&
+		a.priorManifestCoreDigest == b.priorManifestCoreDigest &&
 		a.launchEnvironment == b.launchEnvironment &&
 		stringSetsEqual(a.members, b.members) &&
 		stringSetsEqual(a.revoked, b.revoked) &&
@@ -1050,6 +1149,8 @@ func (r *Registry) RouteableSnapshots() []RouteableSnapshot {
 			MinBinaryVersion:   ps.minBinaryVersion,
 			ModelAllowlist:     cloneStringSlice(ps.modelAllowlist),
 			RuntimeAllowlist:   cloneStringSlice(ps.runtimeAllowlist),
+			ModelEntries:       poolmanifest.ClonePoolModelEntries(ps.modelEntries),
+			AttestedMembers:    poolmanifest.CloneAttestedMembers(ps.attestedMembers),
 			DelegatedMembers:   sortedSetKeys(ps.delegatedMembers),
 			SettlementMode:     routeablePoolSettlementMode(ps.settlementMode),
 			Routeable:          ps.routeable,
@@ -1059,6 +1160,10 @@ func (r *Registry) RouteableSnapshots() []RouteableSnapshot {
 			ManifestVersion:    ps.manifestVersion,
 			ManifestCoreDigest: ps.manifestCoreDigest,
 			LaunchEnvironment:  ps.launchEnvironment,
+
+			PriorManifestVersion:    ps.priorManifestVersion,
+			PriorManifestCoreDigest: ps.priorManifestCoreDigest,
+			PriorModelEntries:       poolmanifest.ClonePoolModelEntries(ps.priorModelEntries),
 		})
 	}
 	return out
@@ -1110,6 +1215,9 @@ func (r *Registry) Snapshot(poolID string) Snapshot {
 		MinBinaryVersion:    ps.minBinaryVersion,
 		ModelAllowlist:      cloneStringSlice(ps.modelAllowlist),
 		RuntimeAllowlist:    cloneStringSlice(ps.runtimeAllowlist),
+		ModelEntries:        poolmanifest.ClonePoolModelEntries(ps.modelEntries),
+		AttestedMembers:     poolmanifest.CloneAttestedMembers(ps.attestedMembers),
+		MemberOwnerAccounts: r.memberOwnerAccountsLocked(members),
 		CreatorAccountID:    ps.creatorAccountID,
 		CreatorOwnedMembers: r.creatorOwnedMembersLocked(ps, members),
 		SettlementMode:      routeablePoolSettlementMode(ps.settlementMode),
@@ -1120,6 +1228,10 @@ func (r *Registry) Snapshot(poolID string) Snapshot {
 		RouteableExpired:    routeableExpired,
 		ManifestVersion:     ps.manifestVersion,
 		ManifestCoreDigest:  ps.manifestCoreDigest,
+
+		PriorManifestVersion:    ps.priorManifestVersion,
+		PriorManifestCoreDigest: ps.priorManifestCoreDigest,
+		PriorModelEntries:       poolmanifest.ClonePoolModelEntries(ps.priorModelEntries),
 	}
 }
 
@@ -1155,6 +1267,9 @@ func (r *Registry) authorizeAndSnapshotLocked(poolID, buyerAccountID string) (Sn
 		MinBinaryVersion:    ps.minBinaryVersion,
 		ModelAllowlist:      cloneStringSlice(ps.modelAllowlist),
 		RuntimeAllowlist:    cloneStringSlice(ps.runtimeAllowlist),
+		ModelEntries:        poolmanifest.ClonePoolModelEntries(ps.modelEntries),
+		AttestedMembers:     poolmanifest.CloneAttestedMembers(ps.attestedMembers),
+		MemberOwnerAccounts: r.memberOwnerAccountsLocked(members),
 		CreatorAccountID:    ps.creatorAccountID,
 		CreatorOwnedMembers: r.creatorOwnedMembersLocked(ps, members),
 		SettlementMode:      routeablePoolSettlementMode(ps.settlementMode),
@@ -1165,6 +1280,10 @@ func (r *Registry) authorizeAndSnapshotLocked(poolID, buyerAccountID string) (Sn
 		RouteableExpired:    routeableExpired,
 		ManifestVersion:     ps.manifestVersion,
 		ManifestCoreDigest:  ps.manifestCoreDigest,
+
+		PriorManifestVersion:    ps.priorManifestVersion,
+		PriorManifestCoreDigest: ps.priorManifestCoreDigest,
+		PriorModelEntries:       poolmanifest.ClonePoolModelEntries(ps.priorModelEntries),
 	}, authorized
 }
 
@@ -1299,6 +1418,93 @@ func (r *Registry) routeMembersLocked(ps *poolState, now time.Time) (map[string]
 		members[id] = true
 	}
 	return members, delegationExpired
+}
+
+// SetProviderOwnerAccounts installs the operator-configured SPEC-003 owner
+// account of each provider (account -> provider ids). It is the only source
+// the SPEC-042-R016 attestation match reads; a provider listed under two
+// accounts is ambiguous and gets no owner account. Changing the map advances
+// the routing generation so no attempt keeps a stale owner match.
+//
+// The returned update names no account: a count, a digest, and whether the
+// map changed, so a reload can log its outcome (#1816 VM acceptance A-7).
+func (r *Registry) SetProviderOwnerAccounts(accountProviders map[string][]string) ProviderOwnerAccountsUpdate {
+	owners := make(map[string]string)
+	ambiguous := make(map[string]bool)
+	for account, providers := range accountProviders {
+		account = strings.TrimSpace(account)
+		if account == "" {
+			continue
+		}
+		for _, providerID := range providers {
+			providerID = strings.TrimSpace(providerID)
+			if providerID == "" {
+				continue
+			}
+			if prior, ok := owners[providerID]; ok && prior != account {
+				ambiguous[providerID] = true
+			}
+			owners[providerID] = account
+		}
+	}
+	for providerID := range ambiguous {
+		delete(owners, providerID)
+	}
+	providers := make([]string, 0, len(owners))
+	for providerID := range owners {
+		providers = append(providers, providerID)
+	}
+	sort.Strings(providers)
+	h := sha256.New()
+	for _, providerID := range providers {
+		fmt.Fprintf(h, "%s\x00%s\n", providerID, owners[providerID])
+	}
+	update := ProviderOwnerAccountsUpdate{Providers: len(owners), Digest: hex.EncodeToString(h.Sum(nil))}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if stringMapsEqual(r.providerOwnerAccounts, owners) {
+		return update
+	}
+	r.providerOwnerAccounts = owners
+	r.ceilingGeneration++
+	update.Changed = true
+	return update
+}
+
+// ProviderOwnerAccountsUpdate is the outcome of SetProviderOwnerAccounts:
+// how many providers have an owner account, a SHA-256 digest of the
+// provider -> account map, and whether it differs from the prior map.
+type ProviderOwnerAccountsUpdate struct {
+	Providers int
+	Digest    string
+	Changed   bool
+}
+
+func stringMapsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
+}
+
+// memberOwnerAccountsLocked returns the recorded owner account of each route
+// member that has one.
+func (r *Registry) memberOwnerAccountsLocked(members map[string]bool) map[string]string {
+	out := make(map[string]string)
+	for id, ok := range members {
+		if !ok {
+			continue
+		}
+		if account := r.providerOwnerAccounts[id]; account != "" {
+			out[id] = account
+		}
+	}
+	return out
 }
 
 // creatorOwnedMembersLocked returns the route members the creator account

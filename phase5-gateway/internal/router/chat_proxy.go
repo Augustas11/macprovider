@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-gateway/internal/config"
+	"github.com/augstar/macprovider-gateway/internal/relayblind"
 	"github.com/augstar/macprovider-gateway/internal/settlement/journal"
 	"github.com/augstar/macprovider-gateway/internal/storage"
 )
@@ -102,8 +103,13 @@ const (
 	// from 30s to 300s (SPEC-022). legacySettlementPolicyVersion is kept
 	// accepted below so rows/receipts pinned to the prior version during
 	// the rollout window keep settling instead of holding indefinitely.
-	settlementPolicyVersion           = "spec022-prereq-v1"
-	legacySettlementPolicyVersion     = "spec022-prereq-v0"
+	settlementPolicyVersion       = "spec022-prereq-v1"
+	legacySettlementPolicyVersion = "spec022-prereq-v0"
+	// settlementPolicyVersionV2 is billing.RouteSnapshotPolicyVersionV2: the
+	// SPEC-015 §N.2 route_snapshot_v2 preimage a #1816 pool-provenance route
+	// (a pool model, or a SPEC-042-R016 attested member) is pinned to. It
+	// settles under the same finality rules as v1.
+	settlementPolicyVersionV2         = "spec022-route-snapshot-v2"
 	settlementHoldFallbackTTL         = 5 * time.Minute
 	maxStreamingFallbackMetadataBytes = int64(64 << 10)
 	// streamingFallbackMetadataBytesPerToken widens the serialized-metadata
@@ -1121,6 +1127,18 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 		}
 		return s.settleBeforeResponseWithFinality(w, r, subject, prompt, completion, maxUsageTokens, source, outcome, finality, resp.Header, false)
 	}
+	// SPEC-049 §4.8/R015: a confirmed privacy response may only be the closed
+	// envelope. Clear completion content is postdispatch uncertainty: bill
+	// known input only and never write the body.
+	if exec := relayBlindExecutionFor(r); exec != nil && exec.Privacy != nil {
+		if err := relayblind.ValidatePrivacyResponseBody(body); err != nil {
+			if !settleWithFinality(promptEstimate, 0, "gateway_estimated", "invalid_provider_response") {
+				return
+			}
+			writePrivacyClassError(w, privacyClassUnconfirmed, "")
+			return
+		}
+	}
 	anthropicDuplicateProviderResponse := false
 	if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && !adapter.stream && anthropicRawHasDuplicateKeys(body) {
 		anthropicDuplicateProviderResponse = true
@@ -1184,6 +1202,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	emitProviderAttribution(w.Header(), resp.Header)
 	copyReceiptEligibleHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
+	maybeSetPrivacySuccessHeaders(w, r)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
 }
@@ -1294,6 +1313,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	// the existing SSE-specific guarantees; we prepend no-store.
 	w.Header().Set("Cache-Control", "no-store, no-cache, no-transform")
 	w.Header().Set("X-Accel-Buffering", "no")
+	maybeSetPrivacySuccessHeaders(w, r)
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
 	wholesale := s.isWholesaleAccount(subject.AccountID)
@@ -1334,6 +1354,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	var emitted int64
 	var serializedEmitted int64
 	var reported *tokenUsage
+	var privacyStream relayblind.PrivacyStreamGate
+	if exec := relayBlindExecutionFor(r); exec != nil && exec.Privacy != nil {
+		privacyStream.Model = exec.Privacy.Model
+	}
 	invalidReportedUsage := false
 	forwardedUsage := false
 	terminalStructuredErrorCode := ""
@@ -1483,6 +1507,17 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		}
 		settleObservedContent("provider_timeout")
 	}
+	// SPEC-049 §4.8/R015: a privacy stream carries only opaque frames, the
+	// final frame, one clear usage chunk, and [DONE]. Anything else is
+	// postdispatch uncertainty; the offending line is never written.
+	refusePrivacyStream := func() {
+		writePrivacyClassStreamError(w, privacyClassUnconfirmed, "")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		cancelCoordinator()
+		s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "invalid_provider_response", reservationWindow, resp)
+	}
 	forwardLine := func(line []byte) bool {
 		select {
 		case <-r.Context().Done():
@@ -1491,6 +1526,30 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		default:
 		}
 		text := strings.TrimRight(string(line), "\r\n")
+		if exec := relayBlindExecutionFor(r); exec != nil && exec.Privacy != nil && strings.TrimSpace(text) != "" {
+			data, ok := sseDataValue(text)
+			if !ok {
+				refusePrivacyStream()
+				return false
+			}
+			kind, err := privacyStream.Observe(data)
+			if err != nil {
+				refusePrivacyStream()
+				return false
+			}
+			if kind == relayblind.PrivacyStreamFrame {
+				if _, err := w.Write(line); err != nil {
+					slog.Warn("streaming buyer write failed", "request_id", requestID(r), "error", err)
+					poisonDedupeCapture(w)
+					settleCancelled()
+					return false
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+				return true
+			}
+		}
 		if data, ok := sseDataValue(text); ok {
 			if data == "[DONE]" {
 				if wholesale {
@@ -1619,6 +1678,20 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					completion := gatewayContentEstimatedCompletion()
 					s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_malformed", reservationWindow, resp)
 					return false
+				}
+				// Privacy frames have no choices and no clear usage. Forward the
+				// original line and skip the metadata ceiling; ciphertext is not logged.
+				if relayBlindExecutionFor(r) != nil && privacyOpaqueStreamFrame(data) {
+					if _, err := w.Write(line); err != nil {
+						slog.Warn("streaming buyer write failed", "request_id", requestID(r), "error", err)
+						poisonDedupeCapture(w)
+						settleCancelled()
+						return false
+					}
+					if flusher != nil {
+						flusher.Flush()
+					}
+					return true
 				}
 				if relayBlindExecutionFor(r) != nil {
 					data = string(relayBlindUsageMetadataBody(r, []byte(data)))
@@ -1887,6 +1960,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			settleCancelled()
 			return
 		}
+	}
+	if exec := relayBlindExecutionFor(r); exec != nil && exec.Privacy != nil && privacyStream.Complete() != nil {
+		refusePrivacyStream()
+		return
 	}
 	if reported != nil && !invalidReportedUsage {
 		outcome := "ok"
@@ -2158,7 +2235,7 @@ func shouldRefundLegacyPreStreamProvider502(status int, body []byte, h http.Head
 		return false
 	}
 	switch openAIErrorCode(body) {
-	case "provider_error", "provider_failed", "provider_disconnected":
+	case "provider_error", "provider_failed", "provider_disconnected", "upstream_provider_error":
 		return true
 	default:
 		return false
@@ -2166,7 +2243,7 @@ func shouldRefundLegacyPreStreamProvider502(status int, body []byte, h http.Head
 }
 
 func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte, promptEstimate, maxUsageTokens, maxTokens int64) {
-	finality := coordinatorSettlementFinalityFromHeaders(resp.Header)
+	finality := coordinatorSettlementFinalityForRequest(resp.Header, relayBlindExecutionFor(r) != nil)
 	switch finality.Action {
 	case settlementFinalityLegacy, settlementFinalityRefund:
 		if err := s.refundWalletAwareReservation(subject, requestID(r)); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
@@ -2550,7 +2627,7 @@ func (s *Server) nudgeBoundSettlementReconciler(r *http.Request, subject usageSu
 }
 
 func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.ResponseWriter, r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string, h http.Header, boundHold bool) bool {
-	return s.settleBeforeResponseWithFinality(w, r, subject, prompt, completion, maxTotal, source, outcome, coordinatorSettlementFinalityFromHeaders(h), h, boundHold)
+	return s.settleBeforeResponseWithFinality(w, r, subject, prompt, completion, maxTotal, source, outcome, coordinatorSettlementFinalityForRequest(h, relayBlindExecutionFor(r) != nil), h, boundHold)
 }
 
 // settleBeforeResponseWithFinality settles a response from an already-parsed
@@ -2723,11 +2800,17 @@ func (s *Server) resolveMissingFinalityAsObserve(r *http.Request, subject usageS
 	return coordinatorObserveFallbackAllowed(finality)
 }
 
+// knownSettlementPolicyVersion reports whether a coordinator route-snapshot
+// policy version is one this gateway settles.
+func knownSettlementPolicyVersion(version string) bool {
+	return version == settlementPolicyVersion || version == legacySettlementPolicyVersion || version == settlementPolicyVersionV2
+}
+
 func coordinatorHeadersPermitObserveFallback(h http.Header) bool {
 	mode := strings.TrimSpace(h.Get(settlementModeHeader))
 	policy := strings.TrimSpace(h.Get(settlementPolicyVersionHeader))
 	return (mode == "" || mode == "observe") &&
-		(policy == "" || policy == settlementPolicyVersion || policy == legacySettlementPolicyVersion)
+		(policy == "" || knownSettlementPolicyVersion(policy))
 }
 
 func (s *Server) markStreamingSettlementHoldForReconciliation(r *http.Request, subject usageSubject, finality coordinatorSettlementFinality,
@@ -2959,7 +3042,7 @@ func coordinatorSettlementFinalityFromHeaders(h http.Header) coordinatorSettleme
 		return coordinatorSettlementFinality{Action: settlementFinalityHold, Reason: "invalid_settlement_mode"}
 	}
 	policyVersion := strings.TrimSpace(h.Get(settlementPolicyVersionHeader))
-	if policyVersion != settlementPolicyVersion && policyVersion != legacySettlementPolicyVersion {
+	if !knownSettlementPolicyVersion(policyVersion) {
 		return coordinatorSettlementFinality{Action: settlementFinalityHold, Reason: "invalid_settlement_policy_version"}
 	}
 	outcome := strings.TrimSpace(h.Get(settlementOutcomeHeader))
@@ -2983,9 +3066,46 @@ func coordinatorSettlementFinalityFromHeaders(h http.Header) coordinatorSettleme
 		return coordinatorSettlementFinality{Action: settlementFinalityHold, Outcome: outcome, Reason: "settlement_refund_tuple_incomplete", PendingDeadlineUnixMS: pendingDeadlineUnixMS}
 	case "pending":
 		return coordinatorSettlementFinality{Action: settlementFinalityHold, Outcome: outcome, Reason: reason, PendingDeadlineUnixMS: pendingDeadlineUnixMS}
+	case relayBlindSettledOutcome:
+		// SPEC-022 R-8.1: a request-agnostic reader never debits this outcome.
+		// Only coordinatorSettlementFinalityForRequest, for a request this
+		// gateway admitted as a relay-blind execution, turns it into a debit;
+		// any other request that reports it is refunded.
+		if receiptResult == "valid" && closedOK && closed {
+			return coordinatorSettlementFinality{Action: settlementFinalityRefund, Outcome: outcome, Reason: "relay_blind_settlement_for_non_relay_blind_request", PendingDeadlineUnixMS: pendingDeadlineUnixMS}
+		}
+		return coordinatorSettlementFinality{Action: settlementFinalityHold, Outcome: outcome, Reason: "relay_blind_receipt_not_final", PendingDeadlineUnixMS: pendingDeadlineUnixMS}
 	default:
 		return coordinatorSettlementFinality{Action: settlementFinalityHold, Outcome: outcome, Reason: "unrecognized_settlement_outcome", PendingDeadlineUnixMS: pendingDeadlineUnixMS}
 	}
+}
+
+// relayBlindSettledOutcome is the SPEC-022 R-14 payable outcome. It is never
+// verified.
+const relayBlindSettledOutcome = "relay_blind_settled"
+
+// coordinatorSettlementFinalityForRequest applies SPEC-022 R-8.1 to a
+// finality tuple for one request: relay_blind_settled final-debits only a
+// request admitted as a relay-blind execution, and a relay-blind execution
+// is never debited on a verified tuple (R-10.7) but held for review.
+func coordinatorSettlementFinalityForRequest(h http.Header, relayBlind bool) coordinatorSettlementFinality {
+	finality := coordinatorSettlementFinalityFromHeaders(h)
+	if !relayBlind {
+		return finality
+	}
+	switch finality.Outcome {
+	case relayBlindSettledOutcome:
+		if finality.Action == settlementFinalityRefund {
+			finality.Action = settlementFinalityDebit
+			finality.Reason = strings.TrimSpace(h.Get(settlementReasonHeader))
+		}
+	case "verified":
+		if finality.Action == settlementFinalityDebit {
+			finality.Action = settlementFinalityHold
+			finality.Reason = "verified_finality_on_relay_blind_request"
+		}
+	}
+	return finality
 }
 
 func hasAnySettlementFinalityHeader(h http.Header) bool {

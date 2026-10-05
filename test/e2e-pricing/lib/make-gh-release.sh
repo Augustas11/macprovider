@@ -3,6 +3,7 @@
 # (scripts/verify-pearl-runtime-release.sh contract): the tag's linux binaries,
 # its catalog release files, pearl-release.json + checksums.txt and their .sig
 # made with the TEST release key (openssl dgst -sha256, the updater's verifier).
+# A stand-in provider CLI tarball carries the signed provider_code_identity (#1842).
 # Usage: make-gh-release.sh <tag>
 set -euo pipefail
 . "$(dirname "$0")/../env.sh"
@@ -29,9 +30,46 @@ fi
 for f in "${catalog_static[@]}"; do
   git -C "$E2E_REPO" show "$tag:phase3-binary/dist/static/$f" >"$out/$f"
 done
-python3 - "$out" "$tag" "$commit" <<'PY'
+# #1842: a catalog-lane release ships the provider CLI and, from 1.8.214 on,
+# MUST sign its provider_code_identity (SPEC-025 §6.2.1); the E2E tags are
+# v90.x. Tier E2 has no Developer ID, so a stand-in CLI goes through the real
+# producer (scripts/provider-code-identity.py) with fake codesign/lipo on PATH,
+# exactly as scripts/tests/test_provider_code_identity.py drives it.
+provider_cli_asset="macprovider-cli-${tag}-darwin-arm64.tar.gz"
+cli_stage="$(mktemp -d "${TMPDIR:-/tmp}/e2e-provider-cli.XXXXXX")"
+trap 'rm -rf "$cli_stage"' EXIT
+mkdir -p "$cli_stage/payload" "$cli_stage/bin"
+printf 'e2e stand-in macprovider-cli %s\n' "$tag" >"$cli_stage/payload/macprovider-cli"
+chmod 755 "$cli_stage/payload/macprovider-cli"
+tar -czf "$out/$provider_cli_asset" -C "$cli_stage/payload" macprovider-cli
+cat >"$cli_stage/bin/lipo" <<'SH'
+#!/bin/sh
+[ "$1" = -archs ] || { echo "e2e fake lipo: unexpected argv: $*" >&2; exit 2; }
+echo arm64
+SH
+cat >"$cli_stage/bin/codesign" <<'SH'
+#!/bin/sh
+[ "$1" = -d ] && [ "$2" = --arch ] && [ "$3" = arm64 ] && [ "$4" = -vvv ] ||
+  { echo "e2e fake codesign: unexpected argv: $*" >&2; exit 2; }
+{
+  echo "Executable=$5"
+  echo "Identifier=live.malibu.provider.cli"
+  echo "Format=Mach-O thin (arm64)"
+  echo "CDHash=$(shasum -a 256 "$5" | cut -c1-40)"
+  echo "TeamIdentifier=$E2E_FAKE_TEAM_ID"
+} >&2
+SH
+chmod 755 "$cli_stage/bin/lipo" "$cli_stage/bin/codesign"
+PATH="$cli_stage/bin:$PATH" E2E_FAKE_TEAM_ID=E2ETEAM001 \
+  python3 "$E2E_SRC_REPO/scripts/provider-code-identity.py" \
+    --tarball "$out/$provider_cli_asset" \
+    --binary-version "${tag#v}" \
+    --expected-team-id E2ETEAM001 \
+    --expect-sha256 "$(shasum -a 256 "$cli_stage/payload/macprovider-cli" | cut -d' ' -f1)" \
+    --output "$cli_stage/provider-code-identity.json"
+python3 - "$out" "$tag" "$commit" "$cli_stage/provider-code-identity.json" <<'PY'
 import hashlib, json, os, sys
-d, tag, commit = sys.argv[1:]
+d, tag, commit, code_identity = sys.argv[1:]
 h = lambda n: hashlib.sha256(open(os.path.join(d, n), "rb").read()).hexdigest()
 cat = ["release.json", "trusted-keys.json", "tier2-catalog.json", "autotune-candidates.json", "autotune-candidates.json.sig",
        "demand-rank.json", "demand-rank.json.sig", "rate-card.json", "rate-card.json.sig"]
@@ -47,7 +85,8 @@ meta = {"schema_version": 1, "release_lane": "pearl_runtime_catalog", "repositor
                                "stats_inventory_sync": {"asset": "stats-inventory-sync-linux-amd64", "sha256": h("stats-inventory-sync-linux-amd64")},
                                "stats_billing_mirror": {"asset": "stats-billing-mirror-linux-amd64", "sha256": h("stats-billing-mirror-linux-amd64")},
                                "stats_hardware_verifier": {"asset": "stats-hardware-verifier-linux-amd64", "sha256": h("stats-hardware-verifier-linux-amd64")}},
-        "catalog": {"files": {n: h(n) for n in cat}}}
+        "catalog": {"files": {n: h(n) for n in cat}},
+        "provider_code_identity": json.load(open(code_identity, encoding="utf-8"))}
 json.dump(meta, open(os.path.join(d, "pearl-release.json"), "w"), indent=2, sort_keys=True)
 PY
 openssl dgst -sha256 -sign "$E2E_KEYS/release-signing.key" -out "$out/pearl-release.json.sig" "$out/pearl-release.json"

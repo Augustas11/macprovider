@@ -111,7 +111,7 @@ func (a *Authority) AcceptProviderKeys(ctx context.Context, providerID, assigned
 	for _, item := range verified {
 		activeKids = append(activeKids, item.record.KID)
 	}
-	return a.store.RevokeMissingKeys(ctx, providerID, activeKids, now, a.replayRetention)
+	return a.store.RevokeMissingKeys(ctx, providerID, activeKids, now, a.replayRetention, KeyClassRelayBlind)
 }
 
 func (a *Authority) RevokeProviderKey(ctx context.Context, providerID, kid string, now time.Time, replayRetention time.Duration) error {

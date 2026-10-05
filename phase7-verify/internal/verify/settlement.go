@@ -35,6 +35,7 @@ const (
 
 var (
 	hex64Re                  = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	poolModelIDRe            = regexp.MustCompile(`^pool/([A-Za-z0-9_-]{22})/([a-z0-9][a-z0-9-]{0,62})$`)
 	receiptKeyIDRe           = regexp.MustCompile(`^ed25519-sha256:[0-9a-f]{64}$`)
 	v04TerminalStates        = map[string]struct{}{"normal_done": {}, "provider_error": {}, "buyer_cancel": {}, "gateway_timeout": {}, "upstream_transport_disconnect": {}}
 	v04ReceiptTupleFieldList = []string{
@@ -180,7 +181,145 @@ type SettlementRouteSnapshot struct {
 	PendingDeadlineSeconds            int64
 	PromptHashBasis                   string
 	PromptHash                        string
+
+	// Owner-defined conditional members of SPEC-015 §N.2, each present in
+	// the JCS object only when set, exactly as the coordinator's
+	// billing.RouteSnapshot.Value emits them.
+	ProviderReportedModelHashAlgorithm   string
+	ExpectedCatalogModelHashAlgorithm    string
+	PoolID                               string
+	ManifestVersion                      int64
+	ManifestCoreDigest                   string
+	RuntimeSource                        string
+	PoolGeneration                       int64
+	PoolOperatorAccountID                string
+	ModelAdmissionCandidateID            string
+	ModelAdmissionCoordinatorEventID     string
+	ModelAdmissionServedModelRef         string
+	ModelAdmissionCatalogModelKey        string
+	ModelAdmissionDiscoveryDigestSHA256  string
+	ModelAdmissionEvaluationDigestSHA256 string
+	ArtifactFeedSHA256                   string
+	ArtifactID                           string
+	ArtifactHash                         string
+	ArtifactHashAlgorithm                string
+	ArtifactFeedSignerKeyID              string
+	ArtifactCandidateCatalogSHA256       string
+
+	// route_snapshot_v2 members (SPEC-015 §N.2, SPEC-022-R013.2 option B):
+	// the #1816 pool provenance of a pool_manifest route and of a
+	// SPEC-042-R016 attested member. They exist only under
+	// RouteSnapshotPolicyVersionV2.
+	ExpectedModelHashSource            string
+	PoolModelID                        string
+	PoolModelPromptRatePerMtok         int64
+	PoolModelPromptCacheHitRatePerMtok int64
+	PoolModelCompletionRatePerMtok     int64
+	PoolModelPricingBoundsSHA256       string
+	PoolModelGlobalMultiplierPPM       int64
+	PoolModelProviderShareBps          int64
+	PoolModelConfigSnapshotID          int64
+	PoolMemberAccountID                string
 }
+
+const (
+	// RouteSnapshotPolicyVersionV2 names the route_snapshot_v2 preimage.
+	RouteSnapshotPolicyVersionV2        = "spec022-route-snapshot-v2"
+	expectedModelHashSourcePoolManifest = "pool_manifest"
+	providerShareDenomBps               = 10000
+)
+
+// poolManifestSourced reports whether the snapshot's expected identity is a
+// SPEC-042-R015 pool entry (SPEC-022-R013).
+func (r SettlementRouteSnapshot) poolManifestSourced() bool {
+	return r.ExpectedModelHashSource == expectedModelHashSourcePoolManifest
+}
+
+func (r SettlementRouteSnapshot) carriesPoolProvenance() bool {
+	return r.ExpectedModelHashSource != "" || r.PoolMemberAccountID != ""
+}
+
+func (r SettlementRouteSnapshot) artifactDerived() bool {
+	return r.ArtifactFeedSHA256 != "" || r.ArtifactID != "" || r.ArtifactHash != "" || r.ArtifactHashAlgorithm != "" ||
+		r.ArtifactFeedSignerKeyID != "" || r.ArtifactCandidateCatalogSHA256 != ""
+}
+
+// validateConditionalMembers checks the conditional and route_snapshot_v2
+// members a standalone verifier needs to recompute the digest strictly: a
+// partial or mixed member set, provenance outside v2, or v2 without
+// provenance is invalid.
+func (r SettlementRouteSnapshot) validateConditionalMembers() error {
+	if (r.ProviderReportedModelHashAlgorithm != "" || r.ExpectedCatalogModelHashAlgorithm != "") &&
+		(r.ProviderReportedModelHashAlgorithm == "" || r.ProviderReportedModelHashAlgorithm != r.ExpectedCatalogModelHashAlgorithm) {
+		return fmt.Errorf("route snapshot model hash algorithm invalid")
+	}
+	if r.ManifestVersion < 0 || r.PoolGeneration < 0 {
+		return fmt.Errorf("route snapshot pool generation or manifest version invalid")
+	}
+	if (r.ManifestVersion != 0 || r.ManifestCoreDigest != "") &&
+		(r.PoolID == "" || r.ManifestVersion == 0 || !hex64Re.MatchString(r.ManifestCoreDigest)) {
+		return fmt.Errorf("route snapshot manifest labels invalid")
+	}
+	if r.RuntimeSource != "" && (r.PoolID == "" || r.ManifestVersion == 0 || r.PoolGeneration == 0 || strings.TrimSpace(r.PoolOperatorAccountID) == "") {
+		return fmt.Errorf("route snapshot runtime_source requires the pool label set")
+	}
+	if r.RuntimeSource == "" && (r.PoolOperatorAccountID != "" || r.PoolMemberAccountID != "") {
+		return fmt.Errorf("route snapshot pool accounts require runtime_source")
+	}
+	if r.PoolGeneration != 0 && r.RuntimeSource == "" && !r.poolManifestSourced() {
+		return fmt.Errorf("route snapshot pool_generation requires runtime_source or a pool_manifest source")
+	}
+	if r.ArtifactDerived() {
+		for field, value := range map[string]string{
+			"artifact_feed_sha256":              r.ArtifactFeedSHA256,
+			"artifact_id":                       r.ArtifactID,
+			"artifact_hash":                     r.ArtifactHash,
+			"artifact_hash_algorithm":           r.ArtifactHashAlgorithm,
+			"artifact_feed_signer_key_id":       r.ArtifactFeedSignerKeyID,
+			"artifact_candidate_catalog_sha256": r.ArtifactCandidateCatalogSHA256,
+		} {
+			if strings.TrimSpace(value) == "" {
+				return fmt.Errorf("route snapshot missing %s", field)
+			}
+		}
+	}
+	switch r.ExpectedModelHashSource {
+	case "":
+		if r.PoolModelID != "" || r.PoolModelPromptRatePerMtok != 0 || r.PoolModelPromptCacheHitRatePerMtok != 0 ||
+			r.PoolModelCompletionRatePerMtok != 0 || r.PoolModelPricingBoundsSHA256 != "" ||
+			r.PoolModelGlobalMultiplierPPM != 0 || r.PoolModelProviderShareBps != 0 || r.PoolModelConfigSnapshotID != 0 {
+			return fmt.Errorf("route snapshot pool model members require expected_model_hash_source pool_manifest")
+		}
+	case expectedModelHashSourcePoolManifest:
+		poolModelMatch := poolModelIDRe.FindStringSubmatch(r.PoolModelID)
+		if r.PoolID == "" || poolModelMatch == nil || poolModelMatch[1] != r.PoolID || r.ModelID != r.PoolModelID {
+			return fmt.Errorf("route snapshot pool_manifest model_id must be a pool_model_id of pool_id")
+		}
+		if r.ManifestVersion == 0 || r.PoolGeneration == 0 || r.ExpectedCatalogModelHashAlgorithm == "" {
+			return fmt.Errorf("route snapshot pool_manifest source requires labels, generation, and algorithm")
+		}
+		if r.PoolModelPromptRatePerMtok < 0 || r.PoolModelPromptCacheHitRatePerMtok < 0 || r.PoolModelCompletionRatePerMtok < 0 ||
+			r.PoolModelPromptCacheHitRatePerMtok > r.PoolModelPromptRatePerMtok || !hex64Re.MatchString(r.PoolModelPricingBoundsSHA256) {
+			return fmt.Errorf("route snapshot pool model price invalid")
+		}
+		if r.PoolModelGlobalMultiplierPPM <= 0 || r.PoolModelProviderShareBps < 0 || r.PoolModelProviderShareBps > providerShareDenomBps ||
+			r.PoolModelConfigSnapshotID <= 0 {
+			return fmt.Errorf("route snapshot pool model economics invalid")
+		}
+		if r.ArtifactDerived() || r.ModelAdmissionCatalogModelKey != "" {
+			return fmt.Errorf("route snapshot pool_manifest source cannot carry catalog or feed identity")
+		}
+	default:
+		return fmt.Errorf("route snapshot expected_model_hash_source invalid")
+	}
+	if (r.RouteSnapshotPolicyVersion == RouteSnapshotPolicyVersionV2) != r.carriesPoolProvenance() {
+		return fmt.Errorf("route snapshot pool provenance members and route_snapshot_v2 must go together")
+	}
+	return nil
+}
+
+// ArtifactDerived reports whether any artifact-feed member is present.
+func (r SettlementRouteSnapshot) ArtifactDerived() bool { return r.artifactDerived() }
 
 func VerifySettlementReceipt(input SettlementVerifyInput) SettlementResult {
 	if input.AlreadyDeadlineQuarantined {
@@ -194,6 +333,14 @@ func VerifySettlementReceipt(input SettlementVerifyInput) SettlementResult {
 	}
 	if input.TrustRootInconclusive {
 		return pendingUntilDeadline(input, "trust_root_inconclusive")
+	}
+	// SPEC-022 R-7.10: a v0.4 receipt never settles a relay-blind (R-14)
+	// attempt. The guard runs before any hash comparison, so the snapshot's
+	// envelope-digest prompt_hash is never compared with a prompt hash. This
+	// verifier implements only the v0.4 profile; relay-blind work is never
+	// reported verified here.
+	if input.RouteSnapshot.RelayBlind() {
+		return settlementQuarantined("v04_receipt_on_relay_blind_snapshot", "")
 	}
 	if !input.CanonicalHashesAvailable {
 		return settlementQuarantined("canonical_hash_unavailable", "")
@@ -576,6 +723,18 @@ func sameStringSet(got, want []string) bool {
 	return true
 }
 
+// SPEC-022 R-14 relay-blind paid entrypoint and prompt-hash basis.
+const (
+	paidEntrypointRelayBlindChat        = "coordinator_buyer_v1_relay_blind_chat_completions"
+	promptHashBasisRelayBlindEnvelopeV1 = "relay_blind_envelope_digest_v1"
+)
+
+// RelayBlind reports a SPEC-022 R-14 relay-blind snapshot: either its paid
+// entrypoint or its prompt-hash basis is the relay-blind one.
+func (r SettlementRouteSnapshot) RelayBlind() bool {
+	return r.PaidEntrypoint == paidEntrypointRelayBlindChat || r.PromptHashBasis == promptHashBasisRelayBlindEnvelopeV1
+}
+
 func (r SettlementRouteSnapshot) Digest() (string, error) {
 	if err := r.Validate(); err != nil {
 		return "", err
@@ -644,10 +803,71 @@ func (r SettlementRouteSnapshot) Validate() error {
 	if r.PendingDeadlineSeconds <= 0 || r.PendingDeadlineSeconds > maxPendingReceiptDeadlineSeconds {
 		return fmt.Errorf("route snapshot pending_deadline_seconds must be between 1 and %d", maxPendingReceiptDeadlineSeconds)
 	}
-	return nil
+	return r.validateConditionalMembers()
 }
 
 func routeSnapshotJCSValue(r SettlementRouteSnapshot) jcs.Value {
+	value := routeSnapshotV1BaseJCSValue(r)
+	str := func(key, v string) { value.Object[key] = jcs.Value{Kind: jcs.KindString, String: v} }
+	num := func(key string, v int64) { value.Object[key] = jcs.Value{Kind: jcs.KindInt, Int: v} }
+	// The conditional members mirror billing.RouteSnapshot.Value exactly.
+	if r.ProviderReportedModelHashAlgorithm != "" || r.ExpectedCatalogModelHashAlgorithm != "" {
+		str("provider_reported_model_hash_algorithm", r.ProviderReportedModelHashAlgorithm)
+		str("expected_catalog_model_hash_algorithm", r.ExpectedCatalogModelHashAlgorithm)
+	}
+	if r.PoolID != "" {
+		str("pool_id", r.PoolID)
+	}
+	if r.ManifestVersion != 0 {
+		num("manifest_version", r.ManifestVersion)
+	}
+	if r.ManifestCoreDigest != "" {
+		str("manifest_core_digest", r.ManifestCoreDigest)
+	}
+	if r.RuntimeSource != "" {
+		str("runtime_source", r.RuntimeSource)
+		num("pool_generation", r.PoolGeneration)
+		str("pool_operator_account_id", r.PoolOperatorAccountID)
+	}
+	if r.ModelAdmissionCandidateID != "" {
+		str("model_admission_candidate_id", r.ModelAdmissionCandidateID)
+		str("model_admission_coordinator_event_id", r.ModelAdmissionCoordinatorEventID)
+		str("model_admission_served_model_ref", r.ModelAdmissionServedModelRef)
+		if !r.poolManifestSourced() {
+			str("model_admission_catalog_model_key", r.ModelAdmissionCatalogModelKey)
+		}
+		str("model_admission_discovery_digest_sha256", r.ModelAdmissionDiscoveryDigestSHA256)
+		str("model_admission_evaluation_digest_sha256", r.ModelAdmissionEvaluationDigestSHA256)
+	}
+	if r.poolManifestSourced() {
+		str("expected_model_hash_source", r.ExpectedModelHashSource)
+		str("pool_model_id", r.PoolModelID)
+		num("pool_model_prompt_rate_per_mtok", r.PoolModelPromptRatePerMtok)
+		num("pool_model_prompt_cache_hit_rate_per_mtok", r.PoolModelPromptCacheHitRatePerMtok)
+		num("pool_model_completion_rate_per_mtok", r.PoolModelCompletionRatePerMtok)
+		str("pool_model_pricing_bounds_sha256", r.PoolModelPricingBoundsSHA256)
+		num("pool_model_global_multiplier_ppm", r.PoolModelGlobalMultiplierPPM)
+		num("pool_model_provider_share_bps", r.PoolModelProviderShareBps)
+		num("pool_model_config_snapshot_id", r.PoolModelConfigSnapshotID)
+		if r.RuntimeSource == "" {
+			num("pool_generation", r.PoolGeneration)
+		}
+	}
+	if r.PoolMemberAccountID != "" {
+		str("pool_member_account_id", r.PoolMemberAccountID)
+	}
+	if r.artifactDerived() {
+		str("artifact_feed_sha256", r.ArtifactFeedSHA256)
+		str("artifact_id", r.ArtifactID)
+		str("artifact_hash", r.ArtifactHash)
+		str("artifact_hash_algorithm", r.ArtifactHashAlgorithm)
+		str("artifact_feed_signer_key_id", r.ArtifactFeedSignerKeyID)
+		str("artifact_candidate_catalog_sha256", r.ArtifactCandidateCatalogSHA256)
+	}
+	return value
+}
+
+func routeSnapshotV1BaseJCSValue(r SettlementRouteSnapshot) jcs.Value {
 	return jcs.Value{Kind: jcs.KindObject, Object: map[string]jcs.Value{
 		"account_scope":                        {Kind: jcs.KindString, String: r.AccountScope},
 		"attempt_n":                            {Kind: jcs.KindInt, Int: r.AttemptN},

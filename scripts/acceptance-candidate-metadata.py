@@ -7,6 +7,7 @@ import argparse
 import base64
 import datetime as dt
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -417,6 +418,21 @@ def compatibility_provider_cli_version(path: pathlib.Path, expected_identity: st
     )
 
 
+def provider_code_identity(path: pathlib.Path, tag: str, provider_cli_version: str) -> dict:
+    """Load the producer's provider_code_identity and validate it with the producer's contract."""
+    script = pathlib.Path(__file__).resolve().with_name("provider-code-identity.py")
+    spec = importlib.util.spec_from_file_location("provider_code_identity", script)
+    if spec is None or spec.loader is None:
+        fail("provider code identity: producer contract is unavailable")
+    producer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(producer)
+    value = strict_json(path, "provider code identity")
+    try:
+        return producer.validate_identity(value, tag=tag, binary_version=provider_cli_version)
+    except producer.IdentityError as exc:
+        fail(f"provider code identity: {exc}")
+
+
 def build_pearl(args: argparse.Namespace) -> dict:
     repository = require_string(args.repository, REPOSITORY, "repository")
     tag = require_string(args.tag, TAG, "tag")
@@ -436,12 +452,18 @@ def build_pearl(args: argparse.Namespace) -> dict:
         fail("Pearl runtime metadata: --runtime-only cannot bind --provider-advertised-version")
     if args.runtime_only and args.provider_admission_policy != "strict_post_migration":
         fail("Pearl runtime metadata: --runtime-only cannot bind provider admission bridge policy")
+    if args.runtime_only and args.provider_code_identity is not None:
+        fail("Pearl runtime metadata: --runtime-only cannot bind --provider-code-identity")
+    if not args.runtime_only and args.provider_code_identity is None:
+        fail("Pearl runtime metadata: --provider-code-identity is required for catalog-bound releases")
     provider_cli_version = None
+    code_identity = None
     if not args.runtime_only:
         provider_cli_version = compatibility_provider_cli_version(
             args.compatibility_manifest,
             compatibility_set_id,
         )
+        code_identity = provider_code_identity(args.provider_code_identity, tag, provider_cli_version)
     catalog_metadata = None
     release_lane = "pearl_runtime"
     if args.catalog_directory is not None:
@@ -497,6 +519,8 @@ def build_pearl(args: argparse.Namespace) -> dict:
     }
     if provider_cli_version is not None:
         metadata["provider_advertised_version"] = provider_cli_version
+    if code_identity is not None:
+        metadata["provider_code_identity"] = code_identity
     return metadata
 
 
@@ -792,6 +816,7 @@ def parser() -> argparse.ArgumentParser:
     pearl.add_argument("--channel", choices=("private_acceptance", "production"), default="private_acceptance")
     pearl.add_argument("--catalog-directory", type=pathlib.Path)
     pearl.add_argument("--runtime-only", action="store_true")
+    pearl.add_argument("--provider-code-identity", type=pathlib.Path)
     pearl.add_argument("--coordinator", required=True, type=pathlib.Path)
     pearl.add_argument("--coordinator-cli", required=True, type=pathlib.Path)
     pearl.add_argument("--gateway", required=True, type=pathlib.Path)

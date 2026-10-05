@@ -280,10 +280,18 @@ type ExplorerConfig struct {
 	Enabled bool `yaml:"enabled"`
 }
 
+// PrivacyClassConfig is the SPEC-049 gateway feature. Default-off.
+// Enabled requires RelayBlindRequests.Enabled; validation rejects the
+// combination where privacy is on and relay-blind is off.
+type PrivacyClassConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
 type FeaturesConfig struct {
 	ResponsesAPIEnabled      bool                     `yaml:"responses_api_enabled"`
 	AnthropicMessagesEnabled bool                     `yaml:"anthropic_messages_enabled"`
 	RelayBlindRequests       RelayBlindRequestsConfig `yaml:"relay_blind_requests"`
+	PrivacyClass             PrivacyClassConfig       `yaml:"privacy_class"`
 	TrustedPools             TrustedPoolsConfig       `yaml:"trusted_pools"`
 }
 
@@ -488,7 +496,7 @@ func Default() Config {
 			ReplayMaxRowsPerAccount:    10000,
 			ReplayMaxBytesPerAccount:   4 * 1024 * 1024,
 			Algorithms:                 []string{"x25519-hkdf-sha256-a256gcm-v1"},
-		}},
+		}, PrivacyClass: PrivacyClassConfig{Enabled: false}},
 	}
 }
 
@@ -647,6 +655,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := validateRelayBlindRequestsConfig(c); err != nil {
+		return err
+	}
+	if err := validatePrivacyClassConfig(c); err != nil {
 		return err
 	}
 	if err := validateTrustedPoolsConfig(c); err != nil {
@@ -1064,6 +1075,13 @@ func validateRelayBlindRequestsConfig(c Config) error {
 	}
 	if rb.MetadataRequestsPerMinute <= 0 || rb.ReplayMaxRowsPerAccount <= 0 || rb.ReplayMaxBytesPerAccount <= 0 {
 		return fmt.Errorf("features.relay_blind_requests metadata replay limits must be > 0 when relay-blind requests are enabled")
+	}
+	return nil
+}
+
+func validatePrivacyClassConfig(c Config) error {
+	if c.Features.PrivacyClass.Enabled && !c.Features.RelayBlindRequests.Enabled {
+		return fmt.Errorf("features.privacy_class.enabled requires features.relay_blind_requests.enabled")
 	}
 	return nil
 }

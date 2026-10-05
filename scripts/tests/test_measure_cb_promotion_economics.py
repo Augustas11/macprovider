@@ -109,7 +109,9 @@ class PromotionEconomicsTests(unittest.TestCase):
             report["inputs"],
             {
                 "matrix_sha256": "f1df7ccbcaf1a1602f41f5d0c802d3ea77c253ecf94fe0740e721ff4b6689d2b",
-                "rate_card_sha256": "20d62a3d8c934560566ca94a861a6c7a203472e38c7f7d9db85959ae5d661173",
+                # The campaign ran on rate card 20d62a3d...; the activation
+                # release re-stamped only its generated_at (same rows/version).
+                "rate_card_sha256": "fba7c05f73990c9f9ff703092b204c649b8cf9c9354f6190c5799bacfdfd323a",
             },
         )
         by_key = {

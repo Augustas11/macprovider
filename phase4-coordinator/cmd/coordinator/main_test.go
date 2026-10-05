@@ -79,7 +79,7 @@ VALUES (?, ?, ?, ?, ?)`,
 
 	var logs bytes.Buffer
 	logger := zerolog.New(&logs)
-	store, registry, ready, err := loadTrustedPools(ctx, reqLogStore.DB(), config.Default().TrustedPools, logger)
+	store, registry, ready, err := loadTrustedPools(ctx, reqLogStore.DB(), config.Default().TrustedPools, nil, logger)
 	if err != nil {
 		t.Fatalf("loadTrustedPools error = %v, want non-fatal nil", err)
 	}

@@ -39,6 +39,11 @@
     },
     "delegation_signed": {
       "type": "object",
+      "description": "SPEC-043-R006: exactly one manifest binding. A new grant names manifest_terms_digest (the policy-terms digest); a legacy grant names manifest_core_digest and stays bound to that exact core.",
+      "oneOf": [
+        {"required": ["manifest_terms_digest"], "not": {"required": ["manifest_core_digest"]}},
+        {"required": ["manifest_core_digest"], "not": {"required": ["manifest_terms_digest"]}}
+      ],
       "additionalProperties": false,
       "required": [
         "schema_version",
@@ -47,7 +52,6 @@
         "provider_identity",
         "delegation_id",
         "operation_id",
-        "manifest_core_digest",
         "environment_network_id",
         "coordinator_audience",
         "provider_owner_key_id",
@@ -65,6 +69,7 @@
         "delegation_id": {"type": "string", "minLength": 1},
         "operation_id": {"type": "string", "minLength": 1},
         "manifest_core_digest": {"$ref": "#/$defs/sha256"},
+        "manifest_terms_digest": {"$ref": "#/$defs/sha256"},
         "environment_network_id": {"type": "string", "minLength": 1},
         "coordinator_audience": {"type": "string", "minLength": 1},
         "provider_owner_key_id": {"type": "string", "minLength": 1},
@@ -77,6 +82,11 @@
     },
     "revocation_signed": {
       "type": "object",
+      "description": "SPEC-043-R006: names the same manifest binding as the grant it revokes.",
+      "oneOf": [
+        {"required": ["manifest_terms_digest"], "not": {"required": ["manifest_core_digest"]}},
+        {"required": ["manifest_core_digest"], "not": {"required": ["manifest_terms_digest"]}}
+      ],
       "additionalProperties": false,
       "required": [
         "schema_version",
@@ -85,7 +95,6 @@
         "provider_identity",
         "delegation_id",
         "operation_id",
-        "manifest_core_digest",
         "environment_network_id",
         "coordinator_audience",
         "provider_owner_key_id",
@@ -101,6 +110,7 @@
         "delegation_id": {"type": "string", "minLength": 1},
         "operation_id": {"type": "string", "minLength": 1},
         "manifest_core_digest": {"$ref": "#/$defs/sha256"},
+        "manifest_terms_digest": {"$ref": "#/$defs/sha256"},
         "environment_network_id": {"type": "string", "minLength": 1},
         "coordinator_audience": {"type": "string", "minLength": 1},
         "provider_owner_key_id": {"type": "string", "minLength": 1},

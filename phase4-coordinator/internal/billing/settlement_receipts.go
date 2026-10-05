@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/computeintegrity"
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 )
 
@@ -326,7 +327,7 @@ func (s *Store) RecordMissingSettlementReceipt(ctx context.Context, input Settle
 	if now == 0 {
 		now = s.nowUTC().UnixMilli()
 	}
-	return s.applySettlementReceiptVerdict(ctx, input.SettlementReceiptIdentity, false, now, func(evidence settlementEvidence, alreadyTerminal bool) SettlementVerifyResult {
+	state, err := s.applySettlementReceiptVerdict(ctx, input.SettlementReceiptIdentity, false, now, func(evidence settlementEvidence, alreadyTerminal bool) SettlementVerifyResult {
 		return VerifySettlementReceipt(SettlementVerifyInput{
 			RouteSnapshot:            evidence.route,
 			AccountScope:             input.AccountScope,
@@ -351,6 +352,106 @@ func (s *Store) RecordMissingSettlementReceipt(ctx context.Context, input Settle
 			ComputeIntegrityCapture:  evidence.computeIntegrityCapture,
 		})
 	})
+	if errors.Is(err, errSettlementAttemptOutputMissing) {
+		return s.closeUnrecordedRelayBlindAttempt(ctx, input.SettlementReceiptIdentity, now, err)
+	}
+	return state, err
+}
+
+// errSettlementAttemptOutputMissing: the attempt has no attempt-output row.
+var errSettlementAttemptOutputMissing = errors.New("settlement attempt output missing")
+
+// closeUnrecordedRelayBlindAttempt is the missing-receipt writer for an
+// enforce relay-blind attempt whose snapshot committed before dispatch but
+// whose terminal, attempt output, and credit were never recorded (SPEC-022
+// R-14.10). Its terminal is the latest the dispatch bound allows, so its
+// deadline is that plus pending_deadline_seconds. Strictly past the deadline
+// it writes one closed quarantined verdict, never payable; a verdict is
+// terminal, so an output, credit, or receipt that arrives later cannot make
+// the attempt payable. In every other case (any other snapshot, an output or
+// credit, a receipt this process is still persisting, or a deadline not yet
+// passed) it returns missingErr and writes nothing.
+func (s *Store) closeUnrecordedRelayBlindAttempt(ctx context.Context, id SettlementReceiptIdentity, now int64, missingErr error) (SettlementReceiptState, error) {
+	if s.settlementReceiptRecoveryPending(id) {
+		return SettlementReceiptState{}, missingErr
+	}
+	var outcome SettlementReceiptState
+	err := sqliteutil.TransactObserved(ctx, s.db, "settlement_receipt", s.sqliteMetric, func(ctx context.Context, conn *sql.Conn) error {
+		existing, found, err := loadSettlementReceiptStateConn(ctx, conn, id)
+		if err != nil {
+			return err
+		}
+		if found {
+			if !existing.Closed {
+				return missingErr
+			}
+			outcome = existing
+			return nil
+		}
+		route, routeHash, err := loadSettlementRouteSnapshotConn(ctx, conn, id)
+		if err != nil {
+			return err
+		}
+		if !RelayBlindSnapshot(route) || route.RouteSnapshotMode != RouteSnapshotModeEnforce {
+			return missingErr
+		}
+		if _, err := loadSettlementAttemptOutputConn(ctx, conn, id); !errors.Is(err, errSettlementAttemptOutputMissing) {
+			if err != nil {
+				return err
+			}
+			return missingErr
+		}
+		var credited bool
+		if err := conn.QueryRowContext(ctx, `
+SELECT EXISTS (SELECT 1 FROM ledger_request_credits
+                WHERE request_id = ? AND attempt_n = ? AND provider_id = ?)`,
+			id.RequestID, id.AttemptN, id.ProviderID).Scan(&credited); err != nil {
+			return err
+		}
+		if credited {
+			return missingErr
+		}
+		terminalTS := s.relayBlindUnrecordedTerminalUnixMS(route.RouteDecisionTSUnixMS)
+		evidence := settlementEvidence{
+			route:     route,
+			routeHash: routeHash,
+			attempt: settlementAttemptEvidence{
+				TerminalState:         TerminalStateUpstreamTransportDisconnect,
+				TerminalStateTSUnixMS: terminalTS,
+			},
+			deadlineMS: terminalTS + route.PendingDeadlineSeconds*1000,
+		}
+		result := pendingUntilSettlementDeadline(SettlementVerifyInput{
+			RouteSnapshot:         route,
+			TerminalStateTSUnixMS: terminalTS,
+			ReceiptReceivedUnixMS: now,
+			NowUnixMS:             now,
+		}, "missing_receipt")
+		if result.Outcome != SettlementOutcomeQuarantined {
+			return missingErr
+		}
+		result.Reason = RelayBlindAttemptUnrecordedReason
+		state, err := settlementReceiptStateFromResult(id, evidence, result, false, now, false)
+		if err != nil {
+			return err
+		}
+		persisted, err := settlementReceiptPersistedFromState(state, result)
+		if err != nil {
+			return err
+		}
+		if err := insertSettlementReceiptStateConn(ctx, conn, persisted); err != nil {
+			return err
+		}
+		if err := insertSettlementReceiptVerdictAuditConn(ctx, conn, state, now); err != nil {
+			return err
+		}
+		outcome = state
+		return nil
+	})
+	if err != nil {
+		return SettlementReceiptState{}, err
+	}
+	return outcome, nil
 }
 
 func (s *Store) applySettlementReceiptVerdict(ctx context.Context, id SettlementReceiptIdentity, receiptPresent bool, receivedAtUnixMS int64, verify func(settlementEvidence, bool) SettlementVerifyResult) (SettlementReceiptState, error) {
@@ -434,7 +535,7 @@ func (s *Store) applySettlementReceiptVerdict(ctx context.Context, id Settlement
 		if err != nil {
 			return err
 		}
-		if reason, err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, state.RequestID, state.AttemptN, state.ProviderID); err != nil {
+		if reason, err := s.syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, state.RequestID, state.AttemptN, state.ProviderID); err != nil {
 			return err
 		} else if reason != "" {
 			state.ReceiptResult = SettlementReceiptResultInvalid
@@ -466,9 +567,46 @@ func (s *Store) applySettlementReceiptVerdict(ctx context.Context, id Settlement
 type settlementReceiptCreditSyncDB interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }
 
-func syncVerifiedReceiptLedgerCreditForAttemptTx(ctx context.Context, db settlementReceiptCreditSyncDB, requestID string, attemptN int64, providerID string) (string, error) {
+// PoolRouteFenceNotSettlementEligible is the quarantine reason for a verified
+// receipt whose pool route no longer holds at final settlement: a durable
+// revocation since routing (membership, delegation, R016 attestation, pool
+// retired or frozen), a label or pool_manifest entry the durable records do
+// not support, or a disputed settlement-time label (SPEC-042-R006/R015,
+// SPEC-005-R015, SPEC-022-R013).
+const PoolRouteFenceNotSettlementEligible = "pool_route_fence_not_settlement_eligible"
+
+// poolRouteSettlementFenced reports whether final settlement of a route is
+// gated by the durable pool fence: every loopback pool route (SPEC-022-R012)
+// and every pool_manifest route (SPEC-022-R013), the two route kinds the hot
+// path fences before it records any credit.
+func poolRouteSettlementFenced(route RouteSnapshot) bool {
+	return route.PoolID != "" && (route.RuntimeSource != "" || route.PoolManifestSourced())
+}
+
+// poolRouteSettlementDecision re-evaluates, through the ledger write
+// transaction q, the durable fence and the settlement-time label of a fenced
+// pool route. Nil holds. A decided failure wraps
+// ErrPoolOperatorAttestationRejected (or Unavailable when trusted pools are
+// off); any other error could not be read and leaves the receipt retryable.
+func (s *Store) poolRouteSettlementDecision(ctx context.Context, q PoolFenceQueryer, route RouteSnapshot) error {
+	source, ok := s.poolOperatorAttestationAuthority().(PoolRouteFenceSource)
+	if !ok || source == nil {
+		return ErrPoolOperatorAttestationUnavailable
+	}
+	if err := source.PoolRouteFenceHolds(ctx, q, poolAttestationClaimForRoute(route)); err != nil {
+		return err
+	}
+	labels := s.settlementPoolLabels(route.PoolID, "")
+	if labels == nil || !poolLabelRotationUndisputed(route.ManifestVersion, route.ManifestCoreDigest, labels) {
+		return fmt.Errorf("%w: settlement-time pool label disputed or unverified", ErrPoolOperatorAttestationRejected)
+	}
+	return nil
+}
+
+func (s *Store) syncVerifiedReceiptLedgerCreditForAttemptTx(ctx context.Context, db settlementReceiptCreditSyncDB, requestID string, attemptN int64, providerID string) (string, error) {
 	var requestCreditID int64
 	var promptRate, completionRate, multiplier, share int64
 	var cachedPromptTokens, configSnapshotID sql.NullInt64
@@ -477,7 +615,7 @@ func syncVerifiedReceiptLedgerCreditForAttemptTx(ctx context.Context, db settlem
 	var accountScopeHash string
 	var faultFlag, ledgerUsageSource string
 	var model string
-	var usageJSON string
+	var usageJSON, routeSnapshotJSON string
 	err := db.QueryRowContext(ctx, `
 SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
        lrc.prompt_tokens, lrc.completion_tokens, lrc.estimated_completion_tokens,
@@ -495,7 +633,7 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
          ORDER BY lpis.id DESC
             LIMIT 1
        ) AS config_snapshot_id,
-       sao.usage_canonical_json
+       sao.usage_canonical_json, srs.route_snapshot_json
   FROM ledger_request_credits lrc
   JOIN settlement_receipt_verdicts srv
     ON srv.account_scope_hash = lrc.settlement_account_scope_hash
@@ -505,7 +643,6 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
    AND srv.route_snapshot_mode = 'enforce'
    AND srv.route_snapshot_policy_version = lrc.settlement_policy_version
    AND srv.closed = 1
-   AND srv.settlement_outcome = 'verified'
   JOIN settlement_route_snapshots srs
     ON srs.request_id = lrc.request_id
    AND srs.attempt_n = lrc.attempt_n
@@ -522,6 +659,7 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
  WHERE lrc.request_id = ?
    AND lrc.attempt_n = ?
    AND lrc.provider_id = ?
+   AND `+payableSettlementOutcomeSQL("srv", "srs")+`
    AND lrc.settlement_policy_mode = 'enforce'
    AND lrc.settlement_account_scope_hash IS NOT NULL
    AND lrc.settlement_policy_version IS NOT NULL
@@ -532,12 +670,36 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
 		requestID,
 		attemptN,
 		providerID,
-	).Scan(&requestCreditID, &model, &cachedPromptTokens, &ledgerPrompt, &ledgerCompletion, &ledgerEstimate, &promptRate, &completionRate, &multiplier, &share, &ledgerGross, &ledgerProvider, &accountScopeHash, &ledgerUsageSource, &faultFlag, &configSnapshotID, &usageJSON)
+	).Scan(&requestCreditID, &model, &cachedPromptTokens, &ledgerPrompt, &ledgerCompletion, &ledgerEstimate, &promptRate, &completionRate, &multiplier, &share, &ledgerGross, &ledgerProvider, &accountScopeHash, &ledgerUsageSource, &faultFlag, &configSnapshotID, &usageJSON, &routeSnapshotJSON)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return "", nil
 		}
 		return "", err
+	}
+	// SPEC-042-R015 / SPEC-005-R015 / SPEC-022-R012-R013: the terminal
+	// verdict and its credit commit in this transaction, so the durable pool
+	// fence and the settlement-time label are decided here, against the
+	// state this commit is made against. A decided failure zero-bills and
+	// quarantines; an unreadable state rolls the receipt back for a retry.
+	var route RouteSnapshot
+	if err := json.Unmarshal([]byte(routeSnapshotJSON), &route); err != nil {
+		return "", fmt.Errorf("decode settlement route snapshot: %w", err)
+	}
+	if poolRouteSettlementFenced(route) {
+		if err := s.poolRouteSettlementDecision(ctx, db, route); err != nil {
+			if !poolOperatorAttestationPermanent(err) {
+				return "", fmt.Errorf("%w: %v", ErrPoolOperatorAttestationTransient, err)
+			}
+			reason := PoolRouteFenceNotSettlementEligible
+			if err := markVerifiedReceiptCacheQuarantinedTx(ctx, db, requestCreditID, reason); err != nil {
+				return "", err
+			}
+			if err := markSettlementReceiptCacheQuarantinedTx(ctx, db, accountScopeHash, requestID, attemptN, providerID, reason); err != nil {
+				return "", err
+			}
+			return reason, nil
+		}
 	}
 	var usage settlementUsageV04
 	if err := json.Unmarshal([]byte(usageJSON), &usage); err != nil {
@@ -549,6 +711,15 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
 		chargedPrompt = ledgerPrompt.Int64
 	}
 	completion := usage.BillableOutputTokens
+	// SPEC-015/SPEC-005 completion clamp: a signed receipt proves its tuple,
+	// not the delivered bytes, so final usage never exceeds the ledger's
+	// independent byte-derived ceiling. The formula applies the hot path's
+	// clamp to it (the lower value bills, as byte_estimated).
+	var completionCeiling *int64
+	if ledgerEstimate.Valid {
+		ceiling := ledgerEstimate.Int64
+		completionCeiling = &ceiling
+	}
 	rateEntry := RateCardEntry{PromptCreditsPerMtok: promptRate, CompletionCreditsPerMtok: completionRate}
 	var cached *int64
 	if cachedPromptTokens.Valid && cachedPromptTokens.Int64 > 0 {
@@ -587,6 +758,11 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
 			return reason, nil
 		}
 		rateEntry = RateFor(rewards.RateCard, model)
+		// SPEC-005-R015: a pool-model attempt's cache-hit rate is its route
+		// snapshot's signed entry rate, never a rate-card lookup.
+		if poolmanifest.IsPoolModelID(model) {
+			rateEntry = poolModelRateEntryFromRouteJSON(routeSnapshotJSON)
+		}
 		if rateEntry.PromptCreditsPerMtok != promptRate ||
 			rateEntry.CompletionCreditsPerMtok != completionRate ||
 			snapshotMultiplier != multiplier ||
@@ -630,20 +806,24 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
 		&chargedPrompt,
 		cached,
 		&completion,
-		nil,
+		completionCeiling,
 		UsageProviderReported,
 		faultFlag,
 		rateEntry,
 		multiplier,
 		share,
 	)
+	var keptEstimate *int64
+	if result.UsageSource == UsageByteEstimated {
+		keptEstimate = completionCeiling
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := db.ExecContext(ctx, `
 		UPDATE ledger_request_credits
 		   SET prompt_tokens = ?,
 		       charged_prompt_tokens = ?,
 		       completion_tokens = ?,
-		       estimated_completion_tokens = NULL,
+		       estimated_completion_tokens = ?,
 		       usage_source = ?,
        gross_credits = ?,
        provider_credits = ?,
@@ -653,6 +833,7 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
 		nullInt64(result.PromptTokens),
 		nullInt64(result.PromptTokens),
 		nullInt64(result.CompletionTokens),
+		nullInt64(keptEstimate),
 		result.UsageSource,
 		result.GrossCredits,
 		result.ProviderCredits,
@@ -795,7 +976,7 @@ func settlementReceiptStateFromResult(id SettlementReceiptIdentity, evidence set
 		ExpectedCatalogModelHash:      evidence.route.ExpectedCatalogModelHash,
 		ModelID:                       evidence.route.ModelID,
 		ModelHash:                     evidence.route.ProviderReportedModelHash,
-		ReceiptProfile:                settlementReceiptProfileV04,
+		ReceiptProfile:                settlementReceiptProfileFor(evidence.route),
 		BuyerDebitOutcome:             settlementReceiptNoMoneyMovementStep5,
 		ProviderSettlementOutcome:     settlementReceiptNoMoneyMovementStep5,
 		PayoutExclusionOutcome:        settlementReceiptPayoutExcludedUntil022,
@@ -812,6 +993,15 @@ func settlementReceiptStateFromResult(id SettlementReceiptIdentity, evidence set
 		return SettlementReceiptState{}, fmt.Errorf("settlement verifier returned incomplete state")
 	}
 	return state, nil
+}
+
+// settlementReceiptProfileFor is the settlement-capable profile locked for
+// the attempt's entrypoint (SPEC-022 R-4.7).
+func settlementReceiptProfileFor(route RouteSnapshot) string {
+	if RelayBlindSnapshot(route) {
+		return RelayBlindSettlementReceiptVersion
+	}
+	return settlementReceiptProfileV04
 }
 
 func (s *Store) nowUTC() time.Time {
@@ -922,7 +1112,8 @@ func settlementReceiptPersistedFromState(state SettlementReceiptState, result Se
 }
 
 func settlementOutcomeTerminal(outcome string) bool {
-	return outcome == SettlementOutcomeVerified || outcome == SettlementOutcomeQuarantined || outcome == SettlementOutcomeZeroSettled
+	return outcome == SettlementOutcomeVerified || outcome == SettlementOutcomeQuarantined || outcome == SettlementOutcomeZeroSettled ||
+		outcome == SettlementOutcomeRelayBlindSettled
 }
 
 func loadSettlementEvidenceConn(ctx context.Context, conn *sql.Conn, id SettlementReceiptIdentity) (settlementEvidence, error) {
@@ -1027,6 +1218,18 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 		ArtifactHashAlgorithm          string `json:"artifact_hash_algorithm"`
 		ArtifactFeedSignerKeyID        string `json:"artifact_feed_signer_key_id"`
 		ArtifactCandidateCatalogSHA256 string `json:"artifact_candidate_catalog_sha256"`
+		// SPEC-022-R013: the pool-manifest source members are json-carried
+		// too and recovered before the recompute; a catalog row has none.
+		ExpectedModelHashSource            string `json:"expected_model_hash_source"`
+		PoolModelID                        string `json:"pool_model_id"`
+		PoolModelPromptRatePerMtok         int64  `json:"pool_model_prompt_rate_per_mtok"`
+		PoolModelPromptCacheHitRatePerMtok int64  `json:"pool_model_prompt_cache_hit_rate_per_mtok"`
+		PoolModelCompletionRatePerMtok     int64  `json:"pool_model_completion_rate_per_mtok"`
+		PoolModelPricingBoundsSHA256       string `json:"pool_model_pricing_bounds_sha256"`
+		PoolModelGlobalMultiplierPPM       int64  `json:"pool_model_global_multiplier_ppm"`
+		PoolModelProviderShareBps          int64  `json:"pool_model_provider_share_bps"`
+		PoolModelConfigSnapshotID          int64  `json:"pool_model_config_snapshot_id"`
+		PoolMemberAccountID                string `json:"pool_member_account_id"`
 	}
 	if err := json.Unmarshal([]byte(routeSnapshotJSON), &recovered); err != nil {
 		return RouteSnapshot{}, "", fmt.Errorf("settlement route snapshot identity metadata invalid: %w", err)
@@ -1051,6 +1254,16 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 	r.ArtifactHashAlgorithm = recovered.ArtifactHashAlgorithm
 	r.ArtifactFeedSignerKeyID = recovered.ArtifactFeedSignerKeyID
 	r.ArtifactCandidateCatalogSHA256 = recovered.ArtifactCandidateCatalogSHA256
+	r.ExpectedModelHashSource = recovered.ExpectedModelHashSource
+	r.PoolModelID = recovered.PoolModelID
+	r.PoolModelPromptRatePerMtok = recovered.PoolModelPromptRatePerMtok
+	r.PoolModelPromptCacheHitRatePerMtok = recovered.PoolModelPromptCacheHitRatePerMtok
+	r.PoolModelCompletionRatePerMtok = recovered.PoolModelCompletionRatePerMtok
+	r.PoolModelPricingBoundsSHA256 = recovered.PoolModelPricingBoundsSHA256
+	r.PoolModelGlobalMultiplierPPM = recovered.PoolModelGlobalMultiplierPPM
+	r.PoolModelProviderShareBps = recovered.PoolModelProviderShareBps
+	r.PoolModelConfigSnapshotID = recovered.PoolModelConfigSnapshotID
+	r.PoolMemberAccountID = recovered.PoolMemberAccountID
 	r.ComputeIntegrityCaptureRequired = computeIntegrityCaptureRequired == 1
 	r.ComputeIntegritySamplingCovered = computeIntegritySamplingCovered == 1
 	if computeIntegrityHardwareDigest.Valid {
@@ -1085,7 +1298,7 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return settlementAttemptEvidence{}, fmt.Errorf("settlement attempt output missing")
+			return settlementAttemptEvidence{}, errSettlementAttemptOutputMissing
 		}
 		return settlementAttemptEvidence{}, err
 	}
@@ -1760,4 +1973,18 @@ func derefString(value *string) string {
 
 func redactedAccountScopeHash(accountScope string) string {
 	return SettlementAccountScopeHash(accountScope)
+}
+
+// poolModelRateEntryFromRouteJSON is the trusted SPEC-005-R015 price a
+// pool_manifest route snapshot recorded. Any other or unreadable snapshot
+// yields a negative sentinel rate that can never match a ledger row, so the
+// caller's rate-contract check fails closed.
+func poolModelRateEntryFromRouteJSON(raw string) RateCardEntry {
+	var route RouteSnapshot
+	if err := json.Unmarshal([]byte(raw), &route); err == nil {
+		if entry, ok := route.PoolModelRateEntry(); ok {
+			return entry
+		}
+	}
+	return RateCardEntry{PromptCreditsPerMtok: -1, CompletionCreditsPerMtok: -1}
 }

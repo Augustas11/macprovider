@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Send lab buyer requests through the lab gateway (127.0.0.1:19110).
 
-  buyer.py [--pool NAME] [--engine SEL] [--stream] [--n N] [--concurrency C] [--max-tokens M]
+  buyer.py [--pool NAME] [--engine SEL] [--model ID] [--stream] [--n N] [--concurrency C] [--max-tokens M]
 
 --pool NAME selects LAB/pools/NAME via X-MacProvider-Pool-Select; without it
 the request is a global route. --engine SEL sends X-MacProvider-Engine-Select
-(SPEC-006-R016); the served X-MacProvider-Engine is reported as "engine". Prints one sanitized JSON line per request:
+(SPEC-006-R016); the served X-MacProvider-Engine is reported as "engine".
+--model ID overrides the request model (#1816: a pool/<pool_id>/<slug> id). Prints one sanitized JSON line per request:
 HTTP status, error code, content length and sha256 (never the text), the
 usage the buyer saw, and for streams whether the chunk sequence was intact.
 """
@@ -33,7 +34,7 @@ def one(i, a):
         headers["X-MacProvider-Pool-Select"] = (LAB / "pools" / a.pool / "pool_id").read_text().strip()
     if a.engine:
         headers["X-MacProvider-Engine-Select"] = a.engine
-    body = {"model": MODEL, "messages": [{"role": "user", "content": f"{PROMPTS[i % len(PROMPTS)]} (lab ref {uuid.uuid4().hex[:8]})"}], "max_tokens": a.max_tokens}
+    body = {"model": a.model or MODEL, "messages": [{"role": "user", "content": f"{PROMPTS[i % len(PROMPTS)]} (lab ref {uuid.uuid4().hex[:8]})"}], "max_tokens": a.max_tokens}
     if a.stream:
         body["stream"] = True
         body["stream_options"] = {"include_usage": True}
@@ -87,6 +88,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--pool")
     p.add_argument("--engine")
+    p.add_argument("--model")
     p.add_argument("--stream", action="store_true")
     p.add_argument("--n", type=int, default=1)
     p.add_argument("--concurrency", type=int, default=1)

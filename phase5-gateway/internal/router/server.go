@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -24,7 +25,10 @@ import (
 	"github.com/augstar/macprovider-gateway/internal/storage"
 )
 
-var unauthenticatedInternalProbes = expvar.NewInt("unauthenticated_internal_probes_total")
+var (
+	unauthenticatedInternalProbes = expvar.NewInt("unauthenticated_internal_probes_total")
+	poolModelIDRe                 = regexp.MustCompile(`^pool/([A-Za-z0-9_-]{22})/([a-z0-9][a-z0-9-]{0,62})$`)
+)
 
 type Server struct {
 	cfg     config.Config
@@ -364,6 +368,23 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// SPEC-006-R018 (#1816): a pool selection asks for the pool view, which
+	// lists that pool's signed pool models. It is authorized exactly like a
+	// chat pool selection (API-key credentials only), and every denial is the
+	// generic pool_unavailable.
+	poolID, poolAccountID := "", ""
+	if strings.TrimSpace(r.Header.Get(poolSelectHeader)) != "" {
+		accountID := ""
+		if authn.Bearer != nil {
+			accountID = authn.Bearer.AccountID
+		}
+		resolved, poolErr := s.resolvePoolSelection(r.Context(), r.Header, accountID, !authn.Demo && authn.WalletSession == nil && accountID != "")
+		if poolErr != nil {
+			writeError(w, poolErr.status, poolErr.typ, poolErr.code, poolErr.message)
+			return
+		}
+		poolID, poolAccountID = resolved, accountID
+	}
 	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, strings.TrimRight(s.coordinatorBuyerURL(), "/")+"/v1/models", nil)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
@@ -374,6 +395,10 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	// request_log.external_request_id matches the gateway's
 	// usage_events.request_id on a per-request basis.
 	upReq.Header.Set("X-Request-ID", requestID(r))
+	if poolID != "" {
+		s.setCoordinatorChatContext(upReq.Header, r, poolAccountID)
+		upReq.Header.Set(poolEmitHeader, poolID)
+	}
 	resp, err := s.client.Do(upReq)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
@@ -389,7 +414,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "api_error", "coordinator_models_error", "Coordinator models error")
 		return
 	}
-	sanitizeModelsResponse(body)
+	sanitizeModelsResponse(body, poolID)
 	disclosure, ok := s.tier1DisclosureForModels(body, r.Context())
 	if !ok {
 		writeError(w, http.StatusBadGateway, "api_error", "tier2_metadata_unavailable", "Coordinator Tier-2 metadata unavailable")
@@ -403,7 +428,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, body)
 }
 
-func sanitizeModelsResponse(body map[string]any) {
+func sanitizeModelsResponse(body map[string]any, poolID string) {
 	for key, value := range body {
 		if sanitized, ok := sanitizeModelsTopLevelValue(key, value); ok {
 			body[key] = sanitized
@@ -430,6 +455,14 @@ func sanitizeModelsResponse(body map[string]any) {
 				rawMembers = value
 				continue
 			}
+			if key == "macprovider_pool_model" {
+				// SPEC-006-R018: the closed pool-model object survives only
+				// in the pool view it was requested for.
+				if sanitizedValue, ok := sanitizePoolModelObject(value, poolID); ok {
+					clean[key] = sanitizedValue
+				}
+				continue
+			}
 			if sanitizedValue, ok := sanitizeModelEntryValue(key, value); ok {
 				clean[key] = sanitizedValue
 			}
@@ -437,6 +470,14 @@ func sanitizeModelsResponse(body map[string]any) {
 		id, ok := sanitizedModelEntryID(clean)
 		if !ok {
 			continue
+		}
+		// A pool/ id is listed only with its closed pool-model object, in
+		// that pool's view; the default list never carries one.
+		if strings.HasPrefix(id, "pool/") {
+			pm, ok := clean["macprovider_pool_model"].(map[string]any)
+			if !ok || pm["pool_model_id"] != id {
+				continue
+			}
 		}
 		clean["compute_integrity"] = makeModelComputeIntegrityUnavailableStatus()
 		modelIDs[id] = struct{}{}
@@ -501,6 +542,51 @@ func sanitizeModelEntryValue(key string, value any) (any, bool) {
 	default:
 		return nil, false
 	}
+}
+
+// sanitizePoolModelObject re-emits the SPEC-006-R018 closed
+// macprovider_pool_model object only for the requested pool view, with every
+// member type-checked; anything else is dropped.
+func sanitizePoolModelObject(value any, poolID string) (any, bool) {
+	raw, ok := value.(map[string]any)
+	if !ok || poolID == "" || raw["pool_id"] != poolID || len(raw) != 12 {
+		return nil, false
+	}
+	for _, key := range []string{"pool_id", "pool_model_id", "artifact_hash_algorithm", "artifact_hash", "manifest_core_digest"} {
+		if v, ok := raw[key].(string); !ok || v == "" {
+			return nil, false
+		}
+	}
+	if raw["disclosure_class"] != poolModelDisclosureClass || raw["price_source"] != "pool_creator_signed" ||
+		raw["disclosure_text"] != "Pool-attested, not network-verified" ||
+		!isLowerHex64Header(raw["artifact_hash"].(string)) || !isLowerHex64Header(raw["manifest_core_digest"].(string)) ||
+		!valueIsJSONNumber(raw["max_context_tokens"]) || !valueIsJSONNumber(raw["manifest_version"]) {
+		return nil, false
+	}
+	poolModelID := raw["pool_model_id"].(string)
+	poolModelMatch := poolModelIDRe.FindStringSubmatch(poolModelID)
+	if poolModelMatch == nil || poolModelMatch[1] != poolID {
+		return nil, false
+	}
+	sources, ok := raw["runtime_sources"].([]any)
+	if !ok || len(sources) == 0 {
+		return nil, false
+	}
+	for _, source := range sources {
+		if class, ok := source.(string); !ok || buyerVisibleEngineHeader(class) == "" {
+			return nil, false
+		}
+	}
+	price, ok := raw["price"].(map[string]any)
+	if !ok || len(price) != 4 {
+		return nil, false
+	}
+	for _, key := range []string{"prompt_rate_per_mtok", "prompt_cache_hit_rate_per_mtok", "completion_rate_per_mtok", "global_multiplier_ppm"} {
+		if !valueIsJSONNumber(price[key]) {
+			return nil, false
+		}
+	}
+	return raw, true
 }
 
 func sanitizeHashVerified(value any) (any, bool) {
@@ -1312,6 +1398,7 @@ var gatewayRetryableByCode = map[string]bool{
 	"relay_blind_key_expired":           true,
 	"relay_blind_decrypt_failed":        true,
 	"relay_blind_provider_unsupported":  true,
+	"privacy_class_posture_stale":       true,
 	// Operator-controlled capacity pauses (M-R2-3 + sweep): the wording on
 	// all three ("paused"/"closed ... while capacity catches up") already
 	// promises the buyer this resolves with time; the code must agree.
@@ -1391,6 +1478,10 @@ var gatewayPermanentCodes = map[string]bool{
 	"relay_blind_required_unavailable":         true,
 	"relay_blind_ciphertext_invalid":           true,
 	"relay_blind_committed_failed":             true,
+	"privacy_class_disabled":                   true,
+	"privacy_class_unavailable":                true,
+	"privacy_class_downgrade_rejected":         true,
+	"privacy_class_unconfirmed":                true,
 	// Round-3 SECURITY MEDIUM revert: round-2 classified these three true
 	// as part of the rate_limit_exceeded family, but unlike
 	// account_request_rate_exceeded/account_concurrency_exceeded/
@@ -1589,6 +1680,14 @@ func copyCleanHeadersWithReceipt(dst, src http.Header, allowReceipt bool) {
 			}
 			continue
 		}
+		// SPEC-006-R018 (#1816): a pool model's disclosure headers survive
+		// the strip only as the exact literal / 64 lowercase hex.
+		if value, ok := buyerVisiblePoolModelHeader(key, values); ok {
+			if value != "" {
+				dst.Set(http.CanonicalHeaderKey(key), value)
+			}
+			continue
+		}
 		if isMacProviderHeader(key) {
 			continue
 		}
@@ -1715,7 +1814,9 @@ func isMacProviderHeader(key string) bool {
 
 func isInternalMacProviderHeader(key string) bool {
 	lower := strings.ToLower(key)
-	return lower == "x-macprovider-internal-conv" || strings.HasPrefix(lower, "x-macprovider-internal-")
+	// The posture timestamp is coordinator-to-gateway only. A buyer-supplied
+	// copy is stripped at ingress and is never a source of usage metadata.
+	return lower == "x-macprovider-internal-conv" || strings.HasPrefix(lower, "x-macprovider-internal-") || lower == "x-macprovider-privacy-posture-verified-at"
 }
 
 func setRateLimitHeaders(w http.ResponseWriter, limit, remaining, reset int64) {

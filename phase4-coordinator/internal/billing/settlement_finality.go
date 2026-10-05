@@ -35,6 +35,15 @@ type RequestSettlementFinality struct {
 	QuarantinedAttempts      int64  `json:"quarantined_attempts"`
 	ZeroSettledAttempts      int64  `json:"zero_settled_attempts"`
 	OverlappingBlockedTokens int64  `json:"overlapping_blocked_tokens,omitempty"`
+	// RelayBlindSettledAttempts counts SPEC-022 R-14 attempts that closed
+	// relay_blind_settled under the R-7.9 binding. They are never counted as
+	// verified attempts.
+	RelayBlindSettledAttempts int64 `json:"relay_blind_settled_attempts"`
+	// RelayBlindSettlementCoverage is the coordinator's authoritative SPEC-022
+	// R-14 coverage answer for a relay-blind attempt lookup:
+	// RelayBlindCoverageEnforce or RelayBlindCoverageObserve. It is set only
+	// when the caller asked for a relay-blind attempt.
+	RelayBlindSettlementCoverage string `json:"relay_blind_settlement_coverage,omitempty"`
 }
 
 type requestSettlementVerdictRow struct {
@@ -50,6 +59,10 @@ type requestSettlementVerdictRow struct {
 	// noSnapshot marks an enforce credit recorded without a route snapshot
 	// (store pressure): the snapshot scope check does not apply to it.
 	noSnapshot bool
+	// relayBlindBound is the SPEC-022 R-7.9 binding of a relay_blind_settled
+	// verdict: relay-blind entrypoint and basis on its snapshot, relay-blind
+	// profile on the verdict.
+	relayBlindBound bool
 }
 
 // SettlementEvidenceMissingReason closes an enforce-mode attempt whose
@@ -127,8 +140,11 @@ func (s *Store) requestSettlementFinalityForAccount(ctx context.Context, account
 		}
 	}
 	internalRequestIDs, err := s.requestIDsForExternalRequest(ctx, accountID, requestID, notBefore)
-	if err != nil || len(internalRequestIDs) == 0 {
+	if err != nil {
 		return RequestSettlementFinality{}, false, err
+	}
+	if len(internalRequestIDs) == 0 {
+		return s.relayBlindRequiredFinality(ctx, accountScope, requestID, requiredInternalRequestID, nowUnixMS)
 	}
 	if requiredInternalRequestID != "" {
 		included := false
@@ -139,7 +155,7 @@ func (s *Store) requestSettlementFinalityForAccount(ctx context.Context, account
 			}
 		}
 		if !included {
-			return RequestSettlementFinality{}, false, nil
+			return s.relayBlindRequiredFinality(ctx, accountScope, requestID, requiredInternalRequestID, nowUnixMS)
 		}
 	}
 	finalities := make([]RequestSettlementFinality, 0, len(internalRequestIDs))
@@ -173,6 +189,141 @@ func (s *Store) requestSettlementFinalityForAccount(ctx context.Context, account
 		finality.PendingAttempts++
 	}
 	return finality, true, nil
+}
+
+// defaultRelayBlindAttemptTimeout is the relay-blind dispatch bound used
+// until SetRelayBlindAttemptTimeout installs the configured buyer request
+// timeout. It is deliberately longer than any configured timeout, so an
+// unconfigured store never closes an attempt that may still be running.
+const defaultRelayBlindAttemptTimeout = time.Hour
+
+// SetRelayBlindAttemptTimeout installs the buyer request timeout that bounds
+// every relay-blind dispatch (SPEC-022 R-14.10). A non-positive value keeps
+// the conservative default.
+func (s *Store) SetRelayBlindAttemptTimeout(timeout time.Duration) {
+	s.relayBlindAttemptTimeoutMS.Store(timeout.Milliseconds())
+}
+
+// RelayBlindAttemptTimeout is the relay-blind dispatch bound in effect.
+func (s *Store) RelayBlindAttemptTimeout() time.Duration {
+	if ms := s.relayBlindAttemptTimeoutMS.Load(); ms > 0 {
+		return time.Duration(ms) * time.Millisecond
+	}
+	return defaultRelayBlindAttemptTimeout
+}
+
+// relayBlindUnrecordedTerminalUnixMS is the latest terminal an enforce
+// relay-blind attempt can have: the dispatch is bounded by the request
+// timeout, and dispatch follows the route decision (SPEC-022 R-14.10). An
+// attempt whose terminal was never recorded is measured from it, so its
+// R-8.3 deadline is this plus pending_deadline_seconds.
+func (s *Store) relayBlindUnrecordedTerminalUnixMS(routeDecisionUnixMS int64) int64 {
+	return routeDecisionUnixMS + s.RelayBlindAttemptTimeout().Milliseconds()
+}
+
+// RelayBlindAttemptUnrecordedReason closes an enforce relay-blind attempt
+// whose snapshot was committed before dispatch but whose credit and attempt
+// output were never written (SPEC-022 R-14.6): nothing is payable, so the
+// buyer is refunded.
+const RelayBlindAttemptUnrecordedReason = "relay_blind_attempt_unrecorded"
+
+// relayBlindRequiredFinality answers a bound lookup whose required internal
+// request id has no request_log row under the external id. A SPEC-022 R-14
+// relay-blind snapshot is committed before dispatch, so its existence is the
+// coordinator's authority that the attempt was enforce-covered even when the
+// coordinator stopped before writing the request log. Anything else stays
+// not found.
+func (s *Store) relayBlindRequiredFinality(ctx context.Context, accountScope, externalRequestID, requiredInternalRequestID string, nowUnixMS int64) (RequestSettlementFinality, bool, error) {
+	if requiredInternalRequestID == "" {
+		return RequestSettlementFinality{}, false, nil
+	}
+	readCtx, cancel := context.WithTimeout(ctx, settlementFinalityReadTimeout)
+	var exists bool
+	err := s.reader().QueryRowContext(readCtx, `
+SELECT EXISTS (
+    SELECT 1 FROM settlement_route_snapshots
+     WHERE account_scope = ? AND request_id = ?
+       AND paid_entrypoint = ? AND prompt_hash_basis = ? AND route_snapshot_mode = ?)`,
+		accountScope, requiredInternalRequestID, PaidEntrypointRelayBlindChat, PromptHashBasisRelayBlindEnvelopeV1, RouteSnapshotModeEnforce).Scan(&exists)
+	cancel()
+	if err != nil || !exists {
+		return RequestSettlementFinality{}, false, err
+	}
+	finality, found, err := s.RequestSettlementFinality(ctx, accountScope, requiredInternalRequestID, nowUnixMS)
+	if err != nil || !found {
+		return RequestSettlementFinality{}, false, err
+	}
+	finality.RequestID = externalRequestID
+	finality.RequiredInternalRequestID = requiredInternalRequestID
+	return finality, true, nil
+}
+
+// SPEC-022 R-14 coverage answers for a relay-blind attempt lookup.
+const (
+	// RelayBlindCoverageEnforce: an enforce R-14 relay-blind route snapshot
+	// exists for the attempt; only R-14 finality decides money.
+	RelayBlindCoverageEnforce = "enforce"
+	// RelayBlindCoverageObserve: the attempt ran without R-14 coverage
+	// (observe or off). The gateway may use its status-row recovery.
+	RelayBlindCoverageObserve = "observe"
+)
+
+// RelayBlindSettlementCoverage answers whether coordinator attempt
+// internalRequestID, the relay-blind attempt for external request
+// externalRequestID bound to the given provider-binding and envelope digests,
+// was R-14 enforce-covered. It returns RelayBlindCoverageEnforce only when an
+// enforce relay-blind route snapshot exists for the attempt (committed before
+// dispatch, R-14.3) whose prompt hash is the supplied envelope digest and
+// whose recorded provider-binding digest is the supplied one. A snapshot
+// committed before that column existed has no recorded binding; it is bound
+// through the attempt's request-log row carrying both digests instead. It
+// returns RelayBlindCoverageObserve only when the attempt's request-log row
+// carries those digests and no relay-blind snapshot exists, and "" (unknown,
+// the caller holds) otherwise, including when an enforce snapshot exists but
+// either digest does not match it (SPEC-022 R-14.9).
+func (s *Store) RelayBlindSettlementCoverage(ctx context.Context, accountID, externalRequestID, internalRequestID, providerBindingDigest, envelopeDigest string) (string, error) {
+	if accountID == "" || externalRequestID == "" || internalRequestID == "" || providerBindingDigest == "" || envelopeDigest == "" {
+		return "", nil
+	}
+	// The snapshot's prompt hash is the hex of the envelope digest (R-3.1).
+	// A digest that does not decode canonically matches no snapshot.
+	envelopeHex, err := relayBlindDigestHex(envelopeDigest)
+	if err != nil {
+		envelopeHex = ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, settlementFinalityReadTimeout)
+	defer cancel()
+	const loggedSQL = `EXISTS (SELECT 1 FROM request_log
+                WHERE account_id = ? AND external_request_id = ? AND request_id = ?
+                  AND relay_blind_provider_binding_digest = ? AND relay_blind_envelope_digest = ?)`
+	var enforceSnapshot, anyRelayBlindSnapshot, logged bool
+	err = s.reader().QueryRowContext(ctx, `
+SELECT EXISTS (SELECT 1 FROM settlement_route_snapshots
+                WHERE account_scope = ? AND request_id = ?
+                  AND paid_entrypoint = ? AND prompt_hash_basis = ? AND route_snapshot_mode = ?
+                  AND prompt_hash = ?
+                  AND (relay_blind_provider_binding_digest = ?
+                       OR (relay_blind_provider_binding_digest IS NULL AND `+loggedSQL+`))),
+       EXISTS (SELECT 1 FROM settlement_route_snapshots
+                WHERE account_scope = ? AND request_id = ?
+                  AND (paid_entrypoint = ? OR prompt_hash_basis = ?)),
+       `+loggedSQL,
+		AccountScopeForSettlement(accountID), internalRequestID, PaidEntrypointRelayBlindChat, PromptHashBasisRelayBlindEnvelopeV1, RouteSnapshotModeEnforce,
+		envelopeHex, providerBindingDigest,
+		accountID, externalRequestID, internalRequestID, providerBindingDigest, envelopeDigest,
+		AccountScopeForSettlement(accountID), internalRequestID, PaidEntrypointRelayBlindChat, PromptHashBasisRelayBlindEnvelopeV1,
+		accountID, externalRequestID, internalRequestID, providerBindingDigest, envelopeDigest).Scan(&enforceSnapshot, &anyRelayBlindSnapshot, &logged)
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case enforceSnapshot:
+		return RelayBlindCoverageEnforce, nil
+	case !anyRelayBlindSnapshot && logged:
+		return RelayBlindCoverageObserve, nil
+	default:
+		return "", nil
+	}
 }
 
 func (s *Store) RequestSettlementFinality(ctx context.Context, accountScope, requestID string, nowUnixMS int64) (RequestSettlementFinality, bool, error) {
@@ -317,6 +468,47 @@ func (s *Store) RequestSettlementFinality(ctx context.Context, accountScope, req
 				finality.PendingAttempts++
 				finality.PendingDeadlineUnixMS = minPositiveDeadline(finality.PendingDeadlineUnixMS, row.pendingDeadlineUnixMS)
 			}
+		case SettlementOutcomeRelayBlindSettled:
+			if !row.closed || row.receiptResult != SettlementReceiptResultValid {
+				finality.PendingAttempts++
+				finality.PendingDeadlineUnixMS = minPositiveDeadline(finality.PendingDeadlineUnixMS, row.pendingDeadlineUnixMS)
+				continue
+			}
+			if !row.relayBlindBound {
+				// R-7.9: not payable without the entrypoint, basis, and
+				// profile binding; the buyer is refunded.
+				finality.QuarantinedAttempts++
+				if firstTerminalRefund == nil {
+					refund := row
+					refund.settlementOutcome = SettlementOutcomeQuarantined
+					refund.receiptResult = SettlementReceiptResultInvalid
+					refund.reason = "relay_blind_settlement_unbound"
+					firstTerminalRefund = &refund
+				}
+				continue
+			}
+			usage, blocked, _, err := s.requestSettlementUsage(ctx, accountScope, requestID, row.attemptN, row.providerID)
+			if errors.Is(err, errVerifiedCreditQuarantined) {
+				finality.ZeroSettledAttempts++
+				if firstTerminalRefund == nil {
+					refund := row
+					refund.settlementOutcome = SettlementOutcomeZeroSettled
+					refund.receiptResult = SettlementReceiptResultValid
+					refund.reason = VerifiedCreditQuarantinedReason
+					firstTerminalRefund = &refund
+				}
+				continue
+			}
+			if err != nil {
+				return RequestSettlementFinality{}, false, err
+			}
+			if blocked {
+				finality.OverlappingBlockedTokens += usage.BillableInputTokens + usage.BillableOutputTokens
+				continue
+			}
+			finality.PromptTokens += usage.BillableInputTokens
+			finality.CompletionTokens += usage.BillableOutputTokens
+			finality.RelayBlindSettledAttempts++
 		case SettlementOutcomeQuarantined:
 			finality.QuarantinedAttempts++
 			if firstTerminalRefund == nil {
@@ -355,6 +547,9 @@ func (s *Store) RequestSettlementFinality(ctx context.Context, accountScope, req
 		finality.Reason = "receipt_verdict_pending"
 		finality.Closed = false
 		return finality, true, nil
+	}
+	if finality.RelayBlindSettledAttempts > 0 {
+		return relayBlindSettledFinality(finality), true, nil
 	}
 	if finality.VerifiedAttempts > 0 {
 		finality.Outcome = SettlementOutcomeVerified
@@ -419,11 +614,19 @@ func (s *Store) requestSettlementVerdicts(ctx context.Context, accountScope, req
 	ctx, cancel := context.WithTimeout(ctx, settlementFinalityReadTimeout)
 	defer cancel()
 	rows, err := s.reader().QueryContext(ctx, `
-SELECT attempt_n, provider_id, receipt_result, settlement_outcome, reason, closed,
-       pending_deadline_unix_ms, route_snapshot_policy_version, route_snapshot_mode
-  FROM settlement_receipt_verdicts
- WHERE account_scope_hash = ? AND request_id = ?
- ORDER BY attempt_n ASC, id ASC`, SettlementAccountScopeHash(accountScope), requestID)
+SELECT srv.attempt_n, srv.provider_id, srv.receipt_result, srv.settlement_outcome, srv.reason, srv.closed,
+       srv.pending_deadline_unix_ms, srv.route_snapshot_policy_version, srv.route_snapshot_mode,
+       srv.receipt_profile, COALESCE(srv.receipt_version, ''), srv.paid_entrypoint,
+       COALESCE(srs.paid_entrypoint, ''), COALESCE(srs.prompt_hash_basis, '')
+  FROM settlement_receipt_verdicts srv
+  LEFT JOIN settlement_route_snapshots srs
+    ON srs.account_scope = ?
+   AND srs.request_id = srv.request_id
+   AND srs.attempt_n = srv.attempt_n
+   AND srs.provider_id = srv.provider_id
+   AND srs.route_snapshot_digest = srv.route_snapshot_digest
+ WHERE srv.account_scope_hash = ? AND srv.request_id = ?
+ ORDER BY srv.attempt_n ASC, srv.id ASC`, accountScope, SettlementAccountScopeHash(accountScope), requestID)
 	if err != nil {
 		return nil, err
 	}
@@ -432,13 +635,40 @@ SELECT attempt_n, provider_id, receipt_result, settlement_outcome, reason, close
 	for rows.Next() {
 		var row requestSettlementVerdictRow
 		var closed int
-		if err := rows.Scan(&row.attemptN, &row.providerID, &row.receiptResult, &row.settlementOutcome, &row.reason, &closed, &row.pendingDeadlineUnixMS, &row.policyVersion, &row.mode); err != nil {
+		var profile, version, verdictEntrypoint, snapshotEntrypoint, snapshotBasis string
+		if err := rows.Scan(&row.attemptN, &row.providerID, &row.receiptResult, &row.settlementOutcome, &row.reason, &closed, &row.pendingDeadlineUnixMS, &row.policyVersion, &row.mode,
+			&profile, &version, &verdictEntrypoint, &snapshotEntrypoint, &snapshotBasis); err != nil {
 			return nil, err
 		}
 		row.closed = closed == 1
+		row.relayBlindBound = relayBlindSettledBound(profile, version, verdictEntrypoint, snapshotEntrypoint, snapshotBasis)
 		out = append(out, row)
 	}
 	return out, rows.Err()
+}
+
+// relayBlindSettledFinality closes a request whose payable attempts settled
+// relay_blind_settled. A request never mixes it with verified: relay-blind
+// work has one pinned attempt and no failover, so any mix holds.
+func relayBlindSettledFinality(finality RequestSettlementFinality) RequestSettlementFinality {
+	if finality.VerifiedAttempts > 0 {
+		finality.Outcome = SettlementOutcomePending
+		finality.ReceiptResult = SettlementReceiptResultInconclusive
+		finality.Reason = "mixed_settlement_outcome"
+		finality.Closed = false
+		finality.TokenSource = ""
+		finality.PromptTokens = 0
+		finality.CompletionTokens = 0
+		finality.TotalTokens = 0
+		return finality
+	}
+	finality.Outcome = SettlementOutcomeRelayBlindSettled
+	finality.ReceiptResult = SettlementReceiptResultValid
+	finality.Reason = "relay_blind_settlement"
+	finality.Closed = true
+	finality.TokenSource = UsageSourceCoordinatorObserved
+	finality.TotalTokens = finality.PromptTokens + finality.CompletionTokens
+	return finality
 }
 
 // requestSettlementAttemptsWithoutVerdict recovers the finality boundary from
@@ -468,7 +698,7 @@ func (s *Store) requestSettlementAttemptsWithoutVerdict(ctx context.Context, acc
 	rows, err := s.reader().QueryContext(ctx, `
 SELECT rs.attempt_n, rs.provider_id,
        COALESCE(sao.terminal_state_ts_unix_ms + (rs.pending_deadline_seconds * 1000), 0),
-       rs.pending_deadline_seconds,
+       rs.pending_deadline_seconds, rs.paid_entrypoint, rs.route_decision_ts_unix_ms,
        rs.route_snapshot_policy_version, rs.route_snapshot_mode,
        sao.request_id IS NOT NULL,
        COALESCE((
@@ -510,9 +740,9 @@ SELECT rs.attempt_n, rs.provider_id,
 	for rows.Next() {
 		var row requestSettlementVerdictRow
 		var hasOutput bool
-		var quarantineReason, creditTS string
-		var pendingDeadlineSeconds int64
-		if err := rows.Scan(&row.attemptN, &row.providerID, &row.pendingDeadlineUnixMS, &pendingDeadlineSeconds, &row.policyVersion, &row.mode, &hasOutput, &quarantineReason, &creditTS); err != nil {
+		var quarantineReason, creditTS, entrypoint string
+		var pendingDeadlineSeconds, routeDecisionUnixMS int64
+		if err := rows.Scan(&row.attemptN, &row.providerID, &row.pendingDeadlineUnixMS, &pendingDeadlineSeconds, &entrypoint, &routeDecisionUnixMS, &row.policyVersion, &row.mode, &hasOutput, &quarantineReason, &creditTS); err != nil {
 			return nil, err
 		}
 		if _, ok := covered[attemptKey{attemptN: row.attemptN, providerID: row.providerID}]; ok {
@@ -535,6 +765,17 @@ SELECT rs.attempt_n, rs.provider_id,
 				continue
 			}
 			row = evidenceRow
+		case row.mode == RouteSnapshotModeEnforce && entrypoint == PaidEntrypointRelayBlindChat:
+			// SPEC-022 R-14.6 / R-14.10: an enforce relay-blind snapshot is
+			// committed before dispatch. Without a credit or an attempt
+			// output the attempt is pending until its deadline, measured from
+			// the latest terminal the dispatch bound allows. Past it the
+			// caller closes the attempt through the missing-receipt writer:
+			// closed quarantined, never payable.
+			row.receiptResult = SettlementReceiptResultInconclusive
+			row.settlementOutcome = SettlementOutcomePending
+			row.reason = "relay_blind_attempt_pending"
+			row.pendingDeadlineUnixMS = s.relayBlindUnrecordedTerminalUnixMS(routeDecisionUnixMS) + pendingDeadlineSeconds*1000
 		default:
 			continue
 		}
@@ -842,6 +1083,7 @@ func aggregateExternalRequestFinality(externalRequestID string, finalities []Req
 		out.PendingAttempts += finality.PendingAttempts
 		out.QuarantinedAttempts += finality.QuarantinedAttempts
 		out.ZeroSettledAttempts += finality.ZeroSettledAttempts
+		out.RelayBlindSettledAttempts += finality.RelayBlindSettledAttempts
 		out.OverlappingBlockedTokens += finality.OverlappingBlockedTokens
 		out.PendingDeadlineUnixMS = minPositiveDeadline(out.PendingDeadlineUnixMS, finality.PendingDeadlineUnixMS)
 		out.PromptTokens += finality.PromptTokens
@@ -850,6 +1092,7 @@ func aggregateExternalRequestFinality(externalRequestID string, finalities []Req
 		if !hasTerminalRefund &&
 			finality.Closed &&
 			finality.Outcome != SettlementOutcomeVerified &&
+			finality.Outcome != SettlementOutcomeRelayBlindSettled &&
 			(finality.QuarantinedAttempts > 0 || finality.ZeroSettledAttempts > 0) {
 			firstTerminalRefund = finality
 			hasTerminalRefund = true
@@ -861,6 +1104,9 @@ func aggregateExternalRequestFinality(externalRequestID string, finalities []Req
 		out.Reason = "receipt_verdict_pending"
 		out.Closed = false
 		return out
+	}
+	if out.RelayBlindSettledAttempts > 0 {
+		return relayBlindSettledFinality(out)
 	}
 	if out.VerifiedAttempts > 0 {
 		out.Outcome = SettlementOutcomeVerified

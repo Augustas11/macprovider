@@ -480,7 +480,7 @@ func TestSanitizeModelsResponseNormalizesNestedPublicMetadata(t *testing.T) {
 		}},
 	}
 
-	sanitizeModelsResponse(body)
+	sanitizeModelsResponse(body, "")
 
 	data := body["data"].([]any)
 	entry := data[0].(map[string]any)
@@ -544,7 +544,7 @@ func TestSanitizeModelsResponseRejectsHostileStringValues(t *testing.T) {
 		},
 	}
 
-	sanitizeModelsResponse(body)
+	sanitizeModelsResponse(body, "")
 
 	data := body["data"].([]any)
 	entry := data[0].(map[string]any)
@@ -7515,6 +7515,7 @@ var gatewayEmittedErrorCodes = []string{
 	"demo_concurrency_exceeded", "demo_paused", "demo_receipt_forbidden", "demo_session_check_failed",
 	"demo_session_rate_limited", "demo_session_record_failed", "demo_token_issuance_failed",
 	"docs_missing", "docs_render_failed", "duplicate_request_id",
+	"privacy_class_disabled", "privacy_class_downgrade_rejected", "privacy_class_posture_stale", "privacy_class_unavailable", "privacy_class_unconfirmed",
 	"privacy_missing", "privacy_render_failed",
 	"feedback_limit_check_failed", "feedback_rate_limited", "feedback_store_failed",
 	"feedback_summary_failed", "identity_create_failed", "internal_error",

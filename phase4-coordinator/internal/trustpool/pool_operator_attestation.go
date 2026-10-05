@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/billing"
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 )
 
 // ErrPoolOperatorAttestation rejects a SPEC-022-R012 pool_operator_attested
@@ -13,18 +15,123 @@ import (
 var ErrPoolOperatorAttestation = fmt.Errorf("trustpool: %w", billing.ErrPoolOperatorAttestationRejected)
 
 var _ billing.PoolOperatorAttestationAuthority = (*Store)(nil)
-var _ billing.PoolEventHighWaterSource = (*Store)(nil)
+var _ billing.PoolManifestRouteAuthority = (*Store)(nil)
+var _ billing.PoolRouteFenceSource = (*Store)(nil)
 
-// PoolEventHighWater returns the id of the pool's latest durable event, read
-// through q so a caller holding the ledger write transaction fences on it
-// without a second connection. 0 means the pool has no durable events.
-func (s *Store) PoolEventHighWater(ctx context.Context, q billing.PoolFenceQueryer, poolID string) (int64, error) {
+// PoolRouteFenceHolds is the durable settlement fence of SPEC-042-R015 and
+// SPEC-047-R011, read through q so a caller holding the ledger write
+// transaction decides on the same durable state it commits against. It reads
+// only the claim's pool through the (pool_id, id) index, never the global
+// log. An attempt keeps settling from its immutable route snapshot across
+// ordinary manifest rotation and across removing or changing its entry in a
+// later core. It stops only when the durable log shows, between routing and
+// now, a revocation of that provider's membership (member_revoked, or
+// delegation_revoked for a delegated admission), the pool retired or frozen,
+// or, for a SPEC-042-R016 member, a later accepted core that no longer attests
+// that member account for the route's runtime class and has taken effect
+// (its not_before has passed). A future-dated core accepted before it takes
+// effect is not a revocation of traffic routed under the core active at route
+// time. The claim's manifest label must be an accepted core of the pool, and
+// for a pool_manifest claim that core must carry the claim's exact entry, so
+// a forged label or entry never holds.
+func (s *Store) PoolRouteFenceHolds(ctx context.Context, q billing.PoolFenceQueryer, claim billing.PoolOperatorAttestationClaim) error {
 	if s == nil || q == nil {
-		return 0, ErrStoreClosed
+		return ErrStoreClosed
 	}
-	var highWater int64
-	err := q.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM trustpool_events WHERE pool_id = ?`, poolID).Scan(&highWater)
-	return highWater, err
+	if claim.PoolID == "" || claim.ProviderID == "" || claim.PoolGeneration == 0 ||
+		claim.ManifestVersion == 0 || claim.ManifestCoreDigest == "" {
+		return fmt.Errorf("%w: incomplete fence claim", ErrPoolOperatorAttestation)
+	}
+	events, err := poolEventsFromQueryer(ctx, q, claim.PoolID)
+	if err != nil {
+		return err
+	}
+	return poolRouteFenceFromEvents(events, claim, s.nowUTC())
+}
+
+func poolRouteFenceFromEvents(events []poolEvent, claim billing.PoolOperatorAttestationClaim, now time.Time) error {
+	var labelAccepted, admitted, delegated, revoked, membershipRemoved, poolEnded, attestationRemoved bool
+	nowUnix := now.Unix()
+	for _, pe := range events {
+		e := pe.event
+		if e.PoolID != claim.PoolID {
+			continue
+		}
+		switch e.EventType {
+		case EventManifestAccepted:
+			if e.ManifestVersion == claim.ManifestVersion && e.ManifestCoreDigest == claim.ManifestCoreDigest {
+				if claim.ExpectedModelHashSource == billing.ExpectedModelHashSourcePoolManifest {
+					core, err := acceptedPolicyCoreFromManifestSnapshot(e)
+					if err != nil {
+						return fmt.Errorf("%w: manifest %d: %v", ErrPoolOperatorAttestation, e.ManifestVersion, err)
+					}
+					runtimeSource := claim.RuntimeSource
+					if runtimeSource == "" {
+						runtimeSource = poolmanifest.RuntimeSourceNativeMLX
+					}
+					if err := poolManifestEntryMatchesClaim(core, claim, runtimeSource); err != nil {
+						return err
+					}
+				}
+				labelAccepted = true
+				continue
+			}
+			if e.ManifestVersion <= claim.ManifestVersion || claim.PoolMemberAccountID == "" {
+				continue
+			}
+			// A later generation is ordinary rotation unless it drops the
+			// R016 attestation the route's member relied on and has taken
+			// effect.
+			core, err := acceptedPolicyCoreFromManifestSnapshot(e)
+			if err != nil {
+				return fmt.Errorf("%w: manifest %d: %v", ErrPoolOperatorAttestation, e.ManifestVersion, err)
+			}
+			if nowUnix < 0 || uint64(nowUnix) < core.NotBeforeUnix {
+				continue
+			}
+			members, err := core.PoolAttestedMembers()
+			if err != nil {
+				return fmt.Errorf("%w: manifest %d attested members: %v", ErrPoolOperatorAttestation, e.ManifestVersion, err)
+			}
+			if !(poolRouteReplay{attestedMembers: members}).attestsMember(claim.PoolMemberAccountID, claim.RuntimeSource) {
+				attestationRemoved = true
+			}
+		case EventMemberAdmitted:
+			// The admission the route relied on is the latest one at or
+			// before its fenced generation; a removal after it ends it.
+			if e.ProviderID != claim.ProviderID || revoked || uint64(pe.id) > claim.PoolGeneration {
+				continue
+			}
+			admitted = true
+			delegated = strings.TrimSpace(e.DelegationID) != ""
+			membershipRemoved = false
+		case EventDelegationRevoked:
+			if e.ProviderID == claim.ProviderID && admitted && delegated {
+				membershipRemoved = true
+			}
+		case EventMemberRevoked:
+			if e.ProviderID == claim.ProviderID {
+				revoked = true
+			}
+		case EventLifecycleChanged:
+			if e.Lifecycle == LifecycleRetired {
+				poolEnded = true
+			}
+		case EventRootCompromiseFrozen:
+			poolEnded = true
+		}
+	}
+	switch {
+	case !labelAccepted:
+		return fmt.Errorf("%w: route label names no accepted core of the pool", ErrPoolOperatorAttestation)
+	case revoked || !admitted || membershipRemoved:
+		return fmt.Errorf("%w: provider membership revoked since routing", ErrPoolOperatorAttestation)
+	case poolEnded:
+		return fmt.Errorf("%w: pool retired or frozen since routing", ErrPoolOperatorAttestation)
+	case attestationRemoved:
+		return fmt.Errorf("%w: member attestation removed since routing", ErrPoolOperatorAttestation)
+	}
+	return nil
 }
 
 // VerifyPoolOperatorAttestation re-evaluates SPEC-042-R006 conditions 2-4 for
@@ -53,60 +160,161 @@ func (s *Store) VerifyPoolOperatorAttestation(ctx context.Context, claim billing
 		strings.TrimSpace(claim.PoolOperatorAccountID) == "" {
 		return fmt.Errorf("%w: incomplete claim", ErrPoolOperatorAttestation)
 	}
-	events, err := s.Events(ctx)
+	replay, err := s.replayPoolRouteClaim(ctx, claim, claim.RuntimeSource)
 	if err != nil {
 		return err
 	}
-	var creator string
-	var manifestFound, admitted, owned, revoked bool
-	for i, e := range events {
-		if uint64(i+1) > claim.PoolGeneration {
-			break
-		}
-		if e.PoolID != claim.PoolID {
+	// Condition 4 (SPEC-042-R006 0.0.37): the creator account owns the
+	// provider, or the accepted core's R016 attestation names the serving
+	// provider's recorded owner account for this runtime class and the
+	// provider is a delegated member.
+	attested := !replay.owned && claim.PoolMemberAccountID != "" && claim.PoolMemberAccountID != claim.PoolOperatorAccountID &&
+		replay.attestsMember(claim.PoolMemberAccountID, claim.RuntimeSource)
+	switch {
+	case replay.creator == "" || replay.creator != claim.PoolOperatorAccountID:
+		return fmt.Errorf("%w: operator account is not the pool creator", ErrPoolOperatorAttestation)
+	case !replay.manifestFound:
+		return fmt.Errorf("%w: no accepted policy core with the snapshot digest", ErrPoolOperatorAttestation)
+	case !replay.admitted || replay.revoked:
+		return fmt.Errorf("%w: provider is not a member at the fenced generation", ErrPoolOperatorAttestation)
+	case !replay.owned && !attested:
+		return fmt.Errorf("%w: provider is neither creator-owned nor named by a current member attestation", ErrPoolOperatorAttestation)
+	case replay.owned && claim.PoolMemberAccountID != "":
+		return fmt.Errorf("%w: a creator-owned provider carries a member attestation account", ErrPoolOperatorAttestation)
+	}
+	return nil
+}
+
+// VerifyPoolManifestRoute is SPEC-022-R013.3 for a natively served
+// (mlx_cache) pool_manifest route: replayed from the durable event log only,
+// the accepted core the snapshot names declares enforce and carries the
+// exact entry for mlx_cache, and the provider is an admitted, unrevoked
+// member at the fenced generation. Native usage is coordinator-observed, so
+// no creator-ownership condition applies.
+func (s *Store) VerifyPoolManifestRoute(ctx context.Context, claim billing.PoolOperatorAttestationClaim) error {
+	if s == nil || s.db == nil {
+		return ErrStoreClosed
+	}
+	if claim.PoolID == "" || claim.ProviderID == "" || claim.PoolGeneration == 0 ||
+		claim.ManifestVersion == 0 || claim.ManifestCoreDigest == "" ||
+		claim.ExpectedModelHashSource != billing.ExpectedModelHashSourcePoolManifest || claim.RuntimeSource != "" {
+		return fmt.Errorf("%w: incomplete pool manifest claim", ErrPoolOperatorAttestation)
+	}
+	replay, err := s.replayPoolRouteClaim(ctx, claim, poolmanifest.RuntimeSourceNativeMLX)
+	if err != nil {
+		return err
+	}
+	switch {
+	case !replay.manifestFound:
+		return fmt.Errorf("%w: no accepted policy core with the snapshot digest", ErrPoolOperatorAttestation)
+	case !replay.admitted || replay.revoked:
+		return fmt.Errorf("%w: provider is not a member at the fenced generation", ErrPoolOperatorAttestation)
+	}
+	return nil
+}
+
+// poolRouteReplay is the durable state a pool route claim is checked against.
+type poolRouteReplay struct {
+	creator                                 string
+	manifestFound, admitted, owned, revoked bool
+	attestedMembers                         []poolmanifest.AttestedMember
+}
+
+func (r poolRouteReplay) attestsMember(accountID, runtimeSource string) bool {
+	for _, a := range r.attestedMembers {
+		if a.ProviderAccountID != accountID {
 			continue
 		}
+		for _, source := range a.RuntimeClasses {
+			if source == runtimeSource {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// replayPoolRouteClaim replays the pool's durable events up to the claim's
+// fenced generation. The manifest the claim names must be an accepted v2
+// core under enforce that allows runtimeSource (a loopback class through
+// runtime_allowlist; native mlx_cache always), and, for a pool_manifest
+// claim, must carry the exact R015 entry for that runtime. It never consults
+// a current manifest.
+func (s *Store) replayPoolRouteClaim(ctx context.Context, claim billing.PoolOperatorAttestationClaim, runtimeSource string) (poolRouteReplay, error) {
+	var r poolRouteReplay
+	events, err := poolEventsFromQueryer(ctx, s.db, claim.PoolID)
+	if err != nil {
+		return r, err
+	}
+	for _, pe := range events {
+		if uint64(pe.id) > claim.PoolGeneration {
+			break
+		}
+		e := pe.event
 		switch e.EventType {
 		case EventPoolCreated:
-			creator = e.CreatorAccountID
+			r.creator = e.CreatorAccountID
 		case EventManifestAccepted:
 			if e.ManifestVersion != claim.ManifestVersion || e.ManifestCoreDigest != claim.ManifestCoreDigest {
 				continue
 			}
 			core, err := acceptedPolicyCoreFromManifestSnapshot(e)
 			if err != nil {
-				return fmt.Errorf("%w: manifest %d: %v", ErrPoolOperatorAttestation, e.ManifestVersion, err)
+				return r, fmt.Errorf("%w: manifest %d: %v", ErrPoolOperatorAttestation, e.ManifestVersion, err)
 			}
-			if !core.IsV2() || core.SettlementMode != billing.RouteSnapshotModeEnforce || !core.AllowsRuntimeSource(claim.RuntimeSource) {
-				return fmt.Errorf("%w: accepted policy core does not allowlist %s under enforce", ErrPoolOperatorAttestation, claim.RuntimeSource)
+			runtimeAllowed := runtimeSource == poolmanifest.RuntimeSourceNativeMLX || core.AllowsRuntimeSource(runtimeSource)
+			if !core.IsV2() || core.SettlementMode != billing.RouteSnapshotModeEnforce || !runtimeAllowed {
+				return r, fmt.Errorf("%w: accepted policy core does not allowlist %s under enforce", ErrPoolOperatorAttestation, runtimeSource)
 			}
-			manifestFound = true
+			if claim.ExpectedModelHashSource == billing.ExpectedModelHashSourcePoolManifest {
+				if err := poolManifestEntryMatchesClaim(core, claim, runtimeSource); err != nil {
+					return r, err
+				}
+			} else if claim.ExpectedModelHashSource != "" {
+				return r, fmt.Errorf("%w: unknown expected_model_hash_source", ErrPoolOperatorAttestation)
+			}
+			members, err := core.PoolAttestedMembers()
+			if err != nil {
+				return r, fmt.Errorf("%w: manifest %d attested members: %v", ErrPoolOperatorAttestation, e.ManifestVersion, err)
+			}
+			r.attestedMembers = members
+			r.manifestFound = true
 		case EventMemberAdmitted:
-			if e.ProviderID != claim.ProviderID || revoked {
+			if e.ProviderID != claim.ProviderID || r.revoked {
 				continue
 			}
-			admitted = true
-			owned = strings.TrimSpace(e.DelegationID) == ""
+			r.admitted = true
+			r.owned = strings.TrimSpace(e.DelegationID) == ""
 		case EventDelegationRevoked:
-			if e.ProviderID == claim.ProviderID && admitted && !owned {
-				admitted = false
+			if e.ProviderID == claim.ProviderID && r.admitted && !r.owned {
+				r.admitted = false
 			}
 		case EventMemberRevoked:
 			if e.ProviderID == claim.ProviderID {
-				revoked = true
-				admitted = false
+				r.revoked = true
+				r.admitted = false
 			}
 		}
 	}
-	switch {
-	case creator == "" || creator != claim.PoolOperatorAccountID:
-		return fmt.Errorf("%w: operator account is not the pool creator", ErrPoolOperatorAttestation)
-	case !manifestFound:
-		return fmt.Errorf("%w: no accepted policy core with the snapshot digest", ErrPoolOperatorAttestation)
-	case !admitted || revoked:
-		return fmt.Errorf("%w: provider is not a member at the fenced generation", ErrPoolOperatorAttestation)
-	case !owned:
-		return fmt.Errorf("%w: provider is admitted through a delegation, not owned by the creator", ErrPoolOperatorAttestation)
+	return r, nil
+}
+
+// poolManifestEntryMatchesClaim is SPEC-022-R013.3: the immutable accepted
+// core carries an entry with the claim's pool_model_id and exact pair that
+// allows the runtime.
+func poolManifestEntryMatchesClaim(core poolmanifest.PolicyCore, claim billing.PoolOperatorAttestationClaim, runtimeSource string) error {
+	entries, err := core.PoolModelEntries()
+	if err != nil {
+		return fmt.Errorf("%w: pool model entries: %v", ErrPoolOperatorAttestation, err)
 	}
-	return nil
+	for _, m := range entries {
+		if m.PoolModelID != claim.PoolModelID {
+			continue
+		}
+		if m.ArtifactHashAlgorithm != claim.ExpectedModelHashAlgorithm || m.ArtifactHash != claim.ExpectedModelHash || !m.AllowsRuntimeSource(runtimeSource) {
+			return fmt.Errorf("%w: pool model entry does not carry the route's pair for %s", ErrPoolOperatorAttestation, runtimeSource)
+		}
+		return nil
+	}
+	return fmt.Errorf("%w: accepted policy core has no entry %s", ErrPoolOperatorAttestation, claim.PoolModelID)
 }

@@ -7,3 +7,15 @@ import "net/http"
 func RemoteIPForUnauthSemaphoreExport(remoteAddr string, header http.Header) string {
 	return remoteIPForUnauthSemaphore(remoteAddr, header)
 }
+
+// WithBeforeHandshakeAckSendForTest runs fn just before the handshake ack is
+// enqueued, so ordering tests can widen the ack-build window.
+func WithBeforeHandshakeAckSendForTest(fn func()) Option {
+	return func(s *Server) { s.beforeHandshakeAckSend = fn }
+}
+
+// WithPrivacyPostureChallengeSentForTest runs fn after each posture
+// challenge is enqueued on a provider session.
+func WithPrivacyPostureChallengeSentForTest(fn func()) Option {
+	return func(s *Server) { s.privacyPostureChallengeSent = fn }
+}

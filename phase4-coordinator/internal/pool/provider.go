@@ -189,6 +189,11 @@ type Provider struct {
 	// session through buyer_serving_hold=catalog_material_missing instead of
 	// reconnecting (SPEC-001 v1.9.21, SPEC-022-R002 R-2.7).
 	CatalogMaterialHoldV1 bool `json:"catalog_material_hold_v1,omitempty"`
+	// RelayBlindSettlementReceiptV1 records that this session's initial-stage
+	// auth_request advertised tier2_capabilities.relay_blind_settlement_receipt_v1
+	// (SPEC-001-R005). Under SPEC-022 enforce only such a session is eligible
+	// for relay-blind work (R-14.2).
+	RelayBlindSettlementReceiptV1 bool `json:"relay_blind_settlement_receipt_v1,omitempty"`
 	// Catalog admission captures the exact signed recommendation envelope that
 	// was accepted for this live session. Deployment canaries use these fields
 	// to distinguish a current catalog-aware provider from a legacy bridge
@@ -217,6 +222,11 @@ type Provider struct {
 	ModelAdmissionCatalogRowStatus           string `json:"-"`
 	ModelAdmissionValidatedReleaseGeneration uint64 `json:"-"`
 	ModelAdmissionBindingGeneration          uint64 `json:"-"`
+	// ModelAdmissionPoolID and ModelAdmissionPoolModelID name the pool and
+	// SPEC-042-R015 entry of a SPEC-047-R011 pool-scoped binding ("" for a
+	// global binding). They are coordinator-derived and never wire-exported.
+	ModelAdmissionPoolID      string `json:"-"`
+	ModelAdmissionPoolModelID string `json:"-"`
 	// ModelAdmissionSessionEpoch is a per-provider monotonic counter the
 	// registry advances on every session replacement and on every change of
 	// the session's identity facts (model id, reported pair, verdict, pin,
@@ -303,6 +313,10 @@ type Provider struct {
 	// active release (SPEC-023-R010). It never touches State, so drain,
 	// blacklist, and trust fences keep their own semantics.
 	CatalogRecheckPending bool `json:"-"`
+	// HandshakeAckPending holds a just-registered session out of routing
+	// until its hello_ack / auth_response v2 is enqueued. The provider
+	// aborts a handshake whose next frame is anything other than the ack.
+	HandshakeAckPending bool `json:"-"`
 	// AdmissionSandboxCredentialBypassed is set only for sessions that entered
 	// as sandbox-only and therefore did not receive newly minted durable
 	// provider credentials. Gate-disable reloads must not auto-promote these
@@ -661,7 +675,7 @@ func (p Provider) RoutingEligible() bool {
 	if p.BenchmarkQuarantined {
 		return false
 	}
-	if p.AdmissionCeilingExcluded || p.AdmissionEvidenceStale || p.AdmissionSandboxed || p.CatalogRecheckPending {
+	if p.AdmissionCeilingExcluded || p.AdmissionEvidenceStale || p.AdmissionSandboxed || p.CatalogRecheckPending || p.HandshakeAckPending {
 		return false
 	}
 	return (p.State == StateReady || p.State == StateBusy) && p.SlotsFree > 0 && !p.capacitySafetyHold
@@ -1074,8 +1088,12 @@ func (r *Registry) RegisterAtDetailed(p *Provider, conn net.Conn, now time.Time)
 		// legitimate Bearer-validated session. A legitimate provider
 		// reconnect with a valid Bearer always wins because their
 		// AuthState is AuthBearerValidated.
+		// A proven session still waiting for its handshake ack is protected
+		// too; the ack hold is transient and must not open an eviction window.
+		settled := *existing
+		settled.HandshakeAckPending = false
 		if existing.AuthState == AuthBearerValidated &&
-			existing.RoutingEligible() &&
+			settled.RoutingEligible() &&
 			p.AuthState != AuthBearerValidated {
 			return nil, false, RegisterRefusalBearerDowngrade
 		}
@@ -1454,6 +1472,9 @@ type ModelAdmissionBinding struct {
 	CatalogModelKey            string
 	CatalogRowStatus           string
 	ValidatedReleaseGeneration uint64
+	// PoolID and PoolModelID are set only for a SPEC-047-R011 pool binding.
+	PoolID      string
+	PoolModelID string
 }
 
 // ModelAdmissionBinding returns the session's current binding, if any.
@@ -1468,6 +1489,8 @@ func (p Provider) ModelAdmissionBinding() (ModelAdmissionBinding, bool) {
 		CatalogModelKey:            p.ModelAdmissionCatalogModelKey,
 		CatalogRowStatus:           p.ModelAdmissionCatalogRowStatus,
 		ValidatedReleaseGeneration: p.ModelAdmissionValidatedReleaseGeneration,
+		PoolID:                     p.ModelAdmissionPoolID,
+		PoolModelID:                p.ModelAdmissionPoolModelID,
 	}, true
 }
 
@@ -1504,6 +1527,8 @@ func clearModelAdmissionBinding(p *Provider) {
 	p.ModelAdmissionEvaluationDigestSHA256 = ""
 	p.ModelAdmissionCatalogRowStatus = ""
 	p.ModelAdmissionValidatedReleaseGeneration = 0
+	p.ModelAdmissionPoolID = ""
+	p.ModelAdmissionPoolModelID = ""
 }
 
 // SetModelAdmissionBinding installs (or, with a nil binding, clears) the
@@ -1526,6 +1551,8 @@ func (r *Registry) SetModelAdmissionBinding(providerID string, binding *ModelAdm
 		p.ModelAdmissionCatalogModelKey = binding.CatalogModelKey
 		p.ModelAdmissionCatalogRowStatus = binding.CatalogRowStatus
 		p.ModelAdmissionValidatedReleaseGeneration = binding.ValidatedReleaseGeneration
+		p.ModelAdmissionPoolID = binding.PoolID
+		p.ModelAdmissionPoolModelID = binding.PoolModelID
 	}
 	p.ModelAdmissionBindingGeneration = bindingGeneration
 	return true
@@ -2347,6 +2374,19 @@ func (r *Registry) ClearCatalogRecheckPending(providerID, assignedID string) boo
 		return false
 	}
 	p.CatalogRecheckPending = false
+	return true
+}
+
+// ClearHandshakeAckPending releases a registered session into routing after
+// its handshake ack was enqueued. Returns true only when the flag changed.
+func (r *Registry) ClearHandshakeAckPending(providerID, assignedID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID || !p.HandshakeAckPending {
+		return false
+	}
+	p.HandshakeAckPending = false
 	return true
 }
 

@@ -79,4 +79,75 @@ final class SELivenessTestSigning: SELivenessSigning, @unchecked Sendable {
     }
 
     var publicKeyBase64: String { _publicKeyBase64 }
+
+    /// ANSI X9.63 private key bytes. Callers persist this at mode 0600 and must not log it.
+    func externalPrivateRepresentation() throws -> Data {
+        var error: Unmanaged<CFError>?
+        guard let data = SecKeyCopyExternalRepresentation(privateKey, &error) as Data?,
+              (1...512).contains(data.count) else {
+            throw NSError(
+                domain: "SELivenessTestSigning",
+                code: -5,
+                userInfo: [NSLocalizedDescriptionKey: "private key export failed"]
+            )
+        }
+        return data
+    }
+
+    static func load(externalPrivateRepresentation data: Data) throws -> SELivenessTestSigning {
+        guard (1...512).contains(data.count) else {
+            throw NSError(
+                domain: "SELivenessTestSigning",
+                code: -6,
+                userInfo: [NSLocalizedDescriptionKey: "private key representation rejected"]
+            )
+        }
+        let attributes: [String: Any] = [
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
+            kSecAttrKeySizeInBits as String: 256,
+        ]
+        var error: Unmanaged<CFError>?
+        guard let privKey = SecKeyCreateWithData(data as CFData, attributes as CFDictionary, &error) else {
+            throw NSError(
+                domain: "SELivenessTestSigning",
+                code: -6,
+                userInfo: [NSLocalizedDescriptionKey: "private key import failed"]
+            )
+        }
+        guard let pubKey = SecKeyCopyPublicKey(privKey) else {
+            throw NSError(
+                domain: "SELivenessTestSigning",
+                code: -2,
+                userInfo: [NSLocalizedDescriptionKey: "cannot extract public key"]
+            )
+        }
+        var copyError: Unmanaged<CFError>?
+        guard let pubData = SecKeyCopyExternalRepresentation(pubKey, &copyError) as Data? else {
+            throw NSError(
+                domain: "SELivenessTestSigning",
+                code: -3,
+                userInfo: [NSLocalizedDescriptionKey: "cannot serialize public key"]
+            )
+        }
+        let raw = pubData.dropFirst()
+        guard raw.count == 64 else {
+            throw NSError(
+                domain: "SELivenessTestSigning",
+                code: -3,
+                userInfo: [NSLocalizedDescriptionKey: "public key is not a 64-byte P-256 point"]
+            )
+        }
+        return SELivenessTestSigning(privateKey: privKey, publicKeyBase64: Data(raw).base64EncodedString())
+    }
+}
+
+extension SELivenessTestSigning: SEBlobSigner {
+    /// Standard-base64 decode of the 64-byte X||Y point. Matches the coordinator SE pin.
+    var publicKeyRaw: Data {
+        guard let raw = Data(base64Encoded: publicKeyBase64), raw.count == 64 else {
+            return Data()
+        }
+        return raw
+    }
 }

@@ -2,6 +2,7 @@ package config
 
 import (
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -9,9 +10,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"math/big"
 	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -74,6 +77,7 @@ type Config struct {
 	WS                           WSConfig                     `yaml:"ws"`
 	Relay                        RelayConfig                  `yaml:"relay"`
 	RelayBlind                   RelayBlindConfig             `yaml:"relay_blind"`
+	PrivacyClass                 PrivacyClassConfig           `yaml:"privacy_class"`
 	Admission                    AdmissionConfig              `yaml:"admission"`
 	Tier2                        Tier2Config                  `yaml:"tier2"`
 	CoordinatorAdvertisedVersion CoordinatorAdvertisedVersion `yaml:"coordinator_advertised_version"`
@@ -1030,6 +1034,40 @@ type RelayBlindConfig struct {
 	MaxActiveReservations     int               `yaml:"max_active_reservations"`
 	MaxKeyRecordsPerProvider  int               `yaml:"max_key_records_per_provider"`
 	MetadataRequestsPerMinute int               `yaml:"metadata_requests_per_minute"`
+	// EnforceSettlementProfile names the SPEC-022 R-14 settlement profile
+	// that lets relay-blind traffic run under settlement enforce mode. Empty
+	// (the default) keeps relay-blind refused under enforce. The only
+	// accepted value is RelayBlindSettlementProfileV1.
+	EnforceSettlementProfile string `yaml:"enforce_settlement_profile"`
+}
+
+// RelayBlindSettlementProfileV1 is the SPEC-015 §N.13 receipt profile that
+// covers relay-blind chat under SPEC-022 enforce (R-14).
+const RelayBlindSettlementProfileV1 = "relay-blind-settlement-v1"
+
+// ApprovedCodeIdentity is one operator-approved privacy-class code identity.
+// BinaryVersion is optional; when set, the posture binary_version must match.
+// ExpiresAt is exclusive: a posture at that instant is expired.
+type ApprovedCodeIdentity struct {
+	TeamID            string    `yaml:"team_id"`
+	SigningIdentifier string    `yaml:"signing_identifier"`
+	CDHash            string    `yaml:"code_cdhash"`
+	BinaryVersion     string    `yaml:"binary_version"`
+	ExpiresAt         time.Time `yaml:"expires_at"`
+}
+
+// PrivacyClassConfig is the default-off SPEC-049 coordinator gate.
+// ProviderSEPublicKeys maps provider_id to a standard-base64 raw 64-byte
+// P-256 X||Y point. Identity pins stay on RelayBlindConfig.
+type PrivacyClassConfig struct {
+	Enabled                         bool                   `yaml:"enabled"`
+	ProviderSEPublicKeys            map[string]string      `yaml:"provider_se_public_keys"`
+	ApprovedCodeIdentities          []ApprovedCodeIdentity `yaml:"approved_code_identities"`
+	AllowedSEKeyBackends            []string               `yaml:"allowed_se_key_backends"`
+	PostureChallengeIntervalSeconds int                    `yaml:"posture_challenge_interval_seconds"`
+	PostureMaxAgeSeconds            int                    `yaml:"posture_max_age_seconds"`
+	PostureResponseTimeoutSeconds   int                    `yaml:"posture_response_timeout_seconds"`
+	QuarantineSeconds               int                    `yaml:"quarantine_seconds"`
 }
 
 type AdmissionConfig struct {
@@ -1285,6 +1323,100 @@ type TrustedPoolsConfig struct {
 	CreatorAdminProviderDelegatedIDs map[string][]string                        `yaml:"creator_admin_provider_delegated_ids"`
 	CreatorAdminBuyerAccountIDs      map[string][]string                        `yaml:"creator_admin_buyer_account_ids"`
 	ProviderOwnerPublicKeys          map[string]string                          `yaml:"provider_owner_public_keys"`
+	// PoolModelPricingBounds are the inclusive per-rate floors and ceilings
+	// every SPEC-042-R015 pool model entry price must sit inside
+	// (SPEC-005-R015). Unset fails every pool model entry closed at manifest
+	// acceptance and route reservation.
+	PoolModelPricingBounds *TrustedPoolsPoolModelPricingBounds `yaml:"pool_model_pricing_bounds"`
+	// ProviderOwnerAccountIDs records the SPEC-003 owner account of each
+	// provider id (account -> provider ids). It is the only input the
+	// SPEC-042-R016 creator member attestation is matched against; a
+	// provider listed under two accounts is rejected.
+	ProviderOwnerAccountIDs map[string][]string `yaml:"provider_owner_account_ids"`
+	// ManifestAcceptanceWitnessPath is an out-of-database high-water witness
+	// for accepted Trusted Pool manifests. Production activation requires it so
+	// restoring an older coordinator.db cannot silently resurrect revoked
+	// pool-model or membership authority.
+	ManifestAcceptanceWitnessPath string `yaml:"manifest_acceptance_witness_path"`
+}
+
+// TrustedPoolsPoolModelPricingBounds is the closed SPEC-005-R015 pool-model
+// pricing bounds object, in SPEC-005 credits per million tokens.
+type TrustedPoolsPoolModelPricingBounds struct {
+	MinPromptRatePerMtok         int64 `yaml:"min_prompt_rate_per_mtok"`
+	MaxPromptRatePerMtok         int64 `yaml:"max_prompt_rate_per_mtok"`
+	MinPromptCacheHitRatePerMtok int64 `yaml:"min_prompt_cache_hit_rate_per_mtok"`
+	MaxPromptCacheHitRatePerMtok int64 `yaml:"max_prompt_cache_hit_rate_per_mtok"`
+	MinCompletionRatePerMtok     int64 `yaml:"min_completion_rate_per_mtok"`
+	MaxCompletionRatePerMtok     int64 `yaml:"max_completion_rate_per_mtok"`
+}
+
+// UnmarshalYAML decodes the bounds as a closed object: every one of the six
+// keys exactly once, each an integer, and no other key (SPEC-005-R015). A
+// misspelled or missing key would otherwise decode to zero and silently widen
+// a floor.
+func (b *TrustedPoolsPoolModelPricingBounds) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.MappingNode {
+		return fmt.Errorf("trusted_pools.pool_model_pricing_bounds must be a mapping")
+	}
+	var decoded TrustedPoolsPoolModelPricingBounds
+	fields := map[string]*int64{
+		"min_prompt_rate_per_mtok":           &decoded.MinPromptRatePerMtok,
+		"max_prompt_rate_per_mtok":           &decoded.MaxPromptRatePerMtok,
+		"min_prompt_cache_hit_rate_per_mtok": &decoded.MinPromptCacheHitRatePerMtok,
+		"max_prompt_cache_hit_rate_per_mtok": &decoded.MaxPromptCacheHitRatePerMtok,
+		"min_completion_rate_per_mtok":       &decoded.MinCompletionRatePerMtok,
+		"max_completion_rate_per_mtok":       &decoded.MaxCompletionRatePerMtok,
+	}
+	seen := make(map[string]bool, len(fields))
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		key, val := value.Content[i].Value, value.Content[i+1]
+		dst, ok := fields[key]
+		if !ok {
+			return fmt.Errorf("trusted_pools.pool_model_pricing_bounds has unknown key %q", key)
+		}
+		if seen[key] {
+			return fmt.Errorf("trusted_pools.pool_model_pricing_bounds has duplicate key %q", key)
+		}
+		seen[key] = true
+		if val.Kind != yaml.ScalarNode || val.ShortTag() != "!!int" {
+			return fmt.Errorf("trusted_pools.pool_model_pricing_bounds.%s must be an integer", key)
+		}
+		if err := val.Decode(dst); err != nil {
+			return fmt.Errorf("trusted_pools.pool_model_pricing_bounds.%s: %w", key, err)
+		}
+	}
+	for key := range fields {
+		if !seen[key] {
+			return fmt.Errorf("trusted_pools.pool_model_pricing_bounds is missing key %q", key)
+		}
+	}
+	*b = decoded
+	return nil
+}
+
+// poolModelMaxBillableTokens is the largest SPEC-042-R015
+// max_context_tokens (poolmanifest.MaxPoolModelContext, 2^20): no pool-model
+// request legitimately carries more prompt or completion tokens.
+const poolModelMaxBillableTokens = int64(1 << 20)
+
+// poolModelPricingBoundsFitFormula reports whether each maximum rate bills
+// without int64 overflow at the pool-model context ceiling and the
+// configured multiplier
+// in ppm (billing.ParseMultiplierPPM): rate * ceiling * ppm must fit, per
+// SPEC-005-R015. The provider-share step divides by 10^12 first, so it cannot
+// overflow when this product fits.
+func poolModelPricingBoundsFitFormula(b *TrustedPoolsPoolModelPricingBounds, globalMultiplier float64) bool {
+	ppm := math.Round(globalMultiplier * 1_000_000)
+	if !(ppm < float64(math.MaxInt64)/float64(poolModelMaxBillableTokens)) {
+		return false
+	}
+	multiplierPPM := int64(ppm)
+	if multiplierPPM < 1 {
+		multiplierPPM = 1
+	}
+	limit := int64(math.MaxInt64) / multiplierPPM / poolModelMaxBillableTokens
+	return b.MaxPromptRatePerMtok <= limit && b.MaxPromptCacheHitRatePerMtok <= limit && b.MaxCompletionRatePerMtok <= limit
 }
 
 // RejectionTimingFloor returns the active pool-rejection timing floor.
@@ -1586,6 +1718,15 @@ func Default() Config {
 			MaxKeyRecordsPerProvider:  8,
 			MetadataRequestsPerMinute: 60,
 		},
+		PrivacyClass: PrivacyClassConfig{
+			Enabled:                         false,
+			ProviderSEPublicKeys:            map[string]string{},
+			AllowedSEKeyBackends:            []string{"file", "keychain"},
+			PostureChallengeIntervalSeconds: 60,
+			PostureMaxAgeSeconds:            150,
+			PostureResponseTimeoutSeconds:   10,
+			QuarantineSeconds:               86400,
+		},
 		Admission: AdmissionConfig{
 			PinnedOnly:                      false,
 			ProvisionalAdmissionRatePerHour: 10,
@@ -1658,6 +1799,7 @@ func Default() Config {
 			CreatorAdminProviderDelegatedIDs: map[string][]string{},
 			CreatorAdminBuyerAccountIDs:      map[string][]string{},
 			ProviderOwnerPublicKeys:          map[string]string{},
+			ManifestAcceptanceWitnessPath:    "",
 			ProductionActivation: TrustedPoolsProductionActivationConfig{
 				AllowedLaunchEnvironments: []string{},
 				RootCustodyHashes:         []string{},
@@ -2527,6 +2669,9 @@ func (c Config) Validate() error {
 	if err := validateTrustedPoolsProviderOwnerPublicKeys(c.TrustedPools); err != nil {
 		return err
 	}
+	if err := validateTrustedPoolsPoolModelConfig(c.TrustedPools, c.Rewards.GlobalMultiplier); err != nil {
+		return err
+	}
 	if err := c.validateCompatibilitySet(); err != nil {
 		return err
 	}
@@ -2576,8 +2721,10 @@ func (c Config) Validate() error {
 		if strings.TrimSpace(c.RelayBlind.SQLitePath) == "" {
 			return fmt.Errorf("relay_blind.sqlite_path must be set when enabled")
 		}
-		if c.Settlement.VerifiedModelSettlementMode == "enforce" {
-			return fmt.Errorf("relay_blind.enabled requires settlement.verified_model_settlement_mode=observe")
+		// SPEC-022 R-1.3/R-14.8: relay-blind traffic runs under enforce only
+		// through the R-14 lane, never by exempting it from coverage.
+		if c.Settlement.VerifiedModelSettlementMode == "enforce" && c.RelayBlind.EnforceSettlementProfile != RelayBlindSettlementProfileV1 {
+			return fmt.Errorf("relay_blind.enabled under settlement.verified_model_settlement_mode=enforce requires relay_blind.enforce_settlement_profile=%s", RelayBlindSettlementProfileV1)
 		}
 		if len(c.RelayBlind.IdentityPublicKeys) == 0 {
 			return fmt.Errorf("relay_blind.identity_public_keys must contain at least one provider pin when enabled")
@@ -2592,6 +2739,9 @@ func (c Config) Validate() error {
 			}
 		}
 	}
+	if c.RelayBlind.EnforceSettlementProfile != "" && c.RelayBlind.EnforceSettlementProfile != RelayBlindSettlementProfileV1 {
+		return fmt.Errorf("relay_blind.enforce_settlement_profile must be empty or %s", RelayBlindSettlementProfileV1)
+	}
 	if c.RelayBlind.ReservationTTLSeconds < 1 || c.RelayBlind.ReservationTTLSeconds > 30 {
 		return fmt.Errorf("relay_blind.reservation_ttl_seconds must be in [1,30]")
 	}
@@ -2603,6 +2753,9 @@ func (c Config) Validate() error {
 	}
 	if c.RelayBlind.MaxActiveReservations < 1 || c.RelayBlind.MaxKeyRecordsPerProvider < 1 || c.RelayBlind.MetadataRequestsPerMinute < 1 {
 		return fmt.Errorf("relay_blind admission limits must be > 0")
+	}
+	if err := c.validatePrivacyClass(); err != nil {
+		return err
 	}
 	if c.Routing.PreflightTimeoutS <= 0 || c.Routing.RequestTimeoutS <= 0 || c.Routing.FailoverTimeoutS <= 0 {
 		return fmt.Errorf("routing timeouts must be > 0")
@@ -3055,6 +3208,13 @@ func validateTrustedPoolsProductionActivation(c TrustedPoolsConfig) error {
 	if !c.Enabled {
 		return fmt.Errorf("trusted_pools.production_activation requires trusted_pools.enabled=true")
 	}
+	witnessPath := strings.TrimSpace(c.ManifestAcceptanceWitnessPath)
+	if witnessPath == "" {
+		return fmt.Errorf("trusted_pools.production_activation requires trusted_pools.manifest_acceptance_witness_path")
+	}
+	if !filepath.IsAbs(witnessPath) {
+		return fmt.Errorf("trusted_pools.manifest_acceptance_witness_path must be absolute")
+	}
 	if !lowerHex64Pattern.MatchString(strings.TrimSpace(gate.EvidenceSHA256)) {
 		return fmt.Errorf("trusted_pools.production_activation.evidence_sha256 must be a lowercase sha256 hex digest")
 	}
@@ -3274,6 +3434,52 @@ func validateTrustedPoolsCreatorAdminProviderDelegatedIDs(c TrustedPoolsConfig) 
 				return fmt.Errorf("trusted_pools.creator_admin_provider_delegated_ids.%s must contain unique provider ids", creatorID)
 			}
 			seen[providerID] = true
+		}
+	}
+	return nil
+}
+
+// validateTrustedPoolsPoolModelConfig checks the SPEC-005-R015 bounds (each
+// floor non-negative and at most its ceiling, and no ceiling that overflows
+// the formula at globalMultiplier) and the SPEC-042-R016 owner account map
+// (canonical account and provider ids, a provider under one account only).
+func validateTrustedPoolsPoolModelConfig(c TrustedPoolsConfig, globalMultiplier float64) error {
+	if (c.PoolModelPricingBounds != nil || len(c.ProviderOwnerAccountIDs) > 0) && !c.Enabled {
+		return fmt.Errorf("trusted_pools.pool_model_pricing_bounds and provider_owner_account_ids require trusted_pools.enabled=true")
+	}
+	if b := c.PoolModelPricingBounds; b != nil {
+		for _, pair := range []struct {
+			name     string
+			min, max int64
+		}{
+			{"prompt_rate_per_mtok", b.MinPromptRatePerMtok, b.MaxPromptRatePerMtok},
+			{"prompt_cache_hit_rate_per_mtok", b.MinPromptCacheHitRatePerMtok, b.MaxPromptCacheHitRatePerMtok},
+			{"completion_rate_per_mtok", b.MinCompletionRatePerMtok, b.MaxCompletionRatePerMtok},
+		} {
+			if pair.min < 0 || pair.min > pair.max {
+				return fmt.Errorf("trusted_pools.pool_model_pricing_bounds %s needs 0 <= min <= max", pair.name)
+			}
+		}
+		if !poolModelPricingBoundsFitFormula(b, globalMultiplier) {
+			return fmt.Errorf("trusted_pools.pool_model_pricing_bounds has a maximum that overflows the SPEC-005 formula at %d tokens and rewards.global_multiplier", poolModelMaxBillableTokens)
+		}
+	}
+	owner := make(map[string]string)
+	for account, providerIDs := range c.ProviderOwnerAccountIDs {
+		if account == "" || strings.TrimSpace(account) != account || strings.Contains(account, "/") {
+			return fmt.Errorf("trusted_pools.provider_owner_account_ids contains invalid account id %q", account)
+		}
+		for _, providerID := range providerIDs {
+			if strings.TrimSpace(providerID) != providerID {
+				return fmt.Errorf("trusted_pools.provider_owner_account_ids.%s contains non-canonical provider_id %q", account, providerID)
+			}
+			if err := ValidateProviderID(providerID); err != nil {
+				return fmt.Errorf("trusted_pools.provider_owner_account_ids.%s contains invalid provider_id %q", account, providerID)
+			}
+			if prior, ok := owner[providerID]; ok {
+				return fmt.Errorf("trusted_pools.provider_owner_account_ids lists provider_id %q under %q and %q", providerID, prior, account)
+			}
+			owner[providerID] = account
 		}
 	}
 	return nil
@@ -4101,6 +4307,127 @@ func validatePayoutRPCURL(name, raw string) (*url.URL, error) {
 		}
 	}
 	return u, nil
+}
+
+func (c Config) validatePrivacyClass() error {
+	pc := c.PrivacyClass
+	if pc.PostureChallengeIntervalSeconds < 15 || pc.PostureChallengeIntervalSeconds > 300 {
+		return fmt.Errorf("privacy_class.posture_challenge_interval_seconds must be in [15,300]")
+	}
+	if pc.PostureResponseTimeoutSeconds <= 0 {
+		return fmt.Errorf("privacy_class.posture_response_timeout_seconds must be > 0")
+	}
+	if pc.QuarantineSeconds <= 0 {
+		return fmt.Errorf("privacy_class.quarantine_seconds must be > 0")
+	}
+	minAge := pc.PostureChallengeIntervalSeconds + pc.PostureResponseTimeoutSeconds
+	if pc.PostureMaxAgeSeconds < minAge || pc.PostureMaxAgeSeconds > 600 {
+		return fmt.Errorf("privacy_class.posture_max_age_seconds must be in [%d,600]", minAge)
+	}
+	if len(pc.AllowedSEKeyBackends) == 0 {
+		if pc.Enabled {
+			return fmt.Errorf("privacy_class.allowed_se_key_backends must be a non-empty subset of file and keychain")
+		}
+	} else {
+		seenBackend := make(map[string]struct{}, len(pc.AllowedSEKeyBackends))
+		for _, backend := range pc.AllowedSEKeyBackends {
+			if backend != "file" && backend != "keychain" {
+				return fmt.Errorf("privacy_class.allowed_se_key_backends contains unknown backend %q", backend)
+			}
+			if _, dup := seenBackend[backend]; dup {
+				return fmt.Errorf("privacy_class.allowed_se_key_backends contains duplicate backend %q", backend)
+			}
+			seenBackend[backend] = struct{}{}
+		}
+	}
+	for providerID, encoded := range pc.ProviderSEPublicKeys {
+		if err := ValidateProviderID(providerID); err != nil {
+			return fmt.Errorf("privacy_class.provider_se_public_keys: %w", err)
+		}
+		decoded, err := base64.StdEncoding.Strict().DecodeString(encoded)
+		if err != nil || base64.StdEncoding.EncodeToString(decoded) != encoded || len(decoded) != 64 {
+			return fmt.Errorf("privacy_class.provider_se_public_keys.%s must be canonical standard base64 of a 64-byte P-256 point", providerID)
+		}
+		x := new(big.Int).SetBytes(decoded[:32])
+		y := new(big.Int).SetBytes(decoded[32:])
+		if !elliptic.P256().IsOnCurve(x, y) {
+			return fmt.Errorf("privacy_class.provider_se_public_keys.%s must be a P-256 point", providerID)
+		}
+	}
+	live := 0
+	now := time.Now()
+	for i, identity := range pc.ApprovedCodeIdentities {
+		field := fmt.Sprintf("privacy_class.approved_code_identities[%d]", i)
+		if !privacyTeamID(identity.TeamID) {
+			return fmt.Errorf("%s.team_id must be 10 characters from A-Z and 0-9", field)
+		}
+		if !privacyCDHash(identity.CDHash) {
+			return fmt.Errorf("%s.code_cdhash must be 40 lowercase hex characters", field)
+		}
+		if !privacyVisibleASCII(identity.SigningIdentifier, 128) {
+			return fmt.Errorf("%s.signing_identifier must be visible ASCII", field)
+		}
+		if identity.BinaryVersion != "" && !privacyVisibleASCII(identity.BinaryVersion, 128) {
+			return fmt.Errorf("%s.binary_version must be visible ASCII", field)
+		}
+		if identity.ExpiresAt.IsZero() {
+			return fmt.Errorf("%s.expires_at must be set", field)
+		}
+		if identity.ExpiresAt.After(now) {
+			live++
+		}
+	}
+	if !pc.Enabled {
+		return nil
+	}
+	if !c.RelayBlind.Enabled {
+		return fmt.Errorf("privacy_class.enabled requires relay_blind.enabled")
+	}
+	if len(pc.ProviderSEPublicKeys) == 0 {
+		return fmt.Errorf("privacy_class.provider_se_public_keys must contain at least one pin when enabled")
+	}
+	if live == 0 {
+		return fmt.Errorf("privacy_class.approved_code_identities must contain an unexpired identity when enabled")
+	}
+	return nil
+}
+
+func privacyTeamID(value string) bool {
+	if len(value) != 10 {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func privacyCDHash(value string) bool {
+	if len(value) != 40 {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func privacyVisibleASCII(value string, max int) bool {
+	if len(value) == 0 || len(value) > max {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < 0x21 || value[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 func ValidateEndpointURL(endpoint string) error {

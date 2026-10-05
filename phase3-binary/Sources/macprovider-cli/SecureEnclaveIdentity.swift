@@ -285,27 +285,33 @@ final class SecureEnclaveIdentity: @unchecked Sendable {
     /// returns -34018, falls back to the file-backed CryptoKit SE store.
     static func loadOrCreate(
         accessGroup: String? = nil,
-        label: String? = nil
+        label: String? = nil,
+        quiet: Bool = false
     ) throws -> SecureEnclaveIdentity {
         guard isAvailable else {
             throw SecureEnclaveIdentityError.secureEnclaveUnavailable
         }
         let group = resolveAccessGroup(accessGroup)
         let keyLabel = label ?? defaultLabel
+        let announce: (SecureEnclaveIdentity) -> Void = { identity in
+            if !quiet {
+                print("INFO se_attestation identity_ready backend=\(identity.backendName)")
+            }
+        }
 
         do {
             do {
                 let existing = try findExisting(accessGroup: group, label: keyLabel)
-                print("INFO se_attestation identity_ready backend=\(existing.backendName)")
+                announce(existing)
                 return existing
             } catch SecureEnclaveIdentityError.keyLookupFailed(status: errSecItemNotFound) {
                 let created = try createNew(accessGroup: group, label: keyLabel)
-                print("INFO se_attestation identity_ready backend=\(created.backendName)")
+                announce(created)
                 return created
             }
         } catch SecureEnclaveIdentityError.missingEntitlement where group == nil {
             let fileBacked = try loadOrCreateFileBacked()
-            print("INFO se_attestation identity_ready backend=\(fileBacked.backendName)")
+            announce(fileBacked)
             return fileBacked
         }
     }

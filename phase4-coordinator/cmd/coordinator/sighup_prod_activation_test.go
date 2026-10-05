@@ -33,7 +33,10 @@ func TestSIGHUPRejectsProductionActivationChange(t *testing.T) {
 		RootCustodyClasses:        map[string]string{strings.Repeat("b", 64): "hsm"},
 	}
 	reloadStartupTrustedPoolsProductionActivation.Store(&booted)
-	t.Cleanup(func() { reloadStartupTrustedPoolsProductionActivation.Store(nil) })
+	t.Cleanup(func() {
+		reloadStartupTrustedPoolsProductionActivation.Store(nil)
+		reloadStartupTrustedPoolsManifestWitnessPath.Store(nil)
+	})
 
 	var logs bytes.Buffer
 	reloadTier2Config(writeReloadConfig(t, startup), startup.Tier2, zerolog.New(&logs), wsServer, buyerServer, nil)
@@ -57,5 +60,32 @@ func TestSIGHUPRejectsProductionActivationChange(t *testing.T) {
 	}
 	if trustedPoolsProductionActivationChanged(booted, same.TrustedPools.ProductionActivation) {
 		t.Fatal("identical production activation reported as changed")
+	}
+}
+
+// #1816: the manifest acceptance witness path is captured by the trust-pool
+// store at boot, so a SIGHUP must not record a new path as applied while the
+// live process still enforces the boot-time witness.
+func TestSIGHUPRejectsManifestAcceptanceWitnessPathChange(t *testing.T) {
+	defer tier2.ResetForTest()
+	statePath := useAppliedConfigStatePath(t)
+	startup, _, wsServer, buyerServer := reloadTestServers(config.Default())
+	reloadTier2Config(writeReloadConfig(t, startup), startup.Tier2, zerolog.Nop(), wsServer, buyerServer, nil)
+	before, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("baseline record: %v", err)
+	}
+
+	bootedPath := "/var/lib/macprovider/trustpool-manifest-witness.json"
+	reloadStartupTrustedPoolsManifestWitnessPath.Store(&bootedPath)
+	t.Cleanup(func() { reloadStartupTrustedPoolsManifestWitnessPath.Store(nil) })
+
+	var logs bytes.Buffer
+	reloadTier2Config(writeReloadConfig(t, startup), startup.Tier2, zerolog.New(&logs), wsServer, buyerServer, nil)
+	if !strings.Contains(logs.String(), "trusted_pools.manifest_acceptance_witness_path is startup-only") {
+		t.Fatalf("expected a rejected reload, logs=%s", logs.String())
+	}
+	if after, _ := os.ReadFile(statePath); !bytes.Equal(before, after) {
+		t.Fatalf("rejected manifest_acceptance_witness_path reload rewrote the applied record: %s", after)
 	}
 }

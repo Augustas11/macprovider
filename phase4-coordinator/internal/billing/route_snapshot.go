@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	"modernc.org/sqlite"
 )
 
@@ -29,13 +30,37 @@ const (
 	// string (currently phase5-gateway's settlementPolicyVersion check)
 	// must accept both this and the immediately-prior version during
 	// rollout so in-flight/legacy rows keep settling.
-	RouteSnapshotPolicyVersion       = "spec022-prereq-v1"
+	RouteSnapshotPolicyVersion = "spec022-prereq-v1"
+	// RouteSnapshotPolicyVersionV2 names the SPEC-015 §N.2
+	// route_snapshot_v2 preimage (SPEC-022-R013.2 option B). A snapshot
+	// carries the #1816 pool provenance members (a pool_manifest source or a
+	// SPEC-042-R016 pool_member_account_id) if and only if it is pinned to
+	// this version; every other snapshot keeps the byte-identical v1
+	// preimage under RouteSnapshotPolicyVersion.
+	RouteSnapshotPolicyVersionV2     = "spec022-route-snapshot-v2"
 	RouteSnapshotModeObserve         = "observe"
 	RouteSnapshotModeEnforce         = "enforce"
 	MaxPendingReceiptDeadlineSeconds = 900
 	routeSnapshotRetryInitialDelay   = 10 * time.Millisecond
 	routeSnapshotRetryMaxDelay       = 100 * time.Millisecond
 	routeSnapshotPrimaryMirrorBudget = 25 * time.Millisecond
+
+	// PaidEntrypointCoordinatorBuyerChat is the plaintext chat entrypoint.
+	PaidEntrypointCoordinatorBuyerChat = "coordinator_buyer_v1_chat_completions"
+	// PaidEntrypointRelayBlindChat is the SPEC-022 R-14 relay-blind entrypoint.
+	PaidEntrypointRelayBlindChat = "coordinator_buyer_v1_relay_blind_chat_completions"
+	// PromptHashBasisCoordinatorV1 is the plaintext prompt-hash basis.
+	PromptHashBasisCoordinatorV1 = "coordinator_prompt_canonical_v1"
+	// PromptHashBasisRelayBlindEnvelopeV1 labels a snapshot whose prompt_hash
+	// member is the hex SHA-256 of the exact relay-blind envelope bytes. It
+	// is an envelope binding, never a plaintext prompt hash (R-3.1).
+	PromptHashBasisRelayBlindEnvelopeV1 = "relay_blind_envelope_digest_v1"
+	// SPEC-022-R013 closed expected_model_hash_source enum. A snapshot that
+	// omits the source is catalog (every pre-#1816 row); only pool_manifest
+	// is written explicitly, so catalog route-snapshot preimages and digests
+	// are byte-identical to before.
+	ExpectedModelHashSourceCatalog      = "catalog"
+	ExpectedModelHashSourcePoolManifest = "pool_manifest"
 )
 
 var (
@@ -108,15 +133,45 @@ type RouteSnapshot struct {
 	// feed-derived binding. Carried in route_snapshot_json (no dedicated
 	// columns), bound into the digest only when present, recovered on the
 	// settlement recompute path. All six or none; a partial record is invalid.
-	ArtifactFeedSHA256              string `json:"artifact_feed_sha256"`
-	ArtifactID                      string `json:"artifact_id"`
-	ArtifactHash                    string `json:"artifact_hash"`
-	ArtifactHashAlgorithm           string `json:"artifact_hash_algorithm"`
-	ArtifactFeedSignerKeyID         string `json:"artifact_feed_signer_key_id"`
-	ArtifactCandidateCatalogSHA256  string `json:"artifact_candidate_catalog_sha256"`
+	ArtifactFeedSHA256             string `json:"artifact_feed_sha256"`
+	ArtifactID                     string `json:"artifact_id"`
+	ArtifactHash                   string `json:"artifact_hash"`
+	ArtifactHashAlgorithm          string `json:"artifact_hash_algorithm"`
+	ArtifactFeedSignerKeyID        string `json:"artifact_feed_signer_key_id"`
+	ArtifactCandidateCatalogSHA256 string `json:"artifact_candidate_catalog_sha256"`
+	// SPEC-022-R013 / SPEC-005-R015 (#1816): a pool-manifest route records
+	// the source of its expected identity, the pool_model_id of the signed
+	// SPEC-042-R015 entry whose artifact pair is the expected hash, the
+	// entry's trusted rates, and the digest of the pricing bounds the entry
+	// was checked against. All are json-carried and digested only when the
+	// source is pool_manifest, so no catalog preimage changes. The catalog_*
+	// members of such a snapshot record the global catalog envelope in force
+	// at route time (which does not carry the pair), never the identity.
+	ExpectedModelHashSource            string `json:"expected_model_hash_source,omitempty"`
+	PoolModelID                        string `json:"pool_model_id,omitempty"`
+	PoolModelPromptRatePerMtok         int64  `json:"pool_model_prompt_rate_per_mtok,omitempty"`
+	PoolModelPromptCacheHitRatePerMtok int64  `json:"pool_model_prompt_cache_hit_rate_per_mtok,omitempty"`
+	PoolModelCompletionRatePerMtok     int64  `json:"pool_model_completion_rate_per_mtok,omitempty"`
+	PoolModelPricingBoundsSHA256       string `json:"pool_model_pricing_bounds_sha256,omitempty"`
+	// SPEC-005-R015: the default-row multiplier and provider share and the
+	// config (rate-card) snapshot generation that supplied them, frozen at
+	// dispatch. Settlement, receipt sync, and recovery price the attempt
+	// from these, never from a later reload.
+	PoolModelGlobalMultiplierPPM int64 `json:"pool_model_global_multiplier_ppm,omitempty"`
+	PoolModelProviderShareBps    int64 `json:"pool_model_provider_share_bps,omitempty"`
+	PoolModelConfigSnapshotID    int64 `json:"pool_model_config_snapshot_id,omitempty"`
+	// PoolMemberAccountID is the serving provider's recorded owner account
+	// when it serves under a SPEC-042-R016 creator attestation rather than
+	// as the creator (json-carried, digested only when set).
+	PoolMemberAccountID             string `json:"pool_member_account_id,omitempty"`
 	ComputeIntegrityCaptureRequired bool   `json:"-"`
 	ComputeIntegritySamplingCovered bool   `json:"-"`
 	ComputeIntegrityHardwareDigest  string `json:"-"`
+	// RelayBlindProviderBindingDigest is the SPEC-041 provider-binding
+	// digest of an R-14 relay-blind attempt. It is stored beside the
+	// snapshot, outside the digested preimage, so coverage lookups can bind
+	// the attempt to its binding (SPEC-022 R-14.9).
+	RelayBlindProviderBindingDigest string `json:"-"`
 }
 
 func ReceiptKeyID(pubkey []byte) (string, error) {
@@ -180,9 +235,30 @@ func (r RouteSnapshot) Value() map[string]any {
 		value["model_admission_candidate_id"] = r.ModelAdmissionCandidateID
 		value["model_admission_coordinator_event_id"] = r.ModelAdmissionCoordinatorEventID
 		value["model_admission_served_model_ref"] = r.ModelAdmissionServedModelRef
-		value["model_admission_catalog_model_key"] = r.ModelAdmissionCatalogModelKey
+		// A SPEC-047-R011 pool binding has no catalog key; route_snapshot_v2
+		// omits the member rather than digesting an empty string.
+		if !r.PoolManifestSourced() {
+			value["model_admission_catalog_model_key"] = r.ModelAdmissionCatalogModelKey
+		}
 		value["model_admission_discovery_digest_sha256"] = r.ModelAdmissionDiscoveryDigestSHA256
 		value["model_admission_evaluation_digest_sha256"] = r.ModelAdmissionEvaluationDigestSHA256
+	}
+	if r.PoolManifestSourced() {
+		value["expected_model_hash_source"] = r.ExpectedModelHashSource
+		value["pool_model_id"] = r.PoolModelID
+		value["pool_model_prompt_rate_per_mtok"] = r.PoolModelPromptRatePerMtok
+		value["pool_model_prompt_cache_hit_rate_per_mtok"] = r.PoolModelPromptCacheHitRatePerMtok
+		value["pool_model_completion_rate_per_mtok"] = r.PoolModelCompletionRatePerMtok
+		value["pool_model_pricing_bounds_sha256"] = r.PoolModelPricingBoundsSHA256
+		value["pool_model_global_multiplier_ppm"] = r.PoolModelGlobalMultiplierPPM
+		value["pool_model_provider_share_bps"] = r.PoolModelProviderShareBps
+		value["pool_model_config_snapshot_id"] = r.PoolModelConfigSnapshotID
+		if r.RuntimeSource == "" {
+			value["pool_generation"] = int64(r.PoolGeneration)
+		}
+	}
+	if r.PoolMemberAccountID != "" {
+		value["pool_member_account_id"] = r.PoolMemberAccountID
 	}
 	if r.ArtifactDerived() {
 		value["artifact_feed_sha256"] = r.ArtifactFeedSHA256
@@ -193,6 +269,97 @@ func (r RouteSnapshot) Value() map[string]any {
 		value["artifact_candidate_catalog_sha256"] = r.ArtifactCandidateCatalogSHA256
 	}
 	return value
+}
+
+// PoolManifestSourced reports whether the snapshot's expected identity is a
+// SPEC-042-R015 pool-manifest entry (SPEC-022-R013).
+func (r RouteSnapshot) PoolManifestSourced() bool {
+	return r.ExpectedModelHashSource == ExpectedModelHashSourcePoolManifest
+}
+
+// CarriesPoolProvenance reports whether the snapshot carries a #1816
+// provenance member, which only the route_snapshot_v2 preimage may carry.
+func (r RouteSnapshot) CarriesPoolProvenance() bool {
+	return r.ExpectedModelHashSource != "" || r.PoolMemberAccountID != ""
+}
+
+// PoolModelEconomics is the dispatch-frozen SPEC-005-R015 multiplier,
+// provider share, and config snapshot generation of a pool_manifest
+// snapshot; ok is false for any other snapshot.
+func (r RouteSnapshot) PoolModelEconomics() (multiplierPPM, providerShareBps, configSnapshotID int64, ok bool) {
+	if !r.PoolManifestSourced() {
+		return 0, 0, 0, false
+	}
+	return r.PoolModelGlobalMultiplierPPM, r.PoolModelProviderShareBps, r.PoolModelConfigSnapshotID, true
+}
+
+// PoolModelRateEntry is the trusted SPEC-005-R015 price a pool-manifest
+// snapshot recorded; ok is false for any other snapshot.
+func (r RouteSnapshot) PoolModelRateEntry() (RateCardEntry, bool) {
+	if !r.PoolManifestSourced() {
+		return RateCardEntry{}, false
+	}
+	entry := RateCardEntry{
+		PromptCreditsPerMtok:     r.PoolModelPromptRatePerMtok,
+		CompletionCreditsPerMtok: r.PoolModelCompletionRatePerMtok,
+	}
+	entry.SetPromptCacheHitCreditsPerMtok(r.PoolModelPromptCacheHitRatePerMtok)
+	return entry, true
+}
+
+// validatePoolManifestSource is SPEC-022-R013.2: a pool_manifest snapshot
+// carries the full pool label set, a pool_model_id of the same pool, the
+// expected pair, a fenced pool generation, a non-negative entry price with
+// cache-hit <= prompt, and the bounds digest; a catalog snapshot carries none
+// of these members.
+func (r RouteSnapshot) validatePoolManifestSource() error {
+	switch r.ExpectedModelHashSource {
+	case "":
+		if r.PoolModelID != "" || r.PoolModelPromptRatePerMtok != 0 || r.PoolModelPromptCacheHitRatePerMtok != 0 ||
+			r.PoolModelCompletionRatePerMtok != 0 || r.PoolModelPricingBoundsSHA256 != "" ||
+			r.PoolModelGlobalMultiplierPPM != 0 || r.PoolModelProviderShareBps != 0 || r.PoolModelConfigSnapshotID != 0 {
+			return fmt.Errorf("route snapshot pool model members require expected_model_hash_source pool_manifest")
+		}
+		return nil
+	case ExpectedModelHashSourcePoolManifest:
+	default:
+		// "catalog" is the implicit value and is never written explicitly,
+		// so catalog digests stay byte-identical.
+		return fmt.Errorf("route snapshot expected_model_hash_source invalid")
+	}
+	poolID, _, ok := poolmanifest.ParsePoolModelID(r.PoolModelID)
+	if !ok || r.PoolID == "" || poolID != r.PoolID {
+		return fmt.Errorf("route snapshot pool_model_id does not belong to pool_id")
+	}
+	if r.ManifestVersion == 0 || !hex64Pattern.MatchString(r.ManifestCoreDigest) {
+		return fmt.Errorf("route snapshot pool_manifest source requires manifest labels")
+	}
+	if r.PoolGeneration == 0 || r.PoolGeneration > math.MaxInt64 {
+		return fmt.Errorf("route snapshot pool_manifest source requires pool_generation")
+	}
+	if r.ExpectedCatalogModelHashAlgorithm != modelidentity.GGUFFileV1 && r.ExpectedCatalogModelHashAlgorithm != modelidentity.SnapshotManifestV1 {
+		return fmt.Errorf("route snapshot pool_manifest source requires an exact artifact algorithm")
+	}
+	if r.PoolModelPromptRatePerMtok < 0 || r.PoolModelPromptCacheHitRatePerMtok < 0 || r.PoolModelCompletionRatePerMtok < 0 ||
+		r.PoolModelPromptCacheHitRatePerMtok > r.PoolModelPromptRatePerMtok {
+		return fmt.Errorf("route snapshot pool model rates invalid")
+	}
+	if !hex64Pattern.MatchString(r.PoolModelPricingBoundsSHA256) {
+		return fmt.Errorf("route snapshot pool_model_pricing_bounds_sha256 invalid")
+	}
+	// SPEC-022-R013.3: the receipt identity of a pool_manifest attempt is
+	// the pool-scoped pool_model_id, never a provider-local served label.
+	if r.ModelID != r.PoolModelID {
+		return fmt.Errorf("route snapshot pool_manifest model_id must be the pool_model_id")
+	}
+	if r.PoolModelGlobalMultiplierPPM <= 0 || r.PoolModelProviderShareBps < 0 || r.PoolModelProviderShareBps > providerShareDenom ||
+		r.PoolModelConfigSnapshotID <= 0 {
+		return fmt.Errorf("route snapshot pool model economics invalid")
+	}
+	if r.ArtifactDerived() || r.ModelAdmissionCatalogModelKey != "" {
+		return fmt.Errorf("route snapshot pool_manifest source cannot carry catalog or feed identity")
+	}
+	return nil
 }
 
 // ArtifactDerived reports whether the snapshot references an artifact-feed
@@ -238,6 +405,16 @@ func (r RouteSnapshot) Validate() error {
 	if r.AttemptN < 0 {
 		return fmt.Errorf("route snapshot attempt_n must be >= 0")
 	}
+	// SPEC-022 R-3.1 (v0.3.0): the relay-blind basis belongs to the
+	// relay-blind entrypoint only, and that entrypoint carries no other basis.
+	if (r.PaidEntrypoint == PaidEntrypointRelayBlindChat) != (r.PromptHashBasis == PromptHashBasisRelayBlindEnvelopeV1) {
+		return fmt.Errorf("route snapshot prompt_hash_basis does not match paid_entrypoint")
+	}
+	if r.RelayBlindProviderBindingDigest != "" {
+		if _, err := relayBlindDigestHex(r.RelayBlindProviderBindingDigest); err != nil || r.PaidEntrypoint != PaidEntrypointRelayBlindChat {
+			return fmt.Errorf("route snapshot relay_blind_provider_binding_digest invalid")
+		}
+	}
 	if !receiptKeyIDPattern.MatchString(r.ProviderReceiptKeyID) {
 		return fmt.Errorf("route snapshot provider_receipt_key_id invalid")
 	}
@@ -257,7 +434,24 @@ func (r RouteSnapshot) Validate() error {
 	// value present requires all six, well-formed and equal to the expected
 	// pair. Settlement re-verification is this same check on the recovered
 	// snapshot plus the digest recompute, never a lookup in a current feed.
-	if r.ArtifactDerived() || r.ExpectedCatalogModelHashAlgorithm == modelidentity.GGUFFileV1 {
+	if err := r.validatePoolManifestSource(); err != nil {
+		return err
+	}
+	// SPEC-015 §N.2 / SPEC-022-R013.2 option B: provenance members exist
+	// only in the route_snapshot_v2 preimage, and v2 exists only for them.
+	switch r.RouteSnapshotPolicyVersion {
+	case RouteSnapshotPolicyVersionV2:
+		if !r.CarriesPoolProvenance() {
+			return fmt.Errorf("route snapshot route_snapshot_v2 requires pool provenance members")
+		}
+	default:
+		if r.CarriesPoolProvenance() {
+			return fmt.Errorf("route snapshot pool provenance members require route_snapshot_v2")
+		}
+	}
+	// A pool-manifest GGUF identity is the signed entry's exact pair
+	// (SPEC-010-R007(j)), not a feed member, so the feed rule does not apply.
+	if !r.PoolManifestSourced() && (r.ArtifactDerived() || r.ExpectedCatalogModelHashAlgorithm == modelidentity.GGUFFileV1) {
 		if err := r.validateArtifactEvidence(); err != nil {
 			return err
 		}
@@ -292,7 +486,7 @@ func (r RouteSnapshot) Validate() error {
 	// SPEC-022-R012.1: an external-runtime snapshot carries the full pool
 	// label set, a loopback runtime class, the fenced generation, and the
 	// operator account, or it is invalid and fails closed before dispatch.
-	if r.RuntimeSource != "" || r.PoolGeneration != 0 || r.PoolOperatorAccountID != "" {
+	if r.RuntimeSource != "" || (r.PoolGeneration != 0 && !r.PoolManifestSourced()) || r.PoolOperatorAccountID != "" || r.PoolMemberAccountID != "" {
 		if !IsLoopbackRuntimeSource(r.RuntimeSource) {
 			return fmt.Errorf("route snapshot runtime_source must be a loopback runtime class")
 		}
@@ -312,13 +506,18 @@ func (r RouteSnapshot) Validate() error {
 		}
 	}
 	if r.ModelAdmissionCandidateID != "" {
-		for field, value := range map[string]string{
+		required := map[string]string{
 			"model_admission_coordinator_event_id":     r.ModelAdmissionCoordinatorEventID,
 			"model_admission_served_model_ref":         r.ModelAdmissionServedModelRef,
-			"model_admission_catalog_model_key":        r.ModelAdmissionCatalogModelKey,
 			"model_admission_discovery_digest_sha256":  r.ModelAdmissionDiscoveryDigestSHA256,
 			"model_admission_evaluation_digest_sha256": r.ModelAdmissionEvaluationDigestSHA256,
-		} {
+		}
+		// A SPEC-047-R011 pool binding has no catalog key (it is never
+		// laundered into one); every other binding carries it.
+		if !r.PoolManifestSourced() {
+			required["model_admission_catalog_model_key"] = r.ModelAdmissionCatalogModelKey
+		}
+		for field, value := range required {
 			if strings.TrimSpace(value) == "" {
 				return fmt.Errorf("route snapshot missing %s", field)
 			}
@@ -400,6 +599,7 @@ INSERT INTO `+table+` (
     route_decision_ts_unix_ms, request_start_ts_unix_ms, pending_deadline_seconds,
     prompt_hash_basis, prompt_hash, compute_integrity_capture_required,
     compute_integrity_sampling_profile_covered, compute_integrity_hardware_runtime_class_digest,
+    relay_blind_provider_binding_digest,
     route_snapshot_digest, route_snapshot_json,
     route_snapshot_canonical_json, created_at_utc
 ) VALUES (
@@ -412,6 +612,7 @@ INSERT INTO `+table+` (
     ?, ?, ?,
     ?, ?, ?,
     ?, ?, ?, ?, ?,
+    ?,
     ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now')
 )`,
 			snapshot.AccountScope, snapshot.RequestID, snapshot.AttemptN, snapshot.ProviderID,
@@ -424,6 +625,7 @@ INSERT INTO `+table+` (
 			snapshot.RouteDecisionTSUnixMS, snapshot.RequestStartTSUnixMS, snapshot.PendingDeadlineSeconds,
 			snapshot.PromptHashBasis, snapshot.PromptHash,
 			boolInt(snapshot.ComputeIntegrityCaptureRequired), boolInt(snapshot.ComputeIntegritySamplingCovered), nullString(snapshot.ComputeIntegrityHardwareDigest),
+			nullString(snapshot.RelayBlindProviderBindingDigest),
 			digest, rendered,
 			canonical,
 		)
@@ -501,6 +703,7 @@ CREATE TABLE IF NOT EXISTS settlement_route_snapshot_journal (
     compute_integrity_capture_required INTEGER NOT NULL DEFAULT 0 CHECK(compute_integrity_capture_required IN (0,1)),
     compute_integrity_sampling_profile_covered INTEGER NOT NULL DEFAULT 0 CHECK(compute_integrity_sampling_profile_covered IN (0,1)),
     compute_integrity_hardware_runtime_class_digest TEXT NULL CHECK(compute_integrity_hardware_runtime_class_digest IS NULL OR (length(compute_integrity_hardware_runtime_class_digest) = 71 AND substr(compute_integrity_hardware_runtime_class_digest, 1, 7) = 'sha256:' AND substr(compute_integrity_hardware_runtime_class_digest, 8) NOT GLOB '*[^0-9a-f]*')),
+    `+relayBlindProviderBindingDigestColumnSQL+`,
     route_snapshot_digest TEXT NOT NULL CHECK(length(route_snapshot_digest) = 64 AND route_snapshot_digest NOT GLOB '*[^0-9a-f]*'),
     route_snapshot_json TEXT NOT NULL,
     route_snapshot_canonical_json TEXT NOT NULL,
@@ -535,8 +738,29 @@ BEGIN
     SELECT RAISE(ABORT, 'settlement route snapshot journal is immutable');
 END;
 `)
+	if err != nil {
+		return err
+	}
+	var hasBinding bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pragma_table_info('settlement_route_snapshot_journal') WHERE name = 'relay_blind_provider_binding_digest')`).Scan(&hasBinding); err != nil || hasBinding {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `ALTER TABLE settlement_route_snapshot_journal ADD COLUMN `+relayBlindProviderBindingDigestAddColumnSQL)
 	return err
 }
+
+// relayBlindProviderBindingDigestColumnSQL is the snapshot column that
+// records an R-14 attempt's SPEC-041 provider-binding digest: 43 canonical
+// base64url characters, NULL on every other snapshot. Fresh tables carry the
+// CHECK.
+const relayBlindProviderBindingDigestColumnSQL = `relay_blind_provider_binding_digest TEXT NULL CHECK(relay_blind_provider_binding_digest IS NULL OR (length(relay_blind_provider_binding_digest) = 43 AND relay_blind_provider_binding_digest NOT GLOB '*[^A-Za-z0-9_-]*'))`
+
+// relayBlindProviderBindingDigestAddColumnSQL adds the same column to an
+// existing table without the CHECK: SQLite validates an added CHECK against
+// every existing row, a full read of a large production table under the
+// schema lock at startup. RouteSnapshot.Validate enforces the canonical form
+// before every insert.
+const relayBlindProviderBindingDigestAddColumnSQL = `relay_blind_provider_binding_digest TEXT NULL`
 
 type persistedRouteSnapshotRow struct {
 	AccountScope                      string
@@ -568,6 +792,7 @@ type persistedRouteSnapshotRow struct {
 	ComputeIntegrityCaptureRequired   int
 	ComputeIntegritySamplingCovered   int
 	ComputeIntegrityHardwareDigest    sql.NullString
+	RelayBlindProviderBindingDigest   sql.NullString
 	RouteSnapshotDigest               string
 	RouteSnapshotJSON                 string
 	RouteSnapshotCanonicalJSON        string
@@ -652,6 +877,7 @@ SELECT account_scope, request_id, attempt_n, provider_id,
        route_decision_ts_unix_ms, request_start_ts_unix_ms, pending_deadline_seconds,
        prompt_hash_basis, prompt_hash, compute_integrity_capture_required,
        compute_integrity_sampling_profile_covered, compute_integrity_hardware_runtime_class_digest,
+       relay_blind_provider_binding_digest,
        route_snapshot_digest, route_snapshot_json, route_snapshot_canonical_json, created_at_utc
   FROM settlement_route_snapshot_journal
  WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
@@ -667,6 +893,7 @@ SELECT account_scope, request_id, attempt_n, provider_id,
 		&row.RouteDecisionTSUnixMS, &row.RequestStartTSUnixMS, &row.PendingDeadlineSeconds,
 		&row.PromptHashBasis, &row.PromptHash, &row.ComputeIntegrityCaptureRequired,
 		&row.ComputeIntegritySamplingCovered, &row.ComputeIntegrityHardwareDigest,
+		&row.RelayBlindProviderBindingDigest,
 		&row.RouteSnapshotDigest, &row.RouteSnapshotJSON, &row.RouteSnapshotCanonicalJSON, &row.CreatedAtUTC,
 	)
 	if err != nil {
@@ -710,6 +937,7 @@ INSERT OR IGNORE INTO settlement_route_snapshots (
     route_decision_ts_unix_ms, request_start_ts_unix_ms, pending_deadline_seconds,
     prompt_hash_basis, prompt_hash, compute_integrity_capture_required,
     compute_integrity_sampling_profile_covered, compute_integrity_hardware_runtime_class_digest,
+    relay_blind_provider_binding_digest,
     route_snapshot_digest, route_snapshot_json,
     route_snapshot_canonical_json, created_at_utc
 ) VALUES (
@@ -722,6 +950,7 @@ INSERT OR IGNORE INTO settlement_route_snapshots (
     ?, ?, ?,
     ?, ?, ?,
     ?, ?, ?, ?, ?,
+    ?,
     ?, ?, ?, ?
 )`,
 		row.AccountScope, row.RequestID, row.AttemptN, row.ProviderID,
@@ -734,6 +963,7 @@ INSERT OR IGNORE INTO settlement_route_snapshots (
 		row.RouteDecisionTSUnixMS, row.RequestStartTSUnixMS, row.PendingDeadlineSeconds,
 		row.PromptHashBasis, row.PromptHash, row.ComputeIntegrityCaptureRequired,
 		row.ComputeIntegritySamplingCovered, row.ComputeIntegrityHardwareDigest,
+		row.RelayBlindProviderBindingDigest,
 		row.RouteSnapshotDigest, row.RouteSnapshotJSON,
 		row.RouteSnapshotCanonicalJSON, row.CreatedAtUTC,
 	)

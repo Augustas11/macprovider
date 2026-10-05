@@ -128,20 +128,16 @@ type billingRecorder struct {
 	// this was billingAttemptN, incremented via deferred closure on
 	// every successful provider-bound record.
 	attemptN int
-	// providerCredited is the LEDGER-EXACT "a provider has been billably
-	// credited in this request" signal that drives the item-18 no-charge
+	// providerCredited is the LEDGER-EXACT "a provider has been payable-credited
+	// in this request" signal that drives the item-18 no-charge
 	// marker (see noPriorDispatchResponseWriter). It is set true INSIDE
-	// recordRow at the exact point a provider-bound billing/settlement row
-	// is durably persisted with a billable status (providerAssignedID != ""
-	// AND status != 503) — never on a 503/no_provider/queue-full row (those
-	// bypass billing at recordRow's `status != http.StatusServiceUnavailable`
-	// gate) and never on a buyer/routing row (providerAssignedID == ""). It
-	// is monotonic within a request: once a credit lands it stays true, so a
-	// later terminal write (e.g. failover-exhaustion 503, or a retried
-	// route_snapshot_failed observed by the gateway) is correctly treated as
-	// following a billed attempt. This replaces the R5 attemptN==0 marker
-	// source, which over-counted (incremented on non-billed 503 rows) and
-	// under-covered (incremented AFTER the terminal write on WS paths).
+	// recordRow at the exact point a provider-bound billing/settlement row is
+	// durably persisted with a payable status (providerAssignedID != "",
+	// status != 503, and not breaker-qualified to zero) — never on a
+	// 503/no_provider/queue-full row, never on a buyer/routing row, and never
+	// on provider-fault rows whose credits are forced to zero. It is monotonic
+	// within a request: once a payable credit lands it stays true, so a later
+	// terminal write is correctly treated as following a billed attempt.
 	providerCredited bool
 	// dispatchedThisAttempt is the per-attempt companion to providerCredited.
 	// It answers "did the CURRENT attempt dispatch to a provider before it
@@ -155,6 +151,11 @@ type billingRecorder struct {
 	// attempt that writes a non-503 terminal WILL be billed (recordRow bills
 	// iff status != 503), so it must not carry the no-charge marker.
 	dispatchedThisAttempt bool
+	// dispatchedThisAttemptFaultFlag is the latest current-attempt fault flag
+	// recorded before the buyer terminal was written. Breaker-qualified
+	// provider failures persist a ledger row but force provider/buyer credits
+	// to zero, so they may still carry the no-charge marker.
+	dispatchedThisAttemptFaultFlag string
 	// routeSnapshotAttemptN is the pre-dispatch provider-dispatch
 	// ordinal used by settlement_route_snapshots. It advances at the
 	// dispatch boundary, not at request_log write time, so streaming
@@ -182,6 +183,9 @@ type billingRecorder struct {
 	settlementRouteSnapshot    *billing.RouteSnapshot
 	routeSnapshotStorePressure bool
 	relayBlind                 *relayBlindAuditFields
+	// relayBlindSettlement is the SPEC-001-R005 metadata of the current
+	// relay-blind attempt's R-14 route snapshot; nil when it has none.
+	relayBlindSettlement *providerws.RelayBlindSettlementMetadata
 	// lastRecordedSettlementSubject latches whether the MOST RECENTLY recorded
 	// row was a leg the coordinator settles at all. It is the single expression
 	// that recordRow's two billing branches gate on: a settlement attempt
@@ -352,6 +356,7 @@ func (b *billingRecorder) setPromptTokenUpperBound(tokens int64) {
 // NOT reset — it accumulates billed credits across the whole request.
 func (b *billingRecorder) beginDispatchAttempt() {
 	b.dispatchedThisAttempt = false
+	b.dispatchedThisAttemptFaultFlag = ""
 }
 
 // markProviderDispatched records that the current attempt is about to relay
@@ -524,9 +529,25 @@ func (b *billingRecorder) recordRow(
 		if faultFlag == "" {
 			faultFlag = billing.FaultNone
 		}
+		b.dispatchedThisAttemptFaultFlag = faultFlag
 		accountScope := accountScopeForSettlement(b.accountID)
 		settlementMode, settlementVersion := b.settlementPolicyForLedger()
 		poolAttested, poolFence := b.poolOperatorAttestation(ctx, billingStore, stableProviderID, providerRuntimeSource, promptTok, cachedPromptTok, completionTok)
+		// SPEC-005-R015 / SPEC-022-R013: a pool-model attempt is priced from
+		// its recorded snapshot's signed entry rates (never the rate card)
+		// and is billable only behind a verified, fenced pool_manifest route.
+		poolManifestRoute, poolManifestVerified, poolManifestFence := b.poolManifestVerification(ctx, billingStore, stableProviderID, poolAttested, poolFence)
+		if poolManifestRoute != nil {
+			if entry, ok := poolManifestRoute.PoolModelRateEntry(); ok {
+				economics.rateEntry = entry
+			}
+			// SPEC-005-R015: bill the multiplier, share, and config
+			// generation frozen in the route snapshot at dispatch.
+			if multiplier, share, snapshotID, ok := poolManifestRoute.PoolModelEconomics(); ok {
+				economics.multiplierPPM, economics.providerShareBps, economics.snapshotID = multiplier, share, snapshotID
+			}
+			poolFence = poolManifestFence
+		}
 		billingInput := billing.HotPathInput{
 			RequestID:                    row.RequestID,
 			AttemptN:                     attemptN,
@@ -534,6 +555,8 @@ func (b *billingRecorder) recordRow(
 			ProviderRuntimeSource:        providerRuntimeSource,
 			PoolOperatorAttested:         poolAttested,
 			PoolAttestationFence:         poolFence,
+			PoolManifestRoute:            poolManifestRoute != nil,
+			PoolManifestVerified:         poolManifestVerified,
 			ProviderID:                   stableProviderID,
 			Model:                        row.Model,
 			Status:                       status,
@@ -587,12 +610,14 @@ func (b *billingRecorder) recordRow(
 		// the provider credit. Advancing the cursor now is therefore safe even if
 		// the projection materializer is temporarily delayed.
 		b.outputCursorByte = nextOutputCursor
-		// A provider-bound, billable (status != 503) row is now durably
-		// persisted — the provider has been credited. Mark BEFORE the
+		// A provider-bound, payable row is now durably persisted — the provider
+		// has been credited. Mark BEFORE the
 		// settlement-output bookkeeping so a settlement-persist hiccup still
 		// leaves the ledger-exact "credited" signal set (conservative vs
 		// under-charge: the gateway settles rather than erasing real credit).
-		b.providerCredited = true
+		if faultFlag != billing.FaultBreakerQualifying {
+			b.providerCredited = true
+		}
 		// #766 observe-only: publish the credited row to the request arbiter
 		// so the buyer terminal / ledger agreement is checkable. Placed with
 		// providerCredited (i.e. BEFORE the settlement-output bookkeeping) so
@@ -614,10 +639,16 @@ func (b *billingRecorder) recordRow(
 		return err
 	}
 	if settlementSubject {
+		if faultFlag == "" {
+			faultFlag = billing.FaultNone
+		}
+		b.dispatchedThisAttemptFaultFlag = faultFlag
 		// Same ledger-exact credit signal as the hot-path branch: a
-		// provider-bound billable row has persisted (reqLog.Insert above
+		// provider-bound payable row has persisted (reqLog.Insert above
 		// succeeded) and settlement is being recorded now.
-		b.providerCredited = true
+		if faultFlag != billing.FaultBreakerQualifying {
+			b.providerCredited = true
+		}
 		// #766 observe-only, same contract as the hot-path site above.
 		b.noteBillableRow(status, attemptN, faultFlag)
 		accountScope := accountScopeForSettlement(b.accountID)
@@ -919,8 +950,10 @@ func (b *billingRecorder) poolOperatorAttestedAttempt(ctx context.Context, store
 }
 
 // poolOperatorAttestation is poolOperatorAttestedAttempt plus the pool fence
-// the decision used, read before the durable checks. The ledger write
-// transaction re-reads the fence and keeps the credit only if it holds.
+// the decision used: the route-time claim, checked against the durable
+// revocation records (never the current manifest version, #1816 F2). The
+// ledger write transaction re-evaluates it and keeps the credit only if it
+// still holds.
 func (b *billingRecorder) poolOperatorAttestation(ctx context.Context, store *billing.Store, providerID, providerRuntimeSource string, promptTok, cachedPromptTok, completionTok *int64) (bool, *billing.PoolAttestationFence) {
 	if b == nil || store == nil || !providerws.IsBYOMLoopbackRuntimeSource(providerRuntimeSource) {
 		return false, nil
@@ -944,7 +977,7 @@ func (b *billingRecorder) poolOperatorAttestation(ctx context.Context, store *bi
 		}
 		return false, nil
 	}
-	fence, ok := store.PoolAttestationFenceFor(ctx, snap.PoolID)
+	fence, ok := store.PoolAttestationFenceFor(ctx, *snap)
 	if !ok || !billing.PoolAttestationFenceMatchesRoute(fence, *snap) {
 		if b.server != nil {
 			b.server.log.Warn().
@@ -952,7 +985,7 @@ func (b *billingRecorder) poolOperatorAttestation(ctx context.Context, store *bi
 				Str("pool_id", snap.PoolID).
 				Str("request_id", b.requestID).
 				Str("provider_id", providerID).
-				Msg("external-runtime attempt recorded byte_estimated: pool state could not be fenced")
+				Msg("external-runtime attempt recorded byte_estimated: pool membership, attestation, or lifecycle revoked since routing, or pool state unreadable")
 		}
 		return false, nil
 	}
@@ -1062,6 +1095,10 @@ func (b *billingRecorder) buildSettlementAttemptOutput(in billing.HotPathInput, 
 		observedOutput = *completionObserved
 		usageSource = billing.UsageSourcePoolOperatorAttested
 	} else if !loopback && promptObserved != nil && completionObserved != nil {
+		// A native pool-model attempt is coordinator_observed only while its
+		// verified pool_manifest credit holds in the atomic hot-path transaction;
+		// a failed fence commits neither provider credit nor this journal event
+		// (SPEC-005-R015).
 		observedInput = *promptObserved
 		observedOutput = *completionObserved
 		usageSource = billing.UsageSourceCoordinatorObserved

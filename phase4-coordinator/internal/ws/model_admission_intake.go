@@ -9,8 +9,11 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 )
 
 // SPEC-047 v0.1.6 R009 — GET /admin/model-admission/intake: the SPEC-023
@@ -24,13 +27,17 @@ import (
 // stale snapshot is `intake_unavailable` (503), never a partial count.
 
 const (
-	modelAdmissionIntakeSchema        = "model_admission_intake_offer_counts.v1"
-	modelAdmissionIntakeWindow        = 30 * 24 * time.Hour
-	modelAdmissionIntakeKAnonymityMin = 3
-	modelAdmissionIntakeCadence       = 15 * time.Minute
-	modelAdmissionIntakeStaleAfter    = 2 * modelAdmissionIntakeCadence
-	modelAdmissionIntakeBuildTimeout  = 10 * time.Second
-	modelAdmissionIntakePairCeiling   = 100_000
+	modelAdmissionIntakeSchema   = "model_admission_intake_offer_counts.v1"
+	modelAdmissionIntakeSchemaV2 = "model_admission_intake_offer_counts.v2"
+	// modelAdmissionIntakeArtifactKeyPrefix marks a SPEC-047 v0.2.5
+	// hash-derived intake key `artifact/<algorithm>/<hash>`.
+	modelAdmissionIntakeArtifactKeyPrefix = "artifact/"
+	modelAdmissionIntakeWindow            = 30 * 24 * time.Hour
+	modelAdmissionIntakeKAnonymityMin     = 3
+	modelAdmissionIntakeCadence           = 15 * time.Minute
+	modelAdmissionIntakeStaleAfter        = 2 * modelAdmissionIntakeCadence
+	modelAdmissionIntakeBuildTimeout      = 10 * time.Second
+	modelAdmissionIntakePairCeiling       = 100_000
 )
 
 var errModelAdmissionIntakeCeiling = errors.New("model admission intake: pair ceiling exceeded")
@@ -52,6 +59,39 @@ type ModelAdmissionIntakeRow struct {
 type modelAdmissionIntakeSnapshot struct {
 	generatedAt time.Time
 	body        []byte
+	// bodyV2 is the opt-in v2 frame built from the same pair scan.
+	bodyV2 []byte
+}
+
+// ModelAdmissionIntakeRowV2 is one v2 `rows` element: the key member is
+// named intake_model_key and holds a catalog key or a hash-derived key.
+type ModelAdmissionIntakeRowV2 struct {
+	IntakeModelKey             string `json:"intake_model_key"`
+	DistinctProviderOfferCount *int   `json:"distinct_provider_offer_count"`
+	Suppressed                 bool   `json:"suppressed"`
+}
+
+// hashDerivedModelAdmissionIntakeKey is the SPEC-047 v0.2.5 (SPEC-023-R026)
+// intake key of an offer that resolves to no catalog key: the single offered
+// pair whose SPEC-010 algorithm is format-compatible with the signed runtime
+// source, as `artifact/<algorithm>/<hash>`. No compatible pair, or a
+// malformed hash, yields no key; the provider's model name is never used.
+func hashDerivedModelAdmissionIntakeKey(runtimeSource string, artifactHashes map[string]string) string {
+	format, ok := poolmanifest.RuntimeSourceFormat(modelAdmissionRuntimeClass(runtimeSource))
+	if !ok {
+		return ""
+	}
+	hash := artifactHashes[format]
+	if !validModelAdmissionSHA256Hex(hash) {
+		return ""
+	}
+	return modelAdmissionIntakeArtifactKeyPrefix + format + "/" + hash
+}
+
+// isHashDerivedModelAdmissionIntakeKey reports whether a recorded intake key
+// is hash-derived (excluded from the v1 frame).
+func isHashDerivedModelAdmissionIntakeKey(key string) bool {
+	return strings.HasPrefix(key, modelAdmissionIntakeArtifactKeyPrefix)
 }
 
 // modelAdmissionIntakeState is embedded in Server.
@@ -199,30 +239,56 @@ func (s *Server) buildModelAdmissionIntakeSnapshot(ctx context.Context) error {
 	if len(pairs) > modelAdmissionIntakePairCeiling {
 		return errModelAdmissionIntakeCeiling
 	}
-	rows, err := BuildModelAdmissionIntakeRows(ctx, pairs, func(c context.Context, providerID string) (bool, error) {
-		return s.providerIntakeEligible(c, providerID, generatedAt)
-	}, modelAdmissionIntakeKAnonymityMin)
+	eligibility := map[string]bool{}
+	eligible := func(c context.Context, providerID string) (bool, error) {
+		if ok, seen := eligibility[providerID]; seen {
+			return ok, nil
+		}
+		ok, err := s.providerIntakeEligible(c, providerID, generatedAt)
+		if err == nil {
+			eligibility[providerID] = ok
+		}
+		return ok, err
+	}
+	allRows, err := BuildModelAdmissionIntakeRows(ctx, pairs, eligible, modelAdmissionIntakeKAnonymityMin)
 	if err != nil {
 		return err
+	}
+	// The v1 frame never carries a hash-derived key (SPEC-047 v0.2.5); the
+	// v2 frame carries every key from the same scan.
+	rows := make([]ModelAdmissionIntakeRow, 0, len(allRows))
+	rowsV2 := make([]ModelAdmissionIntakeRowV2, 0, len(allRows))
+	for _, row := range allRows {
+		rowsV2 = append(rowsV2, ModelAdmissionIntakeRowV2{IntakeModelKey: row.CatalogModelKey, DistinctProviderOfferCount: row.DistinctProviderOfferCount, Suppressed: row.Suppressed})
+		if !isHashDerivedModelAdmissionIntakeKey(row.CatalogModelKey) {
+			rows = append(rows, row)
+		}
 	}
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return fmt.Errorf("nonce: %w", err)
 	}
-	body, err := json.Marshal(map[string]any{
-		"schema":          modelAdmissionIntakeSchema,
-		"nonce":           hex.EncodeToString(nonce[:]),
-		"generated_at":    generatedAt.Format(time.RFC3339),
-		"window_start":    windowStart.Format(time.RFC3339),
-		"window_end":      generatedAt.Format(time.RFC3339),
-		"k_anonymity_min": modelAdmissionIntakeKAnonymityMin,
-		"rows":            rows,
-	})
+	frame := func(schema string, rows any) ([]byte, error) {
+		return json.Marshal(map[string]any{
+			"schema":          schema,
+			"nonce":           hex.EncodeToString(nonce[:]),
+			"generated_at":    generatedAt.Format(time.RFC3339),
+			"window_start":    windowStart.Format(time.RFC3339),
+			"window_end":      generatedAt.Format(time.RFC3339),
+			"k_anonymity_min": modelAdmissionIntakeKAnonymityMin,
+			"rows":            rows,
+		})
+	}
+	body, err := frame(modelAdmissionIntakeSchema, rows)
 	if err != nil {
 		return fmt.Errorf("encode: %w", err)
 	}
+	bodyV2, err := frame(modelAdmissionIntakeSchemaV2, rowsV2)
+	if err != nil {
+		return fmt.Errorf("encode v2: %w", err)
+	}
 	s.modelAdmissionIntakeMu.Lock()
-	s.modelAdmissionIntake = &modelAdmissionIntakeSnapshot{generatedAt: generatedAt, body: body}
+	s.modelAdmissionIntake = &modelAdmissionIntakeSnapshot{generatedAt: generatedAt, body: body, bodyV2: bodyV2}
 	s.modelAdmissionIntakeMu.Unlock()
 	return nil
 }
@@ -267,8 +333,16 @@ func (s *Server) handleAdminModelAdmissionIntake(w http.ResponseWriter, r *http.
 	if _, ok := s.authorizedModelAdmissionOperator(w, r); !ok {
 		return
 	}
-	if len(r.URL.Query()) != 0 {
-		writeJSON(w, http.StatusBadRequest, modelAdmissionError("invalid_request", "no query parameters are accepted"))
+	// SPEC-047 v0.2.5: the only accepted query parameter is the opt-in
+	// schema=model_admission_intake_offer_counts.v2.
+	query := r.URL.Query()
+	wantV2 := false
+	switch {
+	case len(query) == 0:
+	case len(query) == 1 && len(query["schema"]) == 1 && query.Get("schema") == modelAdmissionIntakeSchemaV2:
+		wantV2 = true
+	default:
+		writeJSON(w, http.StatusBadRequest, modelAdmissionError("invalid_request", "only schema=model_admission_intake_offer_counts.v2 is accepted"))
 		return
 	}
 	snap, ok := s.currentModelAdmissionIntake()
@@ -276,8 +350,12 @@ func (s *Server) handleAdminModelAdmissionIntake(w http.ResponseWriter, r *http.
 		writeJSON(w, http.StatusServiceUnavailable, modelAdmissionError("intake_unavailable", "model admission intake snapshot is unavailable"))
 		return
 	}
+	body := snap.body
+	if wantV2 {
+		body = snap.bodyV2
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(snap.body)
+	_, _ = w.Write(body)
 }

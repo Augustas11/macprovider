@@ -11,7 +11,7 @@ func TestCheckPoolRollbackPreflightBlocksUntilPoolSettlementCloses(t *testing.T)
 	pooled := r012SettlementInput(t, "receipt_tuple_v4_normal_done", true)
 	_, store := newRequestAndBillingStores(t)
 	createSettlementReceiptAuditLog(t, store.db)
-	store.SetPoolOperatorAttestationAuthority(&fakePoolAttestationAuthority{})
+	setHoldingPoolRoute(store, &fakePoolAttestationAuthority{})
 	seedSettlementReceiptEvidence(t, store, pooled)
 	if _, err := store.db.Exec(`UPDATE settlement_attempt_outputs SET usage_source = ? WHERE request_id = ?`, UsageSourcePoolOperatorAttested, pooled.RequestID); err != nil {
 		t.Fatal(err)

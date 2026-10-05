@@ -25,6 +25,9 @@ type settlementReceiptRecoveryInput struct {
 	// receivedAtUnixMS is the first observation of the receipt; every retry
 	// re-uses it as the authoritative arrival time.
 	receivedAtUnixMS int64
+	// relayBlind, when set, routes a present receipt to the SPEC-015 §N.13
+	// verifier with the persisted dispatch row it must join.
+	relayBlind *billing.RelayBlindDispatchEvidence
 }
 
 // settlementReceiptRetryable is the recovery-queue retry predicate: transient
@@ -47,6 +50,14 @@ func persistSettlementReceiptDirect(ctx context.Context, store *billing.Store, i
 		return store.RecordMissingSettlementReceipt(ctx, billing.SettlementReceiptMissingInput{
 			SettlementReceiptIdentity: input.identity,
 		})
+	}
+	if input.relayBlind != nil {
+		return store.IngestRelayBlindSettlementReceipt(ctx, billing.RelayBlindSettlementReceiptIngestionInput{
+			SettlementReceiptIdentity: input.identity,
+			Envelope:                  input.header,
+			ProviderReceiptPubkey:     input.providerReceiptPubkey,
+			Dispatch:                  input.relayBlind,
+		}.WithReceivedAt(input.receivedAtUnixMS))
 	}
 	if input.poolLabels != nil {
 		// SPEC-022-R012.4: a pool attempt may settle pool_operator_attested.
@@ -76,17 +87,56 @@ func (s *Server) persistSettlementReceipt(ctx context.Context, store *billing.St
 	return state, err
 }
 
+type settlementPoolLabelRecordFunc func(context.Context, *billing.Store, billing.SettlementReceiptIdentity, *billing.SettlementPoolLabels) (billing.SettlementPoolLabelRecord, error)
+
+func recordSettlementPoolLabelsDirect(ctx context.Context, store *billing.Store, id billing.SettlementReceiptIdentity, labels *billing.SettlementPoolLabels) (billing.SettlementPoolLabelRecord, error) {
+	return store.RecordSettlementPoolLabels(ctx, id, labels)
+}
+
 // recordSettlementPoolLabels stamps the SPEC-042 R006 labels after the verdict
 // is durable. A failure only leaves the label unrecorded, which already keeps
 // the request out of pool-scoped accounting; it never fails settlement.
+//
+// The synchronous receipt path shares one short deadline between the verdict
+// and the label, so under SQLite pressure the label write could miss it and
+// stay NULL on a verified verdict (#1816 VM acceptance A-4). The stamp is
+// idempotent and a dispute is sticky, so an unrecorded label is retried in
+// the background on its own deadline.
 func (s *Server) recordSettlementPoolLabels(ctx context.Context, store *billing.Store, input settlementReceiptRecoveryInput) {
+	rec, err := s.tryRecordSettlementPoolLabels(ctx, store, input)
+	if err == nil {
+		s.reportSettlementPoolLabel(rec, nil, input)
+		return
+	}
+	if s.settlementPoolLabelRetries.Add(1) > settlementPoolLabelMaxBackground {
+		s.settlementPoolLabelRetries.Add(-1)
+		s.reportSettlementPoolLabel(rec, err, input)
+		return
+	}
+	go func() {
+		defer s.settlementPoolLabelRetries.Add(-1)
+		for attempt := 0; attempt < settlementPoolLabelBackgroundAttempts; attempt++ {
+			time.Sleep(settlementReceiptRecoveryBaseDelay << attempt)
+			retryCtx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
+			rec, err = s.tryRecordSettlementPoolLabels(retryCtx, store, input)
+			cancel()
+			if err == nil {
+				break
+			}
+		}
+		s.reportSettlementPoolLabel(rec, err, input)
+	}()
+}
+
+func (s *Server) tryRecordSettlementPoolLabels(ctx context.Context, store *billing.Store, input settlementReceiptRecoveryInput) (billing.SettlementPoolLabelRecord, error) {
+	record := s.settlementPoolLabelRecord
+	if record == nil {
+		record = recordSettlementPoolLabelsDirect
+	}
 	var rec billing.SettlementPoolLabelRecord
 	var err error
-	// A transient store failure is retried; a persistent one is logged as a
-	// terminal, operator-visible event. Either way the request stays out of
-	// pool-scoped accounting, because only a verified label counts there.
 	for attempt := 1; attempt <= settlementPoolLabelAttempts; attempt++ {
-		rec, err = store.RecordSettlementPoolLabels(ctx, input.identity, input.poolLabels)
+		rec, err = record(ctx, store, input.identity, input.poolLabels)
 		if err == nil || ctx.Err() != nil {
 			break
 		}
@@ -94,6 +144,12 @@ func (s *Server) recordSettlementPoolLabels(ctx context.Context, store *billing.
 			time.Sleep(time.Duration(attempt) * settlementPoolLabelRetryBackoff)
 		}
 	}
+	return rec, err
+}
+
+// reportSettlementPoolLabel logs a label that stayed unrecorded after every
+// retry (terminal, operator-visible) or a disputed one.
+func (s *Server) reportSettlementPoolLabel(rec billing.SettlementPoolLabelRecord, err error, input settlementReceiptRecoveryInput) {
 	if err != nil {
 		s.log.Error().Err(err).
 			Str("event", "trusted_pool_label_unrecorded").
@@ -124,9 +180,11 @@ func (s *Server) recordSettlementPoolLabels(ctx context.Context, store *billing.
 		Msg("trusted pool settlement label disputed; request excluded from pool-scoped accounting")
 }
 
-// settlementPoolLabels captures the SPEC-042 R006 settlement-time labels: the
-// selected pool, its manifest as the live registry holds it now, and the route
-// snapshot digest recorded at routing time. nil for global traffic.
+// settlementPoolLabels captures the SPEC-042 R006 labels for the attempt being
+// settled. When a route snapshot exists, prefer its immutable routing-time
+// labels: ordinary manifest rotation, pause, or entry removal after dispatch
+// must not turn an in-flight served request into an unverified label. Legacy
+// pool routes that have no route snapshot still fall back to the live registry.
 func (b *billingRecorder) settlementPoolLabels() *billing.SettlementPoolLabels {
 	if b == nil || b.state == nil || b.state.poolID == "" {
 		return nil
@@ -134,6 +192,11 @@ func (b *billingRecorder) settlementPoolLabels() *billing.SettlementPoolLabels {
 	labels := &billing.SettlementPoolLabels{
 		PoolID:            b.state.poolID,
 		RouteSnapshotHash: b.settlementRouteSnapshotDigest,
+	}
+	if snap := b.settlementRouteSnapshot; snap != nil && snap.PoolID == b.state.poolID {
+		labels.ManifestVersion = snap.ManifestVersion
+		labels.ManifestCoreDigest = snap.ManifestCoreDigest
+		return labels
 	}
 	if b.server != nil && b.server.trustPools != nil {
 		if snap := b.server.trustPools.Snapshot(b.state.poolID); snap.Exists {
@@ -147,6 +210,9 @@ func (b *billingRecorder) settlementPoolLabels() *billing.SettlementPoolLabels {
 const (
 	settlementPoolLabelAttempts     = 3
 	settlementPoolLabelRetryBackoff = 50 * time.Millisecond
+	// Background label retries: bounded in count and in flight.
+	settlementPoolLabelBackgroundAttempts = 5
+	settlementPoolLabelMaxBackground      = 256
 )
 
 func settlementReceiptRecoveryKey(input settlementReceiptRecoveryInput) string {

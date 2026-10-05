@@ -256,6 +256,26 @@ metadata = {
 }
 if lane == "pearl_runtime_catalog":
     metadata["provider_advertised_version"] = version
+    # Issue #1842: the CLI-shipping lane carries the signed CLI code identity.
+    import io
+    import tarfile
+
+    cli = b"fake signed arm64 macprovider-cli\n"
+    asset = f"macprovider-cli-{tag}-darwin-arm64.tar.gz"
+    with tarfile.open(directory / asset, "w:gz") as archive:
+        info = tarfile.TarInfo("macprovider-cli")
+        info.size = len(cli)
+        info.mode = 0o755
+        archive.addfile(info, io.BytesIO(cli))
+    metadata["provider_code_identity"] = {
+        "asset": asset,
+        "member": "macprovider-cli",
+        "binary_version": version,
+        "binary_sha256": hashlib.sha256(cli).hexdigest(),
+        "team_id": "ABCDE12345",
+        "signing_identifier": "live.malibu.provider.cli",
+        "slices": [{"arch": "arm64", "code_cdhash": "0123456789abcdef0123456789abcdef01234567"}],
+    }
 for key in ("stats_inventory_sync", "stats_billing_mirror", "stats_hardware_verifier"):
     asset = key.replace("_", "-") + "-linux-amd64"
     if (directory / asset).is_file():
@@ -668,5 +688,224 @@ if bash "$guard" --tag v1.8.66 --expected-commit "$second" \
   fail "accepted a runtime binary whose digest no longer matches metadata"
 fi
 grep -q 'coordinator-linux-amd64 sha256 does not match pearl-release.json' "$work/bad-digest.out"
+
+# Issue #1842: the CLI-shipping lane must carry a valid signed
+# provider_code_identity; the runtime-only lane must not carry one.
+mutate_code_identity() {
+  local directory="$1"
+  local mutation="$2"
+  python3 - "$directory" "$mutation" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+directory = pathlib.Path(sys.argv[1])
+mutation = sys.argv[2]
+path = directory / "pearl-release.json"
+metadata = json.loads(path.read_text(encoding="utf-8"))
+identity = metadata.get("provider_code_identity")
+if mutation == "missing":
+    metadata.pop("provider_code_identity")
+elif mutation == "bad-hex":
+    identity["slices"][0]["code_cdhash"] = "0123456789ABCDEF0123456789ABCDEF01234567"
+elif mutation == "wrong-identifier":
+    identity["signing_identifier"] = "live.malibu.provider.cli.debug"
+elif mutation == "wrong-sha":
+    identity["binary_sha256"] = "0" * 64
+elif mutation == "wrong-asset":
+    identity["asset"] = "macprovider-cli-v1.8.65-darwin-arm64.tar.gz"
+elif mutation == "runtime-carries":
+    metadata["provider_code_identity"] = {"asset": "macprovider-cli-v1.8.66-darwin-arm64.tar.gz"}
+else:
+    raise SystemExit(f"unknown mutation {mutation}")
+path.write_text(json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+rows = []
+for item in sorted(directory.iterdir()):
+    if item.name != "checksums.txt":
+        rows.append(f"{hashlib.sha256(item.read_bytes()).hexdigest()}  {item.name}\n")
+(directory / "checksums.txt").write_text("".join(rows), encoding="utf-8")
+PY
+}
+
+expect_code_identity_rejection() {
+  local name="$1"
+  local mutation="$2"
+  local lane="$3"
+  local message="$4"
+  make_release_dir "$work/release-code-identity-$name" v1.8.66 "$second" "$lane"
+  mutate_code_identity "$work/release-code-identity-$name" "$mutation"
+  if bash "$guard" --tag v1.8.66 --expected-commit "$second" \
+    --remote "$work/remote.git" --release-dir "$work/release-code-identity-$name" \
+    >"$work/code-identity-$name.out" 2>&1; then
+    fail "accepted provider_code_identity mutation: $name"
+  fi
+  grep -qF -- "$message" "$work/code-identity-$name.out" ||
+    fail "provider_code_identity mutation $name failed for the wrong reason: $(cat "$work/code-identity-$name.out")"
+}
+
+python3 - "$work/release-ok/pearl-release.json" <<'PY'
+import json
+import sys
+
+identity = json.load(open(sys.argv[1], encoding="utf-8"))["provider_code_identity"]
+if identity["asset"] != "macprovider-cli-v1.8.66-darwin-arm64.tar.gz" or identity["slices"][0]["arch"] != "arm64":
+    raise SystemExit("valid fixture does not carry the expected provider_code_identity")
+PY
+# Present-then-strict: a pre-#1842 CLI release without the field stays
+# verifiable (promotion, rollback) and says so explicitly.
+make_release_dir "$work/release-code-identity-absent" v1.8.66 "$second"
+mutate_code_identity "$work/release-code-identity-absent" missing
+bash "$guard" --tag v1.8.66 --expected-commit "$second" \
+  --remote "$work/remote.git" --release-dir "$work/release-code-identity-absent" \
+  >"$work/code-identity-absent.out" 2>&1 ||
+  fail "rejected a pre-#1842 release without provider_code_identity: $(cat "$work/code-identity-absent.out")"
+grep -qF 'provider_code_identity: absent (pre-#1842 release)' "$work/code-identity-absent.out" ||
+  fail "absent provider_code_identity was accepted without the explicit notice"
+grep -q 'ok: v1.8.66 has Pearl runtime assets' "$work/code-identity-absent.out"
+bash "$guard" --tag v1.8.66 --expected-commit "$second" \
+  --remote "$work/remote.git" --release-dir "$work/release-ok" >"$work/code-identity-present.out" 2>&1
+if grep -qF 'provider_code_identity: absent' "$work/code-identity-present.out"; then
+  fail "a release carrying provider_code_identity printed the absence notice"
+fi
+expect_code_identity_rejection bad-hex bad-hex pearl_runtime_catalog \
+  'provider_code_identity code_cdhash must be 40 lowercase hex'
+expect_code_identity_rejection wrong-identifier wrong-identifier pearl_runtime_catalog \
+  'provider_code_identity signing_identifier is not live.malibu.provider.cli'
+expect_code_identity_rejection wrong-sha wrong-sha pearl_runtime_catalog \
+  'provider_code_identity binary_sha256 does not match the shipped macprovider-cli'
+expect_code_identity_rejection wrong-asset wrong-asset pearl_runtime_catalog \
+  'provider_code_identity asset does not match the release tag'
+expect_code_identity_rejection runtime-carries runtime-carries pearl_runtime \
+  'runtime-only lane must not carry provider_code_identity'
+
+make_release_dir "$work/release-code-identity-unlisted" v1.8.66 "$second"
+rm "$work/release-code-identity-unlisted/macprovider-cli-v1.8.66-darwin-arm64.tar.gz"
+python3 - "$work/release-code-identity-unlisted" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1]) / "checksums.txt"
+path.write_text(
+    "".join(line + "\n" for line in path.read_text().splitlines() if "macprovider-cli-" not in line),
+    encoding="utf-8",
+)
+PY
+if bash "$guard" --tag v1.8.66 --expected-commit "$second" \
+  --remote "$work/remote.git" --release-dir "$work/release-code-identity-unlisted" \
+  >"$work/code-identity-unlisted.out" 2>&1; then
+  fail "accepted provider_code_identity for a CLI asset checksums.txt does not list"
+fi
+grep -q 'provider CLI asset bound by provider_code_identity: checksums.txt has no row for macprovider-cli-v1.8.66-darwin-arm64.tar.gz' \
+  "$work/code-identity-unlisted.out"
+
+# The provider tarball needs exactly one checksums.txt row whose digest is the
+# full tarball sha256 (shared require_checksum_row()).
+for checksum_case in duplicate mismatch; do
+  make_release_dir "$work/release-code-identity-row-$checksum_case" v1.8.66 "$second"
+  python3 - "$work/release-code-identity-row-$checksum_case/checksums.txt" "$checksum_case" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+case = sys.argv[2]
+rows = path.read_text(encoding="utf-8").splitlines()
+row = next(line for line in rows if line.endswith("macprovider-cli-v1.8.66-darwin-arm64.tar.gz"))
+if case == "duplicate":
+    rows.append(row)
+else:
+    rows[rows.index(row)] = "0" * 64 + "  macprovider-cli-v1.8.66-darwin-arm64.tar.gz"
+path.write_text("".join(line + "\n" for line in rows), encoding="utf-8")
+PY
+  if bash "$guard" --tag v1.8.66 --expected-commit "$second" \
+    --remote "$work/remote.git" --release-dir "$work/release-code-identity-row-$checksum_case" \
+    >"$work/code-identity-row-$checksum_case.out" 2>&1; then
+    fail "accepted a provider CLI checksums.txt row case: $checksum_case"
+  fi
+  case "$checksum_case" in
+    duplicate) expected='checksums.txt has duplicate rows for macprovider-cli-v1.8.66-darwin-arm64.tar.gz' ;;
+    mismatch) expected='checksums.txt digest mismatch for macprovider-cli-v1.8.66-darwin-arm64.tar.gz' ;;
+  esac
+  grep -qF -- "$expected" "$work/code-identity-row-$checksum_case.out" ||
+    fail "checksum row case $checksum_case failed for the wrong reason: $(cat "$work/code-identity-row-$checksum_case.out")"
+done
+
+# A present identity requires the bound tarball itself, not just its checksum row.
+make_release_dir "$work/release-code-identity-no-tarball" v1.8.66 "$second"
+rm "$work/release-code-identity-no-tarball/macprovider-cli-v1.8.66-darwin-arm64.tar.gz"
+if bash "$guard" --tag v1.8.66 --expected-commit "$second" \
+  --remote "$work/remote.git" --release-dir "$work/release-code-identity-no-tarball" \
+  >"$work/code-identity-no-tarball.out" 2>&1; then
+  fail "accepted provider_code_identity without the bound provider CLI tarball"
+fi
+grep -q 'provider CLI asset bound by provider_code_identity: missing asset bound by checksums.txt: macprovider-cli-v1.8.66-darwin-arm64.tar.gz' \
+  "$work/code-identity-no-tarball.out"
+
+# SPEC-025 §6.2.1 cutoff: 1.8.214 and later MUST carry the field.
+git -C "$work/source" tag v1.8.214 "$second"
+git -C "$work/source" push -q origin refs/tags/v1.8.214
+make_release_dir "$work/release-code-identity-post-cutoff" v1.8.214 "$second"
+bash "$guard" --tag v1.8.214 --expected-commit "$second" \
+  --remote "$work/remote.git" --release-dir "$work/release-code-identity-post-cutoff" |
+  grep -q 'ok: v1.8.214 has Pearl runtime assets'
+mutate_code_identity "$work/release-code-identity-post-cutoff" missing
+if bash "$guard" --tag v1.8.214 --expected-commit "$second" \
+  --remote "$work/remote.git" --release-dir "$work/release-code-identity-post-cutoff" \
+  >"$work/code-identity-post-cutoff.out" 2>&1; then
+  fail "accepted a post-cutoff (1.8.214) release without provider_code_identity"
+fi
+grep -q 'pearl-release.json lacks provider_code_identity required for provider CLI 1.8.214' \
+  "$work/code-identity-post-cutoff.out"
+if grep -qF 'absent (pre-#1842 release)' "$work/code-identity-post-cutoff.out"; then
+  fail "post-cutoff absence printed the legacy notice"
+fi
+
+# GitHub mode: a present identity makes the verifier download the provider
+# tarball and bind binary_sha256 to the extracted macprovider-cli.
+make_release_dir "$work/release-github-code-identity" v1.8.214 "$second"
+FAKE_GH_RELEASE_DIR="$work/release-github-code-identity" PATH="$fake_gh_dir:$PATH" \
+  bash "$guard" --tag v1.8.214 --expected-commit "$second" \
+    --remote "$work/remote.git" |
+  grep -q 'ok: v1.8.214 has Pearl runtime assets'
+
+make_release_dir "$work/release-github-code-identity-swapped" v1.8.214 "$second"
+python3 - "$work/release-github-code-identity-swapped" <<'PY'
+import hashlib
+import io
+import pathlib
+import sys
+import tarfile
+
+directory = pathlib.Path(sys.argv[1])
+cli = b"different macprovider-cli bytes\n"
+with tarfile.open(directory / "macprovider-cli-v1.8.214-darwin-arm64.tar.gz", "w:gz") as archive:
+    info = tarfile.TarInfo("macprovider-cli")
+    info.size = len(cli)
+    archive.addfile(info, io.BytesIO(cli))
+# checksums.txt still covers the swapped tarball, so only the binary_sha256
+# binding (which needs the downloaded tarball) can catch it.
+rows = []
+for item in sorted(directory.iterdir()):
+    if item.name != "checksums.txt":
+        rows.append(f"{hashlib.sha256(item.read_bytes()).hexdigest()}  {item.name}\n")
+(directory / "checksums.txt").write_text("".join(rows), encoding="utf-8")
+PY
+if FAKE_GH_RELEASE_DIR="$work/release-github-code-identity-swapped" PATH="$fake_gh_dir:$PATH" \
+  bash "$guard" --tag v1.8.214 --expected-commit "$second" \
+    --remote "$work/remote.git" >"$work/github-code-identity-swapped.out" 2>&1; then
+  fail "GitHub mode accepted a provider tarball whose CLI differs from binary_sha256"
+fi
+grep -q 'provider_code_identity binary_sha256 does not match the shipped macprovider-cli' \
+  "$work/github-code-identity-swapped.out"
+
+make_release_dir "$work/release-github-code-identity-unpublished" v1.8.214 "$second"
+rm "$work/release-github-code-identity-unpublished/macprovider-cli-v1.8.214-darwin-arm64.tar.gz"
+if FAKE_GH_RELEASE_DIR="$work/release-github-code-identity-unpublished" PATH="$fake_gh_dir:$PATH" \
+  bash "$guard" --tag v1.8.214 --expected-commit "$second" \
+    --remote "$work/remote.git" >"$work/github-code-identity-unpublished.out" 2>&1; then
+  fail "GitHub mode accepted provider_code_identity without a published provider tarball"
+fi
+grep -q 'missing provider CLI asset bound by provider_code_identity: macprovider-cli-v1.8.214-darwin-arm64.tar.gz' \
+  "$work/github-code-identity-unpublished.out"
 
 echo "PASS: Pearl runtime release preflight fails closed on missing assets and source drift"

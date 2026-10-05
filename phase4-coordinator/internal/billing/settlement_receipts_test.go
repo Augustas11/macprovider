@@ -402,7 +402,7 @@ func TestSyncVerifiedReceiptLedgerCreditUpdatesPromptSplitColumns(t *testing.T) 
 	}
 	markSPEC022ReceiptVerified(t, store.db, input)
 
-	reason, err := syncVerifiedReceiptLedgerCreditForAttemptTx(context.Background(), store.db, input.RequestID, int64(input.AttemptN), input.ProviderID)
+	reason, err := store.syncVerifiedReceiptLedgerCreditForAttemptTx(context.Background(), store.db, input.RequestID, int64(input.AttemptN), input.ProviderID)
 	if err != nil {
 		t.Fatal(err)
 	}

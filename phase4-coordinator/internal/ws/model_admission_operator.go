@@ -944,7 +944,11 @@ type ModelAdmissionRouteExpectation struct {
 	ProviderID         string
 	CandidateID        string
 	CoordinatorEventID string
-	BindingGeneration  uint64
+	// PoolBindingEvent is the exact pool-scoped event selected by the buyer.
+	// It is populated only for pool routes so a byte-identical manifest rebind
+	// can remain valid without accepting changed identity or economics.
+	PoolBindingEvent  ModelAdmissionEvent
+	BindingGeneration uint64
 	// ProviderRouteGeneration is the latest model_admission_events id for
 	// this provider observed by an unbound legacy route. It is ignored for a
 	// candidate-bound BYOM route, where CoordinatorEventID is the stronger

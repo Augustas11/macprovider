@@ -284,7 +284,7 @@ func preparePricingFiles(t *testing.T, s *scenario, buyerPort, provPort int, pro
 	catalog.autotuneCatalogSigPath = catalog.autotuneCatalogPath + ".sig"
 	lane.catalog = catalog
 
-	s.writeCoordinatorYAML(buyerPort, provPort, false, s.serviceToken, providerCfgs, catalog, false, 0, false, nil)
+	s.writeCoordinatorYAML(buyerPort, provPort, false, s.serviceToken, providerCfgs, catalog, false, 0, false, nil, nil)
 	raw, err := os.ReadFile(s.coordYAML)
 	if err != nil {
 		t.Fatal(err)
@@ -375,7 +375,7 @@ func newPricingLane(t *testing.T, opts pricingLaneOpts) *pricingLane {
 		lane.coordBin = raceCoordinatorBinary(t)
 	}
 
-	s.writeGatewayYAML(gwPort, false, s.serviceToken, 0, false)
+	s.writeGatewayYAML(gwPort, false, s.serviceToken, 0, false, false)
 	if opts.gatewayConcurrency > 0 {
 		raw, err := os.ReadFile(s.gatewayYAML)
 		if err != nil {

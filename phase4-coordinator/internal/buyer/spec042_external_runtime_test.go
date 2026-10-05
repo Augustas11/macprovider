@@ -57,6 +57,9 @@ type externalRuntimeFixture struct {
 	nativeMember bool
 	// upstream, when set, replaces the provider's OK completion.
 	upstream http.HandlerFunc
+	// midFlight, when set, runs while the provider holds the dispatched
+	// request (between routing and settlement, #1816 F2).
+	midFlight func(*externalRuntimeHarness)
 	// receipt picks the v0.4 receipt the provider returns with its OK
 	// completion: "" signs one bound to the attempt with the reported usage,
 	// "none" returns numbers without a receipt (an old CLI whose loopback
@@ -86,20 +89,28 @@ type externalRuntimeHarness struct {
 	mu        sync.Mutex
 	metadata  []string
 	authority *externalRuntimeAuthority
+	// trustPools and routeable are the pool registry and the snapshot it
+	// was loaded with, so a test can rotate the manifest mid-flight.
+	trustPools *trustpool.Registry
+	routeable  trustpool.RouteableSnapshot
 }
 
 // externalRuntimeAuthority stands in for the trust-pool durable records
 // (trustpool.Store.VerifyPoolOperatorAttestation, tested in its package).
 type externalRuntimeAuthority struct {
-	mu    sync.Mutex
-	err   error
-	calls []billing.PoolOperatorAttestationClaim
+	mu       sync.Mutex
+	err      error
+	fenceErr error
+	calls    []billing.PoolOperatorAttestationClaim
 }
 
-// PoolEventHighWater stands in for the durable pool event high-water mark the
-// ledger transaction fences on (audit R2); the harness pool never changes.
-func (a *externalRuntimeAuthority) PoolEventHighWater(context.Context, billing.PoolFenceQueryer, string) (int64, error) {
-	return 1, nil
+// PoolRouteFenceHolds stands in for the durable route fence the ledger
+// transaction re-evaluates (#1816 F2); fenceErr models a revocation between
+// routing and settlement.
+func (a *externalRuntimeAuthority) PoolRouteFenceHolds(context.Context, billing.PoolFenceQueryer, billing.PoolOperatorAttestationClaim) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.fenceErr
 }
 
 func (a *externalRuntimeAuthority) VerifyPoolOperatorAttestation(_ context.Context, claim billing.PoolOperatorAttestationClaim) error {
@@ -159,6 +170,9 @@ func newExternalRuntimeHarness(t *testing.T, fx externalRuntimeFixture) *externa
 		h.mu.Lock()
 		h.metadata = append(h.metadata, r.Header.Get("X-MacProvider-Settlement-Metadata"))
 		h.mu.Unlock()
+		if fx.midFlight != nil {
+			fx.midFlight(h)
+		}
 		if fx.upstream != nil {
 			fx.upstream(w, r)
 			return
@@ -279,7 +293,8 @@ func newExternalRuntimeHarness(t *testing.T, fx externalRuntimeFixture) *externa
 		snap := trustPools.Snapshot(poolID)
 		return snap.ManifestVersion, snap.ManifestCoreDigest, snap.Exists
 	})
-	loadTrustedPoolLayer2Snapshot(t, trustPools, 0, trustpool.RouteableSnapshot{
+	h.trustPools = trustPools
+	h.routeable = trustpool.RouteableSnapshot{
 		PoolID:             poolID,
 		CreatorAccountID:   externalRuntimeCreator,
 		Members:            members,
@@ -293,7 +308,8 @@ func newExternalRuntimeHarness(t *testing.T, fx externalRuntimeFixture) *externa
 		ManifestVersion:    5,
 		ManifestCoreDigest: strings.Repeat("d", 64),
 		LaunchEnvironment:  "candidate",
-	})
+	}
+	loadTrustedPoolLayer2Snapshot(t, trustPools, 0, h.routeable)
 	h.server = buyer.NewServer(
 		registry,
 		zerolog.Nop(),
@@ -321,10 +337,12 @@ var externalRuntimeBody = []byte(`{"model":"model-a","messages":[{"role":"user",
 
 // externalRuntimePoolHeaders are a pool route's headers from a gateway that
 // negotiated signed settlement finality, which an external-runtime member
-// requires (SPEC-022 R-12.8, E2E-F10).
+// requires (SPEC-022 R-12.8, E2E-F10), and route_snapshot_v2 settlement,
+// which a pool-model or R016 route requires (#1816 VM A-1).
 func externalRuntimePoolHeaders(poolID string) http.Header {
 	h := trustedPoolLayer2Headers(externalRuntimePoolAccount, poolID)
 	h.Set(settlementTrailersCapabilityHeader, "1")
+	h.Set(routeSnapshotV2CapabilityHeader, "1")
 	return h
 }
 

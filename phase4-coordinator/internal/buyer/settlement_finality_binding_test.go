@@ -137,3 +137,55 @@ func TestSettlementFinalityRequiredInternalRequestQueryFailsClosed(t *testing.T)
 		})
 	}
 }
+
+// SPEC-022 R-14: a relay-blind finality lookup returns the coordinator's
+// explicit observe declaration only for an attempt whose request-log row
+// carries the same binding and envelope digests; an unknown attempt is not
+// found, and a malformed lookup is rejected.
+func TestSettlementFinalityRelayBlindCoverageLookup(t *testing.T) {
+	reqLog, _ := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	store, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, envelope := strings.Repeat("B", 43), strings.Repeat("E", 43)
+	if _, err := reqLog.DB().Exec(`INSERT INTO request_log (ts_utc, request_id, external_request_id, account_id, model, latency_ms, routing_ms, status, stream,
+		relay_blind_provider_binding_digest, relay_blind_envelope_digest)
+		VALUES ('2026-10-05T00:00:00Z', 'internal-observe', 'external', 'acct_test', 'model', 0, 0, 200, 0, ?, ?)`, binding, envelope); err != nil {
+		t.Fatal(err)
+	}
+	server := buyer.NewServer(pool.NewRegistry(nil), zerolog.Nop(), time.Now(),
+		buyer.WithBilling(store, config.RewardsConfig{}), buyer.WithGatewayServiceToken("gateway-secret"))
+	digests := "&relay_blind_provider_binding_digest=" + binding + "&relay_blind_envelope_digest=" + envelope
+	for _, tc := range []struct {
+		name, query string
+		status      int
+		body        string
+	}{
+		{"observe", "&required_internal_request_id=internal-observe&reservation_created_at_unix_ms=1" + digests, http.StatusOK,
+			`"relay_blind_settlement_coverage":"observe"`},
+		{"unknown_attempt", "&required_internal_request_id=internal-other&reservation_created_at_unix_ms=1" + digests, http.StatusNotFound, "Settlement finality not found"},
+		{"other_envelope", "&required_internal_request_id=internal-observe&reservation_created_at_unix_ms=1&relay_blind_provider_binding_digest=" + binding +
+			"&relay_blind_envelope_digest=" + strings.Repeat("F", 43), http.StatusNotFound, "Settlement finality not found"},
+		{"missing_internal_id", digests, http.StatusBadRequest, "invalid_request"},
+		{"missing_envelope", "&required_internal_request_id=internal-observe&reservation_created_at_unix_ms=1&relay_blind_provider_binding_digest=" + binding,
+			http.StatusBadRequest, "invalid_request"},
+		{"malformed_digest", "&required_internal_request_id=internal-observe&reservation_created_at_unix_ms=1&relay_blind_provider_binding_digest=short&relay_blind_envelope_digest=" + envelope,
+			http.StatusBadRequest, "invalid_request"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/internal/settlement/finality?account_id=acct_test&request_id=external"+tc.query, nil)
+			req.Header.Set("Authorization", "Bearer gateway-secret")
+			rr := httptest.NewRecorder()
+			server.InternalHandler().ServeHTTP(rr, req)
+			if rr.Code != tc.status || !strings.Contains(rr.Body.String(), tc.body) {
+				t.Fatalf("status=%d want=%d body=%s", rr.Code, tc.status, rr.Body.String())
+			}
+			if tc.status == http.StatusOK && (!strings.Contains(rr.Body.String(), `"request_id":"external"`) ||
+				!strings.Contains(rr.Body.String(), `"required_internal_request_id":"internal-observe"`)) {
+				t.Fatalf("observe declaration does not echo the attempt: %s", rr.Body.String())
+			}
+		})
+	}
+}

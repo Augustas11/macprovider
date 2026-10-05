@@ -325,6 +325,7 @@ func trustPoolAdminSignManifest(args []string, stdout io.Writer) error {
 	prevPath := fs.String("prev", "", "previous manifest_accepted event JSON; omit for the genesis manifest")
 	operationID := fs.String("operation-id", "", "idempotency/operation id of the event")
 	encoding := fs.Int("encoding", 0, "policy core encoding: 1 or 2")
+	poolModelsPath := fs.String("pool-models", "", "encoding 2: JSON file with model_entries and attested_members, signed as the pool_model_entries/v1 and pool_attested_members/v1 extensions (SPEC-042-R015/R016)")
 	signerSetVersion := fs.Uint64("signer-set-version", 0, "signer set that signs this core (genesis: 1)")
 	settlementMode := fs.String("settlement-mode", "", "observe or enforce")
 	runtimeAllowlist := fs.String("runtime-allowlist", "", "comma-separated runtime_allowlist (encoding 2; empty = native only)")
@@ -363,6 +364,9 @@ func trustPoolAdminSignManifest(args []string, stdout io.Writer) error {
 		fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
 		if set["runtime-allowlist"] {
 			return fmt.Errorf("--runtime-allowlist needs --encoding 2")
+		}
+		if set["pool-models"] {
+			return fmt.Errorf("--pool-models needs --encoding 2")
 		}
 	case int(poolmanifest.PolicyCoreEncodingV2):
 		coreEncoding = poolmanifest.PolicyCoreEncodingV2
@@ -422,6 +426,15 @@ func trustPoolAdminSignManifest(args []string, stdout io.Writer) error {
 	}
 	if coreEncoding == poolmanifest.PolicyCoreEncodingV2 {
 		core.RuntimeAllowlist = splitTrustPoolCSV(*runtimeAllowlist)
+		if strings.TrimSpace(*poolModelsPath) != "" {
+			entries, members, err := loadTrustPoolModels(*poolModelsPath)
+			if err != nil {
+				return err
+			}
+			if err := core.SetPoolExtensions(entries, members); err != nil {
+				return fmt.Errorf("--pool-models: %w", err)
+			}
+		}
 	}
 	var snapshot poolmanifest.ManifestSnapshot
 	if strings.TrimSpace(*prevPath) == "" {
@@ -559,6 +572,33 @@ func trustPoolAdminSignManifest(args []string, stdout io.Writer) error {
 		return fmt.Errorf("signed manifest does not verify: %w", err)
 	}
 	return writeTrustPoolEvent(*outPath, e, stdout)
+}
+
+// trustPoolAdminPolicyTermsDigest prints the SPEC-043-R006 policy-terms
+// digest of a manifest_accepted event's core: the value a provider owner signs
+// into a new ProviderPoolDelegationV1 grant as manifest_terms_digest, which
+// stays bound across window/version/chain-only rotation.
+func trustPoolAdminPolicyTermsDigest(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("trust-pool-admin policy-terms-digest", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	manifestPath := fs.String("manifest", "", "manifest_accepted event JSON (sign-manifest --out)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || strings.TrimSpace(*manifestPath) == "" {
+		return fmt.Errorf("policy-terms-digest needs --manifest and no positional arguments")
+	}
+	e, err := readTrustPoolEvent(*manifestPath)
+	if err != nil {
+		return err
+	}
+	terms, err := trustpool.ManifestPolicyTermsDigest(e)
+	if err != nil {
+		return fmt.Errorf("--manifest: %w", err)
+	}
+	_, err = fmt.Fprintf(stdout, "pool_id=%s\nmanifest_version=%d\nmanifest_core_digest=%s\nmanifest_terms_digest=%s\n",
+		e.PoolID, e.ManifestVersion, e.ManifestCoreDigest, terms)
+	return err
 }
 
 func trustPoolCustodyDisclosureHash(path, wantClass string) (string, error) {
@@ -830,4 +870,90 @@ func splitTrustPoolCSV(s string) []string {
 func sha256Hex(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// trustPoolModelsFile is the closed --pool-models input (SPEC-042-R015/R016).
+// Lists are sorted into canonical order here; every other rule (grammar,
+// bounds, runtime/format pairing, licence, disclosure, cache-hit <= prompt)
+// is enforced by the policy-core acceptance check before signing. The
+// coordinator additionally enforces its configured pricing bounds and the
+// catalog shadow/overlap rules at acceptance.
+type trustPoolModelsFile struct {
+	ModelEntries    []trustPoolModelEntryJSON     `json:"model_entries"`
+	AttestedMembers []trustPoolAttestedMemberJSON `json:"attested_members"`
+}
+
+type trustPoolModelEntryJSON struct {
+	PoolModelID           string                 `json:"pool_model_id"`
+	ArtifactHashAlgorithm string                 `json:"artifact_hash_algorithm"`
+	ArtifactHash          string                 `json:"artifact_hash"`
+	AllowedRuntimeSources []string               `json:"allowed_runtime_sources"`
+	License               string                 `json:"license"`
+	PaidServingAttested   *bool                  `json:"paid_serving_attested"`
+	Pricing               *trustPoolModelPricing `json:"pricing"`
+	DisclosureClass       string                 `json:"disclosure_class"`
+	MaxContextTokens      uint64                 `json:"max_context_tokens"`
+}
+
+type trustPoolModelPricing struct {
+	PromptRatePerMtok         *int64 `json:"prompt_rate_per_mtok"`
+	PromptCacheHitRatePerMtok *int64 `json:"prompt_cache_hit_rate_per_mtok"`
+	CompletionRatePerMtok     *int64 `json:"completion_rate_per_mtok"`
+}
+
+type trustPoolAttestedMemberJSON struct {
+	ProviderAccountID string   `json:"provider_account_id"`
+	RuntimeClasses    []string `json:"runtime_classes"`
+}
+
+func loadTrustPoolModels(path string) ([]poolmanifest.PoolModelEntry, []poolmanifest.AttestedMember, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read --pool-models: %w", err)
+	}
+	var in trustPoolModelsFile
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil {
+		return nil, nil, fmt.Errorf("--pool-models: %w", err)
+	}
+	if dec.More() {
+		return nil, nil, fmt.Errorf("--pool-models must contain exactly one JSON object")
+	}
+	entries := make([]poolmanifest.PoolModelEntry, 0, len(in.ModelEntries))
+	for i, m := range in.ModelEntries {
+		p := m.Pricing
+		if m.PaidServingAttested == nil || p == nil || p.PromptRatePerMtok == nil || p.PromptCacheHitRatePerMtok == nil || p.CompletionRatePerMtok == nil {
+			return nil, nil, fmt.Errorf("--pool-models model_entries[%d] needs paid_serving_attested and all three pricing rates", i)
+		}
+		if *p.PromptRatePerMtok < 0 || *p.PromptCacheHitRatePerMtok < 0 || *p.CompletionRatePerMtok < 0 {
+			return nil, nil, fmt.Errorf("--pool-models model_entries[%d] pricing rates must be >= 0", i)
+		}
+		runtimes := append([]string(nil), m.AllowedRuntimeSources...)
+		sort.Strings(runtimes)
+		entries = append(entries, poolmanifest.PoolModelEntry{
+			PoolModelID:           m.PoolModelID,
+			ArtifactHashAlgorithm: m.ArtifactHashAlgorithm,
+			ArtifactHash:          m.ArtifactHash,
+			AllowedRuntimeSources: runtimes,
+			License:               m.License,
+			PaidServingAttested:   *m.PaidServingAttested,
+			Pricing: poolmanifest.PoolModelPricing{
+				PromptRatePerMtok:         uint64(*p.PromptRatePerMtok),
+				PromptCacheHitRatePerMtok: uint64(*p.PromptCacheHitRatePerMtok),
+				CompletionRatePerMtok:     uint64(*p.CompletionRatePerMtok),
+			},
+			DisclosureClass:  m.DisclosureClass,
+			MaxContextTokens: m.MaxContextTokens,
+		})
+	}
+	sort.SliceStable(entries, func(i, j int) bool { return entries[i].PoolModelID < entries[j].PoolModelID })
+	members := make([]poolmanifest.AttestedMember, 0, len(in.AttestedMembers))
+	for _, a := range in.AttestedMembers {
+		classes := append([]string(nil), a.RuntimeClasses...)
+		sort.Strings(classes)
+		members = append(members, poolmanifest.AttestedMember{ProviderAccountID: a.ProviderAccountID, RuntimeClasses: classes})
+	}
+	sort.SliceStable(members, func(i, j int) bool { return members[i].ProviderAccountID < members[j].ProviderAccountID })
+	return entries, members, nil
 }
