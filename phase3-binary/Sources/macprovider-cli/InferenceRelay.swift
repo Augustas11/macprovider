@@ -1016,18 +1016,25 @@ actor InferenceRelay {
         let response: String
         if let privacySealer {
             let counts = privacyCounts(completion)
-            let bodyFrame = try privacySealer.seal(plaintext: ordinary, final: false)
-            let finalFrame = try privacySealer.seal(
-                plaintext: privacyFinalPlaintext(
-                    status: PrivacyClassConstants.finalStatusComplete,
-                    prompt: counts.prompt,
-                    completion: counts.completion
-                ),
-                final: true
-            )
-            response = try privacyResponseJSON(
-                frames: [bodyFrame, finalFrame], prompt: counts.prompt, completion: counts.completion
-            )
+            do {
+                let bodyFrame = try privacySealer.seal(plaintext: ordinary, final: false)
+                let finalFrame = try privacySealer.seal(
+                    plaintext: privacyFinalPlaintext(
+                        status: PrivacyClassConstants.finalStatusComplete,
+                        prompt: counts.prompt,
+                        completion: counts.completion
+                    ),
+                    final: true
+                )
+                response = try privacyResponseJSON(
+                    frames: [bodyFrame, finalFrame], prompt: counts.prompt, completion: counts.completion
+                )
+            } catch {
+                // The privacy response could not be built: the buyer never
+                // receives the completion, so no receipt (R-13.6).
+                state.relayBlindSettlement?.suppressReceiptAfterSendFailure()
+                throw error
+            }
         } else {
             response = ordinary
         }
@@ -1698,19 +1705,19 @@ actor InferenceRelay {
         privacySealer: PrivacyResponseSealerBox? = nil,
         sendFrame: @escaping SendFrame
     ) async throws {
-        let wire: String
-        if let privacySealer {
-            let frame = try privacySealer.seal(plaintext: data, final: false)
-            wire = try privacyFrameSSE(frame)
-        } else {
-            wire = data
-        }
-        // SPEC-015 §N.13: the receipt digests exactly the `data` bytes sent. A
-        // chunk that loses the race with the terminal receipt is not sent.
-        if let attempt = state.relayBlindSettlement, !attempt.recordEmitted(wire) {
-            return
-        }
         do {
+            let wire: String
+            if let privacySealer {
+                let frame = try privacySealer.seal(plaintext: data, final: false)
+                wire = try privacyFrameSSE(frame)
+            } else {
+                wire = data
+            }
+            // SPEC-015 §N.13: the receipt digests exactly the `data` bytes sent. A
+            // chunk that loses the race with the terminal receipt is not sent.
+            if let attempt = state.relayBlindSettlement, !attempt.recordEmitted(wire) {
+                return
+            }
             if let tier2Session {
                 let sealStart = clockMonotonicMicros()
                 let sealed = try tier2Session.sealResponseChunk(requestID: requestID, stream: stream, seq: seq, plaintext: wire)
@@ -1725,9 +1732,10 @@ actor InferenceRelay {
                 "data": wire,
             ])
         } catch {
-            // The digest already holds bytes that may never have been sent, so
-            // the receipt is withheld for good (R-13.6 missing evidence)
-            // rather than signed over a body the coordinator did not receive.
+            // A chunk that failed to seal, serialize, or send leaves the
+            // emitted body short of what the attempt produced (or the digest
+            // holding bytes the coordinator never received), so the receipt is
+            // withheld for good (R-13.6 missing evidence).
             state.relayBlindSettlement?.suppressReceiptAfterSendFailure()
             throw error
         }
@@ -1978,6 +1986,9 @@ actor InferenceRelay {
                 )
             }
         } catch {
+            // A closing frame that failed to seal, serialize, or send leaves
+            // the buyer without an authenticated final frame: no receipt.
+            state.relayBlindSettlement?.suppressReceiptAfterSendFailure()
             return
         }
     }

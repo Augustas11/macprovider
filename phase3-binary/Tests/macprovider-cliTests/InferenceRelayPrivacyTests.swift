@@ -466,6 +466,99 @@ final class InferenceRelayPrivacyTests: XCTestCase {
         try assertNoCanary(frames)
     }
 
+    // MARK: - SPEC-022 R-13.6 privacy-frame failure withholds the receipt
+
+    /// Runs one settlement-bearing relay-blind dispatch whose `sendFrame`
+    /// throws on the first chunk frame `failChunk` matches.
+    private func runSettlementFailure(
+        requestID: String,
+        stream: Bool,
+        privacy: Bool,
+        content: String,
+        failChunk: (@Sendable (String) -> Bool)? = nil
+    ) async throws -> [[String: Any]] {
+        let harness = try await Harness(
+            model: model, session: session, content: content, inputTokens: 4, modelHash: pinnedModelHash
+        )
+        let (builder, key) = try receiptBuilder()
+        var message = try harness.message(
+            requestID: requestID, stream: stream, privacy: privacy, prompt: promptCanary,
+            buyerPrivateKey: privacy ? try goldenBuyerPrivateKey() : nil
+        )
+        message[RelayBlindSettlementMetadata.wireKey] = try settlementWire(for: message, key: key)
+        let relay = harness.relay(
+            privacyMode: privacy, probe: privacy ? ScriptedDecryptProbe(traced: false) : nil,
+            receiptBuilder: builder, receiptProviderID: receiptProvider, failChunk: failChunk
+        )
+        try await relay.handleInferenceRequest(message)
+        await assertIdle(relay)
+        return await harness.frames.values
+    }
+
+    private func assertNoSettlementReceipt(_ frames: [[String: Any]], file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(frames.last?["type"] as? String, "inference_response_end", file: file, line: line)
+        XCTAssertFalse(frames.contains { $0["relay_blind_settlement_receipt"] != nil }, file: file, line: line)
+        XCTAssertFalse(frames.contains { $0["receipt"] != nil }, file: file, line: line)
+    }
+
+    /// A privacy chunk that fails to seal after an opaque chunk was recorded
+    /// (the role delta) leaves the body short: no receipt, even though the
+    /// closing error frame and the end frame are still sent.
+    func testPrivacyStreamSealFailureAfterRecordedChunkWithholdsReceipt() async throws {
+        let oversized = String(repeating: "x", count: RelayBlindEnvelope.maxCiphertextBytes + 1)
+        let frames = try await runSettlementFailure(
+            requestID: "privacy-seal-fail-stream", stream: true, privacy: true, content: oversized
+        )
+        let chunks = frames.filter { $0["type"] as? String == "inference_response_chunk" }
+        XCTAssertGreaterThanOrEqual(chunks.count, 1, "the role chunk was recorded and sent before the failure")
+        XCTAssertNotEqual(frames.last?["status"] as? String, "complete")
+        assertNoSettlementReceipt(frames)
+    }
+
+    /// A non-stream privacy response that cannot be sealed is never
+    /// delivered: no receipt.
+    func testPrivacyNonStreamSealFailureWithholdsReceipt() async throws {
+        let oversized = String(repeating: "x", count: RelayBlindEnvelope.maxCiphertextBytes + 1)
+        let frames = try await runSettlementFailure(
+            requestID: "privacy-seal-fail-nonstream", stream: false, privacy: true, content: oversized
+        )
+        XCTAssertNotEqual(frames.last?["status"] as? String, "complete")
+        assertNoSettlementReceipt(frames)
+    }
+
+    /// The closing frames of a completed privacy stream: a failed send of the
+    /// clear `[DONE]` leaves the buyer short even though the end frame still
+    /// reports `complete`. No receipt.
+    func testPrivacyStreamClosingFrameSendFailureWithholdsReceipt() async throws {
+        let frames = try await runSettlementFailure(
+            requestID: "privacy-close-fail", stream: true, privacy: true, content: completionCanary,
+            failChunk: { $0.contains("[DONE]") }
+        )
+        XCTAssertEqual(frames.last?["status"] as? String, "complete")
+        assertNoSettlementReceipt(frames)
+        try assertNoCanary(frames)
+    }
+
+    /// The authenticated final frame itself fails to send: no receipt.
+    func testPrivacyStreamFinalFrameSendFailureWithholdsReceipt() async throws {
+        let frames = try await runSettlementFailure(
+            requestID: "privacy-final-fail", stream: true, privacy: true, content: completionCanary,
+            failChunk: { $0.contains("\"final\":true") }
+        )
+        XCTAssertEqual(frames.last?["status"] as? String, "complete")
+        assertNoSettlementReceipt(frames)
+    }
+
+    /// The control: the same completed privacy stream with every frame sent
+    /// carries exactly one receipt.
+    func testPrivacyStreamWithoutFailureStillIssuesReceipt() async throws {
+        let frames = try await runSettlementFailure(
+            requestID: "privacy-close-ok", stream: true, privacy: true, content: completionCanary
+        )
+        XCTAssertEqual(frames.last?["status"] as? String, "complete")
+        XCTAssertEqual(frames.filter { $0["relay_blind_settlement_receipt"] != nil }.count, 1)
+    }
+
     func testRelayBlindSettlementMetadataRejectedBeforeDecryptAndClaim() async throws {
         let harness = try await Harness(
             model: model, session: session, content: completionCanary, inputTokens: 4, modelHash: pinnedModelHash
@@ -952,6 +1045,8 @@ private final class KVCacheTelemetryBox: @unchecked Sendable {
     }
 }
 
+private struct InjectedSendFailure: Error {}
+
 private actor PrivacyFrameRecorder {
     private(set) var values: [[String: Any]] = []
     func append(_ frame: [String: Any]) { values.append(frame) }
@@ -1089,7 +1184,8 @@ private struct Harness {
         probe: (any PrivacyPostureProbe)?,
         receiptBuilder: ReceiptBuilder? = nil,
         receiptProviderID: String? = nil,
-        tier2: Tier2ProviderSession? = nil
+        tier2: Tier2ProviderSession? = nil,
+        failChunk: (@Sendable (String) -> Bool)? = nil
     ) -> InferenceRelay {
         InferenceRelay(
             modelRuntime: runtime,
@@ -1107,7 +1203,13 @@ private struct Harness {
             relayBlindRuntime: providerRuntime,
             privacyClassBeta: privacyMode,
             postureProbe: probe,
-            sendFrame: { frame in await frames.append(frame) }
+            sendFrame: { frame in
+                if let failChunk, frame["type"] as? String == "inference_response_chunk",
+                   let data = frame["data"] as? String, failChunk(data) {
+                    throw InjectedSendFailure()
+                }
+                await frames.append(frame)
+            }
         )
     }
 
