@@ -2114,6 +2114,7 @@ final class RelayBlindSettlementAttempt: @unchecked Sendable {
     private let builder: ReceiptBuilder
     private var modelHash: String?
     private var inputTokens: Int64 = 0
+    private var usageValidated = false
     private var responseHasher = SHA256()
     private var responseBytes: Int64 = 0
     private var issued = false
@@ -2134,11 +2135,13 @@ final class RelayBlindSettlementAttempt: @unchecked Sendable {
         self.modelHash = resolves ? modelHash : nil
     }
 
-    /// The `input_tokens` of the SPEC-041 `validated` evidence.
+    /// The `input_tokens` of the SPEC-041 `validated` evidence. Until it is
+    /// recorded, no receipt is signed.
     func validated(inputTokens: Int) {
         lock.lock()
         defer { lock.unlock() }
         self.inputTokens = Int64(inputTokens)
+        usageValidated = true
     }
 
     /// False once the receipt was issued: the caller must not send `data`.
@@ -2163,8 +2166,12 @@ final class RelayBlindSettlementAttempt: @unchecked Sendable {
         let bytes = responseBytes
         let modelHash = modelHash
         let inputTokens = inputTokens
+        let usageValidated = usageValidated
         lock.unlock()
-        guard let modelHash,
+        // SPEC-001-R005 item 3: without a pinned hash or validated usage the
+        // receipt is withheld (SPEC-022 R-13.6 missing evidence).
+        guard usageValidated,
+              let modelHash,
               let inputBound = Int64(exactly: context.inputTokenUpperBound),
               let outputBound = Int64(exactly: context.maxOutputTokens) else {
             return nil

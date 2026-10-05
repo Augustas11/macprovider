@@ -567,6 +567,28 @@ final class InferenceRelayPrivacyTests: XCTestCase {
         XCTAssertFalse(frames.contains { $0["relay_blind_settlement_receipt"] != nil || $0["receipt"] != nil })
     }
 
+    func testRelayBlindSettlementReceiptWithheldWithoutValidatedUsage() async throws {
+        // The pinned handle has a hash, but the input exceeds the envelope
+        // bound, so no SPEC-041 validated evidence exists for the attempt.
+        let harness = try await Harness(
+            model: model, session: session, content: completionCanary, inputTokens: 100, modelHash: pinnedModelHash
+        )
+        let (builder, key) = try receiptBuilder()
+        var message = try harness.message(requestID: "privacy-unvalidated", stream: false, privacy: true, prompt: promptCanary)
+        message[RelayBlindSettlementMetadata.wireKey] = try settlementWire(for: message, key: key)
+        let relay = harness.relay(
+            privacyMode: true, probe: ScriptedDecryptProbe(traced: false),
+            receiptBuilder: builder, receiptProviderID: receiptProvider
+        )
+        try await relay.handleInferenceRequest(message)
+        await assertIdle(relay)
+        let frames = await harness.frames.values
+        XCTAssertEqual(frames.first?["type"] as? String, "inference_response_validation")
+        XCTAssertNotEqual(frames.last?["status"] as? String, "complete")
+        XCTAssertFalse(frames.contains { $0["relay_blind_settlement_receipt"] != nil || $0["receipt"] != nil })
+        try assertNoCanary(frames)
+    }
+
     func testTier2RelayBlindSettlementTravelsInsideProtectedPayload() async throws {
         let harness = try await Harness(
             model: model, session: session, content: completionCanary, inputTokens: 4, modelHash: pinnedModelHash

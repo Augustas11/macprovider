@@ -3,7 +3,7 @@
 **Version:** 0.4.12 (2026-10-05, relay-blind-settlement-v1 profile, #1851; LOCKED v0.4 tuple unchanged)
 **Depends on:** SPEC-001 v1.9.24, SPEC-002 v1.6.2 (v1.5 `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver; v1.6 `/poolz` catalog fields + `/catalog/<catalog_id>` + `/catalog/pubkey` per §M.4), SPEC-005 v0.6.8 (settlement/accounting semantics), SPEC-006 v0.9.38, SPEC-008 v0.7.0 (hard — §5.3-5.6 model-hash semantics; §5.5 hash_status enum), SPEC-010 v1.14 (v1.7 R007(d), v1.10 R007(f) and v1.11 pool-scoped settlement for §N.12; v1.13/v1.14 LM Studio and oMLX legs for §N.12 item 7), SPEC-011 v0.5 (hard — §3.3.1 heartbeat `model_hash`; §3.2 warm-swap state machine; §3.3.0 opt-in gating), SPEC-013 v0.3.1, SPEC-022 v0.3.0 (hard — settlement-capable receipt profile consumer; R-5.6 and R-12 for §N.12; R-13 for §N.13), SPEC-042 0.0.36 (pool runtime authorization for §N.12, v0.4.10)
 
-**Change log v0.4.12 (2026-10-05, issue #1851 — relay-blind settlement receipt profile):** Adds §N.13 and conformance unit `SPEC-015-R007`. §N.13 defines a second settlement-capable profile, `relay-blind-settlement-v1`, for the SPEC-022 R-13 relay-blind entrypoint only. It is signed with the provider's existing SPEC-015 receipt key, not the SPEC-041 relay-blind identity key. It binds the attempt and snapshot, the model and catalog hashes, the SPEC-041 envelope, execution-authorization, and provider-binding digests and `kid`, the SHA-256 of the exact emitted response bytes (ciphertext frames for the SPEC-049 privacy class), the terminal state, and usage capped by the buyer-declared bounds. It carries no v0.4 `prompt_hash` or `output_hash` and no value derived from plaintext request content. It is closed, JCS-canonical, size-bounded, and needs shared Go/Swift vectors. The v0.4.7 rule still holds: a v0.4 receipt is never attached to relay-blind work, and no plaintext prompt hash is derived from ciphertext. The basis-labelled envelope digest in a relay-blind route snapshot is not a plaintext prompt hash. The LOCKED v0.4 tuple, its verifier, and §N.1 to §N.12 are unchanged. A v0.4 verifier MUST quarantine a relay-blind snapshot (SPEC-022 R-7.10).
+**Change log v0.4.12 (2026-10-05, issue #1851 — relay-blind settlement receipt profile):** Adds §N.13 and conformance unit `SPEC-015-R007`. §N.13 defines a second settlement-capable profile, `relay-blind-settlement-v1`, for the SPEC-022 R-13 relay-blind entrypoint only. It is signed with the provider's existing SPEC-015 receipt key, not the SPEC-041 relay-blind identity key. It binds the attempt and snapshot, the model and catalog hashes, the SPEC-041 envelope, execution-authorization, and provider-binding digests and `kid`, the SHA-256 of the exact emitted response bytes (ciphertext frames for the SPEC-049 privacy class), the terminal state, and usage capped by the buyer-declared bounds. It carries no v0.4 `prompt_hash` or `output_hash` and no value derived from plaintext request content. It is closed, JCS-canonical, size-bounded, and needs shared Go/Swift vectors. The v0.4.7 rule still holds: a v0.4 receipt is never attached to relay-blind work, and no plaintext prompt hash is derived from ciphertext. The basis-labelled envelope digest in a relay-blind route snapshot is not a plaintext prompt hash. The LOCKED v0.4 tuple, its verifier, and §N.1 to §N.12 are unchanged. A v0.4 verifier MUST quarantine a relay-blind snapshot (SPEC-022 R-7.10). A claimed attempt that ends before a pinned runtime handle exists, or whose handle has no model hash, an unresolvable model, or no validated usage, withholds the receipt; the coordinator treats that as missing evidence under SPEC-022 R-13.6 (pending, then quarantined, buyer refunded, no provider credit). Duplicate-member detection is coordinator-side.
 
 **Change log v0.4.11 (2026-09-25, issue #1690 M9 — cancelled loopback stream usage):** Adds §N.12 item 7. When a buyer disconnects from a pool-authorized loopback stream, the `buyer_cancel` receipt signs usage that covers exactly the delivered content, derived per runtime: llama-server per-chunk timings (#1690 E2E-F3); for Ollama and (with SPEC-046 0.4.0) LM Studio, the per-chunk `logprobs` token list for the completion tokens and the upstream's own prompt count for the same request; for `mlx_lm.server` and oMLX, and for any runtime whose stream carries no per-chunk count, a local tokenizer's count of the delivered visible content (the served snapshot's, else the catalog row's verified plain MLX artifact's; reasoning and tool-call argument tokens excluded, in the buyer's favour) and the upstream's own prompt count. The post-cancel work is bounded to 1.25 s, inside the coordinator's 2 s wait, so a slow runtime makes the cancel free, never late. Any usage the runtime cannot derive that way stays unattested: relayed empty and never signed, so the attempt is pending, then quarantined, and the partial stream is free. The LOCKED v0.4 tuple, the wire, and the coordinator verifier are unchanged; the signed usage still has to match the recorded expected usage exactly.
 
@@ -4653,8 +4653,24 @@ v0.4 tuple are unchanged, and a v0.4 parser rejects this tuple because its
 
 6. **Delivery and ingestion.** The receipt travels only on the terminal
    `inference_response_end` frame field `relay_blind_settlement_receipt`
-   (SPEC-001-R005). There is exactly one per dispatched attempt. It is never
+   (SPEC-001-R005). There is at most one per dispatched attempt, and exactly
+   one for an attempt that reached a pinned runtime handle with a model hash,
+   a resolved snapshot model, and SPEC-041 `validated` usage. It is never
    an `X-MacProvider-Receipt` header, an SSE event, or a buyer response field.
+
+   The provider MUST withhold the receipt for a claimed attempt that ends
+   before a pinned handle exists (a SPEC-041 `open()` decryption or validation
+   rejection; a claimed relay-blind terminal for a duplicate active request,
+   a full queue, an over-limit body, or a paused provider; or a failed
+   relay-blind prepare step), and for a handle with no model hash, a
+   `model_id` that does not resolve to the handle, or no validated usage. It
+   never signs placeholder values. The coordinator treats a withheld receipt
+   as missing evidence (SPEC-022 R-13.6): pending until the snapshot
+   deadline, then quarantined, with the buyer refunded and no provider credit.
+   Duplicate-member detection is coordinator-side: the provider's JSON parser
+   cannot observe a duplicated `relay_blind_settlement` member, and the
+   coordinator verifier rejects a tuple whose bytes are not the JCS form
+   (item 1), which a duplicated member cannot be.
    §N.9 storage, keying, idempotency, and redaction apply. Verdict, audit, and
    operator rows carry parsed scalar fields and digests only.
 

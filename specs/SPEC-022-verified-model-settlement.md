@@ -30,7 +30,12 @@ the relay-blind verifier quarantines a plaintext snapshot. Disclosure never
 reports a relay-blind request as verified (R-10.7). R-2.2 to R-2.7 apply
 unchanged, and SPEC-005 arithmetic is unchanged. Every new obligation is a
 conformance obligation of `SPEC-022-R013` (pending). The conformance state of
-`SPEC-022-R001`..`SPEC-022-R012` does not change.
+`SPEC-022-R001`..`SPEC-022-R012` does not change. R-13.4 and R-13.6 state
+that the provider withholds the receipt for terminals before a pinned model
+handle exists and for a handle without a model hash, a resolvable model, or
+validated usage, and that the coordinator treats a withheld receipt as missing
+evidence (pending, then quarantined, buyer refunded, no provider credit).
+Duplicate-member detection is coordinator-side.
 
 ### v0.2.7
 
@@ -1608,9 +1613,12 @@ The snapshot `request_id` is the coordinator's settlement request id, the one
 the ledger row uses. It may differ from the SPEC-041 envelope `request_id`,
 which the envelope digest binds.
 
-R-13.4. Receipt. For each dispatched attempt the provider MUST produce exactly
-one SPEC-015 `relay-blind-settlement-v1` receipt, carried on the terminal
-`inference_response_end` frame (SPEC-001-R005). The receipt MUST contain no
+R-13.4. Receipt. For each dispatched attempt that reaches a pinned runtime
+handle with a model hash, a resolved snapshot model, and SPEC-041 `validated`
+usage, the provider MUST produce exactly one SPEC-015
+`relay-blind-settlement-v1` receipt, carried on the terminal
+`inference_response_end` frame (SPEC-001-R005). Otherwise it withholds the
+receipt (R-13.6). The receipt MUST contain no
 plaintext prompt or output hash, no canary-derived or plaintext-derived value,
 and no key material. The coordinator MUST NOT forward it as an
 `X-MacProvider-Receipt` header.
@@ -1639,7 +1647,17 @@ completion, and has a response-body byte count of zero is `zero_settled`.
 
 R-13.6. Missing evidence. A missing receipt follows R-7.6 and R-8.3: the
 attempt is pending until the deadline, then quarantined, with the buyer
-refunded and no provider credit. Under `enforce` the SPEC-041-R004 and
+refunded and no provider credit. A receipt the provider withholds is missing
+evidence. The provider withholds it for every terminal after the SPEC-041
+execution claim but before a pinned model handle exists: an `open()`
+decryption or validation rejection; a claimed relay-blind terminal for a
+duplicate active request, a full queue, an over-limit body, or a paused or
+draining provider; and a failed relay-blind prepare step. It also withholds it
+for a handle with no model hash, a snapshot `model_id` that does not resolve to
+the handle, or no validated usage. Duplicate-member detection on
+`relay_blind_settlement` and on the receipt tuple is coordinator-side, because
+the provider JSON parser cannot observe duplicate members; the verifier's
+canonical-bytes check rejects a duplicated tuple member. Under `enforce` the SPEC-041-R004 and
 SPEC-049-R015 `unknown_postdispatch` rule (settle known input) does not create
 a payable row without a `relay_blind_settled` verdict. Under `observe` and
 `off`, that rule is unchanged.

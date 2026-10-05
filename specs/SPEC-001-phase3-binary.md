@@ -13,7 +13,12 @@ terminal `inference_response_end` carries one
 `relay_blind_settlement_receipt` (SPEC-015 §N.13). Plaintext frames, the v0.4
 `settlement` and `receipt` fields, and older binaries are unchanged. Under
 SPEC-022 `enforce`, a session without the capability never receives
-relay-blind work.
+relay-blind work. A claimed attempt that ends before a pinned runtime handle
+exists, or whose handle has no model hash, does not resolve the snapshot model,
+or has no validated usage, withholds the receipt; the coordinator treats that
+as missing evidence (SPEC-022 R-13.6). Duplicate-member detection on
+`relay_blind_settlement` is the coordinator's obligation, because the provider
+JSON parser cannot observe duplicate members.
 
 **Change log v1.9.27 (2026-09-30, authenticated dispatch output limit):**
 Adds optional coordinator dispatch metadata `max_output_tokens` to cleartext and
@@ -2876,7 +2881,11 @@ relay-blind settlement lane, and nothing else on these frames changes:
    (`body_encoding: relay-blind-request-v1`) for which it committed an R-13
    route snapshot. Under SPEC-008 it is inside the authenticated encrypted
    payload. It has exactly these members, all required and non-null; unknown
-   or duplicate members are invalid:
+   or duplicate members are invalid. The coordinator MUST emit the object
+   without duplicate members; the provider's JSON parser keeps one copy of a
+   duplicated member and cannot observe the duplicate, so duplicate-member
+   detection is coordinator-side (the SPEC-015 §N.13 verifier also rejects a
+   receipt tuple whose bytes are not canonical):
 
    | Field | Type | Value |
    |---|---|---|
@@ -2907,14 +2916,30 @@ relay-blind settlement lane, and nothing else on these frames changes:
    `observe`/`off` path.
 
 3. **`relay_blind_settlement_receipt` on `inference_response_end` (P→C).**
-   For a dispatch that carried valid `relay_blind_settlement` and passed the
-   execution claim, the provider MUST put exactly one SPEC-015 §N.13 envelope
-   string in this member of the terminal frame. This applies to every
-   terminal status (`complete`, `cancelled`, `error_*`). It is never sent on
-   a chunk, a validation frame, or any other frame. The existing `receipt`
-   member MUST be absent on relay-blind terminal frames. The coordinator
-   ingests the value internally and MUST NOT copy it to any buyer header,
-   body, or SSE event. Under SPEC-008 it is inside the protected payload.
+   For a dispatch that carried valid `relay_blind_settlement`, passed the
+   execution claim, and reached a pinned runtime handle, the provider MUST put
+   exactly one SPEC-015 §N.13 envelope string in this member of the terminal
+   frame. This applies to every terminal status (`complete`, `cancelled`,
+   `error_*`). It is never sent on a chunk, a validation frame, or any other
+   frame. The existing `receipt` member MUST be absent on relay-blind terminal
+   frames. The coordinator ingests the value internally and MUST NOT copy it
+   to any buyer header, body, or SSE event. Under SPEC-008 it is inside the
+   protected payload.
+
+   The provider MUST withhold the receipt, and send the terminal frame
+   without this member, when the attempt ends after the execution claim but
+   before `relay_blind_settlement` evidence can be bound: a SPEC-041 `open()`
+   decryption or validation rejection; a claimed relay-blind terminal for a
+   duplicate active `request_id`, a full admission queue, a body over the
+   provider limit, or a paused or draining provider; or a failure of the
+   runtime's relay-blind prepare step. It MUST also withhold the receipt when
+   the pinned handle has no model hash, when the metadata `model_id` does not
+   resolve to that handle, or when no SPEC-041 `validated` usage exists for
+   the attempt, and whenever receipt construction fails. It MUST NOT sign a
+   receipt with a placeholder hash or usage. The coordinator treats a
+   withheld receipt as missing evidence under SPEC-022 R-13.6: the attempt is
+   pending until the snapshot deadline and is then quarantined, the buyer is
+   refunded, and the provider receives no credit.
 
 The coordinator MUST NOT treat a provider without the capability as an error
 under `observe` or `off`. Relay-blind behavior there is unchanged.
