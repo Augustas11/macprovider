@@ -5,15 +5,24 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/augstar/macprovider-gateway/internal/storage"
 )
 
 // ensureRelayBlindSettlementDispatchColumns adds the SPEC-022 R-13 dispatch
 // record to quota_reservations. Existing rows default to "" (no response
-// recorded), which the reconciler treats as undetermined.
+// recorded), which the reconciler treats as undetermined. The columns and the
+// v18 schema stamp commit in one transaction, so a gateway that predates them
+// (max-known v17) refuses the migrated database instead of settling a
+// relay-blind hold without coordinator finality.
 func (s *Store) ensureRelayBlindSettlementDispatchColumns(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(quota_reservations)`)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `PRAGMA table_info(quota_reservations)`)
 	if err != nil {
 		return err
 	}
@@ -38,11 +47,16 @@ func (s *Store) ensureRelayBlindSettlementDispatchColumns(ctx context.Context) e
 		if existing[column.name] {
 			continue
 		}
-		if _, err := s.db.ExecContext(ctx, `ALTER TABLE quota_reservations ADD COLUMN `+column.name+` `+column.ddl); err != nil {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE quota_reservations ADD COLUMN `+column.name+` `+column.ddl); err != nil {
 			return fmt.Errorf("add quota_reservations.%s: %w", column.name, err)
 		}
 	}
-	return nil
+	if _, err := tx.ExecContext(ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(18, ?)`,
+		encodeTime(time.Now().UTC())); err != nil {
+		return fmt.Errorf("stamp schema_migrations v18 inside relay-blind dispatch migration tx: %w", err)
+	}
+	return tx.Commit()
 }
 
 // RecordRelayBlindSettlementDispatch stores the first coverage proof for an

@@ -128,6 +128,10 @@ func (s *Store) Ping(ctx context.Context) error {
 //	     unmet, capacity-constrained, and substituted model demand.
 //	v17 — issue #1807: demand rows persist reasoning-token and phase-timing
 //	     fields needed for allocation reporting.
+//	v18 — SPEC-022 R-13 (#1851): quota_reservations record the relay-blind
+//	     settlement dispatch hint and coordinator internal request id; an
+//	     older gateway would settle a relay-blind hold without coordinator
+//	     finality, so it must refuse this database.
 //
 // At Open time the store reads the current applied version; if it
 // exceeds this constant the binary is older than the DB and refuses
@@ -138,7 +142,7 @@ func (s *Store) Ping(ctx context.Context) error {
 // Operators rolling back the gateway binary on a DB at a higher
 // version must restore /var/lib/macprovider/gateway.db from the
 // pre-deploy snapshot (deploy-pearl-vps.sh step 5b writes one).
-const maxKnownSchemaVersion = 17
+const maxKnownSchemaVersion = 18
 
 func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.checkSchemaVersionGate(ctx); err != nil {
@@ -293,6 +297,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(17, ?)", now); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(18, ?)", now); err != nil {
 		return err
 	}
 	return nil
@@ -623,6 +630,12 @@ func (s *Store) ensureOAuthStateExpiresAtColumn(ctx context.Context) error {
 // a wrong-account row once cross-account request_id duplicates
 // exist. Failing closed at Open is the safe choice.
 func (s *Store) checkSchemaVersionGate(ctx context.Context) error {
+	return s.checkSchemaVersionGateAt(ctx, maxKnownSchemaVersion)
+}
+
+// checkSchemaVersionGateAt is checkSchemaVersionGate for a binary whose
+// max-known version is maxKnown; tests use it to stand in for an older binary.
+func (s *Store) checkSchemaVersionGateAt(ctx context.Context, maxKnown int64) error {
 	// schema_migrations may not exist yet on a brand-new DB; the
 	// follow-up schemaSQL run creates it. Tolerate the missing-table
 	// case here.
@@ -637,9 +650,9 @@ func (s *Store) checkSchemaVersionGate(ctx context.Context) error {
 	if !current.Valid {
 		return nil
 	}
-	if current.Int64 > maxKnownSchemaVersion {
+	if current.Int64 > maxKnown {
 		return fmt.Errorf("gateway DB schema_migrations.version=%d exceeds this binary's max-known version %d — refusing to open (issue #196 rollback safety). Restore from pre-deploy snapshot.",
-			current.Int64, maxKnownSchemaVersion)
+			current.Int64, maxKnown)
 	}
 	return nil
 }

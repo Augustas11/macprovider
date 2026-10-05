@@ -73,3 +73,30 @@ func TestRelayBlindSettlementDispatchRecordedOnceAndLoaded(t *testing.T) {
 		t.Fatalf("lookup=%+v err=%v", one, err)
 	}
 }
+
+// The relay-blind dispatch columns stamp schema v18 with the migration, so a
+// v17 gateway (one that would settle a relay-blind hold from the status row)
+// refuses the migrated database.
+func TestRelayBlindSettlementDispatchMigrationRefusesV17Gateway(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var version int64
+	if err := store.db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 18 {
+		t.Fatalf("schema version=%d err=%v, want 18", version, err)
+	}
+	if err := store.checkSchemaVersionGateAt(ctx, 17); err == nil {
+		t.Fatal("a v17 gateway accepted a database carrying the relay-blind dispatch columns")
+	}
+	if err := store.checkSchemaVersionGateAt(ctx, maxKnownSchemaVersion); err != nil {
+		t.Fatalf("current gateway refused its own schema: %v", err)
+	}
+	// Re-running the migration on a DB that already has the columns is a
+	// no-op that keeps the stamp.
+	if err := store.ensureRelayBlindSettlementDispatchColumns(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
