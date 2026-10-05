@@ -255,6 +255,9 @@ type Server struct {
 	privacyAuthority       *relayblind.PrivacyAuthority
 	privacyPostureChans    sync.Map
 	privacyPostureInFlight sync.Map
+	// privacyAdvertised is the last accepted privacy key digest set per
+	// session, so an unchanged heartbeat re-advertisement does not challenge.
+	privacyAdvertised sync.Map
 	// beforeHandshakeAckSend is a test seam run just before hello_ack /
 	// auth_response v2 is enqueued; privacyPostureChallengeSent runs after a
 	// posture challenge is enqueued. Both nil in production.

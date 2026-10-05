@@ -14,6 +14,7 @@ import (
 	"net"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -204,6 +205,124 @@ func TestReplacedSessionHeartbeatDoesNotRevokePrivacyKeys(t *testing.T) {
 	}
 	if len(sessions) != 1 || sessions[0].AssignedSession != "session-b" {
 		t.Fatalf("replaced-session heartbeat changed privacy keys: %+v", sessions)
+	}
+}
+
+// SPEC-049-R005: the challenge cadence is posture_challenge_interval_seconds
+// (runPrivacyPostureLoop). Heartbeats re-advertising an unchanged key set
+// must not challenge; a new or rotated key does, and an explicit empty array
+// still revokes immediately.
+func TestHeartbeatPrivacyKeysChallengeOnlyOnChange(t *testing.T) {
+	clock := time.Unix(1_800_000_000, 0).UTC()
+	record, identity := wsPrivacyIdentity(t, clock)
+	rotated := wsPrivacyRecordForKey(t, clock, identity, 0x22)
+	fresh := wsPrivacyRecordForKey(t, clock, identity, 0x33)
+	auth := openWSPrivacyAuthority(t, clock, identity)
+	reg := pool.NewRegistry(nil)
+	serverConn, clientConn := net.Pipe()
+	t.Cleanup(func() { clientConn.Close() })
+	t.Cleanup(func() { serverConn.Close() })
+	reg.RegisterAt(&pool.Provider{
+		ProviderID: "provider-a", AssignedID: "session-a", Hostname: "provider.local",
+		ModelID: "model-a", ModelParamsB: 7, RAMGB: 16, MaxContextTokens: 4096, MaxConcurrency: 1,
+		BinaryVersion: "0.0.0-fixture", Tier: pool.TierPinned, State: pool.StateReady,
+	}, serverConn, clock)
+	var challenges atomic.Int32
+	s := &Server{
+		pool:                        reg,
+		log:                         zerolog.Nop(),
+		now:                         func() time.Time { return clock },
+		privacyAuthority:            auth,
+		privacyPostureChallengeSent: func() { challenges.Add(1) },
+	}
+	sess := newProviderSession("provider-a", "session-a", serverConn, 64)
+	go sess.runWriter()
+	t.Cleanup(func() { sess.close() })
+	s.sessions.Store(sessionKey("provider-a", "session-a"), sess)
+	// The fake provider answers every challenge at once with an unparseable
+	// response, so each probe ends without quarantine or a response timeout.
+	go func() {
+		for {
+			payload, _, err := wsutil.ReadServerData(clientConn)
+			if err != nil {
+				return
+			}
+			var envelope struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(payload, &envelope) == nil && envelope.Type == "privacy_posture_challenge" {
+				s.handlePrivacyPostureResponse("provider-a", "session-a", []byte(`{}`))
+			}
+		}
+	}()
+	heartbeat := func(records []relayblind.PrivacyKeyRecord) {
+		t.Helper()
+		s.handleMessage(nil, "provider-a", "session-a", privacyHeartbeat(t, "ready", records))
+		// A scheduled probe holds the in-flight marker until it finishes, so
+		// once it clears every challenge this heartbeat caused was counted.
+		eventually(t, func() bool {
+			_, inFlight := s.privacyPostureInFlight.Load(sessionKey("provider-a", "session-a"))
+			return !inFlight
+		})
+	}
+
+	heartbeat([]relayblind.PrivacyKeyRecord{record})
+	if got := challenges.Load(); got != 1 {
+		t.Fatalf("first advertisement challenges = %d, want 1", got)
+	}
+	for i := 0; i < 3; i++ {
+		heartbeat([]relayblind.PrivacyKeyRecord{record})
+		heartbeat(nil)
+	}
+	if got := challenges.Load(); got != 1 {
+		t.Fatalf("unchanged re-advertisements challenged: total = %d, want 1", got)
+	}
+	heartbeat([]relayblind.PrivacyKeyRecord{rotated})
+	if got := challenges.Load(); got != 2 {
+		t.Fatalf("rotated key challenges total = %d, want 2", got)
+	}
+	heartbeat([]relayblind.PrivacyKeyRecord{})
+	if n := privacyKeySessions(t, auth, clock); n != 0 {
+		t.Fatalf("empty array did not revoke: sessions = %d", n)
+	}
+	heartbeat([]relayblind.PrivacyKeyRecord{fresh})
+	if got := challenges.Load(); got != 3 {
+		t.Fatalf("advertisement after revoke challenges total = %d, want 3", got)
+	}
+}
+
+func eventually(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not met within 5s")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func wsPrivacyRecordForKey(t *testing.T, now time.Time, identity ed25519.PrivateKey, keyByte byte) relayblind.PrivacyKeyRecord {
+	t.Helper()
+	provider, err := ecdh.X25519().NewPrivateKey(bytes.Repeat([]byte{keyByte}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := relayblind.NewSignedKeyRecord(provider.PublicKey().Bytes(), identity, []string{"model-a"}, 4096, now, now.Add(time.Duration(relayblind.MaxPrivacyKeyLifetimeSeconds)*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	attestation := relayblind.PrivacyKeyAttestation{
+		Version: relayblind.PrivacyKeyAttestationVersion, KeyRecordDigest: record.KeyRecordDigest,
+		PrivacyClass: relayblind.PrivacyClassV1, Assurance: relayblind.PrivacyAssurance, BinaryVersion: "0.0.0-fixture",
+		CodeCDHash: "0123456789abcdef0123456789abcdef01234567", NotBeforeUnix: record.NotBeforeUnix, ExpiresAtUnix: record.ExpiresAtUnix,
+	}
+	framed, err := attestation.Framing()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return relayblind.PrivacyKeyRecord{
+		KeyRecord: record, Attestation: attestation, Signature: base64.RawURLEncoding.EncodeToString(ed25519.Sign(identity, framed)),
 	}
 }
 
