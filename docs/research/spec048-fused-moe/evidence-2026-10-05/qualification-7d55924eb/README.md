@@ -4,7 +4,10 @@ Ordinary-path qualification of fork pin
 `b181102984a4d1875efbd9e0eab3a7dfd1c012c5` for the SPEC-048 0.1.23 R003
 review gate, run on 2026-10-05 against provider commit
 `7d55924eb94907a09759c3e0263f374d9fec3dfc` (PR #1832 head with origin/main
-merged; later commits change no `phase3-binary` file).
+merged). Later commits change no Swift source; one restores
+`phase3-binary/Package.resolved` to the full Xcode 16.4 pin set after a local
+Swift 6.3 resolve had pruned unused transitive pins. The lab build resolved
+`mlx-swift` 0.31.4 and the fork pin exactly as the release build does.
 
 ## Setup
 
