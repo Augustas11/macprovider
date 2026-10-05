@@ -236,6 +236,120 @@ struct SettlementReceiptInput {
     let issuedAtUnixMS: Int64
 }
 
+/// SPEC-001-R005: the closed `relay_blind_settlement` object the coordinator
+/// attaches to a relay-blind dispatch that has an SPEC-022 R-13 route snapshot.
+/// Parsing is strict: a missing, unknown, null, or out-of-range member makes
+/// the whole object invalid, and the dispatch is rejected before decryption.
+struct RelayBlindSettlementMetadata: Sendable, Equatable {
+    static let wireKey = "relay_blind_settlement"
+    static let paidEntrypoint = "coordinator_buyer_v1_relay_blind_chat_completions"
+    static let promptHashBasis = "relay_blind_envelope_digest_v1"
+    static let wireFields: Set<String> = [
+        "account_scope", "request_id", "attempt_n", "provider_id", "provider_receipt_key_id",
+        "model_id", "expected_catalog_model_hash", "catalog_id", "catalog_body_digest",
+        "route_snapshot_digest", "route_snapshot_policy_version", "route_snapshot_mode",
+        "pending_deadline_seconds", "paid_entrypoint", "prompt_hash_basis", "relay_blind_envelope_digest",
+    ]
+
+    let accountScope: String
+    let requestID: String
+    let attemptN: Int64
+    let providerID: String
+    let providerReceiptKeyID: String
+    let modelID: String
+    let expectedCatalogModelHash: String
+    let catalogID: String
+    let catalogBodyDigest: String
+    let routeSnapshotDigest: String
+    let routeSnapshotPolicyVersion: String
+    let routeSnapshotMode: String
+    let pendingDeadlineSeconds: Int64
+    let relayBlindEnvelopeDigest: String
+
+    init?(wire value: Any?) {
+        guard let wire = value as? [String: Any],
+              Set(wire.keys) == Self.wireFields,
+              let accountScope = Self.boundedASCII(wire["account_scope"]),
+              let requestID = Self.boundedASCII(wire["request_id"]),
+              let attemptN = Self.jsonInteger(wire["attempt_n"]), attemptN >= 0,
+              let providerID = Self.boundedASCII(wire["provider_id"]),
+              let providerReceiptKeyID = wire["provider_receipt_key_id"] as? String,
+              ReceiptBuilder.isValidReceiptKeyID(providerReceiptKeyID),
+              let modelID = Self.boundedASCII(wire["model_id"]),
+              let expectedCatalogModelHash = wire["expected_catalog_model_hash"] as? String,
+              ReceiptBuilder.isValidModelHash(expectedCatalogModelHash),
+              let catalogID = Self.boundedASCII(wire["catalog_id"]),
+              let catalogBodyDigest = wire["catalog_body_digest"] as? String,
+              ReceiptBuilder.isValidModelHash(catalogBodyDigest),
+              let routeSnapshotDigest = wire["route_snapshot_digest"] as? String,
+              ReceiptBuilder.isValidModelHash(routeSnapshotDigest),
+              let routeSnapshotPolicyVersion = Self.boundedASCII(wire["route_snapshot_policy_version"]),
+              let routeSnapshotMode = wire["route_snapshot_mode"] as? String,
+              routeSnapshotMode == "observe" || routeSnapshotMode == "enforce",
+              let pendingDeadlineSeconds = Self.jsonInteger(wire["pending_deadline_seconds"]),
+              (1...900).contains(pendingDeadlineSeconds),
+              wire["paid_entrypoint"] as? String == Self.paidEntrypoint,
+              wire["prompt_hash_basis"] as? String == Self.promptHashBasis,
+              let relayBlindEnvelopeDigest = wire["relay_blind_envelope_digest"] as? String,
+              ReceiptBuilder.isCanonicalBase64URL(relayBlindEnvelopeDigest, byteCount: 32) else {
+            return nil
+        }
+        self.accountScope = accountScope
+        self.requestID = requestID
+        self.attemptN = attemptN
+        self.providerID = providerID
+        self.providerReceiptKeyID = providerReceiptKeyID
+        self.modelID = modelID
+        self.expectedCatalogModelHash = expectedCatalogModelHash
+        self.catalogID = catalogID
+        self.catalogBodyDigest = catalogBodyDigest
+        self.routeSnapshotDigest = routeSnapshotDigest
+        self.routeSnapshotPolicyVersion = routeSnapshotPolicyVersion
+        self.routeSnapshotMode = routeSnapshotMode
+        self.pendingDeadlineSeconds = pendingDeadlineSeconds
+        self.relayBlindEnvelopeDigest = relayBlindEnvelopeDigest
+    }
+
+    /// SPEC-015 §N.13 item 4: 1..256 printable ASCII bytes.
+    private static func boundedASCII(_ value: Any?) -> String? {
+        guard let string = value as? String, ReceiptBuilder.isBoundedPrintableASCII(string) else { return nil }
+        return string
+    }
+
+    /// A JSON integer only: booleans and fractions are not.
+    private static func jsonInteger(_ value: Any?) -> Int64? {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID() else {
+            return nil
+        }
+        let integer = number.int64Value
+        guard number.isEqual(to: NSNumber(value: integer)) else { return nil }
+        return integer
+    }
+}
+
+/// SPEC-015 §N.13 receipt input. Every value is content-free: the SPEC-041
+/// dispatch-context digests and bounds, the pinned model hash, the digest of
+/// the emitted (for the privacy class, ciphertext) response bytes, and token
+/// counts. Nothing here is derived from plaintext request or response content.
+struct RelayBlindSettlementReceiptInput {
+    let metadata: RelayBlindSettlementMetadata
+    let executionAuthDigest: String
+    let providerBindingDigest: String
+    let kid: String
+    let inputTokenUpperBound: Int64
+    let maxOutputTokens: Int64
+    let privacyClass: Bool
+    let modelHash: String
+    let inputTokens: Int64
+    let outputTokens: Int64
+    let responseBodyBytes: Int64
+    let responseBodySHA256: String
+    let terminalState: String
+    let terminalStateUnixMS: Int64
+    let issuedAtUnixMS: Int64
+}
+
 struct ReceiptBuilder: Sendable {
     /// SPEC-015 §M.0 wire-shape discriminant. ASCII string `"3"`.
     static let receiptVersionV03 = "3"
@@ -324,6 +438,119 @@ struct ReceiptBuilder: Sendable {
         return Data(canonicalTuple.utf8).base64EncodedString()
             + "."
             + Data(signature).base64EncodedString()
+    }
+
+    static let relayBlindSettlementReceiptVersion = "relay-blind-settlement-v1"
+    /// SPEC-015 §N.4.
+    static let terminalStates: Set<String> = [
+        "normal_done", "provider_error", "buyer_cancel", "gateway_timeout", "upstream_transport_disconnect",
+    ]
+    /// SPEC-015 §N.13 item 4.
+    static let relayBlindSettlementMaxTupleBytes = 4096
+    static let relayBlindSettlementMaxEnvelopeBytes = 8192
+
+    /// SPEC-015 §N.13: the `relay-blind-settlement-v1` receipt, signed with
+    /// the SPEC-015 receipt key (never the SPEC-041 identity key or an X25519
+    /// key). Every field rule is checked before signing, so this never emits a
+    /// tuple the §N.13 verifier would reject on its own shape.
+    func buildRelayBlindSettlement(providerId: String, input: RelayBlindSettlementReceiptInput) throws -> String {
+        let metadata = input.metadata
+        guard providerId == metadata.providerID else {
+            throw Error.settlementFieldMismatch("provider_id")
+        }
+        guard Self.isValidModelHash(input.modelHash) else {
+            throw Error.invalidModelHash
+        }
+        guard input.modelHash == metadata.expectedCatalogModelHash else {
+            throw Error.settlementFieldMismatch("model_hash")
+        }
+        guard Self.isCanonicalBase64URL(input.executionAuthDigest, byteCount: 32),
+              Self.isCanonicalBase64URL(input.providerBindingDigest, byteCount: 32),
+              Self.isCanonicalBase64URL(input.kid, byteCount: 16),
+              Self.isValidModelHash(input.responseBodySHA256),
+              Self.terminalStates.contains(input.terminalState),
+              (1...Int64(Int32.max)).contains(input.inputTokenUpperBound),
+              (1...Int64(Int32.max)).contains(input.maxOutputTokens) else {
+            throw Error.invalidSettlementMetadata
+        }
+        for (field, value) in [
+            ("input_tokens", input.inputTokens),
+            ("output_tokens", input.outputTokens),
+            ("response_body_bytes", input.responseBodyBytes),
+            ("terminal_state_ts_unix_ms", input.terminalStateUnixMS),
+            ("issued_at_unix_ms", input.issuedAtUnixMS),
+        ] {
+            guard value >= 0 else { throw Error.negativeInteger(field) }
+        }
+        // SPEC-022 R-3.4.3: signed usage never exceeds the buyer's bounds.
+        guard input.inputTokens <= input.inputTokenUpperBound else {
+            throw Error.integerOutOfRange("usage.input_tokens")
+        }
+        guard input.outputTokens <= input.maxOutputTokens else {
+            throw Error.integerOutOfRange("usage.output_tokens")
+        }
+
+        guard let key = try keyStore.loadCurrent(providerId: providerId) else {
+            throw Error.missingCurrentReceiptKey(providerId: providerId)
+        }
+        guard metadata.providerReceiptKeyID == Self.receiptKeyID(publicKey: key.publicKey) else {
+            throw Error.settlementFieldMismatch("provider_receipt_key_id")
+        }
+        let canonicalTuple = try RFC8785JCS.canonicalString(try relayBlindSettlementTupleObject(input: input))
+        let tupleBytes = Data(canonicalTuple.utf8)
+        guard tupleBytes.count <= Self.relayBlindSettlementMaxTupleBytes else {
+            throw Error.integerOutOfRange("tuple_bytes")
+        }
+        let signature = try key.signature(for: tupleBytes)
+        let envelope = tupleBytes.base64EncodedString() + "." + Data(signature).base64EncodedString()
+        guard envelope.utf8.count <= Self.relayBlindSettlementMaxEnvelopeBytes else {
+            throw Error.integerOutOfRange("envelope_bytes")
+        }
+        return envelope
+    }
+
+    /// `ed25519-sha256:<hex>` of the current receipt key, or nil without one.
+    func currentReceiptKeyID(providerId: String) throws -> String? {
+        try keyStore.loadCurrent(providerId: providerId).map { Self.receiptKeyID(publicKey: $0.publicKey) }
+    }
+
+    private func relayBlindSettlementTupleObject(input: RelayBlindSettlementReceiptInput) throws -> RFC8785JCS.Value {
+        let metadata = input.metadata
+        return .object([
+            "account_scope": .string(metadata.accountScope),
+            "attempt_n": .int(try checkedInt(metadata.attemptN, field: "attempt_n")),
+            "catalog_body_digest": .string(metadata.catalogBodyDigest),
+            "catalog_id": .string(metadata.catalogID),
+            "expected_catalog_model_hash": .string(metadata.expectedCatalogModelHash),
+            "input_token_upper_bound": .int(try checkedInt(input.inputTokenUpperBound, field: "input_token_upper_bound")),
+            "issued_at_unix_ms": .int(try checkedInt(input.issuedAtUnixMS, field: "issued_at_unix_ms")),
+            "max_output_tokens": .int(try checkedInt(input.maxOutputTokens, field: "max_output_tokens")),
+            "model_hash": .string(input.modelHash),
+            "model_id": .string(metadata.modelID),
+            "paid_entrypoint": .string(RelayBlindSettlementMetadata.paidEntrypoint),
+            "privacy_class": .string(input.privacyClass ? PrivacyClassConstants.v1 : "none"),
+            "prompt_hash_basis": .string(RelayBlindSettlementMetadata.promptHashBasis),
+            "provider_id": .string(metadata.providerID),
+            "provider_receipt_key_id": .string(metadata.providerReceiptKeyID),
+            "receipt_version": .string(Self.relayBlindSettlementReceiptVersion),
+            "relay_blind_envelope_digest": .string(metadata.relayBlindEnvelopeDigest),
+            "relay_blind_execution_auth_digest": .string(input.executionAuthDigest),
+            "relay_blind_kid": .string(input.kid),
+            "relay_blind_provider_binding_digest": .string(input.providerBindingDigest),
+            "request_id": .string(metadata.requestID),
+            "response_body_bytes": .int(try checkedInt(input.responseBodyBytes, field: "response_body_bytes")),
+            "response_body_sha256": .string(input.responseBodySHA256),
+            "route_snapshot_digest": .string(metadata.routeSnapshotDigest),
+            "route_snapshot_mode": .string(metadata.routeSnapshotMode),
+            "route_snapshot_policy_version": .string(metadata.routeSnapshotPolicyVersion),
+            "signature_key_alg": .string("Ed25519"),
+            "terminal_state": .string(input.terminalState),
+            "terminal_state_ts_unix_ms": .int(try checkedInt(input.terminalStateUnixMS, field: "terminal_state_ts_unix_ms")),
+            "usage": .object([
+                "input_tokens": .int(try checkedInt(input.inputTokens, field: "usage.input_tokens")),
+                "output_tokens": .int(try checkedInt(input.outputTokens, field: "usage.output_tokens")),
+            ]),
+        ])
     }
 
     private func tupleObject(
@@ -479,6 +706,22 @@ struct ReceiptBuilder: Sendable {
             (scalar.value >= 0x30 && scalar.value <= 0x39) ||
                 (scalar.value >= 0x61 && scalar.value <= 0x66)
         }
+    }
+
+    /// `ed25519-sha256:<64 lowercase hex>`.
+    static func isValidReceiptKeyID(_ value: String) -> Bool {
+        let prefix = "ed25519-sha256:"
+        return value.hasPrefix(prefix) && isValidModelHash(String(value.dropFirst(prefix.count)))
+    }
+
+    /// 1..256 bytes of printable ASCII (0x20...0x7e).
+    static func isBoundedPrintableASCII(_ value: String) -> Bool {
+        (1...256).contains(value.utf8.count) && value.utf8.allSatisfy { (0x20...0x7e).contains($0) }
+    }
+
+    /// Canonical unpadded base64url that decodes to exactly `byteCount` bytes.
+    static func isCanonicalBase64URL(_ value: String, byteCount: Int) -> Bool {
+        (try? RelayBlindBase64URL.decode(value, exactCount: byteCount)) != nil
     }
 
     enum Error: Swift.Error, Equatable {

@@ -26,6 +26,9 @@ final class Tier2ProviderSession: @unchecked Sendable {
         let privacyClass: String?
         /// True when `privacy_class` is present and not a string.
         let privacyClassMalformed: Bool
+        /// SPEC-001-R005 `relay_blind_settlement`, raw. Nil only when absent;
+        /// a JSON null is `NSNull` and fails the strict parse.
+        let relayBlindSettlement: Any?
     }
 
     struct LosslessnessProbePayload {
@@ -247,7 +250,8 @@ final class Tier2ProviderSession: @unchecked Sendable {
             bodyEncoding: envelope["body_encoding"] as? String,
             relayBlindContext: envelope["relay_blind_context"] as? [String: Any],
             privacyClass: privacyClass,
-            privacyClassMalformed: privacyClassMalformed
+            privacyClassMalformed: privacyClassMalformed,
+            relayBlindSettlement: envelope[RelayBlindSettlementMetadata.wireKey]
         )
     }
 
@@ -432,6 +436,7 @@ final class Tier2ProviderSession: @unchecked Sendable {
         bodyEncoding: String? = nil,
         relayBlindContext: [String: Any]? = nil,
         privacyClass: String? = nil,
+        relayBlindSettlement: [String: Any]? = nil,
         seq: UInt64 = 0
     ) throws -> [String: Any] {
         let aad = Tier2FrameAAD(
@@ -454,6 +459,7 @@ final class Tier2ProviderSession: @unchecked Sendable {
         if let bodyEncoding { plaintextEnvelope["body_encoding"] = bodyEncoding }
         if let relayBlindContext { plaintextEnvelope["relay_blind_context"] = relayBlindContext }
         if let privacyClass { plaintextEnvelope["privacy_class"] = privacyClass }
+        if let relayBlindSettlement { plaintextEnvelope[RelayBlindSettlementMetadata.wireKey] = relayBlindSettlement }
         let plaintextData = try JSONSerialization.data(withJSONObject: plaintextEnvelope, options: [.sortedKeys])
         let enc = try sealEnvelope(
             plaintextData,

@@ -5587,6 +5587,8 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(caps["in_band_aead_rekey_v1"] as? Bool, true)
         // SPEC-001 v1.9.21: this build holds through catalog_material_missing.
         XCTAssertEqual(caps["catalog_material_hold_v1"] as? Bool, true)
+        // SPEC-001-R005: relay-blind settlement receipt support.
+        XCTAssertEqual(caps["relay_blind_settlement_receipt_v1"] as? Bool, true)
     }
 
     func testInBandAEADRekeyProvesFreshKeysBeforeSameSessionCutover() async throws {

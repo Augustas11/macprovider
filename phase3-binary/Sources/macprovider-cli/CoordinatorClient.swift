@@ -7233,6 +7233,9 @@ actor CoordinatorClient {
                 // SPEC-001 v1.9.21: this build holds its session through
                 // buyer_serving_hold=catalog_material_missing.
                 "catalog_material_hold_v1": true,
+                // SPEC-001-R005: this build signs the SPEC-015 §N.13
+                // relay-blind-settlement-v1 receipt.
+                "relay_blind_settlement_receipt_v1": true,
             ],
         ]
         let resolvedCatalog: [String]
