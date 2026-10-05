@@ -238,6 +238,7 @@ type scenario struct {
 	rateCardVersion        string
 	autotuneCatalogVersion string
 	autotuneCatalogSHA256  string
+	autotunePolicyVersion  string
 	settlementCatalogID    string
 	settlementCatalogKeyID string
 }
@@ -449,6 +450,7 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 		s.rateCardSHA256 = settlementCatalog.rateCardSHA256
 		s.rateCardVersion = settlementCatalog.rateCardVersion
 		s.autotuneCatalogVersion = settlementCatalog.autotuneCatalogVersion
+		s.autotunePolicyVersion = settlementCatalog.autotunePolicyVersion
 		s.autotuneCatalogSHA256 = settlementCatalog.autotuneCatalogSHA256
 		s.settlementCatalogID = settlementCatalog.catalogID
 		s.settlementCatalogKeyID = settlementCatalog.catalogKeyID

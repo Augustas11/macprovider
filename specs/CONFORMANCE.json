@@ -1650,7 +1650,12 @@
       "tests": [
         "phase4-coordinator/internal/ws/relay_blind_settlement_wire_test.go:TestRelayBlindSettlementMetadataWireShape",
         "phase4-coordinator/internal/ws/relay_blind_settlement_wire_test.go:TestAuthRequestParsesRelayBlindSettlementCapability",
-        "phase4-coordinator/internal/ws/relay_blind_settlement_wire_test.go:TestRelayBlindTerminalReceiptsFollowDispatchKind"
+        "phase4-coordinator/internal/ws/relay_blind_settlement_wire_test.go:TestRelayBlindTerminalReceiptsFollowDispatchKind",
+        "phase3-binary/Tests/macprovider-cliTests/InferenceRelayPrivacyTests.swift:testRelayBlindSettlementMetadataRejectedBeforeDecryptAndClaim",
+        "phase3-binary/Tests/macprovider-cliTests/InferenceRelayPrivacyTests.swift:testRelayBlindSettlementReceiptWithheldWithoutPinnedModelHash",
+        "phase3-binary/Tests/macprovider-cliTests/InferenceRelayPrivacyTests.swift:testRelayBlindSettlementReceiptWithheldWithoutValidatedUsage",
+        "phase3-binary/Tests/macprovider-cliTests/InferenceRelayPrivacyTests.swift:testTier2RelayBlindSettlementTravelsInsideProtectedPayload",
+        "test/integration/relay_blind_settlement_integration_test.go:TestRelayBlindEnforceSettlesSwiftReceipts"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-BETA"
@@ -1660,7 +1665,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1851",
-        "rationale": "SPEC-001 v1.9.28 relay-blind settlement wire. The coordinator records tier2_capabilities.relay_blind_settlement_receipt_v1, sends the sixteen-member relay_blind_settlement object (inside the SPEC-008 payload when encrypted), and parses relay_blind_settlement_receipt while ignoring a v0.4 receipt on relay-blind terminals. Pending: the provider side (InferenceRelay.swift metadata acceptance and terminal receipt, CoordinatorClient.swift capability) in a new signed CLI candidate; 1.8.214 rejects settlement metadata on relay-blind dispatch and emits no receipt."
+        "rationale": "SPEC-001 v1.9.28 relay-blind settlement wire. The coordinator records tier2_capabilities.relay_blind_settlement_receipt_v1, sends the sixteen-member relay_blind_settlement object (inside the SPEC-008 payload when encrypted), and parses relay_blind_settlement_receipt while ignoring a v0.4 receipt on relay-blind terminals. The provider side (InferenceRelay.swift metadata acceptance and terminal receipt, withheld before a pinned handle with a model hash and validated usage exists; CoordinatorClient.swift capability) is implemented in the #1851 campaign and exercised end to end over a SPEC-008 session by the integration suite. Pending: a signed CLI candidate carrying it (1.8.214 rejects settlement metadata on relay-blind dispatch and emits no receipt), journey evidence, and three-lane audits."
       }
     },
     {
@@ -6462,7 +6467,9 @@
       ],
       "tests": [
         "phase4-coordinator/internal/billing/relay_blind_settlement_vectors_test.go:TestRelayBlindSettlementSharedVectors",
-        "phase4-coordinator/internal/billing/relay_blind_settlement_verifier_test.go:TestVerifyRelayBlindSettlementReceiptMismatchTable"
+        "phase4-coordinator/internal/billing/relay_blind_settlement_verifier_test.go:TestVerifyRelayBlindSettlementReceiptMismatchTable",
+        "phase3-binary/Tests/macprovider-cliTests/RelayBlindSettlementReceiptTests.swift:testBuilderMatchesEveryPositiveVectorByteForByte",
+        "phase3-binary/Tests/macprovider-cliTests/RelayBlindSettlementReceiptTests.swift:testEveryNegativeVectorIsRejected"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-BETA"
@@ -6472,7 +6479,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1851",
-        "rationale": "SPEC-015 v0.4.12 section N.13 relay-blind-settlement-v1. The Go coordinator parser and verifier pass every vector in test/fixtures/receipts/relay-blind-settlement-v1.json. Pending: the Swift provider builder (phase3-binary ReceiptBuilder.swift) passing the same vectors, signed journey evidence, and three-lane audits."
+        "rationale": "SPEC-015 v0.4.12 section N.13 relay-blind-settlement-v1. The Go coordinator parser and verifier pass every vector in test/fixtures/receipts/relay-blind-settlement-v1.json. The Swift provider builder (phase3-binary ReceiptBuilder.swift) passes the same vectors byte for byte. Pending: a signed CLI candidate, signed journey evidence, and three-lane audits."
       }
     },
     {
@@ -6980,7 +6987,11 @@
         "phase5-gateway/internal/router/relay_blind_settlement_finality_test.go:TestRelayBlindSettledFinalityDebitsOnlyRelayBlindExecutions",
         "phase5-gateway/internal/router/relay_blind_settlement_finality_test.go:TestRelayBlindReconcileFollowsEnforceFinality",
         "phase5-gateway/internal/router/relay_blind_settlement_finality_test.go:TestRelayBlindSettlementDisclosureNeverClaimsVerified",
-        "test/integration/relay_blind_integration_test.go:TestRelayBlindEnforceExcludesProviderWithoutSettlementCapability"
+        "test/integration/relay_blind_integration_test.go:TestRelayBlindEnforceExcludesProviderWithoutSettlementCapability",
+        "phase4-coordinator/internal/buyer/relay_blind_settlement_test.go:TestRelayBlindEnforceSnapshotWithModelAdmissionGuard",
+        "test/integration/relay_blind_settlement_integration_test.go:TestRelayBlindEnforceSettlesSwiftReceipts",
+        "test/integration/relay_blind_settlement_integration_test.go:TestPrivacyClassEnforceSettlesSwiftReceipts",
+        "test/integration/relay_blind_settlement_integration_test.go:TestRelayBlindEnforceExcludesSwiftProviderWithoutCapability"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-BETA"
@@ -6990,7 +7001,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1851",
-        "rationale": "SPEC-022 v0.3.0 R-13 relay-blind settlement lane. Coordinator and gateway halves are implemented: the enforce_settlement_profile guard, shared route-snapshot prerequisites, the relay-blind snapshot and dispatch metadata, the relay-blind-settlement-v1 verifier with both R-7.10 guards, the relay_blind_settled CHECK migration and billing compat floor 3, the R-7.9 payable binding on every money predicate, and relay-blind-only gateway finality with enforce-aware reconcile. Pending: the provider CLI receipt builder and capability (#1851 slice 5), a signed CLI candidate, the JOURNEY-PRIVACY-CLASS-BETA enforce canary, old-CLI exclusion and tampered-receipt steps, plain relay-blind enforce evidence, and three-lane audits."
+        "rationale": "SPEC-022 v0.3.0 R-13 relay-blind settlement lane. Coordinator and gateway halves are implemented: the enforce_settlement_profile guard, shared route-snapshot prerequisites, the relay-blind snapshot and dispatch metadata, the relay-blind-settlement-v1 verifier with both R-7.10 guards, the relay_blind_settled CHECK migration and billing compat floor 3, the R-7.9 payable binding on every money predicate, and relay-blind-only gateway finality with enforce-aware reconcile. The provider CLI receipt builder and capability (#1851 slice 5) are implemented, and the integration suite runs the full enforce round trip against the real Swift InferenceRelay over a SPEC-008 session: plain relay-blind and privacy-class, stream and non-stream, settle as relay_blind_settled with payable credit equal to gateway debit; a tampered receipt is quarantined and refunded; a session without the capability is excluded. Pending: a signed CLI candidate, the JOURNEY-PRIVACY-CLASS-BETA enforce canary, old-CLI exclusion and tampered-receipt steps on hardware, plain relay-blind enforce evidence, and three-lane audits."
       }
     },
     {
@@ -11004,7 +11015,8 @@
       ],
       "tests": [
         "test/integration/privacy_class_integration_test.go:TestPrivacyClassRedactionNoCanaryInAnyArtifact",
-        "test/integration/privacy_class_integration_test.go:TestPrivacyClassAdversarial"
+        "test/integration/privacy_class_integration_test.go:TestPrivacyClassAdversarial",
+        "test/integration/relay_blind_settlement_integration_test.go:TestPrivacyClassEnforceSettlesSwiftReceipts"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-BETA"
@@ -11014,7 +11026,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits #1851 (SPEC-049 0.1.3): the redaction suite must also cover the relay-blind-settlement-v1 receipt and its rows; not yet implemented."
+        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits #1851 (SPEC-049 0.1.3): the redaction suite covers the relay-blind-settlement-v1 receipt rows: TestPrivacyClassEnforceSettlesSwiftReceipts scans the verdict, route-snapshot, journal, and credit rows for the canaries and the SHA-256 of the canary prompt, completion, and decrypted request."
       }
     },
     {

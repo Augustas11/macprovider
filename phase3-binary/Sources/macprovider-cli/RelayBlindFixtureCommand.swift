@@ -38,15 +38,19 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
     @Flag(name: .customLong("privacy-fixture-traced"), help: "Report the privacy fixture as traced so posture advertising stays off.")
     var privacyFixtureTraced: Bool = false
 
-    @Option(name: .customLong("provider-id"), help: "Provider id carried in privacy posture statements.")
+    @Option(name: .customLong("provider-id"), help: "Provider id carried in privacy posture statements and settlement receipts.")
     var privacyProviderID: String = "privacy-fixture-provider"
+
+    @Option(name: .customLong("settlement-model-hash"), help: "64 lowercase hex catalog model hash the fixture handle pins; enables SPEC-001-R005 receipts over a SPEC-008 session.")
+    var settlementModelHash: String?
 
     @Option(name: .customLong("privacy-fixture-completion"), help: "Deterministic completion text for a privacy fixture. Token counts stay 5 and 4.")
     var privacyFixtureCompletion: String?
     #else
-    // Release builds carry no SPEC-049 privacy fixture options or seams.
+    // Release builds carry no SPEC-049 privacy or settlement fixture options or seams.
     private var privacyClass: Bool { false }
     private var privacyFixtureCompletion: String? { nil }
+    private var settlementModelHash: String? { nil }
     #endif
 
     mutating func run() async throws {
@@ -74,6 +78,15 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
         }
         guard privacyProviderIdentifier(privacyProviderID) else {
             throw ValidationError("--provider-id must be 1...128 printable ASCII characters")
+        }
+        if let settlementModelHash {
+            guard !continuousBatchReplay else {
+                throw ValidationError("--settlement-model-hash cannot be combined with --continuous-batch-replay")
+            }
+            guard settlementModelHash.utf8.count == 64,
+                  settlementModelHash.utf8.allSatisfy({ (0x30...0x39).contains($0) || (0x61...0x66).contains($0) }) else {
+                throw ValidationError("--settlement-model-hash must be 64 lowercase hex characters")
+            }
         }
         #endif
 
@@ -121,6 +134,20 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
         let privacyProbe: (any PrivacyPostureProbe)? = nil
         let privacyResponder: PrivacyPostureResponder? = nil
         #endif
+        // SPEC-001-R005 settlement fixture: an in-memory receipt key and a
+        // SPEC-008 key-agreement attempt the harness completes over its
+        // auth_request handshake. Debug/test builds only.
+        var settlementReceiptBuilder: ReceiptBuilder?
+        var settlementReceiptPublicKey: Data?
+        var tier2Attempt: Tier2AuthAttempt?
+        #if MACPROVIDER_TEST_FIXTURES
+        if settlementModelHash != nil {
+            let keyStore = InMemoryReceiptKeyStore()
+            settlementReceiptPublicKey = try keyStore.loadOrGenerate(providerId: privacyProviderID).publicKey.rawRepresentation
+            settlementReceiptBuilder = ReceiptBuilder(keyStore: keyStore)
+            tier2Attempt = Tier2AuthAttempt()
+        }
+        #endif
         let writer = RelayBlindFixtureWriter()
         let status = ProviderStatus(
             modelID: model,
@@ -128,6 +155,9 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
             capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: 1)
         )
         let fixtureRuntime: any ModelRuntimeServing
+        #if MACPROVIDER_TEST_FIXTURES
+        var blindRuntime: RelayBlindFixtureRuntime?
+        #endif
         let replayObserver: RelayReplayFixtureObserver?
         let receiptBuilder: ReceiptBuilder?
         let receiptProviderID: String?
@@ -140,12 +170,26 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
             receiptProviderID = configured.providerID
             modelHash = configured.modelHash
         } else {
-            fixtureRuntime = RelayBlindFixtureRuntime(model: model, streamDelayMs: streamDelayMs, completionText: privacyFixtureCompletion)
+            let runtime = RelayBlindFixtureRuntime(
+                model: model,
+                streamDelayMs: streamDelayMs,
+                completionText: privacyFixtureCompletion,
+                modelHash: settlementModelHash
+            )
+            fixtureRuntime = runtime
+            #if MACPROVIDER_TEST_FIXTURES
+            blindRuntime = runtime
+            #endif
             replayObserver = nil
-            receiptBuilder = nil
+            receiptBuilder = settlementReceiptBuilder
+            #if MACPROVIDER_TEST_FIXTURES
+            receiptProviderID = settlementReceiptBuilder == nil ? nil : privacyProviderID
+            #else
             receiptProviderID = nil
-            modelHash = nil
+            #endif
+            modelHash = settlementModelHash
         }
+        var tier2Session: Tier2ProviderSession?
         func makeRelay() -> InferenceRelay {
             InferenceRelay(
                 modelRuntime: fixtureRuntime,
@@ -153,6 +197,7 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
                 loadedModelID: model,
                 maxActiveRequests: 1,
                 maxBodyBytes: 1_200_000,
+                tier2Session: tier2Session,
                 receiptBuilder: receiptBuilder,
                 receiptProviderID: receiptProviderID,
                 relayBlindRuntime: continuousBatchReplay ? nil : providerRuntime,
@@ -192,6 +237,15 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
             descriptor["replay_store"] = root.appendingPathComponent("continuous-batching-replay", isDirectory: true).path
         }
         #if MACPROVIDER_TEST_FIXTURES
+        if let tier2Attempt, let settlementReceiptPublicKey, let modelHash {
+            descriptor["provider_id"] = privacyProviderID
+            descriptor["model_id"] = model
+            descriptor["model_hash"] = modelHash
+            descriptor["provider_receipt_public_key"] = settlementReceiptPublicKey.base64EncodedString()
+            descriptor["provider_receipt_key_id"] = "ed25519-sha256:"
+                + SHA256.hash(data: settlementReceiptPublicKey).map { String(format: "%02x", $0) }.joined()
+            descriptor["provider_ecdh_public_key"] = tier2Attempt.publicKeyBase64URL
+        }
         if privacyClass, let privacySigner, let privacyCodeCDHash {
             descriptor["provider_id"] = privacyProviderID
             descriptor["se_public_key"] = privacySigner.publicKeyBase64
@@ -231,6 +285,56 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
                         "type": "relay_fixture_assigned_session_ack",
                         "assigned_session": session,
                     ])
+                    continue
+                }
+                if object["type"] as? String == "relay_fixture_tier2_challenge" {
+                    // Completes the SPEC-008 key agreement from the harness's
+                    // auth_challenge, adopts the assigned session, and serves
+                    // every later dispatch through the encrypted leg.
+                    guard let tier2Attempt,
+                          let challenge = object["challenge"] as? [String: Any],
+                          let assigned = challenge["assigned_id"] as? String,
+                          privacyProviderIdentifier(assigned),
+                          let coordinatorPublicKey = challenge["coordinator_ecdh_public_key"] as? String,
+                          let selectedAEAD = challenge["selected_aead_suite"] as? String,
+                          let session = try? Tier2ProviderSession(
+                              attempt: tier2Attempt,
+                              providerID: privacyProviderID,
+                              assignedID: assigned,
+                              coordinatorPublicKeyBase64URL: coordinatorPublicKey,
+                              selectedAEAD: selectedAEAD,
+                              expectedKeyID: challenge["key_id"] as? String
+                          ) else {
+                        try await writer.write([
+                            "type": "relay_blind_fixture_error",
+                            "code": "fixture_input_invalid",
+                        ])
+                        continue
+                    }
+                    assignedSession = assigned
+                    providerRuntime.adoptAssignedSession(assigned)
+                    tier2Session = session
+                    relay = makeRelay()
+                    try await writer.write([
+                        "type": "relay_fixture_tier2_session_ack",
+                        "assigned_session": assigned,
+                    ])
+                    continue
+                }
+                if object["type"] as? String == "relay_fixture_tamper_receipts" {
+                    // Later handles pin a model hash other than the catalog
+                    // hash the session advertised, so each receipt is validly
+                    // signed over a tuple the relay-blind verifier must
+                    // quarantine (SPEC-022 R-13.5 model-hash equality).
+                    guard settlementReceiptBuilder != nil, let blindRuntime else {
+                        try await writer.write([
+                            "type": "relay_blind_fixture_error",
+                            "code": "fixture_input_invalid",
+                        ])
+                        continue
+                    }
+                    await blindRuntime.substituteModelHash(String(repeating: "0", count: 64))
+                    try await writer.write(["type": "relay_fixture_tamper_receipts_ack"])
                     continue
                 }
                 #endif
@@ -520,14 +624,26 @@ actor RelayBlindFixtureRuntime: ModelRuntimeServing {
     private let promptTokens = 5
     private let streamDelayNanoseconds: UInt64
     private let completionText: String
+    /// The catalog model hash the fixture handle pins. Only the debug/test
+    /// settlement fixture sets it; nil keeps the handle hashless, so no
+    /// SPEC-015 §N.13 receipt is signed.
+    private var modelHash: String?
 
-    init(model: String, streamDelayMs: Int, completionText: String? = nil) {
+    init(model: String, streamDelayMs: Int, completionText: String? = nil, modelHash: String? = nil) {
         self.model = model
         self.streamDelayNanoseconds = UInt64(streamDelayMs) * 1_000_000
         self.completionText = completionText ?? "relay-blind fixture response"
+        self.modelHash = modelHash
     }
 
-    var loadedModelHash: String? { nil }
+    var loadedModelHash: String? { modelHash }
+
+    #if MACPROVIDER_TEST_FIXTURES
+    /// Debug/test fixture seam: later handles pin `hash` instead.
+    func substituteModelHash(_ hash: String) {
+        modelHash = hash
+    }
+    #endif
     var loadedModelHashAlgorithm: String? { nil }
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
@@ -536,7 +652,7 @@ actor RelayBlindFixtureRuntime: ModelRuntimeServing {
     func setProviderStatus(_ providerStatus: ProviderStatus) {}
 
     func currentSnapshot() -> RuntimeSnapshot {
-        RuntimeSnapshot(state: .ready, container: nil, modelID: model, modelHash: nil)
+        RuntimeSnapshot(state: .ready, container: nil, modelID: model, modelHash: modelHash)
     }
 
     func relayBlindPrepare(_ request: ChatCompletionRequest) throws -> RelayBlindPreparedRequest {
@@ -559,7 +675,7 @@ actor RelayBlindFixtureRuntime: ModelRuntimeServing {
 
     func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle {
         RequestHandle(
-            snapshot: RuntimeSnapshot(state: .ready, container: nil, modelID: model, modelHash: nil),
+            snapshot: RuntimeSnapshot(state: .ready, container: nil, modelID: model, modelHash: modelHash),
             registrationID: 1,
             drainCancelled: DrainCancelToken()
         )
