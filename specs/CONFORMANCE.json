@@ -6967,7 +6967,7 @@
         "phase4-coordinator/internal/billing/settlement_finality.go:relayBlindSettledFinality",
         "phase5-gateway/internal/router/chat_proxy.go:coordinatorSettlementFinalityForRequest",
         "phase5-gateway/internal/router/relay_blind_success.go:reconcileRelayBlindEnforceFinality",
-        "phase4-coordinator/internal/billing/settlement_finality.go:RelayBlindSettlementCoverage",
+        "phase4-coordinator/internal/billing/settlement_finality.go:func (s *Store) RelayBlindSettlementCoverage",
         "phase4-coordinator/internal/buyer/server.go:handleInternalSettlementFinality",
         "phase5-gateway/internal/router/settlement_reconcile.go:fetchCoordinatorRelayBlindSettlementFinality",
         "phase7-verify/internal/verify/settlement.go:VerifySettlementReceipt"
