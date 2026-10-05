@@ -20,6 +20,7 @@ final class BYOMOfferDryRunTests: XCTestCase {
         let root = try temporaryBYOMOfferDirectory("byom-offer-command")
         let unsafeTarget = "http://192.168.1.10:11434/private-model?api_key=secret"
         let command = try ModelsOfferCommand.parse([
+            "--offline-artifact-feed",
             unsafeTarget,
             "--dry-run",
             "--json",
@@ -160,9 +161,17 @@ final class BYOMOfferDryRunTests: XCTestCase {
         // by runner, so they are asserted deterministically in the tiny-model
         // non-catalog test above, not here. This 8B catalog model is the smallest
         // in the signed catalog, so its fit cannot be guaranteed on CI runners.
-        XCTAssertEqual(document.catalogModelKey, "qwen3-8b")
+        if AutotuneStaticInputs.bakedUsableArtifactFeed() != nil {
+            // While the compiled-in artifact feed is fresh it covers qwen3-8b, so
+            // the key is decided by the artifact leg alone: a bare Ollama tag
+            // (no reported layer digest) mints no catalog identity (§3.7.6).
+            XCTAssertNil(document.catalogModelKey)
+        } else {
+            // No usable feed (past its freshness window): v0.1 name-level match.
+            XCTAssertEqual(document.catalogModelKey, "qwen3-8b")
+            XCTAssertTrue(document.warnings.contains("catalog_match_unverified"))
+        }
         XCTAssertEqual(document.likelyAdmissionStateSource, "local_default")
-        XCTAssertTrue(document.warnings.contains("catalog_match_unverified"))
         // Never settlement-capable in v0.1 regardless of fit / would_submit.
         XCTAssertNotEqual(document.providerGuidance.earningPathClass, "settlement_capable")
         XCTAssertEqual(client.postCount, 0)   // dry-run NEVER submits, regardless of fit

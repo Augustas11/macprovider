@@ -39,15 +39,17 @@ done
 # 'rate-card.json.sig']" and rolled back. Fixed in tree (the fixed script
 # carries these exact lines; phase4-coordinator/dist/test/
 # deploy_canary_byte_proof_names.test.sh): applied only to a tree that still
-# has the bug (the pre-#1693 base). E2E_NO_CANARY_WORKAROUND=1 never applies it.
+# has the bug (the pre-#1693 base). #1816 removed the installed-byte comparator
+# (deploy_canary_live_catalog_proof.test.sh), so a current tree is a no-op.
+# E2E_NO_CANARY_WORKAROUND=1 never applies it.
 if [ "${E2E_NO_CANARY_WORKAROUND:-0}" != 1 ]; then
   python3 - phase4-coordinator/dist/deploy-pearl-vps.sh <<'PY'
 import sys
 p = sys.argv[1]; s = open(p).read()
 old = '  "$STATIC_DEMAND_SIG" \\\n  "$AUTOTUNE_TIER2_JSON" <<\'PY\'\n'
 new = '  "$STATIC_DEMAND_SIG" \\\n  "$STATIC_RATE_CARD_JSON" \\\n  "$STATIC_RATE_CARD_SIG" \\\n  "$AUTOTUNE_TIER2_JSON" <<\'PY\'\n'
-if s.count(new) == 1:
-    raise SystemExit(0)  # fixed in tree
+if s.count(new) == 1 or s.count(old) == 0:
+    raise SystemExit(0)  # fixed in tree, or the installed-byte comparator is gone (#1816)
 assert s.count(old) == 1, "canary comparator block not found exactly once"
 open(p, "w").write(s.replace(old, new))
 PY

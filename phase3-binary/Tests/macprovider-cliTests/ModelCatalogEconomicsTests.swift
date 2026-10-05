@@ -941,6 +941,56 @@ final class ModelCatalogEconomicsTests: XCTestCase {
     private static let catalogModelKey = "openai/gpt-oss-20b"
     private static let servedModelRef = "ollama:gpt-oss:20b"
 
+    /// #1816 SPEC-047-R011: a pool-manifest binding has no catalog identity
+    /// by design, so it is not reported as a missing one, and its pool price
+    /// never becomes a global catalog rate.
+    func testPoolScopedBindingIsNotAMissingCatalogIdentityAndGetsNoGlobalEconomics() throws {
+        let inputs = try Self.staticInputs()
+        let candidate = Self.candidate(runtimeSource: "llamacpp_loopback", servedModelRef: "llamacpp:my-model", catalogModelKey: nil)
+        let status = BYOMAdmissionStatusWire(
+            schema: "model_admission_status.v1",
+            generatedAt: "2027-01-15T08:00:00Z",
+            cliVersion: "test",
+            providerID: "provider-byom-a",
+            candidateID: Self.candidateID,
+            servedModelRef: "llamacpp:my-model",
+            catalogModelKey: nil,
+            admissionState: "catalog_priced",
+            admissionStateSource: "coordinator",
+            coordinatorEventID: "event-test",
+            stateObservedAt: "2027-01-15T08:00:00Z",
+            providerGuidance: BYOMDiscoveryWire.Guidance(
+                stateLabelKey: "byom.admission.catalog_priced",
+                stateMeaningKey: "byom.admission.not_earning",
+                nextAction: "withdraw",
+                transitionReasonCode: nil,
+                earningPathClass: "pool_attested_earning"
+            ),
+            allowedNextStates: [],
+            warnings: [],
+            poolBinding: try JSONDecoder().decode(
+                BYOMAdmissionStatusWire.PoolBinding.self,
+                from: JSONSerialization.data(withJSONObject: PoolScopedAdmissionTests.poolBindingObject())
+            )
+        )
+        let projection = ModelCatalogEconomicsBuilder.makeProjection(
+            generatedAt: inputs.rateCard.value.generatedAt.addingTimeInterval(60),
+            currentModelID: nil,
+            discovery: Self.discovery(candidate: candidate),
+            admissionStatuses: [Self.candidateID: status],
+            demand: inputs.demand,
+            candidateCatalog: inputs.candidateCatalog,
+            rateCard: inputs.rateCard
+        )
+        let row = try XCTUnwrap(projection.rows.first { $0.actionModelID == Self.candidateID })
+        XCTAssertFalse(row.warningCodes.contains("admission_state_missing"))
+        XCTAssertFalse(row.admission.catalogEconomicsPermitted)
+        XCTAssertFalse(row.admission.settlementCapable)
+        XCTAssertNil(row.providerCompletionPayoutUSDPerMillionTokens)
+        XCTAssertEqual(row.providerGuidance.earningPathClass, "pool_attested_earning")
+        XCTAssertEqual(row.disabledReason, "admission_state_not_settlement_capable")
+    }
+
     private static func sha256Hex(_ data: Data) -> String {
         let digest = SHA256.hash(data: data)
         return digest.map { String(format: "%02x", $0) }.joined()

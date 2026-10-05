@@ -314,14 +314,15 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         // v0.1 feeds, so its warnings reach the same warning sets.
         let inputs = AutotuneStaticInputs(
             fetch: { _ in throw URLError(.cannotConnectToHost) },
-            now: { Self.date("2026-07-11T00:00:00Z") }
+            now: { Self.date("2026-10-02T00:00:00Z") }
         )
         let loaded = await inputs.loadRecommendationInputs()
         XCTAssertTrue(loaded.demand.usedFallback)
-        // The committed snapshot is rate-card-bound: no feed, no warnings, v0.1 exactly.
-        XCTAssertNil(loaded.artifactFeed.value)
-        XCTAssertTrue(loaded.artifactFeed.warnings.isEmpty)
-        XCTAssertFalse(loaded.artifactFeed.usedFallback)
+        // The committed snapshot is the artifact-feed activation release: offline,
+        // the compiled-in feed is selected beside the other compiled-in feeds.
+        XCTAssertNotNil(loaded.artifactFeed.value)
+        XCTAssertTrue(loaded.artifactFeed.usedFallback)
+        XCTAssertTrue(loaded.artifactFeed.warnings.contains(.catalogArtifactFeedFallbackUsed))
     }
 
     func testArtifactFeedWarningsAreNeverBlocking() {
@@ -726,12 +727,18 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         XCTAssertEqual(ArtifactFeed.rawGeneratedAt(in: fixture.candidateBytes), "2026-07-10T00:00:00Z")
     }
 
-    func testCommittedSnapshotBakesNoArtifactFeedUntilActivation() {
-        // The committed release is rate-card-bound: the compiled-in feed is nil and
-        // the compiled-in matcher behaves exactly as v0.1.
-        XCTAssertNil(AutotuneStaticInputs.bakedArtifactFeedBase64)
-        XCTAssertNil(AutotuneStaticInputs.bakedArtifactFeedBytes)
-        XCTAssertNil(AutotuneStaticInputs.bakedArtifactFeedSignerKeyID)
-        XCTAssertNil(AutotuneStaticInputs.bakedUsableArtifactFeed())
+    func testCommittedSnapshotBakesTheActivationArtifactFeed() throws {
+        // The committed release is the artifact-feed activation release: the
+        // compiled-in feed is bound to the compiled-in candidate catalog and
+        // signed by the same key, and it carries the #1754 GGUF secondary.
+        let bytes = try XCTUnwrap(AutotuneStaticInputs.bakedArtifactFeedBytes)
+        XCTAssertEqual(AutotuneStaticInputs.bakedArtifactFeedSignerKeyID, AutotuneStaticInputs.bakedCatalogSignerKeyID)
+        let feed = try AutotuneStaticInputs.decodeArtifactFeed(bytes)
+        XCTAssertEqual(feed.generatedAtRaw, ArtifactFeed.rawGeneratedAt(in: Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)))
+        let usable = try XCTUnwrap(AutotuneStaticInputs.bakedUsableArtifactFeed(now: feed.generatedAt.addingTimeInterval(3_600)))
+        XCTAssertEqual(usable.feed.version, feed.version)
+        XCTAssertTrue(String(decoding: bytes, as: UTF8.self).contains("\"gguf-q4-k-m\""))
+        // Past the §3.7.6 freshness window the offline feed is no longer usable.
+        XCTAssertNil(AutotuneStaticInputs.bakedUsableArtifactFeed(now: feed.generatedAt.addingTimeInterval(15 * 86_400)))
     }
 }

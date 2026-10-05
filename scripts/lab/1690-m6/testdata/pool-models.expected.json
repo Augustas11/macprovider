@@ -1,0 +1,29 @@
+{
+  "model_entries": [
+    {
+      "pool_model_id": "pool/AbCdEfGhIjKlMnOpQrStUv/qwen25-05b-q8",
+      "artifact_hash_algorithm": "macprovider.gguf-file.v1",
+      "artifact_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "allowed_runtime_sources": [
+        "llamacpp_loopback"
+      ],
+      "license": "Apache-2.0",
+      "paid_serving_attested": true,
+      "pricing": {
+        "prompt_rate_per_mtok": 20000,
+        "prompt_cache_hit_rate_per_mtok": 5000,
+        "completion_rate_per_mtok": 40000
+      },
+      "disclosure_class": "pool_attested_unverified",
+      "max_context_tokens": 16384
+    }
+  ],
+  "attested_members": [
+    {
+      "provider_account_id": "acct-lab-1690-member",
+      "runtime_classes": [
+        "llamacpp_loopback"
+      ]
+    }
+  ]
+}

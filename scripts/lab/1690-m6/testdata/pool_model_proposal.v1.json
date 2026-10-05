@@ -1,0 +1,27 @@
+{
+  "schema": "pool_model_proposal.v1",
+  "generated_at": "2026-10-01T00:00:00Z",
+  "cli_version": "1.8.208",
+  "pool_id": "AbCdEfGhIjKlMnOpQrStUv",
+  "provider_id": "lab-1690-m6-provider",
+  "candidate_id": "byom_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "served_model_ref": "llamacpp:qwen2.5-0.5b-instruct-q8_0",
+  "runtime_source": "llamacpp_loopback",
+  "display_name": "qwen2.5-0.5b-instruct-q8_0",
+  "catalog_model_key": null,
+  "model_entry": {
+    "pool_model_id": "pool/AbCdEfGhIjKlMnOpQrStUv/qwen25-05b-q8",
+    "artifact_hash_algorithm": "macprovider.gguf-file.v1",
+    "artifact_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "allowed_runtime_sources": ["llamacpp_loopback"],
+    "license": null,
+    "paid_serving_attested": null,
+    "pricing": null,
+    "disclosure_class": "pool_attested_unverified",
+    "max_context_tokens": 16384
+  },
+  "creator_requirements": ["license_spdx_or_licenseref_required", "paid_serving_attested_must_be_true", "pricing_required_within_pool_model_bounds", "runtime_source_in_runtime_allowlist"],
+  "evidence": {"evaluation_digest_sha256": null, "known_answer_probe_evidence_sha256": null},
+  "offer_status": null,
+  "warnings": []
+}

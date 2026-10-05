@@ -31,6 +31,7 @@ STATIC_FILES = (
     "autotune-candidates.json", "autotune-candidates.json.sig",
     "rate-card.json", "rate-card.json.sig",
     "continuous-batching-policy.json", "continuous-batching-policy.json.sig",
+    "autotune-artifacts.json", "autotune-artifacts.json.sig",
 )
 
 
@@ -64,6 +65,16 @@ def restamp(directory: Path, release_id: str, generated_at: str) -> None:
             candidate_catalog_sha256=candidate_sha,
         ),
     )
+    if (directory / "autotune-artifacts.json").exists():
+        edit_json(
+            directory / "autotune-artifacts.json",
+            lambda o: o.update(
+                version=release_id,
+                release_id=release_id,
+                generated_at=generated_at,
+                candidate_catalog_sha256=candidate_sha,
+            ),
+        )
 
     def manifest(o: dict) -> None:
         o["release_id"] = release_id
@@ -73,7 +84,10 @@ def restamp(directory: Path, release_id: str, generated_at: str) -> None:
             "demand-rank.json",
             "rate-card.json",
             "continuous-batching-policy.json",
+            "autotune-artifacts.json",
         ):
+            if name not in o["feeds"]:
+                continue
             raw = (directory / name).read_bytes()
             o["feeds"][name].update(sha256=cr.sha256(raw), bytes=len(raw))
             if name != "rate-card.json":

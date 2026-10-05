@@ -444,7 +444,7 @@ if _parse_model_hash_legacy_until '2030-01-02T03:04:05Z trailing' >/dev/null 2>&
 fi
 
 grep -q 'CATALOG_CANARY_SSH_TARGET is required' "$DEPLOY_SH" ||
-  fail "deploy must require a trusted canary host for exact installed-byte verification"
+  fail "deploy must require a trusted canary host for the live-process catalog proof"
 
 grep -q 'StrictHostKeyChecking=yes' "$DEPLOY_SH" ||
   fail "trusted canary verification must check the SSH host key"
@@ -486,33 +486,6 @@ grep -q 'value.get("catalog_evidence_source") != "provider_reported"' "$DEPLOY_S
 grep -q 'value.get("catalog_admission_mode") != "current"' "$DEPLOY_SH" ||
   fail "deploy canary must reject legacy and previous catalog admissions"
 
-# The Mac proof hashes every name in its `names` tuple, and the exact-byte
-# check compares that dict to the basenames of its expected argv files, so
-# the two sets must be equal. Before this check the rate card and its sidecar
-# were proven but never expected, so no canary could pass.
-python3 - "$DEPLOY_SH" <<'PY' || fail "deploy canary expected-byte set must equal the file set the Mac proof hashes"
-import re, sys
-text = open(sys.argv[1], encoding="utf-8").read()
-names_block = re.search(r'\n    names = \(\n(.*?)\n    \)\n', text, re.S)
-if names_block is None:
-    raise SystemExit("canary proof names tuple not found")
-proven = set(re.findall(r'"([^"]+)"', names_block.group(1)))
-check = re.search(r'  "\$CATALOG_CANARY_PROVIDER_ID" \\\n((?:  "\$[A-Z0-9_]+" \\\n)*)  "\$([A-Z0-9_]+)" <<\'PY\'\nimport hashlib, json, pathlib, re, sys\n\nproof = json.loads', text)
-if check is None:
-    raise SystemExit("canary exact-byte check argv not found")
-variables = re.findall(r'"\$([A-Z0-9_]+)"', check.group(1)) + [check.group(2)]
-basenames = set()
-for variable in variables:
-    assignment = re.search(r'(?m)^' + variable + r'="[^"\n]*/([^/"\n]+)"$', text)
-    if assignment is None:
-        raise SystemExit(f"no path assignment for {variable}")
-    basenames.add(assignment.group(1))
-if basenames != proven:
-    raise SystemExit(f"proven={sorted(proven)} expected={sorted(basenames)}")
-if "tier2-catalog.json" not in basenames or "rate-card.json.sig" not in basenames:
-    raise SystemExit("expected set must include the Tier-2 catalog and the signed rate card")
-PY
-
 grep -q 'value.get("catalog_candidate_sha256") != sys.argv\[6\]' "$DEPLOY_SH" ||
   fail "deploy canary must match the active candidate catalog digest"
 
@@ -522,13 +495,15 @@ grep -q 'read -r CANARY_ASSIGNED_ID CANARY_CATALOG_ROW_IDENTITY' "$DEPLOY_SH" &&
   grep -q 'canary local catalog proof is not bound to the coordinator-admitted envelope' "$DEPLOY_SH" ||
   fail "deploy canary must cross-bind exact policy and row between coordinator and Mac proof"
 
-grep -q 'canary catalog byte mismatch' "$DEPLOY_SH" ||
-  fail "deploy must compare exact installed canary catalog bytes before commit"
+! grep -q 'canary catalog byte mismatch' "$DEPLOY_SH" &&
+  grep -q 'local_catalog.get("source") != "coordinator"' "$DEPLOY_SH" &&
+  grep -q 'local_catalog.get("state") != "live_verified"' "$DEPLOY_SH" ||
+  fail "deploy must prove the live process loaded the coordinator's signed catalog, not compare installed CLI catalog bytes"
 
 grep -q 'canary provider identity mismatch' "$DEPLOY_SH" &&
   grep -q 'live canary provider text vnode is stale or not the verified installation binary' "$DEPLOY_SH" &&
   grep -q 'live canary provider status does not match the expected identity and catalog' "$DEPLOY_SH" ||
-  fail "exact-byte proof must bind the named provider, live process, and local catalog status"
+  fail "canary proof must bind the named provider, live process, and local catalog status"
 
 grep -q 'O_NOFOLLOW' "$DEPLOY_SH" && grep -q 'dir_fd=' "$DEPLOY_SH" ||
   fail "trusted canary files must be opened no-follow through directory file descriptors"
@@ -583,5 +558,35 @@ grep -q 'set -euo pipefail' "$CATALOG_RUNBOOK" &&
   grep -q 'legacy_bridge is not zero' "$CATALOG_RUNBOOK" &&
   grep -q 'test "$(wc -l <"$EVIDENCE")" -ge 31' "$CATALOG_RUNBOOK" ||
   fail "catalog runbook must provide fail-fast continuous zero-bridge evidence"
+
+# SPEC-023 §3.7.8: the effective artifact-feed config pair must follow the
+# release binding before any upload.
+grep -q '^  assert_artifact_feed_config_matches_release$' "$DEPLOY_SH" ||
+  fail "deploy must check the artifact-feed config pair against the release binding"
+artifact_guard_dir="$(mktemp -d)"
+trap 'rm -f "$token_validator_tmp" "$token_loader_tmp" "$canary_operator_guard_tmp" "$deadline_alarm_tmp" "$deadline_parser_tmp"; rm -rf "$token_file_dir" "$security_mock_dir" "$artifact_guard_dir"' EXIT
+{
+  sed -n '/^yaml_file_block_value() {$/,/^}$/p' "$DEPLOY_SH"
+  sed -n '/^assert_artifact_feed_config_matches_release() {$/,/^}$/p' "$DEPLOY_SH"
+} >"$artifact_guard_dir/guard.sh"
+cat >"$artifact_guard_dir/bound.yaml" <<'YAML'
+autotune:
+  enforce_provider_admission: true
+  catalog_artifacts_path: "/opt/macprovider/autotune/current/autotune-artifacts.json"
+  catalog_artifacts_sig_path: "/opt/macprovider/autotune/current/autotune-artifacts.json.sig"
+tier2:
+  catalog_path: /opt/macprovider/autotune/current/tier2-catalog.json
+YAML
+grep -v catalog_artifacts "$artifact_guard_dir/bound.yaml" >"$artifact_guard_dir/unbound.yaml"
+artifact_guard() { # <bound|unbound> <config>
+  (AUTOTUNE_ARTIFACT_BOUND="$1" DEPLOY_CONFIG="$2"
+    # shellcheck disable=SC1091
+    . "$artifact_guard_dir/guard.sh"
+    assert_artifact_feed_config_matches_release) >/dev/null 2>&1
+}
+artifact_guard bound "$artifact_guard_dir/bound.yaml" || fail "bound release with the pair must pass"
+artifact_guard unbound "$artifact_guard_dir/unbound.yaml" || fail "unbound release without the pair must pass"
+! artifact_guard bound "$artifact_guard_dir/unbound.yaml" || fail "bound release without the pair must abort"
+! artifact_guard unbound "$artifact_guard_dir/bound.yaml" || fail "unbound release with the pair must abort"
 
 echo "PASS: deploy autotune feed access guards present"

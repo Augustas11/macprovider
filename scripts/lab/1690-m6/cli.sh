@@ -11,7 +11,8 @@ export MACPROVIDER_LIFECYCLE_ROOT="$LAB/home/lifecycle"
 export MACPROVIDER_CTL_SOCKET_PATH="$LAB/tmp/ctl.sock"
 export MACPROVIDER_SWITCH_STATE_PATH="$LAB/tmp/last-switch.ts"
 export MACPROVIDER_WATCHDOG_STATE_DIR="$LAB/home/watchdog"
-export MACPROVIDER_LLAMACPP_MODEL_PATH="$LAB/models/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+# LAB_LLAMACPP_MODEL_PATH overrides the served GGUF (e.g. the Q8_0 #1816 pool entry).
+export MACPROVIDER_LLAMACPP_MODEL_PATH="${LAB_LLAMACPP_MODEL_PATH:-$LAB/models/qwen2.5-0.5b-instruct-q4_k_m.gguf}"
 if [[ -n "${LAB_MODEL_ARTIFACT_ROOT:-}" ]]; then
   export MACPROVIDER_MODEL_ARTIFACT_ROOT="$LAB_MODEL_ARTIFACT_ROOT"
 fi

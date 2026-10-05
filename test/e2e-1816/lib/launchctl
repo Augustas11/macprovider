@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# e2e-1816 launchctl stand-in for the catalog canary user in the VM (from
+# test/e2e-pricing/canary-bin/launchctl). Only the caller's
+# ~/Library/LaunchAgents/live.malibu.provider.plist job exists: a plain
+# background process started from the plist's ProgramArguments. The REAL
+# ops/pearl-updater/catalog-canary-proof.py calls `launchctl print` to find
+# its PID and then checks that PID's text vnode and status port with lsof.
+set -euo pipefail
+D="$HOME/.e2e"; mkdir -p "$D"
+PIDF="$D/canary.pid"; LOG="$D/canary.log"
+PLIST="$HOME/Library/LaunchAgents/live.malibu.provider.plist"
+running() { [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; }
+start() {
+  running && return 0
+  # shellcheck disable=SC2046
+  set -- $(python3 -c 'import plistlib,sys; print(" ".join(plistlib.load(open(sys.argv[1],"rb"))["ProgramArguments"]))' "$PLIST")
+  nohup perl -e 'use POSIX (); POSIX::setsid(); POSIX::close($_) for 3..1023; exec @ARGV or die $!' "$@" >>"$LOG" 2>&1 </dev/null &
+  echo $! >"$PIDF"
+}
+stop() {
+  running || return 0
+  kill "$(cat "$PIDF")" 2>/dev/null || true
+  for _ in $(seq 1 50); do running || break; sleep 0.1; done
+  running && kill -9 "$(cat "$PIDF")" 2>/dev/null || true
+  rm -f "$PIDF"
+}
+case "${1:-}" in
+  print)
+    running || { echo "Could not find service \"live.malibu.provider\" in domain" >&2; exit 113; }
+    printf '%s = {\n\tstate = running\n\tpid = %s\n}\n' "${2:-gui/0/live.malibu.provider}" "$(cat "$PIDF")" ;;
+  kickstart) stop; start ;;
+  bootstrap) start ;;
+  bootout|stop) stop ;;
+  *) echo "launchctl (e2e canary stand-in): unsupported: $*" >&2; exit 64 ;;
+esac

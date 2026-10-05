@@ -30,6 +30,9 @@ const (
 	// policyCoreTagV2 prefixes the SPEC-042-R001 v2 preimage (0.0.32, #1690):
 	// the v1 field list, then runtime_allowlist, then extensions.
 	policyCoreTagV2 = "macprovider/spec042/policy-core/v2"
+	// policyTermsTag prefixes the SPEC-043-R006 policy-terms preimage, the
+	// rotation-invariant digest a provider delegation grant binds to.
+	policyTermsTag = "macprovider/spec043/policy-terms/v1"
 )
 
 // Policy-core encodings (SPEC-042-R001). The zero value is v1, so every core
@@ -122,8 +125,9 @@ type PolicyCore struct {
 	// RuntimeAllowlist is the signed set of external runtime_source values a
 	// v2 core authorizes to serve the pool. Empty means native MLX only.
 	RuntimeAllowlist []string
-	// Extensions is the reserved, versioned v2 extension field. No
-	// extension_id is implemented yet, so an accepted core carries none.
+	// Extensions is the reserved, versioned v2 extension field. The only
+	// implemented ids are pool_model_entries/v1 and pool_attested_members/v1
+	// (SPEC-042-R015/R016); every other id is rejected at acceptance.
 	Extensions []PolicyExtension
 }
 
@@ -265,7 +269,9 @@ func (pc PolicyCore) validateV2Grammar() error {
 // ValidateAcceptance applies the SPEC-042-R001 0.0.32 acceptance rules on top
 // of the grammar: the runtime_allowlist vocabulary is closed, a non-empty
 // allowlist requires settlement mode enforce, and a coordinator rejects every
-// extension_id it does not implement (0.0.32 implements none). Signature
+// extension_id it does not implement. The implemented ids are the SPEC-042
+// R015/R016 pool_model_entries/v1 and pool_attested_members/v1 (#1816), whose
+// bodies must be canonical and pass their closed rules. Signature
 // verification runs it, so no core that fails it is ever accepted or replayed.
 func (pc PolicyCore) ValidateAcceptance() error {
 	if _, err := pc.CanonicalBytes(); err != nil {
@@ -282,14 +288,43 @@ func (pc PolicyCore) ValidateAcceptance() error {
 	if len(pc.RuntimeAllowlist) > 0 && pc.SettlementMode != "enforce" {
 		return errRuntimeAllowlistObserve
 	}
-	if len(pc.Extensions) > 0 {
-		return errExtensionUnknown
+	for _, ext := range pc.Extensions {
+		if ext.ID != ExtensionPoolModelEntriesV1 && ext.ID != ExtensionPoolAttestedMembersV1 {
+			return errExtensionUnknown
+		}
 	}
-	return nil
+	return pc.validatePoolExtensions()
 }
 
 // CanonicalBytes returns the SPEC-042-R001 versioned policy-core preimage.
-func (pc PolicyCore) CanonicalBytes() ([]byte, error) {
+func (pc PolicyCore) CanonicalBytes() ([]byte, error) { return pc.encode(false) }
+
+// PolicyTermsBytes returns the SPEC-043-R006 policy-terms preimage: the
+// policy-terms domain tag, the length-prefixed policy-core domain tag of the
+// core's encoding, then the policy-core field list in its order with exactly
+// manifest_version, prev_manifest_core_hash, not_before_unix, and
+// expires_at_unix left out. Every other byte of the core, including every
+// predicate, the signer_set_version, the runtime_allowlist, and each extension
+// body, stays in, so only a window/version/chain rotation keeps the digest.
+func (pc PolicyCore) PolicyTermsBytes() ([]byte, error) { return pc.encode(true) }
+
+// PolicyTermsDigest returns SHA256(PolicyTermsBytes) — the digest a
+// ProviderPoolDelegationV1 grant binds to (SPEC-043-R006), 32 bytes. It is
+// never equal to a manifest_core_digest because the preimages carry
+// different domain tags.
+func (pc PolicyCore) PolicyTermsDigest() ([]byte, error) {
+	b, err := pc.PolicyTermsBytes()
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(b)
+	return sum[:], nil
+}
+
+// encode emits the policy-core preimage, or with terms the policy-terms
+// preimage. Both validate the full core, so a core without a canonical
+// preimage has no terms digest either.
+func (pc PolicyCore) encode(terms bool) ([]byte, error) {
 	if len(pc.PrevManifestCoreHash) != manifestCoreHashLen {
 		return nil, errPrevHashLen
 	}
@@ -312,10 +347,17 @@ func (pc PolicyCore) CanonicalBytes() ([]byte, error) {
 		return nil, errPolicyEncoding
 	}
 	e := &encoder{}
-	e.tag(tag)
+	if terms {
+		e.tag(policyTermsTag)
+		e.str(tag)
+	} else {
+		e.tag(tag)
+	}
 	e.str(pc.PoolID)
-	e.u64(pc.ManifestVersion)
-	e.bytesf(pc.PrevManifestCoreHash)
+	if !terms {
+		e.u64(pc.ManifestVersion)
+		e.bytesf(pc.PrevManifestCoreHash)
+	}
 	e.u64(pc.SignerSetVersion)
 	// list(model_allowlist): count then each element length-prefixed, set-ordered.
 	if uint64(len(allow)) > uint64(^uint32(0)) {
@@ -342,8 +384,10 @@ func (pc PolicyCore) CanonicalBytes() ([]byte, error) {
 	e.str(pc.MetadataVisible)
 	e.str(pc.DowngradePolicy)
 	e.boolean(pc.StickyRoutingAllowed)
-	e.u64(pc.NotBeforeUnix)
-	e.u64(pc.ExpiresAtUnix)
+	if !terms {
+		e.u64(pc.NotBeforeUnix)
+		e.u64(pc.ExpiresAtUnix)
+	}
 	if pc.IsV2() {
 		// runtime_allowlist then extensions, in this order (SPEC-042-R001).
 		e.u32count(len(pc.RuntimeAllowlist))

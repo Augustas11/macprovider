@@ -1459,6 +1459,15 @@ struct ModelCatalogEconomicsBuilder {
         else {
             return false
         }
+        // SPEC-047-R011 (#1816): a pool-manifest binding is never a catalog
+        // identity, so its absent catalog key is not a missing one. It still
+        // gets no catalog economics: the pool price is valid only on that
+        // pool's routes, never as a global rate.
+        if status.isPoolScoped,
+           status.candidateID == candidate.candidateID,
+           status.servedModelRef == candidate.servedModelRef {
+            return false
+        }
         return coordinatorBoundCatalogModelKey(candidate: candidate, status: status) == nil
     }
 

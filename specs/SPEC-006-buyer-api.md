@@ -1,7 +1,10 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.42 (2026-09-30, 32k default per-request output cap)
+**Version:** 0.9.43 (2026-10-01, pool-attested model buyer surface)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.43 (2026-10-01 — pool-attested models, #1816):**
+- Registers `SPEC-006-R018` (§5.4.3): the buyer API surface for SPEC-042-R015 pool models. The default `/v1/models` never lists them; an authenticated pool-selected view lists only that pool's entries with a closed `macprovider_pool_model` object (pool-attested, not network-verified; engine set; exact artifact pair; creator-signed price; manifest provenance). Responses served for a pool model carry closed `X-MacProvider-Model-Disclosure` and `X-MacProvider-Pool-Manifest-Core-Digest` headers. Moved here from the SPEC-043-R014 draft; SPEC-043 keeps the creator and launch disclosure promise.
 
 **Change log v0.9.42 (2026-09-30 — per-request output cap default):**
 - `limits.max_tokens_per_request` default raises from 4096 to 32768. The cap bounds generated
@@ -326,7 +329,7 @@ not enforce it, so the money-path gate is not complete until all three are live.
 
 ## Preliminary conformance unit IDs
 
-SPEC-006 v0.9.40 registers `SPEC-006-R001`..`SPEC-006-R017` in
+SPEC-006 v0.9.43 registers `SPEC-006-R001`..`SPEC-006-R018` in
 `specs/CONFORMANCE.json`. R001–R003 remain the paid-path chat, error, and
 quota units. R004–R009 group additional existing obligation areas without
 changing them:
@@ -370,8 +373,12 @@ changing them:
 - `SPEC-006-R017` — Buyer usage exposes an authenticated auto-prefix cache hit
   in both the OpenAI nested field and the billing-aligned flat field (§5.4,
   v0.9.39; SPEC-024-R003).
+- `SPEC-006-R018` — Pool-attested model buyer surface: pool-scoped
+  `/v1/models` view, creator-signed price disclosure, and response disclosure
+  headers for SPEC-042-R015 entries (§5.4.3, v0.9.43; SPEC-005-R015,
+  SPEC-043-R014).
 
-`requirement_id_migration` is `complete`. R004–R017 are not promoted from
+`requirement_id_migration` is `complete`. R004–R018 are not promoted from
 this close. Signed journey-result evidence is still required before any of
 those rows can become conformant.
 
@@ -1935,6 +1942,18 @@ Disclosure:
 - The header discloses the declared, coordinator-recorded runtime identity. It is not an attestation of the executing process (SPEC-042-R004 administrative trust).
 
 Engines differ. Buyer docs MUST say that engines differ in throughput, time to first token, and quantization quality, and that the per-engine numbers come from the #1690 M0 benchmark harness (`docs/runbooks/runtime-agnostic-m0-benchmark-evidence-2026-09-24.md`). Pricing is unchanged by this version: a request is priced by its model row (SPEC-005), whatever the engine.
+
+#### 5.4.3 Pool-attested models (v0.9.43, SPEC-006-R018, #1816)
+
+A SPEC-042-R015 pool model is a model a Trusted Pool creator signed into one pool's policy. It is reachable only through the authenticated pool selection of SPEC-042-R002/R010, resolved before quota reservation exactly as for any pool route. Without an authorized selection of that pool, the gateway and coordinator treat a `pool/...` model id exactly as an unknown model: a global route, another pool's route, and an unauthorized pool all get the response they would get for a model that does not exist, so no pool's model set leaks.
+
+1. **Default `/v1/models`.** The default response (§5.3), the tier-1 disclosure (§5.3.1), and `GET /v1/openrouter/models` (§5.3.2) MUST NOT contain a pool model.
+2. **Pool view.** An authenticated `GET /v1/models` request carrying an authorized pool selection lists that pool's current entries and nothing from any other pool. Each pool model is a model object with `id` equal to its `pool_model_id`, `object: "model"`, and a closed `macprovider_pool_model` object with exactly: `pool_id`; `pool_model_id`; `disclosure_class` (`"pool_attested_unverified"`); `disclosure_text` (`"Pool-attested, not network-verified"` or a localization with the same meaning); `runtime_sources` (the entry's `allowed_runtime_sources`); `artifact_hash_algorithm`; `artifact_hash`; `max_context_tokens`; `price` (exactly `prompt_rate_per_mtok`, `prompt_cache_hit_rate_per_mtok`, `completion_rate_per_mtok`, and the `default` row's `global_multiplier_ppm`, the values a new reservation would use under SPEC-005-R015); `price_source` (`"pool_creator_signed"`); `manifest_version`; and `manifest_core_digest`. The object MUST NOT alias a SPEC-010 canonical id, carry a catalog-verified hash status, or imply global availability. An entry whose bindings are all ineligible is still listed, without `is_ready`-style availability claims.
+3. **Chat requests.** A chat request on that pool's authorized route naming a `pool_model_id` is priced under SPEC-005-R015 and routed under SPEC-042-R004/R005. When no member is eligible the existing `pool_no_eligible_member` applies; there is no spill to a catalog model or to global.
+4. **Response disclosure.** Every coordinator response served for a pool model carries `X-MacProvider-Model-Disclosure: pool_attested_unverified` and `X-MacProvider-Pool-Manifest-Core-Digest` set to the route snapshot's 64-lowercase-hex `manifest_core_digest`, next to the existing `X-MacProvider-Engine` (§5.4.2). The gateway forwards each only when it is byte-exactly that literal or 64 lowercase hex respectively, and drops any other value. A response for any other model never carries either header.
+5. **Copy.** Buyer docs MUST say that a pool model's identity and price are signed by the pool creator, that the artifact hash names the bytes the provider's CLI hashed and not proof that the serving process loaded them, and that the network does not verify the model (SPEC-042-R004 administrative trust).
+
+Promotion requires tests for: the default lists and the OpenRouter document excluding pool models; the pool view listing only the selected pool's entries with the exact closed object; an unauthorized, other-pool, or global request for a `pool/...` id answering as an unknown model; both disclosure headers on a pool-model response, their absence elsewhere, and the gateway dropping malformed values; and the price fields equalling the SPEC-005-R015 reservation inputs.
 
 ### 5.5 `GET /v1/usage`
 

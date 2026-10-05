@@ -120,7 +120,7 @@
     {
       "spec_id": "SPEC-005",
       "title": "Billing, Settlement, and Provider Rewards",
-      "version": "0.6.13",
+      "version": "0.6.16",
       "path": "specs/SPEC-005-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -146,13 +146,13 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "SPEC-005-R001/R002 restored to conformant from signed observe-mode JOURNEY-BUYER-PAID-PATH envelope 20260918T034532Z (#1022, expires 2026-10-18). SPEC-005-R003 signed JOURNEY-BUYER-CRASH-RECOVERY evidence expired 2026-09-17; that row remains pending until a fresh protected crash-recovery envelope is consumed (#1043/#1057). R004\u2013R009 remain pending evidencable units (D8/settlement/attempt/endpoint/account-scope/quarantine). R010 is the D1a wholesale statement unit (#1023). R011 (#1484) is a pending unit for the signed rate-card money table. R012 (#1636) is the historical auto-prefix no-quarantine carve-out. R013 (#1693, v0.6.9) is the MoneyTable-A price-change invariant unit (I1\u2013I5). R014 (#1768, v0.6.10) makes authenticated auto-prefix cache reuse billable. All remain pending until applicable live evidence; requirement_id_migration is complete after #1023. Do not promote R004\u2013R014 from this close. No enforce claim."
+        "rationale": "SPEC-005-R001/R002 restored to conformant from signed observe-mode JOURNEY-BUYER-PAID-PATH envelope 20260918T034532Z (#1022, expires 2026-10-18). SPEC-005-R003 signed JOURNEY-BUYER-CRASH-RECOVERY evidence expired 2026-09-17; that row remains pending until a fresh protected crash-recovery envelope is consumed (#1043/#1057). R004–R009 remain pending evidencable units (D8/settlement/attempt/endpoint/account-scope/quarantine). R010 is the D1a wholesale statement unit (#1023). R011 (#1484) is a pending unit for the signed rate-card money table. R012 (#1636) is the historical auto-prefix no-quarantine carve-out. R013 (#1693, v0.6.9) is the MoneyTable-A price-change invariant unit (I1–I5). R014 (#1768, v0.6.10) makes authenticated auto-prefix cache reuse billable. R015 (#1816, v0.6.11, amended v0.6.12) defines the pool-manifest trusted price source bounded by coordinator config trusted_pools.pool_model_pricing_bounds and remains pending with its dedicated row. All remain pending until applicable live evidence; requirement_id_migration is complete after #1023. Do not promote R004–R015 from this close. No enforce claim."
       }
     },
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.42",
+      "version": "0.9.43",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -176,7 +176,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "SPEC-006-R001/R002 restored to conformant from signed observe-mode JOURNEY-BUYER-PAID-PATH envelope 20260918T034532Z (#1022, expires 2026-10-18). SPEC-006-R003 remains pending on still-in-date paid-path evidence until a selector-fresh consume. R004\u2013R009 remain pending evidencable units (models/usage/status/kill-switch/public-feeds/demo isolation). requirement_id_migration is complete after #1023. Do not promote R004\u2013R009 from this close."
+        "rationale": "SPEC-006-R001/R002 restored to conformant from signed observe-mode JOURNEY-BUYER-PAID-PATH envelope 20260918T034532Z (#1022, expires 2026-10-18). SPEC-006-R003 remains pending on still-in-date paid-path evidence until a selector-fresh consume. R004–R009 remain pending evidencable units (models/usage/status/kill-switch/public-feeds/demo isolation). requirement_id_migration is complete after #1023. Do not promote R004–R009 from this close."
       }
     },
     {
@@ -259,7 +259,7 @@
     {
       "spec_id": "SPEC-010",
       "title": "Provider Model Catalog",
-      "version": "1.14",
+      "version": "1.16",
       "path": "specs/SPEC-010-model-catalog.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -395,7 +395,7 @@
     {
       "spec_id": "SPEC-015",
       "title": "Verifiable inference receipts",
-      "version": "0.4.11",
+      "version": "0.4.12",
       "path": "specs/SPEC-015-receipts.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -425,7 +425,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "SPEC-015-R001 is the v0.4 settlement-capable issuance/ingestion unit and returned to pending when its signed JOURNEY-BUYER-PAID-PATH evidence expired on 2026-09-26. R002\u2013R005 remain pending evidencable units (historical v0.1\u2013v0.3, receipt-key lifecycle, trust root, storage/redaction). Buyer retrieval stays SPEC-022-R006. requirement_id_migration is complete after #1023. Restore R001 only from fresh protected signed journey evidence; do not promote R002\u2013R005 from this close."
+        "rationale": "SPEC-015-R001 is the v0.4 settlement-capable issuance/ingestion unit and returned to pending when its signed JOURNEY-BUYER-PAID-PATH evidence expired on 2026-09-26. R002–R005 remain pending evidencable units (historical v0.1–v0.3, receipt-key lifecycle, trust root, storage/redaction). Buyer retrieval stays SPEC-022-R006. requirement_id_migration is complete after #1023. Restore R001 only from fresh protected signed journey evidence; do not promote R002–R005 from this close."
       }
     },
     {
@@ -467,7 +467,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "PR #164 merged the SPEC-016 USDC-on-Base payout implementation, PR #827 repaired the spec-index drift, and PR #882 added the provider-facing Add Wallet registration flow. SPEC-016 v0.1.26 (#954) mounts \u00a73.3 registration while payout.enabled=false when hot_wallet_address is set; the runner remains default-off and no production activation claim is made. Exhaustive clause-level requirement ID migration, signed journey evidence, \u00a79 operator prerequisites, production deployment, and the remaining per-requirement reconciliations remain pending under the payout-lifecycle domain."
+        "rationale": "PR #164 merged the SPEC-016 USDC-on-Base payout implementation, PR #827 repaired the spec-index drift, and PR #882 added the provider-facing Add Wallet registration flow. SPEC-016 v0.1.26 (#954) mounts §3.3 registration while payout.enabled=false when hot_wallet_address is set; the runner remains default-off and no production activation claim is made. Exhaustive clause-level requirement ID migration, signed journey evidence, §9 operator prerequisites, production deployment, and the remaining per-requirement reconciliations remain pending under the payout-lifecycle domain."
       }
     },
     {
@@ -627,7 +627,7 @@
     {
       "spec_id": "SPEC-022",
       "title": "Verified model settlement",
-      "version": "v0.2.7",
+      "version": "v0.2.11",
       "path": "specs/SPEC-022-verified-model-settlement.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -665,7 +665,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.22.5",
+      "version": "v0.22.8",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -919,7 +919,7 @@
     {
       "spec_id": "SPEC-032",
       "title": "Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary",
-      "version": "v0.3.4",
+      "version": "v0.3.6",
       "path": "specs/SPEC-032-proof-of-weights-hello-gate.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1239,7 +1239,7 @@
     {
       "spec_id": "SPEC-042",
       "title": "Pool Control Plane and Trusted-Pool Manifest",
-      "version": "0.0.36",
+      "version": "0.0.41",
       "path": "specs/SPEC-042-pool-control-plane.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1281,7 +1281,7 @@
     {
       "spec_id": "SPEC-043",
       "title": "Trusted Pool Creator Onboarding MVP",
-      "version": "0.2.0",
+      "version": "0.2.3",
       "path": "specs/SPEC-043-trusted-pool-creator-onboarding.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1432,7 +1432,7 @@
     {
       "spec_id": "SPEC-047",
       "title": "Network Model Admission",
-      "version": "0.2.3",
+      "version": "0.2.7",
       "path": "specs/SPEC-047-network-model-admission.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1573,7 +1573,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/854",
-        "rationale": "Provider serving continuity across coordinator disconnect, reconnect backoff, and coordinator drain (\u00a76.5 / FR-13 / FR-15 / AC-16): PR #853 binds the macOS sleep assertion to serving intent under regression tests, but production physical uptime evidence remains pending."
+        "rationale": "Provider serving continuity across coordinator disconnect, reconnect backoff, and coordinator drain (§6.5 / FR-13 / FR-15 / AC-16): PR #853 binds the macOS sleep assertion to serving intent under regression tests, but production physical uptime evidence remains pending."
       }
     },
     {
@@ -1778,7 +1778,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1688",
-        "rationale": "SPEC-008 v0.7.0 \u00a75.10 deny-by-default serving closure with the reviewed phase3-binary/catalog/autotune/not-buyer-serving.json exclusion list (empty today; all current recommendable rate-carded models close). Deviates from the prior owner note not to require every candidate in Tier-2 by default because of the #1680 fail-open; needs explicit owner acknowledgement in the PR. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
+        "rationale": "SPEC-008 v0.7.0 §5.10 deny-by-default serving closure with the reviewed phase3-binary/catalog/autotune/not-buyer-serving.json exclusion list (empty today; all current recommendable rate-carded models close). Deviates from the prior owner note not to require every candidate in Tier-2 by default because of the #1680 fail-open; needs explicit owner acknowledgement in the PR. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
       }
     },
     {
@@ -1798,7 +1798,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1688",
-        "rationale": "SPEC-008 v0.7.0 \u00a75.10: tier2_catalog_id and tier2_sha256 on the autotune_feed_sighup_reload success event and the boot compatibility log. Requires a coordinator runtime release before it is observable live. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
+        "rationale": "SPEC-008 v0.7.0 §5.10: tier2_catalog_id and tier2_sha256 on the autotune_feed_sighup_reload success event and the boot compatibility log. Requires a coordinator runtime release before it is observable live. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
       }
     },
     {
@@ -1823,7 +1823,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1688",
-        "rationale": "SPEC-008 v0.7.0 \u00a75.10: coordinator --validate-autotune-release dry-loads a release through the reload's own checks with a strict Tier-2 build (tier2.BuildStrict) that never publishes the singleton. Requires a coordinator runtime release before operators can run it against the live binary. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
+        "rationale": "SPEC-008 v0.7.0 §5.10: coordinator --validate-autotune-release dry-loads a release through the reload's own checks with a strict Tier-2 build (tier2.BuildStrict) that never publishes the singleton. Requires a coordinator runtime release before operators can run it against the live binary. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
       }
     },
     {
@@ -1889,7 +1889,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1453",
-        "rationale": "SPEC-017 v0.2.1 \u00a75.2b (BYOM v0.2 slice 5): the SPEC-023 \u00a716.2(a) unmatched-model aggregator, the intake rollup component, and the partner-keyed /v1/stats/intake read model are implemented and unit-tested; pending until the coordinator serves the endpoint in production for one uninterrupted 30-day epoch and the signed production verification record ties the stats API to it."
+        "rationale": "SPEC-017 v0.2.1 §5.2b (BYOM v0.2 slice 5): the SPEC-023 §16.2(a) unmatched-model aggregator, the intake rollup component, and the partner-keyed /v1/stats/intake read model are implemented and unit-tested; pending until the coordinator serves the endpoint in production for one uninterrupted 30-day epoch and the signed production verification record ties the stats API to it."
       }
     },
     {
@@ -2125,7 +2125,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1453",
-        "rationale": "SPEC-010 1.11 (#1690 M3) adds R007(f) pool-scoped settlement for loopback-served GGUF members, (g) the huggingface_revision GGUF source kind, and (h) defers the MLX-snapshot identity leg for external runtimes; (f) is implemented on the coordinator by the #1690 M4 pool route-time member derivation and (g) by the coordinator feed parser and (#1690 M1 B3a) the CLI feed parser and catalog matcher; the generator leg of (g) and the signed pool journey remain. SPEC-010 v1.7 specifies artifact-feed identity: `macprovider.gguf-file.v1` as a canonical wire pair computed by the CLI over the local GGUF bytes, a release-bound `verified` artifact-feed entry as an expected identity resolving by the globally unique (hash_algorithm, hash) pair to one (model_key, artifact_id), and six-value route-time evidence with fail-closed settlement re-verification for a non-primary member. Owner is the BYOM v0.2 epic (issue #1453), slice 3. SPEC-010 1.13 (#1690 M9) adds R007(i), the LM Studio serving-time binding (LMStudioLoopbackServeModel, OpenAICompatibleLoopbackRuntime.lmStudio, mapped above)."
+        "rationale": "SPEC-010 1.11 (#1690 M3) adds R007(f) pool-scoped settlement for loopback-served GGUF members, (g) the huggingface_revision GGUF source kind, and (h) defers the MLX-snapshot identity leg for external runtimes; (f) is implemented on the coordinator by the #1690 M4 pool route-time member derivation and (g) by the coordinator feed parser and (#1690 M1 B3a) the CLI feed parser and catalog matcher; the generator leg of (g) and the signed pool journey remain. SPEC-010 v1.7 specifies artifact-feed identity: `macprovider.gguf-file.v1` as a canonical wire pair computed by the CLI over the local GGUF bytes, a release-bound `verified` artifact-feed entry as an expected identity resolving by the globally unique (hash_algorithm, hash) pair to one (model_key, artifact_id), and six-value route-time evidence with fail-closed settlement re-verification for a non-primary member. Owner is the BYOM v0.2 epic (issue #1453), slice 3. SPEC-010 1.13 (#1690 M9) adds R007(i), the LM Studio serving-time binding (LMStudioLoopbackServeModel, OpenAICompatibleLoopbackRuntime.lmStudio, mapped above). SPEC-010 1.15/1.16 (#1816) adds R007(j), but the pool-manifest identity source, catalog-overlap exclusion (recommendable/blocked only; candidate/listed matches kept), native mlx_cache pool-entry leg, snapshot-source provenance, global exclusion, and replay tests are unimplemented and are tracked by the pending SPEC-022-R013/SPEC-042-R015/SPEC-047-R011 rows."
       }
     },
     {
@@ -2179,7 +2179,7 @@
         "phase3-binary/Sources/macprovider-cli/MLXLMLoopback.swift:enum MLXLMLoopbackServeModel",
         "phase3-binary/Sources/macprovider-cli/OpenAICompatibleLoopbackRuntime.swift:static func mlxLM",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMMLXLMDiscovery",
-        "phase3-binary/Sources/macprovider-cli/MLXLMLoopback.swift:func submitMLXLMOffer",
+        "phase3-binary/Sources/macprovider-cli/MLXLMLoopback.swift:func submitMLXLMOffer(",
         "phase3-binary/Sources/macprovider-cli/MLXLMLoopback.swift:func mlxlmCandidate",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:func discoverIncludingMLXLM",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:func evaluateIncludingMLXLM",
@@ -2335,7 +2335,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "SPEC-018 v0.2.11 clarifies the \u00a73.8 enforcement point: the coordinator rejects multi-turn tool history for catalogued non-family models on native-only routes before dispatch, resolving aliases with billing.ModelsEquivalent; SPEC-004 model-class aliases keep only profiled members and 400 when none has a profile. Native-only Trusted Pool routes (empty or withheld runtime allowlist, or explicit native selection) are gated the same way; explicit non-native engines and BYOM models are exempt. Unit and handler tests land in this change; conformance stays pending until the coordinator deploys on Pearl."
+        "rationale": "SPEC-018 v0.2.11 clarifies the §3.8 enforcement point: the coordinator rejects multi-turn tool history for catalogued non-family models on native-only routes before dispatch, resolving aliases with billing.ModelsEquivalent; SPEC-004 model-class aliases keep only profiled members and 400 when none has a profile. Native-only Trusted Pool routes (empty or withheld runtime allowlist, or explicit native selection) are gated the same way; explicit non-native engines and BYOM models are exempt. Unit and handler tests land in this change; conformance stays pending until the coordinator deploys on Pearl."
       }
     },
     {
@@ -2798,7 +2798,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1453",
-        "rationale": "SPEC-023 v0.10.4 sources the three intake signals (SPEC-017 v0.2.1 /v1/stats/intake, SPEC-047 v0.1.6 /admin/model-admission/intake, the signed demand-rank feed) and the generator validates the closed \u00a716.8 intake-decision manifest, re-derives every recorded signal from the operator's privately retained sources, and re-evaluates \u00a716.3 for every entry (BYOM v0.2 slice 5, #1453). Remains pending until the first listed-tier release is cut on the monthly cadence with a committed manifest and the signed JOURNEY-PROVIDER-PREBETA-ADMISSION evidence is promoted."
+        "rationale": "SPEC-023 v0.10.4 sources the three intake signals (SPEC-017 v0.2.1 /v1/stats/intake, SPEC-047 v0.1.6 /admin/model-admission/intake, the signed demand-rank feed) and the generator validates the closed §16.8 intake-decision manifest, re-derives every recorded signal from the operator's privately retained sources, and re-evaluates §16.3 for every entry (BYOM v0.2 slice 5, #1453). Remains pending until the first listed-tier release is cut on the monthly cadence with a committed manifest and the signed JOURNEY-PROVIDER-PREBETA-ADMISSION evidence is promoted."
       }
     },
     {
@@ -2830,7 +2830,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1483",
-        "rationale": "SPEC-023 v0.11.0 \u00a74.1 RAM-class rule is implemented in the CLI recommend engine and covered by unit tests that replay the #1483 clean admin M3 16 GB run (3B ~2\u00d7 the dense-8B TPS at $0.027/M parity): a 16 GB Mac selects Llama 3.1 8B when eligible, falls back to Llama 3.2 3B only when every RAM-class row fails a hard \u00a75 gate, ignores advisory TTFT, and keeps 3B the 8 GB default. Selector-policy only \u2014 no rate-card, catalog, or signed-feed change. Remains pending until a signed JOURNEY-PROVIDER-PREBETA-ADMISSION result from live 16 GB hardware (or the recorded admin JSON replay) is promoted as evidence."
+        "rationale": "SPEC-023 v0.11.0 §4.1 RAM-class rule is implemented in the CLI recommend engine and covered by unit tests that replay the #1483 clean admin M3 16 GB run (3B ~2× the dense-8B TPS at $0.027/M parity): a 16 GB Mac selects Llama 3.1 8B when eligible, falls back to Llama 3.2 3B only when every RAM-class row fails a hard §5 gate, ignores advisory TTFT, and keeps 3B the 8 GB default. Selector-policy only — no rate-card, catalog, or signed-feed change. Remains pending until a signed JOURNEY-PROVIDER-PREBETA-ADMISSION result from live 16 GB hardware (or the recorded admin JSON replay) is promoted as evidence."
       }
     },
     {
@@ -2853,7 +2853,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1484",
-        "rationale": "SPEC-023 v0.14.0 specifies market-pegged rate-card and demand-rank authoring from one OpenRouter snapshot: credit mint with the \u00d71e6 factor, and (v0.14.0, after OpenRouter removed per-endpoint 30-day volume) a per-endpoint 30-minute text request-count eligibility floor plus an unweighted median over endpoints collapsed to one quote per distinct provider with a distinct-provider quorum (cheapest-print forbidden; request_count is eligibility only, never a weight), FeedSchema-A, MoneyTable-A, Score-A, an unpublished market-peg-bind.v1 sidecar (never on release.json or the v3 ledger), and a catalog-release recompute from engine bytes. or_completion_tokens_30d is sourced from the OpenRouter rankings-daily total_tokens field (the sole per-model 30-day volume OpenRouter publishes); or_requests_30d is informational and is 0 when the ranking source exposes no per-model request count. Lockstep with SPEC-005-R011; CONFORMANCE depends_on omits SPEC-005 to avoid a cycle. Unimplemented in this revision: the engine mapping of every recommendable key, ingest, and the MoneyTable-A publisher (impl on #1484). Score-B / FeedSchema-B / MoneyTable-B are later belts, not R008 promotion blockers. v0.22.0 adds own-provider exclusion from every market reference (compute and propose) and rule 5a: an openrouter_listed row publishes an operator-reviewed pin, and compute only checks it, holding that row alone when the pin is above the rule-5 mint or not strictly below every active non-own listing in snapshot pricing.listing_evidence; decimal inputs are bounded (AC-MKT-14..17). The mapped implementation and tests cover the v0.22.0 slice only; the full R008 scope (ingest, MoneyTable-A publisher on a market-peg bind) still has no signed cut. Do not promote from this close."
+        "rationale": "SPEC-023 v0.14.0 specifies market-pegged rate-card and demand-rank authoring from one OpenRouter snapshot: credit mint with the ×1e6 factor, and (v0.14.0, after OpenRouter removed per-endpoint 30-day volume) a per-endpoint 30-minute text request-count eligibility floor plus an unweighted median over endpoints collapsed to one quote per distinct provider with a distinct-provider quorum (cheapest-print forbidden; request_count is eligibility only, never a weight), FeedSchema-A, MoneyTable-A, Score-A, an unpublished market-peg-bind.v1 sidecar (never on release.json or the v3 ledger), and a catalog-release recompute from engine bytes. or_completion_tokens_30d is sourced from the OpenRouter rankings-daily total_tokens field (the sole per-model 30-day volume OpenRouter publishes); or_requests_30d is informational and is 0 when the ranking source exposes no per-model request count. Lockstep with SPEC-005-R011; CONFORMANCE depends_on omits SPEC-005 to avoid a cycle. Unimplemented in this revision: the engine mapping of every recommendable key, ingest, and the MoneyTable-A publisher (impl on #1484). Score-B / FeedSchema-B / MoneyTable-B are later belts, not R008 promotion blockers. v0.22.0 adds own-provider exclusion from every market reference (compute and propose) and rule 5a: an openrouter_listed row publishes an operator-reviewed pin, and compute only checks it, holding that row alone when the pin is above the rule-5 mint or not strictly below every active non-own listing in snapshot pricing.listing_evidence; decimal inputs are bounded (AC-MKT-14..17). The mapped implementation and tests cover the v0.22.0 slice only; the full R008 scope (ingest, MoneyTable-A publisher on a market-peg bind) still has no signed cut. Do not promote from this close."
       }
     },
     {
@@ -2885,7 +2885,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1589",
-        "rationale": "SPEC-023 v0.13.0 \u00a79.2 adds an opt-in --calibrate-concurrency post-selection probe that measures the selected verified artifact's aggregate decode throughput and per-stream p95 TTFT across a bounded batch sweep and emits an empirical max_concurrency_override in [1, min(memory_fit_cap, 8)], replacing the blind AutotuneRecommendHardware.recommendedMaxBatch tier constant only when explicitly requested. The tier constant remains the default (when calibration is not run) and the conservative fallback (when the memory-fit bound cannot be computed); it is NOT a floor, so a calibrated value MAY be below it down to 1 when the box cannot sustain it within the latency ceiling. Without the flag the pre-v0.13.0 byte shape and applied value are unchanged. Automatic installer use is NOT authorized in this revision (\u00a79.2): it remains pending signed physical-hardware evidence on a representative multi-slot box (the live 256 GB M3 Ultra) and an owner decision under #1589. Do not promote from this close; measured-selection evidence and a JOURNEY-PROVIDER-PREBETA-ADMISSION-class result are the promotion blockers."
+        "rationale": "SPEC-023 v0.13.0 §9.2 adds an opt-in --calibrate-concurrency post-selection probe that measures the selected verified artifact's aggregate decode throughput and per-stream p95 TTFT across a bounded batch sweep and emits an empirical max_concurrency_override in [1, min(memory_fit_cap, 8)], replacing the blind AutotuneRecommendHardware.recommendedMaxBatch tier constant only when explicitly requested. The tier constant remains the default (when calibration is not run) and the conservative fallback (when the memory-fit bound cannot be computed); it is NOT a floor, so a calibrated value MAY be below it down to 1 when the box cannot sustain it within the latency ceiling. Without the flag the pre-v0.13.0 byte shape and applied value are unchanged. Automatic installer use is NOT authorized in this revision (§9.2): it remains pending signed physical-hardware evidence on a representative multi-slot box (the live 256 GB M3 Ultra) and an owner decision under #1589. Do not promote from this close; measured-selection evidence and a JOURNEY-PROVIDER-PREBETA-ADMISSION-class result are the promotion blockers."
       }
     },
     {
@@ -2974,7 +2974,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1688",
-        "rationale": "SPEC-023 v0.15.0 \u00a73.7.9 retained-window (.previous-target) retention/rollback rule: active + at most 3 previous, prepend outgoing, same-target no-op, incoming never retained, dedupe, hardened atomic write with compare-and-swap on current, one shared writer (scripts/autotune_window.py) for deploy, renewal, and the Pearl updater, multi-line readers. Explicitly not a serving-compatibility guarantee; SPEC-023-R010 is untouched. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
+        "rationale": "SPEC-023 v0.15.0 §3.7.9 retained-window (.previous-target) retention/rollback rule: active + at most 3 previous, prepend outgoing, same-target no-op, incoming never retained, dedupe, hardened atomic write with compare-and-swap on current, one shared writer (scripts/autotune_window.py) for deploy, renewal, and the Pearl updater, multi-line readers. Explicitly not a serving-compatibility guarantee; SPEC-023-R010 is untouched. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
       }
     },
     {
@@ -2995,7 +2995,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1688",
-        "rationale": "SPEC-023 v0.15.0 \u00a73.7.9: runtime deploys classify the tag-pinned catalog against live (equivalent/descends/regression); equivalent skips activation, regression aborts before mutation unless a logged override is supplied. Wired into phase4-coordinator/dist/deploy-pearl-vps.sh. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
+        "rationale": "SPEC-023 v0.15.0 §3.7.9: runtime deploys classify the tag-pinned catalog against live (equivalent/descends/regression); equivalent skips activation, regression aborts before mutation unless a logged override is supplied. Wired into phase4-coordinator/dist/deploy-pearl-vps.sh. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
       }
     },
     {
@@ -3016,7 +3016,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1688",
-        "rationale": "SPEC-023 v0.15.0 \u00a73.7.9 activation coverage over advertised (catalog_release_id, catalog_candidate_sha256) pairs from /poolz: catalog activations refuse unless a logged override; freshness renewal publishes and alerts because a renewal cannot keep its release id (\u00a73.7.8). Offline-provider gap is accepted; SPEC-023-R010 is the durable fix. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
+        "rationale": "SPEC-023 v0.15.0 §3.7.9 activation coverage over advertised (catalog_release_id, catalog_candidate_sha256) pairs from /poolz: catalog activations refuse unless a logged override; freshness renewal publishes and alerts because a renewal cannot keep its release id (§3.7.8). Offline-provider gap is accepted; SPEC-023-R010 is the durable fix. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
       }
     },
     {
@@ -3036,7 +3036,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1688",
-        "rationale": "SPEC-023 v0.15.0 \u00a73.7.9: freshness renewal continuity covers Tier-2 model content (only issued_at/expires_at/signature/catalog_id/version may change) and trusted-keys.json bytes, pre-lock and under the Pearl lock with the same shipped implementation. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed. v0.18.0 (#1693): drift messages direct rows-only rate-card drift to the SPEC-023-R019 pricing path and globals drift to a runtime release; renewal continuity itself is unchanged."
+        "rationale": "SPEC-023 v0.15.0 §3.7.9: freshness renewal continuity covers Tier-2 model content (only issued_at/expires_at/signature/catalog_id/version may change) and trusted-keys.json bytes, pre-lock and under the Pearl lock with the same shipped implementation. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed. v0.18.0 (#1693): drift messages direct rows-only rate-card drift to the SPEC-023-R019 pricing path and globals drift to a runtime release; renewal continuity itself is unchanged."
       }
     },
     {
@@ -3073,7 +3073,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1688",
-        "rationale": "SPEC-023 \u00a73.7.9 catalog-content release lane (v0.15.0, amended by v0.18.0 #1693): content-gate eligibility (catalog-content vs invalid-release/full-provider-app/unknown-predecessor/unverified-commit/stale-or-future/pricing-globals/pricing-unacked-move/freshness-or-noop), live-binary dry-load, lease shared with deploy and the updater, live evidence (a)-(e), rollback and failed-release retention rules. The operator lane script scripts/catalog-content-release.sh (preflight GO/NO_GO, evidence, rollback), the offline gate, the dry-load validator and the shared activation/lease library are mapped above. The v0.15.0 lane merged on main in #1706. The v0.18.0 amendment is implemented in the mapped gate on branch feat/1693-pricing-content-lane: rows-only pricing is eligible (catalog-content plus a pricing object) under SPEC-023-R019, the v0.15.0 pricing refusal lane is retired, pricing-globals and pricing-unacked-move rank after stale-or-future, and removing the default row is invalid-release (scripts/tests/test_catalog_content_gate.py, scripts/tests/test_catalog_pricing_lane.py, scripts/test-catalog-content-release.sh). Pending, not conformant: hermetic unit/dist tests only; no live coordinator-host evidence has been captured for either version, and neither is deployed on Pearl."
+        "rationale": "SPEC-023 §3.7.9 catalog-content release lane (v0.15.0, amended by v0.18.0 #1693): content-gate eligibility (catalog-content vs invalid-release/full-provider-app/unknown-predecessor/unverified-commit/stale-or-future/pricing-globals/pricing-unacked-move/freshness-or-noop), live-binary dry-load, lease shared with deploy and the updater, live evidence (a)-(e), rollback and failed-release retention rules. The operator lane script scripts/catalog-content-release.sh (preflight GO/NO_GO, evidence, rollback), the offline gate, the dry-load validator and the shared activation/lease library are mapped above. The v0.15.0 lane merged on main in #1706. The v0.18.0 amendment is implemented in the mapped gate on branch feat/1693-pricing-content-lane: rows-only pricing is eligible (catalog-content plus a pricing object) under SPEC-023-R019, the v0.15.0 pricing refusal lane is retired, pricing-globals and pricing-unacked-move rank after stale-or-future, and removing the default row is invalid-release (scripts/tests/test_catalog_content_gate.py, scripts/tests/test_catalog_pricing_lane.py, scripts/test-catalog-content-release.sh). Pending, not conformant: hermetic unit/dist tests only; no live coordinator-host evidence has been captured for either version, and neither is deployed on Pearl."
       }
     },
     {
@@ -3174,7 +3174,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1693",
-        "rationale": "SPEC-023 v0.18.0 \u00a73.7.10 rows-only pricing through the catalog-content lane. Implementation and local tests landed on branch feat/1693-pricing-content-lane: pricing scope in the content gate (default removal invalid-release; usd_per_million_credits/provider_share_bps/global_multiplier_ppm \u2192 pricing-globals; policy/schema stay full-provider-app), the effective-price diff over served models with the reviewed acknowledged-pricing-moves.json and a pinned name set, one acknowledged object whose digest covers the Python effective diff and the coordinator binary's resolutions of names outside the key grammar (row key and all three rates, old and new), the commit-bound verbatim rate_card block, the one-writer guard and journal refusal, the on-host splice with the base-equivalence proof, the journaled transaction with separate verified and finalize steps (terminal phases monotonic; a verified price is never rolled back), pre-start recovery that fails closed on an unsafe lock, the post-start closer, evidence (b) record digests, gateway convergence alert-only, and rollback. Mapped tests are the hermetic unit, dist and shell-harness selectors above. Pending, not conformant: only live coordinator-host deployment evidence is outstanding; the change is not yet merged or deployed."
+        "rationale": "SPEC-023 v0.18.0 §3.7.10 rows-only pricing through the catalog-content lane. Implementation and local tests landed on branch feat/1693-pricing-content-lane: pricing scope in the content gate (default removal invalid-release; usd_per_million_credits/provider_share_bps/global_multiplier_ppm → pricing-globals; policy/schema stay full-provider-app), the effective-price diff over served models with the reviewed acknowledged-pricing-moves.json and a pinned name set, one acknowledged object whose digest covers the Python effective diff and the coordinator binary's resolutions of names outside the key grammar (row key and all three rates, old and new), the commit-bound verbatim rate_card block, the one-writer guard and journal refusal, the on-host splice with the base-equivalence proof, the journaled transaction with separate verified and finalize steps (terminal phases monotonic; a verified price is never rolled back), pre-start recovery that fails closed on an unsafe lock, the post-start closer, evidence (b) record digests, gateway convergence alert-only, and rollback. Mapped tests are the hermetic unit, dist and shell-harness selectors above. Pending, not conformant: only live coordinator-host deployment evidence is outstanding; the change is not yet merged or deployed."
       }
     },
     {
@@ -3558,7 +3558,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1690",
-        "rationale": "SPEC-032 v0.3.0 (#1690 M3) amends FR-HG8 with a route-time, pool-scoped buyer-serving path for admission_sandboxed loopback sessions. #1690 M4 implements it: a separate pool-scoped predicate (Provider.PoolExternalRuntimeRoutingEligible) selects a sandboxed session only for a pool route that passes the SPEC-042-R004 runtime-allowlist predicate; RoutingEligible and the sandbox flag are unchanged and global routes never select it. Pending until the SPEC-042-R013 signed pool journey exists."
+        "rationale": "SPEC-032 v0.3.0 (#1690 M3) amends FR-HG8 with a route-time, pool-scoped buyer-serving path for admission_sandboxed loopback sessions. #1690 M4 implements the catalog-member path: a separate pool-scoped predicate selects a sandboxed session only for an authorized pool route; RoutingEligible and the sandbox flag remain unchanged globally. SPEC-032 v0.3.5/v0.3.6 (#1816) adds the exact pool-entry hash path (SPEC-047-R011 binding), the native mlx_cache pool-entry hello exemption, and removes listed as a paid-routing tier, but those branches and their global/cross-pool exclusion and lapse-close tests are not implemented. Pending until the #1816 signed pool journey exists."
       }
     },
     {
@@ -4010,7 +4010,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "FR-KVP3 (snapshot-at-commit, write ordering, durability events) plus the \u00a75a Format v1 normative encoding it publishes; normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+        "rationale": "FR-KVP3 (snapshot-at-commit, write ordering, durability events) plus the §5a Format v1 normative encoding it publishes; normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
       }
     },
     {
@@ -4025,7 +4025,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "FR-KVP4 (four-category envelope validation, full-envelope AAD projection per \u00a75a): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+        "rationale": "FR-KVP4 (four-category envelope validation, full-envelope AAD projection per §5a): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
       }
     },
     {
@@ -4169,7 +4169,9 @@
       "state": "pending",
       "implementation": [],
       "tests": [],
-      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "journeys": [
+        "JOURNEY-NATIVE-MTP-SERVING"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -4184,7 +4186,9 @@
       "state": "pending",
       "implementation": [],
       "tests": [],
-      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "journeys": [
+        "JOURNEY-NATIVE-MTP-SERVING"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -4490,7 +4494,9 @@
       "state": "pending",
       "implementation": [],
       "tests": [],
-      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "journeys": [
+        "JOURNEY-NATIVE-MTP-SERVING"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -5607,7 +5613,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "D8 failed-request accounting (\u00a76): 503 writes no payable ledger row; null-usage errors persist zero-credit rows. Mapped to existing hot-path tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
+        "rationale": "D8 failed-request accounting (§6): 503 writes no payable ledger row; null-usage errors persist zero-credit rows. Mapped to existing hot-path tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -5627,7 +5633,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Settlement cadence, threshold, split, and payout-ready idempotency (\u00a77, \u00a74.5). Mapped to existing RunSettlement tests. job_enabled remains operator-gated. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
+        "rationale": "Settlement cadence, threshold, split, and payout-ready idempotency (§7, §4.5). Mapped to existing RunSettlement tests. job_enabled remains operator-gated. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -5647,7 +5653,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Multi-attempt attribution (\u00a78): monotonic attempt_n, duplicate-without-retry quarantine, derived retry credit. Mapped to existing hot-path tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
+        "rationale": "Multi-attempt attribution (§8): monotonic attempt_n, duplicate-without-retry quarantine, derived retry credit. Mapped to existing hot-path tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -5667,7 +5673,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Operator and provider ledger endpoints (\u00a711): summary, settlement-verdict counters. Mapped to existing endpoint tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
+        "rationale": "Operator and provider ledger endpoints (§11): summary, settlement-verdict counters. Mapped to existing endpoint tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -5687,7 +5693,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Settlement account-scope hashing and identity snapshots (\u00a74.8). Mapped to existing account-scope tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
+        "rationale": "Settlement account-scope hashing and identity snapshots (§4.8). Mapped to existing account-scope tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -5707,7 +5713,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Operator quarantine resolutions (\u00a74.10, \u00a710.5): force-void and open-quarantine list. Mapped to existing quarantine tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
+        "rationale": "Operator quarantine resolutions (§4.10, §10.5): force-void and open-quarantine list. Mapped to existing quarantine tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -5728,7 +5734,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "D1a wholesale partner monthly USD statement ledger and operator export (\u00a72.1a, \u00a711.7). Mapped to new wholesale statement tests. Not promoted. Signed journey-result still required."
+        "rationale": "D1a wholesale partner monthly USD statement ledger and operator export (§2.1a, §11.7). Mapped to new wholesale statement tests. Not promoted. Signed journey-result still required."
       }
     },
     {
@@ -5764,7 +5770,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1636",
-        "rationale": "Auto-prefix ConversationCache hits reported positive cached_prompt_tokens on a non-sticky route and SPEC-005 \u00a75.3.1 gate 4 whole-row-zeroed payable credits. Carve-out re-prices cached=0 without quarantine. Not promoted; no signed journey."
+        "rationale": "Auto-prefix ConversationCache hits reported positive cached_prompt_tokens on a non-sticky route and SPEC-005 §5.3.1 gate 4 whole-row-zeroed payable credits. Carve-out re-prices cached=0 without quarantine. Not promoted; no signed journey."
       }
     },
     {
@@ -5806,7 +5812,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1693",
-        "rationale": "SPEC-005 v0.6.9 \u00a75.6/\u00a711.7/\u00a713.2 MoneyTable-A price-change invariants: I1 billing integrity (parity \u2192 snapshot commit \u2192 publish; every request row linked to a published snapshot), I2 one economics critical section switching request table + snapshot id and the served signed card, I3 path-scoped propagation (informational), I4 disk pair with two bounded mixed intervals, I5 history never re-priced. Implementation and local tests landed on branch feat/1693-pricing-content-lane: the economics publication, rate-table digest, reload transition table, and \u00a711.7 wholesale statements priced per generation with uncapped arbitrary-precision group gross and int64 overflow failing closed. Wholesale identity rule: the identity at the persisted attempt ordinal and the identity at the hot path's re-derived ordinal are resolved independently, a NULL config_snapshot_id counts as absent; exactly one non-null id prices the row; two non-null ids must resolve to the same (rate row, global_multiplier_ppm) or the statement fails closed with ErrWholesaleConflictingGenerations; with neither, the snapshot in effect at ts_utc prices the row. Pending, not conformant: only live coordinator-host deployment evidence is outstanding (forward activation of a reviewed correction with billing_snapshot_id rate_card_json digest == expected and a strict-pin request whose ledger rates and identity link match); the change is not yet merged or deployed."
+        "rationale": "SPEC-005 v0.6.9 §5.6/§11.7/§13.2 MoneyTable-A price-change invariants: I1 billing integrity (parity → snapshot commit → publish; every request row linked to a published snapshot), I2 one economics critical section switching request table + snapshot id and the served signed card, I3 path-scoped propagation (informational), I4 disk pair with two bounded mixed intervals, I5 history never re-priced. Implementation and local tests landed on branch feat/1693-pricing-content-lane: the economics publication, rate-table digest, reload transition table, and §11.7 wholesale statements priced per generation with uncapped arbitrary-precision group gross and int64 overflow failing closed. Wholesale identity rule: the identity at the persisted attempt ordinal and the identity at the hot path's re-derived ordinal are resolved independently, a NULL config_snapshot_id counts as absent; exactly one non-null id prices the row; two non-null ids must resolve to the same (rate row, global_multiplier_ppm) or the statement fails closed with ErrWholesaleConflictingGenerations; with neither, the snapshot in effect at ts_utc prices the row. Pending, not conformant: only live coordinator-host deployment evidence is outstanding (forward activation of a reviewed correction with billing_snapshot_id rate_card_json digest == expected and a strict-pin request whose ledger rates and identity link match); the change is not yet merged or deployed."
       }
     },
     {
@@ -5949,7 +5955,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Public GET /v1/models and tier-1 disclosure (\u00a75.3). Mapped to existing models tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234). Issue #1697 removes internal hostnames and spec document IDs from the buyer disclosure strings. Row stays pending."
+        "rationale": "Public GET /v1/models and tier-1 disclosure (§5.3). Mapped to existing models tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234). Issue #1697 removes internal hostnames and spec document IDs from the buyer disclosure strings. Row stays pending."
       }
     },
     {
@@ -5968,7 +5974,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Authenticated GET /v1/usage (\u00a75.5). Mapped to existing usage disclosure tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234). Issue #1697 removes internal hostnames and spec document IDs from settlement_disclosure. Row stays pending."
+        "rationale": "Authenticated GET /v1/usage (§5.5). Mapped to existing usage disclosure tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234). Issue #1697 removes internal hostnames and spec document IDs from settlement_disclosure. Row stays pending."
       }
     },
     {
@@ -5988,7 +5994,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Public GET /v1/status aggregation and redaction (\u00a75.6). Mapped to existing status tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
+        "rationale": "Public GET /v1/status aggregation and redaction (§5.6). Mapped to existing status tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -6009,7 +6015,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Gateway kill switches (\u00a72.7). Mapped to existing persist/demo-pause tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
+        "rationale": "Gateway kill switches (§2.7). Mapped to existing persist/demo-pause tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -6032,7 +6038,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Unauthenticated public rate-card and stats overview on the buyer host (\u00a72.2, \u00a74.2). Mapped to existing public-feeds tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234). v0.9.33 (#1693) pins the public rate-card staleness bound: gateway rate-card/.sig pair cache at most 300 s, refreshed as one unit, coordinator Cache-Control public, max-age=300 forwarded (gateway half of SPEC-005-R013 I3). Implementation and local tests landed: TestPublicFeedsRateCardAndSigCacheTogether covers the paired cache and TestPublicRateCardCacheBoundIsFiveMinutes the 300 s bound. Pending: only live deployment evidence is outstanding."
+        "rationale": "Unauthenticated public rate-card and stats overview on the buyer host (§2.2, §4.2). Mapped to existing public-feeds tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234). v0.9.33 (#1693) pins the public rate-card staleness bound: gateway rate-card/.sig pair cache at most 300 s, refreshed as one unit, coordinator Cache-Control public, max-age=300 forwarded (gateway half of SPEC-005-R013 I3). Implementation and local tests landed: TestPublicFeedsRateCardAndSigCacheTogether covers the paired cache and TestPublicRateCardCacheBoundIsFiveMinutes the 300 s bound. Pending: only live deployment evidence is outstanding."
       }
     },
     {
@@ -6052,7 +6058,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Demo-token traffic isolation from paid API-key quota (\u00a73.6). Mapped to existing demo tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
+        "rationale": "Demo-token traffic isolation from paid API-key quota (§3.6). Mapped to existing demo tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -6089,7 +6095,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "OpenRouter schema-2.4 models document (v0.9.40: operator listing set is Qwen3.6-35B-A3B only; tools/tool_choice descriptors only for SPEC-018 \u00a73.8 multi-turn families, response_format object descriptor and structured_outputs only for SPEC-019 \u00a74 families; probe rejects rows outside the listing set), wholesale partner chat flags including bounded slot-queue smoothing, immediate same-moment reservation-overflow shedding, gateway 429 capacity shedding, and dual SKU alias ids (\u00a72.2, \u00a75.3.2, \u00a77.8, \u00a717.9). Mapped to new gateway/coordinator/probe tests. Not promoted. Signed journey-result still required."
+        "rationale": "OpenRouter schema-2.4 models document (v0.9.40: operator listing set is Qwen3.6-35B-A3B only; tools/tool_choice descriptors only for SPEC-018 §3.8 multi-turn families, response_format object descriptor and structured_outputs only for SPEC-019 §4 families; probe rejects rows outside the listing set), wholesale partner chat flags including bounded slot-queue smoothing, immediate same-moment reservation-overflow shedding, gateway 429 capacity shedding, and dual SKU alias ids (§2.2, §5.3.2, §7.8, §17.9). Mapped to new gateway/coordinator/probe tests. Not promoted. Signed journey-result still required."
       }
     },
     {
@@ -6317,7 +6323,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Historical v0.1\u2013v0.3 verification and forward-incompat with v0.4 (\u00a710, \u00a7M). Mapped to existing verifier tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
+        "rationale": "Historical v0.1–v0.3 verification and forward-incompat with v0.4 (§10, §M). Mapped to existing verifier tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -6338,7 +6344,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Provider receipt-key lifecycle and buyer-safe pubkey resolver (\u00a77). Mapped to existing receipt-keys tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
+        "rationale": "Provider receipt-key lifecycle and buyer-safe pubkey resolver (§7). Mapped to existing receipt-keys tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -6359,7 +6365,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Pubkey trust root and TLS-trust warnings (\u00a78). Mapped to existing verify/resolver tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
+        "rationale": "Pubkey trust root and TLS-trust warnings (§8). Mapped to existing verify/resolver tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -6378,7 +6384,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Coordinator receipt storage, ingest idempotency, and audit redaction (\u00a713, \u00a7N). Retrieval remains SPEC-022-R006. Mapped to existing ingest tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
+        "rationale": "Coordinator receipt storage, ingest idempotency, and audit redaction (§13, §N). Retrieval remains SPEC-022-R006. Mapped to existing ingest tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -6907,7 +6913,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Default-off rail scope, USDC-on-Base operator prerequisites, and activation boundary (\u00a71, \u00a72, \u00a79): preliminary anchor for the existing obligation area; implementation merged default-off by PR #164, but production enablement and \u00a79 operator prerequisite evidence remain pending."
+        "rationale": "Default-off rail scope, USDC-on-Base operator prerequisites, and activation boundary (§1, §2, §9): preliminary anchor for the existing obligation area; implementation merged default-off by PR #164, but production enablement and §9 operator prerequisite evidence remain pending."
       }
     },
     {
@@ -6968,7 +6974,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Payout package boundary, read surfaces, handler inventory, and import-graph ownership (\u00a73.4, \u00a74.1, \u00a77.3): preliminary anchor for the existing obligation area; implementation exists in the coordinator payout package and wiring, but mappings/tests are not yet reconciled to conformant."
+        "rationale": "Payout package boundary, read surfaces, handler inventory, and import-graph ownership (§3.4, §4.1, §7.3): preliminary anchor for the existing obligation area; implementation exists in the coordinator payout package and wiring, but mappings/tests are not yet reconciled to conformant."
       }
     },
     {
@@ -6983,7 +6989,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Runner selection, signing, broadcast, two-RPC confirmation, and ClaimPayoutReady finalization (\u00a74.3): preliminary anchor for the existing obligation area; runner implementation merged default-off, but production activation, mapped tests, and journey evidence remain pending."
+        "rationale": "Runner selection, signing, broadcast, two-RPC confirmation, and ClaimPayoutReady finalization (§4.3): preliminary anchor for the existing obligation area; runner implementation merged default-off, but production activation, mapped tests, and journey evidence remain pending."
       }
     },
     {
@@ -6998,7 +7004,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Payout attempt schema, idempotent retry, nonce-gap fill, cancel self-transfer, and abandon-attempt recovery (\u00a74.5, \u00a74.6): preliminary anchor for the existing obligation area; implementation merged default-off, but conformance mappings and evidence remain pending."
+        "rationale": "Payout attempt schema, idempotent retry, nonce-gap fill, cancel self-transfer, and abandon-attempt recovery (§4.5, §4.6): preliminary anchor for the existing obligation area; implementation merged default-off, but conformance mappings and evidence remain pending."
       }
     },
     {
@@ -7013,7 +7019,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Reorg polling, orphan recording, compensation, and funding-recording admin flows (\u00a74.7, \u00a74.9): preliminary anchor for the existing obligation area; implementation merged default-off, but operator runbook evidence and signed journey-result support remain pending."
+        "rationale": "Reorg polling, orphan recording, compensation, and funding-recording admin flows (§4.7, §4.9): preliminary anchor for the existing obligation area; implementation merged default-off, but operator runbook evidence and signed journey-result support remain pending."
       }
     },
     {
@@ -7028,7 +7034,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Runtime flags, pause/resume, runner lease, self-fencing, and crash-safe audit outboxes (\u00a74.8, \u00a74.8a, \u00a74.8b, \u00a74.8c, \u00a76.4.1): preliminary anchor for the existing obligation area; implementation merged default-off, but conformance mappings and production evidence remain pending."
+        "rationale": "Runtime flags, pause/resume, runner lease, self-fencing, and crash-safe audit outboxes (§4.8, §4.8a, §4.8b, §4.8c, §6.4.1): preliminary anchor for the existing obligation area; implementation merged default-off, but conformance mappings and production evidence remain pending."
       }
     },
     {
@@ -7043,7 +7049,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Payout caps, hot-wallet balances, gas accounting, and conservation reconciliation (\u00a75, \u00a76.2, \u00a77.4): preliminary anchor for the existing obligation area; implementation merged default-off, but funded-wallet operation and reconciliation evidence remain pending."
+        "rationale": "Payout caps, hot-wallet balances, gas accounting, and conservation reconciliation (§5, §6.2, §7.4): preliminary anchor for the existing obligation area; implementation merged default-off, but funded-wallet operation and reconciliation evidence remain pending."
       }
     },
     {
@@ -7058,7 +7064,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Signer custody, Linux-only process hardening, two-RPC discipline, SPKI pinning, and reload boundaries (\u00a76.3, \u00a76.4, \u00a76.5): preliminary anchor for the existing obligation area; implementation merged default-off, but production host evidence and signed journey-result support remain pending."
+        "rationale": "Signer custody, Linux-only process hardening, two-RPC discipline, SPKI pinning, and reload boundaries (§6.3, §6.4, §6.5): preliminary anchor for the existing obligation area; implementation merged default-off, but production host evidence and signed journey-result support remain pending."
       }
     },
     {
@@ -7073,7 +7079,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Structured audit events, retention, operator queries, BetterStack alert filters, and runbook obligations (\u00a77, \u00a79): preliminary anchor for the existing obligation area; implementation and runbook artifacts merged, but alert verification and production evidence remain pending."
+        "rationale": "Structured audit events, retention, operator queries, BetterStack alert filters, and runbook obligations (§7, §9): preliminary anchor for the existing obligation area; implementation and runbook artifacts merged, but alert verification and production evidence remain pending."
       }
     },
     {
@@ -7088,7 +7094,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Provider-token custody and compliance payout eligibility (\u00a78, v0.1.20 Wave-2 custody gate): preliminary anchor for the existing obligation area; normative custody gate retained through v0.1.23, but provider eligibility policy and production evidence remain pending."
+        "rationale": "Provider-token custody and compliance payout eligibility (§8, v0.1.20 Wave-2 custody gate): preliminary anchor for the existing obligation area; normative custody gate retained through v0.1.23, but provider eligibility policy and production evidence remain pending."
       }
     },
     {
@@ -8409,12 +8415,24 @@
         "phase4-coordinator/internal/trustpool/registry.go:func (r *Registry) Revoke",
         "phase4-coordinator/internal/trustpool/durable_store.go:EventMemberAdmitted",
         "phase4-coordinator/internal/trustpool/durable_store.go:EventMemberRevoked",
-        "phase4-coordinator/internal/trustpool/durable_store.go:func ReconstructEvents"
+        "phase4-coordinator/internal/trustpool/durable_store.go:func ReconstructEvents",
+        "phase4-coordinator/internal/poolmanifest/manifest.go:func (pc PolicyCore) PolicyTermsDigest",
+        "phase4-coordinator/internal/trustpool/provider_delegation.go:func validateDelegationGrantEvent",
+        "phase4-coordinator/internal/trustpool/provider_delegation.go:func (rec delegationRecord) boundToManifest",
+        "phase4-coordinator/internal/trustpool/provider_delegation.go:func ManifestPolicyTermsDigest",
+        "phase4-coordinator/cmd/coordinator-cli/trust_pool_sign.go:func trustPoolAdminPolicyTermsDigest"
       ],
       "tests": [
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_ReconstructsRouteableRegistryAcrossRestart",
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_PausedPoolReplaysButFailsClosedForRouting",
-        "phase4-coordinator/internal/trustpool/spec043_creator_mvp_journey_test.go:TestJourneyTrustedPoolCreatorMVPCandidate"
+        "phase4-coordinator/internal/trustpool/spec043_creator_mvp_journey_test.go:TestJourneyTrustedPoolCreatorMVPCandidate",
+        "phase4-coordinator/internal/poolmanifest/policy_terms_test.go:TestPolicyTermsGoldenVectors",
+        "phase4-coordinator/internal/poolmanifest/policy_terms_test.go:TestPolicyTermsDigestExclusions",
+        "phase4-coordinator/internal/trustpool/provider_delegation_terms_test.go:TestProviderPoolDelegationTermsSurviveWindowOnlyRotation",
+        "phase4-coordinator/internal/trustpool/provider_delegation_terms_test.go:TestProviderPoolDelegationTermsDropOnSubstantiveChange",
+        "phase4-coordinator/internal/trustpool/provider_delegation_terms_test.go:TestProviderPoolDelegationLegacyCoreGrantUnchanged",
+        "phase4-coordinator/cmd/coordinator-cli/trust_pool_sign_test.go:TestTrustPoolSignRoundTripThroughDurableStore",
+        "test/integration/trusted_pool_model_r016_journey_test.go:TestTrustedPoolModelR016WindowOnlyRotationKeepsMember"
       ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
@@ -9429,7 +9447,7 @@
     {
       "requirement_id": "SPEC-046-R003",
       "spec_id": "SPEC-046",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMDiscoveryWire",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMCandidateIdentity",
@@ -9460,12 +9478,17 @@
           "expires_at": "2026-10-18"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "#1816 pool-scoped model changes (coordinator and CLI lanes) updated mapped implementation and test selectors. Local regression checks pass, but the historical signed journey binds earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
+      }
     },
     {
       "requirement_id": "SPEC-046-R004",
       "spec_id": "SPEC-046",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMDiscoveryWire",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMMLXCacheDiscovery",
@@ -9495,12 +9518,17 @@
           "expires_at": "2026-10-18"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "#1816 pool-scoped model changes (coordinator and CLI lanes) updated mapped implementation and test selectors. Local regression checks pass, but the historical signed journey binds earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
+      }
     },
     {
       "requirement_id": "SPEC-046-R005",
       "spec_id": "SPEC-046",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMEvaluationLimits",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMEvaluationRunner",
@@ -9532,12 +9560,17 @@
           "expires_at": "2026-10-18"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "#1816 pool-scoped model changes (coordinator and CLI lanes) updated mapped implementation and test selectors. Local regression checks pass, but the historical signed journey binds earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
+      }
     },
     {
       "requirement_id": "SPEC-046-R006",
       "spec_id": "SPEC-046",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMDiscoveryRunner",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMMLXCacheDiscovery",
@@ -9568,12 +9601,17 @@
           "expires_at": "2026-10-18"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "#1816 pool-scoped model changes (coordinator and CLI lanes) updated mapped implementation and test selectors. Local regression checks pass, but the historical signed journey binds earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
+      }
     },
     {
       "requirement_id": "SPEC-046-R007",
       "spec_id": "SPEC-046",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMDiscoveryPrivacy",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMOllamaDiscovery",
@@ -9605,7 +9643,12 @@
           "expires_at": "2026-10-18"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "#1816 pool-scoped model changes (coordinator and CLI lanes) updated mapped implementation and test selectors. Local regression checks pass, but the historical signed journey binds earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
+      }
     },
     {
       "requirement_id": "SPEC-046-R008",
@@ -9629,12 +9672,6 @@
         "JOURNEY-PROVIDER-BYOM-DISCOVERY"
       ],
       "evidence": [
-        {
-          "artifact": "commit:9b5ddbc14ebed939cf2297cc0e99d662ea52e96b",
-          "source": null,
-          "captured_at": "2026-09-18",
-          "expires_at": "2026-10-18"
-        },
         {
           "artifact": "sha256:0f193ac572e73cb80efb74620f4649529012c92b0adcaf5296d153748c3dc5f4",
           "source": "journeys/evidence/provider-byom-discovery-20260918T033355Z.spec-046-r001-spec-046-r002-spec-046-r003-spec-046-r004-spec-046-r005-spec-046-r006-spec-046-r007-spec-046-r008.journey-result.signed.json",
@@ -9675,7 +9712,7 @@
     {
       "requirement_id": "SPEC-047-R001",
       "spec_id": "SPEC-047",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/ws/model_admission.go:type ModelAdmissionStore",
         "phase4-coordinator/internal/ws/model_admission.go:func (s *memoryModelAdmissionStore) AppendModelAdmissionOffer",
@@ -9726,12 +9763,17 @@
           "expires_at": "2026-10-16"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "#1816 pool-scoped model changes (coordinator and CLI lanes) updated mapped implementation and test selectors. Local regression checks pass, but the historical signed journey binds earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
+      }
     },
     {
       "requirement_id": "SPEC-047-R002",
       "spec_id": "SPEC-047",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMOfferSubmissionBuilder",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMWithdrawalBuilder",
@@ -9764,7 +9806,12 @@
           "expires_at": "2026-10-16"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "#1816 pool-scoped model changes (coordinator and CLI lanes) updated mapped implementation and test selectors. Local regression checks pass, but the historical signed journey binds earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
+      }
     },
     {
       "requirement_id": "SPEC-047-R003",
@@ -9836,7 +9883,7 @@
     {
       "requirement_id": "SPEC-047-R004",
       "spec_id": "SPEC-047",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ModelCatalogEconomics.swift:struct ModelCatalogEconomicsBuilder",
         "phase3-binary/Sources/macprovider-cli/ModelCatalogEconomics.swift:economicsFields",
@@ -9869,7 +9916,12 @@
           "expires_at": "2026-10-16"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "#1816 pool-scoped model changes (coordinator and CLI lanes) updated mapped implementation and test selectors. Local regression checks pass, but the historical signed journey binds earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
+      }
     },
     {
       "requirement_id": "SPEC-047-R005",
@@ -9910,7 +9962,7 @@
     {
       "requirement_id": "SPEC-047-R006",
       "spec_id": "SPEC-047",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMWithdrawalBuilder",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMModelAdmissionRuntime",
@@ -9950,7 +10002,12 @@
           "expires_at": "2026-10-16"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "#1816 pool-scoped model changes (coordinator and CLI lanes) updated mapped implementation and test selectors. Local regression checks pass, but the historical signed journey binds earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
+      }
     },
     {
       "requirement_id": "SPEC-047-R007",
@@ -9994,7 +10051,7 @@
     {
       "requirement_id": "SPEC-047-R008",
       "spec_id": "SPEC-047",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/ws/model_admission.go:type ModelAdmissionStore",
         "phase4-coordinator/internal/routing/filter.go:func EligibleCandidates",
@@ -10021,19 +10078,18 @@
       ],
       "evidence": [
         {
-          "artifact": "commit:9b5ddbc14ebed939cf2297cc0e99d662ea52e96b",
-          "source": null,
-          "captured_at": "2026-09-16",
-          "expires_at": "2026-10-16"
-        },
-        {
           "artifact": "sha256:3d524840e0996c735e84fcde0490c586178e32995282909aa600b6e946321220",
           "source": "journeys/evidence/network-model-admission-20260916T135000Z.spec-047-r001-spec-047-r002-spec-047-r003-spec-047-r004-spec-047-r005-spec-047-r006-spec-047-r007-spec-047-r008.journey-result.signed.json",
           "captured_at": "2026-09-16",
           "expires_at": "2026-10-16"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "The tag-only BYOM dry-run fixture now correctly proves the non-catalog no-earning path, changing a mapped selector after the 2026-09-16 signed network-admission journey. Historical signed evidence is retained without redating or rebinding; restore conformant only after a fresh independently trusted JOURNEY-NETWORK-MODEL-ADMISSION promotion pins the revised selector."
+      }
     },
     {
       "requirement_id": "SPEC-047-R009",
@@ -10061,7 +10117,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1453",
-        "rationale": "SPEC-047 v0.1.6 GET /admin/model-admission/intake (model_admission_intake_offer_counts.v1): the SPEC-023 \u00a716.2(b) distinct_provider_offer_count source, counted from the offer-time intake_model_key over DISTINCT (provider, key) pairs, sanction-excluded by provider_intake_sanctioned with active-trust-root eligibility, suppressed below the fixed k floor, materialized every 15 minutes with a per-build nonce and intake_unavailable instead of a partial count (BYOM v0.2 slice 5, #1453). Conformance needs the signed admission journey and a production read."
+        "rationale": "SPEC-047 v0.1.6 GET /admin/model-admission/intake (model_admission_intake_offer_counts.v1): the SPEC-023 §16.2(b) distinct_provider_offer_count source, counted from the offer-time intake_model_key over DISTINCT (provider, key) pairs, sanction-excluded by provider_intake_sanctioned with active-trust-root eligibility, suppressed below the fixed k floor, materialized every 15 minutes with a per-build nonce and intake_unavailable instead of a partial count (BYOM v0.2 slice 5, #1453). Conformance needs the signed admission journey and a production read."
       }
     },
     {
@@ -10094,7 +10150,9 @@
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPSelectorTests.swift:testDefaultUnavailableCapabilityRoutesOrdinaryWithModeOff",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPSelectorTests.swift:testClassicDraftConfigurationTakesPrecedenceOverNativeMTP"
       ],
-      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "journeys": [
+        "JOURNEY-NATIVE-MTP-SERVING"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -10117,7 +10175,9 @@
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPArtifactObservationTests.swift:testAffineFourRejectsUnpairedMismatchedAndPaddedHeaders",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPArtifactObservationTests.swift:testUnquantizedObservationRejectsMissingFloat32AndGarbageDType"
       ],
-      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "journeys": [
+        "JOURNEY-NATIVE-MTP-SERVING"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -10139,7 +10199,9 @@
         "phase3-binary/Tests/mlx-stage-spikeTests/NativeMTPUpstreamQualificationTests.swift:func testPublicPackedVerificationRequiresContinuationStateFailClosed() throws",
         "scripts/tests/test_upstream_watch.py:class SwiftPMPinParsingTests"
       ],
-      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "journeys": [
+        "JOURNEY-NATIVE-MTP-SERVING"
+      ],
       "evidence": [
         {
           "artifact": "sha256:afb2c7632f3a69a6e8dfd41d12991e667a290d445be22d8aedc9299e318c40f3",
@@ -10168,7 +10230,9 @@
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPSelectorTests.swift:testNativeMTPRejectsRequestFeaturesWithClosedReasons",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPSelectorTests.swift:testNativeMTPRejectsTupleAndRuntimeGatesBeforeRequestEligibility"
       ],
-      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "journeys": [
+        "JOURNEY-NATIVE-MTP-SERVING"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -10188,7 +10252,9 @@
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPAcceptanceTests.swift:testMixedRaggedRowsAcceptIndependently",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPAcceptanceTests.swift:testRejectsAtEveryProposalPosition"
       ],
-      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "journeys": [
+        "JOURNEY-NATIVE-MTP-SERVING"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -10211,7 +10277,9 @@
         "phase3-binary/Tests/MacProviderCoreTests/PagedKVEngineTests.swift:testNativeMTPRaggedRowsCommitIndependently",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testNativeMTPDisableDuringFinalizeFailsOnlyStaleRowAndHealthyPeerCommits"
       ],
-      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "journeys": [
+        "JOURNEY-NATIVE-MTP-SERVING"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -10235,7 +10303,9 @@
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testNativeMTPConcurrentRowsCannotOvercommitRoundByteBudgetBeforeProposal",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPSelectorTests.swift:testNativeMTPRuntimeAdmissionDowngradesAtSignedActiveRowBound"
       ],
-      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "journeys": [
+        "JOURNEY-NATIVE-MTP-SERVING"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -10250,7 +10320,9 @@
       "state": "pending",
       "implementation": [],
       "tests": [],
-      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "journeys": [
+        "JOURNEY-NATIVE-MTP-SERVING"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -10265,7 +10337,9 @@
       "state": "pending",
       "implementation": [],
       "tests": [],
-      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "journeys": [
+        "JOURNEY-NATIVE-MTP-SERVING"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -10288,7 +10362,9 @@
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPStatusTests.swift:testCounterSaturationDisablesNativeTupleUntilNewSinkGeneration",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPStatusTests.swift:testLocalStatusPublishesCapabilityAndExactlyOneNativeMTPObject"
       ],
-      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "journeys": [
+        "JOURNEY-NATIVE-MTP-SERVING"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -10303,7 +10379,9 @@
       "state": "pending",
       "implementation": [],
       "tests": [],
-      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "journeys": [
+        "JOURNEY-NATIVE-MTP-SERVING"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -10318,7 +10396,9 @@
       "state": "pending",
       "implementation": [],
       "tests": [],
-      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "journeys": [
+        "JOURNEY-NATIVE-MTP-SERVING"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -10340,7 +10420,9 @@
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPRevocationFeedTests.swift:testAcceptsSignedFeedAndPersistsRecoverableAnchor",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPRevocationFeedTests.swift:testRejectsRollbackReplayAndRevokedSetRegression"
       ],
-      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "journeys": [
+        "JOURNEY-NATIVE-MTP-SERVING"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -10355,7 +10437,9 @@
       "state": "pending",
       "implementation": [],
       "tests": [],
-      "journeys": ["JOURNEY-NATIVE-MTP-RELEASE"],
+      "journeys": [
+        "JOURNEY-NATIVE-MTP-RELEASE"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -10384,7 +10468,9 @@
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testLoadGateRecorderCountsHeldRoundsAndRestoration",
         "scripts/tests/test_native_mtp_r015_analyze.py:class NativeMTPR015AnalyzeTests"
       ],
-      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "journeys": [
+        "JOURNEY-NATIVE-MTP-SERVING"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -10399,7 +10485,9 @@
       "state": "pending",
       "implementation": [],
       "tests": [],
-      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "journeys": [
+        "JOURNEY-NATIVE-MTP-SERVING"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -10958,6 +11046,227 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
         "rationale": "SPEC-049 v0.1.0 (SPEC-049-R023): draft/not-deployed promotion gate is specified for the default-off Beta privacy class but not implemented, tested, or evidenced; it remains pending until implementation, automated tests, and a signed JOURNEY-PRIVACY-CLASS-BETA hardware result exist. The journey result is one input; staged canary and three-lane audits are also required."
+      }
+    },
+    {
+      "requirement_id": "SPEC-005-R015",
+      "spec_id": "SPEC-005",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/config/config.go:func (b *TrustedPoolsPoolModelPricingBounds) UnmarshalYAML",
+        "phase4-coordinator/internal/config/config.go:func validateTrustedPoolsPoolModelConfig",
+        "phase4-coordinator/cmd/coordinator/trusted_pools_reload.go:func prepareTrustedPoolsReload",
+        "phase4-coordinator/internal/poolmanifest/model_entries.go:func (pc PolicyCore) ValidatePoolModelAcceptance",
+        "phase4-coordinator/internal/buyer/pool_model_route.go:func (s *Server) poolModelRouteBinding",
+        "phase4-coordinator/internal/buyer/pool_model_route.go:func (b *billingRecorder) recordPoolModelRouteSnapshot",
+        "phase4-coordinator/internal/billing/recovery.go:func (s *Store) RecoverLedger"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/config/config_test.go:TestTrustedPoolsPoolModelPricingBoundsClosedDecodeAndOverflow",
+        "phase4-coordinator/internal/config/config_test.go:TestTrustedPoolsPoolModelConfigValidation",
+        "phase4-coordinator/cmd/coordinator/trusted_pools_reload_test.go:TestPrepareTrustedPoolsReloadAppliesBoundsAndOwnerAuthority",
+        "phase4-coordinator/internal/poolmanifest/model_entries_test.go:TestPoolModelAcceptanceContext",
+        "phase4-coordinator/internal/billing/pool_manifest_route_test.go:TestHotPathPoolManifestPricing",
+        "phase4-coordinator/internal/buyer/spec1816_pool_model_route_test.go:TestSPEC1816PoolModelFailClosed",
+        "phase4-coordinator/internal/buyer/spec1816_pool_model_route_test.go:TestSPEC1816PoolModelFreezesEconomicsAtDispatch",
+        "test/integration/trusted_pool_model_journey_test.go:TestTrustedPoolModelJourney"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "#1816 (campaign branch, unshipped): the closed trusted_pools.pool_model_pricing_bounds object (all six keys, integers, overflow-safe at the pool context ceiling and rewards.global_multiplier), fail-closed acceptance and reservation when unset, one bounds snapshot that SIGHUP replaces for acceptance, binding, routing, listing and status, entry-rate pricing with the bounds digest in the pool route snapshot, and the hotpath pool pricing are implemented and tested. The SIGHUP wiring in cmd/coordinator/main.go is held out of the campaign commits by the secret-preflight hook and must land with them. The default-row multiplier, provider share and config snapshot id are frozen in the route_snapshot_v2 at dispatch, and the recorder, receipt sync and recovery bill from them. Still missing: signed journey evidence from a deployed build. Pending until it exists."
+      }
+    },
+    {
+      "requirement_id": "SPEC-006-R018",
+      "spec_id": "SPEC-006",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/buyer/pool_model_route.go:func (s *Server) poolModelListEntries",
+        "phase5-gateway/internal/router/server.go:func sanitizePoolModelObject",
+        "phase5-gateway/internal/router/engine_selection.go:func buyerVisiblePoolModelHeader"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/spec1816_pool_model_route_test.go:TestSPEC1816PoolModelListing",
+        "phase4-coordinator/internal/buyer/spec1816_pool_model_route_test.go:TestSPEC1816PoolModelListingMatchesRoutePredicate",
+        "phase4-coordinator/internal/buyer/spec1816_pool_model_route_test.go:TestSPEC1816PoolModelExcludedOutsideItsPool",
+        "phase5-gateway/internal/router/pool_model_disclosure_test.go:TestSanitizeModelsResponsePoolView",
+        "phase5-gateway/internal/router/pool_model_disclosure_test.go:TestPoolModelDisclosureHeadersAllowlisted"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "#1816 (campaign branch, unshipped): the pool-scoped /v1/models view with the closed macprovider_pool_model object and price disclosure, capacity counted through the routing predicate, the disclosure and core-digest response headers, and unknown-model behavior outside the pool are implemented in the coordinator and gateway and tested. Still missing: signed journey evidence from a deployed build, and the open freeze audit R1 LOW gateway items (duplicate selector header, embedded pool id binding). Pending until the evidence exists."
+      }
+    },
+    {
+      "requirement_id": "SPEC-022-R013",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/billing/route_snapshot.go:func (r RouteSnapshot) PoolManifestSourced",
+        "phase4-coordinator/internal/buyer/pool_model_route.go:func (b *billingRecorder) recordPoolModelRouteSnapshot",
+        "phase4-coordinator/internal/trustpool/pool_operator_attestation.go:func (s *Store) VerifyPoolManifestRoute",
+        "phase7-verify/internal/verify/settlement.go:func (r SettlementRouteSnapshot) Validate"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/pool_manifest_route_test.go:TestRouteSnapshotPoolManifestSourcePreimage",
+        "phase4-coordinator/internal/billing/settlement_pool_labels_test.go:TestRouteSnapshotPoolLabels_GlobalDigestGoldenUnchanged",
+        "phase4-coordinator/internal/billing/pool_manifest_route_test.go:TestRecoverLedger_PoolManifestRoutes",
+        "phase4-coordinator/internal/buyer/spec1816_pool_model_route_test.go:TestSPEC1816PoolModelRoutesSettlesAndDiscloses",
+        "phase4-coordinator/internal/billing/route_snapshot_golden_test.go:TestRouteSnapshotGoldenVectors",
+        "phase7-verify/internal/verify/route_snapshot_v2_test.go:TestRouteSnapshotGoldenVectorsMatchCoordinator",
+        "phase7-verify/internal/verify/route_snapshot_v2_test.go:TestVerifySettlementReceiptPoolModelRouteSnapshotV2"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "#1816 (campaign branch, unshipped): route snapshots carry the pool_manifest expected-identity source, pool_model_id, entry rates, bounds digest, manifest generation and member-account provenance; global v1 digests stay byte-identical (golden test), and insert, recovery and native and loopback pool settlement are tested. Pool provenance rides only in route_snapshot_v2 (spec022-route-snapshot-v2, R-13.2 option B, SPEC-015 0.4.12 §N.2), receipt model_id is the pool_model_id, and the standalone phase7-verify verifier reproduces the v2 preimage against shared golden vectors and verifies a signed pool-model receipt end to end. Still missing: signed journey evidence from a deployed build. Pending until it exists."
+      }
+    },
+    {
+      "requirement_id": "SPEC-023-R026",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "The release generator does not consume the SPEC-047-R009 v2 frame or the SPEC-047-R012 pool-proven aggregate, does not retain or re-derive model-admission-pool-proven.json, and has no macprovider.intake-decision.v2, pool_proven clause, INTAKE_POOL_PAID_REQUEST_FLOOR, or current-passing-probe check. Producers are tracked by SPEC-047-R009/R011/R012. Out-of-band listed release generation is not implemented or evidenced."
+      }
+    },
+    {
+      "requirement_id": "SPEC-042-R015",
+      "spec_id": "SPEC-042",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/poolmanifest/model_entries.go:func DecodePoolModelEntries",
+        "phase4-coordinator/internal/poolmanifest/model_entries.go:func (pc PolicyCore) validatePoolExtensions",
+        "phase4-coordinator/internal/poolmanifest/model_entries.go:func (pc PolicyCore) ValidatePoolModelAcceptance",
+        "phase4-coordinator/internal/ws/model_admission_pool_manifest.go:func (s *Server) ArtifactPairInCatalog",
+        "phase4-coordinator/internal/ws/model_admission_pool_manifest.go:func poolBindingDecisionForHead",
+        "phase4-coordinator/internal/ws/model_admission_pool_manifest.go:func (s *Server) poolEntryForSession",
+        "phase4-coordinator/internal/billing/settlement_receipts.go:func (s *Store) poolRouteSettlementDecision",
+        "phase4-coordinator/internal/trustpool/pool_operator_attestation.go:func poolRouteFenceFromEvents"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/poolmanifest/model_entries_test.go:TestPoolExtensionGoldenVectors",
+        "phase4-coordinator/internal/poolmanifest/model_entries_test.go:TestPoolExtensionRejectionVectors",
+        "phase4-coordinator/internal/trustpool/pool_model_entries_test.go:TestPoolModelEntriesOnlineAcceptance",
+        "phase4-coordinator/internal/trustpool/pool_model_rejection_codes_test.go:TestAdminHandler_PoolModelManifestRejectionCodes",
+        "phase4-coordinator/internal/ws/model_admission_pool_manifest_test.go:TestPoolManifestCatalogPrecedence",
+        "phase4-coordinator/internal/ws/model_admission_pool_manifest_test.go:TestPoolManifestBlockedArtifactFeedPairDenies",
+        "phase4-coordinator/internal/billing/spec1816_freeze_r1_settlement_test.go:TestFreezeR1FinalReceiptSettlementReadsTheDurableFence",
+        "phase4-coordinator/internal/trustpool/pool_route_fence_test.go:TestPoolRouteFenceRequiresTheExactPoolManifestEntry",
+        "test/integration/trusted_pool_model_journey_test.go:TestTrustedPoolModelJourney"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "#1816 (campaign branch, unshipped): the pool_model_entries/v1 codec with golden and rejection vectors, closed validation, the config-bound check, catalog-overlap rejection of catalog-priceable and blocked pairs (artifact-feed deny pairs included) while accepting candidate/listed matches, generation rebind and removal revocation, and native mlx_cache pool-entry routing and hello exemption are implemented and tested. Final receipt settlement re-reads the durable fence for the exact pool_manifest entry in the verdict transaction, and a later core's removal counts only once its not_before has passed. Still missing: signed journey evidence from a deployed build. Pending until it exists."
+      }
+    },
+    {
+      "requirement_id": "SPEC-042-R016",
+      "spec_id": "SPEC-042",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/poolmanifest/model_entries.go:func DecodeAttestedMembers",
+        "phase4-coordinator/internal/ws/model_admission_pool_manifest.go:func poolMemberAccount",
+        "phase4-coordinator/internal/buyer/pool_model_route.go:func (v poolRouteView) attestedMemberAccount",
+        "phase4-coordinator/internal/trustpool/pool_operator_attestation.go:func (s *Store) VerifyPoolOperatorAttestation",
+        "phase4-coordinator/internal/trustpool/pool_operator_attestation.go:func (s *Store) PoolRouteFenceHolds"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/trustpool/pool_model_entries_test.go:TestVerifyPoolManifestClaimsFromDurableRecords",
+        "phase4-coordinator/internal/trustpool/pool_model_entries_test.go:TestRegistryPoolModelsAndOwnerAccounts",
+        "phase4-coordinator/internal/buyer/spec1816_pool_model_route_test.go:TestSPEC1816PoolModelFailClosed",
+        "phase4-coordinator/internal/trustpool/pool_route_fence_test.go:TestPoolRouteFenceIgnoresFutureDatedAttestationRemoval",
+        "phase4-coordinator/internal/billing/spec1816_freeze_r1_settlement_test.go:TestFreezeR1NativePoolAttemptWithDisputedLabelQuarantines",
+        "test/integration/trusted_pool_model_r016_journey_test.go:TestTrustedPoolModelR016NonCreatorMember",
+        "test/integration/trusted_pool_model_r016_journey_test.go:TestTrustedPoolModelR016AttestationInLaterCore",
+        "test/integration/trusted_pool_model_r016_journey_test.go:TestTrustedPoolModelR016WindowOnlyRotationKeepsMember"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "#1816 (campaign branch, unshipped): the pool_attested_members/v1 codec, the recorded owner-account match (reloadable with the owner keys on SIGHUP), the creator-owned-or-attested route predicate, member-account route-snapshot provenance, and pool_operator_attested verification for a non-creator member are implemented and tested, including a cross-service journey. Final receipt settlement re-reads the durable fence and the settlement-time label, so a decided attestation removal or disputed label quarantines and zero-bills, and a future-dated removal takes effect only at its not_before. Still missing: signed journey evidence from a deployed build. Pending until it exists."
+      }
+    },
+    {
+      "requirement_id": "SPEC-043-R014",
+      "spec_id": "SPEC-043",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "Creator policy/status, reviewed-artifact, and announcement enumeration of pool models against the active pool_model_entries/v1 extension, activation and announcement failure on mismatch, and creator-admin/Agreement copy are not implemented or evidenced. The buyer API surface is tracked by SPEC-006-R018."
+      }
+    },
+    {
+      "requirement_id": "SPEC-047-R011",
+      "spec_id": "SPEC-047",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/ws/model_admission_pool_manifest.go:func poolBindingDecisionForHead",
+        "phase4-coordinator/internal/ws/model_admission_pool_manifest.go:func (s *Server) RunPoolManifestBindingSweep",
+        "phase4-coordinator/internal/ws/model_admission_pool_manifest.go:func poolBindingEarningNow",
+        "phase4-coordinator/internal/buyer/pool_model_route.go:func (s *Server) poolModelRouteBinding"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/ws/model_admission_pool_manifest_test.go:TestPoolManifestCatalogPrecedence",
+        "phase4-coordinator/internal/ws/model_admission_pool_manifest_test.go:TestPoolScopedStatusEarningReevaluatesCurrentPredicate",
+        "phase4-coordinator/internal/ws/spec047_pool_status_fixture_test.go:TestSPEC047PoolScopedStatusSharedFixture",
+        "test/integration/trusted_pool_model_journey_test.go:TestTrustedPoolModelJourney"
+      ],
+      "journeys": [
+        "JOURNEY-NETWORK-MODEL-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "#1816 coordinator lane (merged on the campaign branch, unshipped): admission events record the closed pool_binding object, the pool_manifest signed-manifest actor, the bind edge from offer_submitted and (v0.2.6) from the synthetic-probe interim states sandbox_probe_only, network_visible_unpriced and network_admitted_unsettled, the catalog_priced self-rebind, the pool-manifest bind/rebind/revocation reasons, pool model identity/price, manifest_core_digest provenance, observed_catalog_model_key, pool_attested_earning status (claimed only while the current pool predicate holds), native mlx_cache binding, pool_manifest_catalog_superseded, single-pool cardinality, pool-only route/snapshot/settlement, no settlement_capable, and the generation rebind sweep (internal/ws/model_admission_pool_manifest.go, internal/buyer/pool_model_route.go, test/integration/trusted_pool_model_journey_test.go). Still missing: the coordinator-owned model_admission_probe_evidence.v1 record (probe_evidence_digest is always null) and signed journey evidence from a deployed build. Pending until both exist."
+      }
+    },
+    {
+      "requirement_id": "SPEC-047-R012",
+      "spec_id": "SPEC-047",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "rationale": "GET /admin/model-admission/pool-proven and the closed model_admission_pool_proven.v1 frame are not implemented: no materialized build over pool-manifest route snapshots and final settlement rows, k-anonymity suppression, licence agreement, probe-evidence currency, ceilings, or pool_proven_unavailable handling."
       }
     }
   ]
