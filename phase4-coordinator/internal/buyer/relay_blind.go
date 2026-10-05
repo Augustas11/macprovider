@@ -53,8 +53,11 @@ func WithPrivacyAuthority(authority *relayblind.PrivacyAuthority) Option {
 	}
 }
 
+// relayBlindAvailable is SPEC-041 availability. Under SPEC-022 enforce the
+// lane is open only with the R-13 settlement profile configured (R-1.3).
 func (s *Server) relayBlindAvailable() bool {
-	return s != nil && s.relayBlind != nil && s.relayBlind.cfg.Enabled && s.relayBlind.store != nil && s.relayBlind.relay != nil && !s.settlementEnforceMode()
+	return s != nil && s.relayBlind != nil && s.relayBlind.cfg.Enabled && s.relayBlind.store != nil && s.relayBlind.relay != nil &&
+		(!s.settlementEnforceMode() || s.relayBlindSettlementProfileConfigured())
 }
 
 func setRelayBlindNoStore(w http.ResponseWriter) {
@@ -309,6 +312,9 @@ func (s *Server) selectRelayBlindProvider(ctx context.Context, model string, enc
 		if !eligible || !provider.IsWSTunneled() || !modelIDEqual(provider.ModelID, model) {
 			continue
 		}
+		if s.relayBlindSettlementPrerequisite(provider) != "" {
+			continue
+		}
 		records, err := s.relayBlind.store.FreshKeyRecords(ctx, provider.ProviderID, provider.AssignedID, model, encryptedBytes, s.now(), class)
 		if err == nil && len(records) > 0 {
 			return provider, records[0], true
@@ -430,7 +436,7 @@ func (s *Server) handleRelayBlindConsume(w http.ResponseWriter, r *http.Request)
 	}
 	provider, live := s.pool.Resolve(reservation.ProviderID, reservation.AssignedSession)
 	_, keyErr := s.relayBlind.store.LookupKeyRecord(r.Context(), reservation.ProviderID, reservation.AssignedSession, reservation.KID, reservation.KeyRecordDigest, s.now())
-	if !live || !relayBlindBindable(provider) || !provider.IsWSTunneled() || keyErr != nil {
+	if !live || !relayBlindBindable(provider) || !provider.IsWSTunneled() || keyErr != nil || s.relayBlindSettlementPrerequisite(provider) != "" {
 		_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, "relay_blind_key_expired", s.now())
 		writeRelayBlindError(w, "relay_blind_key_expired", "Relay-blind provider session or key expired")
 		return
@@ -541,7 +547,7 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 			writePrivacyClassError(w, privacyClassDisabled, "")
 			return
 		}
-		if !s.relayBlindAvailable() || !live || !provider.RoutingEligible() || !provider.IsWSTunneled() || keyErr != nil {
+		if !s.relayBlindAvailable() || !live || !provider.RoutingEligible() || !provider.IsWSTunneled() || keyErr != nil || s.relayBlindSettlementPrerequisite(provider) != "" {
 			_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, privacyClassStale, s.now())
 			writePrivacyClassError(w, privacyClassStale, "")
 			return
@@ -557,7 +563,7 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 			writeRelayBlindError(w, "relay_blind_required_unavailable", "Relay-blind execution is unavailable")
 			return
 		}
-		if !live || !provider.RoutingEligible() || !provider.IsWSTunneled() || keyErr != nil {
+		if !live || !provider.RoutingEligible() || !provider.IsWSTunneled() || keyErr != nil || s.relayBlindSettlementPrerequisite(provider) != "" {
 			_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, "relay_blind_key_expired", s.now())
 			writeRelayBlindError(w, "relay_blind_key_expired", "Relay-blind provider session or key expired")
 			return
@@ -592,6 +598,25 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 	rec.setRelayBlindAudit(relayBlindAuditFields{Outcome: "relay_blind_unavailable", EnvelopeDigest: reservation.EnvelopeDigest,
 		KeyRecordDigest: reservation.KeyRecordDigest, KID: reservation.KID, ProviderBindingDigest: relayblind.BindingDigest(reservation.ProviderBinding),
 		InputTokenUpperBound: reservation.InputTokenUpperBound, MaxOutputTokens: reservation.MaxOutputTokens})
+	// SPEC-022 R-13.3: under enforce the relay-blind route snapshot commits
+	// before dispatch, and the dispatch carries its settlement metadata.
+	var settlement *providerws.RelayBlindSettlementMetadata
+	if s.settlementEnforceMode() {
+		settlement, err = rec.recordRelayBlindRouteSnapshot(r.Context(), provider, reservation)
+		if err != nil {
+			s.log.Warn().Err(err).Str("request_id", rec.requestID).Str("provider_id", provider.ProviderID).Msg("relay-blind route snapshot failed before dispatch")
+			_ = s.relayBlind.store.RejectArmedPredispatch(r.Context(), reservation.ProviderBinding, "relay_blind_required_unavailable", s.now())
+			if quotaMetered {
+				s.admission.RefundRequest(provider)
+			}
+			if reservation.PrivacyClass {
+				writePrivacyClassError(w, privacyClassStale, "")
+				return
+			}
+			writeRelayBlindError(w, "relay_blind_required_unavailable", "Relay-blind settlement could not be recorded before dispatch")
+			return
+		}
+	}
 	rec.markProviderDispatched()
 	ctx, cancel := context.WithTimeout(r.Context(), s.requestTimeout)
 	defer cancel()
@@ -600,6 +625,7 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		ProviderBindingDigest: relayblind.BindingDigest(reservation.ProviderBinding), BuyerBindingDigest: relayblind.BindingDigest(reservation.BuyerBinding),
 		AssignedSession: reservation.AssignedSession, RequestID: reservation.RequestID,
 		InputTokenUpperBound: reservation.InputTokenUpperBound, MaxOutputTokens: reservation.MaxOutputTokens,
+		Settlement: settlement,
 	}
 	var privacyVerifiedAt time.Time
 	if reservation.PrivacyClass {

@@ -116,6 +116,8 @@ relay_blind:
   max_active_reservations: 10000
   max_key_records_per_provider: 8
   metadata_requests_per_minute: 60
+  # SPEC-022 R-13: relay-blind under settlement enforce needs relay-blind-settlement-v1.
+  enforce_settlement_profile: ""
 
 auth:
   # Operator bearer token for /poolz and /admin/*.

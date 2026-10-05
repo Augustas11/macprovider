@@ -36,6 +36,17 @@ const (
 	routeSnapshotRetryInitialDelay   = 10 * time.Millisecond
 	routeSnapshotRetryMaxDelay       = 100 * time.Millisecond
 	routeSnapshotPrimaryMirrorBudget = 25 * time.Millisecond
+
+	// PaidEntrypointCoordinatorBuyerChat is the plaintext chat entrypoint.
+	PaidEntrypointCoordinatorBuyerChat = "coordinator_buyer_v1_chat_completions"
+	// PaidEntrypointRelayBlindChat is the SPEC-022 R-13 relay-blind entrypoint.
+	PaidEntrypointRelayBlindChat = "coordinator_buyer_v1_relay_blind_chat_completions"
+	// PromptHashBasisCoordinatorV1 is the plaintext prompt-hash basis.
+	PromptHashBasisCoordinatorV1 = "coordinator_prompt_canonical_v1"
+	// PromptHashBasisRelayBlindEnvelopeV1 labels a snapshot whose prompt_hash
+	// member is the hex SHA-256 of the exact relay-blind envelope bytes. It
+	// is an envelope binding, never a plaintext prompt hash (R-3.1).
+	PromptHashBasisRelayBlindEnvelopeV1 = "relay_blind_envelope_digest_v1"
 )
 
 var (
@@ -237,6 +248,11 @@ func (r RouteSnapshot) Validate() error {
 	}
 	if r.AttemptN < 0 {
 		return fmt.Errorf("route snapshot attempt_n must be >= 0")
+	}
+	// SPEC-022 R-3.1 (v0.3.0): the relay-blind basis belongs to the
+	// relay-blind entrypoint only, and that entrypoint carries no other basis.
+	if (r.PaidEntrypoint == PaidEntrypointRelayBlindChat) != (r.PromptHashBasis == PromptHashBasisRelayBlindEnvelopeV1) {
+		return fmt.Errorf("route snapshot prompt_hash_basis does not match paid_entrypoint")
 	}
 	if !receiptKeyIDPattern.MatchString(r.ProviderReceiptKeyID) {
 		return fmt.Errorf("route snapshot provider_receipt_key_id invalid")

@@ -158,6 +158,9 @@ type Tier2Caps struct {
 	InBandAEADRekeyV1              bool     `json:"in_band_aead_rekey_v1,omitempty"`
 	TrustedPoolV1                  bool     `json:"trusted_pool_v1,omitempty"`
 	CatalogMaterialHoldV1          bool     `json:"catalog_material_hold_v1,omitempty"`
+	// RelayBlindSettlementReceiptV1 is the SPEC-001-R005 advertise-only
+	// capability for the SPEC-015 §N.13 relay-blind settlement receipt.
+	RelayBlindSettlementReceiptV1 bool `json:"relay_blind_settlement_receipt_v1,omitempty"`
 }
 
 type AuthChallenge struct {
@@ -420,6 +423,31 @@ type InferenceRequest struct {
 	BodyEncoding      string                     `json:"body_encoding,omitempty"`
 	RelayBlindContext *RelayBlindDispatchContext `json:"relay_blind_context,omitempty"`
 	PrivacyClass      string                     `json:"privacy_class,omitempty"`
+	// RelayBlindSettlement is the SPEC-001-R005 closed metadata object. It
+	// rides only on a relay-blind dispatch that has a SPEC-022 R-13 route
+	// snapshot; under SPEC-008 it is inside the encrypted plaintext instead.
+	RelayBlindSettlement *RelayBlindSettlementMetadata `json:"relay_blind_settlement,omitempty"`
+}
+
+// RelayBlindSettlementMetadata is the SPEC-001-R005 relay_blind_settlement
+// object: exactly these sixteen members, all required and non-null.
+type RelayBlindSettlementMetadata struct {
+	AccountScope               string `json:"account_scope"`
+	RequestID                  string `json:"request_id"`
+	AttemptN                   int64  `json:"attempt_n"`
+	ProviderID                 string `json:"provider_id"`
+	ProviderReceiptKeyID       string `json:"provider_receipt_key_id"`
+	ModelID                    string `json:"model_id"`
+	ExpectedCatalogModelHash   string `json:"expected_catalog_model_hash"`
+	CatalogID                  string `json:"catalog_id"`
+	CatalogBodyDigest          string `json:"catalog_body_digest"`
+	RouteSnapshotDigest        string `json:"route_snapshot_digest"`
+	RouteSnapshotPolicyVersion string `json:"route_snapshot_policy_version"`
+	RouteSnapshotMode          string `json:"route_snapshot_mode"`
+	PendingDeadlineSeconds     int64  `json:"pending_deadline_seconds"`
+	PaidEntrypoint             string `json:"paid_entrypoint"`
+	PromptHashBasis            string `json:"prompt_hash_basis"`
+	RelayBlindEnvelopeDigest   string `json:"relay_blind_envelope_digest"`
 }
 
 type RelayBlindDispatchContext struct {
@@ -433,6 +461,9 @@ type RelayBlindDispatchContext struct {
 	InputTokenUpperBound  int64  `json:"input_token_upper_bound"`
 	MaxOutputTokens       int64  `json:"max_output_tokens"`
 	PrivacyClass          string `json:"privacy_class,omitempty"`
+	// Settlement is not part of relay_blind_context. The dispatcher places it
+	// in the frame's relay_blind_settlement member (SPEC-001-R005).
+	Settlement *RelayBlindSettlementMetadata `json:"-"`
 }
 
 type RelayBlindValidation struct {
@@ -519,6 +550,10 @@ type InferenceResponseEnd struct {
 	// path.
 	Receipt              string                `json:"receipt,omitempty"`
 	RelayBlindValidation *RelayBlindValidation `json:"relay_blind_validation,omitempty"`
+	// RelayBlindSettlementReceipt is the one SPEC-015 §N.13 envelope on the
+	// terminal frame of a dispatch that carried relay_blind_settlement
+	// (SPEC-001-R005). It is internal: never copied to a buyer surface.
+	RelayBlindSettlementReceipt string `json:"relay_blind_settlement_receipt,omitempty"`
 }
 
 // SELivenessChallenge is sent by the coordinator to a provider that completed

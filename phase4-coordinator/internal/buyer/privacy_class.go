@@ -109,6 +109,11 @@ func (s *Server) privacyGate(ctx context.Context, provider pool.Provider, keyDig
 	if !live || current.ProviderID == "" || current.AssignedID == "" || !current.IsWSTunneled() || !relayBlindBindable(current) {
 		return time.Time{}, privacyClassUnavailable
 	}
+	// SPEC-022 R-13.2 / SPEC-049-R021: under enforce the privacy class is a
+	// relay-blind lane and needs the same settlement prerequisites.
+	if s.relayBlindSettlementPrerequisite(current) != "" {
+		return time.Time{}, privacyClassUnavailable
+	}
 	quarantined, err := s.relayBlind.store.IsQuarantined(ctx, current.ProviderID, s.now())
 	if err != nil || quarantined {
 		return time.Time{}, privacyClassUnavailable

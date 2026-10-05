@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	promptHashBasisCoordinatorV1 = "coordinator_prompt_canonical_v1"
+	promptHashBasisCoordinatorV1 = billing.PromptHashBasisCoordinatorV1
 	statusClientClosedRequest    = 499
 )
 
@@ -62,20 +62,7 @@ func (s *Server) CatalogMaterialMissingUnderEnforce(p pool.Provider) bool {
 }
 
 func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool.Provider) (*providerws.SettlementReceiptMetadata, error) {
-	attemptN := b.routeSnapshotAttemptN
-	b.routeSnapshotAttemptN++
-	b.settlementAttemptN = 0
-	b.hasSettlementAttemptN = false
-	b.routeSnapshotStorePressure = false
-	b.settlementPolicyMode = ""
-	b.settlementPolicyVersion = ""
-	b.settlementRouteSnapshot = nil
-	b.settlementRouteSnapshotDigest = ""
-	// A new dispatch: the delivered attempt's own recordRow names the credit
-	// an evidence failure may quarantine, never an earlier attempt's.
-	b.hasLastProviderAttempt = false
-
-	reportedHash := strings.TrimSpace(provider.ModelHash)
+	attemptN := b.beginRouteSnapshotAttempt()
 	expectedHash := strings.TrimSpace(provider.ExpectedModelHash)
 	// #608 Partial: fail closed on active Tier-2 vs admission-hash conflict
 	// before any settlement observe/skip path can mask the disagreement.
@@ -96,59 +83,18 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	}
 	settlementCfg := store.SettlementConfig(config.Default().Settlement)
 	routeMode := billing.VerifiedModelSettlementMode(settlementCfg)
-	skipOrEnforceError := func(reason string) (*providerws.SettlementReceiptMetadata, error) {
+	prereq, skipReason, err := routeSnapshotPrerequisites(provider)
+	if err != nil {
+		return nil, err
+	}
+	if skipReason != "" {
 		if routeMode == billing.RouteSnapshotModeEnforce {
-			return nil, fmt.Errorf("verified model settlement enforce requires route snapshot: %s", reason)
+			return nil, fmt.Errorf("verified model settlement enforce requires route snapshot: %s", skipReason)
 		}
 		return nil, nil
 	}
-	if len(provider.ReceiptPubkey) == 0 {
-		return skipOrEnforceError("missing provider receipt key")
-	}
-	keyID, err := billing.ReceiptKeyID(provider.ReceiptPubkey)
-	if err != nil {
-		return skipOrEnforceError("invalid provider receipt key")
-	}
-	// SPEC-010 v1.7 R007: the expected identity is the artifact member the
-	// session resolved through the release-bound feed, else the admitted row.
-	expectedAlgorithm := modelidentity.SnapshotManifestV1
-	if binding := provider.ArtifactIdentity; binding != nil {
-		expectedAlgorithm, expectedHash = binding.Member.HashAlgorithm, binding.Member.Hash
-	}
-	if !modelidentity.CanonicalAlgorithm(provider.ModelHashAlgorithm) ||
-		provider.ModelHashAlgorithm != expectedAlgorithm ||
-		!isLowerHex64(reportedHash) ||
-		!isLowerHex64(expectedHash) {
-		return skipOrEnforceError("invalid canonical provider model identity")
-	}
-	if reportedHash != expectedHash {
-		return skipOrEnforceError("provider model identity does not match signed admission row")
-	}
-	// Tier-2 material is keyed by the ROW digest; an artifact member looks it
-	// up by the row the session was admitted against (byomMaterialHash, the
-	// same derivation the routing-eligibility path uses).
-	materialHash := byomMaterialHash(provider)
-	material, ok := routeSnapshotCatalogMaterial(provider)
-	if !ok {
-		if byomAdmissionCandidate(provider) {
-			return nil, fmt.Errorf("BYOM model admission requires trusted catalog material")
-		}
-		// catalogMaterialMissing(provider): routing already excludes this
-		// session under enforce (R-2.7); this is the fail-closed backstop.
-		return skipOrEnforceError("missing catalog material")
-	}
-	// The tier-2 row must agree with the ROW the session was admitted for
-	// (SPEC-010-R004); an artifact member is verified against the feed by the
-	// heartbeat path, so its own hash is compared elsewhere, never here.
-	admittedRowHash := expectedHash
-	if provider.ArtifactIdentity != nil {
-		admittedRowHash = materialHash
-	}
-	if material.HashStatus != pool.HashStatusVerified || material.ExpectedModelHash != admittedRowHash {
-		return nil, fmt.Errorf("tier2 catalog does not match signed admission row")
-	}
 	poolView := b.state.poolRouteView()
-	byomBinding, err := b.server.requireBYOMRouteSnapshotBindingForRoute(ctx, provider, material, poolView)
+	byomBinding, err := b.server.requireBYOMRouteSnapshotBindingForRoute(ctx, provider, prereq.material, poolView)
 	if err != nil {
 		return nil, wrapRouteSnapshotGuardPressure(err)
 	}
@@ -172,59 +118,10 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	if err != nil {
 		return nil, err
 	}
-	sessionID := stringPtrOrNil(provider.AssignedID)
-	pendingDeadline := settlementCfg.PendingDeadlineSeconds
-	if pendingDeadline <= 0 {
-		// Fail-open to the SPEC-022 default (300s) rather than fail-closed.
-		// Fail-closing emits route_snapshot_failed pre-dispatch. As of item
-		// 18 the gateway treats a genuine first-attempt route_snapshot_failed
-		// as no-charge (coordinatorPreDispatchNoChargeError refunds the
-		// reservation and passes the body through verbatim — no provider was
-		// invoked), so the buyer-charge concern that once made fail-open
-		// load-bearing is resolved for that case. Fail-open to 300 is still
-		// the better default here: it lets the request proceed on the SPEC-022
-		// default deadline instead of failing outright on an unvalidated
-		// in-memory deadline of 0.
-		// Validated YAML config already rejects deadline 0 (config.Validate
-		// enforces 1..900); this fallback only guards an unvalidated
-		// in-memory caller, where fail-open is benign.
-		pendingDeadline = config.Default().Settlement.PendingDeadlineSeconds
-	}
-	snapshot := billing.RouteSnapshot{
-		AccountScope:                       accountScopeForSettlement(b.accountID),
-		RequestID:                          b.requestID,
-		AttemptN:                           int64(attemptN),
-		ProviderID:                         provider.ProviderID,
-		ProviderSessionID:                  sessionID,
-		ProviderGenerationID:               nil,
-		PaidEntrypoint:                     "coordinator_buyer_v1_chat_completions",
-		ProviderReceiptKeyID:               keyID,
-		ProviderReceiptKeySource:           "auth_session",
-		ModelID:                            provider.ModelID,
-		ProviderReportedModelHash:          reportedHash,
-		ProviderReportedModelHashAlgorithm: expectedAlgorithm,
-		ExpectedCatalogModelHash:           expectedHash,
-		ExpectedCatalogModelHashAlgorithm:  expectedAlgorithm,
-		CatalogID:                          material.CatalogID,
-		CatalogBodyDigest:                  material.CatalogBodyDigest,
-		CatalogSignatureKeyID:              material.CatalogSignatureKeyID,
-		CatalogSignaturePubkeyFingerprint:  material.CatalogSignaturePubkeyFingerprint,
-		CatalogExpiresAtUnixMS:             material.CatalogExpiresAt.UnixMilli(),
-		Spec008HashStatus:                  string(routeSnapshotHashStatus(provider, material)),
-		RouteSnapshotPolicyVersion:         billing.RouteSnapshotPolicyVersion,
-		RouteSnapshotMode:                  routeMode,
-		RouteDecisionTSUnixMS:              b.state.routingDone.UnixMilli(),
-		RequestStartTSUnixMS:               b.startedAt.UnixMilli(),
-		PendingDeadlineSeconds:             int64(pendingDeadline),
-		PromptHashBasis:                    promptHashBasisCoordinatorV1,
-		PromptHash:                         promptHash,
-		// SPEC-042 R006: label the settlement route-snapshot with the pool
-		// that served the request and its routing-time manifest labels (all
-		// empty for global -> omitted from the digest).
-		PoolID:             b.state.poolID,
-		ManifestVersion:    b.state.poolManifestVersion,
-		ManifestCoreDigest: b.state.poolManifestCoreDigest,
-	}
+	snapshot := b.routeSnapshotFor(provider, prereq, routeMode, attemptN, settlementCfg.PendingDeadlineSeconds)
+	snapshot.PaidEntrypoint = billing.PaidEntrypointCoordinatorBuyerChat
+	snapshot.PromptHashBasis = promptHashBasisCoordinatorV1
+	snapshot.PromptHash = promptHash
 	if externalRuntime {
 		snapshot.RuntimeSource = provider.RuntimeSource
 		snapshot.PoolGeneration = b.state.poolGeneration
@@ -238,45 +135,9 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	snapshot.ComputeIntegrityCaptureRequired = computeIntegrityRequired
 	snapshot.ComputeIntegritySamplingCovered = computeIntegrityCovered
 	snapshot.ComputeIntegrityHardwareDigest = computeIntegrityHardwareDigest
-	var digest string
-	insertStorePressure := false
-	insertSnapshot := func() error {
-		inserted, err := store.InsertRouteSnapshot(ctx, snapshot)
-		insertStorePressure = errors.Is(wrapRouteSnapshotGuardPressure(err), billing.ErrRouteSnapshotStorePressure)
-		digest = inserted
-		return err
-	}
-	var insertErr error
-	if externalRuntime {
-		insertErr = b.server.insertPoolBYOMRouteSnapshot(ctx, provider, byomBinding, insertSnapshot)
-	} else {
-		insertErr = b.server.insertBYOMRouteSnapshot(ctx, provider, byomBinding, b.state, insertSnapshot)
-	}
-	if err := insertErr; err != nil {
-		err = wrapRouteSnapshotGuardPressure(err)
-		if routeSnapshotCanSkipStorePressure(routeMode, err, insertStorePressure) {
-			b.routeSnapshotStorePressure = true
-			b.settlementPolicyMode = routeMode
-			b.settlementPolicyVersion = billing.RouteSnapshotPolicyVersion
-			b.server.log.Warn().
-				Err(err).
-				Str("request_id", b.requestID).
-				Str("provider_id", provider.ProviderID).
-				Str("route_snapshot_mode", routeMode).
-				Msg("route snapshot store pressure skipped before provider dispatch")
-			return nil, nil
-		}
+	digest, recorded, err := b.commitSettlementRouteSnapshot(ctx, store, provider, byomBinding, externalRuntime, attemptN, snapshot)
+	if err != nil || !recorded {
 		return nil, err
-	}
-	b.settlementAttemptN = attemptN
-	b.hasSettlementAttemptN = true
-	b.settlementRouteSnapshotDigest = digest
-	b.settlementPolicyMode = snapshot.RouteSnapshotMode
-	b.settlementPolicyVersion = snapshot.RouteSnapshotPolicyVersion
-	b.settlementRouteSnapshot = nil
-	if snapshot.RuntimeSource != "" {
-		recorded := snapshot
-		b.settlementRouteSnapshot = &recorded
 	}
 	meta := &providerws.SettlementReceiptMetadata{
 		AccountScope:               snapshot.AccountScope,
@@ -310,6 +171,197 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 		}
 	}
 	return meta, nil
+}
+
+// beginRouteSnapshotAttempt advances the dispatch attempt and clears the
+// previous attempt's settlement binding.
+func (b *billingRecorder) beginRouteSnapshotAttempt() int {
+	attemptN := b.routeSnapshotAttemptN
+	b.routeSnapshotAttemptN++
+	b.settlementAttemptN = 0
+	b.hasSettlementAttemptN = false
+	b.routeSnapshotStorePressure = false
+	b.settlementPolicyMode = ""
+	b.settlementPolicyVersion = ""
+	b.settlementRouteSnapshot = nil
+	b.settlementRouteSnapshotDigest = ""
+	b.relayBlindSettlement = nil
+	// A new dispatch: the delivered attempt's own recordRow names the credit
+	// an evidence failure may quarantine, never an earlier attempt's.
+	b.hasLastProviderAttempt = false
+	return attemptN
+}
+
+// routeSnapshotPrerequisite is the content-independent half of a SPEC-022
+// route snapshot: the pinned receipt key, the canonical model identity
+// against the signed admission row, and the Tier-2 route-snapshot material.
+type routeSnapshotPrerequisite struct {
+	keyID             string
+	reportedHash      string
+	expectedHash      string
+	expectedAlgorithm string
+	material          tier2.RouteSnapshotMaterial
+}
+
+// routeSnapshotPrerequisites evaluates those prerequisites for one session,
+// with no request content. Plaintext and relay-blind snapshots share it
+// (SPEC-022 R-13.2), so the two lanes cannot drift. skipReason is a gap that
+// only enforce refuses; err is a conflict every mode refuses.
+func routeSnapshotPrerequisites(provider pool.Provider) (routeSnapshotPrerequisite, string, error) {
+	reportedHash := strings.TrimSpace(provider.ModelHash)
+	expectedHash := strings.TrimSpace(provider.ExpectedModelHash)
+	if len(provider.ReceiptPubkey) == 0 {
+		return routeSnapshotPrerequisite{}, "missing provider receipt key", nil
+	}
+	keyID, err := billing.ReceiptKeyID(provider.ReceiptPubkey)
+	if err != nil {
+		return routeSnapshotPrerequisite{}, "invalid provider receipt key", nil
+	}
+	// SPEC-010 v1.7 R007: the expected identity is the artifact member the
+	// session resolved through the release-bound feed, else the admitted row.
+	expectedAlgorithm := modelidentity.SnapshotManifestV1
+	if binding := provider.ArtifactIdentity; binding != nil {
+		expectedAlgorithm, expectedHash = binding.Member.HashAlgorithm, binding.Member.Hash
+	}
+	if !modelidentity.CanonicalAlgorithm(provider.ModelHashAlgorithm) ||
+		provider.ModelHashAlgorithm != expectedAlgorithm ||
+		!isLowerHex64(reportedHash) ||
+		!isLowerHex64(expectedHash) {
+		return routeSnapshotPrerequisite{}, "invalid canonical provider model identity", nil
+	}
+	if reportedHash != expectedHash {
+		return routeSnapshotPrerequisite{}, "provider model identity does not match signed admission row", nil
+	}
+	// Tier-2 material is keyed by the ROW digest; an artifact member looks it
+	// up by the row the session was admitted against (byomMaterialHash, the
+	// same derivation the routing-eligibility path uses).
+	materialHash := byomMaterialHash(provider)
+	material, ok := routeSnapshotCatalogMaterial(provider)
+	if !ok {
+		if byomAdmissionCandidate(provider) {
+			return routeSnapshotPrerequisite{}, "", fmt.Errorf("BYOM model admission requires trusted catalog material")
+		}
+		// catalogMaterialMissing(provider): routing already excludes this
+		// session under enforce (R-2.7); this is the fail-closed backstop.
+		return routeSnapshotPrerequisite{}, "missing catalog material", nil
+	}
+	// The tier-2 row must agree with the ROW the session was admitted for
+	// (SPEC-010-R004); an artifact member is verified against the feed by the
+	// heartbeat path, so its own hash is compared elsewhere, never here.
+	admittedRowHash := expectedHash
+	if provider.ArtifactIdentity != nil {
+		admittedRowHash = materialHash
+	}
+	if material.HashStatus != pool.HashStatusVerified || material.ExpectedModelHash != admittedRowHash {
+		return routeSnapshotPrerequisite{}, "", fmt.Errorf("tier2 catalog does not match signed admission row")
+	}
+	return routeSnapshotPrerequisite{
+		keyID:             keyID,
+		reportedHash:      reportedHash,
+		expectedHash:      expectedHash,
+		expectedAlgorithm: expectedAlgorithm,
+		material:          material,
+	}, "", nil
+}
+
+// routeSnapshotFor assembles the members every SPEC-022 snapshot carries.
+// The caller sets the paid entrypoint, the prompt-hash basis, and its value.
+func (b *billingRecorder) routeSnapshotFor(provider pool.Provider, prereq routeSnapshotPrerequisite, routeMode string, attemptN int, pendingDeadline int) billing.RouteSnapshot {
+	if pendingDeadline <= 0 {
+		// Fail-open to the SPEC-022 default (300s) rather than fail-closed.
+		// Fail-closing emits route_snapshot_failed pre-dispatch. As of item
+		// 18 the gateway treats a genuine first-attempt route_snapshot_failed
+		// as no-charge (coordinatorPreDispatchNoChargeError refunds the
+		// reservation and passes the body through verbatim — no provider was
+		// invoked), so the buyer-charge concern that once made fail-open
+		// load-bearing is resolved for that case. Fail-open to 300 is still
+		// the better default here: it lets the request proceed on the SPEC-022
+		// default deadline instead of failing outright on an unvalidated
+		// in-memory deadline of 0.
+		// Validated YAML config already rejects deadline 0 (config.Validate
+		// enforces 1..900); this fallback only guards an unvalidated
+		// in-memory caller, where fail-open is benign.
+		pendingDeadline = config.Default().Settlement.PendingDeadlineSeconds
+	}
+	return billing.RouteSnapshot{
+		AccountScope:                       accountScopeForSettlement(b.accountID),
+		RequestID:                          b.requestID,
+		AttemptN:                           int64(attemptN),
+		ProviderID:                         provider.ProviderID,
+		ProviderSessionID:                  stringPtrOrNil(provider.AssignedID),
+		ProviderGenerationID:               nil,
+		ProviderReceiptKeyID:               prereq.keyID,
+		ProviderReceiptKeySource:           "auth_session",
+		ModelID:                            provider.ModelID,
+		ProviderReportedModelHash:          prereq.reportedHash,
+		ProviderReportedModelHashAlgorithm: prereq.expectedAlgorithm,
+		ExpectedCatalogModelHash:           prereq.expectedHash,
+		ExpectedCatalogModelHashAlgorithm:  prereq.expectedAlgorithm,
+		CatalogID:                          prereq.material.CatalogID,
+		CatalogBodyDigest:                  prereq.material.CatalogBodyDigest,
+		CatalogSignatureKeyID:              prereq.material.CatalogSignatureKeyID,
+		CatalogSignaturePubkeyFingerprint:  prereq.material.CatalogSignaturePubkeyFingerprint,
+		CatalogExpiresAtUnixMS:             prereq.material.CatalogExpiresAt.UnixMilli(),
+		Spec008HashStatus:                  string(routeSnapshotHashStatus(provider, prereq.material)),
+		RouteSnapshotPolicyVersion:         billing.RouteSnapshotPolicyVersion,
+		RouteSnapshotMode:                  routeMode,
+		RouteDecisionTSUnixMS:              b.state.routingDone.UnixMilli(),
+		RequestStartTSUnixMS:               b.startedAt.UnixMilli(),
+		PendingDeadlineSeconds:             int64(pendingDeadline),
+		// SPEC-042 R006: label the settlement route-snapshot with the pool
+		// that served the request and its routing-time manifest labels (all
+		// empty for global -> omitted from the digest).
+		PoolID:             b.state.poolID,
+		ManifestVersion:    b.state.poolManifestVersion,
+		ManifestCoreDigest: b.state.poolManifestCoreDigest,
+	}
+}
+
+// commitSettlementRouteSnapshot journals the snapshot before dispatch
+// (R-3.2.1) and binds the recorder to it. recorded is false only when store
+// pressure let the attempt continue without a snapshot.
+func (b *billingRecorder) commitSettlementRouteSnapshot(ctx context.Context, store *billing.Store, provider pool.Provider, byomBinding providerws.ModelAdmissionSettlementBinding, externalRuntime bool, attemptN int, snapshot billing.RouteSnapshot) (string, bool, error) {
+	var digest string
+	insertStorePressure := false
+	insertSnapshot := func() error {
+		inserted, err := store.InsertRouteSnapshot(ctx, snapshot)
+		insertStorePressure = errors.Is(wrapRouteSnapshotGuardPressure(err), billing.ErrRouteSnapshotStorePressure)
+		digest = inserted
+		return err
+	}
+	var insertErr error
+	if externalRuntime {
+		insertErr = b.server.insertPoolBYOMRouteSnapshot(ctx, provider, byomBinding, insertSnapshot)
+	} else {
+		insertErr = b.server.insertBYOMRouteSnapshot(ctx, provider, byomBinding, b.state, insertSnapshot)
+	}
+	if err := insertErr; err != nil {
+		err = wrapRouteSnapshotGuardPressure(err)
+		if routeSnapshotCanSkipStorePressure(snapshot.RouteSnapshotMode, err, insertStorePressure) {
+			b.routeSnapshotStorePressure = true
+			b.settlementPolicyMode = snapshot.RouteSnapshotMode
+			b.settlementPolicyVersion = billing.RouteSnapshotPolicyVersion
+			b.server.log.Warn().
+				Err(err).
+				Str("request_id", b.requestID).
+				Str("provider_id", provider.ProviderID).
+				Str("route_snapshot_mode", snapshot.RouteSnapshotMode).
+				Msg("route snapshot store pressure skipped before provider dispatch")
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	b.settlementAttemptN = attemptN
+	b.hasSettlementAttemptN = true
+	b.settlementRouteSnapshotDigest = digest
+	b.settlementPolicyMode = snapshot.RouteSnapshotMode
+	b.settlementPolicyVersion = snapshot.RouteSnapshotPolicyVersion
+	b.settlementRouteSnapshot = nil
+	if snapshot.RuntimeSource != "" {
+		recorded := snapshot
+		b.settlementRouteSnapshot = &recorded
+	}
+	return digest, true, nil
 }
 
 func isLowerHex64(value string) bool {
