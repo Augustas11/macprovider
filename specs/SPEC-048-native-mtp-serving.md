@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.20
+**Version:** 0.1.23
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.20",
+  "version": "0.1.23",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -349,10 +349,12 @@ is blocked until a reviewed upstream API is available. A commit pin may be
 used only under an explicitly reviewed immutable-dependency exception; a
 tagged release is the default production requirement.
 
-The first such exception is closed and exact:
+The campaign's immutable-dependency exception is exact. The candidate pin may
+be built and tested while the review gate below is pending, but it MUST NOT be
+signed, activated, or treated as production-qualified until that gate closes:
 
 - repository: `https://github.com/Augustas11/mlx-swift-lm.git`;
-- revision: `ef4ff8568c38c640bc90a8176dc3acfe943a288d`;
+- revision: `b181102984a4d1875efbd9e0eab3a7dfd1c012c5`;
 - upstream base: `ml-explore/mlx-swift-lm@bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57`
   (`3.31.4`);
 - reviewed surface: `MTPKVCacheStorage`, `MTPKVCacheTransaction`,
@@ -374,15 +376,33 @@ The first such exception is closed and exact:
   `MTPPackedStatefulDrafterModel`, `MTPPackedDrafterAdvanceRow`,
   `MTPPackedDrafterAdvanceResult`, `MTPPackedDrafterError`, and the Qwen 3.5
   `advanceAndProposePacked` implementation that advances every native row's
-  drafter state and proposes its next token in one drafter forward;
-- review date and owner: `2026-09-28`, `@Augustas11`;
+  drafter state and proposes its next token in one drafter forward; plus the
+  Qwen3.5/3.6 sparse-MoE fused small-token path, including its exact affine
+  quantization-layout gate, per-call scratch, overlapping-call safety,
+  chunked evaluation of decode- and verify-shaped calls above seven flattened
+  tokens, stock fallback for rows longer than seven tokens, and exact
+  dtype/shape validation of every packed weight, scale, and bias the fused
+  kernels index (any mismatch keeps the block on the stock path);
+- review date and owner: `2026-10-05`, `@Augustas11`;
 - mandatory exception re-review date: `2026-12-27`;
 - review gate: upstream-focused build-tests, MacProvider qualification and
   real-hardware tests, plus an independent adversarial review with zero
-  Critical, High, or Medium findings; the prior transaction surface passed
-  15/15 focused upstream tests, the expanded surface compiled in the complete
-  upstream test bundle, and the real Qwen 3.5 target/MTP tuple passed the
-  Mac Studio ordinary-versus-native-MTP parity test; and
+  Critical, High, or Medium findings. The prior transaction surface passed
+  15/15 focused upstream tests and real Qwen target/MTP parity. The fused-MoE
+  path is qualified on the ordinary path: the focused upstream fused tests on
+  Mac Studio hardware, eight-slot ordinary/native parity and run-to-run
+  determinism, and one-, two-, and eight-slot ordinary throughput against the
+  stock kernel, followed by the frozen-diff audit. Native-MTP R015 evidence is
+  not part of this gate; it gates signing and activation of a native tuple
+  (R007, R015) and never the ordinary path;
+- review result (2026-10-05): closed for this revision. Mac Studio fused
+  tests 133/133, hardware E2E pass, 0 ordinary/native parity mismatches and
+  bit-identical run-to-run output in 36 paired blocks across one, two, and
+  eight slots, ordinary decode throughput 1.25x / 1.15x / 0.97x stock, and a
+  three-lane freeze audit at 0 Critical, 0 High, 0 Medium
+  (`docs/research/spec048-fused-moe/evidence-2026-10-05/qualification-7d55924eb/`,
+  `audits/2026-10-05-native-mtp-fused-freeze/`). The exception is approved
+  for the ordinary path; native MTP remains default-off and unqualified;
 - removal trigger: replace the fork pin with the first reviewed upstream tag
   that contains equivalent standalone-checkpoint loading, public transaction,
   packed target-verification, and hybrid recurrent-cache surfaces and passes
@@ -420,8 +440,9 @@ path treats it as a documented no-op (the continuous-batching row sampler
 seeds from the scheduler request identity, not the buyer `seed`). Legacy completions, `echo`,
 `suffix`, an unknown top-level key, or any generation-affecting key/value not
 explicitly admitted above routes ordinary. A nonempty `conversation_key` also
-routes ordinary. Prompt length is bounded only by the signed request
-profile's maximum prompt tokens: a prompt longer than one prefill chunk is
+routes ordinary. Prompt length is bounded only by the selected SPEC-023-R024
+entry's signed `max_prompt_tokens`; a longer prompt selects ordinary with
+reason `capability_mismatch`. A prompt longer than one prefill chunk is
 prefilled in chunks with per-chunk drafter seeding (MTP-6), and the prefill
 chunk size is not an eligibility bound. The request additionally requires an admitted
 capability, a supported cache/state class, and enough capacity for the next
@@ -631,12 +652,13 @@ Admission and in-flight behavior are:
   are exempt from the in-flight depth gate.
 
 A bound equal to `qualified_slots` never engages for a runtime that admits at
-most that many rows. The bound is chosen from R015 cells measured at each slot
-count from one up to `qualified_slots`: it is the largest row count whose
-native-eligible cell passes the R015 improvement gate. Only native-eligible
-cells set or justify the bound; a gated cell (slot count above the bound)
-passing MTP-15 non-inferiority shows the gate is safe there and never raises
-the bound.
+most that many rows. The bound is preregistered in the frozen R015 policy and
+justified by its native-eligible cells: every slot count from one up to the
+bound, at every mandatory prompt and output stratum, MUST pass the R015
+improvement gate. Only native-eligible cells set or justify the bound; a gated
+cell (slot count above the bound) passing MTP-15 non-inferiority shows the
+gate is safe there and never raises the bound. A larger bound needs a new
+frozen policy whose native-eligible cells cover it.
 
 Native MTP MUST use SPEC-038 FCFS admission and shared-iteration fairness; it
 MUST NOT create a second priority queue or skip an older ready ordinary row for
@@ -646,14 +668,19 @@ mixed-load fixture, ordinary-row p95 ready-to-decode wait MUST NOT regress by
 more than 10% against the same SPEC-038 workload with MTP disabled.
 
 Every production tuple MUST advertise at least two slots and no more than the
-SPEC-038 validated Entry-110 depth for that exact tuple. At the advertised
-maximum, the acceptance fixture MUST place native MTP on at least half of the
-rows, use proposal depth at least one, force rejection at every proposal
+SPEC-038 validated Entry-110 depth for that exact tuple. At the largest load
+the tuple runs native (`max_native_active_rows` rows; a single row when the
+bound is one), the acceptance fixture MUST place native MTP on every row the
+bound admits, use proposal depth at least one, force rejection at every proposal
 position under load, produce unequal accepted lengths, stagger row entry and
 exit, and prove through backend trace evidence that eligible rows shared a
 packed target verification forward rather than concurrent serial iterators.
-The result MUST match the ordinary batched oracle with no row bleed, deadlock,
-leak, starvation, or counter corruption. An eight-slot experimental cell is
+Ordinary rows coexisting with native rows are proven by the load-gate fixture
+at the advertised maximum (`qualified_slots`), which exercises the gate
+exactly as an MTP-15 gated cell does: native admissions up to the bound,
+`capacity_above_native_bound` and ineligible ordinary rows above it, and held
+native rows at depth zero. The result MUST match the ordinary batched oracle with no row
+bleed, deadlock, leak, starvation, or counter corruption. An eight-slot experimental cell is
 reported on the 256 GB Studio but cannot be advertised unless SPEC-038 has
 independently validated depth eight for that tuple.
 
@@ -835,14 +862,15 @@ SPEC-023 sidecar before any native-MTP tuple can advertise capability.
 
 ### MTP-13 — signed admission and immutable evidence (SPEC-048-R013)
 
-Catalog/autotune admission MUST be based on the SPEC-023 v0.22.4
+Catalog/autotune admission MUST be based on the SPEC-023 v0.22.6
 `macprovider.native-mtp-admission.v1` signed sidecar bound to one immutable SPEC-023
 `release_id` and SPEC-010 model/artifact member, never provider self-report.
 The sidecar MUST bind the exact decode path, model/artifact/tokenizer digests,
 MTP manifest and family adapter, proposal depth, quantization representation,
 runtime/provider revisions, cache/state classes, exact hardware/RAM,
 qualified slot count, native active-row bound (`max_native_active_rows`),
-request-feature profile, benchmark policy digest, source
+request-feature profile, maximum prompt tokens (`max_prompt_tokens`),
+benchmark policy digest, source
 commit, reproducible-build digest, the exact lowercase 40-hex
 `spec023.live_executable_cdhash` CodeDirectory identity for the live signed
 executable, `mtp.complete_window_bytes_by_depth`, and evidence artifact
@@ -934,10 +962,9 @@ The matrix MUST compare native MTP with the best production-qualified ordinary
 configuration the same host can run, including ordinary continuous batching at
 its validated Entry-110 depth; a one-slot ordinary baseline cannot justify an
 MTP tuple that reduces node capacity. It MUST also compare MXFP8 ordinary
-decode and combined native MTP plus MXFP8 when those artifacts exist, at slot counts
-1, 4, and 8 or every lower maximum the tuple advertises; prompt lengths near
-1.5k, 4k, and 8k tokens; fixed short and long outputs; and a sustained thermal
-window of at least 30 minutes. Each cell MUST have at least ten counterbalanced measured runs after
+decode and combined native MTP plus MXFP8 when those artifacts exist, at every
+cell of the mandatory matrix below and in a sustained thermal window of at
+least 30 minutes. Each cell MUST have at least ten counterbalanced measured runs after
 warmup. The pairing unit is one counterbalanced run block on one host/thermal
 window containing ordinary then MTP in randomized order; the bootstrap
 resamples whole blocks with 10,000 draws. Gates apply separately to every
@@ -957,16 +984,53 @@ blocks are not counterbalanced, and it fails an admission policy with fewer
 than ten blocks, independent of the bench's own checks.
 
 **Mandatory matrix.** The frozen admission policy MUST name the tuple's
-advertised `qualified_slots` (2...8) and its `max_native_active_rows`
-(`1..qualified_slots`), and MUST contain a cell at every slot count from 1 up
-to `qualified_slots` (R007 chooses the load-gate bound from these cells), at
-every prompt stratum 1536, 4096, and 8192 tokens (each realized within ±2%),
-and at both fixed output budgets 128 (short) and 512 (long) tokens. The
-sustained window runs on one of those cells. Extra prompt or output strata are
-allowed; a slot count above `qualified_slots` is not. The bench refuses, and
-the analyzer fails closed on, a policy missing any mandatory cell, so a
-reduced matrix cannot pass. Exploratory pilot policies are exempt and never
-yield an admission verdict.
+advertised `qualified_slots` (2...8), its `max_native_active_rows`
+(`1..qualified_slots`, written *bound* below), and its signed SPEC-023-R024
+`max_prompt_tokens` (policy `maximum_prompt_tokens`, written *cap*, at least
+1536), and MUST contain exactly these cells:
+
+- *Native-eligible cells.* Every slot count from 1 up to the bound, at every
+  prompt stratum of {1536, 4096} that is at or below the cap plus the cap
+  itself, and at both fixed output budgets 128
+  (short) and 512 (long) tokens. These carry the native speedup claim and
+  justify the R007 bound. A prompt above the cap selects ordinary under R004,
+  so no native stratum exists there to measure. Every stratum is counted on
+  the served prompt, after the chat template the runtime applies, and is
+  realized within ±2%; a stratum at the cap is realized at or below it. A
+  native run whose row the token bounds sent to ordinary is an error, not a
+  native measurement.
+- *Gated cells* (policy `gated_cells`). When the bound is below
+  `qualified_slots`, exactly the cells at slot counts bound + 1 and
+  `qualified_slots` (one cell when those coincide), each at prompt 1536 and
+  output 512 under the staggered arrival profile below. Gated rows execute the
+  ordinary path (admitted native rows ride the ordinary forward at depth zero
+  and later arrivals are downgraded), so their cost does not depend on the
+  native speedup strata; non-inferiority at the first gated count and at full
+  load bounds the intermediate counts, which repeat the same ordinary-path work
+  at a load between the two. The inference rests on the gated cost model:
+  above the bound, the only work native MTP adds to a round is the drafter
+  catch-up and admission bookkeeping of at most `bound` held rows, which does
+  not grow with the ordinary rows, while the ordinary round time does not
+  shrink as rows are added; the relative regression is therefore largest at
+  bound + 1, and `qualified_slots` adds the full-load scheduling and memory
+  point. A runtime change that adds per-row native work above the bound (for
+  example drafting for downgraded rows) invalidates the model and requires
+  every gated slot count to be measured.
+- *Sustained window* of at least 1800 s on the cell at `qualified_slots`,
+  prompt 1536, output 512 (`s<qualified_slots>-p1536-o512`, staggered):
+  production-shaped full load. It is a separate bench phase on the same frozen
+  policy and output file; it reuses that cell's matrix records rather than
+  re-running them, binds the same policy digest, and keeps the alternating
+  order below. It is one continuous run: an interrupted admission window is
+  never resumed or stitched from separate runs; its records are set aside
+  and the window is rerun whole (every sustained record carries the run's
+  window id). When the bound equals `qualified_slots` the cell is
+  native-eligible and already in the matrix.
+
+A slot count above `qualified_slots` is not allowed. The bench refuses, and
+the analyzer fails closed on, a policy whose cells differ from these, so a
+reduced or substituted matrix cannot pass. Exploratory pilot policies are
+exempt and never yield an admission verdict.
 
 **Cell classes.** The frozen `max_native_active_rows` splits the matrix. A
 cell whose slot count is at or below it is *native-eligible*: it carries the
@@ -988,7 +1052,7 @@ at most one percentage point. These margins are frozen in the policy
 thresholds (`gated_throughput_lower_bound_min` -0.05,
 `gated_ttft_p95_upper_bound_max` 0.05, `gated_itl_p95_upper_bound_max` 0.05)
 and join the same Holm family. A tuple whose bound is 1 therefore passes R015
-with a native gain at one slot and non-inferiority everywhere above it.
+with a native gain at one slot and non-inferiority at its gated cells.
 
 A gated cell MUST also exercise the in-flight hold on the measured hardware,
 so a policy with any gated cell MUST freeze a staggered arrival profile
@@ -1205,6 +1269,70 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.23 (2026-10-05)** — Moves the immutable fork candidate to
+  `b181102984a4d1875efbd9e0eab3a7dfd1c012c5` (chunked envelope at
+  `9c1cd900…`, then exact tensor-layout validation; parent `ca29e954…`) and
+  qualifies the fused A3B MoE path on the ordinary path, independent of native
+  MTP (#1770). The fused-baseline R015 (policy `de99e85c…`, 2026-10-03) failed:
+  one-slot throughput lower bounds `+5.18%` to `+10.96%` against the `0.15`
+  gate, inter-token p95 upper bounds `+59%` to `+62%`, two-slot TTFT `+7.16%`,
+  and eight-slot ordinary/native parity mismatches in 8 of 10 blocks. Studio
+  runs on 2026-10-05 traced the parity failure to the fused/stock switch at
+  eight flattened tokens: stock and fused are each batch-invariant but not
+  bit-equal, and a native row's batch is one token wider than the ordinary
+  row's, so the two crossed the switch at different steps. Decode- and
+  verify-shaped calls now stay fused at any batch size in chunks of at most
+  seven tokens; prefill-shaped rows keep stock. On the Studio the chunked build
+  had 0 of 6 eight-slot parity mismatches, bit-identical run-to-run output on
+  both paths, and eight-slot ordinary decode throughput equal to stock. The
+  R003 review gate for this pin is the ordinary-path qualification plus the
+  frozen-diff audit; native-MTP R015 gates only native-tuple signing and
+  activation, and native MTP stays default-off. Because a native verification
+  row carries `proposal_depth + 1` tokens, SPEC-023-R024 caps
+  `proposal_depth`, and the consumer caps the MTP manifest's
+  `max_proposal_depth` and `adaptation_max_depth`, at `6`. Every R015 policy frozen
+  before this change binds the retired envelope and Studio OS build `25E253`;
+  the next R015 is frozen on the current build. The R003 review gate for
+  this revision closed on 2026-10-05 (ordinary decode 1.25x / 1.15x / 0.97x
+  stock at one / two / eight slots; freeze audit 0/0/0).
+
+- **0.1.22 (2026-10-02)** — Moves the immutable fork candidate to
+  `ca29e9544777068a0b53aad87310ff1cfaf3fd1d` and binds qualification to its
+  production-reduced Qwen3.5/3.6 A3B fused small-token MoE path (#1770). The
+  path is default-on only for the exact affine layout at flattened token counts
+  `1...7`, is batch-invariant and overlap-safe, and falls back to stock at
+  `8+`; the environment value `0`/`false`/`no`/`off` is the emergency kill
+  switch. Because the fused accumulation order can flip bf16 near-tied
+  argmaxes, every ordinary oracle, R015 baseline, journey, and release for the
+  tuple must use the same setting. Stock-baseline evidence cannot qualify the
+  fused pin. The candidate still requires Studio runtime tests, a re-derived
+  R015 result, and the frozen-diff audit before signing or activation.
+
+- **0.1.21 (2026-10-02)** — MTP-15 right-sizes the mandatory R015 matrix to
+  the cells that answer its two questions (#1770). Native-eligible cells
+  (every slot count up to the frozen `max_native_active_rows`) run prompt
+  strata 1536 and 4096 capped by the tuple's signed `max_prompt_tokens`, cap
+  included, at outputs 128 and 512, and carry the speedup claim. Gated cells
+  shrink to two representatives, bound + 1 and `qualified_slots` at prompt 1536
+  and output 512 with staggered arrivals, keeping every gated proof. The
+  sustained window moves to `s<qualified_slots>-p1536-o512` and is a separate
+  bench phase that reuses that cell's matrix records under the same policy
+  digest. Thresholds, ten blocks, run order, and Holm correction are unchanged.
+  The previous 48-cell matrix cost about 2.5 days of Studio time for an A3B
+  tuple at bound 1, nearly all re-measuring the ordinary path in gated cells
+  and 8192-token prefill that the cap makes ineligible; the new matrix is six
+  cells plus the window. Strata are counted on the served (templated)
+  prompt, the cap stratum realized at or below the cap: the first frozen A3B
+  run (policy `525ac686…`) realized its 4096 stratum from raw text, the
+  template pushed it past the cap, and its native rows silently ran ordinary;
+  the runtime now records that token-bound reselection. The gated
+  representatives rest on a stated gated cost model, and the MTP-7 acceptance
+  fixture places native rows up to the bound and exercises the load gate at
+  the advertised maximum. MTP-4/MTP-13 bind the
+  prompt bound to the new
+  SPEC-023-R024 `max_prompt_tokens` (SPEC-023 v0.22.6), and MTP-7 states the
+  bound is preregistered and justified by the native-eligible cells.
+
 - **0.1.20 (2026-10-01)** — MTP-15 preregisters the run order (#1770): per
   cell, a seeded Fisher-Yates permutation runs half the blocks (rounded up)
   native first; the sustained window alternates. The analyzer recomputes it
@@ -1345,7 +1473,31 @@ requests.
   overload). The evidence records 15/15 upstream Xcode qualification tests and
   independent adversarial review with 0 Critical, 0 High, and 0 Medium findings.
   The exception remains default-off and makes no scheduler, artifact, signed
-  journey, hardware, release, or production enablement claim.
+journey, hardware, release, or production enablement claim.
+
+For the exact Qwen3.5/3.6 A3B affine layout recognized by the pinned fork, the
+fused sparse-MoE path is the ordinary and native-MTP kernel baseline for every
+call whose rows carry `1...7` tokens (decode and native verification) at any
+batch size; above seven flattened tokens the call runs as consecutive fused
+chunks of at most seven tokens. Rows longer than seven tokens (prefill) use the
+stock path. `MLX_LM_QWEN35_FUSED_MOE=0` (and the equivalent case-insensitive
+`false`, `no`, or `off`) is the process-level emergency kill switch, not a
+separately qualified performance baseline. The fused path preserves expert
+selection and is batch-invariant, but its bf16 accumulation order can change
+an argmax at near-tied logits, so it is not bit-equal to stock. A decode row
+MUST NOT move between the fused and stock kernels as the batch grows or
+shrinks: a flattened-token switch point made a row's greedy output depend on
+how many of its steps fell on either side of the switch, which broke
+ordinary/native parity in the fused-baseline R015 (`s8-p1536-o512`, 8 of 10
+blocks). That is the same bounded numerical-drift class
+already documented for stock batched quantized kernels: every R005 oracle,
+R015 ordinary baseline, serving journey, and signed tuple using this pin MUST
+run the same fused-kernel setting. Evidence comparing fused native MTP against
+stock ordinary decode is invalid. Changing the layout or the per-row token
+envelope requires a new R003 review, and invalidates every R005 oracle, R015
+result, journey, and signed tuple recorded under the previous envelope. The dependency-revision change also
+changes `KVBuildIdentity`; prior disk-cold-tier entries are expected misses and
+MUST NOT be relabeled as belonging to the new revision.
 - **0.1.2 (2026-09-28)** — Extends the exact immutable-dependency exception
   to the reviewed public packed target-verification facade at fork revision
   `31223c97262bd5123e76055c5662a42677936eea`. The exception remains

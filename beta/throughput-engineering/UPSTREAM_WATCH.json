@@ -395,20 +395,20 @@
     "native_mtp_required_merges_in_latest_release": true,
     "native_mtp_public_row_mapped_transactions_reviewed": true,
     "native_mtp_status": "qualified_transaction_exception_default_off",
-    "note": "Exact reviewed fork standalone Qwen MTP loading, transaction, packed verification, strict continuation-state, and packed recurrent-cache surfaces qualify the SPEC-048-R003 boundary only; upstream #645 remains the tagged-release replacement tracker"
+    "note": "The previously reviewed Qwen MTP transaction surfaces remain present and the pin adds the exact-layout Qwen3.6 A3B fused-MoE path (rows of 1-7 tokens, chunked at any batch size); approved 2026-10-05 on the ordinary-path Studio qualification and a 0/0/0 three-lane freeze audit; native MTP stays default-off and native-MTP R015 gates only native-tuple activation; upstream #645 remains the tagged-release replacement tracker"
   },
   "native_mtp_immutable_dependency_exception": {
     "approved": true,
-    "approved_at": "2026-09-28",
+    "approved_at": "2026-10-05",
     "approved_by": "@Augustas11",
     "review_due_at": "2026-12-27",
     "fork_location": "https://github.com/Augustas11/mlx-swift-lm.git",
-    "fork_revision": "ef4ff8568c38c640bc90a8176dc3acfe943a288d",
+    "fork_revision": "b181102984a4d1875efbd9e0eab3a7dfd1c012c5",
     "remote_revision_verified": true,
     "local_pin_matches": true,
     "upstream_base_revision": "bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57",
     "review_status": "approved_0_critical_0_high_0_medium",
-    "scope": "standalone_qwen_mtp_loading_public_cache_transaction_packed_verification_strict_continuation_and_packed_recurrent_cache_surfaces_only",
+    "scope": "standalone_qwen_mtp_loading_public_cache_transaction_packed_verification_strict_continuation_and_packed_recurrent_cache_surfaces_plus_exact_qwen36_a3b_fused_moe_v3_rows_t1_through_t7_chunked",
     "removal_trigger": "first reviewed upstream tag with equivalent standalone-checkpoint loading and public transaction, packed verification, continuation, and recurrent-cache surfaces that passes the MacProvider qualification artifact",
     "replacement_tracker": "https://github.com/ml-explore/mlx-swift-lm/issues/645"
   },
@@ -416,8 +416,8 @@
   "last_checked_at": "2026-10-03T01:20:31Z",
   "macprovider_pins": {
     "mlx_swift": "0.31.4",
-    "mlx_swift_lm": "ef4ff8568c38c640bc90a8176dc3acfe943a288d",
-    "mlx_swift_lm_revision": "ef4ff8568c38c640bc90a8176dc3acfe943a288d",
+    "mlx_swift_lm": "b181102984a4d1875efbd9e0eab3a7dfd1c012c5",
+    "mlx_swift_lm_revision": "b181102984a4d1875efbd9e0eab3a7dfd1c012c5",
     "mlx_swift_revision": "dc43e62d7055353c7f99fa071a4e71d29dfddc44",
     "swift_jinja": "2.5.1",
     "swift_jinja_revision": "4588064a20f3fc093c95f2f7d3359999bf30cae5",

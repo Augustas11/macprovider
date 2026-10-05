@@ -1,12 +1,51 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.8
+version: v0.22.11
 status: LOCKED
 owner: operator (a11)
-last-locked: 2026-10-01
+last-locked: 2026-10-02
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.22.11 (2026-10-05)** — Follows SPEC-048 0.1.23 (#1770). The pinned
+  fused A3B MoE path now covers every call whose rows carry `1...7` tokens at
+  any batch size, in chunks of at most seven flattened tokens, with stock only
+  for prefill-shaped rows; the v0.22.10 description of a stock fallback above
+  seven flattened tokens is retired. The same-setting rule is unchanged, and
+  any R024 measurement, R015 result, journey, or release recorded under the
+  earlier envelope cannot authorize or seed a tuple on the new pin. R024
+  `proposal_depth` narrows from `1..16` to `1..6` so a native verification row
+  (`proposal_depth + 1` tokens) never leaves the fused envelope when the
+  scheduler reduces depth; the consumer applies the same bound to the MTP
+  manifest's `max_proposal_depth` and `adaptation_max_depth`. Merge
+  note: this branch drafted its #1770 entries as v0.22.6-v0.22.7 while
+  origin/main used those numbers for #1816, so they are renumbered
+  v0.22.9-v0.22.10. No content change to those entries.
+
+- **v0.22.10 (2026-10-02)** — Binds native-MTP admission to the fused ordinary
+  baseline (#1770). The pinned SPEC-048-R003 dependency makes its exact
+  Qwen3.5/3.6 A3B fused small-token MoE path the default at flattened token
+  counts `1...7`, with stock fallback above that bound. The fused path is
+  batch-invariant and preserves expert selection but can change argmax at bf16
+  near-ties. Therefore an R024 entry's `runtime_revision`,
+  `provider_revision`, ordinary-baseline measurement, R015 evidence, journey,
+  and release build MUST all use the same fused-kernel setting. A stock-kernel
+  ordinary measurement cannot authorize or seed a tuple built on this pin.
+  The revision bump intentionally invalidates prior KV disk-cache identities.
+
+- **v0.22.9 (2026-10-02)** — Native-MTP signed prompt bound (#1770).
+  SPEC-023-R024 entries gain the required `max_prompt_tokens` integer
+  `1..1048576`, the SPEC-048-R004 prompt bound above which an otherwise
+  eligible request selects ordinary. Before this the release envelope carried
+  no prompt bound and consumers defaulted it to 1048576, so a tuple whose
+  R015 evidence fails above a prompt length (Qwen3.6-35B-A3B at 8192 tokens)
+  could not be admitted with that limit. It is part of the complete entry and
+  therefore of `native_mtp_admission_tuple_sha256`; a missing, zero,
+  non-integer, or out-of-range value fails the entry closed. The R024 field
+  table now states the domains the consumer enforces: envelope identifiers
+  are printable non-space ASCII, `source_commit` is a 40-hex SHA-1 object id,
+  and `hardware_class` excludes `.` and `_`.
 
 - **v0.22.8 (2026-10-01)** — #1816 freeze audit R1 (A-M7): §16.9 states that
   the pool-proven graduation path is specified but not executable. Until the
@@ -3129,12 +3168,12 @@ schema.
 
 ```text
 schema_version = "macprovider.native-mtp-admission.v1"
-release_id: 1..128 ASCII bytes, equal to release.json version
+release_id: 1..128 printable non-space ASCII bytes (0x21-0x7e), equal to release.json version
 issued_at: RFC3339 UTC seconds
 expires_at: RFC3339 UTC seconds; issued_at < expires_at <= issued_at + 90 days
-signer_key_id: 1..128 ASCII bytes
-challenge_bank_signer_key_id: 1..128 ASCII bytes
-revocation_signer_key_id: 1..128 ASCII bytes
+signer_key_id: 1..128 printable non-space ASCII bytes (0x21-0x7e)
+challenge_bank_signer_key_id: 1..128 printable non-space ASCII bytes (0x21-0x7e)
+revocation_signer_key_id: 1..128 printable non-space ASCII bytes (0x21-0x7e)
 entries: array[1..256]
 ```
 
@@ -3150,17 +3189,19 @@ unsigned JSON integers and never floats.
 | `decode_path` | exactly `"native_mtp"` |
 | `mtp_manifest_sha256` | `sha256` |
 | `mtp_family_adapter`, `mtp_state_class` | `short_string` |
-| `mtp_head_count`, `proposal_depth` | integers `1..16` |
+| `mtp_head_count` | integer `1..16` |
+| `proposal_depth` | integer `1..6`: a native verification row carries `proposal_depth + 1` target tokens and MUST stay inside the SPEC-048 fused MoE envelope of seven tokens per row |
 | `complete_window_bytes_by_depth` | exact array length `proposal_depth + 1`, indexed by proposal depth `0...proposal_depth`; every value is a positive JSON integer no larger than the consumer `Int.max`, values are monotonically nondecreasing, and the last value multiplied by `qualified_slots` MUST fit without integer overflow |
 | `runtime_revision`, `provider_revision` | `short_string` |
-| `source_commit` | full lowercase Git object id for the source repository's object format, exactly 40 or 64 hex characters |
+| `source_commit` | full lowercase SHA-1 Git object id, exactly 40 hex characters (a SHA-256 object-format repository needs a consumer amendment first) |
 | `reproducible_build_sha256` | `sha256` |
 | `live_executable_cdhash` | exact lowercase 40-hex Mach-O CodeDirectory CDHash of the live signed executable admitted to consume this tuple |
 | `cache_state_classes` | sorted unique array `1..16`; every element is an `mtp_state_class` value (`stageable_rewindable` or `hybrid_stageable_rewindable`) and the array MUST contain the entry's `mtp_state_class`, which the runtime matches against the loaded model |
-| `hardware_class` | lowercase ASCII matching `^[a-z0-9][a-z0-9._-]{0,63}$` |
+| `hardware_class` | lowercase ASCII matching `^[a-z0-9][a-z0-9-]{0,63}$`, the canonical form of the host chip name |
 | `ram_bytes` | exact physical RAM integer `> 0`, not a minimum |
 | `qualified_slots` | integer `2..8`, exact admitted slot count |
 | `max_native_active_rows` | integer `1..8`, no larger than `qualified_slots`; the SPEC-048-R007 load bound above which the tuple serves ordinary decode |
+| `max_prompt_tokens` | integer `1..1048576`; the SPEC-048-R004 prompt bound, in target-tokenizer tokens after chat templating, above which an otherwise eligible request selects ordinary |
 | `request_feature_profile` | exactly `"native_mtp_greedy_text_v1"` (greedy rows only) or `"native_mtp_sampled_text_v1"` (greedy rows plus SPEC-048-R004 sampled rows verified by SPEC-048-R005 target-sample exact match) |
 | `decrease_threshold_ppm`, `increase_threshold_ppm` | integers `0..1000000`, strictly increasing |
 | `max_verification_positions_per_committed_milli` | integer `1000..4000` |

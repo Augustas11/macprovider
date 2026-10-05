@@ -148,9 +148,10 @@ native_mtp_required_merges_in_latest_release = all(
     for row in native_mtp_required_merges.values()
 )
 
-native_mtp_exception_revision = "ef4ff8568c38c640bc90a8176dc3acfe943a288d"
+native_mtp_exception_revision = "b181102984a4d1875efbd9e0eab3a7dfd1c012c5"
 native_mtp_exception_base = "bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57"
 native_mtp_exception_repo = "Augustas11/mlx-swift-lm"
+native_mtp_exception_review_approved = True
 native_mtp_exception_remote_verified = commit_is_descendant(
     native_mtp_exception_repo,
     native_mtp_exception_base,
@@ -160,7 +161,9 @@ native_mtp_exception_pin_matches = (
     pins.get("mlx_swift_lm_revision") == native_mtp_exception_revision
 )
 native_mtp_exception_approved = (
-    native_mtp_exception_remote_verified and native_mtp_exception_pin_matches
+    native_mtp_exception_remote_verified
+    and native_mtp_exception_pin_matches
+    and native_mtp_exception_review_approved
 )
 
 # Heuristic: fetch KVCache.swift and look for graph-traceable offset patterns.
@@ -427,18 +430,20 @@ out = {
         "native_mtp_status": (
             "qualified_transaction_exception_default_off"
             if native_mtp_exception_approved
-            else "blocked_transaction_exception_unverified"
+            else "candidate_fused_moe_revision_pending_review"
         ),
         "note": (
-            "Exact reviewed fork standalone Qwen MTP loading, transaction, packed "
-            "verification, strict continuation-state, and packed recurrent-cache "
-            "surfaces qualify the SPEC-048-R003 boundary "
-            "only; upstream #645 remains the tagged-release replacement tracker"
+            "The previously reviewed Qwen MTP transaction surfaces remain present and "
+            "the pin adds the exact-layout Qwen3.6 A3B fused-MoE path (rows of 1-7 "
+            "tokens, chunked at any batch size); approved 2026-10-05 on the "
+            "ordinary-path Studio qualification and a 0/0/0 three-lane freeze audit; "
+            "native MTP stays default-off and native-MTP R015 gates only native-tuple "
+            "activation; upstream #645 remains the tagged-release replacement tracker"
         ),
     },
     "native_mtp_immutable_dependency_exception": {
         "approved": native_mtp_exception_approved,
-        "approved_at": "2026-09-28",
+        "approved_at": "2026-10-05",
         "approved_by": "@Augustas11",
         "review_due_at": "2026-12-27",
         "fork_location": "https://github.com/Augustas11/mlx-swift-lm.git",
@@ -450,7 +455,7 @@ out = {
         "scope": (
             "standalone_qwen_mtp_loading_public_cache_transaction_packed_"
             "verification_strict_continuation_and_packed_recurrent_cache_"
-            "surfaces_only"
+            "surfaces_plus_exact_qwen36_a3b_fused_moe_v3_rows_t1_through_t7_chunked"
         ),
         "removal_trigger": (
             "first reviewed upstream tag with equivalent standalone-checkpoint "

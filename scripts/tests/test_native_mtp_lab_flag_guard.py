@@ -18,7 +18,19 @@ LAB_GUARD = "DEBUG || " + FORBIDDEN
 # Lab-only command types: every declaration and every reference, including
 # the subcommand registration, must sit inside the lab guard so a plain
 # release build compiles none of them.
-LAB_COMMAND_TYPES = ("NativeMTPHardwareE2ECommand", "NativeMTPBenchCommand")
+LAB_COMMAND_TYPES = (
+    "NativeMTPHardwareE2ECommand",
+    "NativeMTPBenchCommand",
+    "NativeMTPJourneyE2ECommand",
+)
+# Lab-only hooks that change decode inputs or bypass serving: every
+# declaration and reference must also sit inside the lab guard.
+LAB_HOOK_SYMBOLS = (
+    "NativeMTPLabProposalOverride",
+    "installLabNativeMTPProposalOverride",
+    "labNativeMTPProposalOverride",
+    "labTokenProbe",
+)
 
 
 def _unguarded_references(text: str, names: tuple[str, ...]) -> list[int]:
@@ -79,7 +91,7 @@ class NativeMTPLabFlagGuardTests(unittest.TestCase):
             for name in LAB_COMMAND_TYPES:
                 if f"struct {name}" in text:
                     declared.add(name)
-            for lineno in _unguarded_references(text, LAB_COMMAND_TYPES):
+            for lineno in _unguarded_references(text, LAB_COMMAND_TYPES + LAB_HOOK_SYMBOLS):
                 offenders.append(f"{path.relative_to(ROOT)}:{lineno}")
         self.assertEqual(set(LAB_COMMAND_TYPES), declared)
         self.assertEqual([], offenders, "Lab-only native MTP commands must be declared and registered only under the lab guard.")

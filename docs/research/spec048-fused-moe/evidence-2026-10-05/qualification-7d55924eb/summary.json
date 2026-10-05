@@ -1,0 +1,310 @@
+{
+  "schema": "macprovider.spec048-fused-ordinary-qualification.v1",
+  "provider_commit": "7d55924eb94907a09759c3e0263f374d9fec3dfc",
+  "header": {
+    "machine": {
+      "chip": "Apple M3 Ultra",
+      "hw_model": "Mac15,14",
+      "os_build": "26A434",
+      "os_version": "Version 27.0.1 (Build 26A434)",
+      "ram_gb": 256
+    },
+    "mlx_fork_revision": "b181102984a4d1875efbd9e0eab3a7dfd1c012c5",
+    "model_id": "qwen/qwen3.6-35b-a3b",
+    "target_sha256": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+    "swift_version": "Apple Swift version 6.3.3 (swiftlang-6.3.3.1.3 clang-2100.1.1.101)"
+  },
+  "raw_sha256": {
+    "fusedA": "27d2522fdded0bc3feee90cd5a12ebf430ce68560afdae3d868d18df72e82e42",
+    "stockA": "5fedabd939ef66f5e5745d6cff88f3af4dabb04f9c8f3077f008fe01baba6d35",
+    "fusedB": "835a5dcf48fc35c6a46dabf06cd96cd7cef6031b2864a5b77df4598eabe363c8",
+    "stockB": "e5125049091f014be94ddbd53ee5ed523de31cb4286806c3ada093f0b48b99dd"
+  },
+  "cells": {
+    "s1-p1536-o512": {
+      "parity_mismatch_rows_by_block": {
+        "fusedA": [
+          [],
+          [],
+          []
+        ],
+        "stockA": [
+          [],
+          [],
+          []
+        ],
+        "fusedB": [
+          [],
+          [],
+          []
+        ],
+        "stockB": [
+          [],
+          [],
+          []
+        ]
+      },
+      "run_to_run_differing_rows": {
+        "fusedA_vs_fusedB": {
+          "ordinary": [
+            [],
+            [],
+            []
+          ],
+          "native_mtp": [
+            [],
+            [],
+            []
+          ]
+        },
+        "stockA_vs_stockB": {
+          "ordinary": [
+            [],
+            [],
+            []
+          ],
+          "native_mtp": [
+            [],
+            [],
+            []
+          ]
+        }
+      },
+      "ordinary_decode_tps": {
+        "fusedA": [
+          94.0,
+          93.6,
+          93.5
+        ],
+        "stockA": [
+          74.6,
+          74.4,
+          65.0
+        ],
+        "fusedB": [
+          86.5,
+          93.2,
+          92.8
+        ],
+        "stockB": [
+          88.7,
+          73.7,
+          74.6
+        ]
+      },
+      "native_decode_tps": {
+        "fusedA": [
+          107.9,
+          107.1,
+          105.4
+        ],
+        "stockA": [
+          95.0,
+          93.4,
+          95.4
+        ],
+        "fusedB": [
+          107.2,
+          107.4,
+          105.5
+        ],
+        "stockB": [
+          110.7,
+          109.3,
+          95.3
+        ]
+      },
+      "ordinary_fused_over_stock_median_ratio": 1.253
+    },
+    "s2-p1536-o512": {
+      "parity_mismatch_rows_by_block": {
+        "fusedA": [
+          [],
+          [],
+          []
+        ],
+        "stockA": [
+          [],
+          [],
+          []
+        ],
+        "fusedB": [
+          [],
+          [],
+          []
+        ],
+        "stockB": [
+          [],
+          [],
+          []
+        ]
+      },
+      "run_to_run_differing_rows": {
+        "fusedA_vs_fusedB": {
+          "ordinary": [
+            [],
+            [],
+            []
+          ],
+          "native_mtp": [
+            [],
+            [],
+            []
+          ]
+        },
+        "stockA_vs_stockB": {
+          "ordinary": [
+            [],
+            [],
+            []
+          ],
+          "native_mtp": [
+            [],
+            [],
+            []
+          ]
+        }
+      },
+      "ordinary_decode_tps": {
+        "fusedA": [
+          121.7,
+          111.7,
+          121.0
+        ],
+        "stockA": [
+          105.5,
+          105.2,
+          105.1
+        ],
+        "fusedB": [
+          121.1,
+          121.1,
+          116.0
+        ],
+        "stockB": [
+          105.4,
+          105.1,
+          105.2
+        ]
+      },
+      "native_decode_tps": {
+        "fusedA": [
+          121.5,
+          121.3,
+          121.0
+        ],
+        "stockA": [
+          97.9,
+          94.9,
+          104.8
+        ],
+        "fusedB": [
+          107.5,
+          120.5,
+          120.3
+        ],
+        "stockB": [
+          105.2,
+          94.9,
+          105.0
+        ]
+      },
+      "ordinary_fused_over_stock_median_ratio": 1.15
+    },
+    "s8-p1536-o512": {
+      "parity_mismatch_rows_by_block": {
+        "fusedA": [
+          [],
+          [],
+          []
+        ],
+        "stockA": [
+          [],
+          [],
+          []
+        ],
+        "fusedB": [
+          [],
+          [],
+          []
+        ],
+        "stockB": [
+          [],
+          [],
+          []
+        ]
+      },
+      "run_to_run_differing_rows": {
+        "fusedA_vs_fusedB": {
+          "ordinary": [
+            [],
+            [],
+            []
+          ],
+          "native_mtp": [
+            [],
+            [],
+            []
+          ]
+        },
+        "stockA_vs_stockB": {
+          "ordinary": [
+            [],
+            [],
+            []
+          ],
+          "native_mtp": [
+            [],
+            [],
+            []
+          ]
+        }
+      },
+      "ordinary_decode_tps": {
+        "fusedA": [
+          183.3,
+          183.8,
+          177.8
+        ],
+        "stockA": [
+          184.7,
+          184.9,
+          184.8
+        ],
+        "fusedB": [
+          182.0,
+          177.5,
+          175.1
+        ],
+        "stockB": [
+          185.0,
+          146.1,
+          185.3
+        ]
+      },
+      "native_decode_tps": {
+        "fusedA": [
+          177.6,
+          183.4,
+          174.8
+        ],
+        "stockA": [
+          185.0,
+          185.0,
+          181.2
+        ],
+        "fusedB": [
+          182.2,
+          183.4,
+          182.7
+        ],
+        "stockB": [
+          178.3,
+          176.4,
+          178.6
+        ]
+      },
+      "ordinary_fused_over_stock_median_ratio": 0.973
+    }
+  }
+}

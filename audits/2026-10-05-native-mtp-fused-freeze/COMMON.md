@@ -1,0 +1,17 @@
+METHOD CONSTRAINT: First-party software-correctness / proof review. Do NOT author or construct malformed payloads or exploit inputs; evaluate by reading source and running EXISTING tests; describe gaps abstractly (field + condition) in prose. Do NOT modify any file in either repository.
+
+Repository: the current working directory, a detached worktree of PR #1832 (branch campaign/native-mtp-formal, #1770), which has origin/main merged in. This is the freeze audit before the PR merges with native MTP still default-off and the fused A3B MoE kernel enabled on the ordinary path.
+
+SCOPE (review all of it):
+1. The complete PR diff: `git diff origin/main...HEAD` (non-doc surface about 34 files: SPEC-048 0.1.21-0.1.23, SPEC-023 v0.22.9-v0.22.11, CONFORMANCE.json, UPSTREAM_WATCH.json, Package.swift/Package.resolved pin, ModelRuntime.swift, ContinuousBatchScheduler.swift, NativeMTPAdmissionSidecar.swift, NativeMTPBenchCommand.swift, NativeMTPJourneyE2ECommand.swift, NativeMTPHardwareE2ECommand.swift, MacProviderCLI.swift, KVConversationColdTierAdapter.swift, scripts/native_mtp_admission_sidecar.py, scripts/native_mtp_r015_analyze.py, scripts/native_mtp_post_gateway_replay_analyze.py, scripts/check-upstream-throughput-blockers.sh, scripts/read_swiftpm_pins.py, and their tests).
+2. The pinned dependency diff, in the read-only clone at <mlx-swift-lm-fork>: `git -C <mlx-swift-lm-fork> diff ef4ff8568c38c640bc90a8176dc3acfe943a288d 9c1cd900287de58ec6577ec0da7aa3ee61781200` (ef4ff856 is the fork revision currently approved on main; 9c1cd900 adds Libraries/MLXLLM/Models/Qwen35FusedMoE.swift, small hooks in Qwen35.swift and MLXLMCommon/SwitchLayers.swift, and Tests/MLXLMTests/Qwen35FusedMoETests.swift). This code runs on every A3B ordinary decode step for buyers once the PR ships.
+
+Context: a prior three-lane audit (audits/2026-10-02-native-mtp-formal/) covered the campaign up to the round-4 fixes; it does not cover the fused-MoE pin, the lab batch-composition fence, the post-gateway replay analyzer, or the SPEC-048 0.1.22/0.1.23 and SPEC-023 v0.22.9-v0.22.11 changes. Evidence for the fused path: docs/research/spec048-fused-moe/evidence-2026-10-05/ (exploratory; raw data stays on the lab host). The fused-baseline R015 (docs/research/spec048-r015/evidence-2026-10-03-a3b-fused-formal/) FAILED and native MTP is not being activated.
+
+Read first: specs/SPEC-048-native-mtp-serving.md (MTP-3 immutable-dependency exception, the fused-baseline paragraph, changelog 0.1.21-0.1.23), specs/SPEC-023-installer-autotune-recommend.md (R024, changelog v0.22.9-v0.22.11).
+
+You may run: `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts.tests.test_native_mtp_r015_analyze scripts.tests.test_native_mtp_lab_flag_guard scripts.tests.test_native_mtp_admission_sidecar scripts.tests.test_native_mtp_post_gateway_replay_analyze scripts.tests.test_upstream_watch`, `python3 scripts/gen_spec_index.py --check`, `python3 scripts/check_spec_governance.py --base-ref origin/main`. Swift tests need Metal and run in CI; do not try to build MLX.
+
+Out of scope (do not report): signing keys and how the operator stores them; the live coordinator; release cutting; style nits.
+
+Report findings as CRITICAL / HIGH / MEDIUM / LOW / INFO, each with file:line, a concrete failure scenario in prose, and a fix; say whether each is new in this diff or pre-existing on main. Do not report style nits as MEDIUM or above. End with a single final line exactly: `VERDICT: <n> CRITICAL, <n> HIGH, <n> MEDIUM, <n> LOW`.

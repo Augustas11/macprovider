@@ -2,6 +2,12 @@ import CryptoKit
 import Darwin
 import Foundation
 
+/// SPEC-048 0.1.23 / SPEC-023-R024: the pinned fused A3B MoE path covers rows
+/// of at most seven tokens, and a native verification row carries
+/// `proposal_depth + 1` target tokens. A deeper proposal would move that row
+/// between the fused and stock kernels as the scheduler reduces depth.
+let nativeMTPMaximumProposalDepth = 6
+
 struct NativeMTPAdmissionCapability: Equatable, Sendable {
     let tupleSHA256: String
     let sidecarSHA256: String
@@ -679,6 +685,7 @@ enum NativeMTPAdmissionSidecar {
         let qualifiedSlots: Int
         let maxNativeActiveRows: Int
         let requestFeatureProfile: String
+        let maxPromptTokens: Int
         let decreaseThresholdPPM: Int
         let increaseThresholdPPM: Int
         let maxVerificationPositionsPerCommittedMilli: Int
@@ -1015,7 +1022,8 @@ enum NativeMTPAdmissionSidecar {
         ], path: "$.mtp")
         let sourceLayout = try requireString(mtp, "source_layout", path: "$.mtp", allowed: ["checkpoint_mtp", "config_next_n", "separate_artifact"])
         let predictionLayerCount = try requireInt(mtp, "prediction_layer_count", path: "$.mtp", range: 1...64)
-        let maxProposalDepth = try requireInt(mtp, "max_proposal_depth", path: "$.mtp", range: 1...16)
+        let maxProposalDepth = try requireInt(
+            mtp, "max_proposal_depth", path: "$.mtp", range: 1...nativeMTPMaximumProposalDepth)
         let completeWindowBytesByDepth = try requireCompleteWindowBytesByDepth(
             mtp,
             key: "complete_window_bytes_by_depth",
@@ -1132,7 +1140,8 @@ enum NativeMTPAdmissionSidecar {
             completeWindowBytesByDepth: completeWindowBytesByDepth,
             throughputDeltaPPM: throughputDeltaPPM,
             adaptationEnabled: try requireBool(mtp, "adaptation_enabled", path: "$.mtp"),
-            adaptationMaxDepth: try requireInt(mtp, "adaptation_max_depth", path: "$.mtp", range: 1...16),
+            adaptationMaxDepth: try requireInt(
+                mtp, "adaptation_max_depth", path: "$.mtp", range: 1...nativeMTPMaximumProposalDepth),
             quantization: Quantization(
                 target: targetQuantization,
                 mtp: mtpQuantization,
@@ -1294,7 +1303,7 @@ enum NativeMTPAdmissionSidecar {
                 penalties: false,
                 conversationCache: false,
                 diskCache: false,
-                maxPromptTokens: 1_048_576,
+                maxPromptTokens: selected.entry.maxPromptTokens,
                 maxCompletionTokens: 1_048_576,
                 sampling: selected.entry.requestFeatureProfile == Self.sampledRequestFeatureProfile
             ),
@@ -1377,7 +1386,8 @@ enum NativeMTPAdmissionSidecar {
             "runtime_revision", "provider_revision", "source_commit",
             "reproducible_build_sha256", "live_executable_cdhash",
             "cache_state_classes", "hardware_class", "ram_bytes",
-            "qualified_slots", "max_native_active_rows", "request_feature_profile", "decrease_threshold_ppm",
+            "qualified_slots", "max_native_active_rows", "request_feature_profile", "max_prompt_tokens",
+            "decrease_threshold_ppm",
             "increase_threshold_ppm", "max_verification_positions_per_committed_milli",
             "throughput_delta_ppm", "benchmark_policy_sha256", "challenge_bank_sha256",
             "quantization", "ordinary_baseline",
@@ -1393,7 +1403,8 @@ enum NativeMTPAdmissionSidecar {
         guard requestFeatureProfiles.contains(requestFeatureProfile) else {
             throw NativeMTPAdmissionSidecarError.invalidValue("\(path).request_feature_profile")
         }
-        let proposalDepth = try requireInt(object, "proposal_depth", path: path, range: 1...16)
+        let proposalDepth = try requireInt(
+            object, "proposal_depth", path: path, range: 1...nativeMTPMaximumProposalDepth)
         let completeWindowBytesByDepth = try requireCompleteWindowBytesByDepth(
             object,
             key: "complete_window_bytes_by_depth",
@@ -1417,6 +1428,9 @@ enum NativeMTPAdmissionSidecar {
         guard maxNativeActiveRows <= qualifiedSlots else {
             throw NativeMTPAdmissionSidecarError.invalidValue("\(path).max_native_active_rows")
         }
+        // SPEC-023-R024 / SPEC-048-R004: the signed prompt bound; a longer
+        // prompt selects ordinary.
+        let maxPromptTokens = try requireInt(object, "max_prompt_tokens", path: path, range: 1...1_048_576)
         let decreaseThreshold = try requireInt(object, "decrease_threshold_ppm", path: path, range: 0...1_000_000)
         let increaseThreshold = try requireInt(object, "increase_threshold_ppm", path: path, range: 0...1_000_000)
         guard decreaseThreshold < increaseThreshold else {
@@ -1462,6 +1476,7 @@ enum NativeMTPAdmissionSidecar {
             qualifiedSlots: qualifiedSlots,
             maxNativeActiveRows: maxNativeActiveRows,
             requestFeatureProfile: requestFeatureProfile,
+            maxPromptTokens: maxPromptTokens,
             decreaseThresholdPPM: decreaseThreshold,
             increaseThresholdPPM: increaseThreshold,
             maxVerificationPositionsPerCommittedMilli: try requireInt(object, "max_verification_positions_per_committed_milli", path: path, range: 1000...4000),
