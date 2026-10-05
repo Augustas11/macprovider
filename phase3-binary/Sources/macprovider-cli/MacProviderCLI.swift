@@ -4108,7 +4108,69 @@ struct UpdateCommand: AsyncParsableCommand {
 /// Replaces this process with the canonical install binary and the same argv
 /// after PATH entrypoint repair (#616). Used by serve/update when launched from
 /// a stale `~/.local/bin` regular-file copy.
+/// #616 hand-off guard: a newer running binary never silently re-execs into an
+/// older canonical install, which would reject newer flags with a misleading
+/// usage error or serve with older code. An unknown canonical version keeps the
+/// #616 re-exec (no spec rule names a version floor for the hand-off).
+enum CanonicalReexecDecision: Equatable {
+    case reexec
+    case refuse(canonicalVersion: String)
+
+    static func decide(canonicalVersion: String?, runningVersion: String) -> CanonicalReexecDecision {
+        guard let canonicalVersion,
+              SelfUpdate.compareSemver(canonicalVersion, runningVersion) == .orderedAscending else {
+            return .reexec
+        }
+        return .refuse(canonicalVersion: canonicalVersion)
+    }
+
+    static func fatalLine(path: String, canonicalVersion: String, runningVersion: String) -> String {
+        "FATAL canonical_install_older path=\(path) canonical=\(canonicalVersion) running=\(runningVersion): "
+            + "update or reinstall the canonical provider, or run the canonical binary\n"
+    }
+}
+
+/// The canonical binary's version: the signed sibling compatibility set's
+/// `provider_cli` member when present, else `<canonical> --version` bounded to
+/// five seconds. Nil when neither yields a strict `X.Y.Z`.
+private func canonicalInstallVersion(_ canonical: URL) -> String? {
+    if let payload = CompatibilitySetManifest.payloadDirectory(for: canonical),
+       let manifest = try? CompatibilitySetManifest.loadValidated(from: payload) {
+        return manifest.providerCLIVersion
+    }
+    let process = Process()
+    let pipe = Pipe()
+    process.executableURL = canonical
+    process.arguments = ["--version"]
+    process.standardOutput = pipe
+    process.standardError = FileHandle.nullDevice
+    let exited = DispatchSemaphore(value: 0)
+    process.terminationHandler = { _ in exited.signal() }
+    do { try process.run() } catch { return nil }
+    guard exited.wait(timeout: .now() + 5) == .success else {
+        process.terminate()
+        return nil
+    }
+    guard process.terminationStatus == 0 else { return nil }
+    let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    return try? SelfUpdate.validateReleaseTag(output)
+}
+
 private func execCanonicalInstall(_ canonical: URL) throws -> Never {
+    if case .refuse(let canonicalVersion) = CanonicalReexecDecision.decide(
+        canonicalVersion: canonicalInstallVersion(canonical),
+        runningVersion: CoordinatorClient.binaryVersion
+    ) {
+        FileHandle.standardError.write(Data(CanonicalReexecDecision.fatalLine(
+            path: canonical.path,
+            canonicalVersion: canonicalVersion,
+            runningVersion: CoordinatorClient.binaryVersion
+        ).utf8))
+        try? FileHandle.standardError.synchronize()
+        // EX_CONFIG, as for the SPEC-049-R007 hardening refusal.
+        throw ExitCode(78)
+    }
     let argv = [canonical.path] + Array(CommandLine.arguments.dropFirst())
     let cArgs = argv.map { strdup($0) } + [nil]
     defer {
