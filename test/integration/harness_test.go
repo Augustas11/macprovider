@@ -193,6 +193,32 @@ func allocatePort(t *testing.T) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
+// reservedProviderListeners holds fake-provider listeners from
+// reserveProviderPort until fakeProvider.start takes them. A fake
+// provider binds long after its port is written into coordinator config,
+// and the coordinator, gateway, and other providers bind ephemeral ports
+// in between, so close-then-rebind collided under load
+// (TestPricingLaneJ2LoadAcrossSwitchRace: "bind: address already in use").
+var reservedProviderListeners sync.Map // port int -> net.Listener
+
+// reserveProviderPort allocates a port for an in-process fake provider and
+// keeps it bound until the provider starts serving on it.
+func reserveProviderPort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve provider port: %v", err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	reservedProviderListeners.Store(port, l)
+	t.Cleanup(func() {
+		if v, ok := reservedProviderListeners.LoadAndDelete(port); ok {
+			_ = v.(net.Listener).Close()
+		}
+	})
+	return port
+}
+
 // scenario wires up one coordinator + one gateway + one fake provider
 // for a single subtest. All temp files live in t.TempDir() and are
 // auto-cleaned. Returns the gateway base URL + API key + coordinator DB
@@ -422,7 +448,7 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 	}
 	providerSlots := make([]providerSlot, opts.providerCount)
 	for i := range providerSlots {
-		port := allocatePort(t)
+		port := reserveProviderPort(t)
 		id := s.providerID
 		if i > 0 {
 			id = fmt.Sprintf("%s-%d", s.providerID, i)
@@ -2326,7 +2352,13 @@ func (p *fakeProvider) start(ctx context.Context) {
 	}
 	httpReady := make(chan struct{})
 	go func() {
-		ln, err := net.Listen("tcp", p.hServer.Addr)
+		var ln net.Listener
+		var err error
+		if v, ok := reservedProviderListeners.LoadAndDelete(p.httpPort); ok {
+			ln = v.(net.Listener)
+		} else {
+			ln, err = net.Listen("tcp", p.hServer.Addr)
+		}
 		if err != nil {
 			p.t.Errorf("fake provider listen: %v", err)
 			close(httpReady)
