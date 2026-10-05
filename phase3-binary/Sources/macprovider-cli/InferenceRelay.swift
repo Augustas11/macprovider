@@ -1710,19 +1710,27 @@ actor InferenceRelay {
         if let attempt = state.relayBlindSettlement, !attempt.recordEmitted(wire) {
             return
         }
-        if let tier2Session {
-            let sealStart = clockMonotonicMicros()
-            let sealed = try tier2Session.sealResponseChunk(requestID: requestID, stream: stream, seq: seq, plaintext: wire)
-            EgressPerfTraceKey.current?.recordSeal(durationMicros: clockMonotonicMicros() &- sealStart)
-            try await sendFrame(sealed)
-            return
+        do {
+            if let tier2Session {
+                let sealStart = clockMonotonicMicros()
+                let sealed = try tier2Session.sealResponseChunk(requestID: requestID, stream: stream, seq: seq, plaintext: wire)
+                EgressPerfTraceKey.current?.recordSeal(durationMicros: clockMonotonicMicros() &- sealStart)
+                try await sendFrame(sealed)
+                return
+            }
+            try await sendFrame([
+                "type": "inference_response_chunk",
+                "request_id": requestID,
+                "seq": seq,
+                "data": wire,
+            ])
+        } catch {
+            // The digest already holds bytes that may never have been sent, so
+            // the receipt is withheld for good (R-13.6 missing evidence)
+            // rather than signed over a body the coordinator did not receive.
+            state.relayBlindSettlement?.suppressReceiptAfterSendFailure()
+            throw error
         }
-        try await sendFrame([
-            "type": "inference_response_chunk",
-            "request_id": requestID,
-            "seq": seq,
-            "data": wire,
-        ])
     }
 
     private static func sendValidationFrame(
@@ -2118,6 +2126,7 @@ final class RelayBlindSettlementAttempt: @unchecked Sendable {
     private var responseHasher = SHA256()
     private var responseBytes: Int64 = 0
     private var issued = false
+    private var sendFailed = false
 
     init(metadata: RelayBlindSettlementMetadata, context: RelayBlindDispatchContext, privacyClass: Bool, builder: ReceiptBuilder) {
         self.metadata = metadata
@@ -2155,6 +2164,15 @@ final class RelayBlindSettlementAttempt: @unchecked Sendable {
         return true
     }
 
+    /// A chunk whose `data` was recorded failed to seal or send: the digest
+    /// can no longer match what the coordinator received, so no receipt is
+    /// ever issued for this attempt.
+    func suppressReceiptAfterSendFailure() {
+        lock.lock()
+        defer { lock.unlock() }
+        sendFailed = true
+    }
+
     func receipt(terminalState: String, terminalStateUnixMS: Int64, outputTokens: Int64) -> String? {
         lock.lock()
         guard !issued else {
@@ -2162,6 +2180,10 @@ final class RelayBlindSettlementAttempt: @unchecked Sendable {
             return nil
         }
         issued = true
+        guard !sendFailed else {
+            lock.unlock()
+            return nil
+        }
         let digest = responseHasher.finalize().map { String(format: "%02x", $0) }.joined()
         let bytes = responseBytes
         let modelHash = modelHash

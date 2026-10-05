@@ -359,4 +359,49 @@ final class RelayBlindSettlementReceiptTests: XCTestCase {
             issuedAtUnixMS: try int(tuple["issued_at_unix_ms"])
         )
     }
+
+    // MARK: - send failure (SPEC-022 R-13.6)
+
+    private func settlementAttempt() throws -> RelayBlindSettlementAttempt {
+        let key = Curve25519.Signing.PrivateKey()
+        let store = InMemoryReceiptKeyStore()
+        try store.storeNew(providerId: "provider-1", privateKey: key)
+        let digest = RelayBlindBase64URL.encode(Data(repeating: 7, count: 32))
+        let metadata = try XCTUnwrap(RelayBlindSettlementMetadata(wire: [
+            "account_scope": "acct-scope-test", "request_id": "ledger-row-1", "attempt_n": 0, "provider_id": "provider-1",
+            "provider_receipt_key_id": "ed25519-sha256:" + SHA256.hash(data: key.publicKey.rawRepresentation).map { String(format: "%02x", $0) }.joined(),
+            "model_id": "model-a", "expected_catalog_model_hash": String(repeating: "5e", count: 32),
+            "catalog_id": "catalog-test", "catalog_body_digest": String(repeating: "c", count: 64),
+            "route_snapshot_digest": String(repeating: "d", count: 64), "route_snapshot_policy_version": "spec022-policy-test",
+            "route_snapshot_mode": "enforce", "pending_deadline_seconds": 300,
+            "paid_entrypoint": RelayBlindSettlementMetadata.paidEntrypoint,
+            "prompt_hash_basis": RelayBlindSettlementMetadata.promptHashBasis, "relay_blind_envelope_digest": digest,
+        ] as [String: Any]))
+        let context = RelayBlindDispatchContext(
+            executionAuthDigest: digest, envelopeDigest: digest, providerBindingDigest: digest, buyerBindingDigest: digest,
+            kid: RelayBlindBase64URL.encode(Data(repeating: 1, count: 16)), assignedSession: "session-1", requestID: "envelope-1",
+            inputTokenUpperBound: 8, maxOutputTokens: 4, privacyClass: nil
+        )
+        let attempt = RelayBlindSettlementAttempt(metadata: metadata, context: context, privacyClass: false, builder: ReceiptBuilder(keyStore: store))
+        attempt.pin(modelHash: String(repeating: "5e", count: 32), preparedModelID: "model-a", aliases: [])
+        attempt.validated(inputTokens: 4)
+        return attempt
+    }
+
+    func testReceiptIsIssuedWhenEveryRecordedChunkWasSent() throws {
+        let attempt = try settlementAttempt()
+        XCTAssertTrue(attempt.recordEmitted("data: one\n\n"))
+        XCTAssertNotNil(attempt.receipt(terminalState: "normal_done", terminalStateUnixMS: 1_780_000_000_000, outputTokens: 2))
+    }
+
+    /// A chunk recorded in the digest but not sent would sign a body the
+    /// coordinator never received; the receipt is withheld permanently.
+    func testSendFailureSuppressesTheReceipt() throws {
+        let attempt = try settlementAttempt()
+        XCTAssertTrue(attempt.recordEmitted("data: one\n\n"))
+        attempt.suppressReceiptAfterSendFailure()
+        XCTAssertNil(attempt.receipt(terminalState: "provider_error", terminalStateUnixMS: 1_780_000_000_000, outputTokens: 1))
+        XCTAssertNil(attempt.receipt(terminalState: "provider_error", terminalStateUnixMS: 1_780_000_000_000, outputTokens: 1))
+        XCTAssertFalse(attempt.recordEmitted("data: two\n\n"))
+    }
 }
