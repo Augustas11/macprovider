@@ -152,7 +152,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.42",
+      "version": "0.9.43",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
