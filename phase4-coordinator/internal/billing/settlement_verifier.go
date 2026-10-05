@@ -148,6 +148,12 @@ func verifySettlementReceiptSPEC022(input SettlementVerifyInput) SettlementVerif
 	if input.TrustRootInconclusive {
 		return pendingUntilSettlementDeadline(input, "trust_root_inconclusive")
 	}
+	// SPEC-022 R-7.10: a v0.4 receipt never settles an R-14 attempt. The
+	// guard runs before any hash comparison, and the snapshot's
+	// envelope-digest prompt_hash is never compared with a prompt hash.
+	if RelayBlindSnapshot(input.RouteSnapshot) {
+		return settlementQuarantined("v04_receipt_on_relay_blind_snapshot", "")
+	}
 	if !input.CanonicalHashesAvailable {
 		return settlementQuarantined("canonical_hash_unavailable", "")
 	}

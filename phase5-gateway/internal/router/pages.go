@@ -51,7 +51,7 @@ var tier1DisclosureText = []disclosureItem{
 	},
 	{
 		Key:  "settlement_outcomes",
-		Text: settlementPendingReservationDisclosure + " " + settlementPendingOutcomeDisclosure + " " + settlementVerifiedOutcomeDisclosure + " " + settlementQuarantinedOutcomeDisclosure + " " + settlementZeroSettledOutcomeDisclosure,
+		Text: settlementPendingReservationDisclosure + " " + settlementPendingOutcomeDisclosure + " " + settlementVerifiedOutcomeDisclosure + " " + settlementQuarantinedOutcomeDisclosure + " " + settlementZeroSettledOutcomeDisclosure + " " + settlementRelayBlindSettledOutcomeDisclosure,
 	},
 	{
 		Key:  "streaming_partial_settlement",

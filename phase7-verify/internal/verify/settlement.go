@@ -334,6 +334,14 @@ func VerifySettlementReceipt(input SettlementVerifyInput) SettlementResult {
 	if input.TrustRootInconclusive {
 		return pendingUntilDeadline(input, "trust_root_inconclusive")
 	}
+	// SPEC-022 R-7.10: a v0.4 receipt never settles a relay-blind (R-14)
+	// attempt. The guard runs before any hash comparison, so the snapshot's
+	// envelope-digest prompt_hash is never compared with a prompt hash. This
+	// verifier implements only the v0.4 profile; relay-blind work is never
+	// reported verified here.
+	if input.RouteSnapshot.RelayBlind() {
+		return settlementQuarantined("v04_receipt_on_relay_blind_snapshot", "")
+	}
 	if !input.CanonicalHashesAvailable {
 		return settlementQuarantined("canonical_hash_unavailable", "")
 	}
@@ -713,6 +721,18 @@ func sameStringSet(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+// SPEC-022 R-14 relay-blind paid entrypoint and prompt-hash basis.
+const (
+	paidEntrypointRelayBlindChat        = "coordinator_buyer_v1_relay_blind_chat_completions"
+	promptHashBasisRelayBlindEnvelopeV1 = "relay_blind_envelope_digest_v1"
+)
+
+// RelayBlind reports a SPEC-022 R-14 relay-blind snapshot: either its paid
+// entrypoint or its prompt-hash basis is the relay-blind one.
+func (r SettlementRouteSnapshot) RelayBlind() bool {
+	return r.PaidEntrypoint == paidEntrypointRelayBlindChat || r.PromptHashBasis == promptHashBasisRelayBlindEnvelopeV1
 }
 
 func (r SettlementRouteSnapshot) Digest() (string, error) {

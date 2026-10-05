@@ -1034,7 +1034,16 @@ type RelayBlindConfig struct {
 	MaxActiveReservations     int               `yaml:"max_active_reservations"`
 	MaxKeyRecordsPerProvider  int               `yaml:"max_key_records_per_provider"`
 	MetadataRequestsPerMinute int               `yaml:"metadata_requests_per_minute"`
+	// EnforceSettlementProfile names the SPEC-022 R-14 settlement profile
+	// that lets relay-blind traffic run under settlement enforce mode. Empty
+	// (the default) keeps relay-blind refused under enforce. The only
+	// accepted value is RelayBlindSettlementProfileV1.
+	EnforceSettlementProfile string `yaml:"enforce_settlement_profile"`
 }
+
+// RelayBlindSettlementProfileV1 is the SPEC-015 §N.13 receipt profile that
+// covers relay-blind chat under SPEC-022 enforce (R-14).
+const RelayBlindSettlementProfileV1 = "relay-blind-settlement-v1"
 
 // ApprovedCodeIdentity is one operator-approved privacy-class code identity.
 // BinaryVersion is optional; when set, the posture binary_version must match.
@@ -2712,8 +2721,10 @@ func (c Config) Validate() error {
 		if strings.TrimSpace(c.RelayBlind.SQLitePath) == "" {
 			return fmt.Errorf("relay_blind.sqlite_path must be set when enabled")
 		}
-		if c.Settlement.VerifiedModelSettlementMode == "enforce" {
-			return fmt.Errorf("relay_blind.enabled requires settlement.verified_model_settlement_mode=observe")
+		// SPEC-022 R-1.3/R-14.8: relay-blind traffic runs under enforce only
+		// through the R-14 lane, never by exempting it from coverage.
+		if c.Settlement.VerifiedModelSettlementMode == "enforce" && c.RelayBlind.EnforceSettlementProfile != RelayBlindSettlementProfileV1 {
+			return fmt.Errorf("relay_blind.enabled under settlement.verified_model_settlement_mode=enforce requires relay_blind.enforce_settlement_profile=%s", RelayBlindSettlementProfileV1)
 		}
 		if len(c.RelayBlind.IdentityPublicKeys) == 0 {
 			return fmt.Errorf("relay_blind.identity_public_keys must contain at least one provider pin when enabled")
@@ -2727,6 +2738,9 @@ func (c Config) Validate() error {
 				return fmt.Errorf("relay_blind.identity_public_keys.%s must be canonical unpadded base64url Ed25519 public key", providerID)
 			}
 		}
+	}
+	if c.RelayBlind.EnforceSettlementProfile != "" && c.RelayBlind.EnforceSettlementProfile != RelayBlindSettlementProfileV1 {
+		return fmt.Errorf("relay_blind.enforce_settlement_profile must be empty or %s", RelayBlindSettlementProfileV1)
 	}
 	if c.RelayBlind.ReservationTTLSeconds < 1 || c.RelayBlind.ReservationTTLSeconds > 30 {
 		return fmt.Errorf("relay_blind.reservation_ttl_seconds must be in [1,30]")

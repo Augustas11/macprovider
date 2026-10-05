@@ -2865,6 +2865,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	entry.EncryptedLeg = true
 	entry.TrustedPoolV1 = initial.Tier2Capabilities.TrustedPoolV1
 	entry.CatalogMaterialHoldV1 = initial.Tier2Capabilities.CatalogMaterialHoldV1
+	entry.RelayBlindSettlementReceiptV1 = initial.Tier2Capabilities.RelayBlindSettlementReceiptV1
 	entry.AttestationStatus = attestationStatus
 	if attestResult.SEResult != nil {
 		entry.SEPublicKey = append([]byte(nil), attestResult.SEResult.SEPublicKey...)

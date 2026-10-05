@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import MacProviderCore
 
@@ -94,6 +95,11 @@ actor InferenceRelay {
         let decryptedConversationKey: String?
         let bodyEncoding: String?
         let relayBlindContextObject: [String: Any]?
+        // SPEC-001-R005: the raw `relay_blind_settlement` member. Under SPEC-008
+        // it travels only inside the protected payload, so an outer copy on an
+        // encrypted frame is misplaced.
+        let relayBlindSettlementWire: Any?
+        let relayBlindSettlementMisplaced: Bool
         var requestPrivacyClass: String?
         var requestPrivacyMalformed = false
         if let tier2Session {
@@ -108,6 +114,8 @@ actor InferenceRelay {
                 decryptedConversationKey = payload.conversationKey
                 bodyEncoding = payload.bodyEncoding
                 relayBlindContextObject = payload.relayBlindContext
+                relayBlindSettlementWire = payload.relayBlindSettlement
+                relayBlindSettlementMisplaced = message.keys.contains(RelayBlindSettlementMetadata.wireKey)
                 requestPrivacyClass = payload.privacyClass
                 requestPrivacyMalformed = payload.privacyClassMalformed
             } catch {
@@ -129,6 +137,8 @@ actor InferenceRelay {
             decryptedConversationKey = nil
             bodyEncoding = message["body_encoding"] as? String
             relayBlindContextObject = message["relay_blind_context"] as? [String: Any]
+            relayBlindSettlementWire = message[RelayBlindSettlementMetadata.wireKey]
+            relayBlindSettlementMisplaced = false
         } else {
             try await sendNAK(inReplyTo: "inference_request", code: "invalid_message", message: "inference_request requires request_id, stream, and body")
             return
@@ -168,6 +178,7 @@ actor InferenceRelay {
         )
 
         let relayBlindOpened: RelayBlindProviderRuntime.OpenedRequest?
+        var relayBlindSettlement: RelayBlindSettlementMetadata?
         if isRelayBlind {
             guard let relayBlindRuntime else {
                 try await sendRelayBlindFailure(requestID: requestID, stream: stream, code: RelayBlindProviderError.disabled.code)
@@ -176,6 +187,21 @@ actor InferenceRelay {
             guard message["settlement"] == nil, let relayBlindContextObject else {
                 try await sendRelayBlindFailure(requestID: requestID, stream: stream, code: RelayBlindProviderError.invalidEnvelope.code)
                 return
+            }
+            // SPEC-001-R005: a malformed or mismatched `relay_blind_settlement`
+            // is rejected like `settlement`, before decryption and the claim.
+            // It binds by envelope digest, never by the plaintext request id.
+            if relayBlindSettlementMisplaced {
+                try await sendRelayBlindFailure(requestID: requestID, stream: stream, code: RelayBlindProviderError.invalidEnvelope.code)
+                return
+            }
+            if let relayBlindSettlementWire {
+                guard let parsed = RelayBlindSettlementMetadata(wire: relayBlindSettlementWire),
+                      relayBlindSettlementBinds(parsed, envelopeBody: body, contextObject: relayBlindContextObject) else {
+                    try await sendRelayBlindFailure(requestID: requestID, stream: stream, code: RelayBlindProviderError.invalidEnvelope.code)
+                    return
+                }
+                relayBlindSettlement = parsed
             }
             if privacyPath == .downgrade {
                 try await sendPrivacyBoundRejection(
@@ -233,7 +259,7 @@ actor InferenceRelay {
             try await sendRelayBlindFailure(requestID: requestID, stream: stream, code: RelayBlindProviderError.invalidEnvelope.code)
             return
         } else {
-            guard relayBlindContextObject == nil else {
+            guard relayBlindContextObject == nil, relayBlindSettlementWire == nil, !relayBlindSettlementMisplaced else {
                 try await sendRelayBlindFailure(requestID: requestID, stream: stream, code: RelayBlindProviderError.invalidEnvelope.code)
                 return
             }
@@ -331,7 +357,16 @@ actor InferenceRelay {
             return
         }
 
-        let state = RelayRequestState()
+        var settlementAttempt: RelayBlindSettlementAttempt?
+        if let opened = relayBlindOpened, let metadata = relayBlindSettlement, let builder = receiptBuilder {
+            settlementAttempt = RelayBlindSettlementAttempt(
+                metadata: metadata,
+                context: opened.context,
+                privacyClass: opened.responseSealer != nil,
+                builder: builder
+            )
+        }
+        let state = RelayRequestState(relayBlindSettlement: settlementAttempt)
         let receiptBuilder = receiptBuilder
         let receiptProviderID = receiptProviderID
         let task = Task { [weak self, modelRuntime, providerStatus, loadedModelID, catalogModelIDAlias, warmSwapEnabled, sendFrame, tier2Session, state, settlementMetadata, streamInterval, relayBlindRuntime] in
@@ -435,6 +470,25 @@ actor InferenceRelay {
                 "message": message,
             ],
         ])
+    }
+
+    /// SPEC-001-R005 binding: the metadata names this provider and its current
+    /// receipt key, and its envelope digest equals both the dispatch context's
+    /// and this provider's own SHA-256 over the exact envelope bytes.
+    private func relayBlindSettlementBinds(
+        _ metadata: RelayBlindSettlementMetadata,
+        envelopeBody: String,
+        contextObject: [String: Any]
+    ) -> Bool {
+        guard let receiptBuilder, let receiptProviderID, !receiptProviderID.isEmpty,
+              metadata.providerID == receiptProviderID,
+              let keyID = try? receiptBuilder.currentReceiptKeyID(providerId: receiptProviderID),
+              metadata.providerReceiptKeyID == keyID,
+              contextObject["envelope_digest"] as? String == metadata.relayBlindEnvelopeDigest else {
+            return false
+        }
+        let computed = RelayBlindBase64URL.encode(Data(SHA256.hash(data: Data(envelopeBody.utf8))))
+        return computed == metadata.relayBlindEnvelopeDigest
     }
 
     private func sendRelayBlindFailure(requestID: String, stream: Bool, code: String) async throws {
@@ -587,6 +641,13 @@ actor InferenceRelay {
                 let relayAliases = (preparedModelID != nil && preparedModelID == loadedModelID)
                     ? modelIDAliasList(catalogModelIDAlias)
                     : []
+                // SPEC-015 §N.13: the receipt's model hash is the hash of this
+                // pinned handle, and the snapshot model id must resolve to it.
+                state.relayBlindSettlement?.pin(
+                    modelHash: prepared.handle.snapshot.modelHash,
+                    preparedModelID: preparedModelID,
+                    aliases: relayAliases
+                )
                 do {
                     try request.validateModelMatches(preparedModelID, aliases: relayAliases)
                 } catch {
@@ -613,6 +674,7 @@ actor InferenceRelay {
                     throw RelayBlindProviderError.ciphertextInvalid
                 }
                 try relayBlindRuntime.journal.markValidated(opened.claim, inputTokens: inputTokens)
+                state.relayBlindSettlement?.validated(inputTokens: inputTokens)
                 let evidence = RelayBlindValidationEvidence(context: opened.context, inputTokens: inputTokens, state: "validated")
                 relayBlindEvidence = evidence
                 try await sendValidationFrame(
@@ -722,6 +784,7 @@ actor InferenceRelay {
                     try? relayBlindRuntime.journal.markTerminal(opened.claim, inputTokens: relayBlindEvidence?.inputTokens)
                 }
                 addSettlementTerminalMetadata(&endFrame, settlementMetadata: settlementMetadata)
+                attachRelayBlindSettlementReceipt(&endFrame, state: state)
                 try? await sendEndFrame(endFrame, requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame)
             }
         } catch let error as RelayBlindProviderError {
@@ -761,6 +824,7 @@ actor InferenceRelay {
                     "error": error.code,
                 ]
                 if let evidence = relayBlindEvidence { endFrame["relay_blind_validation"] = evidence.terminalWireObject() }
+                attachRelayBlindSettlementReceipt(&endFrame, state: state)
                 try? await sendEndFrame(endFrame, requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame)
             }
         } catch let error as APIError {
@@ -790,6 +854,7 @@ actor InferenceRelay {
                 if let evidence = relayBlindEvidence { endFrame["relay_blind_validation"] = evidence.terminalWireObject() }
                 if let opened = relayBlindOpened, let relayBlindRuntime { try? relayBlindRuntime.journal.markTerminal(opened.claim, inputTokens: relayBlindEvidence?.inputTokens) }
                 addSettlementTerminalMetadata(&endFrame, settlementMetadata: settlementMetadata)
+                attachRelayBlindSettlementReceipt(&endFrame, state: state)
                 try? await sendEndFrame(endFrame, requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame)
             }
         } catch {
@@ -818,6 +883,7 @@ actor InferenceRelay {
                 if let evidence = relayBlindEvidence { endFrame["relay_blind_validation"] = evidence.terminalWireObject() }
                 if let opened = relayBlindOpened, let relayBlindRuntime { try? relayBlindRuntime.journal.markTerminal(opened.claim, inputTokens: relayBlindEvidence?.inputTokens) }
                 addSettlementTerminalMetadata(&endFrame, settlementMetadata: settlementMetadata)
+                attachRelayBlindSettlementReceipt(&endFrame, state: state)
                 try? await sendEndFrame(endFrame, requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame)
             }
         }
@@ -938,6 +1004,7 @@ actor InferenceRelay {
                 let issued = receiptHeader.map { _ in
                     ReceiptIssuedAudit(providerID: receiptProviderID, modelID: request.model, tokensOut: 0, ttftMs: completion.ttftMilliseconds ?? Self.elapsedMilliseconds(since: startedAt), unixTs: unixTsSeconds)
                 }
+                attachRelayBlindSettlementReceipt(&endFrame, state: state)
                 try await sendReceiptEndFrame(endFrame, issued: issued, requestID: requestID, stream: false, tier2Session: tier2Session, sendFrame: sendFrame)
             }
             return completion
@@ -949,23 +1016,30 @@ actor InferenceRelay {
         let response: String
         if let privacySealer {
             let counts = privacyCounts(completion)
-            let bodyFrame = try privacySealer.seal(plaintext: ordinary, final: false)
-            let finalFrame = try privacySealer.seal(
-                plaintext: privacyFinalPlaintext(
-                    status: PrivacyClassConstants.finalStatusComplete,
-                    prompt: counts.prompt,
-                    completion: counts.completion
-                ),
-                final: true
-            )
-            response = try privacyResponseJSON(
-                frames: [bodyFrame, finalFrame], prompt: counts.prompt, completion: counts.completion
-            )
+            do {
+                let bodyFrame = try privacySealer.seal(plaintext: ordinary, final: false)
+                let finalFrame = try privacySealer.seal(
+                    plaintext: privacyFinalPlaintext(
+                        status: PrivacyClassConstants.finalStatusComplete,
+                        prompt: counts.prompt,
+                        completion: counts.completion
+                    ),
+                    final: true
+                )
+                response = try privacyResponseJSON(
+                    frames: [bodyFrame, finalFrame], prompt: counts.prompt, completion: counts.completion
+                )
+            } catch {
+                // The privacy response could not be built: the buyer never
+                // receives the completion, so no receipt (R-14.6).
+                state.relayBlindSettlement?.suppressReceiptAfterSendFailure()
+                throw error
+            }
         } else {
             response = ordinary
         }
         let seq = state.nextSeq()
-        try await sendChunk(requestID: requestID, stream: false, seq: seq, data: response, tier2Session: tier2Session, sendFrame: sendFrame)
+        try await sendChunk(requestID: requestID, stream: false, seq: seq, data: response, state: state, tier2Session: tier2Session, sendFrame: sendFrame)
         let ttftMs = completion.ttftMilliseconds ?? Self.elapsedMilliseconds(since: startedAt)
         let terminalStateTSUnixMS = Int64(Date().timeIntervalSince1970 * 1000)
         let receiptHeader = Self.buildReceiptHeader(
@@ -1005,6 +1079,7 @@ actor InferenceRelay {
             let issued = receiptHeader.map { _ in
                 ReceiptIssuedAudit(providerID: receiptProviderID, modelID: request.model, tokensOut: Int64(completion.generatedCompletionTokens), ttftMs: ttftMs, unixTs: unixTsSeconds)
             }
+            attachRelayBlindSettlementReceipt(&endFrame, state: state)
             try await sendReceiptEndFrame(endFrame, issued: issued, requestID: requestID, stream: false, tier2Session: tier2Session, sendFrame: sendFrame)
         }
         return completion
@@ -1247,6 +1322,32 @@ actor InferenceRelay {
         frame["late_receipt_settlement"] = "not_settled"
     }
 
+    /// SPEC-001-R005 item 3: exactly one `relay_blind_settlement_receipt` on
+    /// the terminal frame of a dispatch that carried valid metadata, and never
+    /// the v0.4 `receipt`. The usage signed is the usage this frame reports, so
+    /// the coordinator's terminal evidence and the receipt agree. Construction
+    /// failure withholds the receipt (SPEC-022 R-14.6 missing evidence).
+    private static func attachRelayBlindSettlementReceipt(_ frame: inout [String: Any], state: RelayRequestState) {
+        guard let attempt = state.relayBlindSettlement else { return }
+        frame.removeValue(forKey: "receipt")
+        let terminalState: String
+        switch frame["status"] as? String {
+        case "complete": terminalState = "normal_done"
+        case "cancelled": terminalState = "buyer_cancel"
+        default: terminalState = "provider_error"
+        }
+        let terminalStateUnixMS = (frame["terminal_state_ts_unix_ms"] as? Int64)
+            ?? Int64(Date().timeIntervalSince1970 * 1000)
+        let outputTokens = privacyTokenCount(frame["usage"] as? [String: Any], key: "completion_tokens")
+        guard let receipt = attempt.receipt(
+            terminalState: terminalState,
+            terminalStateUnixMS: terminalStateUnixMS,
+            outputTokens: Int64(outputTokens)
+        ) else { return }
+        frame["terminal_state_ts_unix_ms"] = terminalStateUnixMS
+        frame["relay_blind_settlement_receipt"] = receipt
+    }
+
     private static func attachRelayBlindTerminal(
         _ frame: inout [String: Any],
         evidence: RelayBlindValidationEvidence?,
@@ -1301,6 +1402,7 @@ actor InferenceRelay {
                     stream: true,
                     seq: seq,
                     data: data,
+                    state: state,
                     tier2Session: tier2Session,
                     privacySealer: privacySealer,
                     sendFrame: sendFrame
@@ -1415,6 +1517,7 @@ actor InferenceRelay {
                     let issued = receiptHeader.map { _ in
                         ReceiptIssuedAudit(providerID: receiptProviderID, modelID: request.model, tokensOut: Int64(cancelled.generatedCompletionTokens), ttftMs: 0, unixTs: Int64(Date().timeIntervalSince1970))
                     }
+                    attachRelayBlindSettlementReceipt(&endFrame, state: state)
                     try await sendReceiptEndFrame(endFrame, issued: issued, requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)
                 }
                 return completion
@@ -1503,6 +1606,7 @@ actor InferenceRelay {
                 let issued = receiptHeader.map { _ in
                     ReceiptIssuedAudit(providerID: receiptProviderID, modelID: request.model, tokensOut: Int64(completion.generatedCompletionTokens), ttftMs: 0, unixTs: Int64(Date().timeIntervalSince1970))
                 }
+                attachRelayBlindSettlementReceipt(&endFrame, state: state)
                 try await sendReceiptEndFrame(endFrame, issued: issued, requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)
             }
             return completion
@@ -1535,6 +1639,7 @@ actor InferenceRelay {
                         &endFrame, evidence: relayBlindEvidence, runtime: relayBlindRuntime, claim: relayBlindClaim
                     )
                     addSettlementTerminalMetadata(&endFrame, settlementMetadata: settlementMetadata)
+                    attachRelayBlindSettlementReceipt(&endFrame, state: state)
                     try? await sendEndFrame(endFrame, requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)
                 }
                 throw RelayCancellationAcknowledged()
@@ -1595,30 +1700,45 @@ actor InferenceRelay {
         stream: Bool,
         seq: Int,
         data: String,
+        state: RelayRequestState,
         tier2Session: Tier2ProviderSession?,
         privacySealer: PrivacyResponseSealerBox? = nil,
         sendFrame: @escaping SendFrame
     ) async throws {
-        let wire: String
-        if let privacySealer {
-            let frame = try privacySealer.seal(plaintext: data, final: false)
-            wire = try privacyFrameSSE(frame)
-        } else {
-            wire = data
+        do {
+            let wire: String
+            if let privacySealer {
+                let frame = try privacySealer.seal(plaintext: data, final: false)
+                wire = try privacyFrameSSE(frame)
+            } else {
+                wire = data
+            }
+            // SPEC-015 §N.13: the receipt digests exactly the `data` bytes sent. A
+            // chunk that loses the race with the terminal receipt is not sent.
+            if let attempt = state.relayBlindSettlement, !attempt.recordEmitted(wire) {
+                return
+            }
+            if let tier2Session {
+                let sealStart = clockMonotonicMicros()
+                let sealed = try tier2Session.sealResponseChunk(requestID: requestID, stream: stream, seq: seq, plaintext: wire)
+                EgressPerfTraceKey.current?.recordSeal(durationMicros: clockMonotonicMicros() &- sealStart)
+                try await sendFrame(sealed)
+                return
+            }
+            try await sendFrame([
+                "type": "inference_response_chunk",
+                "request_id": requestID,
+                "seq": seq,
+                "data": wire,
+            ])
+        } catch {
+            // A chunk that failed to seal, serialize, or send leaves the
+            // emitted body short of what the attempt produced (or the digest
+            // holding bytes the coordinator never received), so the receipt is
+            // withheld for good (R-14.6 missing evidence).
+            state.relayBlindSettlement?.suppressReceiptAfterSendFailure()
+            throw error
         }
-        if let tier2Session {
-            let sealStart = clockMonotonicMicros()
-            let sealed = try tier2Session.sealResponseChunk(requestID: requestID, stream: stream, seq: seq, plaintext: wire)
-            EgressPerfTraceKey.current?.recordSeal(durationMicros: clockMonotonicMicros() &- sealStart)
-            try await sendFrame(sealed)
-            return
-        }
-        try await sendFrame([
-            "type": "inference_response_chunk",
-            "request_id": requestID,
-            "seq": seq,
-            "data": wire,
-        ])
     }
 
     private static func sendValidationFrame(
@@ -1866,6 +1986,9 @@ actor InferenceRelay {
                 )
             }
         } catch {
+            // A closing frame that failed to seal, serialize, or send leaves
+            // the buyer without an authenticated final frame: no receipt.
+            state.relayBlindSettlement?.suppressReceiptAfterSendFailure()
             return
         }
     }
@@ -1881,7 +2004,7 @@ actor InferenceRelay {
         let seq = state.nextSeq()
         try await sendChunk(
             requestID: requestID, stream: stream, seq: seq, data: data,
-            tier2Session: tier2Session, sendFrame: sendFrame
+            state: state, tier2Session: tier2Session, sendFrame: sendFrame
         )
     }
 
@@ -1998,13 +2121,129 @@ private final class PrivacyResponseSealerBox: @unchecked Sendable {
     }
 }
 
+/// SPEC-015 §N.13 state for one relay-blind attempt that carried valid
+/// SPEC-001-R005 metadata: the pinned model hash, the validated input tokens,
+/// and a running SHA-256 of the emitted chunk `data` bytes. It issues at most
+/// one receipt; once issued, no further chunk may be emitted.
+final class RelayBlindSettlementAttempt: @unchecked Sendable {
+    private let lock = NSLock()
+    private let metadata: RelayBlindSettlementMetadata
+    private let context: RelayBlindDispatchContext
+    private let privacyClass: Bool
+    private let builder: ReceiptBuilder
+    private var modelHash: String?
+    private var inputTokens: Int64 = 0
+    private var usageValidated = false
+    private var responseHasher = SHA256()
+    private var responseBytes: Int64 = 0
+    private var issued = false
+    private var sendFailed = false
+
+    init(metadata: RelayBlindSettlementMetadata, context: RelayBlindDispatchContext, privacyClass: Bool, builder: ReceiptBuilder) {
+        self.metadata = metadata
+        self.context = context
+        self.privacyClass = privacyClass
+        self.builder = builder
+    }
+
+    /// Records the handle relayBlindPrepare pinned. A model id that does not
+    /// resolve to that handle leaves no hash, so no receipt is signed.
+    func pin(modelHash: String?, preparedModelID: String?, aliases: [String]) {
+        let resolves = metadata.modelID == preparedModelID || aliases.contains(metadata.modelID)
+        lock.lock()
+        defer { lock.unlock() }
+        self.modelHash = resolves ? modelHash : nil
+    }
+
+    /// The `input_tokens` of the SPEC-041 `validated` evidence. Until it is
+    /// recorded, no receipt is signed.
+    func validated(inputTokens: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.inputTokens = Int64(inputTokens)
+        usageValidated = true
+    }
+
+    /// False once the receipt was issued: the caller must not send `data`.
+    func recordEmitted(_ data: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !issued else { return false }
+        let bytes = Data(data.utf8)
+        responseHasher.update(data: bytes)
+        responseBytes += Int64(bytes.count)
+        return true
+    }
+
+    /// A chunk whose `data` was recorded failed to seal or send: the digest
+    /// can no longer match what the coordinator received, so no receipt is
+    /// ever issued for this attempt.
+    func suppressReceiptAfterSendFailure() {
+        lock.lock()
+        defer { lock.unlock() }
+        sendFailed = true
+    }
+
+    func receipt(terminalState: String, terminalStateUnixMS: Int64, outputTokens: Int64) -> String? {
+        lock.lock()
+        guard !issued else {
+            lock.unlock()
+            return nil
+        }
+        issued = true
+        guard !sendFailed else {
+            lock.unlock()
+            return nil
+        }
+        let digest = responseHasher.finalize().map { String(format: "%02x", $0) }.joined()
+        let bytes = responseBytes
+        let modelHash = modelHash
+        let inputTokens = inputTokens
+        let usageValidated = usageValidated
+        lock.unlock()
+        // SPEC-001-R005 item 3: without a pinned hash or validated usage the
+        // receipt is withheld (SPEC-022 R-14.6 missing evidence).
+        guard usageValidated,
+              let modelHash,
+              let inputBound = Int64(exactly: context.inputTokenUpperBound),
+              let outputBound = Int64(exactly: context.maxOutputTokens) else {
+            return nil
+        }
+        return try? builder.buildRelayBlindSettlement(
+            providerId: metadata.providerID,
+            input: RelayBlindSettlementReceiptInput(
+                metadata: metadata,
+                executionAuthDigest: context.executionAuthDigest,
+                providerBindingDigest: context.providerBindingDigest,
+                kid: context.kid,
+                inputTokenUpperBound: inputBound,
+                maxOutputTokens: outputBound,
+                privacyClass: privacyClass,
+                modelHash: modelHash,
+                inputTokens: inputTokens,
+                outputTokens: outputTokens,
+                responseBodyBytes: bytes,
+                responseBodySHA256: digest,
+                terminalState: terminalState,
+                terminalStateUnixMS: terminalStateUnixMS,
+                issuedAtUnixMS: Int64(Date().timeIntervalSince1970 * 1000)
+            )
+        )
+    }
+}
+
 private final class RelayRequestState: @unchecked Sendable {
+    let relayBlindSettlement: RelayBlindSettlementAttempt?
     private let lock = NSLock()
     private var buffer: BlockingChunkBuffer?
     private var terminal = false
     private var sentChunks = 0
     private var cancelled = false
     private var currentUsage: [String: Any]?
+
+    init(relayBlindSettlement: RelayBlindSettlementAttempt? = nil) {
+        self.relayBlindSettlement = relayBlindSettlement
+    }
 
     var terminalSent: Bool {
         lock.lock()

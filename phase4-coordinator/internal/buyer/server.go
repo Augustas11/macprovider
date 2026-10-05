@@ -907,6 +907,11 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 	// own bound. 1-minute window matches the SPEC-004 §7 operational-
 	// hygiene budget for cross-account refresh warns.
 	s.stickyMismatchLimiter = newStickyMismatchLimiter(time.Minute, s.stickyMaxEntries)
+	// SPEC-022 R-14.10: requestTimeout bounds every relay-blind dispatch, so
+	// the billing store measures an unrecorded attempt's deadline from it.
+	if s.billing != nil {
+		s.billing.SetRelayBlindAttemptTimeout(s.requestTimeout)
+	}
 	return s
 }
 
@@ -1285,6 +1290,40 @@ func (s *Server) handleInternalSettlementFinality(w http.ResponseWriter, r *http
 		writeError(w, http.StatusNotFound, "not_found", "Settlement finality is unavailable")
 		return
 	}
+	// SPEC-022 R-14: a relay-blind recovery names its attempt's binding and
+	// envelope digests, and the coordinator answers whether that attempt was
+	// enforce-covered. Only an explicit observe answer lets the gateway use
+	// its status-row recovery; an unknown attempt is not found (hold).
+	relayBlindBinding := strings.TrimSpace(r.URL.Query().Get("relay_blind_provider_binding_digest"))
+	relayBlindEnvelope := strings.TrimSpace(r.URL.Query().Get("relay_blind_envelope_digest"))
+	relayBlindLookup := relayBlindBinding != "" || relayBlindEnvelope != ""
+	if relayBlindLookup && (requiredInternalRequestID == "" || !relayBlindLookupDigest(relayBlindBinding) || !relayBlindLookupDigest(relayBlindEnvelope)) {
+		writeError(w, http.StatusBadRequest, "invalid_request", "A relay-blind finality lookup requires the internal request id and both digests")
+		return
+	}
+	coverage := ""
+	if relayBlindLookup {
+		var err error
+		coverage, err = billingStore.RelayBlindSettlementCoverage(r.Context(), accountID, requestID, requiredInternalRequestID, relayBlindBinding, relayBlindEnvelope)
+		if err != nil {
+			s.log.Warn().Err(err).Str("request_id", requestID).Str("account_id", accountID).Msg("relay-blind settlement coverage lookup failed")
+			writeError(w, http.StatusInternalServerError, "settlement_finality_failed", "Could not load settlement finality")
+			return
+		}
+		switch coverage {
+		case billing.RelayBlindCoverageObserve:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(billing.RequestSettlementFinality{
+				RequestID: requestID, RequiredInternalRequestID: requiredInternalRequestID,
+				RelayBlindSettlementCoverage: billing.RelayBlindCoverageObserve,
+			})
+			return
+		case billing.RelayBlindCoverageEnforce:
+		default:
+			writeError(w, http.StatusNotFound, "not_found", "Settlement finality not found")
+			return
+		}
+	}
 	var finality billing.RequestSettlementFinality
 	var found bool
 	var err error
@@ -1302,8 +1341,23 @@ func (s *Server) handleInternalSettlementFinality(w http.ResponseWriter, r *http
 		writeError(w, http.StatusNotFound, "not_found", "Settlement finality not found")
 		return
 	}
+	finality.RelayBlindSettlementCoverage = coverage
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(finality)
+}
+
+// relayBlindLookupDigest accepts a SPEC-041 binding or envelope digest: 43
+// canonical unpadded base64url characters.
+func relayBlindLookupDigest(value string) bool {
+	if len(value) != 43 {
+		return false
+	}
+	for _, c := range value {
+		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) handleInternalSettlementReceipts(w http.ResponseWriter, r *http.Request) {

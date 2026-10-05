@@ -293,6 +293,8 @@ type encryptedInferencePlaintext struct {
 	BodyEncoding      string                     `json:"body_encoding,omitempty"`
 	RelayBlindContext *RelayBlindDispatchContext `json:"relay_blind_context,omitempty"`
 	PrivacyClass      string                     `json:"privacy_class,omitempty"`
+	// RelayBlindSettlement is inside the SPEC-008 authenticated payload.
+	RelayBlindSettlement *RelayBlindSettlementMetadata `json:"relay_blind_settlement,omitempty"`
 }
 
 type encryptedInferenceResponseChunk struct {
@@ -747,16 +749,17 @@ func (ps *providerSession) sealInferenceRequestWithRelayBlind(provider pool.Prov
 	if session == nil {
 		ps.tier2Mu.Unlock()
 		msg := InferenceRequest{
-			Type:              "inference_request",
-			RequestID:         requestID,
-			Stream:            stream,
-			Body:              string(body),
-			MaxOutputTokens:   maxOutputTokens,
-			Settlement:        settlement,
-			ConversationKey:   conversationKey,
-			BodyEncoding:      relayBlindBodyEncoding(relayBlind),
-			RelayBlindContext: relayBlind,
-			PrivacyClass:      relayBlindPrivacyClass(relayBlind),
+			Type:                 "inference_request",
+			RequestID:            requestID,
+			Stream:               stream,
+			Body:                 string(body),
+			MaxOutputTokens:      maxOutputTokens,
+			Settlement:           settlement,
+			ConversationKey:      conversationKey,
+			BodyEncoding:         relayBlindBodyEncoding(relayBlind),
+			RelayBlindContext:    relayBlind,
+			PrivacyClass:         relayBlindPrivacyClass(relayBlind),
+			RelayBlindSettlement: relayBlindSettlementMetadata(relayBlind),
 		}
 		return json.Marshal(msg)
 	}
@@ -775,13 +778,14 @@ func (ps *providerSession) sealInferenceRequestWithRelayBlind(provider pool.Prov
 		Seq:        seq,
 	}
 	plaintext, err := json.Marshal(encryptedInferencePlaintext{
-		Type:              "inference_request_plaintext",
-		Body:              string(body),
-		MaxOutputTokens:   maxOutputTokens,
-		ConversationKey:   strings.TrimSpace(conversationKey),
-		BodyEncoding:      relayBlindBodyEncoding(relayBlind),
-		RelayBlindContext: relayBlind,
-		PrivacyClass:      relayBlindPrivacyClass(relayBlind),
+		Type:                 "inference_request_plaintext",
+		Body:                 string(body),
+		MaxOutputTokens:      maxOutputTokens,
+		ConversationKey:      strings.TrimSpace(conversationKey),
+		BodyEncoding:         relayBlindBodyEncoding(relayBlind),
+		RelayBlindContext:    relayBlind,
+		PrivacyClass:         relayBlindPrivacyClass(relayBlind),
+		RelayBlindSettlement: relayBlindSettlementMetadata(relayBlind),
 	})
 	if err != nil {
 		return nil, err
@@ -806,6 +810,15 @@ func relayBlindBodyEncoding(context *RelayBlindDispatchContext) string {
 		return ""
 	}
 	return "relay-blind-request-v1"
+}
+
+// relayBlindSettlementMetadata is the SPEC-001-R005 member for a relay-blind
+// dispatch that has an R-14 route snapshot; nil on every other frame.
+func relayBlindSettlementMetadata(context *RelayBlindDispatchContext) *RelayBlindSettlementMetadata {
+	if context == nil {
+		return nil
+	}
+	return context.Settlement
 }
 
 func relayBlindPrivacyClass(context *RelayBlindDispatchContext) string {
@@ -1895,9 +1908,24 @@ func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byt
 		s.log.Warn().Str("provider_id", providerID).Str("request_id", end.RequestID).Msg("unknown inference_response_end request_id")
 		return
 	}
+	end = relayBlindTerminalReceipts(active.relayBlind, end)
 	active.done <- end
 	close(active.chunks)
 	s.closeProviderForTier2RekeyIfDrained(session, providerID, assignedID, end.RequestID)
+}
+
+// relayBlindTerminalReceipts applies SPEC-001-R005 to a terminal frame. A
+// relay-blind terminal never carries a v0.4 receipt, so the receipt member is
+// dropped; the relay-blind settlement receipt counts only on a relay-blind
+// dispatch that carried relay_blind_settlement metadata.
+func relayBlindTerminalReceipts(context *RelayBlindDispatchContext, end InferenceResponseEnd) InferenceResponseEnd {
+	if context != nil {
+		end.Receipt = ""
+	}
+	if context == nil || context.Settlement == nil {
+		end.RelayBlindSettlementReceipt = ""
+	}
+	return end
 }
 
 func relayBlindRejectionCode(code string, privacy bool) bool {

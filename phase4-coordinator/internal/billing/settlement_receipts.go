@@ -327,7 +327,7 @@ func (s *Store) RecordMissingSettlementReceipt(ctx context.Context, input Settle
 	if now == 0 {
 		now = s.nowUTC().UnixMilli()
 	}
-	return s.applySettlementReceiptVerdict(ctx, input.SettlementReceiptIdentity, false, now, func(evidence settlementEvidence, alreadyTerminal bool) SettlementVerifyResult {
+	state, err := s.applySettlementReceiptVerdict(ctx, input.SettlementReceiptIdentity, false, now, func(evidence settlementEvidence, alreadyTerminal bool) SettlementVerifyResult {
 		return VerifySettlementReceipt(SettlementVerifyInput{
 			RouteSnapshot:            evidence.route,
 			AccountScope:             input.AccountScope,
@@ -352,6 +352,106 @@ func (s *Store) RecordMissingSettlementReceipt(ctx context.Context, input Settle
 			ComputeIntegrityCapture:  evidence.computeIntegrityCapture,
 		})
 	})
+	if errors.Is(err, errSettlementAttemptOutputMissing) {
+		return s.closeUnrecordedRelayBlindAttempt(ctx, input.SettlementReceiptIdentity, now, err)
+	}
+	return state, err
+}
+
+// errSettlementAttemptOutputMissing: the attempt has no attempt-output row.
+var errSettlementAttemptOutputMissing = errors.New("settlement attempt output missing")
+
+// closeUnrecordedRelayBlindAttempt is the missing-receipt writer for an
+// enforce relay-blind attempt whose snapshot committed before dispatch but
+// whose terminal, attempt output, and credit were never recorded (SPEC-022
+// R-14.10). Its terminal is the latest the dispatch bound allows, so its
+// deadline is that plus pending_deadline_seconds. Strictly past the deadline
+// it writes one closed quarantined verdict, never payable; a verdict is
+// terminal, so an output, credit, or receipt that arrives later cannot make
+// the attempt payable. In every other case (any other snapshot, an output or
+// credit, a receipt this process is still persisting, or a deadline not yet
+// passed) it returns missingErr and writes nothing.
+func (s *Store) closeUnrecordedRelayBlindAttempt(ctx context.Context, id SettlementReceiptIdentity, now int64, missingErr error) (SettlementReceiptState, error) {
+	if s.settlementReceiptRecoveryPending(id) {
+		return SettlementReceiptState{}, missingErr
+	}
+	var outcome SettlementReceiptState
+	err := sqliteutil.TransactObserved(ctx, s.db, "settlement_receipt", s.sqliteMetric, func(ctx context.Context, conn *sql.Conn) error {
+		existing, found, err := loadSettlementReceiptStateConn(ctx, conn, id)
+		if err != nil {
+			return err
+		}
+		if found {
+			if !existing.Closed {
+				return missingErr
+			}
+			outcome = existing
+			return nil
+		}
+		route, routeHash, err := loadSettlementRouteSnapshotConn(ctx, conn, id)
+		if err != nil {
+			return err
+		}
+		if !RelayBlindSnapshot(route) || route.RouteSnapshotMode != RouteSnapshotModeEnforce {
+			return missingErr
+		}
+		if _, err := loadSettlementAttemptOutputConn(ctx, conn, id); !errors.Is(err, errSettlementAttemptOutputMissing) {
+			if err != nil {
+				return err
+			}
+			return missingErr
+		}
+		var credited bool
+		if err := conn.QueryRowContext(ctx, `
+SELECT EXISTS (SELECT 1 FROM ledger_request_credits
+                WHERE request_id = ? AND attempt_n = ? AND provider_id = ?)`,
+			id.RequestID, id.AttemptN, id.ProviderID).Scan(&credited); err != nil {
+			return err
+		}
+		if credited {
+			return missingErr
+		}
+		terminalTS := s.relayBlindUnrecordedTerminalUnixMS(route.RouteDecisionTSUnixMS)
+		evidence := settlementEvidence{
+			route:     route,
+			routeHash: routeHash,
+			attempt: settlementAttemptEvidence{
+				TerminalState:         TerminalStateUpstreamTransportDisconnect,
+				TerminalStateTSUnixMS: terminalTS,
+			},
+			deadlineMS: terminalTS + route.PendingDeadlineSeconds*1000,
+		}
+		result := pendingUntilSettlementDeadline(SettlementVerifyInput{
+			RouteSnapshot:         route,
+			TerminalStateTSUnixMS: terminalTS,
+			ReceiptReceivedUnixMS: now,
+			NowUnixMS:             now,
+		}, "missing_receipt")
+		if result.Outcome != SettlementOutcomeQuarantined {
+			return missingErr
+		}
+		result.Reason = RelayBlindAttemptUnrecordedReason
+		state, err := settlementReceiptStateFromResult(id, evidence, result, false, now, false)
+		if err != nil {
+			return err
+		}
+		persisted, err := settlementReceiptPersistedFromState(state, result)
+		if err != nil {
+			return err
+		}
+		if err := insertSettlementReceiptStateConn(ctx, conn, persisted); err != nil {
+			return err
+		}
+		if err := insertSettlementReceiptVerdictAuditConn(ctx, conn, state, now); err != nil {
+			return err
+		}
+		outcome = state
+		return nil
+	})
+	if err != nil {
+		return SettlementReceiptState{}, err
+	}
+	return outcome, nil
 }
 
 func (s *Store) applySettlementReceiptVerdict(ctx context.Context, id SettlementReceiptIdentity, receiptPresent bool, receivedAtUnixMS int64, verify func(settlementEvidence, bool) SettlementVerifyResult) (SettlementReceiptState, error) {
@@ -543,7 +643,6 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
    AND srv.route_snapshot_mode = 'enforce'
    AND srv.route_snapshot_policy_version = lrc.settlement_policy_version
    AND srv.closed = 1
-   AND srv.settlement_outcome = 'verified'
   JOIN settlement_route_snapshots srs
     ON srs.request_id = lrc.request_id
    AND srs.attempt_n = lrc.attempt_n
@@ -560,6 +659,7 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
  WHERE lrc.request_id = ?
    AND lrc.attempt_n = ?
    AND lrc.provider_id = ?
+   AND `+payableSettlementOutcomeSQL("srv", "srs")+`
    AND lrc.settlement_policy_mode = 'enforce'
    AND lrc.settlement_account_scope_hash IS NOT NULL
    AND lrc.settlement_policy_version IS NOT NULL
@@ -876,7 +976,7 @@ func settlementReceiptStateFromResult(id SettlementReceiptIdentity, evidence set
 		ExpectedCatalogModelHash:      evidence.route.ExpectedCatalogModelHash,
 		ModelID:                       evidence.route.ModelID,
 		ModelHash:                     evidence.route.ProviderReportedModelHash,
-		ReceiptProfile:                settlementReceiptProfileV04,
+		ReceiptProfile:                settlementReceiptProfileFor(evidence.route),
 		BuyerDebitOutcome:             settlementReceiptNoMoneyMovementStep5,
 		ProviderSettlementOutcome:     settlementReceiptNoMoneyMovementStep5,
 		PayoutExclusionOutcome:        settlementReceiptPayoutExcludedUntil022,
@@ -893,6 +993,15 @@ func settlementReceiptStateFromResult(id SettlementReceiptIdentity, evidence set
 		return SettlementReceiptState{}, fmt.Errorf("settlement verifier returned incomplete state")
 	}
 	return state, nil
+}
+
+// settlementReceiptProfileFor is the settlement-capable profile locked for
+// the attempt's entrypoint (SPEC-022 R-4.7).
+func settlementReceiptProfileFor(route RouteSnapshot) string {
+	if RelayBlindSnapshot(route) {
+		return RelayBlindSettlementReceiptVersion
+	}
+	return settlementReceiptProfileV04
 }
 
 func (s *Store) nowUTC() time.Time {
@@ -1003,7 +1112,8 @@ func settlementReceiptPersistedFromState(state SettlementReceiptState, result Se
 }
 
 func settlementOutcomeTerminal(outcome string) bool {
-	return outcome == SettlementOutcomeVerified || outcome == SettlementOutcomeQuarantined || outcome == SettlementOutcomeZeroSettled
+	return outcome == SettlementOutcomeVerified || outcome == SettlementOutcomeQuarantined || outcome == SettlementOutcomeZeroSettled ||
+		outcome == SettlementOutcomeRelayBlindSettled
 }
 
 func loadSettlementEvidenceConn(ctx context.Context, conn *sql.Conn, id SettlementReceiptIdentity) (settlementEvidence, error) {
@@ -1188,7 +1298,7 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return settlementAttemptEvidence{}, fmt.Errorf("settlement attempt output missing")
+			return settlementAttemptEvidence{}, errSettlementAttemptOutputMissing
 		}
 		return settlementAttemptEvidence{}, err
 	}

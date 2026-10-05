@@ -45,6 +45,16 @@ const (
 	routeSnapshotRetryMaxDelay       = 100 * time.Millisecond
 	routeSnapshotPrimaryMirrorBudget = 25 * time.Millisecond
 
+	// PaidEntrypointCoordinatorBuyerChat is the plaintext chat entrypoint.
+	PaidEntrypointCoordinatorBuyerChat = "coordinator_buyer_v1_chat_completions"
+	// PaidEntrypointRelayBlindChat is the SPEC-022 R-14 relay-blind entrypoint.
+	PaidEntrypointRelayBlindChat = "coordinator_buyer_v1_relay_blind_chat_completions"
+	// PromptHashBasisCoordinatorV1 is the plaintext prompt-hash basis.
+	PromptHashBasisCoordinatorV1 = "coordinator_prompt_canonical_v1"
+	// PromptHashBasisRelayBlindEnvelopeV1 labels a snapshot whose prompt_hash
+	// member is the hex SHA-256 of the exact relay-blind envelope bytes. It
+	// is an envelope binding, never a plaintext prompt hash (R-3.1).
+	PromptHashBasisRelayBlindEnvelopeV1 = "relay_blind_envelope_digest_v1"
 	// SPEC-022-R013 closed expected_model_hash_source enum. A snapshot that
 	// omits the source is catalog (every pre-#1816 row); only pool_manifest
 	// is written explicitly, so catalog route-snapshot preimages and digests
@@ -157,6 +167,11 @@ type RouteSnapshot struct {
 	ComputeIntegrityCaptureRequired bool   `json:"-"`
 	ComputeIntegritySamplingCovered bool   `json:"-"`
 	ComputeIntegrityHardwareDigest  string `json:"-"`
+	// RelayBlindProviderBindingDigest is the SPEC-041 provider-binding
+	// digest of an R-14 relay-blind attempt. It is stored beside the
+	// snapshot, outside the digested preimage, so coverage lookups can bind
+	// the attempt to its binding (SPEC-022 R-14.9).
+	RelayBlindProviderBindingDigest string `json:"-"`
 }
 
 func ReceiptKeyID(pubkey []byte) (string, error) {
@@ -390,6 +405,16 @@ func (r RouteSnapshot) Validate() error {
 	if r.AttemptN < 0 {
 		return fmt.Errorf("route snapshot attempt_n must be >= 0")
 	}
+	// SPEC-022 R-3.1 (v0.3.0): the relay-blind basis belongs to the
+	// relay-blind entrypoint only, and that entrypoint carries no other basis.
+	if (r.PaidEntrypoint == PaidEntrypointRelayBlindChat) != (r.PromptHashBasis == PromptHashBasisRelayBlindEnvelopeV1) {
+		return fmt.Errorf("route snapshot prompt_hash_basis does not match paid_entrypoint")
+	}
+	if r.RelayBlindProviderBindingDigest != "" {
+		if _, err := relayBlindDigestHex(r.RelayBlindProviderBindingDigest); err != nil || r.PaidEntrypoint != PaidEntrypointRelayBlindChat {
+			return fmt.Errorf("route snapshot relay_blind_provider_binding_digest invalid")
+		}
+	}
 	if !receiptKeyIDPattern.MatchString(r.ProviderReceiptKeyID) {
 		return fmt.Errorf("route snapshot provider_receipt_key_id invalid")
 	}
@@ -574,6 +599,7 @@ INSERT INTO `+table+` (
     route_decision_ts_unix_ms, request_start_ts_unix_ms, pending_deadline_seconds,
     prompt_hash_basis, prompt_hash, compute_integrity_capture_required,
     compute_integrity_sampling_profile_covered, compute_integrity_hardware_runtime_class_digest,
+    relay_blind_provider_binding_digest,
     route_snapshot_digest, route_snapshot_json,
     route_snapshot_canonical_json, created_at_utc
 ) VALUES (
@@ -586,6 +612,7 @@ INSERT INTO `+table+` (
     ?, ?, ?,
     ?, ?, ?,
     ?, ?, ?, ?, ?,
+    ?,
     ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now')
 )`,
 			snapshot.AccountScope, snapshot.RequestID, snapshot.AttemptN, snapshot.ProviderID,
@@ -598,6 +625,7 @@ INSERT INTO `+table+` (
 			snapshot.RouteDecisionTSUnixMS, snapshot.RequestStartTSUnixMS, snapshot.PendingDeadlineSeconds,
 			snapshot.PromptHashBasis, snapshot.PromptHash,
 			boolInt(snapshot.ComputeIntegrityCaptureRequired), boolInt(snapshot.ComputeIntegritySamplingCovered), nullString(snapshot.ComputeIntegrityHardwareDigest),
+			nullString(snapshot.RelayBlindProviderBindingDigest),
 			digest, rendered,
 			canonical,
 		)
@@ -675,6 +703,7 @@ CREATE TABLE IF NOT EXISTS settlement_route_snapshot_journal (
     compute_integrity_capture_required INTEGER NOT NULL DEFAULT 0 CHECK(compute_integrity_capture_required IN (0,1)),
     compute_integrity_sampling_profile_covered INTEGER NOT NULL DEFAULT 0 CHECK(compute_integrity_sampling_profile_covered IN (0,1)),
     compute_integrity_hardware_runtime_class_digest TEXT NULL CHECK(compute_integrity_hardware_runtime_class_digest IS NULL OR (length(compute_integrity_hardware_runtime_class_digest) = 71 AND substr(compute_integrity_hardware_runtime_class_digest, 1, 7) = 'sha256:' AND substr(compute_integrity_hardware_runtime_class_digest, 8) NOT GLOB '*[^0-9a-f]*')),
+    `+relayBlindProviderBindingDigestColumnSQL+`,
     route_snapshot_digest TEXT NOT NULL CHECK(length(route_snapshot_digest) = 64 AND route_snapshot_digest NOT GLOB '*[^0-9a-f]*'),
     route_snapshot_json TEXT NOT NULL,
     route_snapshot_canonical_json TEXT NOT NULL,
@@ -709,8 +738,29 @@ BEGIN
     SELECT RAISE(ABORT, 'settlement route snapshot journal is immutable');
 END;
 `)
+	if err != nil {
+		return err
+	}
+	var hasBinding bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pragma_table_info('settlement_route_snapshot_journal') WHERE name = 'relay_blind_provider_binding_digest')`).Scan(&hasBinding); err != nil || hasBinding {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `ALTER TABLE settlement_route_snapshot_journal ADD COLUMN `+relayBlindProviderBindingDigestAddColumnSQL)
 	return err
 }
+
+// relayBlindProviderBindingDigestColumnSQL is the snapshot column that
+// records an R-14 attempt's SPEC-041 provider-binding digest: 43 canonical
+// base64url characters, NULL on every other snapshot. Fresh tables carry the
+// CHECK.
+const relayBlindProviderBindingDigestColumnSQL = `relay_blind_provider_binding_digest TEXT NULL CHECK(relay_blind_provider_binding_digest IS NULL OR (length(relay_blind_provider_binding_digest) = 43 AND relay_blind_provider_binding_digest NOT GLOB '*[^A-Za-z0-9_-]*'))`
+
+// relayBlindProviderBindingDigestAddColumnSQL adds the same column to an
+// existing table without the CHECK: SQLite validates an added CHECK against
+// every existing row, a full read of a large production table under the
+// schema lock at startup. RouteSnapshot.Validate enforces the canonical form
+// before every insert.
+const relayBlindProviderBindingDigestAddColumnSQL = `relay_blind_provider_binding_digest TEXT NULL`
 
 type persistedRouteSnapshotRow struct {
 	AccountScope                      string
@@ -742,6 +792,7 @@ type persistedRouteSnapshotRow struct {
 	ComputeIntegrityCaptureRequired   int
 	ComputeIntegritySamplingCovered   int
 	ComputeIntegrityHardwareDigest    sql.NullString
+	RelayBlindProviderBindingDigest   sql.NullString
 	RouteSnapshotDigest               string
 	RouteSnapshotJSON                 string
 	RouteSnapshotCanonicalJSON        string
@@ -826,6 +877,7 @@ SELECT account_scope, request_id, attempt_n, provider_id,
        route_decision_ts_unix_ms, request_start_ts_unix_ms, pending_deadline_seconds,
        prompt_hash_basis, prompt_hash, compute_integrity_capture_required,
        compute_integrity_sampling_profile_covered, compute_integrity_hardware_runtime_class_digest,
+       relay_blind_provider_binding_digest,
        route_snapshot_digest, route_snapshot_json, route_snapshot_canonical_json, created_at_utc
   FROM settlement_route_snapshot_journal
  WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
@@ -841,6 +893,7 @@ SELECT account_scope, request_id, attempt_n, provider_id,
 		&row.RouteDecisionTSUnixMS, &row.RequestStartTSUnixMS, &row.PendingDeadlineSeconds,
 		&row.PromptHashBasis, &row.PromptHash, &row.ComputeIntegrityCaptureRequired,
 		&row.ComputeIntegritySamplingCovered, &row.ComputeIntegrityHardwareDigest,
+		&row.RelayBlindProviderBindingDigest,
 		&row.RouteSnapshotDigest, &row.RouteSnapshotJSON, &row.RouteSnapshotCanonicalJSON, &row.CreatedAtUTC,
 	)
 	if err != nil {
@@ -884,6 +937,7 @@ INSERT OR IGNORE INTO settlement_route_snapshots (
     route_decision_ts_unix_ms, request_start_ts_unix_ms, pending_deadline_seconds,
     prompt_hash_basis, prompt_hash, compute_integrity_capture_required,
     compute_integrity_sampling_profile_covered, compute_integrity_hardware_runtime_class_digest,
+    relay_blind_provider_binding_digest,
     route_snapshot_digest, route_snapshot_json,
     route_snapshot_canonical_json, created_at_utc
 ) VALUES (
@@ -896,6 +950,7 @@ INSERT OR IGNORE INTO settlement_route_snapshots (
     ?, ?, ?,
     ?, ?, ?,
     ?, ?, ?, ?, ?,
+    ?,
     ?, ?, ?, ?
 )`,
 		row.AccountScope, row.RequestID, row.AttemptN, row.ProviderID,
@@ -908,6 +963,7 @@ INSERT OR IGNORE INTO settlement_route_snapshots (
 		row.RouteDecisionTSUnixMS, row.RequestStartTSUnixMS, row.PendingDeadlineSeconds,
 		row.PromptHashBasis, row.PromptHash, row.ComputeIntegrityCaptureRequired,
 		row.ComputeIntegritySamplingCovered, row.ComputeIntegrityHardwareDigest,
+		row.RelayBlindProviderBindingDigest,
 		row.RouteSnapshotDigest, row.RouteSnapshotJSON,
 		row.RouteSnapshotCanonicalJSON, row.CreatedAtUTC,
 	)

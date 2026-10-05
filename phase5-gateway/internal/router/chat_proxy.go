@@ -2243,7 +2243,7 @@ func shouldRefundLegacyPreStreamProvider502(status int, body []byte, h http.Head
 }
 
 func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte, promptEstimate, maxUsageTokens, maxTokens int64) {
-	finality := coordinatorSettlementFinalityFromHeaders(resp.Header)
+	finality := coordinatorSettlementFinalityForRequest(resp.Header, relayBlindExecutionFor(r) != nil)
 	switch finality.Action {
 	case settlementFinalityLegacy, settlementFinalityRefund:
 		if err := s.refundWalletAwareReservation(subject, requestID(r)); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
@@ -2627,7 +2627,7 @@ func (s *Server) nudgeBoundSettlementReconciler(r *http.Request, subject usageSu
 }
 
 func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.ResponseWriter, r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string, h http.Header, boundHold bool) bool {
-	return s.settleBeforeResponseWithFinality(w, r, subject, prompt, completion, maxTotal, source, outcome, coordinatorSettlementFinalityFromHeaders(h), h, boundHold)
+	return s.settleBeforeResponseWithFinality(w, r, subject, prompt, completion, maxTotal, source, outcome, coordinatorSettlementFinalityForRequest(h, relayBlindExecutionFor(r) != nil), h, boundHold)
 }
 
 // settleBeforeResponseWithFinality settles a response from an already-parsed
@@ -3066,9 +3066,46 @@ func coordinatorSettlementFinalityFromHeaders(h http.Header) coordinatorSettleme
 		return coordinatorSettlementFinality{Action: settlementFinalityHold, Outcome: outcome, Reason: "settlement_refund_tuple_incomplete", PendingDeadlineUnixMS: pendingDeadlineUnixMS}
 	case "pending":
 		return coordinatorSettlementFinality{Action: settlementFinalityHold, Outcome: outcome, Reason: reason, PendingDeadlineUnixMS: pendingDeadlineUnixMS}
+	case relayBlindSettledOutcome:
+		// SPEC-022 R-8.1: a request-agnostic reader never debits this outcome.
+		// Only coordinatorSettlementFinalityForRequest, for a request this
+		// gateway admitted as a relay-blind execution, turns it into a debit;
+		// any other request that reports it is refunded.
+		if receiptResult == "valid" && closedOK && closed {
+			return coordinatorSettlementFinality{Action: settlementFinalityRefund, Outcome: outcome, Reason: "relay_blind_settlement_for_non_relay_blind_request", PendingDeadlineUnixMS: pendingDeadlineUnixMS}
+		}
+		return coordinatorSettlementFinality{Action: settlementFinalityHold, Outcome: outcome, Reason: "relay_blind_receipt_not_final", PendingDeadlineUnixMS: pendingDeadlineUnixMS}
 	default:
 		return coordinatorSettlementFinality{Action: settlementFinalityHold, Outcome: outcome, Reason: "unrecognized_settlement_outcome", PendingDeadlineUnixMS: pendingDeadlineUnixMS}
 	}
+}
+
+// relayBlindSettledOutcome is the SPEC-022 R-14 payable outcome. It is never
+// verified.
+const relayBlindSettledOutcome = "relay_blind_settled"
+
+// coordinatorSettlementFinalityForRequest applies SPEC-022 R-8.1 to a
+// finality tuple for one request: relay_blind_settled final-debits only a
+// request admitted as a relay-blind execution, and a relay-blind execution
+// is never debited on a verified tuple (R-10.7) but held for review.
+func coordinatorSettlementFinalityForRequest(h http.Header, relayBlind bool) coordinatorSettlementFinality {
+	finality := coordinatorSettlementFinalityFromHeaders(h)
+	if !relayBlind {
+		return finality
+	}
+	switch finality.Outcome {
+	case relayBlindSettledOutcome:
+		if finality.Action == settlementFinalityRefund {
+			finality.Action = settlementFinalityDebit
+			finality.Reason = strings.TrimSpace(h.Get(settlementReasonHeader))
+		}
+	case "verified":
+		if finality.Action == settlementFinalityDebit {
+			finality.Action = settlementFinalityHold
+			finality.Reason = "verified_finality_on_relay_blind_request"
+		}
+	}
+	return finality
 }
 
 func hasAnySettlementFinalityHeader(h http.Header) bool {

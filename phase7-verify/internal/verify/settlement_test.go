@@ -520,3 +520,70 @@ func TestSettlementReceiptKeyIDFixture(t *testing.T) {
 		t.Fatalf("key id=%s fixture=%s want=%s", got, fixtures.ProviderReceiptKeyID, want)
 	}
 }
+
+// SPEC-022 R-7.10: a valid v0.4 receipt on a relay-blind snapshot (relay-blind
+// entrypoint, relay_blind_envelope_digest_v1 basis, or both) is quarantined
+// before any hash comparison and never verified.
+func TestVerifySettlementReceiptQuarantinesV04OnRelayBlindSnapshot(t *testing.T) {
+	fixtures := loadSettlementFixtures(t)
+	pubkey := decodeSettlementPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	if len(fixtures.ReceiptTuples) == 0 {
+		t.Fatal("missing v0.4 settlement receipt tuples")
+	}
+	for name, mutate := range map[string]func(*SettlementRouteSnapshot){
+		"entrypoint": func(r *SettlementRouteSnapshot) { r.PaidEntrypoint = paidEntrypointRelayBlindChat },
+		"basis":      func(r *SettlementRouteSnapshot) { r.PromptHashBasis = promptHashBasisRelayBlindEnvelopeV1 },
+		"both": func(r *SettlementRouteSnapshot) {
+			r.PaidEntrypoint = paidEntrypointRelayBlindChat
+			r.PromptHashBasis = promptHashBasisRelayBlindEnvelopeV1
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, tuple := range fixtures.ReceiptTuples {
+				input := settlementInputFromFixture(t, fixtures, tuple, pubkey)
+				if got := VerifySettlementReceipt(input); got.Outcome == SettlementOutcomeQuarantined {
+					t.Fatalf("%s baseline quarantined: %s", tuple.ID, got.Reason)
+				}
+				mutate(&input.RouteSnapshot)
+				got := VerifySettlementReceipt(input)
+				if got.Outcome != SettlementOutcomeQuarantined || got.Reason != "v04_receipt_on_relay_blind_snapshot" ||
+					got.ReceiptResult == SettlementReceiptResultValid || got.Checks.PromptHashMatched || got.Checks.SignatureVerified {
+					t.Fatalf("%s on relay-blind snapshot: %+v", tuple.ID, got)
+				}
+			}
+		})
+	}
+}
+
+// A SPEC-015 relay-blind-settlement-v1 receipt is not a v0.4 or buyer
+// receipt: neither the settlement verifier nor the buyer-facing verifier
+// ever reports it valid or verified.
+func TestRelayBlindSettlementReceiptIsNeverVerifiedExternally(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "test", "fixtures", "receipts", "relay-blind-settlement-v1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vectors struct {
+		Positive []struct {
+			ID       string `json:"id"`
+			Envelope string `json:"envelope"`
+		} `json:"positive"`
+	}
+	if err := json.Unmarshal(raw, &vectors); err != nil || len(vectors.Positive) == 0 {
+		t.Fatalf("relay-blind vectors: %v", err)
+	}
+	fixtures := loadSettlementFixtures(t)
+	pubkey := decodeSettlementPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	for _, vector := range vectors.Positive {
+		got, err := Verify(VerifyInput{Header: vector.Envelope}, VerifyOpts{})
+		if err == nil && got.Result == resultValid {
+			t.Fatalf("%s: buyer verifier reported a relay-blind receipt valid: %+v", vector.ID, got)
+		}
+		input := settlementInputFromFixture(t, fixtures, fixtures.ReceiptTuples[0], pubkey)
+		input.Header = vector.Envelope
+		settled := VerifySettlementReceipt(input)
+		if settled.Outcome == SettlementOutcomeVerified || settled.Outcome == SettlementOutcomeZeroSettled || settled.ReceiptResult == SettlementReceiptResultValid {
+			t.Fatalf("%s: settlement verifier accepted a relay-blind receipt: %+v", vector.ID, settled)
+		}
+	}
+}

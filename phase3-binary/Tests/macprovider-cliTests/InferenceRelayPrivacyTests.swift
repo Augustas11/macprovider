@@ -383,6 +383,463 @@ final class InferenceRelayPrivacyTests: XCTestCase {
         await assertCompletionCount(harness.runtime, 1)
     }
 
+    // MARK: - SPEC-001-R005 / SPEC-015 §N.13 relay-blind settlement receipt
+
+    private let receiptProvider = "provider-1"
+    private let pinnedModelHash = String(repeating: "5e", count: 32)
+
+    func testRelayBlindSettlementReceiptSignsCiphertextOnPrivacyStream() async throws {
+        let harness = try await Harness(
+            model: model, session: session, content: completionCanary, inputTokens: 4, modelHash: pinnedModelHash
+        )
+        let (builder, key) = try receiptBuilder()
+        var message = try harness.message(
+            requestID: "privacy-settle-stream", stream: true, privacy: true, prompt: promptCanary,
+            buyerPrivateKey: try goldenBuyerPrivateKey()
+        )
+        message[RelayBlindSettlementMetadata.wireKey] = try settlementWire(for: message, key: key)
+        let relay = harness.relay(
+            privacyMode: true, probe: ScriptedDecryptProbe(traced: false),
+            receiptBuilder: builder, receiptProviderID: receiptProvider
+        )
+        try await relay.handleInferenceRequest(message)
+        await assertIdle(relay)
+        let frames = await harness.frames.values
+        let end = try XCTUnwrap(frames.last)
+        XCTAssertEqual(end["status"] as? String, "complete")
+        let tuple = try assertSettlementReceipt(frames, key: key, privacyClass: PrivacyClassConstants.v1, terminalState: "normal_done")
+        let usage = try XCTUnwrap(tuple["usage"] as? [String: Any])
+        XCTAssertEqual(jsonInt(usage["input_tokens"]), 4)
+        XCTAssertEqual(jsonInt(usage["output_tokens"]), 2)
+        XCTAssertEqual(jsonInt(tuple["input_token_upper_bound"]), 8)
+        XCTAssertEqual(jsonInt(tuple["max_output_tokens"]), 4)
+        // The digest covers the ciphertext frames exactly as emitted.
+        let opened = try openPrivacyStream(frames)
+        XCTAssertGreaterThanOrEqual(opened.privacy.count, 2)
+        try assertNoCanary(frames)
+    }
+
+    func testRelayBlindSettlementReceiptCoversClearBytesOnPlainNonStream() async throws {
+        let harness = try await Harness(
+            model: model, session: session, content: "plain relay-blind answer", inputTokens: 4, modelHash: pinnedModelHash
+        )
+        let (builder, key) = try receiptBuilder()
+        var message = try harness.message(requestID: "plain-settle", stream: false, privacy: false, prompt: promptCanary)
+        // The settlement request id is the ledger id, not the envelope request id.
+        message[RelayBlindSettlementMetadata.wireKey] = try settlementWire(
+            for: message, key: key, overrides: ["request_id": "ledger-row-77"]
+        )
+        let relay = harness.relay(privacyMode: false, probe: nil, receiptBuilder: builder, receiptProviderID: receiptProvider)
+        try await relay.handleInferenceRequest(message)
+        await assertIdle(relay)
+        let frames = await harness.frames.values
+        XCTAssertEqual(frames.last?["status"] as? String, "complete")
+        let tuple = try assertSettlementReceipt(frames, key: key, privacyClass: "none", terminalState: "normal_done")
+        XCTAssertEqual(tuple["request_id"] as? String, "ledger-row-77")
+        let chunks = frames.compactMap { $0["data"] as? String }
+        XCTAssertEqual(chunks.count, 1)
+        XCTAssertTrue(chunks[0].contains("plain relay-blind answer"))
+    }
+
+    func testRelayBlindSettlementReceiptOnCancelledPrivacyStream() async throws {
+        let harness = try await Harness(
+            model: model, session: session, content: completionCanary, inputTokens: 4,
+            cancelAfterChunk: true, modelHash: pinnedModelHash
+        )
+        let (builder, key) = try receiptBuilder()
+        var message = try harness.message(
+            requestID: "privacy-settle-cancel", stream: true, privacy: true, prompt: promptCanary,
+            buyerPrivateKey: try goldenBuyerPrivateKey()
+        )
+        message[RelayBlindSettlementMetadata.wireKey] = try settlementWire(for: message, key: key)
+        let relay = harness.relay(
+            privacyMode: true, probe: ScriptedDecryptProbe(traced: false),
+            receiptBuilder: builder, receiptProviderID: receiptProvider
+        )
+        try await relay.handleInferenceRequest(message)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        try await relay.handleCancelRequest(["type": "cancel_request", "request_id": "privacy-settle-cancel"])
+        await assertIdle(relay)
+        let frames = await harness.frames.values
+        XCTAssertEqual(frames.last?["status"] as? String, "cancelled")
+        try assertSettlementReceipt(frames, key: key, privacyClass: PrivacyClassConstants.v1, terminalState: "buyer_cancel")
+        try assertNoCanary(frames)
+    }
+
+    // MARK: - SPEC-022 R-14.6 privacy-frame failure withholds the receipt
+
+    /// Runs one settlement-bearing relay-blind dispatch whose `sendFrame`
+    /// throws on the first chunk frame `failChunk` matches.
+    private func runSettlementFailure(
+        requestID: String,
+        stream: Bool,
+        privacy: Bool,
+        content: String,
+        failChunk: (@Sendable (String) -> Bool)? = nil
+    ) async throws -> [[String: Any]] {
+        let harness = try await Harness(
+            model: model, session: session, content: content, inputTokens: 4, modelHash: pinnedModelHash
+        )
+        let (builder, key) = try receiptBuilder()
+        var message = try harness.message(
+            requestID: requestID, stream: stream, privacy: privacy, prompt: promptCanary,
+            buyerPrivateKey: privacy ? try goldenBuyerPrivateKey() : nil
+        )
+        message[RelayBlindSettlementMetadata.wireKey] = try settlementWire(for: message, key: key)
+        let relay = harness.relay(
+            privacyMode: privacy, probe: privacy ? ScriptedDecryptProbe(traced: false) : nil,
+            receiptBuilder: builder, receiptProviderID: receiptProvider, failChunk: failChunk
+        )
+        try await relay.handleInferenceRequest(message)
+        await assertIdle(relay)
+        return await harness.frames.values
+    }
+
+    private func assertNoSettlementReceipt(_ frames: [[String: Any]], file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(frames.last?["type"] as? String, "inference_response_end", file: file, line: line)
+        XCTAssertFalse(frames.contains { $0["relay_blind_settlement_receipt"] != nil }, file: file, line: line)
+        XCTAssertFalse(frames.contains { $0["receipt"] != nil }, file: file, line: line)
+    }
+
+    /// A privacy chunk that fails to seal after an opaque chunk was recorded
+    /// (the role delta) leaves the body short: no receipt, even though the
+    /// closing error frame and the end frame are still sent.
+    func testPrivacyStreamSealFailureAfterRecordedChunkWithholdsReceipt() async throws {
+        let oversized = String(repeating: "x", count: RelayBlindEnvelope.maxCiphertextBytes + 1)
+        let frames = try await runSettlementFailure(
+            requestID: "privacy-seal-fail-stream", stream: true, privacy: true, content: oversized
+        )
+        let chunks = frames.filter { $0["type"] as? String == "inference_response_chunk" }
+        XCTAssertGreaterThanOrEqual(chunks.count, 1, "the role chunk was recorded and sent before the failure")
+        XCTAssertNotEqual(frames.last?["status"] as? String, "complete")
+        assertNoSettlementReceipt(frames)
+    }
+
+    /// A non-stream privacy response that cannot be sealed is never
+    /// delivered: no receipt.
+    func testPrivacyNonStreamSealFailureWithholdsReceipt() async throws {
+        let oversized = String(repeating: "x", count: RelayBlindEnvelope.maxCiphertextBytes + 1)
+        let frames = try await runSettlementFailure(
+            requestID: "privacy-seal-fail-nonstream", stream: false, privacy: true, content: oversized
+        )
+        XCTAssertNotEqual(frames.last?["status"] as? String, "complete")
+        assertNoSettlementReceipt(frames)
+    }
+
+    /// The closing frames of a completed privacy stream: a failed send of the
+    /// clear `[DONE]` leaves the buyer short even though the end frame still
+    /// reports `complete`. No receipt.
+    func testPrivacyStreamClosingFrameSendFailureWithholdsReceipt() async throws {
+        let frames = try await runSettlementFailure(
+            requestID: "privacy-close-fail", stream: true, privacy: true, content: completionCanary,
+            failChunk: { $0.contains("[DONE]") }
+        )
+        XCTAssertEqual(frames.last?["status"] as? String, "complete")
+        assertNoSettlementReceipt(frames)
+        try assertNoCanary(frames)
+    }
+
+    /// The authenticated final frame itself fails to send: no receipt.
+    func testPrivacyStreamFinalFrameSendFailureWithholdsReceipt() async throws {
+        let frames = try await runSettlementFailure(
+            requestID: "privacy-final-fail", stream: true, privacy: true, content: completionCanary,
+            failChunk: { $0.contains("\"final\":true") }
+        )
+        XCTAssertEqual(frames.last?["status"] as? String, "complete")
+        assertNoSettlementReceipt(frames)
+    }
+
+    /// The control: the same completed privacy stream with every frame sent
+    /// carries exactly one receipt.
+    func testPrivacyStreamWithoutFailureStillIssuesReceipt() async throws {
+        let frames = try await runSettlementFailure(
+            requestID: "privacy-close-ok", stream: true, privacy: true, content: completionCanary
+        )
+        XCTAssertEqual(frames.last?["status"] as? String, "complete")
+        XCTAssertEqual(frames.filter { $0["relay_blind_settlement_receipt"] != nil }.count, 1)
+    }
+
+    func testRelayBlindSettlementMetadataRejectedBeforeDecryptAndClaim() async throws {
+        let harness = try await Harness(
+            model: model, session: session, content: completionCanary, inputTokens: 4, modelHash: pinnedModelHash
+        )
+        let (builder, key) = try receiptBuilder()
+        let relay = harness.relay(
+            privacyMode: true, probe: ScriptedDecryptProbe(traced: false),
+            receiptBuilder: builder, receiptProviderID: receiptProvider
+        )
+        let otherKey = Curve25519.Signing.PrivateKey()
+        let cases: [(String, ([String: Any]) throws -> Any)] = [
+            ("unknown member", { try self.settlementWire(for: $0, key: key, overrides: ["prompt_hash": self.pinnedModelHash]) }),
+            ("missing member", { try self.settlementWire(for: $0, key: key, removing: "catalog_id") }),
+            ("null member", { try self.settlementWire(for: $0, key: key, overrides: ["model_id": NSNull()]) }),
+            ("wrong entrypoint", { try self.settlementWire(for: $0, key: key, overrides: ["paid_entrypoint": "coordinator_buyer_v1_chat_completions"]) }),
+            ("wrong envelope digest", { try self.settlementWire(for: $0, key: key, overrides: ["relay_blind_envelope_digest": RelayBlindBase64URL.encode(Data(repeating: 7, count: 32))]) }),
+            ("other provider", { try self.settlementWire(for: $0, key: key, overrides: ["provider_id": "provider-2"]) }),
+            ("other receipt key", { try self.settlementWire(for: $0, key: otherKey) }),
+            ("not an object", { _ in "relay_blind_settlement" }),
+            ("null object", { _ in NSNull() }),
+        ]
+        for (index, entry) in cases.enumerated() {
+            await harness.frames.removeAll()
+            var message = try harness.message(
+                requestID: "privacy-settle-bad-\(index)", stream: false, privacy: true, prompt: promptCanary
+            )
+            message[RelayBlindSettlementMetadata.wireKey] = try entry.1(message)
+            try await relay.handleInferenceRequest(message)
+            await assertIdle(relay)
+            let frames = await harness.frames.values
+            XCTAssertEqual(frames.count, 1, entry.0)
+            XCTAssertEqual(frames.last?["status"] as? String, RelayBlindProviderError.invalidEnvelope.code, entry.0)
+            XCTAssertNil(frames.last?["relay_blind_settlement_receipt"], entry.0)
+            try assertNoJournalClaims(harness.journalDirectory)
+        }
+        // The v0.4 `settlement` member stays forbidden on relay-blind dispatch.
+        await harness.frames.removeAll()
+        var withSettlement = try harness.message(requestID: "privacy-settle-v04", stream: false, privacy: true, prompt: promptCanary)
+        withSettlement[RelayBlindSettlementMetadata.wireKey] = try settlementWire(for: withSettlement, key: key)
+        withSettlement["settlement"] = ["request_id": "privacy-settle-v04"]
+        try await relay.handleInferenceRequest(withSettlement)
+        await assertIdle(relay)
+        let v04Frames = await harness.frames.values
+        XCTAssertEqual(v04Frames.last?["status"] as? String, RelayBlindProviderError.invalidEnvelope.code)
+        try assertNoJournalClaims(harness.journalDirectory)
+        await assertCompletionCount(harness.runtime, 0)
+    }
+
+    func testRelayBlindSettlementForbiddenOnPlaintextDispatch() async throws {
+        let harness = try await Harness(model: model, session: session, content: "plain", inputTokens: 4, modelHash: pinnedModelHash)
+        let (builder, key) = try receiptBuilder()
+        let relay = harness.relay(privacyMode: false, probe: nil, receiptBuilder: builder, receiptProviderID: receiptProvider)
+        let relayBlind = try harness.message(requestID: "plain-carrier", stream: false, privacy: false, prompt: "hello")
+        let plaintext: [String: Any] = [
+            "type": "inference_request",
+            "request_id": "plaintext-with-relay-blind-settlement",
+            "stream": false,
+            "body": #"{"model":"\#(model)","messages":[{"role":"user","content":"hello"}]}"#,
+            RelayBlindSettlementMetadata.wireKey: try settlementWire(for: relayBlind, key: key),
+        ]
+        try await relay.handleInferenceRequest(plaintext)
+        await assertIdle(relay)
+        let frames = await harness.frames.values
+        XCTAssertEqual(frames.last?["status"] as? String, RelayBlindProviderError.invalidEnvelope.code)
+        await assertCompletionCount(harness.runtime, 0)
+    }
+
+    func testRelayBlindWithoutSettlementMetadataEmitsNoReceipt() async throws {
+        let store = CountingReceiptKeyStore()
+        let harness = try await Harness(
+            model: model, session: session, content: completionCanary, inputTokens: 4, modelHash: pinnedModelHash
+        )
+        let message = try harness.message(requestID: "privacy-observe", stream: true, privacy: true, prompt: promptCanary)
+        let relay = harness.relay(
+            privacyMode: true, probe: ScriptedDecryptProbe(traced: false),
+            receiptBuilder: ReceiptBuilder(keyStore: store), receiptProviderID: receiptProvider
+        )
+        try await relay.handleInferenceRequest(message)
+        await assertIdle(relay)
+        let frames = await harness.frames.values
+        XCTAssertEqual(frames.last?["status"] as? String, "complete")
+        XCTAssertFalse(frames.contains { $0["relay_blind_settlement_receipt"] != nil || $0["receipt"] != nil })
+        XCTAssertEqual(store.loads, 0)
+    }
+
+    func testRelayBlindSettlementReceiptWithheldWithoutPinnedModelHash() async throws {
+        let harness = try await Harness(model: model, session: session, content: completionCanary, inputTokens: 4)
+        let (builder, key) = try receiptBuilder()
+        var message = try harness.message(requestID: "privacy-no-hash", stream: false, privacy: true, prompt: promptCanary)
+        message[RelayBlindSettlementMetadata.wireKey] = try settlementWire(for: message, key: key)
+        let relay = harness.relay(
+            privacyMode: true, probe: ScriptedDecryptProbe(traced: false),
+            receiptBuilder: builder, receiptProviderID: receiptProvider
+        )
+        try await relay.handleInferenceRequest(message)
+        await assertIdle(relay)
+        let frames = await harness.frames.values
+        XCTAssertEqual(frames.last?["status"] as? String, "complete")
+        XCTAssertFalse(frames.contains { $0["relay_blind_settlement_receipt"] != nil || $0["receipt"] != nil })
+    }
+
+    func testRelayBlindSettlementReceiptWithheldWithoutValidatedUsage() async throws {
+        // The pinned handle has a hash, but the input exceeds the envelope
+        // bound, so no SPEC-041 validated evidence exists for the attempt.
+        let harness = try await Harness(
+            model: model, session: session, content: completionCanary, inputTokens: 100, modelHash: pinnedModelHash
+        )
+        let (builder, key) = try receiptBuilder()
+        var message = try harness.message(requestID: "privacy-unvalidated", stream: false, privacy: true, prompt: promptCanary)
+        message[RelayBlindSettlementMetadata.wireKey] = try settlementWire(for: message, key: key)
+        let relay = harness.relay(
+            privacyMode: true, probe: ScriptedDecryptProbe(traced: false),
+            receiptBuilder: builder, receiptProviderID: receiptProvider
+        )
+        try await relay.handleInferenceRequest(message)
+        await assertIdle(relay)
+        let frames = await harness.frames.values
+        XCTAssertEqual(frames.first?["type"] as? String, "inference_response_validation")
+        XCTAssertNotEqual(frames.last?["status"] as? String, "complete")
+        XCTAssertFalse(frames.contains { $0["relay_blind_settlement_receipt"] != nil || $0["receipt"] != nil })
+        try assertNoCanary(frames)
+    }
+
+    func testTier2RelayBlindSettlementTravelsInsideProtectedPayload() async throws {
+        let harness = try await Harness(
+            model: model, session: session, content: completionCanary, inputTokens: 4, modelHash: pinnedModelHash
+        )
+        let (builder, key) = try receiptBuilder()
+        let tier2 = try Tier2ProviderSession(
+            providerID: receiptProvider,
+            assignedID: session,
+            selectedAEAD: Tier2ProviderSession.aeadSuite,
+            keyID: "tier2-key",
+            c2pKey: Data(repeating: 0x11, count: 32),
+            p2cKey: Data(repeating: 0x22, count: 32),
+            c2pNonceBase: Data([1, 2, 3, 4]),
+            p2cNonceBase: Data([5, 6, 7, 8])
+        )
+        tier2.enableResponseChunkPlaintextEnvelope()
+        let clear = try harness.message(requestID: "tier2-settle", stream: false, privacy: true, prompt: promptCanary)
+        let metadata = try settlementWire(for: clear, key: key)
+        let wrapped = try Tier2ProviderSession.sealRequestForTest(
+            session: tier2,
+            requestID: "tier2-settle",
+            stream: false,
+            plaintext: try XCTUnwrap(clear["body"] as? String),
+            bodyEncoding: RelayBlindEnvelope.version,
+            relayBlindContext: try XCTUnwrap(clear["relay_blind_context"] as? [String: Any]),
+            privacyClass: PrivacyClassConstants.v1,
+            relayBlindSettlement: metadata
+        )
+        XCTAssertNil(wrapped[RelayBlindSettlementMetadata.wireKey])
+        let relay = harness.relay(
+            privacyMode: true, probe: ScriptedDecryptProbe(traced: false),
+            receiptBuilder: builder, receiptProviderID: receiptProvider, tier2: tier2
+        )
+        try await relay.handleInferenceRequest(wrapped)
+        await assertIdle(relay)
+        let frames = await harness.frames.values
+        XCTAssertEqual(frames.count, 3)
+        XCTAssertFalse(frames.contains { $0["relay_blind_settlement_receipt"] != nil })
+        let chunk = try Tier2ProviderSession.openResponseChunkForTest(
+            session: tier2, frame: frames[1], requestID: "tier2-settle", stream: false, seq: 1
+        )
+        let end = try Tier2ProviderSession.openResponseEndForTest(
+            session: tier2, frame: frames[2], requestID: "tier2-settle", stream: false, seq: 2
+        )
+        XCTAssertEqual(end["status"] as? String, "complete")
+        XCTAssertNil(end["receipt"])
+        let envelope = try XCTUnwrap(end["relay_blind_settlement_receipt"] as? String)
+        let tuple = try RelayBlindSettlementReceiptTests.verify(envelope, publicKey: key.publicKey)
+        XCTAssertEqual(tuple["response_body_sha256"] as? String, hex(SHA256.hash(data: Data(chunk.utf8))))
+        XCTAssertEqual(jsonInt(tuple["response_body_bytes"]), chunk.utf8.count)
+
+        // An unauthenticated outer copy is misplaced and rejected.
+        await harness.frames.removeAll()
+        let outerClear = try harness.message(requestID: "tier2-settle-outer", stream: false, privacy: true, prompt: promptCanary)
+        var outer = try Tier2ProviderSession.sealRequestForTest(
+            session: tier2,
+            requestID: "tier2-settle-outer",
+            stream: false,
+            plaintext: try XCTUnwrap(outerClear["body"] as? String),
+            bodyEncoding: RelayBlindEnvelope.version,
+            relayBlindContext: try XCTUnwrap(outerClear["relay_blind_context"] as? [String: Any]),
+            privacyClass: PrivacyClassConstants.v1,
+            seq: 1
+        )
+        outer[RelayBlindSettlementMetadata.wireKey] = try settlementWire(for: outerClear, key: key)
+        try await relay.handleInferenceRequest(outer)
+        await assertIdle(relay)
+        let outerFrames = await harness.frames.values
+        let rejected = try XCTUnwrap(outerFrames.last)
+        let rejectedEnd = try Tier2ProviderSession.openResponseEndForTest(
+            session: tier2, frame: rejected, requestID: "tier2-settle-outer", stream: false, seq: 3
+        )
+        XCTAssertEqual(rejectedEnd["status"] as? String, RelayBlindProviderError.invalidEnvelope.code)
+        await assertCompletionCount(harness.runtime, 1)
+    }
+
+    private func receiptBuilder() throws -> (ReceiptBuilder, Curve25519.Signing.PrivateKey) {
+        let key = Curve25519.Signing.PrivateKey()
+        let store = InMemoryReceiptKeyStore()
+        try store.storeNew(providerId: receiptProvider, privateKey: key)
+        return (ReceiptBuilder(keyStore: store), key)
+    }
+
+    private func settlementWire(
+        for message: [String: Any],
+        key: Curve25519.Signing.PrivateKey,
+        overrides: [String: Any] = [:],
+        removing: String? = nil
+    ) throws -> [String: Any] {
+        let context = try XCTUnwrap(message["relay_blind_context"] as? [String: Any])
+        var wire: [String: Any] = [
+            "account_scope": "acct-scope-test",
+            "request_id": "ledger-row-1",
+            "attempt_n": 0,
+            "provider_id": receiptProvider,
+            "provider_receipt_key_id": "ed25519-sha256:" + hex(SHA256.hash(data: key.publicKey.rawRepresentation)),
+            "model_id": model,
+            "expected_catalog_model_hash": pinnedModelHash,
+            "catalog_id": "catalog-test",
+            "catalog_body_digest": String(repeating: "c", count: 64),
+            "route_snapshot_digest": String(repeating: "d", count: 64),
+            "route_snapshot_policy_version": "spec022-policy-test",
+            "route_snapshot_mode": "enforce",
+            "pending_deadline_seconds": 300,
+            "paid_entrypoint": RelayBlindSettlementMetadata.paidEntrypoint,
+            "prompt_hash_basis": RelayBlindSettlementMetadata.promptHashBasis,
+            "relay_blind_envelope_digest": try XCTUnwrap(context["envelope_digest"] as? String),
+        ]
+        for (field, value) in overrides { wire[field] = value }
+        if let removing { wire.removeValue(forKey: removing) }
+        return wire
+    }
+
+    /// Exactly one receipt, on the terminal frame only, with no v0.4 `receipt`;
+    /// its digest is the SHA-256 of the emitted chunk `data` bytes; it holds no
+    /// canary and no SHA-256 of plaintext.
+    @discardableResult
+    private func assertSettlementReceipt(
+        _ frames: [[String: Any]],
+        key: Curve25519.Signing.PrivateKey,
+        privacyClass: String,
+        terminalState: String
+    ) throws -> [String: Any] {
+        let end = try XCTUnwrap(frames.last)
+        XCTAssertEqual(end["type"] as? String, "inference_response_end")
+        XCTAssertNil(end["receipt"])
+        XCTAssertEqual(frames.filter { $0["relay_blind_settlement_receipt"] != nil }.count, 1)
+        XCTAssertFalse(frames.contains { $0["receipt"] != nil })
+        let envelope = try XCTUnwrap(end["relay_blind_settlement_receipt"] as? String)
+        let tuple = try RelayBlindSettlementReceiptTests.verify(envelope, publicKey: key.publicKey)
+        let emitted = Data(frames.compactMap { frame -> String? in
+            frame["type"] as? String == "inference_response_chunk" ? frame["data"] as? String : nil
+        }.joined().utf8)
+        XCTAssertEqual(tuple["response_body_sha256"] as? String, hex(SHA256.hash(data: emitted)))
+        XCTAssertEqual(jsonInt(tuple["response_body_bytes"]), emitted.count)
+        XCTAssertEqual(tuple["privacy_class"] as? String, privacyClass)
+        XCTAssertEqual(tuple["terminal_state"] as? String, terminalState)
+        XCTAssertEqual(tuple["model_hash"] as? String, pinnedModelHash)
+        XCTAssertEqual(jsonInt(tuple["terminal_state_ts_unix_ms"]), jsonInt(end["terminal_state_ts_unix_ms"]))
+        let context = (frames.first?["relay_blind_validation"] as? [String: Any]) ?? [:]
+        XCTAssertEqual(tuple["relay_blind_envelope_digest"] as? String, context["envelope_digest"] as? String)
+        XCTAssertEqual(tuple["relay_blind_execution_auth_digest"] as? String, context["execution_auth_digest"] as? String)
+        XCTAssertEqual(tuple["relay_blind_provider_binding_digest"] as? String, context["provider_binding_digest"] as? String)
+        XCTAssertEqual(tuple["relay_blind_kid"] as? String, context["kid"] as? String)
+        let tupleText = String(decoding: try XCTUnwrap(Data(base64Encoded: String(envelope.split(separator: ".")[0]))), as: UTF8.self)
+        XCTAssertFalse(containsCanary(tupleText))
+        for canary in [promptCanary, completionCanary] {
+            let digest = SHA256.hash(data: Data(canary.utf8))
+            XCTAssertFalse(tupleText.contains(hex(digest)))
+            XCTAssertFalse(tupleText.contains(RelayBlindBase64URL.encode(Data(digest))))
+        }
+        return tuple
+    }
+
+    private func hex(_ digest: SHA256.Digest) -> String {
+        digest.map { String(format: "%02x", $0) }.joined()
+    }
+
     private func assertIdle(_ relay: InferenceRelay) async {
         let idle = await relay.waitUntilIdle(timeoutSeconds: 5)
         XCTAssertTrue(idle)
@@ -588,6 +1045,8 @@ private final class KVCacheTelemetryBox: @unchecked Sendable {
     }
 }
 
+private struct InjectedSendFailure: Error {}
+
 private actor PrivacyFrameRecorder {
     private(set) var values: [[String: Any]] = []
     func append(_ frame: [String: Any]) { values.append(frame) }
@@ -599,15 +1058,17 @@ private actor PrivacyTestRuntime: ModelRuntimeServing {
     private let model: String
     private let content: String
     private let cancelAfterChunk: Bool
+    private let modelHash: String?
     private var completions = 0
     private var prepared: ChatCompletionRequest?
     private var perfTraceInstalled = false
 
-    init(inputTokens: Int, model: String, content: String, cancelAfterChunk: Bool) {
+    init(inputTokens: Int, model: String, content: String, cancelAfterChunk: Bool, modelHash: String? = nil) {
         self.inputTokens = inputTokens
         self.model = model
         self.content = content
         self.cancelAfterChunk = cancelAfterChunk
+        self.modelHash = modelHash
     }
 
     func completionCount() -> Int { completions }
@@ -641,7 +1102,7 @@ private actor PrivacyTestRuntime: ModelRuntimeServing {
     func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle {
         try ModelRuntime.validateNativeSamplingPenalties(request)
         return RequestHandle(
-            snapshot: RuntimeSnapshot(state: .ready, container: nil, modelID: model, modelHash: nil),
+            snapshot: RuntimeSnapshot(state: .ready, container: nil, modelID: model, modelHash: modelHash),
             registrationID: 1,
             drainCancelled: DrainCancelToken()
         )
@@ -687,7 +1148,14 @@ private struct Harness {
     let model: String
     let session: String
 
-    init(model: String, session: String, content: String, inputTokens: Int, cancelAfterChunk: Bool = false) async throws {
+    init(
+        model: String,
+        session: String,
+        content: String,
+        inputTokens: Int,
+        cancelAfterChunk: Bool = false,
+        modelHash: String? = nil
+    ) async throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("macprovider-privacy-relay-\(UUID().uuidString)", isDirectory: true)
         let journalDirectory = root.appendingPathComponent("journal", isDirectory: true)
@@ -700,7 +1168,8 @@ private struct Harness {
         self.root = root
         self.journalDirectory = journalDirectory
         self.runtime = PrivacyTestRuntime(
-            inputTokens: inputTokens, model: model, content: content, cancelAfterChunk: cancelAfterChunk
+            inputTokens: inputTokens, model: model, content: content, cancelAfterChunk: cancelAfterChunk,
+            modelHash: modelHash
         )
         self.frames = PrivacyFrameRecorder()
         self.providerPublic = try keys.currentRecord().publicKey
@@ -714,7 +1183,9 @@ private struct Harness {
         privacyMode: Bool,
         probe: (any PrivacyPostureProbe)?,
         receiptBuilder: ReceiptBuilder? = nil,
-        tier2: Tier2ProviderSession? = nil
+        receiptProviderID: String? = nil,
+        tier2: Tier2ProviderSession? = nil,
+        failChunk: (@Sendable (String) -> Bool)? = nil
     ) -> InferenceRelay {
         InferenceRelay(
             modelRuntime: runtime,
@@ -728,10 +1199,17 @@ private struct Harness {
             maxBodyBytes: 1_200_000,
             tier2Session: tier2,
             receiptBuilder: receiptBuilder,
+            receiptProviderID: receiptProviderID,
             relayBlindRuntime: providerRuntime,
             privacyClassBeta: privacyMode,
             postureProbe: probe,
-            sendFrame: { frame in await frames.append(frame) }
+            sendFrame: { frame in
+                if let failChunk, frame["type"] as? String == "inference_response_chunk",
+                   let data = frame["data"] as? String, failChunk(data) {
+                    throw InjectedSendFailure()
+                }
+                await frames.append(frame)
+            }
         )
     }
 

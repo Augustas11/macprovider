@@ -25,6 +25,9 @@ type settlementReceiptRecoveryInput struct {
 	// receivedAtUnixMS is the first observation of the receipt; every retry
 	// re-uses it as the authoritative arrival time.
 	receivedAtUnixMS int64
+	// relayBlind, when set, routes a present receipt to the SPEC-015 §N.13
+	// verifier with the persisted dispatch row it must join.
+	relayBlind *billing.RelayBlindDispatchEvidence
 }
 
 // settlementReceiptRetryable is the recovery-queue retry predicate: transient
@@ -47,6 +50,14 @@ func persistSettlementReceiptDirect(ctx context.Context, store *billing.Store, i
 		return store.RecordMissingSettlementReceipt(ctx, billing.SettlementReceiptMissingInput{
 			SettlementReceiptIdentity: input.identity,
 		})
+	}
+	if input.relayBlind != nil {
+		return store.IngestRelayBlindSettlementReceipt(ctx, billing.RelayBlindSettlementReceiptIngestionInput{
+			SettlementReceiptIdentity: input.identity,
+			Envelope:                  input.header,
+			ProviderReceiptPubkey:     input.providerReceiptPubkey,
+			Dispatch:                  input.relayBlind,
+		}.WithReceivedAt(input.receivedAtUnixMS))
 	}
 	if input.poolLabels != nil {
 		// SPEC-022-R012.4: a pool attempt may settle pool_operator_attested.

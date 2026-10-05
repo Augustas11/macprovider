@@ -45,6 +45,7 @@ type swiftRelayDescriptor struct {
 	ModelHash             string            `json:"model_hash"`
 	ReceiptPublicKey      string            `json:"provider_receipt_public_key"`
 	ReceiptKeyID          string            `json:"provider_receipt_key_id"`
+	ProviderECDHPublicKey string            `json:"provider_ecdh_public_key"`
 	ReplayStore           string            `json:"replay_store"`
 	SEPublicKey           string            `json:"se_public_key"`
 	CodeCDHash            string            `json:"code_cdhash"`
@@ -71,12 +72,20 @@ type swiftRelayFixture struct {
 	privacyTraced     bool
 	privacyCompletion string
 	omitPrivacyKeys   bool
-	holdPosture       atomic.Bool
-	dispatches        atomic.Int32
-	postureReady      chan struct{}
-	postureOnce       sync.Once
-	stdoutLog         *logBuffer
-	stderrLog         *logBuffer
+	// settlementModelHash runs the SPEC-001-R005 settlement fixture: the
+	// handle pins this catalog hash and signs receipts with an in-memory key
+	// under settlementProviderID, over a SPEC-008 session.
+	settlementModelHash  string
+	settlementProviderID string
+	// onDispatch, when set, runs on every inference_request before the
+	// fixture serves it.
+	onDispatch   func(raw []byte)
+	holdPosture  atomic.Bool
+	dispatches   atomic.Int32
+	postureReady chan struct{}
+	postureOnce  sync.Once
+	stdoutLog    *logBuffer
+	stderrLog    *logBuffer
 }
 
 func buildSwiftRelayBinary(t *testing.T) string {
@@ -184,6 +193,12 @@ func (f *swiftRelayFixture) startWithMode(assignedSession string, continuousBatc
 	}
 	if continuousBatchReplay {
 		args = append(args, "--continuous-batch-replay")
+	}
+	if f.settlementModelHash != "" {
+		args = append(args, "--settlement-model-hash", f.settlementModelHash)
+		if !f.privacyClass {
+			args = append(args, "--provider-id", f.settlementProviderID)
+		}
 	}
 	if f.privacyClass {
 		args = append(args, "--privacy-class", "--provider-id", f.privacyProviderID)

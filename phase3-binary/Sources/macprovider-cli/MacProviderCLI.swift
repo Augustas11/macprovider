@@ -40,9 +40,19 @@ struct MacProviderCLI: AsyncParsableCommand {
         commandName: "malibu-cli",
         abstract: "OpenAI-compatible Malibu (Mac Provider) inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ProviderCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self] + labSubcommands() + [MSBThroughputCommand.self, MSBLoopbackCommand.self, MSBPerplexityCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self, RelayBlindKeyCommand.self, RelayBlindFixtureCommand.self, PrivacyClassCommand.self],
+        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ProviderCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self] + labSubcommands() + [MSBThroughputCommand.self, MSBLoopbackCommand.self, MSBPerplexityCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self, RelayBlindKeyCommand.self] + fixtureSubcommands() + [PrivacyClassCommand.self],
         defaultSubcommand: ServeCommand.self
     )
+
+    /// The relay-blind fixture exists only in debug/test builds
+    /// (MACPROVIDER_TEST_FIXTURES); a release binary registers none.
+    private static func fixtureSubcommands() -> [ParsableCommand.Type] {
+        #if MACPROVIDER_TEST_FIXTURES
+        return [RelayBlindFixtureCommand.self]
+        #else
+        return []
+        #endif
+    }
 
     /// Lab-only native-MTP harnesses exist only in DEBUG or explicit
     /// MACPROVIDER_LAB_HARNESS builds; a plain release binary registers none.
@@ -4124,7 +4134,94 @@ struct UpdateCommand: AsyncParsableCommand {
 /// Replaces this process with the canonical install binary and the same argv
 /// after PATH entrypoint repair (#616). Used by serve/update when launched from
 /// a stale `~/.local/bin` regular-file copy.
+/// #616 hand-off guard: a newer running binary never silently re-execs into an
+/// older canonical install, which would reject newer flags with a misleading
+/// usage error or serve with older code. The hand-off fails closed: it runs only
+/// when a strict `X.Y.Z` canonical version proves the canonical install is the
+/// same as or newer than this binary. A missing, invalid, or timed-out version
+/// is refused with its own reason.
+enum CanonicalReexecDecision: Equatable {
+    case reexec
+    case refuse(canonicalVersion: String)
+    case refuseUnknownVersion
+
+    static func decide(canonicalVersion: String?, runningVersion: String) -> CanonicalReexecDecision {
+        guard let canonicalVersion,
+              let canonical = try? SelfUpdate.validateReleaseTag(canonicalVersion),
+              let running = try? SelfUpdate.validateReleaseTag(runningVersion) else {
+            return .refuseUnknownVersion
+        }
+        if SelfUpdate.compareSemver(canonical, running) == .orderedAscending {
+            return .refuse(canonicalVersion: canonical)
+        }
+        return .reexec
+    }
+
+    static func fatalLine(path: String, canonicalVersion: String, runningVersion: String) -> String {
+        "FATAL canonical_install_older path=\(path) canonical=\(canonicalVersion) running=\(runningVersion): "
+            + "update or reinstall the canonical provider, or run the canonical binary\n"
+    }
+
+    static func unknownVersionFatalLine(path: String, runningVersion: String) -> String {
+        "FATAL canonical_install_version_unknown path=\(path) running=\(runningVersion): "
+            + "the canonical provider's version could not be read; update or reinstall the canonical provider, "
+            + "or run the canonical binary\n"
+    }
+}
+
+/// The canonical binary's version: the signed sibling compatibility set's
+/// `provider_cli` member when present, else `<canonical> --version` bounded to
+/// five seconds. Nil when neither yields a strict `X.Y.Z`.
+private func canonicalInstallVersion(_ canonical: URL) -> String? {
+    if let payload = CompatibilitySetManifest.payloadDirectory(for: canonical),
+       let manifest = try? CompatibilitySetManifest.loadValidated(from: payload) {
+        return manifest.providerCLIVersion
+    }
+    let process = Process()
+    let pipe = Pipe()
+    process.executableURL = canonical
+    process.arguments = ["--version"]
+    process.standardOutput = pipe
+    process.standardError = FileHandle.nullDevice
+    let exited = DispatchSemaphore(value: 0)
+    process.terminationHandler = { _ in exited.signal() }
+    do { try process.run() } catch { return nil }
+    guard exited.wait(timeout: .now() + 5) == .success else {
+        process.terminate()
+        return nil
+    }
+    guard process.terminationStatus == 0 else { return nil }
+    let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    return try? SelfUpdate.validateReleaseTag(output)
+}
+
 private func execCanonicalInstall(_ canonical: URL) throws -> Never {
+    let fatal: String
+    switch CanonicalReexecDecision.decide(
+        canonicalVersion: canonicalInstallVersion(canonical),
+        runningVersion: CoordinatorClient.binaryVersion
+    ) {
+    case .reexec:
+        fatal = ""
+    case .refuse(let canonicalVersion):
+        fatal = CanonicalReexecDecision.fatalLine(
+            path: canonical.path,
+            canonicalVersion: canonicalVersion,
+            runningVersion: CoordinatorClient.binaryVersion
+        )
+    case .refuseUnknownVersion:
+        fatal = CanonicalReexecDecision.unknownVersionFatalLine(
+            path: canonical.path,
+            runningVersion: CoordinatorClient.binaryVersion
+        )
+    }
+    if !fatal.isEmpty {
+        FileHandle.standardError.write(Data(fatal.utf8))
+        try? FileHandle.standardError.synchronize()
+        // EX_CONFIG, as for the SPEC-049-R007 hardening refusal.
+        throw ExitCode(78)
+    }
     let argv = [canonical.path] + Array(CommandLine.arguments.dropFirst())
     let cArgs = argv.map { strdup($0) } + [nil]
     defer {

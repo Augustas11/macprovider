@@ -53,8 +53,11 @@ func WithPrivacyAuthority(authority *relayblind.PrivacyAuthority) Option {
 	}
 }
 
+// relayBlindAvailable is SPEC-041 availability. Under SPEC-022 enforce the
+// lane is open only with the R-14 settlement profile configured (R-1.3).
 func (s *Server) relayBlindAvailable() bool {
-	return s != nil && s.relayBlind != nil && s.relayBlind.cfg.Enabled && s.relayBlind.store != nil && s.relayBlind.relay != nil && !s.settlementEnforceMode()
+	return s != nil && s.relayBlind != nil && s.relayBlind.cfg.Enabled && s.relayBlind.store != nil && s.relayBlind.relay != nil &&
+		(!s.settlementEnforceMode() || s.relayBlindSettlementProfileConfigured())
 }
 
 func setRelayBlindNoStore(w http.ResponseWriter) {
@@ -309,6 +312,14 @@ func (s *Server) selectRelayBlindProvider(ctx context.Context, model string, enc
 		if !eligible || !provider.IsWSTunneled() || !modelIDEqual(provider.ModelID, model) {
 			continue
 		}
+		// SPEC-047-R011: a session bound to a pool model entry serves only
+		// that pool's pool-model route; relay-blind is global-pool only.
+		if provider.ModelAdmissionPoolModelID != "" {
+			continue
+		}
+		if s.relayBlindSettlementPrerequisite(provider) != "" {
+			continue
+		}
 		records, err := s.relayBlind.store.FreshKeyRecords(ctx, provider.ProviderID, provider.AssignedID, model, encryptedBytes, s.now(), class)
 		if err == nil && len(records) > 0 {
 			return provider, records[0], true
@@ -430,7 +441,7 @@ func (s *Server) handleRelayBlindConsume(w http.ResponseWriter, r *http.Request)
 	}
 	provider, live := s.pool.Resolve(reservation.ProviderID, reservation.AssignedSession)
 	_, keyErr := s.relayBlind.store.LookupKeyRecord(r.Context(), reservation.ProviderID, reservation.AssignedSession, reservation.KID, reservation.KeyRecordDigest, s.now())
-	if !live || !relayBlindBindable(provider) || !provider.IsWSTunneled() || keyErr != nil {
+	if !live || !relayBlindBindable(provider) || !provider.IsWSTunneled() || keyErr != nil || s.relayBlindSettlementPrerequisite(provider) != "" {
 		_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, "relay_blind_key_expired", s.now())
 		writeRelayBlindError(w, "relay_blind_key_expired", "Relay-blind provider session or key expired")
 		return
@@ -541,7 +552,7 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 			writePrivacyClassError(w, privacyClassDisabled, "")
 			return
 		}
-		if !s.relayBlindAvailable() || !live || !provider.RoutingEligible() || !provider.IsWSTunneled() || keyErr != nil {
+		if !s.relayBlindAvailable() || !live || !provider.RoutingEligible() || !provider.IsWSTunneled() || keyErr != nil || s.relayBlindSettlementPrerequisite(provider) != "" {
 			_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, privacyClassStale, s.now())
 			writePrivacyClassError(w, privacyClassStale, "")
 			return
@@ -557,7 +568,7 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 			writeRelayBlindError(w, "relay_blind_required_unavailable", "Relay-blind execution is unavailable")
 			return
 		}
-		if !live || !provider.RoutingEligible() || !provider.IsWSTunneled() || keyErr != nil {
+		if !live || !provider.RoutingEligible() || !provider.IsWSTunneled() || keyErr != nil || s.relayBlindSettlementPrerequisite(provider) != "" {
 			_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, "relay_blind_key_expired", s.now())
 			writeRelayBlindError(w, "relay_blind_key_expired", "Relay-blind provider session or key expired")
 			return
@@ -592,6 +603,31 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 	rec.setRelayBlindAudit(relayBlindAuditFields{Outcome: "relay_blind_unavailable", EnvelopeDigest: reservation.EnvelopeDigest,
 		KeyRecordDigest: reservation.KeyRecordDigest, KID: reservation.KID, ProviderBindingDigest: relayblind.BindingDigest(reservation.ProviderBinding),
 		InputTokenUpperBound: reservation.InputTokenUpperBound, MaxOutputTokens: reservation.MaxOutputTokens})
+	// SPEC-022 R-14.3: under enforce the relay-blind route snapshot commits
+	// before dispatch, and the dispatch carries its settlement metadata.
+	var settlement *providerws.RelayBlindSettlementMetadata
+	if s.settlementEnforceMode() {
+		settlement, err = rec.recordRelayBlindRouteSnapshot(r.Context(), provider, reservation)
+		if err != nil {
+			s.log.Warn().Err(err).Str("request_id", rec.requestID).Str("provider_id", provider.ProviderID).Msg("relay-blind route snapshot failed before dispatch")
+			_ = s.relayBlind.store.RejectArmedPredispatch(r.Context(), reservation.ProviderBinding, "relay_blind_required_unavailable", s.now())
+			if quotaMetered {
+				s.admission.RefundRequest(provider)
+			}
+			if reservation.PrivacyClass {
+				writePrivacyClassError(w, privacyClassStale, "")
+				return
+			}
+			writeRelayBlindError(w, "relay_blind_required_unavailable", "Relay-blind settlement could not be recorded before dispatch")
+			return
+		}
+		// The gateway binds its settlement hold to this coordinator id. The
+		// coverage marker is set only after the R-14 snapshot committed; the
+		// gateway keeps it as a hint, and coordinator finality stays the
+		// authority for recovery.
+		w.Header().Set(internalRequestIDHeader, rec.requestID)
+		w.Header().Set(relayBlindSettlementCoverageHeader, billing.RelayBlindCoverageEnforce)
+	}
 	rec.markProviderDispatched()
 	ctx, cancel := context.WithTimeout(r.Context(), s.requestTimeout)
 	defer cancel()
@@ -600,6 +636,7 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		ProviderBindingDigest: relayblind.BindingDigest(reservation.ProviderBinding), BuyerBindingDigest: relayblind.BindingDigest(reservation.BuyerBinding),
 		AssignedSession: reservation.AssignedSession, RequestID: reservation.RequestID,
 		InputTokenUpperBound: reservation.InputTokenUpperBound, MaxOutputTokens: reservation.MaxOutputTokens,
+		Settlement: settlement,
 	}
 	var privacyVerifiedAt time.Time
 	if reservation.PrivacyClass {
@@ -696,6 +733,7 @@ func relayBlindEvidence(value providerws.RelayBlindValidation) relayblind.Eviden
 
 func (s *Server) forwardRelayBlindNonStreaming(w http.ResponseWriter, r *http.Request, rec *billingRecorder, provider pool.Provider, reservation relayblind.Reservation, relay *providerws.RelayStream, inputTokens int64) {
 	var output bytes.Buffer
+	responseDigest := newRelayBlindResponseDigest()
 	for {
 		select {
 		case chunk, ok := <-relay.Chunks:
@@ -706,6 +744,7 @@ func (s *Server) forwardRelayBlindNonStreaming(w http.ResponseWriter, r *http.Re
 					return
 				}
 				output.WriteString(chunk.Data)
+				responseDigest.write(chunk.Data)
 			}
 		case end := <-relay.Done:
 			if end.RelayBlindValidation == nil {
@@ -745,7 +784,11 @@ func (s *Server) forwardRelayBlindNonStreaming(w http.ResponseWriter, r *http.Re
 			}
 			prompt, complete := inputTokens, completion
 			var settlementOutput *billing.SettlementOutput
-			if reservation.PrivacyClass {
+			if rec.relayBlindSettlement != nil {
+				// SPEC-022 R-3.5: the response-body digest, never a
+				// plaintext output hash, for an R-14 attempt.
+				settlementOutput = responseDigest.output(relayBlindTerminalState(end.Status), rec.relayBlindTerminalTimestamp(end))
+			} else if reservation.PrivacyClass {
 				settlementOutput = settlementOutputUnavailableFor(terminalStateFromAttempt(status, end.Error, code))
 			} else {
 				var validOutput bool
@@ -757,6 +800,9 @@ func (s *Server) forwardRelayBlindNonStreaming(w http.ResponseWriter, r *http.Re
 			if err := rec.logProviderRowWithEstimateAndOutput(provider, status, &prompt, &complete, end.Error, code, 0, nil, settlementOutput); err != nil {
 				writeRelayBlindError(w, "relay_blind_committed_failed", "Could not durably record relay-blind execution")
 				return
+			}
+			if rec.relayBlindSettlement != nil {
+				s.finishRelayBlindSettlement(w.Header(), rec, provider, reservation.ProviderBinding, end.RelayBlindSettlementReceipt)
 			}
 			if status != http.StatusOK {
 				writeRelayBlindError(w, code, "Provider relay-blind execution failed after commit")
@@ -781,6 +827,16 @@ func (s *Server) forwardRelayBlindNonStreaming(w http.ResponseWriter, r *http.Re
 
 func (s *Server) forwardRelayBlindStreaming(w http.ResponseWriter, r *http.Request, rec *billingRecorder, provider pool.Provider, reservation relayblind.Reservation, relay *providerws.RelayStream, inputTokens int64) {
 	w.Header().Set("Content-Type", "text/event-stream")
+	responseDigest := newRelayBlindResponseDigest()
+	if rec.relayBlindSettlement != nil {
+		// The R-14 verdict is known only after the terminal frame, so it
+		// travels as trailers (MAC'd for a negotiating gateway).
+		if negotiatedSettlementFinality(rec) {
+			declareNonStreamingSettlementTrailers(w.Header(), rec)
+		} else {
+			declareInternalSettlementOutcomeTrailers(w.Header(), rec)
+		}
+	}
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
 	tracker := newSettlementStreamOutputTracker()
@@ -800,6 +856,7 @@ func (s *Server) forwardRelayBlindStreaming(w http.ResponseWriter, r *http.Reque
 		case chunk, ok := <-relay.Chunks:
 			if ok {
 				streamedBytes += int64(len(chunk.Data))
+				responseDigest.write(chunk.Data)
 				if streamedBytes > maxUpstreamResponseBodyBytes {
 					relay.Cancel("response_byte_cap_exceeded")
 					_ = s.relayBlind.store.MarkUnknownPostdispatch(context.Background(), reservation.ProviderBinding, "relay_blind_committed_failed", s.now())
@@ -859,10 +916,14 @@ func (s *Server) forwardRelayBlindStreaming(w http.ResponseWriter, r *http.Reque
 			}
 			prompt, complete := inputTokens, completion
 			settlementOutput := tracker.output(terminalStateFromAttempt(status, end.Error, code))
-			if reservation.PrivacyClass {
+			if rec.relayBlindSettlement != nil {
+				settlementOutput = responseDigest.output(relayBlindTerminalState(end.Status), rec.relayBlindTerminalTimestamp(end))
+			} else if reservation.PrivacyClass {
 				settlementOutput = settlementOutputUnavailableFor(terminalStateFromAttempt(status, end.Error, code))
 			}
-			_ = rec.logProviderRowWithEstimateAndOutput(provider, status, &prompt, &complete, end.Error, code, 0, nil, settlementOutput)
+			if err := rec.logProviderRowWithEstimateAndOutput(provider, status, &prompt, &complete, end.Error, code, 0, nil, settlementOutput); err == nil && rec.relayBlindSettlement != nil {
+				s.finishRelayBlindSettlement(w.Header(), rec, provider, reservation.ProviderBinding, end.RelayBlindSettlementReceipt)
+			}
 			return
 		case <-relay.Errors:
 			_ = s.relayBlind.store.MarkUnknownPostdispatch(context.Background(), reservation.ProviderBinding, "relay_blind_execution_uncertain", s.now())
@@ -896,6 +957,15 @@ func (s *Server) recordRelayBlindUnknown(rec *billingRecorder, provider pool.Pro
 			bounded := rec.relayBlind.MaxOutputTokens
 			estimate = &bounded
 		}
+	}
+	if rec != nil && rec.relayBlindSettlement != nil {
+		// SPEC-022 R-3.5 / R-14.6: an R-14 attempt never persists a plaintext
+		// output hash; without its terminal receipt it can only quarantine.
+		terminal := billing.TerminalStateProviderError
+		if output != nil && output.TerminalState != "" {
+			terminal = output.TerminalState
+		}
+		output = settlementOutputUnavailableFor(terminal)
 	}
 	_ = rec.logProviderRowWithEstimateAndOutput(provider, status, inputTokens, nil, message, "relay_blind_committed_failed", 0, estimate, output)
 }

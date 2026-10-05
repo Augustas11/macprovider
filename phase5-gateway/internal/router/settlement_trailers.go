@@ -95,6 +95,9 @@ type settlementFinalityBinding struct {
 	key, accountID, requestID string
 	// requireSigned is the coordinator.require_settlement_trailers pin.
 	requireSigned bool
+	// relayBlind marks a request admitted as a relay-blind execution, the
+	// only kind that may final-debit relay_blind_settled (SPEC-022 R-8.1).
+	relayBlind bool
 }
 
 func (s *Server) settlementFinalityBinding(r *http.Request, subject usageSubject) settlementFinalityBinding {
@@ -103,6 +106,7 @@ func (s *Server) settlementFinalityBinding(r *http.Request, subject usageSubject
 		accountID:     subject.AccountID,
 		requestID:     requestID(r),
 		requireSigned: s.cfg.Coordinator.RequireSettlementTrailers,
+		relayBlind:    relayBlindExecutionFor(r) != nil,
 	}
 }
 
@@ -167,7 +171,7 @@ func finalityMACFaultDetail(src http.Header) string {
 // without a route snapshot.
 func undeclaredSettlementFinality(resp *http.Response, b settlementFinalityBinding) coordinatorSettlementFinality {
 	if !b.requireSigned {
-		return coordinatorSettlementFinalityFromHeaders(resp.Header)
+		return coordinatorSettlementFinalityForRequest(resp.Header, b.relayBlind)
 	}
 	if !hasAnySettlementFinalityHeader(resp.Header) || !finalityMACValid(resp, resp.Header, b) {
 		detail := "finality_declaration_missing"
@@ -176,7 +180,7 @@ func undeclaredSettlementFinality(resp *http.Response, b settlementFinalityBindi
 		}
 		return missingSettlementFinality(b, "no signed finality declaration", detail)
 	}
-	return coordinatorSettlementFinalityFromHeaders(resp.Header)
+	return coordinatorSettlementFinalityForRequest(resp.Header, b.relayBlind)
 }
 
 // coordinatorNonStreamingSettlementFinality reads a non-streaming 200's
@@ -200,7 +204,7 @@ func coordinatorNonStreamingSettlementFinality(resp *http.Response, b settlement
 	if !finalityMACValid(resp, resp.Trailer, b) {
 		return missingSettlementFinality(b, "trailer MAC missing or invalid", finalityMACFaultDetail(resp.Trailer))
 	}
-	return coordinatorSettlementFinalityFromHeaders(resp.Trailer)
+	return coordinatorSettlementFinalityForRequest(resp.Trailer, b.relayBlind)
 }
 
 // coordinatorStreamingSettlementFinality reads a stream's finality. Trailer
@@ -218,7 +222,7 @@ func coordinatorStreamingSettlementFinality(resp *http.Response, b settlementFin
 		if (b.requireSigned || settlementFinalityMACDeclared(resp)) && !finalityMACValid(resp, resp.Trailer, b) {
 			return missingSettlementFinality(b, "trailer MAC missing or invalid", finalityMACFaultDetail(resp.Trailer))
 		}
-		return coordinatorSettlementFinalityFromHeaders(resp.Trailer)
+		return coordinatorSettlementFinalityForRequest(resp.Trailer, b.relayBlind)
 	}
 	if hasSettlementFinalityTrailerDeclaration(resp) {
 		return coordinatorSettlementFinality{Action: settlementFinalityHold, Reason: missingSettlementFinalityTrailer}

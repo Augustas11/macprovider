@@ -227,7 +227,25 @@ type ActiveReservation struct {
 	RelayBlind      *RelayBlindMetadata
 	OperatorReview  bool
 	Coordinator404  bool
+	// RelayBlindSettlementMode is a recovery hint, never authority: "enforce"
+	// when the coordinator's relay-blind chat response carried its SPEC-022
+	// R-14 coverage marker (emitted only after the R-14 snapshot committed)
+	// and its internal request id, "" otherwise. Recovery always asks the
+	// coordinator, whose explicit coverage answer decides; a legacy
+	// "observe" value authorizes nothing.
+	RelayBlindSettlementMode string
+	// RelayBlindInternalRequestID is the coordinator request id an
+	// "enforce" response named.
+	RelayBlindInternalRequestID string
 }
+
+const (
+	RelayBlindSettlementModeEnforce = "enforce"
+	// RelayBlindSettlementModeObserve is accepted by the column CHECK for
+	// rows written before coverage became a coordinator answer; nothing
+	// writes or trusts it.
+	RelayBlindSettlementModeObserve = "observe"
+)
 
 type SettlementHoldBacklogStats struct {
 	TotalActiveHeld         int

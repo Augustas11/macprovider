@@ -758,3 +758,37 @@ func countSQLiteRows(t *testing.T, path, table string) int {
 	}
 	return count
 }
+
+// SPEC-022 R-14.2 / AC-022-68 across the real coordinator and gateway: with
+// settlement enforce and the relay-blind settlement profile, the coordinator
+// boots with relay-blind enabled, and a provider that never advertised the
+// relay_blind_settlement_receipt_v1 capability (this Go provider advertises
+// neither the capability nor relay-blind keys) is never reserved: the
+// request fails closed before quota, ledger, or dispatch.
+func TestRelayBlindEnforceExcludesProviderWithoutSettlementCapability(t *testing.T) {
+	s := newScenario(t, scenarioOpts{
+		seedAccount:                  true,
+		settlementReceiptProvider:    true,
+		settlementEnforceMode:        true,
+		gatewayRelayBlindEnabled:     true,
+		coordinatorRelayBlindEnabled: true,
+	})
+	status, headers, body := s.jsonRequest(http.MethodPost, "/v1/relay-blind/route-reservations", nil, relayBlindReservationBody)
+	if status != http.StatusServiceUnavailable || relayBlindErrorCode(t, body) != "relay_blind_provider_unsupported" {
+		t.Fatalf("status=%d body=%s, want 503 relay_blind_provider_unsupported", status, body)
+	}
+	if got := headers.Get("Cache-Control"); !strings.Contains(got, "no-store") {
+		t.Fatalf("Cache-Control=%q, want no-store", got)
+	}
+	for table, count := range map[string]int{
+		"quota_reservations": s.countGatewayRows("quota_reservations"),
+		"request_log":        s.countCoordinatorRows("request_log"),
+	} {
+		if count != 0 {
+			t.Fatalf("%s=%d, want 0 before relay-blind dispatch", table, count)
+		}
+	}
+	if got := s.fakeProv.Hits(); got != 0 {
+		t.Fatalf("provider dispatches=%d, want 0", got)
+	}
+}

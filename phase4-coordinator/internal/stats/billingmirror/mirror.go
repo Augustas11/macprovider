@@ -306,6 +306,10 @@ type requestCreditSourceCapabilities struct {
 	HasEffectivePrivacyOutcome      bool
 	HasPositiveVerificationExcluded bool
 	HasRewardsExcluded              bool
+	// HasVerifiedVerdicts reports the settlement_receipt_verdicts table and
+	// the credit's settlement account scope hash that bind a credit to its
+	// literal verified verdict.
+	HasVerifiedVerdicts bool
 }
 
 func detectRequestCreditSourceCapabilities(ctx context.Context, db *sql.DB) (requestCreditSourceCapabilities, error) {
@@ -333,7 +337,16 @@ func detectRequestCreditSourceCapabilities(ctx context.Context, db *sql.DB) (req
 	if err != nil {
 		return requestCreditSourceCapabilities{}, err
 	}
+	hasVerdicts, err := sqliteObjectExists(ctx, db, "settlement_receipt_verdicts")
+	if err != nil {
+		return requestCreditSourceCapabilities{}, err
+	}
+	hasScopeHash, err := sqliteColumnExists(ctx, db, "ledger_request_credits", "settlement_account_scope_hash")
+	if err != nil {
+		return requestCreditSourceCapabilities{}, err
+	}
 	return requestCreditSourceCapabilities{
+		HasVerifiedVerdicts:             hasVerdicts && hasScopeHash,
 		HasSettlementPolicyMode:         hasPolicy,
 		HasSpec022PayableView:           hasPayable,
 		HasRequestedPrivacyMode:         hasRequestedPrivacyMode,
@@ -348,14 +361,6 @@ func requestCreditsQuery(caps requestCreditSourceCapabilities, bounded bool) str
 	if caps.HasSettlementPolicyMode {
 		policyExpr = "COALESCE(lrc.settlement_policy_mode, 'legacy')"
 	}
-	verifiedExpr := "0"
-	if caps.HasSpec022PayableView {
-		verifiedExpr = fmt.Sprintf(`CASE
-           WHEN %s = 'enforce'
-            AND EXISTS (SELECT 1 FROM spec022_payable_request_credits payable WHERE payable.id = lrc.id)
-           THEN 1 ELSE 0
-       END`, policyExpr)
-	}
 	requestedPrivacyExpr := "'none'"
 	if caps.HasRequestedPrivacyMode {
 		requestedPrivacyExpr = "COALESCE(lrc.requested_privacy_mode, 'none')"
@@ -367,6 +372,29 @@ func requestCreditsQuery(caps requestCreditSourceCapabilities, bounded bool) str
 	positiveExcludedExpr := "0"
 	if caps.HasPositiveVerificationExcluded {
 		positiveExcludedExpr = "COALESCE(lrc.positive_verification_excluded, 0)"
+	}
+	// spec022_verified (and the verified audit record it creates) derives
+	// only from the literal closed, valid 'verified' verdict and the
+	// positive-verification predicate. Payable-view membership alone is not
+	// verification: a SPEC-022 R-14 relay_blind_settled credit is payable
+	// but never verified (R-10.7).
+	verifiedExpr := "0"
+	if caps.HasSpec022PayableView && caps.HasVerifiedVerdicts {
+		verifiedExpr = fmt.Sprintf(`CASE
+           WHEN %s = 'enforce'
+            AND %s = 0
+            AND EXISTS (SELECT 1 FROM spec022_payable_request_credits payable WHERE payable.id = lrc.id)
+            AND EXISTS (
+                SELECT 1 FROM settlement_receipt_verdicts srv
+                 WHERE srv.account_scope_hash = lrc.settlement_account_scope_hash
+                   AND srv.request_id = lrc.request_id
+                   AND srv.attempt_n = lrc.attempt_n
+                   AND srv.provider_id = lrc.provider_id
+                   AND srv.closed = 1
+                   AND srv.receipt_result = 'valid'
+                   AND srv.settlement_outcome = 'verified')
+           THEN 1 ELSE 0
+       END`, policyExpr, positiveExcludedExpr)
 	}
 	rewardsExcludedExpr := "0"
 	if caps.HasRewardsExcluded {

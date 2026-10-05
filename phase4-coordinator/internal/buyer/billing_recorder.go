@@ -183,6 +183,9 @@ type billingRecorder struct {
 	settlementRouteSnapshot    *billing.RouteSnapshot
 	routeSnapshotStorePressure bool
 	relayBlind                 *relayBlindAuditFields
+	// relayBlindSettlement is the SPEC-001-R005 metadata of the current
+	// relay-blind attempt's R-14 route snapshot; nil when it has none.
+	relayBlindSettlement *providerws.RelayBlindSettlementMetadata
 	// lastRecordedSettlementSubject latches whether the MOST RECENTLY recorded
 	// row was a leg the coordinator settles at all. It is the single expression
 	// that recordRow's two billing branches gate on: a settlement attempt

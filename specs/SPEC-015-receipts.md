@@ -1,7 +1,9 @@
 # SPEC-015 — Verifiable inference receipts
 
-**Version:** 0.4.12 (2026-10-01, route_snapshot_v2 for #1816 pool provenance; LOCKED v0.4 tuple unchanged)
-**Depends on:** SPEC-001 v1.9.24, SPEC-002 v1.6.2 (v1.5 `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver; v1.6 `/poolz` catalog fields + `/catalog/<catalog_id>` + `/catalog/pubkey` per §M.4), SPEC-005 v0.6.8 (settlement/accounting semantics), SPEC-006 v0.9.38, SPEC-008 v0.7.0 (hard — §5.3-5.6 model-hash semantics; §5.5 hash_status enum), SPEC-010 v1.14 (v1.7 R007(d), v1.10 R007(f) and v1.11 pool-scoped settlement for §N.12; v1.13/v1.14 LM Studio and oMLX legs for §N.12 item 7), SPEC-011 v0.5 (hard — §3.3.1 heartbeat `model_hash`; §3.2 warm-swap state machine; §3.3.0 opt-in gating), SPEC-013 v0.3.1, SPEC-022 v0.2.4 (hard — settlement-capable receipt profile consumer; R-5.6 and R-12 for §N.12), SPEC-042 0.0.36 (pool runtime authorization for §N.12, v0.4.10)
+**Version:** 0.4.13 (2026-10-05, relay-blind-settlement-v1 profile, #1851; LOCKED v0.4 tuple unchanged)
+**Depends on:** SPEC-001 v1.9.24, SPEC-002 v1.6.2 (v1.5 `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver; v1.6 `/poolz` catalog fields + `/catalog/<catalog_id>` + `/catalog/pubkey` per §M.4), SPEC-005 v0.6.8 (settlement/accounting semantics), SPEC-006 v0.9.38, SPEC-008 v0.7.0 (hard — §5.3-5.6 model-hash semantics; §5.5 hash_status enum), SPEC-010 v1.14 (v1.7 R007(d), v1.10 R007(f) and v1.11 pool-scoped settlement for §N.12; v1.13/v1.14 LM Studio and oMLX legs for §N.12 item 7), SPEC-011 v0.5 (hard — §3.3.1 heartbeat `model_hash`; §3.2 warm-swap state machine; §3.3.0 opt-in gating), SPEC-013 v0.3.1, SPEC-022 v0.3.0 (hard — settlement-capable receipt profile consumer; R-5.6 and R-12 for §N.12; R-14 for §N.13), SPEC-042 0.0.36 (pool runtime authorization for §N.12, v0.4.10)
+
+**Change log v0.4.13 (2026-10-05, issue #1851 — relay-blind settlement receipt profile):** Adds §N.13 and conformance unit `SPEC-015-R007`. §N.13 defines a second settlement-capable profile, `relay-blind-settlement-v1`, for the SPEC-022 R-14 relay-blind entrypoint only. It is signed with the provider's existing SPEC-015 receipt key, not the SPEC-041 relay-blind identity key. It binds the attempt and snapshot, the model and catalog hashes, the SPEC-041 envelope, execution-authorization, and provider-binding digests and `kid`, the SHA-256 of the exact emitted response bytes (ciphertext frames for the SPEC-049 privacy class), the terminal state, and usage capped by the buyer-declared bounds. It carries no v0.4 `prompt_hash` or `output_hash` and no value derived from plaintext request content. It is closed, JCS-canonical, size-bounded, and needs shared Go/Swift vectors. The v0.4.7 rule still holds: a v0.4 receipt is never attached to relay-blind work, and no plaintext prompt hash is derived from ciphertext. The basis-labelled envelope digest in a relay-blind route snapshot is not a plaintext prompt hash. The LOCKED v0.4 tuple, its verifier, and §N.1 to §N.12 are unchanged. A v0.4 verifier MUST quarantine a relay-blind snapshot (SPEC-022 R-7.10). A claimed attempt that ends before a pinned runtime handle exists, or whose handle has no model hash, an unresolvable model, or no validated usage, withholds the receipt; the coordinator treats that as missing evidence under SPEC-022 R-14.6 (pending, then quarantined, buyer refunded, no provider credit). Duplicate-member detection is coordinator-side.
 
 **Change log v0.4.12 (2026-10-01, issue #1816 freeze R1 — route_snapshot_v2):** §N.2 defines `route_snapshot_v2` under the route-snapshot policy version `spec022-route-snapshot-v2` for the #1816 pool provenance members (SPEC-022-R013.2 option B). A route snapshot carries those members if and only if it is pinned to v2; every other route keeps the byte-identical `route_snapshot_v1` preimage. The coordinator settlement metadata gains the optional `execution_model_id` (§N.12 item 8) so a pool_manifest receipt signs `model_id = pool_model_id` while the runtime serves its own label. Shared golden vectors live in `testdata/spec015/route_snapshot_golden.json`; the coordinator and `phase7-verify` both recompute them. The LOCKED v0.4 tuple and wire are unchanged.
 
@@ -868,6 +870,9 @@ areas without changing them:
   audit redaction (§13, §N). Buyer retrieval remains SPEC-022-R006.
 - `SPEC-015-R006` — (v0.4.10) per-request receipt eligibility for a
   pool-authorized loopback runtime (§N.12, AC-12b).
+- `SPEC-015-R007` — (v0.4.13) the `relay-blind-settlement-v1` receipt
+  profile: closed tuple, signing key, canonicalization, size limits,
+  verification, and Go/Swift parity vectors (§N.13).
 
 `requirement_id_migration` is `complete`. R002–R005 are not promoted from
 this close. Signed journey-result evidence is still required before any of
@@ -4609,6 +4614,119 @@ The provider decides per request, not from a per-runtime constant.
    (no receipt). A provider older than v0.4.12 compares `model_id` with the
    request's model, omits the receipt for such an attempt, and the attempt
    settles fail-closed with no buyer debit and no provider credit.
+
+### §N.13 Relay-blind settlement receipts (v0.4.13, SPEC-015-R007)
+
+**SPEC-015-R007 — Relay-blind settlement receipt profile.** The profile
+`relay-blind-settlement-v1` is the only settlement-capable receipt for the
+SPEC-022 R-14 paid entrypoint
+`coordinator_buyer_v1_relay_blind_chat_completions`. It MUST NOT be accepted
+for any other entrypoint. No other profile is accepted for that entrypoint.
+It is a separate profile, not a v0.4 variant: §N.1 to §N.12 and the LOCKED
+v0.4 tuple are unchanged, and a v0.4 parser rejects this tuple because its
+`receipt_version` and field set differ.
+
+1. **Signing key.** The provider signs with its SPEC-015 receipt private key,
+   the key whose `provider_receipt_key_id` the route snapshot pins (§7,
+   §N.1). It MUST NOT sign with the SPEC-041 relay-blind identity key, the
+   SPEC-049 posture key, or any X25519 key. SPEC-041 validation and terminal
+   evidence remain execution evidence, not receipts (v0.4.7).
+
+2. **Envelope and canonicalization.** The wire form is the §3.4 envelope
+   `<base64(JCS(T))>.<base64(SIG)>` with
+   `SIG = ed25519_sign(provider_receipt_private_key, UTF-8(JCS(T)))`. `T` is
+   an RFC 8785 JCS object with exactly the fields below and no others. Unknown,
+   missing, duplicate, or null fields, non-integer numbers, and a tuple whose
+   bytes are not already JCS-canonical MUST be rejected.
+
+   | Field | Type | Definition |
+   |---|---|---|
+   | `account_scope` | string | As §N.1. |
+   | `attempt_n` | int64 | As §N.1. |
+   | `catalog_body_digest` | string | As §N.1, from the route snapshot. |
+   | `catalog_id` | string | As §N.1, from the route snapshot. |
+   | `expected_catalog_model_hash` | string | As §N.1, from the route snapshot. |
+   | `input_token_upper_bound` | int64 | The buyer-declared SPEC-041 bound from the envelope and dispatch context. 1..2^31-1. |
+   | `issued_at_unix_ms` | int64 | As §N.1. |
+   | `max_output_tokens` | int64 | The buyer-declared SPEC-041 output bound from the envelope and dispatch context. 1..2^31-1. |
+   | `model_hash` | string | As §N.1. Non-null 64 lowercase hex of the request-start loaded model hash for the runtime handle that SPEC-041-R005 pins. |
+   | `model_id` | string | As §N.1: the route snapshot `model_id`. |
+   | `paid_entrypoint` | string | Exactly `coordinator_buyer_v1_relay_blind_chat_completions`. |
+   | `privacy_class` | string | `operator_constrained_beta_v1` for a SPEC-049 privacy-class dispatch, otherwise `none`. MUST equal the dispatch marker. |
+   | `prompt_hash_basis` | string | Exactly `relay_blind_envelope_digest_v1`. |
+   | `provider_id` | string | As §N.1. |
+   | `provider_receipt_key_id` | string | As §N.1. |
+   | `receipt_version` | string | Exactly `relay-blind-settlement-v1`. |
+   | `relay_blind_envelope_digest` | string | SPEC-041 `envelope_digest`: canonical unpadded base64url (43 ASCII bytes) of SHA-256 over the exact envelope bytes. Its lowercase hex re-encoding MUST equal the route snapshot `prompt_hash`. |
+   | `relay_blind_execution_auth_digest` | string | SPEC-041 `execution_auth_digest` from the dispatch context, 43-byte canonical base64url. |
+   | `relay_blind_kid` | string | SPEC-041 `kid`, 22-byte canonical base64url. |
+   | `relay_blind_provider_binding_digest` | string | SPEC-041 `provider_binding_digest`, 43-byte canonical base64url. |
+   | `request_id` | string | The coordinator settlement request id from `relay_blind_settlement` metadata (SPEC-001-R005). It is not the envelope `request_id`. |
+   | `response_body_bytes` | int64 | Count of the exact response bytes the provider emitted for this attempt. Non-negative. |
+   | `response_body_sha256` | string | 64 lowercase hex SHA-256 of those bytes: the concatenated `inference_response_chunk.data` UTF-8 bytes in `seq` order, through the last chunk before `inference_response_end`. For the privacy class these are the SPEC-049 §4.8 ciphertext frame bytes. |
+   | `route_snapshot_digest` | string | As §N.1. |
+   | `route_snapshot_mode` | string | As §N.1. |
+   | `route_snapshot_policy_version` | string | As §N.1. |
+   | `signature_key_alg` | string | Exactly `Ed25519`. |
+   | `terminal_state` | string | One of §N.4. |
+   | `terminal_state_ts_unix_ms` | int64 | As §N.1. |
+   | `usage` | object | Exactly `{input_tokens, output_tokens}`, both non-negative int64. `input_tokens` is the `input_tokens` of the provider's SPEC-041 `validated` evidence and is `<= input_token_upper_bound`. `output_tokens` is the provider's terminal completion count and is `<= max_output_tokens`. |
+
+3. **Content-free.** The tuple carries no v0.4 `prompt_hash`, `output_hash`,
+   or `settlement_output_v1` material. It carries no hash, length, or token
+   detail of plaintext request content beyond the token counts above, no
+   canary-derived value, and no key material. For the privacy class it also
+   carries no value derived from plaintext response content: the response
+   digest covers ciphertext. For plain relay-blind work, the response bytes
+   are already relay-visible (SPEC-041 scope), so their digest adds no
+   exposure.
+
+4. **Size limits.** `model_id`, `catalog_id`, `request_id`, `provider_id`,
+   `account_scope`, and `route_snapshot_policy_version` are each 1..256
+   printable ASCII bytes. `UTF-8(JCS(T))` is at most 4096 bytes. The full
+   envelope string is at most 8192 bytes. The coordinator MUST reject a larger
+   value before parsing it.
+
+5. **Verification.** The verifier runs SPEC-022 R-7.10 first, then every
+   SPEC-022 R-14.5 check. §N.3 timestamp, replay, and deadline rules and §N.4
+   terminal states apply unchanged. §N.7 chargeability applies with
+   `response_body_bytes` in place of `delivered_output_bytes`, and with the
+   SPEC-022 R-3.4.3 equalities in place of the observed-token columns. Outcome
+   mapping follows §N.8, with `relay_blind_settled` in place of `verified`. A
+   receipt that passes is never reported as `verified`.
+
+6. **Delivery and ingestion.** The receipt travels only on the terminal
+   `inference_response_end` frame field `relay_blind_settlement_receipt`
+   (SPEC-001-R005). There is at most one per dispatched attempt, and exactly
+   one for an attempt that reached a pinned runtime handle with a model hash,
+   a resolved snapshot model, and SPEC-041 `validated` usage. It is never
+   an `X-MacProvider-Receipt` header, an SSE event, or a buyer response field.
+
+   The provider MUST withhold the receipt for a claimed attempt that ends
+   before a pinned handle exists (a SPEC-041 `open()` decryption or validation
+   rejection; a claimed relay-blind terminal for a duplicate active request,
+   a full queue, an over-limit body, or a paused provider; or a failed
+   relay-blind prepare step), and for a handle with no model hash, a
+   `model_id` that does not resolve to the handle, or no validated usage. It
+   never signs placeholder values. The coordinator treats a withheld receipt
+   as missing evidence (SPEC-022 R-14.6): pending until the snapshot
+   deadline, then quarantined, with the buyer refunded and no provider credit.
+   Duplicate-member detection is coordinator-side: the provider's JSON parser
+   cannot observe a duplicated `relay_blind_settlement` member, and the
+   coordinator verifier rejects a tuple whose bytes are not the JCS form
+   (item 1), which a duplicated member cannot be.
+   §N.9 storage, keying, idempotency, and redaction apply. Verdict, audit, and
+   operator rows carry parsed scalar fields and digests only.
+
+7. **Parity vectors.** One shared fixture,
+   `test/fixtures/receipts/relay-blind-settlement-v1.json`, MUST hold a
+   signing test key, at least one non-stream and one stream positive tuple
+   with its JCS bytes, signature, and envelope, and negative vectors for every
+   field rule above. The negatives cover a wrong `receipt_version`, entrypoint,
+   or basis; an extra, missing, or null field; non-canonical bytes; an
+   oversized tuple; usage above a bound; and a v0.4 tuple. The Go coordinator
+   verifier and the Swift provider builder MUST both pass every vector
+   byte-for-byte.
 
 ---
 

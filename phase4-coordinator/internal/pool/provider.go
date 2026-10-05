@@ -189,6 +189,11 @@ type Provider struct {
 	// session through buyer_serving_hold=catalog_material_missing instead of
 	// reconnecting (SPEC-001 v1.9.21, SPEC-022-R002 R-2.7).
 	CatalogMaterialHoldV1 bool `json:"catalog_material_hold_v1,omitempty"`
+	// RelayBlindSettlementReceiptV1 records that this session's initial-stage
+	// auth_request advertised tier2_capabilities.relay_blind_settlement_receipt_v1
+	// (SPEC-001-R005). Under SPEC-022 enforce only such a session is eligible
+	// for relay-blind work (R-14.2).
+	RelayBlindSettlementReceiptV1 bool `json:"relay_blind_settlement_receipt_v1,omitempty"`
 	// Catalog admission captures the exact signed recommendation envelope that
 	// was accepted for this live session. Deployment canaries use these fields
 	// to distinguish a current catalog-aware provider from a legacy bridge
