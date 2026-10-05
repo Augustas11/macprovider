@@ -35,6 +35,7 @@ const (
 
 var (
 	hex64Re                  = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	poolModelIDRe            = regexp.MustCompile(`^pool/([A-Za-z0-9_-]{22})/([a-z0-9][a-z0-9-]{0,62})$`)
 	receiptKeyIDRe           = regexp.MustCompile(`^ed25519-sha256:[0-9a-f]{64}$`)
 	v04TerminalStates        = map[string]struct{}{"normal_done": {}, "provider_error": {}, "buyer_cancel": {}, "gateway_timeout": {}, "upstream_transport_disconnect": {}}
 	v04ReceiptTupleFieldList = []string{
@@ -290,7 +291,8 @@ func (r SettlementRouteSnapshot) validateConditionalMembers() error {
 			return fmt.Errorf("route snapshot pool model members require expected_model_hash_source pool_manifest")
 		}
 	case expectedModelHashSourcePoolManifest:
-		if r.PoolID == "" || !strings.HasPrefix(r.PoolModelID, "pool/"+r.PoolID+"/") || r.ModelID != r.PoolModelID {
+		poolModelMatch := poolModelIDRe.FindStringSubmatch(r.PoolModelID)
+		if r.PoolID == "" || poolModelMatch == nil || poolModelMatch[1] != r.PoolID || r.ModelID != r.PoolModelID {
 			return fmt.Errorf("route snapshot pool_manifest model_id must be a pool_model_id of pool_id")
 		}
 		if r.ManifestVersion == 0 || r.PoolGeneration == 0 || r.ExpectedCatalogModelHashAlgorithm == "" {

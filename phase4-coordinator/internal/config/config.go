@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -1332,6 +1333,11 @@ type TrustedPoolsConfig struct {
 	// SPEC-042-R016 creator member attestation is matched against; a
 	// provider listed under two accounts is rejected.
 	ProviderOwnerAccountIDs map[string][]string `yaml:"provider_owner_account_ids"`
+	// ManifestAcceptanceWitnessPath is an out-of-database high-water witness
+	// for accepted Trusted Pool manifests. Production activation requires it so
+	// restoring an older coordinator.db cannot silently resurrect revoked
+	// pool-model or membership authority.
+	ManifestAcceptanceWitnessPath string `yaml:"manifest_acceptance_witness_path"`
 }
 
 // TrustedPoolsPoolModelPricingBounds is the closed SPEC-005-R015 pool-model
@@ -1793,6 +1799,7 @@ func Default() Config {
 			CreatorAdminProviderDelegatedIDs: map[string][]string{},
 			CreatorAdminBuyerAccountIDs:      map[string][]string{},
 			ProviderOwnerPublicKeys:          map[string]string{},
+			ManifestAcceptanceWitnessPath:    "",
 			ProductionActivation: TrustedPoolsProductionActivationConfig{
 				AllowedLaunchEnvironments: []string{},
 				RootCustodyHashes:         []string{},
@@ -3200,6 +3207,13 @@ func validateTrustedPoolsProductionActivation(c TrustedPoolsConfig) error {
 	}
 	if !c.Enabled {
 		return fmt.Errorf("trusted_pools.production_activation requires trusted_pools.enabled=true")
+	}
+	witnessPath := strings.TrimSpace(c.ManifestAcceptanceWitnessPath)
+	if witnessPath == "" {
+		return fmt.Errorf("trusted_pools.production_activation requires trusted_pools.manifest_acceptance_witness_path")
+	}
+	if !filepath.IsAbs(witnessPath) {
+		return fmt.Errorf("trusted_pools.manifest_acceptance_witness_path must be absolute")
 	}
 	if !lowerHex64Pattern.MatchString(strings.TrimSpace(gate.EvidenceSHA256)) {
 		return fmt.Errorf("trusted_pools.production_activation.evidence_sha256 must be a lowercase sha256 hex digest")

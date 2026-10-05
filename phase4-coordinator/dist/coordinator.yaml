@@ -258,6 +258,9 @@ storage:
 # docs/runbooks/pool-scoped-model-admission.md section 1 (rate values stay out
 # of this file outside rewards.rate_card).
 # trusted_pools:
+#   # Required before production_activation is configured; keep outside
+#   # coordinator.db rollback/snapshot domains.
+#   manifest_acceptance_witness_path: /var/lib/macprovider/trustpool-manifest-witness.json
 #   pool_model_pricing_bounds:
 #     min_prompt_rate_per_mtok: <int>
 #     max_prompt_rate_per_mtok: <int>
