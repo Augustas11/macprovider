@@ -200,9 +200,6 @@ func TestRelayBlindLostValidationHoldsAndRecoversWithoutResubmission(t *testing.
 	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(c *config.Config) {
 		c.Features.RelayBlindRequests.Enabled = true
 		c.Coordinator.BuyerURL = upstream.URL
-		// SPEC-022 R-13.6: recovery first asks the coordinator for enforce
-		// finality; this coordinator has none, so the status row recovers.
-		c.Coordinator.OperatorURL = upstream.URL
 	})
 	key := createAccountAndKey(t, store, cfg, "pilot-recover")
 	request := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(raw))

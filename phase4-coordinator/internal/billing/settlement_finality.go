@@ -135,8 +135,11 @@ func (s *Store) requestSettlementFinalityForAccount(ctx context.Context, account
 		}
 	}
 	internalRequestIDs, err := s.requestIDsForExternalRequest(ctx, accountID, requestID, notBefore)
-	if err != nil || len(internalRequestIDs) == 0 {
+	if err != nil {
 		return RequestSettlementFinality{}, false, err
+	}
+	if len(internalRequestIDs) == 0 {
+		return s.relayBlindRequiredFinality(ctx, accountScope, requestID, requiredInternalRequestID, nowUnixMS)
 	}
 	if requiredInternalRequestID != "" {
 		included := false
@@ -147,7 +150,7 @@ func (s *Store) requestSettlementFinalityForAccount(ctx context.Context, account
 			}
 		}
 		if !included {
-			return RequestSettlementFinality{}, false, nil
+			return s.relayBlindRequiredFinality(ctx, accountScope, requestID, requiredInternalRequestID, nowUnixMS)
 		}
 	}
 	finalities := make([]RequestSettlementFinality, 0, len(internalRequestIDs))
@@ -180,6 +183,49 @@ func (s *Store) requestSettlementFinalityForAccount(ctx context.Context, account
 		finality.TotalTokens = 0
 		finality.PendingAttempts++
 	}
+	return finality, true, nil
+}
+
+// relayBlindUnrecordedAttemptGrace bounds how long an enforce relay-blind
+// attempt whose route snapshot exists but which has no credit and no attempt
+// output stays pending before it closes quarantined. The coordinator request
+// timeout ends the attempt long before this.
+const relayBlindUnrecordedAttemptGrace = time.Hour
+
+// RelayBlindAttemptUnrecordedReason closes an enforce relay-blind attempt
+// whose snapshot was committed before dispatch but whose credit and attempt
+// output were never written (SPEC-022 R-13.6): nothing is payable, so the
+// buyer is refunded.
+const RelayBlindAttemptUnrecordedReason = "relay_blind_attempt_unrecorded"
+
+// relayBlindRequiredFinality answers a bound lookup whose required internal
+// request id has no request_log row under the external id. A SPEC-022 R-13
+// relay-blind snapshot is committed before dispatch, so its existence is the
+// coordinator's authority that the attempt was enforce-covered even when the
+// coordinator stopped before writing the request log. Anything else stays
+// not found.
+func (s *Store) relayBlindRequiredFinality(ctx context.Context, accountScope, externalRequestID, requiredInternalRequestID string, nowUnixMS int64) (RequestSettlementFinality, bool, error) {
+	if requiredInternalRequestID == "" {
+		return RequestSettlementFinality{}, false, nil
+	}
+	readCtx, cancel := context.WithTimeout(ctx, settlementFinalityReadTimeout)
+	var exists bool
+	err := s.reader().QueryRowContext(readCtx, `
+SELECT EXISTS (
+    SELECT 1 FROM settlement_route_snapshots
+     WHERE account_scope = ? AND request_id = ?
+       AND paid_entrypoint = ? AND prompt_hash_basis = ? AND route_snapshot_mode = ?)`,
+		accountScope, requiredInternalRequestID, PaidEntrypointRelayBlindChat, PromptHashBasisRelayBlindEnvelopeV1, RouteSnapshotModeEnforce).Scan(&exists)
+	cancel()
+	if err != nil || !exists {
+		return RequestSettlementFinality{}, false, err
+	}
+	finality, found, err := s.RequestSettlementFinality(ctx, accountScope, requiredInternalRequestID, nowUnixMS)
+	if err != nil || !found {
+		return RequestSettlementFinality{}, false, err
+	}
+	finality.RequestID = externalRequestID
+	finality.RequiredInternalRequestID = requiredInternalRequestID
 	return finality, true, nil
 }
 
@@ -555,7 +601,7 @@ func (s *Store) requestSettlementAttemptsWithoutVerdict(ctx context.Context, acc
 	rows, err := s.reader().QueryContext(ctx, `
 SELECT rs.attempt_n, rs.provider_id,
        COALESCE(sao.terminal_state_ts_unix_ms + (rs.pending_deadline_seconds * 1000), 0),
-       rs.pending_deadline_seconds,
+       rs.pending_deadline_seconds, rs.paid_entrypoint, rs.route_decision_ts_unix_ms,
        rs.route_snapshot_policy_version, rs.route_snapshot_mode,
        sao.request_id IS NOT NULL,
        COALESCE((
@@ -597,9 +643,9 @@ SELECT rs.attempt_n, rs.provider_id,
 	for rows.Next() {
 		var row requestSettlementVerdictRow
 		var hasOutput bool
-		var quarantineReason, creditTS string
-		var pendingDeadlineSeconds int64
-		if err := rows.Scan(&row.attemptN, &row.providerID, &row.pendingDeadlineUnixMS, &pendingDeadlineSeconds, &row.policyVersion, &row.mode, &hasOutput, &quarantineReason, &creditTS); err != nil {
+		var quarantineReason, creditTS, entrypoint string
+		var pendingDeadlineSeconds, routeDecisionUnixMS int64
+		if err := rows.Scan(&row.attemptN, &row.providerID, &row.pendingDeadlineUnixMS, &pendingDeadlineSeconds, &entrypoint, &routeDecisionUnixMS, &row.policyVersion, &row.mode, &hasOutput, &quarantineReason, &creditTS); err != nil {
 			return nil, err
 		}
 		if _, ok := covered[attemptKey{attemptN: row.attemptN, providerID: row.providerID}]; ok {
@@ -622,6 +668,22 @@ SELECT rs.attempt_n, rs.provider_id,
 				continue
 			}
 			row = evidenceRow
+		case row.mode == RouteSnapshotModeEnforce && entrypoint == PaidEntrypointRelayBlindChat:
+			// SPEC-022 R-13.6: an enforce relay-blind snapshot is committed
+			// before dispatch. Without a credit or an attempt output the
+			// attempt is pending, then closed quarantined, never payable.
+			row.receiptResult = SettlementReceiptResultInconclusive
+			deadline := routeDecisionUnixMS + pendingDeadlineSeconds*1000 + relayBlindUnrecordedAttemptGrace.Milliseconds()
+			if nowUnixMS <= deadline {
+				row.settlementOutcome = SettlementOutcomePending
+				row.reason = "relay_blind_attempt_pending"
+				row.pendingDeadlineUnixMS = deadline
+			} else {
+				row.settlementOutcome = SettlementOutcomeQuarantined
+				row.reason = RelayBlindAttemptUnrecordedReason
+				row.closed = true
+				row.pendingDeadlineUnixMS = 0
+			}
 		default:
 			continue
 		}

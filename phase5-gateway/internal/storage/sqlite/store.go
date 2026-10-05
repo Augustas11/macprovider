@@ -227,6 +227,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.ensureRelayBlindAccountingColumns(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureRelayBlindSettlementDispatchColumns(ctx); err != nil {
+		return err
+	}
 	if err := s.ensureUsageEventsPoolOperatorAttestedSource(ctx); err != nil {
 		return err
 	}
@@ -2092,7 +2095,8 @@ func (s *Store) ListSettlementHeldReservations(ctx context.Context, limit int) (
 			qr.reserved_tokens, qr.expires_at, qr.created_at,
 			qr.requested_privacy_mode, qr.effective_privacy_outcome, qr.relay_blind_envelope_digest,
 			qr.relay_blind_key_record_digest, qr.relay_blind_kid, qr.relay_blind_provider_binding_digest,
-			qr.input_token_upper_bound, qr.max_output_tokens
+			qr.input_token_upper_bound, qr.max_output_tokens,
+			qr.relay_blind_settlement_mode, qr.relay_blind_internal_request_id
 		FROM quota_reservations qr
 		LEFT JOIN wallet_session_request_map wrm
 			ON wrm.account_id = qr.account_id AND wrm.request_id = qr.request_id
@@ -2128,7 +2132,8 @@ func (s *Store) ListDueSettlementHeldReservations(ctx context.Context, limit int
 			qr.reserved_tokens, qr.expires_at, qr.created_at,
 			qr.requested_privacy_mode, qr.effective_privacy_outcome, qr.relay_blind_envelope_digest,
 			qr.relay_blind_key_record_digest, qr.relay_blind_kid, qr.relay_blind_provider_binding_digest,
-			qr.input_token_upper_bound, qr.max_output_tokens
+			qr.input_token_upper_bound, qr.max_output_tokens,
+			qr.relay_blind_settlement_mode, qr.relay_blind_internal_request_id
 		FROM quota_reservations qr
 		LEFT JOIN wallet_session_request_map wrm
 			ON wrm.account_id = qr.account_id AND wrm.request_id = qr.request_id
@@ -2170,6 +2175,7 @@ func (s *Store) ListSettlementHeldReservationsForDrain(ctx context.Context, acco
 			qr.requested_privacy_mode, qr.effective_privacy_outcome, qr.relay_blind_envelope_digest,
 			qr.relay_blind_key_record_digest, qr.relay_blind_kid, qr.relay_blind_provider_binding_digest,
 			qr.input_token_upper_bound, qr.max_output_tokens,
+			qr.relay_blind_settlement_mode, qr.relay_blind_internal_request_id,
 			COALESCE(sra.operator_review, 0),
 			CASE WHEN COALESCE(sra.first_not_found_at, '') != '' OR sra.last_result = 'coordinator_404_held' THEN 1 ELSE 0 END
 		FROM quota_reservations qr
@@ -2212,6 +2218,7 @@ func (s *Store) ListSettlementHeldReservationsForDrain(ctx context.Context, acco
 			&reservation.AccountID, &reservation.RequestID, &reservation.WalletSessionID,
 			&reservation.WindowDate, &reservation.ReservedTokens, &expiresAt, &createdAt,
 			&requested, &effective, &envelope, &keyRecord, &kid, &providerBinding, &inputCap, &outputCap,
+			&reservation.RelayBlindSettlementMode, &reservation.RelayBlindInternalRequestID,
 			&operatorReview, &coordinator404,
 		); err != nil {
 			return nil, err
@@ -2232,7 +2239,8 @@ func (s *Store) LookupSettlementHeldReservation(ctx context.Context, accountID, 
 			qr.reserved_tokens, qr.expires_at, qr.created_at,
 			qr.requested_privacy_mode, qr.effective_privacy_outcome, qr.relay_blind_envelope_digest,
 			qr.relay_blind_key_record_digest, qr.relay_blind_kid, qr.relay_blind_provider_binding_digest,
-			qr.input_token_upper_bound, qr.max_output_tokens
+			qr.input_token_upper_bound, qr.max_output_tokens,
+			qr.relay_blind_settlement_mode, qr.relay_blind_internal_request_id
 		FROM quota_reservations qr
 		LEFT JOIN wallet_session_request_map wrm
 			ON wrm.account_id = qr.account_id AND wrm.request_id = qr.request_id
@@ -2258,6 +2266,7 @@ func scanSettlementHeldReservation(row settlementHeldReservationScanner) (storag
 		&reservation.AccountID, &reservation.RequestID, &reservation.WalletSessionID,
 		&reservation.WindowDate, &reservation.ReservedTokens, &expiresAt, &createdAt,
 		&requested, &effective, &envelope, &keyRecord, &kid, &providerBinding, &inputCap, &outputCap,
+		&reservation.RelayBlindSettlementMode, &reservation.RelayBlindInternalRequestID,
 	); err != nil {
 		return storage.ActiveReservation{}, err
 	}

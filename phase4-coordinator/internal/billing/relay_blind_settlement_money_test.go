@@ -306,3 +306,36 @@ func TestRelayBlindSettlementOutcomeMigrationOnPopulatedDatabase(t *testing.T) {
 		t.Fatalf("second NewStore: %v", err)
 	}
 }
+
+// SPEC-022 R-13.6: an enforce relay-blind snapshot committed before dispatch
+// is the coordinator's authority even when the coordinator never wrote the
+// request log, credit, or attempt output. The bound lookup by internal id
+// finds it: pending, then closed quarantined (refund), never payable.
+func TestRelayBlindSnapshotOnlyAttemptFinality(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	ctx := context.Background()
+	accountID := "relay-blind-account"
+	input := relayBlindSignedInputWithSnapshot(t, func(r *RouteSnapshot) { r.AccountScope = AccountScopeForSettlement(accountID) }, nil)
+	if _, err := store.InsertRouteSnapshot(ctx, input.RouteSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	internalID := input.RouteSnapshot.RequestID
+	deadline := input.RouteSnapshot.RouteDecisionTSUnixMS + input.RouteSnapshot.PendingDeadlineSeconds*1000 + relayBlindUnrecordedAttemptGrace.Milliseconds()
+
+	finality, found, err := store.RequestSettlementFinalityForAccountBound(ctx, accountID, "gateway-request-id", internalID, deadline-1, input.RouteSnapshot.RequestStartTSUnixMS)
+	if err != nil || !found || finality.Mode != RouteSnapshotModeEnforce || finality.Outcome != SettlementOutcomePending || finality.Closed ||
+		finality.RequestID != "gateway-request-id" || finality.RequiredInternalRequestID != internalID {
+		t.Fatalf("before deadline finality=%+v found=%v err=%v", finality, found, err)
+	}
+	finality, found, err = store.RequestSettlementFinalityForAccountBound(ctx, accountID, "gateway-request-id", internalID, deadline+1, input.RouteSnapshot.RequestStartTSUnixMS)
+	if err != nil || !found || finality.Outcome != SettlementOutcomeQuarantined || !finality.Closed || finality.Reason != RelayBlindAttemptUnrecordedReason {
+		t.Fatalf("after deadline finality=%+v found=%v err=%v", finality, found, err)
+	}
+	// A plaintext request id without a request log stays not found.
+	if _, found, err := store.RequestSettlementFinalityForAccountBound(ctx, accountID, "gateway-request-id", "other-internal-id", deadline+1, input.RouteSnapshot.RequestStartTSUnixMS); err != nil || found {
+		t.Fatalf("unknown internal id found=%v err=%v", found, err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM spec022_payable_request_credits`); got != 0 {
+		t.Fatalf("payable=%d", got)
+	}
+}

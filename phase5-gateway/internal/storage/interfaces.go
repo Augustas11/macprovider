@@ -77,6 +77,9 @@ type UsageStore interface {
 	ExpireReservation(ctx context.Context, accountID, requestID string, expiredAt time.Time) error
 	MarkReservationStaleHeld(ctx context.Context, accountID, requestID string, staleAt time.Time) error
 	MarkReservationSettlementHold(ctx context.Context, accountID, requestID string) error
+	// RecordRelayBlindSettlementDispatch records, once, the SPEC-022 R-13
+	// coverage a relay-blind chat response proved for an active reservation.
+	RecordRelayBlindSettlementDispatch(ctx context.Context, accountID, requestID, mode, internalRequestID string) error
 	ClampReservationExpiry(ctx context.Context, accountID, requestID string, expiresAt time.Time) error
 	ListSettlementHeldReservations(ctx context.Context, limit int) ([]ActiveReservation, error)
 	ListDueSettlementHeldReservations(ctx context.Context, limit int, now time.Time) ([]ActiveReservation, error)

@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/augstar/macprovider-gateway/internal/config"
@@ -69,11 +70,20 @@ func TestRelayBlindSettledFinalityDebitsOnlyRelayBlindExecutions(t *testing.T) {
 }
 
 type relayBlindReconcileCase struct {
-	name       string
-	finality   map[string]any
-	wantUsed   int64
-	wantHeld   int64
-	wantResult func(SettlementReconcileSummary) bool
+	name     string
+	finality map[string]any
+	// dispatch is what the coordinator chat response proved: "enforce"
+	// (internal request id present, the default), "observe" (absent), or
+	// "lost" (no response reached the gateway).
+	dispatch string
+	// finalityAnswer overrides the finality endpoint: "not_found" (the
+	// coordinator's authoritative answer) or "error" (HTTP 500).
+	finalityAnswer string
+	// noFinalityLookup asserts the reconciler never asked for finality.
+	noFinalityLookup bool
+	wantUsed         int64
+	wantHeld         int64
+	wantResult       func(SettlementReconcileSummary) bool
 }
 
 // SPEC-022 R-13.6 / R-8.1 in the reconciler: under enforce a relay-blind
@@ -112,6 +122,49 @@ func TestRelayBlindReconcileFollowsEnforceFinality(t *testing.T) {
 			wantUsed: 0, wantHeld: 24,
 			wantResult: func(s SettlementReconcileSummary) bool { return s.Held == 1 && s.Verified == 0 },
 		},
+		{
+			name:           "enforce dispatch with coordinator not-found holds, never debits",
+			finalityAnswer: "not_found", wantUsed: 0, wantHeld: 24,
+			wantResult: func(s SettlementReconcileSummary) bool { return s.Coordinator404 == 1 && s.Held == 1 },
+		},
+		{
+			name:           "enforce dispatch with finality fetch error holds",
+			finalityAnswer: "error", wantUsed: 0, wantHeld: 24,
+			wantResult: func(s SettlementReconcileSummary) bool { return s.Errors == 0 && s.Held == 1 },
+		},
+		{
+			name: "enforce unrecorded attempt refunds",
+			finality: map[string]any{"mode": "enforce", "policy_version": settlementPolicyVersion, "outcome": "quarantined", "receipt_result": "inconclusive",
+				"reason": "relay_blind_attempt_unrecorded", "closed": true, "quarantined_attempts": 1, "mode_scope_complete": true},
+			wantUsed: 0, wantHeld: 0,
+			wantResult: func(s SettlementReconcileSummary) bool { return s.Refunded == 1 },
+		},
+		{
+			name:     "observe dispatch keeps status recovery without a finality lookup",
+			dispatch: "observe", noFinalityLookup: true,
+			finality: map[string]any{"mode": "enforce", "policy_version": settlementPolicyVersion, "outcome": "quarantined", "receipt_result": "invalid",
+				"reason": "usage_mismatch", "closed": true, "quarantined_attempts": 1, "mode_scope_complete": true},
+			wantUsed: 4, wantHeld: 0,
+			wantResult: func(s SettlementReconcileSummary) bool { return s.Observed == 1 },
+		},
+		{
+			name:     "lost dispatch with authoritative not-found keeps status recovery",
+			dispatch: "lost", finalityAnswer: "not_found", wantUsed: 4, wantHeld: 0,
+			wantResult: func(s SettlementReconcileSummary) bool { return s.Observed == 1 },
+		},
+		{
+			name:     "lost dispatch with finality fetch error holds",
+			dispatch: "lost", finalityAnswer: "error", wantUsed: 0, wantHeld: 24,
+			wantResult: func(s SettlementReconcileSummary) bool { return s.Held == 1 },
+		},
+		{
+			name:     "lost dispatch with enforce finality follows it",
+			dispatch: "lost",
+			finality: map[string]any{"mode": "enforce", "policy_version": settlementPolicyVersion, "outcome": "pending", "receipt_result": "inconclusive",
+				"reason": "relay_blind_attempt_pending", "closed": false, "pending_attempts": 1, "mode_scope_complete": true},
+			wantUsed: 0, wantHeld: 24,
+			wantResult: func(s SettlementReconcileSummary) bool { return s.Held == 1 },
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -119,15 +172,33 @@ func TestRelayBlindReconcileFollowsEnforceFinality(t *testing.T) {
 			raw := pilotEnvelopeFixture(t, res)
 			digest := sha256.Sum256(raw)
 			digestText := base64.RawURLEncoding.EncodeToString(digest[:])
+			var finalityLookups atomic.Int32
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/v1/relay-blind/consume":
 					json.NewEncoder(w).Encode(relayblind.ConsumeResponse{Version: relayblind.ConsumeVersion, ProviderBinding: res.ProviderBinding, BuyerBinding: res.BuyerBinding, EnvelopeDigest: digestText, ExecutionAuthorization: "internal-execution-authorization", ConsumedAtUnix: fixedNow().Unix(), ExpiresAtUnix: res.ExpiresAtUnix})
 				case "/v1/chat/completions":
+					switch tc.dispatch {
+					case "lost":
+						panic(http.ErrAbortHandler)
+					case "observe":
+					default:
+						w.Header().Set(coordinatorInternalRequestIDHeader, "internal-1")
+					}
 					io.WriteString(w, `{}`)
 				case "/v1/relay-blind/status":
 					json.NewEncoder(w).Encode(map[string]any{"version": "relay-blind-status-v1", "state": "terminal", "internal_request_id": "internal-1", "validated": true, "input_tokens": 4, "completion_tokens": 8, "effective_privacy_outcome": "relay_blind_satisfied", "retry_action": "do_not_resubmit"})
 				case "/internal/settlement/finality":
+					finalityLookups.Add(1)
+					switch tc.finalityAnswer {
+					case "not_found":
+						w.WriteHeader(http.StatusNotFound)
+						json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "not_found", "message": coordinatorFinalityNotFoundMessage}})
+						return
+					case "error":
+						w.WriteHeader(http.StatusInternalServerError)
+						return
+					}
 					if r.URL.Query().Get("required_internal_request_id") != "internal-1" {
 						t.Errorf("finality lookup not bound to the status internal request id: %s", r.URL.RawQuery)
 					}
@@ -160,6 +231,9 @@ func TestRelayBlindReconcileFollowsEnforceFinality(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if tc.noFinalityLookup && finalityLookups.Load() != 0 {
+				t.Fatalf("observe dispatch consulted coordinator finality %d times", finalityLookups.Load())
+			}
 			if !tc.wantResult(summary) {
 				t.Fatalf("summary=%+v", summary)
 			}
@@ -174,8 +248,12 @@ func TestRelayBlindReconcileFollowsEnforceFinality(t *testing.T) {
 				}
 				defer db.Close()
 				var outcome string
-				if err := db.QueryRow(`SELECT outcome FROM usage_events WHERE account_id = 'relay-blind-enforce'`).Scan(&outcome); err != nil || outcome != "spec022_relay_blind_settled" {
-					t.Fatalf("usage outcome=%q err=%v, want spec022_relay_blind_settled", outcome, err)
+				want := "relay_blind_recovered"
+				if summary.RelayBlindSettled == 1 {
+					want = "spec022_relay_blind_settled"
+				}
+				if err := db.QueryRow(`SELECT outcome FROM usage_events WHERE account_id = 'relay-blind-enforce'`).Scan(&outcome); err != nil || outcome != want {
+					t.Fatalf("usage outcome=%q err=%v, want %s", outcome, err, want)
 				}
 			}
 		})

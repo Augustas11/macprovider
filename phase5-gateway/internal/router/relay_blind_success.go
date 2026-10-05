@@ -334,6 +334,7 @@ func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	defer resp.Body.Close()
+	s.recordRelayBlindSettlementDispatch(subject, r, resp.Header)
 	validationValues := nonemptyHeaderValues(resp.Header.Values(relayBlindValidatedHeader))
 	inputValues := nonemptyHeaderValues(resp.Header.Values("X-MacProvider-Relay-Blind-Input-Tokens"))
 	validatedInput := int64(0)
@@ -545,23 +546,71 @@ func (s *Server) reconcileRelayBlindReservation(ctx context.Context, reservation
 	return "observed", err
 }
 
-// reconcileRelayBlindEnforceFinality settles a relay-blind hold from the
-// coordinator's request finality when that finality is in enforce mode: a
-// relay_blind_settled tuple debits the coordinator's usage, a refund tuple
-// refunds, and anything else holds. It reports handled=false when the
-// coordinator has no enforce finality for the request, which keeps the
-// observe and off recovery unchanged.
-func (s *Server) reconcileRelayBlindEnforceFinality(ctx context.Context, reservation storage.ActiveReservation, internalRequestID string) (string, bool, error) {
-	if strings.TrimSpace(internalRequestID) == "" || strings.TrimSpace(s.cfg.Coordinator.OperatorURL) == "" {
+// reconcileRelayBlindEnforceFinality decides a relay-blind hold under
+// SPEC-022 R-13 from what this reservation's own coordinator response proved
+// at dispatch (RelayBlindSettlementMode):
+//   - observe: handled=false, so today's status-row recovery runs unchanged
+//     and no finality lookup is made;
+//   - enforce: only coordinator finality decides money. A closed
+//     relay_blind_settled tuple debits, a refund tuple refunds, and
+//     everything else (pending, a fetch error, a not-found answer) holds; an
+//     authoritative not-found that persists for an hour goes to operator
+//     review. The status row never debits;
+//   - undetermined (no response was recorded): the coordinator's finality for
+//     the status row's internal request id decides. Enforce finality is acted
+//     on as above; the coordinator's authoritative not-found means no R-13
+//     snapshot exists, so the attempt was never enforce-covered and the
+//     status-row recovery runs; any other answer holds.
+func (s *Server) reconcileRelayBlindEnforceFinality(ctx context.Context, reservation storage.ActiveReservation, statusInternalRequestID string) (string, bool, error) {
+	mode := reservation.RelayBlindSettlementMode
+	if mode == storage.RelayBlindSettlementModeObserve {
 		return "", false, nil
 	}
-	finality, found, _, err := s.fetchCoordinatorRequestSettlementFinalityDetail(ctx, reservation, internalRequestID)
-	if err != nil {
-		// The mode is unknown; never debit from the status row on a guess.
-		result, recordErr := s.recordSettlementHeldResult(ctx, reservation, "held")
-		return result, true, recordErr
+	internalRequestID := strings.TrimSpace(statusInternalRequestID)
+	if mode == storage.RelayBlindSettlementModeEnforce && reservation.RelayBlindInternalRequestID != "" {
+		internalRequestID = reservation.RelayBlindInternalRequestID
 	}
-	if !found || finality.Mode != "enforce" {
+	hold := func() (string, bool, error) {
+		result, err := s.recordSettlementHeldResult(ctx, reservation, "held")
+		return result, true, err
+	}
+	if internalRequestID == "" {
+		if mode == storage.RelayBlindSettlementModeEnforce {
+			return hold()
+		}
+		return "", false, nil
+	}
+	finality, found, authoritativeNotFound, err := s.fetchCoordinatorRequestSettlementFinalityDetail(ctx, reservation, internalRequestID)
+	if err != nil {
+		return hold()
+	}
+	if !found {
+		if mode != storage.RelayBlindSettlementModeEnforce && authoritativeNotFound {
+			return "", false, nil
+		}
+		if mode == storage.RelayBlindSettlementModeEnforce && authoritativeNotFound {
+			first, err := s.store.RecordSettlementFinalityNotFound(ctx, reservation, s.now())
+			if err != nil {
+				return "", true, err
+			}
+			if s.now().Sub(first) >= settlementCoordinator404OperatorReviewAge {
+				result, err := s.markSettlementHoldOperatorReview(ctx, reservation, "coordinator_finality_not_found")
+				return result, true, err
+			}
+			result, err := s.recordSettlementHeldResult(ctx, reservation, "coordinator_404_held")
+			return result, true, err
+		}
+		return hold()
+	}
+	if err := s.store.ClearSettlementFinalityNotFound(ctx, reservation); err != nil {
+		return "", true, err
+	}
+	if finality.Mode != "enforce" {
+		if mode == storage.RelayBlindSettlementModeEnforce {
+			// The dispatch proved R-13 coverage; a non-enforce answer is a
+			// contradiction, never authority to debit from the status row.
+			return hold()
+		}
 		return "", false, nil
 	}
 	candidate, candidateErr := s.store.LookupSettlementFallbackCandidate(ctx, reservation)
@@ -586,8 +635,25 @@ func (s *Server) reconcileRelayBlindEnforceFinality(ctx context.Context, reserva
 		}
 		return "refunded", true, nil
 	default:
-		result, err := s.recordSettlementHeldResult(ctx, reservation, "held")
-		return result, true, err
+		return hold()
+	}
+}
+
+// recordRelayBlindSettlementDispatch stores what the coordinator response
+// proved about SPEC-022 R-13 coverage: the coordinator names its internal
+// request id on a relay-blind response only after committing an R-13
+// snapshot. A failed write leaves the reservation undetermined, which the
+// reconciler resolves from coordinator finality.
+func (s *Server) recordRelayBlindSettlementDispatch(subject usageSubject, r *http.Request, h http.Header) {
+	mode, internalRequestID := storage.RelayBlindSettlementModeObserve, strings.TrimSpace(h.Get(coordinatorInternalRequestIDHeader))
+	if internalRequestID != "" {
+		mode = storage.RelayBlindSettlementModeEnforce
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.store.RecordRelayBlindSettlementDispatch(ctx, subject.AccountID, requestID(r), mode, internalRequestID); err != nil {
+		slog.Warn("relay-blind settlement dispatch mode not recorded; recovery will consult coordinator finality",
+			"request_id", requestID(r), "account_id", subject.AccountID, "mode", mode, "error", err)
 	}
 }
 
