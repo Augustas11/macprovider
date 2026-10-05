@@ -4110,23 +4110,36 @@ struct UpdateCommand: AsyncParsableCommand {
 /// a stale `~/.local/bin` regular-file copy.
 /// #616 hand-off guard: a newer running binary never silently re-execs into an
 /// older canonical install, which would reject newer flags with a misleading
-/// usage error or serve with older code. An unknown canonical version keeps the
-/// #616 re-exec (no spec rule names a version floor for the hand-off).
+/// usage error or serve with older code. The hand-off fails closed: it runs only
+/// when a strict `X.Y.Z` canonical version proves the canonical install is the
+/// same as or newer than this binary. A missing, invalid, or timed-out version
+/// is refused with its own reason.
 enum CanonicalReexecDecision: Equatable {
     case reexec
     case refuse(canonicalVersion: String)
+    case refuseUnknownVersion
 
     static func decide(canonicalVersion: String?, runningVersion: String) -> CanonicalReexecDecision {
         guard let canonicalVersion,
-              SelfUpdate.compareSemver(canonicalVersion, runningVersion) == .orderedAscending else {
-            return .reexec
+              let canonical = try? SelfUpdate.validateReleaseTag(canonicalVersion),
+              let running = try? SelfUpdate.validateReleaseTag(runningVersion) else {
+            return .refuseUnknownVersion
         }
-        return .refuse(canonicalVersion: canonicalVersion)
+        if SelfUpdate.compareSemver(canonical, running) == .orderedAscending {
+            return .refuse(canonicalVersion: canonical)
+        }
+        return .reexec
     }
 
     static func fatalLine(path: String, canonicalVersion: String, runningVersion: String) -> String {
         "FATAL canonical_install_older path=\(path) canonical=\(canonicalVersion) running=\(runningVersion): "
             + "update or reinstall the canonical provider, or run the canonical binary\n"
+    }
+
+    static func unknownVersionFatalLine(path: String, runningVersion: String) -> String {
+        "FATAL canonical_install_version_unknown path=\(path) running=\(runningVersion): "
+            + "the canonical provider's version could not be read; update or reinstall the canonical provider, "
+            + "or run the canonical binary\n"
     }
 }
 
@@ -4158,15 +4171,27 @@ private func canonicalInstallVersion(_ canonical: URL) -> String? {
 }
 
 private func execCanonicalInstall(_ canonical: URL) throws -> Never {
-    if case .refuse(let canonicalVersion) = CanonicalReexecDecision.decide(
+    let fatal: String
+    switch CanonicalReexecDecision.decide(
         canonicalVersion: canonicalInstallVersion(canonical),
         runningVersion: CoordinatorClient.binaryVersion
     ) {
-        FileHandle.standardError.write(Data(CanonicalReexecDecision.fatalLine(
+    case .reexec:
+        fatal = ""
+    case .refuse(let canonicalVersion):
+        fatal = CanonicalReexecDecision.fatalLine(
             path: canonical.path,
             canonicalVersion: canonicalVersion,
             runningVersion: CoordinatorClient.binaryVersion
-        ).utf8))
+        )
+    case .refuseUnknownVersion:
+        fatal = CanonicalReexecDecision.unknownVersionFatalLine(
+            path: canonical.path,
+            runningVersion: CoordinatorClient.binaryVersion
+        )
+    }
+    if !fatal.isEmpty {
+        FileHandle.standardError.write(Data(fatal.utf8))
         try? FileHandle.standardError.synchronize()
         // EX_CONFIG, as for the SPEC-049-R007 hardening refusal.
         throw ExitCode(78)
