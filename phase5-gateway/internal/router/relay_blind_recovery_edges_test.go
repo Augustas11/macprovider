@@ -41,6 +41,18 @@ func relayBlindRecoveryMetadata(t *testing.T, reservation relayblind.Reservation
 	}
 }
 
+// relayBlindObserveCoverageResponse is the coordinator's explicit SPEC-022
+// R-13 observe declaration for the attempt the lookup names.
+func relayBlindObserveCoverageResponse(r *http.Request) *http.Response {
+	q := r.URL.Query()
+	if q.Get("required_internal_request_id") == "" || q.Get("relay_blind_provider_binding_digest") == "" || q.Get("relay_blind_envelope_digest") == "" {
+		return responseWithBody(http.StatusBadRequest, nil, `{}`)
+	}
+	body, _ := json.Marshal(map[string]any{"request_id": q.Get("request_id"), "required_internal_request_id": q.Get("required_internal_request_id"),
+		"relay_blind_settlement_coverage": "observe"})
+	return responseWithBody(http.StatusOK, http.Header{"Content-Type": {"application/json"}}, string(body))
+}
+
 func seedRelayBlindAPIHold(t *testing.T, store *sqlite.Store, accountID, requestID string, metadata *storage.RelayBlindMetadata) {
 	t.Helper()
 	ctx := context.Background()
@@ -129,7 +141,12 @@ func TestRelayBlindRecoveryStatusEdges(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var statusCalls atomic.Int32
+			tc.status.InternalRequestID = "internal-recovery"
 			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path == "/internal/settlement/finality" {
+					// Observe recovery needs the coordinator's explicit answer.
+					return relayBlindObserveCoverageResponse(r), nil
+				}
 				if r.URL.Path != "/v1/relay-blind/status" {
 					return responseWithBody(http.StatusNotFound, nil, `{}`), nil
 				}

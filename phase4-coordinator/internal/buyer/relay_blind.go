@@ -616,8 +616,12 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 			writeRelayBlindError(w, "relay_blind_required_unavailable", "Relay-blind settlement could not be recorded before dispatch")
 			return
 		}
-		// The gateway binds its settlement hold to this coordinator id.
+		// The gateway binds its settlement hold to this coordinator id. The
+		// coverage marker is set only after the R-13 snapshot committed; the
+		// gateway keeps it as a hint, and coordinator finality stays the
+		// authority for recovery.
 		w.Header().Set(internalRequestIDHeader, rec.requestID)
+		w.Header().Set(relayBlindSettlementCoverageHeader, billing.RelayBlindCoverageEnforce)
 	}
 	rec.markProviderDispatched()
 	ctx, cancel := context.WithTimeout(r.Context(), s.requestTimeout)

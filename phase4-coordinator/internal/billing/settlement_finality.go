@@ -39,6 +39,11 @@ type RequestSettlementFinality struct {
 	// relay_blind_settled under the R-7.9 binding. They are never counted as
 	// verified attempts.
 	RelayBlindSettledAttempts int64 `json:"relay_blind_settled_attempts"`
+	// RelayBlindSettlementCoverage is the coordinator's authoritative SPEC-022
+	// R-13 coverage answer for a relay-blind attempt lookup:
+	// RelayBlindCoverageEnforce or RelayBlindCoverageObserve. It is set only
+	// when the caller asked for a relay-blind attempt.
+	RelayBlindSettlementCoverage string `json:"relay_blind_settlement_coverage,omitempty"`
 }
 
 type requestSettlementVerdictRow struct {
@@ -227,6 +232,57 @@ SELECT EXISTS (
 	finality.RequestID = externalRequestID
 	finality.RequiredInternalRequestID = requiredInternalRequestID
 	return finality, true, nil
+}
+
+// SPEC-022 R-13 coverage answers for a relay-blind attempt lookup.
+const (
+	// RelayBlindCoverageEnforce: an enforce R-13 relay-blind route snapshot
+	// exists for the attempt; only R-13 finality decides money.
+	RelayBlindCoverageEnforce = "enforce"
+	// RelayBlindCoverageObserve: the attempt ran without R-13 coverage
+	// (observe or off). The gateway may use its status-row recovery.
+	RelayBlindCoverageObserve = "observe"
+)
+
+// RelayBlindSettlementCoverage answers whether coordinator attempt
+// internalRequestID, the relay-blind attempt for external request
+// externalRequestID bound to the given provider-binding and envelope digests,
+// was R-13 enforce-covered. It returns RelayBlindCoverageEnforce when an
+// enforce relay-blind route snapshot exists for the attempt (committed before
+// dispatch, R-13.3), RelayBlindCoverageObserve only when the attempt's
+// request-log row carries those digests and no relay-blind snapshot exists,
+// and "" (unknown, the caller holds) otherwise.
+func (s *Store) RelayBlindSettlementCoverage(ctx context.Context, accountID, externalRequestID, internalRequestID, providerBindingDigest, envelopeDigest string) (string, error) {
+	if accountID == "" || externalRequestID == "" || internalRequestID == "" || providerBindingDigest == "" || envelopeDigest == "" {
+		return "", nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, settlementFinalityReadTimeout)
+	defer cancel()
+	var enforceSnapshot, anyRelayBlindSnapshot, logged bool
+	err := s.reader().QueryRowContext(ctx, `
+SELECT EXISTS (SELECT 1 FROM settlement_route_snapshots
+                WHERE account_scope = ? AND request_id = ?
+                  AND paid_entrypoint = ? AND prompt_hash_basis = ? AND route_snapshot_mode = ?),
+       EXISTS (SELECT 1 FROM settlement_route_snapshots
+                WHERE account_scope = ? AND request_id = ?
+                  AND (paid_entrypoint = ? OR prompt_hash_basis = ?)),
+       EXISTS (SELECT 1 FROM request_log
+                WHERE account_id = ? AND external_request_id = ? AND request_id = ?
+                  AND relay_blind_provider_binding_digest = ? AND relay_blind_envelope_digest = ?)`,
+		AccountScopeForSettlement(accountID), internalRequestID, PaidEntrypointRelayBlindChat, PromptHashBasisRelayBlindEnvelopeV1, RouteSnapshotModeEnforce,
+		AccountScopeForSettlement(accountID), internalRequestID, PaidEntrypointRelayBlindChat, PromptHashBasisRelayBlindEnvelopeV1,
+		accountID, externalRequestID, internalRequestID, providerBindingDigest, envelopeDigest).Scan(&enforceSnapshot, &anyRelayBlindSnapshot, &logged)
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case enforceSnapshot:
+		return RelayBlindCoverageEnforce, nil
+	case !anyRelayBlindSnapshot && logged:
+		return RelayBlindCoverageObserve, nil
+	default:
+		return "", nil
+	}
 }
 
 func (s *Store) RequestSettlementFinality(ctx context.Context, accountScope, requestID string, nowUnixMS int64) (RequestSettlementFinality, bool, error) {

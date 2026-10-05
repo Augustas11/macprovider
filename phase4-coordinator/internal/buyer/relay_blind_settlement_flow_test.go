@@ -120,6 +120,9 @@ func TestRelayBlindEnforceSettlementFlow(t *testing.T) {
 			if result.Header.Get(internalRequestIDHeader) == "" {
 				t.Fatal("relay-blind R-13 response lacks the coordinator internal request id")
 			}
+			if got := result.Header.Get(relayBlindSettlementCoverageHeader); got != billing.RelayBlindCoverageEnforce {
+				t.Fatalf("relay-blind R-13 response coverage marker=%q", got)
+			}
 			if result.Header.Get("X-MacProvider-Receipt") != "" || strings.Contains(result.Header.Get(settlementReasonHeader), "verified") {
 				t.Fatalf("receipt or verified label leaked: %v", result.Header)
 			}
@@ -143,6 +146,90 @@ func TestRelayBlindEnforceSettlementFlow(t *testing.T) {
 			_ = f.db.QueryRow(`SELECT COUNT(*) FROM settlement_receipt_verdicts WHERE settlement_outcome = 'verified'`).Scan(&verified)
 			if verified != 0 {
 				t.Fatalf("verified verdicts=%d", verified)
+			}
+		})
+	}
+}
+
+// SPEC-022 R-13.6: a receipt the provider withholds after the attempt was
+// recorded (a terminal frame without a receipt, or an uncertain stream end)
+// is missing evidence. The attempt is pending until its deadline, then closed
+// quarantined: the buyer is refunded and no provider credit is payable.
+func TestRelayBlindEnforceWithheldReceiptQuarantinesAtDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		stream       bool
+		uncertain    bool
+		noValidation bool
+	}{
+		{name: "terminal without receipt"},
+		{name: "stream terminal without receipt", stream: true},
+		{name: "stream ends uncertain", stream: true, uncertain: true},
+		{name: "validation evidence lost", noValidation: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now().UTC().Truncate(time.Second)
+			body := "data: {\"choices\":[]}\n\ndata: [DONE]\n\n"
+			f := newRelayBlindSettlementFixture(t, now, billing.RouteSnapshotModeEnforce, config.RelayBlindSettlementProfileV1, nil,
+				func(_ context.Context, _ pool.Provider, requestID string, _ []byte, _ bool, relayContext providerws.RelayBlindDispatchContext) (*providerws.RelayStream, error) {
+					chunks := make(chan providerws.InferenceResponseChunk, 1)
+					done := make(chan providerws.InferenceResponseEnd, 1)
+					errs := make(chan error, 1)
+					validations := make(chan providerws.RelayBlindValidation, 1)
+					if tc.noValidation {
+						errs <- context.DeadlineExceeded
+						return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs, Validations: validations}, nil
+					}
+					validations <- relayBlindValidationForContext(relayContext, "validated", 11)
+					terminal := relayBlindValidationForContext(relayContext, "terminal", 11)
+					go func() {
+						chunks <- providerws.InferenceResponseChunk{RequestID: requestID, Seq: 0, Data: body}
+						if tc.uncertain {
+							time.Sleep(10 * time.Millisecond)
+							errs <- context.DeadlineExceeded
+							return
+						}
+						close(chunks)
+						done <- providerws.InferenceResponseEnd{RequestID: requestID, Status: "complete", TerminalStateTSUnixMS: now.UnixMilli(),
+							Usage:                json.RawMessage(`{"prompt_tokens":11,"completion_tokens":3,"total_tokens":14}`),
+							RelayBlindValidation: &terminal}
+					}()
+					return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs, Validations: validations}, nil
+				})
+			result, _, code := relayBlindFixtureExecute(t, f, now, tc.stream)
+			if code != http.StatusOK && !tc.uncertain && !tc.noValidation {
+				t.Fatalf("chat status=%d", code)
+			}
+			internalID := result.Header.Get(internalRequestIDHeader)
+			if internalID == "" {
+				t.Fatal("no coordinator internal request id")
+			}
+			ctx := context.Background()
+			lookup := func(at time.Time) billing.RequestSettlementFinality {
+				t.Helper()
+				finality, found, err := f.billing.RequestSettlementFinality(ctx, billing.AccountScopeForSettlement("account-a"), internalID, at.UnixMilli())
+				if err != nil || !found {
+					t.Fatalf("finality found=%v err=%v", found, err)
+				}
+				return finality
+			}
+			if pending := lookup(now.Add(time.Second)); pending.Closed || pending.Outcome != billing.SettlementOutcomePending || pending.Mode != billing.RouteSnapshotModeEnforce {
+				t.Fatalf("before the deadline finality=%+v, want enforce pending", pending)
+			}
+			late := now.Add(time.Duration(config.Default().Settlement.PendingDeadlineSeconds)*time.Second + 2*time.Hour)
+			closed := lookup(late)
+			if !closed.Closed || closed.Outcome != billing.SettlementOutcomeQuarantined || closed.QuarantinedAttempts != 1 ||
+				closed.RelayBlindSettledAttempts != 0 || closed.PromptTokens != 0 || closed.CompletionTokens != 0 {
+				t.Fatalf("after the deadline finality=%+v, want closed quarantined refund", closed)
+			}
+			// The terminal classification is durable, not re-derived per lookup.
+			var verdicts int64
+			if err := f.db.QueryRow(`SELECT COUNT(*) FROM settlement_receipt_verdicts WHERE closed = 1 AND settlement_outcome = 'quarantined'`).Scan(&verdicts); err != nil || verdicts != 1 {
+				t.Fatalf("closed quarantined verdicts=%d err=%v", verdicts, err)
+			}
+			var payable int64
+			if err := f.db.QueryRow(`SELECT COUNT(*) FROM spec022_payable_request_credits`).Scan(&payable); err != nil || payable != 0 {
+				t.Fatalf("payable credits=%d err=%v", payable, err)
 			}
 		})
 	}

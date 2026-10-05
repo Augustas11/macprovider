@@ -1678,6 +1678,38 @@ implements all of R-13. A coordinator or gateway rollback target MUST read
 is not a valid rollback target; roll forward instead. A CLI rollback removes the
 capability, so R-13.2 excludes that session from relay-blind work.
 
+R-13.9. Recovery authority. A gateway recovering a relay-blind hold MUST ask
+the coordinator about the attempt, never infer R-13 coverage from a response
+header. The coordinator sends its internal request id on every response, so
+that header proves nothing. The coordinator also sends an internal R-13
+coverage marker, only after the R-13 snapshot commits. The gateway MAY keep
+that marker as a hint. The hint never authorizes status-row recovery.
+
+The finality lookup names the external request id, the internal request id
+(from the hint or the SPEC-041 status row; if both are present and differ,
+the gateway holds), and the attempt's provider-binding and envelope digests.
+The coordinator answers coverage for that attempt:
+
+- `enforce` when an enforce relay-blind snapshot exists for the internal id;
+- `observe` when the attempt's request-log row carries the same external id
+  and both digests, and no relay-blind snapshot exists. This covers observe
+  and off; and
+- not found otherwise.
+
+The gateway MUST act only on an answer that echoes the exact non-empty
+external and internal request ids it asked for. An explicit `observe` answer
+permits the SPEC-041 status-row recovery, unless the hint said enforce, in
+which case the gateway holds. An `enforce` answer is acted on only with
+`mode_scope_complete` and mode `enforce`, under R-8.1 and R-13.6.
+Every other outcome holds the reservation: not found, an error, a missing
+coverage answer, or an unbound echo. Not-found answers that persist for an
+hour move it to operator review (R-8.7). As a result, observe recovery needs
+a reachable coordinator.
+
+Under R-13.7, a relay-blind debit with no durable buyer-delivery candidate
+for the attempt's envelope and internal id has 0 delivered completion. The
+gateway debits the verified prompt only.
+
 ## Acceptance criteria
 
 - **AC-022-1:** With enforce mode enabled, a provider/model pair whose

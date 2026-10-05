@@ -547,71 +547,78 @@ func (s *Server) reconcileRelayBlindReservation(ctx context.Context, reservation
 }
 
 // reconcileRelayBlindEnforceFinality decides a relay-blind hold under
-// SPEC-022 R-13 from what this reservation's own coordinator response proved
-// at dispatch (RelayBlindSettlementMode):
-//   - observe: handled=false, so today's status-row recovery runs unchanged
-//     and no finality lookup is made;
-//   - enforce: only coordinator finality decides money. A closed
-//     relay_blind_settled tuple debits, a refund tuple refunds, and
-//     everything else (pending, a fetch error, a not-found answer) holds; an
+// SPEC-022 R-13 from the coordinator's answer for the attempt, never from a
+// header the gateway saw. The attempt is the coordinator internal request id
+// the status row names (cross-checked with the dispatch hint, when one was
+// recorded). The coordinator answers its coverage for that attempt:
+//   - observe (an explicit declaration that no R-13 snapshot exists and the
+//     attempt ran): handled=false, so the status-row recovery runs;
+//   - enforce: only R-13 finality decides money. A closed
+//     relay_blind_settled tuple debits, a refund tuple refunds, and anything
+//     else holds;
+//   - not found, an error, an unbound echo, or any other answer: hold. An
 //     authoritative not-found that persists for an hour goes to operator
-//     review. The status row never debits;
-//   - undetermined (no response was recorded): the coordinator's finality for
-//     the status row's internal request id decides. Enforce finality is acted
-//     on as above; the coordinator's authoritative not-found means no R-13
-//     snapshot exists, so the attempt was never enforce-covered and the
-//     status-row recovery runs; any other answer holds.
+//     review.
+//
+// Observe recovery therefore needs a coordinator answer: a relay-blind hold
+// whose coordinator cannot be reached holds instead of debiting from the
+// status row.
 func (s *Server) reconcileRelayBlindEnforceFinality(ctx context.Context, reservation storage.ActiveReservation, statusInternalRequestID string) (string, bool, error) {
-	mode := reservation.RelayBlindSettlementMode
-	if mode == storage.RelayBlindSettlementModeObserve {
-		return "", false, nil
-	}
-	internalRequestID := strings.TrimSpace(statusInternalRequestID)
-	if mode == storage.RelayBlindSettlementModeEnforce && reservation.RelayBlindInternalRequestID != "" {
-		internalRequestID = reservation.RelayBlindInternalRequestID
-	}
 	hold := func() (string, bool, error) {
 		result, err := s.recordSettlementHeldResult(ctx, reservation, "held")
 		return result, true, err
 	}
-	if internalRequestID == "" {
-		if mode == storage.RelayBlindSettlementModeEnforce {
+	internalRequestID := strings.TrimSpace(statusInternalRequestID)
+	if hint := strings.TrimSpace(reservation.RelayBlindInternalRequestID); hint != "" {
+		if internalRequestID != "" && internalRequestID != hint {
 			return hold()
 		}
-		return "", false, nil
+		internalRequestID = hint
 	}
-	finality, found, authoritativeNotFound, err := s.fetchCoordinatorRequestSettlementFinalityDetail(ctx, reservation, internalRequestID)
+	if internalRequestID == "" || reservation.RelayBlind == nil {
+		return hold()
+	}
+	finality, found, authoritativeNotFound, err := s.fetchCoordinatorRelayBlindSettlementFinality(ctx, reservation, internalRequestID)
 	if err != nil {
 		return hold()
 	}
 	if !found {
-		if mode != storage.RelayBlindSettlementModeEnforce && authoritativeNotFound {
-			return "", false, nil
+		if !authoritativeNotFound {
+			return hold()
 		}
-		if mode == storage.RelayBlindSettlementModeEnforce && authoritativeNotFound {
-			first, err := s.store.RecordSettlementFinalityNotFound(ctx, reservation, s.now())
-			if err != nil {
-				return "", true, err
-			}
-			if s.now().Sub(first) >= settlementCoordinator404OperatorReviewAge {
-				result, err := s.markSettlementHoldOperatorReview(ctx, reservation, "coordinator_finality_not_found")
-				return result, true, err
-			}
-			result, err := s.recordSettlementHeldResult(ctx, reservation, "coordinator_404_held")
+		first, err := s.store.RecordSettlementFinalityNotFound(ctx, reservation, s.now())
+		if err != nil {
+			return "", true, err
+		}
+		if s.now().Sub(first) >= settlementCoordinator404OperatorReviewAge {
+			result, err := s.markSettlementHoldOperatorReview(ctx, reservation, "coordinator_finality_not_found")
 			return result, true, err
 		}
+		result, err := s.recordSettlementHeldResult(ctx, reservation, "coordinator_404_held")
+		return result, true, err
+	}
+	// SPEC-022 R-13: the answer must be for exactly this attempt.
+	if finality.RequestID == "" || finality.RequestID != reservation.RequestID ||
+		finality.RequiredInternalRequestID == "" || finality.RequiredInternalRequestID != internalRequestID {
 		return hold()
 	}
 	if err := s.store.ClearSettlementFinalityNotFound(ctx, reservation); err != nil {
 		return "", true, err
 	}
-	if finality.Mode != "enforce" {
-		if mode == storage.RelayBlindSettlementModeEnforce {
-			// The dispatch proved R-13 coverage; a non-enforce answer is a
-			// contradiction, never authority to debit from the status row.
+	switch finality.RelayBlindSettlementCoverage {
+	case relayBlindCoverageObserve:
+		if reservation.RelayBlindSettlementMode == storage.RelayBlindSettlementModeEnforce {
+			// The coordinator marked this dispatch R-13 covered; an observe
+			// answer contradicts it and never authorizes the status row.
 			return hold()
 		}
 		return "", false, nil
+	case relayBlindCoverageEnforce:
+	default:
+		return hold()
+	}
+	if !finality.ModeScopeComplete || finality.Mode != "enforce" {
+		return hold()
 	}
 	candidate, candidateErr := s.store.LookupSettlementFallbackCandidate(ctx, reservation)
 	if candidateErr != nil && !errors.Is(candidateErr, storage.ErrNotFound) {
@@ -619,6 +626,15 @@ func (s *Server) reconcileRelayBlindEnforceFinality(ctx context.Context, reserva
 	}
 	switch coordinatorSettlementFinalityForRequest(finalityHeaders(finality), true).Action {
 	case settlementFinalityDebit:
+		if candidateErr != nil || candidate.RelayBlind == nil || candidate.RelayBlind.EnvelopeDigest != reservation.RelayBlind.EnvelopeDigest ||
+			(candidate.RequiredInternalRequestID != "" && candidate.RequiredInternalRequestID != internalRequestID) {
+			// SPEC-022 R-13.7 / R-5.6: the buyer is debited no more completion
+			// than the gateway delivered. Without durable delivery evidence for
+			// this envelope, the delivered completion is 0: debit the verified
+			// prompt only.
+			candidate.Outcome = bodyReadFailedOutcome
+			candidate.CompletionTokens = 0
+		}
 		if err := s.settleVerifiedReservation(ctx, reservation, candidate, finality); err != nil {
 			if errors.Is(err, storage.ErrReservationNotFound) || errors.Is(err, storage.ErrReservationTerminal) {
 				return "already_terminal", true, nil
@@ -639,21 +655,32 @@ func (s *Server) reconcileRelayBlindEnforceFinality(ctx context.Context, reserva
 	}
 }
 
-// recordRelayBlindSettlementDispatch stores what the coordinator response
-// proved about SPEC-022 R-13 coverage: the coordinator names its internal
-// request id on a relay-blind response only after committing an R-13
-// snapshot. A failed write leaves the reservation undetermined, which the
-// reconciler resolves from coordinator finality.
+// relayBlindSettlementCoverageHeader is the coordinator's R-13 coverage
+// marker on a relay-blind chat response, emitted only after the R-13
+// snapshot committed. It is persisted as a recovery hint only.
+const relayBlindSettlementCoverageHeader = "X-MacProvider-Internal-Relay-Blind-Settlement"
+
+// Coordinator SPEC-022 R-13 coverage answers on a relay-blind finality lookup.
+const (
+	relayBlindCoverageEnforce = "enforce"
+	relayBlindCoverageObserve = "observe"
+)
+
+// recordRelayBlindSettlementDispatch keeps the coordinator's R-13 coverage
+// marker as a recovery hint: the attempt's internal request id, recorded
+// only when the marker says enforce. Every other response records nothing
+// (the generic internal request id header is sent on every coordinator
+// response, so it proves nothing). Recovery asks the coordinator either way.
 func (s *Server) recordRelayBlindSettlementDispatch(subject usageSubject, r *http.Request, h http.Header) {
-	mode, internalRequestID := storage.RelayBlindSettlementModeObserve, strings.TrimSpace(h.Get(coordinatorInternalRequestIDHeader))
-	if internalRequestID != "" {
-		mode = storage.RelayBlindSettlementModeEnforce
+	internalRequestID := strings.TrimSpace(h.Get(coordinatorInternalRequestIDHeader))
+	if strings.TrimSpace(h.Get(relayBlindSettlementCoverageHeader)) != relayBlindCoverageEnforce || internalRequestID == "" {
+		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := s.store.RecordRelayBlindSettlementDispatch(ctx, subject.AccountID, requestID(r), mode, internalRequestID); err != nil {
-		slog.Warn("relay-blind settlement dispatch mode not recorded; recovery will consult coordinator finality",
-			"request_id", requestID(r), "account_id", subject.AccountID, "mode", mode, "error", err)
+	if err := s.store.RecordRelayBlindSettlementDispatch(ctx, subject.AccountID, requestID(r), storage.RelayBlindSettlementModeEnforce, internalRequestID); err != nil {
+		slog.Warn("relay-blind settlement dispatch hint not recorded; recovery will consult coordinator finality",
+			"request_id", requestID(r), "account_id", subject.AccountID, "error", err)
 	}
 }
 

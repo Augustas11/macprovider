@@ -6966,7 +6966,10 @@
         "phase4-coordinator/internal/billing/relay_blind_outcome_migration.go:ensureRelayBlindSettlementOutcomeVocabulary",
         "phase4-coordinator/internal/billing/settlement_finality.go:relayBlindSettledFinality",
         "phase5-gateway/internal/router/chat_proxy.go:coordinatorSettlementFinalityForRequest",
-        "phase5-gateway/internal/router/relay_blind_success.go:reconcileRelayBlindEnforceFinality"
+        "phase5-gateway/internal/router/relay_blind_success.go:reconcileRelayBlindEnforceFinality",
+        "phase4-coordinator/internal/billing/settlement_finality.go:RelayBlindSettlementCoverage",
+        "phase4-coordinator/internal/buyer/server.go:handleInternalSettlementFinality",
+        "phase5-gateway/internal/router/settlement_reconcile.go:fetchCoordinatorRelayBlindSettlementFinality"
       ],
       "tests": [
         "phase4-coordinator/internal/config/relay_blind_settlement_test.go:TestRelayBlindEnforceRequiresSettlementProfile",
@@ -6986,6 +6989,10 @@
         "phase5-gateway/internal/storage/sqlite/relay_blind_settlement_dispatch_test.go:TestRelayBlindSettlementDispatchRecordedOnceAndLoaded",
         "phase5-gateway/internal/router/relay_blind_settlement_finality_test.go:TestRelayBlindSettledFinalityDebitsOnlyRelayBlindExecutions",
         "phase5-gateway/internal/router/relay_blind_settlement_finality_test.go:TestRelayBlindReconcileFollowsEnforceFinality",
+        "phase4-coordinator/internal/billing/relay_blind_settlement_coverage_test.go:TestRelayBlindSettlementCoverageIsCoordinatorAuthority",
+        "phase4-coordinator/internal/buyer/settlement_finality_binding_test.go:TestSettlementFinalityRelayBlindCoverageLookup",
+        "phase4-coordinator/internal/buyer/relay_blind_settlement_flow_test.go:TestRelayBlindEnforceWithheldReceiptQuarantinesAtDeadline",
+        "phase5-gateway/internal/storage/sqlite/relay_blind_settlement_dispatch_test.go:TestRelayBlindSettlementDispatchMigrationRefusesV17Gateway",
         "phase5-gateway/internal/router/relay_blind_settlement_finality_test.go:TestRelayBlindSettlementDisclosureNeverClaimsVerified",
         "test/integration/relay_blind_integration_test.go:TestRelayBlindEnforceExcludesProviderWithoutSettlementCapability",
         "phase4-coordinator/internal/buyer/relay_blind_settlement_test.go:TestRelayBlindEnforceSnapshotWithModelAdmissionGuard",

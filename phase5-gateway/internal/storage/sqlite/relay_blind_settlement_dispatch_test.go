@@ -9,7 +9,7 @@ import (
 	"github.com/augstar/macprovider-gateway/internal/storage"
 )
 
-// SPEC-022 R-13: the dispatch coverage proof is recorded once per relay-blind
+// SPEC-022 R-13: the enforce dispatch hint is recorded once per relay-blind
 // reservation, survives a restart, and is visible to the reconciler.
 func TestRelayBlindSettlementDispatchRecordedOnceAndLoaded(t *testing.T) {
 	ctx := context.Background()
@@ -37,13 +37,15 @@ func TestRelayBlindSettlementDispatchRecordedOnceAndLoaded(t *testing.T) {
 	if err := store.RecordRelayBlindSettlementDispatch(ctx, "acct_rb_mode", "req_enforce", storage.RelayBlindSettlementModeEnforce, "internal-1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.RecordRelayBlindSettlementDispatch(ctx, "acct_rb_mode", "req_enforce", storage.RelayBlindSettlementModeObserve, ""); err != nil {
+	// A recorded hint is never overwritten.
+	if err := store.RecordRelayBlindSettlementDispatch(ctx, "acct_rb_mode", "req_enforce", storage.RelayBlindSettlementModeEnforce, "internal-2"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.RecordRelayBlindSettlementDispatch(ctx, "acct_rb_mode", "req_observe", storage.RelayBlindSettlementModeObserve, "ignored"); err != nil {
-		t.Fatal(err)
+	// Observe is the coordinator's answer at recovery, never a recorded hint.
+	if err := store.RecordRelayBlindSettlementDispatch(ctx, "acct_rb_mode", "req_observe", storage.RelayBlindSettlementModeObserve, ""); err == nil {
+		t.Fatal("observe dispatch hint accepted")
 	}
-	if err := store.RecordRelayBlindSettlementDispatch(ctx, "acct_rb_mode", "req_missing", storage.RelayBlindSettlementModeObserve, ""); err != storage.ErrReservationNotFound {
+	if err := store.RecordRelayBlindSettlementDispatch(ctx, "acct_rb_mode", "req_missing", storage.RelayBlindSettlementModeEnforce, "internal-3"); err != storage.ErrReservationNotFound {
 		t.Fatalf("missing reservation err=%v", err)
 	}
 	if err := store.Close(); err != nil {
@@ -62,7 +64,7 @@ func TestRelayBlindSettlementDispatchRecordedOnceAndLoaded(t *testing.T) {
 	for _, reservation := range held {
 		got[reservation.RequestID] = [2]string{reservation.RelayBlindSettlementMode, reservation.RelayBlindInternalRequestID}
 	}
-	want := map[string][2]string{"req_enforce": {"enforce", "internal-1"}, "req_observe": {"observe", ""}, "req_unknown": {"", ""}}
+	want := map[string][2]string{"req_enforce": {"enforce", "internal-1"}, "req_observe": {"", ""}, "req_unknown": {"", ""}}
 	for id, value := range want {
 		if got[id] != value {
 			t.Fatalf("%s mode=%v want %v (all=%v)", id, got[id], value, got)

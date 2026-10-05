@@ -58,6 +58,9 @@ const (
 	// (finalizeNegotiatedSettlementFinality).
 	settlementFinalityUnsetReason = "settlement_finality_unset_after_delivery"
 	internalRequestIDHeader       = "X-MacProvider-Internal-Request-ID"
+	// relayBlindSettlementCoverageHeader is emitted on a relay-blind chat
+	// response only after its SPEC-022 R-13 enforce snapshot committed.
+	relayBlindSettlementCoverageHeader = "X-MacProvider-Internal-Relay-Blind-Settlement"
 )
 
 // gatewayNegotiatedSettlementTrailers reports whether the gateway, holding

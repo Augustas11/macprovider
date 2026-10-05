@@ -59,19 +59,16 @@ func (s *Store) ensureRelayBlindSettlementDispatchColumns(ctx context.Context) e
 	return tx.Commit()
 }
 
-// RecordRelayBlindSettlementDispatch stores the first coverage proof for an
-// active relay-blind reservation. An enforce record needs the coordinator
-// internal request id. A recorded mode is never overwritten.
+// RecordRelayBlindSettlementDispatch stores, once, the enforce coverage hint
+// for an active relay-blind reservation: the coordinator's R-13 coverage
+// marker and its internal request id. It is a hint for recovery, which still
+// asks the coordinator; no other mode is recorded.
 func (s *Store) RecordRelayBlindSettlementDispatch(ctx context.Context, accountID, requestID, mode, internalRequestID string) error {
-	switch mode {
-	case storage.RelayBlindSettlementModeEnforce:
-		if internalRequestID == "" {
-			return fmt.Errorf("enforce relay-blind dispatch requires the coordinator internal request id")
-		}
-	case storage.RelayBlindSettlementModeObserve:
-		internalRequestID = ""
-	default:
+	if mode != storage.RelayBlindSettlementModeEnforce {
 		return fmt.Errorf("invalid relay-blind settlement mode %q", mode)
+	}
+	if internalRequestID == "" {
+		return fmt.Errorf("enforce relay-blind dispatch requires the coordinator internal request id")
 	}
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE quota_reservations
