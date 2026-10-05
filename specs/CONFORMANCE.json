@@ -1642,8 +1642,16 @@
       "requirement_id": "SPEC-001-R005",
       "spec_id": "SPEC-001",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/ws/messages.go:type RelayBlindSettlementMetadata",
+        "phase4-coordinator/internal/ws/relay.go:relayBlindSettlementMetadata",
+        "phase4-coordinator/internal/ws/relay.go:relayBlindTerminalReceipts"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/ws/relay_blind_settlement_wire_test.go:TestRelayBlindSettlementMetadataWireShape",
+        "phase4-coordinator/internal/ws/relay_blind_settlement_wire_test.go:TestAuthRequestParsesRelayBlindSettlementCapability",
+        "phase4-coordinator/internal/ws/relay_blind_settlement_wire_test.go:TestRelayBlindTerminalReceiptsFollowDispatchKind"
+      ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-BETA"
       ],
@@ -1652,7 +1660,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1851",
-        "rationale": "SPEC-001 v1.9.28 relay-blind settlement wire (tier2_capabilities.relay_blind_settlement_receipt_v1, inference_request.relay_blind_settlement, inference_response_end.relay_blind_settlement_receipt) is specified; no code implements it yet. Planned: phase4-coordinator/internal/ws/messages.go (Tier2Caps, InferenceRequest, InferenceResponseEnd members), phase3-binary/Sources/macprovider-cli/InferenceRelay.swift (metadata acceptance and terminal receipt), phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift (capability advertisement). Needs a new signed CLI candidate; 1.8.214 rejects settlement metadata on relay-blind dispatch and emits no receipt."
+        "rationale": "SPEC-001 v1.9.28 relay-blind settlement wire. The coordinator records tier2_capabilities.relay_blind_settlement_receipt_v1, sends the sixteen-member relay_blind_settlement object (inside the SPEC-008 payload when encrypted), and parses relay_blind_settlement_receipt while ignoring a v0.4 receipt on relay-blind terminals. Pending: the provider side (InferenceRelay.swift metadata acceptance and terminal receipt, CoordinatorClient.swift capability) in a new signed CLI candidate; 1.8.214 rejects settlement metadata on relay-blind dispatch and emits no receipt."
       }
     },
     {
@@ -6447,8 +6455,15 @@
       "requirement_id": "SPEC-015-R007",
       "spec_id": "SPEC-015",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/billing/relay_blind_settlement.go:VerifyRelayBlindSettlementReceipt",
+        "phase4-coordinator/internal/billing/relay_blind_settlement.go:parseRelayBlindSettlementReceipt",
+        "phase4-coordinator/internal/billing/relay_blind_settlement.go:validateRelayBlindSettlementTuple"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/relay_blind_settlement_vectors_test.go:TestRelayBlindSettlementSharedVectors",
+        "phase4-coordinator/internal/billing/relay_blind_settlement_verifier_test.go:TestVerifyRelayBlindSettlementReceiptMismatchTable"
+      ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-BETA"
       ],
@@ -6457,7 +6472,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1851",
-        "rationale": "SPEC-015 v0.4.12 section N.13 relay-blind-settlement-v1 profile is specified; no builder, verifier, or shared vector exists yet. Planned: phase3-binary/Sources/macprovider-cli/ReceiptBuilder.swift (buildRelayBlindSettlement), phase4-coordinator/internal/billing/settlement_verifier.go (relay-blind tuple parser and verifier), test/fixtures/receipts/relay-blind-settlement-v1.json with Go and Swift parity tests. Promotion needs those tests, signed journey evidence, and three-lane audits."
+        "rationale": "SPEC-015 v0.4.12 section N.13 relay-blind-settlement-v1. The Go coordinator parser and verifier pass every vector in test/fixtures/receipts/relay-blind-settlement-v1.json. Pending: the Swift provider builder (phase3-binary ReceiptBuilder.swift) passing the same vectors, signed journey evidence, and three-lane audits."
       }
     },
     {
@@ -6933,8 +6948,38 @@
       "requirement_id": "SPEC-022-R013",
       "spec_id": "SPEC-022",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/config/config.go:RelayBlindSettlementProfileV1",
+        "phase4-coordinator/internal/buyer/route_snapshot.go:routeSnapshotPrerequisites",
+        "phase4-coordinator/internal/buyer/relay_blind_settlement.go:relayBlindSettlementPrerequisite",
+        "phase4-coordinator/internal/buyer/relay_blind_settlement.go:recordRelayBlindRouteSnapshot",
+        "phase4-coordinator/internal/buyer/relay_blind_settlement.go:ingestRelayBlindSettlementReceipt",
+        "phase4-coordinator/internal/billing/relay_blind_settlement.go:VerifyRelayBlindSettlementReceipt",
+        "phase4-coordinator/internal/billing/relay_blind_settlement.go:payableSettlementOutcomeSQL",
+        "phase4-coordinator/internal/billing/relay_blind_outcome_migration.go:ensureRelayBlindSettlementOutcomeVocabulary",
+        "phase4-coordinator/internal/billing/settlement_finality.go:relayBlindSettledFinality",
+        "phase5-gateway/internal/router/chat_proxy.go:coordinatorSettlementFinalityForRequest",
+        "phase5-gateway/internal/router/relay_blind_success.go:reconcileRelayBlindEnforceFinality"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/config/relay_blind_settlement_test.go:TestRelayBlindEnforceRequiresSettlementProfile",
+        "phase4-coordinator/internal/buyer/relay_blind_settlement_test.go:TestRelayBlindEnforceSelectionAppliesSettlementPrerequisites",
+        "phase4-coordinator/internal/buyer/relay_blind_settlement_test.go:TestRelayBlindEnforceRecordsSnapshotBeforeDispatch",
+        "phase4-coordinator/internal/buyer/relay_blind_settlement_test.go:TestRelayBlindEnforcePreDispatchRecheckBurnsReservation",
+        "phase4-coordinator/internal/buyer/relay_blind_settlement_flow_test.go:TestRelayBlindEnforceSettlementFlow",
+        "phase4-coordinator/internal/billing/relay_blind_route_snapshot_test.go:TestRouteSnapshotRelayBlindBasisBindsToEntrypoint",
+        "phase4-coordinator/internal/billing/relay_blind_settlement_verifier_test.go:TestVerifyRelayBlindSettlementReceiptMismatchTable",
+        "phase4-coordinator/internal/billing/relay_blind_settlement_verifier_test.go:TestRelayBlindCrossProfileDowngradeQuarantines",
+        "phase4-coordinator/internal/billing/relay_blind_settlement_money_test.go:TestRelayBlindSettledIsPayableOnlyThroughTheBinding",
+        "phase4-coordinator/internal/billing/relay_blind_settlement_money_test.go:TestRelayBlindRecoveryAndUndeliveredGuardAdmitBoundSettlement",
+        "phase4-coordinator/internal/billing/relay_blind_settlement_money_test.go:TestRelayBlindSettledWithoutBindingIsNotPayable",
+        "phase4-coordinator/internal/billing/relay_blind_settlement_money_test.go:TestRelayBlindTamperedOrMissingReceiptIsNotPayable",
+        "phase4-coordinator/internal/billing/relay_blind_settlement_money_test.go:TestRelayBlindSettlementOutcomeMigrationOnPopulatedDatabase",
+        "phase5-gateway/internal/router/relay_blind_settlement_finality_test.go:TestRelayBlindSettledFinalityDebitsOnlyRelayBlindExecutions",
+        "phase5-gateway/internal/router/relay_blind_settlement_finality_test.go:TestRelayBlindReconcileFollowsEnforceFinality",
+        "phase5-gateway/internal/router/relay_blind_settlement_finality_test.go:TestRelayBlindSettlementDisclosureNeverClaimsVerified",
+        "test/integration/relay_blind_integration_test.go:TestRelayBlindEnforceExcludesProviderWithoutSettlementCapability"
+      ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-BETA"
       ],
@@ -6943,7 +6988,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1851",
-        "rationale": "SPEC-022 v0.3.0 R-13 relay-blind settlement lane (and its R-1.3, R-2.1, R-3.1, R-3.4.3, R-3.5, R-4.7, R-7.9, R-7.10, R-8.1, R-10.7 obligations) is specified; no code implements it yet. Planned implementation selectors, added only when they resolve: phase4-coordinator/internal/buyer/relay_blind.go (shared covered-dispatch prerequisites, relay-blind route snapshot), phase4-coordinator/internal/buyer/route_snapshot.go (relay_blind_envelope_digest_v1 basis), phase4-coordinator/internal/billing/settlement_verifier.go (v0.4 basis guard and relay-blind verifier), phase4-coordinator/internal/billing/store.go (relay_blind_settled CHECK rebuild and spec022_payable_request_credits binding), phase4-coordinator/internal/billing/settlement.go and recovery.go and settlement_output.go (money-movement predicates), phase4-coordinator/internal/config/config.go (enforce guard), phase5-gateway/internal/router/chat_proxy.go and settlement_reconcile.go (relay-blind-only finality debit). Promotion needs integration tests, the JOURNEY-PRIVACY-CLASS-BETA enforce steps, plain relay-blind enforce evidence, and three-lane audits."
+        "rationale": "SPEC-022 v0.3.0 R-13 relay-blind settlement lane. Coordinator and gateway halves are implemented: the enforce_settlement_profile guard, shared route-snapshot prerequisites, the relay-blind snapshot and dispatch metadata, the relay-blind-settlement-v1 verifier with both R-7.10 guards, the relay_blind_settled CHECK migration and billing compat floor 3, the R-7.9 payable binding on every money predicate, and relay-blind-only gateway finality with enforce-aware reconcile. Pending: the provider CLI receipt builder and capability (#1851 slice 5), a signed CLI candidate, the JOURNEY-PRIVACY-CLASS-BETA enforce canary, old-CLI exclusion and tampered-receipt steps, plain relay-blind enforce evidence, and three-lane audits."
       }
     },
     {

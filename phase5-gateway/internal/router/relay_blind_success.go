@@ -507,6 +507,11 @@ func (s *Server) reconcileRelayBlindReservation(ctx context.Context, reservation
 	if status.State != "terminal" && status.State != "unknown_postdispatch" {
 		return "held", nil
 	}
+	// SPEC-022 R-13.6 / R-8.1: under enforce the coordinator's finality, not
+	// the status row, decides money for a relay-blind execution.
+	if result, handled, err := s.reconcileRelayBlindEnforceFinality(ctx, reservation, status.InternalRequestID); handled {
+		return result, err
+	}
 	recovered := *meta
 	prompt := int64(0)
 	if status.EffectivePrivacyOutcome == "relay_blind_satisfied" {
@@ -538,6 +543,52 @@ func (s *Server) reconcileRelayBlindReservation(ctx context.Context, reservation
 		return "already_terminal", nil
 	}
 	return "observed", err
+}
+
+// reconcileRelayBlindEnforceFinality settles a relay-blind hold from the
+// coordinator's request finality when that finality is in enforce mode: a
+// relay_blind_settled tuple debits the coordinator's usage, a refund tuple
+// refunds, and anything else holds. It reports handled=false when the
+// coordinator has no enforce finality for the request, which keeps the
+// observe and off recovery unchanged.
+func (s *Server) reconcileRelayBlindEnforceFinality(ctx context.Context, reservation storage.ActiveReservation, internalRequestID string) (string, bool, error) {
+	if strings.TrimSpace(internalRequestID) == "" || strings.TrimSpace(s.cfg.Coordinator.OperatorURL) == "" {
+		return "", false, nil
+	}
+	finality, found, _, err := s.fetchCoordinatorRequestSettlementFinalityDetail(ctx, reservation, internalRequestID)
+	if err != nil {
+		// The mode is unknown; never debit from the status row on a guess.
+		result, recordErr := s.recordSettlementHeldResult(ctx, reservation, "held")
+		return result, true, recordErr
+	}
+	if !found || finality.Mode != "enforce" {
+		return "", false, nil
+	}
+	candidate, candidateErr := s.store.LookupSettlementFallbackCandidate(ctx, reservation)
+	if candidateErr != nil && !errors.Is(candidateErr, storage.ErrNotFound) {
+		return "", true, candidateErr
+	}
+	switch coordinatorSettlementFinalityForRequest(finalityHeaders(finality), true).Action {
+	case settlementFinalityDebit:
+		if err := s.settleVerifiedReservation(ctx, reservation, candidate, finality); err != nil {
+			if errors.Is(err, storage.ErrReservationNotFound) || errors.Is(err, storage.ErrReservationTerminal) {
+				return "already_terminal", true, nil
+			}
+			return "", true, err
+		}
+		return relayBlindSettledOutcome, true, nil
+	case settlementFinalityRefund:
+		if err := s.refundHeldReservation(ctx, reservation, candidate); err != nil {
+			if errors.Is(err, storage.ErrReservationNotFound) || errors.Is(err, storage.ErrReservationTerminal) {
+				return "already_terminal", true, nil
+			}
+			return "", true, err
+		}
+		return "refunded", true, nil
+	default:
+		result, err := s.recordSettlementHeldResult(ctx, reservation, "held")
+		return result, true, err
+	}
 }
 
 func (s *Server) applyRelayBlindModelsDisclosure(ctx context.Context, body map[string]any, disclosure *tier1Disclosure) {

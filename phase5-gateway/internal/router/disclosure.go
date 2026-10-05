@@ -130,6 +130,8 @@ type settlementOutcomeDisclosure struct {
 	Verified    string `json:"verified"`
 	Quarantined string `json:"quarantined"`
 	ZeroSettled string `json:"zero_settled"`
+	// RelayBlindSettled is the SPEC-022 R-10.7 label for the relay-blind lane.
+	RelayBlindSettled string `json:"relay_blind_settled"`
 }
 
 type computeIntegrityDisclosure struct {
@@ -331,6 +333,10 @@ const settlementPendingOutcomeDisclosure = "pending: receipt verification is sti
 const settlementVerifiedOutcomeDisclosure = "verified: a settlement-capable receipt matched the route-time catalog snapshot and can finalize buyer debit and provider settlement."
 const settlementQuarantinedOutcomeDisclosure = "quarantined: not charged because model-integrity or receipt verification failed; this is not labeled as buyer fault."
 const settlementZeroSettledOutcomeDisclosure = "zero_settled: not charged because no billable verified work was produced; this is not labeled as buyer fault."
+
+// SPEC-022 R-10.7: relay-blind settlement is a distinct charged lane and is
+// never described as verified.
+const settlementRelayBlindSettledOutcomeDisclosure = "relay_blind_settled: charged under the relay-blind settlement lane. Model identity is checked against the signed catalog exactly as for plaintext routing, and usage is provider-signed and capped by the buyer's declared bounds. A relay-blind request is never reported as verified and never counted as verified work."
 const settlementPartialChargeDisclosure = "Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage."
 const settlementStreamingFailoverDisclosure = "Streaming failover is transparent only before response bytes are committed. After the first buyer-visible SSE event, a provider disconnect terminates the stream with provider_disconnected and the buyer may retry as a new request. That retry is a separate billable request with its own reservation and settlement; cross-request overlapping output is not deduplicated. Settlement remains limited to delivered, receipt-verified output prefixes and must not double-charge overlapping output if a future resume or failover protocol spans multiple provider attempts; verified here means receipt-bound under the provider-reported-hash caveat above."
 const settlementBuyerReceiptStatusDisclosure = "Buyer receipt and status surfaces expose pending, verified, quarantined, and zero_settled labels without raw prompts or raw outputs."
@@ -399,10 +405,11 @@ func makeVerifiedModelSettlementDisclosure(includeResponses, includeAnthropicMes
 		EnforceMode:        enforceMode,
 		PendingReservation: settlementPendingReservationDisclosure,
 		Outcomes: settlementOutcomeDisclosure{
-			Pending:     settlementPendingOutcomeDisclosure,
-			Verified:    settlementVerifiedOutcomeDisclosure,
-			Quarantined: settlementQuarantinedOutcomeDisclosure,
-			ZeroSettled: settlementZeroSettledOutcomeDisclosure,
+			Pending:           settlementPendingOutcomeDisclosure,
+			Verified:          settlementVerifiedOutcomeDisclosure,
+			Quarantined:       settlementQuarantinedOutcomeDisclosure,
+			ZeroSettled:       settlementZeroSettledOutcomeDisclosure,
+			RelayBlindSettled: settlementRelayBlindSettledOutcomeDisclosure,
 		},
 		PartialCharge:      settlementPartialChargeDisclosure,
 		StreamingFailover:  settlementStreamingFailoverDisclosure,

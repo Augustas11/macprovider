@@ -660,6 +660,9 @@ func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled b
 			"max_active_reservations":      10000,
 			"max_key_records_per_provider": 8,
 			"metadata_requests_per_minute": 120,
+			// SPEC-022 R-13: relay-blind runs under enforce only through the
+			// relay-blind settlement profile.
+			"enforce_settlement_profile": relayBlindEnforceSettlementProfile(relayBlindEnabled, settlementEnforceMode),
 		},
 		"privacy_class": coordinatorPrivacyClassYAML(s.providerID, privacy),
 		"admission": map[string]any{
@@ -2822,4 +2825,11 @@ func (s *scenario) gatewayRequest(method, path string, extraHeaders map[string]s
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, resp.Header, body
+}
+
+func relayBlindEnforceSettlementProfile(relayBlindEnabled, settlementEnforceMode bool) string {
+	if relayBlindEnabled && settlementEnforceMode {
+		return "relay-blind-settlement-v1"
+	}
+	return ""
 }

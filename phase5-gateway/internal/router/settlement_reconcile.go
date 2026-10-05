@@ -60,11 +60,15 @@ type coordinatorRequestSettlementFinality struct {
 	PendingAttempts           int64  `json:"pending_attempts"`
 	QuarantinedAttempts       int64  `json:"quarantined_attempts"`
 	ZeroSettledAttempts       int64  `json:"zero_settled_attempts"`
+	RelayBlindSettledAttempts int64  `json:"relay_blind_settled_attempts"`
 }
 
 type SettlementReconcileSummary struct {
-	Scanned                    int `json:"scanned"`
-	Verified                   int `json:"verified"`
+	Scanned  int `json:"scanned"`
+	Verified int `json:"verified"`
+	// RelayBlindSettled counts SPEC-022 R-13 holds debited on
+	// relay_blind_settled; they are never counted as verified.
+	RelayBlindSettled          int `json:"relay_blind_settled"`
 	Observed                   int `json:"observed"`
 	Refunded                   int `json:"refunded"`
 	Expired                    int `json:"expired"`
@@ -249,6 +253,8 @@ func (s *SettlementReconcileSummary) applyResult(result string) {
 	switch result {
 	case "verified":
 		s.Verified++
+	case relayBlindSettledOutcome:
+		s.RelayBlindSettled++
 	case "observed":
 		s.Observed++
 	case "refunded":
@@ -621,6 +627,17 @@ func (s *Server) settleVerifiedReservationWithResult(ctx context.Context, reserv
 		Outcome:                      "spec022_verified",
 		SettledAt:                    s.now(),
 	}
+	if finality.Outcome == relayBlindSettledOutcome {
+		// SPEC-022 R-10.7: a relay-blind debit is recorded under its own
+		// lane label, never as verified.
+		if reservation.RelayBlind == nil {
+			return fmt.Errorf("relay_blind_settled finality for a non-relay-blind reservation")
+		}
+		settled := *reservation.RelayBlind
+		settled.EffectivePrivacyOutcome = "relay_blind_satisfied"
+		settlement.RelayBlind = &settled
+		settlement.Outcome = "spec022_relay_blind_settled"
+	}
 	if reservation.WalletSessionID != "" {
 		walletSettlement := storage.WalletSessionReservationSettlement{
 			ExpectedReservationCreatedAt: reservation.CreatedAt,
@@ -634,6 +651,7 @@ func (s *Server) settleVerifiedReservationWithResult(ctx context.Context, reserv
 			TokenSource:                  settlement.TokenSource,
 			Outcome:                      settlement.Outcome,
 			SettledAt:                    settlement.SettledAt,
+			RelayBlind:                   settlement.RelayBlind,
 		}
 		if reconcileResult != "" {
 			return s.store.FinalizeWalletSessionReservationForDrain(ctx, walletSettlement, reconcileResult)
