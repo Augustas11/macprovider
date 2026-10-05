@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.22
+**Version:** 0.1.23
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.22",
+  "version": "0.1.23",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -354,7 +354,7 @@ be built and tested while the review gate below is pending, but it MUST NOT be
 signed, activated, or treated as production-qualified until that gate closes:
 
 - repository: `https://github.com/Augustas11/mlx-swift-lm.git`;
-- revision: `ca29e9544777068a0b53aad87310ff1cfaf3fd1d`;
+- revision: `9c1cd900287de58ec6577ec0da7aa3ee61781200`;
 - upstream base: `ml-explore/mlx-swift-lm@bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57`
   (`3.31.4`);
 - reviewed surface: `MTPKVCacheStorage`, `MTPKVCacheTransaction`,
@@ -378,17 +378,21 @@ signed, activated, or treated as production-qualified until that gate closes:
   `advanceAndProposePacked` implementation that advances every native row's
   drafter state and proposes its next token in one drafter forward; plus the
   Qwen3.5/3.6 sparse-MoE fused small-token path, including its exact affine
-  quantization-layout gate, per-call scratch, overlapping-call safety, and
-  stock fallback above seven flattened tokens;
-- review date and owner: `2026-10-02`, `@Augustas11`;
+  quantization-layout gate, per-call scratch, overlapping-call safety,
+  chunked evaluation of decode- and verify-shaped calls above seven flattened
+  tokens, and stock fallback for rows longer than seven tokens;
+- review date and owner: `2026-10-05`, `@Augustas11`;
 - mandatory exception re-review date: `2026-12-27`;
 - review gate: upstream-focused build-tests, MacProvider qualification and
   real-hardware tests, plus an independent adversarial review with zero
   Critical, High, or Medium findings. The prior transaction surface passed
   15/15 focused upstream tests and real Qwen target/MTP parity. The fused-MoE
-  production reduction compiles in the focused upstream test bundle; its
-  Mac Studio runtime tests, the re-derived R015 matrix, and the frozen-diff
-  audit remain required before this candidate revision is production-qualified;
+  path is qualified on the ordinary path: the focused upstream fused tests on
+  Mac Studio hardware, eight-slot ordinary/native parity and run-to-run
+  determinism, and one-, two-, and eight-slot ordinary throughput against the
+  stock kernel, followed by the frozen-diff audit. Native-MTP R015 evidence is
+  not part of this gate; it gates signing and activation of a native tuple
+  (R007, R015) and never the ordinary path;
 - removal trigger: replace the fork pin with the first reviewed upstream tag
   that contains equivalent standalone-checkpoint loading, public transaction,
   packed target-verification, and hybrid recurrent-cache surfaces and passes
@@ -1255,6 +1259,27 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.23 (2026-10-05)** — Moves the immutable fork candidate to
+  `9c1cd900287de58ec6577ec0da7aa3ee61781200` (parent `ca29e954…`) and
+  qualifies the fused A3B MoE path on the ordinary path, independent of native
+  MTP (#1770). The fused-baseline R015 (policy `de99e85c…`, 2026-10-03) failed:
+  one-slot throughput lower bounds `+5.18%` to `+10.96%` against the `0.15`
+  gate, inter-token p95 upper bounds `+59%` to `+62%`, two-slot TTFT `+7.16%`,
+  and eight-slot ordinary/native parity mismatches in 8 of 10 blocks. Studio
+  runs on 2026-10-05 traced the parity failure to the fused/stock switch at
+  eight flattened tokens: stock and fused are each batch-invariant but not
+  bit-equal, and a native row's batch is one token wider than the ordinary
+  row's, so the two crossed the switch at different steps. Decode- and
+  verify-shaped calls now stay fused at any batch size in chunks of at most
+  seven tokens; prefill-shaped rows keep stock. On the Studio the chunked build
+  had 0 of 6 eight-slot parity mismatches, bit-identical run-to-run output on
+  both paths, and eight-slot ordinary decode throughput equal to stock. The
+  R003 review gate for this pin is the ordinary-path qualification plus the
+  frozen-diff audit; native-MTP R015 gates only native-tuple signing and
+  activation, and native MTP stays default-off. Every R015 policy frozen
+  before this change binds the retired envelope and Studio OS build `25E253`;
+  the next R015 is frozen on the current build.
+
 - **0.1.22 (2026-10-02)** — Moves the immutable fork candidate to
   `ca29e9544777068a0b53aad87310ff1cfaf3fd1d` and binds qualification to its
   production-reduced Qwen3.5/3.6 A3B fused small-token MoE path (#1770). The
@@ -1435,18 +1460,26 @@ requests.
 journey, hardware, release, or production enablement claim.
 
 For the exact Qwen3.5/3.6 A3B affine layout recognized by the pinned fork, the
-fused sparse-MoE path is the ordinary and native-MTP kernel baseline at a
-flattened token count of `1...7`; calls at `8` or more tokens use the stock
-path. `MLX_LM_QWEN35_FUSED_MOE=0` (and the equivalent case-insensitive
+fused sparse-MoE path is the ordinary and native-MTP kernel baseline for every
+call whose rows carry `1...7` tokens (decode and native verification) at any
+batch size; above seven flattened tokens the call runs as consecutive fused
+chunks of at most seven tokens. Rows longer than seven tokens (prefill) use the
+stock path. `MLX_LM_QWEN35_FUSED_MOE=0` (and the equivalent case-insensitive
 `false`, `no`, or `off`) is the process-level emergency kill switch, not a
 separately qualified performance baseline. The fused path preserves expert
 selection and is batch-invariant, but its bf16 accumulation order can change
-an argmax at near-tied logits. That is the same bounded numerical-drift class
+an argmax at near-tied logits, so it is not bit-equal to stock. A decode row
+MUST NOT move between the fused and stock kernels as the batch grows or
+shrinks: a flattened-token switch point made a row's greedy output depend on
+how many of its steps fell on either side of the switch, which broke
+ordinary/native parity in the fused-baseline R015 (`s8-p1536-o512`, 8 of 10
+blocks). That is the same bounded numerical-drift class
 already documented for stock batched quantized kernels: every R005 oracle,
 R015 ordinary baseline, serving journey, and signed tuple using this pin MUST
 run the same fused-kernel setting. Evidence comparing fused native MTP against
-stock ordinary decode is invalid. Widening the layout or token bound requires a
-new R003 review and new R015 evidence. The dependency-revision change also
+stock ordinary decode is invalid. Changing the layout or the per-row token
+envelope requires a new R003 review, and invalidates every R005 oracle, R015
+result, journey, and signed tuple recorded under the previous envelope. The dependency-revision change also
 changes `KVBuildIdentity`; prior disk-cold-tier entries are expected misses and
 MUST NOT be relabeled as belonging to the new revision.
 - **0.1.2 (2026-09-28)** — Extends the exact immutable-dependency exception

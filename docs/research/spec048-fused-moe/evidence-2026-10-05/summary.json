@@ -1,0 +1,237 @@
+{
+  "schema": "macprovider.spec048-fused-boundary-summary.v1",
+  "cell": "s8-p1536-o512",
+  "blocks_per_run": 3,
+  "runs": [
+    {
+      "run": "unchunked_fused_A",
+      "kernel": "ca29e954 fused on",
+      "raw_sha256": "317e850e66d075ed68f0fd7453751110b06cf72a65f53469a5711569ed03aaff",
+      "os_build": "26A434",
+      "parity_mismatch_rows_by_block": [
+        [],
+        [],
+        []
+      ],
+      "ordinary_aggregate_decode_tps": [
+        187.9,
+        179.1,
+        179.3
+      ],
+      "native_aggregate_decode_tps": [
+        179.1,
+        187.2,
+        187.0
+      ]
+    },
+    {
+      "run": "stock_A_old_binary",
+      "kernel": "ca29e954 MLX_LM_QWEN35_FUSED_MOE=0",
+      "raw_sha256": "db205f885f4c7f5a06fe8fb4969eaca45f7c638c946962d3123ddecba2473873",
+      "os_build": "26A434",
+      "parity_mismatch_rows_by_block": [
+        [],
+        [],
+        []
+      ],
+      "ordinary_aggregate_decode_tps": [
+        181.8,
+        185.9,
+        177.4
+      ],
+      "native_aggregate_decode_tps": [
+        184.4,
+        179.3,
+        181.9
+      ]
+    },
+    {
+      "run": "unchunked_fused_B",
+      "kernel": "ca29e954 fused on",
+      "raw_sha256": "2a3086042e2f8f57e22d53d54667cc4d466b4ea9b237eae789c3f00c69948d91",
+      "os_build": "26A434",
+      "parity_mismatch_rows_by_block": [
+        [
+          0,
+          1,
+          2,
+          3,
+          4
+        ],
+        [],
+        []
+      ],
+      "ordinary_aggregate_decode_tps": [
+        181.7,
+        187.6,
+        179.3
+      ],
+      "native_aggregate_decode_tps": [
+        187.5,
+        187.8,
+        186.9
+      ]
+    },
+    {
+      "run": "stock_B_old_binary",
+      "kernel": "ca29e954 MLX_LM_QWEN35_FUSED_MOE=0",
+      "raw_sha256": "59abebe6a74a10f7344faeda65d20bbb7cec0582e8d9202762abf398107ba314",
+      "os_build": "26A434",
+      "parity_mismatch_rows_by_block": [
+        [],
+        [],
+        []
+      ],
+      "ordinary_aggregate_decode_tps": [
+        179.6,
+        176.3,
+        182.2
+      ],
+      "native_aggregate_decode_tps": [
+        185.0,
+        184.5,
+        185.2
+      ]
+    },
+    {
+      "run": "chunked_fused_A",
+      "kernel": "9c1cd900 fused on",
+      "raw_sha256": "05635c1a60305c9b0309b6de1047b06e2d03832cc4c9e4b5d3c1554d87d7e6fa",
+      "os_build": "26A434",
+      "parity_mismatch_rows_by_block": [
+        [],
+        [],
+        []
+      ],
+      "ordinary_aggregate_decode_tps": [
+        177.5,
+        144.3,
+        183.9
+      ],
+      "native_aggregate_decode_tps": [
+        183.5,
+        183.6,
+        177.6
+      ]
+    },
+    {
+      "run": "stock_A",
+      "kernel": "9c1cd900 MLX_LM_QWEN35_FUSED_MOE=0",
+      "raw_sha256": "7ef0edeaa9ac3c04126c9ec1981053022f4378f64fd5038036c697eeba88efc7",
+      "os_build": "26A434",
+      "parity_mismatch_rows_by_block": [
+        [],
+        [],
+        []
+      ],
+      "ordinary_aggregate_decode_tps": [
+        179.4,
+        182.7,
+        185.8
+      ],
+      "native_aggregate_decode_tps": [
+        185.0,
+        185.1,
+        178.7
+      ]
+    },
+    {
+      "run": "chunked_fused_B",
+      "kernel": "9c1cd900 fused on",
+      "raw_sha256": "4535b39f4be183a355042bf67381091b856e74a4f65e977819b6048b9e48c5e0",
+      "os_build": "26A434",
+      "parity_mismatch_rows_by_block": [
+        [],
+        [],
+        []
+      ],
+      "ordinary_aggregate_decode_tps": [
+        180.8,
+        184.1,
+        184.1
+      ],
+      "native_aggregate_decode_tps": [
+        183.6,
+        183.9,
+        180.1
+      ]
+    },
+    {
+      "run": "stock_B",
+      "kernel": "9c1cd900 MLX_LM_QWEN35_FUSED_MOE=0",
+      "raw_sha256": "621e3a39350d713123e3fe781ca550d6a433aa470888edc0f34d7de85ff8bf72",
+      "os_build": "26A434",
+      "parity_mismatch_rows_by_block": [
+        [],
+        [],
+        []
+      ],
+      "ordinary_aggregate_decode_tps": [
+        185.1,
+        185.8,
+        181.4
+      ],
+      "native_aggregate_decode_tps": [
+        185.3,
+        185.9,
+        185.1
+      ]
+    }
+  ],
+  "run_to_run_differing_rows": {
+    "unchunked_fused_A_vs_unchunked_fused_B": {
+      "ordinary": [
+        [],
+        [],
+        []
+      ],
+      "native_mtp": [
+        [
+          0,
+          1,
+          2,
+          3,
+          4
+        ],
+        [],
+        []
+      ]
+    },
+    "stock_A_old_binary_vs_stock_B_old_binary": {
+      "ordinary": [
+        [],
+        [],
+        []
+      ],
+      "native_mtp": [
+        [],
+        [],
+        []
+      ]
+    },
+    "chunked_fused_A_vs_chunked_fused_B": {
+      "ordinary": [
+        [],
+        [],
+        []
+      ],
+      "native_mtp": [
+        [],
+        [],
+        []
+      ]
+    },
+    "stock_A_vs_stock_B": {
+      "ordinary": [
+        [],
+        [],
+        []
+      ],
+      "native_mtp": [
+        [],
+        [],
+        []
+      ]
+    }
+  }
+}
