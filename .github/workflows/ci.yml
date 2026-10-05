@@ -427,6 +427,10 @@ jobs:
         with:
           path: phase3-binary/.build
           key: spm-${{ runner.os }}-${{ hashFiles('phase3-binary/Package.resolved') }}
+          # A pin change must restore the nearest prior cache (only changed
+          # packages rebuild) instead of a ~15 min cold build in the 25 min step.
+          restore-keys: |
+            spm-${{ runner.os }}-
 
       - name: Run Swift tests
         working-directory: phase3-binary
