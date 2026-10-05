@@ -505,7 +505,6 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
    AND srv.route_snapshot_mode = 'enforce'
    AND srv.route_snapshot_policy_version = lrc.settlement_policy_version
    AND srv.closed = 1
-   AND srv.settlement_outcome = 'verified'
   JOIN settlement_route_snapshots srs
     ON srs.request_id = lrc.request_id
    AND srs.attempt_n = lrc.attempt_n
@@ -522,6 +521,7 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
  WHERE lrc.request_id = ?
    AND lrc.attempt_n = ?
    AND lrc.provider_id = ?
+   AND `+payableSettlementOutcomeSQL("srv", "srs")+`
    AND lrc.settlement_policy_mode = 'enforce'
    AND lrc.settlement_account_scope_hash IS NOT NULL
    AND lrc.settlement_policy_version IS NOT NULL
@@ -795,7 +795,7 @@ func settlementReceiptStateFromResult(id SettlementReceiptIdentity, evidence set
 		ExpectedCatalogModelHash:      evidence.route.ExpectedCatalogModelHash,
 		ModelID:                       evidence.route.ModelID,
 		ModelHash:                     evidence.route.ProviderReportedModelHash,
-		ReceiptProfile:                settlementReceiptProfileV04,
+		ReceiptProfile:                settlementReceiptProfileFor(evidence.route),
 		BuyerDebitOutcome:             settlementReceiptNoMoneyMovementStep5,
 		ProviderSettlementOutcome:     settlementReceiptNoMoneyMovementStep5,
 		PayoutExclusionOutcome:        settlementReceiptPayoutExcludedUntil022,
@@ -812,6 +812,15 @@ func settlementReceiptStateFromResult(id SettlementReceiptIdentity, evidence set
 		return SettlementReceiptState{}, fmt.Errorf("settlement verifier returned incomplete state")
 	}
 	return state, nil
+}
+
+// settlementReceiptProfileFor is the settlement-capable profile locked for
+// the attempt's entrypoint (SPEC-022 R-4.7).
+func settlementReceiptProfileFor(route RouteSnapshot) string {
+	if RelayBlindSnapshot(route) {
+		return RelayBlindSettlementReceiptVersion
+	}
+	return settlementReceiptProfileV04
 }
 
 func (s *Store) nowUTC() time.Time {
@@ -922,7 +931,8 @@ func settlementReceiptPersistedFromState(state SettlementReceiptState, result Se
 }
 
 func settlementOutcomeTerminal(outcome string) bool {
-	return outcome == SettlementOutcomeVerified || outcome == SettlementOutcomeQuarantined || outcome == SettlementOutcomeZeroSettled
+	return outcome == SettlementOutcomeVerified || outcome == SettlementOutcomeQuarantined || outcome == SettlementOutcomeZeroSettled ||
+		outcome == SettlementOutcomeRelayBlindSettled
 }
 
 func loadSettlementEvidenceConn(ctx context.Context, conn *sql.Conn, id SettlementReceiptIdentity) (settlementEvidence, error) {

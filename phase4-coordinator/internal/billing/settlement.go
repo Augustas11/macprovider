@@ -135,7 +135,7 @@ SELECT lrc.id, lrc.provider_id
                   AND srv.route_snapshot_mode = 'enforce'
                   AND srv.route_snapshot_policy_version = lrc.settlement_policy_version
                   AND srv.closed = 1
-                  AND srv.settlement_outcome = 'verified'
+                  AND `+payableSettlementOutcomeSQL("srv", "srs")+`
                   AND sao.overlapping_or_duplicate = 0
            )
        )

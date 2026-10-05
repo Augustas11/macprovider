@@ -286,6 +286,10 @@ func setSettlementEvidenceFailedFinality(dst http.Header, rec *billingRecorder, 
 		// buyer settles through the verified finality (the reconciler
 		// debits it from the coordinator lookup), not a refund.
 		state.SettlementOutcome, state.ReceiptResult, state.Reason, state.Closed = billing.SettlementOutcomeVerified, billing.SettlementReceiptResultValid, "verified_settlement", true
+	case evidenceFailureRelayBlindSettled:
+		// SPEC-022 R-13: a bound relay_blind_settled attempt is payable and
+		// settles through its own outcome, never verified.
+		state.SettlementOutcome, state.ReceiptResult, state.Reason, state.Closed = billing.SettlementOutcomeRelayBlindSettled, billing.SettlementReceiptResultValid, "relay_blind_settlement", true
 	case evidenceFailurePending:
 		// Payability is not yet decided: hold for the reconciler, whose
 		// lookup reaches a terminal verdict once the attempt output's
@@ -304,6 +308,7 @@ const (
 	evidenceFailureRefund evidenceFailureAction = iota
 	evidenceFailureVerified
 	evidenceFailurePending
+	evidenceFailureRelayBlindSettled
 )
 
 func (a evidenceFailureAction) String() string {
@@ -312,6 +317,8 @@ func (a evidenceFailureAction) String() string {
 		return "verified"
 	case evidenceFailurePending:
 		return "pending"
+	case evidenceFailureRelayBlindSettled:
+		return "relay_blind_settled"
 	default:
 		return "refund"
 	}
@@ -371,8 +378,11 @@ func enforceEvidenceFailureAction(rec *billingRecorder, reason string) evidenceF
 //     open pending tuple the reconciler resolves.
 func decideEnforceEvidenceFailure(result billing.UndeliveredQuarantineResult, qErr error, hasOutput, verified bool, evErr error) evidenceFailureAction {
 	if qErr == nil {
-		if result == billing.UndeliveredQuarantineVerified {
+		switch result {
+		case billing.UndeliveredQuarantineVerified:
 			return evidenceFailureVerified
+		case billing.UndeliveredQuarantineRelayBlindSettled:
+			return evidenceFailureRelayBlindSettled
 		}
 		return evidenceFailureRefund
 	}

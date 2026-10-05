@@ -57,6 +57,12 @@ type SettlementOutput struct {
 	// settlement_output_v1.
 	ObservedInputTokens  *int64
 	ObservedOutputTokens *int64
+	// RelayBlindResponseSHA256 marks a SPEC-022 R-13 relay-blind attempt. It
+	// is the lowercase hex SHA-256 of the exact response bytes the coordinator
+	// received (R-3.5), and OutputPrefixEndByte-OutputPrefixStartByte is their
+	// count. Such an output holds no content and is the attempt's output
+	// hash: a relay-blind attempt never persists a plaintext output hash.
+	RelayBlindResponseSHA256 string
 }
 
 type SettlementUsage struct {
@@ -154,6 +160,9 @@ func (o SettlementOutput) Digest() (string, []byte, error) {
 	if err := o.Validate(); err != nil {
 		return "", nil, err
 	}
+	if o.RelayBlindResponseSHA256 != "" {
+		return o.RelayBlindResponseSHA256, nil, nil
+	}
 	return CanonicalSHA256Hex(o.Value())
 }
 
@@ -170,6 +179,15 @@ func (o SettlementOutput) Validate() error {
 	}
 	if o.OutputPrefixStartByte < 0 || o.OutputPrefixEndByte < o.OutputPrefixStartByte {
 		return fmt.Errorf("invalid output byte range [%d,%d)", o.OutputPrefixStartByte, o.OutputPrefixEndByte)
+	}
+	if o.RelayBlindResponseSHA256 != "" {
+		if !hex64Pattern.MatchString(o.RelayBlindResponseSHA256) {
+			return fmt.Errorf("relay-blind response digest must be 64 lowercase hex chars")
+		}
+		if o.Content != "" || o.FinishReason != nil || len(o.ToolCalls) > 0 {
+			return fmt.Errorf("relay-blind output must not carry content")
+		}
+		return nil
 	}
 	delivered := SettlementDeliveredOutputBytes(o.Content)
 	if delivered != o.OutputPrefixEndByte-o.OutputPrefixStartByte {
@@ -346,6 +364,11 @@ const (
 	// verified verdict, so its credit is legitimately payable and was left
 	// alone.
 	UndeliveredQuarantineVerified
+	// UndeliveredQuarantineRelayBlindSettled: the attempt already has a
+	// closed relay_blind_settled verdict under the SPEC-022 R-7.9 binding.
+	// Its credit is payable and was left alone; it is never reported as
+	// verified.
+	UndeliveredQuarantineRelayBlindSettled
 )
 
 func (s *Store) QuarantineUndeliveredSettlementCredit(ctx context.Context, accountScope, requestID string, attemptN int, providerID, reason string) (UndeliveredQuarantineResult, error) {
@@ -365,11 +388,16 @@ UPDATE ledger_request_credits
    AND settled = 0
    AND NOT EXISTS (
        SELECT 1 FROM settlement_receipt_verdicts srv
+         JOIN settlement_route_snapshots srs
+           ON srs.request_id = srv.request_id
+          AND srs.attempt_n = srv.attempt_n
+          AND srs.provider_id = srv.provider_id
+          AND srs.route_snapshot_digest = srv.route_snapshot_digest
         WHERE srv.account_scope_hash = ?
           AND srv.request_id = ledger_request_credits.request_id
           AND srv.provider_id = ledger_request_credits.provider_id
           AND srv.closed = 1
-          AND srv.settlement_outcome = 'verified')`,
+          AND `+payableSettlementOutcomeSQL("srv", "srs")+`)`,
 		reason, time.Now().UTC().Format(time.RFC3339Nano), requestID, attemptN, providerID, scopeHash)
 	if err != nil {
 		return UndeliveredQuarantineNoCredit, err
@@ -386,7 +414,38 @@ UPDATE ledger_request_credits
 	if verified {
 		return UndeliveredQuarantineVerified, nil
 	}
+	relayBlindSettled, err := s.boundRelayBlindSettledAttempt(ctx, accountScope, requestID, providerID)
+	if err != nil {
+		return UndeliveredQuarantineNoCredit, err
+	}
+	if relayBlindSettled {
+		return UndeliveredQuarantineRelayBlindSettled, nil
+	}
 	return UndeliveredQuarantineNoCredit, nil
+}
+
+// boundRelayBlindSettledAttempt reports whether the request's attempt on
+// providerID has a closed relay_blind_settled verdict under the SPEC-022
+// R-7.9 binding, the only way that outcome is payable.
+func (s *Store) boundRelayBlindSettledAttempt(ctx context.Context, accountScope, requestID, providerID string) (bool, error) {
+	if s == nil {
+		return false, nil
+	}
+	var settled bool
+	err := s.db.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM settlement_receipt_verdicts srv
+      JOIN settlement_route_snapshots srs
+        ON srs.request_id = srv.request_id
+       AND srs.attempt_n = srv.attempt_n
+       AND srs.provider_id = srv.provider_id
+       AND srs.route_snapshot_digest = srv.route_snapshot_digest
+     WHERE srv.account_scope_hash = ? AND srv.request_id = ? AND srv.provider_id = ?
+       AND srv.closed = 1
+       AND srv.settlement_outcome = '`+SettlementOutcomeRelayBlindSettled+`'
+       AND `+payableSettlementOutcomeSQL("srv", "srs")+`)`,
+		SettlementAccountScopeHash(accountScope), requestID, providerID).Scan(&settled)
+	return settled, err
 }
 
 // SettlementAttemptEvidence reports whether the request's attempt on
@@ -431,7 +490,7 @@ func prepareSettlementAttemptOutput(attempt SettlementAttemptOutput) (preparedSe
 		if err != nil {
 			return preparedSettlementAttemptOutput{}, err
 		}
-		outputCanonical = sql.NullString{String: string(canonical), Valid: true}
+		outputCanonical = sql.NullString{String: string(canonical), Valid: canonical != nil}
 	}
 	usageHash, usageCanonical, err := attempt.Usage.Digest()
 	if err != nil {

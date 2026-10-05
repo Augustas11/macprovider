@@ -2,9 +2,13 @@ package buyer
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"hash"
+	"io"
+	"net/http"
 	"strings"
 
 	"github.com/augstar/macprovider-coordinator/internal/billing"
@@ -163,4 +167,145 @@ func (b *billingRecorder) recordRelayBlindRouteSnapshot(ctx context.Context, pro
 	}
 	b.relayBlindSettlement = meta
 	return meta, nil
+}
+
+// relayBlindResponseDigest records the SPEC-022 R-3.5 response-body digest:
+// the SHA-256 and count of the exact inference_response_chunk.data bytes the
+// coordinator received, in seq order (ciphertext frames for the privacy
+// class). It replaces the plaintext output hash for an R-13 attempt.
+type relayBlindResponseDigest struct {
+	sum   hash.Hash
+	bytes int64
+}
+
+func newRelayBlindResponseDigest() *relayBlindResponseDigest {
+	return &relayBlindResponseDigest{sum: sha256.New()}
+}
+
+func (d *relayBlindResponseDigest) write(data string) {
+	_, _ = io.WriteString(d.sum, data)
+	d.bytes += int64(len(data))
+}
+
+func (d *relayBlindResponseDigest) output(terminalState string, terminalStateTSUnixMS int64) *billing.SettlementOutput {
+	return &billing.SettlementOutput{
+		Available:                true,
+		OutputPrefixStartByte:    0,
+		OutputPrefixEndByte:      d.bytes,
+		TerminalState:            terminalState,
+		TerminalStateTSUnixMS:    terminalStateTSUnixMS,
+		RelayBlindResponseSHA256: hex.EncodeToString(d.sum.Sum(nil)),
+	}
+}
+
+// relayBlindTerminalState maps the provider's terminal status to the SPEC-015
+// §N.4 state its relay-blind receipt signs.
+func relayBlindTerminalState(status string) string {
+	switch status {
+	case "complete":
+		return billing.TerminalStateNormalDone
+	case "cancelled":
+		return billing.TerminalStateBuyerCancel
+	default:
+		return billing.TerminalStateProviderError
+	}
+}
+
+// relayBlindTerminalTimestamp is the provider's terminal timestamp when it
+// is within the request window, the value its receipt echoes; otherwise the
+// coordinator clock, which a receipt cannot match.
+func (b *billingRecorder) relayBlindTerminalTimestamp(end providerws.InferenceResponseEnd) int64 {
+	now := b.server.now().UTC()
+	if ts, ok := trustedProviderTerminalStateTSInt(end.TerminalStateTSUnixMS, b.startedAt, now); ok {
+		return ts
+	}
+	return now.UnixMilli()
+}
+
+// relayBlindDispatchEvidence reads the persisted SPEC-041-R005 dispatch row
+// the receipt must join (R-13.5); nil when it cannot be read.
+func (s *Server) relayBlindDispatchEvidence(ctx context.Context, providerBinding string) *billing.RelayBlindDispatchEvidence {
+	if s.relayBlind == nil || s.relayBlind.store == nil {
+		return nil
+	}
+	row, err := s.relayBlind.store.LookupReservation(ctx, providerBinding)
+	if err != nil {
+		return nil
+	}
+	privacy := billing.RelayBlindPrivacyClassNone
+	if row.PrivacyClass {
+		privacy = billing.RelayBlindPrivacyClassBetaV1
+	}
+	return &billing.RelayBlindDispatchEvidence{
+		EnvelopeDigest:        row.EnvelopeDigest,
+		ExecutionAuthDigest:   row.ExecutionAuthDigest,
+		ProviderBindingDigest: relayblind.BindingDigest(row.ProviderBinding),
+		KID:                   row.KID,
+		PrivacyClass:          privacy,
+		InputTokenUpperBound:  row.InputTokenUpperBound,
+		MaxOutputTokens:       row.MaxOutputTokens,
+		ValidatedInputTokens:  row.ValidatedInputTokens,
+		CompletionTokens:      row.CompletionTokens,
+	}
+}
+
+// ingestRelayBlindSettlementReceipt records the attempt's SPEC-015 §N.13
+// verdict. An absent receipt takes the ordinary missing-receipt path
+// (pending to the deadline, then quarantined: R-13.6).
+func (b *billingRecorder) ingestRelayBlindSettlementReceipt(provider pool.Provider, envelope, providerBinding string) (billing.SettlementReceiptState, bool, error) {
+	if b.relayBlindSettlement == nil || !b.hasSettlementAttemptN {
+		return billing.SettlementReceiptState{}, false, nil
+	}
+	envelope = strings.TrimSpace(envelope)
+	if envelope == "" {
+		return b.ingestSettlementReceipt(provider, "")
+	}
+	if len(provider.ReceiptPubkey) == 0 {
+		return billing.SettlementReceiptState{}, false, nil
+	}
+	store, _, _ := b.server.billingState()
+	if store == nil {
+		return billing.SettlementReceiptState{}, false, nil
+	}
+	if b.settlementOutputMissingAfterCredit {
+		return billing.SettlementReceiptState{}, false, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), settlementReceiptSynchronousTimeout)
+	defer cancel()
+	identity := billing.SettlementReceiptIdentity{
+		AccountScope: accountScopeForSettlement(b.accountID),
+		RequestID:    b.requestID,
+		AttemptN:     int64(b.settlementAttemptN),
+		ProviderID:   provider.ProviderID,
+	}
+	input := settlementReceiptRecoveryInput{
+		identity:              identity,
+		header:                envelope,
+		providerReceiptPubkey: append([]byte(nil), provider.ReceiptPubkey...),
+		receivedAtUnixMS:      store.ObserveSettlementReceiptForRecovery(identity),
+		relayBlind:            b.server.relayBlindDispatchEvidence(ctx, providerBinding),
+	}
+	return b.persistObservedSettlementReceipt(ctx, store, provider, input)
+}
+
+// finishRelayBlindSettlement ingests the receipt and sets the attempt's
+// finality tuple. A tuple that cannot be decided is an open pending tuple,
+// so the gateway holds for the reconciler instead of debiting locally.
+func (s *Server) finishRelayBlindSettlement(dst http.Header, rec *billingRecorder, provider pool.Provider, providerBinding, envelope string) {
+	state, ok, err := rec.ingestRelayBlindSettlementReceipt(provider, envelope, providerBinding)
+	if err != nil || !ok {
+		if err != nil {
+			s.log.Warn().Err(err).Str("request_id", rec.requestID).Str("provider_id", provider.ProviderID).Msg("relay-blind settlement receipt ingestion failed")
+		}
+		mode, version := rec.settlementPolicyForLedger()
+		state = billing.SettlementReceiptState{
+			SettlementOutcome: billing.SettlementOutcomePending, ReceiptResult: billing.SettlementReceiptResultInconclusive,
+			Reason: "receipt_verdict_pending", RouteSnapshotMode: mode, RouteSnapshotPolicyVersion: version,
+		}
+	}
+	setInternalSettlementOutcomeHeaders(dst, rec, state)
+	if !rec.settlementFinalityMACActive && negotiatedSettlementFinality(rec) {
+		// Header finality written before the body: sign it in place.
+		signSettlementFinality(dst, rec)
+	}
 }

@@ -616,6 +616,8 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 			writeRelayBlindError(w, "relay_blind_required_unavailable", "Relay-blind settlement could not be recorded before dispatch")
 			return
 		}
+		// The gateway binds its settlement hold to this coordinator id.
+		w.Header().Set(internalRequestIDHeader, rec.requestID)
 	}
 	rec.markProviderDispatched()
 	ctx, cancel := context.WithTimeout(r.Context(), s.requestTimeout)
@@ -722,6 +724,7 @@ func relayBlindEvidence(value providerws.RelayBlindValidation) relayblind.Eviden
 
 func (s *Server) forwardRelayBlindNonStreaming(w http.ResponseWriter, r *http.Request, rec *billingRecorder, provider pool.Provider, reservation relayblind.Reservation, relay *providerws.RelayStream, inputTokens int64) {
 	var output bytes.Buffer
+	responseDigest := newRelayBlindResponseDigest()
 	for {
 		select {
 		case chunk, ok := <-relay.Chunks:
@@ -732,6 +735,7 @@ func (s *Server) forwardRelayBlindNonStreaming(w http.ResponseWriter, r *http.Re
 					return
 				}
 				output.WriteString(chunk.Data)
+				responseDigest.write(chunk.Data)
 			}
 		case end := <-relay.Done:
 			if end.RelayBlindValidation == nil {
@@ -771,7 +775,11 @@ func (s *Server) forwardRelayBlindNonStreaming(w http.ResponseWriter, r *http.Re
 			}
 			prompt, complete := inputTokens, completion
 			var settlementOutput *billing.SettlementOutput
-			if reservation.PrivacyClass {
+			if rec.relayBlindSettlement != nil {
+				// SPEC-022 R-3.5: the response-body digest, never a
+				// plaintext output hash, for an R-13 attempt.
+				settlementOutput = responseDigest.output(relayBlindTerminalState(end.Status), rec.relayBlindTerminalTimestamp(end))
+			} else if reservation.PrivacyClass {
 				settlementOutput = settlementOutputUnavailableFor(terminalStateFromAttempt(status, end.Error, code))
 			} else {
 				var validOutput bool
@@ -783,6 +791,9 @@ func (s *Server) forwardRelayBlindNonStreaming(w http.ResponseWriter, r *http.Re
 			if err := rec.logProviderRowWithEstimateAndOutput(provider, status, &prompt, &complete, end.Error, code, 0, nil, settlementOutput); err != nil {
 				writeRelayBlindError(w, "relay_blind_committed_failed", "Could not durably record relay-blind execution")
 				return
+			}
+			if rec.relayBlindSettlement != nil {
+				s.finishRelayBlindSettlement(w.Header(), rec, provider, reservation.ProviderBinding, end.RelayBlindSettlementReceipt)
 			}
 			if status != http.StatusOK {
 				writeRelayBlindError(w, code, "Provider relay-blind execution failed after commit")
@@ -807,6 +818,16 @@ func (s *Server) forwardRelayBlindNonStreaming(w http.ResponseWriter, r *http.Re
 
 func (s *Server) forwardRelayBlindStreaming(w http.ResponseWriter, r *http.Request, rec *billingRecorder, provider pool.Provider, reservation relayblind.Reservation, relay *providerws.RelayStream, inputTokens int64) {
 	w.Header().Set("Content-Type", "text/event-stream")
+	responseDigest := newRelayBlindResponseDigest()
+	if rec.relayBlindSettlement != nil {
+		// The R-13 verdict is known only after the terminal frame, so it
+		// travels as trailers (MAC'd for a negotiating gateway).
+		if negotiatedSettlementFinality(rec) {
+			declareNonStreamingSettlementTrailers(w.Header(), rec)
+		} else {
+			declareInternalSettlementOutcomeTrailers(w.Header(), rec)
+		}
+	}
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
 	tracker := newSettlementStreamOutputTracker()
@@ -826,6 +847,7 @@ func (s *Server) forwardRelayBlindStreaming(w http.ResponseWriter, r *http.Reque
 		case chunk, ok := <-relay.Chunks:
 			if ok {
 				streamedBytes += int64(len(chunk.Data))
+				responseDigest.write(chunk.Data)
 				if streamedBytes > maxUpstreamResponseBodyBytes {
 					relay.Cancel("response_byte_cap_exceeded")
 					_ = s.relayBlind.store.MarkUnknownPostdispatch(context.Background(), reservation.ProviderBinding, "relay_blind_committed_failed", s.now())
@@ -885,10 +907,14 @@ func (s *Server) forwardRelayBlindStreaming(w http.ResponseWriter, r *http.Reque
 			}
 			prompt, complete := inputTokens, completion
 			settlementOutput := tracker.output(terminalStateFromAttempt(status, end.Error, code))
-			if reservation.PrivacyClass {
+			if rec.relayBlindSettlement != nil {
+				settlementOutput = responseDigest.output(relayBlindTerminalState(end.Status), rec.relayBlindTerminalTimestamp(end))
+			} else if reservation.PrivacyClass {
 				settlementOutput = settlementOutputUnavailableFor(terminalStateFromAttempt(status, end.Error, code))
 			}
-			_ = rec.logProviderRowWithEstimateAndOutput(provider, status, &prompt, &complete, end.Error, code, 0, nil, settlementOutput)
+			if err := rec.logProviderRowWithEstimateAndOutput(provider, status, &prompt, &complete, end.Error, code, 0, nil, settlementOutput); err == nil && rec.relayBlindSettlement != nil {
+				s.finishRelayBlindSettlement(w.Header(), rec, provider, reservation.ProviderBinding, end.RelayBlindSettlementReceipt)
+			}
 			return
 		case <-relay.Errors:
 			_ = s.relayBlind.store.MarkUnknownPostdispatch(context.Background(), reservation.ProviderBinding, "relay_blind_execution_uncertain", s.now())
@@ -922,6 +948,15 @@ func (s *Server) recordRelayBlindUnknown(rec *billingRecorder, provider pool.Pro
 			bounded := rec.relayBlind.MaxOutputTokens
 			estimate = &bounded
 		}
+	}
+	if rec != nil && rec.relayBlindSettlement != nil {
+		// SPEC-022 R-3.5 / R-13.6: an R-13 attempt never persists a plaintext
+		// output hash; without its terminal receipt it can only quarantine.
+		terminal := billing.TerminalStateProviderError
+		if output != nil && output.TerminalState != "" {
+			terminal = output.TerminalState
+		}
+		output = settlementOutputUnavailableFor(terminal)
 	}
 	_ = rec.logProviderRowWithEstimateAndOutput(provider, status, inputTokens, nil, message, "relay_blind_committed_failed", 0, estimate, output)
 }

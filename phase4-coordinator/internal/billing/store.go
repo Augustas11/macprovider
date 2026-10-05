@@ -488,7 +488,7 @@ CREATE TABLE IF NOT EXISTS settlement_receipt_verdicts (
     receipt_present INTEGER NOT NULL CHECK(receipt_present IN (0,1)),
     receipt_version TEXT NULL,
     receipt_result TEXT NOT NULL CHECK(receipt_result IN ('valid','invalid','inconclusive')),
-    settlement_outcome TEXT NOT NULL CHECK(settlement_outcome IN ('pending','verified','quarantined','zero_settled')),
+    settlement_outcome TEXT NOT NULL CHECK(settlement_outcome IN ('pending','verified','quarantined','zero_settled','relay_blind_settled')),
     reason TEXT NOT NULL,
     idempotency_status TEXT NOT NULL CHECK(idempotency_status IN ('pending','pending_updated','first_terminal','terminal_after_pending','terminal_noop')),
     closed INTEGER NOT NULL CHECK(closed IN (0,1)),
@@ -508,7 +508,7 @@ CREATE TABLE IF NOT EXISTS settlement_receipt_verdicts (
     expected_catalog_model_hash TEXT NOT NULL CHECK(length(expected_catalog_model_hash) = 64 AND expected_catalog_model_hash NOT GLOB '*[^0-9a-f]*'),
     model_id TEXT NOT NULL,
     model_hash TEXT NULL CHECK(model_hash IS NULL OR (length(model_hash) = 64 AND model_hash NOT GLOB '*[^0-9a-f]*')),
-    receipt_profile TEXT NOT NULL CHECK(receipt_profile = 'spec015-v0.4'),
+    receipt_profile TEXT NOT NULL CHECK(receipt_profile IN ('spec015-v0.4','relay-blind-settlement-v1')),
     buyer_debit_outcome TEXT NOT NULL CHECK(buyer_debit_outcome = 'no_money_movement_step5'),
     provider_settlement_outcome TEXT NOT NULL CHECK(provider_settlement_outcome = 'no_money_movement_step5'),
     payout_exclusion_outcome TEXT NOT NULL CHECK(payout_exclusion_outcome = 'excluded_until_spec022_verified'),
@@ -544,7 +544,7 @@ CREATE TABLE IF NOT EXISTS settlement_receipt_audit_outbox (
     receipt_present INTEGER NOT NULL DEFAULT 0 CHECK(receipt_present IN (0,1)),
     receipt_version TEXT NULL,
     receipt_result TEXT NOT NULL DEFAULT 'inconclusive' CHECK(receipt_result IN ('valid','invalid','inconclusive')),
-    settlement_outcome TEXT NOT NULL DEFAULT 'pending' CHECK(settlement_outcome IN ('pending','verified','quarantined','zero_settled')),
+    settlement_outcome TEXT NOT NULL DEFAULT 'pending' CHECK(settlement_outcome IN ('pending','verified','quarantined','zero_settled','relay_blind_settled')),
     reason TEXT NOT NULL DEFAULT '',
     closed INTEGER NOT NULL DEFAULT 0 CHECK(closed IN (0,1)),
     terminal_state TEXT NOT NULL DEFAULT '',
@@ -632,6 +632,9 @@ CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutio
 		return err
 	}
 	if err := s.ensureSettlementAttemptOutputUsageSourceVocabulary(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureRelayBlindSettlementOutcomeVocabulary(ctx); err != nil {
 		return err
 	}
 	if err := s.normalizeBillingTimeTextColumns(ctx); err != nil {
@@ -735,7 +738,7 @@ func (s *Store) ensureSettlementReceiptAuditOutboxSnapshotColumns(ctx context.Co
 		{"receipt_present", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN receipt_present INTEGER NOT NULL DEFAULT 0 CHECK(receipt_present IN (0,1))`},
 		{"receipt_version", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN receipt_version TEXT NULL`},
 		{"receipt_result", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN receipt_result TEXT NOT NULL DEFAULT 'inconclusive' CHECK(receipt_result IN ('valid','invalid','inconclusive'))`},
-		{"settlement_outcome", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN settlement_outcome TEXT NOT NULL DEFAULT 'pending' CHECK(settlement_outcome IN ('pending','verified','quarantined','zero_settled'))`},
+		{"settlement_outcome", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN settlement_outcome TEXT NOT NULL DEFAULT 'pending' CHECK(settlement_outcome IN ('pending','verified','quarantined','zero_settled','relay_blind_settled'))`},
 		{"reason", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN reason TEXT NOT NULL DEFAULT ''`},
 		{"closed", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN closed INTEGER NOT NULL DEFAULT 0 CHECK(closed IN (0,1))`},
 		{"terminal_state", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN terminal_state TEXT NOT NULL DEFAULT ''`},
@@ -1448,7 +1451,7 @@ SELECT lrc.*
                   AND srv.route_snapshot_mode = 'enforce'
                   AND srv.route_snapshot_policy_version = lrc.settlement_policy_version
                   AND srv.closed = 1
-                  AND srv.settlement_outcome = 'verified'
+                  AND `+payableSettlementOutcomeSQL("srv", "srs")+`
                   AND sao.overlapping_or_duplicate = 0
            )
        )

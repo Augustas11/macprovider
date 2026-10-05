@@ -592,6 +592,13 @@ func (b *billingRecorder) ingestSettlementReceipt(provider pool.Provider, header
 		}
 		return state, err == nil, err
 	}
+	return b.persistObservedSettlementReceipt(ctx, store, provider, input)
+}
+
+// persistObservedSettlementReceipt records a receipt the coordinator already
+// observed (the sweep fence is installed), deferring transient store
+// pressure to the bounded recovery queue.
+func (b *billingRecorder) persistObservedSettlementReceipt(ctx context.Context, store *billing.Store, provider pool.Provider, input settlementReceiptRecoveryInput) (billing.SettlementReceiptState, bool, error) {
 	state, err := b.server.persistSettlementReceipt(ctx, store, input)
 	if err != nil {
 		if settlementReceiptRetryable(err) {

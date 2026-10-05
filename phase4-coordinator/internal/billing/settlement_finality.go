@@ -35,6 +35,10 @@ type RequestSettlementFinality struct {
 	QuarantinedAttempts      int64  `json:"quarantined_attempts"`
 	ZeroSettledAttempts      int64  `json:"zero_settled_attempts"`
 	OverlappingBlockedTokens int64  `json:"overlapping_blocked_tokens,omitempty"`
+	// RelayBlindSettledAttempts counts SPEC-022 R-13 attempts that closed
+	// relay_blind_settled under the R-7.9 binding. They are never counted as
+	// verified attempts.
+	RelayBlindSettledAttempts int64 `json:"relay_blind_settled_attempts"`
 }
 
 type requestSettlementVerdictRow struct {
@@ -50,6 +54,10 @@ type requestSettlementVerdictRow struct {
 	// noSnapshot marks an enforce credit recorded without a route snapshot
 	// (store pressure): the snapshot scope check does not apply to it.
 	noSnapshot bool
+	// relayBlindBound is the SPEC-022 R-7.9 binding of a relay_blind_settled
+	// verdict: relay-blind entrypoint and basis on its snapshot, relay-blind
+	// profile on the verdict.
+	relayBlindBound bool
 }
 
 // SettlementEvidenceMissingReason closes an enforce-mode attempt whose
@@ -317,6 +325,47 @@ func (s *Store) RequestSettlementFinality(ctx context.Context, accountScope, req
 				finality.PendingAttempts++
 				finality.PendingDeadlineUnixMS = minPositiveDeadline(finality.PendingDeadlineUnixMS, row.pendingDeadlineUnixMS)
 			}
+		case SettlementOutcomeRelayBlindSettled:
+			if !row.closed || row.receiptResult != SettlementReceiptResultValid {
+				finality.PendingAttempts++
+				finality.PendingDeadlineUnixMS = minPositiveDeadline(finality.PendingDeadlineUnixMS, row.pendingDeadlineUnixMS)
+				continue
+			}
+			if !row.relayBlindBound {
+				// R-7.9: not payable without the entrypoint, basis, and
+				// profile binding; the buyer is refunded.
+				finality.QuarantinedAttempts++
+				if firstTerminalRefund == nil {
+					refund := row
+					refund.settlementOutcome = SettlementOutcomeQuarantined
+					refund.receiptResult = SettlementReceiptResultInvalid
+					refund.reason = "relay_blind_settlement_unbound"
+					firstTerminalRefund = &refund
+				}
+				continue
+			}
+			usage, blocked, _, err := s.requestSettlementUsage(ctx, accountScope, requestID, row.attemptN, row.providerID)
+			if errors.Is(err, errVerifiedCreditQuarantined) {
+				finality.ZeroSettledAttempts++
+				if firstTerminalRefund == nil {
+					refund := row
+					refund.settlementOutcome = SettlementOutcomeZeroSettled
+					refund.receiptResult = SettlementReceiptResultValid
+					refund.reason = VerifiedCreditQuarantinedReason
+					firstTerminalRefund = &refund
+				}
+				continue
+			}
+			if err != nil {
+				return RequestSettlementFinality{}, false, err
+			}
+			if blocked {
+				finality.OverlappingBlockedTokens += usage.BillableInputTokens + usage.BillableOutputTokens
+				continue
+			}
+			finality.PromptTokens += usage.BillableInputTokens
+			finality.CompletionTokens += usage.BillableOutputTokens
+			finality.RelayBlindSettledAttempts++
 		case SettlementOutcomeQuarantined:
 			finality.QuarantinedAttempts++
 			if firstTerminalRefund == nil {
@@ -355,6 +404,9 @@ func (s *Store) RequestSettlementFinality(ctx context.Context, accountScope, req
 		finality.Reason = "receipt_verdict_pending"
 		finality.Closed = false
 		return finality, true, nil
+	}
+	if finality.RelayBlindSettledAttempts > 0 {
+		return relayBlindSettledFinality(finality), true, nil
 	}
 	if finality.VerifiedAttempts > 0 {
 		finality.Outcome = SettlementOutcomeVerified
@@ -419,11 +471,19 @@ func (s *Store) requestSettlementVerdicts(ctx context.Context, accountScope, req
 	ctx, cancel := context.WithTimeout(ctx, settlementFinalityReadTimeout)
 	defer cancel()
 	rows, err := s.reader().QueryContext(ctx, `
-SELECT attempt_n, provider_id, receipt_result, settlement_outcome, reason, closed,
-       pending_deadline_unix_ms, route_snapshot_policy_version, route_snapshot_mode
-  FROM settlement_receipt_verdicts
- WHERE account_scope_hash = ? AND request_id = ?
- ORDER BY attempt_n ASC, id ASC`, SettlementAccountScopeHash(accountScope), requestID)
+SELECT srv.attempt_n, srv.provider_id, srv.receipt_result, srv.settlement_outcome, srv.reason, srv.closed,
+       srv.pending_deadline_unix_ms, srv.route_snapshot_policy_version, srv.route_snapshot_mode,
+       srv.receipt_profile, COALESCE(srv.receipt_version, ''), srv.paid_entrypoint,
+       COALESCE(srs.paid_entrypoint, ''), COALESCE(srs.prompt_hash_basis, '')
+  FROM settlement_receipt_verdicts srv
+  LEFT JOIN settlement_route_snapshots srs
+    ON srs.account_scope = ?
+   AND srs.request_id = srv.request_id
+   AND srs.attempt_n = srv.attempt_n
+   AND srs.provider_id = srv.provider_id
+   AND srs.route_snapshot_digest = srv.route_snapshot_digest
+ WHERE srv.account_scope_hash = ? AND srv.request_id = ?
+ ORDER BY srv.attempt_n ASC, srv.id ASC`, accountScope, SettlementAccountScopeHash(accountScope), requestID)
 	if err != nil {
 		return nil, err
 	}
@@ -432,13 +492,40 @@ SELECT attempt_n, provider_id, receipt_result, settlement_outcome, reason, close
 	for rows.Next() {
 		var row requestSettlementVerdictRow
 		var closed int
-		if err := rows.Scan(&row.attemptN, &row.providerID, &row.receiptResult, &row.settlementOutcome, &row.reason, &closed, &row.pendingDeadlineUnixMS, &row.policyVersion, &row.mode); err != nil {
+		var profile, version, verdictEntrypoint, snapshotEntrypoint, snapshotBasis string
+		if err := rows.Scan(&row.attemptN, &row.providerID, &row.receiptResult, &row.settlementOutcome, &row.reason, &closed, &row.pendingDeadlineUnixMS, &row.policyVersion, &row.mode,
+			&profile, &version, &verdictEntrypoint, &snapshotEntrypoint, &snapshotBasis); err != nil {
 			return nil, err
 		}
 		row.closed = closed == 1
+		row.relayBlindBound = relayBlindSettledBound(profile, version, verdictEntrypoint, snapshotEntrypoint, snapshotBasis)
 		out = append(out, row)
 	}
 	return out, rows.Err()
+}
+
+// relayBlindSettledFinality closes a request whose payable attempts settled
+// relay_blind_settled. A request never mixes it with verified: relay-blind
+// work has one pinned attempt and no failover, so any mix holds.
+func relayBlindSettledFinality(finality RequestSettlementFinality) RequestSettlementFinality {
+	if finality.VerifiedAttempts > 0 {
+		finality.Outcome = SettlementOutcomePending
+		finality.ReceiptResult = SettlementReceiptResultInconclusive
+		finality.Reason = "mixed_settlement_outcome"
+		finality.Closed = false
+		finality.TokenSource = ""
+		finality.PromptTokens = 0
+		finality.CompletionTokens = 0
+		finality.TotalTokens = 0
+		return finality
+	}
+	finality.Outcome = SettlementOutcomeRelayBlindSettled
+	finality.ReceiptResult = SettlementReceiptResultValid
+	finality.Reason = "relay_blind_settlement"
+	finality.Closed = true
+	finality.TokenSource = UsageSourceCoordinatorObserved
+	finality.TotalTokens = finality.PromptTokens + finality.CompletionTokens
+	return finality
 }
 
 // requestSettlementAttemptsWithoutVerdict recovers the finality boundary from
@@ -842,6 +929,7 @@ func aggregateExternalRequestFinality(externalRequestID string, finalities []Req
 		out.PendingAttempts += finality.PendingAttempts
 		out.QuarantinedAttempts += finality.QuarantinedAttempts
 		out.ZeroSettledAttempts += finality.ZeroSettledAttempts
+		out.RelayBlindSettledAttempts += finality.RelayBlindSettledAttempts
 		out.OverlappingBlockedTokens += finality.OverlappingBlockedTokens
 		out.PendingDeadlineUnixMS = minPositiveDeadline(out.PendingDeadlineUnixMS, finality.PendingDeadlineUnixMS)
 		out.PromptTokens += finality.PromptTokens
@@ -850,6 +938,7 @@ func aggregateExternalRequestFinality(externalRequestID string, finalities []Req
 		if !hasTerminalRefund &&
 			finality.Closed &&
 			finality.Outcome != SettlementOutcomeVerified &&
+			finality.Outcome != SettlementOutcomeRelayBlindSettled &&
 			(finality.QuarantinedAttempts > 0 || finality.ZeroSettledAttempts > 0) {
 			firstTerminalRefund = finality
 			hasTerminalRefund = true
@@ -861,6 +950,9 @@ func aggregateExternalRequestFinality(externalRequestID string, finalities []Req
 		out.Reason = "receipt_verdict_pending"
 		out.Closed = false
 		return out
+	}
+	if out.RelayBlindSettledAttempts > 0 {
+		return relayBlindSettledFinality(out)
 	}
 	if out.VerifiedAttempts > 0 {
 		out.Outcome = SettlementOutcomeVerified

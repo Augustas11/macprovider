@@ -1117,7 +1117,6 @@ SELECT sao.usage_canonical_json
    AND srv.route_snapshot_mode = 'enforce'
    AND srv.route_snapshot_policy_version = lrc.settlement_policy_version
    AND srv.closed = 1
-   AND srv.settlement_outcome = 'verified'
   JOIN settlement_route_snapshots srs
     ON srs.request_id = lrc.request_id
    AND srs.attempt_n = lrc.attempt_n
@@ -1132,6 +1131,7 @@ SELECT sao.usage_canonical_json
    AND sao.provider_id = srs.provider_id
    AND sao.overlapping_or_duplicate = 0
  WHERE lrc.id = ?
+   AND `+payableSettlementOutcomeSQL("srv", "srs")+`
    AND lrc.settlement_policy_mode = 'enforce'
    AND lrc.settlement_account_scope_hash IS NOT NULL
    AND lrc.settlement_policy_version IS NOT NULL
