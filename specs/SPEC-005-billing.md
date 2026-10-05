@@ -1,7 +1,14 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.6.13 (2026-10-03, atomic attempt-output evidence journal)
+**Version:** 0.6.14 (2026-10-05, relay-blind settled outcome note)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.7, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.39, SPEC-024 v0.2.7 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.18.0 / SPEC-005-R011 / SPEC-005-R013 (SPEC-023-R019) is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
+
+**Change log v0.6.14 (2026-10-05, issue #1851):** Note only; no arithmetic,
+ledger-owner, or formula change. The §7.5a enforce payable gate gains a second
+admitted outcome, SPEC-022 `relay_blind_settled`, payable only under the
+SPEC-022 R-7.9 entrypoint, basis, and profile binding. The v0.6.5 relay-blind
+composition still holds for `off` and `observe`. Under `enforce`, relay-blind
+work settles only through SPEC-022 R-13.
 
 **Change log v0.6.13 (2026-10-03, issue #1793):** The hot-path transaction
 atomically commits a compact immutable settlement-attempt-output journal row
@@ -1711,6 +1718,15 @@ version, a verified outcome, and no overlapping row** (`internal/billing/store.g
 `settlement_account_scope_hash` is the 64-hex account partition the enforce gate matches on. This is
 the SPEC-022 settlement-policy enforcement surface; SPEC-022 is authoritative on the policy
 lifecycle, SPEC-005 documents only how the columns gate the payable projection.
+
+*Note (v0.6.14, #1851):* SPEC-022 R-7.9 adds a second admitted outcome to that
+enforce gate. A `relay_blind_settled` verdict is payable only when its route
+snapshot carries the relay-blind entrypoint and the `relay_blind_envelope_digest_v1`
+basis and its receipt is `relay-blind-settlement-v1`. All the other predicates
+above apply unchanged. The same admission applies wherever this section's gate
+is materialized, including the §7 settlement sweep. Pricing, split, rounding,
+ceilings, and the `quarantined = 0` basis are unchanged. Verified-work counters
+and rewards stay `verified`-only and are owned by SPEC-022.
 
 ### 7.5b Verified-receipt finalization (re-pricing exception, v0.6)
 

@@ -1,6 +1,19 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.27 (2026-09-30, authenticated dispatch output limit)
+**Version:** 1.9.28 (2026-10-05, relay-blind settlement receipt wire)
+
+**Change log v1.9.28 (2026-10-05, relay-blind settlement receipt wire):**
+Adds `SPEC-001-R005` (#1851) with three closed wire additions for the SPEC-022
+R-13 relay-blind settlement lane. The provider advertises
+`tier2_capabilities.relay_blind_settlement_receipt_v1: true` in its
+initial-stage `auth_request`. A relay-blind `inference_request` may carry a
+`relay_blind_settlement` metadata object. It is distinct from the SPEC-015 v0.4
+`settlement` object, which a relay-blind dispatch still must not carry. The
+terminal `inference_response_end` carries one
+`relay_blind_settlement_receipt` (SPEC-015 §N.13). Plaintext frames, the v0.4
+`settlement` and `receipt` fields, and older binaries are unchanged. Under
+SPEC-022 `enforce`, a session without the capability never receives
+relay-blind work.
 
 **Change log v1.9.27 (2026-09-30, authenticated dispatch output limit):**
 Adds optional coordinator dispatch metadata `max_output_tokens` to cleartext and
@@ -2743,6 +2756,7 @@ provider.
 | `stream` | boolean | Yes | Whether the buyer requested streaming. Determines whether the provider sends `inference_response_chunk` per token (true) or a single chunk with the full response (false). |
 | `max_output_tokens` | integer | No | Authenticated coordinator dispatch ceiling, >= 0. The provider uses `min(body.max_tokens, max_output_tokens)` when the body is explicit and uses this value when the body omits `max_tokens`. This field is not part of `body` or the SPEC-015 prompt hash. Under SPEC-008 it is inside the authenticated encrypted plaintext. |
 | `body` | string | Yes | The buyer's original request body, JSON-serialized as a string. The provider parses this as if it were a `POST /v1/chat/completions` request body per § 6.2. |
+| `relay_blind_settlement` | object | No | (v1.9.28) Closed relay-blind settlement metadata, only on a relay-blind dispatch with an R-13 route snapshot. Schema and rules: SPEC-001-R005. |
 
 **Why `body` is a string, not an embedded object:** The buyer's
 request may contain fields the coordinator does not parse
@@ -2818,6 +2832,7 @@ Sent by the provider when inference is complete, cancelled, or failed.
 | `chunks_sent` | integer | Yes | Total `inference_response_chunk` messages sent for this request. Coordinator verifies it received all chunks. |
 | `usage` | object | No | Token usage. Present when `status` is `"complete"` and when `status` is `"cancelled"` in response to `cancel_request`. Contains `prompt_tokens`, `completion_tokens`, `total_tokens`. |
 | `error` | string | No | Human-readable error message. Present when `status` starts with `"error_"`. |
+| `relay_blind_settlement_receipt` | string | No | (v1.9.28) Exactly one SPEC-015 §N.13 receipt envelope, present on the terminal frame exactly when the dispatch carried valid `relay_blind_settlement` (SPEC-001-R005). |
 
 When `inference_response_end` is sent in response to a `cancel_request`
 (per § 6.6's cancel handling), the provider MUST include a `usage` field
@@ -2842,6 +2857,67 @@ fall back to estimation when usage is absent (gateway example:
 **Invariant:** After sending `inference_response_end`, the provider
 MUST NOT send any more `inference_response_chunk` messages for that
 `request_id`.
+
+#### Relay-blind settlement receipt wire (NEW in v1.9.28)
+
+**SPEC-001-R005 — Relay-blind settlement receipt wire.** The provider and
+coordinator MUST implement exactly these three additions for the SPEC-022 R-13
+relay-blind settlement lane, and nothing else on these frames changes:
+
+1. **Capability.** A provider that implements this requirement and SPEC-015
+   §N.13 MUST advertise `tier2_capabilities.relay_blind_settlement_receipt_v1:
+   true` in its initial-stage `auth_request` (§6.15.1). The coordinator does
+   not echo it. A legacy `hello` cannot carry it. Under SPEC-022 `enforce`,
+   the coordinator MUST NOT reserve or dispatch relay-blind work to a session
+   that did not advertise it (SPEC-022 R-13.2).
+
+2. **`relay_blind_settlement` on `inference_request` (C→P).** The coordinator
+   attaches this closed object only to a relay-blind dispatch
+   (`body_encoding: relay-blind-request-v1`) for which it committed an R-13
+   route snapshot. Under SPEC-008 it is inside the authenticated encrypted
+   payload. It has exactly these members, all required and non-null; unknown
+   or duplicate members are invalid:
+
+   | Field | Type | Value |
+   |---|---|---|
+   | `account_scope` | string | Snapshot `account_scope`. |
+   | `request_id` | string | Coordinator settlement request id, the ledger row's id. It may differ from the frame `request_id`, which is the SPEC-041 envelope `request_id`. |
+   | `attempt_n` | integer | Snapshot `attempt_n`, >= 0. |
+   | `provider_id` | string | Snapshot `provider_id`; MUST equal the provider's own id. |
+   | `provider_receipt_key_id` | string | Snapshot-pinned `ed25519-sha256:<hex>`; MUST equal the provider's own receipt key id. |
+   | `model_id` | string | Snapshot `model_id`; MUST resolve to the runtime handle SPEC-041-R005 pins. |
+   | `expected_catalog_model_hash` | string | 64 lowercase hex. |
+   | `catalog_id` | string | Snapshot `catalog_id`. |
+   | `catalog_body_digest` | string | 64 lowercase hex. |
+   | `route_snapshot_digest` | string | 64 lowercase hex. |
+   | `route_snapshot_policy_version` | string | Snapshot policy version. |
+   | `route_snapshot_mode` | string | `observe` or `enforce`. |
+   | `pending_deadline_seconds` | integer | 1..900. |
+   | `paid_entrypoint` | string | Exactly `coordinator_buyer_v1_relay_blind_chat_completions`. |
+   | `prompt_hash_basis` | string | Exactly `relay_blind_envelope_digest_v1`. |
+   | `relay_blind_envelope_digest` | string | SPEC-041 `envelope_digest`; MUST equal `relay_blind_context.envelope_digest` and the provider's own recomputation over `body`. |
+
+   The `settlement` member stays forbidden on a relay-blind dispatch, and
+   `relay_blind_settlement` is forbidden on a plaintext dispatch. If the
+   provider gets either one, or a malformed or mismatched
+   `relay_blind_settlement`, it MUST reject the dispatch before decryption
+   and before the SPEC-041-R005 execution claim. It rejects the same way it
+   rejects a `settlement` member on relay-blind dispatch today. A dispatch
+   without `relay_blind_settlement` produces no receipt. This is the
+   `observe`/`off` path.
+
+3. **`relay_blind_settlement_receipt` on `inference_response_end` (P→C).**
+   For a dispatch that carried valid `relay_blind_settlement` and passed the
+   execution claim, the provider MUST put exactly one SPEC-015 §N.13 envelope
+   string in this member of the terminal frame. This applies to every
+   terminal status (`complete`, `cancelled`, `error_*`). It is never sent on
+   a chunk, a validation frame, or any other frame. The existing `receipt`
+   member MUST be absent on relay-blind terminal frames. The coordinator
+   ingests the value internally and MUST NOT copy it to any buyer header,
+   body, or SSE event. Under SPEC-008 it is inside the protected payload.
+
+The coordinator MUST NOT treat a provider without the capability as an error
+under `observe` or `off`. Relay-blind behavior there is unchanged.
 
 #### cancel_request (C→P)
 
@@ -4066,6 +4142,9 @@ Initial-stage fields:
   beyond the §6.7.1 `{encrypted_leg, attestation, aead_suites}` schema. SPEC-008
   defines only the first three capability fields, so SPEC-001 carries this one as
   transport owner of last resort (schema below).
+- `tier2_capabilities.relay_blind_settlement_receipt_v1: true` — (v1.9.28)
+  provider support for the SPEC-001-R005 relay-blind settlement wire and the
+  SPEC-015 §N.13 receipt. Advertise-only; the coordinator does not echo it.
 - `tier2_capabilities.in_band_aead_rekey_v1: true` — provider support for the
   single-WebSocket four-frame fresh-epoch handoff in SPEC-008 v0.5 §6.9. The
   coordinator confirms selection at

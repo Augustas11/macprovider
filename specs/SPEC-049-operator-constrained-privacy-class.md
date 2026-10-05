@@ -1,6 +1,6 @@
 # SPEC-049 - Operator-Constrained Privacy Class
 
-**Version:** 0.1.2
+**Version:** 0.1.3
 Status: draft
 Owner: @Augustas11
 Issue: https://github.com/Augustas11/macprovider/issues/1749
@@ -10,7 +10,7 @@ Audit history: v0.1.0 is the initial default-off Beta contract. It does not prom
 {
   "spec_id": "SPEC-049",
   "title": "Operator-Constrained Privacy Class",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -115,8 +115,8 @@ SPEC-049 owns authority domain `operator-constrained-privacy-class`: the privacy
 - **SPEC-041** owns relay-blind identities, key records, pins, envelopes, the transcript, reservations, consume, opaque dispatch, the provider execution journal, accounting, and the relay-blind error inventory. SPEC-049 extends SPEC-041 closed schemas only by the named additions in SPEC-041 §2 (`privacy_key_records`, `privacy-class-reservation-v1`, the `privacy_class` dispatch key, and the two privacy rejection `error_code` values), only when the privacy class is requested. Every SPEC-041 obligation continues to apply to privacy-class work; SPEC-049 only adds constraints. A privacy-class request is a SPEC-041 relay-blind request plus the SPEC-049 marker.
 - **SPEC-042** owns pool selection. SPEC-042-R009 stays in force: every pool-scoped privacy-class request is rejected (SPEC-049-R022).
 - **SPEC-008** owns provider Tier-2 trust evidence, including the Secure Enclave session key. SPEC-049 consumes it only as a cross-check (SPEC-049-R004) and does not create a new trust tier. The posture key pin is an operator-pinned privacy identity, not an admission credential.
-- **SPEC-015** owns receipts. The v0.4 tuple is unchanged; privacy-class work emits no positive receipt (SPEC-041-R006).
-- **SPEC-022** owns verified-model settlement. Unchanged; privacy-class work is excluded as relay-blind work is.
+- **SPEC-015** owns receipts. The v0.4 tuple is unchanged and privacy-class work never emits one. Its only receipt is the content-free §N.13 `relay-blind-settlement-v1` receipt (SPEC-049-R010).
+- **SPEC-022** owns verified-model settlement. Privacy-class work is excluded from `verified` as relay-blind work is. Under `enforce` it settles only through the SPEC-022 R-13 relay-blind lane as `relay_blind_settled`.
 - **SPEC-005** owns settlement arithmetic. Unchanged.
 - **SPEC-001** owns provider wire framing. SPEC-049 adds the `privacy_class` field on `inference_request` and the `privacy_posture_challenge` / `privacy_posture_response` messages and `privacy_key_records` advertisement field.
 - **SPEC-002** owns assignment and lifecycle. SPEC-049 adds gate checks without bypassing them.
@@ -356,7 +356,7 @@ Only the in-process `native_mlx` runtime MAY serve privacy-class work. The provi
 
 ### SPEC-049-R010 - Sink suppression
 
-For every privacy-class request the provider MUST produce no SPEC-015 receipt, no KV telemetry, no egress or performance trace, no conversation-cache entry or lookup, and no KV disk-tier write. No component MAY write prompt bytes, completion bytes, decrypted request JSON, frame plaintext, shared secrets, or key bytes to any log, trace, error message, metric label, crash breadcrumb, SQLite store, or state file. Errors carry bounded codes and digests only.
+For every privacy-class request the provider MUST produce no SPEC-015 v0.4 receipt and no receipt containing any value derived from plaintext request or response content, no KV telemetry, no egress or performance trace, no conversation-cache entry or lookup, and no KV disk-tier write. No component MAY write prompt bytes, completion bytes, decrypted request JSON, frame plaintext, shared secrets, or key bytes to any log, trace, error message, metric label, crash breadcrumb, SQLite store, or state file. Errors carry bounded codes and digests only. When the dispatch carries SPEC-001-R005 `relay_blind_settlement` metadata, the provider MUST produce exactly one SPEC-015 §N.13 `relay-blind-settlement-v1` receipt for the attempt and no other receipt artifact. Its response digest covers the §4.8 ciphertext frames, and it is never written to a log, trace, or state file.
 
 ### SPEC-049-R011 - Plaintext lifetime
 
@@ -376,7 +376,7 @@ The provider MUST seal every privacy-class response exactly as §4.8 specifies: 
 
 ### SPEC-049-R015 - Opaque relay of responses
 
-The coordinator and gateway MUST forward privacy frames byte-for-byte, MUST NOT decode, parse, or log ciphertext, and MUST NOT treat a missing `choices` field in a privacy frame as an error. They MAY bound and annotate only the clear usage chunk or non-stream `usage` object. Settlement uses the clear usage bounded by the SPEC-041-R006 caps. On `unknown_postdispatch` the coordinator MUST settle known input only and MUST record a delivered-output estimate of 0, because it cannot count output from ciphertext. After a 200 response for a privacy-class request without exactly one coordinator privacy-class echo and exactly one positive `X-MacProvider-Privacy-Posture-Verified-At` value (§4.2), the gateway MUST return `privacy_class_unconfirmed` without writing the body.
+The coordinator and gateway MUST forward privacy frames byte-for-byte, MUST NOT decode, parse, or log ciphertext, and MUST NOT treat a missing `choices` field in a privacy frame as an error. They MAY bound and annotate only the clear usage chunk or non-stream `usage` object. Settlement uses the clear usage bounded by the SPEC-041-R006 caps. On `unknown_postdispatch` the coordinator MUST settle known input only and MUST record a delivered-output estimate of 0, because it cannot count output from ciphertext. Under SPEC-022 `enforce` that row is recorded but becomes payable only with a `relay_blind_settled` verdict (SPEC-022 R-13.6). After a 200 response for a privacy-class request without exactly one coordinator privacy-class echo and exactly one positive `X-MacProvider-Privacy-Posture-Verified-At` value (§4.2), the gateway MUST return `privacy_class_unconfirmed` without writing the body.
 
 ### SPEC-049-R016 - Buyer verification
 
@@ -451,11 +451,11 @@ request_and_response_content_hidden_from_relays; provider_runtime_reads_plaintex
 
 ### SPEC-049-R021 - Automated redaction proof
 
-An automated integration test MUST run privacy-class stream and non-stream requests with a canary prompt and a canary completion and MUST prove that neither canary, nor the base64url of the buyer ephemeral key or any derived key, appears in provider, coordinator, or gateway stdout/stderr, any SQLite store, the provider state directory, or the scenario temporary directories. The same suite MUST cover plaintext downgrade, header strip and inject, envelope replay, wrong key record, stale posture, revoked and quarantined providers, unapproved cdhash, debugger-attached posture, tampered and truncated responses, and the kill switch.
+An automated integration test MUST run privacy-class stream and non-stream requests with a canary prompt and a canary completion and MUST prove that neither canary, nor the base64url of the buyer ephemeral key or any derived key, appears in provider, coordinator, or gateway stdout/stderr, any SQLite store, the provider state directory, or the scenario temporary directories. It MUST also prove that the `relay-blind-settlement-v1` receipt and every row derived from it contain no canary, no plaintext-derived hash (no SHA-256 of the canary prompt, the canary completion, or the decrypted request or response), and no key material. The same suite MUST cover plaintext downgrade, header strip and inject, envelope replay, wrong key record, stale posture, revoked and quarantined providers, unapproved cdhash, debugger-attached posture, tampered and truncated responses, and the kill switch.
 
 ### SPEC-049-R022 - Composition limits
 
-Any privacy-class request with a nonempty pool selection or other pool intent MUST be rejected with `privacy_class_downgrade_rejected` before reservation, quota, or dispatch, preserving SPEC-042-R009. Accounting, positive-receipt and reward exclusion, and SPEC-022 observe-mode limits follow SPEC-041-R006 unchanged. SPEC-005 arithmetic, the SPEC-015 v0.4 receipt tuple, and SPEC-022 finality are unchanged.
+Any privacy-class request with a nonempty pool selection or other pool intent MUST be rejected with `privacy_class_downgrade_rejected` before reservation, quota, or dispatch, preserving SPEC-042-R009. Accounting, positive-receipt and reward exclusion, and SPEC-022 mode limits follow SPEC-041-R006: under `enforce`, privacy-class work settles only through the SPEC-022 R-13 lane, and under `off` and `observe` the SPEC-041-R006 rules apply. SPEC-005 arithmetic and the SPEC-015 v0.4 receipt tuple are unchanged. SPEC-022 finality changes only by the R-13 `relay_blind_settled` outcome, which is never `verified`.
 
 ### SPEC-049-R023 - Promotion gate
 
@@ -487,3 +487,4 @@ No evidence is attached. Physical evidence requires a signed `JOURNEY-PRIVACY-CL
 - 0.1.0 - Successful privacy-class chat responses carry `X-MacProvider-Privacy-Posture-Verified-At` from the dispatch-time gate for the gateway. The gateway does not store that timestamp, and the header is not a buyer response header.
 - 0.1.1 - SPEC-049-R007 hardening precedes any credential being resolved into the runtime configuration, used, or transmitted, rather than any credential load; reading the operator's own configuration file earlier is not a credential resolution, and a same-user observer is the operator already in scope. Test-fixture posture sources compile only into debug and test builds. No wire, schema, or routing change.
 - 0.1.2 - SPEC-049-R007 item 7: on a hardened-runtime binary without the allow-dyld-environment-variables entitlement (items 4 and 5), dyld prunes `DYLD_*` before `main`, so the variables are inert and the in-process check cannot see them; the in-process `DYLD_*` refusal stays as defense in depth, and `DYLD_*` acceptance evidence is inertness rather than a refusal exit. `MACPROVIDER_*` diagnostic variables remain refusals. Hardware basis: the #1839 journey on signed 1.8.214, where `DYLD_INSERT_LIBRARIES=/nonexistent.dylib DYLD_PRINT_LIBRARIES=1 macprovider-cli --version` printed only the version and exited 0. SPEC-049-R005: interval challenges every `posture_challenge_interval_seconds` remain mandatory for every session with accepted privacy keys; a new or rotated key set additionally triggers an immediate challenge, and a heartbeat re-advertising an unchanged key set triggers no extra challenge. The embedded gap rationale now records the implementation as unit-tested, with signed hardware evidence (#1839) and production activation pending. No wire, schema, or routing change.
+- 0.1.3 - Issue #1851, enforce-compatible relay-blind settlement. SPEC-049-R010: no SPEC-015 v0.4 receipt and no receipt with a plaintext-derived value; exactly one content-free SPEC-015 §N.13 `relay-blind-settlement-v1` receipt per attempt when the dispatch carries `relay_blind_settlement`, with the response digest over ciphertext frames. SPEC-049-R021: the redaction proof covers that receipt and its rows. SPEC-049-R015 notes that under `enforce` the `unknown_postdispatch` row is payable only with that verdict. SPEC-049-R022: the observe-only limit is dropped; under `enforce` privacy-class work settles only through SPEC-022 R-13 as `relay_blind_settled`, never `verified`. Composition bullets updated. No claim, disclosure string, posture, key, envelope, or response-AEAD change.
