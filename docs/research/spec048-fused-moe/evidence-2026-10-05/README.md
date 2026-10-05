@@ -63,8 +63,10 @@ safety, T=2/4/7 batch invariance and agreement with stock within 2%, and the
 new chunked decode (8, 9, 16 rows × 1 token) and verify (4, 5, 8 rows × 2
 tokens) batches bit-identical to per-token evaluation.
 
-## Not covered here
+## Follow-up
 
-One- and two-slot ordinary throughput against stock on the pinned branch
-build, the frozen-diff audit, and any native-MTP R015 result for the chunked
+The final pin `b1811029` (this envelope plus exact tensor-layout validation
+from the freeze audit) was qualified on the branch build in
+`qualification-7d55924eb/`, including one-, two-, and eight-slot ordinary
+throughput against stock. No native-MTP R015 result exists for the chunked
 envelope.

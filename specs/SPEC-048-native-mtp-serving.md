@@ -395,6 +395,14 @@ signed, activated, or treated as production-qualified until that gate closes:
   stock kernel, followed by the frozen-diff audit. Native-MTP R015 evidence is
   not part of this gate; it gates signing and activation of a native tuple
   (R007, R015) and never the ordinary path;
+- review result (2026-10-05): closed for this revision. Mac Studio fused
+  tests 133/133, hardware E2E pass, 0 ordinary/native parity mismatches and
+  bit-identical run-to-run output in 36 paired blocks across one, two, and
+  eight slots, ordinary decode throughput 1.25x / 1.15x / 0.97x stock, and a
+  three-lane freeze audit at 0 Critical, 0 High, 0 Medium
+  (`docs/research/spec048-fused-moe/evidence-2026-10-05/qualification-7d55924eb/`,
+  `audits/2026-10-05-native-mtp-fused-freeze/`). The exception is approved
+  for the ordinary path; native MTP remains default-off and unqualified;
 - removal trigger: replace the fork pin with the first reviewed upstream tag
   that contains equivalent standalone-checkpoint loading, public transaction,
   packed target-verification, and hybrid recurrent-cache surfaces and passes
@@ -1284,7 +1292,9 @@ requests.
   `proposal_depth`, and the consumer caps the MTP manifest's
   `max_proposal_depth` and `adaptation_max_depth`, at `6`. Every R015 policy frozen
   before this change binds the retired envelope and Studio OS build `25E253`;
-  the next R015 is frozen on the current build.
+  the next R015 is frozen on the current build. The R003 review gate for
+  this revision closed on 2026-10-05 (ordinary decode 1.25x / 1.15x / 0.97x
+  stock at one / two / eight slots; freeze audit 0/0/0).
 
 - **0.1.22 (2026-10-02)** — Moves the immutable fork candidate to
   `ca29e9544777068a0b53aad87310ff1cfaf3fd1d` and binds qualification to its

@@ -393,21 +393,21 @@
       }
     },
     "native_mtp_required_merges_in_latest_release": true,
-    "native_mtp_public_row_mapped_transactions_reviewed": false,
-    "native_mtp_status": "candidate_fused_moe_revision_pending_review",
-    "note": "The previously reviewed Qwen MTP transaction surfaces remain present, but the pinned candidate now also includes the exact-layout Qwen3.6 A3B fused-MoE path (rows of 1-7 tokens, chunked at any batch size) and is not approved until the ordinary-path Studio qualification and the freeze audits pass; native-MTP R015 gates only native-tuple activation; upstream #645 remains the tagged-release replacement tracker"
+    "native_mtp_public_row_mapped_transactions_reviewed": true,
+    "native_mtp_status": "qualified_transaction_exception_default_off",
+    "note": "The previously reviewed Qwen MTP transaction surfaces remain present and the pin adds the exact-layout Qwen3.6 A3B fused-MoE path (rows of 1-7 tokens, chunked at any batch size); approved 2026-10-05 on the ordinary-path Studio qualification and a 0/0/0 three-lane freeze audit; native MTP stays default-off and native-MTP R015 gates only native-tuple activation; upstream #645 remains the tagged-release replacement tracker"
   },
   "native_mtp_immutable_dependency_exception": {
-    "approved": false,
-    "approved_at": null,
-    "approved_by": null,
+    "approved": true,
+    "approved_at": "2026-10-05",
+    "approved_by": "@Augustas11",
     "review_due_at": "2026-12-27",
     "fork_location": "https://github.com/Augustas11/mlx-swift-lm.git",
     "fork_revision": "b181102984a4d1875efbd9e0eab3a7dfd1c012c5",
     "remote_revision_verified": true,
     "local_pin_matches": true,
     "upstream_base_revision": "bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57",
-    "review_status": "candidate_extension_pending_ordinary_path_qualification_and_freeze_audits",
+    "review_status": "approved_0_critical_0_high_0_medium",
     "scope": "standalone_qwen_mtp_loading_public_cache_transaction_packed_verification_strict_continuation_and_packed_recurrent_cache_surfaces_plus_exact_qwen36_a3b_fused_moe_v3_rows_t1_through_t7_chunked",
     "removal_trigger": "first reviewed upstream tag with equivalent standalone-checkpoint loading and public transaction, packed verification, continuation, and recurrent-cache surfaces that passes the MacProvider qualification artifact",
     "replacement_tracker": "https://github.com/ml-explore/mlx-swift-lm/issues/645"

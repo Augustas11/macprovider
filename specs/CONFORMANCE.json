@@ -10343,13 +10343,19 @@
           "source": "docs/research/SPEC_048_PHASE0_UPSTREAM_GATE_2026-09-28.md",
           "captured_at": "2026-09-28",
           "expires_at": "2026-12-27"
+        },
+        {
+          "artifact": "sha256:f2ae6b294340c2b84c4d917727fe6068e173d5167297c75f082cd93c30394457",
+          "source": "docs/research/spec048-fused-moe/evidence-2026-10-05/qualification-7d55924eb/README.md",
+          "captured_at": "2026-10-05",
+          "expires_at": "2026-12-27"
         }
       ],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "Candidate fork revision b181102984a4d1875efbd9e0eab3a7dfd1c012c5 retains the previously reviewed standalone Qwen MTP loading, public row-mapped cache transactions, packed target verification, strict row-local continuation state, serialized drafter-state access, packed recurrent Mamba transactions, and round-overhead reductions from ef4ff8568c38c640bc90a8176dc3acfe943a288d. It additionally introduces a default-on, kill-switchable fused Qwen3.6-35B-A3B MoE path only for the exact affine layout and decode- or verify-shaped calls of at most 7 tokens per row, run in chunks of at most 7 flattened tokens at any batch size, with stock for prefill-shaped rows. The extension is a candidate, not an approved exception: R003 remains pending until the fused ordinary-path Studio qualification (upstream harness, eight-slot parity and run-to-run determinism, one/two/eight-slot ordinary throughput against stock) and the complete code, security, and architecture freeze audits report 0 Critical/High/Medium. Native-MTP R015 gates signing and activation of a native tuple, not this pin. This does not make any production tuple eligible."
+        "rationale": "Candidate fork revision b181102984a4d1875efbd9e0eab3a7dfd1c012c5 retains the previously reviewed standalone Qwen MTP loading, public row-mapped cache transactions, packed target verification, strict row-local continuation state, serialized drafter-state access, packed recurrent Mamba transactions, and round-overhead reductions from ef4ff8568c38c640bc90a8176dc3acfe943a288d. It additionally introduces a default-on, kill-switchable fused Qwen3.6-35B-A3B MoE path only for the exact affine layout and decode- or verify-shaped calls of at most 7 tokens per row, run in chunks of at most 7 flattened tokens at any batch size, with stock for prefill-shaped rows. The exception for this revision was approved on 2026-10-05 after the fused ordinary-path Studio qualification (fork tests 133/133, hardware E2E pass, 0 parity mismatches and bit-identical run-to-run output in 36 paired blocks at one, two, and eight slots, ordinary decode 1.25x / 1.15x / 0.97x stock) and a three-lane freeze audit at 0 Critical/High/Medium. R003 stays pending for native serving: native-MTP R015 gates signing and activation of a native tuple, not this pin, and nothing here makes any production tuple eligible."
       }
     },
     {

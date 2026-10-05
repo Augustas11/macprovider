@@ -1,0 +1,1 @@
+{"schema":"macprovider.native-mtp-hardware-e2e-result.v1","status":"pass","evidence_class":"correctness_only","model_id":"qwen/qwen3.6-35b-a3b","target_sha256":"3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1","mtp_sha256":"fa01beecb6c1e76845e9880623c3b5a009baa602c52e9e9b5d12edc489a23fd2","admissions":3,"max_observed_batch_depth":2,"serve_path_verified":true}
