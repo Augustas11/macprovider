@@ -95,3 +95,46 @@ func buyerVisibleEngineHeader(raw string) string {
 	}
 	return ""
 }
+
+// SPEC-006-R018 (#1816) pool-model response disclosure headers.
+const (
+	poolModelDisclosureResponseHeader    = "X-MacProvider-Model-Disclosure"
+	poolManifestCoreDigestResponseHeader = "X-MacProvider-Pool-Manifest-Core-Digest"
+	poolModelDisclosureClass             = "pool_attested_unverified"
+)
+
+// buyerVisiblePoolModelHeader reports whether key is one of the pool-model
+// disclosure headers and returns the value to forward: the disclosure only
+// as the exact pool_attested_unverified literal, the manifest digest only as
+// 64 lowercase hex; any other value is dropped ("").
+func buyerVisiblePoolModelHeader(key string, values []string) (string, bool) {
+	switch {
+	case strings.EqualFold(key, poolModelDisclosureResponseHeader):
+		for _, value := range values {
+			if value == poolModelDisclosureClass {
+				return value, true
+			}
+		}
+		return "", true
+	case strings.EqualFold(key, poolManifestCoreDigestResponseHeader):
+		for _, value := range values {
+			if isLowerHex64Header(value) {
+				return value, true
+			}
+		}
+		return "", true
+	}
+	return "", false
+}
+
+func isLowerHex64Header(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, ch := range value {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			return false
+		}
+	}
+	return true
+}

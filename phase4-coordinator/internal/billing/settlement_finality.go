@@ -35,12 +35,12 @@ type RequestSettlementFinality struct {
 	QuarantinedAttempts      int64  `json:"quarantined_attempts"`
 	ZeroSettledAttempts      int64  `json:"zero_settled_attempts"`
 	OverlappingBlockedTokens int64  `json:"overlapping_blocked_tokens,omitempty"`
-	// RelayBlindSettledAttempts counts SPEC-022 R-13 attempts that closed
+	// RelayBlindSettledAttempts counts SPEC-022 R-14 attempts that closed
 	// relay_blind_settled under the R-7.9 binding. They are never counted as
 	// verified attempts.
 	RelayBlindSettledAttempts int64 `json:"relay_blind_settled_attempts"`
 	// RelayBlindSettlementCoverage is the coordinator's authoritative SPEC-022
-	// R-13 coverage answer for a relay-blind attempt lookup:
+	// R-14 coverage answer for a relay-blind attempt lookup:
 	// RelayBlindCoverageEnforce or RelayBlindCoverageObserve. It is set only
 	// when the caller asked for a relay-blind attempt.
 	RelayBlindSettlementCoverage string `json:"relay_blind_settlement_coverage,omitempty"`
@@ -198,7 +198,7 @@ func (s *Store) requestSettlementFinalityForAccount(ctx context.Context, account
 const defaultRelayBlindAttemptTimeout = time.Hour
 
 // SetRelayBlindAttemptTimeout installs the buyer request timeout that bounds
-// every relay-blind dispatch (SPEC-022 R-13.10). A non-positive value keeps
+// every relay-blind dispatch (SPEC-022 R-14.10). A non-positive value keeps
 // the conservative default.
 func (s *Store) SetRelayBlindAttemptTimeout(timeout time.Duration) {
 	s.relayBlindAttemptTimeoutMS.Store(timeout.Milliseconds())
@@ -214,7 +214,7 @@ func (s *Store) RelayBlindAttemptTimeout() time.Duration {
 
 // relayBlindUnrecordedTerminalUnixMS is the latest terminal an enforce
 // relay-blind attempt can have: the dispatch is bounded by the request
-// timeout, and dispatch follows the route decision (SPEC-022 R-13.10). An
+// timeout, and dispatch follows the route decision (SPEC-022 R-14.10). An
 // attempt whose terminal was never recorded is measured from it, so its
 // R-8.3 deadline is this plus pending_deadline_seconds.
 func (s *Store) relayBlindUnrecordedTerminalUnixMS(routeDecisionUnixMS int64) int64 {
@@ -223,12 +223,12 @@ func (s *Store) relayBlindUnrecordedTerminalUnixMS(routeDecisionUnixMS int64) in
 
 // RelayBlindAttemptUnrecordedReason closes an enforce relay-blind attempt
 // whose snapshot was committed before dispatch but whose credit and attempt
-// output were never written (SPEC-022 R-13.6): nothing is payable, so the
+// output were never written (SPEC-022 R-14.6): nothing is payable, so the
 // buyer is refunded.
 const RelayBlindAttemptUnrecordedReason = "relay_blind_attempt_unrecorded"
 
 // relayBlindRequiredFinality answers a bound lookup whose required internal
-// request id has no request_log row under the external id. A SPEC-022 R-13
+// request id has no request_log row under the external id. A SPEC-022 R-14
 // relay-blind snapshot is committed before dispatch, so its existence is the
 // coordinator's authority that the attempt was enforce-covered even when the
 // coordinator stopped before writing the request log. Anything else stays
@@ -258,12 +258,12 @@ SELECT EXISTS (
 	return finality, true, nil
 }
 
-// SPEC-022 R-13 coverage answers for a relay-blind attempt lookup.
+// SPEC-022 R-14 coverage answers for a relay-blind attempt lookup.
 const (
-	// RelayBlindCoverageEnforce: an enforce R-13 relay-blind route snapshot
-	// exists for the attempt; only R-13 finality decides money.
+	// RelayBlindCoverageEnforce: an enforce R-14 relay-blind route snapshot
+	// exists for the attempt; only R-14 finality decides money.
 	RelayBlindCoverageEnforce = "enforce"
-	// RelayBlindCoverageObserve: the attempt ran without R-13 coverage
+	// RelayBlindCoverageObserve: the attempt ran without R-14 coverage
 	// (observe or off). The gateway may use its status-row recovery.
 	RelayBlindCoverageObserve = "observe"
 )
@@ -271,9 +271,9 @@ const (
 // RelayBlindSettlementCoverage answers whether coordinator attempt
 // internalRequestID, the relay-blind attempt for external request
 // externalRequestID bound to the given provider-binding and envelope digests,
-// was R-13 enforce-covered. It returns RelayBlindCoverageEnforce when an
+// was R-14 enforce-covered. It returns RelayBlindCoverageEnforce when an
 // enforce relay-blind route snapshot exists for the attempt (committed before
-// dispatch, R-13.3), RelayBlindCoverageObserve only when the attempt's
+// dispatch, R-14.3), RelayBlindCoverageObserve only when the attempt's
 // request-log row carries those digests and no relay-blind snapshot exists,
 // and "" (unknown, the caller holds) otherwise.
 func (s *Store) RelayBlindSettlementCoverage(ctx context.Context, accountID, externalRequestID, internalRequestID, providerBindingDigest, envelopeDigest string) (string, error) {
@@ -749,7 +749,7 @@ SELECT rs.attempt_n, rs.provider_id,
 			}
 			row = evidenceRow
 		case row.mode == RouteSnapshotModeEnforce && entrypoint == PaidEntrypointRelayBlindChat:
-			// SPEC-022 R-13.6 / R-13.10: an enforce relay-blind snapshot is
+			// SPEC-022 R-14.6 / R-14.10: an enforce relay-blind snapshot is
 			// committed before dispatch. Without a credit or an attempt
 			// output the attempt is pending until its deadline, measured from
 			// the latest terminal the dispatch bound allows. Past it the

@@ -161,6 +161,12 @@ struct SettlementReceiptMetadata: Sendable, Equatable {
     let providerID: String
     let providerReceiptKeyID: String
     let modelID: String
+    /// SPEC-022-R013.3: the provider-local served label a pool_manifest
+    /// attempt's relayed body names, while `modelID` (the signed receipt
+    /// identity) is the pool-scoped `pool/<pool_id>/<slug>` id. Nil on every
+    /// other frame; a present value is honoured only for a pool-scoped
+    /// `modelID`, otherwise the metadata is malformed.
+    let executionModelID: String?
     let expectedCatalogModelHash: String
     let catalogID: String
     let catalogBodyDigest: String
@@ -196,6 +202,14 @@ struct SettlementReceiptMetadata: Sendable, Equatable {
         self.attemptN = attemptN
         self.providerID = providerID
         self.providerReceiptKeyID = providerReceiptKeyID
+        if let raw = wire["execution_model_id"] {
+            guard let execution = raw as? String, !execution.isEmpty, modelID.hasPrefix("pool/") else {
+                return nil
+            }
+            self.executionModelID = execution
+        } else {
+            self.executionModelID = nil
+        }
         self.modelID = modelID
         self.expectedCatalogModelHash = expectedCatalogModelHash
         self.catalogID = catalogID
@@ -208,6 +222,10 @@ struct SettlementReceiptMetadata: Sendable, Equatable {
         self.pendingDeadlineSeconds = pendingDeadlineSeconds
         self.poolRuntimeAuthorization = PoolRuntimeAuthorization(wire: wire[PoolRuntimeAuthorization.wireKey])
     }
+
+    /// The model label the relayed request must name: the execution label
+    /// when the coordinator sent one, else the receipt identity itself.
+    var servedModelID: String { executionModelID ?? modelID }
 
     private static func int64(_ value: Any?) -> Int64? {
         switch value {
@@ -237,7 +255,7 @@ struct SettlementReceiptInput {
 }
 
 /// SPEC-001-R005: the closed `relay_blind_settlement` object the coordinator
-/// attaches to a relay-blind dispatch that has an SPEC-022 R-13 route snapshot.
+/// attaches to a relay-blind dispatch that has an SPEC-022 R-14 route snapshot.
 /// Parsing is strict: a missing, unknown, null, or out-of-range member makes
 /// the whole object invalid, and the dispatch is rejected before decryption.
 struct RelayBlindSettlementMetadata: Sendable, Equatable {

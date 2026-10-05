@@ -68,10 +68,21 @@ func BuildArtifactIdentityIndex(feeds AutotuneFeeds) (*artifactidentity.Index, e
 	if feed.CandidateCatalogSHA256 != feeds.AutotuneCandidatesVerification.SHA256 {
 		return nil, fmt.Errorf("artifact identity index: feed is bound to candidate catalog %q, served catalog is %q", feed.CandidateCatalogSHA256, feeds.AutotuneCandidatesVerification.SHA256)
 	}
-	var members []artifactidentity.Member
+	var members, blocked []artifactidentity.Member
 	for _, key := range sortedKeys(feed.Models) {
 		row, ok := catalog.Rows[key]
 		if !ok {
+			continue
+		}
+		// SPEC-042-R015 / SPEC-032-R004 (#1816 freeze audit R1 S-H4): every
+		// artifact of a blocked row, verified or not, is kept as a deny
+		// pair so a pool entry can never readmit or keep it.
+		if row.RuntimeStatus == "blocked" {
+			model := feed.Models[key]
+			for _, artifactID := range sortedKeys(model.Artifacts) {
+				entry := model.Artifacts[artifactID]
+				blocked = append(blocked, artifactidentity.Member{ModelKey: key, ArtifactID: artifactID, HashAlgorithm: entry.HashAlgorithm, Hash: entry.Hash})
+			}
 			continue
 		}
 		// SPEC-010-R007(b): an artifact of a `candidate` or `blocked` row is
@@ -98,11 +109,11 @@ func BuildArtifactIdentityIndex(feeds AutotuneFeeds) (*artifactidentity.Index, e
 			})
 		}
 	}
-	return artifactidentity.New(artifactidentity.Provenance{
+	return artifactidentity.NewWithBlocked(artifactidentity.Provenance{
 		FeedSHA256:             feeds.CatalogArtifactsVerification.SHA256,
 		SignerKeyID:            feeds.CatalogArtifactsVerification.KeyID,
 		ReleaseID:              feed.ReleaseID,
 		CandidateCatalogSHA256: feed.CandidateCatalogSHA256,
 		FeedGeneratedAt:        feeds.CatalogArtifactsVerification.GeneratedAt,
-	}, members)
+	}, members, blocked)
 }

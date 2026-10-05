@@ -508,7 +508,7 @@ func (s *Server) reconcileRelayBlindReservation(ctx context.Context, reservation
 	if status.State != "terminal" && status.State != "unknown_postdispatch" {
 		return "held", nil
 	}
-	// SPEC-022 R-13.6 / R-8.1: under enforce the coordinator's finality, not
+	// SPEC-022 R-14.6 / R-8.1: under enforce the coordinator's finality, not
 	// the status row, decides money for a relay-blind execution.
 	if result, handled, err := s.reconcileRelayBlindEnforceFinality(ctx, reservation, status.InternalRequestID); handled {
 		return result, err
@@ -547,13 +547,13 @@ func (s *Server) reconcileRelayBlindReservation(ctx context.Context, reservation
 }
 
 // reconcileRelayBlindEnforceFinality decides a relay-blind hold under
-// SPEC-022 R-13 from the coordinator's answer for the attempt, never from a
+// SPEC-022 R-14 from the coordinator's answer for the attempt, never from a
 // header the gateway saw. The attempt is the coordinator internal request id
 // the status row names (cross-checked with the dispatch hint, when one was
 // recorded). The coordinator answers its coverage for that attempt:
-//   - observe (an explicit declaration that no R-13 snapshot exists and the
+//   - observe (an explicit declaration that no R-14 snapshot exists and the
 //     attempt ran): handled=false, so the status-row recovery runs;
-//   - enforce: only R-13 finality decides money. A closed
+//   - enforce: only R-14 finality decides money. A closed
 //     relay_blind_settled tuple debits, a refund tuple refunds, and anything
 //     else holds;
 //   - not found, an error, an unbound echo, or any other answer: hold. An
@@ -597,7 +597,7 @@ func (s *Server) reconcileRelayBlindEnforceFinality(ctx context.Context, reserva
 		result, err := s.recordSettlementHeldResult(ctx, reservation, "coordinator_404_held")
 		return result, true, err
 	}
-	// SPEC-022 R-13: the answer must be for exactly this attempt.
+	// SPEC-022 R-14: the answer must be for exactly this attempt.
 	if finality.RequestID == "" || finality.RequestID != reservation.RequestID ||
 		finality.RequiredInternalRequestID == "" || finality.RequiredInternalRequestID != internalRequestID {
 		return hold()
@@ -608,7 +608,7 @@ func (s *Server) reconcileRelayBlindEnforceFinality(ctx context.Context, reserva
 	switch finality.RelayBlindSettlementCoverage {
 	case relayBlindCoverageObserve:
 		if reservation.RelayBlindSettlementMode == storage.RelayBlindSettlementModeEnforce {
-			// The coordinator marked this dispatch R-13 covered; an observe
+			// The coordinator marked this dispatch R-14 covered; an observe
 			// answer contradicts it and never authorizes the status row.
 			return hold()
 		}
@@ -628,7 +628,7 @@ func (s *Server) reconcileRelayBlindEnforceFinality(ctx context.Context, reserva
 	case settlementFinalityDebit:
 		if candidateErr != nil || candidate.RelayBlind == nil || candidate.RelayBlind.EnvelopeDigest != reservation.RelayBlind.EnvelopeDigest ||
 			candidate.RequiredInternalRequestID != internalRequestID {
-			// SPEC-022 R-13.7 / R-5.6: the buyer is debited no more completion
+			// SPEC-022 R-14.7 / R-5.6: the buyer is debited no more completion
 			// than the gateway delivered. Delivery evidence counts only when it
 			// names this envelope and exactly this attempt; a candidate with no
 			// internal request id is not bound to the attempt. Without bound
@@ -657,18 +657,18 @@ func (s *Server) reconcileRelayBlindEnforceFinality(ctx context.Context, reserva
 	}
 }
 
-// relayBlindSettlementCoverageHeader is the coordinator's R-13 coverage
-// marker on a relay-blind chat response, emitted only after the R-13
+// relayBlindSettlementCoverageHeader is the coordinator's R-14 coverage
+// marker on a relay-blind chat response, emitted only after the R-14
 // snapshot committed. It is persisted as a recovery hint only.
 const relayBlindSettlementCoverageHeader = "X-MacProvider-Internal-Relay-Blind-Settlement"
 
-// Coordinator SPEC-022 R-13 coverage answers on a relay-blind finality lookup.
+// Coordinator SPEC-022 R-14 coverage answers on a relay-blind finality lookup.
 const (
 	relayBlindCoverageEnforce = "enforce"
 	relayBlindCoverageObserve = "observe"
 )
 
-// recordRelayBlindSettlementDispatch keeps the coordinator's R-13 coverage
+// recordRelayBlindSettlementDispatch keeps the coordinator's R-14 coverage
 // marker as a recovery hint: the attempt's internal request id, recorded
 // only when the marker says enforce. Every other response records nothing
 // (the generic internal request id header is sent on every coordinator

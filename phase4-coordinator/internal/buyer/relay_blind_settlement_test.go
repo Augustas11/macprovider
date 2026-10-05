@@ -28,7 +28,7 @@ import (
 const relayBlindSettlementTestHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 // relayBlindSettlementProvider is a session that satisfies every SPEC-022
-// R-13.2 prerequisite: pinned receipt key, verified canonical model identity,
+// R-14.2 prerequisite: pinned receipt key, verified canonical model identity,
 // Tier-2 material (installed by withModelACatalogMaterial), and the
 // SPEC-001-R005 capability.
 func relayBlindSettlementProvider(receiptPub ed25519.PublicKey) pool.Provider {
@@ -153,7 +153,7 @@ func relayBlindFixtureExecute(t *testing.T, f relayBlindSettlementFixture, now t
 	return response.Result(), consume.EnvelopeDigest, response.Code
 }
 
-// SPEC-022 R-13.10: the billing store measures an unrecorded relay-blind
+// SPEC-022 R-14.10: the billing store measures an unrecorded relay-blind
 // attempt's deadline from the same request timeout that bounds the dispatch.
 func TestRelayBlindDispatchTimeoutBoundsUnrecordedAttemptDeadline(t *testing.T) {
 	now := time.Unix(1_780_000_000, 0).UTC()
@@ -229,6 +229,34 @@ func TestRelayBlindEnforceSelectionAppliesSettlementPrerequisites(t *testing.T) 
 			t.Fatalf("reservation status=%d body=%s", response.Code, response.Body.String())
 		}
 	})
+}
+
+// SPEC-022 R-14.1 / SPEC-047-R011: a session bound to a pool model entry is
+// never selected for relay-blind work, under enforce or observe.
+func TestRelayBlindSelectionExcludesPoolModelBoundSession(t *testing.T) {
+	now := time.Unix(1_800_200_150, 0).UTC()
+	bind := func(p *pool.Provider) {
+		p.ModelAdmissionPoolID = "pool-a"
+		p.ModelAdmissionPoolModelID = "pool/pool-a/model-a"
+	}
+	for _, mode := range []string{billing.RouteSnapshotModeEnforce, billing.RouteSnapshotModeObserve} {
+		profile := ""
+		if mode == billing.RouteSnapshotModeEnforce {
+			profile = config.RelayBlindSettlementProfileV1
+		}
+		f := newRelayBlindSettlementFixture(t, now, mode, profile, bind, nil)
+		provider, _ := f.registry.Resolve("provider-a", "session-a")
+		if provider.ModelAdmissionPoolModelID == "" {
+			t.Fatal("fixture did not keep the pool model binding")
+		}
+		if _, _, found := f.server.selectRelayBlindProvider(context.Background(), "model-a", 2048, false, relayblind.KeyClassRelayBlind); found {
+			t.Fatalf("mode=%s selected a pool-model-bound session", mode)
+		}
+		unbound := newRelayBlindSettlementFixture(t, now, mode, profile, nil, nil)
+		if _, _, found := unbound.server.selectRelayBlindProvider(context.Background(), "model-a", 2048, false, relayblind.KeyClassRelayBlind); !found {
+			t.Fatalf("mode=%s did not select the unbound session", mode)
+		}
+	}
 }
 
 // AC-022-67 (dispatch half): under enforce a capable session gets an R-3.1

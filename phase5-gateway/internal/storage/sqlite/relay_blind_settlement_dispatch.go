@@ -10,7 +10,7 @@ import (
 	"github.com/augstar/macprovider-gateway/internal/storage"
 )
 
-// ensureRelayBlindSettlementDispatchColumns adds the SPEC-022 R-13 dispatch
+// ensureRelayBlindSettlementDispatchColumns adds the SPEC-022 R-14 dispatch
 // record to quota_reservations. Existing rows default to "" (no response
 // recorded), which the reconciler treats as undetermined. The columns and the
 // v18 schema stamp commit in one transaction, so a gateway that predates them
@@ -60,7 +60,7 @@ func (s *Store) ensureRelayBlindSettlementDispatchColumns(ctx context.Context) e
 }
 
 // RecordRelayBlindSettlementDispatch stores, once, the enforce coverage hint
-// for an active relay-blind reservation: the coordinator's R-13 coverage
+// for an active relay-blind reservation: the coordinator's R-14 coverage
 // marker and its internal request id. It is a hint for recovery, which still
 // asks the coordinator; no other mode is recorded.
 func (s *Store) RecordRelayBlindSettlementDispatch(ctx context.Context, accountID, requestID, mode, internalRequestID string) error {

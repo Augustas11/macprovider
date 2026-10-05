@@ -220,10 +220,11 @@ func runTrailerChatCases(t *testing.T, prefix string, cases []trailerChatCase) {
 	t.Helper()
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var advertised string
+			var advertised, advertisedV2 string
 			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 				if r.URL.Path == "/v1/chat/completions" {
 					advertised = r.Header.Get(settlementTrailersCapabilityHeader)
+					advertisedV2 = r.Header.Get(routeSnapshotV2CapabilityHeader)
 					return tc.respond(r), nil
 				}
 				// A held settlement nudges the reconciler's finality lookup.
@@ -242,12 +243,17 @@ func runTrailerChatCases(t *testing.T, prefix string, cases []trailerChatCase) {
 			}
 			// A buyer-supplied copy of the capability header is never
 			// forwarded: the gateway sets its own.
-			resp := postChat(t, h, fullKey, body, map[string]string{settlementTrailersCapabilityHeader: "0"})
+			resp := postChat(t, h, fullKey, body, map[string]string{settlementTrailersCapabilityHeader: "0", routeSnapshotV2CapabilityHeader: "0"})
 			if resp.Code != http.StatusOK {
 				t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 			}
 			if advertised != "1" {
 				t.Fatalf("capability header=%q, want the gateway's own 1", advertised)
+			}
+			// #1816 VM A-1: the coordinator refuses a pool-model route to a
+			// gateway that does not advertise route_snapshot_v2 settlement.
+			if advertisedV2 != "1" {
+				t.Fatalf("route_snapshot_v2 capability header=%q, want the gateway's own 1", advertisedV2)
 			}
 			tc.check(t, gatewaySettlementSnapshot(t, dbPath, accountID))
 		})

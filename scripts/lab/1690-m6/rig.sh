@@ -50,6 +50,10 @@ GGUF_REPO=Qwen/Qwen2.5-0.5B-Instruct-GGUF
 GGUF_REV=9217f5db79a29953eb74d5343926648285ec7e67
 GGUF_FILE=qwen2.5-0.5b-instruct-q4_k_m.gguf
 GGUF_SHA=74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db
+# #1816: the GGUF llama-server serves. Defaults to the catalog GGUF above; a
+# different file in $LAB/models (a non-catalog pool model) leaves the lab
+# catalog release unchanged.
+SERVE_GGUF_FILE="${LAB_SERVE_GGUF_FILE:-$GGUF_FILE}"
 MLX_ID="${LAB_MLX_ID:-mlx-community/Qwen2.5-0.5B-Instruct-4bit}"
 MLX_REV="${LAB_MLX_REV:-a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3}"
 ROW_KEY="${LAB_ROW_KEY:-qwen2.5-0.5b-instruct}"
@@ -364,7 +368,7 @@ EOF
 
 engine_model_ref() {
   case "$ENGINE" in
-    llamacpp) echo "llamacpp:${GGUF_FILE%.gguf}" ;;
+    llamacpp) echo "llamacpp:${SERVE_GGUF_FILE%.gguf}" ;;
     mlxlm) echo "mlxlm:$(basename "$MLXLM_SNAPSHOT")" ;;
     ollama) echo "ollama:$OLLAMA_TAG" ;;
     lmstudio) echo "lmstudio:$LMS_KEY" ;;
@@ -388,7 +392,7 @@ engine_offer_flags() {
 cmd_server_start() {
   case "$ENGINE" in
     llamacpp)
-      start_bg llama-server "$LLAMA_DIR/llama-server" -m "$LAB/models/$GGUF_FILE" --host 127.0.0.1 --port 19130 -c 16384 -np 4 -ngl 99 --jinja
+      start_bg llama-server "$LLAMA_DIR/llama-server" -m "$LAB/models/$SERVE_GGUF_FILE" --host 127.0.0.1 --port 19130 -c 16384 -np 4 -ngl 99 --jinja
       wait_http http://127.0.0.1:19130/health ;;
     mlxlm)
       # mlx_lm.server lists its Hugging Face cache and fails the listing when

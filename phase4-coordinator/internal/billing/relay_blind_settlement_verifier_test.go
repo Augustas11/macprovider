@@ -16,7 +16,7 @@ type relayBlindVerifierCase struct {
 
 // relayBlindSignedInput returns a passing verifier input for the vector
 // snapshot whose receipt was built from the mutated tuple and signed with the
-// vector key, so each case isolates one R-13.5 check.
+// vector key, so each case isolates one R-14.5 check.
 func relayBlindSignedInput(t *testing.T, mutate func(map[string]any)) RelayBlindSettlementVerifyInput {
 	t.Helper()
 	return relayBlindSignedInputWithSnapshot(t, nil, mutate)

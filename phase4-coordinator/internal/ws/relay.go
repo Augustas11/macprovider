@@ -813,7 +813,7 @@ func relayBlindBodyEncoding(context *RelayBlindDispatchContext) string {
 }
 
 // relayBlindSettlementMetadata is the SPEC-001-R005 member for a relay-blind
-// dispatch that has an R-13 route snapshot; nil on every other frame.
+// dispatch that has an R-14 route snapshot; nil on every other frame.
 func relayBlindSettlementMetadata(context *RelayBlindDispatchContext) *RelayBlindSettlementMetadata {
 	if context == nil {
 		return nil

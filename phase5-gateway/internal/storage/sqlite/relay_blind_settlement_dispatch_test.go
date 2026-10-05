@@ -9,7 +9,7 @@ import (
 	"github.com/augstar/macprovider-gateway/internal/storage"
 )
 
-// SPEC-022 R-13: the enforce dispatch hint is recorded once per relay-blind
+// SPEC-022 R-14: the enforce dispatch hint is recorded once per relay-blind
 // reservation, survives a restart, and is visible to the reconciler.
 func TestRelayBlindSettlementDispatchRecordedOnceAndLoaded(t *testing.T) {
 	ctx := context.Background()

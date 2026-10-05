@@ -27,6 +27,10 @@ const maxSettlementReconcileNudgeAttempts = 4
 const maxSettlementReconcileOverflowCatchupPasses = maxSettlementReconcileNudgeQueue/maxSettlementReconcileLimit + 2
 const settlementCoordinator404OperatorReviewAge = time.Hour
 
+// settlementStartupCatchupHorizon is the "now" the startup catch-up lists
+// due holds at: past every backoff and deadline.
+var settlementStartupCatchupHorizon = time.Date(9999, time.December, 31, 0, 0, 0, 0, time.UTC)
+
 type settlementReconcileNudge struct {
 	reservation storage.ActiveReservation
 	attempt     int
@@ -61,7 +65,7 @@ type coordinatorRequestSettlementFinality struct {
 	QuarantinedAttempts       int64  `json:"quarantined_attempts"`
 	ZeroSettledAttempts       int64  `json:"zero_settled_attempts"`
 	RelayBlindSettledAttempts int64  `json:"relay_blind_settled_attempts"`
-	// RelayBlindSettlementCoverage is the coordinator's SPEC-022 R-13
+	// RelayBlindSettlementCoverage is the coordinator's SPEC-022 R-14
 	// coverage answer on a relay-blind lookup: "enforce" or "observe".
 	RelayBlindSettlementCoverage string `json:"relay_blind_settlement_coverage"`
 }
@@ -69,7 +73,7 @@ type coordinatorRequestSettlementFinality struct {
 type SettlementReconcileSummary struct {
 	Scanned  int `json:"scanned"`
 	Verified int `json:"verified"`
-	// RelayBlindSettled counts SPEC-022 R-13 holds debited on
+	// RelayBlindSettled counts SPEC-022 R-14 holds debited on
 	// relay_blind_settled; they are never counted as verified.
 	RelayBlindSettled          int `json:"relay_blind_settled"`
 	Observed                   int `json:"observed"`
@@ -197,8 +201,11 @@ func (s *Server) CatchUpSettlementHolds(ctx context.Context, limit int) (Settlem
 	if limit > maxSettlementReconcileLimit {
 		limit = maxSettlementReconcileLimit
 	}
-	now := s.now()
-	reservations, err := s.store.ListDueSettlementHeldReservations(ctx, limit, now)
+	// Startup re-checks every non-review hold once, ignoring the backoff: a
+	// hold an older gateway binary kept answering "held" (a policy version
+	// it did not know, #1816 VM A-1) may be final for this one, and the older
+	// binary's backoff can be hours long.
+	reservations, err := s.store.ListDueSettlementHeldReservations(ctx, limit, settlementStartupCatchupHorizon)
 	if err != nil {
 		return SettlementReconcileSummary{}, err
 	}
@@ -730,7 +737,7 @@ func (s *Server) markSettlementHoldOperatorReview(ctx context.Context, reservati
 // Older coordinators omit the completeness flag and remain fail-closed.
 func coordinatorObserveFallbackAllowed(finality coordinatorRequestSettlementFinality) bool {
 	if !finality.ModeScopeComplete || finality.RequestID == "" || strings.TrimSpace(finality.RequiredInternalRequestID) == "" || finality.Mode != "observe" ||
-		(finality.PolicyVersion != settlementPolicyVersion && finality.PolicyVersion != legacySettlementPolicyVersion) ||
+		!knownSettlementPolicyVersion(finality.PolicyVersion) ||
 		finality.Reason == "mixed_settlement_policy_snapshot" || finality.Reason == "missing_current_settlement_finality" {
 		return false
 	}
@@ -807,7 +814,7 @@ func (s *Server) fetchCoordinatorRequestSettlementFinalityDetail(ctx context.Con
 }
 
 // fetchCoordinatorRelayBlindSettlementFinality asks the coordinator for one
-// relay-blind attempt's finality together with its SPEC-022 R-13 coverage
+// relay-blind attempt's finality together with its SPEC-022 R-14 coverage
 // answer, bound to the reservation's provider-binding and envelope digests.
 func (s *Server) fetchCoordinatorRelayBlindSettlementFinality(ctx context.Context, reservation storage.ActiveReservation, internalRequestID string) (coordinatorRequestSettlementFinality, bool, bool, error) {
 	if reservation.RelayBlind == nil || internalRequestID == "" {

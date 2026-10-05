@@ -22,12 +22,12 @@ import (
 )
 
 // relayBlindSettlementProfileConfigured reports whether the operator enabled
-// the SPEC-022 R-13 lane, the only way relay-blind runs under enforce.
+// the SPEC-022 R-14 lane, the only way relay-blind runs under enforce.
 func (s *Server) relayBlindSettlementProfileConfigured() bool {
 	return s != nil && s.relayBlind != nil && s.relayBlind.cfg.EnforceSettlementProfile == config.RelayBlindSettlementProfileV1
 }
 
-// relayBlindSettlementPrerequisite is the SPEC-022 R-13.2 session gate. Under
+// relayBlindSettlementPrerequisite is the SPEC-022 R-14.2 session gate. Under
 // enforce it applies to relay-blind work the content-independent
 // prerequisites plaintext routing applies (routeSnapshotRejection, the R-2.3
 // to R-2.5 hash-verified predicate, the shared route-snapshot identity
@@ -76,7 +76,7 @@ func relayBlindEnvelopeDigestHex(digest string) (string, error) {
 }
 
 // recordRelayBlindRouteSnapshot commits the SPEC-022 R-3.1 relay-blind route
-// snapshot before dispatch (R-13.3) and returns the SPEC-001-R005
+// snapshot before dispatch (R-14.3) and returns the SPEC-001-R005
 // relay_blind_settlement metadata bound to it. It runs only under enforce;
 // every failure is fatal for this dispatch, never a skip, because a dispatch
 // without the metadata produces no receipt and can never settle.
@@ -113,7 +113,7 @@ func (b *billingRecorder) recordRelayBlindRouteSnapshot(ctx context.Context, pro
 	ctx, cancel := newRouteSnapshotDispatchContext(ctx)
 	defer cancel()
 	poolView := b.state.poolRouteView()
-	if poolView.externalRuntimeCandidate(provider) {
+	if poolView.externalRuntimeCandidate(provider) || poolView.poolModelCandidate(provider) || provider.ModelAdmissionPoolModelID != "" {
 		return nil, fmt.Errorf("relay-blind settlement is global-pool only")
 	}
 	// SPEC-047-R001: the paid-routing evaluation the plaintext route runs at
@@ -184,7 +184,7 @@ func (b *billingRecorder) recordRelayBlindRouteSnapshot(ctx context.Context, pro
 // relayBlindResponseDigest records the SPEC-022 R-3.5 response-body digest:
 // the SHA-256 and count of the exact inference_response_chunk.data bytes the
 // coordinator received, in seq order (ciphertext frames for the privacy
-// class). It replaces the plaintext output hash for an R-13 attempt.
+// class). It replaces the plaintext output hash for an R-14 attempt.
 type relayBlindResponseDigest struct {
 	sum   hash.Hash
 	bytes int64
@@ -235,7 +235,7 @@ func (b *billingRecorder) relayBlindTerminalTimestamp(end providerws.InferenceRe
 }
 
 // relayBlindDispatchEvidence reads the persisted SPEC-041-R005 dispatch row
-// the receipt must join (R-13.5); nil when it cannot be read.
+// the receipt must join (R-14.5); nil when it cannot be read.
 func (s *Server) relayBlindDispatchEvidence(ctx context.Context, providerBinding string) *billing.RelayBlindDispatchEvidence {
 	if s.relayBlind == nil || s.relayBlind.store == nil {
 		return nil
@@ -263,7 +263,7 @@ func (s *Server) relayBlindDispatchEvidence(ctx context.Context, providerBinding
 
 // ingestRelayBlindSettlementReceipt records the attempt's SPEC-015 §N.13
 // verdict. An absent receipt takes the ordinary missing-receipt path
-// (pending to the deadline, then quarantined: R-13.6).
+// (pending to the deadline, then quarantined: R-14.6).
 func (b *billingRecorder) ingestRelayBlindSettlementReceipt(provider pool.Provider, envelope, providerBinding string) (billing.SettlementReceiptState, bool, error) {
 	if b.relayBlindSettlement == nil || !b.hasSettlementAttemptN {
 		return billing.SettlementReceiptState{}, false, nil

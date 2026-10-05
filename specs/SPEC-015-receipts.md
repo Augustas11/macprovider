@@ -1,9 +1,11 @@
 # SPEC-015 — Verifiable inference receipts
 
-**Version:** 0.4.12 (2026-10-05, relay-blind-settlement-v1 profile, #1851; LOCKED v0.4 tuple unchanged)
-**Depends on:** SPEC-001 v1.9.24, SPEC-002 v1.6.2 (v1.5 `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver; v1.6 `/poolz` catalog fields + `/catalog/<catalog_id>` + `/catalog/pubkey` per §M.4), SPEC-005 v0.6.8 (settlement/accounting semantics), SPEC-006 v0.9.38, SPEC-008 v0.7.0 (hard — §5.3-5.6 model-hash semantics; §5.5 hash_status enum), SPEC-010 v1.14 (v1.7 R007(d), v1.10 R007(f) and v1.11 pool-scoped settlement for §N.12; v1.13/v1.14 LM Studio and oMLX legs for §N.12 item 7), SPEC-011 v0.5 (hard — §3.3.1 heartbeat `model_hash`; §3.2 warm-swap state machine; §3.3.0 opt-in gating), SPEC-013 v0.3.1, SPEC-022 v0.3.0 (hard — settlement-capable receipt profile consumer; R-5.6 and R-12 for §N.12; R-13 for §N.13), SPEC-042 0.0.36 (pool runtime authorization for §N.12, v0.4.10)
+**Version:** 0.4.13 (2026-10-05, relay-blind-settlement-v1 profile, #1851; LOCKED v0.4 tuple unchanged)
+**Depends on:** SPEC-001 v1.9.24, SPEC-002 v1.6.2 (v1.5 `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver; v1.6 `/poolz` catalog fields + `/catalog/<catalog_id>` + `/catalog/pubkey` per §M.4), SPEC-005 v0.6.8 (settlement/accounting semantics), SPEC-006 v0.9.38, SPEC-008 v0.7.0 (hard — §5.3-5.6 model-hash semantics; §5.5 hash_status enum), SPEC-010 v1.14 (v1.7 R007(d), v1.10 R007(f) and v1.11 pool-scoped settlement for §N.12; v1.13/v1.14 LM Studio and oMLX legs for §N.12 item 7), SPEC-011 v0.5 (hard — §3.3.1 heartbeat `model_hash`; §3.2 warm-swap state machine; §3.3.0 opt-in gating), SPEC-013 v0.3.1, SPEC-022 v0.3.0 (hard — settlement-capable receipt profile consumer; R-5.6 and R-12 for §N.12; R-14 for §N.13), SPEC-042 0.0.36 (pool runtime authorization for §N.12, v0.4.10)
 
-**Change log v0.4.12 (2026-10-05, issue #1851 — relay-blind settlement receipt profile):** Adds §N.13 and conformance unit `SPEC-015-R007`. §N.13 defines a second settlement-capable profile, `relay-blind-settlement-v1`, for the SPEC-022 R-13 relay-blind entrypoint only. It is signed with the provider's existing SPEC-015 receipt key, not the SPEC-041 relay-blind identity key. It binds the attempt and snapshot, the model and catalog hashes, the SPEC-041 envelope, execution-authorization, and provider-binding digests and `kid`, the SHA-256 of the exact emitted response bytes (ciphertext frames for the SPEC-049 privacy class), the terminal state, and usage capped by the buyer-declared bounds. It carries no v0.4 `prompt_hash` or `output_hash` and no value derived from plaintext request content. It is closed, JCS-canonical, size-bounded, and needs shared Go/Swift vectors. The v0.4.7 rule still holds: a v0.4 receipt is never attached to relay-blind work, and no plaintext prompt hash is derived from ciphertext. The basis-labelled envelope digest in a relay-blind route snapshot is not a plaintext prompt hash. The LOCKED v0.4 tuple, its verifier, and §N.1 to §N.12 are unchanged. A v0.4 verifier MUST quarantine a relay-blind snapshot (SPEC-022 R-7.10). A claimed attempt that ends before a pinned runtime handle exists, or whose handle has no model hash, an unresolvable model, or no validated usage, withholds the receipt; the coordinator treats that as missing evidence under SPEC-022 R-13.6 (pending, then quarantined, buyer refunded, no provider credit). Duplicate-member detection is coordinator-side.
+**Change log v0.4.13 (2026-10-05, issue #1851 — relay-blind settlement receipt profile):** Adds §N.13 and conformance unit `SPEC-015-R007`. §N.13 defines a second settlement-capable profile, `relay-blind-settlement-v1`, for the SPEC-022 R-14 relay-blind entrypoint only. It is signed with the provider's existing SPEC-015 receipt key, not the SPEC-041 relay-blind identity key. It binds the attempt and snapshot, the model and catalog hashes, the SPEC-041 envelope, execution-authorization, and provider-binding digests and `kid`, the SHA-256 of the exact emitted response bytes (ciphertext frames for the SPEC-049 privacy class), the terminal state, and usage capped by the buyer-declared bounds. It carries no v0.4 `prompt_hash` or `output_hash` and no value derived from plaintext request content. It is closed, JCS-canonical, size-bounded, and needs shared Go/Swift vectors. The v0.4.7 rule still holds: a v0.4 receipt is never attached to relay-blind work, and no plaintext prompt hash is derived from ciphertext. The basis-labelled envelope digest in a relay-blind route snapshot is not a plaintext prompt hash. The LOCKED v0.4 tuple, its verifier, and §N.1 to §N.12 are unchanged. A v0.4 verifier MUST quarantine a relay-blind snapshot (SPEC-022 R-7.10). A claimed attempt that ends before a pinned runtime handle exists, or whose handle has no model hash, an unresolvable model, or no validated usage, withholds the receipt; the coordinator treats that as missing evidence under SPEC-022 R-14.6 (pending, then quarantined, buyer refunded, no provider credit). Duplicate-member detection is coordinator-side.
+
+**Change log v0.4.12 (2026-10-01, issue #1816 freeze R1 — route_snapshot_v2):** §N.2 defines `route_snapshot_v2` under the route-snapshot policy version `spec022-route-snapshot-v2` for the #1816 pool provenance members (SPEC-022-R013.2 option B). A route snapshot carries those members if and only if it is pinned to v2; every other route keeps the byte-identical `route_snapshot_v1` preimage. The coordinator settlement metadata gains the optional `execution_model_id` (§N.12 item 8) so a pool_manifest receipt signs `model_id = pool_model_id` while the runtime serves its own label. Shared golden vectors live in `testdata/spec015/route_snapshot_golden.json`; the coordinator and `phase7-verify` both recompute them. The LOCKED v0.4 tuple and wire are unchanged.
 
 **Change log v0.4.11 (2026-09-25, issue #1690 M9 — cancelled loopback stream usage):** Adds §N.12 item 7. When a buyer disconnects from a pool-authorized loopback stream, the `buyer_cancel` receipt signs usage that covers exactly the delivered content, derived per runtime: llama-server per-chunk timings (#1690 E2E-F3); for Ollama and (with SPEC-046 0.4.0) LM Studio, the per-chunk `logprobs` token list for the completion tokens and the upstream's own prompt count for the same request; for `mlx_lm.server` and oMLX, and for any runtime whose stream carries no per-chunk count, a local tokenizer's count of the delivered visible content (the served snapshot's, else the catalog row's verified plain MLX artifact's; reasoning and tool-call argument tokens excluded, in the buyer's favour) and the upstream's own prompt count. The post-cancel work is bounded to 1.25 s, inside the coordinator's 2 s wait, so a slow runtime makes the cancel free, never late. Any usage the runtime cannot derive that way stays unattested: relayed empty and never signed, so the attempt is pending, then quarantined, and the partial stream is free. The LOCKED v0.4 tuple, the wire, and the coordinator verifier are unchanged; the signed usage still has to match the recorded expected usage exactly.
 
@@ -868,7 +870,7 @@ areas without changing them:
   audit redaction (§13, §N). Buyer retrieval remains SPEC-022-R006.
 - `SPEC-015-R006` — (v0.4.10) per-request receipt eligibility for a
   pool-authorized loopback runtime (§N.12, AC-12b).
-- `SPEC-015-R007` — (v0.4.12) the `relay-blind-settlement-v1` receipt
+- `SPEC-015-R007` — (v0.4.13) the `relay-blind-settlement-v1` receipt
   profile: closed tuple, signing key, canonicalization, size limits,
   verification, and Go/Swift parity vectors (§N.13).
 
@@ -4039,6 +4041,37 @@ never reconstructs the object, so these members bind into the receipt with
 no tuple change. Any member beyond this list still falls under the
 `route_snapshot_v2` rule above.
 
+**`route_snapshot_v2` (v0.4.12, SPEC-022-R013.2 option B, #1816).** The
+digest is `sha256(UTF-8(JCS(route_snapshot_v2)))`. `route_snapshot_v2` is
+`route_snapshot_v1` (with its owner-defined conditional members) plus the
+#1816 pool provenance members below, and its `route_snapshot_policy_version`
+is `spec022-route-snapshot-v2`. A snapshot carries a provenance member if and
+only if it is pinned to that version; a v1 snapshot with one, or a v2
+snapshot without one, is invalid and fails closed before dispatch and at
+settlement. The members
+(`phase4-coordinator/internal/billing/route_snapshot.go`, `RouteSnapshot.Value`):
+
+- for a SPEC-022-R013 `pool_manifest` route: `expected_model_hash_source`
+  (`pool_manifest`), `pool_model_id` (equal to `model_id`, R-13.3), the
+  entry's `pool_model_prompt_rate_per_mtok`,
+  `pool_model_prompt_cache_hit_rate_per_mtok`, and
+  `pool_model_completion_rate_per_mtok`,
+  `pool_model_pricing_bounds_sha256`, and the SPEC-005-R015 dispatch-frozen
+  `pool_model_global_multiplier_ppm`, `pool_model_provider_share_bps`, and
+  `pool_model_config_snapshot_id`; a native route (no `runtime_source`) also
+  carries `pool_generation`. A pool binding has no catalog key, so
+  `model_admission_catalog_model_key` is omitted;
+- for a SPEC-042-R016 attested member: `pool_member_account_id` (the
+  SPEC-022-R012.1 `serving_provider_account_id`).
+
+The entry's artifact algorithm is the existing
+`expected_catalog_model_hash_algorithm` member. For a `pool_manifest`
+source, `expected_catalog_model_hash` carries the entry's artifact hash as
+the generic expected model hash: "from the route-time catalog snapshot"
+reads as "from the route snapshot's expected identity" (SPEC-022-R013.3).
+The standalone verifier recomputes v1 and v2 identically; the shared golden
+vectors are `testdata/spec015/route_snapshot_golden.json`.
+
 Settlement verification MUST prove the SPEC-022 three-way equality:
 
 `receipt.model_hash == route_snapshot.provider_reported_model_hash == route_snapshot.expected_catalog_model_hash`.
@@ -4570,12 +4603,23 @@ The provider decides per request, not from a per-runtime constant.
    with an estimate. The count is an administrative attestation like any
    pool usage, bounded by the SPEC-005 ceilings; it is not a coordinator
    observation.
+8. **Execution label of a pool_manifest attempt (v0.4.12, #1816).** For a
+   SPEC-022-R013 `pool_manifest` attempt the settlement metadata's
+   `model_id` is the pool-scoped `pool_model_id` the receipt signs, and the
+   metadata MAY carry `execution_model_id`: the provider-local label the
+   relayed request body names. The provider requires the request's model to
+   equal `execution_model_id` when present, else `model_id`. A present
+   `execution_model_id` that is not a non-empty string, or that accompanies
+   a `model_id` outside the `pool/` namespace, makes the metadata malformed
+   (no receipt). A provider older than v0.4.12 compares `model_id` with the
+   request's model, omits the receipt for such an attempt, and the attempt
+   settles fail-closed with no buyer debit and no provider credit.
 
-### §N.13 Relay-blind settlement receipts (v0.4.12, SPEC-015-R007)
+### §N.13 Relay-blind settlement receipts (v0.4.13, SPEC-015-R007)
 
 **SPEC-015-R007 — Relay-blind settlement receipt profile.** The profile
 `relay-blind-settlement-v1` is the only settlement-capable receipt for the
-SPEC-022 R-13 paid entrypoint
+SPEC-022 R-14 paid entrypoint
 `coordinator_buyer_v1_relay_blind_chat_completions`. It MUST NOT be accepted
 for any other entrypoint. No other profile is accepted for that entrypoint.
 It is a separate profile, not a v0.4 variant: §N.1 to §N.12 and the LOCKED
@@ -4644,7 +4688,7 @@ v0.4 tuple are unchanged, and a v0.4 parser rejects this tuple because its
    value before parsing it.
 
 5. **Verification.** The verifier runs SPEC-022 R-7.10 first, then every
-   SPEC-022 R-13.5 check. §N.3 timestamp, replay, and deadline rules and §N.4
+   SPEC-022 R-14.5 check. §N.3 timestamp, replay, and deadline rules and §N.4
    terminal states apply unchanged. §N.7 chargeability applies with
    `response_body_bytes` in place of `delivered_output_bytes`, and with the
    SPEC-022 R-3.4.3 equalities in place of the observed-token columns. Outcome
@@ -4665,7 +4709,7 @@ v0.4 tuple are unchanged, and a v0.4 parser rejects this tuple because its
    relay-blind prepare step), and for a handle with no model hash, a
    `model_id` that does not resolve to the handle, or no validated usage. It
    never signs placeholder values. The coordinator treats a withheld receipt
-   as missing evidence (SPEC-022 R-13.6): pending until the snapshot
+   as missing evidence (SPEC-022 R-14.6): pending until the snapshot
    deadline, then quarantined, with the buyer refunded and no provider credit.
    Duplicate-member detection is coordinator-side: the provider's JSON parser
    cannot observe a duplicated `relay_blind_settlement` member, and the

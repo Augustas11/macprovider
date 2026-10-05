@@ -528,6 +528,26 @@ func (c *Catalog) RouteSnapshotMaterial(modelID, reportedHash string) (RouteSnap
 	}, true
 }
 
+// EnvelopeMaterial returns the active signed catalog's envelope (id, body
+// digest, signing key, fingerprint, expiry) with no model row. A SPEC-022-R013
+// pool_manifest route snapshot records it as the global catalog in force at
+// route time, never as the expected identity.
+func (c *Catalog) EnvelopeMaterial() (RouteSnapshotMaterial, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	parsed := activeParsedLocked(c.st)
+	if parsed == nil {
+		return RouteSnapshotMaterial{}, false
+	}
+	return RouteSnapshotMaterial{
+		CatalogID:                         parsed.CatalogID,
+		CatalogBodyDigest:                 parsed.CatalogBodyDigest,
+		CatalogSignatureKeyID:             parsed.CatalogSignatureKeyID,
+		CatalogSignaturePubkeyFingerprint: parsed.CatalogSignaturePubkeyFingerprint,
+		CatalogExpiresAt:                  parsed.ExpiresAt,
+	}, true
+}
+
 // CatalogBytes returns the exact signed catalog bytes accepted by signature
 // verification, or nil if no active catalog exists.
 func (c *Catalog) CatalogBytes() []byte {

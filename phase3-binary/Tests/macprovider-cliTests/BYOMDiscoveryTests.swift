@@ -68,6 +68,7 @@ final class BYOMDiscoveryTests: XCTestCase {
         )
 
         let command = try ModelsDiscoverCommand.parse([
+            "--offline-artifact-feed",
             "--json",
             "--local-discovery-namespace-path", namespace.path,
             "--mlx-cache-dir", cache.path,
@@ -221,6 +222,7 @@ final class BYOMDiscoveryTests: XCTestCase {
     func testDiscoverCommandMirrorsWarningsToStderrInJSONMode() async throws {
         let root = try temporaryDirectory("byom-stderr")
         let command = try ModelsDiscoverCommand.parse([
+            "--offline-artifact-feed",
             "--json",
             "--local-discovery-namespace-path", root.appendingPathComponent("ns").path,
             "--mlx-cache-dir", root.appendingPathComponent("missing-cache", isDirectory: true).path,
@@ -509,6 +511,7 @@ final class BYOMDiscoveryTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let listener = try SilentLoopbackListener()
         let command = try ModelsDiscoverCommand.parse([
+            "--offline-artifact-feed",
             "--skip-lmstudio",
             "--skip-llamacpp",
             "--json",
@@ -819,6 +822,7 @@ final class BYOMDiscoveryTests: XCTestCase {
         let runtime = try OneShotHTTPServer(body: body)
         let origin = "http://127.0.0.1:\(try XCTUnwrap(runtime.url.port))"
         let command = try ModelsDiscoverCommand.parse([
+            "--offline-artifact-feed",
             "--skip-lmstudio",
             "--skip-llamacpp",
             "--json", "--local-discovery-namespace-path", root.appendingPathComponent("ns").path,

@@ -43,7 +43,7 @@ func (s *Store) ensureSettlementAttemptOutputUsageSourceVocabulary(ctx context.C
 // that cannot read the newer rows fails closed at startup. Binaries that
 // predate this floor cannot read it; SPEC-022-R012 (R-12.8) gates a
 // downgrade to them with `coordinator pool-rollback-preflight`.
-// 3 = SPEC-022 v0.3.0 (R-13.8): settlement_receipt_verdicts may hold
+// 3 = SPEC-022 v0.3.0 (R-14.8): settlement_receipt_verdicts may hold
 // relay_blind_settled rows with the relay-blind-settlement-v1 profile. A
 // binary that cannot read them is not a rollback target; roll forward.
 const billingCompatContract = 3

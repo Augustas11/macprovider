@@ -138,7 +138,7 @@ func TestSettlementFinalityRequiredInternalRequestQueryFailsClosed(t *testing.T)
 	}
 }
 
-// SPEC-022 R-13: a relay-blind finality lookup returns the coordinator's
+// SPEC-022 R-14: a relay-blind finality lookup returns the coordinator's
 // explicit observe declaration only for an attempt whose request-log row
 // carries the same binding and envelope digests; an unknown attempt is not
 // found, and a malformed lookup is rejected.

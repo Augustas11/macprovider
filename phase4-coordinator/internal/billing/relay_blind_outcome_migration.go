@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// SPEC-022 v0.3.0 (R-7.9, R-13.8) migration: widen the settlement verdict and
+// SPEC-022 v0.3.0 (R-7.9, R-14.8) migration: widen the settlement verdict and
 // audit-outbox CHECK constraints to admit relay_blind_settled and the
 // relay-blind-settlement-v1 profile. Like the R-12.6a usage-source widening,
 // it edits only the stored table definitions: every existing value already

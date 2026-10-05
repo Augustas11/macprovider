@@ -302,7 +302,7 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
                     // Later handles pin a model hash other than the catalog
                     // hash the session advertised, so each receipt is validly
                     // signed over a tuple the relay-blind verifier must
-                    // quarantine (SPEC-022 R-13.5 model-hash equality).
+                    // quarantine (SPEC-022 R-14.5 model-hash equality).
                     guard settlementReceiptBuilder != nil, let blindRuntime else {
                         try await writer.write([
                             "type": "relay_blind_fixture_error",

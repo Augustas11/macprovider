@@ -47,7 +47,7 @@ type Store struct {
 	poolSweep   poolSettlementSweepState
 	// relayBlindAttemptTimeoutMS bounds a relay-blind dispatch (the buyer
 	// request timeout), so it bounds the terminal of an attempt whose
-	// terminal was never recorded (SPEC-022 R-13.10). Zero means unset.
+	// terminal was never recorded (SPEC-022 R-14.10). Zero means unset.
 	relayBlindAttemptTimeoutMS atomic.Int64
 	// settlementReceiptRecovery protects a signed receipt already observed by
 	// this process from racing the missing-receipt deadline sweeper while its

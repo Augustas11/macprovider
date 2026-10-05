@@ -42,7 +42,7 @@ func relayBlindRecoveryMetadata(t *testing.T, reservation relayblind.Reservation
 }
 
 // relayBlindObserveCoverageResponse is the coordinator's explicit SPEC-022
-// R-13 observe declaration for the attempt the lookup names.
+// R-14 observe declaration for the attempt the lookup names.
 func relayBlindObserveCoverageResponse(r *http.Request) *http.Response {
 	q := r.URL.Query()
 	if q.Get("required_internal_request_id") == "" || q.Get("relay_blind_provider_binding_digest") == "" || q.Get("relay_blind_envelope_digest") == "" {

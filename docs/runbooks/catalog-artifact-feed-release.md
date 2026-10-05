@@ -43,15 +43,55 @@ the prior served set. `/v1/autotune-release` reports a `catalog_artifacts`
 entry only for an artifact-bound release, so a four-feed release keeps the
 exact status shape v0.1 clients read.
 
-**Configuring the pair is an activation-deploy step, not a default.** The
-checked-in `phase4-coordinator/dist/coordinator.yaml` deliberately does not
-name the two paths: a configured path whose file is absent fails startup
-closed, and every release before activation is a four-feed release without the
-file. Add the two keys (see the commented example in `coordinator.yaml.example`)
-in the same deploy that installs the first artifact-bound release directory;
-until then both routes answer 404 and `catalog-release.py status` lists the
-step. Removing the two keys and reloading is the disablement path
+**The config pair follows the release binding.** A configured path whose
+file is absent fails startup closed, and an artifact-bound release under a
+config without the pair installs a feed nothing serves. So
+`autotune.catalog_artifacts_path` / `_sig_path` must name
+`/opt/macprovider/autotune/current/autotune-artifacts.json` (+ `.sig`) exactly
+when the installed `release.json` binds the feed, and be absent otherwise. Each
+path that changes Pearl enforces this:
+
+- **Pearl updater** (`ops/pearl-updater/macprovider-pearl-update`): a catalog
+  release whose signed `pearl-release.json` `catalog.files` binds the pair
+  verifies it like the other feeds, installs it into the immutable release
+  directory, and sets the two keys in the coordinator config that carries the
+  advertised version, or removes them for an unbound release, in the same
+  transaction. Rollback restores the previous `current` pointer and the
+  previous config bytes together. A second config file (the Pearl overlay)
+  that names either key is refused. The exact-admission canary requires the
+  `catalog_artifacts` status entry for a bound release and its absence for an
+  unbound one.
+- **`deploy-pearl-vps.sh`** installs the pair but never edits the config, and
+  refuses an effective config whose pair does not match the release binding.
+  The checked-in `phase4-coordinator/dist/coordinator.yaml` names the pair
+  because the committed release binds the feed.
+- **`scripts/catalog-content-release.sh`** flips `current` and SIGHUPs but
+  never edits the config. Its preflight (and the re-check under the lease)
+  refuses with `artifact_feed_config` when the live pair does not follow the
+  release, so a bound/unbound transition goes through the Pearl updater.
+
+Removing the two keys and reloading is the disablement path
 (`docs/runbooks/byom-disablement-rollback.md`, row 11).
+
+**nginx is a manual, additive step.** Neither the Pearl updater nor a routine
+`deploy-pearl-vps.sh` run replaces Pearl's coordinator vhost: the deploy
+installs `nginx-coordinator.malibu.tech.conf` only for a domain whose
+certificate it is (re)issuing, and Pearl's live vhost carries hand-managed
+routes the repo file lacks. Before the activation release goes live, copy only
+the `location = /v1/catalog-artifacts` and `location = /v1/catalog-artifacts.sig`
+blocks from `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf` into
+Pearl's vhost, before its `location /v1/ { return 404; }`, then run
+`nginx -t && systemctl reload nginx`. Never copy the whole repo site file over
+Pearl's.
+
+The Pearl updater checks this inside its rollback-armed rollout, right after
+the public exact catalog admission check: it fetches
+`https://coordinator.malibu.tech/v1/catalog-artifacts` and `.sig` and requires
+the release's exact bound bytes (or neither, for an unbound release). If the
+blocks are missing it fails with an error naming this step and rolls the
+release back; that is the same blast radius as any other admission check
+failure at that point, and the previous release keeps serving. Add the blocks
+and re-run the update.
 
 `scripts/verify-live-coordinator-release-gate.py` reads whether the release
 binds `autotune-artifacts.json` (+ `.sig`) from `pearl-release.json`
@@ -249,6 +289,7 @@ artifact-bound cut, and would list any future surface here as pending:
 | coordinator serving | `phase4-coordinator/internal/buyer`, `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf` | `/v1/catalog-artifacts` (+ `.sig`) on the buyer mux, release-bound at load; exact nginx allow-through blocks before `location /v1/ { return 404; }` | **landed (slice 2b)** |
 | scheduled renewal | `scripts/renew-autotune-static-feed.sh` | once `status` reports `post-activation`, the renewal fetches the live coordinator's `current` release directory from Pearl as the previous signed release (or uses `AUTOTUNE_PREVIOUS_RELEASE_DIR` when set) and `generate` authenticates it; the monthly freshness cron therefore cannot fail closed at generate after activation | **landed (slice 2b-ii)** |
 | coordinator deploy | `phase4-coordinator/dist/deploy-pearl-vps.sh` | when `release.json` binds the feed, the pair is uploaded, content-addressed into the immutable release envelope, and staged beside the other feeds (a bound release whose checkout lacks the pair aborts before upload; `verify-directory` on Pearl re-checks the envelope) | **landed (slice 2b-ii)** |
+| Pearl updater | `ops/pearl-updater/macprovider-pearl-update` | when signed `pearl-release.json` `catalog.files` binds the pair (and only then: the `release.json` feed set must agree), it is downloaded, checksum- and binding-verified, inner-Ed25519-verified, installed into the immutable release directory, and named in the coordinator config in the same transaction; rollback restores pointer and config together | **landed (#1816)** |
 
 **Deferred requirements** (recorded by the ledger, not enforced by this slice;
 `status` lists the first): the §16.8 intake-decision manifest schema and
@@ -264,23 +305,42 @@ ledgered).
 `components.catalog.files` stays the exact nine-name set in every one of these
 (Stage A, below).
 
+**The activation deploy does not need a new CLI on the canary.** Since #1816 the
+`deploy-pearl-vps.sh` and Pearl updater canaries prove that the canary's live
+process loaded the new release from the coordinator (`state: live_verified`,
+`source: coordinator`, release/policy/digest/signer/row bound to the
+coordinator-admitted envelope). They no longer byte-compare the CLI-installed
+`catalog-release/` directory, which only a signed CLI payload writes. A CLI
+that bakes the release is still needed for features that resolve against the
+compiled-in feed (BYOM identity, slice 2c), not for the deploy.
+
 ## Current state
 
-The source is committed and seeded with all ten catalog rows — each with its
-primary MLX artifact copied from the signed candidate row, `verification_status:
-"verified"`, and its §3.3.1 `rate_class`. **No release has been cut with it yet.**
-Two operator gaps are deliberate and fail closed at generation:
+**The activation release is cut but not deployed.**
+`published-2026-10-01-artifact-feed-activation-v1` (#1816 step 1, #1690 M1) is
+the first artifact-bound release:
 
-1. **`size_bytes` is `null` on every seeded artifact.** Publishing a fabricated
-   byte count into a signed feed is not acceptable, so the generator refuses to
-   build a feed while any `size_bytes` is `null`
-   (`size_bytes must be measured before the release is generated`). Measure the
-   snapshot and fill the integer.
-2. **No GGUF artifacts are seeded.** Real GGUF digests require pulling and
-   hashing the blob; see below.
+- Its feeds are signed with `streamvc-autotune-static-v4`.
+- The release ledger is v3.
+- The artifact feed covers 17 model keys with 18 artifacts: every MLX
+  primary, with `size_bytes` measured, plus one verified GGUF secondary,
+  `meta-llama/llama-3.2-3b-instruct` / `gguf-q4-k-m`. That GGUF is a
+  `huggingface_revision` + `file_path` source, `llamacpp_loopback` only.
+- The provider CLI snapshot bakes the feed.
+- Its rate card is unchanged from the preceding release.
 
-`verified_at` on the seeded primaries is `2026-09-02`, the date the candidate
-release published those digests as operator-verified identities.
+Nothing serves the feed yet. Going live needs:
+
+- a provider CLI cut from the commit that carries this release;
+- the `/v1/catalog-artifacts` (+ `.sig`) nginx locations added to Pearl's
+  vhost by hand (see "Serving the feed");
+- the catalog release deployed through the Pearl updater, which sets
+  `autotune.catalog_artifacts_path` / `_sig_path` with it. A
+  `deploy-pearl-vps.sh` activation instead needs both keys already in Pearl's
+  on-disk `coordinator.yaml`; the deploy refuses otherwise.
+
+The repository is now `post-activation`. Every later cut passes
+`--previous-release-dir`, and `--activate-artifact-feed` is refused.
 
 ## Adding an artifact
 

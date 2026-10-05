@@ -3,7 +3,7 @@
 Status: draft journey contract; no implementation evidence
 Owner: operator-constrained privacy class
 Specs: SPEC-049, SPEC-022, SPEC-015, SPEC-001
-Requirements: SPEC-022-R013, SPEC-015-R007, SPEC-001-R005, SPEC-049-R001, SPEC-049-R002, SPEC-049-R003, SPEC-049-R004,
+Requirements: SPEC-022-R014, SPEC-015-R007, SPEC-001-R005, SPEC-049-R001, SPEC-049-R002, SPEC-049-R003, SPEC-049-R004,
 SPEC-049-R005, SPEC-049-R006, SPEC-049-R007, SPEC-049-R008, SPEC-049-R009,
 SPEC-049-R010, SPEC-049-R011, SPEC-049-R012, SPEC-049-R013, SPEC-049-R014,
 SPEC-049-R015, SPEC-049-R016, SPEC-049-R017, SPEC-049-R018, SPEC-049-R019,
@@ -30,7 +30,7 @@ and does not make any SPEC-049 requirement conformant by itself.
 SPEC-049-R023 is mapped here because a signed result of this journey is one of
 its required inputs; a signed result MUST NOT promote SPEC-049-R023 on its own,
 because that requirement also needs a recorded staged canary and three-lane
-audits outside this evidence object. SPEC-022-R013, SPEC-015-R007, and
+audits outside this evidence object. SPEC-022-R014, SPEC-015-R007, and
 SPEC-001-R005 are mapped here for their privacy-class leg (steps 9, 13, 14,
 and 15). A signed result MUST NOT promote them on its own, because they also
 cover plain relay-blind work outside this journey, so the signed result does
@@ -224,7 +224,7 @@ The `observations` object contains exactly the booleans listed in this section.
 
 The journey is complete only when every required step passes, the signed result
 names every requirement mapped to this journey except SPEC-049-R023,
-SPEC-022-R013, SPEC-015-R007, and SPEC-001-R005 (and no unmapped
+SPEC-022-R014, SPEC-015-R007, and SPEC-001-R005 (and no unmapped
 requirement), every evidence digest resolves, and the evidence has not
 expired. The staged canary and three-lane review are deliberately
 outside this evidence object and remain SPEC-049-R023 inputs.

@@ -6946,6 +6946,46 @@ final class CoordinatorClientTests: XCTestCase {
         }
     }
 
+    /// #1816: a native model served as a signed pool entry has no catalog
+    /// envelope, so it is held like a loopback session instead of flapping on
+    /// the catalog readiness gate, and its pool id never becomes the hello
+    /// model id.
+    func testNativePoolEntrySessionHoldsWithoutCatalogServingCapabilityCheck() async throws {
+        let fixture = try LifecycleFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let script = ReadinessScript([.indeterminate], then: .indeterminate)
+        let client = try await makeClient(
+            status: ProviderStatus(
+                modelID: "model-a",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: 2048, maxConcurrencyOverride: 1)
+            ),
+            recorder: CoordinatorFrameRecorder(),
+            poolModelID: "pool/AbCdEfGhIjKlMnOpQrStUv/model-a",
+            installedCompatibilityManifest: { _, _ in nil },
+            coordinatorReadiness: { _, _, _ in await script.next() },
+            coordinatorReadinessAttempts: 3,
+            admissionPendingReadinessPollNanoseconds: 20_000_000,
+            lifecycleStateStore: fixture.store,
+            lifecycleOperationID: fixture.operationID
+        )
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-pool-native",
+            "heartbeat_interval_s": 30,
+            "catalog_compatible": true,
+        ])
+        let calls = await script.calls
+        XCTAssertEqual(calls, 0)
+        if case .valid(let record) = fixture.store.inspect() {
+            XCTAssertNotEqual(record.reasonCode, "buyer_serving_readiness_unconfirmed")
+        }
+        let hello = await client.helloMessage()
+        XCTAssertEqual(hello["model_id"] as? String, "model-a")
+        XCTAssertNil(hello["runtime_source"], "native keeps no runtime_source")
+        await client.cleanupConnectionForTest()
+    }
+
     func testCatalogRuntimeStillRequiresServingCapabilityConfirmation() async throws {
         // Contrast: a non-loopback (catalog) runtime with an unconfirmable
         // readiness still fails closed — the fix is loopback-scoped.
@@ -8047,6 +8087,7 @@ final class CoordinatorClientTests: XCTestCase {
         watchdogExitHook: (@Sendable (String) -> Void)? = nil,
         publishesSpecDecodeTelemetry: Bool = false,
         modelCatalogModelID: String? = nil,
+        poolModelID: String? = nil,
         losslessnessProbeEnabled: Bool = false,
         credentialBootstrap: Bool = false,
         bootstrapReceiptSigningKey: Curve25519.Signing.PrivateKey? = nil,
@@ -8094,6 +8135,7 @@ final class CoordinatorClientTests: XCTestCase {
         config.providerToken = providerToken
         config.model = "model-a"
         config.modelCatalogModelID = modelCatalogModelID
+        config.poolModelID = poolModelID
         config.drainTimeoutSeconds = drainTimeoutSeconds
         config.enableWarmSwap = enableWarmSwap
         config.publishesSpecDecodeTelemetry = publishesSpecDecodeTelemetry

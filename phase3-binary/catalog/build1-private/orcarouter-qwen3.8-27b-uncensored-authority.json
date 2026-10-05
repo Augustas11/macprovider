@@ -12,9 +12,9 @@
   },
   "catalog_guard": {
     "absent": true,
-    "candidate_catalog_sha256": "f4977d19a0e09f488f9bb9f7f0f34b919aee76d0421b9a2ea4f289ce7c7510ab",
-    "candidate_release_id": "published-2026-09-25-artifact-hash-correction-v1",
-    "checked_at": "2026-09-26T09:08:43Z",
+    "candidate_catalog_sha256": "559a058f65093b70e1115a152eac4466a4c40eb5854055f61849aea395b0e666",
+    "candidate_release_id": "published-2026-10-01-artifact-feed-activation-v1",
+    "checked_at": "2026-10-01T05:10:09Z",
     "model_key": "orcarouter/qwen3.8-27b-uncensored"
   },
   "constraints": {
@@ -24,14 +24,14 @@
     "rewards_or_payouts": false,
     "settlement_granted": false
   },
-  "expires_at": "2026-10-10T09:08:43Z",
-  "generated_at": "2026-09-26T09:08:43Z",
+  "expires_at": "2026-10-15T05:10:09Z",
+  "generated_at": "2026-10-01T05:10:09Z",
   "model": {
     "model_id": "orcarouter/Qwen3.8-27B-Uncensored-MLX",
     "model_key": "orcarouter/qwen3.8-27b-uncensored",
     "revision": "38d0ad4e02031658fadd3828634a0174e0b8a282"
   },
   "profile": "build1-orcarouter-private",
-  "release_id": "build1-orcarouter-private-2026-09-26-v1",
+  "release_id": "build1-orcarouter-private-2026-10-01-v1",
   "schema_version": "macprovider.build1-private-authority.v1"
 }

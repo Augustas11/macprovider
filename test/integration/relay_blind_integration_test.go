@@ -759,7 +759,7 @@ func countSQLiteRows(t *testing.T, path, table string) int {
 	return count
 }
 
-// SPEC-022 R-13.2 / AC-022-68 across the real coordinator and gateway: with
+// SPEC-022 R-14.2 / AC-022-68 across the real coordinator and gateway: with
 // settlement enforce and the relay-blind settlement profile, the coordinator
 // boots with relay-blind enabled, and a provider that never advertised the
 // relay_blind_settlement_receipt_v1 capability (this Go provider advertises

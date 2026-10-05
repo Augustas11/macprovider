@@ -24,9 +24,14 @@ const (
 	// X-MacProvider-Internal-* namespace: honored only with the service
 	// token. copyForwardHeaders never forwards a buyer-supplied copy.
 	settlementTrailersCapabilityHeader = "X-MacProvider-Internal-Settlement-Trailers"
-	settlementFinalityMACHeader        = "X-MacProvider-Settlement-Finality-Mac"
-	settlementFinalityMACDomain        = "macprovider-settlement-finality-trailers-v1"
-	missingSettlementFinalityTrailer   = "missing_settlement_finality_trailer"
+	// routeSnapshotV2CapabilityHeader advertises that this gateway settles
+	// finality pinned to settlementPolicyVersionV2. The coordinator refuses
+	// a pool-model route (and withholds R016 attested members) without it,
+	// since an older gateway holds that finality forever (#1816 VM A-1).
+	routeSnapshotV2CapabilityHeader  = "X-MacProvider-Internal-Settlement-Route-Snapshot-V2"
+	settlementFinalityMACHeader      = "X-MacProvider-Settlement-Finality-Mac"
+	settlementFinalityMACDomain      = "macprovider-settlement-finality-trailers-v1"
+	missingSettlementFinalityTrailer = "missing_settlement_finality_trailer"
 )
 
 // settlementFinalityMAC is hex HMAC-SHA256, keyed by the trimmed coordinator
@@ -68,6 +73,7 @@ func (s *Server) setCoordinatorChatContext(h http.Header, r *http.Request, accou
 	// The MAC key is the bearer, so advertise only when one is configured.
 	if strings.TrimSpace(bearer) != "" {
 		h.Set(settlementTrailersCapabilityHeader, "1")
+		h.Set(routeSnapshotV2CapabilityHeader, "1")
 	}
 }
 

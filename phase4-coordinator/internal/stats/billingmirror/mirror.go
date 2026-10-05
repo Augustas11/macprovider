@@ -376,7 +376,7 @@ func requestCreditsQuery(caps requestCreditSourceCapabilities, bounded bool) str
 	// spec022_verified (and the verified audit record it creates) derives
 	// only from the literal closed, valid 'verified' verdict and the
 	// positive-verification predicate. Payable-view membership alone is not
-	// verification: a SPEC-022 R-13 relay_blind_settled credit is payable
+	// verification: a SPEC-022 R-14 relay_blind_settled credit is payable
 	// but never verified (R-10.7).
 	verifiedExpr := "0"
 	if caps.HasSpec022PayableView && caps.HasVerifiedVerdicts {

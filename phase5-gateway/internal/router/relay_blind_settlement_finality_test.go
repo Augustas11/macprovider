@@ -77,7 +77,7 @@ type relayBlindReconcileCase struct {
 	// no coverage (an older coordinator).
 	finality map[string]any
 	// dispatch is what the coordinator chat response carried: "marker" (the
-	// generic internal request id plus the R-13 coverage marker, the
+	// generic internal request id plus the R-14 coverage marker, the
 	// default), "generic" (only the generic internal request id every
 	// coordinator response carries), "stripped" (neither header), or "lost"
 	// (no response reached the gateway).
@@ -122,9 +122,9 @@ func relayBlindObserveDeclaration() map[string]any {
 	return map[string]any{"relay_blind_settlement_coverage": "observe"}
 }
 
-// SPEC-022 R-13.6 / R-8.1 in the reconciler: a relay-blind hold settles from
+// SPEC-022 R-14.6 / R-8.1 in the reconciler: a relay-blind hold settles from
 // the coordinator's answer for its attempt, never from a header the gateway
-// saw. Enforce coverage follows R-13 finality (relay_blind_settled debits,
+// saw. Enforce coverage follows R-14 finality (relay_blind_settled debits,
 // bounded by buyer delivery; a refund tuple refunds; anything else holds).
 // Only the coordinator's explicit observe declaration runs the status-row
 // recovery; not-found, errors, unbound echoes, and contradictions hold.

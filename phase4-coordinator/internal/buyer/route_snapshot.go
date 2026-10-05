@@ -83,6 +83,15 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	}
 	settlementCfg := store.SettlementConfig(config.Default().Settlement)
 	routeMode := billing.VerifiedModelSettlementMode(settlementCfg)
+	// SPEC-042-R015 / SPEC-022-R013: a pool-model attempt records its own
+	// pool_manifest snapshot (enforce only); no catalog row is consulted.
+	if b.state != nil && b.state.poolRouteView().poolModelCandidate(provider) {
+		pendingDeadline := settlementCfg.PendingDeadlineSeconds
+		if pendingDeadline <= 0 {
+			pendingDeadline = config.Default().Settlement.PendingDeadlineSeconds
+		}
+		return b.recordPoolModelRouteSnapshot(ctx, providerBody, provider, attemptN, store, routeMode, pendingDeadline)
+	}
 	prereq, skipReason, err := routeSnapshotPrerequisites(provider)
 	if err != nil {
 		return nil, err
@@ -126,6 +135,16 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 		snapshot.RuntimeSource = provider.RuntimeSource
 		snapshot.PoolGeneration = b.state.poolGeneration
 		snapshot.PoolOperatorAccountID = poolView.creatorAccountID
+		// SPEC-042-R016: a non-creator member serving under the creator's
+		// attestation binds its recorded owner account for replay.
+		if !poolView.creatorOwned[provider.ProviderID] {
+			if account, ok := poolView.attestedMemberAccount(provider); ok {
+				snapshot.PoolMemberAccountID = account
+				// SPEC-015 §N.2 / SPEC-022-R013.2: the member account is a
+				// #1816 provenance member, carried only by route_snapshot_v2.
+				snapshot.RouteSnapshotPolicyVersion = billing.RouteSnapshotPolicyVersionV2
+			}
+		}
 	}
 	applyBYOMRouteSnapshotBinding(&snapshot, byomBinding)
 	computeIntegrityRequired, computeIntegrityCovered, computeIntegrityHardwareDigest, err := computeIntegrityRouteBinding(provider, routeMode)
@@ -205,7 +224,7 @@ type routeSnapshotPrerequisite struct {
 
 // routeSnapshotPrerequisites evaluates those prerequisites for one session,
 // with no request content. Plaintext and relay-blind snapshots share it
-// (SPEC-022 R-13.2), so the two lanes cannot drift. skipReason is a gap that
+// (SPEC-022 R-14.2), so the two lanes cannot drift. skipReason is a gap that
 // only enforce refuses; err is a conflict every mode refuses.
 func routeSnapshotPrerequisites(provider pool.Provider) (routeSnapshotPrerequisite, string, error) {
 	reportedHash := strings.TrimSpace(provider.ModelHash)

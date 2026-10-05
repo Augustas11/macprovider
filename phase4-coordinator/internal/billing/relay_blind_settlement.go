@@ -16,7 +16,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/computeintegrity"
 )
 
-// SPEC-022 R-13 / SPEC-015 §N.13: the content-free relay-blind settlement
+// SPEC-022 R-14 / SPEC-015 §N.13: the content-free relay-blind settlement
 // lane. Its only positive outcome is relay_blind_settled, which is never
 // verified and is payable only under the R-7.9 entrypoint, basis, and
 // profile binding (payableSettlementOutcomeSQL).
@@ -51,7 +51,7 @@ var (
 )
 
 // RelayBlindDispatchEvidence is the persisted SPEC-041-R005 dispatch row the
-// coordinator joins a relay-blind receipt to (R-13.5): the envelope,
+// coordinator joins a relay-blind receipt to (R-14.5): the envelope,
 // execution-authorization, and provider-binding digests and kid, the
 // buyer-declared bounds, the validated input tokens, and the bounded
 // completion recorded from the terminal evidence.
@@ -67,7 +67,7 @@ type RelayBlindDispatchEvidence struct {
 	CompletionTokens      *int64
 }
 
-// RelayBlindSettlementVerifyInput is everything the R-13.5 verifier compares.
+// RelayBlindSettlementVerifyInput is everything the R-14.5 verifier compares.
 // ResponseBodySHA256 and ResponseBodyBytes are the coordinator's recorded
 // digest of the exact response bytes it received (R-3.5); Usage is the
 // attempt's recorded ledger usage.
@@ -132,13 +132,13 @@ type relayBlindSettlementUsage struct {
 	OutputTokens int64 `json:"output_tokens"`
 }
 
-// RelayBlindSnapshot reports whether a route snapshot belongs to the R-13
+// RelayBlindSnapshot reports whether a route snapshot belongs to the R-14
 // lane: the relay-blind entrypoint or the relay-blind basis.
 func RelayBlindSnapshot(route RouteSnapshot) bool {
 	return route.PaidEntrypoint == PaidEntrypointRelayBlindChat || route.PromptHashBasis == PromptHashBasisRelayBlindEnvelopeV1
 }
 
-// VerifyRelayBlindSettlementReceipt is the SPEC-015 §N.13 / SPEC-022 R-13.5
+// VerifyRelayBlindSettlementReceipt is the SPEC-015 §N.13 / SPEC-022 R-14.5
 // verifier. It returns relay_blind_settled only when every check passes, and
 // it never returns verified.
 func VerifyRelayBlindSettlementReceipt(input RelayBlindSettlementVerifyInput) SettlementVerifyResult {
@@ -483,7 +483,7 @@ func relayBlindSettlementFacts(tuple relayBlindSettlementTuple) *SettlementRecei
 }
 
 // RelayBlindSettlementReceiptIngestionInput carries one §N.13 envelope and the
-// persisted dispatch row it must join (R-13.5).
+// persisted dispatch row it must join (R-14.5).
 type RelayBlindSettlementReceiptIngestionInput struct {
 	SettlementReceiptIdentity
 	Envelope              string

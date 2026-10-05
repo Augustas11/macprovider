@@ -16,7 +16,7 @@ func insertRelayBlindRequestLogRow(t *testing.T, store *Store, accountID, extern
 	}
 }
 
-// SPEC-022 R-13: the coordinator, not a header the gateway saw, says whether
+// SPEC-022 R-14: the coordinator, not a header the gateway saw, says whether
 // a relay-blind attempt was enforce-covered. Enforce needs an enforce
 // relay-blind snapshot; observe needs the attempt's request-log row with the
 // same binding and envelope digests and no relay-blind snapshot; anything

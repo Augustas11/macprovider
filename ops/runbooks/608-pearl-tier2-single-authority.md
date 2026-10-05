@@ -185,6 +185,28 @@ proves the physical Mac files/text vnode/listener and the matching
 signer, and row identity. This command does not start the buyer-canary service,
 enable its timer, or create either enable gate.
 
+**Trust model of the catalog canary (accepted residual risk, #1816 freeze
+audit R1 S-M4).** The canary is a functional rollout check, not an integrity
+control. Every leg it reads is produced by, or on behalf of, the canary Mac
+account: the proof program runs there (and a hostile account can answer the
+pinned SSH session with anything, for example through an `authorized_keys`
+forced command), the local status is unauthenticated loopback, and
+`/v1/pool/check` reports the session's provider-reported catalog envelope
+(`catalog_evidence_source=provider_reported`), which the coordinator only
+checks against its own current release. A user who controls the canary
+account can therefore make the canary pass. That cannot change what is
+deployed: the updater verifies the release's signed manifest, feed digests,
+and signer keyring before install, the coordinator re-verifies every feed at
+load, and every provider verifies the signatures it fetches. A forged pass can
+only let an already signed release proceed without functional evidence. So
+the canary account is operator custody: a dedicated account on an operator
+Mac, SSH host key pinned (`catalog_canary_known_hosts_file`), its key and
+token files root-owned `0600` on Pearl. Treat a compromise of that account as
+a loss of the canary signal and re-run the rollout's exact checks from a
+trusted Mac. No coordinator record binds a session to the bytes it fetched
+(the feeds are public, unauthenticated GETs), so there is no server-side
+fact the canary could be bound to without new attestation work.
+
 Use the apply start timestamp as the journal boundary and require zero matches:
 
 ```bash

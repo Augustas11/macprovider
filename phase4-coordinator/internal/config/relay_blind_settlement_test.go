@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// SPEC-022 R-1.3 / R-13.8: relay-blind under enforce is admitted only with
-// the R-13 settlement profile; the guard is never lifted by exemption.
+// SPEC-022 R-1.3 / R-14.8: relay-blind under enforce is admitted only with
+// the R-14 settlement profile; the guard is never lifted by exemption.
 func TestRelayBlindEnforceRequiresSettlementProfile(t *testing.T) {
 	if got := Default().RelayBlind.EnforceSettlementProfile; got != "" {
 		t.Fatalf("default enforce_settlement_profile = %q, want empty", got)

@@ -83,9 +83,12 @@ t.commit(); t.close()
 # a database without any trust-pool history
 t = sqlite3.connect(os.path.join(d, "empty.db")); t.execute("CREATE TABLE IF NOT EXISTS x (y)"); t.commit(); t.close()
 PY
-# expected: "<verdict> <exit>"
+# expected: "<verdict> <exit>" (the lab history carries no #1816 extension;
+# the extension cases are pinned in Go by
+# phase4-coordinator/internal/trustpool/rollback_check_runbook_test.go)
 declare -a CASES=(
   "full-history-m9|$D/full.db|m9|replayable 0"
+  "full-history-p1816|$D/full.db|p1816|replayable 0"
   "full-history-m8|$D/full.db|m8|STOP 1"
   "full-history-v1-only|$D/full.db|v1-only|STOP 1"
   "m8-classes-only-m8|$D/m8-only.db|m8|replayable 0"

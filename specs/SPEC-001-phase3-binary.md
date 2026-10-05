@@ -4,7 +4,7 @@
 
 **Change log v1.9.28 (2026-10-05, relay-blind settlement receipt wire):**
 Adds `SPEC-001-R005` (#1851) with three closed wire additions for the SPEC-022
-R-13 relay-blind settlement lane. The provider advertises
+R-14 relay-blind settlement lane. The provider advertises
 `tier2_capabilities.relay_blind_settlement_receipt_v1: true` in its
 initial-stage `auth_request`. A relay-blind `inference_request` may carry a
 `relay_blind_settlement` metadata object. It is distinct from the SPEC-015 v0.4
@@ -16,7 +16,7 @@ SPEC-022 `enforce`, a session without the capability never receives
 relay-blind work. A claimed attempt that ends before a pinned runtime handle
 exists, or whose handle has no model hash, does not resolve the snapshot model,
 or has no validated usage, withholds the receipt; the coordinator treats that
-as missing evidence (SPEC-022 R-13.6). Duplicate-member detection on
+as missing evidence (SPEC-022 R-14.6). Duplicate-member detection on
 `relay_blind_settlement` is the coordinator's obligation, because the provider
 JSON parser cannot observe duplicate members.
 
@@ -2761,7 +2761,7 @@ provider.
 | `stream` | boolean | Yes | Whether the buyer requested streaming. Determines whether the provider sends `inference_response_chunk` per token (true) or a single chunk with the full response (false). |
 | `max_output_tokens` | integer | No | Authenticated coordinator dispatch ceiling, >= 0. The provider uses `min(body.max_tokens, max_output_tokens)` when the body is explicit and uses this value when the body omits `max_tokens`. This field is not part of `body` or the SPEC-015 prompt hash. Under SPEC-008 it is inside the authenticated encrypted plaintext. |
 | `body` | string | Yes | The buyer's original request body, JSON-serialized as a string. The provider parses this as if it were a `POST /v1/chat/completions` request body per § 6.2. |
-| `relay_blind_settlement` | object | No | (v1.9.28) Closed relay-blind settlement metadata, only on a relay-blind dispatch with an R-13 route snapshot. Schema and rules: SPEC-001-R005. |
+| `relay_blind_settlement` | object | No | (v1.9.28) Closed relay-blind settlement metadata, only on a relay-blind dispatch with an R-14 route snapshot. Schema and rules: SPEC-001-R005. |
 
 **Why `body` is a string, not an embedded object:** The buyer's
 request may contain fields the coordinator does not parse
@@ -2866,7 +2866,7 @@ MUST NOT send any more `inference_response_chunk` messages for that
 #### Relay-blind settlement receipt wire (NEW in v1.9.28)
 
 **SPEC-001-R005 — Relay-blind settlement receipt wire.** The provider and
-coordinator MUST implement exactly these three additions for the SPEC-022 R-13
+coordinator MUST implement exactly these three additions for the SPEC-022 R-14
 relay-blind settlement lane, and nothing else on these frames changes:
 
 1. **Capability.** A provider that implements this requirement and SPEC-015
@@ -2874,11 +2874,11 @@ relay-blind settlement lane, and nothing else on these frames changes:
    true` in its initial-stage `auth_request` (§6.15.1). The coordinator does
    not echo it. A legacy `hello` cannot carry it. Under SPEC-022 `enforce`,
    the coordinator MUST NOT reserve or dispatch relay-blind work to a session
-   that did not advertise it (SPEC-022 R-13.2).
+   that did not advertise it (SPEC-022 R-14.2).
 
 2. **`relay_blind_settlement` on `inference_request` (C→P).** The coordinator
    attaches this closed object only to a relay-blind dispatch
-   (`body_encoding: relay-blind-request-v1`) for which it committed an R-13
+   (`body_encoding: relay-blind-request-v1`) for which it committed an R-14
    route snapshot. Under SPEC-008 it is inside the authenticated encrypted
    payload. It has exactly these members, all required and non-null; unknown
    or duplicate members are invalid. The coordinator MUST emit the object
@@ -2937,7 +2937,7 @@ relay-blind settlement lane, and nothing else on these frames changes:
    resolve to that handle, or when no SPEC-041 `validated` usage exists for
    the attempt, and whenever receipt construction fails. It MUST NOT sign a
    receipt with a placeholder hash or usage. The coordinator treats a
-   withheld receipt as missing evidence under SPEC-022 R-13.6: the attempt is
+   withheld receipt as missing evidence under SPEC-022 R-14.6: the attempt is
    pending until the snapshot deadline and is then quarantined, the buyer is
    refunded, and the provider receives no credit.
 

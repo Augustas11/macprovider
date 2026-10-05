@@ -118,10 +118,10 @@ func TestRelayBlindEnforceSettlementFlow(t *testing.T) {
 				t.Fatalf("finality outcome=%q want %q (headers=%v trailers=%v)", outcome, tc.wantOutcome, result.Header, result.Trailer)
 			}
 			if result.Header.Get(internalRequestIDHeader) == "" {
-				t.Fatal("relay-blind R-13 response lacks the coordinator internal request id")
+				t.Fatal("relay-blind R-14 response lacks the coordinator internal request id")
 			}
 			if got := result.Header.Get(relayBlindSettlementCoverageHeader); got != billing.RelayBlindCoverageEnforce {
-				t.Fatalf("relay-blind R-13 response coverage marker=%q", got)
+				t.Fatalf("relay-blind R-14 response coverage marker=%q", got)
 			}
 			if result.Header.Get("X-MacProvider-Receipt") != "" || strings.Contains(result.Header.Get(settlementReasonHeader), "verified") {
 				t.Fatalf("receipt or verified label leaked: %v", result.Header)
@@ -151,7 +151,7 @@ func TestRelayBlindEnforceSettlementFlow(t *testing.T) {
 	}
 }
 
-// SPEC-022 R-13.6: a receipt the provider withholds after the attempt was
+// SPEC-022 R-14.6: a receipt the provider withholds after the attempt was
 // recorded (a terminal frame without a receipt, or an uncertain stream end)
 // is missing evidence. The attempt is pending until its deadline, then closed
 // quarantined: the buyer is refunded and no provider credit is payable.

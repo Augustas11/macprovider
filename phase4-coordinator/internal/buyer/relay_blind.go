@@ -54,7 +54,7 @@ func WithPrivacyAuthority(authority *relayblind.PrivacyAuthority) Option {
 }
 
 // relayBlindAvailable is SPEC-041 availability. Under SPEC-022 enforce the
-// lane is open only with the R-13 settlement profile configured (R-1.3).
+// lane is open only with the R-14 settlement profile configured (R-1.3).
 func (s *Server) relayBlindAvailable() bool {
 	return s != nil && s.relayBlind != nil && s.relayBlind.cfg.Enabled && s.relayBlind.store != nil && s.relayBlind.relay != nil &&
 		(!s.settlementEnforceMode() || s.relayBlindSettlementProfileConfigured())
@@ -310,6 +310,11 @@ func (s *Server) selectRelayBlindProvider(ctx context.Context, model string, enc
 			eligible = provider.RoutingEligible()
 		}
 		if !eligible || !provider.IsWSTunneled() || !modelIDEqual(provider.ModelID, model) {
+			continue
+		}
+		// SPEC-047-R011: a session bound to a pool model entry serves only
+		// that pool's pool-model route; relay-blind is global-pool only.
+		if provider.ModelAdmissionPoolModelID != "" {
 			continue
 		}
 		if s.relayBlindSettlementPrerequisite(provider) != "" {
@@ -598,7 +603,7 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 	rec.setRelayBlindAudit(relayBlindAuditFields{Outcome: "relay_blind_unavailable", EnvelopeDigest: reservation.EnvelopeDigest,
 		KeyRecordDigest: reservation.KeyRecordDigest, KID: reservation.KID, ProviderBindingDigest: relayblind.BindingDigest(reservation.ProviderBinding),
 		InputTokenUpperBound: reservation.InputTokenUpperBound, MaxOutputTokens: reservation.MaxOutputTokens})
-	// SPEC-022 R-13.3: under enforce the relay-blind route snapshot commits
+	// SPEC-022 R-14.3: under enforce the relay-blind route snapshot commits
 	// before dispatch, and the dispatch carries its settlement metadata.
 	var settlement *providerws.RelayBlindSettlementMetadata
 	if s.settlementEnforceMode() {
@@ -617,7 +622,7 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 			return
 		}
 		// The gateway binds its settlement hold to this coordinator id. The
-		// coverage marker is set only after the R-13 snapshot committed; the
+		// coverage marker is set only after the R-14 snapshot committed; the
 		// gateway keeps it as a hint, and coordinator finality stays the
 		// authority for recovery.
 		w.Header().Set(internalRequestIDHeader, rec.requestID)
@@ -781,7 +786,7 @@ func (s *Server) forwardRelayBlindNonStreaming(w http.ResponseWriter, r *http.Re
 			var settlementOutput *billing.SettlementOutput
 			if rec.relayBlindSettlement != nil {
 				// SPEC-022 R-3.5: the response-body digest, never a
-				// plaintext output hash, for an R-13 attempt.
+				// plaintext output hash, for an R-14 attempt.
 				settlementOutput = responseDigest.output(relayBlindTerminalState(end.Status), rec.relayBlindTerminalTimestamp(end))
 			} else if reservation.PrivacyClass {
 				settlementOutput = settlementOutputUnavailableFor(terminalStateFromAttempt(status, end.Error, code))
@@ -824,7 +829,7 @@ func (s *Server) forwardRelayBlindStreaming(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Content-Type", "text/event-stream")
 	responseDigest := newRelayBlindResponseDigest()
 	if rec.relayBlindSettlement != nil {
-		// The R-13 verdict is known only after the terminal frame, so it
+		// The R-14 verdict is known only after the terminal frame, so it
 		// travels as trailers (MAC'd for a negotiating gateway).
 		if negotiatedSettlementFinality(rec) {
 			declareNonStreamingSettlementTrailers(w.Header(), rec)
@@ -954,7 +959,7 @@ func (s *Server) recordRelayBlindUnknown(rec *billingRecorder, provider pool.Pro
 		}
 	}
 	if rec != nil && rec.relayBlindSettlement != nil {
-		// SPEC-022 R-3.5 / R-13.6: an R-13 attempt never persists a plaintext
+		// SPEC-022 R-3.5 / R-14.6: an R-14 attempt never persists a plaintext
 		// output hash; without its terminal receipt it can only quarantine.
 		terminal := billing.TerminalStateProviderError
 		if output != nil && output.TerminalState != "" {

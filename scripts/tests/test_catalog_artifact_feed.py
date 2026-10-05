@@ -1050,7 +1050,9 @@ class LedgerV3Test(unittest.TestCase):
 
     def test_historical_rows_stay_valid_and_may_not_gain_the_new_keys(self):
         committed = catalog_release.validate_release_ledger((CATALOG / "release-ledger.json").read_bytes())
-        self.assertEqual(committed["schema_version"], catalog_release.LEDGER_SCHEMA_V2)
+        # The committed ledger is v3 since the activation release; every
+        # pre-activation row in it stays a historical-feed-set row.
+        self.assertEqual(committed["schema_version"], catalog_release.LEDGER_SCHEMA_V3)
         rate_card_bound = {
             name: {"bytes": 10, "sha256": "a" * 64, "signer_key_id": "k", "version": CANDIDATE_OBJ["version"]}
             for name in catalog_release.RATE_CARD_BOUND_LEDGER_FEEDS
@@ -1577,9 +1579,11 @@ class ArtifactFeedConformanceCorpusTest(unittest.TestCase):
         # quote, a backslash escape, a control character) reach the binary
         # exactly, because the bake is base64 of the signed bytes.
         hostile = b'{"models":{"k":"\\"\\"\\" \\\\u0000 \\t"}}'
-        bound = catalog_release.generated_swift(
-            candidate, demand, rate_card, CB_POLICY_BYTES, artifacts=hostile
-        )
+        with tempfile.TemporaryDirectory() as no_sidecars:
+            with patch.object(catalog_release, "STATIC_DIR", pathlib.Path(no_sidecars)):
+                bound = catalog_release.generated_swift(
+                    candidate, demand, rate_card, CB_POLICY_BYTES, artifacts=hostile
+                )
         match = re.search(r'static let bakedArtifactFeedBase64: String\? = "([A-Za-z0-9+/=]+)"', bound)
         self.assertIsNotNone(match)
         self.assertEqual(base64.b64decode(match.group(1)), hostile)
@@ -2276,8 +2280,77 @@ class HermeticRelease:
             "schema_version": "macprovider.autotune-keys.v1",
             "keys": keys,
         }, indent=2, sort_keys=True) + "\n")
+        self.rewind_to_pre_activation()
         self.baseline = (self.catalog / "release-ledger.json").read_bytes()
         self._saved: dict[str, object] = {}
+
+    def rewind_to_pre_activation(self) -> None:
+        """Start from the last release BEFORE the committed activation release.
+
+        The harness drives the pre-activation -> activation -> post-activation
+        sequence itself, so a repository that has already cut its activation
+        release is rewound: the artifact-bound ledger rows are dropped, the
+        published artifact feed is removed, and the stamp-derived fields are
+        restored to the preceding release. The rewind must reproduce that
+        release's ledger-bound feed bytes exactly, or it fails loudly."""
+        ledger_path = self.catalog / "release-ledger.json"
+        ledger = json.loads(ledger_path.read_text())
+        bound = [
+            release_id
+            for release_id, row in ledger["releases"].items()
+            if catalog_release.artifact_bound_row(row)
+        ]
+        if not bound:
+            return
+        for release_id in bound:
+            del ledger["releases"][release_id]
+        ledger["schema_version"] = catalog_release.LEDGER_SCHEMA_V2
+        ledger_path.write_bytes(catalog_release.ledger_bytes(ledger))
+        release_id, row = max(
+            ledger["releases"].items(),
+            key=lambda item: catalog_release.release_order_key(item[0], item[1]),
+        )
+        generated_at = row["generated_at"]
+        (self.catalog / "autotune-artifacts.json").unlink()
+        self.bump(release_id, generated_at)
+
+        def restamp(name: str, **fields) -> bytes:
+            path = self.catalog / name
+            obj = json.loads(path.read_text())
+            obj.update(fields)
+            path.write_bytes(catalog_release.canonical_bytes(obj))
+            return path.read_bytes()
+
+        candidate_sha = catalog_release.sha256((self.catalog / "autotune-candidates.json").read_bytes())
+        rewound = {
+            "autotune-candidates.json": (self.catalog / "autotune-candidates.json").read_bytes(),
+            "demand-rank.json": (self.catalog / "demand-rank.json").read_bytes(),
+            "rate-card.json": restamp("rate-card.json", generated_at=generated_at),
+            "continuous-batching-policy.json": restamp(
+                "continuous-batching-policy.json",
+                release_id=release_id,
+                generated_at=generated_at,
+                candidate_catalog_sha256=candidate_sha,
+            ),
+        }
+        for name, body in rewound.items():
+            if catalog_release.sha256(body) != row["feeds"][name]["sha256"]:
+                raise AssertionError(f"pre-activation rewind does not reproduce {release_id} {name}")
+        binding_path = self.catalog / "tier2-identity-binding.json"
+        binding = json.loads(binding_path.read_text())
+        binding.update(
+            autotune_candidates_sha256=candidate_sha,
+            generated_at=generated_at,
+            release_id=release_id,
+        )
+        binding_path.write_text(json.dumps(binding, indent=2, sort_keys=True) + "\n")
+        (self.catalog / "release.json").write_text(json.dumps({
+            "feeds": row["feeds"],
+            "generated_at": generated_at,
+            "policy_version": row["policy_version"],
+            "release_id": release_id,
+            "schema_version": "macprovider.autotune-release.v1",
+        }, indent=2, sort_keys=True) + "\n")
 
     # --- module patching -----------------------------------------------------
 

@@ -38,6 +38,11 @@ const (
 	// namespace, so a buyer-port request carrying it without the gateway
 	// service token is refused (hasInternalRoutingHeader).
 	settlementTrailersCapabilityHeader = "X-MacProvider-Internal-Settlement-Trailers"
+	// routeSnapshotV2CapabilityHeader: the gateway settles finality pinned to
+	// billing.RouteSnapshotPolicyVersionV2. A pre-#1816 gateway holds such a
+	// 200 with invalid_settlement_policy_version while the provider credit is
+	// payable (#1816 VM A-1), so a v2 route needs it (poolRouteNeedsGatewayV2).
+	routeSnapshotV2CapabilityHeader = "X-MacProvider-Internal-Settlement-Route-Snapshot-V2"
 	// settlementFinalityMACHeader carries the hex HMAC-SHA256 over the
 	// request binding and the finality tuple (settlementFinalityMAC).
 	settlementFinalityMACHeader = "X-MacProvider-Settlement-Finality-Mac"
@@ -59,7 +64,7 @@ const (
 	settlementFinalityUnsetReason = "settlement_finality_unset_after_delivery"
 	internalRequestIDHeader       = "X-MacProvider-Internal-Request-ID"
 	// relayBlindSettlementCoverageHeader is emitted on a relay-blind chat
-	// response only after its SPEC-022 R-13 enforce snapshot committed.
+	// response only after its SPEC-022 R-14 enforce snapshot committed.
 	relayBlindSettlementCoverageHeader = "X-MacProvider-Internal-Relay-Blind-Settlement"
 )
 
@@ -68,6 +73,14 @@ const (
 func (s *Server) gatewayNegotiatedSettlementTrailers(h http.Header) bool {
 	return strings.TrimSpace(h.Get(settlementTrailersCapabilityHeader)) == "1" &&
 		auth.GatewayInternalBearerMatches(h, s.gatewayServiceToken) != auth.BearerKindNone
+}
+
+// gatewayNegotiatedRouteSnapshotV2 reports whether the gateway, holding the
+// service token and negotiating signed finality, advertised that it settles
+// route_snapshot_v2 finality.
+func (s *Server) gatewayNegotiatedRouteSnapshotV2(h http.Header) bool {
+	return strings.TrimSpace(h.Get(routeSnapshotV2CapabilityHeader)) == "1" &&
+		s.gatewayNegotiatedSettlementTrailers(h)
 }
 
 func negotiatedSettlementFinality(rec *billingRecorder) bool {
@@ -271,7 +284,7 @@ func setSettlementEvidenceFailedFinality(dst http.Header, rec *billingRecorder, 
 	if rec == nil || !rec.settlementFinalityMACActive {
 		return
 	}
-	mode, _ := rec.settlementPolicyForLedger()
+	mode, version := rec.settlementPolicyForLedger()
 	if mode != billing.RouteSnapshotModeEnforce {
 		logSettlementEvidenceFailure(rec, reason, mode, "legacy")
 		setSignedLegacyTuple(dst, rec)
@@ -281,7 +294,7 @@ func setSettlementEvidenceFailedFinality(dst http.Header, rec *billingRecorder, 
 	logSettlementEvidenceFailure(rec, reason, mode, action.String())
 	state := billing.SettlementReceiptState{
 		RouteSnapshotMode:          billing.RouteSnapshotModeEnforce,
-		RouteSnapshotPolicyVersion: billing.RouteSnapshotPolicyVersion,
+		RouteSnapshotPolicyVersion: version,
 	}
 	switch action {
 	case evidenceFailureVerified:
@@ -290,7 +303,7 @@ func setSettlementEvidenceFailedFinality(dst http.Header, rec *billingRecorder, 
 		// debits it from the coordinator lookup), not a refund.
 		state.SettlementOutcome, state.ReceiptResult, state.Reason, state.Closed = billing.SettlementOutcomeVerified, billing.SettlementReceiptResultValid, "verified_settlement", true
 	case evidenceFailureRelayBlindSettled:
-		// SPEC-022 R-13: a bound relay_blind_settled attempt is payable and
+		// SPEC-022 R-14: a bound relay_blind_settled attempt is payable and
 		// settles through its own outcome, never verified.
 		state.SettlementOutcome, state.ReceiptResult, state.Reason, state.Closed = billing.SettlementOutcomeRelayBlindSettled, billing.SettlementReceiptResultValid, "relay_blind_settlement", true
 	case evidenceFailurePending:

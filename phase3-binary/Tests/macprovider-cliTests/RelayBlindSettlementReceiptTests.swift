@@ -360,7 +360,7 @@ final class RelayBlindSettlementReceiptTests: XCTestCase {
         )
     }
 
-    // MARK: - send failure (SPEC-022 R-13.6)
+    // MARK: - send failure (SPEC-022 R-14.6)
 
     private func settlementAttempt() throws -> RelayBlindSettlementAttempt {
         let key = Curve25519.Signing.PrivateKey()

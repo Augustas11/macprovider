@@ -23,7 +23,7 @@ type relayBlindMoneyFixture struct {
 }
 
 // seedRelayBlindAttempt persists exactly what the coordinator persists for
-// an R-13 attempt: the relay-blind route snapshot, the enforce ledger credit,
+// an R-14 attempt: the relay-blind route snapshot, the enforce ledger credit,
 // and the attempt output carrying the response-body digest (no plaintext
 // output hash). mutateSnapshot can make the snapshot plaintext.
 func seedRelayBlindAttempt(t *testing.T, mutateSnapshot func(*RouteSnapshot)) relayBlindMoneyFixture {
@@ -250,7 +250,7 @@ func mustScalarString(t *testing.T, db *sql.DB, query string, args ...any) strin
 	return out
 }
 
-// SPEC-022 R-13.8 migration: a populated pre-v0.3.0 database is widened in
+// SPEC-022 R-14.8 migration: a populated pre-v0.3.0 database is widened in
 // place; existing verdicts are untouched, relay_blind_settled and the
 // relay-blind profile become storable, and the compat floor moves to 3.
 func TestRelayBlindSettlementOutcomeMigrationOnPopulatedDatabase(t *testing.T) {
@@ -313,7 +313,7 @@ func TestRelayBlindSettlementOutcomeMigrationOnPopulatedDatabase(t *testing.T) {
 	}
 }
 
-// SPEC-022 R-13.6 / R-13.10: an enforce relay-blind snapshot committed before
+// SPEC-022 R-14.6 / R-14.10: an enforce relay-blind snapshot committed before
 // dispatch is the coordinator's authority even when the coordinator never
 // wrote the request log, credit, or attempt output. The bound lookup by
 // internal id finds it: pending through the deadline measured from the latest
@@ -371,7 +371,7 @@ func TestRelayBlindSnapshotOnlyAttemptFinality(t *testing.T) {
 	}
 }
 
-// SPEC-022 R-8.3 / R-13.10: the bounded background sweep closes an enforce
+// SPEC-022 R-8.3 / R-14.10: the bounded background sweep closes an enforce
 // relay-blind attempt that has a snapshot and nothing else, with no finality
 // read, through the missing-receipt writer, strictly after its deadline. It
 // leaves alone an attempt with an attempt output, an observe or ordinary
@@ -477,7 +477,7 @@ func TestUnrecordedRelayBlindSweepUsesPartialIndex(t *testing.T) {
 	}
 }
 
-// SPEC-022 R-13.8: contract 3 is recorded only with the relay-blind outcome
+// SPEC-022 R-14.8: contract 3 is recorded only with the relay-blind outcome
 // widening. A relay-blind migration that fails leaves the floor at 2, so a
 // contract-2 coordinator is still a valid rollback target; a later
 // successful migration records 3.
@@ -524,7 +524,7 @@ func TestBillingCompatFloorStaysAtTwoWhenRelayBlindMigrationFails(t *testing.T) 
 	}
 }
 
-// SPEC-022 R-13.8: contract 3 is recorded only together with a revalidated
+// SPEC-022 R-14.8: contract 3 is recorded only together with a revalidated
 // relay-blind widening. A database already widened but still at floor 2 is
 // repaired inside a BEGIN IMMEDIATE transaction that rereads every target
 // definition on its own connection; a partially widened database whose

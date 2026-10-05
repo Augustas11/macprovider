@@ -466,7 +466,7 @@ final class InferenceRelayPrivacyTests: XCTestCase {
         try assertNoCanary(frames)
     }
 
-    // MARK: - SPEC-022 R-13.6 privacy-frame failure withholds the receipt
+    // MARK: - SPEC-022 R-14.6 privacy-frame failure withholds the receipt
 
     /// Runs one settlement-bearing relay-blind dispatch whose `sendFrame`
     /// throws on the first chunk frame `failChunk` matches.

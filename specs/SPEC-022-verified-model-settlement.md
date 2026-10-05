@@ -11,7 +11,9 @@ Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011
 
 Issue #1851: an enforce-compatible, content-free settlement lane for
 SPEC-041 relay-blind traffic and the SPEC-049 privacy class (normative text
-only). Adds requirement group R-13 (`SPEC-022-R013`). The paid entrypoint
+only). Adds requirement group R-14 (`SPEC-022-R014`); it was drafted as
+R-13 and renumbered on merge because #1816 had already assigned R-13
+(`SPEC-022-R013`) to the pool-manifest expected identity. The paid entrypoint
 `coordinator_buyer_v1_relay_blind_chat_completions` becomes a covered enforce
 entrypoint (R-1.3, R-2.1). Its route snapshot uses `prompt_hash_basis:
 relay_blind_envelope_digest_v1`, whose `prompt_hash` member holds the hex
@@ -29,13 +31,60 @@ directions (R-7.10): the v0.4 verifier quarantines a relay-blind snapshot, and
 the relay-blind verifier quarantines a plaintext snapshot. Disclosure never
 reports a relay-blind request as verified (R-10.7). R-2.2 to R-2.7 apply
 unchanged, and SPEC-005 arithmetic is unchanged. Every new obligation is a
-conformance obligation of `SPEC-022-R013` (pending). The conformance state of
-`SPEC-022-R001`..`SPEC-022-R012` does not change. R-13.4 and R-13.6 state
+conformance obligation of `SPEC-022-R014` (pending). The conformance state of
+`SPEC-022-R001`..`SPEC-022-R013` does not change. R-14.4 and R-14.6 state
 that the provider withholds the receipt for terminals before a pinned model
 handle exists and for a handle without a model hash, a resolvable model, or
 validated usage, and that the coordinator treats a withheld receipt as missing
 evidence (pending, then quarantined, buyer refunded, no provider credit).
 Duplicate-member detection is coordinator-side.
+
+### v0.2.11
+
+#1816 freeze-audit R1 fixes, and the #1816 VM acceptance A-1 fix: v2 is
+negotiated with the gateway (R-13.2). R-13.2 names option B: #1816 provenance rides
+only in the SPEC-015 §N.2 `route_snapshot_v2` preimage, pinned by
+`route_snapshot_policy_version = spec022-route-snapshot-v2`; every other
+route keeps the byte-identical v1 preimage, and the standalone verifier
+recomputes both. R-13.3 is implemented: a `pool_manifest` snapshot's
+`model_id` is the `pool_model_id`, and the provider-local served label rides
+in the settlement metadata's `execution_model_id` (SPEC-015 §N.12 item 8).
+R-13.4: final receipt settlement re-reads the SPEC-042-R015 durable route
+fence and the R006 label in the transaction that writes the terminal verdict
+and its credit, for every loopback and `pool_manifest` route; a decided
+revocation or a disputed or unverifiable label quarantines with no
+buyer-final debit or provider credit, and an unreadable fence leaves the
+receipt retryable. Receipt-bound usage never raises the completion count
+above the ledger's byte-derived ceiling (the existing SPEC-005 clamp).
+
+### v0.2.10
+
+#1816 lab e2e fixes. R-13.4 states the in-flight rule precisely: an attempt
+settles from its immutable route snapshot across manifest rotation and entry
+removal or change, and falls back to zero only under the SPEC-042-R015
+durable route fence or a real SPEC-042-R006 label mismatch. R-12 decisions
+use the same fence in the hot path and in ledger recovery.
+
+### v0.2.9
+
+#1816 round-1 audit fixes. R-12.1 and R-12.3 now admit the SPEC-047-R011
+pool-manifest identity source and SPEC-042-R016 attested members, bound as
+`serving_provider_account_id`, consistently with SPEC-042-R006 (the
+R015/R016 extensions live in the SPEC-042 v2 core). R-13 keeps the SPEC-015
+`route_snapshot_v1` preimage byte-identical for every existing route: the new
+provenance sits either outside the receipt-bound digest or in a versioned
+preimage used only by routes that carry it, implementation-defined pending the
+implementation slice, and reconciled with SPEC-015 §N.2 by reference. Native
+`mlx_cache` pool-entry attempts keep native receipts and `coordinator_observed`.
+
+### v0.2.8
+
+Pool-manifest expected identity (#1816). Adds SPEC-022-R013: a route snapshot
+names whether its expected artifact pair comes from the global catalog or the
+route's signed pool manifest, and pool-manifest snapshots bind the exact core
+digest. Equality and replay remain hash-exact; the new source makes no trust
+claim beyond SPEC-042-R006 and does not make a pool model globally
+`settlement_capable`.
 
 ### v0.2.7
 
@@ -421,7 +470,7 @@ MacProvider MUST NOT use SPEC-022 to claim:
 - The provider could not produce low-quality or malicious text.
 - The coordinator was unable to observe buyer plaintext.
 
-(v0.3.0) A request that settles `relay_blind_settled` (R-13) is outside the
+(v0.3.0) A request that settles `relay_blind_settled` (R-14) is outside the
 claim above. It was routed under the same catalog-verified model snapshot, but
 its receipt binds content-free digests and provider-signed capped usage rather
 than prompt and output hashes. It MUST NOT be described as verified.
@@ -602,11 +651,11 @@ the effective policy. It MUST bind at least:
 - route-time verification snapshot digest or equivalent snapshot binding;
 - provider signature.
 
-(v0.3.0, R-13) For the relay-blind paid entrypoint
+(v0.3.0, R-14) For the relay-blind paid entrypoint
 `coordinator_buyer_v1_relay_blind_chat_completions` only, the locked profile
 binds the relay-blind envelope digest in place of the prompt hash and the
 SHA-256 of the exact emitted response bytes in place of the output hash. No
-plaintext-derived value is bound (R-13.4).
+plaintext-derived value is bound (R-14.4).
 
 **Receipt verification outcome** has exactly these SPEC-022 settlement values:
 
@@ -619,12 +668,12 @@ plaintext-derived value is bound (R-13.4).
 - `zero_settled`: verified non-creditable terminal outcome where no provider
   credit is owed;
 - (v0.3.0) `relay_blind_settled`: a content-free relay-blind attempt whose
-  `relay-blind-settlement-v1` receipt passed every R-13 check. Buyer final
+  `relay-blind-settlement-v1` receipt passed every R-14 check. Buyer final
   debit and positive provider settlement may proceed for that attempt only
   (R-7.9). It is not `verified` and makes no verified-work claim.
 
 `zero_settled` MUST NOT be used for receipt trust failures.
-`relay_blind_settled` MUST NOT be recorded for any attempt outside R-13.
+`relay_blind_settled` MUST NOT be recorded for any attempt outside R-14.
 
 **Terminal-state timestamp** means the timestamp at which the gateway or
 coordinator records the terminal state for deadline calculation. For streaming:
@@ -641,8 +690,8 @@ state and terminal-state timestamp.
 
 ## Normative requirements
 
-Requirement IDs `SPEC-022-R001`..`SPEC-022-R013` are the conformance units and
-map one-to-one to the top-level requirement groups R-1..R-13 below; the `R-N.M`
+Requirement IDs `SPEC-022-R001`..`SPEC-022-R014` are the conformance units and
+map one-to-one to the top-level requirement groups R-1..R-14 below; the `R-N.M`
 sub-clauses are the normative obligations within each group. The IDs are
 registered in `specs/CONFORMANCE.json`.
 
@@ -667,11 +716,11 @@ R-1.3. `enforce` MUST fail startup or refuse activation unless:
 
 Activation refusal MUST identify the unmet precondition or preconditions.
 
-(v0.3.0, conformance obligation of `SPEC-022-R013`) For the paid entrypoint
+(v0.3.0, conformance obligation of `SPEC-022-R014`) For the paid entrypoint
 `coordinator_buyer_v1_relay_blind_chat_completions`, the locked
 settlement-capable profile is the SPEC-015 `relay-blind-settlement-v1`
 receipt, for streaming and non-streaming requests. A coordinator that cannot
-create R-13 snapshots, ingest that profile, and run the R-13 verifier MUST
+create R-14 snapshots, ingest that profile, and run the R-14 verifier MUST
 keep refusing relay-blind traffic under `enforce`. It MUST NOT activate
 `enforce` by exempting relay-blind traffic from coverage.
 
@@ -691,9 +740,9 @@ R-2.1. Every paid entrypoint is either covered by SPEC-022 enforce mode,
 disabled for paid traffic, or explicitly excluded from the product claim and
 incapable of creating paid ledger rows.
 
-(v0.3.0, conformance obligation of `SPEC-022-R013`) Under `enforce`, the
+(v0.3.0, conformance obligation of `SPEC-022-R014`) Under `enforce`, the
 relay-blind entrypoint `coordinator_buyer_v1_relay_blind_chat_completions` is
-covered through R-13. R-2.2 to R-2.7 apply to it unchanged, with the same
+covered through R-14. R-2.2 to R-2.7 apply to it unchanged, with the same
 predicates and the same lookup as plaintext routing. The SPEC-041 envelope
 names the canonical model and the provider model; the route snapshot model is
 the selected session's served model, and the two MUST agree under the
@@ -767,7 +816,7 @@ R-3.1. For every covered request attempt, the coordinator MUST create and
 persist a route-time verification snapshot before forwarding work to the
 provider.
 
-(v0.3.0, conformance obligation of `SPEC-022-R013`) A relay-blind attempt's
+(v0.3.0, conformance obligation of `SPEC-022-R014`) A relay-blind attempt's
 snapshot carries `paid_entrypoint:
 coordinator_buyer_v1_relay_blind_chat_completions` and `prompt_hash_basis:
 relay_blind_envelope_digest_v1`. Its `prompt_hash` member holds the lowercase
@@ -836,7 +885,7 @@ this exception. (v0.2.1) R-3.4.2 is a conformance obligation of
 `SPEC-022-R012`, not of `SPEC-022-R003`.
 
 R-3.4.3. (v0.3.0) The second and last exception to R-3.4.1 is a relay-blind
-attempt under R-13. The coordinator cannot observe relay-blind request content,
+attempt under R-14. The coordinator cannot observe relay-blind request content,
 and it cannot observe response content for the privacy class. Its usage is the
 provider-signed usage in the `relay-blind-settlement-v1` receipt. That usage
 settles only when all of the following hold:
@@ -853,7 +902,7 @@ settles only when all of the following hold:
 
 The SPEC-005 ceilings still bound the result. No other entrypoint or attempt
 may rely on this exception. R-3.4.3 is a conformance obligation of
-`SPEC-022-R013`, not of `SPEC-022-R003`.
+`SPEC-022-R014`, not of `SPEC-022-R003`.
 
 R-3.5. Settlement MUST compare receipt `prompt_hash` and `output_hash` against
 persisted canonical hashes for the exact request attempt: the buyer request
@@ -861,7 +910,7 @@ payload as normalized by the coordinator/gateway, and the delivered response or
 streamed output prefix used for buyer debit and provider settlement. If either
 canonical hash is unavailable or mismatched, the row MUST be quarantined.
 
-(v0.3.0, conformance obligation of `SPEC-022-R013`) For the relay-blind
+(v0.3.0, conformance obligation of `SPEC-022-R014`) For the relay-blind
 entrypoint, two content-free digests replace the prompt and output hashes:
 
 - the envelope digest, which MUST equal the snapshot `prompt_hash` under basis
@@ -915,7 +964,7 @@ or `zero_settled`) closes the row for SPEC-022 money movement. Subsequent
 receipts for the same attempt MUST be idempotent no-ops or rejected and MUST NOT
 change buyer debit, provider credit, payout readiness, or settlement outcome.
 
-R-4.7. (v0.3.0, conformance obligation of `SPEC-022-R013`) R-4.1 to R-4.6
+R-4.7. (v0.3.0, conformance obligation of `SPEC-022-R014`) R-4.1 to R-4.6
 apply to the relay-blind entrypoint with the SPEC-015
 `relay-blind-settlement-v1` profile as its only settlement-capable receipt.
 That receipt is signed with the provider's SPEC-015 receipt key, the key
@@ -1088,7 +1137,7 @@ may define an exception only with a receipt-failure-specific hold, evidence
 bundle, dual-control audit trail, and explicit exclusion from automatic payout
 until hold expiry.
 
-R-7.9. (v0.3.0, conformance obligation of `SPEC-022-R013`) `relay_blind_settled`
+R-7.9. (v0.3.0, conformance obligation of `SPEC-022-R014`) `relay_blind_settled`
 is payable only when the closed verdict, the route snapshot it names, and the
 ingested receipt all bind together:
 
@@ -1115,7 +1164,7 @@ reward, reward unlock, or referral qualification. Those consumers keep
 admitting only the literal `verified`. Ordinary SPEC-005 provider earnings and
 SPEC-016 payout readiness include a payable `relay_blind_settled` credit.
 
-R-7.10. (v0.3.0, conformance obligation of `SPEC-022-R013`) Cross-verifier
+R-7.10. (v0.3.0, conformance obligation of `SPEC-022-R014`) Cross-verifier
 downgrade guards. The SPEC-015 v0.4 verifier MUST quarantine any attempt whose
 route snapshot carries `prompt_hash_basis: relay_blind_envelope_digest_v1` or
 the relay-blind entrypoint, before comparing any hash. The
@@ -1128,7 +1177,7 @@ failure (R-7.4).
 
 R-8.1. Covered traffic uses reservation-first buyer accounting. Buyer quota or
 balance may be reserved while the request runs, but final debit MUST wait for
-`receipt_verification_outcome == verified`. (v0.3.0) For an R-13 attempt,
+`receipt_verification_outcome == verified`. (v0.3.0) For an R-14 attempt,
 final debit waits for `relay_blind_settled` under R-7.9 instead. The gateway
 MUST final-debit on `relay_blind_settled` only for a request it admitted as a
 relay-blind execution, and MUST refund any other request that reports it.
@@ -1253,7 +1302,7 @@ and that the reservation releases or refunds on a non-`verified` terminal
 outcome. (v0.3.0) The same applies to a relay-blind request, whose payable
 outcome is `relay_blind_settled`.
 
-R-10.7. (v0.3.0, conformance obligation of `SPEC-022-R013`) No buyer, provider,
+R-10.7. (v0.3.0, conformance obligation of `SPEC-022-R014`) No buyer, provider,
 operator, or public surface may report a relay-blind request, or the privacy
 class, as `verified`, as verified-model settled, or as counted in a verified
 aggregate. Buyer surfaces report `relay_blind_settled` as charged under the
@@ -1334,10 +1383,15 @@ so global and native-pool digests are byte-identical to v0.1.8. A non-empty
 dispatch. The recorded value is the coordinator-derived runtime class of
 SPEC-042-R004, never the hello value alone. Its `expected_catalog_model_hash`
 is the GGUF member derived at route time by the SPEC-047-R003(iv) pool
-route-time member derivation. A snapshot with a non-empty
+route-time member derivation or, **[v0.2.6]** for a SPEC-047-R011 binding,
+the matched SPEC-042-R015 entry's artifact hash (R-13). A snapshot with a non-empty
 `runtime_source` MUST also carry `pool_generation` (the fenced pool
-generation of the selection) and `pool_operator_account_id` (the account the
-coordinator verified as both pool creator and provider owner at routing).
+generation of the selection) and `pool_operator_account_id` (the pool creator account the coordinator
+verified at routing). **[v0.2.6]** When the serving provider's SPEC-003
+owner account differs from it, which SPEC-042-R016 permits only for an
+account named in the core's `pool_attested_members/v1` extension, the
+snapshot also binds that owner account as `serving_provider_account_id`
+under R-13.2.
 Both are digested only when `runtime_source` is non-empty, so no other digest
 changes. Settlement re-evaluates R-12.3 from these values and the durable,
 append-only records they name (SPEC-042-R006), never from live state.
@@ -1363,9 +1417,13 @@ only when every SPEC-042-R006 condition holds. In short: a pool route whose
 snapshot carries `pool_id`, `manifest_version`, `manifest_core_digest`, and
 `runtime_source`; a current coordinator-recorded member at the fenced
 generation; a durable v2 policy core for that digest that declares
-`enforce` and allowlists that `runtime_source`; a serving provider whose
-account is the pool creator; and a pool label that is not disputed when the
-attempt is recorded. The coordinator MUST derive the source only from the
+`enforce` and allowlists that `runtime_source`; an expected identity from
+either the SPEC-047-R003(iv) pool route-time member derivation or a current
+SPEC-047-R011 pool-manifest binding (R-13); a serving provider whose owner
+account is the pool creator or **[v0.2.6]** is named with that
+`runtime_source` in that core's `pool_attested_members/v1` extension
+(SPEC-042-R016) and bound as `serving_provider_account_id`; and a pool label
+that is not disputed when the attempt is recorded. The coordinator MUST derive the source only from the
 snapshot's digested values and the durable policy history they name, never
 from the live registry, the provider hello, or the receipt. It MUST also
 require that the snapshot's `route_snapshot_mode` is `enforce`.
@@ -1570,23 +1628,120 @@ the pool attempts recorded before a downgrade.
   keeps the receipt's first-observed arrival time for the retry; only a
   decided rejection leaves an attempt un-cross-checked.
 
-### R-13. Relay-blind settlement lane (SPEC-022-R013)
+### R-13. Expected model-hash source and replay (SPEC-022-R013)
 
-R-13 (v0.3.0, #1851) makes SPEC-041 relay-blind chat, including the SPEC-049
+R-13.1. Source. Every route snapshot has an expected model-hash source from
+the closed enum `catalog | pool_manifest`. `catalog` preserves all current
+behavior: the expected algorithm/hash and catalog or artifact-feed evidence
+come from SPEC-010/SPEC-047, and no pool manifest may replace or repair them.
+`pool_manifest` is valid only for a current SPEC-047-R011 binding on a route
+to the same non-empty `pool_id`; its expected identity is the matched
+SPEC-042-R015 entry's exact artifact pair in the accepted core named by the
+snapshot's `manifest_core_digest`.
+
+R-13.2. Receipt-bound digest compatibility. The SPEC-015 §N.2
+`route_snapshot_v1` preimage of every route that carries no #1816 provenance
+MUST stay byte-identical: no new member and no new default value. The #1816
+provenance members are `expected_model_hash_source` (present only as
+`pool_manifest`), `pool_model_id`, the entry's `artifact_hash_algorithm`, and
+`serving_provider_account_id` (present only when it differs from
+`pool_operator_account_id`, R-12.1). They are carried by exactly one of:
+
+- (A) an immutable coordinator-owned pool-provenance record keyed by
+  `route_snapshot_digest` and written in the same transaction as the
+  snapshot, outside the receipt-bound digest. It binds to the receipt
+  transitively through v1 members the provider already signs over
+  (`model_id`, `expected_catalog_model_hash`, `pool_id`, `manifest_version`,
+  `manifest_core_digest`, and for loopback `pool_operator_account_id`); or
+- (B) a versioned `route_snapshot_v2` preimage, used only by routes that
+  carry #1816 provenance, under SPEC-015 §N.2's `route_snapshot_v2` rule.
+
+The choice is **implementation-defined pending** the implementation slice,
+which MUST name it in this clause's implementation state before R013 leaves
+pending. **Implementation state (v0.2.9): option (B).** The provenance
+members are carried only by `route_snapshot_v2`
+(`route_snapshot_policy_version = spec022-route-snapshot-v2`, SPEC-015 §N.2
+v0.4.12): `expected_model_hash_source`, `pool_model_id`, the entry rates,
+the bounds digest, the SPEC-005-R015 dispatch-frozen multiplier, provider
+share, and config snapshot generation, `pool_generation` for a native route,
+and `pool_member_account_id` (the value of `serving_provider_account_id`).
+A snapshot carries them if and only if it is pinned to v2. A gateway that
+predates v2 holds v2 finality as `invalid_settlement_policy_version` while
+the provider credit is payable, so v2 is negotiated like the signed
+trailers: the coordinator routes a v2-pinned attempt only for a caller that
+advertised `X-MacProvider-Internal-Settlement-Route-Snapshot-V2: 1` together
+with the negotiated `X-MacProvider-Internal-Settlement-Trailers: 1` under the
+gateway service token. For any other caller a pool-model request fails closed
+before dispatch with 503 `pool_model_requires_gateway_upgrade` (no debit, no
+credit), and the core's R016 attestations are withheld for the request, so no
+attested member is selectable. Option (B) additionally requires a SPEC-015 §N.2 amendment that lists
+the v2 members before any v2 digest is issued; option (A) needs none, because
+the v1 preimage is unchanged. Under either option settlement verifies the
+provenance members as strictly as digested members: a missing, mixed-source,
+cross-pool, or mismatched member fails closed before dispatch, and at
+settlement maps the attempt to `quarantined` with no buyer-final debit or
+provider credit. A snapshot whose `model_id` is in the SPEC-042-R015 `pool/`
+namespace and has no provenance is invalid.
+
+R-13.3. Receipt tuple semantics. The SPEC-015 v0.4 tuple is unchanged. For a
+`pool_manifest` attempt, `model_id` is the `pool_model_id`,
+`expected_catalog_model_hash` carries the entry's artifact hash as the generic
+expected model hash, and `catalog_id` / `catalog_body_digest` carry the
+route-valid global catalog generation as ambient context exactly as for every
+route; they are not this route's identity source, and settlement MUST NOT
+look `model_id` up in that catalog. SPEC-015 defines
+`expected_catalog_model_hash` as the expected hash "from the route-time
+catalog snapshot"; for this source that reads as "from the route snapshot's
+expected identity". This SPEC records that reading by reference, and SPEC-015
+§N.2 MUST be amended to state it before R013 is promoted.
+
+R-13.4. Equality and replay. Settlement equality is source-independent and
+exact: `receipt.model_hash == route_snapshot.provider_reported_model_hash ==
+route_snapshot.expected_catalog_model_hash`, and the receipt/session algorithm
+MUST equal the expected algorithm. For `pool_manifest`, settlement MUST also
+replay the accepted immutable core named by the snapshot and verify that the
+exact entry existed there; it MUST NOT consult a current manifest to repair
+missing evidence or re-price the attempt. A later manifest rotation, entry
+removal, or entry change does not alter the immutable snapshot and does not
+dispute its label. Only the SPEC-042-R015 durable route fence (membership,
+delegation, or R016 attestation revoked, or the pool retired or frozen,
+between routing and settlement, re-read inside the ledger transaction) or a
+real SPEC-042-R006 label mismatch forces zero billable usage.
+
+R-13.5. Native pool entries. A native `mlx_cache` session serving an R015 entry
+that lists `mlx_cache` (SPEC-042-R004 native pool-entry path) has an empty
+`runtime_source` under R-12.1, records `coordinator_observed` usage, and signs
+an ordinary native receipt; only the expected identity comes from the pool
+manifest under R-13.1-R-13.4. No R-12 eligibility rule applies to it.
+
+R-13.6. Scope and migration. The source proves provenance and replayability
+only. It does not call a pool artifact network-verified, does not weaken
+SPEC-042-R006, does not turn a pool binding into `settlement_capable`, and does
+not authorize global or cross-pool routing. Migration MUST cover inserts,
+reads, digest recomputation, recovery/backfill, receipt verification, and
+historical rows. A historical snapshot without provenance is `catalog`, which
+is the only source that existed before this clause, and it settles only when
+its existing catalog evidence validates.
+
+### R-14. Relay-blind settlement lane (SPEC-022-R014)
+
+R-14 (v0.3.0, #1851) makes SPEC-041 relay-blind chat, including the SPEC-049
 privacy class, a covered enforce entrypoint without reading request or
 response content. It changes no plaintext path. The R-1.3, R-2.1, R-3.1,
 R-3.4.3, R-3.5, R-4.7, R-7.9, R-7.10, R-8.1, and R-10.7 additions marked v0.3.0
 are its conformance obligations.
 
-R-13.1. Scope. The paid entrypoint is
+R-14.1. Scope. The paid entrypoint is
 `coordinator_buyer_v1_relay_blind_chat_completions`. It covers every SPEC-041
 relay-blind `chat_completions` execution on the global pool, with or without
 the SPEC-049 marker. SPEC-042-R009 is unchanged, so pool-scoped relay-blind
-requests are still rejected. Under `enforce`, relay-blind traffic is admitted
-only through R-13. Under `observe`, R-13 MAY run to compute verdicts and MUST
+requests are still rejected. A relay-blind snapshot's R-13 expected
+model-hash source is therefore always `catalog`, and a session bound to a
+SPEC-047-R011 pool model entry is never selected for relay-blind work. Under
+`enforce`, relay-blind traffic is admitted only through R-14. Under `observe`, R-14 MAY run to compute verdicts and MUST
 NOT change money movement (R-1.2).
 
-R-13.2. Dispatch prerequisites. Under `enforce`, at reservation, at consume,
+R-14.2. Dispatch prerequisites. Under `enforce`, at reservation, at consume,
 and immediately before dispatch, the coordinator MUST apply to the reserved
 session the same content-independent prerequisites it applies to a plaintext
 covered attempt, from one shared evaluation:
@@ -1604,7 +1759,7 @@ reservation returns the existing typed unavailable error before quota. Failure
 after consume burns the reservation and refunds held quota under SPEC-041-R004
 (SPEC-049-R013 for the privacy class), with no failover.
 
-R-13.3. Snapshot and dispatch. The coordinator MUST commit the R-3.1 relay-blind
+R-14.3. Snapshot and dispatch. The coordinator MUST commit the R-3.1 relay-blind
 snapshot to the route-snapshot journal before dispatch (R-3.2.1). The
 `inference_request` MUST carry the `relay_blind_settlement` metadata object
 (SPEC-001-R005) bound to that snapshot. It MUST NOT carry the SPEC-015 v0.4
@@ -1613,17 +1768,17 @@ The snapshot `request_id` is the coordinator's settlement request id, the one
 the ledger row uses. It may differ from the SPEC-041 envelope `request_id`,
 which the envelope digest binds.
 
-R-13.4. Receipt. For each dispatched attempt that reaches a pinned runtime
+R-14.4. Receipt. For each dispatched attempt that reaches a pinned runtime
 handle with a model hash, a resolved snapshot model, and SPEC-041 `validated`
 usage, the provider MUST produce exactly one SPEC-015
 `relay-blind-settlement-v1` receipt, carried on the terminal
 `inference_response_end` frame (SPEC-001-R005). Otherwise it withholds the
-receipt (R-13.6). The receipt MUST contain no
+receipt (R-14.6). The receipt MUST contain no
 plaintext prompt or output hash, no canary-derived or plaintext-derived value,
 and no key material. The coordinator MUST NOT forward it as an
 `X-MacProvider-Receipt` header.
 
-R-13.5. Verification. The relay-blind verifier MUST return `relay_blind_settled`
+R-14.5. Verification. The relay-blind verifier MUST return `relay_blind_settled`
 only when every check below passes, and MUST quarantine on any trust failure:
 
 - the R-7.10 basis guard;
@@ -1645,7 +1800,7 @@ only when every check below passes, and MUST quarantine on any trust failure:
 A receipt that passes every check, has a terminal state other than normal
 completion, and has a response-body byte count of zero is `zero_settled`.
 
-R-13.6. Missing evidence. A missing receipt follows R-7.6 and R-8.3: the
+R-14.6. Missing evidence. A missing receipt follows R-7.6 and R-8.3: the
 attempt is pending until the deadline, then quarantined, with the buyer
 refunded and no provider credit. A receipt the provider withholds is missing
 evidence. The provider withholds it for every terminal after the SPEC-041
@@ -1662,27 +1817,27 @@ SPEC-049-R015 `unknown_postdispatch` rule (settle known input) does not create
 a payable row without a `relay_blind_settled` verdict. Under `observe` and
 `off`, that rule is unchanged.
 
-R-13.7. Partial output. R-5.5 and R-5.6 apply. The receipt binds the emitted
+R-14.7. Partial output. R-5.5 and R-5.6 apply. The receipt binds the emitted
 prefix digest, its byte count, and partial usage. The gateway delivered-only
 bound applies. For the privacy class the gateway cannot count completion
 tokens from ciphertext, so its forwarded-completion estimate is 0
 (SPEC-049-R015) and buyer final debit for a gateway-ended privacy stream is at
 most the verified prompt.
 
-R-13.8. Rollout and rollback. The order is: coordinator with the outcome
+R-14.8. Rollout and rollback. The order is: coordinator with the outcome
 migration, then gateway, then a provider CLI candidate that advertises the
 capability. The SPEC-041 configuration guard that refuses
 `relay_blind.enabled` under `enforce` MAY be lifted only in a coordinator that
-implements all of R-13. A coordinator or gateway rollback target MUST read
+implements all of R-14. A coordinator or gateway rollback target MUST read
 `relay_blind_settled` and the relay-blind basis. A target that cannot read them
 is not a valid rollback target; roll forward instead. A CLI rollback removes the
-capability, so R-13.2 excludes that session from relay-blind work.
+capability, so R-14.2 excludes that session from relay-blind work.
 
-R-13.9. Recovery authority. A gateway recovering a relay-blind hold MUST ask
-the coordinator about the attempt, never infer R-13 coverage from a response
+R-14.9. Recovery authority. A gateway recovering a relay-blind hold MUST ask
+the coordinator about the attempt, never infer R-14 coverage from a response
 header. The coordinator sends its internal request id on every response, so
-that header proves nothing. The coordinator also sends an internal R-13
-coverage marker, only after the R-13 snapshot commits. The gateway MAY keep
+that header proves nothing. The coordinator also sends an internal R-14
+coverage marker, only after the R-14 snapshot commits. The gateway MAY keep
 that marker as a hint. The hint never authorizes status-row recovery.
 
 The finality lookup names the external request id, the internal request id
@@ -1700,18 +1855,18 @@ The gateway MUST act only on an answer that echoes the exact non-empty
 external and internal request ids it asked for. An explicit `observe` answer
 permits the SPEC-041 status-row recovery, unless the hint said enforce, in
 which case the gateway holds. An `enforce` answer is acted on only with
-`mode_scope_complete` and mode `enforce`, under R-8.1 and R-13.6.
+`mode_scope_complete` and mode `enforce`, under R-8.1 and R-14.6.
 Every other outcome holds the reservation: not found, an error, a missing
 coverage answer, or an unbound echo. Not-found answers that persist for an
 hour move it to operator review (R-8.7). As a result, observe recovery needs
 a reachable coordinator.
 
-Under R-13.7, a relay-blind debit with no durable buyer-delivery candidate
+Under R-14.7, a relay-blind debit with no durable buyer-delivery candidate
 for the attempt's envelope and internal id has 0 delivered completion. The
 gateway debits the verified prompt only.
 
-R-13.10. Unrecorded attempt. An enforce relay-blind attempt can have its
-snapshot (committed before dispatch, R-13.3) and no attempt output, no
+R-14.10. Unrecorded attempt. An enforce relay-blind attempt can have its
+snapshot (committed before dispatch, R-14.3) and no attempt output, no
 credit, and no verdict, for example when the coordinator stops mid-attempt.
 It has no recorded terminal. The buyer request timeout bounds every
 relay-blind dispatch, and dispatch follows the route decision, so the latest
@@ -1998,7 +2153,7 @@ finality.
   relay-blind snapshot is quarantined, and a relay-blind receipt on a plaintext
   snapshot is quarantined. A `relay_blind_settled` value whose snapshot is not
   bound to the relay-blind entrypoint, basis, and profile is not payable.
-- **AC-022-70 (v0.3.0):** No artifact of an R-13 attempt contains a plaintext
+- **AC-022-70 (v0.3.0):** No artifact of an R-14 attempt contains a plaintext
   prompt or output hash. Disclosure never reports the request as `verified`.
 
 ## Implementation sequencing
@@ -2140,7 +2295,7 @@ spec or the SPEC-022 implementation prompt, not in the locked settlement gate.
 - **D-022-10: Relay-blind settlement is content-free and never `verified`
   (v0.3.0, #1851).** A relay that cannot read the request cannot check prompt
   or output hashes, and SPEC-041/SPEC-049 forbid inventing plaintext hashes from
-  ciphertext. R-13 instead binds the content-free facts every party can check:
+  ciphertext. R-14 instead binds the content-free facts every party can check:
   catalog-verified model identity, the envelope digest, the emitted response
   bytes, and usage that the buyer capped in advance and the provider signed.
   D-022-4 still holds: no receipt, no payment. A distinct outcome keeps that

@@ -1031,7 +1031,7 @@ actor InferenceRelay {
                 )
             } catch {
                 // The privacy response could not be built: the buyer never
-                // receives the completion, so no receipt (R-13.6).
+                // receives the completion, so no receipt (R-14.6).
                 state.relayBlindSettlement?.suppressReceiptAfterSendFailure()
                 throw error
             }
@@ -1248,7 +1248,7 @@ actor InferenceRelay {
         do {
             if let settlementMetadata {
                 guard settlementMetadata.providerID == providerID,
-                      settlementMetadata.modelID == request.model else {
+                      settlementMetadata.servedModelID == request.model else {
                     ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .constructionFailed)
                     return nil
                 }
@@ -1326,7 +1326,7 @@ actor InferenceRelay {
     /// the terminal frame of a dispatch that carried valid metadata, and never
     /// the v0.4 `receipt`. The usage signed is the usage this frame reports, so
     /// the coordinator's terminal evidence and the receipt agree. Construction
-    /// failure withholds the receipt (SPEC-022 R-13.6 missing evidence).
+    /// failure withholds the receipt (SPEC-022 R-14.6 missing evidence).
     private static func attachRelayBlindSettlementReceipt(_ frame: inout [String: Any], state: RelayRequestState) {
         guard let attempt = state.relayBlindSettlement else { return }
         frame.removeValue(forKey: "receipt")
@@ -1735,7 +1735,7 @@ actor InferenceRelay {
             // A chunk that failed to seal, serialize, or send leaves the
             // emitted body short of what the attempt produced (or the digest
             // holding bytes the coordinator never received), so the receipt is
-            // withheld for good (R-13.6 missing evidence).
+            // withheld for good (R-14.6 missing evidence).
             state.relayBlindSettlement?.suppressReceiptAfterSendFailure()
             throw error
         }
@@ -2202,7 +2202,7 @@ final class RelayBlindSettlementAttempt: @unchecked Sendable {
         let usageValidated = usageValidated
         lock.unlock()
         // SPEC-001-R005 item 3: without a pinned hash or validated usage the
-        // receipt is withheld (SPEC-022 R-13.6 missing evidence).
+        // receipt is withheld (SPEC-022 R-14.6 missing evidence).
         guard usageValidated,
               let modelHash,
               let inputBound = Int64(exactly: context.inputTokenUpperBound),

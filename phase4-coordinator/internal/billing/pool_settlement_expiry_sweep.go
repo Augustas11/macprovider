@@ -70,7 +70,7 @@ func poolSweepBackoffDelayMS(failures int) int64 {
 // pass closed.
 //
 // The same pass then closes enforce relay-blind attempts that have no verdict
-// row at all (SPEC-022 R-13.10): see sweepUnrecordedRelayBlindAttempts.
+// row at all (SPEC-022 R-14.10): see sweepUnrecordedRelayBlindAttempts.
 //
 // A pass reads at most limit rows after a keyset cursor carried from the
 // previous pass and wraps to the start once it reaches the end, so rows that
@@ -208,7 +208,7 @@ func (s *Store) ensureRelayBlindUnrecordedAttemptIndex(ctx context.Context) erro
 }
 
 // unrecordedRelayBlindSweepSQL pages enforce relay-blind snapshots past their
-// R-13.10 deadline that have no attempt output and no credit. Arguments: the
+// R-14.10 deadline that have no attempt output and no credit. Arguments: the
 // coarse decision bound (now - timeout), the timeout, now, the cursor, and the
 // page limit.
 const unrecordedRelayBlindSweepSQL = `
@@ -229,7 +229,7 @@ SELECT rs.route_decision_ts_unix_ms, rs.id, rs.account_scope, rs.request_id, rs.
 
 // sweepUnrecordedRelayBlindAttempts closes, in bounded pages, every enforce
 // relay-blind attempt whose snapshot committed before dispatch but which has
-// no attempt output, no credit, and no verdict, once its SPEC-022 R-13.10
+// no attempt output, no credit, and no verdict, once its SPEC-022 R-14.10
 // deadline (route decision + relay-blind dispatch timeout +
 // pending_deadline_seconds) is strictly past. Each attempt is revalidated and
 // closed by the ordinary per-row missing-receipt writer, so it becomes closed
@@ -238,7 +238,7 @@ SELECT rs.route_decision_ts_unix_ms, rs.id, rs.account_scope, rs.request_id, rs.
 // Only enforce relay-blind snapshots are selected. Other snapshot-only
 // attempts are left as they are: an ordinary route has no pre-dispatch
 // snapshot authority (its finality needs a credit or an attempt output), and
-// observe and off modes keep their existing finality (R-13.6).
+// observe and off modes keep their existing finality (R-14.6).
 func (s *Store) sweepUnrecordedRelayBlindAttempts(ctx context.Context, st *poolSettlementSweepState, nowUnixMS int64, limit int) (int, error) {
 	if st.unrecordedBackoff == nil {
 		st.unrecordedBackoff = make(map[int64]poolSweepBackoff)

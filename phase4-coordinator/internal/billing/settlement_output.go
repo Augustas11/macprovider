@@ -57,7 +57,7 @@ type SettlementOutput struct {
 	// settlement_output_v1.
 	ObservedInputTokens  *int64
 	ObservedOutputTokens *int64
-	// RelayBlindResponseSHA256 marks a SPEC-022 R-13 relay-blind attempt. It
+	// RelayBlindResponseSHA256 marks a SPEC-022 R-14 relay-blind attempt. It
 	// is the lowercase hex SHA-256 of the exact response bytes the coordinator
 	// received (R-3.5), and OutputPrefixEndByte-OutputPrefixStartByte is their
 	// count. Such an output holds no content and is the attempt's output

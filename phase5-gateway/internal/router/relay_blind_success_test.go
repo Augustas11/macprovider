@@ -193,7 +193,7 @@ func TestRelayBlindLostValidationHoldsAndRecoversWithoutResubmission(t *testing.
 			}
 			json.NewEncoder(w).Encode(map[string]any{"version": "relay-blind-status-v1", "state": "terminal", "internal_request_id": "internal-1", "validated": true, "input_tokens": 4, "completion_tokens": 8, "effective_privacy_outcome": "relay_blind_satisfied", "retry_action": "do_not_resubmit"})
 		case "/internal/settlement/finality":
-			// SPEC-022 R-13: observe recovery runs on the coordinator's
+			// SPEC-022 R-14: observe recovery runs on the coordinator's
 			// explicit observe answer for this attempt.
 			resp := relayBlindObserveCoverageResponse(r)
 			w.WriteHeader(resp.StatusCode)

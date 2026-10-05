@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	statsprewarm "github.com/augstar/macprovider-coordinator/internal/stats/prewarm"
 	"github.com/rs/zerolog"
 )
@@ -1032,6 +1033,17 @@ SELECT rl.request_id, rl.ts_utc, rl.model, COALESCE(rl.provider_assigned_id, '')
 			total += gross
 			continue
 		}
+		// SPEC-005-R015: a pool-model attempt has no rate-card price; its
+		// buyer equivalent is the unquarantined ledger gross priced from
+		// the route snapshot's signed entry (zero when it was not billable).
+		if poolmanifest.IsPoolModelID(s.model) {
+			gross, err := h.unquarantinedLedgerGross(ctx, s.requestID, s.attemptN)
+			if err != nil {
+				return 0, err
+			}
+			total += gross
+			continue
+		}
 		var rewards RewardsConfig
 		var multiplier, share int64
 		configSnapshotID, found, err := h.providerIdentityConfigSnapshotID(ctx, s.requestID, s.attemptN, s.providerAssignedID)
@@ -1071,6 +1083,15 @@ SELECT config_snapshot_id
 		return 0, false, err
 	}
 	return id.Int64, id.Valid, nil
+}
+
+func (h *handler) unquarantinedLedgerGross(ctx context.Context, requestID string, attemptN int) (int64, error) {
+	var gross int64
+	err := h.store.db.QueryRowContext(ctx, `
+SELECT COALESCE(SUM(gross_credits), 0)
+  FROM ledger_request_credits
+ WHERE request_id = ? AND attempt_n = ? AND quarantined = 0`, requestID, attemptN).Scan(&gross)
+	return gross, err
 }
 
 func (h *handler) byteEstimatedLedgerGross(ctx context.Context, requestID string, attemptN int) (int64, bool, error) {

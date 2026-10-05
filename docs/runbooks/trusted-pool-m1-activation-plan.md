@@ -156,7 +156,9 @@ it today:
 
 Public "Latest" is `macprovider-cli v1.8.123`. So P5 needs a new signed
 acceptance candidate (see §3.5 for why it must be cut after the catalog
-release). Check:
+release; the reason is the member's compiled-in BYOM resolution, not the
+deploy canary, which since #1816 accepts a canary that loaded the release live
+from the coordinator). Check:
 
 ```bash
 sudo grep -n -A12 'compatibility_set:' /opt/macprovider/coordinator.yaml
@@ -338,6 +340,12 @@ activation (`catalog-artifact-feed-release.md`, "Activation state").
    `coordinator.streamvc.live` (copy only those two `location` blocks from
    `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf`; never copy the
    site file, which would drop live routes). Then P7 and the live release gate.
+   The deploy's catalog canary does not need a CLI carrying this release: since
+   #1816 it proves the canary's live process loaded the release from the
+   coordinator (`state: live_verified`, `source: coordinator`, release/digest/
+   row bound to the coordinator-admitted envelope) instead of byte-comparing the
+   CLI-installed `catalog-release/` directory. §3.5 is still required, but only
+   for the pool member's BYOM identity resolution, not for this deploy.
 
 ### 3.4 Admission of the member's candidate
 
@@ -368,6 +376,12 @@ carries `gguf-q4-k-m`). Cut it with `.github/workflows/acceptance-candidate.yml`
 (`production-release` environment), then add its `v<ver>@<commit>` to
 `coordinator.compatibility_set.accepted_ids` (Pearl actor, restart). The live
 native provider is not updated by this; it keeps its own candidate.
+
+This candidate is not a prerequisite of the §3.3 deploy. The deploy canary
+(`deploy-pearl-vps.sh` step 8, and the Pearl updater) no longer compares the
+canary Mac's CLI-installed `catalog-release/` bytes with the release (#1816).
+Only a signed CLI payload writes that directory, so that check failed every
+catalog-only release (the v1.8.194 rollback).
 
 ## 4. The pool manifest
 

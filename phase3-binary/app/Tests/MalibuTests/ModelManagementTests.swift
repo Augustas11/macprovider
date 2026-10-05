@@ -2497,6 +2497,274 @@ final class ModelManagementTests: XCTestCase {
     }
 }
 
+// MARK: - #1816 Trusted Pool models
+
+extension ModelManagementTests {
+    private static let poolID = "AbCdEfGhIjKlMnOpQrStUv"
+    private static let poolCandidateID = "byom_" + String(repeating: "a", count: 52)
+
+    private func coordinatorBYOMRowJSON(
+        candidateID: String = poolCandidateID,
+        state: String,
+        nextAction: String,
+        earningPath: String,
+        observedAt: String
+    ) -> String {
+        """
+        {"model_key":"\(candidateID)","served_model_id":"llamacpp:my-model","display_model_id":"my-model","action_model_id":"\(candidateID)","is_current":false,"weights_present_locally":true,"runtime_state":"ready","estimated_gb":3.0,"fit":"fits","disabled_reason":"admission_state_not_settlement_capable","warning_codes":["admission_state_not_settlement_capable"],"admission":{"state":"\(state)","source":"coordinator","coordinator_event_id":"event-1","state_observed_at":"\(observedAt)","catalog_economics_permitted":false,"settlement_capable":false},"provider_guidance":{"state_label_key":"byom.admission.\(state)","state_meaning_key":"byom.admission.not_earning","next_action":"\(nextAction)","transition_reason_code":null,"earning_path_class":"\(earningPath)"},"rate_card_version":null,"rate_card_generated_at":null,"rate_card_key":null,"rate_source":"none","prompt_rate_usd_per_million_tokens":null,"completion_rate_usd_per_million_tokens":null,"provider_share_bps":null,"provider_prompt_payout_usd_per_million_tokens":null,"provider_completion_payout_usd_per_million_tokens":null,"economics_state":"blocked","demand_rank":null,"demand_weight":null,"ready_provider_count":null,"supply_deficit_score":null,"switch":\(Self.unavailableActionJSON()),"prepare":\(Self.unavailableActionJSON()),"evaluate":\(Self.unavailableActionJSON()),"adopt_recommendation":\(Self.unavailableActionJSON()),"cleanup_staging":\(Self.unavailableActionJSON())}
+        """
+    }
+
+    // Exactly the coordinator's modelAdmissionPoolBindingObject key set.
+    private static func poolBindingJSON(poolModelID: String = "pool/\(poolID)/my-model", scope: String = "pool") -> String {
+        """
+        {"binding_scope":"\(scope)","pool_id":"\(poolID)","pool_model_id":"\(poolModelID)","manifest_version":3,"manifest_core_digest":"\(String(repeating: "c", count: 64))","artifact_hash_algorithm":"macprovider.gguf-file.v1","artifact_hash":"\(String(repeating: "d", count: 64))","runtime_source":"llamacpp_loopback","prompt_rate_per_mtok":100,"prompt_cache_hit_rate_per_mtok":10,"completion_rate_per_mtok":400,"disclosure_class":"pool_attested_unverified","max_context_tokens":32768,"provider_account_id":"acct-creator","observed_catalog_model_key":null,"probe_evidence_digest":null}
+        """
+    }
+
+    private static func poolStatusJSON(
+        catalogModelKey: String = "null",
+        earningPath: String = "pool_attested_earning",
+        binding: String? = poolBindingJSON()
+    ) -> String {
+        let bindingField = binding.map { #","pool_binding":"# + $0 } ?? ""
+        return """
+        {"schema":"model_admission_status.v1","generated_at":"2026-10-01T00:00:00Z","cli_version":"1.8.208","provider_id":"provider-1","candidate_id":"\(poolCandidateID)","served_model_ref":"llamacpp:my-model","catalog_model_key":\(catalogModelKey),"admission_state":"catalog_priced","admission_state_source":"coordinator","coordinator_event_id":"event-1","state_observed_at":"2026-10-01T00:00:00Z","provider_guidance":{"state_label_key":"byom.admission.catalog_priced","state_meaning_key":"byom.admission.not_earning","next_action":"withdraw","transition_reason_code":null,"earning_path_class":"\(earningPath)"},"allowed_next_states":["withdrawn","revoked"],"warnings":[]\(bindingField)}
+        """
+    }
+
+    private static func withdrawJSON(candidateID: String) -> String {
+        """
+        {"schema":"model_admission_withdraw.v1","generated_at":"2026-10-01T00:00:00Z","cli_version":"1.8.208","provider_id":"provider-1","candidate_id":"\(candidateID)","served_model_ref":"llamacpp:my-model","catalog_model_key":null,"idempotency_key":"idem-1","reason_code":"provider_requested","previous_admission_state":"offer_submitted","coordinator_event_id":"event-2","accepted_at":"2026-10-01T00:00:00Z","resulting_admission_state":"withdrawn","provider_guidance":{"state_label_key":"byom.admission.withdrawn","state_meaning_key":"byom.admission.not_earning","next_action":"submit_offer","transition_reason_code":"provider_requested","earning_path_class":"no_earning_path_in_v0_1"},"warnings":[]}
+        """
+    }
+
+    private static func proposalJSON(candidateID: String, poolID: String = poolID) -> String {
+        """
+        {"schema":"pool_model_proposal.v1","generated_at":"2026-10-01T00:00:00Z","cli_version":"1.8.208","pool_id":"\(poolID)","provider_id":"provider-1","candidate_id":"\(candidateID)","served_model_ref":"llamacpp:my-model","runtime_source":"llamacpp_loopback","display_name":"my-model","catalog_model_key":null,"model_entry":{"pool_model_id":"pool/\(poolID)/my-model","artifact_hash_algorithm":"macprovider.gguf-file.v1","artifact_hash":"\(String(repeating: "d", count: 64))","allowed_runtime_sources":["llamacpp_loopback"],"license":null,"paid_serving_attested":null,"pricing":null,"disclosure_class":"pool_attested_unverified","max_context_tokens":32768},"creator_requirements":["license_spdx_or_licenseref_required"],"evidence":{"evaluation_digest_sha256":null,"known_answer_probe_evidence_sha256":null},"offer_status":null,"warnings":[]}
+        """
+    }
+
+    private func decodeStatus(_ json: String) throws -> MalibuBYOMAdmissionStatusDocument {
+        try JSONDecoder().decode(MalibuBYOMAdmissionStatusDocument.self, from: Data(json.utf8))
+    }
+
+    /// #1816 F1: the coordinator-generated SPEC-047-R011 statuses (shared with
+    /// the CLI decoder tests) validate here too, including the pool-scoped
+    /// `catalog_priced` next states, which a global status never may claim.
+    func testSharedCoordinatorPoolStatusFixtureValidates() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let raw = try Data(contentsOf: repoRoot.appendingPathComponent("testdata/spec047/pool_scoped_status_v1.json"))
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: raw) as? [String: Any])
+        let statuses = try XCTUnwrap(root["statuses"] as? [String: [String: Any]])
+        for (name, object) in statuses {
+            let candidateID = try XCTUnwrap(object["candidate_id"] as? String)
+            let document = try JSONDecoder().decode(MalibuBYOMAdmissionStatusDocument.self, from: JSONSerialization.data(withJSONObject: object))
+            XCTAssertNoThrow(try document.validated(expectedCandidateID: candidateID), name)
+        }
+        var pooled = try XCTUnwrap(statuses["pool_scoped_catalog_priced"])
+        let pooledDocument = try JSONDecoder().decode(MalibuBYOMAdmissionStatusDocument.self, from: JSONSerialization.data(withJSONObject: pooled))
+        XCTAssertEqual(pooledDocument.allowedNextStates, ["catalog_priced", "withdrawn", "revoked"])
+        XCTAssertNotNil(pooledDocument.validPoolBinding)
+        pooled["allowed_next_states"] = ["catalog_priced", "settlement_capable"]
+        let widened = try JSONDecoder().decode(MalibuBYOMAdmissionStatusDocument.self, from: JSONSerialization.data(withJSONObject: pooled))
+        let candidateID = try XCTUnwrap(pooled["candidate_id"] as? String)
+        XCTAssertThrowsError(try widened.validated(expectedCandidateID: candidateID))
+
+        let global = Self.poolStatusJSON(catalogModelKey: #""qwen3-8b""#, earningPath: "not_earning_yet_catalog_or_receipt_path_exists", binding: nil)
+            .replacingOccurrences(of: #""allowed_next_states":["withdrawn","revoked"]"#, with: #""allowed_next_states":["catalog_priced","withdrawn","revoked"]"#)
+        XCTAssertThrowsError(try decodeStatus(global).validated(expectedCandidateID: Self.poolCandidateID))
+    }
+
+    func testPoolScopedStatusDecodesAndFailsClosed() throws {
+        let status = try decodeStatus(Self.poolStatusJSON())
+        XCTAssertNoThrow(try status.validated(expectedCandidateID: Self.poolCandidateID))
+        XCTAssertEqual(status.validPoolBinding?.poolID, Self.poolID)
+        XCTAssertEqual(status.validPoolBinding?.manifestCoreDigest, String(repeating: "c", count: 64))
+        XCTAssertEqual(status.validPoolBinding?.completionRatePerMtok, 400)
+        let rejected = [
+            Self.poolStatusJSON(binding: nil),
+            Self.poolStatusJSON(catalogModelKey: #""qwen3-8b""#),
+            Self.poolStatusJSON(binding: Self.poolBindingJSON(poolModelID: "pool/ZZCdEfGhIjKlMnOpQrStUv/my-model")),
+            Self.poolStatusJSON(binding: Self.poolBindingJSON(scope: "global")),
+        ]
+        for json in rejected {
+            let document = try decodeStatus(json)
+            XCTAssertThrowsError(try document.validated(expectedCandidateID: Self.poolCandidateID), json)
+        }
+        let extraKey = Self.poolStatusJSON(binding: Self.poolBindingJSON().replacingOccurrences(of: "}", with: #","extra":1}"#))
+        XCTAssertThrowsError(try decodeStatus(extraKey))
+        let legacyDigestName = Self.poolStatusJSON(binding: Self.poolBindingJSON().replacingOccurrences(of: "manifest_core_digest", with: "core_digest"))
+        XCTAssertThrowsError(try decodeStatus(legacyDigestName))
+        let missingNullable = Self.poolStatusJSON(binding: Self.poolBindingJSON().replacingOccurrences(of: #","probe_evidence_digest":null"#, with: ""))
+        XCTAssertThrowsError(try decodeStatus(missingNullable))
+        let topLevelScope = Self.poolStatusJSON().replacingOccurrences(of: #""schema":"#, with: #""binding_scope":"pool","schema":"#)
+        XCTAssertThrowsError(try decodeStatus(topLevelScope))
+    }
+
+    func testPoolEarningRowUsesPoolCopyAndOnlyForCoordinatorCatalogPriced() throws {
+        let observedAt = ModelManagementTests.recentTimestamp()
+        let document = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [coordinatorBYOMRowJSON(state: "catalog_priced", nextAction: "withdraw", earningPath: "pool_attested_earning", observedAt: observedAt)], generatedAt: observedAt).utf8)
+        )
+        let row = try XCTUnwrap(try document.validated().rowsForMalibu(currentModelID: nil, warmSwapAvailable: true).first)
+        XCTAssertEqual(row.earningPathClass, "pool_attested_earning", "the row passes per-row validation")
+        XCTAssertEqual(row.earningVerdict, "Earns in its Trusted Pool — pool-attested, not network-verified")
+        XCTAssertTrue(row.earningDisclosure?.contains("not a network catalog model") == true)
+        XCTAssertEqual(row.blockReason, "Pool-priced by its Trusted Pool creator; no network catalog rate applies.")
+        XCTAssertTrue(row.canWithdraw)
+        XCTAssertFalse(row.canProposeToPool)
+        let bindingStatus = try decodeStatus(Self.poolStatusJSON())
+        let line = row.poolBindingLine(try XCTUnwrap(bindingStatus.validPoolBinding))
+        XCTAssertTrue(line.contains("pool \(Self.poolID)"))
+        XCTAssertTrue(line.contains("pool-attested, not network-verified"))
+
+        // Pool earning never validates outside a coordinator catalog_priced binding.
+        let forged = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [coordinatorBYOMRowJSON(state: "network_admitted_unsettled", nextAction: "withdraw", earningPath: "pool_attested_earning", observedAt: observedAt)], generatedAt: observedAt).utf8)
+        )
+        let degraded = try XCTUnwrap(try forged.validated().rowsForMalibu(currentModelID: nil, warmSwapAvailable: true).first)
+        XCTAssertEqual(degraded.warningCodes, ["projection_unsupported"])
+        XCTAssertNil(degraded.earningPathClass)
+    }
+
+    func testLocalOnlyRowOffersPoolProposalWithoutCLIOnlyCopy() throws {
+        let document = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [localOnlyBYOMRowJSON()]).utf8)
+        )
+        let row = try XCTUnwrap(MalibuModelRow(economics: try document.validated(now: ModelTestTimestamp.date).rows[0], currentModelID: nil, warmSwapAvailable: true))
+        XCTAssertTrue(row.canProposeToPool)
+        XCTAssertFalse(row.canWithdraw)
+        XCTAssertFalse((row.blockReason ?? "").contains("CLI-only"))
+    }
+
+    func testAdapterSettingsValidateAndBecomeCLIArguments() throws {
+        var settings = MalibuBYOMAdapterSettings()
+        XCTAssertEqual(settings.cliArguments, [])
+        settings.llamacppModelRoot = " /Users/me/models "
+        settings.llamacppOrigin = "http://127.0.0.1:8081"
+        settings.openaiCompatibleOrigin = "http://[::1]:8000"
+        let valid = try settings.validated()
+        XCTAssertEqual(valid.cliArguments, [
+            "--llamacpp-model-root", "/Users/me/models",
+            "--llamacpp-origin", "http://127.0.0.1:8081",
+            "--openai-compatible-origin", "http://[::1]:8000",
+        ])
+        XCTAssertEqual(valid.proposeArguments, ["--llamacpp-model-root", "/Users/me/models", "--llamacpp-origin", "http://127.0.0.1:8081"])
+        for bad in ["http://example.com:80", "https://127.0.0.1:8080", "http://127.0.0.1", "http://127.0.0.1:80/path", "http://user@127.0.0.1:80"] {
+            var candidate = MalibuBYOMAdapterSettings()
+            candidate.lmstudioOrigin = bad
+            XCTAssertThrowsError(try candidate.validated(), bad)
+        }
+        var relative = MalibuBYOMAdapterSettings()
+        relative.llamacppModelPath = "models/x.gguf"
+        XCTAssertThrowsError(try relative.validated())
+    }
+
+    @MainActor
+    func testWithdrawRunsTypedCLIWithdrawalAndAdapterArguments() async throws {
+        let timestamp = Self.recentTimestamp()
+        let row = coordinatorBYOMRowJSON(state: "offer_submitted", nextAction: "wait_for_coordinator", earningPath: "no_earning_path_in_v0_1", observedAt: timestamp)
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(exitCode: 0, stdout: catalogEconomicsJSON(rows: [row], generatedAt: timestamp), stderr: ""),
+            ModelCLIResult(exitCode: 0, stdout: Self.withdrawJSON(candidateID: Self.poolCandidateID), stderr: ""),
+            ModelCLIResult(exitCode: 0, stdout: catalogEconomicsJSON(rows: [row], generatedAt: timestamp, projectionSequence: 2), stderr: ""),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.withdraw.\(UUID().uuidString)")!
+        )
+        var settings = MalibuBYOMAdapterSettings()
+        settings.llamacppModelRoot = "/Users/me/models"
+        try store.setBYOMAdapterSettings(settings)
+        await store.refresh(
+            currentModelID: "other/model",
+            peer: peer(for: [MalibuModelCapabilityManifest.readySwitch, MalibuModelCapabilityManifest.catalogEconomics])
+        )
+        let target = try XCTUnwrap(store.rows.first { $0.id == Self.poolCandidateID })
+        XCTAssertTrue(target.canWithdraw)
+        await store.withdraw(target)
+        let configPath = cli.invocations[0][4]
+        XCTAssertEqual(Array(cli.invocations[0].suffix(2)), ["--llamacpp-model-root", "/Users/me/models"])
+        XCTAssertEqual(cli.invocations[1], [
+            "models", "admission", "withdraw", Self.poolCandidateID, "--yes", "--json", "--config", configPath,
+            "--llamacpp-model-root", "/Users/me/models",
+        ])
+        XCTAssertEqual(cli.invocations.count, 3, "the store refreshes after a withdrawal")
+    }
+
+    @MainActor
+    func testProposeRunsTypedCLIProposalAndKeepsTheExactBundle() async throws {
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(exitCode: 0, stdout: catalogEconomicsJSON(rows: [localOnlyBYOMRowJSON()], generatedAt: Self.recentTimestamp()), stderr: ""),
+            ModelCLIResult(exitCode: 0, stdout: Self.proposalJSON(candidateID: "local-candidate"), stderr: ""),
+            ModelCLIResult(exitCode: 0, stdout: catalogEconomicsJSON(rows: [localOnlyBYOMRowJSON()], generatedAt: Self.recentTimestamp(), projectionSequence: 2), stderr: ""),
+            ModelCLIResult(exitCode: 2, stdout: "", stderr: "models propose: openai_compatible_loopback has no exact artifact identity a pool entry can name\n"),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.propose.\(UUID().uuidString)")!
+        )
+        await store.refresh(
+            currentModelID: "other/model",
+            peer: peer(for: [MalibuModelCapabilityManifest.readySwitch, MalibuModelCapabilityManifest.catalogEconomics])
+        )
+        let row = try XCTUnwrap(store.rows.first { $0.id == "local-candidate" })
+        await store.propose(row, poolID: "not-a-pool")
+        XCTAssertEqual(cli.invocations.count, 1, "an invalid pool id never reaches the CLI")
+
+        await store.propose(row, poolID: " \(Self.poolID) ")
+        let configPath = cli.invocations[0][4]
+        XCTAssertEqual(cli.invocations[1], ["models", "propose", "local-candidate", "--pool", Self.poolID, "--yes", "--json", "--config", configPath])
+        let proposal = try XCTUnwrap(store.poolProposal)
+        XCTAssertEqual(proposal.poolModelID, "pool/\(Self.poolID)/my-model")
+        XCTAssertEqual(proposal.bundleJSON, Self.proposalJSON(candidateID: "local-candidate"))
+
+        store.dismissPoolProposal()
+        let refreshed = try XCTUnwrap(store.rows.first { $0.id == "local-candidate" })
+        await store.propose(refreshed, poolID: Self.poolID)
+        XCTAssertNil(store.poolProposal)
+        XCTAssertEqual(store.statusLine, "models propose: openai_compatible_loopback has no exact artifact identity a pool entry can name")
+    }
+
+    @MainActor
+    func testRefreshReadsBackThePoolBindingForPoolEarningRows() async throws {
+        let timestamp = Self.recentTimestamp()
+        let row = coordinatorBYOMRowJSON(state: "catalog_priced", nextAction: "withdraw", earningPath: "pool_attested_earning", observedAt: timestamp)
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(exitCode: 0, stdout: catalogEconomicsJSON(rows: [row], generatedAt: timestamp), stderr: ""),
+            ModelCLIResult(exitCode: 0, stdout: Self.poolStatusJSON(), stderr: ""),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.poolBinding.\(UUID().uuidString)")!
+        )
+        await store.refresh(
+            currentModelID: "other/model",
+            peer: peer(for: [MalibuModelCapabilityManifest.readySwitch, MalibuModelCapabilityManifest.catalogEconomics])
+        )
+        XCTAssertEqual(cli.invocations[1].prefix(4), ["models", "admission", "status", Self.poolCandidateID])
+        XCTAssertEqual(store.poolBindings[Self.poolCandidateID]?.poolModelID, "pool/\(Self.poolID)/my-model")
+    }
+
+    func testSafeCLIReasonStripsControlCharactersAndBoundsLength() {
+        XCTAssertNil(ModelManagementStore.safeCLIReason("\n  \n"))
+        XCTAssertEqual(ModelManagementStore.safeCLIReason("line\u{1b}[31m one\nline two"), "line[31m one")
+        XCTAssertEqual(ModelManagementStore.safeCLIReason(String(repeating: "x", count: 500))?.count, 240)
+    }
+}
+
 private enum ModelTestTimestamp {
     static let fractional = "2026-08-08T00:00:00.123Z"
     static let date = ISO8601DateFormatter().date(from: "2026-08-09T00:00:00Z")!

@@ -18,7 +18,7 @@ enum Build1PrivatePrepareProfile {
     static let artifactScope = "complete_revision_snapshot"
     static let signerKeyID = "streamvc-autotune-static-v4"
     static let schemaVersion = "macprovider.build1-private-authority.v1"
-    static let releaseID = "build1-orcarouter-private-2026-09-26-v1"
+    static let releaseID = "build1-orcarouter-private-2026-10-01-v1"
     static let runtimeVariantDirectory = "4-bit"
     static let authorityUnavailableReason = "private_authority_unavailable"
 

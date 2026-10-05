@@ -24,7 +24,7 @@ import (
 	"github.com/gobwas/ws/wsutil"
 )
 
-// SPEC-022 R-13 / SPEC-001-R005 / SPEC-015 §N.13 across the real
+// SPEC-022 R-14 / SPEC-001-R005 / SPEC-015 §N.13 across the real
 // coordinator, gateway, relay-blind client, and Swift InferenceRelay: an
 // enforce coordinator with relay_blind.enforce_settlement_profile, a Swift
 // fixture that pins the catalog model hash, completes the SPEC-008 key
@@ -285,7 +285,7 @@ func verifiedWorkCount(t *testing.T, s *scenario) int {
 	return count
 }
 
-// assertRelayBlindSettled runs one request and proves the full R-13 money
+// assertRelayBlindSettled runs one request and proves the full R-14 money
 // path: snapshot before dispatch, a closed relay_blind_settled verdict, a
 // payable provider credit, and gateway debit usage equal to credit usage.
 func (st *relayBlindSettlementStack) assertRelayBlindSettled(t *testing.T, n int, stream, privacy bool) {
@@ -442,7 +442,7 @@ func assertSQLiteTableLacks(t *testing.T, path, table string, needles []string) 
 	}
 }
 
-// R-13.2 with a real Swift provider over auth_request: a session that did
+// R-14.2 with a real Swift provider over auth_request: a session that did
 // not advertise relay_blind_settlement_receipt_v1 is never reserved.
 func TestRelayBlindEnforceExcludesSwiftProviderWithoutCapability(t *testing.T) {
 	st := newRelayBlindSettlementStack(t, relayBlindSettlementOpts{omitCapability: true})
