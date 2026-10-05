@@ -40,9 +40,19 @@ struct MacProviderCLI: AsyncParsableCommand {
         commandName: "malibu-cli",
         abstract: "OpenAI-compatible Malibu (Mac Provider) inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ProviderCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self] + labSubcommands() + [MSBThroughputCommand.self, MSBLoopbackCommand.self, MSBPerplexityCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self, RelayBlindKeyCommand.self, RelayBlindFixtureCommand.self, PrivacyClassCommand.self],
+        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ProviderCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self] + labSubcommands() + [MSBThroughputCommand.self, MSBLoopbackCommand.self, MSBPerplexityCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self, RelayBlindKeyCommand.self] + fixtureSubcommands() + [PrivacyClassCommand.self],
         defaultSubcommand: ServeCommand.self
     )
+
+    /// The relay-blind fixture exists only in debug/test builds
+    /// (MACPROVIDER_TEST_FIXTURES); a release binary registers none.
+    private static func fixtureSubcommands() -> [ParsableCommand.Type] {
+        #if MACPROVIDER_TEST_FIXTURES
+        return [RelayBlindFixtureCommand.self]
+        #else
+        return []
+        #endif
+    }
 
     /// Lab-only native-MTP harnesses exist only in DEBUG or explicit
     /// MACPROVIDER_LAB_HARNESS builds; a plain release binary registers none.
