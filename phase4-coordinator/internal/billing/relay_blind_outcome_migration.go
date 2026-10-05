@@ -34,16 +34,17 @@ func (s *Store) ensureRelayBlindSettlementOutcomeVocabulary(ctx context.Context)
 	if err := s.requireBillingCompatFloor(ctx); err != nil {
 		return err
 	}
-	if err := s.widenSchemaChecks(ctx, relayBlindSettlementOutcomeWidenings); err != nil {
-		return err
-	}
-	return s.recordBillingCompatFloor(ctx)
+	// Contract 3 commits in the same transaction as the widening, so a
+	// failed widening leaves the floor where it was (contract 2).
+	return s.widenSchemaChecks(ctx, relayBlindSettlementOutcomeWidenings, billingCompatContract)
 }
 
 // widenSchemaChecks applies every pending CHECK replacement in one
 // writable_schema transaction, bumps the schema cookie so open connections
 // re-read the definitions, and then proves each edited table still parses.
-func (s *Store) widenSchemaChecks(ctx context.Context, widenings []schemaCheckWidening) error {
+// A positive floorContract is recorded in that same transaction (or, when
+// nothing is pending, on its own as an idempotent repair).
+func (s *Store) widenSchemaChecks(ctx context.Context, widenings []schemaCheckWidening, floorContract int64) error {
 	var pending []schemaCheckWidening
 	for _, w := range widenings {
 		var definition string
@@ -59,6 +60,9 @@ func (s *Store) widenSchemaChecks(ctx context.Context, widenings []schemaCheckWi
 		pending = append(pending, w)
 	}
 	if len(pending) == 0 {
+		if floorContract > 0 {
+			return s.recordBillingCompatFloorAt(ctx, floorContract)
+		}
 		return nil
 	}
 	conn, err := s.db.Conn(ctx)
@@ -76,6 +80,11 @@ func (s *Store) widenSchemaChecks(ctx context.Context, widenings []schemaCheckWi
 			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		}
 	}()
+	if floorContract > 0 {
+		if err := recordBillingCompatFloorExec(ctx, conn, floorContract); err != nil {
+			return err
+		}
+	}
 	var schemaVersion int64
 	if err := conn.QueryRowContext(ctx, `PRAGMA schema_version`).Scan(&schemaVersion); err != nil {
 		return err

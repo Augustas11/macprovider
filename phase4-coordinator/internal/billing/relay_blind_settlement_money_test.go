@@ -262,7 +262,7 @@ func TestRelayBlindSettlementOutcomeMigrationOnPopulatedDatabase(t *testing.T) {
 	for _, w := range relayBlindSettlementOutcomeWidenings {
 		reverse = append(reverse, schemaCheckWidening{table: w.table, from: w.to, to: w.from})
 	}
-	if err := f.store.widenSchemaChecks(ctx, reverse); err != nil {
+	if err := f.store.widenSchemaChecks(ctx, reverse, 0); err != nil {
 		t.Fatalf("restore legacy schema: %v", err)
 	}
 	if _, err := db.Exec(`UPDATE billing_compat_floor SET contract = 2`); err != nil {
@@ -337,5 +337,52 @@ func TestRelayBlindSnapshotOnlyAttemptFinality(t *testing.T) {
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM spec022_payable_request_credits`); got != 0 {
 		t.Fatalf("payable=%d", got)
+	}
+}
+
+// SPEC-022 R-13.8: contract 3 is recorded only with the relay-blind outcome
+// widening. A relay-blind migration that fails leaves the floor at 2, so a
+// contract-2 coordinator is still a valid rollback target; a later
+// successful migration records 3.
+func TestBillingCompatFloorStaysAtTwoWhenRelayBlindMigrationFails(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	ctx := context.Background()
+	db := store.db
+	if got := scalar(t, db, `SELECT contract FROM billing_compat_floor WHERE id = 1`); got != 3 {
+		t.Fatalf("fresh floor=%d want 3", got)
+	}
+	var reverse []schemaCheckWidening
+	for _, w := range relayBlindSettlementOutcomeWidenings {
+		reverse = append(reverse, schemaCheckWidening{table: w.table, from: w.to, to: w.from})
+	}
+	if err := store.widenSchemaChecks(ctx, reverse, 0); err != nil {
+		t.Fatalf("restore contract-2 schema: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE billing_compat_floor SET contract = 2`); err != nil {
+		t.Fatal(err)
+	}
+	// An outbox CHECK the widening does not recognize makes the relay-blind
+	// migration fail.
+	unexpected := "CHECK(settlement_outcome IN ('pending','verified','quarantined','zero_settled','unexpected'))"
+	if err := store.widenSchemaChecks(ctx, []schemaCheckWidening{{table: "settlement_receipt_audit_outbox", from: settlementOutcomeCheckV1, to: unexpected}}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewStore(db); err == nil {
+		t.Fatal("NewStore succeeded over an unrecognized outbox CHECK")
+	}
+	if got := scalar(t, db, `SELECT contract FROM billing_compat_floor WHERE id = 1`); got != 2 {
+		t.Fatalf("floor after failed relay-blind migration=%d want 2", got)
+	}
+	if definition := mustScalarString(t, db, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'settlement_receipt_verdicts'`); strings.Contains(definition, settlementOutcomeCheckV2) {
+		t.Fatal("failed migration widened settlement_receipt_verdicts")
+	}
+	if err := store.widenSchemaChecks(ctx, []schemaCheckWidening{{table: "settlement_receipt_audit_outbox", from: unexpected, to: settlementOutcomeCheckV1}}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewStore(db); err != nil {
+		t.Fatalf("NewStore after repair: %v", err)
+	}
+	if got := scalar(t, db, `SELECT contract FROM billing_compat_floor WHERE id = 1`); got != 3 {
+		t.Fatalf("floor after relay-blind migration=%d want 3", got)
 	}
 }

@@ -29,7 +29,10 @@ func (s *Store) ensureSettlementAttemptOutputUsageSourceVocabulary(ctx context.C
 	if err := s.widenSettlementAttemptOutputUsageSourceCheck(ctx); err != nil {
 		return err
 	}
-	return s.recordBillingCompatFloor(ctx)
+	// Contract 2 only: contract 3 is recorded with the relay-blind outcome
+	// widening it describes (ensureRelayBlindSettlementOutcomeVocabulary), so
+	// a failed relay-blind migration leaves a contract-2 rollback target.
+	return s.recordBillingCompatFloorAt(ctx, billingCompatContractPoolOperatorAttested)
 }
 
 // billingCompatContract is the billing read contract this binary implements.
@@ -44,6 +47,10 @@ func (s *Store) ensureSettlementAttemptOutputUsageSourceVocabulary(ctx context.C
 // relay_blind_settled rows with the relay-blind-settlement-v1 profile. A
 // binary that cannot read them is not a rollback target; roll forward.
 const billingCompatContract = 3
+
+// billingCompatContractPoolOperatorAttested is contract 2, the floor the
+// R-12.6a usage-source widening records.
+const billingCompatContractPoolOperatorAttested = 2
 
 // ErrBillingCompatFloor means the database was written under a newer billing
 // contract than this binary implements.
@@ -71,12 +78,20 @@ func (s *Store) requireBillingCompatFloor(ctx context.Context) error {
 	return nil
 }
 
-func (s *Store) recordBillingCompatFloor(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `
+// recordBillingCompatFloorAt raises the recorded floor to contract; it never
+// lowers it.
+func (s *Store) recordBillingCompatFloorAt(ctx context.Context, contract int64) error {
+	return recordBillingCompatFloorExec(ctx, s.db, contract)
+}
+
+func recordBillingCompatFloorExec(ctx context.Context, db interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, contract int64) error {
+	_, err := db.ExecContext(ctx, `
 INSERT INTO billing_compat_floor (id, contract, recorded_at_utc) VALUES (1, ?, ?)
 ON CONFLICT(id) DO UPDATE SET contract = excluded.contract, recorded_at_utc = excluded.recorded_at_utc
  WHERE excluded.contract > billing_compat_floor.contract`,
-		billingCompatContract, time.Now().UTC().Format(time.RFC3339Nano))
+		contract, time.Now().UTC().Format(time.RFC3339Nano))
 	return err
 }
 

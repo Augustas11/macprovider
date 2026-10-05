@@ -6985,6 +6985,8 @@
         "phase4-coordinator/internal/billing/relay_blind_settlement_money_test.go:TestRelayBlindSettledWithoutBindingIsNotPayable",
         "phase4-coordinator/internal/billing/relay_blind_settlement_money_test.go:TestRelayBlindTamperedOrMissingReceiptIsNotPayable",
         "phase4-coordinator/internal/billing/relay_blind_settlement_money_test.go:TestRelayBlindSettlementOutcomeMigrationOnPopulatedDatabase",
+        "phase4-coordinator/internal/billing/relay_blind_settlement_money_test.go:TestBillingCompatFloorStaysAtTwoWhenRelayBlindMigrationFails",
+        "phase4-coordinator/internal/stats/billingmirror/mirror_test.go:TestFetchRequestCreditsVerifiedOnlyFromLiteralVerifiedVerdict",
         "phase4-coordinator/internal/billing/relay_blind_settlement_money_test.go:TestRelayBlindSnapshotOnlyAttemptFinality",
         "phase5-gateway/internal/storage/sqlite/relay_blind_settlement_dispatch_test.go:TestRelayBlindSettlementDispatchRecordedOnceAndLoaded",
         "phase5-gateway/internal/router/relay_blind_settlement_finality_test.go:TestRelayBlindSettledFinalityDebitsOnlyRelayBlindExecutions",
