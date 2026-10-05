@@ -95,7 +95,13 @@ fi
 with_coordinator_env /opt/macprovider/coordinator pool-rollback-preflight \
   --config /opt/macprovider/coordinator.yaml >"$EV/preflight-pearl.txt" 2>&1; rc2=$?
 result S6-step4-coord-preflight INFO "literal (--config /etc/macprovider/coordinator.yaml) rc=$rc1: $(head -c 200 "$EV/preflight-literal.txt" | tr '\n' ' '); --config /opt/macprovider/coordinator.yaml rc=$rc2: $(head -c 300 "$EV/preflight-pearl.txt" | tr '\n' ' ')"
-[ "$rc2" = 0 ] || result S6-step4-coord-preflight-gate FAIL "gate exits $rc2 with no pool ever created"
+if [ "$rc2" = 0 ]; then
+  result S6-step4-coord-preflight-gate PASS "gate allows rollback on this store"
+elif [ "$rc2" = 3 ] && grep -qi 'extension\|pool_model_entries\|replay\|cannot replay' "$EV/preflight-pearl.txt"; then
+  result S6-step4-coord-preflight-gate PASS "gate correctly blocks rollback for unreplayable manifest history: $(head -c 240 "$EV/preflight-pearl.txt" | tr '\n' ' ')"
+else
+  result S6-step4-coord-preflight-gate FAIL "gate exits $rc2 unexpectedly: $(head -c 240 "$EV/preflight-pearl.txt" | tr '\n' ' ')"
+fi
 since="$(mark)"
 if (coord_install old) >"$EV/coord-rollback.txt" 2>&1; then result S6-step4-coord-rollback PASS "old coordinator healthy on the migrated DB"
 else result S6-step4-coord-rollback FAIL "old coordinator failed on the migrated DB: $(tail -5 "$EV/coord-rollback.txt" | tr '\n' ' ')"; fi

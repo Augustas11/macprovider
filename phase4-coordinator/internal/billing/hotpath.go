@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 )
@@ -59,10 +60,35 @@ type HotPathInput struct {
 	// PoolAttestationFence is the pool state that decision used. The ledger
 	// transaction re-reads it and keeps the credit only if it still holds.
 	PoolAttestationFence *PoolAttestationFence
+	// PoolManifestRoute marks an attempt whose route snapshot takes its
+	// expected identity and price from a SPEC-042-R015 pool entry
+	// (SPEC-022-R013 pool_manifest). PoolManifestVerified is set only when
+	// the recorder re-evaluated that route against the durable pool records
+	// (the exact entry in the immutable accepted core, membership, an
+	// undisputed label) and PoolAttestationFence pins that decision. Without
+	// both, a pool-manifest attempt carries no credit (SPEC-005-R015).
+	PoolManifestRoute    bool
+	PoolManifestVerified bool
 	// SettlementAttemptOutput is the compact immutable evidence event that
 	// commits with the provider credit. The asynchronous materializer projects
 	// it into settlement_attempt_outputs after this transaction commits.
 	SettlementAttemptOutput *SettlementAttemptOutput
+}
+
+// PoolManifestRouteNotSettlementEligible is the ledger quarantine reason for
+// a pool-model attempt whose SPEC-022-R013 pool_manifest route could not be
+// re-verified (or a pool/ model id with no pool_manifest route at all).
+const PoolManifestRouteNotSettlementEligible = "pool_manifest_route_not_settlement_eligible"
+
+// poolManifestAttemptBillable is the ledger-boundary SPEC-005-R015 rule: an
+// attempt for a pool/ model id, or on a pool_manifest route, earns and bills
+// only behind a verified pool_manifest decision whose fence still holds.
+// Every other attempt is unaffected.
+func poolManifestAttemptBillable(in HotPathInput, fenceHolds bool) bool {
+	if !in.PoolManifestRoute && !poolmanifest.IsPoolModelID(in.Model) {
+		return true
+	}
+	return in.PoolManifestRoute && in.PoolManifestVerified && fenceHolds
 }
 
 // LoopbackRuntimeNotSettlementEligible is the ledger quarantine reason for an
@@ -233,8 +259,31 @@ func (s *Store) writeHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 		// The pool state that decision used is re-read inside this
 		// transaction, so a manifest, membership, or lifecycle change, or
 		// trusted pools going off, before the commit zero-bills it.
-		poolAttestedUsage := in.PoolOperatorAttested && in.PromptTokens != nil && in.CompletionTokens != nil &&
+		// The fence is read once per attempt: a loopback pool-model attempt
+		// is both pool_operator_attested and pool_manifest, and both rules
+		// decide on the same read.
+		fenceHolds := (in.PoolOperatorAttested || in.PoolManifestRoute) &&
 			s.poolAttestationFenceHolds(ctx, conn, in.PoolAttestationFence)
+		poolAttestedUsage := in.PoolOperatorAttested && in.PromptTokens != nil && in.CompletionTokens != nil && fenceHolds
+		// SPEC-005-R015 / SPEC-022-R013: a pool-model attempt is priced only
+		// from its verified pool_manifest route, never a rate-card fallback.
+		if !poolManifestAttemptBillable(in, fenceHolds) {
+			result := zeroCredits(ComputeCredits(
+				in.PromptTokens,
+				in.CompletionTokens,
+				in.EstimatedCompTokens,
+				usageFor(in.ErrorCode, in.EstimatedCompTokens),
+				in.FaultFlag,
+				hotPathRateEntry(in),
+				in.MultiplierPPM,
+				in.ProviderShareBps,
+			))
+			now := time.Now().UTC().Format(time.RFC3339Nano)
+			if _, err := insertRequestCreditTx(ctx, conn, in, result, "hot_path", now, true, PoolManifestRouteNotSettlementEligible); err != nil {
+				return err
+			}
+			return insertProviderIdentitySnapshotTx(ctx, conn, in, now)
+		}
 		// Only a known-native runtime bills as before; any other value,
 		// recognised or not, could be loopback and fails closed, the rule
 		// ledger recovery applies (recoveredLoopbackAttemptBillable).
@@ -311,7 +360,7 @@ func (s *Store) writeHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 		if err := insertProviderIdentitySnapshotTx(ctx, conn, in, now); err != nil {
 			return err
 		}
-		if _, err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, in.RequestID, int64(in.AttemptN), in.ProviderID); err != nil {
+		if _, err := s.syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, in.RequestID, int64(in.AttemptN), in.ProviderID); err != nil {
 			return err
 		}
 		return s.journalHotPathSettlementAttemptOutput(ctx, conn, in, poolAttestedUsage)

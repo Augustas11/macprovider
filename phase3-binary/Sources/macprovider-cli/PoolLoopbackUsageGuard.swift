@@ -77,7 +77,7 @@ enum PoolLoopbackUsageGuard {
         snapshotDirectory: (String) -> URL? = ModelRuntime.localHuggingFaceSnapshot(for:)
     ) async -> Status {
         var recounted: Int64?
-        if let directory = snapshotDirectory(settlementMetadata.modelID),
+        if let directory = snapshotDirectory(settlementMetadata.servedModelID),
            let tokenizer = await TokenizerCache.shared.tokenizer(at: directory) {
             recounted = Int64(tokenizer.encode(text: completionText, addSpecialTokens: false).count)
         }

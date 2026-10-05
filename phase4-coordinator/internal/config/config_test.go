@@ -1987,3 +1987,93 @@ func TestTrustedPoolsProductionActivationAcceptsUnmappedCustodyHash(t *testing.T
 		t.Fatalf("Validate err=%v, want a partially migrated production config to start", err)
 	}
 }
+
+// SPEC-005-R015 / SPEC-042-R016 (#1816): pool-model pricing bounds and the
+// recorded provider owner-account map validate closed.
+func TestTrustedPoolsPoolModelConfigValidation(t *testing.T) {
+	valid := func() Config {
+		cfg := validTestConfig()
+		cfg.TrustedPools.Enabled = true
+		cfg.TrustedPools.RefreshIntervalS = 5
+		cfg.TrustedPools.PoolModelPricingBounds = &TrustedPoolsPoolModelPricingBounds{
+			MinPromptRatePerMtok: 1, MaxPromptRatePerMtok: 10,
+			MaxPromptCacheHitRatePerMtok: 10, MinCompletionRatePerMtok: 1, MaxCompletionRatePerMtok: 10,
+		}
+		cfg.TrustedPools.ProviderOwnerAccountIDs = map[string][]string{"acct-a": {"provider-a"}}
+		return cfg
+	}
+	cfg := valid()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid pool model config: %v", err)
+	}
+	for name, mutate := range map[string]func(*Config){
+		"pools disabled":      func(c *Config) { c.TrustedPools.Enabled = false },
+		"inverted bounds":     func(c *Config) { c.TrustedPools.PoolModelPricingBounds.MinCompletionRatePerMtok = 11 },
+		"negative floor":      func(c *Config) { c.TrustedPools.PoolModelPricingBounds.MinPromptRatePerMtok = -1 },
+		"provider twice":      func(c *Config) { c.TrustedPools.ProviderOwnerAccountIDs["acct-b"] = []string{"provider-a"} },
+		"bad provider id":     func(c *Config) { c.TrustedPools.ProviderOwnerAccountIDs["acct-a"] = []string{"bad provider"} },
+		"non-canonical acct":  func(c *Config) { c.TrustedPools.ProviderOwnerAccountIDs[" acct-c"] = []string{"provider-c"} },
+		"slash in account id": func(c *Config) { c.TrustedPools.ProviderOwnerAccountIDs["acct/c"] = []string{"provider-c"} },
+	} {
+		bad := valid()
+		mutate(&bad)
+		if err := bad.Validate(); err == nil {
+			t.Errorf("%s: invalid pool model config validated", name)
+		}
+	}
+}
+
+// Freeze audit R1 (#1816) SECURITY M1: the bounds object decodes closed (all
+// six keys, integers only, nothing else) and its maxima must bill without
+// overflow at the token ceiling.
+func TestTrustedPoolsPoolModelPricingBoundsClosedDecodeAndOverflow(t *testing.T) {
+	const full = "min_prompt_rate_per_mtok: 1\nmax_prompt_rate_per_mtok: 10\nmin_prompt_cache_hit_rate_per_mtok: 0\nmax_prompt_cache_hit_rate_per_mtok: 10\nmin_completion_rate_per_mtok: 1\nmax_completion_rate_per_mtok: 10\n"
+	var ok TrustedPoolsPoolModelPricingBounds
+	if err := yaml.Unmarshal([]byte(full), &ok); err != nil {
+		t.Fatalf("complete bounds rejected: %v", err)
+	}
+	if ok.MaxCompletionRatePerMtok != 10 || ok.MinPromptRatePerMtok != 1 {
+		t.Fatalf("decoded bounds = %+v", ok)
+	}
+	for name, doc := range map[string]string{
+		"missing key":   strings.Replace(full, "min_prompt_rate_per_mtok: 1\n", "", 1),
+		"misspelled":    strings.Replace(full, "min_prompt_rate_per_mtok", "min_promt_rate_per_mtok", 1),
+		"unknown key":   full + "max_total_per_mtok: 3\n",
+		"duplicate key": full + "max_prompt_rate_per_mtok: 11\n",
+		"float value":   strings.Replace(full, "max_prompt_rate_per_mtok: 10", "max_prompt_rate_per_mtok: 10.5", 1),
+		"string value":  strings.Replace(full, "max_prompt_rate_per_mtok: 10", "max_prompt_rate_per_mtok: \"10\"", 1),
+		"int overflow":  strings.Replace(full, "max_prompt_rate_per_mtok: 10", "max_prompt_rate_per_mtok: 9223372036854775808", 1),
+		"not a mapping": "[1, 2]\n",
+	} {
+		var b TrustedPoolsPoolModelPricingBounds
+		if err := yaml.Unmarshal([]byte(doc), &b); err == nil {
+			t.Errorf("%s: bounds decoded, want rejection", name)
+		}
+	}
+
+	cfg := validTestConfig()
+	cfg.TrustedPools.Enabled = true
+	cfg.TrustedPools.RefreshIntervalS = 5
+	cfg.Rewards.GlobalMultiplier = 1.0
+	// At multiplier 1.0 (10^6 ppm) each maximum may be at most
+	// MaxInt64 / 10^6 / 2^20 = 8796093 credits per Mtok.
+	cfg.TrustedPools.PoolModelPricingBounds = &TrustedPoolsPoolModelPricingBounds{
+		MaxPromptRatePerMtok: 8796093, MaxPromptCacheHitRatePerMtok: 8796093, MaxCompletionRatePerMtok: 8796093,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("bounds at the overflow edge rejected: %v", err)
+	}
+	cfg.TrustedPools.PoolModelPricingBounds.MaxCompletionRatePerMtok = 8796094
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "overflow") {
+		t.Fatalf("overflowing bounds err=%v, want overflow rejection", err)
+	}
+	cfg.TrustedPools.PoolModelPricingBounds.MaxCompletionRatePerMtok = 1
+	cfg.Rewards.GlobalMultiplier = 2.0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("a maximum that overflows at multiplier 2.0 validated")
+	}
+	cfg.Rewards.GlobalMultiplier = 1e300
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("bounds under an unrepresentable multiplier validated")
+	}
+}

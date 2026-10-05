@@ -6,7 +6,9 @@ import (
 	"strings"
 
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
+	"github.com/augstar/macprovider-coordinator/internal/trustpool"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 )
 
@@ -25,6 +27,43 @@ type poolRouteView struct {
 	runtimeAllowlist []string
 	creatorAccountID string
 	creatorOwned     map[string]bool
+	// SPEC-042-R015/R016 (#1816): attestations, recorded owner accounts, the
+	// active core labels, and the requested pool model entry.
+	attestedMembers     []poolmanifest.AttestedMember
+	memberOwnerAccounts map[string]string
+	manifestVersion     uint64
+	manifestCoreDigest  string
+	poolModel           *poolmanifest.PoolModelEntry
+	// priorManifestVersion and priorManifestCoreDigest are set only when the
+	// accepted core immediately before the active one carries a
+	// byte-identical poolModel entry: a binding to that generation stays
+	// routable until the sweep records its rebind (#1816 F3).
+	priorManifestVersion    uint64
+	priorManifestCoreDigest string
+}
+
+// poolModelPriorGeneration returns the prior accepted generation when it
+// carries an entry byte-identical to entry, so routing never gaps across a
+// rotation that keeps the entry (SPEC-047-R011, #1816 F3).
+func poolModelPriorGeneration(snap trustpool.Snapshot, entry *poolmanifest.PoolModelEntry) (uint64, string) {
+	if entry == nil || snap.PriorManifestVersion == 0 || snap.PriorManifestVersion+1 != snap.ManifestVersion || snap.PriorManifestCoreDigest == "" {
+		return 0, ""
+	}
+	for _, prior := range snap.PriorModelEntries {
+		if prior.PoolModelID == entry.PoolModelID && prior.Equal(*entry) {
+			return snap.PriorManifestVersion, snap.PriorManifestCoreDigest
+		}
+	}
+	return 0, ""
+}
+
+// bindingGenerationRoutable reports whether a binding's manifest label is the
+// active generation, or the prior one carrying the same entry unchanged.
+func (v poolRouteView) bindingGenerationRoutable(version uint64, digest string) bool {
+	if version == v.manifestVersion && digest == v.manifestCoreDigest {
+		return true
+	}
+	return v.priorManifestVersion != 0 && version == v.priorManifestVersion && digest == v.priorManifestCoreDigest
 }
 
 func (st *forwardState) poolRouteView() poolRouteView {
@@ -37,6 +76,15 @@ func (st *forwardState) poolRouteView() poolRouteView {
 		runtimeAllowlist: st.poolRuntimeAllowlist,
 		creatorAccountID: st.poolCreatorAccountID,
 		creatorOwned:     st.poolCreatorOwnedMembers,
+
+		attestedMembers:     st.poolAttestedMembers,
+		memberOwnerAccounts: st.poolMemberOwnerAccounts,
+		manifestVersion:     st.poolManifestVersion,
+		manifestCoreDigest:  st.poolManifestCoreDigest,
+		poolModel:           st.poolModelEntry,
+
+		priorManifestVersion:    st.poolPriorManifestVersion,
+		priorManifestCoreDigest: st.poolPriorManifestCoreDigest,
 	}
 }
 
@@ -60,8 +108,16 @@ func (v poolRouteView) externalRuntimeCandidate(p pool.Provider) bool {
 		providerws.IsBYOMLoopbackRuntimeSource(p.RuntimeSource) &&
 		v.members[p.ProviderID] &&
 		v.creatorAccountID != "" &&
-		v.creatorOwned[p.ProviderID] &&
+		(v.creatorOwned[p.ProviderID] || v.attestedMemberEligible(p)) &&
 		v.allowsRuntime(p.RuntimeSource)
+}
+
+// attestedMemberEligible is SPEC-042-R016: a non-creator member named, by
+// its recorded owner account, in the active core's attestation for the
+// session's runtime class.
+func (v poolRouteView) attestedMemberEligible(p pool.Provider) bool {
+	_, ok := v.attestedMemberAccount(p)
+	return ok
 }
 
 // poolHasExternalRuntimeMember reports whether any session in scope is a
@@ -81,7 +137,7 @@ func poolHasExternalRuntimeMember(providers []pool.Provider, members map[string]
 // session. Every caller also applies byomPaidRoutingEligibilityForRoute, so
 // the sandbox term is only ever skipped together with the full predicate.
 func routingEligibleForRoute(p pool.Provider, view poolRouteView) bool {
-	if view.externalRuntimeCandidate(p) {
+	if view.externalRuntimeCandidate(p) || view.poolModelCandidate(p) {
 		return p.PoolExternalRuntimeRoutingEligible()
 	}
 	return p.RoutingEligible()
@@ -94,7 +150,7 @@ func routingEligibleForRoute(p pool.Provider, view poolRouteView) bool {
 // do. Every other provider and every global route is returned unchanged, and
 // the paid-routing predicate (binding half) is still applied by the caller.
 func providerForRoute(p pool.Provider, view poolRouteView) pool.Provider {
-	if view.externalRuntimeCandidate(p) {
+	if view.externalRuntimeCandidate(p) || view.poolModelCandidate(p) {
 		p.AdmissionSandboxed = false
 	}
 	return p

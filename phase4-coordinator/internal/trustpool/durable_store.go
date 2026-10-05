@@ -6,15 +6,18 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	"github.com/augstar/macprovider-coordinator/internal/providerid"
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
@@ -168,13 +171,27 @@ type DurableEvent struct {
 	CoordinatorAudience                       string `json:"coordinator_audience,omitempty"`
 	ProviderPoolDelegationSignature           string `json:"provider_pool_delegation_signature,omitempty"`
 	ProviderPoolDelegationRevocationSignature string `json:"provider_pool_delegation_revocation_signature,omitempty"`
+	// ManifestTermsDigest is the SPEC-043-R006 policy-terms digest a
+	// delegation grant (and its revocation) binds to instead of
+	// ManifestCoreDigest. A delegation event carries exactly one of the two:
+	// a legacy grant names the full core digest and stays bound to that core.
+	ManifestTermsDigest string `json:"manifest_terms_digest,omitempty"`
 }
 
 // Store persists DurableEvent rows in the coordinator SQLite DB.
 type Store struct {
 	db                       *sql.DB
 	productionActivationGate productionActivationGate
-	providerOwnerPublicKeys  map[string][]byte
+	// providerOwnerPublicKeys is the operator-configured provider -> owner
+	// key map; SetProviderOwnerPublicKeys swaps it on a config reload.
+	providerOwnerPublicKeys atomic.Pointer[map[string][]byte]
+	// poolModelAcceptance supplies the coordinator state SPEC-042-R015
+	// entries are checked against at online manifest acceptance (pricing
+	// bounds, catalog shadow/overlap). Nil fails every entry closed.
+	poolModelAcceptance func() poolmanifest.PoolModelAcceptanceContext
+	// now is the settlement-fence clock (a later accepted core takes effect
+	// at its not_before). Nil is time.Now.
+	now func() time.Time
 }
 
 type productionActivationGate struct {
@@ -214,27 +231,158 @@ func WithProductionActivationGate(g ProductionActivationGate) StoreOption {
 
 func WithProviderOwnerPublicKeys(keys map[string][]byte) StoreOption {
 	return func(s *Store) error {
-		if len(keys) == 0 {
-			s.providerOwnerPublicKeys = nil
-			return nil
+		return s.SetProviderOwnerPublicKeys(keys)
+	}
+}
+
+// SetProviderOwnerPublicKeys atomically replaces the provider owner key map
+// (a SIGHUP reload of trusted_pools.provider_owner_public_keys). Delegation
+// grants and revocations appended afterwards are checked against the new
+// keys; durable history is never re-validated. An invalid key leaves the
+// current map in force.
+func (s *Store) SetProviderOwnerPublicKeys(keys map[string][]byte) error {
+	if len(keys) == 0 {
+		s.providerOwnerPublicKeys.Store(nil)
+		return nil
+	}
+	next := make(map[string][]byte, len(keys))
+	for providerID, key := range keys {
+		if providerID == "" || len(key) != ed25519.PublicKeySize {
+			return fmt.Errorf("trustpool: invalid provider owner public key for %q", providerID)
 		}
-		s.providerOwnerPublicKeys = make(map[string][]byte, len(keys))
-		for providerID, key := range keys {
-			if providerID == "" || len(key) != ed25519.PublicKeySize {
-				return fmt.Errorf("trustpool: invalid provider owner public key for %q", providerID)
-			}
-			s.providerOwnerPublicKeys[providerID] = append([]byte(nil), key...)
-		}
+		next[providerID] = append([]byte(nil), key...)
+	}
+	s.providerOwnerPublicKeys.Store(&next)
+	return nil
+}
+
+// ProviderOwnerPublicKey returns the current owner key of providerID, for
+// the admin handler's delegation checks (AdminDeps).
+func (s *Store) ProviderOwnerPublicKey(providerID string) ([]byte, bool) {
+	if s == nil {
+		return nil, false
+	}
+	keys := s.providerOwnerPublicKeys.Load()
+	if keys == nil {
+		return nil, false
+	}
+	key, ok := (*keys)[providerID]
+	if !ok || len(key) != ed25519.PublicKeySize {
+		return nil, false
+	}
+	return append([]byte(nil), key...), true
+}
+
+// WithPoolModelAcceptance installs the SPEC-042-R015 / SPEC-005-R015 online
+// acceptance context source for pool_model_entries.
+func WithPoolModelAcceptance(source func() poolmanifest.PoolModelAcceptanceContext) StoreOption {
+	return func(s *Store) error {
+		s.poolModelAcceptance = source
 		return nil
 	}
 }
 
-func (s *Store) validateProviderOwnerPublicKeyBinding(state *ReconstructedState, e DurableEvent) error {
-	if s == nil || len(s.providerOwnerPublicKeys) == 0 {
-		return ErrProviderDelegation
+// WithClock replaces the clock the settlement fence compares a later core's
+// not_before against.
+func WithClock(now func() time.Time) StoreOption {
+	return func(s *Store) error {
+		s.now = now
+		return nil
 	}
-	registered, ok := s.providerOwnerPublicKeys[e.ProviderID]
-	if !ok || len(registered) != ed25519.PublicKeySize {
+}
+
+func (s *Store) nowUTC() time.Time {
+	if s != nil && s.now != nil {
+		return s.now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+// Pool-model acceptance rejection codes (SPEC-042-R015, SPEC-005-R015).
+// The extension-rule codes come from poolmanifest.PoolModelRejectCode.
+const (
+	PoolModelRejectPricingBounds      = poolmanifest.RejectCodePricingOutOfBounds
+	PoolModelRejectPricingBoundsUnset = poolmanifest.RejectCodePricingBoundsUnset
+	PoolModelRejectCatalogShadow      = poolmanifest.RejectCodeShadowsCatalog
+	PoolModelRejectCatalogOverlap     = poolmanifest.RejectCodeCatalogOverlap
+	PoolModelRejectCreatorMember      = "pool_attested_member_is_creator"
+	PoolModelRejectInvalid            = poolmanifest.RejectCodeInvalid
+)
+
+// PoolModelEntryRejectionError carries the closed rejection code of a
+// manifest refused for its R015/R016 extensions (#1816 F4).
+type PoolModelEntryRejectionError struct {
+	Code string
+	Err  error
+}
+
+func (e *PoolModelEntryRejectionError) Error() string {
+	if e.Err == nil {
+		return ErrPoolModelEntryRejected.Error() + ": " + e.Code
+	}
+	return ErrPoolModelEntryRejected.Error() + ": " + e.Code + ": " + e.Err.Error()
+}
+
+func (e *PoolModelEntryRejectionError) Unwrap() []error {
+	if e.Err == nil {
+		return []error{ErrPoolModelEntryRejected}
+	}
+	return []error{ErrPoolModelEntryRejected, e.Err}
+}
+
+// poolModelRejection wraps err with its closed rejection code, or returns nil
+// when err is not an R015/R016 extension failure.
+func poolModelRejection(err error) error {
+	code := poolmanifest.PoolModelRejectCode(err)
+	if code == "" {
+		return nil
+	}
+	return &PoolModelEntryRejectionError{Code: code, Err: err}
+}
+
+// ErrPoolModelEntryRejected rejects a manifest whose pool_model_entries fail
+// the context-dependent acceptance rules.
+var ErrPoolModelEntryRejected = errors.New("trustpool: pool model entry rejected")
+
+// verifyPoolModelAcceptance applies the context-dependent R015 rules to a NEW
+// manifest_accepted append. Replay never re-runs it: a bounds or catalog
+// change later only affects routing, never an accepted history.
+func (s *Store) verifyPoolModelAcceptance(e DurableEvent, creatorAccountID string) error {
+	core, err := acceptedPolicyCoreFromManifestSnapshot(e)
+	if err != nil {
+		return err
+	}
+	// SPEC-042-R016: an attestation naming the creator account itself is
+	// redundant and invalidates the core.
+	members, err := core.PoolAttestedMembers()
+	if err != nil {
+		if rejection := poolModelRejection(err); rejection != nil {
+			return rejection
+		}
+		return &PoolModelEntryRejectionError{Code: PoolModelRejectInvalid, Err: err}
+	}
+	for _, member := range members {
+		if member.ProviderAccountID == creatorAccountID {
+			return &PoolModelEntryRejectionError{Code: PoolModelRejectCreatorMember}
+		}
+	}
+	var ctx poolmanifest.PoolModelAcceptanceContext
+	if s != nil && s.poolModelAcceptance != nil {
+		ctx = s.poolModelAcceptance()
+	}
+	err = core.ValidatePoolModelAcceptance(ctx)
+	if err == nil {
+		return nil
+	}
+	if rejection := poolModelRejection(err); rejection != nil {
+		return rejection
+	}
+	return &PoolModelEntryRejectionError{Code: PoolModelRejectInvalid, Err: err}
+}
+
+func (s *Store) validateProviderOwnerPublicKeyBinding(state *ReconstructedState, e DurableEvent) error {
+	registered, ok := s.ProviderOwnerPublicKey(e.ProviderID)
+	if !ok {
 		return ErrProviderDelegation
 	}
 	switch e.EventType {
@@ -1867,7 +2015,17 @@ func (s *Store) appendValidatedEvent(ctx context.Context, e DurableEvent, allowS
 		}
 		if e.EventType == EventManifestAccepted {
 			if err := verifyManifestAcceptanceOnline(e); err != nil {
+				if rejection := poolModelRejection(err); rejection != nil {
+					return fmt.Errorf("%w: manifest policy not acceptable now: %w", errCreatorInvalidEvent, rejection)
+				}
 				return fmt.Errorf("%w: manifest policy not acceptable now: %v", errCreatorInvalidEvent, err)
+			}
+			creatorAccountID := ""
+			if pool := preState.Pools[e.PoolID]; pool != nil {
+				creatorAccountID = pool.CreatorAccountID
+			}
+			if err := s.verifyPoolModelAcceptance(e, creatorAccountID); err != nil {
+				return fmt.Errorf("%w: %w", errCreatorInvalidEvent, err)
 			}
 		}
 		if e.EventType == EventRootIssuerRegistered {
@@ -2168,6 +2326,44 @@ func eventsFromQueryer(ctx context.Context, q eventQueryer) ([]DurableEvent, err
 		}
 		seen[e.OperationID] = id
 		events = append(events, e)
+	}
+	return events, rows.Err()
+}
+
+// poolEvent is one durable event of a pool with its row id. Row ids are the
+// AUTOINCREMENT ordinals the replay indexes by, never below an event's replay
+// position, so comparing them with a route's pool_generation can only treat
+// an event as later than it is (fail closed), never earlier.
+type poolEvent struct {
+	id    int64
+	event DurableEvent
+}
+
+// poolEventsFromQueryer reads only one pool's events, in durable order,
+// through the (pool_id, id) index. Settlement fences run inside the ledger
+// writer transaction, so they must never scan or decode the global log.
+func poolEventsFromQueryer(ctx context.Context, q eventQueryer, poolID string) ([]poolEvent, error) {
+	rows, err := q.QueryContext(ctx, `SELECT id, operation_id, payload_json FROM trustpool_events WHERE pool_id = ? ORDER BY id`, poolID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []poolEvent
+	for rows.Next() {
+		var id int64
+		var operationID string
+		var raw string
+		if err := rows.Scan(&id, &operationID, &raw); err != nil {
+			return nil, err
+		}
+		var e DurableEvent
+		if err := json.Unmarshal([]byte(raw), &e); err != nil {
+			return nil, fmt.Errorf("%w: row %d payload_json: %v", ErrMalformedDurableEvent, id, err)
+		}
+		if e.OperationID != operationID || e.PoolID != poolID {
+			return nil, fmt.Errorf("%w: row %d operation_id or pool_id column does not match its payload", ErrMalformedDurableEvent, id)
+		}
+		events = append(events, poolEvent{id: id, event: e})
 	}
 	return events, rows.Err()
 }
@@ -2710,14 +2906,17 @@ type frozenLineageKey struct {
 }
 
 type ReconstructedPoolState struct {
-	PoolID                     string
-	CreatorAccountID           string
-	ApprovalRecordID           string
-	Lifecycle                  string
-	LifecycleReason            string
-	MinBinaryVersion           string
-	ManifestVersion            uint64
-	ManifestCoreDigest         string
+	PoolID             string
+	CreatorAccountID   string
+	ApprovalRecordID   string
+	Lifecycle          string
+	LifecycleReason    string
+	MinBinaryVersion   string
+	ManifestVersion    uint64
+	ManifestCoreDigest string
+	// ManifestTermsDigest is the newest accepted core's SPEC-043-R006
+	// policy-terms digest, the value a terms-bound delegation grant names.
+	ManifestTermsDigest        string
 	ManifestSnapshot           string
 	ManifestMinEligibleMembers uint64
 	ManifestMinBinaryVersion   string
@@ -2726,8 +2925,13 @@ type ReconstructedPoolState struct {
 	// ManifestPolicyCoreV2 and ManifestRuntimeAllowlist project the accepted
 	// core's SPEC-042-R001 encoding and signed runtime_allowlist. A v1 core or
 	// an empty list is native MLX only.
-	ManifestPolicyCoreV2         bool
-	ManifestRuntimeAllowlist     []string
+	ManifestPolicyCoreV2     bool
+	ManifestRuntimeAllowlist []string
+	// ManifestModelEntries and ManifestAttestedMembers project the accepted
+	// core's SPEC-042-R015/R016 pool extensions (pool_model_entries/v1,
+	// pool_attested_members/v1); empty when the core carries neither.
+	ManifestModelEntries         []poolmanifest.PoolModelEntry
+	ManifestAttestedMembers      []poolmanifest.AttestedMember
 	ManifestRetentionPolicyID    string
 	ManifestSplitExecutionStatus string
 	// ManifestPolicies is every accepted policy core's routing projection with
@@ -2912,7 +3116,7 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 		if e.RootIssuerKeyID != p.RootIssuer.KeyID || e.RootIssuerPublicKeyFingerprint != p.RootIssuer.PublicKeyFingerprint {
 			return nil, fmt.Errorf("%w: event %d manifest root issuer mismatch for pool %q", ErrMalformedDurableEvent, index, e.PoolID)
 		}
-		prevDigest, core, err := VerifyManifestAcceptedEvent(e, *p.RootIssuer)
+		prevDigest, core, err := verifyManifestAcceptedEventCached(e, *p.RootIssuer)
 		if err != nil {
 			return nil, fmt.Errorf("%w: event %d manifest signature invalid: %v", ErrMalformedDurableEvent, index, err)
 		}
@@ -2936,8 +3140,21 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 				return nil, fmt.Errorf("%w: event %d lowers min binary version from %q to %q for pool %q", ErrMalformedDurableEvent, index, currentFloor, core.MinBinaryVersion, e.PoolID)
 			}
 		}
+		modelEntries, err := core.PoolModelEntries()
+		if err != nil {
+			return nil, fmt.Errorf("%w: event %d pool_model_entries invalid for pool %q: %v", ErrMalformedDurableEvent, index, e.PoolID, err)
+		}
+		attestedMembers, err := core.PoolAttestedMembers()
+		if err != nil {
+			return nil, fmt.Errorf("%w: event %d pool_attested_members invalid for pool %q: %v", ErrMalformedDurableEvent, index, e.PoolID, err)
+		}
+		termsDigest, err := core.PolicyTermsDigest()
+		if err != nil {
+			return nil, fmt.Errorf("%w: event %d policy terms digest for pool %q: %v", ErrMalformedDurableEvent, index, e.PoolID, err)
+		}
 		p.ManifestVersion = e.ManifestVersion
 		p.ManifestCoreDigest = e.ManifestCoreDigest
+		p.ManifestTermsDigest = hex.EncodeToString(termsDigest)
 		p.ManifestSnapshot = e.ManifestSnapshot
 		p.ManifestMinEligibleMembers = core.MinEligibleMembers
 		p.ManifestMinBinaryVersion = core.MinBinaryVersion
@@ -2945,11 +3162,14 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 		p.ManifestSettlementMode = canonicalPoolSettlementMode(core.SettlementMode)
 		p.ManifestPolicyCoreV2 = core.IsV2()
 		p.ManifestRuntimeAllowlist = append([]string(nil), core.RuntimeAllowlist...)
+		p.ManifestModelEntries = modelEntries
+		p.ManifestAttestedMembers = attestedMembers
 		p.ManifestRetentionPolicyID = core.RetentionPolicyID
 		p.ManifestSplitExecutionStatus = core.SplitExecutionStatus
 		p.ManifestPolicies = append(p.ManifestPolicies, manifestPolicyWindow{
 			Version:              e.ManifestVersion,
 			CoreDigest:           e.ManifestCoreDigest,
+			TermsDigest:          p.ManifestTermsDigest,
 			NotBeforeUnix:        core.NotBeforeUnix,
 			ExpiresAtUnix:        core.ExpiresAtUnix,
 			MinEligibleMembers:   core.MinEligibleMembers,
@@ -2958,6 +3178,8 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 			SettlementMode:       canonicalPoolSettlementMode(core.SettlementMode),
 			PolicyCoreV2:         core.IsV2(),
 			RuntimeAllowlist:     append([]string(nil), core.RuntimeAllowlist...),
+			ModelEntries:         poolmanifest.ClonePoolModelEntries(modelEntries),
+			AttestedMembers:      poolmanifest.CloneAttestedMembers(attestedMembers),
 			RetentionPolicyID:    core.RetentionPolicyID,
 			SplitExecutionStatus: core.SplitExecutionStatus,
 		})
@@ -2989,7 +3211,7 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 			if !e.TimestampUTC.Before(rec.ExpiresAt) {
 				return nil, fmt.Errorf("%w: event %d member_admitted delegation expired for pool %q", ErrProviderDelegation, index, e.PoolID)
 			}
-			if rec.ManifestCoreDigest != p.ManifestCoreDigest {
+			if !rec.boundToManifest(p) {
 				return nil, fmt.Errorf("%w: event %d member_admitted delegation manifest mismatch for pool %q", ErrProviderDelegation, index, e.PoolID)
 			}
 			if p.MemberDelegationIDs == nil {
@@ -3470,6 +3692,7 @@ func hasSignedControlProof(e DurableEvent) bool {
 type manifestPolicyWindow struct {
 	Version              uint64
 	CoreDigest           string
+	TermsDigest          string
 	NotBeforeUnix        uint64
 	ExpiresAtUnix        uint64
 	MinEligibleMembers   uint64
@@ -3478,6 +3701,8 @@ type manifestPolicyWindow struct {
 	SettlementMode       string
 	PolicyCoreV2         bool
 	RuntimeAllowlist     []string
+	ModelEntries         []poolmanifest.PoolModelEntry
+	AttestedMembers      []poolmanifest.AttestedMember
 	RetentionPolicyID    string
 	SplitExecutionStatus string
 }
@@ -3503,12 +3728,15 @@ func (p *ReconstructedPoolState) activePolicyView(at time.Time) (*ReconstructedP
 		view := *p
 		view.ManifestVersion = w.Version
 		view.ManifestCoreDigest = w.CoreDigest
+		view.ManifestTermsDigest = w.TermsDigest
 		view.ManifestMinEligibleMembers = w.MinEligibleMembers
 		view.ManifestMinBinaryVersion = w.MinBinaryVersion
 		view.ManifestModelAllowlist = w.ModelAllowlist
 		view.ManifestSettlementMode = w.SettlementMode
 		view.ManifestPolicyCoreV2 = w.PolicyCoreV2
 		view.ManifestRuntimeAllowlist = w.RuntimeAllowlist
+		view.ManifestModelEntries = w.ModelEntries
+		view.ManifestAttestedMembers = w.AttestedMembers
 		view.ManifestRetentionPolicyID = w.RetentionPolicyID
 		view.ManifestSplitExecutionStatus = w.SplitExecutionStatus
 		var until time.Time
@@ -3518,6 +3746,58 @@ func (p *ReconstructedPoolState) activePolicyView(at time.Time) (*ReconstructedP
 		return &view, until, true
 	}
 	return p, time.Time{}, false
+}
+
+func (p *ReconstructedPoolState) extendedSameTermsRouteableUntil(version uint64) time.Time {
+	active, ok := p.policyWindow(version)
+	if !ok {
+		return time.Time{}
+	}
+	if active.ExpiresAtUnix > uint64(math.MaxInt64) {
+		return time.Time{}
+	}
+	untilUnix := active.ExpiresAtUnix
+	if active.TermsDigest != "" {
+		for _, next := range p.ManifestPolicies {
+			if next.Version <= active.Version {
+				continue
+			}
+			if next.NotBeforeUnix != untilUnix || next.TermsDigest != active.TermsDigest {
+				break
+			}
+			untilUnix = next.ExpiresAtUnix
+			if untilUnix > uint64(math.MaxInt64) {
+				return time.Time{}
+			}
+		}
+	}
+	return time.Unix(int64(untilUnix), 0).UTC()
+}
+
+func (p *ReconstructedPoolState) policyWindow(version uint64) (manifestPolicyWindow, bool) {
+	if p == nil || version == 0 {
+		return manifestPolicyWindow{}, false
+	}
+	for _, w := range p.ManifestPolicies {
+		if w.Version == version {
+			return w, true
+		}
+	}
+	return manifestPolicyWindow{}, false
+}
+
+// priorPolicyWindow returns the accepted core immediately before version,
+// or a zero window when there is none (#1816 F3).
+func (p *ReconstructedPoolState) priorPolicyWindow(version uint64) manifestPolicyWindow {
+	if p == nil || version < 2 {
+		return manifestPolicyWindow{}
+	}
+	for _, w := range p.ManifestPolicies {
+		if w.Version == version-1 {
+			return w
+		}
+	}
+	return manifestPolicyWindow{}
 }
 
 func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
@@ -3538,16 +3818,13 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 		pool := s.Pools[id]
 		p, policyUntil, policyActive := pool.activePolicyView(at)
 		routeable, routeabilityReason := poolRouteability(p)
+		prior := pool.priorPolicyWindow(p.ManifestVersion)
 		if routeable && !policyActive {
 			routeable, routeabilityReason = false, "pool_policy_stale"
 		}
 		generation := pool.EffectiveGeneration()
 		if pool.Lifecycle == LifecycleActive && !routeable {
 			generation++
-		}
-		routeableUntil := earliestDeadline(p.CreatorGateExpiresAtUTC, p.OnCallReadinessExpiresAtUTC)
-		if routeable {
-			routeableUntil = earliestDeadline(routeableUntil, policyUntil)
 		}
 		members := make([]string, 0, len(p.Members))
 		if routeable {
@@ -3572,6 +3849,13 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 		sort.Strings(members)
 		sort.Strings(revoked)
 		sort.Strings(buyers)
+		routeableUntil := earliestDeadline(p.CreatorGateExpiresAtUTC, p.OnCallReadinessExpiresAtUTC)
+		if routeable {
+			if extended := s.extendedSameTermsRouteableUntil(pool, p, members, at); !extended.IsZero() && policyUntil.Before(extended) {
+				policyUntil = extended
+			}
+			routeableUntil = earliestDeadline(routeableUntil, policyUntil)
+		}
 		memberDelegationExpiry := make(map[string]time.Time, len(members))
 		var delegatedMembers []string
 		for _, memberID := range members {
@@ -3592,6 +3876,8 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 			MinBinaryVersion:          policyMinBinaryVersion(p),
 			ModelAllowlist:            append([]string(nil), p.ManifestModelAllowlist...),
 			RuntimeAllowlist:          policyRuntimeAllowlist(p),
+			ModelEntries:              policyModelEntries(p),
+			AttestedMembers:           policyAttestedMembers(p),
 			DelegatedMembers:          delegatedMembers,
 			SettlementMode:            routeablePoolSettlementMode(p.ManifestSettlementMode),
 			Routeable:                 routeable,
@@ -3601,9 +3887,46 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 			ManifestVersion:           p.ManifestVersion,
 			ManifestCoreDigest:        p.ManifestCoreDigest,
 			LaunchEnvironment:         rootIssuerLaunchEnvironment(p),
+			PriorManifestVersion:      prior.Version,
+			PriorManifestCoreDigest:   prior.CoreDigest,
+			PriorModelEntries:         poolmanifest.ClonePoolModelEntries(prior.ModelEntries),
 		})
 	}
 	return out
+}
+
+func (s *ReconstructedState) extendedSameTermsRouteableUntil(pool, active *ReconstructedPoolState, members []string, at time.Time) time.Time {
+	if pool == nil || active == nil || len(members) == 0 {
+		return time.Time{}
+	}
+	if !s.routeableMembersSurviveTermsEquivalentRollover(active, members, at) {
+		return time.Time{}
+	}
+	return pool.extendedSameTermsRouteableUntil(active.ManifestVersion)
+}
+
+func (s *ReconstructedState) routeableMembersSurviveTermsEquivalentRollover(p *ReconstructedPoolState, members []string, at time.Time) bool {
+	if s == nil || p == nil {
+		return false
+	}
+	for _, providerID := range members {
+		delegationID := p.MemberDelegationIDs[providerID]
+		if delegationID == "" {
+			continue
+		}
+		activeID, ok := s.activeProviderDelegations[poolProviderKey{PoolID: p.PoolID, ProviderID: providerID}]
+		if !ok || activeID != delegationID {
+			return false
+		}
+		rec, ok := s.delegationRecordFor(p.PoolID, delegationID)
+		if !ok || rec.Revoked || !at.Before(rec.ExpiresAt) {
+			return false
+		}
+		if rec.ManifestTermsDigest == "" || rec.ManifestTermsDigest != p.ManifestTermsDigest {
+			return false
+		}
+	}
+	return true
 }
 
 // earliestDeadline returns the earlier non-zero instant, or zero if both are.
@@ -3760,7 +4083,7 @@ func validateEvent(e DurableEvent) error {
 		if err := providerid.Validate(e.ProviderID); err != nil {
 			return err
 		}
-		if e.CreatorAccountID == "" || e.ManifestCoreDigest == "" || e.ProviderOwnerKeyID == "" ||
+		if e.CreatorAccountID == "" || !delegationNamesOneManifestBinding(e) || e.ProviderOwnerKeyID == "" ||
 			e.ProviderOwnerKeyVersion == "" || e.ProviderOwnerPublicKey == "" || e.DelegationIssuedAt == "" ||
 			e.DelegationExpiresAt == "" || e.EnvironmentNetworkID == "" || e.CoordinatorAudience == "" ||
 			e.ProviderPoolDelegationSignature == "" {
@@ -3773,7 +4096,7 @@ func validateEvent(e DurableEvent) error {
 		if err := providerid.Validate(e.ProviderID); err != nil {
 			return err
 		}
-		if e.CreatorAccountID == "" || e.ManifestCoreDigest == "" || e.ProviderOwnerKeyID == "" ||
+		if e.CreatorAccountID == "" || !delegationNamesOneManifestBinding(e) || e.ProviderOwnerKeyID == "" ||
 			e.ProviderOwnerKeyVersion == "" || e.DelegationRevokedAt == "" || e.EnvironmentNetworkID == "" ||
 			e.CoordinatorAudience == "" || e.ProviderPoolDelegationRevocationSignature == "" {
 			return fmt.Errorf("delegation_revoked requires signed revocation fields")

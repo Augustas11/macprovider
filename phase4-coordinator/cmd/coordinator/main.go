@@ -36,6 +36,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/onboarding"
 	"github.com/augstar/macprovider-coordinator/internal/payout"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	"github.com/augstar/macprovider-coordinator/internal/pow"
 	"github.com/augstar/macprovider-coordinator/internal/providerevents"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
@@ -1146,7 +1147,9 @@ func main() {
 	var trustPoolRegistry *trustpool.Registry
 	if cfg.TrustedPools.Enabled {
 		var trustPoolsReady bool
-		trustPoolStore, trustPoolRegistry, trustPoolsReady, err = loadTrustedPools(context.Background(), reqLogStore.DB(), cfg.TrustedPools, logger)
+		livePoolModelPricingBounds.Store(poolModelPricingBounds(cfg.TrustedPools.PoolModelPricingBounds))
+		poolModelAcceptance := trustPoolModelAcceptance(currentPoolModelPricingBounds, wsServer)
+		trustPoolStore, trustPoolRegistry, trustPoolsReady, err = loadTrustedPools(context.Background(), reqLogStore.DB(), cfg.TrustedPools, poolModelAcceptance, logger)
 		if err != nil {
 			logger.Fatal().Err(err).Msg("trusted pools durable store open failed")
 		}
@@ -1161,12 +1164,21 @@ func main() {
 				snap := registry.Snapshot(poolID)
 				return snap.ManifestVersion, snap.ManifestCoreDigest, snap.Exists
 			})
+			// SIGHUP reloads bounds and owner authority through these
+			// (trusted_pools_reload.go).
+			poolModelBoundsSource := currentPoolModelPricingBounds
+			liveTrustPoolOwnerAuthority.Store(&trustPoolOwnerAuthority{store: trustPoolStore, registry: trustPoolRegistry})
 			buyerOpts = append(
 				buyerOpts,
 				buyer.WithPoolMembership(trustPoolRegistry),
 				buyer.WithTrustPoolStatusStore(trustPoolStore),
 				buyer.WithPoolRejectionTimingFloor(cfg.TrustedPools.RejectionTimingFloor()),
+				buyer.WithPoolModelPricingBounds(poolModelBoundsSource),
 			)
+			// SPEC-047-R011: pool-manifest admission binding and its sweep
+			// (manifest acceptance, membership, and release changes).
+			wsServer.SetPoolModelSource(trustPoolRegistry, poolModelBoundsSource)
+			go wsServer.RunPoolManifestBindingSweep(shutdownCtx)
 			trustpool.StartRefreshLoop(
 				shutdownCtx,
 				trustPoolStore,
@@ -1213,10 +1225,6 @@ func main() {
 		if err != nil {
 			logger.Fatal().Err(err).Msg("trusted pools creator admin credential config invalid")
 		}
-		providerOwnerKeys, err := trustpool.ParseProviderOwnerPublicKeys(cfg.TrustedPools.ProviderOwnerPublicKeys)
-		if err != nil {
-			logger.Fatal().Err(err).Msg("trusted pools provider owner public keys invalid")
-		}
 		trustPoolAdminHandler := trustpool.NewAdminHandler(trustpool.AdminDeps{
 			Store:                            trustPoolStore,
 			Registry:                         trustPoolRegistry,
@@ -1228,7 +1236,8 @@ func main() {
 			CreatorProviderAdmitted: func(providerID string) bool {
 				return creatorProviderServingCapable(registry, providerID)
 			},
-			ProviderOwnerPublicKeyForProvider: trustpool.ProviderOwnerPublicKeyLookup(providerOwnerKeys),
+			// Read through the store so a SIGHUP key rotation applies here too.
+			ProviderOwnerPublicKeyForProvider: trustPoolStore.ProviderOwnerPublicKey,
 		})
 		if reloader, ok := trustPoolAdminHandler.(trustpool.CreatorAdminConfigReloader); ok {
 			trustPoolAdminReloader = reloader
@@ -3650,7 +3659,38 @@ func creatorProviderServingCapable(registry *pool.Registry, providerID string) b
 	return false
 }
 
-func loadTrustedPools(ctx context.Context, db *sql.DB, cfg config.TrustedPoolsConfig, logger zerolog.Logger) (*trustpool.Store, *trustpool.Registry, bool, error) {
+// trustPoolModelAcceptance is the SPEC-042-R015 / SPEC-005-R015 acceptance
+// context: the configured pool-model pricing bounds (nil fails every entry
+// closed) and the live catalog shadow/overlap probes.
+func trustPoolModelAcceptance(bounds func() *poolmanifest.PoolModelPricingBounds, catalog interface {
+	IsCatalogModelID(string) bool
+	ArtifactPairInCatalog(string, string, []string) bool
+}) func() poolmanifest.PoolModelAcceptanceContext {
+	return func() poolmanifest.PoolModelAcceptanceContext {
+		ctx := poolmanifest.PoolModelAcceptanceContext{PricingBounds: bounds()}
+		if catalog != nil {
+			ctx.IsCatalogModelID = catalog.IsCatalogModelID
+			ctx.ArtifactInCatalog = catalog.ArtifactPairInCatalog
+		}
+		return ctx
+	}
+}
+
+func poolModelPricingBounds(b *config.TrustedPoolsPoolModelPricingBounds) *poolmanifest.PoolModelPricingBounds {
+	if b == nil {
+		return nil
+	}
+	return &poolmanifest.PoolModelPricingBounds{
+		MinPromptRatePerMtok:         b.MinPromptRatePerMtok,
+		MaxPromptRatePerMtok:         b.MaxPromptRatePerMtok,
+		MinPromptCacheHitRatePerMtok: b.MinPromptCacheHitRatePerMtok,
+		MaxPromptCacheHitRatePerMtok: b.MaxPromptCacheHitRatePerMtok,
+		MinCompletionRatePerMtok:     b.MinCompletionRatePerMtok,
+		MaxCompletionRatePerMtok:     b.MaxCompletionRatePerMtok,
+	}
+}
+
+func loadTrustedPools(ctx context.Context, db *sql.DB, cfg config.TrustedPoolsConfig, poolModelAcceptance func() poolmanifest.PoolModelAcceptanceContext, logger zerolog.Logger) (*trustpool.Store, *trustpool.Registry, bool, error) {
 	providerOwnerKeys, err := trustpool.ParseProviderOwnerPublicKeys(cfg.ProviderOwnerPublicKeys)
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("trusted pools provider owner public keys: %w", err)
@@ -3665,6 +3705,9 @@ func loadTrustedPools(ctx context.Context, db *sql.DB, cfg config.TrustedPoolsCo
 	}
 	if len(providerOwnerKeys) > 0 {
 		storeOpts = append(storeOpts, trustpool.WithProviderOwnerPublicKeys(providerOwnerKeys))
+	}
+	if poolModelAcceptance != nil {
+		storeOpts = append(storeOpts, trustpool.WithPoolModelAcceptance(poolModelAcceptance))
 	}
 	store, err := trustpool.NewStore(db, storeOpts...)
 	if err != nil {
@@ -3689,6 +3732,8 @@ func loadTrustedPools(ctx context.Context, db *sql.DB, cfg config.TrustedPoolsCo
 		// whose root launch_environment is candidate.
 		registry.RejectCandidateLaunchEnvironment()
 	}
+	// SPEC-042-R016: the recorded owner account each attestation matches.
+	registry.SetProviderOwnerAccounts(cfg.ProviderOwnerAccountIDs)
 	logger.Info().
 		Int("pool_count", len(reconstructed.Pools)).
 		Msg("trusted pools durable state reconstructed and routing enabled")
@@ -4122,6 +4167,11 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 			return
 		}
 	}
+	applyTrustedPools, err := prepareTrustedPoolsReload(cfg.TrustedPools)
+	if err != nil {
+		logger.Error().Err(err).Msg("trusted pools config reload rejected")
+		return
+	}
 	if tier2StartupFieldsChangedWithLogger(startupTier2, cfg.Tier2, logger) {
 		logger.Error().Msg("tier2 config reload rejected: startup-only tier2 fields require restart")
 		return
@@ -4280,6 +4330,19 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 			Int("trusted_pools_creator_buyer_allowlist_creators", len(cfg.TrustedPools.CreatorAdminBuyerAccountIDs)).
 			Msg("trusted pools creator admin config reloaded")
 	}
+	// SPEC-005-R015 / SPEC-042-R016: pool-model bounds and provider owner
+	// authority apply together, after every fallible step.
+	owners, ownersApplied := applyTrustedPools()
+	// #1816 VM acceptance A-7: the owner-account outcome, never the ids.
+	logger.Info().
+		Bool("trusted_pools_pool_model_pricing_bounds_set", currentPoolModelPricingBounds() != nil).
+		Int("trusted_pools_provider_owner_public_keys", len(cfg.TrustedPools.ProviderOwnerPublicKeys)).
+		Int("trusted_pools_provider_owner_accounts", len(cfg.TrustedPools.ProviderOwnerAccountIDs)).
+		Bool("trusted_pools_provider_owner_account_ids_applied", ownersApplied).
+		Bool("trusted_pools_provider_owner_account_ids_changed", owners.Changed).
+		Int("trusted_pools_provider_owner_account_ids_providers", owners.Providers).
+		Str("trusted_pools_provider_owner_account_ids_sha256", owners.Digest).
+		Msg("trusted pools pool-model bounds and owner authority reloaded")
 	// Every fallible step above returned early on rejection, so reaching here
 	// means this reload's config is the applied one.
 	recordAppliedConfig(logger, "sighup", configPath, configOverlay, configDigests, configLoadedAt, buyerServer.AppliedEconomics())

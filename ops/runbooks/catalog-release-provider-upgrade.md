@@ -538,10 +538,12 @@ catalog status, and an explicit exact provider canary. Configure
 file, a host-key-pinned SSH target/key, and the canary install directory. Before
 success persistence, the selected provider must report `buyer_serving:true`,
 `catalog_admission_mode:current`, and the exact release/policy/digest/signer/row
-envelope. Independently, the updater reads all seven installed catalog files on
-that Mac through no-follow handles, binds provider ID and local status to the
-same row, and proves the live launchd PID's actual text vnode and listener use
-that installation. Only then may it persist success and disarm rollback.
+envelope. Independently, over host-key-pinned SSH, the updater binds provider ID
+and local status to the same row, requires that status to report the release
+loaded live from the coordinator (`state: live_verified`, `source:
+coordinator`), and proves the live launchd PID's actual text vnode and listener
+use that installation. It does not compare the CLI-installed `catalog-release/`
+files (#1816). Only then may it persist success and disarm rollback.
 
 ### 6.3 Direct deploy: catalog/config validation only
 
@@ -626,19 +628,23 @@ The direct-deploy recovery procedure is:
    the provider's on-disk bytes.
 12. Set `CATALOG_CANARY_SSH_TARGET` to the operator-controlled canary Mac and
    `CATALOG_CANARY_SSH_KEY` to a dedicated read-only operator key. Ensure its SSH
-   host key is already present in `known_hosts`. The deploy reads the seven shipped
-   files below `CATALOG_CANARY_INSTALL_DIR` (default
-   `macprovider/catalog-release`) through no-follow directory handles and
-   compares every SHA-256 with the locally verified release before commit. The
-   remote proof must also match `~/.config/macprovider/provider_id`, the live
-   `live.malibu.provider` launchd PID and executable path/device/inode from
-   `lsof`, that PID's configured listening port, and its local catalog status.
-   Its policy version and selected row identity must exactly match the
-   coordinator-admitted envelope. This prevents an
-   admitted provider and a different host with matching bytes from satisfying
-   the same canary gate. A legacy bridge, previous release, byte mismatch, truly
-   degraded provider, missing identity, unknown canary, or SSH trust failure is
-   a deployment failure.
+   host key is already present in `known_hosts`. The remote proof must match
+   `~/.config/macprovider/provider_id`, the live `live.malibu.provider` launchd
+   PID and executable path/device/inode from `lsof` (the `macprovider-cli` in
+   the parent of `CATALOG_CANARY_INSTALL_DIR`, default
+   `macprovider/catalog-release`), that PID's configured listening port, and its
+   local catalog status. That status must report the new release's
+   release/policy/digest/signer with `state: live_verified` and
+   `source: coordinator`, and its row identity must exactly match the
+   coordinator-admitted envelope. This prevents an admitted provider and a
+   different host from satisfying the same canary gate. The deploy does NOT
+   compare the CLI-installed `catalog-release/` files: only a signed CLI
+   payload writes them, while a running provider loads the coordinator's live
+   signed catalog and keeps it in memory, so a catalog-only release needs no
+   new CLI on the canary (#1816; the byte comparison rolled back v1.8.194). A
+   legacy bridge, previous release, baked-fallback catalog, truly degraded
+   provider, missing identity, unknown canary, or SSH trust failure is a
+   deployment failure.
 
 Only after all direct-deploy checks pass, write its committed marker, remove
 its snapshot, and release `/run/lock/macprovider-pearl-updater.lock`. If rollback

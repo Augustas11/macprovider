@@ -13,6 +13,11 @@ autotune_install() {
   for f in rate-card.json rate-card.json.sig demand-rank.json demand-rank.json.sig autotune-candidates.json autotune-candidates.json.sig; do
     install -o root -g macprovider -m 0640 "$wt/phase3-binary/dist/static/$f" "$dir/$f"
   done
+  # Later trees sign the continuous-batching policy feed too (the Pearl updater
+  # treats it as a catalog member).
+  for f in continuous-batching-policy.json continuous-batching-policy.json.sig; do
+    if [ -f "$wt/phase3-binary/dist/static/$f" ]; then install -o root -g macprovider -m 0640 "$wt/phase3-binary/dist/static/$f" "$dir/$f"; fi
+  done
   for f in tier2-catalog.json release.json trusted-keys.json; do
     install -o root -g macprovider -m 0640 "$wt/phase3-binary/catalog/autotune/$f" "$dir/$f"
   done
@@ -90,7 +95,7 @@ for p in parts[:-1]:
 cur[parts[-1]] = val
 open(path, "w").write(yaml.safe_dump(doc, sort_keys=False))
 PY
-  chown macprovider:macprovider /opt/macprovider/gateway.yaml; chmod 0640 /opt/macprovider/gateway.yaml
+  chown root:macprovider /opt/macprovider/gateway.yaml; chmod 0640 /opt/macprovider/gateway.yaml
 }
 
 # wait_providers <n>: until the coordinator reports n ready providers.
@@ -136,6 +141,10 @@ while i < len(lines):
 open(p, "w").write("\n".join(out))
 PY
   nginx -t 2>&1 | tail -1 && systemctl reload nginx
+  # reload is asynchronous: wait until the new workers answer 503
+  local i; for i in $(seq 1 20); do
+    [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST https://api.malibu.tech/v1/chat/completions)" = 503 ] && break; sleep 0.5
+  done
 }
 nginx_unblock_buyers() {
   mv /etc/nginx/sites-available/api.malibu.tech.e2e-pre503 /etc/nginx/sites-available/api.malibu.tech && nginx -t 2>&1 | tail -1 && systemctl reload nginx

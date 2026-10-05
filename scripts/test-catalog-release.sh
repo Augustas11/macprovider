@@ -58,6 +58,8 @@ stage_release() {
   cp "$STATIC/continuous-batching-policy.json" "$TMP/release/"
   cp "$STATIC/continuous-batching-policy.json.sig" "$TMP/release/"
   cp "$CANONICAL/tier2-catalog.json" "$TMP/release/"
+  cp "$STATIC/autotune-artifacts.json" "$TMP/release/"
+  cp "$STATIC/autotune-artifacts.json.sig" "$TMP/release/"
 }
 
 expect_rejected() {
@@ -221,8 +223,21 @@ expected = {
 if configured != expected:
     raise SystemExit(f"coordinator public_keys drift from canonical keyring: {configured!r} != {expected!r}")
 
-release_id, record = module.release_record((canonical / "release.json").read_bytes())
 ledger = module.validate_release_ledger((canonical / "release-ledger.json").read_bytes())
+current_manifest = (canonical / "release.json").read_bytes()
+current_row = ledger["releases"][json.loads(current_manifest)["release_id"]]
+current_release_id, current_record = module.release_record(
+    current_manifest,
+    current_row.get("artifact_bindings"),
+    current_row.get("intake_decision_sha256"),
+)
+if current_record != current_row:
+    raise SystemExit("current release manifest does not reproduce its ledger row")
+# The ledger-evolution fixtures below exercise the pre-artifact feed-set rules
+# (including the one-time CB-policy enrichment), so they start from the
+# CB-policy transition release's own ledger row, not the artifact-bound one.
+release_id = module.CB_POLICY_TRANSITION_RELEASE_ID
+record = ledger["releases"][release_id]
 expected_history = {
     "published-2026-07-02",
     "published-2026-07-03",
@@ -251,7 +266,9 @@ expected_history = {
     "published-2026-09-22-qwen36-27b-hash-fix-v1",
     # Superseded by the #1735 eight-row artifact-hash correction cut.
     "published-2026-09-23-tier2-buyer-closure-v1",
-    release_id,
+    # Superseded by the artifact-feed activation cut (#1816).
+    "published-2026-09-25-artifact-hash-correction-v1",
+    current_release_id,
 }
 if set(ledger["releases"]) != expected_history:
     raise SystemExit(f"release ledger history is incomplete: {set(ledger['releases'])!r}")

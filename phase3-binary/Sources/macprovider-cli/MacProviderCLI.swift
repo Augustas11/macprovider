@@ -955,6 +955,15 @@ struct ServeCommand: AsyncParsableCommand {
         artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver(),
         persistConfigMigration: Bool = false
     ) async throws -> ModelArtifactPreflightOutcome {
+        // #1816: a configured pool_model_id must be well formed and never
+        // pinned beside a catalog identity, for every runtime.
+        let servesPoolModelEntry: Bool
+        do {
+            servesPoolModelEntry = try PoolModelServe.validatedPoolModelID(resolved) != nil
+        } catch let error as PoolModelServe.ConfigError {
+            FileHandle.standardError.write(Data("\(error.description)\n".utf8))
+            throw ExitCode(2)
+        }
         // SPEC-046-R002 / SPEC-010-R007(e) loopback serving (#1569, #1690): an
         // `ollama_loopback` / `llamacpp_loopback` model carries a
         // `macprovider.gguf-file.v1` identity resolved from the local GGUF
@@ -1047,7 +1056,12 @@ struct ServeCommand: AsyncParsableCommand {
             throw ExitCode(2)
         }
         resolved.modelArtifactPath = loadPath
-        if resolved.donorMode || (joiningCoordinator && !relaxesJoinAdmissionForLab(
+        // #1816: a native model served as a signed pool entry has no catalog
+        // row by definition. Its artifact hash was verified above; the
+        // coordinator matches that hash against the pool manifest and is the
+        // only authority that admits it, so the catalog preflight is skipped
+        // for that join alone. Donor mode keeps its catalog gate.
+        if resolved.donorMode || (joiningCoordinator && !servesPoolModelEntry && !relaxesJoinAdmissionForLab(
             isolateLifecycle: isolateLifecycle,
             coordinatorURL: resolved.coordinatorURL
         )) {
@@ -2409,10 +2423,12 @@ struct ServeCommand: AsyncParsableCommand {
         // relayed buyer requests carrying it are not 404'd. Trimmed here to
         // match CoordinatorClient's catalogModelIDForCoordinator normalization;
         // nil/empty → no alias.
-        let catalogModelIDAlias: String? = resolved.modelCatalogModelID.flatMap { value in
-            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : trimmed
-        }
+        // #1816: with no catalog id, a configured pool_model_id is the alias
+        // (validated by the startup preflight; never both).
+        let catalogModelIDAlias: String? = PoolModelServe.requestAlias(
+            catalogModelID: resolved.modelCatalogModelID,
+            poolModelID: resolved.poolModelID
+        )
         var targetResolver = CachedModelArtifactResolver()
         if let root = resolved.modelArtifactRoot, root.hasPrefix("/") {
             targetResolver.durableRoot = URL(fileURLWithPath: root, isDirectory: true).standardizedFileURL

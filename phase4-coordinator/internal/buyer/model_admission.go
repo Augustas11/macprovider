@@ -121,6 +121,12 @@ func (s *Server) byomDefaultPaidRoutingEligibility(p pool.Provider) modelAdmissi
 }
 
 func (s *Server) byomDefaultPaidRoutingEligibilityWithContext(ctx context.Context, p pool.Provider) modelAdmissionPaidRoutingEligibility {
+	// SPEC-047-R011: a session bound to a pool model entry is paid only on
+	// that pool's pool-model route, through the current binding; it is never
+	// eligible on a global or other route, native or loopback alike.
+	if p.ModelAdmissionPoolModelID != "" {
+		return s.poolModelEligibility(ctx, p)
+	}
 	// SPEC-047-R003(iv) / SPEC-032 FR-HG8: a loopback runtime session never
 	// serves paid global traffic, bound or not, sandboxed or not (the hello
 	// sandbox only applies when the strict gate is on). Every paid selection

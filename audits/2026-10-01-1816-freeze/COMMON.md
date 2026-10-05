@@ -1,0 +1,12 @@
+# #1816 freeze audit (round 1): pool-scoped non-catalog model admission, the artifact-feed activation, and deploy tooling
+
+Review the COMPLETE campaign diff: `git diff abab8d8389214e0f0702c3fd84d4d719b18b4dee HEAD` (merge-base with origin/main = abab8d8389214e0f0702c3fd84d4d719b18b4dee), on branch feat/1816-pool-scoped-models in this worktree. Read the code, not only the diff, where a contract crosses outside the diff (decoders, SPEC restatements, recovery paths, other consumers of changed structs).
+
+What the campaign does (tracking issue #1816):
+- Specs: SPEC-042 v2 policy-core extensions `pool_model_entries/v1` / `pool_attested_members/v1`; SPEC-047-R011 pool-manifest admission binding (`catalog_priced`, `binding_scope: pool`, never `settlement_capable`); SPEC-005-R015 pool-entry pricing within coordinator-config bounds; SPEC-022-R013 route-snapshot provenance; SPEC-006-R018 buyer surface; SPEC-023-R026 intake/graduation; SPEC-032-R004 hello-gate exemption, including native mlx_cache.
+- Coordinator/gateway: manifest codec and signer, acceptance and bounds, binding/rebind/revocation sweep, pool-only routing and `/v1/models`, pricing, settlement fence across manifest rotation (in-flight attempts settle unless membership, provider, delegation or attestation was revoked, or the pool was retired/frozen), recovery, receipts.
+- CLI/Malibu: `models propose --pool`, the live-feed matcher, pool-model serve (loopback and native), status decoding, app actions.
+- Catalog: the signed artifact-feed activation release (first GGUF artifact), the Build 1 private authority re-issue, the Pearl updater learning the bound feed, the deploy canary no longer byte-comparing the CLI install dir (it now proves live_verified/coordinator source instead).
+- Lab tooling and runbooks.
+
+Bar: report every CRITICAL/HIGH/MEDIUM/LOW/INFO with file:line, the defect, a concrete failure scenario (inputs → wrong outcome), and a concrete fix. Classify each as NEW (introduced by this diff) or PRE-EXISTING. Do not edit files. End with exactly one line: `TOTALS: C=<n> H=<n> M=<n> L=<n> I=<n>`.

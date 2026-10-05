@@ -9,7 +9,7 @@ final class Build1PrivateAuthorityTests: XCTestCase {
         let authority = try Build1PrivateAuthorityLoader.load(
             authorityURL: fixture.authority,
             signatureURL: fixture.signature,
-            now: Self.date("2026-09-27T00:00:00Z")
+            now: Self.date("2026-10-02T00:00:00Z")
         )
 
         XCTAssertEqual(authority.catalogKey, Build1PrivatePrepareProfile.modelKey)
@@ -42,7 +42,7 @@ final class Build1PrivateAuthorityTests: XCTestCase {
             try Build1PrivateAuthorityLoader.load(
                 authorityURL: temporary.authority,
                 signatureURL: temporary.signature,
-                now: Self.date("2026-09-27T00:00:00Z")
+                now: Self.date("2026-10-02T00:00:00Z")
             )
         ) { error in
             XCTAssertEqual(error as? Build1PrivateAuthorityError, .invalid("signature_invalid"))
@@ -55,7 +55,7 @@ final class Build1PrivateAuthorityTests: XCTestCase {
             try Build1PrivateAuthorityLoader.load(
                 authorityURL: fixture.authority,
                 signatureURL: fixture.signature,
-                now: Self.date("2026-10-11T00:00:00Z")
+                now: Self.date("2026-10-16T00:00:00Z")
             )
         ) { error in
             XCTAssertEqual(error as? Build1PrivateAuthorityError, .invalid("release_or_freshness_invalid"))
@@ -74,7 +74,7 @@ final class Build1PrivateAuthorityTests: XCTestCase {
             try Build1PrivateAuthorityLoader.load(
                 authorityURL: fixture.urls.authority,
                 signatureURL: fixture.urls.signature,
-                now: Self.date("2026-09-27T00:00:00Z"),
+                now: Self.date("2026-10-02T00:00:00Z"),
                 verifySignature: { _, _ in true }
             )
         ) { error in
@@ -105,7 +105,7 @@ final class Build1PrivateAuthorityTests: XCTestCase {
             try Build1PrivateAuthorityLoader.load(
                 authorityURL: fixture.urls.authority,
                 signatureURL: fixture.urls.signature,
-                now: Self.date("2026-09-27T00:00:00Z"),
+                now: Self.date("2026-10-02T00:00:00Z"),
                 candidateBytes: candidateBytes,
                 verifySignature: { _, _ in true }
             )
@@ -124,7 +124,7 @@ final class Build1PrivateAuthorityTests: XCTestCase {
             try Build1PrivateAuthorityLoader.load(
                 authorityURL: fixture.urls.authority,
                 signatureURL: fixture.urls.signature,
-                now: Self.date("2026-09-27T00:00:00Z"),
+                now: Self.date("2026-10-02T00:00:00Z"),
                 verifySignature: { _, _ in true }
             )
         ) { error in
@@ -145,7 +145,7 @@ final class Build1PrivateAuthorityTests: XCTestCase {
             try Build1PrivateAuthorityLoader.load(
                 authorityURL: temporary.authority,
                 signatureURL: temporary.signature,
-                now: Self.date("2026-09-27T00:00:00Z")
+                now: Self.date("2026-10-02T00:00:00Z")
             )
         ) { error in
             XCTAssertEqual(error as? Build1PrivateAuthorityError, .invalid("authority_unavailable"))

@@ -109,6 +109,10 @@ func (b Binding) ArtifactDerived() bool { return b.Member.ArtifactID != "" }
 type Index struct {
 	provenance Provenance
 	members    map[string]Member
+	// blocked holds every artifact pair of a `blocked` row in the same
+	// authenticated feed (pair -> model key). Blocked pairs are never
+	// members; they only deny (SPEC-042-R015 / SPEC-032-R004).
+	blocked map[string]string
 }
 
 func memberKey(algorithm, hash string) string { return algorithm + "\x00" + hash }
@@ -117,6 +121,13 @@ func memberKey(algorithm, hash string) string { return algorithm + "\x00" + hash
 // unnamed algorithm, or a malformed digest is a construction error — the
 // generator and loader reject such feeds, so this is a second line only.
 func New(provenance Provenance, members []Member) (*Index, error) {
+	return NewWithBlocked(provenance, members, nil)
+}
+
+// NewWithBlocked is New plus the deny set: the artifact pairs of the feed's
+// `blocked` rows, whatever their verification status. A blocked pair that is
+// also a member is a construction error.
+func NewWithBlocked(provenance Provenance, members []Member, blocked []Member) (*Index, error) {
 	if !isLowerHex64(provenance.CandidateCatalogSHA256) || !isLowerHex64(provenance.FeedSHA256) {
 		return nil, fmt.Errorf("artifact identity index: provenance digests must be lowercase sha256")
 	}
@@ -146,7 +157,30 @@ func New(provenance Provenance, members []Member) (*Index, error) {
 		}
 		index.members[key] = member
 	}
+	for _, member := range blocked {
+		if !modelidentity.CanonicalAlgorithm(member.HashAlgorithm) || !isLowerHex64(member.Hash) || member.ModelKey == "" {
+			return nil, fmt.Errorf("artifact identity index: blocked %s/%s is not a canonical pair", member.ModelKey, member.ArtifactID)
+		}
+		key := memberKey(member.HashAlgorithm, member.Hash)
+		if existing, dup := index.members[key]; dup {
+			return nil, fmt.Errorf("artifact identity index: (%s, %s) is a member of %s and blocked under %s", member.HashAlgorithm, member.Hash, existing.ModelKey, member.ModelKey)
+		}
+		if index.blocked == nil {
+			index.blocked = make(map[string]string)
+		}
+		index.blocked[key] = member.ModelKey
+	}
 	return index, nil
+}
+
+// Blocked reports whether the exact pair is an artifact of a blocked row in
+// this feed. It does not depend on freshness: a stale feed still denies.
+func (i *Index) Blocked(algorithm, hash string) bool {
+	if i == nil {
+		return false
+	}
+	_, ok := i.blocked[memberKey(algorithm, hash)]
+	return ok
 }
 
 // Provenance returns the feed provenance every resolved binding carries.

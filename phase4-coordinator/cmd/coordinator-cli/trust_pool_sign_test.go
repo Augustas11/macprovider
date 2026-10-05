@@ -264,6 +264,31 @@ func TestTrustPoolSignRoundTripThroughDurableStore(t *testing.T) {
 	if _, _, _, err := store.AppendValidatedEvent(ctx, successor); err != nil {
 		t.Fatalf("append manifest_accepted v2: %v", err)
 	}
+	// SPEC-043-R006: a window-only successor keeps the policy-terms digest a
+	// delegation grant signs, and the store projects the same value.
+	termsOf := func(path string) string {
+		t.Helper()
+		var termsOut bytes.Buffer
+		if err := trustPoolAdmin([]string{"policy-terms-digest", "--manifest", path}, os.Getenv, nil, &termsOut); err != nil {
+			t.Fatalf("policy-terms-digest %s: %v", path, err)
+		}
+		for _, line := range strings.Split(termsOut.String(), "\n") {
+			if v, ok := strings.CutPrefix(line, "manifest_terms_digest="); ok {
+				return v
+			}
+		}
+		t.Fatalf("policy-terms-digest printed no manifest_terms_digest: %q", termsOut.String())
+		return ""
+	}
+	if termsOf(manifestOut) != termsOf(successorOut) || successor.ManifestCoreDigest == manifest.ManifestCoreDigest {
+		t.Fatal("window-only successor must keep the terms digest and change the core digest")
+	}
+	if state, err = store.Reconstruct(ctx); err != nil || state.Pools[f.poolID].ManifestTermsDigest != termsOf(successorOut) {
+		t.Fatalf("store terms digest disagrees with policy-terms-digest (err=%v)", err)
+	}
+	if err := trustPoolAdmin([]string{"policy-terms-digest", "--manifest", rootOut}, os.Getenv, nil, &out); err == nil {
+		t.Fatal("policy-terms-digest accepted a non-manifest event")
+	}
 	overlap := append(withoutFlag(f.manifestArgs("m1-manifest-3", filepath.Join(f.dir, "overlap.json"), notBefore, expiresAt), "--manifest-authority-key"), "--prev", successorOut)
 	if err := trustPoolAdmin(overlap, os.Getenv, nil, &out); err == nil || !strings.Contains(err.Error(), "previous policy window") {
 		t.Fatalf("overlapping successor window error = %v", err)

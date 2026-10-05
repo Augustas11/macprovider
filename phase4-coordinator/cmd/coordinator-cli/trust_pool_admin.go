@@ -76,6 +76,8 @@ func trustPoolAdmin(args []string, getenv func(string) string, stdin io.Reader, 
 		return trustPoolAdminSignRoot(args[1:], stdout)
 	case "sign-manifest":
 		return trustPoolAdminSignManifest(args[1:], stdout)
+	case "policy-terms-digest":
+		return trustPoolAdminPolicyTermsDigest(args[1:], stdout)
 	case "rotate-signer-set":
 		return fmt.Errorf("rotate-signer-set is not implemented in the SPEC-043 candidate surface; submit a signed SPEC-042 authority-log event through append-event after signer-set support lands")
 	default:

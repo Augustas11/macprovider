@@ -65,12 +65,28 @@ func settlementPoolLabelStatus(route RouteSnapshot, routeHash string, labels *Se
 		return PoolLabelStatusUnverified
 	}
 	if labels.PoolID != route.PoolID ||
-		labels.ManifestVersion != route.ManifestVersion ||
-		labels.ManifestCoreDigest != route.ManifestCoreDigest ||
+		!poolLabelRotationUndisputed(route.ManifestVersion, route.ManifestCoreDigest, labels) ||
 		(labels.RouteSnapshotHash != "" && labels.RouteSnapshotHash != routeHash) {
 		return PoolLabelStatusDisputed
 	}
 	return PoolLabelStatusVerified
+}
+
+// poolLabelRotationUndisputed compares a route-time manifest label with the
+// settlement-time view (SPEC-042-R006/R015). The same generation must carry
+// the same core digest. A later accepted generation is ordinary manifest
+// rotation, not a dispute: the attempt settles from its immutable route
+// snapshot, and revocation is fenced separately from the durable records
+// (PoolRouteFenceSource). An earlier generation can only be a rollback or a
+// forged label, so it is disputed.
+func poolLabelRotationUndisputed(routeVersion uint64, routeDigest string, labels *SettlementPoolLabels) bool {
+	if labels == nil || routeVersion == 0 || routeDigest == "" || labels.ManifestVersion == 0 {
+		return false
+	}
+	if labels.ManifestVersion == routeVersion {
+		return labels.ManifestCoreDigest == routeDigest
+	}
+	return labels.ManifestVersion > routeVersion
 }
 
 // RecordSettlementPoolLabels stamps the SPEC-042 R006 labels onto an existing

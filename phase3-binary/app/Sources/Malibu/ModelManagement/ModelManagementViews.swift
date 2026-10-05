@@ -1,4 +1,6 @@
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 private enum ModelFeatureUI {
     static let model = String(localized: "Model", comment: "Model feature label")
@@ -26,11 +28,17 @@ private enum ModelFeatureUI {
     static let notNow = String(localized: "Not now", comment: "Recommendation snooze action")
     static let stopBackground = String(localized: "Stop background recommendations", comment: "Recommendation opt-out action")
     static let activate = String(localized: "Run offer preflight", comment: "BYOM guided activation action")
+    static let withdraw = String(localized: "Withdraw", comment: "BYOM withdraw action")
+    static let proposeToPool = String(localized: "Propose to pool…", comment: "BYOM propose-to-pool action")
+    static let localRuntimes = String(localized: "Local runtimes", comment: "BYOM adapter settings section")
 
     static func operationLabel(_ raw: String) -> String {
         switch raw {
         case "revert": return String(localized: "Revert", comment: "Model history operation")
         case "adopt": return String(localized: "Adopt", comment: "Model history operation")
+        case "withdraw": return String(localized: "Withdraw", comment: "Model history operation")
+        case "propose": return String(localized: "Propose to pool", comment: "Model history operation")
+        case "evaluate": return String(localized: "Offer", comment: "Model history operation")
         default: return String(localized: "Switch", comment: "Model history operation")
         }
     }
@@ -50,6 +58,9 @@ struct ModelSwitcherSheet: View {
     @State private var pendingSwitch: MalibuModelRow?
     @State private var pendingOperationName = "switch"
     @State private var showConfirmation = false
+    @State private var pendingWithdraw: MalibuModelRow?
+    @State private var proposeRow: MalibuModelRow?
+    @State private var proposePoolID = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -168,6 +179,32 @@ struct ModelSwitcherSheet: View {
         } message: {
             Text(confirmationMessage(for: pendingSwitch))
         }
+        .confirmationDialog(
+            String(localized: "Withdraw this offer?", comment: "BYOM withdraw confirmation title"),
+            isPresented: Binding(get: { pendingWithdraw != nil }, set: { if !$0 { pendingWithdraw = nil } })
+        ) {
+            Button(ModelFeatureUI.withdraw, role: .destructive) {
+                if let row = pendingWithdraw {
+                    Task { await store.withdraw(row) }
+                }
+                pendingWithdraw = nil
+            }
+            Button(String(localized: "Cancel", comment: "Withdraw confirmation cancel"), role: .cancel) { pendingWithdraw = nil }
+        } message: {
+            Text(String(localized: "The coordinator stops routing to this model, in the network and in any Trusted Pool, until you offer it again.", comment: "BYOM withdraw confirmation message"))
+        }
+        .sheet(item: $proposeRow) { row in
+            PoolProposeSheet(row: row, poolID: $proposePoolID) {
+                proposeRow = nil
+                let poolID = proposePoolID
+                Task { await store.propose(row, poolID: poolID) }
+            } onCancel: {
+                proposeRow = nil
+            }
+        }
+        .sheet(item: Binding(get: { store.poolProposal }, set: { if $0 == nil { store.dismissPoolProposal() } })) { proposal in
+            PoolProposalResultSheet(proposal: proposal) { store.dismissPoolProposal() }
+        }
         .task(id: "\(agent.snapshot.localProviderID ?? "unknown"):\(agent.snapshot.statusObservationID ?? "unknown")") {
             await refreshFromSnapshot()
         }
@@ -257,11 +294,22 @@ struct ModelSwitcherSheet: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text(title).font(.headline)
                 ForEach(matching) { row in
-                    ModelRowView(row: row, enabled: canAct) {
-                        pendingSwitch = row
-                        pendingOperationName = "switch"
-                        showConfirmation = true
-                    }
+                    ModelRowView(
+                        row: row,
+                        enabled: canAct,
+                        byomEnabled: store.canPerformBYOMAction,
+                        poolBindingLine: store.poolBindings[row.id].map(row.poolBindingLine),
+                        onAction: {
+                            pendingSwitch = row
+                            pendingOperationName = "switch"
+                            showConfirmation = true
+                        },
+                        onWithdraw: { pendingWithdraw = row },
+                        onPropose: {
+                            proposePoolID = ""
+                            proposeRow = row
+                        }
+                    )
                 }
             }
         }
@@ -304,7 +352,11 @@ struct ModelSwitcherSheet: View {
 private struct ModelRowView: View {
     let row: MalibuModelRow
     let enabled: Bool
+    let byomEnabled: Bool
+    let poolBindingLine: String?
     let onAction: () -> Void
+    let onWithdraw: () -> Void
+    let onPropose: () -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -360,6 +412,13 @@ private struct ModelRowView: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                if let poolBindingLine {
+                    Text(poolBindingLine)
+                        .font(.caption.weight(.medium))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("byom.pool-binding")
+                }
                 if let earningDisclosure = row.earningDisclosure {
                     Text(earningDisclosure)
                         .font(.caption.weight(.medium))
@@ -402,14 +461,26 @@ private struct ModelRowView: View {
                 }
             }
             Spacer(minLength: 6)
-            if row.action == .switchModel {
-                Button(ModelFeatureUI.switchModel, action: onAction)
-                    .disabled(!enabled)
-                    .accessibilityHint(Text(String(localized: "Shows a confirmation before the provider changes its served model.", comment: "Switch accessibility hint")))
-            } else if row.action == .evaluate {
-                Button(ModelFeatureUI.activate, action: onAction)
-                    .disabled(!enabled)
-                    .accessibilityLabel(Text(String(localized: "Evaluate \(row.displayID)", comment: "Evaluation accessibility label")))
+            VStack(alignment: .trailing, spacing: 6) {
+                if row.action == .switchModel {
+                    Button(ModelFeatureUI.switchModel, action: onAction)
+                        .disabled(!enabled)
+                        .accessibilityHint(Text(String(localized: "Shows a confirmation before the provider changes its served model.", comment: "Switch accessibility hint")))
+                } else if row.action == .evaluate {
+                    Button(ModelFeatureUI.activate, action: onAction)
+                        .disabled(!enabled)
+                        .accessibilityLabel(Text(String(localized: "Evaluate \(row.displayID)", comment: "Evaluation accessibility label")))
+                }
+                if row.canProposeToPool {
+                    Button(ModelFeatureUI.proposeToPool, action: onPropose)
+                        .disabled(!byomEnabled)
+                        .accessibilityLabel(Text(String(localized: "Propose \(row.displayID) to a Trusted Pool", comment: "Propose accessibility label")))
+                }
+                if row.canWithdraw {
+                    Button(ModelFeatureUI.withdraw, role: .destructive, action: onWithdraw)
+                        .disabled(!byomEnabled)
+                        .accessibilityLabel(Text(String(localized: "Withdraw the offer for \(row.displayID)", comment: "Withdraw accessibility label")))
+                }
             }
         }
         .padding(10)
@@ -429,9 +500,38 @@ private struct ModelRowView: View {
 
 struct ModelSettingsView: View {
     @ObservedObject private var store = ModelManagementStore.shared
+    @State private var adapterDraft = MalibuBYOMAdapterSettings()
+    @State private var adapterMessage: String?
 
     var body: some View {
         Form {
+            Section(ModelFeatureUI.localRuntimes) {
+                TextField(String(localized: "llama.cpp model folder", comment: "BYOM adapter setting"), text: $adapterDraft.llamacppModelRoot, prompt: Text("/Users/me/models"))
+                TextField(String(localized: "llama.cpp model file (optional)", comment: "BYOM adapter setting"), text: $adapterDraft.llamacppModelPath, prompt: Text("/Users/me/models/model.gguf"))
+                TextField(String(localized: "llama.cpp server", comment: "BYOM adapter setting"), text: $adapterDraft.llamacppOrigin, prompt: Text("http://127.0.0.1:8080"))
+                TextField(String(localized: "LM Studio server", comment: "BYOM adapter setting"), text: $adapterDraft.lmstudioOrigin, prompt: Text("http://127.0.0.1:1234"))
+                TextField(String(localized: "OpenAI-compatible server", comment: "BYOM adapter setting"), text: $adapterDraft.openaiCompatibleOrigin, prompt: Text("http://127.0.0.1:8000"))
+                Text(String(localized: "Malibu passes these to the provider CLI when it discovers, offers, withdraws, or proposes local models. Servers must be loopback (127.0.0.1 or ::1) with a port; folders and files must be absolute paths. Leave a field empty to keep the CLI default.", comment: "BYOM adapter settings explanation"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Button(String(localized: "Save", comment: "BYOM adapter settings save")) {
+                        do {
+                            try store.setBYOMAdapterSettings(adapterDraft)
+                            adapterDraft = store.byomAdapterSettings
+                            adapterMessage = String(localized: "Saved.", comment: "BYOM adapter settings saved")
+                        } catch {
+                            adapterMessage = String(localized: "Not saved: use loopback servers with a port and absolute paths.", comment: "BYOM adapter settings invalid")
+                        }
+                    }
+                    if let adapterMessage {
+                        Text(adapterMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
             Section(ModelFeatureUI.settingsModels) {
                 Toggle(
                     ModelFeatureUI.backgroundRecommendations,
@@ -452,5 +552,86 @@ struct ModelSettingsView: View {
         .frame(width: 480)
         .padding()
         .accessibilityElement(children: .contain)
+        .onAppear { adapterDraft = store.byomAdapterSettings }
+    }
+}
+
+/// #1816: collects the Trusted Pool id before `models propose` runs.
+private struct PoolProposeSheet: View {
+    let row: MalibuModelRow
+    @Binding var poolID: String
+    let onPropose: () -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(String(localized: "Propose to a Trusted Pool", comment: "Propose sheet title"))
+                .font(.title3.weight(.semibold))
+            Text(row.displayID)
+                .font(.body.monospaced())
+                .lineLimit(2)
+                .truncationMode(.middle)
+            Text(String(localized: "Malibu asks the provider CLI to hash the served model's files, submit the network offer, and build a proposal for the pool creator. The model earns only after the creator signs it into the pool, only on that pool's routes, and it is pool-attested, not network-verified.", comment: "Propose sheet explanation"))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            TextField(String(localized: "Pool id", comment: "Propose pool id field"), text: $poolID, prompt: Text(String(localized: "22-character pool id", comment: "Propose pool id prompt")))
+                .textFieldStyle(.roundedBorder)
+                .font(.body.monospaced())
+            HStack {
+                Spacer()
+                Button(String(localized: "Cancel", comment: "Propose cancel"), role: .cancel, action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                Button(String(localized: "Propose", comment: "Propose confirm"), action: onPropose)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(poolID.trimmingCharacters(in: .whitespacesAndNewlines).range(of: MalibuBYOMPoolBinding.poolIDPattern, options: .regularExpression) == nil)
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
+    }
+}
+
+/// #1816: shows the `pool_model_proposal.v1` bundle for copy or export.
+private struct PoolProposalResultSheet: View {
+    let proposal: MalibuPoolProposalResult
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(String(localized: "Pool proposal", comment: "Proposal sheet title"))
+                .font(.title3.weight(.semibold))
+            Text(String(localized: "Send this to the creator of pool \(proposal.poolID). They add the licence, confirm paid serving and the price, and sign it as \(proposal.poolModelID). Until then this model does not earn.", comment: "Proposal sheet explanation"))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            ScrollView {
+                Text(proposal.bundleJSON)
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(minHeight: 220)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color.gray.opacity(0.08)))
+            HStack {
+                Button(String(localized: "Copy", comment: "Proposal copy")) {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(proposal.bundleJSON, forType: .string)
+                }
+                Button(String(localized: "Export…", comment: "Proposal export")) {
+                    let panel = NSSavePanel()
+                    panel.allowedContentTypes = [.json]
+                    panel.nameFieldStringValue = "pool-model-proposal-\(proposal.poolID).json"
+                    if panel.runModal() == .OK, let url = panel.url {
+                        try? Data(proposal.bundleJSON.utf8).write(to: url, options: .atomic)
+                    }
+                }
+                Spacer()
+                Button(String(localized: "Done", comment: "Proposal done"), action: onClose)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 560, height: 480)
     }
 }

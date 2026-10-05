@@ -520,6 +520,79 @@ func TestModelAdmissionBindingRetryStopsAfterSessionEpochDrift(t *testing.T) {
 	}
 }
 
+func TestModelAdmissionHelloBindingRefreshRetriesAfterTransientListingFailure(t *testing.T) {
+	f := newBindingFixture(t)
+	s := f.server
+	offered := f.offer(t, "p1", "a", "mlx_cache", map[string]string{modelidentity.SnapshotManifestV1: bindingRowHash})
+	priced := f.decide(t, offered, "catalog_priced")
+	f.registerSession(t, "p1", "s1", "model-a", true)
+
+	flaky := &flakyLatestModelAdmissionStore{ModelAdmissionStore: s.modelAdmissions}
+	flaky.failures.Store(2)
+	s.modelAdmissions = flaky
+
+	s.bindModelAdmissionSessionAtHello("p1", pool.Provider{}, false)
+	p, _ := s.pool.Resolve("p1", "")
+	if p.ModelAdmissionCandidateID != "" {
+		t.Fatalf("failed hello refresh must leave the fresh session unbound, got candidate=%q", p.ModelAdmissionCandidateID)
+	}
+	if p.ModelAdmissionBindingGeneration >= s.ModelAdmissionBindingGeneration("p1") {
+		t.Fatalf("unbound hello session must remain behind the provider section generation: provider=%d section=%d",
+			p.ModelAdmissionBindingGeneration, s.ModelAdmissionBindingGeneration("p1"))
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		p, _ := s.pool.Resolve("p1", "")
+		if p.ModelAdmissionCandidateID == priced.CandidateID && p.ModelAdmissionCoordinatorEventID == priced.CoordinatorEventID {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	p, _ = s.pool.Resolve("p1", "")
+	t.Fatalf("hello retry did not bind the current session to the latest head: candidate=%q head=%q want candidate=%q head=%q",
+		p.ModelAdmissionCandidateID, p.ModelAdmissionCoordinatorEventID, priced.CandidateID, priced.CoordinatorEventID)
+}
+
+func TestModelAdmissionHelloBindingRetryStopsAfterSessionEpochDrift(t *testing.T) {
+	f := newBindingFixture(t)
+	s := f.server
+	offered := f.offer(t, "p1", "a", "mlx_cache", map[string]string{modelidentity.SnapshotManifestV1: bindingRowHash})
+	priced := f.decide(t, offered, "catalog_priced")
+	f.registerSession(t, "p1", "s1", "model-a", true)
+
+	flaky := &flakyLatestModelAdmissionStore{ModelAdmissionStore: s.modelAdmissions}
+	flaky.failures.Store(2)
+	s.modelAdmissions = flaky
+
+	s.bindModelAdmissionSessionAtHello("p1", pool.Provider{}, false)
+	before, _ := s.pool.Resolve("p1", "")
+	if before.ModelAdmissionCandidateID != "" {
+		t.Fatalf("failed hello refresh must leave the first session unbound, got candidate=%q", before.ModelAdmissionCandidateID)
+	}
+	startEpoch := before.ModelAdmissionSessionEpoch
+
+	f.registerSession(t, "p1", "s2", "model-a", true)
+	afterReplace, _ := s.pool.Resolve("p1", "")
+	if afterReplace.ModelAdmissionSessionEpoch == startEpoch {
+		t.Fatalf("replacement hello must advance the session epoch before retry: before=%d after=%d", startEpoch, afterReplace.ModelAdmissionSessionEpoch)
+	}
+
+	time.Sleep(500 * time.Millisecond)
+	afterRetry, _ := s.pool.Resolve("p1", "")
+	if afterRetry.AssignedID != "s2" {
+		t.Fatalf("retry must not replace the current session: assigned=%q", afterRetry.AssignedID)
+	}
+	if afterRetry.ModelAdmissionCandidateID != "" || afterRetry.ModelAdmissionCoordinatorEventID != "" {
+		t.Fatalf("stale hello retry must not bind the replacement session: candidate=%q head=%q",
+			afterRetry.ModelAdmissionCandidateID, afterRetry.ModelAdmissionCoordinatorEventID)
+	}
+	latest := f.latest(t, "p1", priced.CandidateID)
+	if latest.State != "catalog_priced" {
+		t.Fatalf("epoch guard should stop hello retry without inventing a drift event: %+v", latest)
+	}
+}
+
 type flakyLatestModelAdmissionStore struct {
 	ModelAdmissionStore
 	failures atomic.Int32
