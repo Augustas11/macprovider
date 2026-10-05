@@ -42,29 +42,13 @@ func (s *Store) ensureRelayBlindSettlementOutcomeVocabulary(ctx context.Context)
 // widenSchemaChecks applies every pending CHECK replacement in one
 // writable_schema transaction, bumps the schema cookie so open connections
 // re-read the definitions, and then proves each edited table still parses.
-// A positive floorContract is recorded in that same transaction (or, when
-// nothing is pending, on its own as an idempotent repair).
+// The definitions are classified inside that BEGIN IMMEDIATE transaction on
+// its own connection, so no writer can change them between the check and the
+// write. A positive floorContract is recorded in the same transaction: with
+// the widening, or, when every target is already widened, as an idempotent
+// repair. When any target has an unexpected definition the transaction rolls
+// back and nothing (no widening, no floor) is recorded.
 func (s *Store) widenSchemaChecks(ctx context.Context, widenings []schemaCheckWidening, floorContract int64) error {
-	var pending []schemaCheckWidening
-	for _, w := range widenings {
-		var definition string
-		if err := s.db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`, w.table).Scan(&definition); err != nil {
-			return err
-		}
-		if strings.Contains(definition, w.to) && !strings.Contains(definition, w.from) {
-			continue
-		}
-		if strings.Count(definition, w.from) != 1 {
-			return fmt.Errorf("%s CHECK has an unexpected definition for widening", w.table)
-		}
-		pending = append(pending, w)
-	}
-	if len(pending) == 0 {
-		if floorContract > 0 {
-			return s.recordBillingCompatFloorAt(ctx, floorContract)
-		}
-		return nil
-	}
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return err
@@ -80,10 +64,31 @@ func (s *Store) widenSchemaChecks(ctx context.Context, widenings []schemaCheckWi
 			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		}
 	}()
+	var pending []schemaCheckWidening
+	for _, w := range widenings {
+		var definition string
+		if err := conn.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`, w.table).Scan(&definition); err != nil {
+			return err
+		}
+		if strings.Contains(definition, w.to) && !strings.Contains(definition, w.from) {
+			continue
+		}
+		if strings.Count(definition, w.from) != 1 {
+			return fmt.Errorf("%s CHECK has an unexpected definition for widening", w.table)
+		}
+		pending = append(pending, w)
+	}
 	if floorContract > 0 {
 		if err := recordBillingCompatFloorExec(ctx, conn, floorContract); err != nil {
 			return err
 		}
+	}
+	if len(pending) == 0 {
+		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+			return err
+		}
+		committed = true
+		return nil
 	}
 	var schemaVersion int64
 	if err := conn.QueryRowContext(ctx, `PRAGMA schema_version`).Scan(&schemaVersion); err != nil {

@@ -5,9 +5,14 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/requestlog"
+	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 )
 
 type relayBlindMoneyFixture struct {
@@ -517,4 +522,132 @@ func TestBillingCompatFloorStaysAtTwoWhenRelayBlindMigrationFails(t *testing.T) 
 	if got := scalar(t, db, `SELECT contract FROM billing_compat_floor WHERE id = 1`); got != 3 {
 		t.Fatalf("floor after relay-blind migration=%d want 3", got)
 	}
+}
+
+// SPEC-022 R-13.8: contract 3 is recorded only together with a revalidated
+// relay-blind widening. A database already widened but still at floor 2 is
+// repaired inside a BEGIN IMMEDIATE transaction that rereads every target
+// definition on its own connection; a partially widened database whose
+// remaining CHECK is unrecognized advances nothing.
+func TestBillingCompatFloorRepairRevalidatesWideningInTransaction(t *testing.T) {
+	ctx := context.Background()
+	open := func(t *testing.T) (string, *Store) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "coordinator.db")
+		reqStore, err := requestlog.OpenStore(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = reqStore.Close() })
+		store, err := NewStore(reqStore.DB())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return path, store
+	}
+	floor := func(t *testing.T, db *sql.DB) int64 {
+		t.Helper()
+		return scalar(t, db, `SELECT contract FROM billing_compat_floor WHERE id = 1`)
+	}
+	unexpected := "CHECK(settlement_outcome IN ('pending','verified','quarantined','zero_settled','unexpected'))"
+
+	t.Run("already widened at floor 2 records 3", func(t *testing.T) {
+		_, store := open(t)
+		if _, err := store.db.Exec(`UPDATE billing_compat_floor SET contract = 2`); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.ensureRelayBlindSettlementOutcomeVocabulary(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if got := floor(t, store.db); got != 3 {
+			t.Fatalf("floor=%d want 3", got)
+		}
+	})
+
+	t.Run("partially widened with an unrecognized CHECK stays at 2", func(t *testing.T) {
+		_, store := open(t)
+		if err := store.widenSchemaChecks(ctx, []schemaCheckWidening{{table: "settlement_receipt_audit_outbox", from: settlementOutcomeCheckV2, to: unexpected}}, 0); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.db.Exec(`UPDATE billing_compat_floor SET contract = 2`); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.ensureRelayBlindSettlementOutcomeVocabulary(ctx); err == nil {
+			t.Fatal("repair succeeded over an unrecognized outbox CHECK")
+		}
+		if got := floor(t, store.db); got != 2 {
+			t.Fatalf("floor=%d want 2", got)
+		}
+		if definition := mustScalarString(t, store.db, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'settlement_receipt_audit_outbox'`); !strings.Contains(definition, unexpected) {
+			t.Fatalf("outbox definition changed: %s", definition)
+		}
+	})
+
+	t.Run("partially widened with the legacy CHECK widens and records 3 together", func(t *testing.T) {
+		_, store := open(t)
+		if err := store.widenSchemaChecks(ctx, []schemaCheckWidening{{table: "settlement_receipt_audit_outbox", from: settlementOutcomeCheckV2, to: settlementOutcomeCheckV1}}, 0); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.db.Exec(`UPDATE billing_compat_floor SET contract = 2`); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.ensureRelayBlindSettlementOutcomeVocabulary(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if got := floor(t, store.db); got != 3 {
+			t.Fatalf("floor=%d want 3", got)
+		}
+		if definition := mustScalarString(t, store.db, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'settlement_receipt_audit_outbox'`); !strings.Contains(definition, settlementOutcomeCheckV2) {
+			t.Fatalf("outbox not widened: %s", definition)
+		}
+	})
+
+	// The definitions are read inside the repair's own write transaction: a
+	// writer that narrows a CHECK while the repair waits for the lock makes
+	// the repair fail instead of recording 3 over a schema it never checked.
+	t.Run("a concurrent narrowing is seen by the repair", func(t *testing.T) {
+		path, store := open(t)
+		if _, err := store.db.Exec(`UPDATE billing_compat_floor SET contract = 2`); err != nil {
+			t.Fatal(err)
+		}
+		other, err := sql.Open("sqlite", sqliteutil.WithPragmas(path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = other.Close() })
+		conn, err := other.Conn(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		var schemaVersion int64
+		for _, stmt := range []string{`BEGIN IMMEDIATE`, `PRAGMA writable_schema = ON`} {
+			if _, err := conn.ExecContext(ctx, stmt); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := conn.ExecContext(ctx, `UPDATE sqlite_master SET sql = replace(sql, ?, ?) WHERE type = 'table' AND name = 'settlement_receipt_audit_outbox'`, settlementOutcomeCheckV2, unexpected); err != nil {
+			t.Fatal(err)
+		}
+		if err := conn.QueryRowContext(ctx, `PRAGMA schema_version`).Scan(&schemaVersion); err != nil {
+			t.Fatal(err)
+		}
+		for _, stmt := range []string{fmt.Sprintf(`PRAGMA schema_version = %d`, schemaVersion+1), `PRAGMA writable_schema = OFF`} {
+			if _, err := conn.ExecContext(ctx, stmt); err != nil {
+				t.Fatal(err)
+			}
+		}
+		done := make(chan error, 1)
+		go func() { done <- store.ensureRelayBlindSettlementOutcomeVocabulary(ctx) }()
+		time.Sleep(200 * time.Millisecond)
+		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-done; err == nil {
+			t.Fatal("repair recorded contract 3 over a narrowed CHECK")
+		}
+		if got := floor(t, store.db); got != 2 {
+			t.Fatalf("floor=%d want 2", got)
+		}
+	})
 }
