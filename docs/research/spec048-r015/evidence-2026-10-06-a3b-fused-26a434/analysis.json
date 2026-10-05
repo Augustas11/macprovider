@@ -1,0 +1,1548 @@
+{
+  "cells": [
+    {
+      "acceptance_rate": 0.8880597014925373,
+      "cell_class": "native_eligible",
+      "cell_id": "s1-p1536-o128",
+      "decode_tps_sources": [
+        "recorded"
+      ],
+      "forwards_per_committed_token": 0.52734375,
+      "hard_failures": [],
+      "informational_metrics": {
+        "end_to_end_throughput": {
+          "ci_lower": 0.05747817357540086,
+          "ci_upper": 0.07399518890883194,
+          "confidence_level": 0.95,
+          "gated": false,
+          "median": 0.06654754329227375
+        }
+      },
+      "load_gate_downgrades": 0,
+      "memory_failures": [],
+      "metric_failures": [
+        "throughput",
+        "itl"
+      ],
+      "metrics": {
+        "itl": {
+          "confidence_level": 0.975,
+          "corrected_upper_bound": 0.5626390426385901,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.025,
+          "holm_rank": 23,
+          "median": 0.545955706350113,
+          "p_value": 0.9998000199980002,
+          "status": "FAIL",
+          "threshold": 0.0
+        },
+        "rejection": {
+          "confidence_level": 0.9978260869565218,
+          "corrected_upper_bound": 0.0,
+          "holm_adjusted_p_value": 0.0023997600239976003,
+          "holm_alpha": 0.002173913043478261,
+          "holm_rank": 2,
+          "median": 0.0,
+          "p_value": 9.999000099990002e-05,
+          "status": "PASS",
+          "threshold": 1.0
+        },
+        "throughput": {
+          "confidence_level": 0.9944444444444445,
+          "corrected_lower_bound": 0.13524411261352953,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.005555555555555556,
+          "holm_rank": 16,
+          "median": 0.15864741922674785,
+          "p_value": 0.2004799520047995,
+          "status": "FAIL",
+          "threshold": 0.15
+        },
+        "ttft": {
+          "confidence_level": 0.9979166666666667,
+          "corrected_upper_bound": 0.04463818013831378,
+          "holm_adjusted_p_value": 0.0023997600239976003,
+          "holm_alpha": 0.0020833333333333333,
+          "holm_rank": 1,
+          "median": 0.04131572893833091,
+          "p_value": 9.999000099990002e-05,
+          "status": "PASS",
+          "threshold": 0.1
+        }
+      },
+      "min_available_memory_fraction": 0.7074570059776306,
+      "paired_blocks": 10,
+      "peak_phys_footprint_bytes": 23764925656,
+      "reported_metrics": {
+        "native_mtp": {
+          "aggregate_committed_tps": {
+            "ci_lower": 54.15079487124698,
+            "ci_upper": 68.8484714947082,
+            "confidence_level": 0.9982142857142857,
+            "median": 67.82151194596435
+          },
+          "aggregate_decode_tps": {
+            "ci_lower": 89.48545579031884,
+            "ci_upper": 130.98010898447563,
+            "confidence_level": 0.9982142857142857,
+            "median": 127.49162339962908
+          },
+          "capacity_rejection_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "fallback_error_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "inter_token_gap_p50_seconds": {
+            "ci_lower": 0.01449573040008545,
+            "ci_upper": 0.01677525043487549,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.014557749032974243
+          },
+          "inter_token_gap_p95_seconds": {
+            "ci_lower": 0.014867788553237914,
+            "ci_upper": 0.0337298572063446,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.014977437257766724
+          },
+          "mtp_acceptance_rate": {
+            "ci_lower": 0.8529411764705882,
+            "ci_upper": 0.939044289044289,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.8880597014925373
+          },
+          "mtp_accepted_tokens": {
+            "ci_lower": 58.0,
+            "ci_upper": 61.5,
+            "confidence_level": 0.9982142857142857,
+            "median": 59.5
+          },
+          "mtp_proposed_tokens": {
+            "ci_lower": 65.5,
+            "ci_upper": 68.5,
+            "confidence_level": 0.9982142857142857,
+            "median": 67.0
+          },
+          "peak_phys_footprint_bytes": {
+            "ci_lower": 23762902208.0,
+            "ci_upper": 23764679896.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 23763664076.0
+          },
+          "per_request_decode_tps": {
+            "ci_lower": 89.48545579031884,
+            "ci_upper": 130.98010898447563,
+            "confidence_level": 0.9982142857142857,
+            "median": 127.49162339962908
+          },
+          "per_request_tps": {
+            "ci_lower": 54.153712703529145,
+            "ci_upper": 68.85272362801155,
+            "confidence_level": 0.9982142857142857,
+            "median": 67.82543062402206
+          },
+          "target_forwards_per_committed_token": {
+            "ci_lower": 0.51171875,
+            "ci_upper": 0.5390625,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.52734375
+          },
+          "ttft_p50_seconds": {
+            "ci_lower": 0.8876546025276184,
+            "ci_upper": 0.9453030824661255,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.8901640176773071
+          },
+          "ttft_p95_seconds": {
+            "ci_lower": 0.8876546025276184,
+            "ci_upper": 0.9453030824661255,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.8901640176773071
+          }
+        },
+        "ordinary": {
+          "aggregate_committed_tps": {
+            "ci_lower": 56.72335932475999,
+            "ci_upper": 64.16663185542788,
+            "confidence_level": 0.9982142857142857,
+            "median": 63.83487689999144
+          },
+          "aggregate_decode_tps": {
+            "ci_lower": 94.05178948272878,
+            "ci_upper": 111.26306735272505,
+            "confidence_level": 0.9982142857142857,
+            "median": 110.38614098327358
+          },
+          "capacity_rejection_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "fallback_error_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "inter_token_gap_p50_seconds": {
+            "ci_lower": 0.008945941925048828,
+            "ci_upper": 0.01064223051071167,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.009016036987304688
+          },
+          "inter_token_gap_p95_seconds": {
+            "ci_lower": 0.009481841325759887,
+            "ci_upper": 0.014648344987737297,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.009987422823905943
+          },
+          "mtp_accepted_tokens": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "mtp_proposed_tokens": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "peak_phys_footprint_bytes": {
+            "ci_lower": 23763025088.0,
+            "ci_upper": 23764884696.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 23763680448.0
+          },
+          "per_request_decode_tps": {
+            "ci_lower": 94.05178948272878,
+            "ci_upper": 111.26306735272505,
+            "confidence_level": 0.9982142857142857,
+            "median": 110.38614098327358
+          },
+          "per_request_tps": {
+            "ci_lower": 56.72660179577053,
+            "ci_upper": 64.17049064705203,
+            "confidence_level": 0.9982142857142857,
+            "median": 63.838774640074405
+          },
+          "ttft_p50_seconds": {
+            "ci_lower": 0.8526950478553772,
+            "ci_upper": 0.9065377449350699,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.8549255728721619
+          },
+          "ttft_p95_seconds": {
+            "ci_lower": 0.8526950478553772,
+            "ci_upper": 0.9065377449350699,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.8549255728721619
+          }
+        }
+      },
+      "required_blocks": 10,
+      "status": "FAIL",
+      "sustained_duration_seconds": 0,
+      "sustained_min_available_memory_fraction": 0,
+      "sustained_runs": 0,
+      "thermal_end_states": [
+        "nominal"
+      ],
+      "thermal_start_states": [
+        "nominal"
+      ]
+    },
+    {
+      "acceptance_rate": 0.8545454545454545,
+      "cell_class": "native_eligible",
+      "cell_id": "s1-p1536-o512",
+      "decode_tps_sources": [
+        "recorded"
+      ],
+      "forwards_per_committed_token": 0.5390625,
+      "hard_failures": [],
+      "informational_metrics": {
+        "end_to_end_throughput": {
+          "ci_lower": 0.10874052050928529,
+          "ci_upper": 0.2740027801096032,
+          "confidence_level": 0.95,
+          "gated": false,
+          "median": 0.11518937504134241
+        }
+      },
+      "load_gate_downgrades": 0,
+      "memory_failures": [],
+      "metric_failures": [
+        "throughput",
+        "itl"
+      ],
+      "metrics": {
+        "itl": {
+          "confidence_level": 0.99,
+          "corrected_upper_bound": 0.5356145168351671,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.01,
+          "holm_rank": 20,
+          "median": 0.5254486055156007,
+          "p_value": 0.8308169183081692,
+          "status": "FAIL",
+          "threshold": 0.0
+        },
+        "rejection": {
+          "confidence_level": 0.9976190476190476,
+          "corrected_upper_bound": 0.0,
+          "holm_adjusted_p_value": 0.0023997600239976003,
+          "holm_alpha": 0.002380952380952381,
+          "holm_rank": 4,
+          "median": 0.0,
+          "p_value": 9.999000099990002e-05,
+          "status": "PASS",
+          "threshold": 1.0
+        },
+        "throughput": {
+          "confidence_level": 0.9928571428571429,
+          "corrected_lower_bound": 0.13574229266784843,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0071428571428571435,
+          "holm_rank": 18,
+          "median": 0.14557668821848457,
+          "p_value": 0.6363363663633637,
+          "status": "FAIL",
+          "threshold": 0.15
+        },
+        "ttft": {
+          "confidence_level": 0.9977272727272727,
+          "corrected_upper_bound": 0.04275396857964453,
+          "holm_adjusted_p_value": 0.0023997600239976003,
+          "holm_alpha": 0.002272727272727273,
+          "holm_rank": 3,
+          "median": 0.04067703686033908,
+          "p_value": 9.999000099990002e-05,
+          "status": "PASS",
+          "threshold": 0.1
+        }
+      },
+      "min_available_memory_fraction": 0.7013399004936218,
+      "paired_blocks": 10,
+      "peak_phys_footprint_bytes": 24592941784,
+      "reported_metrics": {
+        "native_mtp": {
+          "aggregate_committed_tps": {
+            "ci_lower": 88.32115707590786,
+            "ci_upper": 90.53965814824004,
+            "confidence_level": 0.9982142857142857,
+            "median": 89.4881577612295
+          },
+          "aggregate_decode_tps": {
+            "ci_lower": 105.33153768136349,
+            "ci_upper": 108.47479942582375,
+            "confidence_level": 0.9982142857142857,
+            "median": 106.99305521868934
+          },
+          "capacity_rejection_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "fallback_error_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "inter_token_gap_p50_seconds": {
+            "ci_lower": 0.01664954423904419,
+            "ci_upper": 0.016744494438171387,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.016696244478225708
+          },
+          "inter_token_gap_p95_seconds": {
+            "ci_lower": 0.017426198720932005,
+            "ci_upper": 0.017535506154277514,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.017496001720428464
+          },
+          "mtp_acceptance_rate": {
+            "ci_lower": 0.8315412186379928,
+            "ci_upper": 0.8738951544487273,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.8545454545454545
+          },
+          "mtp_accepted_tokens": {
+            "ci_lower": 232.0,
+            "ci_upper": 238.03616071428587,
+            "confidence_level": 0.9982142857142857,
+            "median": 235.0
+          },
+          "mtp_proposed_tokens": {
+            "ci_lower": 272.4276785714286,
+            "ci_upper": 279.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 275.0
+          },
+          "peak_phys_footprint_bytes": {
+            "ci_lower": 24592040664.0,
+            "ci_upper": 24592818904.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 24592663256.0
+          },
+          "per_request_decode_tps": {
+            "ci_lower": 105.33153768136349,
+            "ci_upper": 108.47479942582375,
+            "confidence_level": 0.9982142857142857,
+            "median": 106.99305521868934
+          },
+          "per_request_tps": {
+            "ci_lower": 88.32332038008762,
+            "ci_upper": 90.54204216335955,
+            "confidence_level": 0.9982142857142857,
+            "median": 89.49082605128561
+          },
+          "target_forwards_per_committed_token": {
+            "ci_lower": 0.5331324986049107,
+            "ci_upper": 0.544921875,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.5390625
+          },
+          "ttft_p50_seconds": {
+            "ci_lower": 0.9429035186767578,
+            "ci_upper": 0.9452760219573975,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.9441649913787842
+          },
+          "ttft_p95_seconds": {
+            "ci_lower": 0.9429035186767578,
+            "ci_upper": 0.9452760219573975,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.9441649913787842
+          }
+        },
+        "ordinary": {
+          "aggregate_committed_tps": {
+            "ci_lower": 69.60384086479905,
+            "ci_upper": 80.65320929610743,
+            "confidence_level": 0.9982142857142857,
+            "median": 80.52470926073289
+          },
+          "aggregate_decode_tps": {
+            "ci_lower": 79.24852018376446,
+            "ci_upper": 93.90604882729855,
+            "confidence_level": 0.9982142857142857,
+            "median": 93.74043934450947
+          },
+          "capacity_rejection_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "fallback_error_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "inter_token_gap_p50_seconds": {
+            "ci_lower": 0.010652482509613037,
+            "ci_upper": 0.010685503482818604,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.010673999786376953
+          },
+          "inter_token_gap_p95_seconds": {
+            "ci_lower": 0.011402386426925658,
+            "ci_upper": 0.03241484165191651,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.011445832252502442
+          },
+          "mtp_accepted_tokens": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "mtp_proposed_tokens": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "peak_phys_footprint_bytes": {
+            "ci_lower": 24592122584.0,
+            "ci_upper": 24592885032.45714,
+            "confidence_level": 0.9982142857142857,
+            "median": 24592720600.0
+          },
+          "per_request_decode_tps": {
+            "ci_lower": 79.24852018376446,
+            "ci_upper": 93.90604882729855,
+            "confidence_level": 0.9982142857142857,
+            "median": 93.74043934450947
+          },
+          "per_request_tps": {
+            "ci_lower": 69.60510762441517,
+            "ci_upper": 80.65520473287717,
+            "confidence_level": 0.9982142857142857,
+            "median": 80.52665307900071
+          },
+          "ttft_p50_seconds": {
+            "ci_lower": 0.9062760739986385,
+            "ci_upper": 0.9077349901199341,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.9069929718971252
+          },
+          "ttft_p95_seconds": {
+            "ci_lower": 0.9062760739986385,
+            "ci_upper": 0.9077349901199341,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.9069929718971252
+          }
+        }
+      },
+      "required_blocks": 10,
+      "status": "FAIL",
+      "sustained_duration_seconds": 0,
+      "sustained_min_available_memory_fraction": 0,
+      "sustained_runs": 0,
+      "thermal_end_states": [
+        "nominal"
+      ],
+      "thermal_start_states": [
+        "nominal"
+      ]
+    },
+    {
+      "acceptance_rate": 0.9166666666666666,
+      "cell_class": "native_eligible",
+      "cell_id": "s1-p4096-o128",
+      "decode_tps_sources": [
+        "recorded"
+      ],
+      "forwards_per_committed_token": 0.51953125,
+      "hard_failures": [],
+      "informational_metrics": {
+        "end_to_end_throughput": {
+          "ci_lower": 0.0052099515703579735,
+          "ci_upper": 0.017942684562017197,
+          "confidence_level": 0.95,
+          "gated": false,
+          "median": 0.012232797838276355
+        }
+      },
+      "load_gate_downgrades": 0,
+      "memory_failures": [],
+      "metric_failures": [
+        "throughput",
+        "itl"
+      ],
+      "metrics": {
+        "itl": {
+          "confidence_level": 0.95,
+          "corrected_upper_bound": 0.5656547394919049,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.05,
+          "holm_rank": 24,
+          "median": 0.5515448770281443,
+          "p_value": 1.0,
+          "status": "FAIL",
+          "threshold": 0.0
+        },
+        "rejection": {
+          "confidence_level": 0.9973684210526316,
+          "corrected_upper_bound": 0.0,
+          "holm_adjusted_p_value": 0.0023997600239976003,
+          "holm_alpha": 0.002631578947368421,
+          "holm_rank": 6,
+          "median": 0.0,
+          "p_value": 9.999000099990002e-05,
+          "status": "PASS",
+          "threshold": 1.0
+        },
+        "throughput": {
+          "confidence_level": 0.9916666666666667,
+          "corrected_lower_bound": 0.1101656582887548,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.008333333333333333,
+          "holm_rank": 19,
+          "median": 0.1382511585290056,
+          "p_value": 0.797920207979202,
+          "status": "FAIL",
+          "threshold": 0.15
+        },
+        "ttft": {
+          "confidence_level": 0.9975,
+          "corrected_upper_bound": 0.05364447315567511,
+          "holm_adjusted_p_value": 0.0023997600239976003,
+          "holm_alpha": 0.0025,
+          "holm_rank": 5,
+          "median": 0.050151967206523484,
+          "p_value": 9.999000099990002e-05,
+          "status": "PASS",
+          "threshold": 0.1
+        }
+      },
+      "min_available_memory_fraction": 0.6912230849266052,
+      "paired_blocks": 10,
+      "peak_phys_footprint_bytes": 26885604200,
+      "reported_metrics": {
+        "native_mtp": {
+          "aggregate_committed_tps": {
+            "ci_lower": 30.220390914356557,
+            "ci_upper": 34.264359991524195,
+            "confidence_level": 0.9982142857142857,
+            "median": 33.91473410252106
+          },
+          "aggregate_decode_tps": {
+            "ci_lower": 79.42438177473329,
+            "ci_upper": 106.44484482280052,
+            "confidence_level": 0.9982142857142857,
+            "median": 103.70846264337447
+          },
+          "capacity_rejection_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "fallback_error_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "inter_token_gap_p50_seconds": {
+            "ci_lower": 0.017932236194610596,
+            "ci_upper": 0.01806250201272113,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.018009483814239502
+          },
+          "inter_token_gap_p95_seconds": {
+            "ci_lower": 0.01857452392578125,
+            "ci_upper": 0.03624789470274535,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.018638479709625243
+          },
+          "mtp_acceptance_rate": {
+            "ci_lower": 0.8602941176470589,
+            "ci_upper": 0.9538461538461539,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.9166666666666666
+          },
+          "mtp_accepted_tokens": {
+            "ci_lower": 58.5,
+            "ci_upper": 62.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 60.5
+          },
+          "mtp_proposed_tokens": {
+            "ci_lower": 65.0,
+            "ci_upper": 68.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 66.0
+          },
+          "peak_phys_footprint_bytes": {
+            "ci_lower": 26844357456.0,
+            "ci_upper": 26884686696.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 26871628636.0
+          },
+          "per_request_decode_tps": {
+            "ci_lower": 79.42438177473329,
+            "ci_upper": 106.44484482280052,
+            "confidence_level": 0.9982142857142857,
+            "median": 103.70846264337447
+          },
+          "per_request_tps": {
+            "ci_lower": 30.22176448140103,
+            "ci_upper": 34.26616449666465,
+            "confidence_level": 0.9982142857142857,
+            "median": 33.91650005528724
+          },
+          "target_forwards_per_committed_token": {
+            "ci_lower": 0.5078125,
+            "ci_upper": 0.53515625,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.51953125
+          },
+          "ttft_p50_seconds": {
+            "ci_lower": 2.5436025261878967,
+            "ci_upper": 2.554009974002838,
+            "confidence_level": 0.9982142857142857,
+            "median": 2.5487850308418274
+          },
+          "ttft_p95_seconds": {
+            "ci_lower": 2.5436025261878967,
+            "ci_upper": 2.554009974002838,
+            "confidence_level": 0.9982142857142857,
+            "median": 2.5487850308418274
+          }
+        },
+        "ordinary": {
+          "aggregate_committed_tps": {
+            "ci_lower": 33.320495152069554,
+            "ci_upper": 33.56767363548667,
+            "confidence_level": 0.9982142857142857,
+            "median": 33.50322317392076
+          },
+          "aggregate_decode_tps": {
+            "ci_lower": 90.9983303712449,
+            "ci_upper": 91.40833911299637,
+            "confidence_level": 0.9982142857142857,
+            "median": 91.119182410262
+          },
+          "capacity_rejection_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "fallback_error_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "inter_token_gap_p50_seconds": {
+            "ci_lower": 0.010930776596069336,
+            "ci_upper": 0.010974526405334473,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.010956525802612305
+          },
+          "inter_token_gap_p95_seconds": {
+            "ci_lower": 0.011897444725036621,
+            "ci_upper": 0.012222766876220703,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.012047117948532105
+          },
+          "mtp_accepted_tokens": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "mtp_proposed_tokens": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "peak_phys_footprint_bytes": {
+            "ci_lower": 26844537680.0,
+            "ci_upper": 26885178216.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 26871726940.0
+          },
+          "per_request_decode_tps": {
+            "ci_lower": 90.9983303712449,
+            "ci_upper": 91.40833911299637,
+            "confidence_level": 0.9982142857142857,
+            "median": 91.119182410262
+          },
+          "per_request_tps": {
+            "ci_lower": 33.32191479211508,
+            "ci_upper": 33.56921054840077,
+            "confidence_level": 0.9982142857142857,
+            "median": 33.50484565898523
+          },
+          "ttft_p50_seconds": {
+            "ci_lower": 2.422409474849701,
+            "ci_upper": 2.4472780227661133,
+            "confidence_level": 0.9982142857142857,
+            "median": 2.4270350337028503
+          },
+          "ttft_p95_seconds": {
+            "ci_lower": 2.422409474849701,
+            "ci_upper": 2.4472780227661133,
+            "confidence_level": 0.9982142857142857,
+            "median": 2.4270350337028503
+          }
+        }
+      },
+      "required_blocks": 10,
+      "status": "FAIL",
+      "sustained_duration_seconds": 0,
+      "sustained_min_available_memory_fraction": 0,
+      "sustained_runs": 0,
+      "thermal_end_states": [
+        "nominal"
+      ],
+      "thermal_start_states": [
+        "nominal"
+      ]
+    },
+    {
+      "acceptance_rate": 0.8429777916796997,
+      "cell_class": "native_eligible",
+      "cell_id": "s1-p4096-o512",
+      "decode_tps_sources": [
+        "recorded"
+      ],
+      "forwards_per_committed_token": 0.5419921875,
+      "hard_failures": [],
+      "informational_metrics": {
+        "end_to_end_throughput": {
+          "ci_lower": 0.05114292177345159,
+          "ci_upper": 0.1411604234035082,
+          "confidence_level": 0.95,
+          "gated": false,
+          "median": 0.059304046394199506
+        }
+      },
+      "load_gate_downgrades": 0,
+      "memory_failures": [],
+      "metric_failures": [
+        "throughput",
+        "itl"
+      ],
+      "metrics": {
+        "itl": {
+          "confidence_level": 0.9833333333333333,
+          "corrected_upper_bound": 0.553269183338052,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.016666666666666666,
+          "holm_rank": 22,
+          "median": 0.5465808821759295,
+          "p_value": 0.9526047395260474,
+          "status": "FAIL",
+          "threshold": 0.0
+        },
+        "rejection": {
+          "confidence_level": 0.9970588235294118,
+          "corrected_upper_bound": 0.0,
+          "holm_adjusted_p_value": 0.0023997600239976003,
+          "holm_alpha": 0.0029411764705882353,
+          "holm_rank": 8,
+          "median": 0.0,
+          "p_value": 9.999000099990002e-05,
+          "status": "PASS",
+          "threshold": 1.0
+        },
+        "throughput": {
+          "confidence_level": 0.9875,
+          "corrected_lower_bound": 0.09977518836740384,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.0125,
+          "holm_rank": 21,
+          "median": 0.10890834572182029,
+          "p_value": 0.8478152184781522,
+          "status": "FAIL",
+          "threshold": 0.15
+        },
+        "ttft": {
+          "confidence_level": 0.9972222222222222,
+          "corrected_upper_bound": 0.05182156178418951,
+          "holm_adjusted_p_value": 0.0023997600239976003,
+          "holm_alpha": 0.002777777777777778,
+          "holm_rank": 7,
+          "median": 0.04985451509516048,
+          "p_value": 9.999000099990002e-05,
+          "status": "PASS",
+          "threshold": 0.1
+        }
+      },
+      "min_available_memory_fraction": 0.6866143345832825,
+      "paired_blocks": 10,
+      "peak_phys_footprint_bytes": 29093348224,
+      "reported_metrics": {
+        "native_mtp": {
+          "aggregate_committed_tps": {
+            "ci_lower": 66.57806001371875,
+            "ci_upper": 67.45776777302069,
+            "confidence_level": 0.9982142857142857,
+            "median": 66.79733530229063
+          },
+          "aggregate_decode_tps": {
+            "ci_lower": 99.37728777432578,
+            "ci_upper": 101.35447356744042,
+            "confidence_level": 0.9982142857142857,
+            "median": 99.91980722531719
+          },
+          "capacity_rejection_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "fallback_error_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "inter_token_gap_p50_seconds": {
+            "ci_lower": 0.017801225185394287,
+            "ci_upper": 0.017921507358551025,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.017864733934402466
+          },
+          "inter_token_gap_p95_seconds": {
+            "ci_lower": 0.018550127744674683,
+            "ci_upper": 0.018637463450431824,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.018609130382537843
+          },
+          "mtp_acceptance_rate": {
+            "ci_lower": 0.8312446816740157,
+            "ci_upper": 0.8681318681318682,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.8429777916796997
+          },
+          "mtp_accepted_tokens": {
+            "ci_lower": 231.5,
+            "ci_upper": 237.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 233.5
+          },
+          "mtp_proposed_tokens": {
+            "ci_lower": 273.0,
+            "ci_upper": 279.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 277.0
+          },
+          "peak_phys_footprint_bytes": {
+            "ci_lower": 29092397952.0,
+            "ci_upper": 29092791168.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 29092561792.0
+          },
+          "per_request_decode_tps": {
+            "ci_lower": 99.37728777432578,
+            "ci_upper": 101.35447356744042,
+            "confidence_level": 0.9982142857142857,
+            "median": 99.91980722531719
+          },
+          "per_request_tps": {
+            "ci_lower": 66.5797660426563,
+            "ci_upper": 67.45952356618221,
+            "confidence_level": 0.9982142857142857,
+            "median": 66.799003773403
+          },
+          "target_forwards_per_committed_token": {
+            "ci_lower": 0.53515625,
+            "ci_upper": 0.5458984375,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.5419921875
+          },
+          "ttft_p50_seconds": {
+            "ci_lower": 2.543677508831024,
+            "ci_upper": 2.5517300367355347,
+            "confidence_level": 0.9982142857142857,
+            "median": 2.55080646276474
+          },
+          "ttft_p95_seconds": {
+            "ci_lower": 2.543677508831024,
+            "ci_upper": 2.5517300367355347,
+            "confidence_level": 0.9982142857142857,
+            "median": 2.55080646276474
+          }
+        },
+        "ordinary": {
+          "aggregate_committed_tps": {
+            "ci_lower": 46.162633134422045,
+            "ci_upper": 63.81863661569769,
+            "confidence_level": 0.9982142857142857,
+            "median": 63.62813267247369
+          },
+          "aggregate_decode_tps": {
+            "ci_lower": 60.084709366407225,
+            "ci_upper": 91.38851945896943,
+            "confidence_level": 0.9982142857142857,
+            "median": 91.05256375193736
+          },
+          "capacity_rejection_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "fallback_error_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "inter_token_gap_p50_seconds": {
+            "ci_lower": 0.010929945696677481,
+            "ci_upper": 0.020906716585159302,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.010955989360809326
+          },
+          "inter_token_gap_p95_seconds": {
+            "ci_lower": 0.01198982405609318,
+            "ci_upper": 0.034824714064598083,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.012014570832252502
+          },
+          "mtp_accepted_tokens": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "mtp_proposed_tokens": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 0.0
+          },
+          "peak_phys_footprint_bytes": {
+            "ci_lower": 29092553600.0,
+            "ci_upper": 29093249920.0,
+            "confidence_level": 0.9982142857142857,
+            "median": 29092701056.0
+          },
+          "per_request_decode_tps": {
+            "ci_lower": 60.084709366407225,
+            "ci_upper": 91.38851945896943,
+            "confidence_level": 0.9982142857142857,
+            "median": 91.05256375193736
+          },
+          "per_request_tps": {
+            "ci_lower": 46.16345196485109,
+            "ci_upper": 63.82017335850666,
+            "confidence_level": 0.9982142857142857,
+            "median": 63.62967438408511
+          },
+          "ttft_p50_seconds": {
+            "ci_lower": 2.4249714296843323,
+            "ci_upper": 2.568196952342987,
+            "confidence_level": 0.9982142857142857,
+            "median": 2.4314475059509277
+          },
+          "ttft_p95_seconds": {
+            "ci_lower": 2.4249714296843323,
+            "ci_upper": 2.568196952342987,
+            "confidence_level": 0.9982142857142857,
+            "median": 2.4314475059509277
+          }
+        }
+      },
+      "required_blocks": 10,
+      "status": "FAIL",
+      "sustained_duration_seconds": 0,
+      "sustained_min_available_memory_fraction": 0,
+      "sustained_runs": 0,
+      "thermal_end_states": [
+        "nominal"
+      ],
+      "thermal_start_states": [
+        "nominal"
+      ]
+    },
+    {
+      "acceptance_rate": null,
+      "cell_class": "gated",
+      "cell_id": "s2-p1536-o512",
+      "decode_tps_sources": [
+        "recorded"
+      ],
+      "forwards_per_committed_token": 0.0,
+      "hard_failures": [],
+      "informational_metrics": {
+        "end_to_end_throughput": {
+          "ci_lower": -0.05161970861103293,
+          "ci_upper": 0.02878355077005057,
+          "confidence_level": 0.95,
+          "gated": false,
+          "median": -0.007754482142021346
+        }
+      },
+      "load_gate_downgrades": 10,
+      "memory_failures": [],
+      "metric_failures": [
+        "throughput",
+        "itl"
+      ],
+      "metrics": {
+        "itl": {
+          "confidence_level": 0.99375,
+          "corrected_upper_bound": 1.0397714508354863,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.00625,
+          "holm_rank": 17,
+          "median": 0.028507692092180292,
+          "p_value": 0.36566343365663434,
+          "status": "FAIL",
+          "threshold": 0.05
+        },
+        "rejection": {
+          "confidence_level": 0.9966666666666667,
+          "corrected_upper_bound": 0.0,
+          "holm_adjusted_p_value": 0.0023997600239976003,
+          "holm_alpha": 0.0033333333333333335,
+          "holm_rank": 10,
+          "median": 0.0,
+          "p_value": 9.999000099990002e-05,
+          "status": "PASS",
+          "threshold": 1.0
+        },
+        "throughput": {
+          "confidence_level": 0.995,
+          "corrected_lower_bound": -0.08187667637138041,
+          "holm_adjusted_p_value": 1.0,
+          "holm_alpha": 0.005,
+          "holm_rank": 15,
+          "median": -0.004846985005756588,
+          "p_value": 0.10188981101889812,
+          "status": "FAIL",
+          "threshold": -0.05
+        },
+        "ttft": {
+          "confidence_level": 0.996875,
+          "corrected_upper_bound": 0.0277305190061794,
+          "holm_adjusted_p_value": 0.0023997600239976003,
+          "holm_alpha": 0.003125,
+          "holm_rank": 9,
+          "median": 0.02012077597045847,
+          "p_value": 9.999000099990002e-05,
+          "status": "PASS",
+          "threshold": 0.05
+        }
+      },
+      "min_available_memory_fraction": 0.6792020797729492,
+      "paired_blocks": 10,
+      "peak_phys_footprint_bytes": 30553097112,
+      "reported_metrics": {
+        "native_mtp": {
+          "aggregate_committed_tps": {
+            "ci_lower": 99.7243994176067,
+            "ci_upper": 108.87424350604333,
+            "confidence_level": 0.9981481481481481,
+            "median": 108.52239588101315
+          },
+          "aggregate_decode_tps": {
+            "ci_lower": 109.77259467851216,
+            "ci_upper": 120.96066631167419,
+            "confidence_level": 0.9981481481481481,
+            "median": 120.58305846437719
+          },
+          "capacity_rejection_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "fallback_error_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "inter_token_gap_p50_seconds": {
+            "ci_lower": 0.014116525650024414,
+            "ci_upper": 0.0142744779586792,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.014181554317474365
+          },
+          "inter_token_gap_p95_seconds": {
+            "ci_lower": 0.017580795288085933,
+            "ci_upper": 0.04052749204138942,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.017827522754669183
+          },
+          "mtp_accepted_tokens": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "mtp_proposed_tokens": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "peak_phys_footprint_bytes": {
+            "ci_lower": 30551974808.0,
+            "ci_upper": 30553097112.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 30552581016.0
+          },
+          "per_request_decode_tps": {
+            "ci_lower": 59.06310357353908,
+            "ci_upper": 65.60014667234843,
+            "confidence_level": 0.9981481481481481,
+            "median": 65.38604189714079
+          },
+          "per_request_tps": {
+            "ci_lower": 50.70833908126906,
+            "ci_upper": 55.446812407092146,
+            "confidence_level": 0.9981481481481481,
+            "median": 55.26098411038976
+          },
+          "target_forwards_per_committed_token": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "ttft_p50_seconds": {
+            "ci_lower": 1.4084942263861497,
+            "ci_upper": 1.4188617765903473,
+            "confidence_level": 0.9981481481481481,
+            "median": 1.4131094813346863
+          },
+          "ttft_p95_seconds": {
+            "ci_lower": 1.8148074716329574,
+            "ci_upper": 1.8297537863254547,
+            "confidence_level": 0.9981481481481481,
+            "median": 1.8209404289722442
+          }
+        },
+        "ordinary": {
+          "aggregate_committed_tps": {
+            "ci_lower": 102.06352746094772,
+            "ci_upper": 109.9839499519874,
+            "confidence_level": 0.9981481481481481,
+            "median": 109.41042651032986
+          },
+          "aggregate_decode_tps": {
+            "ci_lower": 112.65722659451761,
+            "ci_upper": 121.77441714970186,
+            "confidence_level": 0.9981481481481481,
+            "median": 121.09807926124849
+          },
+          "capacity_rejection_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "fallback_error_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "inter_token_gap_p50_seconds": {
+            "ci_lower": 0.014161944389343262,
+            "ci_upper": 0.01429399847984314,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.014239698648452759
+          },
+          "inter_token_gap_p95_seconds": {
+            "ci_lower": 0.017145803570747374,
+            "ci_upper": 0.030726671467224766,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.017317637801170346
+          },
+          "mtp_accepted_tokens": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "mtp_proposed_tokens": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "peak_phys_footprint_bytes": {
+            "ci_lower": 30552105880.0,
+            "ci_upper": 30553097112.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 30552679320.0
+          },
+          "per_request_decode_tps": {
+            "ci_lower": 61.73881973739694,
+            "ci_upper": 66.07163071120154,
+            "confidence_level": 0.9981481481481481,
+            "median": 65.68646350991506
+          },
+          "per_request_tps": {
+            "ci_lower": 51.91030531722413,
+            "ci_upper": 56.01923459652822,
+            "confidence_level": 0.9981481481481481,
+            "median": 55.71664945619031
+          },
+          "ttft_p50_seconds": {
+            "ci_lower": 1.3702287375926971,
+            "ci_upper": 1.5645374971131485,
+            "confidence_level": 0.9981481481481481,
+            "median": 1.375181496143341
+          },
+          "ttft_p95_seconds": {
+            "ci_lower": 1.7764578253030776,
+            "ci_upper": 2.1237033000836774,
+            "confidence_level": 0.9981481481481481,
+            "median": 1.7834084510803223
+          }
+        }
+      },
+      "required_blocks": 10,
+      "status": "FAIL",
+      "sustained_duration_seconds": 0,
+      "sustained_min_available_memory_fraction": 0,
+      "sustained_runs": 0,
+      "thermal_end_states": [
+        "nominal"
+      ],
+      "thermal_start_states": [
+        "nominal"
+      ]
+    },
+    {
+      "acceptance_rate": null,
+      "cell_class": "gated",
+      "cell_id": "s8-p1536-o512",
+      "decode_tps_sources": [
+        "recorded"
+      ],
+      "forwards_per_committed_token": 0.0,
+      "hard_failures": [],
+      "informational_metrics": {
+        "end_to_end_throughput": {
+          "ci_lower": -0.017027039183127368,
+          "ci_upper": 0.03910948323644847,
+          "confidence_level": 0.95,
+          "gated": false,
+          "median": 0.010225893059102265
+        }
+      },
+      "load_gate_downgrades": 315,
+      "memory_failures": [],
+      "metric_failures": [],
+      "metrics": {
+        "itl": {
+          "confidence_level": 0.9958333333333333,
+          "corrected_upper_bound": 0.02631803507465391,
+          "holm_adjusted_p_value": 0.017998200179982,
+          "holm_alpha": 0.004166666666666667,
+          "holm_rank": 13,
+          "median": 0.010620238312158636,
+          "p_value": 0.0014998500149985001,
+          "status": "PASS",
+          "threshold": 0.05
+        },
+        "rejection": {
+          "confidence_level": 0.9961538461538462,
+          "corrected_upper_bound": 0.0,
+          "holm_adjusted_p_value": 0.0023997600239976003,
+          "holm_alpha": 0.0038461538461538464,
+          "holm_rank": 12,
+          "median": 0.0,
+          "p_value": 9.999000099990002e-05,
+          "status": "PASS",
+          "threshold": 1.0
+        },
+        "throughput": {
+          "confidence_level": 0.9964285714285714,
+          "corrected_lower_bound": -0.031260481758031755,
+          "holm_adjusted_p_value": 0.0023997600239976003,
+          "holm_alpha": 0.0035714285714285718,
+          "holm_rank": 11,
+          "median": 0.01233896581262306,
+          "p_value": 9.999000099990002e-05,
+          "status": "PASS",
+          "threshold": -0.05
+        },
+        "ttft": {
+          "confidence_level": 0.9954545454545455,
+          "corrected_upper_bound": 0.011506561798797055,
+          "holm_adjusted_p_value": 0.017998200179982,
+          "holm_alpha": 0.004545454545454546,
+          "holm_rank": 14,
+          "median": 0.004688869135500928,
+          "p_value": 0.0015998400159984002,
+          "status": "PASS",
+          "threshold": 0.05
+        }
+      },
+      "min_available_memory_fraction": 0.6339905858039856,
+      "paired_blocks": 10,
+      "peak_phys_footprint_bytes": 42334355080,
+      "reported_metrics": {
+        "native_mtp": {
+          "aggregate_committed_tps": {
+            "ci_lower": 170.5565996785207,
+            "ci_upper": 175.59208311615401,
+            "confidence_level": 0.9981481481481481,
+            "median": 175.17572267459002
+          },
+          "aggregate_decode_tps": {
+            "ci_lower": 177.4160334986655,
+            "ci_upper": 182.84112101516698,
+            "confidence_level": 0.9981481481481481,
+            "median": 182.4012413999262
+          },
+          "capacity_rejection_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "fallback_error_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "inter_token_gap_p50_seconds": {
+            "ci_lower": 0.03054507573445638,
+            "ci_upper": 0.030874550342559814,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.030678987503051758
+          },
+          "inter_token_gap_p95_seconds": {
+            "ci_lower": 0.04486205990115802,
+            "ci_upper": 0.05334955453872679,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.04520824253559111
+          },
+          "mtp_accepted_tokens": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "mtp_proposed_tokens": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "peak_phys_footprint_bytes": {
+            "ci_lower": 41876292864.0,
+            "ci_upper": 41881912600.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 41881691404.0
+          },
+          "per_request_decode_tps": {
+            "ci_lower": 28.871498457841277,
+            "ci_upper": 29.706485073801694,
+            "confidence_level": 0.9981481481481481,
+            "median": 29.620984465365275
+          },
+          "per_request_tps": {
+            "ci_lower": 22.416870436051013,
+            "ci_upper": 23.112214418016528,
+            "confidence_level": 0.9981481481481481,
+            "median": 23.056070976990274
+          },
+          "target_forwards_per_committed_token": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "ttft_p50_seconds": {
+            "ci_lower": 5.142758250236511,
+            "ci_upper": 5.5091292560100555,
+            "confidence_level": 0.9981481481481481,
+            "median": 5.148820787668228
+          },
+          "ttft_p95_seconds": {
+            "ci_lower": 6.017074865102768,
+            "ci_upper": 6.386762645840644,
+            "confidence_level": 0.9981481481481481,
+            "median": 6.024884077906608
+          }
+        },
+        "ordinary": {
+          "aggregate_committed_tps": {
+            "ci_lower": 168.17842498427456,
+            "ci_upper": 176.32558062548406,
+            "confidence_level": 0.9981481481481481,
+            "median": 172.0343352034402
+          },
+          "aggregate_decode_tps": {
+            "ci_lower": 174.56178096226586,
+            "ci_upper": 183.3279394798547,
+            "confidence_level": 0.9981481481481481,
+            "median": 178.70391626389628
+          },
+          "capacity_rejection_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "fallback_error_rate": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "inter_token_gap_p50_seconds": {
+            "ci_lower": 0.030589699745178223,
+            "ci_upper": 0.03088062256574631,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.03067922592163086
+          },
+          "inter_token_gap_p95_seconds": {
+            "ci_lower": 0.04403035938739776,
+            "ci_upper": 0.0622547187904517,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.04456633329391478
+          },
+          "mtp_accepted_tokens": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "mtp_proposed_tokens": {
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "confidence_level": 0.9981481481481481,
+            "median": 0.0
+          },
+          "peak_phys_footprint_bytes": {
+            "ci_lower": 41875899660.0,
+            "ci_upper": 41881941132.36667,
+            "confidence_level": 0.9981481481481481,
+            "median": 41881724172.0
+          },
+          "per_request_decode_tps": {
+            "ci_lower": 27.993525366261096,
+            "ci_upper": 29.81975039253596,
+            "confidence_level": 0.9981481481481481,
+            "median": 29.376496189348
+          },
+          "per_request_tps": {
+            "ci_lower": 22.087875430160196,
+            "ci_upper": 23.22049080257891,
+            "confidence_level": 0.9981481481481481,
+            "median": 22.62186356010981
+          },
+          "ttft_p50_seconds": {
+            "ci_lower": 5.106184244155884,
+            "ci_upper": 5.586141255497933,
+            "confidence_level": 0.9981481481481481,
+            "median": 5.1187350153923035
+          },
+          "ttft_p95_seconds": {
+            "ci_lower": 5.971276396512986,
+            "ci_upper": 6.456609609723091,
+            "confidence_level": 0.9981481481481481,
+            "median": 5.991772964596748
+          }
+        }
+      },
+      "required_blocks": 10,
+      "status": "PASS",
+      "sustained_duration_seconds": 1829.619705080986,
+      "sustained_min_available_memory_fraction": 0.6339905858039856,
+      "sustained_runs": 70,
+      "thermal_end_states": [
+        "nominal"
+      ],
+      "thermal_start_states": [
+        "nominal"
+      ]
+    }
+  ],
+  "overall_status": "FAIL",
+  "policy_sha256": "2c8a234462c1d3dcaff16268915e714774bbf3fff0aa944880208e807707e19a",
+  "provider_commit": "280f0e95d623353873147e523391e78d71327c5b",
+  "schema": "macprovider.native-mtp-r015-analysis.v1",
+  "unavailable_metrics": []
+}

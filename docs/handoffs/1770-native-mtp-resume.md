@@ -20,6 +20,7 @@ campaign is released, deployed, or activated.
 | Private acceptance candidate | `v1.8.212`, workflow run `37075501296`, candidate `d806dcf203a94f813aadbe458c8de578be476bd0`, control `dac2ab8df6d1acd7bf54df61b2a604ac609780a4` | PASS; Developer ID signed, Apple notarized, stapled, and exported as a private `promotion_ready=false` artifact expiring `2026-10-03T23:42:32Z` |
 | Post-gateway replay analyzer | `e2a5b51fc` | Exact R004 mix semantics and frozen corrected gates; capture/replay pending |
 | Governance versions | `bfbdc0d94` | SPEC-023 v0.22.7 and SPEC-048 0.1.22 reconciled in `CONFORMANCE.json` |
+| R015 on chunked fused baseline, build 26A434 | policy `2c8a234462c1d3dcaff16268915e714774bbf3fff0aa944880208e807707e19a`, provider `280f0e95d`, PR #1859 | FAIL 2026-10-05: s1 decode LB +10.0..+13.6% (gate 15%), s1 ITL UB +54..+57% (gate 0), s2 gated decode LB -8.2% / ITL UB +104% (live-load noise); s8 + 1830 s sustained PASS, parity 0 mismatches. Cause: native step about 1.6x a fused ordinary forward; per-step chunk emission makes ITL structural. See `docs/research/spec048-r015/evidence-2026-10-06-a3b-fused-26a434/` |
 | Historical stock R015 | policy `30934c07e5b6ca6dfa569505bbfdb2fd118be719cba81ddf99193a4ebe72d581` | PASS, preserved, superseded for fused authorization |
 | Serving journey | `NativeMTPJourneyE2ECommand.swift` | Incomplete; deterministic step-07 harness committed |
 
