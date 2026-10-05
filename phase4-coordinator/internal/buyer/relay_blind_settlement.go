@@ -116,6 +116,18 @@ func (b *billingRecorder) recordRelayBlindRouteSnapshot(ctx context.Context, pro
 	if poolView.externalRuntimeCandidate(provider) {
 		return nil, fmt.Errorf("relay-blind settlement is global-pool only")
 	}
+	// SPEC-047-R001: the paid-routing evaluation the plaintext route runs at
+	// selection, remembered so the compare-and-insert can check the legacy
+	// admission generation. Relay-blind selected the session at reservation,
+	// so it evaluates here, immediately before the snapshot.
+	eligibility := b.server.byomPaidRoutingEligibilityForRoute(ctx, provider, poolView)
+	if !eligibility.eligible {
+		if eligibility.storePressure {
+			return nil, fmt.Errorf("%w: relay-blind admission evaluation", billing.ErrRouteSnapshotStorePressure)
+		}
+		return nil, fmt.Errorf("relay-blind provider is not paid-routing eligible")
+	}
+	b.server.rememberLegacyModelAdmissionRouteExpectation(b.state, provider, eligibility)
 	byomBinding, err := b.server.requireBYOMRouteSnapshotBindingForRoute(ctx, provider, prereq.material, poolView)
 	if err != nil {
 		return nil, wrapRouteSnapshotGuardPressure(err)

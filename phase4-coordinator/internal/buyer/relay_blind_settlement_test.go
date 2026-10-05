@@ -51,7 +51,7 @@ type relayBlindSettlementFixture struct {
 	registry        *pool.Registry
 }
 
-func newRelayBlindSettlementFixture(t *testing.T, now time.Time, mode, profile string, mutate func(*pool.Provider), relay RelayBlindRelayFunc) relayBlindSettlementFixture {
+func newRelayBlindSettlementFixture(t *testing.T, now time.Time, mode, profile string, mutate func(*pool.Provider), relay RelayBlindRelayFunc, opts ...Option) relayBlindSettlementFixture {
 	t.Helper()
 	withModelACatalogMaterial(t)
 	store, err := relayblind.OpenStore(filepath.Join(t.TempDir(), "relay-blind.sqlite"))
@@ -111,8 +111,9 @@ func newRelayBlindSettlementFixture(t *testing.T, now time.Time, mode, profile s
 	cfg.MaxActiveReservations = 100
 	cfg.MetadataRequestsPerMinute = 100
 	cfg.EnforceSettlementProfile = profile
-	server := NewServer(registry, zerolog.Nop(), now, WithGatewayServiceToken("gateway-token"), WithRequireGatewayContext(true),
-		WithRequestLog(reqLog), WithBilling(billingStore, config.Default().Rewards), WithBillingSnapshotID(snapshotID), WithRelayBlind(cfg, store, relay))
+	opts = append([]Option{WithGatewayServiceToken("gateway-token"), WithRequireGatewayContext(true),
+		WithRequestLog(reqLog), WithBilling(billingStore, config.Default().Rewards), WithBillingSnapshotID(snapshotID), WithRelayBlind(cfg, store, relay)}, opts...)
+	server := NewServer(registry, zerolog.Nop(), now, opts...)
 	server.now = func() time.Time { return now }
 	return relayBlindSettlementFixture{server: server, billing: billingStore, db: reqLog.DB(), providerPrivate: providerPrivate, receiptPrivate: receiptPrivate, registry: registry}
 }
@@ -277,6 +278,53 @@ func TestRelayBlindEnforceRecordsSnapshotBeforeDispatch(t *testing.T) {
 				t.Fatalf("ledger settlement_policy_mode=%q want enforce", policy)
 			}
 		})
+	}
+}
+
+// relayBlindLegacyRouteGuard is the SPEC-047-R001 legacy compare-and-insert
+// guard a production coordinator wires: it records each expectation.
+type relayBlindLegacyRouteGuard struct {
+	mu      sync.Mutex
+	expects []providerws.ModelAdmissionRouteExpectation
+}
+
+func (g *relayBlindLegacyRouteGuard) ModelAdmissionBindingGeneration(string) uint64 { return 7 }
+
+func (g *relayBlindLegacyRouteGuard) CompareAndInsertModelAdmissionRouteSnapshot(_ context.Context, expect providerws.ModelAdmissionRouteExpectation, insert func() error) error {
+	g.mu.Lock()
+	g.expects = append(g.expects, expect)
+	g.mu.Unlock()
+	if expect.CandidateID != "" {
+		return providerws.ErrModelAdmissionRouteStale
+	}
+	return insert()
+}
+
+// With the model-admission store and route guard wired, as in production, the
+// relay-blind snapshot evaluates and remembers the legacy admission route
+// expectation itself, because relay-blind selects its session at reservation
+// and never runs the plaintext selection that records it.
+func TestRelayBlindEnforceSnapshotWithModelAdmissionGuard(t *testing.T) {
+	now := time.Unix(1_800_200_300, 0).UTC()
+	guard := &relayBlindLegacyRouteGuard{}
+	var snapshotsAtDispatch int
+	var f relayBlindSettlementFixture
+	f = newRelayBlindSettlementFixture(t, now, billing.RouteSnapshotModeEnforce, config.RelayBlindSettlementProfileV1, nil,
+		func(_ context.Context, _ pool.Provider, requestID string, _ []byte, _ bool, relayContext providerws.RelayBlindDispatchContext) (*providerws.RelayStream, error) {
+			_ = f.db.QueryRow(`SELECT COUNT(*) FROM settlement_route_snapshots`).Scan(&snapshotsAtDispatch)
+			return relayBlindFixtureStream(requestID, relayContext, false), nil
+		},
+		WithModelAdmissionStore(providerws.NewMemoryModelAdmissionStore()), WithModelAdmissionRouteGuard(guard))
+	if _, _, code := relayBlindFixtureExecute(t, f, now, false); code != http.StatusOK {
+		t.Fatalf("chat status=%d", code)
+	}
+	if snapshotsAtDispatch != 1 {
+		t.Fatalf("journaled snapshots at dispatch=%d want 1", snapshotsAtDispatch)
+	}
+	guard.mu.Lock()
+	defer guard.mu.Unlock()
+	if len(guard.expects) != 1 || guard.expects[0].ProviderID != "provider-a" || guard.expects[0].CandidateID != "" {
+		t.Fatalf("route guard expectations=%+v want one legacy expectation for provider-a", guard.expects)
 	}
 }
 
