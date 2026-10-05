@@ -441,12 +441,18 @@ func TestMoneySQLiteWALCheckpointerKeepsCheckpointingUnderSustainedWrites(t *tes
 		}
 	}()
 
+	// Wait for both conditions the assertions below need: on a slow runner the
+	// checkpointer can reach three positive checkpoints before the writer has
+	// made 20 writes, which failed the write-count check without any defect.
 	deadline := time.After(2 * time.Second)
-	for observer.positiveCheckpointed.Load() < 3 {
+	recheck := time.NewTicker(10 * time.Millisecond)
+	defer recheck.Stop()
+	for observer.positiveCheckpointed.Load() < 3 || writes.Load() < 20 {
 		select {
 		case err := <-writerErr:
 			t.Fatalf("sustained writer failed after %d writes: %v", writes.Load(), err)
 		case <-observer.checkpointed:
+		case <-recheck.C:
 		case <-deadline:
 			t.Fatalf("checkpointed positive frames %d times after %d writes; latest busy=%d log=%d checkpointed=%d",
 				observer.positiveCheckpointed.Load(),

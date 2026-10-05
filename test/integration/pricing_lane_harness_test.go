@@ -354,7 +354,7 @@ func newPricingLane(t *testing.T, opts pricingLaneOpts) *pricingLane {
 		if i > 0 {
 			id = fmt.Sprintf("%s-%d", s.providerID, i)
 		}
-		slots[i] = slot{id: id, port: allocatePort(t)}
+		slots[i] = slot{id: id, port: reserveProviderPort(t)}
 		providerCfgs[i] = map[string]any{
 			"provider_id":  id,
 			"display_name": fmt.Sprintf("fake-pricing-%d", i),
