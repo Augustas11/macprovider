@@ -1254,8 +1254,31 @@ func TestTrustedPoolsProductionActivationRequiresCompleteExplicitGate(t *testing
 		want  string
 	}{
 		{
+			name: "missing manifest witness rejected",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.Enabled = true
+				cfg.TrustedPools.ManifestAcceptanceWitnessPath = ""
+				cfg.TrustedPools.ProductionActivation.EvidenceSHA256 = digest
+				cfg.TrustedPools.ProductionActivation.AllowedLaunchEnvironments = []string{"production"}
+				cfg.TrustedPools.ProductionActivation.RootCustodyHashes = []string{digest}
+			},
+			want: "manifest_acceptance_witness_path",
+		},
+		{
+			name: "relative manifest witness rejected",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.Enabled = true
+				cfg.TrustedPools.ManifestAcceptanceWitnessPath = "trustpool-witness.json"
+				cfg.TrustedPools.ProductionActivation.EvidenceSHA256 = digest
+				cfg.TrustedPools.ProductionActivation.AllowedLaunchEnvironments = []string{"production"}
+				cfg.TrustedPools.ProductionActivation.RootCustodyHashes = []string{digest}
+			},
+			want: "must be absolute",
+		},
+		{
 			name: "disabled trusted pools",
 			build: func(cfg *Config) {
+				cfg.TrustedPools.ManifestAcceptanceWitnessPath = "/var/lib/macprovider/trustpool-manifest-witness.json"
 				cfg.TrustedPools.ProductionActivation.EvidenceSHA256 = digest
 				cfg.TrustedPools.ProductionActivation.AllowedLaunchEnvironments = []string{"production"}
 				cfg.TrustedPools.ProductionActivation.RootCustodyHashes = []string{digest}
@@ -1266,6 +1289,7 @@ func TestTrustedPoolsProductionActivationRequiresCompleteExplicitGate(t *testing
 			name: "invalid evidence digest",
 			build: func(cfg *Config) {
 				cfg.TrustedPools.Enabled = true
+				cfg.TrustedPools.ManifestAcceptanceWitnessPath = "/var/lib/macprovider/trustpool-manifest-witness.json"
 				cfg.TrustedPools.ProductionActivation.EvidenceSHA256 = strings.ToUpper(digest)
 				cfg.TrustedPools.ProductionActivation.AllowedLaunchEnvironments = []string{"production"}
 				cfg.TrustedPools.ProductionActivation.RootCustodyHashes = []string{digest}
@@ -1276,6 +1300,7 @@ func TestTrustedPoolsProductionActivationRequiresCompleteExplicitGate(t *testing
 			name: "candidate environment rejected",
 			build: func(cfg *Config) {
 				cfg.TrustedPools.Enabled = true
+				cfg.TrustedPools.ManifestAcceptanceWitnessPath = "/var/lib/macprovider/trustpool-manifest-witness.json"
 				cfg.TrustedPools.ProductionActivation.EvidenceSHA256 = digest
 				cfg.TrustedPools.ProductionActivation.AllowedLaunchEnvironments = []string{"candidate"}
 				cfg.TrustedPools.ProductionActivation.RootCustodyHashes = []string{digest}
@@ -1286,6 +1311,7 @@ func TestTrustedPoolsProductionActivationRequiresCompleteExplicitGate(t *testing
 			name: "software custody class rejected",
 			build: func(cfg *Config) {
 				cfg.TrustedPools.Enabled = true
+				cfg.TrustedPools.ManifestAcceptanceWitnessPath = "/var/lib/macprovider/trustpool-manifest-witness.json"
 				cfg.TrustedPools.ProductionActivation.EvidenceSHA256 = digest
 				cfg.TrustedPools.ProductionActivation.AllowedLaunchEnvironments = []string{"production"}
 				cfg.TrustedPools.ProductionActivation.RootCustodyHashes = []string{digest}
@@ -1297,6 +1323,7 @@ func TestTrustedPoolsProductionActivationRequiresCompleteExplicitGate(t *testing
 			name: "custody class for unapproved hash rejected",
 			build: func(cfg *Config) {
 				cfg.TrustedPools.Enabled = true
+				cfg.TrustedPools.ManifestAcceptanceWitnessPath = "/var/lib/macprovider/trustpool-manifest-witness.json"
 				cfg.TrustedPools.ProductionActivation.EvidenceSHA256 = digest
 				cfg.TrustedPools.ProductionActivation.AllowedLaunchEnvironments = []string{"production"}
 				cfg.TrustedPools.ProductionActivation.RootCustodyHashes = []string{digest}
@@ -1308,6 +1335,7 @@ func TestTrustedPoolsProductionActivationRequiresCompleteExplicitGate(t *testing
 			name: "invalid custody digest",
 			build: func(cfg *Config) {
 				cfg.TrustedPools.Enabled = true
+				cfg.TrustedPools.ManifestAcceptanceWitnessPath = "/var/lib/macprovider/trustpool-manifest-witness.json"
 				cfg.TrustedPools.ProductionActivation.EvidenceSHA256 = digest
 				cfg.TrustedPools.ProductionActivation.AllowedLaunchEnvironments = []string{"production"}
 				cfg.TrustedPools.ProductionActivation.RootCustodyHashes = []string{"not-a-digest"}
@@ -1331,6 +1359,7 @@ func TestTrustedPoolsProductionActivationRequiresCompleteExplicitGate(t *testing
 	cfg := validTestConfig()
 	cfg.TrustedPools.Enabled = true
 	cfg.TrustedPools.RefreshIntervalS = 30
+	cfg.TrustedPools.ManifestAcceptanceWitnessPath = "/var/lib/macprovider/trustpool-manifest-witness.json"
 	cfg.TrustedPools.ProductionActivation.EvidenceSHA256 = digest
 	cfg.TrustedPools.ProductionActivation.AllowedLaunchEnvironments = []string{"production"}
 	cfg.TrustedPools.ProductionActivation.RootCustodyHashes = []string{digest}
@@ -1982,6 +2011,7 @@ func TestTrustedPoolsProductionActivationAcceptsUnmappedCustodyHash(t *testing.T
 	cfg.TrustedPools.ProductionActivation.EvidenceSHA256 = digest
 	cfg.TrustedPools.ProductionActivation.AllowedLaunchEnvironments = []string{"production"}
 	cfg.TrustedPools.ProductionActivation.RootCustodyHashes = []string{digest}
+	cfg.TrustedPools.ManifestAcceptanceWitnessPath = "/var/lib/macprovider/trustpool-manifest-witness.json"
 	ensureTrustedPoolsProviderOwnerKeys(&cfg)
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate err=%v, want a partially migrated production config to start", err)

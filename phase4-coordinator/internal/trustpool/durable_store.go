@@ -182,6 +182,7 @@ type DurableEvent struct {
 type Store struct {
 	db                       *sql.DB
 	productionActivationGate productionActivationGate
+	manifestWitnessPath      string
 	// providerOwnerPublicKeys is the operator-configured provider -> owner
 	// key map; SetProviderOwnerPublicKeys swaps it on a config reload.
 	providerOwnerPublicKeys atomic.Pointer[map[string][]byte]
@@ -225,6 +226,21 @@ func WithProductionActivationGate(g ProductionActivationGate) StoreOption {
 			return err
 		}
 		s.productionActivationGate = normalized
+		return nil
+	}
+}
+
+// WithManifestAcceptanceWitnessPath enables an out-of-database manifest
+// high-water witness. A configured store fail-closes if coordinator.db is
+// restored below the witness, which prevents accepted pool-model authority from
+// being silently resurrected by a whole-database rollback.
+func WithManifestAcceptanceWitnessPath(path string) StoreOption {
+	return func(s *Store) error {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return fmt.Errorf("%w: manifest acceptance witness path is empty", ErrMalformedDurableEvent)
+		}
+		s.manifestWitnessPath = path
 		return nil
 	}
 }
@@ -498,6 +514,9 @@ func NewStore(db *sql.DB, opts ...StoreOption) (*Store, error) {
 		}
 	}
 	if err := s.migrate(context.Background()); err != nil {
+		return nil, err
+	}
+	if err := s.verifyManifestAcceptanceWitness(context.Background()); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -1941,6 +1960,13 @@ func (s *Store) appendValidatedEvent(ctx context.Context, e DurableEvent, allowS
 	var committed DurableEvent
 	var applied bool
 	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		reconcileWitness := func() error {
+			highWater, err := manifestAcceptanceHighWaterFromQueryer(ctx, conn)
+			if err != nil {
+				return err
+			}
+			return s.reconcileManifestAcceptanceWitness(highWater)
+		}
 		events, err := eventsFromQueryer(ctx, conn)
 		if err != nil {
 			return err
@@ -1974,9 +2000,15 @@ func (s *Store) appendValidatedEvent(ctx context.Context, e DurableEvent, allowS
 				return ErrConflictingOperationID
 			}
 			reconstructed, err = reconstructEventsWithApprovals(events, approvals, time.Now().UTC())
+			if err != nil {
+				return err
+			}
 			committed = existing
 			applied = false
-			return err
+			if existing.EventType == EventManifestAccepted {
+				return reconcileWitness()
+			}
+			return nil
 		}
 		if e.EventType == EventRootCompromiseFrozen {
 			fingerprint := strings.TrimSpace(e.RootIssuerPublicKeyFingerprint)
@@ -2077,6 +2109,11 @@ func (s *Store) appendValidatedEvent(ctx context.Context, e DurableEvent, allowS
 		if err := verifyManifestAcceptanceState(ctx, conn, next); err != nil {
 			return err
 		}
+		if e.EventType == EventManifestAccepted {
+			if err := reconcileWitness(); err != nil {
+				return err
+			}
+		}
 		reconstructed = state
 		committed = e
 		applied = true
@@ -2117,6 +2154,13 @@ func (s *Store) PromotePool(ctx context.Context, e DurableEvent) (*Reconstructed
 			return err
 		}
 		if err := verifyManifestAcceptanceState(ctx, conn, events); err != nil {
+			return err
+		}
+		highWater, err := manifestAcceptanceHighWaterFromQueryer(ctx, conn)
+		if err != nil {
+			return err
+		}
+		if err := s.reconcileManifestAcceptanceWitness(highWater); err != nil {
 			return err
 		}
 		approvals, err := creatorApprovalsFromQueryer(ctx, conn)

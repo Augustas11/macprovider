@@ -102,6 +102,7 @@ Configure `trusted_pools` on the production coordinator (requires
 trusted_pools:
   enabled: true
   refresh_interval_s: 30
+  manifest_acceptance_witness_path: /var/lib/macprovider/trustpool-manifest-witness.json
   production_activation:
     allowed_launch_environments: ["<non-candidate launch env>"]
     evidence_sha256: "<lowercase sha256 of the signed launch evidence>"

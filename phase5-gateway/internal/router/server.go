@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -24,7 +25,10 @@ import (
 	"github.com/augstar/macprovider-gateway/internal/storage"
 )
 
-var unauthenticatedInternalProbes = expvar.NewInt("unauthenticated_internal_probes_total")
+var (
+	unauthenticatedInternalProbes = expvar.NewInt("unauthenticated_internal_probes_total")
+	poolModelIDRe                 = regexp.MustCompile(`^pool/([A-Za-z0-9_-]{22})/([a-z0-9][a-z0-9-]{0,62})$`)
+)
 
 type Server struct {
 	cfg     config.Config
@@ -557,6 +561,11 @@ func sanitizePoolModelObject(value any, poolID string) (any, bool) {
 		raw["disclosure_text"] != "Pool-attested, not network-verified" ||
 		!isLowerHex64Header(raw["artifact_hash"].(string)) || !isLowerHex64Header(raw["manifest_core_digest"].(string)) ||
 		!valueIsJSONNumber(raw["max_context_tokens"]) || !valueIsJSONNumber(raw["manifest_version"]) {
+		return nil, false
+	}
+	poolModelID := raw["pool_model_id"].(string)
+	poolModelMatch := poolModelIDRe.FindStringSubmatch(poolModelID)
+	if poolModelMatch == nil || poolModelMatch[1] != poolID {
 		return nil, false
 	}
 	sources, ok := raw["runtime_sources"].([]any)

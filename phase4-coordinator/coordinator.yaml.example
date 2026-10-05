@@ -227,6 +227,10 @@ storage:
 trusted_pools:
   enabled: false
   refresh_interval_s: 30
+  # Required before production_activation is configured. This witness lives
+  # outside coordinator.db so a whole-database restore cannot roll accepted
+  # manifest high-water state backwards without fail-closing Trusted Pools.
+  manifest_acceptance_witness_path: "/var/lib/macprovider/trustpool-manifest-witness.json"
   # SPEC-042 production pool promotion is default-blocked. Configure only
   # after signed launch evidence and root-custody review are complete.
   production_activation:

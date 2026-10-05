@@ -72,6 +72,7 @@ fall-through row is excluded.
 
 ```yaml
 trusted_pools:
+  manifest_acceptance_witness_path: /var/lib/macprovider/trustpool-manifest-witness.json
   pool_model_pricing_bounds:
     min_prompt_rate_per_mtok: 13500
     max_prompt_rate_per_mtok: 425000

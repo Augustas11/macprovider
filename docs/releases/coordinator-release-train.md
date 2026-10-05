@@ -235,12 +235,14 @@ namespace.
 activation. Keep #1816 open until the real paid Pearl journey and its rollback
 evidence are complete.
 
-1. **Close the launch gates.** Add tamper-evident Trusted Pool rollback
-   protection, or the normative equivalent required by the SPEC-042 launch
-   gate. Capture fresh signed journey evidence for the new #1830 requirements
-   and the affected SPEC-046/SPEC-047 rows. Resolve or explicitly disposition
-   the two LOW freeze findings: strict embedded-pool-id parsing in the gateway
-   and full `pool_model_id` grammar validation in `phase7-verify`.
+1. **Close the launch gates.** Land the post-#1830 hardening PR: production
+   Trusted Pool activation now requires an out-of-database manifest-acceptance
+   high-water witness, startup/replay fail closed if `coordinator.db` rolls back
+   below that witness, the gateway strictly parses the embedded pool segment in
+   pool model IDs, and `phase7-verify` enforces the full `pool_model_id`
+   grammar. Fresh signed journey evidence for the new #1830 requirements and
+   affected SPEC-046/SPEC-047 rows still belongs to the reviewed Pearl release
+   and live production canary, not a local branch.
 2. **Prepare Pearl without enabling traffic.** Add the artifact-feed nginx
    locations, configure all six
    `trusted_pools.pool_model_pricing_bounds` values and required
