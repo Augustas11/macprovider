@@ -1584,6 +1584,8 @@ func main() {
 	// Stored before the reloader starts so the first SIGHUP already checks it.
 	startupProductionActivation := cfg.TrustedPools.ProductionActivation
 	reloadStartupTrustedPoolsProductionActivation.Store(&startupProductionActivation)
+	startupManifestWitnessPath := cfg.TrustedPools.ManifestAcceptanceWitnessPath
+	reloadStartupTrustedPoolsManifestWitnessPath.Store(&startupManifestWitnessPath)
 	reloads := startSIGHUPReloader(signals.hup, func() {
 		checkPricingRecoveryWiring(logger, filepath.Dir(*configPath))
 		reloadCoordinatorConfig(*configPath, *configOverlay, cfg.Tier2, logger, wsServer, buyerServer, autotuneCatalog, autotuneEvidenceStore, trustPoolAdminReloader, billingStore)
@@ -3706,6 +3708,9 @@ func loadTrustedPools(ctx context.Context, db *sql.DB, cfg config.TrustedPoolsCo
 	if len(providerOwnerKeys) > 0 {
 		storeOpts = append(storeOpts, trustpool.WithProviderOwnerPublicKeys(providerOwnerKeys))
 	}
+	if cfg.ManifestAcceptanceWitnessPath != "" {
+		storeOpts = append(storeOpts, trustpool.WithManifestAcceptanceWitnessPath(cfg.ManifestAcceptanceWitnessPath))
+	}
 	if poolModelAcceptance != nil {
 		storeOpts = append(storeOpts, trustpool.WithPoolModelAcceptance(poolModelAcceptance))
 	}
@@ -4068,11 +4073,13 @@ func candidateAutotuneFeedsForRuntimeParity(buyerServer *buyer.Server, haveReloa
 }
 
 // reloadStartupTrustedPoolsProductionActivation holds the boot-time
-// trusted_pools.production_activation. The trust-pool store builds its
-// production gate once at startup, so a SIGHUP that changes it would report a
-// config as applied that is not in force; such a reload is rejected instead.
-// Nil (tests, or before boot finishes) skips the check.
+// trusted_pools.production_activation and manifest_acceptance_witness_path. The
+// trust-pool store builds its production gate and witness path once at startup,
+// so a SIGHUP that changes either would report a config as applied that is not
+// in force; such a reload is rejected instead. Nil (tests, or before boot
+// finishes) skips the matching check.
 var reloadStartupTrustedPoolsProductionActivation atomic.Pointer[config.TrustedPoolsProductionActivationConfig]
+var reloadStartupTrustedPoolsManifestWitnessPath atomic.Pointer[string]
 
 // trustedPoolsProductionActivationChanged compares two production activation
 // configs by their normalized content, so whitespace or ordering differences
@@ -4181,6 +4188,13 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		logger.Error().
 			Str("field", "trusted_pools.production_activation").
 			Msg("config reload rejected: trusted_pools.production_activation is startup-only and requires a restart")
+		return
+	}
+	if startup := reloadStartupTrustedPoolsManifestWitnessPath.Load(); startup != nil &&
+		strings.TrimSpace(*startup) != strings.TrimSpace(cfg.TrustedPools.ManifestAcceptanceWitnessPath) {
+		logger.Error().
+			Str("field", "trusted_pools.manifest_acceptance_witness_path").
+			Msg("config reload rejected: trusted_pools.manifest_acceptance_witness_path is startup-only and requires a restart")
 		return
 	}
 	if err := validateAutotuneRuntimeEconomics(candidateAutotuneFeedsForRuntimeParity(buyerServer, haveReloadedAutotune, reloadedAutotuneFeeds), cfg); err != nil {

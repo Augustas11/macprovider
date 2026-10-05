@@ -46,7 +46,7 @@ func TestPoolModelDisclosureHeadersAllowlisted(t *testing.T) {
 func TestSanitizeModelsResponsePoolView(t *testing.T) {
 	poolID := "QpsclmzwdJaWJTk3zowcXQ"
 	modelID := "pool/" + poolID + "/creator-model"
-	build := func() map[string]any {
+	build := func(mutators ...func(map[string]any)) map[string]any {
 		raw := `{"object":"list","data":[{"id":"model-a","object":"model","owned_by":"macprovider","created":1},` +
 			`{"id":"` + modelID + `","object":"model","owned_by":"macprovider","created":1,"macprovider_pool_model":{` +
 			`"pool_id":"` + poolID + `","pool_model_id":"` + modelID + `","disclosure_class":"pool_attested_unverified",` +
@@ -57,6 +57,9 @@ func TestSanitizeModelsResponsePoolView(t *testing.T) {
 		var body map[string]any
 		if err := json.Unmarshal([]byte(raw), &body); err != nil {
 			t.Fatal(err)
+		}
+		for _, mutate := range mutators {
+			mutate(body)
 		}
 		return body
 	}
@@ -82,5 +85,21 @@ func TestSanitizeModelsResponsePoolView(t *testing.T) {
 	sanitizeModelsResponse(other, "AAAAAAAAAAAAAAAAAAAAAA")
 	if got := ids(other); len(got) != 1 {
 		t.Fatalf("other pool's view kept the pool model: %v", got)
+	}
+	for name, mutate := range map[string]func(map[string]any){
+		"embedded pool mismatch": func(body map[string]any) {
+			pm := body["data"].([]any)[1].(map[string]any)["macprovider_pool_model"].(map[string]any)
+			pm["pool_model_id"] = "pool/AAAAAAAAAAAAAAAAAAAAAA/creator-model"
+		},
+		"bad slug grammar": func(body map[string]any) {
+			pm := body["data"].([]any)[1].(map[string]any)["macprovider_pool_model"].(map[string]any)
+			pm["pool_model_id"] = "pool/" + poolID + "/Creator_Model"
+		},
+	} {
+		body := build(mutate)
+		sanitizeModelsResponse(body, poolID)
+		if got := ids(body); len(got) != 1 || got[0] != "model-a" {
+			t.Fatalf("%s kept malformed pool model: %v", name, got)
+		}
 	}
 }

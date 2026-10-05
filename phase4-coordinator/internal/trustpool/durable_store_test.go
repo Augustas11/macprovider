@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -362,6 +363,183 @@ func TestDurableStore_ManifestAcceptanceProjectionTamperFailsClosedOnOpen(t *tes
 
 	if _, err := trustpool.NewStore(db); !errors.Is(err, trustpool.ErrMalformedDurableEvent) {
 		t.Fatalf("reopen NewStore err=%v, want ErrMalformedDurableEvent", err)
+	}
+}
+
+func TestDurableStore_ManifestAcceptanceWitnessRejectsDatabaseRollback(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := openTrustPoolDB(t)
+	witnessPath := filepath.Join(t.TempDir(), "trustpool-witness.json")
+	store, err := trustpool.NewStore(db, trustpool.WithManifestAcceptanceWitnessPath(witnessPath))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts := time.Unix(1800000623, 0).UTC()
+	root := newRootFixture(t)
+	v1 := signedManifest(t, "op-manifest-v1", ts.Add(2*time.Second), root.poolID, 1, root)
+	v2 := signedManifestExtendingWithPolicyCoreMutation(t, "op-manifest-v2", ts.Add(3*time.Second), v1, root, nil)
+	appendTrustPoolEvents(t, ctx, store,
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+		signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+		v1,
+		v2,
+	)
+	raw, err := os.ReadFile(witnessPath)
+	if err != nil {
+		t.Fatalf("read witness: %v", err)
+	}
+	if !strings.Contains(string(raw), `"manifest_version": 2`) {
+		t.Fatalf("witness did not advance to v2: %s", string(raw))
+	}
+	var v1SnapshotSHA256 string
+	if err := db.QueryRowContext(ctx, `SELECT manifest_snapshot_sha256 FROM trustpool_manifest_acceptances WHERE operation_id = ?`, v1.OperationID).Scan(&v1SnapshotSHA256); err != nil {
+		t.Fatalf("query v1 snapshot digest: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM trustpool_events WHERE operation_id = ?`, v2.OperationID); err != nil {
+		t.Fatalf("delete v2 event: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM trustpool_manifest_acceptances WHERE operation_id = ?`, v2.OperationID); err != nil {
+		t.Fatalf("delete v2 projection: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+UPDATE trustpool_manifest_acceptance_high_water
+SET manifest_version = ?, operation_id = ?, accepted_at_utc = ?, manifest_core_digest = ?,
+    root_issuer_key_id = ?, root_issuer_public_key_fingerprint = ?,
+    manifest_signature = ?, manifest_snapshot_sha256 = ?
+WHERE pool_id = ?`,
+		v1.ManifestVersion,
+		v1.OperationID,
+		v1.TimestampUTC.Format(time.RFC3339Nano),
+		v1.ManifestCoreDigest,
+		v1.RootIssuerKeyID,
+		v1.RootIssuerPublicKeyFingerprint,
+		v1.ManifestSignature,
+		v1SnapshotSHA256,
+		root.poolID,
+	); err != nil {
+		t.Fatalf("restore high-water to v1: %v", err)
+	}
+	if _, err := trustpool.NewStore(db, trustpool.WithManifestAcceptanceWitnessPath(witnessPath)); !errors.Is(err, trustpool.ErrMalformedDurableEvent) {
+		t.Fatalf("reopen after rollback err=%v, want ErrMalformedDurableEvent", err)
+	}
+}
+
+func TestDurableStore_ManifestAcceptanceWitnessMissingWithHighWaterFailsClosed(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := openTrustPoolDB(t)
+	witnessPath := filepath.Join(t.TempDir(), "trustpool-witness.json")
+	store, err := trustpool.NewStore(db, trustpool.WithManifestAcceptanceWitnessPath(witnessPath))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts := time.Unix(1800000624, 0).UTC()
+	root := newRootFixture(t)
+	appendTrustPoolEvents(t, ctx, store,
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+		signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+		signedManifest(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root),
+	)
+	if err := os.Remove(witnessPath); err != nil {
+		t.Fatalf("remove witness: %v", err)
+	}
+	if _, err := trustpool.NewStore(db, trustpool.WithManifestAcceptanceWitnessPath(witnessPath)); !errors.Is(err, trustpool.ErrMalformedDurableEvent) {
+		t.Fatalf("reopen with missing witness and high-water err=%v, want ErrMalformedDurableEvent", err)
+	}
+}
+
+func TestDurableStore_ManifestAcceptanceWitnessIdempotentRetryRepairsStaleWitness(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := openTrustPoolDB(t)
+	witnessPath := filepath.Join(t.TempDir(), "trustpool-witness.json")
+	store, err := trustpool.NewStore(db, trustpool.WithManifestAcceptanceWitnessPath(witnessPath))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts := time.Unix(1800000625, 0).UTC()
+	root := newRootFixture(t)
+	v1 := signedManifest(t, "op-manifest-v1", ts.Add(2*time.Second), root.poolID, 1, root)
+	v2 := signedManifestExtendingWithPolicyCoreMutation(t, "op-manifest-v2", ts.Add(3*time.Second), v1, root, nil)
+	appendTrustPoolEvents(t, ctx, store,
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+		signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+		v1,
+	)
+	v1Witness, err := os.ReadFile(witnessPath)
+	if err != nil {
+		t.Fatalf("read v1 witness: %v", err)
+	}
+	appendTrustPoolEvents(t, ctx, store, v2)
+	if err := os.WriteFile(witnessPath, v1Witness, 0o600); err != nil {
+		t.Fatalf("restore stale v1 witness: %v", err)
+	}
+	_, committed, applied, err := store.AppendValidatedEvent(ctx, v2)
+	if err != nil {
+		t.Fatalf("idempotent manifest retry should repair stale witness: %v", err)
+	}
+	if applied || committed.OperationID != v2.OperationID {
+		t.Fatalf("idempotent retry applied=%v committed=%s, want replay of %s", applied, committed.OperationID, v2.OperationID)
+	}
+	raw, err := os.ReadFile(witnessPath)
+	if err != nil {
+		t.Fatalf("read repaired witness: %v", err)
+	}
+	if !strings.Contains(string(raw), `"manifest_version": 2`) {
+		t.Fatalf("idempotent retry did not repair witness to v2: %s", string(raw))
+	}
+}
+
+func TestDurableStore_ManifestAcceptanceWitnessFailureAbortsManifestCommit(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := openTrustPoolDB(t)
+	witnessPath := filepath.Join(t.TempDir(), "trustpool-witness.json")
+	store, err := trustpool.NewStore(db, trustpool.WithManifestAcceptanceWitnessPath(witnessPath))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts := time.Unix(1800000626, 0).UTC()
+	root := newRootFixture(t)
+	v1 := signedManifest(t, "op-manifest-v1", ts.Add(2*time.Second), root.poolID, 1, root)
+	v2 := signedManifestExtendingWithPolicyCoreMutation(t, "op-manifest-v2", ts.Add(3*time.Second), v1, root, nil)
+	appendTrustPoolEvents(t, ctx, store,
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+		signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+		v1,
+	)
+	if err := os.WriteFile(witnessPath, []byte(`{"schema_version":"corrupt"`), 0o600); err != nil {
+		t.Fatalf("corrupt witness: %v", err)
+	}
+	if _, _, _, err := store.AppendValidatedEvent(ctx, v2); !errors.Is(err, trustpool.ErrMalformedDurableEvent) {
+		t.Fatalf("manifest append with corrupt witness err=%v, want ErrMalformedDurableEvent", err)
+	}
+	var eventCount int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM trustpool_events WHERE operation_id = ?`, v2.OperationID).Scan(&eventCount); err != nil {
+		t.Fatalf("query v2 event count: %v", err)
+	}
+	if eventCount != 0 {
+		t.Fatalf("v2 event committed despite witness failure: count=%d", eventCount)
+	}
+	var highWaterVersion uint64
+	if err := db.QueryRowContext(ctx, `SELECT manifest_version FROM trustpool_manifest_acceptance_high_water WHERE pool_id = ?`, root.poolID).Scan(&highWaterVersion); err != nil {
+		t.Fatalf("query high-water version: %v", err)
+	}
+	if highWaterVersion != 1 {
+		t.Fatalf("high-water version=%d, want v1 after aborted v2 witness failure", highWaterVersion)
 	}
 }
 

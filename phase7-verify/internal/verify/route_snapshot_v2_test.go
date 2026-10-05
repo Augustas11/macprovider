@@ -119,6 +119,10 @@ func TestRouteSnapshotV2RejectsMixedOrPartialProvenance(t *testing.T) {
 			r.PoolModelID = "pool/AAAAAAAAAAAAAAAAAAAAAA/x"
 			r.ModelID = r.PoolModelID
 		},
+		"bad pool-model slug grammar": func(r *SettlementRouteSnapshot) {
+			r.PoolModelID = "pool/" + r.PoolID + "/Bad_Slug"
+			r.ModelID = r.PoolModelID
+		},
 		"no multiplier":      func(r *SettlementRouteSnapshot) { r.PoolModelGlobalMultiplierPPM = 0 },
 		"no config snapshot": func(r *SettlementRouteSnapshot) { r.PoolModelConfigSnapshotID = 0 },
 		"cache above prompt": func(r *SettlementRouteSnapshot) {
