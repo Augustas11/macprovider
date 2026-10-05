@@ -271,29 +271,46 @@ const (
 // RelayBlindSettlementCoverage answers whether coordinator attempt
 // internalRequestID, the relay-blind attempt for external request
 // externalRequestID bound to the given provider-binding and envelope digests,
-// was R-14 enforce-covered. It returns RelayBlindCoverageEnforce when an
+// was R-14 enforce-covered. It returns RelayBlindCoverageEnforce only when an
 // enforce relay-blind route snapshot exists for the attempt (committed before
-// dispatch, R-14.3), RelayBlindCoverageObserve only when the attempt's
-// request-log row carries those digests and no relay-blind snapshot exists,
-// and "" (unknown, the caller holds) otherwise.
+// dispatch, R-14.3) whose prompt hash is the supplied envelope digest and
+// whose recorded provider-binding digest is the supplied one. A snapshot
+// committed before that column existed has no recorded binding; it is bound
+// through the attempt's request-log row carrying both digests instead. It
+// returns RelayBlindCoverageObserve only when the attempt's request-log row
+// carries those digests and no relay-blind snapshot exists, and "" (unknown,
+// the caller holds) otherwise, including when an enforce snapshot exists but
+// either digest does not match it (SPEC-022 R-14.9).
 func (s *Store) RelayBlindSettlementCoverage(ctx context.Context, accountID, externalRequestID, internalRequestID, providerBindingDigest, envelopeDigest string) (string, error) {
 	if accountID == "" || externalRequestID == "" || internalRequestID == "" || providerBindingDigest == "" || envelopeDigest == "" {
 		return "", nil
 	}
+	// The snapshot's prompt hash is the hex of the envelope digest (R-3.1).
+	// A digest that does not decode canonically matches no snapshot.
+	envelopeHex, err := relayBlindDigestHex(envelopeDigest)
+	if err != nil {
+		envelopeHex = ""
+	}
 	ctx, cancel := context.WithTimeout(ctx, settlementFinalityReadTimeout)
 	defer cancel()
+	const loggedSQL = `EXISTS (SELECT 1 FROM request_log
+                WHERE account_id = ? AND external_request_id = ? AND request_id = ?
+                  AND relay_blind_provider_binding_digest = ? AND relay_blind_envelope_digest = ?)`
 	var enforceSnapshot, anyRelayBlindSnapshot, logged bool
-	err := s.reader().QueryRowContext(ctx, `
+	err = s.reader().QueryRowContext(ctx, `
 SELECT EXISTS (SELECT 1 FROM settlement_route_snapshots
                 WHERE account_scope = ? AND request_id = ?
-                  AND paid_entrypoint = ? AND prompt_hash_basis = ? AND route_snapshot_mode = ?),
+                  AND paid_entrypoint = ? AND prompt_hash_basis = ? AND route_snapshot_mode = ?
+                  AND prompt_hash = ?
+                  AND (relay_blind_provider_binding_digest = ?
+                       OR (relay_blind_provider_binding_digest IS NULL AND `+loggedSQL+`))),
        EXISTS (SELECT 1 FROM settlement_route_snapshots
                 WHERE account_scope = ? AND request_id = ?
                   AND (paid_entrypoint = ? OR prompt_hash_basis = ?)),
-       EXISTS (SELECT 1 FROM request_log
-                WHERE account_id = ? AND external_request_id = ? AND request_id = ?
-                  AND relay_blind_provider_binding_digest = ? AND relay_blind_envelope_digest = ?)`,
+       `+loggedSQL,
 		AccountScopeForSettlement(accountID), internalRequestID, PaidEntrypointRelayBlindChat, PromptHashBasisRelayBlindEnvelopeV1, RouteSnapshotModeEnforce,
+		envelopeHex, providerBindingDigest,
+		accountID, externalRequestID, internalRequestID, providerBindingDigest, envelopeDigest,
 		AccountScopeForSettlement(accountID), internalRequestID, PaidEntrypointRelayBlindChat, PromptHashBasisRelayBlindEnvelopeV1,
 		accountID, externalRequestID, internalRequestID, providerBindingDigest, envelopeDigest).Scan(&enforceSnapshot, &anyRelayBlindSnapshot, &logged)
 	if err != nil {

@@ -165,6 +165,7 @@ func TestRelayBlindSettledWithoutBindingIsNotPayable(t *testing.T) {
 			if tc.plaintext {
 				mutate = func(r *RouteSnapshot) {
 					r.PaidEntrypoint, r.PromptHashBasis = PaidEntrypointCoordinatorBuyerChat, PromptHashBasisCoordinatorV1
+					r.RelayBlindProviderBindingDigest = ""
 				}
 			}
 			f := seedRelayBlindAttempt(t, mutate)
@@ -453,27 +454,129 @@ func TestSweepClosesUnrecordedRelayBlindAttempts(t *testing.T) {
 	}
 }
 
-// The unrecorded pass reads the partial index, never the whole snapshot
-// table, so it stays cheap on a large money database.
-func TestUnrecordedRelayBlindSweepUsesPartialIndex(t *testing.T) {
+// The unrecorded pass reads settlement_route_snapshots only through its
+// INTEGER PRIMARY KEY (no index is built for it), and one pass examines at
+// most one primary-key window, so it stays cheap on a large money database.
+func TestUnrecordedRelayBlindSweepUsesPrimaryKeyWindow(t *testing.T) {
 	_, store := newRequestAndBillingStores(t)
-	rows, err := store.db.Query(`EXPLAIN QUERY PLAN `+unrecordedRelayBlindSweepSQL, 1, 1, 1, 0, 0, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	var plan []string
-	for rows.Next() {
-		var id, parent, notused int
-		var detail string
-		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+	createSettlementReceiptAuditLog(t, store.db)
+	plan := func(query string, args ...any) string {
+		t.Helper()
+		rows, err := store.db.Query(`EXPLAIN QUERY PLAN `+query, args...)
+		if err != nil {
 			t.Fatal(err)
 		}
-		plan = append(plan, detail)
+		defer rows.Close()
+		var details []string
+		for rows.Next() {
+			var id, parent, notused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			details = append(details, detail)
+		}
+		return strings.Join(details, "; ")
 	}
-	joined := strings.Join(plan, "; ")
-	if !strings.Contains(joined, "SEARCH rs USING INDEX idx_srs_relay_blind_enforce_decision") || strings.Contains(joined, "SCAN ") {
-		t.Fatalf("plan=%s", joined)
+	if got := plan(unrecordedRelayBlindSweepSQL, 1, 1, 0, 10); !strings.Contains(got, "SEARCH rs USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)") || strings.Contains(got, "SCAN ") {
+		t.Fatalf("window plan=%s", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_srs_relay_blind_enforce_decision'`); got != 0 {
+		t.Fatalf("startup built the relay-blind sweep index")
+	}
+
+	// 3 windows of ordinary snapshots with expired, unrecorded enforce
+	// relay-blind snapshots spread through them.
+	const limit = 2
+	window := int64(limit * unrecordedRelayBlindSweepScanFactor)
+	store.SetRelayBlindAttemptTimeout(time.Minute)
+	ctx := context.Background()
+	base := relayBlindSignedInputWithSnapshot(t, nil, nil)
+	var relayBlindIDs []string
+	for i := int64(1); i <= 3*window; i++ {
+		snapshot := base.RouteSnapshot
+		snapshot.RequestID = fmt.Sprintf("snapshot-%03d", i)
+		if i%7 == 0 {
+			relayBlindIDs = append(relayBlindIDs, snapshot.RequestID)
+		} else {
+			snapshot.PaidEntrypoint, snapshot.PromptHashBasis, snapshot.RelayBlindProviderBindingDigest = PaidEntrypointCoordinatorBuyerChat, PromptHashBasisCoordinatorV1, ""
+		}
+		if _, err := store.InsertRouteSnapshot(ctx, snapshot); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := base.RouteSnapshot.RouteDecisionTSUnixMS + time.Minute.Milliseconds() + base.RouteSnapshot.PendingDeadlineSeconds*1000 + 1
+	closedVerdicts := func() int64 {
+		return scalar(t, store.db, `SELECT COUNT(*) FROM settlement_receipt_verdicts WHERE reason = ?`, RelayBlindAttemptUnrecordedReason)
+	}
+	// One pass examines one window: it closes the relay-blind attempts
+	// inside it (at most limit) and leaves the rest for later passes.
+	if _, err := store.SweepExpiredSettlementVerdicts(ctx, now, limit); err != nil {
+		t.Fatal(err)
+	}
+	if got := closedVerdicts(); got != limit {
+		t.Fatalf("first pass closed=%d want %d", got, limit)
+	}
+	if store.poolSweep.unrecordedCursor > window {
+		t.Fatalf("first pass cursor=%d beyond window %d", store.poolSweep.unrecordedCursor, window)
+	}
+	for pass := 0; pass < 10; pass++ {
+		if _, err := store.SweepExpiredSettlementVerdicts(ctx, now, limit); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := closedVerdicts(); got != int64(len(relayBlindIDs)) {
+		t.Fatalf("closed=%d want %d", got, len(relayBlindIDs))
+	}
+	if store.poolSweep.unrecordedCursor != 3*window {
+		t.Fatalf("cursor=%d want tail %d", store.poolSweep.unrecordedCursor, 3*window)
+	}
+}
+
+// A new process starts its unrecorded walk after the last snapshot older
+// than the lookback, found by primary-key probes, never by a scan.
+func TestUnrecordedRelayBlindSweepPositionsByPrimaryKey(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	ctx := context.Background()
+	if got, err := store.positionUnrecordedRelayBlindSweep(ctx, 0, 1); err != nil || got != 0 {
+		t.Fatalf("empty table position=%d err=%v", got, err)
+	}
+	base := relayBlindSignedInputWithSnapshot(t, nil, nil).RouteSnapshot
+	const rows = 37
+	for i := int64(1); i <= rows; i++ {
+		snapshot := base
+		snapshot.RequestID = fmt.Sprintf("snapshot-%03d", i)
+		snapshot.RouteDecisionTSUnixMS = base.RouteDecisionTSUnixMS + i*1000
+		snapshot.RequestStartTSUnixMS = snapshot.RouteDecisionTSUnixMS
+		if _, err := store.InsertRouteSnapshot(ctx, snapshot); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for floor := int64(0); floor <= rows+1; floor++ {
+		got, err := store.positionUnrecordedRelayBlindSweep(ctx, rows, base.RouteDecisionTSUnixMS+floor*1000)
+		want := max(min(floor-1, rows), 0)
+		if err != nil || got != want {
+			t.Fatalf("floor=%d position=%d want %d err=%v", floor, got, want, err)
+		}
+	}
+	if got := strings.Join(func() []string {
+		r, err := store.db.Query(`EXPLAIN QUERY PLAN SELECT id, route_decision_ts_unix_ms FROM settlement_route_snapshots WHERE id >= ? ORDER BY id ASC LIMIT 1`, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Close()
+		var out []string
+		for r.Next() {
+			var id, parent, notused int
+			var detail string
+			if err := r.Scan(&id, &parent, &notused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, detail)
+		}
+		return out
+	}(), "; "); !strings.Contains(got, "USING INTEGER PRIMARY KEY") || strings.Contains(got, "SCAN ") {
+		t.Fatalf("probe plan=%s", got)
 	}
 }
 

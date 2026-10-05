@@ -308,6 +308,13 @@ func TestRelayBlindEnforceRecordsSnapshotBeforeDispatch(t *testing.T) {
 			if meta.RequestID == captured.RequestID {
 				t.Fatalf("settlement request_id must be the coordinator ledger id, not the envelope request_id %q", captured.RequestID)
 			}
+			// SPEC-022 R-14.9: the snapshot records the dispatch's binding
+			// digest, which an enforce coverage answer must match.
+			var binding string
+			if err := f.db.QueryRow(`SELECT relay_blind_provider_binding_digest FROM settlement_route_snapshots`).Scan(&binding); err != nil ||
+				binding == "" || binding != captured.ProviderBindingDigest {
+				t.Fatalf("snapshot binding=%q dispatch binding=%q err=%v", binding, captured.ProviderBindingDigest, err)
+			}
 			var policy string
 			if err := f.db.QueryRow(`SELECT settlement_policy_mode FROM ledger_request_credits`).Scan(&policy); err != nil {
 				t.Fatal(err)

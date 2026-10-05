@@ -139,6 +139,7 @@ func (b *billingRecorder) recordRelayBlindRouteSnapshot(ctx context.Context, pro
 	snapshot.PaidEntrypoint = billing.PaidEntrypointRelayBlindChat
 	snapshot.PromptHashBasis = billing.PromptHashBasisRelayBlindEnvelopeV1
 	snapshot.PromptHash = promptHash
+	snapshot.RelayBlindProviderBindingDigest = relayblind.BindingDigest(reservation.ProviderBinding)
 	applyBYOMRouteSnapshotBinding(&snapshot, byomBinding)
 	required, covered, hardwareDigest, err := computeIntegrityRouteBinding(provider, routeMode)
 	if err != nil {

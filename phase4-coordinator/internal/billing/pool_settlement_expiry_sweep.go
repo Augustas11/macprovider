@@ -39,15 +39,19 @@ type poolSweepBackoff struct {
 type poolSettlementSweepState struct {
 	cursor  poolSweepKey
 	backoff map[int64]poolSweepBackoff // by settlement_receipt_verdicts.id
-	// The unrecorded relay-blind pass has its own keyset cursor over
-	// (route decision, snapshot id) and backoff by snapshot id.
-	unrecordedCursor  unrecordedSweepKey
-	unrecordedBackoff map[int64]poolSweepBackoff
+	// The unrecorded relay-blind pass walks settlement_route_snapshots by
+	// its INTEGER PRIMARY KEY: every snapshot id at or below
+	// unrecordedCursor is settled for that pass. The cursor is positioned
+	// once per process (unrecordedPositioned). Attempts whose close failed
+	// are retried by snapshot id after their backoff.
+	unrecordedCursor     int64
+	unrecordedPositioned bool
+	unrecordedRetry      map[int64]unrecordedRetry
 }
 
-type unrecordedSweepKey struct {
-	routeDecisionUnixMS int64
-	snapshotID          int64
+type unrecordedRetry struct {
+	poolSweepBackoff
+	id SettlementReceiptIdentity
 }
 
 func poolSweepBackoffDelayMS(failures int) int64 {
@@ -194,40 +198,61 @@ SELECT v.pending_deadline_unix_ms, v.id, rs.id,
 	return closed, errors.Join(errs...)
 }
 
-// relayBlindUnrecordedIndexSQL indexes only enforce relay-blind snapshots, so
-// the unrecorded pass never scans ordinary route snapshots. The literals in
-// its WHERE clause are repeated verbatim in the sweep query, which lets the
-// SQLite planner use the partial index.
-const relayBlindUnrecordedIndexSQL = `CREATE INDEX IF NOT EXISTS idx_srs_relay_blind_enforce_decision
-    ON settlement_route_snapshots(route_decision_ts_unix_ms, id)
- WHERE paid_entrypoint = '` + PaidEntrypointRelayBlindChat + `' AND route_snapshot_mode = '` + RouteSnapshotModeEnforce + `'`
+// unrecordedRelayBlindSweepScanFactor sizes the unrecorded pass's snapshot
+// id window: one pass examines at most limit * factor snapshot rows, by
+// primary key, and closes at most limit attempts.
+const unrecordedRelayBlindSweepScanFactor = 10
 
-func (s *Store) ensureRelayBlindUnrecordedAttemptIndex(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, relayBlindUnrecordedIndexSQL)
-	return err
+// unrecordedRelayBlindSweepLookback is how far back, by route decision time,
+// a newly started process begins its walk. An older unrecorded attempt is
+// still closed by any finality read that asks for it (R-14.10).
+const unrecordedRelayBlindSweepLookback = 7 * 24 * time.Hour
+
+// unrecordedRelayBlindSweepSQL reads the enforce relay-blind snapshots in one
+// primary-key window. It uses only the INTEGER PRIMARY KEY of
+// settlement_route_snapshots, so it examines at most the window's rows and
+// needs no extra index on the large money database. Arguments: the timeout,
+// now, the window's exclusive lower and inclusive upper snapshot id.
+const unrecordedRelayBlindSweepSQL = `
+SELECT rs.id, rs.account_scope, rs.request_id, rs.attempt_n, rs.provider_id,
+       rs.route_decision_ts_unix_ms + ? + rs.pending_deadline_seconds * 1000 < ?,
+       EXISTS (SELECT 1 FROM settlement_attempt_outputs sao
+                WHERE sao.account_scope = rs.account_scope AND sao.request_id = rs.request_id
+                  AND sao.attempt_n = rs.attempt_n AND sao.provider_id = rs.provider_id)
+       OR EXISTS (SELECT 1 FROM ledger_request_credits lrc
+                   WHERE lrc.request_id = rs.request_id AND lrc.attempt_n = rs.attempt_n
+                     AND lrc.provider_id = rs.provider_id)
+  FROM settlement_route_snapshots rs
+ WHERE rs.id > ? AND rs.id <= ?
+   AND rs.paid_entrypoint = '` + PaidEntrypointRelayBlindChat + `' AND rs.route_snapshot_mode = '` + RouteSnapshotModeEnforce + `'
+ ORDER BY rs.id ASC`
+
+// positionUnrecordedRelayBlindSweep returns the snapshot id a new process
+// starts after: the last snapshot whose route decision is older than the
+// lookback. Snapshot ids follow insertion order, which follows route
+// decision time, so a binary search over primary-key probes finds it
+// without a scan.
+func (s *Store) positionUnrecordedRelayBlindSweep(ctx context.Context, maxID, floorUnixMS int64) (int64, error) {
+	lo, hi := int64(0), maxID
+	for lo < hi {
+		mid := lo + (hi-lo+1)/2
+		var id, decision int64
+		err := s.reader().QueryRowContext(ctx, `
+SELECT id, route_decision_ts_unix_ms FROM settlement_route_snapshots
+ WHERE id >= ? ORDER BY id ASC LIMIT 1`, mid).Scan(&id, &decision)
+		if err != nil {
+			return 0, err
+		}
+		if decision < floorUnixMS {
+			lo = id
+		} else {
+			hi = mid - 1
+		}
+	}
+	return lo, nil
 }
 
-// unrecordedRelayBlindSweepSQL pages enforce relay-blind snapshots past their
-// R-14.10 deadline that have no attempt output and no credit. Arguments: the
-// coarse decision bound (now - timeout), the timeout, now, the cursor, and the
-// page limit.
-const unrecordedRelayBlindSweepSQL = `
-SELECT rs.route_decision_ts_unix_ms, rs.id, rs.account_scope, rs.request_id, rs.attempt_n, rs.provider_id
-  FROM settlement_route_snapshots rs
- WHERE rs.paid_entrypoint = '` + PaidEntrypointRelayBlindChat + `' AND rs.route_snapshot_mode = '` + RouteSnapshotModeEnforce + `'
-   AND rs.route_decision_ts_unix_ms < ?
-   AND rs.route_decision_ts_unix_ms + ? + rs.pending_deadline_seconds * 1000 < ?
-   AND (rs.route_decision_ts_unix_ms, rs.id) > (?, ?)
-   AND NOT EXISTS (SELECT 1 FROM settlement_attempt_outputs sao
-                    WHERE sao.account_scope = rs.account_scope AND sao.request_id = rs.request_id
-                      AND sao.attempt_n = rs.attempt_n AND sao.provider_id = rs.provider_id)
-   AND NOT EXISTS (SELECT 1 FROM ledger_request_credits lrc
-                    WHERE lrc.request_id = rs.request_id AND lrc.attempt_n = rs.attempt_n
-                      AND lrc.provider_id = rs.provider_id)
- ORDER BY rs.route_decision_ts_unix_ms ASC, rs.id ASC
- LIMIT ?`
-
-// sweepUnrecordedRelayBlindAttempts closes, in bounded pages, every enforce
+// sweepUnrecordedRelayBlindAttempts closes, in bounded passes, every enforce
 // relay-blind attempt whose snapshot committed before dispatch but which has
 // no attempt output, no credit, and no verdict, once its SPEC-022 R-14.10
 // deadline (route decision + relay-blind dispatch timeout +
@@ -239,93 +264,142 @@ SELECT rs.route_decision_ts_unix_ms, rs.id, rs.account_scope, rs.request_id, rs.
 // attempts are left as they are: an ordinary route has no pre-dispatch
 // snapshot authority (its finality needs a credit or an attempt output), and
 // observe and off modes keep their existing finality (R-14.6).
+//
+// A pass examines one primary-key window of at most limit *
+// unrecordedRelayBlindSweepScanFactor snapshot rows after the cursor and
+// closes at most limit attempts. The cursor stops before the first
+// relay-blind attempt still inside its deadline, so that attempt is examined
+// again; an attempt whose close failed moves to the retry set instead of
+// holding the cursor.
 func (s *Store) sweepUnrecordedRelayBlindAttempts(ctx context.Context, st *poolSettlementSweepState, nowUnixMS int64, limit int) (int, error) {
-	if st.unrecordedBackoff == nil {
-		st.unrecordedBackoff = make(map[int64]poolSweepBackoff)
+	if st.unrecordedRetry == nil {
+		st.unrecordedRetry = make(map[int64]unrecordedRetry)
 	}
-	for id, b := range st.unrecordedBackoff {
-		if nowUnixMS-b.retryAtUnixMS >= poolSweepBackoffMax.Milliseconds() {
-			delete(st.unrecordedBackoff, id)
-		}
-	}
-	timeoutMS := s.RelayBlindAttemptTimeout().Milliseconds()
-	c := st.unrecordedCursor
-	rows, err := s.reader().QueryContext(ctx, unrecordedRelayBlindSweepSQL, nowUnixMS-timeoutMS, timeoutMS, nowUnixMS, c.routeDecisionUnixMS, c.snapshotID, limit)
-	if err != nil {
+	var maxID int64
+	if err := s.reader().QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM settlement_route_snapshots`).Scan(&maxID); err != nil {
 		return 0, err
 	}
-	type candidate struct {
-		key unrecordedSweepKey
-		id  SettlementReceiptIdentity
-	}
-	var page []candidate
-	for rows.Next() {
-		var cand candidate
-		if err := rows.Scan(&cand.key.routeDecisionUnixMS, &cand.key.snapshotID,
-			&cand.id.AccountScope, &cand.id.RequestID, &cand.id.AttemptN, &cand.id.ProviderID); err != nil {
-			_ = rows.Close()
+	if !st.unrecordedPositioned {
+		cursor, err := s.positionUnrecordedRelayBlindSweep(ctx, maxID, nowUnixMS-unrecordedRelayBlindSweepLookback.Milliseconds())
+		if err != nil {
 			return 0, err
 		}
-		page = append(page, cand)
-	}
-	if err := rows.Close(); err != nil {
-		return 0, err
-	}
-	if err := rows.Err(); err != nil {
-		return 0, err
+		st.unrecordedCursor, st.unrecordedPositioned = cursor, true
 	}
 	closed := 0
-	processed := 0
+	attempted := 0
 	var errs []error
-	for _, cand := range page {
-		if err := ctx.Err(); err != nil {
-			errs = append(errs, err)
-			break
-		}
-		processed++
-		// An attempt already closed here keeps matching the page filter;
-		// skip it without a write.
+	// retry keeps a failed attempt for a later pass after its backoff.
+	retry := func(snapshotID int64, id SettlementReceiptIdentity, err error) {
+		r := st.unrecordedRetry[snapshotID]
+		r.id = id
+		r.failures++
+		r.retryAtUnixMS = nowUnixMS + poolSweepBackoffDelayMS(r.failures)
+		st.unrecordedRetry[snapshotID] = r
+		errs = append(errs, fmt.Errorf("sweep unrecorded relay-blind attempt %s attempt %d: %w", id.RequestID, id.AttemptN, err))
+	}
+	// finalize closes one attempt; it reports whether the attempt is done
+	// (closed, already decided, or now owned by the ordinary paths).
+	finalize := func(snapshotID int64, id SettlementReceiptIdentity) bool {
+		// An attempt already closed here stays a relay-blind snapshot
+		// without output or credit; skip it without a write.
 		var hasVerdict bool
 		if err := s.reader().QueryRowContext(ctx, `
 SELECT EXISTS (SELECT 1 FROM settlement_receipt_verdicts
                 WHERE account_scope_hash = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?)`,
-			SettlementAccountScopeHash(cand.id.AccountScope), cand.id.RequestID, cand.id.AttemptN, cand.id.ProviderID).Scan(&hasVerdict); err != nil {
-			errs = append(errs, err)
-			continue
+			SettlementAccountScopeHash(id.AccountScope), id.RequestID, id.AttemptN, id.ProviderID).Scan(&hasVerdict); err != nil {
+			retry(snapshotID, id, err)
+			return false
 		}
 		if hasVerdict {
-			continue
+			return true
 		}
-		if b, ok := st.unrecordedBackoff[cand.key.snapshotID]; ok && nowUnixMS < b.retryAtUnixMS {
-			continue
-		}
+		attempted++
 		state, err := s.RecordMissingSettlementReceipt(ctx, SettlementReceiptMissingInput{
-			SettlementReceiptIdentity: cand.id,
+			SettlementReceiptIdentity: id,
 			NowUnixMS:                 nowUnixMS,
 		})
-		if err != nil {
-			b := st.unrecordedBackoff[cand.key.snapshotID]
-			b.failures++
-			b.retryAtUnixMS = nowUnixMS + poolSweepBackoffDelayMS(b.failures)
-			st.unrecordedBackoff[cand.key.snapshotID] = b
-			// An attempt whose output or credit committed after the page
-			// was read is no longer unrecorded; the ordinary paths own it.
-			if !errors.Is(err, errSettlementAttemptOutputMissing) {
-				errs = append(errs, fmt.Errorf("sweep unrecorded relay-blind attempt %s attempt %d: %w", cand.id.RequestID, cand.id.AttemptN, err))
-			}
-			continue
+		// An attempt whose output or credit committed after the window was
+		// read is no longer unrecorded; the ordinary paths own it.
+		if errors.Is(err, errSettlementAttemptOutputMissing) {
+			return true
 		}
-		delete(st.unrecordedBackoff, cand.key.snapshotID)
+		if err != nil {
+			retry(snapshotID, id, err)
+			return false
+		}
 		if state.Closed {
 			closed++
 		}
+		return true
 	}
-	switch {
-	case processed == len(page) && len(page) < limit:
-		st.unrecordedCursor = unrecordedSweepKey{}
-	case processed > 0:
-		st.unrecordedCursor = page[processed-1].key
+	for snapshotID, r := range st.unrecordedRetry {
+		if attempted >= limit || ctx.Err() != nil {
+			break
+		}
+		if nowUnixMS < r.retryAtUnixMS {
+			continue
+		}
+		if finalize(snapshotID, r.id) {
+			delete(st.unrecordedRetry, snapshotID)
+		}
 	}
+	lower := st.unrecordedCursor
+	upper := min(lower+int64(limit)*unrecordedRelayBlindSweepScanFactor, maxID)
+	if upper <= lower {
+		return closed, errors.Join(errs...)
+	}
+	timeoutMS := s.RelayBlindAttemptTimeout().Milliseconds()
+	rows, err := s.reader().QueryContext(ctx, unrecordedRelayBlindSweepSQL, timeoutMS, nowUnixMS, lower, upper)
+	if err != nil {
+		return closed, errors.Join(append(errs, err)...)
+	}
+	type candidate struct {
+		snapshotID int64
+		id         SettlementReceiptIdentity
+		expired    bool
+		recorded   bool
+	}
+	var window []candidate
+	for rows.Next() {
+		var cand candidate
+		if err := rows.Scan(&cand.snapshotID, &cand.id.AccountScope, &cand.id.RequestID, &cand.id.AttemptN, &cand.id.ProviderID,
+			&cand.expired, &cand.recorded); err != nil {
+			_ = rows.Close()
+			return closed, errors.Join(append(errs, err)...)
+		}
+		window = append(window, cand)
+	}
+	if err := rows.Close(); err != nil {
+		return closed, errors.Join(append(errs, err)...)
+	}
+	if err := rows.Err(); err != nil {
+		return closed, errors.Join(append(errs, err)...)
+	}
+	next := upper
+	for _, cand := range window {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err)
+			next = min(next, cand.snapshotID-1)
+			break
+		}
+		if !cand.expired {
+			next = min(next, cand.snapshotID-1)
+			continue
+		}
+		if cand.recorded {
+			continue
+		}
+		if _, retrying := st.unrecordedRetry[cand.snapshotID]; retrying {
+			continue
+		}
+		if attempted >= limit {
+			next = min(next, cand.snapshotID-1)
+			break
+		}
+		finalize(cand.snapshotID, cand.id)
+	}
+	st.unrecordedCursor = next
 	return closed, errors.Join(errs...)
 }
 

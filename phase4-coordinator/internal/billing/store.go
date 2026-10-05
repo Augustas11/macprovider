@@ -359,6 +359,7 @@ CREATE TABLE IF NOT EXISTS settlement_route_snapshots (
     compute_integrity_capture_required INTEGER NOT NULL DEFAULT 0 CHECK(compute_integrity_capture_required IN (0,1)),
     compute_integrity_sampling_profile_covered INTEGER NOT NULL DEFAULT 0 CHECK(compute_integrity_sampling_profile_covered IN (0,1)),
     compute_integrity_hardware_runtime_class_digest TEXT NULL CHECK(compute_integrity_hardware_runtime_class_digest IS NULL OR (length(compute_integrity_hardware_runtime_class_digest) = 71 AND substr(compute_integrity_hardware_runtime_class_digest, 1, 7) = 'sha256:' AND substr(compute_integrity_hardware_runtime_class_digest, 8) NOT GLOB '*[^0-9a-f]*')),
+    `+relayBlindProviderBindingDigestColumnSQL+`,
     route_snapshot_digest TEXT NOT NULL CHECK(length(route_snapshot_digest) = 64 AND route_snapshot_digest NOT GLOB '*[^0-9a-f]*'),
     route_snapshot_json TEXT NOT NULL,
     route_snapshot_canonical_json TEXT NOT NULL,
@@ -641,9 +642,6 @@ CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutio
 	if err := s.ensureRelayBlindSettlementOutcomeVocabulary(ctx); err != nil {
 		return err
 	}
-	if err := s.ensureRelayBlindUnrecordedAttemptIndex(ctx); err != nil {
-		return err
-	}
 	if err := s.normalizeBillingTimeTextColumns(ctx); err != nil {
 		return err
 	}
@@ -721,6 +719,7 @@ func (s *Store) ensureSettlementRouteSnapshotComputeIntegrityColumns(ctx context
 		{"compute_integrity_capture_required", `ALTER TABLE settlement_route_snapshots ADD COLUMN compute_integrity_capture_required INTEGER NOT NULL DEFAULT 0 CHECK(compute_integrity_capture_required IN (0,1))`},
 		{"compute_integrity_sampling_profile_covered", `ALTER TABLE settlement_route_snapshots ADD COLUMN compute_integrity_sampling_profile_covered INTEGER NOT NULL DEFAULT 0 CHECK(compute_integrity_sampling_profile_covered IN (0,1))`},
 		{"compute_integrity_hardware_runtime_class_digest", `ALTER TABLE settlement_route_snapshots ADD COLUMN compute_integrity_hardware_runtime_class_digest TEXT NULL CHECK(compute_integrity_hardware_runtime_class_digest IS NULL OR (length(compute_integrity_hardware_runtime_class_digest) = 71 AND substr(compute_integrity_hardware_runtime_class_digest, 1, 7) = 'sha256:' AND substr(compute_integrity_hardware_runtime_class_digest, 8) NOT GLOB '*[^0-9a-f]*'))`},
+		{"relay_blind_provider_binding_digest", `ALTER TABLE settlement_route_snapshots ADD COLUMN ` + relayBlindProviderBindingDigestAddColumnSQL},
 	}
 	for _, col := range add {
 		exists, err := s.columnExists(ctx, "settlement_route_snapshots", col.name)

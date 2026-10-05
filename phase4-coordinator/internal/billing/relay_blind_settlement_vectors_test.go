@@ -96,6 +96,7 @@ func relayBlindVectorSnapshot(keyID string) RouteSnapshot {
 		PendingDeadlineSeconds:             300,
 		PromptHashBasis:                    PromptHashBasisRelayBlindEnvelopeV1,
 		PromptHash:                         envelopeHex,
+		RelayBlindProviderBindingDigest:    relayBlindVectorDigest("vector provider binding"),
 	}
 }
 

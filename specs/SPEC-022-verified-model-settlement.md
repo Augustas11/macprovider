@@ -1845,7 +1845,11 @@ The finality lookup names the external request id, the internal request id
 the gateway holds), and the attempt's provider-binding and envelope digests.
 The coordinator answers coverage for that attempt:
 
-- `enforce` when an enforce relay-blind snapshot exists for the internal id;
+- `enforce` when an enforce relay-blind snapshot exists for the internal id
+  whose prompt hash is the supplied envelope digest (hex) and whose recorded
+  provider-binding digest is the supplied one (a snapshot recorded before
+  that column existed is bound instead through the attempt's request-log row
+  carrying both digests); a mismatched digest is not found;
 - `observe` when the attempt's request-log row carries the same external id
   and both digests, and no relay-blind snapshot exists. This covers observe
   and off; and
@@ -1884,6 +1888,11 @@ receipt. The closed verdict is terminal: a receipt, output, or credit that
 arrives later never makes the attempt payable. This applies only to enforce
 relay-blind snapshots; other snapshot-only attempts keep their existing
 finality.
+
+Note: the background sweep walks route snapshots by their primary key, one
+bounded id window per pass, so it needs no index build at coordinator
+startup; a new process starts its walk at snapshots decided within the last
+seven days, and older attempts close on a finality read.
 
 ## Acceptance criteria
 
