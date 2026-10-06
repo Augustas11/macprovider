@@ -14,10 +14,10 @@ It is rehearsal evidence. It does not sign a journey result, flip
   provider can do: default-off serving, serve-path admission rejections,
   continuous batching on the tuple, the isolated coordinator path, release
   asset identity, and the updater path;
-- a lab build of the exact release source commit (`--lab-cli`), compiled with
-  `-DMACPROVIDER_LAB_HARNESS`, for the hidden `native-mtp-hardware-e2e` and
-  `native-mtp-journey-e2e` fixtures. Release builds compile those commands out
-  (`NativeMTPJourneyE2ECommand.swift` `#if DEBUG || MACPROVIDER_LAB_HARNESS`).
+- a lab-harness build of the exact release source commit (`--lab-cli`; the
+  compile flag is in docs/runbooks/native-mtp-enablement.md), for the hidden
+  `native-mtp-hardware-e2e` and `native-mtp-journey-e2e` fixtures. Release
+  builds compile those commands out (`NativeMTPJourneyE2ECommand.swift`).
 
 Safety rails, all enforced before anything starts:
 
