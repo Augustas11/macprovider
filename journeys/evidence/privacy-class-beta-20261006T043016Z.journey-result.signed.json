@@ -1,0 +1,273 @@
+{
+  "schema_version": "macprovider.journey-result-envelope.v1",
+  "signatures": [
+    {
+      "algorithm": "ecdsa-p256-sha256",
+      "key_id": "macprovider-acceptance-p256-v1",
+      "signature": "MEQCIFOfbiIFYoSZkxdjk4DmSd6muxkMhMHthdXEIrDA2RaLAiAza1DQmbDqOPqEqvfJ/2FC+gnv6TWtKXL1lybsuo6waA==",
+      "signed_sha256": "00e9cf2df8f942713246e5325f2b9865d922a3d65d901424e6d939b12e993278",
+      "verified_at": "2026-10-06T07:38:01Z",
+      "verifier": ".github/workflows/promote-signed-privacy-class-beta-journey.yml:37430812962:1"
+    }
+  ],
+  "signed": {
+    "schema_version": "macprovider.journey-result.v1",
+    "journey_id": "JOURNEY-PRIVACY-CLASS-BETA",
+    "requirement_ids": [
+      "SPEC-049-R001",
+      "SPEC-049-R002",
+      "SPEC-049-R003",
+      "SPEC-049-R004",
+      "SPEC-049-R005",
+      "SPEC-049-R006",
+      "SPEC-049-R007",
+      "SPEC-049-R008",
+      "SPEC-049-R009",
+      "SPEC-049-R010",
+      "SPEC-049-R011",
+      "SPEC-049-R012",
+      "SPEC-049-R013",
+      "SPEC-049-R014",
+      "SPEC-049-R015",
+      "SPEC-049-R016",
+      "SPEC-049-R017",
+      "SPEC-049-R018",
+      "SPEC-049-R019",
+      "SPEC-049-R020",
+      "SPEC-049-R021",
+      "SPEC-049-R022"
+    ],
+    "repository": {
+      "name": "Augustas11/macprovider",
+      "commit": "cab10eabb216394f1fcfd729330a4e656a840e0a"
+    },
+    "evidence_repository": {
+      "name": "Augustas11/macprovider",
+      "commit": "3f61995d90394fb5abd8589e03b7aa7d14cc102e"
+    },
+    "captured_at": "2026-10-06T04:30:16Z",
+    "expires_at": "2027-01-03",
+    "operator": {
+      "role": "acceptance-operator",
+      "identity_fingerprint": "c071ab744594d767ab0b173c181ecf8cb2426e0bb73e73810c0fc5da55483987"
+    },
+    "environment": {
+      "class": "provider-privacy-class-beta",
+      "hardware_profile": "apple-silicon-mac15-14",
+      "candidate": "release:v1.8.215"
+    },
+    "candidate_identity": {
+      "release_tag": "v1.8.215",
+      "binary_sha256": "d8327fdbbc8f64690015debec2774c22f3d1573669a1b2239cf5ebe8fee37c83",
+      "code_cdhash": "3214ffcc6b706507f9a268cfb400da5c74287ff6",
+      "team_id": "YF7XNRJUG4",
+      "signing_identifier": "live.malibu.provider.cli"
+    },
+    "artifacts": [
+      {
+        "id": "redacted-privacy-class-beta",
+        "sha256": "cde636ea7a090c259ce48d85639c98d84dbf93a4d78ea5d83408b67bd377984c",
+        "source": "journeys/evidence/privacy-class-beta-20261006T043016Z.redacted.json"
+      },
+      {
+        "id": "privacy-class-beta-redaction-manifest",
+        "sha256": "550c541377fd801f0d33c3f934637c48ec46a22b3b4fc02186597017bf30c26b",
+        "source": "journeys/evidence/privacy-class-beta-20261006T043016Z/MANIFEST.sha256"
+      }
+    ],
+    "result": {
+      "status": "pass",
+      "summary": "signed notarized release passed every JOURNEY-PRIVACY-CLASS-BETA step on Apple Silicon"
+    },
+    "steps": [
+      {
+        "id": "step-01-bind-signed-release",
+        "status": "pass",
+        "assertion": "signed notarized hardened-runtime release bound by cdhash, team, and identifier to signed release metadata and the isolated stack",
+        "artifacts": [
+          "redacted-privacy-class-beta",
+          "privacy-class-beta-redaction-manifest"
+        ]
+      },
+      {
+        "id": "step-02-privacy-mode-start",
+        "status": "pass",
+        "assertion": "privacy mode started, privacy key records accepted and memory-only, posture verified by the coordinator",
+        "artifacts": [
+          "redacted-privacy-class-beta",
+          "privacy-class-beta-redaction-manifest"
+        ]
+      },
+      {
+        "id": "step-03-debugger-attach-refused",
+        "status": "pass",
+        "assertion": "user and root lldb and root dtrace attach refused while the provider stayed eligible",
+        "artifacts": [
+          "redacted-privacy-class-beta",
+          "privacy-class-beta-redaction-manifest"
+        ]
+      },
+      {
+        "id": "step-04-core-dump-and-env-refused",
+        "status": "pass",
+        "assertion": "core dumps off, diagnostic env, KV disk tier, loopback runtime, and relay-blind off refused before network, DYLD_* inert",
+        "artifacts": [
+          "redacted-privacy-class-beta",
+          "privacy-class-beta-redaction-manifest"
+        ]
+      },
+      {
+        "id": "step-05-unsigned-build-refused",
+        "status": "pass",
+        "assertion": "re-signed, unsigned, and local debug builds exit non-zero before network",
+        "artifacts": [
+          "redacted-privacy-class-beta",
+          "privacy-class-beta-redaction-manifest"
+        ]
+      },
+      {
+        "id": "step-06-sip-off-refused",
+        "status": "pass",
+        "assertion": "SIP-disabled lab Mac exits sip_disabled before network with zero connections",
+        "artifacts": [
+          "redacted-privacy-class-beta",
+          "privacy-class-beta-redaction-manifest"
+        ]
+      },
+      {
+        "id": "step-07-canary-stream",
+        "status": "pass",
+        "assertion": "stream canary decrypted and verified with exact disclosure and headers",
+        "artifacts": [
+          "redacted-privacy-class-beta",
+          "privacy-class-beta-redaction-manifest"
+        ]
+      },
+      {
+        "id": "step-08-canary-nonstream",
+        "status": "pass",
+        "assertion": "non-stream canary decrypted and verified with exact disclosure and headers",
+        "artifacts": [
+          "redacted-privacy-class-beta",
+          "privacy-class-beta-redaction-manifest"
+        ]
+      },
+      {
+        "id": "step-09-redaction-sweep",
+        "status": "pass",
+        "assertion": "zero canary, canary-hash, and buyer-key matches; one content-free relay-blind settlement receipt per privacy attempt",
+        "artifacts": [
+          "redacted-privacy-class-beta",
+          "privacy-class-beta-redaction-manifest"
+        ]
+      },
+      {
+        "id": "step-10-downgrade-negatives",
+        "status": "pass",
+        "assertion": "downgrade, replay, and wrong-key attempts rejected with zero dispatch; tamper and truncation say do not resubmit",
+        "artifacts": [
+          "redacted-privacy-class-beta",
+          "privacy-class-beta-redaction-manifest"
+        ]
+      },
+      {
+        "id": "step-11-stale-posture-and-quarantine",
+        "status": "pass",
+        "assertion": "stale posture ineligible without quarantine; unapproved cdhash quarantine and key revocation survive restart",
+        "artifacts": [
+          "redacted-privacy-class-beta",
+          "privacy-class-beta-redaction-manifest"
+        ]
+      },
+      {
+        "id": "step-12-kill-switch",
+        "status": "pass",
+        "assertion": "kill switch rejects held and next privacy requests; relay-blind and plaintext unaffected; re-enable recovers",
+        "artifacts": [
+          "redacted-privacy-class-beta",
+          "privacy-class-beta-redaction-manifest"
+        ]
+      },
+      {
+        "id": "step-13-enforce-canary",
+        "status": "pass",
+        "assertion": "enforce snapshot before dispatch, closed relay_blind_settled verdict, payable credit, debit equals credit, verified counters unchanged",
+        "artifacts": [
+          "redacted-privacy-class-beta",
+          "privacy-class-beta-redaction-manifest"
+        ]
+      },
+      {
+        "id": "step-14-no-capability-provider-excluded",
+        "status": "pass",
+        "assertion": "provider without relay_blind_settlement_receipt_v1 never reserved; typed unavailable before quota",
+        "artifacts": [
+          "redacted-privacy-class-beta",
+          "privacy-class-beta-redaction-manifest"
+        ]
+      },
+      {
+        "id": "step-15-tampered-receipt-quarantined",
+        "status": "pass",
+        "assertion": "withheld, tampered, and v0.4 receipts closed quarantined with zero payable credit and buyer refund",
+        "artifacts": [
+          "redacted-privacy-class-beta",
+          "privacy-class-beta-redaction-manifest"
+        ]
+      },
+      {
+        "id": "step-16-redaction-review",
+        "status": "pass",
+        "assertion": "redacted bundle reviewed; automated secret sweep clean; no private path remains",
+        "artifacts": [
+          "redacted-privacy-class-beta",
+          "privacy-class-beta-redaction-manifest"
+        ]
+      }
+    ],
+    "redaction": {
+      "secrets_redacted": true,
+      "operator_identity_redacted": true,
+      "local_account_names_redacted": true
+    },
+    "run_id": "privacy-class-beta-20261006T043016Z",
+    "execution_mode": "provider-privacy-class-beta",
+    "observations": {
+      "hardening_applied_before_network_verified": true,
+      "privacy_key_memory_only_verified": true,
+      "posture_verified_by_coordinator": true,
+      "debugger_attach_refused_verified": true,
+      "core_dumps_disabled_verified": true,
+      "diagnostic_env_refused_verified": true,
+      "dyld_env_inert_verified": true,
+      "unsigned_or_resigned_build_refused_verified": true,
+      "sip_off_host_refused_verified": true,
+      "stream_frames_decrypted_and_verified": true,
+      "nonstream_frames_decrypted_and_verified": true,
+      "disclosure_strings_exact_verified": true,
+      "canary_absent_from_all_artifacts_verified": true,
+      "downgrade_attempts_rejected_verified": true,
+      "tampered_or_truncated_response_rejected_verified": true,
+      "stale_posture_ineligible_verified": true,
+      "quarantine_durable_across_restart_verified": true,
+      "kill_switch_blocks_all_phases_verified": true,
+      "relay_blind_and_plaintext_unaffected_verified": true,
+      "exactly_one_content_free_settlement_receipt_verified": true,
+      "enforce_snapshot_before_dispatch_verified": true,
+      "relay_blind_settled_verdict_closed_verified": true,
+      "relay_blind_credit_payable_verified": true,
+      "buyer_debit_equals_provider_credit_usage_verified": true,
+      "verified_count_delta_zero_verified": true,
+      "no_capability_provider_excluded_verified": true,
+      "tampered_or_missing_receipt_quarantined_and_refunded_verified": true,
+      "plaintext_observed_at_relay": false,
+      "failover_or_alternate_provider_observed": false,
+      "silent_downgrade_observed": false,
+      "plaintext_derived_receipt_or_telemetry_emitted_for_privacy_request": false,
+      "relay_blind_request_reported_as_verified": false,
+      "privacy_key_written_to_disk": false,
+      "unreleased_local_binary_connected_to_live_coordinator": false,
+      "secret_or_canary_persisted": false
+    }
+  }
+}
