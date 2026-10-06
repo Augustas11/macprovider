@@ -192,6 +192,29 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
                 "inter_token_gaps_seconds": [0.009] * 100,
             }],
         }
+        # A request with no decode interval (0 or 1 completion tokens) cannot
+        # carry a decode rate, whatever gaps other requests supply.
+        for tokens in (0, 1):
+            with self.subTest(completion_tokens=tokens):
+                # The second request supplies every gap, so only the
+                # completion-token floor can catch the first.
+                gaps = [0.009] * 100
+                result = self._run_case(native_overrides={
+                    "requests": 2,
+                    "per_request_tps": [130.0, 130.0],
+                    "per_request_decode_tps": [500.0, 130.0],
+                    "raw_inter_token_gaps_seconds": [[], gaps],
+                    "request_metrics": [
+                        {"request_id": "c-b0-r0", "completion_tokens": tokens, "decode_tps": 500.0,
+                         "inter_token_gaps_seconds": []},
+                        {"request_id": "c-b0-r1", "completion_tokens": 129, "decode_tps": 130.0,
+                         "inter_token_gaps_seconds": gaps},
+                    ],
+                })
+                self.assertEqual(result["overall_status"], "FAIL")
+                self.assertTrue(any(
+                    "request_metrics" in item for item in result["cells"][0]["hard_failures"]
+                ), result["cells"][0]["hard_failures"])
         for field, metrics in cases.items():
             with self.subTest(field=field):
                 result = self._run_case(native_overrides={"request_metrics": metrics})
