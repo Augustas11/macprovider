@@ -551,3 +551,67 @@ func writeNativeMTPSignatureSidecar(path string, sig nativeMTPCanaryDetachedSign
 	}
 	return os.WriteFile(path, raw, 0o600)
 }
+
+// A provider session carries the served wire id (the MLX repo id), while the
+// tuple and its challenge bank name the catalog key. The offer binds when the
+// two are the same model under routing normalization, and only then (#1770).
+func TestNativeMTPTupleOfferBindsTheServedWireModelID(t *testing.T) {
+	raw, binding := nativeMTPValidBankFixture(t)
+	bank, err := ParseNativeMTPChallengeBank(raw, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := bank.Entries[0]
+	now := time.Date(2026, 9, 28, 1, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		servedModelID string
+		recorded      bool
+	}{
+		{"mlx-community/qwen3-fixture-4bit", true},
+		{record.ModelID, true},
+		{"mlx-community/other-model-4bit", false},
+	} {
+		registry := pool.NewRegistry(nil)
+		provider := &pool.Provider{
+			ProviderID: "provider-a", AssignedID: "assigned-a",
+			ModelID: tc.servedModelID, ModelHash: record.ModelHash,
+			State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1, MaxContextTokens: 4096,
+		}
+		clientConn, serverConn := net.Pipe()
+		registry.Register(provider, serverConn)
+		cfg := config.Default()
+		cfg.Pool.NativeMTPCanary.IntervalS = 900
+		server := NewServer(cfg, registry, zerolog.Nop(), WithNow(func() time.Time { return now }))
+		server.cfg.Pool.NativeMTPCanary.Enabled = true
+		server.nativeMTPCanaryBank = &bank
+		tuple := NativeMTPRuntimeTuple{
+			ModelID: record.ModelID, ModelHash: record.ModelHash, ModelHashAlgorithm: "sha256",
+			ProviderRevision: "1.8.123", RuntimeRevision: "mlx-swift-lm-e874140",
+			TokenizerDigest: record.TokenizerSHA256, ArtifactDigest: record.ArtifactSHA256,
+			ManifestDigest: record.MTPManifestSHA256, SidecarDigest: strings.Repeat("8", 64),
+			ProviderBinarySHA256: strings.Repeat("9", 64), RuntimeCDHash: strings.Repeat("a", 64),
+			CacheNamespace: "native-mtp-test", StateDigest: record.ExpectedCommittedStateSHA256,
+			ProposalDepth: int(record.FixedProposalDepth),
+		}
+		admission := strings.Repeat("8", 64)
+		offer := NativeMTPTupleOffer{
+			Type: "native_mtp_tuple_offer_v1", Version: 1,
+			ProviderID: provider.ProviderID, AssignedID: provider.AssignedID, TargetGeneration: 7,
+			ProviderRevision: tuple.ProviderRevision, RuntimeRevision: tuple.RuntimeRevision, RuntimeTuple: tuple,
+			NativeMTPAdmissionTupleSHA256: admission, ServedSnapshotID: "snapshot-a",
+			NativeMTPRuntimeTupleSHA256: nativeMTPRuntimeTupleIdentitySHA256(
+				provider.ProviderID, provider.AssignedID, 7, admission, "snapshot-a"),
+			SidecarDigest: tuple.SidecarDigest, ChallengeBankReleaseID: bank.ReleaseID,
+			ChallengeBankSHA256: bank.RawSHA256, ChallengeCorpusSHA256: strings.Repeat("b", 64),
+			SelftestProfile: "native_mtp_selftest_v1", SelftestPassDigest: strings.Repeat("c", 64),
+			SelftestObservedAt: now.Format(time.RFC3339),
+		}
+		server.handleNativeMTPTupleOffer(provider.ProviderID, provider.AssignedID, mustMarshalNativeMTP(t, offer))
+		snap, _ := registry.Resolve(provider.ProviderID, provider.AssignedID)
+		if got := snap.NativeMTPCanary != nil; got != tc.recorded {
+			t.Errorf("served %q: offer recorded=%v want %v", tc.servedModelID, got, tc.recorded)
+		}
+		clientConn.Close()
+		serverConn.Close()
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 )
@@ -137,8 +138,11 @@ func (s *Server) handleNativeMTPTupleOffer(providerID, assignedID string, payloa
 		s.log.Warn().Str("provider_id", providerID).Msg("native MTP tuple offer rejected: tuple or selftest mismatch")
 		return
 	}
+	// The tuple names the catalog key (the bank's model_id); the session
+	// carries the served wire id (e.g. the MLX repo id). Routing treats the
+	// two as one model through the same normalization (#900).
 	if provider, ok := s.pool.Resolve(providerID, assignedID); !ok ||
-		offer.RuntimeTuple.ModelID != provider.ModelID ||
+		!billing.ModelsEquivalent(offer.RuntimeTuple.ModelID, provider.ModelID) ||
 		offer.RuntimeTuple.ModelHash != provider.ModelHash {
 		s.log.Warn().Str("provider_id", providerID).Msg("native MTP tuple offer rejected: active session mismatch")
 		return
