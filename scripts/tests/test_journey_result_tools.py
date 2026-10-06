@@ -442,6 +442,199 @@ class JourneyResultToolsTests(unittest.TestCase):
                 )
             self.assertEqual([], validate_repository(root, trusted_journey_result_public_key_sha256=trusted_hash).errors)
 
+    def _sign_fixture_result(self, root: Path, private_key: str, commit: str, output: str) -> None:
+        openssl = shutil.which("openssl")
+        if openssl is None:
+            raise unittest.SkipTest("openssl is required")
+        payload_path = root.parent / f"{root.name}-payload-{commit[:12]}.json"
+        payload_path.write_text(json.dumps(signed_journey_envelope(commit, signatures=[])["signed"], indent=2) + "\n", encoding="utf-8")
+        env = os.environ.copy()
+        env["MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM"] = private_key
+        subprocess.run(
+            [
+                sys.executable,
+                str(SIGNER),
+                "--root",
+                str(root),
+                "--input",
+                str(payload_path),
+                "--output",
+                output,
+                "--verified-at",
+                "2026-01-01T00:00:01Z",
+                "--openssl-bin",
+                openssl,
+            ],
+            env=env,
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        payload_path.unlink()
+
+    def _demoted_row_with_retained_stale_evidence(self, root: Path) -> tuple[str, str, str]:
+        """Mirror #1830: a pending row keeps a commit pin and signed envelope whose selector bytes changed since."""
+        write_repository(root, base_repository())
+        private_key = generate_acceptance_key(root)
+        trusted_hash = hashlib.sha256((root / "security" / "acceptance-candidate-signing-public.pem").read_bytes()).hexdigest()
+        old_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+        old_source = "journeys/evidence/old-signed-result.json"
+        self._sign_fixture_result(root, private_key, old_commit, old_source)
+        old_digest = hashlib.sha256((root / old_source).read_bytes()).hexdigest()
+        conformance_path = root / "specs" / "CONFORMANCE.json"
+        conformance = json.loads(conformance_path.read_text(encoding="utf-8"))
+        requirement = conformance["requirements"][0]
+        requirement["journeys"] = ["JOURNEY-BOOT"]
+        requirement["evidence"] = [
+            {"artifact": f"commit:{old_commit}", "source": None, "captured_at": "2026-01-01", "expires_at": "2027-01-01"},
+            {"artifact": f"sha256:{old_digest}", "source": old_source, "captured_at": "2026-01-01", "expires_at": "2027-01-01"},
+        ]
+        conformance_path.write_text(json.dumps(conformance, indent=2) + "\n", encoding="utf-8")
+        (root / "src" / "example.py").write_text("def example():\n    return 1 == 1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-qm", "selector moved; row demoted with retained evidence"], cwd=root, check=True)
+        self.assertEqual([], validate_repository(root, trusted_journey_result_public_key_sha256=trusted_hash).errors)
+        return private_key, trusted_hash, old_commit
+
+    def test_promoter_repromotes_demoted_row_with_retained_stale_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            root.mkdir()
+            private_key, trusted_hash, old_commit = self._demoted_row_with_retained_stale_evidence(root)
+            conformance_path = root / "specs" / "CONFORMANCE.json"
+            new_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            new_source = "journeys/evidence/new-signed-result.json"
+            self._sign_fixture_result(root, private_key, new_commit, new_source)
+
+            # The pre-fix append behavior reproduces the production failure.
+            appended = json.loads(conformance_path.read_text(encoding="utf-8"))
+            row = appended["requirements"][0]
+            row["state"] = "conformant"
+            row["gap"] = None
+            row["evidence"] += [
+                {"artifact": f"commit:{new_commit}", "source": None, "captured_at": "2026-01-01", "expires_at": "2027-01-01"},
+                {
+                    "artifact": "sha256:" + hashlib.sha256((root / new_source).read_bytes()).hexdigest(),
+                    "source": new_source,
+                    "captured_at": "2026-01-01",
+                    "expires_at": "2027-01-01",
+                },
+            ]
+            appended_errors = validate_repository(
+                root, trusted_journey_result_public_key_sha256=trusted_hash, conformance_override=appended
+            ).errors
+            self.assertTrue(
+                any(
+                    f"commit evidence {old_commit} does not match current mapped selector fragment 'example'" in error
+                    for error in appended_errors
+                ),
+                appended_errors,
+            )
+
+            promoter = load_promoter_module()
+            with contextlib.redirect_stdout(io.StringIO()):
+                promoter.promote(
+                    root,
+                    "SPEC-001-R001",
+                    new_source,
+                    base_ref="HEAD",
+                    trusted_public_key_sha256=trusted_hash,
+                )
+
+            requirement = json.loads(conformance_path.read_text(encoding="utf-8"))["requirements"][0]
+            new_digest = hashlib.sha256((root / new_source).read_bytes()).hexdigest()
+            self.assertEqual("conformant", requirement["state"])
+            self.assertIsNone(requirement["gap"])
+            self.assertEqual(
+                [
+                    {"artifact": f"commit:{new_commit}", "source": None, "captured_at": "2026-01-01", "expires_at": "2027-01-01"},
+                    {"artifact": f"sha256:{new_digest}", "source": new_source, "captured_at": "2026-01-01", "expires_at": "2027-01-01"},
+                ],
+                requirement["evidence"],
+            )
+            self.assertTrue((root / "journeys" / "evidence" / "old-signed-result.json").exists())
+            self.assertEqual([], validate_repository(root, trusted_journey_result_public_key_sha256=trusted_hash).errors)
+
+    def test_promoter_keeps_non_journey_evidence_when_superseding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            root.mkdir()
+            private_key, trusted_hash, _ = self._demoted_row_with_retained_stale_evidence(root)
+            (root / "docs").mkdir()
+            (root / "docs" / "review.md").write_text("reviewed\n", encoding="utf-8")
+            review = {
+                "artifact": "sha256:" + hashlib.sha256(b"reviewed\n").hexdigest(),
+                "source": "docs/review.md",
+                "captured_at": "2026-01-01",
+                "expires_at": "2027-01-01",
+            }
+            conformance_path = root / "specs" / "CONFORMANCE.json"
+            conformance = json.loads(conformance_path.read_text(encoding="utf-8"))
+            conformance["requirements"][0]["evidence"].append(review)
+            conformance_path.write_text(json.dumps(conformance, indent=2) + "\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "reviewed evidence"], cwd=root, check=True)
+            new_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            self._sign_fixture_result(root, private_key, new_commit, "journeys/evidence/new-signed-result.json")
+
+            promoter = load_promoter_module()
+            with contextlib.redirect_stdout(io.StringIO()):
+                promoter.promote(
+                    root,
+                    "SPEC-001-R001",
+                    "journeys/evidence/new-signed-result.json",
+                    base_ref="HEAD",
+                    trusted_public_key_sha256=trusted_hash,
+                )
+
+            evidence = json.loads(conformance_path.read_text(encoding="utf-8"))["requirements"][0]["evidence"]
+            self.assertIn(review, evidence)
+            self.assertEqual([f"commit:{new_commit}"], [item["artifact"] for item in evidence if item["artifact"].startswith("commit:")])
+
+    def test_conformant_row_with_stale_current_evidence_still_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            root.mkdir()
+            write_repository(root, base_repository())
+            private_key = generate_acceptance_key(root)
+            trusted_hash = hashlib.sha256((root / "security" / "acceptance-candidate-signing-public.pem").read_bytes()).hexdigest()
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            conformance_path = root / "specs" / "CONFORMANCE.json"
+            conformance = json.loads(conformance_path.read_text(encoding="utf-8"))
+            conformance["requirements"][0]["journeys"] = ["JOURNEY-BOOT"]
+            conformance_path.write_text(json.dumps(conformance, indent=2) + "\n", encoding="utf-8")
+            self._sign_fixture_result(root, private_key, commit, "journeys/evidence/signed-result.json")
+            promoter = load_promoter_module()
+            with contextlib.redirect_stdout(io.StringIO()):
+                promoter.promote(
+                    root,
+                    "SPEC-001-R001",
+                    "journeys/evidence/signed-result.json",
+                    base_ref="HEAD",
+                    trusted_public_key_sha256=trusted_hash,
+                )
+            self.assertEqual([], validate_repository(root, trusted_journey_result_public_key_sha256=trusted_hash).errors)
+
+            (root / "src" / "example.py").write_text("def example():\n    return 1 == 1\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "selector moved under a conformant row"], cwd=root, check=True)
+            errors = validate_repository(root, trusted_journey_result_public_key_sha256=trusted_hash).errors
+            self.assertTrue(
+                any(f"commit evidence {commit} does not match current mapped selector fragment 'example'" in error for error in errors),
+                errors,
+            )
+
+            # Re-promoting with the same stale signed result is still rejected and leaves the ledger untouched.
+            before = conformance_path.read_text(encoding="utf-8")
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+                promoter.promote(
+                    root,
+                    "SPEC-001-R001",
+                    "journeys/evidence/signed-result.json",
+                    base_ref="HEAD",
+                    trusted_public_key_sha256=trusted_hash,
+                )
+            self.assertEqual(before, conformance_path.read_text(encoding="utf-8"))
+
     def test_promoter_does_not_rewrite_conformance_when_gate_rejects(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -28,6 +28,7 @@ from check_spec_governance import (
     trusted_pool_model_prerequisite_error,
     ValidationResult,
     _load_json,
+    _looks_like_signed_journey_result,
     _source_under_journey_evidence,
     _validate_signed_journey_result,
     resolve_trusted_openssl,
@@ -148,6 +149,33 @@ def upsert_evidence(existing: list[Any], record: dict[str, Any]) -> list[Any]:
     ] + [record]
 
 
+def is_superseded_by_promotion(root: Path, item: Any) -> bool:
+    """Evidence a fresh signed promotion replaces rather than appends to.
+
+    The validator pins every commit evidence entry on a conformant row to the
+    current mapped selector bytes, and a signed journey-result binds exactly
+    one repository commit. A row demoted with its historical commit pin and
+    signed envelope retained (#1830) therefore cannot be re-promoted by
+    appending; the new signed pair supersedes them. The superseded envelope
+    files stay under journeys/evidence/ and in git history. Other reviewed
+    evidence is kept.
+    """
+    if not isinstance(item, dict):
+        return False
+    artifact = item.get("artifact")
+    if not isinstance(artifact, str):
+        return False
+    if artifact.startswith("commit:"):
+        return True
+    source = item.get("source")
+    return (
+        artifact.startswith("sha256:")
+        and isinstance(source, str)
+        and _source_under_journey_evidence(root, source)
+        and _looks_like_signed_journey_result(root, source)
+    )
+
+
 def load_conformance(root: Path) -> dict[str, Any]:
     conformance_path = root / "specs" / "CONFORMANCE.json"
     load_result = ValidationResult()
@@ -198,6 +226,7 @@ def promote_requirement_in_memory(
     evidence = updated.get("evidence")
     if not isinstance(evidence, list):
         evidence = []
+    evidence = [item for item in evidence if not is_superseded_by_promotion(root, item)]
     evidence = upsert_evidence(
         evidence,
         {
