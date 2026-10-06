@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 	"github.com/augstar/macprovider-coordinator/internal/trustpool"
 )
@@ -504,13 +505,16 @@ func trustPoolAdminRequest(method, target, operatorKey, operationID string, body
 }
 
 // trustPoolAdminManifestWitnessInit writes the first manifest-acceptance
-// witness from a coordinator DB that already has accepted manifests. It runs
-// on the coordinator host while the coordinator is up, so it opens the DB
-// read-only and never writes to it.
+// witness from the coordinator DB named by the coordinator's own config
+// (storage.db_path); it takes no free-form DB path. It runs on the coordinator
+// host while the coordinator is up, so it opens the DB read-only and never
+// writes to it. The result trusts the live DB as of this moment: the runbook
+// binds it to the locked step that also adds the key and restarts.
 func trustPoolAdminManifestWitnessInit(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("trust-pool-admin manifest-witness-init", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	dbPath := fs.String("db", "", "path to the coordinator SQLite database")
+	configPath := fs.String("config", "", "coordinator YAML config the running coordinator uses")
+	configOverlay := fs.String("config-overlay", "", "optional YAML overlay the running coordinator uses")
 	out := fs.String("out", "", "absolute path for the new witness file; must not exist")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -518,9 +522,8 @@ func trustPoolAdminManifestWitnessInit(args []string, stdout io.Writer) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected positional arguments")
 	}
-	db := strings.TrimSpace(*dbPath)
-	if db == "" {
-		return fmt.Errorf("--db is required")
+	if strings.TrimSpace(*configPath) == "" {
+		return fmt.Errorf("--config is required")
 	}
 	witnessPath := strings.TrimSpace(*out)
 	if witnessPath == "" {
@@ -529,10 +532,21 @@ func trustPoolAdminManifestWitnessInit(args []string, stdout io.Writer) error {
 	if !filepath.IsAbs(witnessPath) {
 		return fmt.Errorf("--out must be an absolute path")
 	}
-	if _, err := os.Stat(db); err != nil {
-		return fmt.Errorf("coordinator DB %q: %w", db, err)
+	cfg, err := config.LoadWithOverlay(strings.TrimSpace(*configPath), strings.TrimSpace(*configOverlay))
+	if err != nil {
+		return err
 	}
-	handle, err := sql.Open("sqlite", sqliteutil.ReadOnlyDSN(db))
+	if configured := strings.TrimSpace(cfg.TrustedPools.ManifestAcceptanceWitnessPath); configured != "" && configured != witnessPath {
+		return fmt.Errorf("--out %q differs from trusted_pools.manifest_acceptance_witness_path %q in the config", witnessPath, configured)
+	}
+	dbPath := strings.TrimSpace(cfg.Storage.DBPath)
+	if dbPath == "" || dbPath == ":memory:" || !filepath.IsAbs(dbPath) {
+		return fmt.Errorf("storage.db_path %q must be an absolute path to the coordinator DB", dbPath)
+	}
+	if _, err := os.Stat(dbPath); err != nil {
+		return fmt.Errorf("coordinator DB %q: %w", dbPath, err)
+	}
+	handle, err := sql.Open("sqlite", sqliteutil.ReadOnlyDSN(dbPath))
 	if err != nil {
 		return err
 	}
@@ -542,7 +556,7 @@ func trustPoolAdminManifestWitnessInit(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(stdout, "wrote manifest acceptance witness %s (pools=%d)\n", witnessPath, len(pools)); err != nil {
+	if _, err := fmt.Fprintf(stdout, "db=%s\nwitness=%s\npools=%d\n", dbPath, witnessPath, len(pools)); err != nil {
 		return err
 	}
 	for _, p := range pools {
@@ -550,7 +564,8 @@ func trustPoolAdminManifestWitnessInit(args []string, stdout io.Writer) error {
 		if len(digest) > 12 {
 			digest = digest[:12]
 		}
-		if _, err := fmt.Fprintf(stdout, "pool_id=%s manifest_version=%d manifest_core_digest=%s...\n", p.PoolID, p.ManifestVersion, digest); err != nil {
+		if _, err := fmt.Fprintf(stdout, "pool_id=%s manifest_version=%d operation_id=%s accepted_at_utc=%s manifest_core_digest=%s...\n",
+			p.PoolID, p.ManifestVersion, p.OperationID, p.AcceptedAtUTC.UTC().Format(time.RFC3339Nano), digest); err != nil {
 			return err
 		}
 	}

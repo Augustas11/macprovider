@@ -158,8 +158,8 @@ func writeManifestAcceptanceWitness(path string, highWater map[string]ManifestAc
 }
 
 // writeManifestAcceptanceWitnessFile publishes the witness through a synced
-// temp file. noClobber links instead of renaming, so an existing file is
-// never replaced.
+// temp file. noClobber (bootstrap only) links instead of renaming, so an
+// existing file is never replaced, and then syncs the parent directory.
 func writeManifestAcceptanceWitnessFile(path string, highWater map[string]ManifestAcceptanceProjection, noClobber bool) error {
 	file := manifestAcceptanceWitnessFile{
 		SchemaVersion: manifestAcceptanceWitnessSchema,
@@ -203,14 +203,16 @@ func writeManifestAcceptanceWitnessFile(path string, highWater map[string]Manife
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if noClobber {
-		if err := os.Link(tmpName, path); err != nil {
-			if errors.Is(err, os.ErrExist) {
-				return fmt.Errorf("manifest acceptance witness %q already exists; refusing to overwrite", path)
-			}
-			return err
+	if !noClobber {
+		// The runtime path runs inside the manifest-acceptance DB transaction;
+		// keep its error surface to the rename so a post-publish failure can
+		// never roll the DB back behind an already-advanced witness.
+		return os.Rename(tmpName, path)
+	}
+	if err := os.Link(tmpName, path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("manifest acceptance witness %q already exists; refusing to overwrite", path)
 		}
-	} else if err := os.Rename(tmpName, path); err != nil {
 		return err
 	}
 	return syncManifestAcceptanceWitnessDir(dir)
