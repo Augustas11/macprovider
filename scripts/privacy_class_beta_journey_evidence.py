@@ -285,12 +285,19 @@ BUNDLE_FORBIDDEN_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("an AWS key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
     ("an email address", re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")),
 )
-# Public or internal DNS names (a signing identifier such as
-# `live.malibu.provider.cli` or a file name such as `pearl-release.json` has no
-# such final label, so it is not flagged).
-HOSTNAME_RE = re.compile(
-    r"(?i)(?<![A-Za-z0-9_.-])(?:[A-Za-z0-9-]+\.)+(?:com|net|org|io|dev|tech|app|ai|cloud|local|internal|lan|home|corp|test|example)(?![A-Za-z0-9_-])"
+# Every DNS-shaped token is treated as a hostname unless it is a file name with
+# a known extension, an Apple reverse-DNS subsystem id, or one of the fixed
+# non-host identifiers the run records. Unknown suffixes fail closed.
+DNS_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])((?:[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?\.)+([A-Za-z]{2,63}))(?![A-Za-z0-9_-])"
 )
+NON_HOST_SUFFIXES = frozenset({
+    "txt", "json", "jsonl", "tsv", "db", "log", "meta", "stderr", "stdout", "status", "sig", "err", "yaml", "yml",
+    "gz", "dmg", "ips", "xml", "plist", "dylib", "sh", "py", "md", "pem", "metallib", "bundle", "patch", "tar",
+})
+NON_HOST_TOKENS = frozenset({
+    "live.malibu.provider.cli", "hw.model", "machdep.cpu", "quarantine.reason", "encryption.current", "bytes.fromhex",
+})
 IPV6_CANDIDATE_RE = re.compile(r"(?<![0-9A-Za-z:])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?![0-9A-Za-z:])")
 IPV4_RE = re.compile(r"(?<![0-9A-Za-z.])([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})(?![0-9.])")
 URL_HOST_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://([^/:\s\"'<>]+)")
@@ -465,8 +472,11 @@ def assert_bundle_redacted(bundle: Bundle) -> None:
             octets = [int(item) for item in match.groups()]
             if all(octet <= 255 for octet in octets) and octets[0] != 127 and octets != [0, 0, 0, 0]:
                 fail(f"reviewed bundle file {path} contains a non-loopback IPv4 literal")
-        if HOSTNAME_RE.search(text):
-            fail(f"reviewed bundle file {path} contains a hostname")
+        for match in DNS_TOKEN_RE.finditer(text):
+            token, suffix = match.group(1), match.group(2)
+            if suffix.lower() in NON_HOST_SUFFIXES or token in NON_HOST_TOKENS or token == "com.apple" or token.startswith("com.apple."):
+                continue
+            fail(f"reviewed bundle file {path} contains a hostname-shaped token")
         for match in IPV6_CANDIDATE_RE.finditer(text):
             try:
                 address = ipaddress.IPv6Address(match.group(0))
@@ -551,6 +561,31 @@ def privacy_posture(event: dict[str, Any]) -> int | None:
         return None
     value = usage.get("posture_verified_at_unix")
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def _frame(data: bytes) -> bytes:
+    return len(data).to_bytes(4, "big") + data
+
+
+def key_record_signed_framing(record: dict[str, Any]) -> bytes:
+    """SPEC-041 key-record signing input (relayblind KeyRecord.SignedFraming)."""
+    public = b64url_bytes(record["public_key"])
+    fingerprint = b64url_bytes(record["identity_fingerprint"])
+    if public is None or len(public) != 32 or fingerprint is None or len(fingerprint) != 32:
+        raise ValueError("key record key or fingerprint")
+    models, families = record["models"], record["endpoint_families"]
+    if not isinstance(models, list) or not isinstance(families, list):
+        raise TypeError("key record arrays")
+    framed = _frame(str(record["alg"]).encode()) + _frame(public) + _frame(fingerprint)
+    framed += len(models).to_bytes(4, "big") + b"".join(_frame(str(item).encode()) for item in models)
+    framed += int(record["max_encrypted_request_bytes"]).to_bytes(8, "big")
+    framed += len(families).to_bytes(4, "big") + b"".join(_frame(str(item).encode()) for item in families)
+    framed += _frame(str(record["signature_algorithm"]).encode())
+    for value in (record["not_before_unix"], record["expires_at_unix"]):
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise TypeError("key record time")
+        framed += (value & 0xFFFFFFFFFFFFFFFF).to_bytes(8, "big")
+    return framed
 
 
 def attestation_framing(attestation: dict[str, Any]) -> bytes:
@@ -1405,7 +1440,12 @@ class Checks:
         rows = doc.get("rows")
         if doc.get("table") != table or not isinstance(rows, list) or doc.get("truncated") is not False:
             fail(f"primary/db/{database}/{table}.json must be a complete row export")
-        return [row for row in rows if isinstance(row, dict)]
+        if not all(isinstance(row, dict) for row in rows) or doc.get("row_count") != len(rows):
+            fail(f"primary/db/{database}/{table}.json row_count must equal its rows")
+        inventory = (self.primary("db/inventory.json").get("databases") or {}).get(database) or {}
+        if inventory.get(table) != len(rows):
+            fail(f"primary/db/{database}/{table}.json must export every row the inventory counts")
+        return rows
 
     def reservations(self) -> list[dict[str, Any]]:
         return self.rows("relay-blind.db", "relay_blind_reservations")
@@ -1460,8 +1500,17 @@ class Checks:
         roots = {str(item.get("path", "")).split("/", 1)[0] for item in files}
         expect({"db", "logs", "evidence"} <= roots, errors, "the raw sweep must cover db, logs, and evidence")
         digests = self.primary("sweep/salted-needle-digests.json")
-        classes = {item.get("class") for item in digests.get("digests") or []}
-        expect(REVIEW_NEEDLE_CLASSES <= classes, errors, "salted digests must cover every review needle class")
+        forms: dict[str, dict[str, int]] = {}
+        for item in digests.get("digests") or []:
+            forms.setdefault(str(item.get("class")), {}).setdefault(str(item.get("form")), 0)
+            forms[str(item.get("class"))][str(item.get("form"))] += 1
+        expect(set(forms) == set(REVIEW_NEEDLE_CLASSES), errors, "salted digests must cover exactly the review needle classes")
+        for klass, counts in forms.items():
+            expect(
+                set(counts) <= {"raw", "json", "utf16le"} and counts.get("raw", 0) >= 1 and counts.get("raw") == counts.get("utf16le"),
+                errors,
+                f"salted digests for {klass} must carry the raw and UTF-16LE form of every needle",
+            )
         expect(re.fullmatch(r"[0-9a-f]{64}", str(digests.get("salt", ""))) is not None, errors, "salted digests must publish a 32-byte salt")
 
     def p_primary_canary_recheck(self, errors: list[str]) -> None:
@@ -1513,9 +1562,18 @@ class Checks:
             try:
                 framing = attestation_framing(attestation)
                 ok = public is not None and ed25519_verify(public, framing, b64url_bytes(signature) or b"")
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, KeyError):
                 ok = False
             expect(ok, errors, f"{label} attestation signature must verify under the pinned identity key")
+            try:
+                signed = key_record_signed_framing(record)
+                digest_ok = base64.urlsafe_b64encode(hashlib.sha256(signed).digest()).rstrip(b"=").decode() == record.get("key_record_digest")
+                record_ok = public is not None and ed25519_verify(public, signed, b64url_bytes(record.get("signature")) or b"")
+            except (TypeError, ValueError, KeyError):
+                digest_ok = record_ok = False
+            expect(digest_ok, errors, f"{label} key_record_digest must be the SHA-256 of its signed framing")
+            expect(record_ok, errors, f"{label} key record signature must verify under the pinned identity key")
+            expect(record.get("endpoint_families") == ["chat_completions"] and bool(record.get("models")), errors, f"{label} key record scope must be chat completions for named models")
 
     def p_primary_posture(self, errors: list[str]) -> None:
         privacy = self.provider_id("privacy")
@@ -1615,7 +1673,10 @@ class Checks:
             expect("prompt_hash" not in facts, errors, f"{label} receipt facts must carry no plaintext prompt hash")
             expect(bool(verdict.get("output_hash")) and verdict.get("output_hash") == out.get("output_hash") == facts.get("output_hash"), errors, f"{label} response_body_sha256 must be the captured frame digest")
             expect(out.get("settlement_output_canonical_json") in ("", None), errors, f"{label} attempt output must carry no content")
-            expect(all(item.get("settlement_receipt_verdict_id") == verdict.get("id") and item.get("receipt_version") in (None, "", RB_PROFILE) for item in self.by_request(outbox, request)), errors, f"{label} audit outbox must name only its one receipt")
+            bound = self.by_request(outbox, request)
+            expect(bool(bound) and all(item.get("settlement_receipt_verdict_id") == verdict.get("id") and item.get("receipt_version") in (None, "", RB_PROFILE) for item in bound), errors, f"{label} audit outbox must hold records naming only its one receipt")
+            checks = verdict.get("checks_json") if isinstance(verdict.get("checks_json"), dict) else {}
+            expect(checks.get("signature_verified") is True and checks.get("route_snapshot_matched") is True and checks.get("output_hash_matched") is True, errors, f"{label} receipt signature, snapshot, and output checks must have passed")
         undispatched = {str(value) for row in reservations if row.get("dispatched_at_unix") is None for value in (row.get("request_id"), row.get("internal_request_id")) if value}
         expect(not any(row.get("request_id") in undispatched for row in verdicts), errors, "undispatched privacy requests must have no receipt verdict")
         hits = self.primary("db/request-id-crossref.json").get("hits") or {}
@@ -1653,9 +1714,16 @@ class Checks:
             self.snapshot_checks(row, shot, errors, label)
             expect(shot.get("route_snapshot_mode") == "enforce", errors, f"{label} snapshot must be enforce")
             expect(shot.get("prompt_hash") in proxied, errors, f"{label} prompt_hash must be the SHA-256 of the proxied envelope bytes")
-            dispatched = int(row.get("dispatched_at_unix") or 0)
-            created = utc_unix(shot.get("created_at_utc"))
-            expect(created is not None and created <= dispatched + 1 and int(shot.get("route_decision_ts_unix_ms") or 0) <= (dispatched + 1) * 1000, errors, f"{label} snapshot must be committed before dispatch")
+            # dispatched_at_unix has one-second resolution, so ordering is
+            # proven by the provider-signed receipt instead: the coordinator
+            # verified the signature over a tuple naming this snapshot's digest,
+            # which the provider can learn only from the dispatch frame, and the
+            # signed issue time follows the route decision.
+            checks = verdict.get("checks_json") if isinstance(verdict.get("checks_json"), dict) else {}
+            facts = verdict.get("facts_json") if isinstance(verdict.get("facts_json"), dict) else {}
+            issued = facts.get("issued_at_unix_ms")
+            expect(checks.get("signature_verified") is True and checks.get("route_snapshot_matched") is True, errors, f"{label} provider-signed receipt must bind the snapshot digest")
+            expect(isinstance(issued, int) and int(shot.get("route_decision_ts_unix_ms") or 0) < issued, errors, f"{label} snapshot route decision must precede the signed receipt")
             expect(verdict.get("settlement_outcome") == RB_SETTLED and verdict.get("closed") == 1 and verdict.get("receipt_result") == "valid", errors, f"{label} verdict must be closed {RB_SETTLED}")
             expect(verdict.get("receipt_profile") == RB_PROFILE and verdict.get("receipt_version") == RB_PROFILE and verdict.get("route_snapshot_mode") == "enforce", errors, f"{label} verdict must be the enforce relay-blind profile")
             expect(verdict.get("route_snapshot_digest") == shot.get("route_snapshot_digest"), errors, f"{label} verdict must bind the snapshot digest")
@@ -1690,20 +1758,34 @@ class Checks:
                             break
         verified = [row for row in self.rows("coordinator.db", "settlement_receipt_verdicts") if row.get("settlement_outcome") == "verified" and start * 1000 <= int(row.get("received_at_unix_ms") or 0) <= (end + 1) * 1000]
         expect(not verified, errors, "no verified verdict may be recorded during the enforce canary")
+        requests = {str(row.get("internal_request_id")) for row in self.enforce_rows()}
+        credits = [row for row in self.rows("coordinator.db", "ledger_request_credits") if row.get("request_id") in requests]
+        expect(len(credits) == len(requests) and len(requests) == 3, errors, "every enforce request must have one ledger credit")
+        expect(
+            all(row.get("rewards_excluded") == 1 and row.get("positive_verification_excluded") == 1 for row in credits),
+            errors,
+            "relay-blind enforce credits must be excluded from verified-work rewards and positive verification",
+        )
 
     def p_primary_kill_switch_refund(self, errors: list[str]) -> None:
         start, end = self.window("step-12-kill-switch")
         held = [row for row in self.reservations() if row.get("privacy_class") == 1 and start <= int(row.get("created_at_unix") or 0) <= end and row.get("terminal_code") == "privacy_class_disabled"]
-        expect(bool(held) and all(row.get("state") == "rejected" and row.get("dispatched_at_unix") is None for row in held), errors, "the held privacy reservation must be rejected predispatch")
+        expect(len(held) == 1, errors, "step-12 must hold exactly one privacy reservation rejected privacy_class_disabled")
         quotas = self.rows("gateway.db", "quota_reservations")
         usage = self.rows("gateway.db", "usage_events")
         for row in held:
-            matched = [item for item in quotas if (row.get("internal_request_id") and item.get("relay_blind_internal_request_id") == row.get("internal_request_id")) or (row.get("envelope_digest") and item.get("relay_blind_envelope_digest") == row.get("envelope_digest"))]
-            for quota in matched:
-                expect(quota.get("status") == "refunded" or (quota.get("status") == "settled" and quota.get("settled_tokens") == 0), errors, "the held request's gateway reservation must be refunded")
-                expect(all(int(item.get("total_tokens") or 0) == 0 for item in usage if item.get("account_id") == quota.get("account_id") and item.get("request_id") == quota.get("request_id")), errors, "the held request must debit no usage")
-            if row.get("envelope_digest"):
-                expect(not any(item.get("relay_blind_envelope_digest") == row.get("envelope_digest") and int(item.get("total_tokens") or 0) > 0 for item in usage), errors, "the held request must debit no usage")
+            expect(row.get("state") == "rejected" and row.get("dispatched_at_unix") is None, errors, "the held privacy reservation must be rejected predispatch")
+            opened, closed = int(row.get("created_at_unix") or 0), int(row.get("terminal_at_unix") or 0)
+            expect(closed >= opened, errors, "the held reservation must record its rejection time")
+            # The gateway reserves buyer quota only when the chat is consumed;
+            # a reservation rejected first never reserves, so the refund is
+            # that no quota reservation or usage debit exists in its lifetime.
+            linked = [item for item in quotas if (row.get("internal_request_id") and item.get("relay_blind_internal_request_id") == row.get("internal_request_id")) or (row.get("envelope_digest") and item.get("relay_blind_envelope_digest") == row.get("envelope_digest"))]
+            during = [item for item in quotas if opened <= (utc_unix(item.get("created_at")) or 0) <= closed + 1]
+            for quota in linked + during:
+                expect(quota.get("status") == "refunded" or (quota.get("status") == "settled" and quota.get("settled_tokens") == 0), errors, "no buyer quota may be charged for the held request")
+            debits = [item for item in usage if opened <= (utc_unix(item.get("created_at")) or 0) <= closed + 1 and int(item.get("total_tokens") or 0) > 0]
+            expect(not debits, errors, "no buyer usage may be debited during the held request")
 
     def p_primary_receipt_quarantine(self, errors: list[str]) -> None:
         verdicts = self.rows("coordinator.db", "settlement_receipt_verdicts")
@@ -1732,6 +1814,21 @@ class Checks:
             if event.get("provider_id") == plain and "auth_response accepted" in str(event.get("reason") or event.get("message") or "")
         ]
         expect(any(stamp is not None and start <= stamp <= end for stamp in accepted), errors, "the fault build's session must be accepted by the isolated journey coordinator")
+        events = self.rows("provider_connection_events.db", "provider_connection_events")
+        sessions = {
+            str(row.get("session_id")): utc_unix(row.get("occurred_at_utc"))
+            for row in events
+            if row.get("provider_id") == plain and row.get("kind") == "auth_accepted" and row.get("outcome") == "success"
+        }
+        snapshots = self.snapshots()
+        for line in self.b.lines("step-15-tampered-receipt-quarantined/cases.tsv"):
+            name, request, _ = line.split("\t")
+            if not name.startswith("fault-"):
+                continue
+            shots = self.by_request(snapshots, request)
+            session = str(shots[0].get("provider_session_id")) if len(shots) == 1 else ""
+            accepted_at = sessions.get(session)
+            expect(bool(session) and accepted_at is not None and start <= accepted_at <= end, errors, f"{name} must be served by a session the journey coordinator accepted during step-15")
 
     def p_primary_dyld_procedure(self, errors: list[str]) -> None:
         record = self.primary("procedure/dyld.json")

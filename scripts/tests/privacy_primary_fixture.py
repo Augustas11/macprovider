@@ -78,8 +78,15 @@ def build_raw(raw: Path, bundle: Path, *, needles: dict[str, str] | None = None)
     binding = contract.Checks(contract.Bundle("x", {"step-01-bind-signed-release/binding.txt": (bundle / "step-01-bind-signed-release/binding.txt").read_bytes()}, b"")).binding()
     start = int(contract.parse_fields((bundle / "step-02-privacy-mode-start/timing.txt").read_text(), "timing")["provider_start_unix"])
 
-    reservations, verdicts, outputs, outbox, snapshots, credits, quotas, usage, proxy = [], [], [], [], [], [], [], [], []
+    reservations, verdicts, outputs, outbox, snapshots, credits, quotas, usage, proxy, ledger = [], [], [], [], [], [], [], [], [], []
     facts: dict = {"enforce": [], "cases": {}}
+    base15 = t["step-14-no-capability-provider-excluded"]
+    connection_events: list[dict] = []
+
+    def session_for(provider: str, created: int) -> str:
+        if provider == plain and created > base15:
+            return "sess-fault"
+        return "sess-" + provider
 
     def reservation(created: int, *, privacy_class: int, provider: str, stream: int, dispatched: bool = True, state: str = "terminal", terminal_code: str | None = None, request_id: str | None = None) -> dict:
         request = request_id or f"irid-{len(reservations):03d}-{secrets.token_hex(4)}"
@@ -107,6 +114,7 @@ def build_raw(raw: Path, bundle: Path, *, needles: dict[str, str] | None = None)
             "id": len(snapshots) + 1, "account_scope": "acct", "request_id": request, "attempt_n": 0, "provider_id": row["provider_id"],
             "paid_entrypoint": contract.RB_ENTRYPOINT, "prompt_hash_basis": contract.RB_BASIS, "prompt_hash": prompt_hash,
             "route_snapshot_mode": mode, "route_decision_ts_unix_ms": created * 1000 + 100, "route_snapshot_digest": digest,
+            "provider_session_id": session_for(row["provider_id"], created),
             "route_snapshot_json": canonical, "route_snapshot_canonical_json": canonical, "created_at_utc": utc_text(created),
         })
         output_hash = hashlib.sha256(secrets.token_bytes(16)).hexdigest()
@@ -117,8 +125,9 @@ def build_raw(raw: Path, bundle: Path, *, needles: dict[str, str] | None = None)
             "settlement_outcome": outcome, "reason": reason, "closed": 1, "terminal_state": "normal_done", "received_at_unix_ms": (created + 2) * 1000,
             "route_snapshot_digest": digest, "route_snapshot_mode": mode, "paid_entrypoint": contract.RB_ENTRYPOINT,
             "receipt_profile": contract.RB_PROFILE, "prompt_hash": prompt_hash, "output_hash": output_hash if receipt_present else None,
-            "checks_json": "{}", "verifier_diagnostics_json": "{}",
-            "facts_json": json.dumps({"output_hash": output_hash, "output_prefix_end_byte": 512}) if receipt_present else None,
+            "checks_json": json.dumps({"signature_verified": receipt_present == 1 and outcome == contract.RB_SETTLED, "route_snapshot_matched": True, "output_hash_matched": True}),
+            "verifier_diagnostics_json": "{}",
+            "facts_json": json.dumps({"output_hash": output_hash, "output_prefix_end_byte": 512, "issued_at_unix_ms": created * 1000 + 600}) if receipt_present else None,
             "created_at_utc": utc_text(created + 2),
         })
         outputs.append({
@@ -129,8 +138,10 @@ def build_raw(raw: Path, bundle: Path, *, needles: dict[str, str] | None = None)
         })
         outbox.append({"id": len(outbox) + 1, "settlement_receipt_verdict_id": verdict_id, "request_id": request, "receipt_version": version, "event_type": "settlement_receipt_verdict"})
         prompt, completion = tokens
+        credit = {"id": len(ledger) + 1, "request_id": request, "provider_id": row["provider_id"], "prompt_tokens": prompt, "charged_prompt_tokens": prompt, "completion_tokens": completion, "provider_credits": 2, "settlement_policy_mode": mode, "rewards_excluded": 1, "positive_verification_excluded": 1, "effective_privacy_outcome": "relay_blind_satisfied"}
+        ledger.append(credit)
         if payable:
-            credits.append({"id": len(credits) + 1, "request_id": request, "provider_id": row["provider_id"], "prompt_tokens": prompt, "charged_prompt_tokens": prompt, "completion_tokens": completion, "provider_credits": 2, "settlement_policy_mode": mode})
+            credits.append(credit)
         quotas.append({
             "account_id": "acct-journey-1839-buyer", "request_id": "gw-" + request, "window_date": "2026-10-06", "reserved_tokens": 576,
             "settled_tokens": prompt + completion if gateway_status == "settled" else 0, "status": gateway_status, "created_at": utc_text(created),
@@ -162,7 +173,6 @@ def build_raw(raw: Path, bundle: Path, *, needles: dict[str, str] | None = None)
         settle(row, mode="enforce", tokens=tokens)
         facts["enforce"].append(row)
     # Step-15 quarantine cases from the bundle's cases.tsv.
-    base15 = t["step-14-no-capability-provider-excluded"]
     for index, line in enumerate((bundle / "step-15-tampered-receipt-quarantined/cases.tsv").read_text().splitlines()):
         name, request, _ = line.split("\t")
         privacy_class = 1 if name.startswith("ws-") else 0
@@ -175,8 +185,11 @@ def build_raw(raw: Path, bundle: Path, *, needles: dict[str, str] | None = None)
     # Key records: one attested privacy key for step-02, plain relay-blind keys.
     public, _ = contract.ed25519_sign(SEED, b"")
     nb = start + 5
-    record_digest = b64url(secrets.token_bytes(32))
-    record = {"alg": "x25519", "public_key": b64url(secrets.token_bytes(32)), "identity_fingerprint": identity["relay_blind_fingerprint"], "models": ["m"], "max_encrypted_request_bytes": 4096, "endpoint_families": ["chat_completions"], "signature_algorithm": "ed25519", "not_before_unix": nb, "expires_at_unix": nb + 3600, "kid": "kid-privacy-1", "key_record_digest": record_digest, "signature": b64url(b"\0" * 64)}
+    record = {"alg": "x25519", "public_key": b64url(secrets.token_bytes(32)), "identity_fingerprint": identity["relay_blind_fingerprint"], "models": ["m"], "max_encrypted_request_bytes": 4096, "endpoint_families": ["chat_completions"], "signature_algorithm": "ed25519", "not_before_unix": nb, "expires_at_unix": nb + 3600, "kid": "kid-privacy-1"}
+    signed = contract.key_record_signed_framing(record)
+    record_digest = b64url(hashlib.sha256(signed).digest())
+    record["key_record_digest"] = record_digest
+    record["signature"] = b64url(contract.ed25519_sign(SEED, signed)[1])
     attestation = {"version": "privacy-key-attestation-v1", "key_record_digest": record_digest, "privacy_class": contract.PRIVACY_CLASS, "assurance": contract.PRIVACY_ASSURANCE, "binary_version": binding["binary_version"], "code_cdhash": binding["code_cdhash"], "not_before_unix": nb, "expires_at_unix": nb + 3600}
     _, signature = contract.ed25519_sign(SEED, contract.attestation_framing(attestation))
     keys = [
@@ -198,7 +211,7 @@ def build_raw(raw: Path, bundle: Path, *, needles: dict[str, str] | None = None)
         create(db, "settlement_receipt_verdicts", verdict_columns, verdicts)
         create(db, "settlement_attempt_outputs", list(outputs[0]), outputs)
         create(db, "settlement_receipt_audit_outbox", list(outbox[0]), outbox)
-        create(db, "ledger_request_credits", list(credits[0]), credits)
+        create(db, "ledger_request_credits", list(ledger[0]), ledger)
         create(db, "spec022_payable_request_credits", list(credits[0]), credits)
         create(db, "referral_serving_qualifications", ["id", "account_id", "created_at"], [])
         create(db, "provider_rewards", ["id", "provider_id", "amount", "created_at_utc"], [])
@@ -207,8 +220,9 @@ def build_raw(raw: Path, bundle: Path, *, needles: dict[str, str] | None = None)
         create(db, "quota_reservations", list(quotas[0]), quotas)
         create(db, "usage_events", list(usage[0]), usage)
     with contextlib.closing(sqlite3.connect(raw / "db" / "provider_connection_events.db")) as db, db:
-        create(db, "provider_connection_events", ["id", "provider_id", "occurred_at_utc", "kind", "outcome", "diagnostic"], [
-            {"id": 1, "provider_id": privacy, "occurred_at_utc": utc_text(start + 3), "kind": "connect", "outcome": "accepted", "diagnostic": "dial /Users/a1/journey-1839/state ok"},
+        create(db, "provider_connection_events", ["id", "provider_id", "session_id", "occurred_at_utc", "kind", "outcome", "diagnostic"], [
+            {"id": 1, "provider_id": privacy, "session_id": "sess-" + privacy, "occurred_at_utc": utc_text(start + 3), "kind": "auth_accepted", "outcome": "success", "diagnostic": "dial /Users/a1/journey-1839/state ok"},
+            {"id": 2, "provider_id": plain, "session_id": "sess-fault", "occurred_at_utc": utc_text(base15 + 20), "kind": "auth_accepted", "outcome": "success", "diagnostic": ""},
         ])
     with contextlib.closing(sqlite3.connect(raw / "db" / "coordinator-audit.db")) as db, db:
         create(db, "settlement_receipt_audit_events", ["id", "request_id"], [])

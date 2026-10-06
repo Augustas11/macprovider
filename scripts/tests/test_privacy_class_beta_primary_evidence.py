@@ -208,7 +208,7 @@ class PrimaryPredicateTests(unittest.TestCase):
             row["route_decision_ts_unix_ms"] += 60_000
 
         self.fx.edit_json("db/coordinator.db/settlement_route_snapshots.json", late)
-        self.assertTrue(any("before dispatch" in error for error in self.fx.errors("primary_enforce")))
+        self.assertTrue(any("must precede the signed receipt" in error for error in self.fx.errors("primary_enforce")))
 
     def test_snapshot_canonical_digest_mismatch_fails(self) -> None:
         def mutate(doc):
@@ -243,15 +243,20 @@ class PrimaryPredicateTests(unittest.TestCase):
             next(row for row in doc["rows"] if row["relay_blind_envelope_digest"] == digest)["settled_tokens"] = 5
 
         self.fx.edit_json("db/gateway.db/quota_reservations.json", debit)
-        self.assertTrue(any("refunded" in error for error in self.fx.errors("primary_kill_switch_refund")))
+        self.assertTrue(any("no buyer quota may be charged" in error for error in self.fx.errors("primary_kill_switch_refund")))
 
     def test_quarantined_case_with_payable_credit_fails(self) -> None:
         request = self.fx.facts["cases"]["fault-tamper-field"]["internal_request_id"]
 
         def credit(doc):
             doc["rows"].append({"id": 99, "request_id": request, "provider_id": "journey-1839-plain", "prompt_tokens": 1, "completion_tokens": 1, "provider_credits": 1, "settlement_policy_mode": "enforce"})
+            doc["row_count"] += 1
+
+        def count(doc):
+            doc["databases"]["coordinator.db"]["spec022_payable_request_credits"] += 1
 
         self.fx.edit_json("db/coordinator.db/spec022_payable_request_credits.json", credit)
+        self.fx.edit_json("db/inventory.json", count)
         self.assertTrue(any("no payable credit" in error for error in self.fx.errors("primary_receipt_quarantine")))
 
     def test_fault_build_must_target_the_loopback_coordinator(self) -> None:
@@ -290,6 +295,45 @@ class PrimaryPredicateTests(unittest.TestCase):
 
         self.fx.edit_json("sweep/raw-files.json", hit)
         self.assertTrue(self.fx.errors("primary_integrity"))
+
+    def test_row_exports_must_match_the_inventory(self) -> None:
+        def drop(doc):
+            doc["rows"].pop()
+            doc["row_count"] -= 1
+
+        self.fx.edit_json("db/coordinator.db/settlement_receipt_verdicts.json", drop)
+        self.assertTrue(any("every row the inventory counts" in error for error in self.fx.errors("primary_receipts")))
+
+    def test_salted_digests_must_cover_every_class(self) -> None:
+        def drop(doc):
+            doc["digests"] = [item for item in doc["digests"] if item["class"] != "completion_canary"]
+
+        self.fx.edit_json("sweep/salted-needle-digests.json", drop)
+        self.assertTrue(self.fx.errors("primary_integrity"))
+
+    def test_forged_key_record_fails(self) -> None:
+        def tamper(doc):
+            row = next(row for row in doc["rows"] if row["key_class"] == "privacy")
+            row["record_json"]["models"] = ["other-model"]
+
+        self.fx.edit_json("db/relay-blind.db/relay_blind_key_records.json", tamper)
+        errors = self.fx.errors("primary_key_attestation")
+        self.assertTrue(any("key record signature" in error for error in errors), errors)
+
+    def test_fault_case_served_by_an_unaccepted_session_fails(self) -> None:
+        def other(doc):
+            for row in doc["rows"]:
+                if row.get("provider_session_id") == "sess-fault":
+                    row["provider_session_id"] = "sess-elsewhere"
+
+        self.fx.edit_json("db/coordinator.db/settlement_route_snapshots.json", other)
+        self.assertTrue(self.fx.errors("primary_fault_isolation"))
+
+    def test_bare_hostnames_fail_redaction(self) -> None:
+        for text in (b"peer=collector.example.xyz\n", b"service.example.co ok\n", b"coordinator.malibu.tech\n"):
+            with self.assertRaises(contract.PrivacyEvidenceError):
+                contract.assert_bundle_redacted(contract.Bundle("x", {"a.txt": text}, b""))
+        contract.assert_bundle_redacted(contract.Bundle("x", {"a.txt": b"live.malibu.provider.cli results.tsv com.apple.network\n"}, b""))
 
     def test_missing_primary_exports_fail_closed(self) -> None:
         shutil.rmtree(self.fx.bundle / "primary" / "db")
