@@ -41,14 +41,32 @@ type relayBlindService struct {
 	// consumed authorization waits for a slot, so a concurrent duplicate is
 	// a replay and never takes a second slot-queue position.
 	dispatchClaims sync.Map
+	// waiters counts relay-blind slot waiters per provider. It is capped so
+	// relay-blind waits cannot fill the shared queue plaintext routing uses.
+	waiters map[string]int
 }
 
-// relayBlindCleanupTimeout bounds terminal rejection writes that must land
-// even after the buyer request context is canceled.
-const relayBlindCleanupTimeout = 5 * time.Second
+func (r *relayBlindService) enterWaiter(providerID string, limit int) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.waiters == nil {
+		r.waiters = map[string]int{}
+	}
+	if r.waiters[providerID] >= limit {
+		return false
+	}
+	r.waiters[providerID]++
+	return true
+}
 
-func relayBlindCleanupContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), relayBlindCleanupTimeout)
+func (r *relayBlindService) leaveWaiter(providerID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.waiters[providerID] <= 1 {
+		delete(r.waiters, providerID)
+		return
+	}
+	r.waiters[providerID]--
 }
 
 func WithRelayBlind(cfg config.RelayBlindConfig, store *relayblind.Store, relay RelayBlindRelayFunc) Option {
@@ -333,7 +351,7 @@ func relayBlindSessionLostCode(privacy bool) (string, bool) {
 func (s *Server) relayBlindPredispatchFailure(ctx context.Context, reservation relayblind.Reservation) (string, bool) {
 	provider, live := s.pool.Resolve(reservation.ProviderID, reservation.AssignedSession)
 	_, keyErr := s.relayBlind.store.LookupKeyRecord(ctx, reservation.ProviderID, reservation.AssignedSession, reservation.KID, reservation.KeyRecordDigest, s.now())
-	sessionLost := !live || provider.AssignedID != reservation.AssignedSession || !relayBlindSessionUsable(provider) || !provider.IsWSTunneled() || keyErr != nil || s.relayBlindSettlementPrerequisite(provider) != ""
+	sessionLost := reservation.ExpiresAtUnix <= s.now().Unix() || !live || provider.AssignedID != reservation.AssignedSession || !relayBlindSessionUsable(provider) || !provider.IsWSTunneled() || keyErr != nil || s.relayBlindSettlementPrerequisite(provider) != ""
 	if reservation.PrivacyClass {
 		if s.privacyDisabledNow(ctx) {
 			return privacyClassDisabled, true
@@ -408,6 +426,14 @@ func (s *Server) awaitRelayBlindSlot(ctx context.Context, reservation relayblind
 	if pollInterval <= 0 {
 		pollInterval = slotQueueDefaultPollInterval
 	}
+	limit := s.slotQueue.maxPending / 4
+	if limit < 1 {
+		limit = 1
+	}
+	if !s.relayBlind.enterWaiter(provider.ProviderID, limit) {
+		return pool.Provider{}, relayBlindSlotUnavailable
+	}
+	defer s.relayBlind.leaveWaiter(provider.ProviderID)
 	waiter, ok := s.slotQueue.enter(provider.ProviderID)
 	if !ok {
 		return pool.Provider{}, relayBlindSlotUnavailable
@@ -714,7 +740,25 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		writeRelayBlindError(w, "relay_blind_replay", "Relay-blind authorization has already been used")
 		return
 	}
-	defer s.relayBlind.dispatchClaims.Delete(reservation.ProviderBinding)
+	// Store writes from here on must land even if the buyer disconnects, or
+	// a consumed authorization could stay dispatchable.
+	durableCtx := context.WithoutCancel(r.Context())
+	heldBinding, heldExpiry := reservation.ProviderBinding, reservation.ExpiresAtUnix
+	releaseClaim := true
+	defer func() {
+		if releaseClaim {
+			s.relayBlind.dispatchClaims.Delete(heldBinding)
+		}
+	}()
+	// burn rejects the consumed row. If the write fails, the in-process
+	// claim stays until reservation expiry so the authorization cannot
+	// dispatch from this coordinator in the meantime.
+	burn := func(code string) {
+		if err := s.relayBlind.store.RejectPredispatch(durableCtx, heldBinding, code, s.now()); err != nil {
+			releaseClaim = false
+			time.AfterFunc(time.Until(time.Unix(heldExpiry, 0))+time.Second, func() { s.relayBlind.dispatchClaims.Delete(heldBinding) })
+		}
+	}
 	slotState := &forwardState{}
 	defer s.releaseQueuedSlotReservation(slotState)
 	defer s.restoreConsumedForwardedSlot(slotState)
@@ -722,16 +766,14 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 	if slotOutcome != relayBlindSlotAcquired {
 		// A wait can outlive the posture, the kill switch, or the key. Those
 		// keep their own codes; only a pure capacity miss is a capacity code.
-		cleanupCtx, cancelCleanup := relayBlindCleanupContext()
-		defer cancelCleanup()
-		code, privacyCode := s.relayBlindPredispatchFailure(cleanupCtx, reservation)
+		code, privacyCode := s.relayBlindPredispatchFailure(durableCtx, reservation)
 		if code == "" {
 			code, privacyCode = "relay_blind_provider_unsupported", false
 			if slotOutcome == relayBlindSlotSessionLost {
 				code, privacyCode = relayBlindSessionLostCode(reservation.PrivacyClass)
 			}
 		}
-		_ = s.relayBlind.store.RejectPredispatch(cleanupCtx, reservation.ProviderBinding, code, s.now())
+		burn(code)
 		if privacyCode {
 			writePrivacyClassError(w, code, "")
 			return
@@ -751,15 +793,15 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 	quotaMetered := false
 	if s.admission != nil {
 		if !s.admission.TryReserveRequest(provider) {
-			_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, "relay_blind_provider_unsupported", s.now())
+			burn("relay_blind_provider_unsupported")
 			writeRelayBlindError(w, "relay_blind_provider_unsupported", "Relay-blind provider quota is unavailable")
 			return
 		}
 		quotaMetered = s.admission.RequestQuotaMetered(provider)
 	}
 	// ArmDispatchWithRequestID returns a zero Reservation on error.
-	heldBinding, heldPrivacy := reservation.ProviderBinding, reservation.PrivacyClass
-	reservation, err = s.relayBlind.store.ArmDispatchWithRequestID(r.Context(), account.ID(), walletSession, authorization, internalRequestID, s.now())
+	heldPrivacy := reservation.PrivacyClass
+	reservation, err = s.relayBlind.store.ArmDispatchWithRequestID(durableCtx, account.ID(), walletSession, authorization, internalRequestID, s.now())
 	if err != nil {
 		if quotaMetered {
 			s.admission.RefundRequest(provider)
@@ -775,14 +817,24 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		// not replays, and the consumed row is burned.
 		if errors.Is(err, relayblind.ErrReservationExpired) || errors.Is(err, relayblind.ErrKeyRevoked) || errors.Is(err, relayblind.ErrStaleSession) {
 			code, privacyCode := relayBlindSessionLostCode(heldPrivacy)
-			cleanupCtx, cancelCleanup := relayBlindCleanupContext()
-			_ = s.relayBlind.store.RejectPredispatch(cleanupCtx, heldBinding, code, s.now())
-			cancelCleanup()
+			burn(code)
 			if privacyCode {
 				writePrivacyClassError(w, code, "")
 				return
 			}
 			writeRelayBlindError(w, code, "Relay-blind provider session or key expired")
+			return
+		}
+		if !errors.Is(err, relayblind.ErrReplay) && !errors.Is(err, relayblind.ErrReservationMismatch) {
+			// Store failure: the authorization was not armed. Burn it and
+			// fail closed rather than report a replay.
+			if heldPrivacy {
+				burn(privacyClassStale)
+				writePrivacyClassError(w, privacyClassStale, "")
+				return
+			}
+			burn("relay_blind_required_unavailable")
+			writeRelayBlindError(w, "relay_blind_required_unavailable", "Relay-blind state is unavailable")
 			return
 		}
 		writeRelayBlindError(w, "relay_blind_replay", "Relay-blind authorization has already been used")
@@ -801,7 +853,7 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		settlement, err = rec.recordRelayBlindRouteSnapshot(r.Context(), provider, reservation)
 		if err != nil {
 			s.log.Warn().Err(err).Str("request_id", rec.requestID).Str("provider_id", provider.ProviderID).Msg("relay-blind route snapshot failed before dispatch")
-			_ = s.relayBlind.store.RejectArmedPredispatch(r.Context(), reservation.ProviderBinding, "relay_blind_required_unavailable", s.now())
+			_ = s.relayBlind.store.RejectArmedPredispatch(durableCtx, reservation.ProviderBinding, "relay_blind_required_unavailable", s.now())
 			if quotaMetered {
 				s.admission.RefundRequest(provider)
 			}
@@ -835,7 +887,7 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		verifiedAt, code := s.privacyGate(r.Context(), provider, reservation.KeyRecordDigest)
 		if code != "" {
 			observed := privacyObservedCode(code, false)
-			_ = s.relayBlind.store.RejectArmedPredispatch(r.Context(), reservation.ProviderBinding, observed, s.now())
+			_ = s.relayBlind.store.RejectArmedPredispatch(durableCtx, reservation.ProviderBinding, observed, s.now())
 			if quotaMetered {
 				s.admission.RefundRequest(provider)
 			}
@@ -849,7 +901,7 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		s.noteProviderAcceptedRequest(slotState)
 	}
 	if err != nil {
-		_ = s.relayBlind.store.RejectArmedPredispatch(r.Context(), reservation.ProviderBinding, "relay_blind_provider_unsupported", s.now())
+		_ = s.relayBlind.store.RejectArmedPredispatch(durableCtx, reservation.ProviderBinding, "relay_blind_provider_unsupported", s.now())
 		if quotaMetered {
 			s.admission.RefundRequest(provider)
 		}
