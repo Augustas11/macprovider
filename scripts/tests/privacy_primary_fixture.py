@@ -226,7 +226,7 @@ def build_raw(raw: Path, bundle: Path, *, needles: dict[str, str] | None = None)
     (raw / "logs" / "provider-plain.log").write_text("malibu-cli config\n  coordinator_url: ws://127.0.0.1:19302/ws/provider\nmalibu-cli config\n  coordinator_url: ws://127.0.0.1:19302/ws/provider\n")
     (raw / "logs" / "provider-old.log").write_text("malibu-cli config\n  coordinator_url: ws://127.0.0.1:19302/ws/provider\n")
     (raw / "logs" / "unified-provider-96156.log").write_text(
-        f"{datetime.fromtimestamp(start, LOCAL).strftime('%Y-%m-%d %H:%M:%S')}.100 Df macprovider-cli[96156:1a2b] [com.apple.network:connection] nw_connection 127.0.0.1:19302 ready\n"
+        f"{datetime.fromtimestamp(start, LOCAL).strftime('%Y-%m-%d %H:%M:%S')}.100 Df macprovider-cli[96156:1a2b] [com.apple.network:connection] [C1 IPv4#f14eaaea:19302 in_progress socket-flow (satisfied (Path is satisfied), interface: lo0)] event: flow:start_connect @0.000s\n"
     )
     (raw / "logs" / "proxy-events.jsonl").write_text("".join(json.dumps(event) + "\n" for event in proxy))
     (raw / "logs" / "wsproxy-events.jsonl").write_text(json.dumps({"conn": 1, "event": "mutated", "mode": "corrupt-end", "at_unix": base15 + 30}) + "\n")
@@ -274,6 +274,7 @@ def attach_primary(bundle: Path, work: Path) -> dict:
     )
     if completed.returncode != 0:
         raise AssertionError(completed.stderr)
+    shutil.rmtree(bundle / "primary", ignore_errors=True)
     shutil.copytree(work / "out" / "primary", bundle / "primary")
     remanifest(bundle)
     return facts

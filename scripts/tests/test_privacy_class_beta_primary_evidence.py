@@ -55,7 +55,8 @@ class Fixture:
         for relative in ("specs/CONFORMANCE.json", contract.JOURNEY_PATH, SOURCE):
             (self.root / relative).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(REPO_ROOT / relative, self.root / relative)
-        shutil.copytree(REPO_ROOT / BUNDLE, self.root / BUNDLE)
+        # Synthetic primary exports replace the committed real ones.
+        shutil.copytree(REPO_ROOT / BUNDLE, self.root / BUNDLE, ignore=shutil.ignore_patterns("primary"))
         self.bundle = self.root / BUNDLE
         fixture.rewrite_identity(self.bundle)
         self.raw = base / "run2-raw"
@@ -296,6 +297,23 @@ class PrimaryPredicateTests(unittest.TestCase):
         checks = contract.Checks(self.fx.load())
         for name in ("primary_receipts", "primary_enforce", "primary_key_attestation", "primary_integrity"):
             self.assertTrue(checks.run(name), name)
+
+    def test_network_flow_identifiers_are_not_ip_literals(self) -> None:
+        bundle = contract.Bundle("x", {"a.txt": b"[C1.1.1.1 IPv4#289b0c85:443 initial path]\n"}, b"")
+        contract.assert_bundle_redacted(bundle)
+        with self.assertRaises(contract.PrivacyEvidenceError):
+            contract.assert_bundle_redacted(contract.Bundle("x", {"a.txt": b"peer 1.1.1.1:443\n"}, b""))
+
+    def test_first_network_flow_before_process_start_fails(self) -> None:
+        def early(doc):
+            doc["network_events"][0]["time_utc"] = "2026-10-06T04:00:00.000000Z"
+
+        self.fx.edit_json("logs/unified-provider-96156.json", early)
+        self.assertTrue(any("first network flow" in error for error in self.fx.errors("primary_first_connect")))
+
+    def test_missing_not_recoverable_record_fails(self) -> None:
+        self.fx.edit_json("summary.json", lambda doc: doc["not_recoverable"].pop())
+        self.assertTrue(self.fx.errors("primary_integrity"))
 
     def test_composed_evidence_validates_with_primary_exports(self) -> None:
         evidence = contract.compose_evidence(self.fx.root, BUNDLE)

@@ -1,0 +1,58 @@
+{
+ "kit_script": {
+  "dyld_lines": [
+   {
+    "line": 127,
+    "text": "# paths; a clean environment so no inherited DYLD_* or diagnostic variable"
+   },
+   {
+    "line": 569,
+    "text": "# DYLD_*: the hardened runtime (and R006 item 5's refusal of"
+   },
+   {
+    "line": 570,
+    "text": "# allow-dyld-environment-variables) makes dyld prune DYLD_* before main, so"
+   },
+   {
+    "line": 573,
+    "text": "# DYLD_PRINT_LIBRARIES must print nothing."
+   },
+   {
+    "line": 574,
+    "text": "mkdir -p \"$s/env-dyld\""
+   },
+   {
+    "line": 576,
+    "text": "with_timeout 30 \"${envs[@]}\" DYLD_INSERT_LIBRARIES=/nonexistent/journey-1839-inject.dylib DYLD_PRINT_LIBRARIES=1 \\"
+   },
+   {
+    "line": 577,
+    "text": "\"$b\" --version >\"$s/env-dyld/stdout.txt\" 2>\"$s/env-dyld/stderr.txt\"; local drc=$?"
+   },
+   {
+    "line": 578,
+    "text": "echo \"exit=$drc\" >\"$s/env-dyld/result.txt\""
+   },
+   {
+    "line": 579,
+    "text": "if [[ $drc == 0 && \"$(cat \"$s/env-dyld/stdout.txt\")\" == \"$VERSION\" && ! -s \"$s/env-dyld/stderr.txt\" ]]; then"
+   },
+   {
+    "line": 580,
+    "text": "echo \"env-dyld: DYLD_* pruned by dyld (inert)\""
+   },
+   {
+    "line": 582,
+    "text": "echo \"env-dyld: DYLD_* reached dyld (exit $drc)\"; fail=1"
+   },
+   {
+    "line": 595,
+    "text": "result step-04-core-dump-and-env-refused PASS \"core dumps off via accepted posture; DYLD_* pruned by dyld (inert); 4 diagnostic vars, KV disk tier, loopback runtime, relay-blind off exit non-zero before network\""
+   }
+  ],
+  "mtime_utc": "2026-10-06T04:29:33Z",
+  "sha256": "8253dd10c705b641b50157855ae250440898089a42858df0652459cdaf4556a0"
+ },
+ "recoverable_from_run_data": false,
+ "schema_version": "macprovider.privacy-class-beta-primary.v1"
+}

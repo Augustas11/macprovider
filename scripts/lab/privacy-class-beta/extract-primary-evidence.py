@@ -4,7 +4,7 @@
 Usage:
   extract-primary-evidence.py --raw RAW_DIR --out OUT_DIR --needles NEEDLES.tsv \\
       [--needles MORE.tsv ...] [--kit-script run-journey.sh] \\
-      [--home-prefix /Users/a1] [--log-utc-offset -07:00]
+      [--home-prefix /Users/a1] [--log-utc-offset=-07:00]
 
 RAW_DIR is the frozen run directory (db/, logs/, evidence/). Every SQLite file is
 opened read-only with `file:...?immutable=1`; nothing under RAW_DIR is written.

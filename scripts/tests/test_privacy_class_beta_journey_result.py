@@ -30,9 +30,6 @@ if str(SCRIPTS) not in sys.path:
 
 import privacy_class_beta_journey_evidence as contract  # noqa: E402
 
-if str(SCRIPTS / "tests") not in sys.path:
-    sys.path.insert(0, str(SCRIPTS / "tests"))
-import privacy_primary_fixture as primary_fixture  # noqa: E402
 
 SOURCE = "journeys/evidence/privacy-class-beta-20261006T043016Z.redacted.json"
 BUNDLE = "journeys/evidence/privacy-class-beta-20261006T043016Z"
@@ -55,20 +52,14 @@ class PrivacyClassBetaEvidenceTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        # The reviewed bundle plus synthetic primary/ exports from the real
-        # extractor; the evidence object is recomposed from that bundle. Each
-        # test works on a copy of this pristine root.
+        # The committed reviewed bundle, including its real primary/ exports.
+        # Each test works on a copy of this pristine root.
         cls.pristine = tempfile.TemporaryDirectory()
         root = Path(cls.pristine.name) / "repo"
         for relative in ("specs/CONFORMANCE.json", contract.JOURNEY_PATH, SOURCE):
             (root / relative).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(REPO_ROOT / relative, root / relative)
         shutil.copytree(REPO_ROOT / BUNDLE, root / BUNDLE)
-        work = Path(cls.pristine.name) / "work"
-        work.mkdir()
-        primary_fixture.attach_primary(root / BUNDLE, work)
-        evidence = contract.compose_evidence(root, BUNDLE)
-        (root / SOURCE).write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -115,7 +106,7 @@ class PrivacyClassBetaEvidenceTests(unittest.TestCase):
 
     # -- committed evidence
 
-    def test_evidence_validates_and_recomposes_exactly(self) -> None:
+    def test_committed_evidence_validates_and_recomposes_exactly(self) -> None:
         contract.validate_evidence(self.root, SOURCE, self.evidence, now=NOW)
         self.assertEqual(self.evidence, contract.compose_evidence(self.root, BUNDLE))
         self.assertEqual({name: [] for name in self.predicate_errors()}, self.predicate_errors())
@@ -385,11 +376,10 @@ class PrivacyClassBetaGovernanceTests(unittest.TestCase):
             root = Path(directory) / "clone"
             subprocess.run(["git", "clone", "--quiet", "--shared", "--no-checkout", str(REPO_ROOT), str(root)], check=True)
             subprocess.run(["git", "checkout", "--quiet", head, "--", "specs", "journeys", "security"], cwd=root, check=True)
-            work = Path(directory) / "work"
-            work.mkdir()
-            primary_fixture.attach_primary(root / BUNDLE, work)
-            evidence = contract.compose_evidence(root, BUNDLE)
-            (root / SOURCE).write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+            # The working tree's reviewed bundle and evidence, committed in the clone.
+            shutil.rmtree(root / BUNDLE, ignore_errors=True)
+            shutil.copytree(REPO_ROOT / BUNDLE, root / BUNDLE)
+            shutil.copyfile(REPO_ROOT / SOURCE, root / SOURCE)
             git = ["git", "-c", "user.name=fixture", "-c", "user.email=fixture@invalid", "-c", "commit.gpgsign=false"]
             subprocess.run([*git, "add", "--", "journeys"], cwd=root, check=True)
             subprocess.run([*git, "commit", "--quiet", "--no-verify", "-m", "fixture evidence"], cwd=root, check=True)

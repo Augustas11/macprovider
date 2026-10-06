@@ -1,0 +1,1339 @@
+{
+ "entries": 954,
+ "first_entry_utc": "2026-10-06T04:30:25.743000Z",
+ "last_entry_utc": "2026-10-06T04:31:42.655000Z",
+ "network_events": [
+  {
+   "message": "[0x106fddef0] activating connection: mach=true listener=false peer=false name=com.apple.cfprefsd.daemon",
+   "pid": 96156,
+   "subsystem": "com.apple.xpc:connection",
+   "time_utc": "2026-10-06T04:30:25.755000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[0x106fde3b0] activating connection: mach=true listener=false peer=false name=com.apple.cfprefsd.agent",
+   "pid": 96156,
+   "subsystem": "com.apple.xpc:connection",
+   "time_utc": "2026-10-06T04:30:25.755000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[0x106fe4ff0] activating connection: mach=true listener=false peer=false name=com.apple.trustd.agent",
+   "pid": 96156,
+   "subsystem": "com.apple.xpc:connection",
+   "time_utc": "2026-10-06T04:30:25.756000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[0x79df1ac000] activating connection: mach=true listener=false peer=false name=com.apple.AppSSO.service-xpc",
+   "pid": 96156,
+   "subsystem": "com.apple.xpc:connection",
+   "time_utc": "2026-10-06T04:30:27.430000Z",
+   "type": "Df"
+  },
+  {
+   "message": "<SOServiceConnection: 0x79dedb57c0>: new XPC connection",
+   "pid": 96156,
+   "subsystem": "com.apple.AppSSO:SOServiceConnection",
+   "time_utc": "2026-10-06T04:30:27.430000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Initializing connection",
+   "pid": 96156,
+   "subsystem": "com.apple.runningboard:connection",
+   "time_utc": "2026-10-06T04:30:27.432000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Sending handshake request attempt #1 to server",
+   "pid": 96156,
+   "subsystem": "com.apple.runningboard:connection",
+   "time_utc": "2026-10-06T04:30:27.432000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Creating connection to com.apple.runningboard",
+   "pid": 96156,
+   "subsystem": "com.apple.runningboard:connection",
+   "time_utc": "2026-10-06T04:30:27.432000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[0x79df1ac280] activating connection: mach=true listener=false peer=false name=com.apple.runningboard",
+   "pid": 96156,
+   "subsystem": "com.apple.xpc:connection",
+   "time_utc": "2026-10-06T04:30:27.432000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Handshake succeeded",
+   "pid": 96156,
+   "subsystem": "com.apple.runningboard:connection",
+   "time_utc": "2026-10-06T04:30:27.433000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Identity resolved as anon<macprovider-cli>(501)",
+   "pid": 96156,
+   "subsystem": "com.apple.runningboard:connection",
+   "time_utc": "2026-10-06T04:30:27.433000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[0x79df1ac3c0] activating connection: mach=true listener=false peer=false name=com.apple.analyticsd",
+   "pid": 96156,
+   "subsystem": "com.apple.xpc:connection",
+   "time_utc": "2026-10-06T04:30:27.435000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[0x79df1ac500] activating connection: mach=true listener=false peer=false name=com.apple.distributed_notifications@Uv3",
+   "pid": 96156,
+   "subsystem": "com.apple.xpc:connection",
+   "time_utc": "2026-10-06T04:30:27.447000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Connection 0: creating secure tcp or quic connection",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:27.449000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Connection 1: enabling TLS",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:27.449000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Connection 1: starting, TC(0x0)",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:27.449000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1 B9678B96-A048-447B-810D-4315AADFD35A Hostname#6711a094:443 quic-connection, url hash: f846f5dc, definite, attribution: developer, context: com.apple.CFNetwork.NSURLSession.{1657AB19-5557-4AD6-A4D8",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:27.449000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1 Hostname#6711a094:443 initial parent-flow ((null))] event: path:start @0.000s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:27.449000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1 Hostname#6711a094:443 waiting parent-flow (satisfied (Path is satisfied), interface: en1[802.11], ipv4, dns, uses wifi, LQM: good)] event: path:satisfied @0.000s, uuid: DDD204C9-3413-4190-A7BE-FAD",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:27.450000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1 Hostname#6711a094:443 in_progress parent-flow (satisfied (Path is satisfied), interface: en1[802.11], ipv4, dns, uses wifi, LQM: good)] event: flow:start_connect @0.000s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:27.450000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_connection_report_state_with_handler_on_nw_queue [C1] reporting state preparing",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:27.450000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1 Hostname#6711a094:443 in_progress parent-flow (satisfied (Path is satisfied), interface: en1[802.11], ipv4, dns, uses wifi, LQM: good)] event: flow:start_child @0.000s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:27.450000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1.1 Hostname#6711a094:443 initial path ((null))] event: path:start @0.000s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:27.450000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1.1 Hostname#6711a094:443 waiting path (satisfied (Path is satisfied), interface: en1[802.11], ipv4, dns, uses wifi, LQM: good)] event: path:satisfied @0.000s, uuid: DDD204C9-3413-4190-A7BE-FAD6BBD5",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:27.450000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1.1 Hostname#6711a094:443 in_progress transform (satisfied (Path is satisfied), interface: en1[802.11], ipv4, dns, uses wifi, LQM: good)] event: transform:start @0.000s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:27.450000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1.1.1 Hostname#6711a094:443 initial path ((null))] event: path:start @0.000s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:27.450000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1.1.1 Hostname#6711a094:443 waiting path (satisfied (Path is satisfied), interface: en1[802.11], ipv4, dns, uses wifi, LQM: good)] event: path:satisfied @0.000s, uuid: D77B635C-E7A0-4119-846E-B85E7E",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:27.450000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1.1.1 Hostname#6711a094:443 in_progress resolver (satisfied (Path is satisfied), interface: en1[802.11], ipv4, dns, uses wifi, LQM: good)] event: resolver:start_dns @0.000s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:27.450000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[0x79df1aca00] activating connection: mach=true listener=false peer=false name=com.apple.dnssd.service",
+   "pid": 96156,
+   "subsystem": "com.apple.xpc:connection",
+   "time_utc": "2026-10-06T04:30:27.450000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Task <22805CFF-AA61-41FF-A5A9-44E392A560D5>.<9> setting up Connection 1",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:27.450000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_endpoint_resolver_update [C1.1.1 Hostname#6711a094:443 in_progress resolver (satisfied (Path is satisfied), interface: en1[802.11], ipv4, dns, uses wifi, LQM: good)] Adding endpoint handler for IPv",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:27.451000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1.1.1 Hostname#6711a094:443 in_progress resolver (satisfied (Path is satisfied), interface: en1[802.11], ipv4, dns, uses wifi, LQM: good)] event: resolver:receive_dns @0.001s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:27.451000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1.1.1.1 IPv4#289b0c85:443 initial path ((null))] event: path:start @0.001s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:27.451000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1.1.1.1 IPv4#289b0c85:443 waiting path (satisfied (Path is satisfied), interface: en1[802.11], ipv4, dns, uses wifi, LQM: good)] event: path:satisfied @0.001s, uuid: DD2D455E-4A49-4003-9FCC-A98EAD1D",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:27.451000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1.1.1.1 IPv4#289b0c85:443 in_progress channel-flow (satisfied (Path is satisfied), interface: en1[802.11], ipv4, dns, uses wifi, LQM: good)] event: flow:start_nexus @0.001s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:27.451000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1.1.1.1 IPv4#289b0c85:443 in_progress channel-flow (satisfied (Path is satisfied), viable, interface: en1[802.11], ipv4, dns, uses wifi, LQM: good)] event: flow:receive_nexus @0.001s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:27.451000Z",
+   "type": "Df"
+  },
+  {
+   "message": "user_tcp_init_all_block_invoke g_tcp_nw_assert_context is false value -1",
+   "pid": 96156,
+   "subsystem": "com.apple.network:",
+   "time_utc": "2026-10-06T04:30:27.451000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1.1.1.1 IPv4#289b0c85:443 in_progress channel-flow (satisfied (Path is satisfied), viable, interface: en1[802.11], ipv4, dns, uses wifi, LQM: good)] event: flow:start_connect @0.002s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:27.451000Z",
+   "type": "Df"
+  },
+  {
+   "message": "tcp_output [C1.1.1.1:3] flags=[SEC] seq=1895642103, ack=0, win=65535 state=SYN_SENT rcv_nxt=0, snd_una=1895642103",
+   "pid": 96156,
+   "subsystem": "com.apple.network:tcp",
+   "time_utc": "2026-10-06T04:30:27.452000Z",
+   "type": "Df"
+  },
+  {
+   "message": "tcp_input [C1.1.1.1:3] flags=[S.E] seq=3060779225, ack=1895642104, win=65160 state=SYN_SENT rcv_nxt=0, snd_una=1895642103",
+   "pid": 96156,
+   "subsystem": "com.apple.network:tcp",
+   "time_utc": "2026-10-06T04:30:27.747000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_flow_connected [C1.1.1.1 IPv4#289b0c85:443 in_progress channel-flow (satisfied (Path is satisfied), viable, interface: en1[802.11], ipv4, dns, uses wifi, LQM: good)] Transport protocol connected (t",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:27.747000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1.1.1.1 IPv4#289b0c85:443 in_progress channel-flow (satisfied (Path is satisfied), viable, interface: en1[802.11], ipv4, dns, uses wifi, LQM: good)] event: flow:finish_transport @0.298s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:27.747000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Connection 1: asked to evaluate TLS Trust",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:28.045000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Connection 1: TLS Trust result 0",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:28.050000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_boringssl_signal_connected(907) [C1.1.1.1:2][0x79df14d960] TLS connected [server(0) version(0x0304) ciphersuite(TLS_AES_256_GCM_SHA384) group(0x001d) signature_alg(0x0403) alpn(h2) resumed",
+   "pid": 96156,
+   "subsystem": "com.apple.network:boringssl",
+   "time_utc": "2026-10-06T04:30:28.050000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_flow_connected [C1.1.1.1 IPv4#289b0c85:443 in_progress channel-flow (satisfied (Path is satisfied), viable, interface: en1[802.11], ipv4, dns, uses wifi, LQM: good)] Output protocol connected (CFNe",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:28.050000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1.1.1.1 IPv4#289b0c85:443 ready channel-flow (satisfied (Path is satisfied), viable, interface: en1[802.11], ipv4, dns, uses wifi, LQM: good)] event: flow:child_finish_connect @0.601s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:28.051000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1.1.1 Hostname#6711a094:443 ready resolver (satisfied (Path is satisfied), interface: en1[802.11], ipv4, dns, uses wifi, LQM: good)] event: flow:child_finish_connect @0.601s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:28.051000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1.1 Hostname#6711a094:443 ready transform (satisfied (Path is satisfied), interface: en1[802.11], ipv4, dns, uses wifi, LQM: good)] event: flow:child_finish_connect @0.601s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:28.051000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1.1.1.1 IPv4#289b0c85:443 ready channel-flow (satisfied (Path is satisfied), viable, interface: en1[802.11], ipv4, dns, uses wifi, LQM: good)] event: flow:changed_viability @0.601s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:28.051000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1.1.1 Hostname#6711a094:443 ready resolver (satisfied (Path is satisfied), interface: en1[802.11], ipv4, dns, uses wifi, LQM: good)] event: flow:changed_viability @0.601s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:28.051000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1.1 Hostname#6711a094:443 ready transform (satisfied (Path is satisfied), interface: en1[802.11], ipv4, dns, uses wifi, LQM: good)] event: flow:changed_viability @0.601s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:28.051000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_flow_connected [C1 IPv4#289b0c85:443 in_progress parent-flow (satisfied (Path is satisfied), interface: en1[802.11], ipv4, dns, uses wifi, LQM: good)] Output protocol connected (endpoint_flow)",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:28.051000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1 IPv4#289b0c85:443 ready parent-flow (satisfied (Path is satisfied), interface: en1[802.11], ipv4, dns, uses wifi, LQM: good)] event: flow:finish_connect @0.601s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:28.051000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_connection_report_state_with_handler_on_nw_queue [C1] reporting state ready",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:28.051000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1 IPv4#289b0c85:443 ready parent-flow (satisfied (Path is satisfied), interface: en1[802.11], ipv4, dns, uses wifi, LQM: good)] event: flow:changed_viability @0.601s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:28.051000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_connection_send_viability_changed_on_nw_queue [C1] viability_changed_handler(true)",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:28.051000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Connection 1: connected successfully",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:28.051000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Connection 1: TLS handshake complete",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:28.051000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Connection 1: ready C(N) E(N)",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:28.051000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1] event: client:connection_reused @0.602s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:28.051000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_tcp_notify [C1.1.1.1:3] nw_protocol_notification_type_connection_idle is false",
+   "pid": 96156,
+   "subsystem": "com.apple.network:tcp",
+   "time_utc": "2026-10-06T04:30:28.052000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_tcp_set_connection_idle [C1.1.1.1:3] os_nexus_flow_set_connection_idle returned 0",
+   "pid": 96156,
+   "subsystem": "com.apple.network:tcp",
+   "time_utc": "2026-10-06T04:30:28.052000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Task <22805CFF-AA61-41FF-A5A9-44E392A560D5>.<9> now using Connection 1",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:28.052000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Connection 1: received viability advisory(Y)",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:28.053000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Task <22805CFF-AA61-41FF-A5A9-44E392A560D5>.<9> done using Connection 1",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:28.359000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1] event: client:connection_idle @0.909s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:28.359000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_tcp_notify [C1.1.1.1:3] nw_protocol_notification_type_connection_idle is true",
+   "pid": 96156,
+   "subsystem": "com.apple.network:tcp",
+   "time_utc": "2026-10-06T04:30:28.359000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_tcp_set_connection_idle [C1.1.1.1:3] os_nexus_flow_set_connection_idle returned 0",
+   "pid": 96156,
+   "subsystem": "com.apple.network:tcp",
+   "time_utc": "2026-10-06T04:30:28.359000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Task <22805CFF-AA61-41FF-A5A9-44E392A560D5>.<9> summary for task success {transaction_duration_ms=913, response_status=200, connection=1, protocol=\"h2\", domain_lookup_duration_ms=1, connect_duration_m",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Summary",
+   "time_utc": "2026-10-06T04:30:28.359000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1] event: client:connection_reused @0.910s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:28.360000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_tcp_notify [C1.1.1.1:3] nw_protocol_notification_type_connection_idle is false",
+   "pid": 96156,
+   "subsystem": "com.apple.network:tcp",
+   "time_utc": "2026-10-06T04:30:28.360000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_tcp_set_connection_idle [C1.1.1.1:3] os_nexus_flow_set_connection_idle returned 0",
+   "pid": 96156,
+   "subsystem": "com.apple.network:tcp",
+   "time_utc": "2026-10-06T04:30:28.360000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Task <2D824AF2-4188-48C6-A666-6F88A8A96CDC>.<10> now using Connection 1",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:28.360000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Task <2D824AF2-4188-48C6-A666-6F88A8A96CDC>.<10> done using Connection 1",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:28.660000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C1] event: client:connection_idle @1.211s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:28.660000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_tcp_notify [C1.1.1.1:3] nw_protocol_notification_type_connection_idle is true",
+   "pid": 96156,
+   "subsystem": "com.apple.network:tcp",
+   "time_utc": "2026-10-06T04:30:28.660000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_tcp_set_connection_idle [C1.1.1.1:3] os_nexus_flow_set_connection_idle returned 0",
+   "pid": 96156,
+   "subsystem": "com.apple.network:tcp",
+   "time_utc": "2026-10-06T04:30:28.660000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Task <2D824AF2-4188-48C6-A666-6F88A8A96CDC>.<10> summary for task success {transaction_duration_ms=300, response_status=200, connection=1, reused=1, reused_after_ms=1, request_start_ms=0, request_dura",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Summary",
+   "time_utc": "2026-10-06T04:30:28.661000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_path_evaluator_start [89F660C5-4B5B-4556-BEBE-61A61D97082B <NULL> generic, multipath service: handover, attribution: developer]",
+   "pid": 96156,
+   "subsystem": "com.apple.network:path",
+   "time_utc": "2026-10-06T04:30:28.790000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[0x79df1ad400] activating connection: mach=true listener=false peer=false name=com.apple.lsd.mapdb",
+   "pid": 96156,
+   "subsystem": "com.apple.xpc:connection",
+   "time_utc": "2026-10-06T04:30:31.258000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[0x79df1ad680] activating connection: mach=true listener=false peer=false name=com.apple.ctkd.token-client",
+   "pid": 96156,
+   "subsystem": "com.apple.xpc:connection",
+   "time_utc": "2026-10-06T04:30:31.268000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[0x79df1ad680] invalidated because the current process cancelled the connection by calling xpc_connection_cancel()",
+   "pid": 96156,
+   "subsystem": "com.apple.xpc:connection",
+   "time_utc": "2026-10-06T04:30:31.269000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[0x79df1ad7c0] activating connection: mach=true listener=false peer=false name=com.apple.ctkd.token-client",
+   "pid": 96156,
+   "subsystem": "com.apple.xpc:connection",
+   "time_utc": "2026-10-06T04:30:31.269000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[0x79df1ad7c0] invalidated because the current process cancelled the connection by calling xpc_connection_cancel()",
+   "pid": 96156,
+   "subsystem": "com.apple.xpc:connection",
+   "time_utc": "2026-10-06T04:30:31.269000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[0x79df1ad7c0] activating connection: mach=true listener=false peer=false name=com.apple.securityd.xpc",
+   "pid": 96156,
+   "subsystem": "com.apple.xpc:connection",
+   "time_utc": "2026-10-06T04:30:31.269000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[0x79df1ad900] activating connection: mach=true listener=false peer=false name=com.apple.ctkd.token-client",
+   "pid": 96156,
+   "subsystem": "com.apple.xpc:connection",
+   "time_utc": "2026-10-06T04:30:31.270000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[0x79df1ad680] activating connection: mach=true listener=false peer=false name=com.apple.ctkd.token-client",
+   "pid": 96156,
+   "subsystem": "com.apple.xpc:connection",
+   "time_utc": "2026-10-06T04:30:31.280000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[0x79df1ad680] invalidated because the current process cancelled the connection by calling xpc_connection_cancel()",
+   "pid": 96156,
+   "subsystem": "com.apple.xpc:connection",
+   "time_utc": "2026-10-06T04:30:31.281000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[0x79df1ada40] activating connection: mach=true listener=false peer=false name=com.apple.ctkd.token-client",
+   "pid": 96156,
+   "subsystem": "com.apple.xpc:connection",
+   "time_utc": "2026-10-06T04:30:31.282000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[0x79df1ada40] invalidated because the current process cancelled the connection by calling xpc_connection_cancel()",
+   "pid": 96156,
+   "subsystem": "com.apple.xpc:connection",
+   "time_utc": "2026-10-06T04:30:31.282000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[0x79df1ada40] activating connection: mach=true listener=false peer=false name=com.apple.ctkd.token-client",
+   "pid": 96156,
+   "subsystem": "com.apple.xpc:connection",
+   "time_utc": "2026-10-06T04:30:31.286000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[0x79df1ada40] invalidated because the current process cancelled the connection by calling xpc_connection_cancel()",
+   "pid": 96156,
+   "subsystem": "com.apple.xpc:connection",
+   "time_utc": "2026-10-06T04:30:31.287000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Connection 2: starting, TC(0x0)",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:31.299000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C2 ECB6F410-3352-4B1A-8CF9-8B3E8BB9F133 IPv4#f14eaaea:19302 tcp, url hash: 7c261aca, definite, attribution: developer, context: com.apple.CFNetwork.NSURLSession.{B7559DF0-7371-46AF-A008-5780FE261878}",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C2 IPv4#f14eaaea:19302 initial parent-flow ((null))] event: path:start @0.000s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C2 IPv4#f14eaaea:19302 waiting parent-flow (satisfied (Path is satisfied), interface: lo0)] event: path:satisfied @0.000s, uuid: 200AE095-6FF6-49CF-9B92-E0989F7E06FC",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C2 IPv4#f14eaaea:19302 in_progress socket-flow (satisfied (Path is satisfied), interface: lo0)] event: flow:start_connect @0.000s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_connection_report_state_with_handler_on_nw_queue [C2] reporting state preparing",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Task <8984877B-8B80-464E-8140-001DD68E5C5D>.<1> setting up Connection 2",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_socket_handle_socket_event [C2:2] Socket received CONNECTED event",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_flow_connected [C2 IPv4#f14eaaea:19302 in_progress socket-flow (satisfied (Path is satisfied), viable, interface: lo0)] Transport protocol connected (socket)",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C2 IPv4#f14eaaea:19302 in_progress socket-flow (satisfied (Path is satisfied), viable, interface: lo0)] event: flow:finish_transport @0.000s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_flow_connected [C2 IPv4#f14eaaea:19302 in_progress socket-flow (satisfied (Path is satisfied), viable, interface: lo0)] Output protocol connected (CFNetworkConnection-735533666)",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C2 IPv4#f14eaaea:19302 ready socket-flow (satisfied (Path is satisfied), viable, interface: lo0)] event: flow:finish_connect @0.000s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_connection_report_state_with_handler_on_nw_queue [C2] reporting state ready",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C2 IPv4#f14eaaea:19302 ready socket-flow (satisfied (Path is satisfied), viable, interface: lo0)] event: flow:changed_viability @0.000s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_connection_send_viability_changed_on_nw_queue [C2] viability_changed_handler(true)",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Connection 2: connected successfully",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Connection 2: ready C(N) E(N)",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Task <8984877B-8B80-464E-8140-001DD68E5C5D>.<1> now using Connection 2",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Connection 2: received viability advisory(Y)",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Task <8984877B-8B80-464E-8140-001DD68E5C5D>.<1> done using Connection 2",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C2 IPv4#f14eaaea:19302 in_progress socket-flow (satisfied (Path is satisfied), viable, interface: lo0)] event: flow:start_secondary_connect @0.000s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_connection_report_state_with_handler_on_nw_queue [C2] reporting state preparing",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C2 IPv4#f14eaaea:19302 in_progress socket-flow (satisfied (Path is satisfied), viable, interface: lo0)] event: flow:start_connect @0.000s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_flow_connected [C2 IPv4#f14eaaea:19302 in_progress socket-flow (satisfied (Path is satisfied), viable, interface: lo0)] Transport protocol connected (socket)",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C2 IPv4#f14eaaea:19302 in_progress socket-flow (satisfied (Path is satisfied), viable, interface: lo0)] event: flow:finish_transport @0.000s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_flow_connected [C2 IPv4#f14eaaea:19302 in_progress socket-flow (satisfied (Path is satisfied), viable, interface: lo0)] Output protocol connected (CFNetworkConnection-735533666)",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C2 IPv4#f14eaaea:19302 ready socket-flow (satisfied (Path is satisfied), viable, interface: lo0)] event: flow:finish_connect @0.000s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_connection_report_state_with_handler_on_nw_queue [C2] reporting state ready",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.300000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Connection 3: starting, TC(0x0)",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:31.601000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C3 0E414D2E-98A8-49B0-A590-B8453F8C8C36 IPv4#f14eaaea:19302 tcp, url hash: da7ade5e, definite, attribution: developer, context: com.apple.CFNetwork.NSURLSession.{1657AB19-5557-4AD6-A4D8-A06ECB820244}",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.601000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C3 IPv4#f14eaaea:19302 initial parent-flow ((null))] event: path:start @0.000s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.601000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C3 IPv4#f14eaaea:19302 waiting parent-flow (satisfied (Path is satisfied), interface: lo0)] event: path:satisfied @0.000s, uuid: F7078772-6EDB-476A-AF9C-6EE155050D7C",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.601000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C3 IPv4#f14eaaea:19302 in_progress socket-flow (satisfied (Path is satisfied), interface: lo0)] event: flow:start_connect @0.000s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.601000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_connection_report_state_with_handler_on_nw_queue [C3] reporting state preparing",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.601000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Task <3DBAD6EA-2B21-43E4-A76E-502DC15DDB48>.<11> setting up Connection 3",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:31.601000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_socket_handle_socket_event [C3:2] Socket received CONNECTED event",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.601000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_flow_connected [C3 IPv4#f14eaaea:19302 in_progress socket-flow (satisfied (Path is satisfied), viable, interface: lo0)] Transport protocol connected (socket)",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.601000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C3 IPv4#f14eaaea:19302 in_progress socket-flow (satisfied (Path is satisfied), viable, interface: lo0)] event: flow:finish_transport @0.000s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.601000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_flow_connected [C3 IPv4#f14eaaea:19302 in_progress socket-flow (satisfied (Path is satisfied), viable, interface: lo0)] Output protocol connected (CFNetworkConnection-735533666)",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.601000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C3 IPv4#f14eaaea:19302 ready socket-flow (satisfied (Path is satisfied), viable, interface: lo0)] event: flow:finish_connect @0.000s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.601000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_connection_report_state_with_handler_on_nw_queue [C3] reporting state ready",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.601000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C3 IPv4#f14eaaea:19302 ready socket-flow (satisfied (Path is satisfied), viable, interface: lo0)] event: flow:changed_viability @0.000s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.601000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_connection_send_viability_changed_on_nw_queue [C3] viability_changed_handler(true)",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.601000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Connection 3: connected successfully",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:31.601000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Connection 3: ready C(N) E(N)",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:31.601000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Task <3DBAD6EA-2B21-43E4-A76E-502DC15DDB48>.<11> now using Connection 3",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:31.601000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Connection 3: received viability advisory(Y)",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:31.601000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Task <3DBAD6EA-2B21-43E4-A76E-502DC15DDB48>.<11> done using Connection 3",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:31.605000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C3] event: client:connection_idle @0.004s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.605000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_socket_notify [C3:2] nw_protocol_notification_type_connection_idle is true",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.605000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C3] event: client:connection_idle @0.004s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.605000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_socket_notify [C3:2] nw_protocol_notification_type_connection_idle is true",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:31.605000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Task <3DBAD6EA-2B21-43E4-A76E-502DC15DDB48>.<11> summary for task success {transaction_duration_ms=5, response_status=200, connection=3, protocol=\"http/1.1\", domain_lookup_duration_ms=0, connect_durat",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Summary",
+   "time_utc": "2026-10-06T04:30:31.605000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C3] event: client:connection_idle @15.040s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:46.642000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_socket_notify [C3:2] nw_protocol_notification_type_connection_idle is true",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:46.642000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Task <A1464B4A-8C2B-4B96-A799-B3518B454EB2>.<12> now using Connection 3",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:46.642000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C3] event: client:connection_reused @15.040s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:46.642000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_socket_notify [C3:2] nw_protocol_notification_type_connection_idle is false",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:46.642000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Task <A1464B4A-8C2B-4B96-A799-B3518B454EB2>.<12> done using Connection 3",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:30:46.642000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C3] event: client:connection_idle @15.041s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:46.642000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_socket_notify [C3:2] nw_protocol_notification_type_connection_idle is true",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:46.642000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C3] event: client:connection_idle @15.041s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:46.642000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_socket_notify [C3:2] nw_protocol_notification_type_connection_idle is true",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:30:46.642000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Task <A1464B4A-8C2B-4B96-A799-B3518B454EB2>.<12> summary for task success {transaction_duration_ms=0, response_status=200, connection=3, reused=1, reused_after_ms=0, request_start_ms=0, request_durati",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Summary",
+   "time_utc": "2026-10-06T04:30:46.642000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C3] event: client:connection_idle @30.044s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:31:01.645000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_socket_notify [C3:2] nw_protocol_notification_type_connection_idle is true",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:31:01.645000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Task <567EF1D8-0741-4F3A-A27A-B1679ACFED4B>.<13> now using Connection 3",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:31:01.645000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C3] event: client:connection_reused @30.044s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:31:01.645000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_socket_notify [C3:2] nw_protocol_notification_type_connection_idle is false",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:31:01.645000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Task <567EF1D8-0741-4F3A-A27A-B1679ACFED4B>.<13> done using Connection 3",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:31:01.646000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C3] event: client:connection_idle @30.045s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:31:01.646000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_socket_notify [C3:2] nw_protocol_notification_type_connection_idle is true",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:31:01.646000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C3] event: client:connection_idle @30.045s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:31:01.646000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_socket_notify [C3:2] nw_protocol_notification_type_connection_idle is true",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:31:01.646000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Task <567EF1D8-0741-4F3A-A27A-B1679ACFED4B>.<13> summary for task success {transaction_duration_ms=1, response_status=200, connection=3, reused=1, reused_after_ms=0, request_start_ms=0, request_durati",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Summary",
+   "time_utc": "2026-10-06T04:31:01.646000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C3] event: client:connection_idle @45.177s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:31:16.778000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_socket_notify [C3:2] nw_protocol_notification_type_connection_idle is true",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:31:16.778000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Task <8893D737-ABB9-43F7-8C1C-DECF272D92C8>.<14> now using Connection 3",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:31:16.778000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C3] event: client:connection_reused @45.177s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:31:16.778000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_socket_notify [C3:2] nw_protocol_notification_type_connection_idle is false",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:31:16.778000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Task <8893D737-ABB9-43F7-8C1C-DECF272D92C8>.<14> done using Connection 3",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:31:16.778000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C3] event: client:connection_idle @45.177s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:31:16.779000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_socket_notify [C3:2] nw_protocol_notification_type_connection_idle is true",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:31:16.779000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C3] event: client:connection_idle @45.177s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:31:16.779000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_socket_notify [C3:2] nw_protocol_notification_type_connection_idle is true",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:31:16.779000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Task <8893D737-ABB9-43F7-8C1C-DECF272D92C8>.<14> summary for task success {transaction_duration_ms=1, response_status=200, connection=3, reused=1, reused_after_ms=0, request_start_ms=0, request_durati",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Summary",
+   "time_utc": "2026-10-06T04:31:16.779000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C3] event: client:connection_idle @60.268s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:31:31.870000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_socket_notify [C3:2] nw_protocol_notification_type_connection_idle is true",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:31:31.870000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Task <82350036-01D8-433E-8E92-3ECBC0E334B0>.<15> now using Connection 3",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:31:31.870000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C3] event: client:connection_reused @60.269s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:31:31.870000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_socket_notify [C3:2] nw_protocol_notification_type_connection_idle is false",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:31:31.870000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Task <82350036-01D8-433E-8E92-3ECBC0E334B0>.<15> done using Connection 3",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Default",
+   "time_utc": "2026-10-06T04:31:31.871000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C3] event: client:connection_idle @60.270s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:31:31.871000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_socket_notify [C3:2] nw_protocol_notification_type_connection_idle is true",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:31:31.871000Z",
+   "type": "Df"
+  },
+  {
+   "message": "[C3] event: client:connection_idle @60.270s",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:31:31.871000Z",
+   "type": "Df"
+  },
+  {
+   "message": "nw_protocol_socket_notify [C3:2] nw_protocol_notification_type_connection_idle is true",
+   "pid": 96156,
+   "subsystem": "com.apple.network:connection",
+   "time_utc": "2026-10-06T04:31:31.871000Z",
+   "type": "Df"
+  },
+  {
+   "message": "Task <82350036-01D8-433E-8E92-3ECBC0E334B0>.<15> summary for task success {transaction_duration_ms=1, response_status=200, connection=3, reused=1, reused_after_ms=0, request_start_ms=0, request_durati",
+   "pid": 96156,
+   "subsystem": "com.apple.CFNetwork:Summary",
+   "time_utc": "2026-10-06T04:31:31.871000Z",
+   "type": "Df"
+  }
+ ],
+ "schema_version": "macprovider.privacy-class-beta-primary.v1",
+ "source": "unified-provider-96156.log"
+}

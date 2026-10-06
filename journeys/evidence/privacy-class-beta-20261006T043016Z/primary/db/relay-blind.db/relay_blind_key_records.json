@@ -1,0 +1,426 @@
+{
+ "columns": [
+  "provider_id",
+  "kid",
+  "assigned_session",
+  "record_json",
+  "key_record_digest",
+  "immutable_digest",
+  "not_before_unix",
+  "expires_at_unix",
+  "accepted_at_unix",
+  "revoked_at_unix",
+  "revocation_retained_until_unix",
+  "key_class",
+  "privacy_attestation_json",
+  "privacy_attestation_signature"
+ ],
+ "dropped_columns": [],
+ "row_count": 10,
+ "rows": [
+  {
+   "accepted_at_unix": 1791261104,
+   "assigned_session": "62515c87-fd68-4ca0-a90a-6eef6b18a9ee",
+   "expires_at_unix": 1791264630,
+   "immutable_digest": "1SldX5IZ5_8GICCdlFihPdZASFeot40ijLYRaSbqopU",
+   "key_class": "privacy",
+   "key_record_digest": "KEw61hU4x-HjctVyinIuMMV736v9YuZfGsnYPT8rtng",
+   "kid": "1SldX5IZ5_8GICCdlFihPQ",
+   "not_before_unix": 1791261030,
+   "privacy_attestation_json": {
+    "assurance": "device_bound_self_attested_beta",
+    "binary_version": "1.8.215",
+    "code_cdhash": "3214ffcc6b706507f9a268cfb400da5c74287ff6",
+    "expires_at_unix": 1791264630,
+    "key_record_digest": "KEw61hU4x-HjctVyinIuMMV736v9YuZfGsnYPT8rtng",
+    "not_before_unix": 1791261030,
+    "privacy_class": "operator_constrained_beta_v1",
+    "version": "privacy-key-attestation-v1"
+   },
+   "privacy_attestation_signature": "ZuI8eF3ytW0uN21iMbB1mRBHEmdrdO3un65pRTkKqzN70ykWoNNKBxvivYpxs3MjWZErgGdlJe5U956IfFPvAw",
+   "provider_id": "journey-1839-privacy",
+   "record_json": {
+    "alg": "x25519-hkdf-sha256-a256gcm-v1",
+    "endpoint_families": [
+     "chat_completions"
+    ],
+    "expires_at_unix": 1791264630,
+    "identity_fingerprint": "TRkeHShUNAsoZNXPtS7bM0tPdBmJyAlGiDGHF0q2WM0",
+    "key_record_digest": "KEw61hU4x-HjctVyinIuMMV736v9YuZfGsnYPT8rtng",
+    "kid": "1SldX5IZ5_8GICCdlFihPQ",
+    "max_encrypted_request_bytes": 1048576,
+    "models": [
+     "mlx-community/Llama-3.2-3B-Instruct-4bit"
+    ],
+    "not_before_unix": 1791261030,
+    "public_key": "a-JfDAIH_L4yYuOtYREweAnICIU7yQOR54Xc6gE5bGs",
+    "signature": "0JYwf8mk674n5S96fDDj6M1K1lYuaG26lN5iVDTeI98MCknqnVd5cghx6htM9M-mAS9nsZNc5VNN8zjIp179Ag",
+    "signature_algorithm": "ed25519"
+   },
+   "revocation_retained_until_unix": 1791264630,
+   "revoked_at_unix": 1791261215
+  },
+  {
+   "accepted_at_unix": 1791261231,
+   "assigned_session": "494727fe-03b8-4988-970d-17091064652c",
+   "expires_at_unix": 1791264814,
+   "immutable_digest": "0hVcwVRXBncDB6fX3Y72OkUlERcqdMupQ8_pq-Ot140",
+   "key_class": "privacy",
+   "key_record_digest": "ITbZkbqmppxYjP5YVY7Y7480sOqG9TxH__2kUZBupC8",
+   "kid": "0hVcwVRXBncDB6fX3Y72Og",
+   "not_before_unix": 1791261214,
+   "privacy_attestation_json": {
+    "assurance": "device_bound_self_attested_beta",
+    "binary_version": "1.8.215",
+    "code_cdhash": "3214ffcc6b706507f9a268cfb400da5c74287ff6",
+    "expires_at_unix": 1791264814,
+    "key_record_digest": "ITbZkbqmppxYjP5YVY7Y7480sOqG9TxH__2kUZBupC8",
+    "not_before_unix": 1791261214,
+    "privacy_class": "operator_constrained_beta_v1",
+    "version": "privacy-key-attestation-v1"
+   },
+   "privacy_attestation_signature": "ynOuu1gFUN2Ex7Dw6Clz2pE0a_PqsclcXm42nZp6jwJAwrC1OE7nyBm21Xb7nBCepUExMj06jLYoo8ylcq6zDA",
+   "provider_id": "journey-1839-privacy",
+   "record_json": {
+    "alg": "x25519-hkdf-sha256-a256gcm-v1",
+    "endpoint_families": [
+     "chat_completions"
+    ],
+    "expires_at_unix": 1791264814,
+    "identity_fingerprint": "TRkeHShUNAsoZNXPtS7bM0tPdBmJyAlGiDGHF0q2WM0",
+    "key_record_digest": "ITbZkbqmppxYjP5YVY7Y7480sOqG9TxH__2kUZBupC8",
+    "kid": "0hVcwVRXBncDB6fX3Y72Og",
+    "max_encrypted_request_bytes": 1048576,
+    "models": [
+     "mlx-community/Llama-3.2-3B-Instruct-4bit"
+    ],
+    "not_before_unix": 1791261214,
+    "public_key": "Tzu2UUSEW8lC3pOD0Cc5XstkLgAJAuvQGwP6EZeC5Go",
+    "signature": "3xktf97pig89xNPJNIVpKbPks7kImY5pTi0o4IU-blHsir0E7ZB573uhnBsOi082FfW66xeLmbMUCluREYvsDQ",
+    "signature_algorithm": "ed25519"
+   },
+   "revocation_retained_until_unix": 1791264814,
+   "revoked_at_unix": 1791261276
+  },
+  {
+   "accepted_at_unix": 1791261882,
+   "assigned_session": "386c4a79-7f21-4bfa-9245-34cebbc77534",
+   "expires_at_unix": 1791263298,
+   "immutable_digest": "KjZow-CxaJGHkSyh1AiVjUSLRhF9oaDlMu9Bv7IVPY8",
+   "key_class": "relay_blind",
+   "key_record_digest": "OrluSqjyknIoHS5WSATDzuYuvx3_hKtSZKz93Eu3B1M",
+   "kid": "KjZow-CxaJGHkSyh1AiVjQ",
+   "not_before_unix": 1791259697,
+   "privacy_attestation_json": null,
+   "privacy_attestation_signature": null,
+   "provider_id": "journey-1839-plain",
+   "record_json": {
+    "alg": "x25519-hkdf-sha256-a256gcm-v1",
+    "endpoint_families": [
+     "chat_completions"
+    ],
+    "expires_at_unix": 1791263298,
+    "identity_fingerprint": "STO7YQd2at_vncvGxniX-ZqeghFzTMKMisKU8kFjm2w",
+    "key_record_digest": "OrluSqjyknIoHS5WSATDzuYuvx3_hKtSZKz93Eu3B1M",
+    "kid": "KjZow-CxaJGHkSyh1AiVjQ",
+    "max_encrypted_request_bytes": 1048576,
+    "models": [
+     "mlx-community/Llama-3.2-3B-Instruct-4bit"
+    ],
+    "not_before_unix": 1791259697,
+    "public_key": "I7bEawSgPw0fU4gkToDEOP8KilvtEIRzxqGjpp3EyQg",
+    "signature": "tIfN7EcAYvMgqk1R0HeP8gNNFnN95ZDN4ZVEitckO2exCM3ErkMgp8p3oiRAcMldEtdHe6ijDhWCjqEW4aKRCA",
+    "signature_algorithm": "ed25519"
+   },
+   "revocation_retained_until_unix": null,
+   "revoked_at_unix": null
+  },
+  {
+   "accepted_at_unix": 1791261280,
+   "assigned_session": "35117a5d-fa9d-423d-a1eb-9ec4cf9c189d",
+   "expires_at_unix": 1791264875,
+   "immutable_digest": "6y4XWMWtQmEH-ZBP4mhr9BC-3IOOyIL3iSnMsMLwx4U",
+   "key_class": "privacy",
+   "key_record_digest": "KMeOn7_S6DpwqM_3Ms1R6jdrjXSKbLopIgyCfZM2SBI",
+   "kid": "6y4XWMWtQmEH-ZBP4mhr9A",
+   "not_before_unix": 1791261275,
+   "privacy_attestation_json": {
+    "assurance": "device_bound_self_attested_beta",
+    "binary_version": "1.8.215",
+    "code_cdhash": "3214ffcc6b706507f9a268cfb400da5c74287ff6",
+    "expires_at_unix": 1791264875,
+    "key_record_digest": "KMeOn7_S6DpwqM_3Ms1R6jdrjXSKbLopIgyCfZM2SBI",
+    "not_before_unix": 1791261275,
+    "privacy_class": "operator_constrained_beta_v1",
+    "version": "privacy-key-attestation-v1"
+   },
+   "privacy_attestation_signature": "MwNTx_duU6FdjRtGSCIPmSh0akdSzS6b0wV-fgv01c9guZB1GIdE7RzW-_0oxp7jHPuDwi6FvutfDKNz6g0pCA",
+   "provider_id": "journey-1839-privacy",
+   "record_json": {
+    "alg": "x25519-hkdf-sha256-a256gcm-v1",
+    "endpoint_families": [
+     "chat_completions"
+    ],
+    "expires_at_unix": 1791264875,
+    "identity_fingerprint": "TRkeHShUNAsoZNXPtS7bM0tPdBmJyAlGiDGHF0q2WM0",
+    "key_record_digest": "KMeOn7_S6DpwqM_3Ms1R6jdrjXSKbLopIgyCfZM2SBI",
+    "kid": "6y4XWMWtQmEH-ZBP4mhr9A",
+    "max_encrypted_request_bytes": 1048576,
+    "models": [
+     "mlx-community/Llama-3.2-3B-Instruct-4bit"
+    ],
+    "not_before_unix": 1791261275,
+    "public_key": "0d6jx3FcntKISH0ffWHQN5eQQxfq8s_lxRJxuAwVwgA",
+    "signature": "ie-sXIIsC6T4_8FuTfsDRA3GxVYWcc03yaP8Yv_SE2v-wU9VNs3chzooxDPXxFBJmh56nJZuN6COmA8YMuEsDQ",
+    "signature_algorithm": "ed25519"
+   },
+   "revocation_retained_until_unix": 1791264875,
+   "revoked_at_unix": 1791261282
+  },
+  {
+   "accepted_at_unix": 1791261471,
+   "assigned_session": "af37b90a-1913-4659-bd81-d5fecf354602",
+   "expires_at_unix": 1791264964,
+   "immutable_digest": "4ak5ucRRZEPG3Cbp9hOqT4w5PMcxDr7VWpyITfuOOjE",
+   "key_class": "privacy",
+   "key_record_digest": "-sRwJGQGKw3VYz14eF2PFAihRjo2cVDaHC8AwVb_fP4",
+   "kid": "4ak5ucRRZEPG3Cbp9hOqTw",
+   "not_before_unix": 1791261364,
+   "privacy_attestation_json": {
+    "assurance": "device_bound_self_attested_beta",
+    "binary_version": "1.8.215",
+    "code_cdhash": "3214ffcc6b706507f9a268cfb400da5c74287ff6",
+    "expires_at_unix": 1791264964,
+    "key_record_digest": "-sRwJGQGKw3VYz14eF2PFAihRjo2cVDaHC8AwVb_fP4",
+    "not_before_unix": 1791261364,
+    "privacy_class": "operator_constrained_beta_v1",
+    "version": "privacy-key-attestation-v1"
+   },
+   "privacy_attestation_signature": "dVIBmCedTS7nXT2KoWZITsngYA-a4R0sLDCJsHdGi-bl8P_6CYs-5Q4tJDXFjsFDTdoapP6n1Q5tri2xl0E-Aw",
+   "provider_id": "journey-1839-privacy",
+   "record_json": {
+    "alg": "x25519-hkdf-sha256-a256gcm-v1",
+    "endpoint_families": [
+     "chat_completions"
+    ],
+    "expires_at_unix": 1791264964,
+    "identity_fingerprint": "TRkeHShUNAsoZNXPtS7bM0tPdBmJyAlGiDGHF0q2WM0",
+    "key_record_digest": "-sRwJGQGKw3VYz14eF2PFAihRjo2cVDaHC8AwVb_fP4",
+    "kid": "4ak5ucRRZEPG3Cbp9hOqTw",
+    "max_encrypted_request_bytes": 1048576,
+    "models": [
+     "mlx-community/Llama-3.2-3B-Instruct-4bit"
+    ],
+    "not_before_unix": 1791261364,
+    "public_key": "J069u7KmagMwGRLhq3Z5urbmlmN22qlfKT_bfimLAAg",
+    "signature": "flvcevqcFUg-p49BwAv2awQ8WLoSwR1ezZQqRRjuNFqHFO4eKAr1OnoGJ8N-nbioKpWzbwU8Vrh6cn0RbARCBA",
+    "signature_algorithm": "ed25519"
+   },
+   "revocation_retained_until_unix": 1791264964,
+   "revoked_at_unix": 1791261526
+  },
+  {
+   "accepted_at_unix": 1791261509,
+   "assigned_session": "46f4df5c-b7cd-47ca-a18c-36de77c55e13",
+   "expires_at_unix": 1791265081,
+   "immutable_digest": "xgh5OfIAwzpTFMe_K7sbGN4T_AbulFxz_0RoUUywlp0",
+   "key_class": "privacy",
+   "key_record_digest": "GUQBD3FxWshd27MI-8tnfPfIJQLaqzoXvmW_cU6qnmI",
+   "kid": "xgh5OfIAwzpTFMe_K7sbGA",
+   "not_before_unix": 1791261481,
+   "privacy_attestation_json": {
+    "assurance": "device_bound_self_attested_beta",
+    "binary_version": "1.8.214",
+    "code_cdhash": "9f94cbc0a102439b77838011d9512b7a676bdcf6",
+    "expires_at_unix": 1791265081,
+    "key_record_digest": "GUQBD3FxWshd27MI-8tnfPfIJQLaqzoXvmW_cU6qnmI",
+    "not_before_unix": 1791261481,
+    "privacy_class": "operator_constrained_beta_v1",
+    "version": "privacy-key-attestation-v1"
+   },
+   "privacy_attestation_signature": "lJWDYvXnCQa3jfigBXzSgsJUmAMp0CUVV3mOLc6oCyQgE8DoimohOt8qAnHYx9CL381yz8jbF9j3GjRbH-s8CQ",
+   "provider_id": "journey-1839-old",
+   "record_json": {
+    "alg": "x25519-hkdf-sha256-a256gcm-v1",
+    "endpoint_families": [
+     "chat_completions"
+    ],
+    "expires_at_unix": 1791265081,
+    "identity_fingerprint": "jDTIjHJq80260EjTRNm07Y69rJsNN4QgJc-XSgB6cLs",
+    "key_record_digest": "GUQBD3FxWshd27MI-8tnfPfIJQLaqzoXvmW_cU6qnmI",
+    "kid": "xgh5OfIAwzpTFMe_K7sbGA",
+    "max_encrypted_request_bytes": 1048576,
+    "models": [
+     "mlx-community/Llama-3.2-3B-Instruct-4bit"
+    ],
+    "not_before_unix": 1791261481,
+    "public_key": "LL9ZW-C9nw_OGAlyM35KhiDd7gZKorpcWXAQdQfUuHU",
+    "signature": "i5Cf0VMfIz4DBYsBXIYTkRIdjx0GnYcFQ1TMot2s_o-HyjCatzBfCSGPrychdzUoS1JSrMkdXHAadYImeKo-Bg",
+    "signature_algorithm": "ed25519"
+   },
+   "revocation_retained_until_unix": null,
+   "revoked_at_unix": null
+  },
+  {
+   "accepted_at_unix": 1791261520,
+   "assigned_session": "e8c2e897-85e2-4c7c-b0fe-2c29b99f3aaf",
+   "expires_at_unix": 1791263830,
+   "immutable_digest": "fXBqd7RESW9BWGFRm5Qyv7TeBFnwQl_Q44lvezNxXqU",
+   "key_class": "relay_blind",
+   "key_record_digest": "SPI3kcJM5XfoEmN8pej0l1mF9FhaqMrXQUTwdHmdH6U",
+   "kid": "fXBqd7RESW9BWGFRm5Qyvw",
+   "not_before_unix": 1791260229,
+   "privacy_attestation_json": null,
+   "privacy_attestation_signature": null,
+   "provider_id": "journey-1839-old",
+   "record_json": {
+    "alg": "x25519-hkdf-sha256-a256gcm-v1",
+    "endpoint_families": [
+     "chat_completions"
+    ],
+    "expires_at_unix": 1791263830,
+    "identity_fingerprint": "jDTIjHJq80260EjTRNm07Y69rJsNN4QgJc-XSgB6cLs",
+    "key_record_digest": "SPI3kcJM5XfoEmN8pej0l1mF9FhaqMrXQUTwdHmdH6U",
+    "kid": "fXBqd7RESW9BWGFRm5Qyvw",
+    "max_encrypted_request_bytes": 1048576,
+    "models": [
+     "mlx-community/Llama-3.2-3B-Instruct-4bit"
+    ],
+    "not_before_unix": 1791260229,
+    "public_key": "7BCD9jutwmRE2NM-TE1eTAJXGA2LP30GY2i51Hrnx1E",
+    "signature": "FdXdRgX8JVeQNgQDtSXW5gbfdwTPOLP3R8KbU2Z3YDkthr68X-BmReT3oOwfI2SE8Pwz_5o0N6U1Etig5W-uAQ",
+    "signature_algorithm": "ed25519"
+   },
+   "revocation_retained_until_unix": null,
+   "revoked_at_unix": null
+  },
+  {
+   "accepted_at_unix": 1791261534,
+   "assigned_session": "74579673-68cc-45e9-b017-4bd5f00b1d09",
+   "expires_at_unix": 1791265125,
+   "immutable_digest": "IsyZGEwcF3WR-OSQODB-bSsDL87EHtal1obRov-vqOI",
+   "key_class": "privacy",
+   "key_record_digest": "1HdpRdxDPtKzRefDvkJtPTxWa_Ff_8a-AMINupGEKOY",
+   "kid": "IsyZGEwcF3WR-OSQODB-bQ",
+   "not_before_unix": 1791261525,
+   "privacy_attestation_json": {
+    "assurance": "device_bound_self_attested_beta",
+    "binary_version": "1.8.215",
+    "code_cdhash": "3214ffcc6b706507f9a268cfb400da5c74287ff6",
+    "expires_at_unix": 1791265125,
+    "key_record_digest": "1HdpRdxDPtKzRefDvkJtPTxWa_Ff_8a-AMINupGEKOY",
+    "not_before_unix": 1791261525,
+    "privacy_class": "operator_constrained_beta_v1",
+    "version": "privacy-key-attestation-v1"
+   },
+   "privacy_attestation_signature": "u73pg-Rg-t9EX4Ax6WDRjACW7ZkzIko4risotjFgnMaEFGaqgrcb5FtiXg13hD2yZtC6xmLLNUVI2P4sWuW1Cw",
+   "provider_id": "journey-1839-privacy",
+   "record_json": {
+    "alg": "x25519-hkdf-sha256-a256gcm-v1",
+    "endpoint_families": [
+     "chat_completions"
+    ],
+    "expires_at_unix": 1791265125,
+    "identity_fingerprint": "TRkeHShUNAsoZNXPtS7bM0tPdBmJyAlGiDGHF0q2WM0",
+    "key_record_digest": "1HdpRdxDPtKzRefDvkJtPTxWa_Ff_8a-AMINupGEKOY",
+    "kid": "IsyZGEwcF3WR-OSQODB-bQ",
+    "max_encrypted_request_bytes": 1048576,
+    "models": [
+     "mlx-community/Llama-3.2-3B-Instruct-4bit"
+    ],
+    "not_before_unix": 1791261525,
+    "public_key": "jdcdmnvmLPhNOVAVoImfgsYQGfgN5kcJXAihcq-WTiw",
+    "signature": "_DVQPM-au9TZ7zH_8BIL_nl06B1WMnjSe8QWjXdMIroO4LitjlGLhEFoZNlANlmtwej-e_l3WTfV47lLORloAQ",
+    "signature_algorithm": "ed25519"
+   },
+   "revocation_retained_until_unix": 1791265125,
+   "revoked_at_unix": 1791261540
+  },
+  {
+   "accepted_at_unix": 1791261564,
+   "assigned_session": "3ae2977b-202c-48e0-9d8f-f3f3c7f2bd49",
+   "expires_at_unix": 1791265139,
+   "immutable_digest": "1uww-GaklfsnFWzN_Ca_B24CYhxiNL0Js9KdQvfL0hI",
+   "key_class": "privacy",
+   "key_record_digest": "ffAuEZg8f5DkWX59gfoAhrOkhx9TNsw_fQ2WZpjasvE",
+   "kid": "1uww-GaklfsnFWzN_Ca_Bw",
+   "not_before_unix": 1791261539,
+   "privacy_attestation_json": {
+    "assurance": "device_bound_self_attested_beta",
+    "binary_version": "1.8.215",
+    "code_cdhash": "3214ffcc6b706507f9a268cfb400da5c74287ff6",
+    "expires_at_unix": 1791265139,
+    "key_record_digest": "ffAuEZg8f5DkWX59gfoAhrOkhx9TNsw_fQ2WZpjasvE",
+    "not_before_unix": 1791261539,
+    "privacy_class": "operator_constrained_beta_v1",
+    "version": "privacy-key-attestation-v1"
+   },
+   "privacy_attestation_signature": "IoSbH8J8tPVFQNAj55QmgB3JG2Rigdd4mFZzTToa4DHAByLplnTYiwflwaTFVCWQoKdtunY8hGvglfb72sRECQ",
+   "provider_id": "journey-1839-privacy",
+   "record_json": {
+    "alg": "x25519-hkdf-sha256-a256gcm-v1",
+    "endpoint_families": [
+     "chat_completions"
+    ],
+    "expires_at_unix": 1791265139,
+    "identity_fingerprint": "TRkeHShUNAsoZNXPtS7bM0tPdBmJyAlGiDGHF0q2WM0",
+    "key_record_digest": "ffAuEZg8f5DkWX59gfoAhrOkhx9TNsw_fQ2WZpjasvE",
+    "kid": "1uww-GaklfsnFWzN_Ca_Bw",
+    "max_encrypted_request_bytes": 1048576,
+    "models": [
+     "mlx-community/Llama-3.2-3B-Instruct-4bit"
+    ],
+    "not_before_unix": 1791261539,
+    "public_key": "UndL7ytHKKsGeEk03dV4zcHXyf7neM5kyn4OCMbZVz8",
+    "signature": "R5TF1yVZwv4g2RaEXb4Z3fTsS9DOWTuZIq53U9-8APM8EgBieDYPbv0-dNHrw2o8NQsJzGf4sr41KbI04Vu2CA",
+    "signature_algorithm": "ed25519"
+   },
+   "revocation_retained_until_unix": 1791265139,
+   "revoked_at_unix": 1791261570
+  },
+  {
+   "accepted_at_unix": 1791261882,
+   "assigned_session": "2fdc2c23-0144-4e3b-8eb0-64ee2d9da21b",
+   "expires_at_unix": 1791265169,
+   "immutable_digest": "Iiqe6IaVawaTaPgi_l0utD3wSiLdgACyuv6FYn7uchU",
+   "key_class": "privacy",
+   "key_record_digest": "XcoZWUA_LJjFU0O5SkoFfQVzN3jFKrxldozNyKmtBSY",
+   "kid": "Iiqe6IaVawaTaPgi_l0utA",
+   "not_before_unix": 1791261569,
+   "privacy_attestation_json": {
+    "assurance": "device_bound_self_attested_beta",
+    "binary_version": "1.8.215",
+    "code_cdhash": "3214ffcc6b706507f9a268cfb400da5c74287ff6",
+    "expires_at_unix": 1791265169,
+    "key_record_digest": "XcoZWUA_LJjFU0O5SkoFfQVzN3jFKrxldozNyKmtBSY",
+    "not_before_unix": 1791261569,
+    "privacy_class": "operator_constrained_beta_v1",
+    "version": "privacy-key-attestation-v1"
+   },
+   "privacy_attestation_signature": "FYf7Mzvg6B7F8z03TPGcBZZOBehO7kUjck8BaABG6g28jzohAqP-DkeEXzLhBZwOaEcY3DAd9_jDanS9khdEDQ",
+   "provider_id": "journey-1839-privacy",
+   "record_json": {
+    "alg": "x25519-hkdf-sha256-a256gcm-v1",
+    "endpoint_families": [
+     "chat_completions"
+    ],
+    "expires_at_unix": 1791265169,
+    "identity_fingerprint": "TRkeHShUNAsoZNXPtS7bM0tPdBmJyAlGiDGHF0q2WM0",
+    "key_record_digest": "XcoZWUA_LJjFU0O5SkoFfQVzN3jFKrxldozNyKmtBSY",
+    "kid": "Iiqe6IaVawaTaPgi_l0utA",
+    "max_encrypted_request_bytes": 1048576,
+    "models": [
+     "mlx-community/Llama-3.2-3B-Instruct-4bit"
+    ],
+    "not_before_unix": 1791261569,
+    "public_key": "6J6OKtTJxlHB_2SmJrNXHr-CUS4Qj5XQvCrQ_SsOjAo",
+    "signature": "2n_Bn8on_30z1PKsbTRGSu6gjLA-GBA72GrKOJ6qFblwzkO2DwuT1xyuQHjwXrUsfyGcRKMr8xKjovd0TplrDw",
+    "signature_algorithm": "ed25519"
+   },
+   "revocation_retained_until_unix": null,
+   "revoked_at_unix": null
+  }
+ ],
+ "table": "relay_blind_key_records",
+ "truncated": false
+}

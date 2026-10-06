@@ -1,0 +1,1447 @@
+{
+ "construction": "sha256(bytes.fromhex(salt) || needle_form_bytes); forms raw UTF-8, JSON-escaped, UTF-16LE",
+ "digests": [
+  {
+   "class": "prompt_canary",
+   "form": "raw",
+   "length": 36,
+   "sha256": "62245a2d35e9bb3a6c7a019fe3af6e021eda97631c2262d175c11daa6f952203"
+  },
+  {
+   "class": "completion_canary",
+   "form": "raw",
+   "length": 40,
+   "sha256": "85daf0e27f8a71788163db3d93e18eb4336c57e04e062c6ce4655570537f62ac"
+  },
+  {
+   "class": "prompt_canary_sha256_b64url",
+   "form": "raw",
+   "length": 43,
+   "sha256": "009b758c6d5a9a3b75b420b5695f37d362fb90c17b2b92a38fe59844b88ecc1b"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "02d0d58aa50c21f11403d30d0cc156b353fb42e609b4ff7fe690339f9e6ff756"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "034e5aab72bec3199df4ba5d0bbf233dfa477a7885afd6352610b819006cbe85"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "064eb4145fe8c71c5739ba1a2a842f94e974715c45922f0122e81e9d6a6d196c"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "0a77b5c8a63bbb624dd1b021e035f7869b96544aed38ebc1a5f2c3a9098bbafa"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "0cc76a1b78eaad0b66700b0a51e1a50f2aca23198875c9d00cacddabfca6af0b"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "0d59ea88536cf19db0f553de3528ae5b1ae369df993bc065c7384748313ef862"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "0db1f3ac5bb11e3312db43624c35c7172353d18860ddce70d8d98fd0bedca739"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "102d19229b916dd74234c490bc992f8d840d1ab0b65b0f56e8dd6edf25117562"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "1195c56e16ca7713ae95ec5a97ef4104043a3e3a4c71a02559f12276032be330"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "15d4380196ecc0cb0f21f5b2fbbdac520896743d2a75488d35f1acea780a8fd0"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "181ad25d87bd65060559900b20660a9108c5cc073b8970b4fae385108fc5e954"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "1abc3c5e758e40e9eb547319e5e2e8d47f15e7ccb2d7ecb58169281aa584f655"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "1b988fd6d792d026bd65ecfdab43db133ba0a49275cb0742b48c3ddc44d75db4"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "1cbce47fde3d7b64f25d97d2a3f073c21557471f05396914477ab1dbee996716"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "26fdb8299c4428d9ffd4498757b3b35908cff53c7e82238f55b0202675763537"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "2795ef6e35d0f01688d05806b8fce2592725eb4f343df9791a213920a9b83dfc"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "2acdea0274a10579b0fe1da90d9a21eaba61bb11a457cf86347ab94fddf8aee5"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "2c0d7843a693163bf1c0c38f76b3c632ea86fd845a808c0ee2fec889de3cc226"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "348e39e14b057f9d9973326acd665887c68e3a138ce06cea34ad003cfaa385ea"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "39c72e46fcfd9d6791c970080050776ddf098304d75869a2fe01fc7933e6ced9"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "3dfd8e4aee96e53eb1178c372d5b12a02cf88d31a70fb1fb020eebe1ccd33012"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "446e1f076bb5948e3921e8ea164593895d2526b754219de67c1bca836bffcf60"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "492805c4de86d9964f9811a69b37c5079bd5659b64cc88c85fa3f068d8728b82"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "4a21183a5da24f243c1d32a625055e767aa57b5062e606d554febdd47a44818d"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "4aeda856ea60b20dda3be9fc1a7573ad8690c36e3a74136b9a2f9005affa29c9"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "4cabe2103fc0d1e0f0b4bda96dd52b716ed6251d8868312bb31c6154f757b021"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "4e76b953d61d88d21a87f88c0c15d57928bcc2e8bcb780e35e26c416c2a9e9ef"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "4f791ee014352ae9387ac3f5fbcc53982cec9a54b99e8d2eeda5ea678604c2ad"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "51b6aa29066dee33f9d28778d6d9c83aee3e233f04193d6954e7d340162c016e"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "58b22b72f13c9c7e149e948796c7ede2d30c9859c503dacc71388f9572d4465b"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "5acfd7222fe7d91f4e8b46bafa7bfcfbba554c15981320434d8d7e9da5571ad1"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "5e0f666221c36c6a7797a646f0b27e77c559ed6becfd5fd953b0d2c3ebb070d3"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "65752f9d3e2629d827a018eac679e834369158a137bb4f7a5fd768c9424c1c86"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "68bef2a6e74c601d70aa7913c963f2ed7f95ba97c7cdc11f264f5ba2d439e1ca"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "697e1ee203e035ca5c37d0a0997417771c5523d192163421bf240065c039d732"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "699cd00c1882c1972bf6d13057bd697895352f9e38cd744d6cc8ecaa2a0fe22f"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "6b148c9046f46342d10424e90047ee902676d6fa8d4e636711d1fbf69a38c7f5"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "726465b0ce05c22ee93dbfb4e056ed433a4644ce51fe49390c6f12d6ea2729ea"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "72778389fe77653836cda567d49c7aeb6b73042528eb133f03658af01bb3f5ad"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "73f33729b52b21c04598707173054b940377a14d4dae85774be0626f54769d7f"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "7718a74f0db7e2ab23ba466c692e2ed8915e2c46b812464cab34da1a34b3a01a"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "7ab131eed53eb9e2cb9360410658f1908f0e9135ce2c7de09e25921dcfc34f12"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "7bbcb27b7d8a00c0db59bc5283c8566ddd7c901db5ccdfcdddd2cb3c37df5dca"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "7dc571de9f1fcad889d609acc432220fefd3aaf11bbcf115b7806e9ea07c55d3"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "7e0917d4ba30749b40393a3a1f5d2122d85677729a11b4b972a9dac612c55795"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "89699a0435d20f8bc24c6059d8329021fc1a1f30cbe51d33a1be01fba92e94ec"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "947e4cf480b6cb7da3a196c905c98ef1124eb5b04a77c0c2cf3244b91c0406bd"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "94a4232211cad9a2e3ac549f773b7320be4c824f1ec804323699e81b3fbb9d4f"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "94cc53dc1d985a7d2f0f55cd68dbc8602c1a53c08575036f586b56022906b858"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "9a79fcc9016f6bd78c55284ff7791b593f4581cea3600acd1743b586c3cdc804"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "9dccc87290d27a9036a994e13e8782bf28b3f7dd00b5459d7957d65e68a7b431"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "a2f9360290458b1b7dadc3016606d08d332fd3d9c6c0453a237ba6d9131d5843"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "a35ce5bf623b350c94ede38551deb244a17d9294f8ded5f8cbf172a59c215258"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "a4c008c313ca32a8feb1b081140d07f7106da77f297d3e7d6171e6712e45e19d"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "a4f0f08363decf9a7915c0ed740f60ff531b89311070e3f75704f8ce7f85f02a"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "a65b7129129f9cc64d1f0be277d123aea4b4cddd3b29717f76086d766593cf3a"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "a7b673044fff6127470a11f6bce4d1198ce226895607af6d37b9c97b3c2e7d7c"
+  },
+  {
+   "class": "canary_prompt_sha256_b64url",
+   "form": "raw",
+   "length": 43,
+   "sha256": "ace0274d4e70441e62813361521a90b6a16b4da88d37bab461865cd40d4b3183"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "b2f7d8d25648d6d8c9973dc302ab8486e2aa8081b0f18d177944a6f4115dffa9"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "b4cf5c0d0164c754f494e66cfe082acc5d84b475ea3879927a43cf6fb808923f"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "b56ede8fa490c3b4a10d8ee5cceec667457facacc6aefe1967d808b165210bb8"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "b5b5c7d1c8460093977f7dc4956de4ddd8786fe3acf8019b1964ca3f32688e72"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "b7d15522fcd6d7e7c1a2ed2a97304473673cd7fb52fc4defc0d8bad19852c7b0"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "c08a207531d4779ff82574701e526d268d51fd3acf089906e847f94d7998523c"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "c188284a2ca8a634696fa4485012227a3f66635c800d1c075dd8262b6c311ead"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "c222f5f7fa37666e208c956e8a2a9238e9ba70a262f603a9850d6e39d59b6984"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "c2efe889a871308eef81ec61599a1de788371ed494ccefa7073e55f6d94b09a3"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "c307e259ddf602739353439dc6d15597a82b26d63e6c51840cebcc806a07d7f8"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "c6bfefac5c774a96bbf59c16daa34cb7a6dc396baa3668aa632bbd017f931896"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "c86188fb96e351b436624488a93b38eada3a9b6b5dfa784b45f530d33b9c8164"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "cca7df5c491628118e9746050e1cb73576011e01eaf50c594855b28e0c840b08"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "cd7b2199fa617c4ce32e11c8ad4eee774b1b7cb5fe3f6859c84c8df0a38ef4ef"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "d17f3789e1bc7b545cea01b2b6213a51c94947d45f69bce69146c1a4902a90b4"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "d4730cbcaab324933667ca141c3c68719934ccca9f85f01f4a7b1d68501e0e26"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "d56c1745c517fc57cded7b33456567b16e779e1c88cfa1930fba127f5db6115e"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "d66fac3fde23839dcb3cd9f3b0683a4d08fb10ed4306b9c052499b604927bc63"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "d6b42d175bfda6104d691e228c62e442f044363bad1c938f8c09190fc9387412"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "d8347268d5f9c584372f3b6964df41dea203ff0447c8574242c4f04882bbf34d"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "d904c1cca97eb05971cb5ef26bce87b1172b394e63301b086438a01a90abd57c"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "dd776c0178557e9e0cd0b89d33e04b936befa14d7f11b44bac7191f7d18c259f"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "ddc31340de98637e8d6e7138994dd50333f7ca37db34d8db9d6f656e36daca09"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "e16efa9e3bd5bc54e119ebf6959286867315a7015b143844cbce50b599d1bc8f"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "e2d22b69e41fa143817cfeac04ac69835d112b972c07fe7c445c06a042e53a9f"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "e2e1ea8c45e4dc378558852d59b532bb6a1d4f5ebc526b076398631cb893acc4"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "e32962543892a08b553dcfb6da2267c8d11b9cbbd3be6ff25396d2117c602ddc"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "e50e0b8f44b0e705cd8644940ba38ddf027ca005b9a7d4a258858e2b765f1ff3"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "eac82ec08d9bfb3c3c4ccd73e1a2e1fcb20bd313e5f2ec5b1f441d458fc9448d"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "eb0a7b72c10f5bd7d05619c0f04b3b57e0e5e36fd5b0867c5f1bdee919b78ba8"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "ef900a58e36a97c480840020bd46cc57343acbe29b28e26a82db7fd4f67cf83d"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "f10db1e8cbe5d11bf79750a3e32ccff2c4d3edbff390a0d1e353f9ec0d3f137d"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "f3a07e16b3e8dfbfd88b75a55208c6e9e7766d2b51ab4ab7271a41212531a85f"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "f5aef2ab89f6ece0f5c57292d3a68517e2e32dd7860282da106e490fd1b42998"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "f683918cc4fd2e7718e74e638c122c6fef210f1da8238606c594dde1390c2336"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "f8b21694ae534e3b497d658f6418d65416148f811e06769fe6cc6c8440e8f972"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "f8d6871b148874ea51f890ae3da74b38d5a0cedada50bdc479ef3cff0adc9465"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "f9e20840a79356eab36b074889b8a190336a87211591fc738287495d0d16dfa9"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "fa431345d4f0b944c30994ed7cc3bff42dae8b415e3ae64e9495d7c0b8da0dc8"
+  },
+  {
+   "class": "completion_canary_sha256_b64url",
+   "form": "raw",
+   "length": 43,
+   "sha256": "fbb437aca742db74ea559b2510581501dfb13de9d5e4ab802eda1287fac5dd48"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "fde94d64506b515b6be852692c7ae9bda4899be3fdbcc79062ea9761eb2a7724"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "raw",
+   "length": 43,
+   "sha256": "ffa364d6b7e5df6d330de73df506926b1fcc45d5a6ee5af3cbef7302fd948d4f"
+  },
+  {
+   "class": "completion_canary_sha256_b64",
+   "form": "raw",
+   "length": 44,
+   "sha256": "2343f8d95c291944836cfa5991438f81b88f01b677e8fd72aa1b8bdbc76fb84a"
+  },
+  {
+   "class": "prompt_canary_sha256_b64",
+   "form": "raw",
+   "length": 44,
+   "sha256": "a7749c0e8c829a88995f5854731bcfccc13c4c7398be72dd5b76fbe51da0ca2d"
+  },
+  {
+   "class": "canary_prompt_sha256_b64",
+   "form": "raw",
+   "length": 44,
+   "sha256": "d41e9468426537ec5f58c3ccb11df93cb06ef8f93d46af9a4d6bcea61a587850"
+  },
+  {
+   "class": "buyer_api_key",
+   "form": "raw",
+   "length": 46,
+   "sha256": "5218c3dcb3092c841304d076d81cd917a2696915a54d5c54b2bb4d5dbb3fe9e7"
+  },
+  {
+   "class": "prompt_canary_sha256_hex",
+   "form": "raw",
+   "length": 64,
+   "sha256": "0553e6797fc5406105eb5ba7a2f499e40088c55ab8698718024a4541bef8f6da"
+  },
+  {
+   "class": "journey_secret_gateway_service_token",
+   "form": "raw",
+   "length": 64,
+   "sha256": "086a70f3becbe9bdd00c2cff1d88d535b64cf126c3c42bba186114081c703c37"
+  },
+  {
+   "class": "completion_canary_sha256_hex",
+   "form": "raw",
+   "length": 64,
+   "sha256": "17b4a0dd92dc59ec025823581a7f7b632af70748335d73602adc1635cb0ea76f"
+  },
+  {
+   "class": "provider_token",
+   "form": "raw",
+   "length": 64,
+   "sha256": "2ac260d31fad26214b39900ffb6a47a935c1b00a366b9b7fb9ea9e00f9966a3c"
+  },
+  {
+   "class": "provider_token",
+   "form": "raw",
+   "length": 64,
+   "sha256": "3daeaa022cbc654607adba320296733172bd045d49ff7ca7341cfeaabacc115f"
+  },
+  {
+   "class": "completion_canary_sha256_hex_upper",
+   "form": "raw",
+   "length": 64,
+   "sha256": "53e22c1f388cbc3637512d8d58f01dab8d834a4c5b4201076ec2b75775110726"
+  },
+  {
+   "class": "journey_secret_demo_secret",
+   "form": "raw",
+   "length": 64,
+   "sha256": "7aaed4338fe6eeadec2f12417c8328eb2c5dc67baf523a5576a9256830810e28"
+  },
+  {
+   "class": "canary_prompt_sha256_hex",
+   "form": "raw",
+   "length": 64,
+   "sha256": "8333bb49628b10392fa7593d022474bce8871293f2d8b476039348c8cb01b4d5"
+  },
+  {
+   "class": "journey_secret_key_hash_secret",
+   "form": "raw",
+   "length": 64,
+   "sha256": "8f62d38aa4032946c1e23be6a91c17f1259919e7541615c240695504dfd1c4e9"
+  },
+  {
+   "class": "canary_prompt_sha256_hex_upper",
+   "form": "raw",
+   "length": 64,
+   "sha256": "971c467fa51bd7008e0c0edb65852211864fcb1dfcc64ce5313505893b3b59ba"
+  },
+  {
+   "class": "provider_token",
+   "form": "raw",
+   "length": 64,
+   "sha256": "ab32a4ea003f5d76fbd33284c35f8e051c89bbeb69e892379cdbbeac24cf954a"
+  },
+  {
+   "class": "journey_secret_operator_key",
+   "form": "raw",
+   "length": 64,
+   "sha256": "bb70551e44f7dae4f149a04e31e8bfdee232ec8ce76de4e6795a863feb2e8422"
+  },
+  {
+   "class": "prompt_canary_sha256_hex_upper",
+   "form": "raw",
+   "length": 64,
+   "sha256": "ccacf32f4add8990c0c7c468fac83d9a39698d069dd09cf6f777f4ab82c8618e"
+  },
+  {
+   "class": "prompt_canary",
+   "form": "utf16le",
+   "length": 72,
+   "sha256": "021c5b3c17c7689e53f6e7d16fc2ee8ff8eedc975feb2d0de97d298a0ab908d4"
+  },
+  {
+   "class": "completion_canary",
+   "form": "utf16le",
+   "length": 80,
+   "sha256": "e3695cf1786bc2cb7bffacafc19c481d4ebf95e48259cca738b7835135668ea8"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "01723352eefb8becfb12b217dc85bd11e70fbdbf428080910d65a89b0bf82892"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "045ed0c94850ec1a80aaf040304a7542bae74678c4028226c4312ee3a0d1a75e"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "05aeced12a96e968124de423e2a6a1e1bcf90f006cf7c4f2713badfd378e2ca7"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "0f17391f9c83f699088c78114e47005caee158404ba9fe439b3c21b819f8a74e"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "110e36439136e806f61b805e9d61096d23acc7195cc5740732be919ff0f522c0"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "111b15c54835deb60b44f2bc7c67ff7d2f44c5e1bf28d639a1d19ef5ea673778"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "11d937b1390ddde384471b09728f57fd5fee60880e485cf4dbb1ebd1a352e70e"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "158bcb4e96de2b75a33169c64b8959519792936aec962d5ef3cce0585341f57a"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "17e3c5b5a58aaa321b60513edbaa615529b9833f7d1bc806b054660243b4b368"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "1aa68a7e636103d51a7e492f01057493adef9b471a92e5399823af7de025366a"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "1ff274455e4c899391307e94016d9d7ae7a671db29638bba4e7a1e159cb032e6"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "2bd01ca876a21b6b4c0fe98fd25c1150ba1b2da197bc99bca309b997906aefa4"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "2cf00f080cb38f6acca665a8db5ae064b92566f7224e480237f01bb3ddf515c2"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "2eceb572a5b3da258e64e8ad88b27b2be4349cc8ed0b350cfd0fce9d087e368a"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "35bfca5a9e730f2ef972ddc75145e701e5199c50b111e67e04852f35cf993525"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "35f5693c845a384070dca1eba450572499957fb41a81f55215a69d5a93a8a08d"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "38b67e070e52a390f49c7c2a1558506f8f173c48fe7456eef4838803f4b1e662"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "3a63de8a88ecea466fd82027cd9c6cd8c1699bd030186417716aee58e4f3c4db"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "3c6b0263aa28ca4828f9cafd6570bfd636b086f5875b71318b4764d25e7ed8f9"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "3c6cb4dc29bbfb84ded467660e5bf589470a1ea37bcc6e8943289dfca6dcd0cb"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "3dedcf1fb4f3bb544a2089b8c2535250dfdb506f43dae144185e0c460f5795dd"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "3fb50164ec7b7c2032d6ece7c203f2a938a91e1936df60df2cff4678a62ffd8e"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "44a2a1e92e39ae11666523832dda6a31c00aa039bb9150f20498bd25d232b5d0"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "4554bf591606f4a0989e7ce0603e0d68f65efaa5c7f279926523cde534e90af3"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "47d42120ab2d51b02a149c5f55200c2a5aae8bd96147dc29ac68a78b023a9ef1"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "48cf0d7e73d340e202a1699a41e298f8ef7ebc10cec42c5b43c472380f5829d3"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "4953ad7fa81010748b4d5cb069976500613f24d431eae036f796741cabfd5866"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "4aef14c9057c35f6a845976350c2cc9a96cef9e489a9535ea1cb56f704b97b95"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "4bcd21f4d2a93da29946bdb28b507207060180a30e2ffffdd4edd74d90c52563"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "4f7ec8b6bfc885bb4c4eb8a875786d2ed8e39717619da58ff2ab6068fb0ae075"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "529aaeb68e14865c9b37583df0fb92f6ecb518acc7a9395fea0b7e65dec394dc"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "53edab192e1e195325f58e3acae8844c9b9d46f3e8d147b14e93f3dbd7b1f1af"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "562ea847ff911854b6d791249d235cdf9d7e05010e1b882af7537ef047b34cf8"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "56e3e8d501a8b7696f7223fbf4d908b1a3db39af5102fcac4b5de43833dbbf99"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "57987dde14088cbe0241a5853f94b2a169b64246221713f00448e8010e4e6a44"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "5af56dd1cfd74849528f68b94e0c4c9e5e7ee208a3086c811c13d896a5ec83d5"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "5c537684b8715431006262dded3e2badfd1614643272ad552bebda9a4b22aa54"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "5ed8d7bdfd17380175c4a9a8d9fe8f5edb4a44a1765adb8051f6d9571c13eeec"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "639160a1d27c914dde28689544b8c28c1303195ba4a80aaa4bdfa187d7d84e75"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "6a5c66b764e603d46dc77c916f2844c0fbbbf55964f64d7fcf0a00ea04c5aa04"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "6a81ae3cf464165231cead7a8f2c6ce6dadd42515816df8d2c36cac76e9e0aa3"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "6c0f649158011197d763220c5fa580288040f918c21b69500edb2f8768688efa"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "6db3aded7d4f135b303bba1d2c8d1aee3cb9b34dc6c3119938fca0a2cb31622f"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "6e092102b46151d863aa3465dcd6f25a6cb42c258d69a4b5e569f554314de034"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "73020a4ea18a2b2f310ea76ac963c7be22dc99cd48e3d035fa811980d2946655"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "741d58c0b36799487d944625d0ee2f6adc925662ea9d0c4ba0bc8027ac177795"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "759f1455356d1c9603818925c3e1d530fb382845106952f809ceda9a19d16d62"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "7632efba1f05f012728741d648b03bd37efffb7660b88a1e4f9e901234242955"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "7794d6b6e79c3fe6e89f218778cedf20cee58369360033066d9ae89d29818455"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "7bebb3b23565236c5373002f4c9731d344492c51ebd83669b8ac9335fc205461"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "7ff3cf895bdeaaed610e6774646c707e39f7739874fdaba10fa1a4d38e00eff4"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "809b7eceefde0bc6a69d11e293a31c6634ec8f5251fc4802d037016c63c84f33"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "819ab07152932e406e545f33ee690a373f944e0917066595f1f1c5e38cc1796a"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "839381e64ad7a23d788c1685849ab4beb0e1605cbd9c103f3f2bea26e3b6d5a5"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "8952e415fd056be9accc48d80f43905e83a3e192e4266321b3c5fe4b04144c0f"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "8e299569ff21bb42345e732cd453e5a6c96ae33aaf27bd46dc840d930e3002f7"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "8ee9445f39fe0bbcdd19c27c6c898fb614c39325cd32fdeb04c86c36fb931823"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "94643d6de4c4842e94b5a4a7c09cabc442d9ec4ae502fd381c34b3e52309f086"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "97263bf5d99a0958cd6361a07e25b9e43fac9ea1ce25bea1a85e6089a55c2a0d"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "9a1a53ca66945c3b567ec2f5e0bb8b6c64c12c4cdb7a17ef18942694b5de9b0d"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "9c1e5c7c26e8264efe5a65de31f1b0f916ad178cc9c1bb54c1db69c102325e68"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "a0deb7a7499c45554eb57c378ea1ed27814871b9d0cf6b030bab1d983e933e2a"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "a5530dc11aebe437f39ae920f4a1d1bd1bc92788ccff3f02832c71717092ac5d"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "a9dbe2b38ff2e10a6c67fb371e7d440d44f7cf4d2b5aaaf2388a762692800d8f"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "aa1a7ded1c5b6e7256093d300acf48f4ce1f4dd3f08dd570dafd3964a76cb86c"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "aeca547e52787fd33dc68bf154a831a2cb81db18e50fb20ef8cf73c57e350ffb"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "af45cb11874aa4bb54fc2fb2a1f348564cc300a2165bf36ae18668c423b3f871"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "b010d2115c36b370b03cd0d0e306fbd35212601b01b4b6e4864c325092047fb7"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "b022ccb049ce686a7dfb19b013f0fb27e984ec56f9e49c43c9b7a0af88ef9da8"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "b2869bfaf0abf09d481916075a5a9826ee66c7bddf7bfd6ccd3c51498fa61b92"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "b697aab59a77612169745fb2bbc6c1ad46c1d2df75f9f34d91a51fcc3c70558f"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "bbd3c82516c84dce6244238ec279861289a3bd998d9b4b86b786c13e02d3eac6"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "bd54b59715a76c0342079344616cb8a9c383575b8b60a9b242452a20ee358fc9"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "bd87df8f12239d65c42b2b2e5bbc644059bca4a9f1e1a7d1636cbd7d61af2a8d"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "be5688c73142056e594f4fbffa85d2588ac4bdfd7636a12f80716b5e73c14ce3"
+  },
+  {
+   "class": "prompt_canary_sha256_b64url",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "bf4c4063cb4f8da4b600bfd6da7972997cb9c3f240bf188c62b05d0d32a21762"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "c1797bd5b49b28a76cb50a92e57098ae674d412d3e5ff44e97db3c5b29d12610"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "c1d48c48e45abefdb37595a5376c14de2cc482adfc7be2253830f65e86956f0b"
+  },
+  {
+   "class": "completion_canary_sha256_b64url",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "c29e5fefa907b5bec7c76a6c31a6c77345e04825700d155b4777566b1f6dd060"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "c2dd3328f7d1d4c985a607a0273abd48b8f11227553658855f86623a89ae477a"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "c961eafd1b8a811bb06ed6677f49f7e32892454e184eb0a142057c822cd65b59"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "cc0fd11b8b5a9e4e6da9ce8b983de6fa5eb456a3e579f9a6f9445f1208394a13"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "ce7399152768385fd1d37da6590df0db4797acce859bad0d56f139e6e1b6dc0e"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "cfcff895b5a936c1b6e3342e067fd1563e869483e01561c4cfbff6b65e9d0de1"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "d4b6490ae49942fffe21315b8878f8d8987e680421584aaed32c008d0013b9f8"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "d60fe84000bc423e9b07bfd8a839b098dc529b74921dd4c22265d5e4e7c394b5"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "d8c37c6159730777f55ecce16dc0910b61b62e4a3354e60f6bf2ea3d4b8b6c2c"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "dbbb0674cddbbe88777665ac5888ddc9e25d655a9d2619623b11c1f20329a302"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "dbe609860244341632232a6dfd2813a0a9e890c924f46f2057f29fe6668ff935"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "df017f8091bec949f33ba01eb743eac40d3020d25d3a9270dea0c0e2dc050cc5"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "dfaf272843a0b3f22ba7a9fcab2d5ef7d372cc76478840bb9f4e69d18420ee46"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "e3d75164c9c5787c83b8c7226f9ba29120e8bbeae9d2b2ac1008fb39c3843f81"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "e45fec1660450605a015c514880f244163e04c8232191903e9d67ec1364e43a2"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "e75fc7b819ea23bb14522c0134433c5f9275cae55867739c27c035294ca0e09e"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "e822362d2ae70be414eb7557204df41255cf5f6bf5ef5d6f4efcd111d0b58777"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "ecd2c78ed74edc5b78127a6fd77db712d3dc3b69b50ee075e53816b536fe2660"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "f0d377029d9a5a76e26f3f9397340155afb3505a4d8afe1627fa92a18423bf6f"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "f2009e4b2fa0f121fd8bf34b63aa90dc5b5ce1d7181ffa394a1157c27a52ec2a"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "f25bdf4e6971d2f7ecc6e7b3b5610e627062ab74a52c27368cd7aaa3ba4b03d2"
+  },
+  {
+   "class": "buyer_ephemeral_key",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "f891dcba7c3dfd9eff2d2f9ecce29cf1cb2e55668d2ee96de425cc30c07d0683"
+  },
+  {
+   "class": "canary_prompt_sha256_b64url",
+   "form": "utf16le",
+   "length": 86,
+   "sha256": "fb35a298040dd67a69845e1da2497c2cc2b4e388923d8b07ec572c52c992f1bf"
+  },
+  {
+   "class": "completion_canary_sha256_b64",
+   "form": "utf16le",
+   "length": 88,
+   "sha256": "29984e7f1ef461f165a1c25d111fadaaa53603a9d073301a20d10eb445f8e618"
+  },
+  {
+   "class": "prompt_canary_sha256_b64",
+   "form": "utf16le",
+   "length": 88,
+   "sha256": "3149c3a186c1ec069ef9b99d6abb8015e31cd37797e0946a33b3795a93e021e5"
+  },
+  {
+   "class": "canary_prompt_sha256_b64",
+   "form": "utf16le",
+   "length": 88,
+   "sha256": "d758ca80c69f699acb89a720ea111b2eb44a712d4900f3d9564aa719623c248c"
+  },
+  {
+   "class": "buyer_api_key",
+   "form": "utf16le",
+   "length": 92,
+   "sha256": "76a8a138744ac5688cf4c26bf7267eff1b0d4cfc3c8734dc082592caf993f5a8"
+  },
+  {
+   "class": "canary_prompt_sha256_hex_upper",
+   "form": "utf16le",
+   "length": 128,
+   "sha256": "00bf75790dfee39168e959cb84d219d3e7c79d95ab9c4e3b2a0fc15d7b1e914b"
+  },
+  {
+   "class": "journey_secret_operator_key",
+   "form": "utf16le",
+   "length": 128,
+   "sha256": "03afa9418bbe94cd2a38ba66a967b569a8621356490d5939f17604daeecd3144"
+  },
+  {
+   "class": "journey_secret_demo_secret",
+   "form": "utf16le",
+   "length": 128,
+   "sha256": "1bc78a06bc408f782b32fa551e73474be4333edb4aed991df6ebefcdacddc4a7"
+  },
+  {
+   "class": "canary_prompt_sha256_hex",
+   "form": "utf16le",
+   "length": 128,
+   "sha256": "1f58322e1dbcfb831a1a816628dc64837d15fb0eed98432d36a79338810c7377"
+  },
+  {
+   "class": "prompt_canary_sha256_hex_upper",
+   "form": "utf16le",
+   "length": 128,
+   "sha256": "474e17b7791fe2d75e2adf17bb1de92e2b0a047dccd271295d00997738d572db"
+  },
+  {
+   "class": "completion_canary_sha256_hex_upper",
+   "form": "utf16le",
+   "length": 128,
+   "sha256": "5820f5af66028cee1db27cde1b882354ae7a174dac22b5d240124819b1dde81a"
+  },
+  {
+   "class": "journey_secret_key_hash_secret",
+   "form": "utf16le",
+   "length": 128,
+   "sha256": "630c3be20b54b6a4fc30ecbfc7c6ea0d11fee336f059e7766fd313b4c8ca8f58"
+  },
+  {
+   "class": "completion_canary_sha256_hex",
+   "form": "utf16le",
+   "length": 128,
+   "sha256": "915d0f60cc58675968e55ceea92896a98f9ce4d1b0b0d55a39dd02623e572067"
+  },
+  {
+   "class": "provider_token",
+   "form": "utf16le",
+   "length": 128,
+   "sha256": "9d76a1b9c37064088b780992ec807617cea342c0b2597b8f8ea101bd73fec9f9"
+  },
+  {
+   "class": "provider_token",
+   "form": "utf16le",
+   "length": 128,
+   "sha256": "9fa94288ef1051f7f8336f46c706b44c75ebc68e0f842d84a905bfb225c03c96"
+  },
+  {
+   "class": "journey_secret_gateway_service_token",
+   "form": "utf16le",
+   "length": 128,
+   "sha256": "bb067f5075e49288304912391b24643fe8ef9ea7c08ca2a8823afacd8102edbd"
+  },
+  {
+   "class": "prompt_canary_sha256_hex",
+   "form": "utf16le",
+   "length": 128,
+   "sha256": "d61510ba1401a0927153f5cb20e80d0fd505eab02b65074dc00dc7c15eaf91fe"
+  },
+  {
+   "class": "provider_token",
+   "form": "utf16le",
+   "length": 128,
+   "sha256": "ee420b84c3e0d23ad545aec2d289a1e64a321590853340f769caaa7a7748b211"
+  }
+ ],
+ "salt": "5ade49a82f436298cfa34a68767161fd08a6022a2eb4492c358496475bbce20d",
+ "schema_version": "macprovider.privacy-class-beta-primary.v1"
+}

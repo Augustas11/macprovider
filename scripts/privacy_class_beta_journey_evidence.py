@@ -292,7 +292,7 @@ HOSTNAME_RE = re.compile(
     r"(?i)(?<![A-Za-z0-9_.-])(?:[A-Za-z0-9-]+\.)+(?:com|net|org|io|dev|tech|app|ai|cloud|local|internal|lan|home|corp|test|example)(?![A-Za-z0-9_-])"
 )
 IPV6_CANDIDATE_RE = re.compile(r"(?<![0-9A-Za-z:])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?![0-9A-Za-z:])")
-IPV4_RE = re.compile(r"(?<![0-9.])([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})(?![0-9.])")
+IPV4_RE = re.compile(r"(?<![0-9A-Za-z.])([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})(?![0-9.])")
 URL_HOST_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://([^/:\s\"'<>]+)")
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost"})
 
@@ -502,6 +502,16 @@ def privacy_disclosure(fingerprint: str) -> str:
 # ---------------------------------------------------------------- primary helpers
 
 PRIMARY_SCHEMA = "macprovider.privacy-class-beta-primary.v1"
+# Facts the 1.8.215 run never recorded. Their observations rest on the
+# indirect evidence named in the predicates; DYLD_* inertness is
+# procedure-attested (the run-version kit line plus the recorded outputs).
+NOT_RECOVERABLE_ITEMS = (
+    "hardening-complete timestamp",
+    "privacy frame sequence and final-frame count",
+    "posture challenge/acceptance rows",
+    "P_TRACED/CS_DEBUGGED",
+    "DYLD invocation environment",
+)
 REWARD_TABLE_RE = re.compile(r"(reward|emission|unlock|verified_work|referral_serving|referral_social_grants)", re.I)
 PRIVACY_KEY_ATTESTATION_DOMAIN = "macprovider/spec049/key-attestation/v1"
 
@@ -1438,6 +1448,9 @@ class Checks:
     def p_primary_integrity(self, errors: list[str]) -> None:
         summary = self.primary("summary.json")
         expect(summary.get("log_utc_offset") == "-07:00", errors, "primary exports must declare the run log offset")
+        expect(summary.get("warnings") == [], errors, "the primary extraction must finish without warnings")
+        recorded = [str(item).split(":", 1)[0] for item in summary.get("not_recoverable") or []]
+        expect(recorded == list(NOT_RECOVERABLE_ITEMS), errors, f"primary/summary.json must record exactly the not-recoverable items {list(NOT_RECOVERABLE_ITEMS)}")
         inventory = self.primary("db/inventory.json").get("databases") or {}
         for database in ("coordinator.db", "gateway.db", "relay-blind.db", "provider_connection_events.db"):
             expect(database in inventory, errors, f"primary inventory must cover {database}")
@@ -1541,6 +1554,21 @@ class Checks:
         ]
         in_step = [stamp for stamp in accepted if stamp is not None and start - 600 <= stamp <= end]
         expect(bool(in_step) and min(in_step) >= started, errors, "the privacy provider's first accepted session must follow its start")
+        # The process's own unified log: its first network flow must follow the
+        # process start. This bounds, but cannot prove, hardening-before-network
+        # (no hardening-complete line exists; see primary/summary.json).
+        crashed = self.b.fields("step-09-redaction-sweep/forced-crash.txt").get("crashed_pid", "")
+        if not crashed.isdigit():
+            fail("forced-crash.txt must name the privacy provider pid")
+        unified = self.primary(f"logs/unified-provider-{crashed}.json")
+        connects = [
+            utc_unix(event.get("time_utc"))
+            for event in unified.get("network_events") or []
+            if "flow:start_connect" in str(event.get("message", ""))
+        ]
+        connects = [stamp for stamp in connects if stamp is not None]
+        first_entry = utc_unix(unified.get("first_entry_utc"))
+        expect(bool(connects) and first_entry is not None and min(connects) >= started and min(connects) >= first_entry, errors, "the privacy provider's first network flow must follow its process start")
 
     def p_primary_canary_completion(self, errors: list[str]) -> None:
         privacy = self.provider_id("privacy")
@@ -1600,7 +1628,7 @@ class Checks:
 
     def enforce_rows(self) -> list[dict[str, Any]]:
         start, end = self.window("step-13-enforce-canary")
-        return [row for row in self.reservations() if start <= int(row.get("created_at_unix") or 0) <= end and row.get("dispatched_at_unix") is not None]
+        return [row for row in self.reservations() if start < int(row.get("created_at_unix") or 0) <= end and row.get("dispatched_at_unix") is not None]
 
     def p_primary_enforce(self, errors: list[str]) -> None:
         rows = self.enforce_rows()

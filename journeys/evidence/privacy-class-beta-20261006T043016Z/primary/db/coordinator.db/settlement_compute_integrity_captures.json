@@ -1,0 +1,21 @@
+{
+ "columns": [
+  "id",
+  "account_scope",
+  "request_id",
+  "attempt_n",
+  "provider_id",
+  "capture_required",
+  "request_sampling_profile_covered",
+  "route_snapshot_hardware_class_digest",
+  "capture_json",
+  "request_start_snapshot_digest",
+  "captured_at_unix_ms",
+  "created_at_utc"
+ ],
+ "dropped_columns": [],
+ "row_count": 0,
+ "rows": [],
+ "table": "settlement_compute_integrity_captures",
+ "truncated": false
+}

@@ -151,5 +151,5 @@
     "unreleased_local_binary_connected_to_live_coordinator": false,
     "secret_or_canary_persisted": false
   },
-  "redaction_manifest_sha256": "91ef8a00eb4fdbda13d23f31c64ac299257e4c71205a1aa3052af9f7f7c92271"
+  "redaction_manifest_sha256": "97bd5a4e77fa1c185472584111223d81491b284a732a28a91f2b1c30ed1bf1c6"
 }

@@ -1,0 +1,20 @@
+{
+ "columns": [
+  "id",
+  "disabled",
+  "reason",
+  "updated_at_unix"
+ ],
+ "dropped_columns": [],
+ "row_count": 1,
+ "rows": [
+  {
+   "disabled": 0,
+   "id": 1,
+   "reason": "enabled",
+   "updated_at_unix": 1791261388
+  }
+ ],
+ "table": "privacy_class_control",
+ "truncated": false
+}

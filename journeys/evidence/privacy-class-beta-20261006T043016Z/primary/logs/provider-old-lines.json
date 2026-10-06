@@ -1,0 +1,77 @@
+{
+ "lines": [
+  {
+   "line": 8,
+   "text": "malibu-cli config"
+  },
+  {
+   "line": 9,
+   "text": "  port: 19322"
+  },
+  {
+   "line": 10,
+   "text": "  model: meta-llama/llama-3.2-3b-instruct"
+  },
+  {
+   "line": 14,
+   "text": "  coordinator_url: ws://127.0.0.1:19302/ws/provider"
+  },
+  {
+   "line": 15,
+   "text": "  provider_id: journey-1839-old"
+  },
+  {
+   "line": 18,
+   "text": "  log_level: info"
+  },
+  {
+   "line": 19,
+   "text": "  log_format: json"
+  },
+  {
+   "line": 31,
+   "text": "  privacy_class_beta: true"
+  },
+  {
+   "line": 42,
+   "text": "Coordinator tier: provisional"
+  },
+  {
+   "line": 46,
+   "text": "malibu-cli config"
+  },
+  {
+   "line": 47,
+   "text": "  port: 19322"
+  },
+  {
+   "line": 48,
+   "text": "  model: meta-llama/llama-3.2-3b-instruct"
+  },
+  {
+   "line": 52,
+   "text": "  coordinator_url: ws://127.0.0.1:19302/ws/provider"
+  },
+  {
+   "line": 53,
+   "text": "  provider_id: journey-1839-old"
+  },
+  {
+   "line": 56,
+   "text": "  log_level: info"
+  },
+  {
+   "line": 57,
+   "text": "  log_format: json"
+  },
+  {
+   "line": 69,
+   "text": "  privacy_class_beta: false"
+  },
+  {
+   "line": 80,
+   "text": "Coordinator tier: provisional"
+  }
+ ],
+ "schema_version": "macprovider.privacy-class-beta-primary.v1"
+}
