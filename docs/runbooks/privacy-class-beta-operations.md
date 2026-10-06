@@ -4,6 +4,8 @@ SPEC-049 `operator_constrained_beta_v1`, v0.2.0. The coordinator, gateway, and b
 
 These commands print public material only. Do not print, log, or copy private key bytes.
 
+Production activation. The v0.1.4 staged canary (SPEC-049 §8.1, Entry 249) covers 0.1.x code with one pinned provider only. Do not run v0.2.0 code with `privacy_class.enabled: true` in production under that exception; automatic enrollment needs its own dated exception or SPEC-049-R023 promotion first (SPEC-049 §8.2).
+
 ## What enrollment trusts
 
 The coordinator enrolls a provider ID's Secure Enclave key and relay-blind identity from the first posture that verifies for that provider's live, authenticated session under an approved signed code identity. That record is the pin from then on. A later different key quarantines the provider and is never enrolled on its own.
@@ -49,12 +51,15 @@ coordinator-cli privacy-class directory-keygen --out /etc/macprovider/privacy-di
 
 It refuses to overwrite a file, writes the 32-byte seed as base64url with mode 0600, and prints `directory_public_key=` and `directory_key_id=`. The coordinator refuses a key file that is a symlink, not mode 0600 or 0400, or not owned by the coordinator user or root. This key is online by design: the directory changes whenever a provider enrolls. Do not reuse the release signing key or any SPEC-023 static-feed key (`streamvc-autotune-static-v4` and the like) here, and never put those offline keys on the coordinator host.
 
-Enable the class:
+Enable the class. It requires `coordinator.require_gateway_context: true` and `relay_blind.enabled: true` with a `sqlite_path`. Under `settlement.verified_model_settlement_mode: enforce`, relay-blind also requires the SPEC-022 R-14 profile:
 
 ```yaml
+coordinator:
+  require_gateway_context: true
 relay_blind:
   enabled: true
-  sqlite_path: /var/lib/macprovider/relay-blind.sqlite
+  sqlite_path: /var/lib/macprovider/relay-blind.db
+  enforce_settlement_profile: relay-blind-settlement-v1
 privacy_class:
   enabled: true
   release_code_identities:

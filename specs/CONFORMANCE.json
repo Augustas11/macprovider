@@ -1549,7 +1549,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "SPEC-049 v0.2.0 defines the Beta operator-constrained privacy class with automatic provider enrollment, release-derived code approval, and the operator-signed identity directory. The coordinator, gateway, and buyer client stay default-off; the provider enters the class only on an eligible signed host. It is implemented locally with unit and integration tests. The signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence on a v0.2 release (SPEC-049-R023), the staged canary, and promotion remain pending; every requirement stays pending. No conformance or production promotion is made."
+        "rationale": "SPEC-049 v0.2.0 defines the Beta operator-constrained privacy class with automatic provider enrollment, release-derived code approval, and the operator-signed identity directory. The coordinator, gateway, and buyer client stay default-off; the provider enters the class only on an eligible signed host. It is implemented locally with unit and integration tests. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result for the v0.1 requirement set is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json), and the v0.1.4 one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249) and superseded for v0.2.0 code by §8.2. The canary outcome, a signed journey on a v0.2 release, a new activation exception or promotion, and SPEC-049-R023 remain pending; every requirement stays pending. No conformance or production promotion is made."
       }
     }
   ],
@@ -10668,7 +10668,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -10694,7 +10694,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -10718,7 +10718,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -10745,7 +10745,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -10773,7 +10773,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -10800,7 +10800,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -10823,7 +10823,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -10849,7 +10849,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -10871,7 +10871,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -10894,7 +10894,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits #1851 (SPEC-049 0.1.3): exactly one content-free relay-blind-settlement-v1 receipt per attempt when relay_blind_settlement metadata is present; not yet implemented (tracked as SPEC-015-R007)."
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -10918,7 +10918,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -10944,7 +10944,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -10969,7 +10969,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -10994,7 +10994,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -11015,7 +11015,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -11041,7 +11041,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -11066,7 +11066,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -11091,7 +11091,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -11114,7 +11114,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -11138,7 +11138,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -11165,7 +11165,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits #1851 (SPEC-049 0.1.3): the redaction suite covers the relay-blind-settlement-v1 receipt rows: TestPrivacyClassEnforceSettlesSwiftReceipts scans the verdict, route-snapshot, journal, and credit rows for the canaries and the SHA-256 of the canary prompt, completion, and decrypted request."
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -11189,7 +11189,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits #1851 (SPEC-049 0.1.3): the observe-only limit is replaced by SPEC-022 R-14 coverage under enforce; not yet implemented (tracked as SPEC-022-R014)."
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -11206,7 +11206,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "SPEC-049 v0.1.0 (SPEC-049-R023): draft/not-deployed promotion gate is specified for the default-off Beta privacy class but not implemented, tested, or evidenced; it remains pending until implementation, automated tests, and a signed JOURNEY-PRIVACY-CLASS-BETA hardware result exist. The journey result is one input; staged canary and three-lane audits are also required."
+        "rationale": "SPEC-049-R023 promotion gate: the signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, 1.8.215) and the one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). Promotion still needs the canary outcome, a signed result with the carried residuals closed, a signed journey on a v0.2 release for R024..R028, and 0/0/0 three-lane audits; the requirement stays pending."
       }
     },
     {
