@@ -1120,13 +1120,16 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     staged += try layer.stageCommit(inputCount: input.committedInputTokenCount)
                 }
             }
-            if let advance {
+            // Convert the seeds inside the same evaluation so the host
+            // readback below is a plain copy, not a second GPU submit and wait.
+            let seedTokens = advance?.proposals.asType(.int32)
+            if let advance, let seedTokens {
                 staged += advance.states.flatMap { $0.cache.flatMap(\.state) }
-                staged.append(advance.proposals)
+                staged.append(seedTokens)
             }
             eval(staged)
-            if let advance {
-                let seeds = advance.proposals.asType(.int32).asArray(Int32.self).map(Int.init)
+            if let advance, let seedTokens {
+                let seeds = seedTokens.asArray(Int32.self).map(Int.init)
                 self.storeNativeMTPDrafterAdvance(
                     requestIDs: committing.map(\.0.requestID),
                     states: advance.states,
