@@ -28,6 +28,7 @@ from check_spec_governance import (
     trusted_pool_model_prerequisite_error,
     ValidationResult,
     _load_json,
+    _looks_like_signed_journey_result,
     _source_under_journey_evidence,
     _validate_signed_journey_result,
     resolve_trusted_openssl,
@@ -148,6 +149,60 @@ def upsert_evidence(existing: list[Any], record: dict[str, Any]) -> list[Any]:
     ] + [record]
 
 
+def signed_journey_identity(root: Path, item: Any) -> tuple[str, str] | None:
+    """Return (journey_id, repository commit) for a signed journey-result evidence entry."""
+    if not isinstance(item, dict):
+        return None
+    artifact = item.get("artifact")
+    source = item.get("source")
+    if not (
+        isinstance(artifact, str)
+        and artifact.startswith("sha256:")
+        and isinstance(source, str)
+        and _source_under_journey_evidence(root, source)
+        and _looks_like_signed_journey_result(root, source)
+    ):
+        return None
+    envelope = _load_json(root / source, ValidationResult())
+    signed = envelope.get("signed") if isinstance(envelope, dict) else None
+    if not isinstance(signed, dict):
+        return None
+    journey_id = signed.get("journey_id")
+    repository = signed.get("repository")
+    commit = repository.get("commit") if isinstance(repository, dict) else None
+    if not isinstance(journey_id, str) or not isinstance(commit, str):
+        return None
+    return journey_id, commit
+
+
+def drop_superseded_same_journey_evidence(root: Path, evidence: list[Any], journey_id: str) -> list[Any]:
+    """Remove evidence a fresh signed result for the same journey supersedes.
+
+    The validator pins every commit evidence entry on a conformant row to the
+    current mapped selector bytes. A row demoted with its historical commit pin
+    and signed envelope retained (#1830) therefore cannot be re-promoted by
+    appending. Only signed results for this journey are superseded, plus each
+    source-less commit pin bound by one of them and by no retained signed result. Signed
+    evidence from other journeys, unattributed commit pins, and other reviewed
+    evidence stay; if any of those are stale, governance validation still fails
+    the promotion. Superseded envelope files stay under journeys/evidence/.
+    """
+    identities = [signed_journey_identity(root, item) for item in evidence]
+    removed_commits = {identity[1] for identity in identities if identity and identity[0] == journey_id}
+    retained_commits = {identity[1] for identity in identities if identity and identity[0] != journey_id}
+    kept: list[Any] = []
+    for item, identity in zip(evidence, identities):
+        if identity and identity[0] == journey_id:
+            continue
+        artifact = item.get("artifact") if isinstance(item, dict) else None
+        if isinstance(artifact, str) and artifact.startswith("commit:") and item.get("source") is None:
+            commit = artifact.split(":", 1)[1]
+            if commit in removed_commits and commit not in retained_commits:
+                continue
+        kept.append(item)
+    return kept
+
+
 def load_conformance(root: Path) -> dict[str, Any]:
     conformance_path = root / "specs" / "CONFORMANCE.json"
     load_result = ValidationResult()
@@ -198,6 +253,7 @@ def promote_requirement_in_memory(
     evidence = updated.get("evidence")
     if not isinstance(evidence, list):
         evidence = []
+    evidence = drop_superseded_same_journey_evidence(root, evidence, journey_id)
     evidence = upsert_evidence(
         evidence,
         {

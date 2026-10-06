@@ -1,0 +1,20 @@
+started_at=2026-10-06T08:36:06Z
+host=1deMac-Studio.local os_build=26A434 hw_model=Mac15,14
+policy_sha256=e24cb7bc4599cfb7281f3dc3985efd6c3b7c9a3b61e424bbc0435d8ea756d44a
+provider_commit=e1103712d408a0b158ac17dd8834875245874a42
+binary_sha256=ca12a90c889437acf23ac67e0f74dc765edf29c323c65a5f6e31b2087c531b5f
+metallib_sha256=84e487182336648a826132e50e7a4cd2cae0bc77ac6eafa89cc72f3a964fdbaf
+lock_acquired at=2026-10-06T08:35:30Z
+live_pause_start at=2026-10-06T08:35:33Z
+live_stopped at=2026-10-06T08:35:45Z
+gpu_preflight median=0 at=2026-10-06T08:36:06Z
+phase=hardware_e2e exit_code=0 at=2026-10-06T08:37:11Z
+matrix_started at=2026-10-06T08:37:11Z
+phase=matrix exit_code=0 jsonl_sha256=d1859e2f8aa4ab45931d808c527818933c769d70d72f4a7cc0b57ac007d10167 lines=133 at=2026-10-06T09:00:47Z
+sustained_started at=2026-10-06T09:00:47Z
+phase=sustained exit_code=0 jsonl_sha256=e1f3c42e5e7ac72d713399139d9581725ad8cd6f053b92a2c1fd60762cb17dd3 lines=209 at=2026-10-06T09:31:49Z
+phase=all exit_code=0 at=2026-10-06T09:31:49Z
+live_restore_begin at=2026-10-06T09:31:49Z
+live_not_ready_after_bootstrap; kickstart at=2026-10-06T09:41:58Z
+live_restored_ready_after_kickstart at=2026-10-06T09:46:01Z
+lock_released at=2026-10-06T09:46:02Z
