@@ -595,10 +595,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// produced while riding the ordinary forward at load-gate depth zero, in
     /// order. They are exactly the columns a depth-zero native finalize would
     /// have fed the drafter, and are flushed into it with one packed advance
-    /// before the row's next proposal (or once a row buffers
-    /// `nativeMTPDrafterColumnFlushThreshold` of them).
+    /// only before the row's next proposal. A held row that finishes at depth
+    /// zero never advances its drafter, so the gate adds no drafter forward to
+    /// the shared ordinary rounds (SPEC-048 R015 gated cells). The buffer is
+    /// bounded by the row's admitted completion budget; each column is one
+    /// token and one hidden-state row.
     private var nativeMTPPendingDrafterColumns: [String: [(token: Int, hidden: MLXArray)]] = [:]
-    static let nativeMTPDrafterColumnFlushThreshold = 64
     private var activeOperations = 0
     private var cancelRequested = false
     private var cancellationWaiters: [CheckedContinuation<Void, Never>] = []
@@ -860,15 +862,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
 
         let decoded: [ContinuousBatchDecodeOutcome] = try await container.perform(nonSendable: supportedInputs) { context, supportedInputs in
-            let decoded = try self.performDecode(
+            try self.performDecode(
                 model: context.model,
                 supportedInputs: supportedInputs,
                 steps: 1
-            )
-            return await self.flushingNativeMTPDrafterColumns(
-                targetModel: context.model,
-                inputs: supportedInputs,
-                decoded: decoded
             )
         }
         for outcome in decoded {
@@ -909,16 +906,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             return inputs.map { .rowFailure(requestID: $0.requestID) }
         }
         let decoded: [ContinuousBatchDecodeOutcome] = try await container.perform(nonSendable: supportedInputs) { context, supportedInputs in
-            let decoded = try self.performDecode(
+            try self.performDecode(
                 model: context.model,
                 supportedInputs: supportedInputs,
                 steps: steps,
                 onStep: onStep
-            )
-            return await self.flushingNativeMTPDrafterColumns(
-                targetModel: context.model,
-                inputs: supportedInputs,
-                decoded: decoded
             )
         }
         for outcome in decoded {
@@ -1862,38 +1854,6 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             states: [advanced.state],
             seedTokens: [input.isFinalChunk ? advanced.seed : nil]
         )
-    }
-
-    /// Bounds a gated row's buffered columns: once a row holds the flush
-    /// threshold, its drafter catches up now. A row whose drafter cannot
-    /// advance fails alone; its batch peers keep their decoded tokens.
-    private func flushingNativeMTPDrafterColumns(
-        targetModel: any LanguageModel,
-        inputs: [ContinuousBatchDecodeInput],
-        decoded: [ContinuousBatchDecodeOutcome]
-    ) async -> [ContinuousBatchDecodeOutcome] {
-        let captureIDs = inputs.filter(\.captureNativeMTPDrafterColumns).map(\.requestID)
-        guard !captureIDs.isEmpty else { return decoded }
-        do {
-            try await flushNativeMTPDrafterColumns(
-                targetModel: targetModel,
-                requestIDs: captureIDs,
-                minimumColumns: Self.nativeMTPDrafterColumnFlushThreshold
-            )
-            return decoded
-        } catch {
-            ContinuousBatchingPolicy.logForwardFailed(error)
-            let failed = Set(captureIDs.filter {
-                (pendingNativeMTPDrafterColumnCount(for: $0) ?? 0) >= Self.nativeMTPDrafterColumnFlushThreshold
-            })
-            return decoded.map { failed.contains($0.requestID) ? .rowFailure(requestID: $0.requestID) : $0 }
-        }
-    }
-
-    private func pendingNativeMTPDrafterColumnCount(for requestID: String) -> Int? {
-        lock.lock()
-        defer { lock.unlock() }
-        return nativeMTPPendingDrafterColumns[requestID]?.count
     }
 
     private func hasPendingNativeMTPDrafterColumns(for requestID: String) -> Bool {

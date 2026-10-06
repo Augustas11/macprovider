@@ -1,0 +1,10 @@
+lock_acquired 2026-10-06T07:43:19Z
+2026-10-06T07:43:19Z start old1
+2026-10-06T07:51:30Z end old1 exit=0
+2026-10-06T07:51:30Z start new1
+2026-10-06T07:59:32Z end new1 exit=0
+2026-10-06T07:59:32Z start new2
+2026-10-06T08:07:32Z end new2 exit=0
+2026-10-06T08:07:32Z start old2
+2026-10-06T08:15:48Z end old2 exit=0
+DONE

@@ -586,11 +586,13 @@ A row held at depth zero by the MTP-7 load gate does not run a one-column
 native verification. It shares the ordinary lockstep decode forward, and the
 provider keeps, in order, each token that forward commits for the row with the
 target hidden state that produced it. These are exactly the columns per-round
-depth-zero finalizes would have fed the MTP adapter. Before the row's next
-native proposal (or once it holds 64 such columns) they advance its proposal
-state in one packed step, so a restored row proposes from the same committed
-prefix as one that was never gated. The emitted tokens are ordinary decode's
-by construction.
+depth-zero finalizes would have fed the MTP adapter. Only before the row's
+next native proposal do they advance its proposal state, in one packed step,
+so a restored row proposes from the same committed prefix as one that was
+never gated. A held row MUST NOT advance its proposal state inside the shared
+ordinary rounds: a row held until it finishes adds no MTP-adapter forward to
+them. The buffer is bounded by the row's admitted completion budget. The
+emitted tokens are ordinary decode's by construction.
 
 Transactions MUST preserve row identity across proposal, packed verification,
 commit, discard, cancellation, and release. State or metrics from one row MUST
@@ -1023,8 +1025,9 @@ advertised `qualified_slots` (2...8), its `max_native_active_rows`
   native speedup strata; non-inferiority at the first gated count and at full
   load bounds the intermediate counts, which repeat the same ordinary-path work
   at a load between the two. The inference rests on the gated cost model:
-  above the bound, the only work native MTP adds to a round is the drafter
-  catch-up and admission bookkeeping of at most `bound` held rows, which does
+  above the bound, the only work native MTP adds to a round is buffering the
+  committed columns (MTP-6) and admission bookkeeping of at most `bound` held
+  rows, plus one drafter catch-up when a held row's depth returns, which does
   not grow with the ordinary rows, while the ordinary round time does not
   shrink as rows are added; the relative regression is therefore largest at
   bound + 1, and `qualified_slots` adds the full-load scheduling and memory
@@ -1330,7 +1333,12 @@ requests.
   throughput, TTFT, rejection, memory, and hard gates are unchanged; earlier
   verdicts stay as recorded and legacy-gate policies are still judged by
   their own gates. A new R015 must be frozen with the amended gates; native
-  MTP stays default-off.
+  MTP stays default-off. MTP-6: a load-gated row no longer advances its
+  drafter every 64 buffered columns; it catches up only before its next
+  native proposal. An interleaved s2 control (2026-10-06) showed the periodic
+  catch-up as a ~10 ms stall in the shared round every 64 tokens, on both
+  rows, in every gated native run of both the 10-06 and step-overhead
+  binaries.
 
 - **0.1.24 (2026-10-06)** — Moves the immutable fork candidate to
   `ca8c384c4fb6bc7d2fbb7c70a18c34b935701805` (parent `b1811029…`) to cut

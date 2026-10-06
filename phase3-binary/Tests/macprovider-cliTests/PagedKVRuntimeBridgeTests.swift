@@ -1491,6 +1491,53 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(gated.backend.base.retainedRowCountForTest(), 0)
     }
 
+    /// SPEC-048 R015 gated cells: a native row the load gate holds until it
+    /// finishes never advances its drafter while it rides the ordinary
+    /// forward, however many rounds it is held, so the gate adds no drafter
+    /// forward to the shared rounds. Its columns stay buffered for a restore
+    /// that never comes, and its tokens are the ordinary path's.
+    func testHeldNativeRowBuffersColumnsWithoutAdvancingItsDrafter() async throws {
+        try requireMetal()
+        let prompt = Self.tinyPrompt(length: 11, salt: 7)
+        let budget = 90
+        let gated = try Self.tinyQwen35Native(maxPhysicalBlocks: 256)
+        let scheduler = try Self.makeScheduler(maxActiveRows: 2, backend: gated.backend, maxPhysicalBlocks: 256)
+        let peer = RuntimeBridgeTaskBox()
+        let pendingAtStep = RuntimeBridgePendingColumnsBox()
+        let gatedResult = try await scheduler.submit(
+            Self.tinyNativeRequest("a", prompt, budget, temperature: 0.8, maximumActiveRows: 1)
+        ) { event in
+            if event.tokenIndex == 3 {
+                peer.start {
+                    try await scheduler.submit(Self.tinyNativeRequest(
+                        "peer", Self.tinyPrompt(length: 6, salt: 9), budget + 20, decodePath: .ordinary
+                    ))
+                }
+            }
+            if event.tokenIndex == budget - 5 {
+                pendingAtStep.record(gated.backend.base.nativeMTPDrafterSnapshotForTest(requestID: "a").pendingColumns)
+            }
+        }
+        let peerResult = try await peer.value()
+        XCTAssertEqual(gatedResult.terminalStatus, .length, gatedResult.errorCode ?? "")
+        XCTAssertEqual(peerResult.terminalStatus, .length, peerResult.errorCode ?? "")
+
+        let fusedSteps = gated.backend.capturedDecodeStepsByRow()["a"] ?? []
+        XCTAssertGreaterThan(fusedSteps.count, 64, "row was not held past the old flush threshold")
+        // Every held column is still buffered: none was fed to the drafter.
+        let pending = try XCTUnwrap(pendingAtStep.value())
+        XCTAssertGreaterThan(pending, 64)
+        XCTAssertLessThanOrEqual(pending, fusedSteps.count)
+
+        let ordinary = try Self.tinyQwen35Native(maxPhysicalBlocks: 256)
+        let ordinaryResult = try await Self.makeScheduler(
+            maxActiveRows: 2, backend: ordinary.backend, maxPhysicalBlocks: 256
+        ).submit(Self.tinyNativeRequest("a", prompt, budget, decodePath: .ordinary, temperature: 0.8))
+        XCTAssertEqual(gatedResult.generatedTokens, ordinaryResult.generatedTokens)
+        XCTAssertEqual(gated.backend.base.retainedRowCountForTest(), 0)
+        XCTAssertEqual(gated.backend.base.nativeMTPDrafterSnapshotForTest(requestID: "a").pendingColumns, 0)
+    }
+
     /// SPEC-048 target-sample exact match: seeded sampled native rows (and a
     /// greedy native row beside them) emit exactly the tokens the same seeded
     /// rows emit on the ordinary path, because each verify position samples
@@ -3567,6 +3614,23 @@ private final class RuntimeBridgeTaskBox: @unchecked Sendable {
             if let current { return try await current.value }
             try await Task.sleep(nanoseconds: 5_000_000)
         }
+    }
+}
+
+private final class RuntimeBridgePendingColumnsBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: Int?
+
+    func record(_ count: Int) {
+        lock.lock()
+        recorded = count
+        lock.unlock()
+    }
+
+    func value() -> Int? {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
     }
 }
 
