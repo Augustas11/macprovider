@@ -37,6 +37,18 @@ type relayBlindService struct {
 	relay   RelayBlindRelayFunc
 	mu      sync.Mutex
 	windows map[string][]time.Time
+	// dispatchClaims holds one in-process claim per provider binding while a
+	// consumed authorization waits for a slot, so a concurrent duplicate is
+	// a replay and never takes a second slot-queue position.
+	dispatchClaims sync.Map
+}
+
+// relayBlindCleanupTimeout bounds terminal rejection writes that must land
+// even after the buyer request context is canceled.
+const relayBlindCleanupTimeout = 5 * time.Second
+
+func relayBlindCleanupContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), relayBlindCleanupTimeout)
 }
 
 func WithRelayBlind(cfg config.RelayBlindConfig, store *relayblind.Store, relay RelayBlindRelayFunc) Option {
@@ -306,6 +318,44 @@ func relayBlindBindable(p pool.Provider) bool {
 // awaitRelayBlindSlot acquires separately.
 func relayBlindSessionUsable(p pool.Provider) bool {
 	return relayBlindBindable(p) && !p.CatalogRecheckPending
+}
+
+func relayBlindSessionLostCode(privacy bool) (string, bool) {
+	if privacy {
+		return privacyClassStale, true
+	}
+	return "relay_blind_key_expired", false
+}
+
+// relayBlindPredispatchFailure re-runs the non-capacity predispatch checks
+// for a reservation whose slot wait failed. It returns "" when only
+// capacity is missing. The bool reports a privacy-class error code.
+func (s *Server) relayBlindPredispatchFailure(ctx context.Context, reservation relayblind.Reservation) (string, bool) {
+	provider, live := s.pool.Resolve(reservation.ProviderID, reservation.AssignedSession)
+	_, keyErr := s.relayBlind.store.LookupKeyRecord(ctx, reservation.ProviderID, reservation.AssignedSession, reservation.KID, reservation.KeyRecordDigest, s.now())
+	sessionLost := !live || provider.AssignedID != reservation.AssignedSession || !relayBlindSessionUsable(provider) || !provider.IsWSTunneled() || keyErr != nil || s.relayBlindSettlementPrerequisite(provider) != ""
+	if reservation.PrivacyClass {
+		if s.privacyDisabledNow(ctx) {
+			return privacyClassDisabled, true
+		}
+		if !s.relayBlindAvailable() || sessionLost {
+			return privacyClassStale, true
+		}
+		if _, code := s.privacyGate(ctx, provider, reservation.KeyRecordDigest); code != "" {
+			return privacyObservedCode(code, false), true
+		}
+		return "", false
+	}
+	if !s.relayBlind.cfg.Enabled {
+		return "relay_blind_disabled", false
+	}
+	if !s.relayBlindAvailable() {
+		return "relay_blind_required_unavailable", false
+	}
+	if sessionLost {
+		return "relay_blind_key_expired", false
+	}
+	return "", false
 }
 
 type relayBlindSlotOutcome int
@@ -660,24 +710,42 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 	// session with no free slot is a capacity condition, not a lost session,
 	// a stale posture, or an expired key. Wait on the pinned session's slot
 	// queue like plaintext routing; never move to another provider.
+	if _, claimed := s.relayBlind.dispatchClaims.LoadOrStore(reservation.ProviderBinding, struct{}{}); claimed {
+		writeRelayBlindError(w, "relay_blind_replay", "Relay-blind authorization has already been used")
+		return
+	}
+	defer s.relayBlind.dispatchClaims.Delete(reservation.ProviderBinding)
 	slotState := &forwardState{}
 	defer s.releaseQueuedSlotReservation(slotState)
 	defer s.restoreConsumedForwardedSlot(slotState)
 	provider, slotOutcome := s.awaitRelayBlindSlot(r.Context(), reservation, slotState)
-	switch slotOutcome {
-	case relayBlindSlotAcquired:
-	case relayBlindSlotSessionLost:
-		if reservation.PrivacyClass {
-			_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, privacyClassStale, s.now())
-			writePrivacyClassError(w, privacyClassStale, "")
+	if slotOutcome != relayBlindSlotAcquired {
+		// A wait can outlive the posture, the kill switch, or the key. Those
+		// keep their own codes; only a pure capacity miss is a capacity code.
+		cleanupCtx, cancelCleanup := relayBlindCleanupContext()
+		defer cancelCleanup()
+		code, privacyCode := s.relayBlindPredispatchFailure(cleanupCtx, reservation)
+		if code == "" {
+			code, privacyCode = "relay_blind_provider_unsupported", false
+			if slotOutcome == relayBlindSlotSessionLost {
+				code, privacyCode = relayBlindSessionLostCode(reservation.PrivacyClass)
+			}
+		}
+		_ = s.relayBlind.store.RejectPredispatch(cleanupCtx, reservation.ProviderBinding, code, s.now())
+		if privacyCode {
+			writePrivacyClassError(w, code, "")
 			return
 		}
-		_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, "relay_blind_key_expired", s.now())
-		writeRelayBlindError(w, "relay_blind_key_expired", "Relay-blind provider session or key expired")
-		return
-	default:
-		_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, "relay_blind_provider_unsupported", s.now())
-		writeRelayBlindError(w, "relay_blind_provider_unsupported", "Relay-blind provider capacity is unavailable")
+		message := "Relay-blind provider session or key expired"
+		switch code {
+		case "relay_blind_provider_unsupported":
+			message = "Relay-blind provider capacity is unavailable"
+		case "relay_blind_disabled":
+			message = "Relay-blind execution is disabled"
+		case "relay_blind_required_unavailable":
+			message = "Relay-blind execution is unavailable"
+		}
+		writeRelayBlindError(w, code, message)
 		return
 	}
 	quotaMetered := false
@@ -689,6 +757,8 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		}
 		quotaMetered = s.admission.RequestQuotaMetered(provider)
 	}
+	// ArmDispatchWithRequestID returns a zero Reservation on error.
+	heldBinding, heldPrivacy := reservation.ProviderBinding, reservation.PrivacyClass
 	reservation, err = s.relayBlind.store.ArmDispatchWithRequestID(r.Context(), account.ID(), walletSession, authorization, internalRequestID, s.now())
 	if err != nil {
 		if quotaMetered {
@@ -699,6 +769,21 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 				writePrivacyClassError(w, code, "")
 				return
 			}
+		}
+		// A slot wait can end after the reservation expired or its key or
+		// session was invalidated. Those are retryable predispatch failures,
+		// not replays, and the consumed row is burned.
+		if errors.Is(err, relayblind.ErrReservationExpired) || errors.Is(err, relayblind.ErrKeyRevoked) || errors.Is(err, relayblind.ErrStaleSession) {
+			code, privacyCode := relayBlindSessionLostCode(heldPrivacy)
+			cleanupCtx, cancelCleanup := relayBlindCleanupContext()
+			_ = s.relayBlind.store.RejectPredispatch(cleanupCtx, heldBinding, code, s.now())
+			cancelCleanup()
+			if privacyCode {
+				writePrivacyClassError(w, code, "")
+				return
+			}
+			writeRelayBlindError(w, code, "Relay-blind provider session or key expired")
+			return
 		}
 		writeRelayBlindError(w, "relay_blind_replay", "Relay-blind authorization has already been used")
 		return

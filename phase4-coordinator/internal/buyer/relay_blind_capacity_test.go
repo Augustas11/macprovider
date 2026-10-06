@@ -26,6 +26,29 @@ func (h *privacyHarness) setSlots(t *testing.T, state pool.State, free int) {
 	}
 }
 
+// waitForSlotWaiter blocks until a chat is parked in the provider's slot
+// queue, so a test exercises the wait path instead of racing it.
+func (h *privacyHarness) waitForSlotWaiter(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for !h.server.slotQueue.hasWaiters(h.provider.ProviderID) {
+		if time.Now().After(deadline) {
+			t.Fatal("chat never entered the slot queue")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func (h *privacyHarness) assertNoSlotLease(t *testing.T) {
+	t.Helper()
+	h.server.slotQueue.mu.Lock()
+	reserved, queued := h.server.slotQueue.reserved[h.provider.ProviderID], len(h.server.slotQueue.queues[h.provider.ProviderID])
+	h.server.slotQueue.mu.Unlock()
+	if reserved != 0 || queued != 0 {
+		t.Fatalf("slot lease leaked: reserved=%d queued=%d", reserved, queued)
+	}
+}
+
 func (h *privacyHarness) consumePrivacy(t *testing.T, requestID string) (relayblind.ReservationResponse, []byte, string) {
 	t.Helper()
 	reservation := h.reserve(t, true)
@@ -55,11 +78,7 @@ func TestPrivacyChatOnSaturatedSessionWaitsForSlot(t *testing.T) {
 	go func() {
 		done <- h.privacyRequest(t, http.MethodPost, "/v1/chat/completions", raw, authorization, nil)
 	}()
-	select {
-	case response := <-done:
-		t.Fatalf("chat returned while the session was saturated: status=%d body=%s", response.Code, response.Body.String())
-	case <-time.After(50 * time.Millisecond):
-	}
+	h.waitForSlotWaiter(t)
 	if dispatches.Load() != 0 {
 		t.Fatalf("dispatched to a saturated session: dispatches=%d", dispatches.Load())
 	}
@@ -76,12 +95,7 @@ func TestPrivacyChatOnSaturatedSessionWaitsForSlot(t *testing.T) {
 	if gotClass.Load() != relayblind.PrivacyClassV1 || dispatches.Load() != 1 {
 		t.Fatalf("class=%v dispatches=%d", gotClass.Load(), dispatches.Load())
 	}
-	h.server.slotQueue.mu.Lock()
-	reserved, queued := h.server.slotQueue.reserved[h.provider.ProviderID], len(h.server.slotQueue.queues[h.provider.ProviderID])
-	h.server.slotQueue.mu.Unlock()
-	if reserved != 0 || queued != 0 {
-		t.Fatalf("slot lease leaked: reserved=%d queued=%d", reserved, queued)
-	}
+	h.assertNoSlotLease(t)
 }
 
 func TestPrivacyChatOnSaturatedSessionTimesOutAsCapacity(t *testing.T) {
@@ -108,12 +122,7 @@ func TestPrivacyChatOnSaturatedSessionTimesOutAsCapacity(t *testing.T) {
 		t.Fatal("a capacity wait consumed provider quota")
 	}
 	h.admission.RefundRequest(h.provider)
-	h.server.slotQueue.mu.Lock()
-	reserved, queued := h.server.slotQueue.reserved[h.provider.ProviderID], len(h.server.slotQueue.queues[h.provider.ProviderID])
-	h.server.slotQueue.mu.Unlock()
-	if reserved != 0 || queued != 0 {
-		t.Fatalf("slot lease leaked: reserved=%d queued=%d", reserved, queued)
-	}
+	h.assertNoSlotLease(t)
 }
 
 // A session that is gone while the request waits is still a lost session.
@@ -129,7 +138,7 @@ func TestPrivacyChatSessionLostWhileWaitingIsPostureStale(t *testing.T) {
 	go func() {
 		done <- h.privacyRequest(t, http.MethodPost, "/v1/chat/completions", raw, authorization, nil)
 	}()
-	time.Sleep(30 * time.Millisecond)
+	h.waitForSlotWaiter(t)
 	h.setSlots(t, pool.StateDraining, 0)
 	var response *httptest.ResponseRecorder
 	select {
@@ -160,6 +169,136 @@ func TestRelayBlindChatOnSaturatedSessionIsCapacityNotKeyExpired(t *testing.T) {
 	h.setSlots(t, pool.StateBusy, 0)
 	response = relayBlindRequest(t, h.server, http.MethodPost, "/v1/chat/completions", raw, consume.ExecutionAuthorization)
 	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"relay_blind_provider_unsupported"`) || dispatches.Load() != 0 {
+		t.Fatalf("chat status=%d dispatches=%d body=%s", response.Code, dispatches.Load(), response.Body.String())
+	}
+}
+
+// A concurrent duplicate of a waiting authorization is a replay. It never
+// takes a second slot-queue position.
+func TestPrivacyChatConcurrentDuplicateIsReplayWithoutQueueing(t *testing.T) {
+	var dispatches atomic.Int32
+	h := newPrivacyHarness(t, privacyHarnessConfig{privacyKey: true, relayKey: true, relay: privacyCountingRelay(&dispatches)})
+	h.server.slotQueueDeadline = 5 * time.Second
+	h.server.slotQueuePollInterval = 5 * time.Millisecond
+	_, raw, authorization := h.consumePrivacy(t, "privacy-saturated-duplicate")
+	h.setSlots(t, pool.StateBusy, 0)
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- h.privacyRequest(t, http.MethodPost, "/v1/chat/completions", raw, authorization, nil)
+	}()
+	h.waitForSlotWaiter(t)
+	duplicate := h.privacyRequest(t, http.MethodPost, "/v1/chat/completions", raw, authorization, nil)
+	if duplicate.Code != http.StatusConflict || !strings.Contains(duplicate.Body.String(), `"code":"relay_blind_replay"`) {
+		t.Fatalf("duplicate status=%d body=%s", duplicate.Code, duplicate.Body.String())
+	}
+	h.server.slotQueue.mu.Lock()
+	queued := len(h.server.slotQueue.queues[h.provider.ProviderID])
+	h.server.slotQueue.mu.Unlock()
+	if queued != 1 {
+		t.Fatalf("duplicate took a queue position: queued=%d", queued)
+	}
+	h.setSlots(t, pool.StateDraining, 0)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first chat never returned")
+	}
+	if dispatches.Load() != 0 {
+		t.Fatalf("dispatches=%d", dispatches.Load())
+	}
+}
+
+// A buyer that disconnects while waiting still burns the consumed row, so
+// the authorization cannot dispatch later.
+func TestPrivacyChatCanceledWhileWaitingBurnsReservation(t *testing.T) {
+	var dispatches atomic.Int32
+	h := newPrivacyHarness(t, privacyHarnessConfig{privacyKey: true, relayKey: true, relay: privacyCountingRelay(&dispatches)})
+	h.server.slotQueueDeadline = 5 * time.Second
+	h.server.slotQueuePollInterval = 5 * time.Millisecond
+	reservation, raw, authorization := h.consumePrivacy(t, "privacy-saturated-cancel")
+	h.setSlots(t, pool.StateBusy, 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- h.privacyRequest(t, http.MethodPost, "/v1/chat/completions", raw, authorization, func(r *http.Request) {
+			*r = *r.WithContext(ctx)
+		})
+	}()
+	h.waitForSlotWaiter(t)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("canceled chat kept waiting")
+	}
+	row, err := h.store.LookupReservation(context.Background(), reservation.ProviderBinding)
+	if err != nil || row.State != relayblind.ReservationStateRejected {
+		t.Fatalf("row=%#v err=%v", row, err)
+	}
+	h.setSlots(t, pool.StateReady, 1)
+	retry := h.privacyRequest(t, http.MethodPost, "/v1/chat/completions", raw, authorization, nil)
+	if retry.Code == http.StatusOK || dispatches.Load() != 0 {
+		t.Fatalf("burned authorization dispatched: status=%d dispatches=%d body=%s", retry.Code, dispatches.Load(), retry.Body.String())
+	}
+	h.assertNoSlotLease(t)
+}
+
+// A posture that lapses during the wait is posture-stale, not capacity.
+func TestPrivacyChatPostureLapsesWhileWaitingIsPostureStale(t *testing.T) {
+	var dispatches atomic.Int32
+	h := newPrivacyHarness(t, privacyHarnessConfig{privacyKey: true, relayKey: true, relay: privacyCountingRelay(&dispatches)})
+	h.server.slotQueueDeadline = 200 * time.Millisecond
+	h.server.slotQueuePollInterval = 5 * time.Millisecond
+	reservation, raw, authorization := h.consumePrivacy(t, "privacy-saturated-posture")
+	h.setSlots(t, pool.StateBusy, 0)
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- h.privacyRequest(t, http.MethodPost, "/v1/chat/completions", raw, authorization, nil)
+	}()
+	h.waitForSlotWaiter(t)
+	h.authority.DropSession(h.provider.ProviderID, h.provider.AssignedID)
+	var response *httptest.ResponseRecorder
+	select {
+	case response = <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("chat never returned")
+	}
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"privacy_class_posture_stale"`) || dispatches.Load() != 0 {
+		t.Fatalf("chat status=%d dispatches=%d body=%s", response.Code, dispatches.Load(), response.Body.String())
+	}
+	row, err := h.store.LookupReservation(context.Background(), reservation.ProviderBinding)
+	if err != nil || row.State != relayblind.ReservationStateRejected || row.TerminalCode != privacyClassStale {
+		t.Fatalf("row=%#v err=%v", row, err)
+	}
+}
+
+// A slot that frees after the reservation expired is a retryable
+// posture-stale outcome, not a non-retryable replay.
+func TestPrivacyChatSlotAfterReservationExpiryIsPostureStale(t *testing.T) {
+	var dispatches atomic.Int32
+	h := newPrivacyHarness(t, privacyHarnessConfig{privacyKey: true, relayKey: true, ttl: 30, relay: privacyCountingRelay(&dispatches)})
+	h.server.slotQueueDeadline = 5 * time.Second
+	h.server.slotQueuePollInterval = 5 * time.Millisecond
+	_, raw, authorization := h.consumePrivacy(t, "privacy-saturated-expiry")
+	h.setSlots(t, pool.StateBusy, 0)
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- h.privacyRequest(t, http.MethodPost, "/v1/chat/completions", raw, authorization, nil)
+	}()
+	h.waitForSlotWaiter(t)
+	h.clock.Advance(31 * time.Second)
+	h.setSlots(t, pool.StateReady, 1)
+	var response *httptest.ResponseRecorder
+	select {
+	case response = <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("chat never returned")
+	}
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"privacy_class_posture_stale"`) || !strings.Contains(response.Body.String(), `"retryable":true`) || dispatches.Load() != 0 {
 		t.Fatalf("chat status=%d dispatches=%d body=%s", response.Code, dispatches.Load(), response.Body.String())
 	}
 }
