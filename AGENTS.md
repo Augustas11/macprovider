@@ -244,3 +244,6 @@ Runbook: `docs/runbooks/provider-cli-release-verification.md`.
   hardcode drifting versions in agent instructions.
 - Production coordinator is `coordinator.malibu.tech`; public installer redirect
   is `get.malibu.tech/install.sh`.
+- Before ANY Pearl coordinator change (runtime apply, catalog activation,
+  config edit), read `docs/runbooks/pearl-coordinator-rollout.md` and state the
+  expected downtime to the operator before starting.
