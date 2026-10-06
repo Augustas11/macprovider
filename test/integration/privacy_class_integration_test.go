@@ -143,6 +143,8 @@ type privacyStackOpts struct {
 	approvedCDHash string
 	completion     string
 	waitPosture    bool
+	// autoEnroll runs SPEC-049 v0.2 automatic enrollment: no operator pins.
+	autoEnroll bool
 }
 
 func newPrivacyStack(t *testing.T, opts privacyStackOpts) *privacyStack {
@@ -169,14 +171,19 @@ func newPrivacyStack(t *testing.T, opts privacyStackOpts) *privacyStack {
 	if approved == "" {
 		approved = fixture.descriptor.CodeCDHash
 	}
+	identityPins := map[string]string{providerID: fixture.descriptor.IdentityPublicKey}
+	if opts.autoEnroll {
+		identityPins = nil
+	}
 	s := newScenario(t, scenarioOpts{
 		seedAccount:                  true,
 		providerID:                   providerID,
 		externalWebSocketProvider:    true,
 		gatewayRelayBlindEnabled:     true,
 		coordinatorRelayBlindEnabled: true,
-		relayBlindIdentityPublicKeys: map[string]string{providerID: fixture.descriptor.IdentityPublicKey},
+		relayBlindIdentityPublicKeys: identityPins,
 		coordinatorPrivacyClass: &coordinatorPrivacyClassOpts{
+			AutoEnroll:        opts.autoEnroll,
 			SEPublicKey:       fixture.descriptor.SEPublicKey,
 			TeamID:            fixture.descriptor.TeamID,
 			SigningIdentifier: fixture.descriptor.SigningIdentifier,
@@ -219,9 +226,16 @@ func (p *privacyStack) pinPath(t *testing.T) string {
 
 func runPrivacyClient(t *testing.T, apiKey, baseURL, pinPath, prompt string, stream, privacy bool) (string, string, error) {
 	t.Helper()
+	return runPrivacyClientWithDirectory(t, apiKey, baseURL, pinPath, "", prompt, stream, privacy)
+}
+
+// runPrivacyClientWithDirectory runs the reference client. An empty pinPath
+// omits --identity-pin so the client pins from the signed directory with
+// directoryKey (SPEC-049-R028).
+func runPrivacyClientWithDirectory(t *testing.T, apiKey, baseURL, pinPath, directoryKey, prompt string, stream, privacy bool) (string, string, error) {
+	t.Helper()
 	args := []string{
 		"--base-url", baseURL,
-		"--identity-pin", pinPath,
 		"--model", defaultFakeModelID,
 		"--max-output-tokens", "32",
 		"--input-token-upper-bound", "64",
@@ -233,8 +247,14 @@ func runPrivacyClient(t *testing.T, apiKey, baseURL, pinPath, prompt string, str
 	if privacy {
 		args = append(args, "--privacy-class")
 	}
+	if pinPath != "" {
+		args = append(args, "--identity-pin", pinPath)
+	}
 	cmd := exec.Command(relayBlindClientBin, args...)
 	cmd.Env = append(os.Environ(), "MACPROVIDER_API_KEY="+apiKey)
+	if directoryKey != "" {
+		cmd.Env = append(cmd.Env, "MACPROVIDER_PRIVACY_DIRECTORY_PUBLIC_KEY="+directoryKey)
+	}
 	cmd.Stdin = strings.NewReader(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}],"stream":%t,"max_tokens":32}`, defaultFakeModelID, prompt, stream))
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
@@ -757,9 +777,10 @@ func TestPrivacyClassAdversarial(t *testing.T) {
 			fixtureCDHash:  strings.Repeat("a", 40),
 			approvedCDHash: privacyFixtureCDHash,
 		})
+		// SPEC-049-R006 v0.2: unapproved is refused by routing, not quarantined.
 		status := runPrivacyCLI(t, "privacy-class", "status", "--config", stack.s.coordYAML)
-		if privacyStatusValue(status, "quarantine.provider_id") != stack.providerID || privacyStatusValue(status, "quarantine.reason") != "posture_unapproved_code_identity" {
-			t.Fatalf("quarantine count=%s reason=%s", privacyStatusValue(status, "quarantine_count"), privacyStatusValue(status, "quarantine.reason"))
+		if privacyStatusValue(status, "quarantine_count") != "0" {
+			t.Fatalf("unapproved identity quarantined: count=%s reason=%s", privacyStatusValue(status, "quarantine_count"), privacyStatusValue(status, "quarantine.reason"))
 		}
 		base, capture := startPrivacyProxy(t, stack.s.gatewayBaseURL, privacyProxyObserve)
 		_, stderr, err := runPrivacyClient(t, stack.s.apiKey, base, stack.pinPath(t), "unapproved", false, true)

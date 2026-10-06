@@ -227,6 +227,9 @@ func reserveProviderPort(t *testing.T) int {
 type scenario struct {
 	t                   *testing.T
 	tempDir             string
+	// privacyDirectoryPublicKey is the canonical base64url SPEC-049-R028
+	// directory key the buyer pins when the scenario enables the class.
+	privacyDirectoryPublicKey string
 	coordinatorDB       string
 	gatewayDB           string
 	coordYAML           string
@@ -367,6 +370,9 @@ type scenarioOpts struct {
 // reservation-expiry ceiling so a stale-posture wait can expire posture
 // without expiring the reservation.
 type coordinatorPrivacyClassOpts struct {
+	// AutoEnroll omits every operator pin so the coordinator enrolls the
+	// provider from its first verified posture (SPEC-049-R025).
+	AutoEnroll        bool
 	SEPublicKey       string
 	TeamID            string
 	SigningIdentifier string
@@ -497,7 +503,8 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 		s.settlementCatalogKeyID = settlementCatalog.catalogKeyID
 	}
 	relayBlindIdentityPublicKeys := opts.relayBlindIdentityPublicKeys
-	if opts.coordinatorRelayBlindEnabled && len(relayBlindIdentityPublicKeys) == 0 {
+	autoEnroll := opts.coordinatorPrivacyClass != nil && opts.coordinatorPrivacyClass.AutoEnroll
+	if opts.coordinatorRelayBlindEnabled && len(relayBlindIdentityPublicKeys) == 0 && !autoEnroll {
 		relayBlindIdentityPublicKeys = make(map[string]string, len(providerSlots))
 		for _, slot := range providerSlots {
 			pub, _, err := ed25519.GenerateKey(rand.Reader)
@@ -630,6 +637,10 @@ func secretEntropyBitsPerByte(s string) float64 {
 // dedicated tests in phase4-coordinator/internal/ws).
 func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled bool, gatewayServiceToken string, providers []map[string]any, settlementCatalog settlementCatalogFixture, settlementEnforceMode bool, pendingDeadlineSeconds int, relayBlindEnabled bool, relayBlindIdentityPublicKeys map[string]string, privacy *coordinatorPrivacyClassOpts) {
 	s.t.Helper()
+	directoryKeyPath := ""
+	if privacy != nil {
+		directoryKeyPath, s.privacyDirectoryPublicKey = writePrivacyDirectoryKey(s.t, s.tempDir)
+	}
 	tier2Cfg := map[string]any{
 		"observe_enabled":                    false,
 		"require_hash_verified":              false,
@@ -713,7 +724,7 @@ func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled b
 			// relay-blind settlement profile.
 			"enforce_settlement_profile": relayBlindEnforceSettlementProfile(relayBlindEnabled, settlementEnforceMode),
 		},
-		"privacy_class": coordinatorPrivacyClassYAML(s.providerID, privacy),
+		"privacy_class": coordinatorPrivacyClassYAML(s.providerID, privacy, directoryKeyPath),
 		"admission": map[string]any{
 			"pinned_only":                         false,
 			"provisional_admission_rate_per_hour": 1000,
@@ -792,7 +803,22 @@ func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled b
 	}
 }
 
-func coordinatorPrivacyClassYAML(providerID string, privacy *coordinatorPrivacyClassOpts) map[string]any {
+// writePrivacyDirectoryKey writes a fresh SPEC-049-R028 directory signing
+// seed (canonical base64url, mode 0600) and returns its path and public key.
+func writePrivacyDirectoryKey(t *testing.T, dir string) (string, string) {
+	t.Helper()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate privacy directory key: %v", err)
+	}
+	path := filepath.Join(dir, "privacy-directory.key")
+	if err := os.WriteFile(path, []byte(base64.RawURLEncoding.EncodeToString(private.Seed())+"\n"), 0o600); err != nil {
+		t.Fatalf("write privacy directory key: %v", err)
+	}
+	return path, base64.RawURLEncoding.EncodeToString(public)
+}
+
+func coordinatorPrivacyClassYAML(providerID string, privacy *coordinatorPrivacyClassOpts, directoryKeyPath string) map[string]any {
 	if privacy == nil {
 		return map[string]any{"enabled": false}
 	}
@@ -812,10 +838,16 @@ func coordinatorPrivacyClassYAML(providerID string, privacy *coordinatorPrivacyC
 	if quarantine == 0 {
 		quarantine = 86400
 	}
+	sePins := map[string]string{}
+	if !privacy.AutoEnroll {
+		sePins[providerID] = privacy.SEPublicKey
+	}
 	return map[string]any{
-		"enabled": true,
-		"provider_se_public_keys": map[string]string{
-			providerID: privacy.SEPublicKey,
+		"enabled":                 true,
+		"provider_se_public_keys": sePins,
+		"directory": map[string]any{
+			"signing_key_path": directoryKeyPath,
+			"ttl_seconds":      300,
 		},
 		"approved_code_identities": []map[string]any{{
 			"team_id":            privacy.TeamID,
