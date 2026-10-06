@@ -150,10 +150,34 @@ FORCE_RESTART=1 CONFIG_MODE=preserve-live \
 - **Deploy-script fix.** Deploy scripts older than v1.8.218 (#1860) can never
   pass the post-restart smoke for an artifact-bound release, because they do
   not fetch `/v1/catalog-artifacts`. Use v1.8.218 or later tooling.
-- **Canary.** The canary no longer needs a CLI whose `catalog-release/` bytes
-  match: providers load the catalog live from the coordinator. It does need the
-  canary ssh key and the Keychain token
-  `macprovider.catalog-canary.operator-token`.
+- **Canary (this caused three rollbacks on 2026-10-06).**
+  - **Why it fails without a restart.** A 1.8.207 provider freezes the catalog
+    reported by its local `/v1/status` at process start (HTTPServer
+    `catalogStatus`). A `hello_ack` only stages the new envelope for the next
+    hello, and is rate-limited to one refresh per 300 s. So the deploy's 180 s
+    canary proof can never see the new release unless the canary process
+    restarts.
+  - **What to do.** As soon as public `/v1/autotune-release` reports the new
+    `release_id`, run
+    `launchctl kickstart -k gui/$(id -u)/live.malibu.provider` on the canary
+    Mac.
+  - **Verify and retry.** Then check
+    `curl -s http://127.0.0.1:<status-port>/v1/status`. The `catalog.release_id`
+    must be the new release with `buyer_serving` and `connected: true`. If it
+    came up on the old release, kickstart it again right away. The first
+    kickstart at 04:01:25 still loaded 09-25; the second, at 04:04:30, passed.
+  - **Credentials.** The canary also needs its ssh key and the Keychain token
+    `macprovider.catalog-canary.operator-token`.
+  - **Durable fix.** Have `deploy-pearl-vps.sh` kickstart the canary itself
+    after the feed-identity proof (#1749).
+- **A failed activation strands the fleet.** Providers that adopted the new
+  catalog are rejected (`catalog_incompatible`) by the rolled-back coordinator.
+  Each one waits out its own 300 s refresh gate, so capacity took 3–11 minutes
+  to return. Get the canary right; do not "just retry".
+- **Edit `coordinator.yaml` in place only.** Other sessions edit the same file
+  (`compatibility_set.accepted_ids`, `trusted_pools`). Add and remove only your
+  own keys, under both locks. Never restore a whole-file backup: on 2026-10-06
+  that wiped another session's 1.8.217 accept.
 - **stats-inventory-sync timer.** The "left stopped" message refers to the
   timer, which has been disabled since 2026-09-30. Leave it as it was.
 
