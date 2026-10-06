@@ -139,8 +139,8 @@ then **crash-loops on the missing file**; this caused a 502 outage on
 
 ```bash
 FORCE_RESTART=1 CONFIG_MODE=preserve-live \
-  CATALOG_CANARY_PROVIDER_ID=mp-26592d710fc97aa7c07b260665c67cf6 \
-  CATALOG_CANARY_SSH_TARGET=augstar@127.0.0.1 \
+  CATALOG_CANARY_PROVIDER_ID=<canary-provider-id> \
+  CATALOG_CANARY_SSH_TARGET=<canary-ssh-target> \
   bash phase4-coordinator/dist/deploy-pearl-vps.sh \
   || ssh pearl 'readlink /opt/macprovider/autotune/current | grep -q <new-release> ||
        { cp -a <pre-key-backup> /opt/macprovider/coordinator.yaml;
@@ -167,7 +167,7 @@ FORCE_RESTART=1 CONFIG_MODE=preserve-live \
     came up on the old release, kickstart it again right away. The first
     kickstart at 04:01:25 still loaded 09-25; the second, at 04:04:30, passed.
   - **Credentials.** The canary also needs its ssh key and the Keychain token
-    `macprovider.catalog-canary.operator-token`.
+    operator token (from the operator's local secret store).
   - **Durable fix.** Have `deploy-pearl-vps.sh` kickstart the canary itself
     after the feed-identity proof (#1749).
 - **A failed activation strands the fleet.** Providers that adopted the new

@@ -133,13 +133,22 @@ relay-blind-client --privacy-class --base-url https://gateway.example --model <m
 
 The control plane is the relay-blind SQLite file named by `relay_blind.sqlite_path`. `coordinator-cli` opens that file directly. Do not restart the coordinator for these commands. The next reservation, consume, or dispatch reads the new row.
 
+Use the same base config and overlay as the running coordinator for every
+incident or rollback command, including the abbreviated rollback examples in
+SPEC-049 §8.1. When startup uses `--config-overlay`, pass that overlay to the
+CLI too; otherwise the command can inspect or mutate a different SQLite store.
+The examples below show a deployment with an overlay. Omit `--config-overlay`
+only when the running coordinator uses no overlay. This flag requires a CLI
+release containing the overlay support; older CLIs need an operator-prepared
+effective config containing both files' settings.
+
 ```bash
-coordinator-cli privacy-class status --config /path/to/coordinator.yaml
-coordinator-cli privacy-class disable --config /path/to/coordinator.yaml --reason "visible ASCII, 1-128 chars"
-coordinator-cli privacy-class enable --config /path/to/coordinator.yaml
-coordinator-cli privacy-class quarantine --config /path/to/coordinator.yaml --provider <provider_id> --reason "visible ASCII, 1-128 chars" --seconds 3600
-coordinator-cli privacy-class unquarantine --config /path/to/coordinator.yaml --provider <provider_id>
-coordinator-cli privacy-class reenroll --config /path/to/coordinator.yaml --provider <provider_id> --reason "visible ASCII, 1-128 chars"
+coordinator-cli privacy-class status --config /path/to/coordinator.yaml --config-overlay /path/to/overlay.yaml
+coordinator-cli privacy-class disable --config /path/to/coordinator.yaml --config-overlay /path/to/overlay.yaml --reason "visible ASCII, 1-128 chars"
+coordinator-cli privacy-class enable --config /path/to/coordinator.yaml --config-overlay /path/to/overlay.yaml
+coordinator-cli privacy-class quarantine --config /path/to/coordinator.yaml --config-overlay /path/to/overlay.yaml --provider <provider_id> --reason "visible ASCII, 1-128 chars" --seconds 3600
+coordinator-cli privacy-class unquarantine --config /path/to/coordinator.yaml --config-overlay /path/to/overlay.yaml --provider <provider_id>
+coordinator-cli privacy-class reenroll --config /path/to/coordinator.yaml --config-overlay /path/to/overlay.yaml --provider <provider_id> --reason "visible ASCII, 1-128 chars"
 ```
 
 `--seconds` is 1 through 2592000 (30 days). `status` also lists active and recently revoked enrollments by fingerprint and cdhash, never key bytes.

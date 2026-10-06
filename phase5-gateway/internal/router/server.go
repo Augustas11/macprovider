@@ -349,6 +349,7 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+	start := s.now()
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
 		return
@@ -381,6 +382,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		}
 		resolved, poolErr := s.resolvePoolSelection(r.Context(), r.Header, accountID, !authn.Demo && authn.WalletSession == nil && accountID != "")
 		if poolErr != nil {
+			s.enforcePoolRejectionTimingFloor(start)
 			writeError(w, poolErr.status, poolErr.typ, poolErr.code, poolErr.message)
 			return
 		}

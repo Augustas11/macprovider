@@ -1231,6 +1231,9 @@ func (s *Server) handleInternalRouting(w http.ResponseWriter, r *http.Request) {
 		accountPools, generation := s.trustPools.BuyerAuthorizations()
 		pools["account_pools"] = accountPools
 		pools["buyer_authorization_generation"] = generation
+		// SPEC-043-R007: a static account_pools gateway refuses a configured
+		// pool outside this set locally, like an unknown pool.
+		pools["routeable_pools"] = s.trustPools.RouteablePoolIDs()
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -3843,6 +3846,12 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 	if state != nil {
 		state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s), provider.AssignedID)
 	}
+	if stream {
+		// forwardWSStreaming registers the delivered-output measure; a
+		// buyer_disconnected cancel that wins the race with that
+		// registration still carries the (empty) boundary (#1690 BUG-2).
+		ctx = providerws.WithDeliveredOutputTracking(ctx)
+	}
 	if settlementMetadata != nil && s.settlementRelay != nil {
 		relay, err = s.settlementRelay(ctx, provider, requestID, body, stream, settlementMetadata)
 	} else {
@@ -4178,6 +4187,9 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 	if streamingMode != streamingModeIncremental {
 		return s.forwardWSStreamingBuffered(w, r, requestID, provider, relay, streamingMode, streamingBuyer, state, billingAttemptN)
 	}
+	// A buyer_disconnected cancel tells the provider the delivered prefix
+	// this tracker binds (#1690 BUG-2).
+	relay.TrackDeliveredOutput(acct.deliveredOutputBytes)
 	coalescer := newConcatSafeToolStream()
 	commit := func() {
 		if committed {
@@ -4254,16 +4266,27 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		}
 		commit()
 		acct.render([]byte(rewritten))
-		if n, err := w.Write([]byte(rewritten)); err != nil {
-			// Only the complete SSE events the writer accepted reached the
-			// buyer; a torn event does not count.
+		// The write and the record of the bytes it accepted are one step
+		// against the cancel boundary (RecordDelivered). Only the complete
+		// SSE events the writer accepted reached the buyer; a torn event
+		// does not count.
+		var writeErr error
+		if !relay.RecordDelivered(func() {
+			var n int
+			n, writeErr = w.Write([]byte(rewritten))
 			acct.written([]byte(rewritten)[:n])
-			relay.Cancel("buyer_disconnected")
-			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer ws stream write failed")
+		}) {
+			// A buyer_disconnected cancel already told the provider the
+			// delivered prefix; these bytes are past it and were not written.
 			markProviderDone()
 			return true, wsForwardCancelled
 		}
-		acct.written([]byte(rewritten))
+		if writeErr != nil {
+			relay.Cancel("buyer_disconnected")
+			s.log.Warn().Err(writeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer ws stream write failed")
+			markProviderDone()
+			return true, wsForwardCancelled
+		}
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -4551,6 +4574,7 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 		attempt := requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during buffered streaming", FaultFlag: billing.FaultNone, SettlementOutput: acct.output(billing.TerminalStateBuyerCancel)}
 		return awaitBuyerCancelTerminal(attempt, relay, acct.tracker, started, providerws.IsBYOMLoopbackRuntimeSource(provider.RuntimeSource))
 	}
+	relay.TrackDeliveredOutput(acct.deliveredOutputBytes)
 	for {
 		select {
 		case <-r.Context().Done():
@@ -4654,17 +4678,24 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 			}
 			w.WriteHeader(http.StatusOK)
 			acct.render(out)
-			if n, err := w.Write(out); err != nil {
+			// The write and the record of the bytes it accepted are one step
+			// against the cancel boundary, and both precede relay.Cancel, so
+			// a sealed boundary equals the recorded delivered bytes.
+			var writeErr error
+			recorded := relay.RecordDelivered(func() {
+				var n int
+				n, writeErr = w.Write(out)
+				acct.written(out[:n])
+			})
+			if !recorded || writeErr != nil {
 				relay.Cancel("buyer_disconnected")
 				// The provider completed, but only the complete events the
 				// writer accepted reached the buyer: a buyer_cancel over that
 				// prefix, never the provider's normal_done receipt.
-				acct.written(out[:n])
 				cancelled := requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during buffered streaming", FaultFlag: billing.FaultNone, SettlementOutput: acct.output(billing.TerminalStateBuyerCancel)}
 				acct.applyUsage(s, &cancelled, acct.billableUsage())
 				return wsForwardCancelled, cancelled
 			}
-			acct.written(out)
 			attempt := requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: s.observedCompletionTokensFromBytes(acct.deliveredBytes()), SettlementOutput: acct.outputAt(billing.TerminalStateNormalDone, terminalTS), SettlementReceipt: receiptValue}
 			usage := acct.completionUsage(end.Usage)
 			attempt.PromptTokens, attempt.CachedPromptTokens, attempt.CompletionTokens = usage.prompt, usage.cached, usage.completion

@@ -104,6 +104,50 @@ func TestPrivacyClassCLI(t *testing.T) {
 	}
 }
 
+func TestPrivacyClassCLIConfigOverlay(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "relay-blind.sqlite")
+	cfgPath := filepath.Join(dir, "coordinator.yaml")
+	overlayPath := filepath.Join(dir, "overlay.yaml")
+	baseYAML := "auth:\n  operator_key: 0123456789abcdefABCDEFghijklmnop\n  gateway_service_token: fedcba9876543210PONMLKJIHGFEDCBA\nrelay_blind:\n  sqlite_path: " + quoteYAML(filepath.Join(dir, "base-does-not-exist.sqlite")) + "\n"
+	overlayYAML := "relay_blind:\n  sqlite_path: " + quoteYAML(dbPath) + "\n"
+	if err := os.WriteFile(cfgPath, []byte(baseYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(overlayPath, []byte(overlayYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := privacyClassCommand([]string{"disable", "-config", cfgPath, "--config-overlay", overlayPath, "--reason", "overlay-maintenance"}, &out); err != nil {
+		t.Fatalf("disable with overlay: %v", err)
+	}
+	if !strings.Contains(out.String(), "disabled=1\n") || !strings.Contains(out.String(), "reason=overlay-maintenance\n") {
+		t.Fatalf("overlay disable status: %s", out.String())
+	}
+
+	store, err := relayblind.OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, err := store.PrivacyControl(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !control.Disabled || control.Reason != "overlay-maintenance" {
+		t.Fatalf("overlay store control = %#v", control)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	out.Reset()
+	err = privacyClassCommand([]string{"status", "-config", cfgPath, "--config-overlay", filepath.Join(dir, "missing.yaml")}, &out)
+	if err == nil || !strings.Contains(err.Error(), "overlay config") {
+		t.Fatalf("missing overlay err = %v", err)
+	}
+}
+
 func privacyCLIReservation(kid, digest string, privacy bool, now time.Time) relayblind.ReservationCreate {
 	return relayblind.ReservationCreate{
 		AccountID: "account-a", WalletSession: "wallet-a", ProviderID: "provider-a", AssignedSession: "session-a",

@@ -1331,7 +1331,11 @@ struct NativeMTPBenchPolicy {
         let expected: [String: Double] = [
             "throughput_lower_bound_min": 0.15,
             "ttft_p95_upper_bound_max": 0.10,
-            "itl_p95_upper_bound_max": 0.0,
+            // SPEC-048 0.1.25: per-output-token latency and the worst-gap
+            // bound (native p99 chunk gap at most proposal_depth + 1 = 2x
+            // ordinary's) replace the inter-chunk p95 gate.
+            "tpot_p95_upper_bound_max": 0.0,
+            "chunk_gap_p99_upper_bound_max": 1.0,
             "rejection_increase_max_pp": 1.0,
             "min_available_memory_fraction": 0.10,
             "bootstrap_draws": 10000,
@@ -1340,7 +1344,7 @@ struct NativeMTPBenchPolicy {
             // non-inferiority to ordinary at the mixed-load margins.
             "gated_throughput_lower_bound_min": -0.05,
             "gated_ttft_p95_upper_bound_max": 0.05,
-            "gated_itl_p95_upper_bound_max": 0.05,
+            "gated_tpot_p95_upper_bound_max": 0.05,
         ]
         guard Set(thresholds.keys) == Set(expected.keys) else {
             throw NativeMTPBenchError.invalidPolicy("threshold keys mismatch")

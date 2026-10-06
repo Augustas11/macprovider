@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,7 +20,7 @@ import (
 // bounds, and the shared pool_unavailable envelope is non-retryable.
 func TestPoolRejectionTimingFloor_EnforcedAndUniform(t *testing.T) {
 	const floor = 50 * time.Millisecond
-	h, cap, key := newPoolHarness(t, `{"pools":{"enabled":true}}`, func(cfg *config.Config) {
+	h, cap, key := newPoolHarness(t, `{"pools":{"enabled":true,"routeable_pools":["abcdefghijklmnopqrstuv"]}}`, func(cfg *config.Config) {
 		cfg.Features.TrustedPools.RejectionTimingFloorMS = 50
 		cfg.Quotas.AccountRequestRatePerSecond = 1000
 	})
@@ -72,12 +73,14 @@ func TestPoolRejectionTimingFloor_EnforcedAndUniform(t *testing.T) {
 		unknown = append(unknown, measure("zzzzzzzzzzzzzzzzzzzzzz"))
 		unauthorized = append(unauthorized, measure("bbbbbbbbbbbbbbbbbbbbbb"))
 	}
-	if cap.chatHits != 0 || cap.routingHits != 0 {
-		t.Fatalf("rejection path consulted coordinator chat=%d routing=%d", cap.chatHits, cap.routingHits)
+	// Every class performs the identical selector-independent routing refresh
+	// (one per request) and none reaches the coordinator chat path.
+	if cap.chatHits != 0 || cap.routingHits != 2*samples {
+		t.Fatalf("rejection path consulted coordinator chat=%d routing=%d, want chat=0 routing=%d", cap.chatHits, cap.routingHits, 2*samples)
 	}
 	assertDurationDeltasWithinOracleBounds(t, "unknown", unknown, "unauthorized", unauthorized)
 
-	disabledH, disabledCap, disabledKey := newPoolHarness(t, `{"pools":{"enabled":true}}`, func(cfg *config.Config) {
+	disabledH, disabledCap, disabledKey := newPoolHarness(t, `{"pools":{"enabled":true,"routeable_pools":["abcdefghijklmnopqrstuv"]}}`, func(cfg *config.Config) {
 		cfg.Features.TrustedPools.Enabled = false
 		cfg.Features.TrustedPools.RejectionTimingFloorMS = 50
 		cfg.Quotas.AccountRequestRatePerSecond = 1000
@@ -113,7 +116,7 @@ func TestPoolRejectionTimingFloor_WalletSessionMatchesUnknown(t *testing.T) {
 		switch r.URL.Path {
 		case "/internal/routing":
 			cap.routingHits++
-			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"pools":{"enabled":true}}`), nil
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"pools":{"enabled":true,"routeable_pools":["abcdefghijklmnopqrstuv"]}}`), nil
 		case "/v1/chat/completions":
 			cap.chatHits++
 			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, poolChatOK), nil
@@ -142,7 +145,7 @@ func TestPoolRejectionTimingFloor_WalletSessionMatchesUnknown(t *testing.T) {
 	apiKey := createAccountAndKey(t, store, cfg, accountID)
 	walletClient := registerWalletSessionViaAPIWithCaps(t, h, cfg, apiKey, accountID, []string{"llama"}, 100000, 4096)
 
-	unknownH, _, unknownKey := newPoolHarness(t, `{"pools":{"enabled":true}}`, func(cfg *config.Config) {
+	unknownH, _, unknownKey := newPoolHarness(t, `{"pools":{"enabled":true,"routeable_pools":["abcdefghijklmnopqrstuv"]}}`, func(cfg *config.Config) {
 		cfg.Features.TrustedPools.RejectionTimingFloorMS = 50
 		cfg.Quotas.AccountRequestRatePerSecond = 1000
 	})
@@ -229,4 +232,272 @@ func absDuration(d time.Duration) time.Duration {
 		return -d
 	}
 	return d
+}
+
+// TestPoolRejectionTimingFloor_CoordinatorAuthorizedClassesShareLocalPath is
+// the production-shape (coordinator_authorizes, no static account_pools)
+// regression for the 2026-10-06 R007 oracle: an authorized buyer selecting a
+// paused pool used to be forwarded to the coordinator, which stacked its own
+// round trip and rejection floor on top of the gateway's, so "disabled" was
+// ~55 ms slower than "unknown"/"unauthorized". The coordinator projection now
+// omits non-active pools, so every class is refused by the same local lookup
+// after the same /internal/routing fetch. The fake coordinator adds latency to
+// both calls; a forwarded chat would add a further 80 ms and fail the bounds.
+func TestPoolRejectionTimingFloor_CoordinatorAuthorizedClassesShareLocalPath(t *testing.T) {
+	const (
+		floor         = 50 * time.Millisecond
+		samples       = 16
+		pausedPoolID  = "pausedpoolxxxxxxxxxxxx"
+		foreignPoolID = "bbbbbbbbbbbbbbbbbbbbbb"
+		unknownPoolID = "zzzzzzzzzzzzzzzzzzzzzz"
+	)
+	// Projection as the coordinator now serves it: acct_pool is a buyer of
+	// testPoolID (active) and of pausedPoolID (paused, therefore omitted);
+	// foreignPoolID exists for another buyer only.
+	routingBody := `{"pools":{"enabled":true,"account_pools":{"acct_pool":["` + testPoolID + `"],"acct_other":["` + foreignPoolID + `"]},"buyer_authorization_generation":3,"routeable_pools":["` + testPoolID + `","` + foreignPoolID + `"]}}`
+	var mu sync.Mutex
+	routingHits, chatHits := 0, 0
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/internal/routing":
+			time.Sleep(10 * time.Millisecond)
+			mu.Lock()
+			routingHits++
+			mu.Unlock()
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, routingBody), nil
+		case "/v1/chat/completions":
+			// What the coordinator answers for a forwarded paused pool:
+			// its own floor plus round trip, then pool_unavailable.
+			time.Sleep(80 * time.Millisecond)
+			mu.Lock()
+			chatHits++
+			mu.Unlock()
+			return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}},
+				`{"error":{"type":"service_unavailable","code":"pool_unavailable","message":"Pool unavailable"}}`), nil
+		default:
+			t.Fatalf("unexpected coordinator path %s", r.URL.Path)
+			return nil, nil
+		}
+	})}
+	h, st, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+		cfg.Features.TrustedPools = config.TrustedPoolsConfig{Enabled: true, CoordinatorAuthorizes: true}
+		cfg.Quotas.AccountRequestRatePerSecond = 1000
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, st, cfg, "acct_pool")
+
+	measure := func(class, selector string) time.Duration {
+		t.Helper()
+		start := time.Now()
+		resp := postChat(t, h, key, poolChatBody, selectHeader(selector))
+		elapsed := time.Since(start)
+		if resp.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s status=%d body=%s, want 503", class, resp.Code, resp.Body.String())
+		}
+		assertErrorCode(t, resp.Body.String(), "pool_unavailable")
+		if elapsed+5*time.Millisecond < floor {
+			t.Fatalf("%s elapsed=%s below floor=%s", class, elapsed, floor)
+		}
+		return elapsed
+	}
+
+	byClass := map[string][]time.Duration{}
+	selectors := map[string]string{"unknown": unknownPoolID, "unauthorized": foreignPoolID, "disabled": pausedPoolID}
+	order := []string{"unknown", "unauthorized", "disabled"}
+	for i := 0; i < samples; i++ {
+		// Rotate class order per round so warm-up and drift do not bias one class.
+		for j := range order {
+			class := order[(i+j)%len(order)]
+			byClass[class] = append(byClass[class], measure(class, selectors[class]))
+		}
+	}
+	mu.Lock()
+	gotChat, gotRouting := chatHits, routingHits
+	mu.Unlock()
+	if gotChat != 0 {
+		t.Fatalf("a pool_unavailable class was forwarded to the coordinator chat path %d times; all classes must be refused locally", gotChat)
+	}
+	if gotRouting != samples*len(order) {
+		t.Fatalf("routing fetches=%d, want one per request (%d) on every class", gotRouting, samples*len(order))
+	}
+	assertDurationDeltasWithinOracleBounds(t, "unknown", byClass["unknown"], "unauthorized", byClass["unauthorized"])
+	assertDurationDeltasWithinOracleBounds(t, "unknown", byClass["unknown"], "disabled", byClass["disabled"])
+	assertDurationDeltasWithinOracleBounds(t, "unauthorized", byClass["unauthorized"], "disabled", byClass["disabled"])
+}
+
+// TestPoolRejectionTimingFloor_ModelsPoolViewHonorsFloor covers the SPEC-006
+// R018 pool view: a /v1/models pool selection is authorized like a chat pool
+// selection, so its pool_unavailable rejection also holds the R007 floor.
+func TestPoolRejectionTimingFloor_ModelsPoolViewHonorsFloor(t *testing.T) {
+	const floor = 50 * time.Millisecond
+	h, cap, key := newPoolHarness(t, `{"pools":{"enabled":true,"routeable_pools":["abcdefghijklmnopqrstuv"]}}`, func(cfg *config.Config) {
+		cfg.Quotas.AccountRequestRatePerSecond = 1000
+	})
+	for _, selector := range []string{"zzzzzzzzzzzzzzzzzzzzzz", "bbbbbbbbbbbbbbbbbbbbbb"} {
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set(poolSelectHeader, selector)
+		start := time.Now()
+		resp := httptest.NewRecorder()
+		h.ServeHTTP(resp, req)
+		elapsed := time.Since(start)
+		if resp.Code != http.StatusServiceUnavailable {
+			t.Fatalf("selector=%q status=%d body=%s, want 503", selector, resp.Code, resp.Body.String())
+		}
+		assertErrorCode(t, resp.Body.String(), "pool_unavailable")
+		if elapsed+5*time.Millisecond < floor {
+			t.Fatalf("selector=%q elapsed=%s below floor=%s", selector, elapsed, floor)
+		}
+	}
+	if cap.chatHits != 0 || cap.routingHits != 2 {
+		t.Fatalf("static-scope rejection consulted coordinator chat=%d routing=%d, want chat=0 routing=2 (one shared refresh per request)", cap.chatHits, cap.routingHits)
+	}
+}
+
+// TestPoolRejectionTimingFloor_StaticScopeNonRouteablePoolRefusedLocally
+// (#1690 BUG-3 audit r1): in static account_pools mode a configured pool that
+// the coordinator no longer lists as routeable (paused, expired,
+// candidate-blocked) is refused on the same local floored path as an unknown
+// pool, for chat and the /v1/models pool view, without a coordinator chat or
+// models call. A coordinator that omits routeable_pools routes none.
+func TestPoolRejectionTimingFloor_StaticScopeNonRouteablePoolRefusedLocally(t *testing.T) {
+	const (
+		floor        = 50 * time.Millisecond
+		pausedPoolID = "pausedpoolxxxxxxxxxxxx"
+	)
+	for _, tc := range []struct {
+		name        string
+		routingBody string
+	}{
+		{name: "not listed", routingBody: `{"pools":{"enabled":true,"routeable_pools":["` + testPoolID + `"]}}`},
+		{name: "old coordinator", routingBody: `{"pools":{"enabled":true}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, cap, key := newPoolHarness(t, tc.routingBody, func(cfg *config.Config) {
+				cfg.Features.TrustedPools.AccountPools = map[string][]string{"acct_pool": {testPoolID, pausedPoolID}}
+				cfg.Quotas.AccountRequestRatePerSecond = 1000
+			})
+			start := time.Now()
+			resp := postChat(t, h, key, poolChatBody, selectHeader(pausedPoolID))
+			elapsed := time.Since(start)
+			if resp.Code != http.StatusServiceUnavailable {
+				t.Fatalf("chat status=%d body=%s, want 503", resp.Code, resp.Body.String())
+			}
+			assertErrorCode(t, resp.Body.String(), "pool_unavailable")
+			if elapsed+5*time.Millisecond < floor {
+				t.Fatalf("chat elapsed=%s below floor=%s", elapsed, floor)
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+			req.Header.Set("Authorization", "Bearer "+key)
+			req.Header.Set(poolSelectHeader, pausedPoolID)
+			start = time.Now()
+			models := httptest.NewRecorder()
+			h.ServeHTTP(models, req)
+			elapsed = time.Since(start)
+			if models.Code != http.StatusServiceUnavailable {
+				t.Fatalf("models status=%d body=%s, want 503", models.Code, models.Body.String())
+			}
+			assertErrorCode(t, models.Body.String(), "pool_unavailable")
+			if elapsed+5*time.Millisecond < floor {
+				t.Fatalf("models elapsed=%s below floor=%s", elapsed, floor)
+			}
+			if cap.chatHits != 0 {
+				t.Fatalf("a non-routeable pool was forwarded to the coordinator chat path %d times", cap.chatHits)
+			}
+			if cap.routingHits != 2 {
+				t.Fatalf("routing fetches=%d, want one per request", cap.routingHits)
+			}
+		})
+	}
+}
+
+// TestPoolRejectionTimingFloor_StaticScopeClassesShareOneLookupPath (#1690
+// BUG-3 audit r2): in static account_pools mode an unknown selector, a pool
+// configured only for another account, and a pool configured for the caller
+// but no longer routeable must all do the same /internal/routing fetch before
+// being refused. The fake coordinator answers that fetch slower than the floor,
+// so a class that returned before the fetch would be ~30 ms faster than one that
+// returned after it — a gap the floor cannot pad away.
+func TestPoolRejectionTimingFloor_StaticScopeClassesShareOneLookupPath(t *testing.T) {
+	const (
+		floor         = 50 * time.Millisecond
+		samples       = 12
+		pausedPoolID  = "pausedpoolxxxxxxxxxxxx"
+		foreignPoolID = "bbbbbbbbbbbbbbbbbbbbbb"
+		unknownPoolID = "zzzzzzzzzzzzzzzzzzzzzz"
+	)
+	routingBody := `{"pools":{"enabled":true,"routeable_pools":["` + testPoolID + `","` + foreignPoolID + `"]}}`
+	var mu sync.Mutex
+	routingHits, chatHits := 0, 0
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/internal/routing":
+			time.Sleep(80 * time.Millisecond)
+			mu.Lock()
+			routingHits++
+			mu.Unlock()
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, routingBody), nil
+		case "/v1/chat/completions":
+			mu.Lock()
+			chatHits++
+			mu.Unlock()
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, poolChatOK), nil
+		default:
+			t.Fatalf("unexpected coordinator path %s", r.URL.Path)
+			return nil, nil
+		}
+	})}
+	h, st, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+		cfg.Features.TrustedPools = config.TrustedPoolsConfig{
+			Enabled: true,
+			AccountPools: map[string][]string{
+				"acct_pool":  {testPoolID, pausedPoolID},
+				"acct_other": {foreignPoolID},
+			},
+			RejectionTimingFloorMS: 50,
+		}
+		cfg.Quotas.AccountRequestRatePerSecond = 1000
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, st, cfg, "acct_pool")
+
+	measure := func(class, selector string) time.Duration {
+		t.Helper()
+		start := time.Now()
+		resp := postChat(t, h, key, poolChatBody, selectHeader(selector))
+		elapsed := time.Since(start)
+		if resp.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s status=%d body=%s, want 503", class, resp.Code, resp.Body.String())
+		}
+		assertErrorCode(t, resp.Body.String(), "pool_unavailable")
+		if elapsed+5*time.Millisecond < floor {
+			t.Fatalf("%s elapsed=%s below floor=%s", class, elapsed, floor)
+		}
+		return elapsed
+	}
+
+	byClass := map[string][]time.Duration{}
+	selectors := map[string]string{"unknown": unknownPoolID, "unauthorized": foreignPoolID, "disabled": pausedPoolID}
+	order := []string{"unknown", "unauthorized", "disabled"}
+	for i := 0; i < samples; i++ {
+		for j := range order {
+			class := order[(i+j)%len(order)]
+			byClass[class] = append(byClass[class], measure(class, selectors[class]))
+		}
+	}
+	mu.Lock()
+	gotChat, gotRouting := chatHits, routingHits
+	mu.Unlock()
+	if gotChat != 0 {
+		t.Fatalf("a pool_unavailable class was forwarded to the coordinator chat path %d times", gotChat)
+	}
+	if gotRouting != samples*len(order) {
+		t.Fatalf("routing fetches=%d, want one per request (%d) on every class", gotRouting, samples*len(order))
+	}
+	assertDurationDeltasWithinOracleBounds(t, "unknown", byClass["unknown"], "unauthorized", byClass["unauthorized"])
+	assertDurationDeltasWithinOracleBounds(t, "unknown", byClass["unknown"], "disabled", byClass["disabled"])
+	assertDurationDeltasWithinOracleBounds(t, "unauthorized", byClass["unauthorized"], "disabled", byClass["disabled"])
 }

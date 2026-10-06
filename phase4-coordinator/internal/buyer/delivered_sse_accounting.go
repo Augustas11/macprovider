@@ -196,6 +196,12 @@ func (a *deliveredSSEAccounting) deliveredBytes() int {
 	return a.delivered
 }
 
+// deliveredOutputBytes is the canonical byte length of the delivered content
+// (SPEC-015 §N.5), the delivered_output_bytes the settlement output binds.
+func (a *deliveredSSEAccounting) deliveredOutputBytes() int64 {
+	return billing.SettlementDeliveredOutputBytes(a.tracker.content)
+}
+
 func (a *deliveredSSEAccounting) contentDelivered() bool {
 	return a.tracker.content != "" || len(a.tracker.toolCalls) > 0
 }

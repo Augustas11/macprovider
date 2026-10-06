@@ -34,6 +34,7 @@ func runPrivacyClass(action string, args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("privacy-class "+action, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	configPath := fs.String("config", "", "coordinator config path")
+	configOverlay := fs.String("config-overlay", "", "optional YAML overlay the running coordinator uses")
 	reason := fs.String("reason", "", "bounded operator reason")
 	providerID := fs.String("provider", "", "provider id")
 	seconds := fs.Int("seconds", 0, "quarantine duration in seconds")
@@ -43,7 +44,7 @@ func runPrivacyClass(action string, args []string, stdout io.Writer) error {
 	if strings.TrimSpace(*configPath) == "" {
 		return errors.New("config is required")
 	}
-	store, retention, err := openPrivacyClassStore(*configPath)
+	store, retention, err := openPrivacyClassStore(*configPath, *configOverlay)
 	if err != nil {
 		return err
 	}
@@ -109,8 +110,8 @@ func runPrivacyClass(action string, args []string, stdout io.Writer) error {
 	}
 }
 
-func openPrivacyClassStore(path string) (*relayblind.Store, time.Duration, error) {
-	cfg, err := config.Load(path)
+func openPrivacyClassStore(path, overlayPath string) (*relayblind.Store, time.Duration, error) {
+	cfg, err := config.LoadWithOverlay(strings.TrimSpace(path), strings.TrimSpace(overlayPath))
 	if err != nil {
 		return nil, 0, err
 	}
