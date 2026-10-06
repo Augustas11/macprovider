@@ -1,11 +1,24 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.3.0
+Version: v0.3.1
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.3.1
+
+#1816 clarification, aligning the text with shipped behavior (no new
+obligation, no behavior change). R-13.5 now states that a native `mlx_cache`
+pool-entry route snapshot carries none of `runtime_source`,
+`pool_operator_account_id`, and `pool_member_account_id`: R-12 attribution
+does not apply, usage is `coordinator_observed`, and payment attribution is
+the serving provider id. R-13.2 now states that `pool_member_account_id` is a
+`route_snapshot_v2` member only on loopback (R016 attested) routes. This
+matches `buyer/pool_model_route.go` and the native pool-model golden vector
+in `testdata/spec015/route_snapshot_golden.json`. The conformance state of
+`SPEC-022-R013` does not change.
 
 ### v0.3.0
 
@@ -1664,8 +1677,10 @@ members are carried only by `route_snapshot_v2`
 v0.4.12): `expected_model_hash_source`, `pool_model_id`, the entry rates,
 the bounds digest, the SPEC-005-R015 dispatch-frozen multiplier, provider
 share, and config snapshot generation, `pool_generation` for a native route,
-and `pool_member_account_id` (the value of `serving_provider_account_id`).
-A snapshot carries them if and only if it is pinned to v2. A gateway that
+and, on a loopback route served under an R016 attestation only,
+`pool_member_account_id` (the value of `serving_provider_account_id`); a
+native `mlx_cache` route never carries it (R-13.5). A snapshot carries these
+members if and only if it is pinned to v2. A gateway that
 predates v2 holds v2 finality as `invalid_settlement_policy_version` while
 the provider credit is payable, so v2 is negotiated like the signed
 trailers: the coordinator routes a v2-pinned attempt only for a caller that
@@ -1712,7 +1727,11 @@ R-13.5. Native pool entries. A native `mlx_cache` session serving an R015 entry
 that lists `mlx_cache` (SPEC-042-R004 native pool-entry path) has an empty
 `runtime_source` under R-12.1, records `coordinator_observed` usage, and signs
 an ordinary native receipt; only the expected identity comes from the pool
-manifest under R-13.1-R-13.4. No R-12 eligibility rule applies to it.
+manifest under R-13.1-R-13.4. No R-12 eligibility or attribution rule applies
+to it. Its route snapshot therefore carries none of `runtime_source`,
+`pool_operator_account_id`, and `pool_member_account_id`, including when the
+serving member is a delegated non-creator; payment attribution is the serving
+provider id (`provider_id`), as on every native route.
 
 R-13.6. Scope and migration. The source proves provenance and replayability
 only. It does not call a pool artifact network-verified, does not weaken

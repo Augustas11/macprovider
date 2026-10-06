@@ -67,11 +67,11 @@ design here.
 Two coordinator facts the journey reflects rather than requires otherwise:
 
 - A native `mlx_cache` pool route snapshot carries no `pool_member_account_id`
-  (nor `runtime_source` or `pool_operator_account_id`): the coordinator records
-  them only for loopback routes (`buyer/pool_model_route.go`), so the native
-  delegated member's serving account is not in the route snapshot. The journey
-  requires the fields absent; whether SPEC-022 R-13.2 should require them on
-  native routes is an open coordinator/SPEC question.
+  (nor `runtime_source` or `pool_operator_account_id`), including for the
+  delegated non-creator member: SPEC-022 v0.3.1 R-13.5 (matching
+  `buyer/pool_model_route.go` and the native golden vector). Payment
+  attribution is the serving `provider_id`; the journey requires the three
+  fields absent.
 - A binding revocation is appended with actor `coordinator` and carries the
   ended binding's pool entry, generation and core, not the revoking core. The
   journey ties each revocation to its revoking manifest by time (after that
