@@ -282,7 +282,7 @@ func TestPrivacyChatSlotAfterReservationExpiryIsPostureStale(t *testing.T) {
 	h := newPrivacyHarness(t, privacyHarnessConfig{privacyKey: true, relayKey: true, ttl: 30, relay: privacyCountingRelay(&dispatches)})
 	h.server.slotQueueDeadline = 5 * time.Second
 	h.server.slotQueuePollInterval = 5 * time.Millisecond
-	_, raw, authorization := h.consumePrivacy(t, "privacy-saturated-expiry")
+	reservation, raw, authorization := h.consumePrivacy(t, "privacy-saturated-expiry")
 	h.setSlots(t, pool.StateBusy, 0)
 
 	done := make(chan *httptest.ResponseRecorder, 1)
@@ -300,6 +300,10 @@ func TestPrivacyChatSlotAfterReservationExpiryIsPostureStale(t *testing.T) {
 	}
 	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"privacy_class_posture_stale"`) || !strings.Contains(response.Body.String(), `"retryable":true`) || dispatches.Load() != 0 {
 		t.Fatalf("chat status=%d dispatches=%d body=%s", response.Code, dispatches.Load(), response.Body.String())
+	}
+	row, err := h.store.LookupReservation(context.Background(), reservation.ProviderBinding)
+	if err != nil || row.State != relayblind.ReservationStateRejected || row.TerminalCode != privacyClassStale {
+		t.Fatalf("row=%#v err=%v", row, err)
 	}
 }
 
@@ -374,4 +378,20 @@ func TestRelayBlindSlotWaitersAreCappedPerProvider(t *testing.T) {
 	if dispatches.Load() != 0 {
 		t.Fatalf("dispatches=%d", dispatches.Load())
 	}
+}
+
+// A one-entry slot queue is never taken by a relay-blind waiter.
+func TestRelayBlindDoesNotQueueWhenQueueHasOnePosition(t *testing.T) {
+	var dispatches atomic.Int32
+	h := newPrivacyHarness(t, privacyHarnessConfig{privacyKey: true, relayKey: true, relay: privacyCountingRelay(&dispatches)})
+	h.server.slotQueue = newSlotQueue(1)
+	h.server.slotQueueDeadline = 5 * time.Second
+	h.server.slotQueuePollInterval = 5 * time.Millisecond
+	_, raw, authorization := h.consumePrivacy(t, "privacy-saturated-one-slot")
+	h.setSlots(t, pool.StateBusy, 0)
+	response := h.privacyRequest(t, http.MethodPost, "/v1/chat/completions", raw, authorization, nil)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"relay_blind_provider_unsupported"`) || dispatches.Load() != 0 {
+		t.Fatalf("chat status=%d dispatches=%d body=%s", response.Code, dispatches.Load(), response.Body.String())
+	}
+	h.assertNoSlotLease(t)
 }
