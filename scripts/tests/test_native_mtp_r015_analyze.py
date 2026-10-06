@@ -68,7 +68,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
     def test_legacy_records_derive_decode_throughput(self):
         # 129 tokens at 100 tok/s end-to-end = 1.29s wall; 0.29s TTFT leaves
         # 128 decode tokens over 1.0s.
-        result = self._run_case(legacy=True)
+        result = self._run_case(legacy=True, legacy_gates=True)
         cell = result["cells"][0]
         self.assertEqual(cell["decode_tps_sources"], ["derived_legacy"])
         ordinary = cell["reported_metrics"]["ordinary"]["aggregate_decode_tps"]["median"]
@@ -78,7 +78,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
     def test_legacy_multi_request_uses_arrival_offsets(self):
         # r0: 0s start, TTFT 0.5, wall 2.0; r1: 1s start, TTFT 0.5, wall 2.0.
         # Decode window 0.5 -> 3.0 = 2.5s for 2 * 200 decode tokens.
-        result = self._run_case(legacy=True, legacy_multi=True, arrival_interval_ms=1000)
+        result = self._run_case(legacy=True, legacy_multi=True, arrival_interval_ms=1000, legacy_gates=True)
         ordinary = result["cells"][0]["reported_metrics"]["ordinary"]["aggregate_decode_tps"]["median"]
         self.assertAlmostEqual(ordinary, 160.0)
 
@@ -164,6 +164,43 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
                     "raw_inter_token_gaps_seconds" in item for item in result["cells"][0]["hard_failures"]
                 ), result["cells"][0]["hard_failures"])
         legacy = self._run_case(native_overrides={"raw_inter_token_gaps_seconds": self._DELETE}, legacy_gates=True)
+        self.assertEqual(legacy["overall_status"], "PASS")
+
+    def test_amended_per_request_series_must_cover_every_request(self):
+        # Two requests declared, one entry per series: the missing request
+        # cannot drop out of the TPOT p95 or the gap p99.
+        short = self._run_case(native_overrides={"requests": 2})
+        self.assertEqual(short["overall_status"], "FAIL")
+        self.assertTrue(any(
+            "per_request_decode_tps" in item and "raw_inter_token_gaps_seconds" in item and "request_metrics" in item
+            for item in short["cells"][0]["hard_failures"]
+        ), short["cells"][0]["hard_failures"])
+        cases = {
+            # Top-level gaps disagree with the request's own gaps.
+            "raw_inter_token_gaps_seconds": [{
+                "request_id": "c-b0-r0", "completion_tokens": 129, "decode_tps": 130.0,
+                "inter_token_gaps_seconds": [0.009] * 99,
+            }],
+            # Top-level decode throughput disagrees with the request's own.
+            "per_request_decode_tps": [{
+                "request_id": "c-b0-r0", "completion_tokens": 129, "decode_tps": 1000.0,
+                "inter_token_gaps_seconds": [0.009] * 100,
+            }],
+            # More gaps than the request's tokens can produce.
+            "request_metrics": [{
+                "request_id": "c-b0-r0", "completion_tokens": 50, "decode_tps": 130.0,
+                "inter_token_gaps_seconds": [0.009] * 100,
+            }],
+        }
+        for field, metrics in cases.items():
+            with self.subTest(field=field):
+                result = self._run_case(native_overrides={"request_metrics": metrics})
+                self.assertEqual(result["overall_status"], "FAIL")
+                self.assertTrue(any(
+                    field in item for item in result["cells"][0]["hard_failures"]
+                ), result["cells"][0]["hard_failures"])
+        # The legacy gate set never read these series; its verdicts stand.
+        legacy = self._run_case(native_overrides={"request_metrics": self._DELETE}, legacy_gates=True)
         self.assertEqual(legacy["overall_status"], "PASS")
 
     def test_non_finite_policy_constants_and_non_object_records_are_rejected(self):
@@ -734,6 +771,24 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
 
     _DELETE = object()
 
+    @staticmethod
+    def _sync_request_metrics(record):
+        """request_metrics that agree with the record's per-request series,
+        as the bench writes them (one entry per series element)."""
+        gaps = record.get("raw_inter_token_gaps_seconds")
+        decode = record.get("per_request_decode_tps")
+        if not isinstance(gaps, list) or not isinstance(decode, list):
+            record["request_metrics"] = []
+            return
+        record["request_metrics"] = [
+            {
+                "request_id": f"c-b{record.get('block_index', 0)}-r{index}",
+                "completion_tokens": 129,
+                "decode_tps": decode[index] if index < len(decode) else None,
+                "inter_token_gaps_seconds": item,
+            }
+            for index, item in enumerate(gaps)
+        ]
     SLOTS = (1,)
     # s1 cells are native-eligible; s2 cells are gated (SPEC-048-R015).
     BOUND = 1
@@ -913,6 +968,8 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
                         native_record.pop(field, None)
                     else:
                         native_record[field] = value
+                if not legacy and "request_metrics" not in overrides:
+                    self._sync_request_metrics(native_record)
 
             for block in range(blocks_written):
                 ordinary = self._run_record("ordinary", block, 100.0, 0.100, 0.010, False, policy_sha=run_policy_sha or policy_sha, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=matrix_min_available_memory_fraction, cell_id=cell_id, **record_options)
@@ -1000,6 +1057,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
             decode = tps if decode_tps is None else decode_tps
             record["aggregate_decode_tps"] = decode
             record["per_request_decode_tps"] = [decode]
+            self._sync_request_metrics(record)
         elif legacy_multi:
             # Two requests, 201 tokens each, 2.0s wall, 0.5s TTFT.
             record["requests"] = 2

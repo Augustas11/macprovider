@@ -524,6 +524,37 @@ def _chunk_gap_p99(run: dict) -> float:
     return _percentile(_chunk_gaps(run) or [], 0.99)  # type: ignore[return-value]
 
 
+def _per_request_misalignment(run: dict) -> list[str]:
+    """The amended gates take a p95 or p99 over per-request series. Each
+    series must hold exactly one entry per request, in the order of the
+    record's own request_metrics, so no request can drop out of a gate."""
+    requests = run.get("requests")
+    if not _is_count(requests):
+        return []
+    invalid = [
+        field
+        for field in ("per_request_tps", "per_request_decode_tps", "raw_inter_token_gaps_seconds", "request_metrics")
+        if not isinstance(run.get(field), list) or len(run[field]) != requests
+    ]
+    if invalid:
+        return invalid
+    for index, item in enumerate(run["request_metrics"]):
+        gaps = run["raw_inter_token_gaps_seconds"][index]
+        if not isinstance(item, dict):
+            invalid.append("request_metrics")
+            continue
+        if item.get("inter_token_gaps_seconds") != gaps:
+            invalid.append("raw_inter_token_gaps_seconds")
+        if item.get("decode_tps") != run["per_request_decode_tps"][index]:
+            invalid.append("per_request_decode_tps")
+        # Every chunk carries at least one token, so a request has at most
+        # completion_tokens - 1 gaps.
+        tokens = item.get("completion_tokens")
+        if not _is_count(tokens) or (isinstance(gaps, list) and len(gaps) > max(0, tokens - 1)):
+            invalid.append("request_metrics")
+    return invalid
+
+
 def _invalid_run_fields(run: dict, require_chunk_gaps: bool = False) -> list[str]:
     invalid = [field for field in _REQUIRED_NUMBER_FIELDS if not _is_number(run.get(field))]
     invalid += [field for field in _REQUIRED_COUNT_FIELDS if not _is_count(run.get(field))]
@@ -554,8 +585,10 @@ def _invalid_run_fields(run: dict, require_chunk_gaps: bool = False) -> list[str
         invalid.append("per_request_decode_tps")
     # The worst-gap bound reads the recorded gaps; none, or one malformed,
     # fails the record rather than reading as a stall-free run.
-    if require_chunk_gaps and _chunk_gaps(run) is None:
-        invalid.append("raw_inter_token_gaps_seconds")
+    if require_chunk_gaps:
+        if _chunk_gaps(run) is None:
+            invalid.append("raw_inter_token_gaps_seconds")
+        invalid += _per_request_misalignment(run)
     return sorted(set(invalid))
 
 
