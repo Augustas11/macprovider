@@ -271,13 +271,12 @@ artifact), SIGN (signing/workflow), PEARL (Pearl config) and SPEC.
      satisfy the monotonic checks. The operator rsyncs it over the directory.
      A missed renewal makes the feed expire, which disables native and keeps
      ordinary decode (fail closed in the safe direction).
-  5. **CLI:** derive the feed origin from the joined coordinator origin, not
-     a constant. That lets a signed release binary run against an isolated
-     coordinator in rehearsal (section 5). The pinned key, the closed schema
-     and the Keychain generation anchor still apply.
-- **Surface.** CLI, COORD, SIGN, PEARL (nginx + directory). SPEC-023 text:
-  the origin is the joined coordinator origin; publication uses a pre-signed
-  slot batch; state the emergency procedure.
+  5. **CLI:** keep the canonical static-feed origin, like every other signed
+     feed (`AutotuneRecommend.swift:2043`). Isolated rehearsals use a lab
+     build whose origin and keyring are injected under
+     `#if DEBUG || MACPROVIDER_LAB_HARNESS`; a release binary has no override.
+- **Surface.** COORD, SIGN, PEARL (nginx + directory). SPEC-023 v0.22.12
+  text: transport routes, pre-signed slot publication, emergency procedure.
 
 ### G6. CB qualification for the tuple (R014.5 FAIL): input dependency D-CB
 
@@ -455,7 +454,7 @@ merge (section 5).
 
 | Step | Forced by | Contents | Downtime |
 |---|---|---|---|
-| **One CLI cut** | G1 (prefill), G3 (feed fetch and materialize), G5 (origin derivation), any harness-free journey hooks | Signed candidate, release train row, transport publish (G13) | Provider restart per node on update. The live Studio swap is an operator-approved restart of `live.malibu.provider`. |
+| **One CLI cut** | G1 (prefill), G3 (feed fetch and materialize), the lab-only origin/keyring injection, any harness-free journey hooks | Signed candidate, release train row, transport publish (G13) | Provider restart per node on update. The live Studio swap is an operator-approved restart of `live.malibu.provider`. |
 | **One Pearl runtime apply** | G3 and G5 coordinator feed routes (`/v1/native-mtp-admission*`, `/v1/native-mtp-revocations.*`), plus G7's wire field only if that amendment lands | Tag of merged `main`, signed updater | **15–20 min network down** per `pearl-coordinator-rollout.md:11-15`, unless the short-quiesce updater hotfix is installed (probe P3). Must be stated to the operator before starting. One Pearl actor at a time. |
 | **One catalog release** | G2/G3/G4 sidecar, artifact manifest and self-test bank; G6 CB policy entry; ledger v4 | `deploy-pearl-vps.sh` from the running tag, after: nginx locations for the new feeds, in-place `coordinator.yaml` keys (`native_mtp_*_path`, `native_mtp.revocations_dir`, `pool.native_mtp_canary`), revocation slot batch rsynced | **Seconds** (one coordinator restart), plus the canary kickstart procedure (`:153-172`). Use the chained restore (`:141-147`). |
 
@@ -500,8 +499,9 @@ identity injection exists only under `#if DEBUG || MACPROVIDER_LAB_HARNESS`
   observe), as in R014 `raw/isolated-coordinator-*.log`.
   - The rehearsal catalog is served at `autotune.*_path`.
   - The revocation slot directory is presigned for the rehearsal window.
-  - Because of G5 origin derivation, the off-train binary fetches revocation
-    from the isolated coordinator.
+  - The lab build's injected static-feed origin points at the isolated
+    coordinator, so it fetches the catalog, admission set, and revocation
+    feed from there.
 - **Catalog activation.** Run the deploy-script preflight
   (`catalog-content-release.sh --preflight`, `verify-directory`) against the
   rehearsal directory. Also do a `deploy-pearl-vps.sh` dry run against a copy
@@ -566,7 +566,7 @@ roughly 6–8 h (L3) and 1 h (L6).
 | Work | Estimate |
 |---|---|
 | G1 parity fix + tests + hardware verify | 2–3 days |
-| G3/G4/G5 CLI fetch, materialize, origin derivation + tests | 4–5 days |
+| G3/G4/G5 CLI fetch, materialize, lab origin injection + tests | 4–5 days |
 | G3/G5 coordinator routes, config, nginx, tests | 2–3 days |
 | G2/G3/G4/G5 catalog-release v4 ledger, members, signing, renewal stage, slot presigner + tests | 4–5 days |
 | G10 journey harness steps, result builders, promote workflows | 5–7 days |

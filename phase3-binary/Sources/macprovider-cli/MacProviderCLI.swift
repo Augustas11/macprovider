@@ -932,6 +932,13 @@ struct ServeCommand: AsyncParsableCommand {
         let loadPath: String
         let loadSHA256: String
         let nativeMTPResolvedArtifactAuthority: NativeMTPResolvedArtifactAuthority?
+        /// The sidecar the serve-path loader reads; nil uses the bundle lookup.
+        var nativeMTPAdmissionSidecarPath: String? = nil
+    }
+
+    struct NativeMTPResolvedAdmission {
+        let authority: NativeMTPResolvedArtifactAuthority
+        let sidecarPath: String?
     }
 
     struct ModelArtifactPreflightOutcome {
@@ -1102,7 +1109,7 @@ struct ServeCommand: AsyncParsableCommand {
                 config: resolved,
                 artifactResolver: artifactResolver
             )
-            let nativeMTPResolvedArtifactAuthority = await resolveNativeMTPArtifactAuthority(
+            let nativeMTPResolvedAdmission = await resolveNativeMTPArtifactAuthority(
                 config: resolved,
                 catalogTrust: catalogTrust,
                 authorityPath: canonicalAuthorityPath,
@@ -1116,7 +1123,8 @@ struct ServeCommand: AsyncParsableCommand {
                     authoritySHA256: actual,
                     loadPath: canonicalLoadPath,
                     loadSHA256: runtimeLoadSHA256,
-                    nativeMTPResolvedArtifactAuthority: nativeMTPResolvedArtifactAuthority
+                    nativeMTPResolvedArtifactAuthority: nativeMTPResolvedAdmission?.authority,
+                    nativeMTPAdmissionSidecarPath: nativeMTPResolvedAdmission?.sidecarPath
                 )
             )
         }
@@ -1138,7 +1146,7 @@ struct ServeCommand: AsyncParsableCommand {
         authorityPath: String,
         authoritySHA256: String,
         staticInputs: AutotuneStaticInputs
-    ) async -> NativeMTPResolvedArtifactAuthority? {
+    ) async -> NativeMTPResolvedAdmission? {
         guard config.nativeMTPMode == .auto,
               let modelKey = config.modelCatalogKey,
               !modelKey.isEmpty,
@@ -1170,19 +1178,36 @@ struct ServeCommand: AsyncParsableCommand {
         let targetURL = URL(fileURLWithPath: authorityPath, isDirectory: true).standardizedFileURL
         let bundleRoot = targetURL.deletingLastPathComponent()
         let bundledSidecar = bundleRoot.appendingPathComponent("native-mtp-admission.json")
-        let sidecarURL = FileManager.default.fileExists(atPath: bundledSidecar.path)
+        let localSidecarURL = FileManager.default.fileExists(atPath: bundledSidecar.path)
             ? bundledSidecar
             : targetURL.appendingPathComponent("native-mtp-admission.json")
-        guard FileManager.default.fileExists(atPath: sidecarURL.path) else {
-            return nil
+        let sidecarPath: String?
+        if FileManager.default.fileExists(atPath: localSidecarURL.path) {
+            // An operator-placed set next to the bundle keeps the bundle lookup.
+            sidecarPath = nil
+        } else {
+            // SPEC-023 §12.5 Stage A: the release's signed admission set,
+            // fetched from the static-feed origin into a private directory.
+            guard let fetched = try? await NativeMTPAdmissionFeed.fetchAndMaterialize(
+                releaseID: catalogTrust.releaseID,
+                signerKeyID: AutotuneStaticInputs.keyID,
+                trustedPublicKeys: staticInputs.trustedPublicKeys,
+                fetch: staticInputs.fetch
+            ) else {
+                return nil
+            }
+            sidecarPath = fetched.path
         }
-        return try? qualified.nativeMTPResolvedArtifactAuthority(
+        guard let authority = try? qualified.nativeMTPResolvedArtifactAuthority(
             releaseID: catalogTrust.releaseID,
             modelKey: modelKey,
             artifactID: identity.artifactID,
             hash: identity.hash,
             preflightTargetURL: targetURL
-        )
+        ) else {
+            return nil
+        }
+        return NativeMTPResolvedAdmission(authority: authority, sidecarPath: sidecarPath)
     }
 
     /// The Build 1 private authority covers the complete upstream revision,
@@ -2639,6 +2664,7 @@ struct ServeCommand: AsyncParsableCommand {
                     continuousBatchingEmergencyOffOverride: emergencyOffOverride,
                     continuousBatchingModeExplicitlyConfigured: resolved.continuousBatchingExplicitlyConfigured,
                     nativeMTPMode: resolved.nativeMTPMode,
+                    nativeMTPAdmissionSidecarPath: startupPreflight.runtimeBinding?.nativeMTPAdmissionSidecarPath,
                     nativeMTPResolvedArtifactAuthority: startupPreflight.runtimeBinding?.nativeMTPResolvedArtifactAuthority,
                     warmSwapEnabled: resolved.enableWarmSwap,
                     swapDrainTimeoutSeconds: resolved.swapDrainTimeoutSeconds,
