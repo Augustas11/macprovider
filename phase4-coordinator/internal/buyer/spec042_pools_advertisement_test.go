@@ -107,6 +107,7 @@ func TestInternalRoutingAdvertisesBuyerAuthorizationProjection(t *testing.T) {
 			Enabled                      bool                `json:"enabled"`
 			AccountPools                 map[string][]string `json:"account_pools"`
 			BuyerAuthorizationGeneration uint64              `json:"buyer_authorization_generation"`
+			RouteablePools               []string            `json:"routeable_pools"`
 		} `json:"pools"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
@@ -123,9 +124,13 @@ func TestInternalRoutingAdvertisesBuyerAuthorizationProjection(t *testing.T) {
 	if len(got.Pools.AccountPools["acct-a"]) != 1 || got.Pools.AccountPools["acct-a"][0] != "abcdefghijklmnopqrstuv" {
 		t.Fatalf("acct-a pools=%v, want only the routeable pool", got.Pools.AccountPools["acct-a"])
 	}
-	// A creator-agreement-expired pool stays projected so its authorized
-	// buyers still reach the coordinator's pool_policy_stale answer.
-	if len(got.Pools.AccountPools["acct-b"]) != 2 || got.Pools.AccountPools["acct-b"][0] != "abcdefghijklmnopqrstuv" || got.Pools.AccountPools["acct-b"][1] != "expiredpoolxxxxxxxxxxx" {
-		t.Fatalf("acct-b pools=%v, want sorted routeable + expired projection", got.Pools.AccountPools["acct-b"])
+	// A creator-agreement-expired pool is not routeable either: it is
+	// omitted, so the gateway answers the generic floored pool_unavailable
+	// locally instead of forwarding to pool_policy_stale (SPEC-043-R007).
+	if len(got.Pools.AccountPools["acct-b"]) != 1 || got.Pools.AccountPools["acct-b"][0] != "abcdefghijklmnopqrstuv" {
+		t.Fatalf("acct-b pools=%v, want only the routeable pool", got.Pools.AccountPools["acct-b"])
+	}
+	if len(got.Pools.RouteablePools) != 1 || got.Pools.RouteablePools[0] != "abcdefghijklmnopqrstuv" {
+		t.Fatalf("routeable_pools=%v, want only the routeable pool", got.Pools.RouteablePools)
 	}
 }

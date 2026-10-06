@@ -1174,15 +1174,18 @@ func (r *Registry) RouteableSnapshots() []RouteableSnapshot {
 // gets only credential scope, then the coordinator still enforces routeability,
 // membership, generation, and freshness on dispatch.
 //
-// A pool whose durable lifecycle is not active (created, paused, draining,
-// retired, or candidate-blocked) is omitted, so the gateway refuses it on the
-// same local lookup path as unknown and unauthorized pools (SPEC-043-R007
-// identical lookup path and timing). Forwarding it instead stacked the
-// coordinator round trip and the coordinator's own rejection floor on top of
-// the gateway's, which made "disabled" measurably slower than "unknown". A
-// creator-agreement-expired pool stays projected: its authorized buyers keep
-// the coordinator's authorized-only pool_policy_stale answer. The coordinator
-// still rejects a pool paused after the gateway's last projection fetch.
+// Every non-routeable pool is omitted: a durable lifecycle that is not active
+// (created, paused, draining, retired, or candidate-blocked) and a
+// creator-agreement-expired pool alike. The gateway then refuses it on the
+// same local lookup path as unknown and unauthorized pools, with the generic
+// floored pool_unavailable (SPEC-043-R007: unknown, unauthorized, disabled
+// and stale pools get an identical response and lookup path). Forwarding it
+// instead stacked the coordinator round trip and the coordinator's own
+// rejection floor on top of the gateway's, which made "disabled" measurably
+// slower than "unknown". The coordinator's authorized-only pool_policy_stale
+// (SPEC-042) is still its own route-time answer for a caller that reaches it
+// directly, and it still rejects a pool that stopped being routeable after
+// the gateway's last projection fetch.
 func (r *Registry) BuyerAuthorizations() (map[string][]string, uint64) {
 	if r == nil {
 		return nil, 0
@@ -1191,7 +1194,7 @@ func (r *Registry) BuyerAuthorizations() (map[string][]string, uint64) {
 	defer r.mu.RUnlock()
 	accounts := make(map[string][]string)
 	for poolID, ps := range r.pools {
-		if !ps.routeable && !ps.routeableExpired {
+		if !ps.routeable {
 			continue
 		}
 		for accountID := range ps.buyers {
@@ -1205,6 +1208,25 @@ func (r *Registry) BuyerAuthorizations() (map[string][]string, uint64) {
 		sort.Strings(accounts[accountID])
 	}
 	return accounts, r.revision + r.ceilingGeneration
+}
+
+// RouteablePoolIDs returns the sorted ids of the pools that are routeable now,
+// the set BuyerAuthorizations projects from. A gateway in static account_pools
+// mode refuses a configured pool outside it locally (SPEC-043-R007).
+func (r *Registry) RouteablePoolIDs() []string {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]string, 0, len(r.pools))
+	for poolID, ps := range r.pools {
+		if ps.routeable {
+			out = append(out, poolID)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Snapshot returns a consistent read of the pool's non-revoked members, its

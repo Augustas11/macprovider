@@ -141,11 +141,18 @@ func (s *Server) resolvePoolSelection(ctx context.Context, headers http.Header, 
 	// protected /internal/routing projection, then performs an equivalent local
 	// map lookup against creator-authored buyer scopes. The request-specific
 	// selector is never sent to the coordinator for authorization lookup.
+	//
+	// In both modes a pool the coordinator does not list as routeable now
+	// (paused, draining, retired, created, candidate-blocked, or
+	// creator-agreement-expired) is refused here, on the same local path and
+	// floored response as an unknown pool, before any coordinator chat or
+	// models call (SPEC-043-R007).
 	if !tp.CoordinatorAuthorizes {
 		if !tp.Authorizes(accountID, selector) {
 			return "", errPoolUnavailable
 		}
-		if md, ok := s.coordinatorRoutingMetadataFresh(ctx); !ok || !md.Pools.Enabled {
+		md, ok := s.coordinatorRoutingMetadataFresh(ctx)
+		if !ok || !md.Pools.Enabled || !md.Pools.Routeable(selector) {
 			return "", errPoolUnavailable
 		}
 		return selector, nil
@@ -155,6 +162,9 @@ func (s *Server) resolvePoolSelection(ctx context.Context, headers http.Header, 
 		return "", errPoolUnavailable
 	}
 	if !tp.Authorizes(accountID, selector) && !md.Pools.Authorizes(accountID, selector) {
+		return "", errPoolUnavailable
+	}
+	if !md.Pools.Routeable(selector) {
 		return "", errPoolUnavailable
 	}
 

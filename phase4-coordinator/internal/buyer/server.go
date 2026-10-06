@@ -1230,6 +1230,9 @@ func (s *Server) handleInternalRouting(w http.ResponseWriter, r *http.Request) {
 		accountPools, generation := s.trustPools.BuyerAuthorizations()
 		pools["account_pools"] = accountPools
 		pools["buyer_authorization_generation"] = generation
+		// SPEC-043-R007: a static account_pools gateway refuses a configured
+		// pool outside this set locally, like an unknown pool.
+		pools["routeable_pools"] = s.trustPools.RouteablePoolIDs()
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{

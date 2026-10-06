@@ -26,7 +26,7 @@ func newEngineHarness(t *testing.T, respEngine string) (http.Handler, *engineCoo
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		switch r.URL.Path {
 		case "/internal/routing":
-			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"pools":{"enabled":true}}`), nil
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"pools":{"enabled":true,"routeable_pools":["abcdefghijklmnopqrstuv"]}}`), nil
 		case "/v1/chat/completions":
 			cap.chatHits++
 			if v := r.Header.Get(engineEmitHeader); v != "" {
