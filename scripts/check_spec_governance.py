@@ -270,6 +270,103 @@ TRUSTED_POOL_EXTERNAL_RUNTIME_CANDIDATE_IDENTITY_KEYS = {
     "runtime_source",
     "fingerprint_salt",
 }
+TRUSTED_POOL_MODEL_JOURNEY_ID = "JOURNEY-TRUSTED-POOL-MODEL"
+TRUSTED_POOL_MODEL_EXECUTION_MODE = TRUSTED_POOL_EXTERNAL_RUNTIME_EXECUTION_MODE
+TRUSTED_POOL_MODEL_ARTIFACT_ID = "redacted-trusted-pool-model"
+# Step ids are the normative list in journeys/JOURNEY-TRUSTED-POOL-MODEL.md.
+TRUSTED_POOL_MODEL_STEP_ID_ORDER = (
+    "step-01-preconditions",
+    "step-02-pricing-bounds-and-owner-authority",
+    "step-03-pool-genesis-with-entries",
+    "step-04-non-creator-members",
+    "step-05-proposal-bundles",
+    "step-06-offer-binding",
+    "step-07-pool-models-disclosure",
+    "step-08-native-entry-paid",
+    "step-09-attested-member-paid",
+    "step-10-refusals",
+    "step-11-window-rotation-no-gap",
+    "step-12-price-change-in-flight",
+    "step-13-current-generation-revocation",
+    "step-14-pause-resume-rollback",
+    "step-15-restart-ordering",
+    "step-16-redaction",
+)
+TRUSTED_POOL_MODEL_STEP_IDS = set(TRUSTED_POOL_MODEL_STEP_ID_ORDER)
+# SPEC-047-R011 is not promotable here: its promotion also needs the
+# coordinator-owned model_admission_probe_evidence.v1 record, which does not
+# exist yet. The journey still records the unmatched-offer bind it observes.
+TRUSTED_POOL_MODEL_PROMOTABLE_REQUIREMENT_IDS = {
+    "SPEC-005-R015",
+    "SPEC-006-R018",
+    "SPEC-022-R013",
+    "SPEC-042-R015",
+    "SPEC-042-R016",
+}
+TRUSTED_POOL_MODEL_FIXED_OBSERVATIONS = {
+    "settlement_mode": "enforce",
+    "enforce_activated": True,
+    "enforce_scope": "pool",
+    "production_coordinator": True,
+    "launch_environment": "candidate",
+    "payout_ready_mutated": False,
+    "raw_prompt_output_redacted": True,
+    "bearer_tokens_redacted": True,
+    "native_entry_served": True,
+    "attested_member_served": True,
+    "global_route_absent": True,
+    "current_generation_revocation": True,
+}
+TRUSTED_POOL_MODEL_OBSERVATION_KEYS = set(TRUSTED_POOL_MODEL_FIXED_OBSERVATIONS) | {
+    "buyer_visible_usage_equals_debit",
+}
+TRUSTED_POOL_MODEL_CANDIDATE_IDENTITY_KEYS = {
+    "coordinator_version",
+    "accepted_id",
+    "native_member_cli_sha256",
+    "gguf_member_cli_sha256",
+    "llama_server_build",
+    "pool_id",
+    "native_pool_model_id",
+    "native_artifact_hash",
+    "gguf_pool_model_id",
+    "gguf_artifact_hash",
+    "manifest_version",
+    "manifest_core_digest",
+    "pricing_bounds_sha256",
+    "fingerprint_salt",
+}
+# SPEC-042 §4: a journey that relies on R015/R016 promotes only after the
+# R013 external-runtime prerequisite (fail-closed set and signed journey) is
+# conformant.
+TRUSTED_POOL_MODEL_PROMOTION_PREREQUISITES = {
+    "SPEC-042-R015": ("SPEC-042-R013",),
+    "SPEC-042-R016": ("SPEC-042-R013",),
+}
+
+
+def trusted_pool_model_prerequisite_error(conformance: Any, requirement_id: str) -> str | None:
+    """The SPEC-042 §4 prerequisite gate for JOURNEY-TRUSTED-POOL-MODEL."""
+    prerequisites = TRUSTED_POOL_MODEL_PROMOTION_PREREQUISITES.get(requirement_id, ())
+    rows = {}
+    if isinstance(conformance, dict) and isinstance(conformance.get("requirements"), list):
+        rows = {row.get("requirement_id"): row for row in conformance["requirements"] if isinstance(row, dict)}
+    missing = [item for item in prerequisites if rows.get(item, {}).get("state") != "conformant"]
+    if missing:
+        return (f"{requirement_id} cannot be promoted from {TRUSTED_POOL_MODEL_JOURNEY_ID} until "
+                f"{', '.join(missing)} is conformant (SPEC-042 §4 prerequisite)")
+    return None
+
+
+TRUSTED_POOL_MODEL_SHA256_IDENTITY_KEYS = (
+    "native_member_cli_sha256",
+    "gguf_member_cli_sha256",
+    "native_artifact_hash",
+    "gguf_artifact_hash",
+    "manifest_core_digest",
+    "pricing_bounds_sha256",
+    "fingerprint_salt",
+)
 LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID = "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
 LOCAL_CONSUMER_ENDPOINT_EVIDENCE_CONTROL_IMPLEMENTATION_MAPPINGS = frozenset(
     {
@@ -2216,6 +2313,147 @@ def _validate_trusted_pool_external_runtime_journey_result(
         )
 
 
+def _revalidate_trusted_pool_model_evidence(
+    root: Path, artifacts: list[Any], location: str, result: ValidationResult, requirement_id: str | None = None
+) -> None:
+    """Promotion-time revalidation: the committed redacted evidence a signed
+    trusted-pool model result names must still pass the journey's full
+    semantic validator (closed schema, cross-record joins, derived result)."""
+    import contextlib
+    import importlib.util
+    import io
+
+    for index, artifact in enumerate(artifacts):
+        if not isinstance(artifact, dict) or not isinstance(artifact.get("source"), str):
+            continue
+        path = root / artifact["source"]
+        if path.is_symlink() or not path.is_file():
+            result.error(f"{location}.signed.artifacts[{index}].source", "redacted evidence must be committed")
+            continue
+        payload = path.read_bytes()
+        if hashlib.sha256(payload).hexdigest() != artifact.get("sha256"):
+            result.error(f"{location}.signed.artifacts[{index}].sha256", "must equal the committed redacted evidence")
+            continue
+        builder_path = Path(__file__).resolve().with_name("build-trusted-pool-model-journey-result.py")
+        spec = importlib.util.spec_from_file_location("trusted_pool_model_builder_for_governance", builder_path)
+        if spec is None or spec.loader is None:
+            result.error(location, "trusted-pool model evidence validator is unavailable")
+            continue
+        stderr = io.StringIO()
+        scripts_dir = str(builder_path.parent)
+        inserted = scripts_dir not in sys.path
+        if inserted:
+            sys.path.insert(0, scripts_dir)
+        try:
+            with contextlib.redirect_stderr(stderr):
+                builder = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(builder)
+                builder.validate_committed_evidence(payload, requirement_id)
+        except SystemExit:
+            result.error(f"{location}.signed.artifacts[{index}]", "redacted evidence fails the journey validator: " + stderr.getvalue().strip())
+        finally:
+            if inserted:
+                sys.path.remove(scripts_dir)
+
+
+def _validate_trusted_pool_model_journey_result(
+    signed: dict[str, Any],
+    requirement_id: str,
+    journeys: list[str],
+    artifacts: list[Any],
+    steps: list[Any],
+    location: str,
+    result: ValidationResult,
+    *,
+    root: Path | None = None,
+) -> None:
+    label = "trusted-pool model"
+    if signed.get("journey_id") != TRUSTED_POOL_MODEL_JOURNEY_ID:
+        result.error(f"{location}.signed.journey_id", f"must equal {TRUSTED_POOL_MODEL_JOURNEY_ID!r}")
+    if TRUSTED_POOL_MODEL_JOURNEY_ID not in journeys:
+        result.error(location, f"{label} requirement journeys must include {TRUSTED_POOL_MODEL_JOURNEY_ID!r}")
+    if signed.get("execution_mode") != TRUSTED_POOL_MODEL_EXECUTION_MODE:
+        result.error(f"{location}.signed.execution_mode", f"must equal {TRUSTED_POOL_MODEL_EXECUTION_MODE!r}")
+    environment = signed.get("environment")
+    if isinstance(environment, dict) and environment.get("class") != TRUSTED_POOL_MODEL_EXECUTION_MODE:
+        result.error(f"{location}.signed.environment.class", f"must equal {TRUSTED_POOL_MODEL_EXECUTION_MODE!r}")
+
+    observations = signed.get("observations")
+    if _expect_object(observations, f"{location}.signed.observations", result):
+        _expect_keys(
+            observations,
+            TRUSTED_POOL_MODEL_OBSERVATION_KEYS,
+            TRUSTED_POOL_MODEL_OBSERVATION_KEYS,
+            f"{location}.signed.observations",
+            result,
+        )
+        for field_name, expected in TRUSTED_POOL_MODEL_FIXED_OBSERVATIONS.items():
+            value = observations.get(field_name)
+            if value != expected or type(value) is not type(expected):
+                result.error(f"{location}.signed.observations.{field_name}", f"must equal {expected!r}")
+        if not isinstance(observations.get("buyer_visible_usage_equals_debit"), bool):
+            result.error(f"{location}.signed.observations.buyer_visible_usage_equals_debit", "must be a boolean")
+
+    identity = signed.get("candidate_identity")
+    if _expect_object(identity, f"{location}.signed.candidate_identity", result):
+        _expect_keys(
+            identity,
+            TRUSTED_POOL_MODEL_CANDIDATE_IDENTITY_KEYS,
+            TRUSTED_POOL_MODEL_CANDIDATE_IDENTITY_KEYS,
+            f"{location}.signed.candidate_identity",
+            result,
+        )
+        for field_name in TRUSTED_POOL_MODEL_SHA256_IDENTITY_KEYS:
+            value = identity.get(field_name)
+            if not isinstance(value, str) or not SHA256_HEX_RE.fullmatch(value):
+                result.error(f"{location}.signed.candidate_identity.{field_name}", "must be a 64-char hex fingerprint")
+        for field_name in ("coordinator_version", "accepted_id", "llama_server_build", "pool_id"):
+            if not isinstance(identity.get(field_name), str) or not identity.get(field_name):
+                result.error(f"{location}.signed.candidate_identity.{field_name}", "must be a non-empty string")
+        pool_id = identity.get("pool_id")
+        for field_name in ("native_pool_model_id", "gguf_pool_model_id"):
+            value = identity.get(field_name)
+            if not isinstance(value, str) or not isinstance(pool_id, str) or not value.startswith(f"pool/{pool_id}/"):
+                result.error(f"{location}.signed.candidate_identity.{field_name}", "must be a pool/<pool_id>/<slug> id of the journey pool")
+        version = identity.get("manifest_version")
+        if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+            result.error(f"{location}.signed.candidate_identity.manifest_version", "must be a positive integer")
+
+    for index, artifact in enumerate(artifacts):
+        if isinstance(artifact, dict) and artifact.get("id") != TRUSTED_POOL_MODEL_ARTIFACT_ID:
+            result.error(f"{location}.signed.artifacts[{index}].id", f"must equal {TRUSTED_POOL_MODEL_ARTIFACT_ID!r}")
+    if len([artifact for artifact in artifacts if isinstance(artifact, dict)]) != 1:
+        result.error(f"{location}.signed.artifacts", f"{label} journey-result must contain exactly one redacted evidence artifact")
+    for index, step in enumerate(steps):
+        if isinstance(step, dict) and step.get("artifacts") != [TRUSTED_POOL_MODEL_ARTIFACT_ID]:
+            result.error(f"{location}.signed.steps[{index}].artifacts", f"must equal [{TRUSTED_POOL_MODEL_ARTIFACT_ID!r}]")
+
+    signed_requirement_ids = signed.get("requirement_ids")
+    if not isinstance(signed_requirement_ids, list) or requirement_id not in signed_requirement_ids:
+        result.error(f"{location}.signed.requirement_ids", f"must include the requirement being promoted: {requirement_id}")
+    unexpected = [
+        item
+        for item in (signed_requirement_ids if isinstance(signed_requirement_ids, list) else [])
+        if not isinstance(item, str) or item not in TRUSTED_POOL_MODEL_PROMOTABLE_REQUIREMENT_IDS
+    ]
+    if unexpected:
+        result.error(
+            f"{location}.signed.requirement_ids",
+            f"{label} journey-result cannot promote " + ", ".join(sorted(str(item) for item in unexpected)),
+        )
+    if requirement_id not in TRUSTED_POOL_MODEL_PROMOTABLE_REQUIREMENT_IDS:
+        result.error(f"{location}.signed.requirement_ids", f"{label} journey-result cannot promote {requirement_id}")
+    _validate_named_journey_steps(steps, TRUSTED_POOL_MODEL_STEP_IDS, location, result, label)
+    ordered_step_ids = [step.get("id") for step in steps if isinstance(step, dict)]
+    if ordered_step_ids != list(TRUSTED_POOL_MODEL_STEP_ID_ORDER):
+        result.error(
+            f"{location}.signed.steps",
+            f"{label} physical steps must be ordered as {list(TRUSTED_POOL_MODEL_STEP_ID_ORDER)}",
+        )
+    if root is not None:
+        _revalidate_trusted_pool_model_evidence(root, artifacts, location, result, requirement_id)
+
+
 def _validate_trusted_pool_layer2_no_overclaim_text(value: Any, location: str, result: ValidationResult) -> None:
     if isinstance(value, str) and TRUSTED_POOL_LAYER2_FORBIDDEN_OVERCLAIM_RE.search(value):
         result.error(location, "must not claim Privacy Pool unlinkability, coordinator blindness, or provider/operator blindness")
@@ -4022,6 +4260,17 @@ def _validate_signed_journey_result(
             steps,
             location,
             result,
+        )
+    if journey_id == TRUSTED_POOL_MODEL_JOURNEY_ID:
+        _validate_trusted_pool_model_journey_result(
+            signed,
+            requirement_id,
+            [item for item in journeys if isinstance(item, str)],
+            artifact_records,
+            steps,
+            location,
+            result,
+            root=root,
         )
     if journey_id == LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID:
         _validate_local_consumer_endpoint_journey_result(
