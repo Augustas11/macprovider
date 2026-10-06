@@ -23,7 +23,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WT="$(cd "$HERE/../../.." && pwd)"
 RIG="$HERE/../1690-m6/rig.sh"
-ASSETS="${ASSETS:-/Users/a1/lab-1690-m6/assets}"
+ASSETS="${ASSETS:-${LAB_ROOT:-/Users/a1/lab-1690-m6}/assets}"
 CMD="${1:-}"; shift || true
 REF="" ENGINES="llamacpp ollama" SAMPLES=24
 while [[ $# -gt 0 ]]; do
@@ -36,8 +36,11 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$REF" ]] || { echo "usage: pearl_shaped.sh run|summary|down --ref <commit> [--engines E] [--samples N]" >&2; exit 2; }
 REF=$(git -C "$WT" rev-parse --verify "$REF^{commit}")
-export LAB="${LAB:-/Users/a1/lab-1690-m6/pearl-${REF:0:9}}"
-case "$LAB" in /Users/a1/lab-1690-m6/*) ;; *) echo "refusing: LAB must be under /Users/a1/lab-1690-m6" >&2; exit 2 ;; esac
+# Canonical LAB strictly beneath LAB_ROOT (no ./.., no symlink), checked
+# before anything is moved, created or written; rig.sh checks it again.
+export LAB_ROOT="${LAB_ROOT:-/Users/a1/lab-1690-m6}"
+LAB=$(python3 "$HERE/../1690-m6/lab_guard.py" --strict "${LAB:-$LAB_ROOT/pearl-${REF:0:9}}") || exit 2
+export LAB
 export LAB_BUILD_REF=$REF
 export LLAMA_DIR="${LLAMA_DIR:-/Users/a1/lab-1816-final/tools/llama-b11149}"
 export METALLIB="${METALLIB:-$ASSETS/mlx.metallib}"
@@ -87,6 +90,9 @@ EOF
   "$RIG" model
   echo "--- build $REF (log: $LAB/logs/build.log)"
   "$RIG" build >"$LAB/logs/build.log" 2>&1 || { tail -40 "$LAB/logs/build.log"; echo "HARNESS ERROR: build failed"; exit 1; }
+  # Every engine runs; any non-PASS case (or harness error) fails the run
+  # after the summary is written.
+  local failed=0
   for e in $ENGINES; do
     pool_of "$e" >/dev/null
     echo "--- $(date -u +%FT%TZ) engine=$e"
@@ -94,6 +100,7 @@ EOF
     if ! ENGINE=$e "$RIG" up >"$LAB/logs/up-$e.log" 2>&1; then
       tail -30 "$LAB/logs/up-$e.log"
       echo "HARNESS ERROR: rig up failed for $e"
+      failed=1
       python3 - "$LAB/pearl/$e.json" "$e" <<'EOF'
 import json, sys
 json.dump([{"engine": sys.argv[2], "case": "rig_up", "expected": "rig up", "status": "ERROR", "actual": "",
@@ -104,11 +111,12 @@ EOF
     # Join, the #1863 startup throughput probe, and the pool refresh.
     sleep "${E2E_SETTLE_JOIN_S:-25}"
     "$RIG" status || true
-    python3 "$HERE/pearl_shaped.py" cases --engine "$e" --samples "$SAMPLES" || echo "HARNESS ERROR: cases exited $? for $e"
+    python3 "$HERE/pearl_shaped.py" cases --engine "$e" --samples "$SAMPLES" || { echo "FAIL: cases exited $? for $e"; failed=1; }
   done
   "$RIG" down >/dev/null 2>&1 || true
-  python3 "$HERE/pearl_shaped.py" summary | tee "$LAB/pearl/summary.md"
-  echo "=== done $(date -u +%FT%TZ) summary: $LAB/pearl/summary.md"
+  python3 "$HERE/pearl_shaped.py" summary | tee "$LAB/pearl/summary.md" || failed=1
+  echo "=== done $(date -u +%FT%TZ) failed=$failed summary: $LAB/pearl/summary.md"
+  return "$failed"
 }
 
 case "$CMD" in

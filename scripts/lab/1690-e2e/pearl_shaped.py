@@ -54,6 +54,8 @@ from datetime import datetime, timezone
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / "1690-m6"))
+import lab_guard  # noqa: E402
 import matrix  # noqa: E402  (same LAB; reuses gather/finality/disconnect_prefix)
 
 LAB = matrix.LAB
@@ -379,6 +381,19 @@ def case_pause_r007(engine, samples):
     if status not in (200, 202):
         result(engine, "pause", "503 pool_unavailable while paused", False, "", error=f"pause admin -> {status} {json.dumps(doc)[:300]}")
         return
+    # The pool is resumed whatever happens while it is paused, so a failure
+    # here never leaves it paused for later engines; a resume failure is
+    # recorded as its own case.
+    try:
+        paused_r007(engine, pid, samples)
+    finally:
+        try:
+            resume_pool(engine, pid)
+        except Exception as err:  # recorded separately from the paused-phase result
+            result(engine, "resume", "200 after resume", False, "", error=f"resume cleanup: {type(err).__name__}: {err}")
+
+
+def paused_r007(engine, pid, samples):
     rec, deadline = None, time.time() + 60
     while time.time() < deadline:
         rec = send(engine, content="Hi ({ref})", stream=False, select=engine)
@@ -421,6 +436,9 @@ def case_pause_r007(engine, samples):
         actual += f"; non-pool_unavailable answers: {bad[:6]}"
     result(engine, "r007_timing", f"{samples}/class shuffled; every answer 503 pool_unavailable; within SPEC-043-R007 bounds",
            within and not bad, actual, rows=[{"samples_json": str(sj), "evaluator_exit": proc.returncode}])
+
+
+def resume_pool(engine, pid):
     status, doc = lifecycle(pid, "resume")
     if status not in (200, 202):
         result(engine, "resume", "200 after resume", False, "", error=f"promote admin -> {status} {json.dumps(doc)[:300]}")
@@ -459,6 +477,8 @@ def cmd_cases(a):
             result(e, name, "", False, "", error=f"{type(err).__name__}: {err}")
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / f"{e}.json").write_text(json.dumps(RESULTS, indent=1, sort_keys=True, default=str))
+    # Any FAIL or ERROR fails the run, after the results are written.
+    return 0 if RESULTS and all(r["status"] == "PASS" for r in RESULTS) else 1
 
 
 def cmd_summary(a):
@@ -481,6 +501,12 @@ def cmd_summary(a):
         for rid, row in zip(r["request_ids"], r["rows"] or [None] * len(r["request_ids"])):
             if row:
                 print(f"- {r['engine']} {r['case']} {rid}: {json.dumps(row, sort_keys=True, default=str)}")
+    failed = [r for r in rows if r["status"] != "PASS"]
+    if not rows or failed:
+        print(f"\nRESULT: FAIL ({len(failed)} non-PASS of {len(rows)} cases)")
+        return 1
+    print(f"\nRESULT: PASS ({len(rows)} cases)")
+    return 0
 
 
 def main():
@@ -491,8 +517,12 @@ def main():
     c.add_argument("--samples", type=int, default=24)
     sub.add_parser("summary")
     a = p.parse_args()
-    {"cases": cmd_cases, "summary": cmd_summary}[a.cmd](a)
+    try:
+        lab_guard.check(str(LAB))
+    except ValueError as err:
+        sys.exit(f"refusing: {err}")
+    return {"cases": cmd_cases, "summary": cmd_summary}[a.cmd](a)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

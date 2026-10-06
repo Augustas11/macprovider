@@ -11,7 +11,14 @@ import pathlib
 import secrets
 import sys
 
-LAB = pathlib.Path(os.environ.get("LAB", "/Users/a1/lab-1690-m6"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import lab_guard  # noqa: E402
+
+try:
+    # Canonical and within LAB_ROOT before any key or config is written.
+    LAB = pathlib.Path(lab_guard.check(os.environ.get("LAB", lab_guard.DEFAULT_ROOT)))
+except ValueError as err:
+    sys.exit(f"refusing: {err}")
 PORTS = {"coord_buyer": 19101, "coord_provider": 19102, "gateway": 19110, "serve": 19120, "llama": 19130}
 PROVIDER_ID = "lab-1690-m6-provider"
 BUYER_ACCOUNT = "acct-lab-1690-buyer"
