@@ -30,7 +30,7 @@ func TestNativeMTPCanaryBankRequiresValidDetachedSignature(t *testing.T) {
 		t.Fatal(err)
 	}
 	sig := nativeMTPCanaryDetachedSignature{
-		Alg:       "Ed25519",
+		Alg:       "ed25519",
 		KeyID:     binding.SignerKeyID,
 		Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(priv, raw)),
 	}
@@ -49,21 +49,33 @@ func TestNativeMTPCanaryBankRequiresValidDetachedSignature(t *testing.T) {
 		t.Fatalf("valid signed bank: %v", err)
 	}
 
-	if err := os.WriteFile(sigPath, []byte(`{"alg":"Ed25519","key_id":"`+binding.SignerKeyID+`","signature":"`+sig.Signature+`","extra":"nope"}`), 0o600); err != nil {
+	if err := os.WriteFile(sigPath, []byte(`{"alg":"ed25519","key_id":"`+binding.SignerKeyID+`","signature":"`+sig.Signature+`","extra":"nope"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := loadVerifiedNativeMTPChallengeBank(cfg); err == nil || !strings.Contains(err.Error(), "wrong field count") {
 		t.Fatalf("unknown sidecar field err=%v", err)
 	}
-	if err := os.WriteFile(sigPath, []byte(`{"alg":"Ed25519","alg":"Ed25519","key_id":"`+binding.SignerKeyID+`","signature":"`+sig.Signature+`"}`), 0o600); err != nil {
+	if err := os.WriteFile(sigPath, []byte(`{"alg":"ed25519","alg":"ed25519","key_id":"`+binding.SignerKeyID+`","signature":"`+sig.Signature+`"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := loadVerifiedNativeMTPChallengeBank(cfg); err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Fatalf("duplicate sidecar field err=%v", err)
 	}
 
+	// Only the static-feed sidecar spelling is accepted (SPEC-023 §3.5).
 	if err := writeNativeMTPSignatureSidecar(sigPath, nativeMTPCanaryDetachedSignature{
 		Alg:       "Ed25519",
+		KeyID:     binding.SignerKeyID,
+		Signature: sig.Signature,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadVerifiedNativeMTPChallengeBank(cfg); err == nil || !strings.Contains(err.Error(), "key binding mismatch") {
+		t.Fatalf("non-static-feed alg err=%v", err)
+	}
+
+	if err := writeNativeMTPSignatureSidecar(sigPath, nativeMTPCanaryDetachedSignature{
+		Alg:       "ed25519",
 		KeyID:     binding.SignerKeyID,
 		Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(priv, append([]byte("tamper"), raw...))),
 	}); err != nil {

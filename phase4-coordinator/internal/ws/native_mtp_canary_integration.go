@@ -48,7 +48,9 @@ func loadVerifiedNativeMTPChallengeBank(cfg config.NativeMTPCanaryConfig) (Nativ
 	if err != nil {
 		return NativeMTPChallengeBank{}, fmt.Errorf("parse challenge bank signature: %w", err)
 	}
-	if sig.Alg != "Ed25519" || sig.KeyID == "" || sig.KeyID != cfg.SignerKeyID {
+	// The bank is a SPEC-023 static release feed: its detached signature is
+	// the static-feed sidecar the release signer writes, `alg` "ed25519".
+	if sig.Alg != "ed25519" || sig.KeyID == "" || sig.KeyID != cfg.SignerKeyID {
 		return NativeMTPChallengeBank{}, fmt.Errorf("challenge bank signature key binding mismatch")
 	}
 	keyring, err := cfg.DecodePublicKeyring()
