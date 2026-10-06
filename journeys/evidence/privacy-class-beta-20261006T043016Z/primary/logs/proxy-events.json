@@ -1,0 +1,1516 @@
+{
+ "events": [
+  {
+   "at_unix": 1791261035,
+   "body_len": 1871,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261035,
+   "body_len": 3187,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/chat/completions",
+   "request_envelope_sha256": "1072e20e7ce854d9cf618a7e91dcec6ea689a414876dfbb9d634cfd5bb2d4b84",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "29411313845007d3dccf7cd547a0562e9cc114f7643453637769eaf8bbf2c93f",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_satisfied",
+    "X-Macprovider-Privacy-Assurance": "device_bound_self_attested_beta",
+    "X-Macprovider-Privacy-Class": "operator_constrained_beta_v1",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required",
+    "X-Macprovider-Response-Encryption": "buyer_provider_aead_v1"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": {
+    "assurance": "device_bound_self_attested_beta",
+    "class": "operator_constrained_beta_v1",
+    "does_not_protect": [
+     "provider_runtime_reads_plaintext_to_infer",
+     "operator_running_a_modified_runtime_binary",
+     "request_metadata_visible_to_relays",
+     "confidential_compute_or_hardware_enclave_execution",
+     "end_to_end_encryption_excluding_the_provider",
+     "pool_scoped_requests"
+    ],
+    "posture_verified_at_unix": 1791261031,
+    "protects": [
+     "request_content_from_gateway_and_coordinator",
+     "response_content_from_gateway_and_coordinator",
+     "debugger_attach_to_approved_signed_runtime",
+     "core_dumps_of_approved_signed_runtime",
+     "prompt_and_completion_in_provider_logs_traces_receipts_and_telemetry",
+     "prompt_and_completion_in_provider_disk_and_conversation_caches",
+     "plaintext_proxy_or_subprocess_runtime_hop",
+     "dev_debug_unsigned_or_unapproved_builds_refused_by_routing",
+     "sip_disabled_hosts_refused_by_routing"
+    ],
+    "residual_risks": [
+     "modified_binary_can_forge_posture_se_key_device_bound_not_code_bound",
+     "root_sip_bypass_kernel_or_firmware_compromise",
+     "physical_or_hardware_attack",
+     "gpu_and_unified_memory_residue",
+     "encrypted_swap_and_hibernation_images",
+     "compromise_of_the_live_runtime_process",
+     "malicious_signed_release_or_supply_chain",
+     "crash_report_register_and_stack_residue",
+     "secure_boot_level_not_evaluated",
+     "immutable_prompt_strings_not_zeroized",
+     "relays_observe_sizes_timing_and_token_counts"
+    ],
+    "scope": "request_and_response_content_hidden_from_relays; provider_runtime_reads_plaintext; ordinary_operator_access_paths_constrained_on_approved_signed_runtime; posture_self_attested_device_bound_not_code_bound"
+   }
+  },
+  {
+   "at_unix": 1791261097,
+   "body_len": 1871,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261098,
+   "body_len": 3187,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/chat/completions",
+   "request_envelope_sha256": "37be8476a4dcfc5556608d9aaf39c16468f1b014616d14b38aaad962ddde1561",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "76860ac24f67791da61804da98e8fb97b4f2a21d7631dc2f41d0f98b29e827ea",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_satisfied",
+    "X-Macprovider-Privacy-Assurance": "device_bound_self_attested_beta",
+    "X-Macprovider-Privacy-Class": "operator_constrained_beta_v1",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required",
+    "X-Macprovider-Response-Encryption": "buyer_provider_aead_v1"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": {
+    "assurance": "device_bound_self_attested_beta",
+    "class": "operator_constrained_beta_v1",
+    "does_not_protect": [
+     "provider_runtime_reads_plaintext_to_infer",
+     "operator_running_a_modified_runtime_binary",
+     "request_metadata_visible_to_relays",
+     "confidential_compute_or_hardware_enclave_execution",
+     "end_to_end_encryption_excluding_the_provider",
+     "pool_scoped_requests"
+    ],
+    "posture_verified_at_unix": 1791261084,
+    "protects": [
+     "request_content_from_gateway_and_coordinator",
+     "response_content_from_gateway_and_coordinator",
+     "debugger_attach_to_approved_signed_runtime",
+     "core_dumps_of_approved_signed_runtime",
+     "prompt_and_completion_in_provider_logs_traces_receipts_and_telemetry",
+     "prompt_and_completion_in_provider_disk_and_conversation_caches",
+     "plaintext_proxy_or_subprocess_runtime_hop",
+     "dev_debug_unsigned_or_unapproved_builds_refused_by_routing",
+     "sip_disabled_hosts_refused_by_routing"
+    ],
+    "residual_risks": [
+     "modified_binary_can_forge_posture_se_key_device_bound_not_code_bound",
+     "root_sip_bypass_kernel_or_firmware_compromise",
+     "physical_or_hardware_attack",
+     "gpu_and_unified_memory_residue",
+     "encrypted_swap_and_hibernation_images",
+     "compromise_of_the_live_runtime_process",
+     "malicious_signed_release_or_supply_chain",
+     "crash_report_register_and_stack_residue",
+     "secure_boot_level_not_evaluated",
+     "immutable_prompt_strings_not_zeroized",
+     "relays_observe_sizes_timing_and_token_counts"
+    ],
+    "scope": "request_and_response_content_hidden_from_relays; provider_runtime_reads_plaintext; ordinary_operator_access_paths_constrained_on_approved_signed_runtime; posture_self_attested_device_bound_not_code_bound"
+   }
+  },
+  {
+   "at_unix": 1791261103,
+   "body_len": 1870,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261103,
+   "body_len": 13189,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/chat/completions",
+   "request_envelope_sha256": "f268ef6d33e06d65a32459ecdb2b0416eccb31c1be0c3a0c4a44dab673071fcc",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "59214bee0413affa16814aa15a774914284deb2262ba29c3f911af0897e19b03",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_satisfied",
+    "X-Macprovider-Gateway-Firstbyte-Unix-Ms": "1791261103282",
+    "X-Macprovider-Privacy-Assurance": "device_bound_self_attested_beta",
+    "X-Macprovider-Privacy-Class": "operator_constrained_beta_v1",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required",
+    "X-Macprovider-Response-Encryption": "buyer_provider_aead_v1"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": {
+    "assurance": "device_bound_self_attested_beta",
+    "class": "operator_constrained_beta_v1",
+    "does_not_protect": [
+     "provider_runtime_reads_plaintext_to_infer",
+     "operator_running_a_modified_runtime_binary",
+     "request_metadata_visible_to_relays",
+     "confidential_compute_or_hardware_enclave_execution",
+     "end_to_end_encryption_excluding_the_provider",
+     "pool_scoped_requests"
+    ],
+    "posture_verified_at_unix": 1791261099,
+    "protects": [
+     "request_content_from_gateway_and_coordinator",
+     "response_content_from_gateway_and_coordinator",
+     "debugger_attach_to_approved_signed_runtime",
+     "core_dumps_of_approved_signed_runtime",
+     "prompt_and_completion_in_provider_logs_traces_receipts_and_telemetry",
+     "prompt_and_completion_in_provider_disk_and_conversation_caches",
+     "plaintext_proxy_or_subprocess_runtime_hop",
+     "dev_debug_unsigned_or_unapproved_builds_refused_by_routing",
+     "sip_disabled_hosts_refused_by_routing"
+    ],
+    "residual_risks": [
+     "modified_binary_can_forge_posture_se_key_device_bound_not_code_bound",
+     "root_sip_bypass_kernel_or_firmware_compromise",
+     "physical_or_hardware_attack",
+     "gpu_and_unified_memory_residue",
+     "encrypted_swap_and_hibernation_images",
+     "compromise_of_the_live_runtime_process",
+     "malicious_signed_release_or_supply_chain",
+     "crash_report_register_and_stack_residue",
+     "secure_boot_level_not_evaluated",
+     "immutable_prompt_strings_not_zeroized",
+     "relays_observe_sizes_timing_and_token_counts"
+    ],
+    "scope": "request_and_response_content_hidden_from_relays; provider_runtime_reads_plaintext; ordinary_operator_access_paths_constrained_on_approved_signed_runtime; posture_self_attested_device_bound_not_code_bound"
+   }
+  },
+  {
+   "at_unix": 1791261103,
+   "body_len": 1871,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261103,
+   "body_len": 3208,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/chat/completions",
+   "request_envelope_sha256": "864dab48f5aaba61c496776696a5d3c03bb4bb968e86ae51b818e73596e1e40e",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "c5d5268c64c4d3c561352b0632833efbc590d9e28cb6de092fa4ed80bfb7d886",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_satisfied",
+    "X-Macprovider-Privacy-Assurance": "device_bound_self_attested_beta",
+    "X-Macprovider-Privacy-Class": "operator_constrained_beta_v1",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required",
+    "X-Macprovider-Response-Encryption": "buyer_provider_aead_v1"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": {
+    "assurance": "device_bound_self_attested_beta",
+    "class": "operator_constrained_beta_v1",
+    "does_not_protect": [
+     "provider_runtime_reads_plaintext_to_infer",
+     "operator_running_a_modified_runtime_binary",
+     "request_metadata_visible_to_relays",
+     "confidential_compute_or_hardware_enclave_execution",
+     "end_to_end_encryption_excluding_the_provider",
+     "pool_scoped_requests"
+    ],
+    "posture_verified_at_unix": 1791261099,
+    "protects": [
+     "request_content_from_gateway_and_coordinator",
+     "response_content_from_gateway_and_coordinator",
+     "debugger_attach_to_approved_signed_runtime",
+     "core_dumps_of_approved_signed_runtime",
+     "prompt_and_completion_in_provider_logs_traces_receipts_and_telemetry",
+     "prompt_and_completion_in_provider_disk_and_conversation_caches",
+     "plaintext_proxy_or_subprocess_runtime_hop",
+     "dev_debug_unsigned_or_unapproved_builds_refused_by_routing",
+     "sip_disabled_hosts_refused_by_routing"
+    ],
+    "residual_risks": [
+     "modified_binary_can_forge_posture_se_key_device_bound_not_code_bound",
+     "root_sip_bypass_kernel_or_firmware_compromise",
+     "physical_or_hardware_attack",
+     "gpu_and_unified_memory_residue",
+     "encrypted_swap_and_hibernation_images",
+     "compromise_of_the_live_runtime_process",
+     "malicious_signed_release_or_supply_chain",
+     "crash_report_register_and_stack_residue",
+     "secure_boot_level_not_evaluated",
+     "immutable_prompt_strings_not_zeroized",
+     "relays_observe_sizes_timing_and_token_counts"
+    ],
+    "scope": "request_and_response_content_hidden_from_relays; provider_runtime_reads_plaintext; ordinary_operator_access_paths_constrained_on_approved_signed_runtime; posture_self_attested_device_bound_not_code_bound"
+   }
+  },
+  {
+   "at_unix": 1791261229,
+   "body_len": 1871,
+   "error_code": "",
+   "method": "POST",
+   "mode": "strip",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261229,
+   "body_len": 606,
+   "error_code": "privacy_class_downgrade_rejected",
+   "method": "POST",
+   "mode": "strip",
+   "mutated": false,
+   "path": "/v1/chat/completions",
+   "request_envelope_sha256": "7ed0dbc3e2038680049cec06994bea5cb7a299356ee88955187326f22c531e2e",
+   "request_privacy_header": "",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Relay-Blind-Retry-Action": "new_reservation_and_envelope",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 400,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261229,
+   "body_len": 1229,
+   "error_code": "",
+   "method": "POST",
+   "mode": "inject",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261229,
+   "body_len": 606,
+   "error_code": "privacy_class_downgrade_rejected",
+   "method": "POST",
+   "mode": "inject",
+   "mutated": false,
+   "path": "/v1/chat/completions",
+   "request_envelope_sha256": "03a589ab871a5a9fb8e798f0179a7693411ab8a175a6fdda2c86bd136da72b5a",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Relay-Blind-Retry-Action": "new_reservation_and_envelope",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 400,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261229,
+   "body_len": 612,
+   "error_code": "privacy_class_downgrade_rejected",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/chat/completions",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 400,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261229,
+   "body_len": 605,
+   "error_code": "privacy_class_downgrade_rejected",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 400,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261230,
+   "body_len": 605,
+   "error_code": "privacy_class_downgrade_rejected",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 400,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261230,
+   "body_len": 1871,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261230,
+   "body_len": 3181,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/chat/completions",
+   "request_envelope_sha256": "06f62ee0fbcc5c6c28f5a969b8102ca600d88ce304ac1267a12a274d70894835",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "a425314747737755a6eece1e689e62e6807dd4de1d537e0ffcc9e48880c178d3",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_satisfied",
+    "X-Macprovider-Privacy-Assurance": "device_bound_self_attested_beta",
+    "X-Macprovider-Privacy-Class": "operator_constrained_beta_v1",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required",
+    "X-Macprovider-Response-Encryption": "buyer_provider_aead_v1"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": {
+    "assurance": "device_bound_self_attested_beta",
+    "class": "operator_constrained_beta_v1",
+    "does_not_protect": [
+     "provider_runtime_reads_plaintext_to_infer",
+     "operator_running_a_modified_runtime_binary",
+     "request_metadata_visible_to_relays",
+     "confidential_compute_or_hardware_enclave_execution",
+     "end_to_end_encryption_excluding_the_provider",
+     "pool_scoped_requests"
+    ],
+    "posture_verified_at_unix": 1791261219,
+    "protects": [
+     "request_content_from_gateway_and_coordinator",
+     "response_content_from_gateway_and_coordinator",
+     "debugger_attach_to_approved_signed_runtime",
+     "core_dumps_of_approved_signed_runtime",
+     "prompt_and_completion_in_provider_logs_traces_receipts_and_telemetry",
+     "prompt_and_completion_in_provider_disk_and_conversation_caches",
+     "plaintext_proxy_or_subprocess_runtime_hop",
+     "dev_debug_unsigned_or_unapproved_builds_refused_by_routing",
+     "sip_disabled_hosts_refused_by_routing"
+    ],
+    "residual_risks": [
+     "modified_binary_can_forge_posture_se_key_device_bound_not_code_bound",
+     "root_sip_bypass_kernel_or_firmware_compromise",
+     "physical_or_hardware_attack",
+     "gpu_and_unified_memory_residue",
+     "encrypted_swap_and_hibernation_images",
+     "compromise_of_the_live_runtime_process",
+     "malicious_signed_release_or_supply_chain",
+     "crash_report_register_and_stack_residue",
+     "secure_boot_level_not_evaluated",
+     "immutable_prompt_strings_not_zeroized",
+     "relays_observe_sizes_timing_and_token_counts"
+    ],
+    "scope": "request_and_response_content_hidden_from_relays; provider_runtime_reads_plaintext; ordinary_operator_access_paths_constrained_on_approved_signed_runtime; posture_self_attested_device_bound_not_code_bound"
+   }
+  },
+  {
+   "at_unix": 1791261230,
+   "body_len": 606,
+   "error_code": "relay_blind_replay",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/chat/completions",
+   "request_envelope_sha256": "06f62ee0fbcc5c6c28f5a969b8102ca600d88ce304ac1267a12a274d70894835",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 409,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261230,
+   "body_len": 1871,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261230,
+   "body_len": 1870,
+   "error_code": "",
+   "method": "POST",
+   "mode": "tamper",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261231,
+   "body_len": 4650,
+   "error_code": "",
+   "method": "POST",
+   "mode": "tamper",
+   "mutated": true,
+   "path": "/v1/chat/completions",
+   "request_envelope_sha256": "5dd29e6b8ea48ccda8570f79bb398368419d90004b3babcee00b845cb4c8aa8b",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "74d11329fd0dacad9a7299e610127c68e23448ae2f3175ca459c77151e9eedb3",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_satisfied",
+    "X-Macprovider-Gateway-Firstbyte-Unix-Ms": "1791261230950",
+    "X-Macprovider-Privacy-Assurance": "device_bound_self_attested_beta",
+    "X-Macprovider-Privacy-Class": "operator_constrained_beta_v1",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required",
+    "X-Macprovider-Response-Encryption": "buyer_provider_aead_v1"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": {
+    "assurance": "device_bound_self_attested_beta",
+    "class": "operator_constrained_beta_v1",
+    "does_not_protect": [
+     "provider_runtime_reads_plaintext_to_infer",
+     "operator_running_a_modified_runtime_binary",
+     "request_metadata_visible_to_relays",
+     "confidential_compute_or_hardware_enclave_execution",
+     "end_to_end_encryption_excluding_the_provider",
+     "pool_scoped_requests"
+    ],
+    "posture_verified_at_unix": 1791261219,
+    "protects": [
+     "request_content_from_gateway_and_coordinator",
+     "response_content_from_gateway_and_coordinator",
+     "debugger_attach_to_approved_signed_runtime",
+     "core_dumps_of_approved_signed_runtime",
+     "prompt_and_completion_in_provider_logs_traces_receipts_and_telemetry",
+     "prompt_and_completion_in_provider_disk_and_conversation_caches",
+     "plaintext_proxy_or_subprocess_runtime_hop",
+     "dev_debug_unsigned_or_unapproved_builds_refused_by_routing",
+     "sip_disabled_hosts_refused_by_routing"
+    ],
+    "residual_risks": [
+     "modified_binary_can_forge_posture_se_key_device_bound_not_code_bound",
+     "root_sip_bypass_kernel_or_firmware_compromise",
+     "physical_or_hardware_attack",
+     "gpu_and_unified_memory_residue",
+     "encrypted_swap_and_hibernation_images",
+     "compromise_of_the_live_runtime_process",
+     "malicious_signed_release_or_supply_chain",
+     "crash_report_register_and_stack_residue",
+     "secure_boot_level_not_evaluated",
+     "immutable_prompt_strings_not_zeroized",
+     "relays_observe_sizes_timing_and_token_counts"
+    ],
+    "scope": "request_and_response_content_hidden_from_relays; provider_runtime_reads_plaintext; ordinary_operator_access_paths_constrained_on_approved_signed_runtime; posture_self_attested_device_bound_not_code_bound"
+   }
+  },
+  {
+   "at_unix": 1791261231,
+   "body_len": 1870,
+   "error_code": "",
+   "method": "POST",
+   "mode": "dropfinal",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261231,
+   "body_len": 4380,
+   "error_code": "",
+   "method": "POST",
+   "mode": "dropfinal",
+   "mutated": true,
+   "path": "/v1/chat/completions",
+   "request_envelope_sha256": "024fd4a587603bf9d65493501769d1dcde2dcb2d12ddb0b1ca217b4b386334b5",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "eb34d73c583405e409dc4ba7585513c0a6f271ad78dc76bb1095f769613f9675",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_satisfied",
+    "X-Macprovider-Gateway-Firstbyte-Unix-Ms": "1791261231475",
+    "X-Macprovider-Privacy-Assurance": "device_bound_self_attested_beta",
+    "X-Macprovider-Privacy-Class": "operator_constrained_beta_v1",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required",
+    "X-Macprovider-Response-Encryption": "buyer_provider_aead_v1"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": {
+    "assurance": "device_bound_self_attested_beta",
+    "class": "operator_constrained_beta_v1",
+    "does_not_protect": [
+     "provider_runtime_reads_plaintext_to_infer",
+     "operator_running_a_modified_runtime_binary",
+     "request_metadata_visible_to_relays",
+     "confidential_compute_or_hardware_enclave_execution",
+     "end_to_end_encryption_excluding_the_provider",
+     "pool_scoped_requests"
+    ],
+    "posture_verified_at_unix": 1791261219,
+    "protects": [
+     "request_content_from_gateway_and_coordinator",
+     "response_content_from_gateway_and_coordinator",
+     "debugger_attach_to_approved_signed_runtime",
+     "core_dumps_of_approved_signed_runtime",
+     "prompt_and_completion_in_provider_logs_traces_receipts_and_telemetry",
+     "prompt_and_completion_in_provider_disk_and_conversation_caches",
+     "plaintext_proxy_or_subprocess_runtime_hop",
+     "dev_debug_unsigned_or_unapproved_builds_refused_by_routing",
+     "sip_disabled_hosts_refused_by_routing"
+    ],
+    "residual_risks": [
+     "modified_binary_can_forge_posture_se_key_device_bound_not_code_bound",
+     "root_sip_bypass_kernel_or_firmware_compromise",
+     "physical_or_hardware_attack",
+     "gpu_and_unified_memory_residue",
+     "encrypted_swap_and_hibernation_images",
+     "compromise_of_the_live_runtime_process",
+     "malicious_signed_release_or_supply_chain",
+     "crash_report_register_and_stack_residue",
+     "secure_boot_level_not_evaluated",
+     "immutable_prompt_strings_not_zeroized",
+     "relays_observe_sizes_timing_and_token_counts"
+    ],
+    "scope": "request_and_response_content_hidden_from_relays; provider_runtime_reads_plaintext; ordinary_operator_access_paths_constrained_on_approved_signed_runtime; posture_self_attested_device_bound_not_code_bound"
+   }
+  },
+  {
+   "at_unix": 1791261271,
+   "body_len": 564,
+   "error_code": "privacy_class_unavailable",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 503,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261281,
+   "body_len": 1871,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261281,
+   "body_len": 3187,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/chat/completions",
+   "request_envelope_sha256": "0f1bda6f4fa3dc0a4cae852fe67ba99913c0906e455411d06ab400aa1d022827",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "cb3f43348cd57a4fca5bb84d527039cfc042348dc3806dda2360e7c951bfb64a",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_satisfied",
+    "X-Macprovider-Privacy-Assurance": "device_bound_self_attested_beta",
+    "X-Macprovider-Privacy-Class": "operator_constrained_beta_v1",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required",
+    "X-Macprovider-Response-Encryption": "buyer_provider_aead_v1"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": {
+    "assurance": "device_bound_self_attested_beta",
+    "class": "operator_constrained_beta_v1",
+    "does_not_protect": [
+     "provider_runtime_reads_plaintext_to_infer",
+     "operator_running_a_modified_runtime_binary",
+     "request_metadata_visible_to_relays",
+     "confidential_compute_or_hardware_enclave_execution",
+     "end_to_end_encryption_excluding_the_provider",
+     "pool_scoped_requests"
+    ],
+    "posture_verified_at_unix": 1791261279,
+    "protects": [
+     "request_content_from_gateway_and_coordinator",
+     "response_content_from_gateway_and_coordinator",
+     "debugger_attach_to_approved_signed_runtime",
+     "core_dumps_of_approved_signed_runtime",
+     "prompt_and_completion_in_provider_logs_traces_receipts_and_telemetry",
+     "prompt_and_completion_in_provider_disk_and_conversation_caches",
+     "plaintext_proxy_or_subprocess_runtime_hop",
+     "dev_debug_unsigned_or_unapproved_builds_refused_by_routing",
+     "sip_disabled_hosts_refused_by_routing"
+    ],
+    "residual_risks": [
+     "modified_binary_can_forge_posture_se_key_device_bound_not_code_bound",
+     "root_sip_bypass_kernel_or_firmware_compromise",
+     "physical_or_hardware_attack",
+     "gpu_and_unified_memory_residue",
+     "encrypted_swap_and_hibernation_images",
+     "compromise_of_the_live_runtime_process",
+     "malicious_signed_release_or_supply_chain",
+     "crash_report_register_and_stack_residue",
+     "secure_boot_level_not_evaluated",
+     "immutable_prompt_strings_not_zeroized",
+     "relays_observe_sizes_timing_and_token_counts"
+    ],
+    "scope": "request_and_response_content_hidden_from_relays; provider_runtime_reads_plaintext; ordinary_operator_access_paths_constrained_on_approved_signed_runtime; posture_self_attested_device_bound_not_code_bound"
+   }
+  },
+  {
+   "at_unix": 1791261317,
+   "body_len": 564,
+   "error_code": "privacy_class_unavailable",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 503,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261357,
+   "body_len": 564,
+   "error_code": "privacy_class_unavailable",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 503,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261369,
+   "body_len": 1871,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261369,
+   "body_len": 3185,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/chat/completions",
+   "request_envelope_sha256": "d0092b92b94424156bdfd4cd165a1948cb6357eeb6702b9321402a85a389698b",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "552f75dda2c079af15acfb36b39a4474ac27221632e6225dd1f635a361920c40",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_satisfied",
+    "X-Macprovider-Privacy-Assurance": "device_bound_self_attested_beta",
+    "X-Macprovider-Privacy-Class": "operator_constrained_beta_v1",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required",
+    "X-Macprovider-Response-Encryption": "buyer_provider_aead_v1"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": {
+    "assurance": "device_bound_self_attested_beta",
+    "class": "operator_constrained_beta_v1",
+    "does_not_protect": [
+     "provider_runtime_reads_plaintext_to_infer",
+     "operator_running_a_modified_runtime_binary",
+     "request_metadata_visible_to_relays",
+     "confidential_compute_or_hardware_enclave_execution",
+     "end_to_end_encryption_excluding_the_provider",
+     "pool_scoped_requests"
+    ],
+    "posture_verified_at_unix": 1791261365,
+    "protects": [
+     "request_content_from_gateway_and_coordinator",
+     "response_content_from_gateway_and_coordinator",
+     "debugger_attach_to_approved_signed_runtime",
+     "core_dumps_of_approved_signed_runtime",
+     "prompt_and_completion_in_provider_logs_traces_receipts_and_telemetry",
+     "prompt_and_completion_in_provider_disk_and_conversation_caches",
+     "plaintext_proxy_or_subprocess_runtime_hop",
+     "dev_debug_unsigned_or_unapproved_builds_refused_by_routing",
+     "sip_disabled_hosts_refused_by_routing"
+    ],
+    "residual_risks": [
+     "modified_binary_can_forge_posture_se_key_device_bound_not_code_bound",
+     "root_sip_bypass_kernel_or_firmware_compromise",
+     "physical_or_hardware_attack",
+     "gpu_and_unified_memory_residue",
+     "encrypted_swap_and_hibernation_images",
+     "compromise_of_the_live_runtime_process",
+     "malicious_signed_release_or_supply_chain",
+     "crash_report_register_and_stack_residue",
+     "secure_boot_level_not_evaluated",
+     "immutable_prompt_strings_not_zeroized",
+     "relays_observe_sizes_timing_and_token_counts"
+    ],
+    "scope": "request_and_response_content_hidden_from_relays; provider_runtime_reads_plaintext; ordinary_operator_access_paths_constrained_on_approved_signed_runtime; posture_self_attested_device_bound_not_code_bound"
+   }
+  },
+  {
+   "at_unix": 1791261373,
+   "body_len": 1871,
+   "error_code": "",
+   "method": "POST",
+   "mode": "delay:15",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261388,
+   "body_len": 558,
+   "error_code": "privacy_class_disabled",
+   "method": "POST",
+   "mode": "delay:15",
+   "mutated": false,
+   "path": "/v1/chat/completions",
+   "request_envelope_sha256": "7a1ce6282b5ffe59c0171ed32db3842bfc7b77d68b0e4a2251778feb405bc31c",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Relay-Blind-Retry-Action": "new_reservation_and_envelope",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 503,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261388,
+   "body_len": 558,
+   "error_code": "privacy_class_disabled",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 503,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261388,
+   "body_len": 1229,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261388,
+   "body_len": 883,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/chat/completions",
+   "request_envelope_sha256": "8c32083c24ea3941683493f28115f9f351f60598c4481a8307de4fd310009fda",
+   "request_privacy_header": "",
+   "response_body_sha256": "39c297e51d3b3286c8729bbe8d274790e04a9415d2ad0cd3b965298ef6a6c62f",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_satisfied",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261388,
+   "body_len": 482,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/chat/completions",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "",
+   "response_body_sha256": "0948f5d281921cd6eba847e7d5f19499107d94dfb090a018ae4e0b41e4969b39",
+   "response_macprovider_headers": {
+    "X-Macprovider-Engine": "mlx_cache"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261393,
+   "body_len": 1871,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261393,
+   "body_len": 3187,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/chat/completions",
+   "request_envelope_sha256": "0be6643e1de112da2cf800d13798a2318007566928de67d11534ea85a1c248ef",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "992754e42d8882e2489b4f031dafba40d60c17344159c0f303dcb6d141aeef08",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_satisfied",
+    "X-Macprovider-Privacy-Assurance": "device_bound_self_attested_beta",
+    "X-Macprovider-Privacy-Class": "operator_constrained_beta_v1",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required",
+    "X-Macprovider-Response-Encryption": "buyer_provider_aead_v1"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": {
+    "assurance": "device_bound_self_attested_beta",
+    "class": "operator_constrained_beta_v1",
+    "does_not_protect": [
+     "provider_runtime_reads_plaintext_to_infer",
+     "operator_running_a_modified_runtime_binary",
+     "request_metadata_visible_to_relays",
+     "confidential_compute_or_hardware_enclave_execution",
+     "end_to_end_encryption_excluding_the_provider",
+     "pool_scoped_requests"
+    ],
+    "posture_verified_at_unix": 1791261391,
+    "protects": [
+     "request_content_from_gateway_and_coordinator",
+     "response_content_from_gateway_and_coordinator",
+     "debugger_attach_to_approved_signed_runtime",
+     "core_dumps_of_approved_signed_runtime",
+     "prompt_and_completion_in_provider_logs_traces_receipts_and_telemetry",
+     "prompt_and_completion_in_provider_disk_and_conversation_caches",
+     "plaintext_proxy_or_subprocess_runtime_hop",
+     "dev_debug_unsigned_or_unapproved_builds_refused_by_routing",
+     "sip_disabled_hosts_refused_by_routing"
+    ],
+    "residual_risks": [
+     "modified_binary_can_forge_posture_se_key_device_bound_not_code_bound",
+     "root_sip_bypass_kernel_or_firmware_compromise",
+     "physical_or_hardware_attack",
+     "gpu_and_unified_memory_residue",
+     "encrypted_swap_and_hibernation_images",
+     "compromise_of_the_live_runtime_process",
+     "malicious_signed_release_or_supply_chain",
+     "crash_report_register_and_stack_residue",
+     "secure_boot_level_not_evaluated",
+     "immutable_prompt_strings_not_zeroized",
+     "relays_observe_sizes_timing_and_token_counts"
+    ],
+    "scope": "request_and_response_content_hidden_from_relays; provider_runtime_reads_plaintext; ordinary_operator_access_paths_constrained_on_approved_signed_runtime; posture_self_attested_device_bound_not_code_bound"
+   }
+  },
+  {
+   "at_unix": 1791261402,
+   "body_len": 1870,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261402,
+   "body_len": 14627,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/chat/completions",
+   "request_envelope_sha256": "7618866e0285dfa6dd1ce739eff72bed63efd0b737e44d84e90dab47c4d6ab7e",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "0ac5ab9f4f1b3ebda36c3c98a53db73fb1d437932fd745acce4d7dfe9f767acb",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_satisfied",
+    "X-Macprovider-Gateway-Firstbyte-Unix-Ms": "1791261402289",
+    "X-Macprovider-Privacy-Assurance": "device_bound_self_attested_beta",
+    "X-Macprovider-Privacy-Class": "operator_constrained_beta_v1",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required",
+    "X-Macprovider-Response-Encryption": "buyer_provider_aead_v1"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": {
+    "assurance": "device_bound_self_attested_beta",
+    "class": "operator_constrained_beta_v1",
+    "does_not_protect": [
+     "provider_runtime_reads_plaintext_to_infer",
+     "operator_running_a_modified_runtime_binary",
+     "request_metadata_visible_to_relays",
+     "confidential_compute_or_hardware_enclave_execution",
+     "end_to_end_encryption_excluding_the_provider",
+     "pool_scoped_requests"
+    ],
+    "posture_verified_at_unix": 1791261391,
+    "protects": [
+     "request_content_from_gateway_and_coordinator",
+     "response_content_from_gateway_and_coordinator",
+     "debugger_attach_to_approved_signed_runtime",
+     "core_dumps_of_approved_signed_runtime",
+     "prompt_and_completion_in_provider_logs_traces_receipts_and_telemetry",
+     "prompt_and_completion_in_provider_disk_and_conversation_caches",
+     "plaintext_proxy_or_subprocess_runtime_hop",
+     "dev_debug_unsigned_or_unapproved_builds_refused_by_routing",
+     "sip_disabled_hosts_refused_by_routing"
+    ],
+    "residual_risks": [
+     "modified_binary_can_forge_posture_se_key_device_bound_not_code_bound",
+     "root_sip_bypass_kernel_or_firmware_compromise",
+     "physical_or_hardware_attack",
+     "gpu_and_unified_memory_residue",
+     "encrypted_swap_and_hibernation_images",
+     "compromise_of_the_live_runtime_process",
+     "malicious_signed_release_or_supply_chain",
+     "crash_report_register_and_stack_residue",
+     "secure_boot_level_not_evaluated",
+     "immutable_prompt_strings_not_zeroized",
+     "relays_observe_sizes_timing_and_token_counts"
+    ],
+    "scope": "request_and_response_content_hidden_from_relays; provider_runtime_reads_plaintext; ordinary_operator_access_paths_constrained_on_approved_signed_runtime; posture_self_attested_device_bound_not_code_bound"
+   }
+  },
+  {
+   "at_unix": 1791261402,
+   "body_len": 1871,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261402,
+   "body_len": 3220,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/chat/completions",
+   "request_envelope_sha256": "a1255173c469f2b6cdcf8784ac65881b2dfe936a04d7b042369d31bc3a6b5faa",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "e4cb32071d37cf3633d714e14469c76b2a17ab1c93cfe8f1e8f4a9344ccc3db1",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_satisfied",
+    "X-Macprovider-Privacy-Assurance": "device_bound_self_attested_beta",
+    "X-Macprovider-Privacy-Class": "operator_constrained_beta_v1",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required",
+    "X-Macprovider-Response-Encryption": "buyer_provider_aead_v1"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": {
+    "assurance": "device_bound_self_attested_beta",
+    "class": "operator_constrained_beta_v1",
+    "does_not_protect": [
+     "provider_runtime_reads_plaintext_to_infer",
+     "operator_running_a_modified_runtime_binary",
+     "request_metadata_visible_to_relays",
+     "confidential_compute_or_hardware_enclave_execution",
+     "end_to_end_encryption_excluding_the_provider",
+     "pool_scoped_requests"
+    ],
+    "posture_verified_at_unix": 1791261391,
+    "protects": [
+     "request_content_from_gateway_and_coordinator",
+     "response_content_from_gateway_and_coordinator",
+     "debugger_attach_to_approved_signed_runtime",
+     "core_dumps_of_approved_signed_runtime",
+     "prompt_and_completion_in_provider_logs_traces_receipts_and_telemetry",
+     "prompt_and_completion_in_provider_disk_and_conversation_caches",
+     "plaintext_proxy_or_subprocess_runtime_hop",
+     "dev_debug_unsigned_or_unapproved_builds_refused_by_routing",
+     "sip_disabled_hosts_refused_by_routing"
+    ],
+    "residual_risks": [
+     "modified_binary_can_forge_posture_se_key_device_bound_not_code_bound",
+     "root_sip_bypass_kernel_or_firmware_compromise",
+     "physical_or_hardware_attack",
+     "gpu_and_unified_memory_residue",
+     "encrypted_swap_and_hibernation_images",
+     "compromise_of_the_live_runtime_process",
+     "malicious_signed_release_or_supply_chain",
+     "crash_report_register_and_stack_residue",
+     "secure_boot_level_not_evaluated",
+     "immutable_prompt_strings_not_zeroized",
+     "relays_observe_sizes_timing_and_token_counts"
+    ],
+    "scope": "request_and_response_content_hidden_from_relays; provider_runtime_reads_plaintext; ordinary_operator_access_paths_constrained_on_approved_signed_runtime; posture_self_attested_device_bound_not_code_bound"
+   }
+  },
+  {
+   "at_unix": 1791261402,
+   "body_len": 1229,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261403,
+   "body_len": 884,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/chat/completions",
+   "request_envelope_sha256": "bd5efad23760bb1e766916e8be8bbf68d7145977c2542d2bb3be42c678082f4e",
+   "request_privacy_header": "",
+   "response_body_sha256": "cdc3bc7bc6c61125445bccd8e2b76e0608bd4e7434811ce30ea4fb0cca23b838",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_satisfied",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261509,
+   "body_len": 564,
+   "error_code": "privacy_class_unavailable",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 503,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261521,
+   "body_len": 603,
+   "error_code": "relay_blind_provider_unsupported",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 503,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261565,
+   "body_len": 1871,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261566,
+   "body_len": 597,
+   "error_code": "relay_blind_committed_failed",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/chat/completions",
+   "request_envelope_sha256": "1ba2b9785860e2a3dd01976d3cbf1752b7bff64fc3800059dd7a542173528330",
+   "request_privacy_header": "operator_constrained_beta_v1",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_satisfied",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 500,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261594,
+   "body_len": 1229,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261594,
+   "body_len": 883,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/chat/completions",
+   "request_envelope_sha256": "fa821239cd97a6d5cb10ff83b6c36754eebaefd328bf88d7fa488930fb297c13",
+   "request_privacy_header": "",
+   "response_body_sha256": "93031b635fcd92f82c30943e72ca2a813092d952295fa0b3a5593a870b8c4602",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_satisfied",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261594,
+   "body_len": 1229,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261594,
+   "body_len": 884,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/chat/completions",
+   "request_envelope_sha256": "8f2272287cb1679fdb804c736860bf4e4b46fc82d2e78d749d518532d8ba86c0",
+   "request_privacy_header": "",
+   "response_body_sha256": "5872a4373abecf5ef360f5c4b5954156196e587be4e482871fc0b6edd904b36a",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_satisfied",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261594,
+   "body_len": 1229,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/relay-blind/route-reservations",
+   "request_envelope_sha256": "",
+   "request_privacy_header": "",
+   "response_body_sha256": "",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_unavailable",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  },
+  {
+   "at_unix": 1791261594,
+   "body_len": 883,
+   "error_code": "",
+   "method": "POST",
+   "mode": "observe",
+   "mutated": false,
+   "path": "/v1/chat/completions",
+   "request_envelope_sha256": "7c191ed6f74830ef447dd6eb10ee02dfe4a09a179ea190bbe5b37cc3fabfeb82",
+   "request_privacy_header": "",
+   "response_body_sha256": "c9517930c52f67b0580d26d6568c7c4c5f89dd4d3235de232006af61b7e8a7b8",
+   "response_macprovider_headers": {
+    "X-Macprovider-Effective-Privacy-Outcome": "relay_blind_satisfied",
+    "X-Macprovider-Request-Encryption-Scope": "request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays",
+    "X-Macprovider-Requested-Privacy-Mode": "relay_blind_required"
+   },
+   "status": 200,
+   "usage_macprovider_privacy": null
+  }
+ ],
+ "schema_version": "macprovider.privacy-class-beta-primary.v1"
+}

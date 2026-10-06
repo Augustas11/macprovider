@@ -1,0 +1,19 @@
+Executable=<lab-home>/journey-1839/neg/bins/adhoc/macprovider-cli
+Identifier=macprovider-cli-555549443474ea5437e332d19c5fc0fb03147ce9
+Format=Mach-O thin (arm64)
+CodeDirectory v=20500 size=135257 flags=0x10002(adhoc,runtime) hashes=4220+2 location=embedded
+Hash type=sha256 size=32
+CandidateCDHash sha256=3ef5856619a4f2aca56d92416b6e994f67f8b52c
+CandidateCDHashFull sha256=3ef5856619a4f2aca56d92416b6e994f67f8b52cbe2872a535ac53109c47d458
+Hash choices=sha256
+CMSDigest=3ef5856619a4f2aca56d92416b6e994f67f8b52cbe2872a535ac53109c47d458
+CMSDigestType=2
+CDHash=3ef5856619a4f2aca56d92416b6e994f67f8b52c
+Signature=adhoc
+Info.plist=not bound
+TeamIdentifier=not set
+Runtime Version=15.5.0
+Sealed Resources=none
+Internal requirements count=0 size=12
+Total signatures=1
+Chosen signature=1

@@ -1,0 +1,1 @@
+FATAL privacy_class_hardening_failed reasons=sip_disabled,missing_cs_hard,missing_cs_kill

@@ -1,0 +1,14 @@
+{
+  "asset": "macprovider-cli-v1.8.215-darwin-arm64.tar.gz",
+  "binary_sha256": "d8327fdbbc8f64690015debec2774c22f3d1573669a1b2239cf5ebe8fee37c83",
+  "binary_version": "1.8.215",
+  "member": "macprovider-cli",
+  "signing_identifier": "live.malibu.provider.cli",
+  "slices": [
+    {
+      "arch": "arm64",
+      "code_cdhash": "3214ffcc6b706507f9a268cfb400da5c74287ff6"
+    }
+  ],
+  "team_id": "YF7XNRJUG4"
+}

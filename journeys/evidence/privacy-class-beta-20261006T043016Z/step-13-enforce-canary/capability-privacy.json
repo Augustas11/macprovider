@@ -1,0 +1,1 @@
+{"expected_capability": true, "pass": true, "provider_id": "journey-1839-privacy", "sessions": [{"hash_status": "hash_verified", "receipt_key_pinned": true, "relay_blind_settlement_receipt_v1": true, "routing_eligible": true, "state": "ready"}]}

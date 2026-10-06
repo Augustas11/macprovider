@@ -1,0 +1,155 @@
+{
+  "schema_version": "macprovider.privacy-class-beta-evidence.v1",
+  "journey_id": "JOURNEY-PRIVACY-CLASS-BETA",
+  "requirement_ids": [
+    "SPEC-049-R001",
+    "SPEC-049-R002",
+    "SPEC-049-R003",
+    "SPEC-049-R004",
+    "SPEC-049-R005",
+    "SPEC-049-R006",
+    "SPEC-049-R007",
+    "SPEC-049-R008",
+    "SPEC-049-R009",
+    "SPEC-049-R010",
+    "SPEC-049-R011",
+    "SPEC-049-R012",
+    "SPEC-049-R013",
+    "SPEC-049-R014",
+    "SPEC-049-R015",
+    "SPEC-049-R016",
+    "SPEC-049-R017",
+    "SPEC-049-R018",
+    "SPEC-049-R019",
+    "SPEC-049-R020",
+    "SPEC-049-R021",
+    "SPEC-049-R022"
+  ],
+  "captured_at": "2026-10-06T04:30:16Z",
+  "expires_at": "2027-01-04T04:30:16Z",
+  "release_tag": "v1.8.215",
+  "binary_sha256": "d8327fdbbc8f64690015debec2774c22f3d1573669a1b2239cf5ebe8fee37c83",
+  "code_cdhash": "3214ffcc6b706507f9a268cfb400da5c74287ff6",
+  "team_id": "YF7XNRJUG4",
+  "signing_identifier": "live.malibu.provider.cli",
+  "steps": [
+    {
+      "step_id": "step-01-bind-signed-release",
+      "status": "pass",
+      "artifact_sha256": "6acaa6928e97da87451d71bdb2f9a6931cff07cc653a03777062504bd25b1c07"
+    },
+    {
+      "step_id": "step-02-privacy-mode-start",
+      "status": "pass",
+      "artifact_sha256": "b67b526ac4f821513e9ca3aad0a7932271bd5ef1007cd38d1e208d916d47281e"
+    },
+    {
+      "step_id": "step-03-debugger-attach-refused",
+      "status": "pass",
+      "artifact_sha256": "b2d6fb4a25239965586b9bf03f6bc40831c6963b74252ff6877809c2c5df547c"
+    },
+    {
+      "step_id": "step-04-core-dump-and-env-refused",
+      "status": "pass",
+      "artifact_sha256": "b68f709a45e10cb1a3624cfc4f5ce61ba70ef7bcad7d37c9c4c8107a2cc66da3"
+    },
+    {
+      "step_id": "step-05-unsigned-build-refused",
+      "status": "pass",
+      "artifact_sha256": "141ab79488e92e466b6981f953304e78e76b3ced1945b67a48dd1d2620342f24"
+    },
+    {
+      "step_id": "step-06-sip-off-refused",
+      "status": "pass",
+      "artifact_sha256": "742536e028ce39a70ab91b95e6192b8874f8d365a1dd271b86b6a51b48f8d1a8"
+    },
+    {
+      "step_id": "step-07-canary-stream",
+      "status": "pass",
+      "artifact_sha256": "384be59f2bb308418c1980917824ed69867337d8add0f12003c8ab1fea16a449"
+    },
+    {
+      "step_id": "step-08-canary-nonstream",
+      "status": "pass",
+      "artifact_sha256": "3c1c50558a403cb05ffa1c4a3fd436455c971079435c9a47149b887e92c212c3"
+    },
+    {
+      "step_id": "step-09-redaction-sweep",
+      "status": "pass",
+      "artifact_sha256": "ab38b9dd6ebfe576a44fdbc3613d930a096818f50930239e10ac359e5e89e2a8"
+    },
+    {
+      "step_id": "step-10-downgrade-negatives",
+      "status": "pass",
+      "artifact_sha256": "2cee465334d9edb8489b1f90342e2ee5bf0f5bfc7073ebedbece99e955ed5416"
+    },
+    {
+      "step_id": "step-11-stale-posture-and-quarantine",
+      "status": "pass",
+      "artifact_sha256": "0c367446ddc91ec90dd3d996872eae8dad13759c4925907c6d18c07921138501"
+    },
+    {
+      "step_id": "step-12-kill-switch",
+      "status": "pass",
+      "artifact_sha256": "333e8de3be4798ecbcf5fcc340797b0e5143a716fb1eb57b1e2e297400a6d8d0"
+    },
+    {
+      "step_id": "step-13-enforce-canary",
+      "status": "pass",
+      "artifact_sha256": "511e9fdbb65641b93edc45e2460d9d450bf3f6f7253240c03004f4b27490c3d2"
+    },
+    {
+      "step_id": "step-14-no-capability-provider-excluded",
+      "status": "pass",
+      "artifact_sha256": "5d6af20dd8f0ef0d6915066d8a4ee2006732298637001363b4d966e04d6e3ee9"
+    },
+    {
+      "step_id": "step-15-tampered-receipt-quarantined",
+      "status": "pass",
+      "artifact_sha256": "9f0d23cc315f192cdb5cff6fdb3cbe2687bf0b1e7500951c511c453af0fed3e3"
+    },
+    {
+      "step_id": "step-16-redaction-review",
+      "status": "pass",
+      "artifact_sha256": "f86247a27be72586748bd53989673391575bd19570a521d412d9b79b6a009325"
+    }
+  ],
+  "observations": {
+    "hardening_applied_before_network_verified": true,
+    "privacy_key_memory_only_verified": true,
+    "posture_verified_by_coordinator": true,
+    "debugger_attach_refused_verified": true,
+    "core_dumps_disabled_verified": true,
+    "diagnostic_env_refused_verified": true,
+    "dyld_env_inert_verified": true,
+    "unsigned_or_resigned_build_refused_verified": true,
+    "sip_off_host_refused_verified": true,
+    "stream_frames_decrypted_and_verified": true,
+    "nonstream_frames_decrypted_and_verified": true,
+    "disclosure_strings_exact_verified": true,
+    "canary_absent_from_all_artifacts_verified": true,
+    "downgrade_attempts_rejected_verified": true,
+    "tampered_or_truncated_response_rejected_verified": true,
+    "stale_posture_ineligible_verified": true,
+    "quarantine_durable_across_restart_verified": true,
+    "kill_switch_blocks_all_phases_verified": true,
+    "relay_blind_and_plaintext_unaffected_verified": true,
+    "exactly_one_content_free_settlement_receipt_verified": true,
+    "enforce_snapshot_before_dispatch_verified": true,
+    "relay_blind_settled_verdict_closed_verified": true,
+    "relay_blind_credit_payable_verified": true,
+    "buyer_debit_equals_provider_credit_usage_verified": true,
+    "verified_count_delta_zero_verified": true,
+    "no_capability_provider_excluded_verified": true,
+    "tampered_or_missing_receipt_quarantined_and_refunded_verified": true,
+    "plaintext_observed_at_relay": false,
+    "failover_or_alternate_provider_observed": false,
+    "silent_downgrade_observed": false,
+    "plaintext_derived_receipt_or_telemetry_emitted_for_privacy_request": false,
+    "relay_blind_request_reported_as_verified": false,
+    "privacy_key_written_to_disk": false,
+    "unreleased_local_binary_connected_to_live_coordinator": false,
+    "secret_or_canary_persisted": false
+  },
+  "redaction_manifest_sha256": "550c541377fd801f0d33c3f934637c48ec46a22b3b4fc02186597017bf30c26b"
+}

@@ -1,0 +1,229 @@
+{
+ "lines": [
+  {
+   "line": 2,
+   "text": "{\"config_path\":\"<lab-home>\\/journey-1839\\/provider\\/privacy\\/config.yaml\",\"event\":\"provider_token_legacy_source_removed_after_admission\"}"
+  },
+  {
+   "line": 23,
+   "text": "FATAL coordinator recovery watchdog: heartbeat liveness exceeded tolerance: 40s since last success >= 15s"
+  },
+  {
+   "line": 44,
+   "text": "malibu-cli config"
+  },
+  {
+   "line": 45,
+   "text": "  port: 19320"
+  },
+  {
+   "line": 46,
+   "text": "  model: meta-llama/llama-3.2-3b-instruct"
+  },
+  {
+   "line": 50,
+   "text": "  coordinator_url: ws://127.0.0.1:19302/ws/provider"
+  },
+  {
+   "line": 51,
+   "text": "  provider_id: journey-1839-privacy"
+  },
+  {
+   "line": 53,
+   "text": "  config: <lab-home>/journey-1839/provider/privacy/config.yaml"
+  },
+  {
+   "line": 54,
+   "text": "  log_level: info"
+  },
+  {
+   "line": 55,
+   "text": "  log_format: json"
+  },
+  {
+   "line": 67,
+   "text": "  privacy_class_beta: true"
+  },
+  {
+   "line": 78,
+   "text": "Coordinator tier: provisional"
+  },
+  {
+   "line": 79,
+   "text": "Coordinator tier: provisional"
+  },
+  {
+   "line": 80,
+   "text": "Coordinator tier: provisional"
+  },
+  {
+   "line": 88,
+   "text": "{\"event\":\"receipt_issued\",\"model_id\":\"mlx-community\\/Llama-3.2-3B-Instruct-4bit\",\"provider_id\":\"journey-1839-privacy\",\"request_id\":\"03075863-6c58-418d-961c-8014e922e841\",\"tokens_out\":2,\"ttft_ms\":50,\"u"
+  },
+  {
+   "line": 89,
+   "text": "{\"cached_prompt_tokens\":0,\"completion_tokens\":2,\"event\":\"kv_cache_request_completed\",\"finish_reason\":\"stop\",\"kv_cache_bytes_reused\":0,\"kv_cache_reuse_ratio\":0,\"model_id\":\"mlx-community\\/Llama-3.2-3B-I"
+  },
+  {
+   "line": 109,
+   "text": "malibu-cli config"
+  },
+  {
+   "line": 110,
+   "text": "  port: 19320"
+  },
+  {
+   "line": 111,
+   "text": "  model: meta-llama/llama-3.2-3b-instruct"
+  },
+  {
+   "line": 115,
+   "text": "  coordinator_url: ws://127.0.0.1:19302/ws/provider"
+  },
+  {
+   "line": 116,
+   "text": "  provider_id: journey-1839-privacy"
+  },
+  {
+   "line": 118,
+   "text": "  config: <lab-home>/journey-1839/provider/privacy/config.yaml"
+  },
+  {
+   "line": 119,
+   "text": "  log_level: info"
+  },
+  {
+   "line": 120,
+   "text": "  log_format: json"
+  },
+  {
+   "line": 132,
+   "text": "  privacy_class_beta: true"
+  },
+  {
+   "line": 143,
+   "text": "Coordinator tier: provisional"
+  },
+  {
+   "line": 147,
+   "text": "malibu-cli config"
+  },
+  {
+   "line": 148,
+   "text": "  port: 19320"
+  },
+  {
+   "line": 149,
+   "text": "  model: meta-llama/llama-3.2-3b-instruct"
+  },
+  {
+   "line": 153,
+   "text": "  coordinator_url: ws://127.0.0.1:19302/ws/provider"
+  },
+  {
+   "line": 154,
+   "text": "  provider_id: journey-1839-privacy"
+  },
+  {
+   "line": 156,
+   "text": "  config: <lab-home>/journey-1839/provider/privacy/config.yaml"
+  },
+  {
+   "line": 157,
+   "text": "  log_level: info"
+  },
+  {
+   "line": 158,
+   "text": "  log_format: json"
+  },
+  {
+   "line": 170,
+   "text": "  privacy_class_beta: true"
+  },
+  {
+   "line": 181,
+   "text": "Coordinator tier: provisional"
+  },
+  {
+   "line": 188,
+   "text": "malibu-cli config"
+  },
+  {
+   "line": 189,
+   "text": "  port: 19320"
+  },
+  {
+   "line": 190,
+   "text": "  model: meta-llama/llama-3.2-3b-instruct"
+  },
+  {
+   "line": 194,
+   "text": "  coordinator_url: ws://127.0.0.1:19303/ws/provider"
+  },
+  {
+   "line": 195,
+   "text": "  provider_id: journey-1839-privacy"
+  },
+  {
+   "line": 197,
+   "text": "  config: <lab-home>/journey-1839/provider/privacy/config-wsproxy.yaml"
+  },
+  {
+   "line": 198,
+   "text": "  log_level: info"
+  },
+  {
+   "line": 199,
+   "text": "  log_format: json"
+  },
+  {
+   "line": 211,
+   "text": "  privacy_class_beta: true"
+  },
+  {
+   "line": 222,
+   "text": "Coordinator tier: provisional"
+  },
+  {
+   "line": 295,
+   "text": "malibu-cli config"
+  },
+  {
+   "line": 296,
+   "text": "  port: 19320"
+  },
+  {
+   "line": 297,
+   "text": "  model: meta-llama/llama-3.2-3b-instruct"
+  },
+  {
+   "line": 301,
+   "text": "  coordinator_url: ws://127.0.0.1:19302/ws/provider"
+  },
+  {
+   "line": 302,
+   "text": "  provider_id: journey-1839-privacy"
+  },
+  {
+   "line": 304,
+   "text": "  config: <lab-home>/journey-1839/provider/privacy/config.yaml"
+  },
+  {
+   "line": 305,
+   "text": "  log_level: info"
+  },
+  {
+   "line": 306,
+   "text": "  log_format: json"
+  },
+  {
+   "line": 318,
+   "text": "  privacy_class_beta: true"
+  },
+  {
+   "line": 329,
+   "text": "Coordinator tier: provisional"
+  }
+ ],
+ "schema_version": "macprovider.privacy-class-beta-primary.v1"
+}

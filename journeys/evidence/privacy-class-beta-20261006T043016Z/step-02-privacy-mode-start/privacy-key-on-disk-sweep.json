@@ -1,0 +1,33 @@
+{
+  "match_count": 0,
+  "matches": [],
+  "needle_classes": [
+    "privacy_record_value"
+  ],
+  "roots": [
+    {
+      "files_scanned": 17,
+      "present": true,
+      "root": "<lab-home>/journey-1839/state/privacy",
+      "unreadable": 0
+    },
+    {
+      "files_scanned": 10,
+      "present": true,
+      "root": "<lab-home>/journey-1839/home/privacy",
+      "unreadable": 0
+    },
+    {
+      "files_scanned": 0,
+      "present": true,
+      "root": "<lab-home>/journey-1839/tmp/privacy",
+      "unreadable": 0
+    },
+    {
+      "files_scanned": 8,
+      "present": true,
+      "root": "<lab-home>/journey-1839/provider/privacy",
+      "unreadable": 0
+    }
+  ]
+}

@@ -1,0 +1,2 @@
+(lldb) process attach --pid 96156
+error: attach failed: this is a non-interactive debug session, cannot get permission to debug processes.

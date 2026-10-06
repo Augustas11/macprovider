@@ -1,0 +1,16 @@
+{
+ "columns": [
+  "campaign",
+  "provider_id",
+  "bonus_kind",
+  "issuer_id",
+  "verification_post_hash",
+  "amount",
+  "granted_at"
+ ],
+ "dropped_columns": [],
+ "row_count": 0,
+ "rows": [],
+ "table": "referral_social_grants",
+ "truncated": false
+}

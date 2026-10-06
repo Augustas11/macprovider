@@ -1,0 +1,1 @@
+provider watchdog exit after freeze (expected; supervisor restart emulated)

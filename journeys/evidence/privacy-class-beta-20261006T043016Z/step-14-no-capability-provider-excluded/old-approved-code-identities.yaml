@@ -1,0 +1,6 @@
+# provider_code_identity from signed pearl-release.json v1.8.214 (macprovider-cli-v1.8.214-darwin-arm64.tar.gz)
+- team_id: YF7XNRJUG4
+  signing_identifier: live.malibu.provider.cli
+  code_cdhash: 9f94cbc0a102439b77838011d9512b7a676bdcf6
+  binary_version: "1.8.214"
+  expires_at: "2026-10-20T04:37:52Z"

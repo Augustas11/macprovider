@@ -1,0 +1,13 @@
+{
+ "columns": [
+  "provider_id",
+  "reason",
+  "quarantined_at_unix",
+  "expires_at_unix"
+ ],
+ "dropped_columns": [],
+ "row_count": 0,
+ "rows": [],
+ "table": "privacy_class_quarantine",
+ "truncated": false
+}

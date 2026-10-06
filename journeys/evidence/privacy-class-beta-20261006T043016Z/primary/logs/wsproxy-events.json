@@ -1,0 +1,36 @@
+{
+ "events": [
+  {
+   "at_unix": 1791261540,
+   "conn": "1791261540-59327",
+   "event": "connected",
+   "status_line": "HTTP/1.1 101 Switching Protocols"
+  },
+  {
+   "at_unix": 1791261541,
+   "conn": "1791261541-59329",
+   "event": "connected",
+   "status_line": "HTTP/1.1 200 OK"
+  },
+  {
+   "at_unix": 1791261556,
+   "conn": "1791261541-59329",
+   "event": "closed"
+  },
+  {
+   "at_unix": 1791261566,
+   "conn": "1791261540-59327",
+   "encrypted": true,
+   "event": "mutated",
+   "frame_type": "inference_response_end",
+   "mode": "corrupt-end",
+   "request_id": "828194ae-a489-4ec6-838b-0015342691b2"
+  },
+  {
+   "at_unix": 1791261566,
+   "conn": "1791261540-59327",
+   "event": "closed"
+  }
+ ],
+ "schema_version": "macprovider.privacy-class-beta-primary.v1"
+}

@@ -1,0 +1,5 @@
+<lab-home>/journey-1839/bin/macprovider-cli: accepted
+source=Notarized Developer ID
+origin=Developer ID Application: Superposition Technologies Pte. Ltd. (YF7XNRJUG4)
+<lab-home>/journey-1839/bin/macprovider-cli: rejected (the code is valid but does not seem to be an app)
+origin=Developer ID Application: Superposition Technologies Pte. Ltd. (YF7XNRJUG4)
