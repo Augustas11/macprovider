@@ -255,6 +255,8 @@ class Rehearsal:
             "MACPROVIDER_LAB_STATIC_FEED_KEY_ID": self.summary["key_id"],
             "MACPROVIDER_LAB_STATIC_FEED_PUBLIC_KEY": self.summary["public_key_base64"],
             "MACPROVIDER_LAB_NATIVE_MTP_SOURCE_COMMIT": self.summary["facts"]["source_commit"],
+            # Per-request CB lease and native decode-path trace lines.
+            "MACPROVIDER_CB_TRACE": "1",
         })
         return env
 
@@ -407,6 +409,23 @@ class Rehearsal:
                                             if "continuous_batching" in ln.lower()][-10:],
         }
 
+    def coordinator_canary(self, wait_s: int = 0) -> dict:
+        """The provider's native-MTP canary state from the operator /poolz,
+        polled until a canary outcome is recorded or `wait_s` elapses."""
+        end = time.time() + wait_s
+        while True:
+            status, body = http_json("GET", self.ports["coordinator_ws_port"], "/poolz",
+                                     headers={"Authorization": f"Bearer {self.secrets['operator_key']}"}, timeout=10)
+            providers = body.get("pool") if isinstance(body, dict) else []
+            mine = next((p for p in providers or [] if isinstance(p, dict)
+                         and p.get("provider_id") == self.provider_id), {})
+            canary = mine.get("native_mtp_canary") or {}
+            state = {"http_status": status, "model_id": mine.get("model_id"), "model_hash": mine.get("model_hash"),
+                     "native_mtp_canary": canary}
+            if canary.get("last_outcome") or time.time() >= end:
+                return state
+            time.sleep(10)
+
     def phase_native(self) -> None:
         up = self.start_provider("native", "auto")
         phase = {"provider": up}
@@ -418,6 +437,7 @@ class Rehearsal:
             phase["status_after"] = native_status(self.ports["serve_port"])
             after = self.db_snapshot()
             phase["accounting_delta"] = self.delta(before, after)
+            phase["coordinator_canary"] = self.coordinator_canary(wait_s=180)
         else:
             phase["delivery"] = self.delivery_evidence("native")
         self.result["phases"]["native"] = phase
@@ -491,7 +511,12 @@ class Rehearsal:
                                                        for m in delivery.get("materialized_members", [])),
             "delivery.drafter_fetched": delivery.get("drafter_fetched_into_lab_store") is True,
             "delivery.native_admitted": nm.get("enabled") is True,
-            "delivery.tuple_offered": delivery.get("tuple_offer_received") is True,
+            "delivery.tuple_offered": ((native.get("coordinator_canary") or {}).get("native_mtp_canary") or {})
+            .get("offered") is True,
+            "delivery.canary_passed": ((native.get("coordinator_canary") or {}).get("native_mtp_canary") or {})
+            .get("last_outcome") in ("pass", "passed"),
+            "serving.native_rows_served": ((native.get("status_after") or {}).get("native_mtp") or {})
+            .get("requests_since_reset", 0) > 0,
             "serving.all_200": bool(reqs_n) and all(r["status"] == 200 for r in reqs_n),
             "g8.ordinary_all_200": bool(reqs_o) and all(r["status"] == 200 for r in reqs_o),
             "g8.greedy_content_identical": bool(reqs_n) and [r["content_sha256"] for r in reqs_n]
