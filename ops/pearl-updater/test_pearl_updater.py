@@ -6145,10 +6145,12 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.validate_transaction = mock.Mock()
         self.updater._restore_catalog = mock.Mock()
         self.updater._prove_rollback_serving = mock.Mock()
+        self.updater.sqlite_quick_check = mock.Mock(return_value=(True, ["ok"]))
         for path in tx.rglob("*"):
             if path.is_file():
                 path.chmod(0o600)
         self.updater.restore_transaction()
+        self.updater.sqlite_quick_check.assert_called_once_with(tx / "databases" / "0.sqlite")
         self.updater._prove_rollback_serving.assert_called_once_with(tx)
         for name in ("coordinator", "gateway", "coordinator.yaml", "gateway.yaml"):
             self.assertEqual((install / name).read_text(), "old-" + name)
@@ -7250,9 +7252,478 @@ class PearlUpdaterTests(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, "ok\n", "")
 
         self.updater.config = dataclasses.replace(self.updater.config, sqlite_snapshot_timeout_s=1234)
+        self.updater._sqlite_binary = "/opt/sqlite/bin/sqlite3"
         with mock.patch.object(self.updater, "run_command", side_effect=fake_run):
             self.updater.sqlite_backup(source, destination)
+            self.assertEqual(self.updater.sqlite_quick_check(destination), (True, ["ok"]))
         self.assertEqual(timeouts, [1234, 1234])
+
+    SCHEMA_FINGERPRINT = "f" * 64
+    LIVE_SCHEMA_OUTPUT = "0\n0\ntable|t|t|CREATE TABLE t(a)\n--migration-tables--\n"
+
+    def database_snapshot_fixture(self, fingerprint=SCHEMA_FINGERPRINT):
+        self.make_bundle(runtime_only=True)
+        if fingerprint is not None:
+            self.resign_bundle(lambda metadata: metadata.update(database_schema_fingerprint=fingerprint))
+        release = self.stage(self.verify())
+        self.operator_artifact_install_fixture(release)
+        database = self.root / "coordinator.sqlite"
+        database.write_bytes(b"live-database")
+        database.chmod(0o600)
+        self.updater.databases = (database,)
+        self.updater.audit = mock.Mock()
+        self.sqlite_calls = []
+        self.quick_check_output = "ok\n"
+        self.schema_result = (0, self.LIVE_SCHEMA_OUTPUT)
+        self.updater._sqlite_binary = "/opt/sqlite/bin/sqlite3"
+        original_run = self.updater.run_command
+
+        def run_command(argv, *, check=True, timeout, env=None, input_text=None):
+            if argv[0] != "/opt/sqlite/bin/sqlite3":
+                return original_run(argv, check=check, timeout=timeout, env=env, input_text=input_text)
+            self.sqlite_calls.append(list(argv))
+            if argv[-1].startswith(".backup"):
+                Path(argv[-1].split("'")[1]).write_bytes(b"snapshot-database")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            if "quick_check" in argv[-1]:
+                return subprocess.CompletedProcess(argv, 0, self.quick_check_output, "")
+            if "sqlite_master" in argv[-1]:
+                code, output = self.schema_result
+                return subprocess.CompletedProcess(argv, code, output, "" if code == 0 else "Error: locked\n")
+            raise AssertionError(f"unexpected sqlite invocation: {argv}")
+
+        self.updater.run_command = run_command
+        return release, database
+
+    def write_durable_release(self, *, fingerprint=SCHEMA_FINGERPRINT, schemas=None, coordinator_sha=None):
+        install = self.updater.install_root
+        state = {
+            "schema_version": 1,
+            "version": "1.8.26",
+            "coordinator_sha256": coordinator_sha or updater_module.sha256_file(install / "coordinator"),
+            "gateway_sha256": updater_module.sha256_file(install / "gateway"),
+            "transaction": str(self.root / "state" / "transactions" / "1-v1.8.26"),
+        }
+        if fingerprint is not None:
+            state["database_schema_fingerprint"] = fingerprint
+        if schemas is not None:
+            state["database_schemas"] = schemas
+        self.updater.state_root.mkdir(parents=True, exist_ok=True)
+        self.updater.state_root.chmod(0o700)
+        path = self.updater.state_root / "current-release.json"
+        path.write_text(json.dumps(state) + "\n")
+        path.chmod(0o600)
+
+    def audit_events(self):
+        return {call.args[0]: call for call in self.updater.audit.call_args_list}
+
+    def live_schema_digest(self):
+        return hashlib.sha256(self.LIVE_SCHEMA_OUTPUT.encode("utf-8")).hexdigest()
+
+    def test_snapshot_only_copies_databases_while_traffic_is_quiesced(self):
+        release, database = self.database_snapshot_fixture(fingerprint=None)
+
+        tx = self.updater.snapshot(release)
+
+        self.assertEqual(len(self.sqlite_calls), 1)
+        self.assertTrue(self.sqlite_calls[0][-1].startswith(".backup"))
+        self.assertFalse(any("check" in call[-1] for call in self.sqlite_calls))
+        manifest = json.loads((tx / "database-manifest.json").read_text())
+        self.assertEqual([(row["source"], row["existed"]) for row in manifest], [(str(database), True)])
+        taken = self.audit_events()["database_snapshot_taken"]
+        self.assertEqual(taken.kwargs["snapshots"], [str(database)])
+        self.assertIn("no database schema fingerprint", taken.kwargs["reason"])
+
+    def test_apply_restores_traffic_and_commits_before_checking_the_rollback_point(self):
+        release = self.verify()
+        order = []
+        self.updater.verify_buyer_canary_rollout_posture = mock.Mock()
+        self.updater.capture_rollout_state = mock.Mock()
+        self.updater.enter_deadman_maintenance = mock.Mock()
+        self.updater.stop_for_rollout = mock.Mock(side_effect=lambda: order.append("quiesce"))
+        self.updater.snapshot = mock.Mock(side_effect=lambda _release: order.append("copy"))
+        self.updater.install_release = mock.Mock(side_effect=lambda _release: order.append("restart"))
+        self.updater.verify_rollout = mock.Mock(side_effect=lambda _release: order.append("healthy"))
+        self.updater.persist_success = mock.Mock(side_effect=lambda *_args: order.append("commit"))
+        self.updater.restore_deadman_monitoring = mock.Mock()
+        self.updater.prune_transaction_snapshots = mock.Mock(side_effect=lambda: order.append("prune"))
+
+        def check(_tx):
+            self.assertFalse(self.updater.journal_path.exists())
+            order.append("check")
+
+        self.updater.verify_rollback_point = mock.Mock(side_effect=check)
+
+        self.updater.apply(release, updater_module.SemVer.parse("1.8.26"))
+
+        self.assertEqual(order, ["quiesce", "copy", "restart", "healthy", "commit", "prune", "check"])
+
+    def test_failed_rollback_point_check_alerts_and_never_rolls_back_a_healthy_release(self):
+        release = self.verify()
+        tx = self.root / "state" / "transactions" / "7-v1.8.27"
+        (tx / "databases").mkdir(parents=True)
+        (tx / "databases" / "0.sqlite").write_bytes(b"bad copy")
+        (tx / "database-manifest.json").write_text(
+            json.dumps([{"source": "/srv/coordinator.db", "existed": True, "snapshot": "0.sqlite"}]) + "\n"
+        )
+        (tx / "database-manifest.json").chmod(0o600)
+        self.updater.state_root.chmod(0o700)
+        self.updater.verify_buyer_canary_rollout_posture = mock.Mock()
+        self.updater.capture_rollout_state = mock.Mock()
+        self.updater.enter_deadman_maintenance = mock.Mock()
+        self.updater.stop_for_rollout = mock.Mock()
+        self.updater.snapshot = mock.Mock(side_effect=lambda _release: setattr(self.updater, "transaction", tx))
+        self.updater.install_release = mock.Mock()
+        self.updater.verify_rollout = mock.Mock()
+        self.updater.persist_success = mock.Mock()
+        self.updater.restore_deadman_monitoring = mock.Mock()
+        self.updater.restore_transaction = mock.Mock()
+        self.updater.restore_previous_services = mock.Mock()
+        self.updater.audit = mock.Mock()
+        output = [f"row {number} missing from index idx_srao_drained_retention" for number in range(25)]
+        self.updater.sqlite_quick_check = mock.Mock(return_value=(False, output[:20]))
+        alerts = []
+
+        def run_command(argv, *, check=True, timeout, env=None, input_text=None):
+            alerts.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        self.updater.run_command = run_command
+
+        self.updater.apply(release, updater_module.SemVer.parse("1.8.26"))
+
+        self.updater.restore_transaction.assert_not_called()
+        self.updater.restore_previous_services.assert_not_called()
+        self.updater.sqlite_quick_check.assert_called_once_with(tx / "databases" / "0.sqlite")
+        unverified = self.audit_events()["rollback_point_unverified"]
+        self.assertEqual(unverified.kwargs["failures"], {"/srv/coordinator.db": output[:20]})
+        self.assertEqual(alerts, [["systemctl", "start", "--no-block", updater_module.ROLLBACK_POINT_UNVERIFIED_ALERT]])
+        self.assertNotIn("rollout_failed", self.audit_events())
+
+        # If even the alert cannot be raised, the run fails (OnFailure alerts),
+        # still without touching the committed release.
+        self.updater.run_command = mock.Mock(return_value=subprocess.CompletedProcess(["systemctl"], 1, "", "denied"))
+        with self.assertRaisesRegex(updater_module.UpdateError, "critical alert could not be raised"):
+            self.updater.verify_rollback_point(tx)
+        self.updater.restore_transaction.assert_not_called()
+
+    def test_restore_refuses_a_snapshot_that_fails_quick_check_and_keeps_live_databases(self):
+        tx = self.root / "refused-transaction"
+        (tx / "databases").mkdir(parents=True)
+        (tx / "databases" / "0.sqlite").write_bytes(b"corrupt copy")
+        live = self.root / "coordinator.db"
+        live.write_bytes(b"live state")
+        wal = live.with_name(live.name + "-wal")
+        wal.write_bytes(b"live wal")
+        created = self.root / "candidate-created.db"
+        created.write_bytes(b"candidate state")
+        manifest = tx / "database-manifest.json"
+        manifest.write_text(
+            json.dumps(
+                [
+                    {"source": str(live), "existed": True, "snapshot": "0.sqlite", "uid": os.geteuid(), "gid": os.getegid(), "mode": 0o600},
+                    {"source": str(created), "existed": False},
+                ]
+            )
+            + "\n"
+        )
+        manifest.chmod(0o600)
+        self.updater.audit = mock.Mock()
+        self.updater.sqlite_quick_check = mock.Mock(return_value=(False, ["*** in database main ***", "row 3 missing"]))
+        self.updater.run_command = mock.Mock(return_value=subprocess.CompletedProcess(["systemctl"], 0, "", ""))
+
+        self.updater._restore_databases(tx)
+
+        self.assertEqual(live.read_bytes(), b"live state")
+        self.assertEqual(wal.read_bytes(), b"live wal")
+        self.assertEqual(created.read_bytes(), b"candidate state")
+        refused = self.audit_events()["rollback_point_refused"]
+        self.assertEqual(refused.kwargs["failures"], {str(live): ["*** in database main ***", "row 3 missing"]})
+        self.updater.run_command.assert_called_once_with(
+            ["systemctl", "start", "--no-block", updater_module.ROLLBACK_POINT_REFUSED_ALERT],
+            check=False,
+            timeout=30,
+        )
+
+    def test_sqlite_binary_and_retention_configuration(self):
+        config = self.root / "updater.conf"
+        config.write_text("PEARL_UPDATER_ENABLED=0\n")
+        config.chmod(0o600)
+        loaded = updater_module.load_config(config, trusted_uid=os.geteuid())
+        self.assertIsNone(loaded.sqlite_bin)
+        self.assertEqual(loaded.snapshot_retention, 3)
+        config.write_text("PEARL_UPDATER_SQLITE_BIN=/opt/macprovider-tools/sqlite/bin/sqlite3\nPEARL_UPDATER_SNAPSHOT_RETENTION=1\n")
+        loaded = updater_module.load_config(config, trusted_uid=os.geteuid())
+        self.assertEqual(loaded.sqlite_bin, Path("/opt/macprovider-tools/sqlite/bin/sqlite3"))
+        self.assertEqual(loaded.snapshot_retention, 1)
+        for bad in ("sqlite3", "/opt/../bin/sqlite3", "/opt//sqlite3", "/opt/sqlite 3", "/opt/sqlite3;id"):
+            config.write_text(f"PEARL_UPDATER_SQLITE_BIN={bad}\n")
+            with self.assertRaisesRegex(updater_module.UpdateError, "PEARL_UPDATER_SQLITE_BIN"):
+                updater_module.load_config(config, trusted_uid=os.geteuid())
+        for bad in ("0", "101", "-1"):
+            config.write_text(f"PEARL_UPDATER_SNAPSHOT_RETENTION={bad}\n")
+            with self.assertRaises(updater_module.UpdateError):
+                updater_module.load_config(config, trusted_uid=os.geteuid())
+
+    def fake_sqlite_binary(self, name, version="3.53.2 2026-01-01 00:00:00 fixture"):
+        directory = self.root / name
+        directory.mkdir(mode=0o755)
+        binary = directory / "sqlite3"
+        binary.write_text(f"#!/bin/sh\necho '{version}'\n")
+        binary.chmod(0o755)
+        return binary
+
+    def test_sqlite_binary_is_selected_trust_checked_logged_and_used_for_every_call(self):
+        configured = self.fake_sqlite_binary("configured")
+        default = self.fake_sqlite_binary("default")
+        on_path = self.fake_sqlite_binary("on-path", version="3.45.1 2024-01-30 system")
+
+        self.updater.audit = mock.Mock()
+        self.updater.config = dataclasses.replace(self.updater.config, sqlite_bin=configured)
+        self.assertEqual(self.updater.sqlite_binary(), str(configured))
+        selected = self.audit_events()["sqlite_binary_selected"]
+        self.assertEqual(
+            (selected.kwargs["source"], selected.kwargs["version"]),
+            ("configured", "3.53.2 2026-01-01 00:00:00 fixture"),
+        )
+        calls = []
+
+        def run_command(argv, *, check=True, timeout, env=None, input_text=None):
+            calls.append(argv[0])
+            if argv[-1].startswith(".backup"):
+                Path(argv[-1].split("'")[1]).write_bytes(b"copy")
+            if "sqlite_master" in argv[-1]:
+                return subprocess.CompletedProcess(argv, 0, "0\n0\n--migration-tables--\n", "")
+            return subprocess.CompletedProcess(argv, 0, "ok\n", "")
+
+        with mock.patch.object(self.updater, "run_command", side_effect=run_command):
+            self.updater.sqlite_backup(self.root / "live.db", self.root / "copy.db")
+            self.updater.sqlite_quick_check(self.root / "copy.db")
+            (self.root / "live.db").write_bytes(b"live")
+            self.updater.database_schema_digest(self.root / "live.db")
+        self.assertEqual(calls, [str(configured)] * 3)
+
+        self.updater.config = dataclasses.replace(self.updater.config, sqlite_bin=None)
+        self.updater._sqlite_binary = None
+        with mock.patch.object(updater_module, "DEFAULT_SQLITE_BIN", default):
+            self.assertEqual(self.updater.sqlite_binary(), str(default))
+        self.assertEqual(self.audit_events()["sqlite_binary_selected"].kwargs["source"], "default")
+
+        self.updater._sqlite_binary = None
+        with mock.patch.object(updater_module, "DEFAULT_SQLITE_BIN", self.root / "absent" / "sqlite3"), \
+                mock.patch.object(updater_module.shutil, "which", return_value=str(on_path)) as which:
+            self.assertEqual(self.updater.sqlite_binary(), str(on_path))
+        which.assert_called_once_with("sqlite3", path="/usr/local/bin:/usr/bin:/bin")
+        self.assertEqual(self.audit_events()["sqlite_binary_selected"].kwargs["source"], "path")
+
+        writable = self.fake_sqlite_binary("writable")
+        writable.chmod(0o775)
+        self.updater._sqlite_binary = None
+        self.updater.config = dataclasses.replace(self.updater.config, sqlite_bin=writable)
+        with self.assertRaisesRegex(updater_module.UpdateError, "not writable by group or other"):
+            self.updater.sqlite_binary()
+        writable.chmod(0o755)
+        writable.parent.chmod(0o777)
+        with self.assertRaisesRegex(updater_module.UpdateError, "ancestor is not a trusted directory"):
+            self.updater.sqlite_binary()
+        writable.parent.chmod(0o755)
+
+    def test_quick_check_reports_the_first_lines_of_a_failure(self):
+        self.updater._sqlite_binary = "/opt/sqlite/bin/sqlite3"
+        output = "".join(f"row {number} missing from index i\n" for number in range(40))
+        self.updater.run_command = mock.Mock(return_value=subprocess.CompletedProcess(["sqlite3"], 0, output, ""))
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            ok, lines = self.updater.sqlite_quick_check(self.root / "copy.db")
+        self.assertFalse(ok)
+        self.assertEqual(lines, [f"row {number} missing from index i" for number in range(20)])
+        self.assertIn("row 19 missing", stderr.getvalue())
+        argv = self.updater.run_command.call_args.args[0]
+        self.assertEqual(argv[-1], "PRAGMA quick_check;")
+        self.assertIn("mode=ro&immutable=1", argv[-2])
+        self.updater.run_command = mock.Mock(side_effect=updater_module.CommandTimeout("timed out"))
+        self.assertEqual(self.updater.sqlite_quick_check(self.root / "copy.db")[0], False)
+
+    def test_quick_check_reads_a_wal_mode_snapshot_without_creating_side_files(self):
+        sqlite3 = shutil.which("sqlite3")
+        if sqlite3 is None:
+            self.skipTest("sqlite3 is not installed")
+        live = self.root / "live.db"
+        subprocess.run(
+            [sqlite3, str(live), "PRAGMA journal_mode=wal; CREATE TABLE t(a); INSERT INTO t VALUES (1);"],
+            check=True,
+            capture_output=True,
+        )
+        self.updater.audit = mock.Mock()
+        copy = self.root / "copies" / "0.sqlite"
+        copy.parent.mkdir()
+        self.updater.sqlite_backup(live, copy)
+        self.assertEqual(self.updater.sqlite_quick_check(copy), (True, ["ok"]))
+        self.assertEqual(sorted(path.name for path in copy.parent.iterdir()), ["0.sqlite"])
+        self.assertEqual(len(self.updater.database_schema_digest(live)), 64)
+        subprocess.run(
+            [sqlite3, str(live), "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY); INSERT INTO schema_migrations VALUES (17);"],
+            check=True,
+            capture_output=True,
+        )
+        before = self.updater.database_schema_digest(live)
+        subprocess.run([sqlite3, str(live), "INSERT INTO schema_migrations VALUES (18);"], check=True, capture_output=True)
+        self.assertNotEqual(self.updater.database_schema_digest(live), before)
+        copy.write_bytes(b"not a database at all, just bytes" * 200)
+        ok, lines = self.updater.sqlite_quick_check(copy)
+        self.assertFalse(ok)
+        self.assertTrue(lines)
+
+    def test_snapshot_is_skipped_only_when_schema_evidence_proves_it_unchanged(self):
+        release, database = self.database_snapshot_fixture()
+        self.write_durable_release(schemas={str(database): self.live_schema_digest()})
+
+        tx = self.updater.snapshot(release)
+
+        self.assertFalse(any(call[-1].startswith(".backup") for call in self.sqlite_calls))
+        self.assertEqual(json.loads((tx / "database-manifest.json").read_text()), [])
+        self.assertEqual(list((tx / "databases").iterdir()), [])
+        skipped = self.audit_events()["database_snapshot_skipped"]
+        self.assertEqual(skipped.kwargs["candidate_fingerprint"], self.SCHEMA_FINGERPRINT)
+        self.assertEqual(skipped.kwargs["live_fingerprint"], self.SCHEMA_FINGERPRINT)
+        self.assertEqual(skipped.kwargs["live_schemas"], {str(database): self.live_schema_digest()})
+        self.assertNotIn("database_snapshot_taken", self.audit_events())
+
+        # Rollback of a skipped transaction restores binaries/config only.
+        self.updater.validate_transaction(tx)
+        database.write_bytes(b"written by the candidate")
+        self.updater.sqlite_quick_check = mock.Mock()
+        self.updater._restore_databases(tx)
+        self.assertEqual(database.read_bytes(), b"written by the candidate")
+        self.updater.sqlite_quick_check.assert_not_called()
+
+    def test_snapshot_is_taken_whenever_schema_evidence_is_missing_or_disagrees(self):
+        other = "e" * 64
+        cases = {
+            "candidate has no fingerprint": dict(candidate=None),
+            "no durable record": dict(durable=False),
+            "durable record has no fingerprint": dict(fingerprint=None),
+            "fingerprints differ": dict(fingerprint=other),
+            "installed binary changed": dict(coordinator_sha=other),
+            "durable record has no schemas": dict(schemas=None),
+            "durable schemas cover other databases": dict(schemas={"/srv/other.db": other}),
+            "live schema changed": dict(schemas="changed"),
+            "live schema unreadable": dict(schema_result=(1, "")),
+            "durable record unreadable": dict(corrupt=True),
+        }
+        for name, case in cases.items():
+            with self.subTest(name):
+                shutil.rmtree(self.updater.state_root, ignore_errors=True)
+                release, database = self.database_snapshot_fixture(fingerprint=case.get("candidate", self.SCHEMA_FINGERPRINT))
+                schemas = case.get("schemas", {str(database): self.live_schema_digest()})
+                if schemas == "changed":
+                    schemas = {str(database): other}
+                if case.get("durable", True):
+                    self.write_durable_release(
+                        fingerprint=case.get("fingerprint", self.SCHEMA_FINGERPRINT),
+                        schemas=schemas,
+                        coordinator_sha=case.get("coordinator_sha"),
+                    )
+                if case.get("corrupt"):
+                    (self.updater.state_root / "current-release.json").write_text("{not json\n")
+                if "schema_result" in case:
+                    self.schema_result = case["schema_result"]
+
+                tx = self.updater.snapshot(release)
+
+                self.assertEqual(sum(call[-1].startswith(".backup") for call in self.sqlite_calls), 1)
+                manifest = json.loads((tx / "database-manifest.json").read_text())
+                self.assertEqual([row["existed"] for row in manifest], [True])
+                self.assertIn("database_snapshot_taken", self.audit_events())
+                self.assertNotIn("database_snapshot_skipped", self.audit_events())
+
+    def test_commit_records_schema_evidence_only_when_it_is_known(self):
+        release, database = self.database_snapshot_fixture()
+        self.updater.transaction = self.root / "state" / "transactions" / "9-v1.8.27"
+        schemas = self.updater.live_database_schema_digests()
+        self.assertEqual(schemas, {str(database): self.live_schema_digest()})
+        self.updater.persist_success(release, updater_module.SemVer.parse("1.8.26"), schemas)
+        state = json.loads((self.updater.state_root / "current-release.json").read_text())
+        self.assertEqual(state["database_schema_fingerprint"], self.SCHEMA_FINGERPRINT)
+        self.assertEqual(state["database_schemas"], schemas)
+
+        self.schema_result = (1, "")
+        self.assertIsNone(self.updater.live_database_schema_digests())
+        self.updater.persist_success(release, updater_module.SemVer.parse("1.8.26"), None)
+        state = json.loads((self.updater.state_root / "current-release.json").read_text())
+        self.assertNotIn("database_schema_fingerprint", state)
+        self.assertNotIn("database_schemas", state)
+
+    def test_release_metadata_rejects_an_invalid_schema_fingerprint(self):
+        self.make_bundle(runtime_only=True)
+        self.resign_bundle(lambda metadata: metadata.update(database_schema_fingerprint="F" * 64))
+        with self.assertRaisesRegex(updater_module.UpdateError, "database schema fingerprint is invalid"):
+            self.verify()
+        self.resign_bundle(lambda metadata: metadata.update(database_schema_fingerprint="a" * 64))
+        self.assertEqual(self.verify().database_schema_fingerprint, "a" * 64)
+
+    def test_retention_prunes_old_database_payloads_and_never_the_active_or_current_transaction(self):
+        transactions = self.updater.state_root / "transactions"
+        transactions.mkdir(parents=True, mode=0o700)
+        self.updater.state_root.chmod(0o700)
+
+        def transaction(created, version, *, payload=True):
+            tx = transactions / f"{created}-v{version}"
+            (tx / "databases").mkdir(parents=True, mode=0o700)
+            tx.chmod(0o700)
+            if payload:
+                for name in ("0.sqlite", "1.sqlite"):
+                    (tx / "databases" / name).write_bytes(b"x" * 10)
+            (tx / "database-manifest.json").write_text("[]\n")
+            return tx
+
+        oldest_current = transaction(100, "1.8.20")
+        armed = transaction(200, "1.8.21")
+        pruned_a = transaction(300, "1.8.22")
+        (pruned_a / "databases" / "0.sqlite-wal").write_bytes(b"w")
+        pruned_b = transaction(400, "1.8.23")
+        kept_a = transaction(500, "1.8.24")
+        skipped = transaction(600, "1.8.25", payload=False)
+        kept_b = transaction(700, "1.8.26")
+        unrelated = transactions / "operator-notes"
+        unrelated.mkdir()
+        (unrelated / "0.sqlite").write_bytes(b"keep")
+        self.updater.transaction = kept_b
+        state = self.updater.state_root / "current-release.json"
+        state.write_text(json.dumps({"version": "1.8.26", "transaction": str(oldest_current)}) + "\n")
+        state.chmod(0o600)
+        self.updater.journal_path.write_text(json.dumps({"schema_version": 1, "transaction": str(armed)}) + "\n")
+        self.updater.journal_path.chmod(0o600)
+        self.updater.config = dataclasses.replace(self.updater.config, snapshot_retention=2)
+        self.updater.audit = mock.Mock()
+
+        self.updater.prune_transaction_snapshots()
+
+        def payloads(tx):
+            return sorted(path.name for path in (tx / "databases").iterdir())
+
+        for tx in (kept_b, kept_a, armed, oldest_current):
+            self.assertEqual(payloads(tx), ["0.sqlite", "1.sqlite"], tx.name)
+        for tx in (pruned_a, pruned_b):
+            self.assertEqual(payloads(tx), [], tx.name)
+            self.assertTrue((tx / "database-manifest.json").exists())
+        self.assertEqual(payloads(skipped), [])
+        self.assertTrue((unrelated / "0.sqlite").exists())
+        pruned = [call.kwargs for call in self.updater.audit.call_args_list if call.args[0] == "database_snapshot_pruned"]
+        self.assertEqual(
+            [(Path(row["transaction"]).name, row["files"], row["retention"]) for row in pruned],
+            [
+                ("400-v1.8.23", ["0.sqlite", "1.sqlite"], 2),
+                ("300-v1.8.22", ["0.sqlite", "0.sqlite-wal", "1.sqlite"], 2),
+            ],
+        )
+
+        # Retention 1 keeps only the newest, plus anything protected.
+        self.updater.config = dataclasses.replace(self.updater.config, snapshot_retention=1)
+        self.updater.prune_transaction_snapshots()
+        self.assertEqual(payloads(kept_b), ["0.sqlite", "1.sqlite"])
+        self.assertEqual(payloads(kept_a), [])
+        self.assertEqual(payloads(armed), ["0.sqlite", "1.sqlite"])
+        self.assertEqual(payloads(oldest_current), ["0.sqlite", "1.sqlite"])
 
     def test_release_mirror_gate_ignores_non_string_asset_names(self):
         self.with_release_mirror_gate()
@@ -7906,9 +8377,14 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.restore_deadman_monitoring = mock.Mock(
             side_effect=lambda: setattr(self.updater, "deadman_restore_required", False)
         )
+        self.updater.after_commit = mock.Mock(
+            side_effect=lambda: self.assertFalse(self.updater.journal_path.exists())
+        )
 
         self.assertTrue(self.updater.reconcile())
 
+        # The crash skipped apply's post-commit prune and rollback-point check.
+        self.updater.after_commit.assert_called_once_with()
         self.updater.prove_catalog_canary_mac.assert_called_once()
         canary_release = self.updater.prove_catalog_canary_mac.call_args.args[0]
         self.assertEqual(canary_release.directory, Path("/committed-release"))

@@ -165,6 +165,7 @@ test-dist:
 	bash -n scripts/lib/catalog-canary-token.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_autotune_feed_freshness
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_pearl_autotune_deploy_lock
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_pearl_database_schema_fingerprint
 	bash scripts/test-tier2-provider-artifact.sh
 	bash scripts/test-tier2-provider-release.sh
 	bash scripts/test-tier2-activation-safety.sh
@@ -199,6 +200,7 @@ test-dist:
 	bash phase4-coordinator/dist/test/check_nginx_catalog_routes_test.sh
 	bash phase4-coordinator/dist/test/check_nginx_stats_test.sh
 	bash phase4-coordinator/dist/test/check_nginx_mdm_enroll_routes_test.sh
+	bash phase4-coordinator/dist/test/check_nginx_model_admission_routes_test.sh
 	bash phase4-coordinator/dist/test/check_nginx_referral_routes_test.sh
 	bash phase4-coordinator/dist/test/check_stats_inventory_deploy_test.sh
 	bash phase4-coordinator/dist/test/check_stats_billing_mirror_deploy_test.sh
