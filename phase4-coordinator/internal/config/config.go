@@ -409,6 +409,18 @@ type AutotuneFeedsConfig struct {
 	// only by the deploy that installs an artifact-bound release.
 	CatalogArtifactsPath    string `yaml:"catalog_artifacts_path"`
 	CatalogArtifactsSigPath string `yaml:"catalog_artifacts_sig_path"`
+	// NativeMTP* point at the SPEC-023 §12.5 native-MTP admission set of the
+	// SAME release (signed sidecar, projection manifest, signed challenge
+	// bank) served at /v1/native-mtp-* and the directory of pre-signed
+	// emergency-revocation slots served at
+	// /v1/native-mtp-revocations.<key>.json (+ .sig). All six are set together
+	// or none; unset, every route answers 404 and providers stay ordinary.
+	NativeMTPAdmissionPath        string `yaml:"native_mtp_admission_path"`
+	NativeMTPAdmissionSigPath     string `yaml:"native_mtp_admission_sig_path"`
+	NativeMTPArtifactManifestPath string `yaml:"native_mtp_artifact_manifest_path"`
+	NativeMTPSelftestBankPath     string `yaml:"native_mtp_selftest_bank_path"`
+	NativeMTPSelftestBankSigPath  string `yaml:"native_mtp_selftest_bank_sig_path"`
+	NativeMTPRevocationsDir       string `yaml:"native_mtp_revocations_dir"`
 	// EnforceProviderAdmission is the shared strict-mode switch for signed
 	// catalog compatibility and challenge-bound provider identity. Disabling it
 	// opens only the deadline-bounded migration bridge below.

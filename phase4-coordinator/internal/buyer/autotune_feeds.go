@@ -89,6 +89,9 @@ type AutotuneFeeds struct {
 	ContinuousBatchingPolicyJSON         []byte
 	ContinuousBatchingPolicySig          []byte
 	ContinuousBatchingPolicyVerification AutotuneFeedVerification
+	// NativeMTP is the optional SPEC-023 §12.5 admission set of this release
+	// and its revocation slot directory.
+	NativeMTP NativeMTPFeeds
 	// SourceConfig is the exact feed configuration these feeds were loaded
 	// from (paths, previous-release target, keyring), so a publication that
 	// needs the retained previous releases resolves them from the SAME
@@ -223,7 +226,12 @@ func LoadAutotuneFeeds(cfg config.AutotuneFeedsConfig) (AutotuneFeeds, error) {
 			return AutotuneFeeds{}, err
 		}
 	}
+	nativeMTP, err := loadNativeMTPFeeds(cfg, keyring, candidates)
+	if err != nil {
+		return AutotuneFeeds{}, err
+	}
 	return AutotuneFeeds{
+		NativeMTP:                            nativeMTP,
 		RateCardJSON:                         rateCard.jsonBytes,
 		RateCardSig:                          rateCard.sigBytes,
 		RateCardVerification:                 rateCard.verification,
