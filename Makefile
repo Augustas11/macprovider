@@ -196,6 +196,7 @@ test-dist:
 	bash phase4-coordinator/dist/test/check_nginx_catalog_routes_test.sh
 	bash phase4-coordinator/dist/test/check_nginx_stats_test.sh
 	bash phase4-coordinator/dist/test/check_nginx_mdm_enroll_routes_test.sh
+	bash phase4-coordinator/dist/test/check_nginx_model_admission_routes_test.sh
 	bash phase4-coordinator/dist/test/check_nginx_referral_routes_test.sh
 	bash phase4-coordinator/dist/test/check_stats_inventory_deploy_test.sh
 	bash phase4-coordinator/dist/test/check_stats_billing_mirror_deploy_test.sh
