@@ -1,0 +1,6 @@
+lock_acquired 2026-10-06T12:16:42Z
+2026-10-06T12:16:42Z start longgen2 new
+2026-10-06T12:23:14Z end longgen2 new exit=0
+2026-10-06T12:23:14Z start longgen2 old
+2026-10-06T12:29:48Z end longgen2 old exit=0
+DONE

@@ -148,10 +148,10 @@ native_mtp_required_merges_in_latest_release = all(
     for row in native_mtp_required_merges.values()
 )
 
-native_mtp_exception_revision = "b181102984a4d1875efbd9e0eab3a7dfd1c012c5"
+native_mtp_exception_revision = "ca8c384c4fb6bc7d2fbb7c70a18c34b935701805"
 native_mtp_exception_base = "bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57"
 native_mtp_exception_repo = "Augustas11/mlx-swift-lm"
-native_mtp_exception_review_approved = True
+native_mtp_exception_review_approved = False
 native_mtp_exception_remote_verified = commit_is_descendant(
     native_mtp_exception_repo,
     native_mtp_exception_base,
@@ -430,32 +430,33 @@ out = {
         "native_mtp_status": (
             "qualified_transaction_exception_default_off"
             if native_mtp_exception_approved
-            else "candidate_fused_moe_revision_pending_review"
+            else "candidate_step_overhead_revision_pending_review"
         ),
         "note": (
-            "The previously reviewed Qwen MTP transaction surfaces remain present and "
-            "the pin adds the exact-layout Qwen3.6 A3B fused-MoE path (rows of 1-7 "
-            "tokens, chunked at any batch size); approved 2026-10-05 on the "
-            "ordinary-path Studio qualification and a 0/0/0 three-lane freeze audit; "
-            "native MTP stays default-off and native-MTP R015 gates only native-tuple "
-            "activation; upstream #645 remains the tagged-release replacement tracker"
+            "The reviewed Qwen MTP transaction surfaces and the exact-layout Qwen3.6 "
+            "A3B fused-MoE path (approved 2026-10-05 at b1811029) remain present; the "
+            "candidate adds a single-pass checkpointed GDN verify kernel and skips the "
+            "all-true SSM mask for unpadded packed verification, and is not approved "
+            "until Studio validation and the freeze audits pass; native MTP stays "
+            "default-off; upstream #645 remains the tagged-release replacement tracker"
         ),
     },
     "native_mtp_immutable_dependency_exception": {
         "approved": native_mtp_exception_approved,
-        "approved_at": "2026-10-05",
-        "approved_by": "@Augustas11",
+        "approved_at": None,
+        "approved_by": None,
         "review_due_at": "2026-12-27",
         "fork_location": "https://github.com/Augustas11/mlx-swift-lm.git",
         "fork_revision": native_mtp_exception_revision,
         "upstream_base_revision": native_mtp_exception_base,
         "remote_revision_verified": native_mtp_exception_remote_verified,
         "local_pin_matches": native_mtp_exception_pin_matches,
-        "review_status": "approved_0_critical_0_high_0_medium",
+        "review_status": "candidate_extension_pending_studio_and_freeze_audits",
         "scope": (
             "standalone_qwen_mtp_loading_public_cache_transaction_packed_"
             "verification_strict_continuation_and_packed_recurrent_cache_"
-            "surfaces_plus_exact_qwen36_a3b_fused_moe_v3_rows_t1_through_t7_chunked"
+            "surfaces_plus_exact_qwen36_a3b_fused_moe_v3_rows_t1_through_t7_chunked_"
+            "plus_single_pass_checkpointed_gdn_verify_and_unpadded_packed_ssm_mask_skip"
         ),
         "removal_trigger": (
             "first reviewed upstream tag with equivalent standalone-checkpoint "

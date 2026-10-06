@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.23
+**Version:** 0.1.25
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.23",
+  "version": "0.1.25",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -354,7 +354,9 @@ be built and tested while the review gate below is pending, but it MUST NOT be
 signed, activated, or treated as production-qualified until that gate closes:
 
 - repository: `https://github.com/Augustas11/mlx-swift-lm.git`;
-- revision: `b181102984a4d1875efbd9e0eab3a7dfd1c012c5`;
+- revision: `ca8c384c4fb6bc7d2fbb7c70a18c34b935701805` (candidate; parent
+  `b181102984a4d1875efbd9e0eab3a7dfd1c012c5`, whose review closed on
+  2026-10-05);
 - upstream base: `ml-explore/mlx-swift-lm@bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57`
   (`3.31.4`);
 - reviewed surface: `MTPKVCacheStorage`, `MTPKVCacheTransaction`,
@@ -382,7 +384,12 @@ signed, activated, or treated as production-qualified until that gate closes:
   chunked evaluation of decode- and verify-shaped calls above seven flattened
   tokens, stock fallback for rows longer than seven tokens, and exact
   dtype/shape validation of every packed weight, scale, and bias the fused
-  kernels index (any mismatch keeps the block on the stock path);
+  kernels index (any mismatch keeps the block on the stock path); plus
+  `gatedDeltaUpdateCheckpointed`, the single-pass Gated DeltaNet recurrence
+  that returns the state after `checkpointAfter` steps bit-identically to two
+  split `gatedDeltaUpdate` calls, used by the Qwen 3.5 verify-row checkpoint;
+  plus packed verification leaving recurrent caches unprepared (no SSM mask)
+  when no row is right-padded;
 - review date and owner: `2026-10-05`, `@Augustas11`;
 - mandatory exception re-review date: `2026-12-27`;
 - review gate: upstream-focused build-tests, MacProvider qualification and
@@ -395,7 +402,7 @@ signed, activated, or treated as production-qualified until that gate closes:
   stock kernel, followed by the frozen-diff audit. Native-MTP R015 evidence is
   not part of this gate; it gates signing and activation of a native tuple
   (R007, R015) and never the ordinary path;
-- review result (2026-10-05): closed for this revision. Mac Studio fused
+- review result (2026-10-05): closed for parent revision `b1811029…`. Mac Studio fused
   tests 133/133, hardware E2E pass, 0 ordinary/native parity mismatches and
   bit-identical run-to-run output in 36 paired blocks across one, two, and
   eight slots, ordinary decode throughput 1.25x / 1.15x / 0.97x stock, and a
@@ -403,6 +410,13 @@ signed, activated, or treated as production-qualified until that gate closes:
   (`docs/research/spec048-fused-moe/evidence-2026-10-05/qualification-7d55924eb/`,
   `audits/2026-10-05-native-mtp-fused-freeze/`). The exception is approved
   for the ordinary path; native MTP remains default-off and unqualified;
+- review result for `ca8c384c…`: pending. Its two commits change only the
+  native verify path (the checkpointed recurrence runs only when a verify row
+  requests a checkpoint, and the mask skip only inside packed verification),
+  so ordinary decode is unchanged. The gate is the upstream GDN and MTP
+  tests, the Mac Studio fused harness and hardware E2E with zero
+  ordinary/native parity mismatches, and the frozen-diff audit; until it
+  closes the pin is not signed or activated;
 - removal trigger: replace the fork pin with the first reviewed upstream tag
   that contains equivalent standalone-checkpoint loading, public transaction,
   packed target-verification, and hybrid recurrent-cache surfaces and passes
@@ -572,11 +586,18 @@ A row held at depth zero by the MTP-7 load gate does not run a one-column
 native verification. It shares the ordinary lockstep decode forward, and the
 provider keeps, in order, each token that forward commits for the row with the
 target hidden state that produced it. These are exactly the columns per-round
-depth-zero finalizes would have fed the MTP adapter. Before the row's next
-native proposal (or once it holds 64 such columns) they advance its proposal
-state in one packed step, so a restored row proposes from the same committed
-prefix as one that was never gated. The emitted tokens are ordinary decode's
-by construction.
+depth-zero finalizes would have fed the MTP adapter. Only before the row's
+next native proposal do they advance its proposal state, in one packed step,
+so a restored row proposes from the same committed prefix as one that was
+never gated. A held row MUST NOT advance its proposal state inside the shared
+ordinary rounds, except at the column cap: a row held until it finishes within
+1024 committed columns adds no MTP-adapter forward to them. A held row MUST
+NOT buffer more than 1024 columns; one whose next ordinary window would pass
+the cap advances its proposal state first, in one packed step, so a long held
+completion pays one catch-up per 1024 tokens and its buffer stays bounded.
+Each buffered hidden state MUST own its storage rather than view the shared
+batch output, which would keep every row's state of that round alive. The
+emitted tokens are ordinary decode's by construction.
 
 Transactions MUST preserve row identity across proposal, packed verification,
 commit, discard, cancellation, and release. State or metrics from one row MUST
@@ -970,7 +991,8 @@ window containing ordinary then MTP in randomized order; the bootstrap
 resamples whole blocks with 10,000 draws. Gates apply separately to every
 advertised `(hardware, artifact, slots, prompt/output stratum)` cell; no pooled
 pass may hide a failing cell. Holm correction at family-wise alpha 0.05 covers
-the throughput, TTFT, inter-token, and rejection hypotheses across all cells.
+the throughput, TTFT, per-output-token latency, worst-gap, and rejection
+hypotheses across all cells.
 
 **Run order.** The order is preregistered by the frozen policy seed: in each
 cell, half the measured blocks (rounded up) run native first, placed by a
@@ -1008,14 +1030,16 @@ advertised `qualified_slots` (2...8), its `max_native_active_rows`
   native speedup strata; non-inferiority at the first gated count and at full
   load bounds the intermediate counts, which repeat the same ordinary-path work
   at a load between the two. The inference rests on the gated cost model:
-  above the bound, the only work native MTP adds to a round is the drafter
-  catch-up and admission bookkeeping of at most `bound` held rows, which does
-  not grow with the ordinary rows, while the ordinary round time does not
-  shrink as rows are added; the relative regression is therefore largest at
-  bound + 1, and `qualified_slots` adds the full-load scheduling and memory
-  point. A runtime change that adds per-row native work above the bound (for
-  example drafting for downgraded rows) invalidates the model and requires
-  every gated slot count to be measured.
+  above the bound, the only work native MTP adds to a round is buffering the
+  committed columns (MTP-6) and admission bookkeeping of at most `bound` held
+  rows, plus one drafter catch-up when a held row's depth returns or its
+  buffer reaches the 1024-column cap (beyond the gated cells' 512 tokens),
+  which does not grow with the ordinary rows, while the ordinary round time
+  does not shrink as rows are added; the relative regression is therefore
+  largest at bound + 1, and `qualified_slots` adds the full-load scheduling
+  and memory point. A runtime change that adds per-row native work above the
+  bound (for example drafting for downgraded rows) invalidates the model and
+  requires every gated slot count to be measured.
 - *Sustained window* of at least 1800 s on the cell at `qualified_slots`,
   prompt 1536, output 512 (`s<qualified_slots>-p1536-o512`, staggered):
   production-shaped full load. It is a separate bench phase on the same frozen
@@ -1034,7 +1058,8 @@ exempt and never yield an admission verdict.
 
 **Cell classes.** The frozen `max_native_active_rows` splits the matrix. A
 cell whose slot count is at or below it is *native-eligible*: it carries the
-throughput, TTFT, inter-token, and rejection gates above, admits every row
+throughput, TTFT, per-output-token latency, worst-gap, and rejection gates
+above, admits every row
 native (a load-gate downgrade there fails the cell), and every native run
 must show proposals and target forwards. A cell above it is *gated*: it
 measures the R007 load gate, so admitted native rows may legitimately spend
@@ -1047,10 +1072,11 @@ at or above it; admissions plus downgrades account for every request; parity
 holds and fallback/error is zero; and native is non-inferior to ordinary at
 the mixed-load margins of this section — the Holm-corrected lower bound of
 the decode-throughput change at least -5%, the corrected upper bounds of p95
-TTFT and p95 inter-token regression at most 5%, and capacity rejection up by
+TTFT and p95 per-output-token latency regression at most 5%, the worst-gap
+bound below, and capacity rejection up by
 at most one percentage point. These margins are frozen in the policy
 thresholds (`gated_throughput_lower_bound_min` -0.05,
-`gated_ttft_p95_upper_bound_max` 0.05, `gated_itl_p95_upper_bound_max` 0.05)
+`gated_ttft_p95_upper_bound_max` 0.05, `gated_tpot_p95_upper_bound_max` 0.05)
 and join the same Holm family. A tuple whose bound is 1 therefore passes R015
 with a native gain at one slot and non-inferiority at its gated cells.
 
@@ -1072,7 +1098,8 @@ Zero proposals remain allowed for held rows.
 The campaign MUST report median and corrected confidence interval for
 aggregate and per-request decode throughput, aggregate committed tokens/s and
 per-request tokens/s end to end, p50/p95 TTFT and
-inter-token latency, proposed/accepted/per-position/mean acceptance, target
+inter-chunk gap, p95 per-output-token latency, p99 inter-chunk gap,
+proposed/accepted/per-position/mean acceptance, target
 forwards per committed token, peak/resident memory, capacity rejection,
 fallback/error rate, terminal parity, and thermal stability.
 
@@ -1094,8 +1121,40 @@ MUST be at least 15% in each cell at the intended advertised slot count; both
 paths use that same slot count, and the baseline is the best ordinary
 production-qualified configuration at that count. The corrected upper bound
 for native-MTP p95 TTFT regression MUST be no more than 10%, and the corrected
-upper bound for p95 inter-token regression MUST be no more than 0%; bare point
-estimates do not pass. Capacity rejection MUST increase by no more than one
+upper bound for p95 per-output-token latency (TPOT) regression MUST be no more
+than 0%; bare point estimates do not pass. A request's TPOT is its decode
+interval (first token to completion) divided by its completion tokens after
+the first: the token-weighted mean, over every streamed chunk after the first,
+of the chunk's gap divided by the tokens it carries. A run's statistic is the
+p95 of its requests' TPOT, compared native over ordinary per paired block like
+every other gate. TPOT is computed from the recorded per-request decode
+throughput, so it needs no per-chunk token count, which the stream does not
+expose. Every cell, native-eligible and gated, MUST also pass a worst-gap
+bound: the corrected upper bound of the paired-block ratio of native p99
+inter-chunk gap (over every gap of the run's requests) to ordinary p99
+inter-chunk gap MUST be no more than `proposal_depth + 1` (policy
+`chunk_gap_p99_upper_bound_max` 1.0, as ratio minus one, at the frozen depth
+1). A native chunk is one verify round that commits at most `proposal_depth +
+1` tokens, so even a round whose every token is a fresh target forward may take
+at most that many ordinary token-times; a tail beyond it is a stall or extra
+work that no per-token average excuses. A record without its inter-chunk gaps
+fails closed.
+
+*Gate amendment (0.1.25).* Through 0.1.24 the latency gate was the corrected
+upper bound of the p95 inter-chunk gap, native over ordinary, at most 0%
+(gated cells 5%). That compares one native verify round, which streams all of
+its committed tokens as one chunk (about 1.85-1.92 tokens at depth 1 on the
+A3B tuple), with one ordinary token, so it grows as the native path commits
+more tokens per round and cannot pass at any acceptance rate while accepted
+tokens are emitted together. The mismatch was first seen in the 2026-10-03
+fused-baseline R015 and is documented in both 2026-10-06 R015 runs, where
+native per-token latency fell (decode ratio 1.24-1.31) while the inter-chunk
+upper bound stayed at +37% to +57%. The amendment replaces that gate with the
+TPOT gate and the worst-gap bound above. It does not reinterpret any earlier
+run: every R015 verdict recorded under 0.1.24 or earlier stays as recorded
+(all of them FAIL), policies frozen with the inter-chunk gate are still judged
+by it, and the decode-throughput, TTFT, rejection, memory, and hard gates are
+unchanged. Inter-chunk p50/p95 remain reported. Capacity rejection MUST increase by no more than one
 percentage point. Measured peak process resident memory plus the frozen safety
 margin MUST remain within physical RAM, and system-wide available unified
 memory sampled at least once per second MUST retain at least 10% physical-RAM
@@ -1268,6 +1327,45 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.25 (2026-10-06)** — MTP-15 replaces the R015 inter-chunk p95 latency
+  gate with a per-output-token latency (TPOT) gate (p95 across a run's
+  requests, corrected upper bound <= 0%, gated cells <= 5%) and a worst-gap
+  bound in every cell (native p99 inter-chunk gap at most `proposal_depth + 1`
+  times ordinary's, corrected upper bound, frozen 1.0 as ratio minus one), in
+  the same Holm family and paired-block bootstrap (#1770). Motivation: the
+  structural mismatch between one multi-token native chunk and one ordinary
+  token, first seen 2026-10-03 and documented in the 2026-10-06 runs. Decode
+  throughput, TTFT, rejection, memory, and hard gates are unchanged; earlier
+  verdicts stay as recorded and legacy-gate policies are still judged by
+  their own gates. A new R015 must be frozen with the amended gates; native
+  MTP stays default-off. MTP-6: a load-gated row no longer advances its
+  drafter every 64 buffered columns; it catches up only before its next
+  native proposal. An interleaved s2 control (2026-10-06) showed the periodic
+  catch-up as a ~10 ms stall in the shared round every 64 tokens, on both
+  rows, in every gated native run of both the 10-06 and step-overhead
+  binaries. A held row's buffer is capped at 1024 columns (an early
+  catch-up when its next window would pass the cap), and each buffered
+  hidden state is a copy of its own row: an uncapped buffer of batch-output
+  views kept `B x 4 KiB` per committed token alive outside the paged-KV
+  accounting, up to 32 GiB for a held row at `B = 8` and the 1,048,576-token
+  completion budget. The cap is above every R015 cell's 512 tokens.
+  The R015 frozen on `e1103712d` with these gates (policy `e24cb7bc…`, quiet
+  window, live provider paused by operator authorization) passed every cell
+  on 2026-10-06. That is lab evidence for one tuple on one host: R015
+  conformance still needs every advertised tier and the post-gateway replay,
+  and native MTP stays default-off until the R014 operator gate.
+
+- **0.1.24 (2026-10-06)** — Moves the immutable fork candidate to
+  `ca8c384c4fb6bc7d2fbb7c70a18c34b935701805` (parent `b1811029…`) to cut
+  native-step overhead (#1770): a single-pass checkpointed Gated DeltaNet
+  verify kernel, bit-identical to the split prefix/suffix recurrence, and no
+  all-true SSM mask when no packed verification row is padded. The provider
+  folds the drafter seed conversion into the round's staged evaluation. The
+  2026-10-06 R015 (policy `2c8a2344…`) showed native-step cost as the
+  one-slot limit; a new R015 must be frozen on this pin. The R003 review gate
+  for this revision is pending; ordinary decode is unchanged, and native MTP
+  stays default-off.
 
 - **0.1.23 (2026-10-05)** — Moves the immutable fork candidate to
   `b181102984a4d1875efbd9e0eab3a7dfd1c012c5` (chunked envelope at

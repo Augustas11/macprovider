@@ -65,6 +65,9 @@ type externalRuntimeFixture struct {
 	// "none" returns numbers without a receipt (an old CLI whose loopback
 	// upstream omitted usage), "mismatched" signs different usage.
 	receipt string
+	// wsRelay, when set, routes the member over the WS tunnel and serves
+	// each dispatched attempt with the returned relay stream.
+	wsRelay func(h *externalRuntimeHarness, ctx context.Context, requestID string, meta *providerws.SettlementReceiptMetadata) *providerws.RelayStream
 }
 
 func defaultExternalRuntimeFixture() externalRuntimeFixture {
@@ -253,6 +256,9 @@ func newExternalRuntimeHarness(t *testing.T, fx externalRuntimeFixture) *externa
 	routeProvider.RuntimeSource = fx.helloSource
 	routeProvider.TrustedPoolV1 = true
 	routeProvider.AdmissionSandboxed = true // SPEC-032 FR-HG8: the hello sandbox stays set.
+	if fx.wsRelay != nil {
+		routeProvider.InferencePath = pool.InferencePathWSTunneled
+	}
 	registry.Register(&routeProvider, nil)
 	if fx.nativeMember {
 		registerSettlementProvider(registry, "p2", "session-2", upstream.URL, 30, bytes.Repeat([]byte{0x7a}, 32))
@@ -310,10 +316,7 @@ func newExternalRuntimeHarness(t *testing.T, fx externalRuntimeFixture) *externa
 		LaunchEnvironment:  "candidate",
 	}
 	loadTrustedPoolLayer2Snapshot(t, trustPools, 0, h.routeable)
-	h.server = buyer.NewServer(
-		registry,
-		zerolog.Nop(),
-		time.Unix(1716768000, 0).UTC(),
+	opts := []buyer.Option{
 		buyer.WithGatewayServiceToken("gateway-secret"),
 		buyer.WithRequireGatewayContext(true),
 		buyer.WithRequestLog(reqLog),
@@ -324,7 +327,19 @@ func newExternalRuntimeHarness(t *testing.T, fx externalRuntimeFixture) *externa
 		buyer.WithRoutingConfig(config.RoutingConfig{MaxRetries: 0}),
 		buyer.WithModelAdmissionStore(store),
 		buyer.WithModelAdmissionRouteGuard(testRouteGuard{registry: registry, store: store}),
-	)
+	}
+	if fx.wsRelay != nil {
+		opts = append(opts,
+			buyer.WithRelay(func(context.Context, pool.Provider, string, []byte, bool) (*providerws.RelayStream, error) {
+				t.Fatalf("pool attempt dispatched without settlement metadata")
+				return nil, nil
+			}, 5*time.Second),
+			buyer.WithSettlementRelay(func(ctx context.Context, _ pool.Provider, requestID string, _ []byte, _ bool, meta *providerws.SettlementReceiptMetadata) (*providerws.RelayStream, error) {
+				return fx.wsRelay(h, ctx, requestID, meta), nil
+			}),
+		)
+	}
+	h.server = buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0).UTC(), opts...)
 	h.dbPath = dbPath
 	h.poolID = poolID
 	h.registry = registry
@@ -571,5 +586,77 @@ func TestSPEC042ExternalRuntimeUsageWithoutBoundReceiptIsZeroBilled(t *testing.T
 				t.Fatalf("evidence usage_source=%q, want byte_estimated", ledger.usageSource)
 			}
 		})
+	}
+}
+
+// #1690 BUG-1 (SPEC-022-R012.4, R-3.4.2): a loopback engine's chat-template
+// prompt count exceeds the len(body)/4 anti-inflation bound. The ledger
+// charges the bound; the pool_operator_attested evidence keeps the runtime's
+// count, which the provider's v0.4 receipt signs, so the receipt verifies
+// instead of quarantining usage_mismatch, and the credit stays bounded.
+func TestSPEC042ExternalRuntimeBoundedPromptReceiptVerifies(t *testing.T) {
+	const reportedPrompt = int64(69)
+	fx := defaultExternalRuntimeFixture()
+	var key ed25519.PrivateKey
+	fx.midFlight = func(h *externalRuntimeHarness) { key = h.key }
+	fx.upstream = func(w http.ResponseWriter, r *http.Request) {
+		if meta := decodeSettlementMetadataHeader(r.Header.Get("X-MacProvider-Settlement-Metadata")); meta != nil {
+			terminalTS := time.Now().UTC().UnixMilli()
+			w.Header().Set("X-MacProvider-Receipt-Terminal-State-TS-Unix-MS", strconv.FormatInt(terminalTS, 10))
+			w.Header().Set("X-MacProvider-Receipt", signedNormalDoneReceipt(t, key, meta, "ok", reportedPrompt, 1, terminalTS))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":      "cmpl-test",
+			"object":  "chat.completion",
+			"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "ok"}}},
+			"usage":   map[string]int64{"prompt_tokens": reportedPrompt, "completion_tokens": 1, "total_tokens": reportedPrompt + 1},
+		})
+	}
+	h := newExternalRuntimeHarness(t, fx)
+	rec := postChat(t, h.server, externalRuntimeBody, externalRuntimePoolHeaders(h.poolID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pool route status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	db, err := sql.Open("sqlite", h.dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	var charged, reported, gross, quarantined int64
+	if err := db.QueryRow(`SELECT charged_prompt_tokens, provider_reported_prompt_tokens, gross_credits, quarantined FROM ledger_request_credits`).
+		Scan(&charged, &reported, &gross, &quarantined); err != nil {
+		t.Fatalf("ledger: %v", err)
+	}
+	if reported != reportedPrompt || charged >= reportedPrompt || charged <= 0 || gross == 0 || quarantined != 0 {
+		t.Fatalf("ledger charged/reported/gross/quarantined=%d/%d/%d/%d, want the prompt bounded below %d and credited", charged, reported, gross, quarantined, reportedPrompt)
+	}
+	var source, canonical string
+	if err := db.QueryRow(`SELECT usage_source, usage_canonical_json FROM settlement_attempt_outputs`).Scan(&source, &canonical); err != nil {
+		t.Fatalf("evidence: %v", err)
+	}
+	var usage struct {
+		BillableInputTokens int64 `json:"billable_input_tokens"`
+		ObservedInputTokens int64 `json:"observed_input_tokens"`
+	}
+	if err := json.Unmarshal([]byte(canonical), &usage); err != nil {
+		t.Fatalf("decode usage: %v", err)
+	}
+	if source != billing.UsageSourcePoolOperatorAttested || usage.BillableInputTokens != reportedPrompt || usage.ObservedInputTokens != reportedPrompt {
+		t.Fatalf("evidence source=%s billable/observed input=%d/%d, want pool_operator_attested %d/%d", source, usage.BillableInputTokens, usage.ObservedInputTokens, reportedPrompt, reportedPrompt)
+	}
+	var outcome, reason string
+	if err := db.QueryRow(`SELECT settlement_outcome, reason FROM settlement_receipt_verdicts`).Scan(&outcome, &reason); err != nil {
+		t.Fatalf("verdict: %v", err)
+	}
+	if outcome != billing.SettlementOutcomeVerified {
+		t.Fatalf("receipt signing the runtime prompt outcome=%s reason=%s, want verified", outcome, reason)
+	}
+	var grossAfter, chargedAfter int64
+	if err := db.QueryRow(`SELECT gross_credits, charged_prompt_tokens FROM ledger_request_credits`).Scan(&grossAfter, &chargedAfter); err != nil {
+		t.Fatalf("ledger after verdict: %v", err)
+	}
+	if grossAfter != gross || chargedAfter != charged {
+		t.Fatalf("verified receipt moved gross %d->%d charged %d->%d, want the bounded credit unchanged", gross, grossAfter, charged, chargedAfter)
 	}
 }
