@@ -1,0 +1,2 @@
+483e7fb0c7076b460c16229e5b136687abfb3fa8bc62d81bb7bde9fe63e4edac  macprovider-cli
+84e487182336648a826132e50e7a4cd2cae0bc77ac6eafa89cc72f3a964fdbaf  mlx.metallib
