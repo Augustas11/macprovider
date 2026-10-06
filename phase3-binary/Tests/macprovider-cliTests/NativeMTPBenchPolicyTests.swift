@@ -176,6 +176,28 @@ final class NativeMTPBenchPolicyTests: XCTestCase {
         XCTAssertThrowsError(try load(relaxed))
     }
 
+    func testTemplateFreezesAmendedLatencyGatesAndRefusesTheInterChunkGate() throws {
+        let policy = try load(template())
+        XCTAssertEqual((policy.thresholds["tpot_p95_upper_bound_max"] as? NSNumber)?.doubleValue, 0.0)
+        XCTAssertEqual((policy.thresholds["chunk_gap_p99_upper_bound_max"] as? NSNumber)?.doubleValue, 1.0)
+        XCTAssertEqual((policy.thresholds["gated_tpot_p95_upper_bound_max"] as? NSNumber)?.doubleValue, 0.05)
+        // SPEC-048 0.1.24 gate set: no longer accepted for a new run.
+        var legacy = try template()
+        var thresholds = try XCTUnwrap(legacy["thresholds"] as? [String: Any])
+        thresholds.removeValue(forKey: "tpot_p95_upper_bound_max")
+        thresholds.removeValue(forKey: "chunk_gap_p99_upper_bound_max")
+        thresholds.removeValue(forKey: "gated_tpot_p95_upper_bound_max")
+        thresholds["itl_p95_upper_bound_max"] = 0.0
+        thresholds["gated_itl_p95_upper_bound_max"] = 0.05
+        legacy["thresholds"] = thresholds
+        XCTAssertThrowsError(try load(legacy))
+        var looseGap = try template()
+        thresholds = try XCTUnwrap(looseGap["thresholds"] as? [String: Any])
+        thresholds["chunk_gap_p99_upper_bound_max"] = 1.5
+        looseGap["thresholds"] = thresholds
+        XCTAssertThrowsError(try load(looseGap))
+    }
+
     func testGatedCellsRequireStaggeredArrivals() throws {
         XCTAssertEqual(try load(template()).arrivalIntervalMS, 250)
         var simultaneous = try template()

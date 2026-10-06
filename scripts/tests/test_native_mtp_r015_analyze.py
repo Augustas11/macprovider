@@ -68,7 +68,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
     def test_legacy_records_derive_decode_throughput(self):
         # 129 tokens at 100 tok/s end-to-end = 1.29s wall; 0.29s TTFT leaves
         # 128 decode tokens over 1.0s.
-        result = self._run_case(legacy=True)
+        result = self._run_case(legacy=True, legacy_gates=True)
         cell = result["cells"][0]
         self.assertEqual(cell["decode_tps_sources"], ["derived_legacy"])
         ordinary = cell["reported_metrics"]["ordinary"]["aggregate_decode_tps"]["median"]
@@ -78,7 +78,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
     def test_legacy_multi_request_uses_arrival_offsets(self):
         # r0: 0s start, TTFT 0.5, wall 2.0; r1: 1s start, TTFT 0.5, wall 2.0.
         # Decode window 0.5 -> 3.0 = 2.5s for 2 * 200 decode tokens.
-        result = self._run_case(legacy=True, legacy_multi=True, arrival_interval_ms=1000)
+        result = self._run_case(legacy=True, legacy_multi=True, arrival_interval_ms=1000, legacy_gates=True)
         ordinary = result["cells"][0]["reported_metrics"]["ordinary"]["aggregate_decode_tps"]["median"]
         self.assertAlmostEqual(ordinary, 160.0)
 
@@ -102,6 +102,149 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
                 main([str(jsonl_path), str(policy_path), "--format", "markdown"])
             self.assertTrue(out.getvalue().startswith("| Cell | Status |"))
             self.assertIn("Decode LB", out.getvalue())
+
+    def test_amended_gates_replace_inter_chunk_itl(self):
+        # Native carries ~1.9 tokens per chunk: its inter-chunk p95 is above
+        # ordinary's while per-token latency is lower. The legacy gate fails
+        # on that; the amended TPOT and worst-gap gates pass it.
+        amended = self._run_case(native_itl=0.016)
+        self.assertEqual(amended["overall_status"], "PASS")
+        self.assertEqual(amended["gate_set"], analyzer.GATE_SET_AMENDED)
+        cell = amended["cells"][0]
+        self.assertNotIn("itl", cell["metrics"])
+        self.assertEqual(cell["metrics"]["tpot"]["threshold"], 0.0)
+        self.assertEqual(cell["metrics"]["chunk_gap_p99"]["threshold"], 1.0)
+        self.assertAlmostEqual(cell["metrics"]["tpot"]["median"], 100.0 / 130.0 - 1.0)
+        legacy = self._run_case(native_itl=0.016, legacy_gates=True)
+        self.assertEqual(legacy["gate_set"], analyzer.GATE_SET_LEGACY)
+        self.assertIn("itl", legacy["cells"][0]["metric_failures"])
+        self.assertNotIn("tpot", legacy["cells"][0]["metrics"])
+
+    def test_tpot_gate_fails_on_slower_per_token_latency(self):
+        # Aggregate decode passes, but the request's own per-token latency is
+        # worse than ordinary's.
+        result = self._run_case(native_overrides={"per_request_decode_tps": [95.0]})
+        cell = result["cells"][0]
+        self.assertEqual(result["overall_status"], "FAIL")
+        self.assertIn("tpot", cell["metric_failures"])
+        self.assertNotIn("throughput", cell["metric_failures"])
+
+    def test_gated_tpot_uses_the_non_inferiority_margin(self):
+        within = self._run_case(gated_native_overrides={"per_request_decode_tps": [97.0]})
+        for cell in within["cells"]:
+            if cell["cell_class"] == "gated":
+                self.assertEqual(cell["metrics"]["tpot"]["threshold"], 0.05)
+                self.assertNotIn("tpot", cell["metric_failures"])
+        beyond = self._run_case(gated_native_overrides={"per_request_decode_tps": [90.0]})
+        self.assertTrue(any(
+            "tpot" in cell["metric_failures"] for cell in beyond["cells"] if cell["cell_class"] == "gated"
+        ))
+
+    def test_worst_gap_bound_catches_a_stall_the_average_hides(self):
+        # Two 0.5s stalls in 100 chunks barely move TPOT but put the native
+        # p99 gap far above 2x ordinary's.
+        stalled = [[0.009] * 98 + [0.5, 0.5]]
+        result = self._run_case(native_overrides={"raw_inter_token_gaps_seconds": stalled})
+        cell = result["cells"][0]
+        self.assertEqual(result["overall_status"], "FAIL")
+        self.assertIn("chunk_gap_p99", cell["metric_failures"])
+        self.assertNotIn("tpot", cell["metric_failures"])
+        # Just under twice ordinary's p99 gap passes; twice it does not.
+        under = self._run_case(native_overrides={"raw_inter_token_gaps_seconds": [[0.019] * 100]})
+        self.assertNotIn("chunk_gap_p99", under["cells"][0]["metric_failures"])
+        at = self._run_case(native_overrides={"raw_inter_token_gaps_seconds": [[0.020] * 100]})
+        self.assertIn("chunk_gap_p99", at["cells"][0]["metric_failures"])
+
+    def test_missing_chunk_gaps_fail_closed_under_amended_gates_only(self):
+        for value in (self._DELETE, [], [[]], [[0.01, None]], [[0.01, -1.0]]):
+            with self.subTest(value=value):
+                result = self._run_case(native_overrides={"raw_inter_token_gaps_seconds": value})
+                self.assertEqual(result["overall_status"], "FAIL")
+                self.assertTrue(any(
+                    "raw_inter_token_gaps_seconds" in item for item in result["cells"][0]["hard_failures"]
+                ), result["cells"][0]["hard_failures"])
+        legacy = self._run_case(native_overrides={"raw_inter_token_gaps_seconds": self._DELETE}, legacy_gates=True)
+        self.assertEqual(legacy["overall_status"], "PASS")
+
+    def test_amended_per_request_series_must_cover_every_request(self):
+        # Two requests declared, one entry per series: the missing request
+        # cannot drop out of the TPOT p95 or the gap p99.
+        short = self._run_case(native_overrides={"requests": 2})
+        self.assertEqual(short["overall_status"], "FAIL")
+        self.assertTrue(any(
+            "per_request_decode_tps" in item and "raw_inter_token_gaps_seconds" in item and "request_metrics" in item
+            for item in short["cells"][0]["hard_failures"]
+        ), short["cells"][0]["hard_failures"])
+        cases = {
+            # Top-level gaps disagree with the request's own gaps.
+            "raw_inter_token_gaps_seconds": [{
+                "request_id": "c-b0-r0", "completion_tokens": 129, "decode_tps": 130.0,
+                "inter_token_gaps_seconds": [0.009] * 99,
+            }],
+            # Top-level decode throughput disagrees with the request's own.
+            "per_request_decode_tps": [{
+                "request_id": "c-b0-r0", "completion_tokens": 129, "decode_tps": 1000.0,
+                "inter_token_gaps_seconds": [0.009] * 100,
+            }],
+            # More gaps than the request's tokens can produce.
+            "request_metrics": [{
+                "request_id": "c-b0-r0", "completion_tokens": 50, "decode_tps": 130.0,
+                "inter_token_gaps_seconds": [0.009] * 100,
+            }],
+        }
+        for field, metrics in cases.items():
+            with self.subTest(field=field):
+                result = self._run_case(native_overrides={"request_metrics": metrics})
+                self.assertEqual(result["overall_status"], "FAIL")
+                self.assertTrue(any(
+                    field in item for item in result["cells"][0]["hard_failures"]
+                ), result["cells"][0]["hard_failures"])
+        # The legacy gate set never read these series; its verdicts stand.
+        legacy = self._run_case(native_overrides={"request_metrics": self._DELETE}, legacy_gates=True)
+        self.assertEqual(legacy["overall_status"], "PASS")
+
+    def test_non_finite_policy_constants_and_non_object_records_are_rejected(self):
+        for token in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(token=token), tempfile.TemporaryDirectory() as tmp:
+                jsonl_path, policy_path = self._write_case(Path(tmp))
+                text = policy_path.read_text("utf-8")
+                self.assertIn('"alpha": 0.05', text)
+                policy_path.write_text(text.replace('"alpha": 0.05', f'"alpha": {token}'), "utf-8")
+                with self.assertRaises(ValueError):
+                    analyze(jsonl_path, policy_path)
+        # A literal that overflows to infinity parses; the frozen-value check
+        # still refuses it.
+        with tempfile.TemporaryDirectory() as tmp:
+            jsonl_path, policy_path = self._write_case(Path(tmp))
+            text = policy_path.read_text("utf-8").replace('"alpha": 0.05', '"alpha": 1e999')
+            policy_path.write_text(text, "utf-8")
+            result = analyze(jsonl_path, policy_path)
+            self.assertEqual(result["overall_status"], "FAIL")
+            self.assertIn("threshold_not_frozen:alpha", result["matrix_violations"])
+        with tempfile.TemporaryDirectory() as tmp:
+            jsonl_path, policy_path = self._write_case(Path(tmp))
+            jsonl_path.write_text(jsonl_path.read_text("utf-8") + "[]\n", "utf-8")
+            with self.assertRaises(ValueError):
+                analyze(jsonl_path, policy_path)
+
+    def test_exploratory_amended_reanalysis_never_yields_a_verdict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jsonl_path, policy_path = self._write_case(Path(tmp), native_itl=0.016, legacy_gates=True)
+            self.assertEqual(analyze(jsonl_path, policy_path)["overall_status"], "FAIL")
+            result = analyze(jsonl_path, policy_path, exploratory_amended_gates=True)
+            self.assertEqual(result["overall_status"], "EXPLORATORY_NO_VERDICT")
+            self.assertEqual(result["gate_set"], analyzer.GATE_SET_AMENDED)
+            self.assertEqual(result["exploratory_reanalysis_of_gate_set"], analyzer.GATE_SET_LEGACY)
+            self.assertTrue(all(cell["status"] == "PASS" for cell in result["cells"]))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = main([str(jsonl_path), str(policy_path), "--exploratory-amended-gates", "--format", "markdown"])
+            self.assertEqual(code, 1)
+            self.assertIn("TPOT p95 UB | Gap p99 UB", out.getvalue())
+        with tempfile.TemporaryDirectory() as tmp:
+            jsonl_path, policy_path = self._write_case(Path(tmp))
+            refused = analyze(jsonl_path, policy_path, exploratory_amended_gates=True)
+            self.assertEqual(refused["reason"], "exploratory_reanalysis_needs_legacy_policy")
 
     def test_ttft_fail(self):
         result = self._run_case(native_ttft=0.13)
@@ -297,7 +440,8 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         result = self._run_case(policy_overrides={"thresholds": {
             "throughput_lower_bound_min": 0.15,
             "ttft_p95_upper_bound_max": 0.10,
-            "itl_p95_upper_bound_max": 0.0,
+            "tpot_p95_upper_bound_max": 0.0,
+            "chunk_gap_p99_upper_bound_max": 1.0,
             "rejection_increase_max_pp": 1.0,
             "min_available_memory_fraction": 0.10,
             "bootstrap_draws": 1000,
@@ -365,16 +509,26 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         relaxed = self._run_case(policy_overrides={"thresholds": {
             "throughput_lower_bound_min": 0.10,
             "ttft_p95_upper_bound_max": 0.10,
-            "itl_p95_upper_bound_max": 0.0,
+            "tpot_p95_upper_bound_max": 0.0,
+            "chunk_gap_p99_upper_bound_max": 1.0,
             "rejection_increase_max_pp": 1.0,
             "min_available_memory_fraction": 0.10,
             "bootstrap_draws": 10000,
             "alpha": 0.05,
             "gated_throughput_lower_bound_min": -0.05,
             "gated_ttft_p95_upper_bound_max": 0.05,
-            "gated_itl_p95_upper_bound_max": 0.05,
+            "gated_tpot_p95_upper_bound_max": 0.05,
         }})
         self.assertIn("threshold_not_frozen:throughput_lower_bound_min", relaxed["matrix_violations"])
+        loose_gap = self._run_case(policy_overrides={"thresholds": {
+            **analyzer.FROZEN_THRESHOLDS, "chunk_gap_p99_upper_bound_max": 1.5,
+        }})
+        self.assertIn("threshold_not_frozen:chunk_gap_p99_upper_bound_max", loose_gap["matrix_violations"])
+        # A mix of the two gate sets is neither frozen set.
+        mixed = self._run_case(policy_overrides={"thresholds": {
+            **analyzer.FROZEN_THRESHOLDS, "itl_p95_upper_bound_max": 0.0,
+        }})
+        self.assertIn("thresholds_key_set_not_frozen", mixed["matrix_violations"])
         method = self._run_case(policy_overrides={"prompt_corpus": "deterministic_synthetic_unique_v1"})
         self.assertIn("methodology_not_frozen:prompt_corpus", method["matrix_violations"])
         unknown = self._run_case(policy_overrides={"extra": 1})
@@ -548,9 +702,13 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
                 ), result["cells"][0]["hard_failures"])
 
     def test_wrong_typed_or_non_finite_fields_fail_closed(self):
+        # A NaN or Infinity constant is refused when the JSONL is read.
+        for value in (float("nan"), float("inf")):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self._run_case(native_overrides={"inter_token_gap_p95_seconds": value})
         for field, value in (
             ("ttft_p95_seconds", "0.1"),
-            ("inter_token_gap_p95_seconds", float("nan")),
+            ("inter_token_gap_p95_seconds", -1.0),
             ("aggregate_committed_tps", -1.0),
             ("requests", 0),
             ("errors", 1.5),
@@ -598,6 +756,8 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
                 "ttft_p95_seconds",
                 "inter_token_gap_p50_seconds",
                 "inter_token_gap_p95_seconds",
+                "tpot_p95_seconds",
+                "chunk_gap_p99_seconds",
                 "peak_phys_footprint_bytes",
                 "capacity_rejection_rate",
                 "fallback_error_rate",
@@ -610,6 +770,25 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
             self.assertIn(name, reported["native_mtp"])
 
     _DELETE = object()
+
+    @staticmethod
+    def _sync_request_metrics(record):
+        """request_metrics that agree with the record's per-request series,
+        as the bench writes them (one entry per series element)."""
+        gaps = record.get("raw_inter_token_gaps_seconds")
+        decode = record.get("per_request_decode_tps")
+        if not isinstance(gaps, list) or not isinstance(decode, list):
+            record["request_metrics"] = []
+            return
+        record["request_metrics"] = [
+            {
+                "request_id": f"c-b{record.get('block_index', 0)}-r{index}",
+                "completion_tokens": 129,
+                "decode_tps": decode[index] if index < len(decode) else None,
+                "inter_token_gaps_seconds": item,
+            }
+            for index, item in enumerate(gaps)
+        ]
     SLOTS = (1,)
     # s1 cells are native-eligible; s2 cells are gated (SPEC-048-R015).
     BOUND = 1
@@ -631,6 +810,19 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
     }
     PROMPTS = (1536, 4096)
     OUTPUTS = (128, 512)
+    # SPEC-048 0.1.24-and-earlier gates (inter-chunk p95 ITL).
+    LEGACY_THRESHOLDS = {
+        "throughput_lower_bound_min": 0.15,
+        "ttft_p95_upper_bound_max": 0.10,
+        "itl_p95_upper_bound_max": 0.0,
+        "rejection_increase_max_pp": 1.0,
+        "min_available_memory_fraction": 0.10,
+        "bootstrap_draws": 1000,
+        "alpha": 0.05,
+        "gated_throughput_lower_bound_min": -0.05,
+        "gated_ttft_p95_upper_bound_max": 0.05,
+        "gated_itl_p95_upper_bound_max": 0.05,
+    }
 
     @staticmethod
     def _cell(result, cell_id):
@@ -670,6 +862,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         gated_native_overrides=None,
         order_override=None,
         write_sustained=True,
+        legacy_gates=False,
     ):
         policy_path = root / "policy.json"
         jsonl_path = root / "runs.jsonl"
@@ -710,17 +903,18 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
             "target_sha256": "1" * 64,
             "mtp_sha256": "2" * 64,
             "tokenizer_sha256": "3" * 64,
-            "thresholds": {
+            "thresholds": self.LEGACY_THRESHOLDS if legacy_gates else {
                 "throughput_lower_bound_min": 0.15,
                 "ttft_p95_upper_bound_max": 0.10,
-                "itl_p95_upper_bound_max": 0.0,
+                "tpot_p95_upper_bound_max": 0.0,
+                "chunk_gap_p99_upper_bound_max": 1.0,
                 "rejection_increase_max_pp": 1.0,
                 "min_available_memory_fraction": 0.10,
                 "bootstrap_draws": 1000,
                 "alpha": 0.05,
                 "gated_throughput_lower_bound_min": -0.05,
                 "gated_ttft_p95_upper_bound_max": 0.05,
-                "gated_itl_p95_upper_bound_max": 0.05,
+                "gated_tpot_p95_upper_bound_max": 0.05,
             },
         }
         if exploratory_policy:
@@ -774,6 +968,8 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
                         native_record.pop(field, None)
                     else:
                         native_record[field] = value
+                if not legacy and "request_metrics" not in overrides:
+                    self._sync_request_metrics(native_record)
 
             for block in range(blocks_written):
                 ordinary = self._run_record("ordinary", block, 100.0, 0.100, 0.010, False, policy_sha=run_policy_sha or policy_sha, peak_phys_footprint_bytes=peak_phys_footprint_bytes, min_available_memory_fraction=matrix_min_available_memory_fraction, cell_id=cell_id, **record_options)
@@ -833,6 +1029,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
             "ttft_p95_seconds": ttft,
             "inter_token_gap_p50_seconds": itl * 0.9,
             "inter_token_gap_p95_seconds": itl,
+            "raw_inter_token_gaps_seconds": [[itl] * 100],
             "capacity_rejections": 0,
             "fallbacks": 0,
             "errors": 0,
@@ -860,6 +1057,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
             decode = tps if decode_tps is None else decode_tps
             record["aggregate_decode_tps"] = decode
             record["per_request_decode_tps"] = [decode]
+            self._sync_request_metrics(record)
         elif legacy_multi:
             # Two requests, 201 tokens each, 2.0s wall, 0.5s TTFT.
             record["requests"] = 2
