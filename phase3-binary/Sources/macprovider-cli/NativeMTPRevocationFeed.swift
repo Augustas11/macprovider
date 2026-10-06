@@ -1218,6 +1218,21 @@ final class KeychainNativeMTPRevocationStore: NativeMTPRevocationStore, @uncheck
         return home
             .appendingPathComponent("Library/Application Support/macprovider/native-mtp-revocations", isDirectory: true)
     }
+
+    /// The anchor store the serve path uses: the Keychain-anchored store.
+    /// A lab build with a static-feed override keeps the anchor in a file
+    /// under its isolated home instead: a rehearsal never writes the user's
+    /// login keychain, which an SSH session cannot unlock anyway.
+    static func live() -> NativeMTPRevocationStore {
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if StaticFeedOrigin.labOverride != nil {
+            return FileNativeMTPRevocationStore(
+                directory: defaultCacheDirectory().appendingPathComponent("lab-anchor", isDirectory: true)
+            )
+        }
+        #endif
+        return KeychainNativeMTPRevocationStore()
+    }
 }
 
 private extension JSONEncoder {

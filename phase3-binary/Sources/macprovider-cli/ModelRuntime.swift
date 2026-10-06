@@ -3410,7 +3410,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let servedSnapshotID = load.servedSnapshotID
         let targetGeneration = load.selfTestInput.servedSnapshot?.generation ?? 0
         let verifier = NativeMTPRevocationEd25519Verifier(publicKeysByKeyID: trustedKeyring.publicKeysByKeyID)
-        let store = KeychainNativeMTPRevocationStore()
+        let store = KeychainNativeMTPRevocationStore.live()
         nativeMTPRevocationRefreshTask = Task { [weak self] in
             await NativeMTPRevocationFeedManager.pollWhileActive(
                 pinnedSignerKeyID: signerKeyID,
@@ -9164,7 +9164,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 signatureData: signatureData,
                 trustedKeyring: trustedKeyring
             )
-            let store = KeychainNativeMTPRevocationStore()
+            let store = KeychainNativeMTPRevocationStore.live()
             let verifier = NativeMTPRevocationEd25519Verifier(publicKeysByKeyID: trustedKeyring.publicKeysByKeyID)
             let state = try await NativeMTPRevocationFeedManager.loadNetworkFirst(
                 pinnedSignerKeyID: revocationSignerKeyID,

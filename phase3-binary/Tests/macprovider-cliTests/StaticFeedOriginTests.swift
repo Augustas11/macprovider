@@ -104,5 +104,10 @@ final class StaticFeedOriginTests: XCTestCase {
             XCTAssertEqual(once, 1)
         }
     }
+
+    func testRevocationAnchorStoreIsTheKeychainWithoutALabOverride() {
+        XCTAssertNil(StaticFeedOrigin.labOverride)
+        XCTAssertTrue(KeychainNativeMTPRevocationStore.live() is KeychainNativeMTPRevocationStore)
+    }
 }
 
