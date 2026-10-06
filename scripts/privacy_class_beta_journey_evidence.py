@@ -29,6 +29,7 @@ Nothing in this module signs or promotes anything.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import re
 import subprocess
@@ -283,6 +284,13 @@ BUNDLE_FORBIDDEN_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("an AWS key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
     ("an email address", re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")),
 )
+# Public or internal DNS names (a signing identifier such as
+# `live.malibu.provider.cli` or a file name such as `pearl-release.json` has no
+# such final label, so it is not flagged).
+HOSTNAME_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_.-])(?:[A-Za-z0-9-]+\.)+(?:com|net|org|io|dev|tech|app|ai|cloud|local|internal|lan|home|corp|test|example)(?![A-Za-z0-9_-])"
+)
+IPV6_CANDIDATE_RE = re.compile(r"(?<![0-9A-Za-z:])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?![0-9A-Za-z:])")
 IPV4_RE = re.compile(r"(?<![0-9.])([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})(?![0-9.])")
 URL_HOST_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://([^/:\s\"'<>]+)")
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost"})
@@ -386,7 +394,13 @@ def require_no_symlink_components(root: Path, relative: str) -> Path:
 
 
 def load_bundle(root: Path, relative_dir: str) -> Bundle:
+    if not relative_dir.startswith(EVIDENCE_PREFIX) or Path(relative_dir).is_absolute() or ".." in Path(relative_dir).parts:
+        fail(f"reviewed bundle must be a repository-relative {EVIDENCE_PREFIX}* directory")
     directory = require_no_symlink_components(root, relative_dir)
+    try:
+        directory.resolve(strict=True).relative_to(root.resolve(strict=True))
+    except (OSError, ValueError):
+        fail(f"reviewed bundle must stay inside the repository: {relative_dir}")
     if not directory.is_dir():
         fail(f"reviewed bundle directory is absent: {relative_dir}")
     files: dict[str, bytes] = {}
@@ -450,6 +464,15 @@ def assert_bundle_redacted(bundle: Bundle) -> None:
             octets = [int(item) for item in match.groups()]
             if all(octet <= 255 for octet in octets) and octets[0] != 127 and octets != [0, 0, 0, 0]:
                 fail(f"reviewed bundle file {path} contains a non-loopback IPv4 literal")
+        if HOSTNAME_RE.search(text):
+            fail(f"reviewed bundle file {path} contains a hostname")
+        for match in IPV6_CANDIDATE_RE.finditer(text):
+            try:
+                address = ipaddress.IPv6Address(match.group(0))
+            except ValueError:
+                continue
+            if not address.is_loopback and not address.is_unspecified:
+                fail(f"reviewed bundle file {path} contains a non-loopback IPv6 literal")
         for match in URL_HOST_RE.finditer(text):
             if match.group(1).lower() not in LOOPBACK_HOSTS:
                 fail(f"reviewed bundle file {path} contains a non-loopback URL host")
@@ -1084,6 +1107,11 @@ class Checks:
                 expect(session.get("relay_blind_settlement_receipt_v1") is False, errors, f"old {case} session must lack the settlement capability")
                 expect(session.get("routing_eligible") is True and session.get("hash_status") == "hash_verified" and session.get("receipt_key_pinned") is True, errors, f"old {case} session must otherwise be routable")
         expect(isinstance(old_id, str) and old_id not in (self.provider_id("privacy"), self.provider_id("plain")), errors, "old provider must be a distinct provider")
+        # One old provider identity across both capability snapshots, its own
+        # credential import, and the exclusion rows.
+        ids = {self.b.json_object(f"{base}/capability-old-{case}.json").get("provider_id") for case in ("privacy", "plain")}
+        ids.add(self.b.json_object(f"{base}/credentials-import-old.txt").get("provider_id"))
+        expect(ids == {old_id}, errors, "every step-14 record must name the same old provider")
         errors.extend(self.proxy_code(f"{base}/old-privacy.code.json", "/v1/relay-blind/route-reservations", "privacy_class_unavailable", dispatches=None))
         errors.extend(self.proxy_code(f"{base}/old-relay-blind.code.json", "/v1/relay-blind/route-reservations", "relay_blind_provider_unsupported", dispatches=None))
         errors.extend(self.client_refused(f"{base}/old-privacy"))

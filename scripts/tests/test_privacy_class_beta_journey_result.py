@@ -198,6 +198,11 @@ class PrivacyClassBetaEvidenceTests(unittest.TestCase):
         self.bundle_file("extra.txt").write_text("x\n", encoding="utf-8")
         self.assert_rejected(self.evidence, "must list exactly the bundle files")
 
+    def test_bundle_loader_rejects_paths_outside_the_evidence_prefix(self) -> None:
+        for relative in ("/etc", "journeys/evidence/privacy-class-beta-x/../../..", "specs"):
+            with self.assertRaises(contract.PrivacyEvidenceError):
+                contract.load_bundle(self.root, relative)
+
     def test_rejects_symlinks_in_bundle(self) -> None:
         os.symlink(self.bundle_file("results.tsv"), self.bundle_file("link.txt"))
         self.assert_rejected(self.evidence, "symlinks")
@@ -253,7 +258,7 @@ class PrivacyClassBetaEvidenceTests(unittest.TestCase):
                     contract.compose_evidence(self.root, BUNDLE)
 
     def test_private_path_or_secret_left_in_bundle_fails_review(self) -> None:
-        for text in ("/Users/someone/journey", "\\/Users\\/someone\\/x", "-----BEGIN EC " + "PRIVATE KEY-----", "operator@example.com", "10.1.2.3", "wss://coordinator.example.test/ws"):
+        for text in ("/Users/someone/journey", "\\/Users\\/someone\\/x", "-----BEGIN EC " + "PRIVATE KEY-----", "operator@example.com", "10.1.2.3", "wss://coordinator.example.test/ws", "peer=staging-worker.internal", "addr=2001:db8::1"):
             with self.subTest(text=text):
                 self.fresh()
                 path = self.bundle_file("step-00b-verify-candidate/compat-id.err")
