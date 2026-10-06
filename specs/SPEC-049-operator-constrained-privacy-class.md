@@ -1,6 +1,6 @@
 # SPEC-049 - Operator-Constrained Privacy Class
 
-**Version:** 0.1.4
+**Version:** 0.1.5
 Status: draft
 Owner: @Augustas11
 Issue: https://github.com/Augustas11/macprovider/issues/1749
@@ -10,7 +10,7 @@ Audit history: v0.1.0 is the initial default-off Beta contract. It does not prom
 {
   "spec_id": "SPEC-049",
   "title": "Operator-Constrained Privacy Class",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -368,7 +368,7 @@ The header marker (§4.2), the reservation version (§4.6), the reservation row'
 
 ### SPEC-049-R013 - Routing gate at every phase
 
-At reservation, at consume, and immediately before dispatch, the coordinator MUST re-evaluate all of: the privacy class is enabled in configuration; the durable kill switch is not set (SPEC-049-R018); the provider is not quarantined; a verified posture for the same live session is no older than `posture_max_age_seconds`; the reserved privacy key digest is listed in that posture; the posture cdhash is still approved and unexpired; the key record is fresh and unrevoked with known revocation freshness; and the live WebSocket session is the one bound by the reservation. A privacy-class reservation MUST select only privacy-class key records, and a non-privacy relay-blind reservation MUST NOT select them. Failure before consume returns `privacy_class_unavailable` or `privacy_class_disabled`; failure between consume and dispatch burns the reservation, refunds held quota, and returns `privacy_class_posture_stale` or `privacy_class_disabled`. There MUST be no failover, retry, alternate provider, downgrade to plain SPEC-041 relay-blind, or downgrade to plaintext.
+At reservation, at consume, and immediately before dispatch, the coordinator MUST re-evaluate all of: the privacy class is enabled in configuration; the durable kill switch is not set (SPEC-049-R018); the provider is not quarantined; a verified posture for the same live session is no older than `posture_max_age_seconds`; the reserved privacy key digest is listed in that posture; the posture cdhash is still approved and unexpired; the key record is fresh and unrevoked with known revocation freshness; and the live WebSocket session is the one bound by the reservation. A privacy-class reservation MUST select only privacy-class key records, and a non-privacy relay-blind reservation MUST NOT select them. Model selection and binding follow SPEC-041-R004: the buyer may name either name of a signed-catalog row, the reservation binds the name the selected privacy record signs, and selection never crosses catalog rows. The `<canonical model>` of the §4.8 clear usage chunk is that bound model. Failure before consume returns `privacy_class_unavailable` or `privacy_class_disabled`; failure between consume and dispatch burns the reservation, refunds held quota, and returns `privacy_class_posture_stale` or `privacy_class_disabled`. There MUST be no failover, retry, alternate provider, downgrade to plain SPEC-041 relay-blind, or downgrade to plaintext.
 
 ### SPEC-049-R014 - Response AEAD
 
@@ -536,3 +536,4 @@ This is the one-time limited activation exception that `specs/PROCESS.md` allows
   - the residuals carried from #1864.
 
   §9 attaches the signed `JOURNEY-PRIVACY-CLASS-BETA` result. No requirement becomes conformant. The normative text (wire, schema, routing, claim, disclosure strings) does not change; the exception only switches the existing default-off behavior on within this scope.
+- 0.1.5 - SPEC-049-R013: privacy-class model selection and binding follow SPEC-041-R004 (v0.5.0). A buyer may name either the catalog key or the artifact id of a signed-catalog row. The reservation binds the name the selected privacy record signs, and selection never crosses rows. The §4.8 clear usage `model` is the bound model. No claim, disclosure string, posture, key, envelope, or response-AEAD change.
