@@ -1339,6 +1339,11 @@ requests.
   catch-up as a ~10 ms stall in the shared round every 64 tokens, on both
   rows, in every gated native run of both the 10-06 and step-overhead
   binaries.
+  The R015 frozen on `e1103712d` with these gates (policy `e24cb7bc…`, quiet
+  window, live provider paused by operator authorization) passed every cell
+  on 2026-10-06. That is lab evidence for one tuple on one host: R015
+  conformance still needs every advertised tier and the post-gateway replay,
+  and native MTP stays default-off until the R014 operator gate.
 
 - **0.1.24 (2026-10-06)** — Moves the immutable fork candidate to
   `ca8c384c4fb6bc7d2fbb7c70a18c34b935701805` (parent `b1811029…`) to cut
