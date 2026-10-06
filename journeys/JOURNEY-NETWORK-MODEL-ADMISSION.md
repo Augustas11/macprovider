@@ -64,6 +64,15 @@ The signed result MUST contain these passing steps:
    non-catalog candidates and confirm status output includes provider-facing
    state meaning, next action, and the distinction between "not earning-eligible
    yet; catalog/receipt path exists" and "no earning path exists in this release".
+   The novel candidate is the GGUF input: discovery must list it once with a
+   GGUF loopback `runtime_source`, and the offer response and the final status
+   must name the same provider id, candidate id, and served model ref. The
+   coordinator probes an offer only through a session that serves the offered
+   ref, so a novel offer made beside the settleable session may stay
+   `offer_submitted`. In that case the final status head must equal the event
+   the offer appended (both 64-hex coordinator event ids, distinct from the
+   settleable candidate's head): an appended event that leaves the state
+   `offer_submitted` fails the step.
 11. `step-11-transition-validity` - Attempt at least one invalid transition
    outside the SPEC-047 matrix, one valid withdrawal/re-offer path, and one valid
    revocation/re-offer path; confirm invalid transitions are rejected and re-entry

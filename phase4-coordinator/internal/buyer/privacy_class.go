@@ -106,7 +106,7 @@ func (s *Server) privacyGate(ctx context.Context, provider pool.Provider, keyDig
 		return time.Time{}, privacyClassUnavailable
 	}
 	current, live := s.pool.Resolve(provider.ProviderID, provider.AssignedID)
-	if !live || current.ProviderID == "" || current.AssignedID == "" || !current.IsWSTunneled() || !relayBlindBindable(current) {
+	if !live || current.ProviderID == "" || current.AssignedID == "" || !current.IsWSTunneled() || !relayBlindSessionUsable(current) {
 		return time.Time{}, privacyClassUnavailable
 	}
 	// SPEC-022 R-14.2 / SPEC-049-R021: under enforce the privacy class is a

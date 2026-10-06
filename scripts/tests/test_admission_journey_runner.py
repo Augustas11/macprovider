@@ -153,6 +153,15 @@ class FakeRig:
         self.mutate_on_duplicate_offer = mutate_on_duplicate_offer  # append an event while answering 409 (the bug step 2 must catch)
         self.skip_stale_head_check = skip_stale_head_check          # approve against a moved head (the bug step 9 must catch)
         self.gguf_earning = None  # fault-injection override for the GGUF earning; None => faithful state-based earning
+        # #1576 coordinator: the offer-time probe runs only against a session
+        # serving the offered ref, so a GGUF offer next to an MLX session
+        # stays offer_submitted with no probe edge.
+        self.novel_offer_unprobed = False
+        # Step-10 fault injection (each None/False => faithful behavior).
+        self.gguf_runtime_source = "ollama_loopback"   # what discovery reports for the GGUF ref
+        self.novel_submit_overrides: dict = {}          # fields the offer response misreports
+        self.novel_status_overrides: dict = {}          # fields the final status misreports
+        self.novel_append_after_offer = False           # coordinator appends an event yet leaves offer_submitted
         self.request_log = 0
 
     def _event(self, ref: str) -> str:
@@ -281,15 +290,25 @@ class FakeRig:
             assert current in ("not_offered", "withdrawn", "revoked"), "fake: duplicate live offer must go through cli_raw"
             assert "offer_submitted" in ADMISSION_ALLOWED_NEXT_STATES.get(current, frozenset({"offer_submitted"})), f"fake: illegal offer from {current}"
             event = self._set(ref, "offer_submitted")
-            self._set(ref, "sandbox_probe_only", "synthetic_probe_required")
+            if ref == GGUF and self.novel_append_after_offer:
+                self._set(ref, "offer_submitted")
+            elif not (ref == GGUF and self.novel_offer_unprobed):
+                self._set(ref, "sandbox_probe_only", "synthetic_probe_required")
             # `models offer submit` prints the coordinator status readback
             # (BYOMAdmissionStatusWire -> model_admission_status.v1), not the
             # model_admission_offer_submit.v1 request-package schema it signs and
             # sends. Model the command's stdout contract, not the wire request.
-            return {"schema": "model_admission_status.v1", "generated_at": NOW, "cli_version": CLI_VERSION,
-                    "admission_state": "offer_submitted", "admission_state_source": "coordinator", "coordinator_event_id": event}
+            doc = {"schema": "model_admission_status.v1", "generated_at": NOW, "cli_version": CLI_VERSION,
+                   "provider_id": PROVIDER_ID, "candidate_id": self._candidate_id(ref), "served_model_ref": ref,
+                   "admission_state": "offer_submitted", "admission_state_source": "coordinator", "coordinator_event_id": event}
+            if ref == GGUF:
+                doc.update(self.novel_submit_overrides)
+            return doc
         if cmd == ["models", "admission", "status"]:
-            return self._status_doc(args[3])
+            doc = self._status_doc(args[3])
+            if args[3] == GGUF:
+                doc.update(self.novel_status_overrides)
+            return doc
         if cmd == ["models", "admission", "withdraw"]:
             ref = args[3]; previous = self.state[ref]
             reason = args[args.index("--reason-code") + 1]
@@ -312,7 +331,10 @@ class FakeRig:
                                 guidance_obj=guidance(state, earning))
             return {"schema": "model_catalog_economics.v1", "generated_at": NOW, "projection_sequence": 1, "source": dict(ECONOMICS_SOURCE), "rows": [row], "warnings": []}
         if cmd[:2] == ["models", "discover"]:
-            return {"candidates": [{"served_model_ref": SETTLEABLE}, {"served_model_ref": OPAQUE}, {"served_model_ref": GGUF}]}
+            return {"candidates": [
+                {"served_model_ref": SETTLEABLE, "runtime_source": "mlx_cache", "candidate_id": self._candidate_id(SETTLEABLE)},
+                {"served_model_ref": OPAQUE, "runtime_source": "openai_compatible_loopback", "candidate_id": self._candidate_id(OPAQUE)},
+                {"served_model_ref": GGUF, "runtime_source": self.gguf_runtime_source, "candidate_id": self._candidate_id(GGUF)}]}
         raise AssertionError("fake rig: unexpected cli " + " ".join(args))
 
     def _decision_response(self, ref: str, actor: str, reason: str, pending_id=None) -> dict:
@@ -590,6 +612,60 @@ class AdmissionJourneyRunnerTests(unittest.TestCase):
             aj.build_parser().parse_args(["--out", "x", "--cli-binary", "x", "--provider-config", "x", "--coordinator-admin-origin", "x",
                                           "--operator-actor-a", "a", "--operator-actor-b", "b", "--settleable-ref", "s", "--opaque-ref", "o",
                                           "--provider-log", "x", "--coordinator-log", "x"])
+
+    def test_step_10_accepts_an_unprobed_coordinator_backed_novel_offer(self):
+        rig = FakeRig()
+        rig.novel_offer_unprobed = True
+        manifest = self.run_journey(rig)
+        self.assertEqual(rig.state[GGUF], "offer_submitted")
+        self.assertTrue(manifest.is_file())
+        rig = FakeRig()
+        rig.novel_offer_unprobed = True
+        rig.gguf_earning = "local_inventory_only"
+        with self.assertRaises(aj.JourneyFailure) as caught:
+            self.run_journey(rig)
+        self.assertIn("not no_earning_path_in_v0_1", str(caught.exception))
+
+    def assert_step_10_fails(self, rig: FakeRig, message: str) -> None:
+        with self.assertRaises(aj.JourneyFailure) as caught:
+            self.run_journey(rig)
+        self.assertIn(message, str(caught.exception))
+        self.assertFalse((self.out / "run-manifest.json").exists())
+
+    def test_step_10_binds_the_novel_candidate_to_the_gguf_input(self):
+        rig = FakeRig(); rig.gguf_runtime_source = "openai_compatible_loopback"
+        self.assert_step_10_fails(rig, "is not a GGUF loopback runtime")
+        for field, value in (("provider_id", "mp-" + "b" * 32), ("candidate_id", candidate_id("other")), ("served_model_ref", "ollama:other-model")):
+            rig = FakeRig(); rig.novel_offer_unprobed = True; rig.novel_submit_overrides = {field: value}
+            self.assert_step_10_fails(rig, "the novel offer response names a different provider, candidate or served model ref")
+            rig = FakeRig(); rig.novel_offer_unprobed = True; rig.novel_status_overrides = {field: value}
+            # A provider/candidate the runner did not offer must not stand in for the GGUF status.
+            with self.assertRaises(aj.JourneyFailure):
+                self.run_journey(rig)
+            self.assertFalse((self.out / "run-manifest.json").exists())
+
+    def test_step_10_event_ids_are_64_hex_unreused_and_unmoved(self):
+        # Malformed submit id.
+        rig = FakeRig(); rig.novel_offer_unprobed = True; rig.novel_submit_overrides = {"coordinator_event_id": "not-an-event-id"}
+        self.assert_step_10_fails(rig, "carries no 64-hex coordinator event id")
+        # Malformed final id (uppercase hex is not the coordinator grammar).
+        rig = FakeRig(); rig.novel_offer_unprobed = True
+        rig.novel_status_overrides = {"coordinator_event_id": "A" * 64}
+        self.assert_step_10_fails(rig, "status carries no 64-hex coordinator event id")
+        # Reused id: the novel offer answers with the settleable candidate's head.
+        rig = FakeRig(); rig.novel_offer_unprobed = True
+        rig.novel_submit_overrides = {"coordinator_event_id": "__settleable_head__"}
+        original = rig.cli
+        def cli(args, _original=original, _rig=rig):
+            doc = _original(args)
+            if doc.get("coordinator_event_id") == "__settleable_head__":
+                doc["coordinator_event_id"] = _rig._event_id(SETTLEABLE)
+            return doc
+        rig.cli = cli
+        self.assert_step_10_fails(rig, "reuses the settleable candidate's coordinator event id")
+        # Changed id: an event is appended after the offer while the state stays offer_submitted.
+        rig = FakeRig(); rig.novel_append_after_offer = True
+        self.assert_step_10_fails(rig, "head moved past its offer without leaving offer_submitted")
 
     def test_redaction_review_covers_every_surface(self):
         # A leak in any one surface fails step 12 and publishes nothing; the
