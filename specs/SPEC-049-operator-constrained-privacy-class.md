@@ -1,6 +1,6 @@
 # SPEC-049 - Operator-Constrained Privacy Class
 
-**Version:** 0.1.4
+**Version:** 0.1.5
 Status: draft
 Owner: @Augustas11
 Issue: https://github.com/Augustas11/macprovider/issues/1749
@@ -10,7 +10,7 @@ Audit history: v0.1.0 is the initial default-off Beta contract. It does not prom
 {
   "spec_id": "SPEC-049",
   "title": "Operator-Constrained Privacy Class",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -487,7 +487,7 @@ This is the one-time limited activation exception that `specs/PROCESS.md` allows
     - `settlement.verified_model_settlement_mode: enforce`;
     - `relay_blind.enabled: true`, with a non-empty `relay_blind.sqlite_path` and `relay_blind.enforce_settlement_profile: relay-blind-settlement-v1` (SPEC-022 R-14);
     - `privacy_class.enabled: true`, with `privacy_class.allowed_se_key_backends: [file, keychain]`.
-  - **One provider.** Exactly one provider is pinned in `privacy_class.provider_se_public_keys` and `relay_blind.identity_public_keys`, under the same provider id: the operator's Mac Studio `mp-5aad6b654611666e16edf83dc0f326eb`. Coordinator validation accepts more than one pin, so this one-provider limit is an operator configuration control, checked by the operator against this section before each restart. Any added pin requires a new dated exception.
+  - **One provider.** Exactly one provider is pinned in `privacy_class.provider_se_public_keys` and `relay_blind.identity_public_keys`, under the same provider id: the operator's pinned canary provider (its id is recorded in the operator's private configuration). Coordinator validation accepts more than one pin, so this one-provider limit is an operator configuration control, checked by the operator against this section before each restart. Any added pin requires a new dated exception.
   - **One approved code identity.** `approved_code_identities` holds exactly one entry for the signed and notarized release `1.8.217`: team `YF7XNRJUG4`, identifier `live.malibu.provider.cli`, cdhash `df44bcf4ef55e543eb49c75187e868b0fce1a8a2`, `binary_version: "1.8.217"`, and `expires_at` no later than this exception's expiry. These are the predicates the coordinator enforces. The release binary sha256 `a6ea51d7ad19359a21fac63995194523264035fbca2ab32dceeede9d9da739bb` is evidence only; the coordinator does not check it.
   - **Provider.** On the pinned provider only, set `relay_blind_enabled: true`, `privacy_class_beta: true`, and an absolute `relay_blind_state_directory` outside any repository (0700, owned by the provider user). The provider serves the signed `1.8.217` binary. No other provider sets `privacy_class_beta`.
   - **Gateway.** The gateway sets `features.relay_blind_requests.enabled` and `features.privacy_class.enabled`. The gateway has no per-buyer allowlist, so any authenticated non-demo buyer may request the class with the reference `relay-blind-client --privacy-class`, and `/v1/models` discloses it. Every such request is served only by the pinned provider, or fails with a typed SPEC-049 error; there is no fallback.
@@ -498,8 +498,8 @@ This is the one-time limited activation exception that `specs/PROCESS.md` allows
   - The three-lane audits of the implementation PRs, including #1853 (round 3 at 0/0/0).
   - The canary runs `1.8.217`, which carries the same privacy-class and relay-blind settlement code as `1.8.215` plus the fused A3B MoE decode path (#1832). The journey was not re-run on `1.8.217`; the staged canary is its production check.
 - **Rollback.**
-  1. Engage the durable kill switch: `coordinator-cli privacy-class disable --config /opt/macprovider/coordinator.yaml --reason ...`. It needs no restart. Privacy-class requests then fail with `privacy_class_disabled`, while relay-blind and plaintext traffic are unaffected.
-  2. If needed, quarantine the provider: `coordinator-cli privacy-class quarantine --config /opt/macprovider/coordinator.yaml --provider mp-5aad6b654611666e16edf83dc0f326eb --reason ... --seconds ...`.
+  1. Engage the durable kill switch: `coordinator-cli privacy-class disable --config <coordinator-config> --config-overlay <coordinator-overlay> --reason ...`. Use the running coordinator's base config and overlay; omit `--config-overlay` only when startup uses no overlay. Older CLIs without this flag require a prepared effective config containing both files' settings. It needs no restart. Privacy-class requests then fail with `privacy_class_disabled`, while relay-blind and plaintext traffic are unaffected.
+  2. If needed, quarantine the provider: `coordinator-cli privacy-class quarantine --config <coordinator-config> --config-overlay <coordinator-overlay> --provider <pinned-provider-id> --reason ... --seconds ...`, using the same effective-config procedure.
   3. Remove the `privacy_class` and `relay_blind` coordinator blocks and the gateway feature flags, and restart each service. The restart takes seconds and needs no runtime updater apply.
   4. Turn off `privacy_class_beta` and `relay_blind_enabled` on the provider, and restart it.
 
@@ -536,3 +536,4 @@ This is the one-time limited activation exception that `specs/PROCESS.md` allows
   - the residuals carried from #1864.
 
   §9 attaches the signed `JOURNEY-PRIVACY-CLASS-BETA` result. No requirement becomes conformant. The normative text (wire, schema, routing, claim, disclosure strings) does not change; the exception only switches the existing default-off behavior on within this scope.
+- 0.1.5 - Editorial: §8.1 replaces an operator-specific provider identifier and host path with placeholders; the actual values are kept in the operator's private configuration. Rollback examples clarify use of the running coordinator's effective base/overlay configuration. No requirement, activation scope, or expiry change.
