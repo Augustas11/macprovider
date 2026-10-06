@@ -27,6 +27,10 @@ enum PrivacyAutoEnrollment {
     /// any install or repository directory.
     static let defaultStateDirectory = "~/.config/macprovider/relay-blind"
 
+    /// An explicit `relay_blind_enabled` with the class unset keeps the
+    /// operator's plain SPEC-041 relay-blind choice: false opts out, and true
+    /// keeps advertising plain relay-blind records instead of switching the
+    /// provider to privacy-only records an older coordinator would ignore.
     static func mode(_ config: AppConfig) -> PrivacyClassMode {
         switch config.privacyClassRequested {
         case .some(true):
@@ -34,7 +38,7 @@ enum PrivacyAutoEnrollment {
         case .some(false):
             return .off
         case .none:
-            return config.relayBlindRequested == false ? .off : .automatic
+            return config.relayBlindRequested == nil ? .automatic : .off
         }
     }
 

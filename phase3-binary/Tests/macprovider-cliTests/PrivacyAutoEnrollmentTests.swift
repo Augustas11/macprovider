@@ -18,6 +18,8 @@ final class PrivacyAutoEnrollmentTests: XCTestCase {
             ("env", CLIOverrides(configPath: empty.path), ["MACPROVIDER_PRIVACY_CLASS_BETA": "false"]),
             ("relay-blind flag", CLIOverrides(configPath: empty.path, relayBlindEnabled: false), [String: String]()),
             ("relay-blind env", CLIOverrides(configPath: empty.path), ["MACPROVIDER_RELAY_BLIND_ENABLED": "false"]),
+            // An explicit plain relay-blind choice stays plain relay-blind.
+            ("relay-blind on", CLIOverrides(configPath: empty.path, relayBlindEnabled: true), [String: String]()),
         ] {
             let loaded = try ConfigLoader.load(cli: cli, environment: environment)
             XCTAssertEqual(PrivacyAutoEnrollment.mode(loaded), .off, name)

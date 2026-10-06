@@ -14,8 +14,10 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -485,6 +487,29 @@ func TestLoadReleaseCodeIdentities(t *testing.T) {
 	}
 	if _, _, err := LoadReleaseCodeIdentities(filepath.Join(dir, "missing"), public); err == nil {
 		t.Fatal("missing directory loaded")
+	}
+}
+
+// Past the file bound the loader drops the oldest releases, never the set.
+func TestReleaseIdentityOverflowKeepsNewest(t *testing.T) {
+	names := []string{"v1.8.9.json", "notes.json", "v1.10.0.json", "v1.8.10.json", "v2.0.0.json"}
+	sort.Slice(names, func(i, j int) bool { return releaseNameNewer(names[i], names[j]) })
+	want := []string{"v2.0.0.json", "v1.10.0.json", "v1.8.10.json", "v1.8.9.json", "notes.json"}
+	if strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Fatalf("order = %v", names)
+	}
+	dir := t.TempDir()
+	key, public := releaseSigningKey(t)
+	for i := 0; i < maxReleaseIdentityFiles+2; i++ {
+		version := fmt.Sprintf("1.9.%d", i)
+		writeSignedReleaseMetadata(t, dir, "v"+version, key, releaseIdentityObject(version, fmt.Sprintf("%040x", i+1)))
+	}
+	identities, rejected, err := LoadReleaseCodeIdentities(dir, public)
+	if err != nil || len(identities) != maxReleaseIdentityFiles || len(rejected) != 2 {
+		t.Fatalf("identities=%d rejected=%v err=%v", len(identities), rejected, err)
+	}
+	if rejected[0] != "v1.9.1.json" || rejected[1] != "v1.9.0.json" {
+		t.Fatalf("overflow dropped %v, want the two oldest", rejected)
 	}
 }
 

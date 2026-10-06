@@ -85,8 +85,8 @@ func TestPostureRejectsWrongNonceStaleSkewSeqRegression(t *testing.T) {
 		}
 		err = f.auth.VerifyPosture(context.Background(), f.providerID, f.session, nonce, f.response(f.statement(nonce, 1, issued+31)), nil, f.now)
 		mustReject(t, err, "posture_clock_skew")
-		if _, ok := f.auth.Eligible(f.providerID, f.session, f.record.KeyRecord.KeyRecordDigest, f.now); !ok {
-			t.Fatal("clock skew cleared a fresh posture")
+		if _, ok := f.auth.Eligible(f.providerID, f.session, f.record.KeyRecord.KeyRecordDigest, f.now); ok {
+			t.Fatal("a skewed re-check left the earlier posture eligible")
 		}
 		if q, err := f.store.IsQuarantined(context.Background(), f.providerID, f.now); err != nil || q {
 			t.Fatalf("quarantined = %v, %v", q, err)
@@ -315,8 +315,8 @@ func TestPostureDisallowedBackendDoesNotQuarantine(t *testing.T) {
 	statement.SEKeyBackend = PrivacySEBackendKeychain
 	err = f.auth.VerifyPosture(context.Background(), f.providerID, f.session, nonce, f.response(statement), nil, f.now)
 	mustReject(t, err, "posture_key_backend")
-	if _, ok := f.auth.Eligible(f.providerID, f.session, f.record.KeyRecord.KeyRecordDigest, f.now); !ok {
-		t.Fatal("disallowed backend cleared eligibility")
+	if _, ok := f.auth.Eligible(f.providerID, f.session, f.record.KeyRecord.KeyRecordDigest, f.now); ok {
+		t.Fatal("a disallowed backend left the earlier posture eligible")
 	}
 	if q, qerr := f.store.IsQuarantined(context.Background(), f.providerID, f.now); qerr != nil || q {
 		t.Fatalf("quarantined = %v, %v", q, qerr)

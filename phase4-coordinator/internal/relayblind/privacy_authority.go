@@ -551,7 +551,11 @@ func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, sessio
 	if !verifySEPosture(sePin, framing, response.SESignature) || !verifyIdentityPosture(idPub, framing, response.IdentitySignature) {
 		return a.failQuarantine(ctx, providerID, now, "posture_signature_failure")
 	}
+	// A consumed challenge that fails without quarantine also clears the
+	// session's earlier posture, so eligibility never outlives a failed
+	// re-check until max age.
 	if statement.ProviderID != providerID || statement.AssignedSession != session {
+		a.NoteChallengeTimeout(providerID, session)
 		return privacyReject("posture_session_binding")
 	}
 	reason, quarantine := a.policyFailure(statement, snap, sessionSEKey, sePin, now)
@@ -565,7 +569,7 @@ func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, sessio
 	skewed := abs64(now.Unix()-statement.IssuedAtUnix) > privacyClockSkewSeconds
 	late := a.late(now.Unix(), snap.issuedAt)
 	backendOK := a.backendAllowed(statement.SEKeyBackend)
-	if late {
+	if late || skewed || !backendOK {
 		a.NoteChallengeTimeout(providerID, session)
 	}
 	if skewed {

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
@@ -29,11 +30,12 @@ const (
 )
 
 var (
-	releaseIdentityAsset   = regexp.MustCompile(`^macprovider-cli-v[0-9]+\.[0-9]+\.[0-9]+-darwin-arm64\.tar\.gz$`)
-	releaseIdentityVersion = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
-	releaseIdentityHex40   = regexp.MustCompile(`^[0-9a-f]{40}$`)
-	releaseIdentityHex64   = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	releaseIdentityTeam    = regexp.MustCompile(`^[A-Z0-9]{10}$`)
+	releaseIdentityAsset    = regexp.MustCompile(`^macprovider-cli-v[0-9]+\.[0-9]+\.[0-9]+-darwin-arm64\.tar\.gz$`)
+	releaseIdentityVersion  = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
+	releaseIdentityHex40    = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	releaseIdentityHex64    = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	releaseIdentityTeam     = regexp.MustCompile(`^[A-Z0-9]{10}$`)
+	releaseIdentityFileName = regexp.MustCompile(`^v([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})\.json$`)
 )
 
 // ParseReleaseSigningPublicKey parses the PEM SubjectPublicKeyInfo P-256 key
@@ -77,12 +79,15 @@ func LoadReleaseCodeIdentities(dir string, key *ecdsa.PublicKey) ([]config.Appro
 			names = append(names, name)
 		}
 	}
-	sort.Strings(names)
-	if len(names) > maxReleaseIdentityFiles {
-		return nil, nil, fmt.Errorf("relayblind: release identity directory holds more than %d metadata files", maxReleaseIdentityFiles)
-	}
+	// Newest release first, so a directory that outgrows the bound drops
+	// only its oldest releases instead of every approval.
+	sort.Slice(names, func(i, j int) bool { return releaseNameNewer(names[i], names[j]) })
 	var identities []config.ApprovedCodeIdentity
 	var rejected []string
+	if len(names) > maxReleaseIdentityFiles {
+		rejected = append(rejected, names[maxReleaseIdentityFiles:]...)
+		names = names[:maxReleaseIdentityFiles]
+	}
 	seen := make(map[config.ApprovedCodeIdentity]struct{})
 	for _, name := range names {
 		identity, err := loadReleaseCodeIdentity(filepath.Join(dir, name), key)
@@ -134,6 +139,42 @@ func loadReleaseCodeIdentity(path string, key *ecdsa.PublicKey) (config.Approved
 		return config.ApprovedCodeIdentity{}, errors.New("signature")
 	}
 	return parseReleaseCodeIdentity(payload)
+}
+
+// releaseNameNewer orders `v<major>.<minor>.<patch>.json` names by version,
+// newest first; other names sort after them by name.
+func releaseNameNewer(a, b string) bool {
+	va, okA := releaseNameVersion(a)
+	vb, okB := releaseNameVersion(b)
+	switch {
+	case okA && okB:
+		for i := range va {
+			if va[i] != vb[i] {
+				return va[i] > vb[i]
+			}
+		}
+		return a < b
+	case okA != okB:
+		return okA
+	default:
+		return a < b
+	}
+}
+
+func releaseNameVersion(name string) ([3]int, bool) {
+	var version [3]int
+	match := releaseIdentityFileName.FindStringSubmatch(name)
+	if match == nil {
+		return version, false
+	}
+	for i := 0; i < 3; i++ {
+		value, err := strconv.Atoi(match[i+1])
+		if err != nil {
+			return version, false
+		}
+		version[i] = value
+	}
+	return version, true
 }
 
 // parseReleaseCodeIdentity extracts SPEC-025 §6.2.1 provider_code_identity
