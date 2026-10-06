@@ -15,6 +15,10 @@ fixes is the reproduction):
       engine's prompt exceeds the coordinator bound len(body)/4 (BUG-1):
       expect verified + pool_operator_attested + payable credit and gateway
       debit == finality == ledger charged tokens
+  paid_short_stream_tool / paid_short_ns_tool  the same with one minimal tool:
+      a bare stream's stream_options keeps its bound above the templated
+      prompt, a tool definition expands in the template far more than in the
+      body, so these cross the bound on a stream too
   paid_long_ns / paid_long_stream  padded prompt whose engine count stays
       under the bound: the control for BUG-1
   disconnect  buyer closes after a few SSE lines through the 220 ms RTT
@@ -63,6 +67,7 @@ OTHER_ACCOUNT = "acct-lab-1690-unauth"
 # the coordinator bound counts 1 per 4, so the reported prompt stays under it.
 PAD = " information" * 150
 WS = (",", ":")
+TOOL = [{"type": "function", "function": {"name": "t", "parameters": {"type": "object", "properties": {}}}}]
 
 
 def secret(name):
@@ -74,12 +79,14 @@ def key_of(account):
 
 
 def send(engine, *, content, stream, max_tokens=16, pool=True, select=None, model=None, account=matrix.ACCOUNT,
-         disconnect_after=None, pool_id=None):
+         disconnect_after=None, pool_id=None, tools=None):
     """One compact-JSON chat request through the lab gateway. Returns the
     buyer's view (no text)."""
     rid = str(uuid.uuid4())
     body = {"model": model or MODEL, "messages": [{"role": "user", "content": content.replace("{ref}", rid[:8])}],
             "max_tokens": max_tokens}
+    if tools:
+        body["tools"] = tools
     if stream:
         body["stream"] = True
         body["stream_options"] = {"include_usage": True}
@@ -225,6 +232,8 @@ def annotate(rec, rows):
     notes = []
     if rep is not None and chg is not None and rep > chg:
         notes.append(f"reported prompt {rep} > bound-clamped {chg}")
+    elif rep is not None and chg is not None:
+        notes.append(f"reported prompt {rep} <= bound (BUG-1 trigger not reached)")
     if "usage_mismatch" in reason:
         notes.append("BUG-1 usage_mismatch")
     if "output_hash_mismatch" in reason:
@@ -243,8 +252,8 @@ def result(engine, case, expected, ok, actual, recs=(), rows=(), error=None):
     print(f"{status} [{engine}] {case}: {actual if not error else error}", flush=True)
 
 
-def case_paid(engine, case, content, stream, n=2):
-    recs = [send(engine, content=content, stream=stream, select=engine) for _ in range(n)]
+def case_paid(engine, case, content, stream, n=2, tools=None):
+    recs = [send(engine, content=content, stream=stream, select=engine, tools=tools) for _ in range(n)]
     evs = settle(recs)
     allok, actual, rows = True, [], []
     for rec, ev in zip(recs, evs):
@@ -431,6 +440,12 @@ def cmd_cases(a):
     steps = [
         ("paid_short_ns", lambda: case_paid(e, "paid_short_ns", "Hi ({ref})", False)),
         ("paid_short_stream", lambda: case_paid(e, "paid_short_stream", "Hi ({ref})", True)),
+        # stream_options makes a bare short stream's body bound exceed the
+        # templated prompt; one small tool makes the chat template expand far
+        # more than the body (the agent-client shape), so the stream case
+        # crosses the bound too.
+        ("paid_short_stream_tool", lambda: case_paid(e, "paid_short_stream_tool", "Hi ({ref})", True, tools=TOOL)),
+        ("paid_short_ns_tool", lambda: case_paid(e, "paid_short_ns_tool", "Hi ({ref})", False, tools=TOOL)),
         ("paid_long_ns(control)", lambda: case_paid(e, "paid_long_ns(control)", pad, False)),
         ("paid_long_stream(control)", lambda: case_paid(e, "paid_long_stream(control)", pad, True)),
         ("disconnect_220ms_rtt", lambda: case_disconnect(e)),
@@ -448,10 +463,10 @@ def cmd_cases(a):
 
 def cmd_summary(a):
     rows = []
-    for f in sorted(OUT.glob("*.json")):
-        if f.name.startswith("r007-"):
-            continue
-        rows += json.loads(f.read_text())
+    for engine in sorted(POOL):
+        f = OUT / f"{engine}.json"
+        if f.exists():
+            rows += json.loads(f.read_text())
     meta = OUT / "run-meta.json"
     if meta.exists():
         m = json.loads(meta.read_text())
