@@ -31,6 +31,11 @@
 #                   19105) between the gateway and the coordinator buyer port
 #   rig.sh status   show lab processes and the coordinator's view of the member
 #
+# Pearl-shaped e2e (scripts/lab/1690-e2e/pearl_shaped.sh): LAB_BUILD_REF builds
+# the binaries from that commit instead of HEAD (the helpers still run from
+# this worktree), and E2E_LATENCY_MS starts latency_proxy.py on 19103 between
+# the lab CLI and the coordinator provider port with that one-way delay.
+#
 # It never signals a process by name, never uses port 8080/8443/8444, never
 # reads ~/.config/macprovider, and never contacts a production host. The lab
 # CLI runs through cli.sh, which redirects every home-derived path into $LAB.
@@ -104,7 +109,7 @@ prep_src() {
   if [[ -d "$SRC/.build" ]]; then mv "$SRC/.build" "$LAB/$1.build-cache"; fi
   rm -rf "${LAB:?}/$1"
   mkdir -p "$SRC_ROOT"
-  git -C "$WT" archive HEAD | tar -xm -C "$SRC_ROOT"
+  git -C "$WT" archive "${LAB_BUILD_REF:-HEAD}" | tar -xm -C "$SRC_ROOT"
   if [[ -d "$LAB/$1.build-cache" ]]; then mv "$LAB/$1.build-cache" "$SRC/.build"; fi
 }
 static_swift() {
@@ -271,6 +276,12 @@ cmd_up() {
   start_bg gateway "$LAB/bin/gateway" -config "$LAB/run/gateway.yaml"
   wait_http http://127.0.0.1:19110/healthz
   cmd_server_start
+  local ws_url=ws://127.0.0.1:19102/ws/provider
+  if [[ -n "${E2E_LATENCY_MS:-}" ]]; then
+    pg_verify "$LAB/run/latency-proxy.pid" >/dev/null 2>&1 \
+      || start_bg latency-proxy python3 "$WT/scripts/lab/1690-e2e/latency_proxy.py" 19103 19102 "$E2E_LATENCY_MS" "$LAB/logs/latency-proxy.jsonl"
+    ws_url=ws://127.0.0.1:19103/ws/provider
+  fi
   pg_verify "$LAB/run/usage-tap.pid" >/dev/null 2>&1 || start_bg usage-tap python3 "$HERE/usage_tap.py" 19131 19130 "$LAB/logs/upstream-usage.jsonl" "$LAB/run/strip-usage" "$LAB/run/slow-stream"
   if [[ ! -d "$LAB/provider/protected-credentials" ]]; then
     (umask 077; cat >"$LAB/provider/config.yaml" <<EOF
@@ -296,11 +307,12 @@ EOF
   # provider). Loopback engines carry no artifact pin.
   python3 - "$LAB/provider/config.yaml" "$(engine_model_ref)" "$ENGINE" "${MLX_SHA:-}" \
     "$MLXLM_SNAPSHOT" "$MLX_REV" \
-    "$LAB/static/autotune-candidates.json" "${LAB_CATALOG_MLX_SHA:-${MLX_SHA:-}}" <<'EOF'
+    "$LAB/static/autotune-candidates.json" "${LAB_CATALOG_MLX_SHA:-${MLX_SHA:-}}" "$ws_url" <<'EOF'
 import hashlib, json, re, sys
-path, ref, engine, sha, snap, rev, candidates, catalog_sha = sys.argv[1:9]
+path, ref, engine, sha, snap, rev, candidates, catalog_sha, ws_url = sys.argv[1:10]
 text = open(path).read()
 text = re.sub(r"(?m)^model: .*$", "model: " + ref, text, count=1)
+text = re.sub(r"(?m)^coordinator_url: .*$", "coordinator_url: " + ws_url, text, count=1)
 text = re.sub(r"(?m)^model_artifact_(sha256|path): .*\n", "", text)
 text = re.sub(r"(?m)^model_catalog_(revision|sha256|version|hash): .*\n", "", text)
 if engine == "native":
@@ -443,13 +455,13 @@ cmd_server_stop() { for p in llama-server mlxlm-server ollama omlx; do stop_pid 
 
 cmd_down() {
   "$HERE/serve.sh" stop
-  for p in trailer-proxy usage-tap llama-server mlxlm-server ollama omlx gateway coordinator; do stop_pid "$p"; done
+  for p in trailer-proxy latency-proxy usage-tap llama-server mlxlm-server ollama omlx gateway coordinator; do stop_pid "$p"; done
   lms_down
   echo "rig down"
 }
 
 cmd_status() {
-  for p in serve trailer-proxy usage-tap llama-server mlxlm-server ollama omlx gateway coordinator; do
+  for p in serve trailer-proxy latency-proxy usage-tap llama-server mlxlm-server ollama omlx gateway coordinator; do
     if pid=$(pg_verify "$LAB/run/$p.pid"); then echo "$p: pid $pid"; elif [[ -f "$LAB/run/$p.pid" ]]; then echo "$p: stale pid file"; else echo "$p: stopped"; fi
   done
   if curl -fs http://127.0.0.1:19102/healthz >/dev/null 2>&1; then

@@ -139,6 +139,20 @@ def main():
     # member (pool_setup.py entry --attest) is matched against. A JSON object.
     if os.environ.get("LAB_PROVIDER_OWNER_ACCOUNT_IDS"):
         coord["trusted_pools"]["provider_owner_account_ids"] = json.loads(os.environ["LAB_PROVIDER_OWNER_ACCOUNT_IDS"])
+    # Pearl-shaped e2e (scripts/lab/1690-e2e/pearl_shaped.sh): the production
+    # values the #1690 launch runs with, from phase4-coordinator/dist/
+    # coordinator.yaml and the Pearl overlay (the completion max is a lab
+    # value; Pearl's is not in the repo). Pearl itself is never read.
+    if os.environ.get("E2E_PEARL_SHAPED") == "1":
+        coord["routing"]["min_provider_throughput_tps"] = 1.0
+        coord["settlement"]["verified_model_settlement_mode"] = "enforce"
+        coord["trusted_pools"]["refresh_interval_s"] = 30
+        coord["trusted_pools"]["pool_model_pricing_bounds"] = {
+            "min_prompt_rate_per_mtok": 13500, "max_prompt_rate_per_mtok": 425000,
+            "min_prompt_cache_hit_rate_per_mtok": 3375, "max_prompt_cache_hit_rate_per_mtok": 106250,
+            "min_completion_rate_per_mtok": 27000, "max_completion_rate_per_mtok": 850000}
+        gateway["coordinator"]["require_settlement_trailers"] = True
+        gateway["features"]["trusted_pools"] = {"enabled": True, "coordinator_authorizes": True}
     (LAB / "run" / "coordinator.yaml").write_text(json.dumps(coord, indent=2))
     (LAB / "run" / "gateway.yaml").write_text(json.dumps(gateway, indent=2))
     for p in ("coordinator.yaml", "gateway.yaml"):
