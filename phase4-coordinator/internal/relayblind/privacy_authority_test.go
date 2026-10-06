@@ -108,7 +108,9 @@ func TestPostureRejectsWrongNonceStaleSkewSeqRegression(t *testing.T) {
 	})
 }
 
-func TestPostureUnapprovedCDHashQuarantinesAndRevokes(t *testing.T) {
+// SPEC-049-R006 v0.2: an identity that is merely not approved (here a binary
+// version the configured entry does not name) is refused without quarantine.
+func TestPostureUnapprovedIdentityIneligibleWithoutQuarantine(t *testing.T) {
 	f := newPrivacyFixture(t, nil)
 	f.accept()
 	nonce, issued, err := f.auth.BeginChallenge(f.providerID, f.session, f.now)
@@ -116,15 +118,63 @@ func TestPostureUnapprovedCDHashQuarantinesAndRevokes(t *testing.T) {
 		t.Fatal(err)
 	}
 	statement := f.statement(nonce, 0, issued)
-	statement.CodeCDHash = strings.Repeat("f", 40)
+	statement.BinaryVersion = "9.9.9"
 	err = f.auth.VerifyPosture(context.Background(), f.providerID, f.session, nonce, f.response(statement), nil, f.now)
-	mustQuarantine(t, err, "posture_unapproved_code_identity")
+	mustReject(t, err, "posture_unapproved_code_identity")
+	if q, qerr := f.store.IsQuarantined(context.Background(), f.providerID, f.now); qerr != nil || q {
+		t.Fatalf("quarantined = %v, %v", q, qerr)
+	}
+	if _, ok := f.auth.Eligible(f.providerID, f.session, f.record.KeyRecord.KeyRecordDigest, f.now); ok {
+		t.Fatal("unapproved identity is eligible")
+	}
+	fresh, err := f.store.PrivacyKeyFresh(context.Background(), f.providerID, f.session, f.record.KeyRecord.KeyRecordDigest, f.now)
+	if err != nil || !fresh {
+		t.Fatalf("privacy key fresh = %v, %v; an unapproved identity must not revoke keys", fresh, err)
+	}
+	f.verify(1, nil)
+	if _, ok := f.auth.Eligible(f.providerID, f.session, f.record.KeyRecord.KeyRecordDigest, f.now); !ok {
+		t.Fatal("approved posture after an unapproved one is not eligible")
+	}
+}
+
+// A denied cdhash quarantines and revokes, even before it is compared with
+// the attested cdhash.
+func TestPostureDeniedCDHashQuarantinesAndRevokes(t *testing.T) {
+	f := newPrivacyFixture(t, func(cfg *config.PrivacyClassConfig) {
+		cfg.DeniedCodeCDHashes = []string{secondFixtureCDHash}
+	})
+	f.accept()
+	nonce, issued, err := f.auth.BeginChallenge(f.providerID, f.session, f.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statement := f.statement(nonce, 0, issued)
+	statement.CodeCDHash = secondFixtureCDHash
+	err = f.auth.VerifyPosture(context.Background(), f.providerID, f.session, nonce, f.response(statement), nil, f.now)
+	mustQuarantine(t, err, "posture_denied_code_identity")
 	if q, qerr := f.store.IsQuarantined(context.Background(), f.providerID, f.now); qerr != nil || !q {
 		t.Fatalf("quarantined = %v, %v", q, qerr)
 	}
 	fresh, err := f.store.PrivacyKeyFresh(context.Background(), f.providerID, f.session, f.record.KeyRecord.KeyRecordDigest, f.now)
 	if err != nil || fresh {
 		t.Fatalf("privacy key fresh = %v, %v", fresh, err)
+	}
+}
+
+func TestPostureAttestationDeniedQuarantinesUnapprovedRejects(t *testing.T) {
+	denied := newPrivacyFixture(t, func(cfg *config.PrivacyClassConfig) {
+		cfg.DeniedCodeCDHashes = []string{fixtureCDHash}
+	})
+	err := denied.auth.AcceptPrivacyKeys(context.Background(), denied.providerID, denied.session, []PrivacyKeyRecord{denied.record}, denied.now)
+	mustQuarantine(t, err, "posture_denied_code_identity")
+
+	unapproved := newPrivacyFixture(t, func(cfg *config.PrivacyClassConfig) {
+		cfg.ApprovedCodeIdentities = []config.ApprovedCodeIdentity{approvedIdentity(secondFixtureCDHash, time.Unix(1_800_000_000, 0).Add(time.Hour))}
+	})
+	err = unapproved.auth.AcceptPrivacyKeys(context.Background(), unapproved.providerID, unapproved.session, []PrivacyKeyRecord{unapproved.record}, unapproved.now)
+	mustReject(t, err, "posture_unapproved_code_identity")
+	if q, qerr := unapproved.store.IsQuarantined(context.Background(), unapproved.providerID, unapproved.now); qerr != nil || q {
+		t.Fatalf("quarantined = %v, %v", q, qerr)
 	}
 }
 

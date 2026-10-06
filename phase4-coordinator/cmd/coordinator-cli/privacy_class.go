@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,11 +18,13 @@ const privacyQuarantineMaxSeconds = 86400 * 30
 
 func privacyClassCommand(args []string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("privacy-class requires status, disable, enable, quarantine, or unquarantine")
+		return errors.New("privacy-class requires status, disable, enable, quarantine, unquarantine, reenroll, or directory-keygen")
 	}
 	switch args[0] {
-	case "status", "disable", "enable", "quarantine", "unquarantine":
+	case "status", "disable", "enable", "quarantine", "unquarantine", "reenroll":
 		return runPrivacyClass(args[0], args[1:], stdout)
+	case "directory-keygen":
+		return runPrivacyDirectoryKeygen(args[1:], stdout)
 	default:
 		return errors.New("unknown privacy-class subcommand")
 	}
@@ -85,6 +88,22 @@ func runPrivacyClass(action string, args []string, stdout io.Writer) error {
 			return err
 		}
 		return writePrivacyClassStatus(ctx, store, stdout, now)
+	case "reenroll":
+		// SPEC-049-R026: the only re-enrollment path after a key change.
+		if err := privacyCLIProviderID(*providerID); err != nil {
+			return err
+		}
+		if err := privacyCLIReason(*reason); err != nil {
+			return err
+		}
+		changed, err := store.ReenrollPrivacyProvider(ctx, strings.TrimSpace(*providerID), strings.TrimSpace(*reason), now, retention)
+		if err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(stdout, "reenroll.revoked_active_enrollment=%t\n", changed); err != nil {
+			return err
+		}
+		return writePrivacyClassStatus(ctx, store, stdout, now)
 	default:
 		return errors.New("unknown privacy-class subcommand")
 	}
@@ -127,7 +146,40 @@ func writePrivacyClassStatus(ctx context.Context, store *relayblind.Store, stdou
 			return err
 		}
 	}
+	enrollments, err := store.ListPrivacyEnrollments(ctx, now.Add(-relayblind.EnrollmentRevocationRetention))
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(stdout, "enrollment_count=%d\n", len(enrollments)); err != nil {
+		return err
+	}
+	// Public fingerprints and code identity only; key material is not printed.
+	for _, item := range enrollments {
+		if _, err := fmt.Fprintf(stdout, "enrollment.provider_id=%s\nenrollment.identity_fingerprint=%s\nenrollment.se_fingerprint=%s\nenrollment.code_cdhash=%s\nenrollment.binary_version=%s\nenrollment.enrolled_at_unix=%d\nenrollment.revoked_at_unix=%d\n", item.ProviderID, item.IdentityFingerprint, item.SEFingerprint, item.CodeCDHash, item.BinaryVersion, item.EnrolledAtUnix, item.RevokedAtUnix); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// runPrivacyDirectoryKeygen creates the SPEC-049-R028 directory signing key.
+// It prints only the public key and key_id, never the seed.
+func runPrivacyDirectoryKeygen(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("privacy-class directory-keygen", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	out := fs.String("out", "", "absolute path of the new 0600 key file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*out) == "" || fs.NArg() != 0 {
+		return errors.New("directory-keygen requires --out <absolute path>")
+	}
+	public, err := relayblind.GenerateIdentityDirectorySigningKey(*out)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "directory_public_key=%s\ndirectory_key_id=%s\n", base64.RawURLEncoding.EncodeToString(public), relayblind.PublicKeyFingerprint(public))
+	return err
 }
 
 func privacyCLIReason(reason string) error {

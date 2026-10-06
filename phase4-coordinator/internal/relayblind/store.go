@@ -944,7 +944,7 @@ CREATE TABLE IF NOT EXISTS privacy_class_control (
 	if err != nil {
 		return fmt.Errorf("%w: migrate privacy class: %v", ErrStoreUnavailable, err)
 	}
-	return nil
+	return s.ensureEnrollmentSchema(ctx)
 }
 
 func (s *Store) addColumnIfMissing(ctx context.Context, table, column, alter string) error {

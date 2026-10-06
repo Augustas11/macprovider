@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -16,7 +17,22 @@ import (
 func (s *Server) runPrivacyPostureLoop() {
 	ticker := time.NewTicker(s.privacyAuthority.ChallengeInterval())
 	defer ticker.Stop()
+	lastRelease := ""
 	for range ticker.C {
+		// SPEC-049-R027: release-derived approvals reload on the challenge
+		// cadence. A change in the loaded state is logged by file name only.
+		load := s.privacyAuthority.RefreshReleaseIdentities()
+		if load.Configured {
+			state := fmt.Sprintf("%d|%s|%v", load.Identities, strings.Join(load.Rejected, ","), load.Err)
+			if state != lastRelease {
+				lastRelease = state
+				event := s.log.Info()
+				if load.Err != nil || len(load.Rejected) > 0 {
+					event = s.log.Warn().Err(load.Err).Strs("rejected_files", load.Rejected)
+				}
+				event.Int("approved_identities", load.Identities).Msg("privacy class release-derived code identities loaded")
+			}
+		}
 		s.runPrivacyPostureSweep()
 	}
 }
@@ -148,16 +164,16 @@ func (s *Server) acceptHeartbeatPrivacyKeys(providerID, assignedID string, paylo
 	if !validState(pool.State(hb.Status)) {
 		return
 	}
-	s.acceptPrivacyKeys(providerID, assignedID, hb.PrivacyKeyRecords, false)
+	s.acceptPrivacyKeys(providerID, assignedID, hb.PrivacyKeyRecords, hb.PrivacyEnrollment, false)
 }
 
 // acceptPrivacyKeyRecords is the handshake path: accepted keys are always
 // challenged once, right away.
-func (s *Server) acceptPrivacyKeyRecords(providerID, assignedID string, records []relayblind.PrivacyKeyRecord) {
-	s.acceptPrivacyKeys(providerID, assignedID, records, true)
+func (s *Server) acceptPrivacyKeyRecords(providerID, assignedID string, records []relayblind.PrivacyKeyRecord, claim *relayblind.PrivacyEnrollmentClaim) {
+	s.acceptPrivacyKeys(providerID, assignedID, records, claim, true)
 }
 
-func (s *Server) acceptPrivacyKeys(providerID, assignedID string, records []relayblind.PrivacyKeyRecord, alwaysProbe bool) {
+func (s *Server) acceptPrivacyKeys(providerID, assignedID string, records []relayblind.PrivacyKeyRecord, claim *relayblind.PrivacyEnrollmentClaim, alwaysProbe bool) {
 	if s == nil || s.privacyAuthority == nil || records == nil {
 		return
 	}
@@ -174,7 +190,7 @@ func (s *Server) acceptPrivacyKeys(providerID, assignedID string, records []rela
 		if !ok {
 			return
 		}
-		if err := s.privacyAuthority.AcceptPrivacyKeys(context.Background(), providerID, assignedID, records, s.now()); err != nil {
+		if err := s.privacyAuthority.AcceptPrivacyKeysWithClaim(context.Background(), providerID, assignedID, records, claim, s.now()); err != nil {
 			s.privacyAdvertised.Delete(key)
 			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("privacy key advertisement rejected")
 			return

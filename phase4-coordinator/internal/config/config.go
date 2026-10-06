@@ -1058,16 +1058,45 @@ type ApprovedCodeIdentity struct {
 
 // PrivacyClassConfig is the default-off SPEC-049 coordinator gate.
 // ProviderSEPublicKeys maps provider_id to a standard-base64 raw 64-byte
-// P-256 X||Y point. Identity pins stay on RelayBlindConfig.
+// P-256 X||Y point. Identity pins stay on RelayBlindConfig. Both are optional
+// overrides: providers without them are enrolled automatically
+// (SPEC-049-R025).
 type PrivacyClassConfig struct {
-	Enabled                         bool                   `yaml:"enabled"`
-	ProviderSEPublicKeys            map[string]string      `yaml:"provider_se_public_keys"`
-	ApprovedCodeIdentities          []ApprovedCodeIdentity `yaml:"approved_code_identities"`
+	Enabled                bool                   `yaml:"enabled"`
+	ProviderSEPublicKeys   map[string]string      `yaml:"provider_se_public_keys"`
+	ApprovedCodeIdentities []ApprovedCodeIdentity `yaml:"approved_code_identities"`
+	// DeniedCodeCDHashes withdraws approval from any source and quarantines
+	// a provider that presents one (SPEC-049-R006).
+	DeniedCodeCDHashes []string `yaml:"denied_code_cdhashes"`
+	// ReleaseCodeIdentities approves every signed pearl-release.json
+	// provider_code_identity in MetadataDir (SPEC-049-R027).
+	ReleaseCodeIdentities PrivacyReleaseCodeIdentitiesConfig `yaml:"release_code_identities"`
+	// Directory signs the buyer identity directory (SPEC-049-R028).
+	Directory                       PrivacyDirectoryConfig `yaml:"directory"`
 	AllowedSEKeyBackends            []string               `yaml:"allowed_se_key_backends"`
 	PostureChallengeIntervalSeconds int                    `yaml:"posture_challenge_interval_seconds"`
 	PostureMaxAgeSeconds            int                    `yaml:"posture_max_age_seconds"`
 	PostureResponseTimeoutSeconds   int                    `yaml:"posture_response_timeout_seconds"`
 	QuarantineSeconds               int                    `yaml:"quarantine_seconds"`
+}
+
+// PrivacyReleaseCodeIdentitiesConfig names the directory of signed
+// pearl-release.json files and the PEM P-256 release signing public key.
+type PrivacyReleaseCodeIdentitiesConfig struct {
+	MetadataDir   string `yaml:"metadata_dir"`
+	PublicKeyPath string `yaml:"public_key_path"`
+}
+
+// Configured reports whether release-derived approval is on.
+func (c PrivacyReleaseCodeIdentitiesConfig) Configured() bool {
+	return strings.TrimSpace(c.MetadataDir) != "" || strings.TrimSpace(c.PublicKeyPath) != ""
+}
+
+// PrivacyDirectoryConfig is the online identity-directory signing key file
+// (canonical base64url Ed25519 seed, mode 0600 or 0400) and the signed TTL.
+type PrivacyDirectoryConfig struct {
+	SigningKeyPath string `yaml:"signing_key_path"`
+	TTLSeconds     int    `yaml:"ttl_seconds"`
 }
 
 type AdmissionConfig struct {
@@ -1722,6 +1751,7 @@ func Default() Config {
 			Enabled:                         false,
 			ProviderSEPublicKeys:            map[string]string{},
 			AllowedSEKeyBackends:            []string{"file", "keychain"},
+			Directory:                       PrivacyDirectoryConfig{TTLSeconds: 300},
 			PostureChallengeIntervalSeconds: 60,
 			PostureMaxAgeSeconds:            150,
 			PostureResponseTimeoutSeconds:   10,
@@ -2726,7 +2756,9 @@ func (c Config) Validate() error {
 		if c.Settlement.VerifiedModelSettlementMode == "enforce" && c.RelayBlind.EnforceSettlementProfile != RelayBlindSettlementProfileV1 {
 			return fmt.Errorf("relay_blind.enabled under settlement.verified_model_settlement_mode=enforce requires relay_blind.enforce_settlement_profile=%s", RelayBlindSettlementProfileV1)
 		}
-		if len(c.RelayBlind.IdentityPublicKeys) == 0 {
+		// SPEC-049-R025: with the privacy class on, providers enroll
+		// automatically, so operator identity pins are optional overrides.
+		if len(c.RelayBlind.IdentityPublicKeys) == 0 && !c.PrivacyClass.Enabled {
 			return fmt.Errorf("relay_blind.identity_public_keys must contain at least one provider pin when enabled")
 		}
 		for providerID, encoded := range c.RelayBlind.IdentityPublicKeys {
@@ -4344,6 +4376,9 @@ func (c Config) validatePrivacyClass() error {
 		if err := ValidateProviderID(providerID); err != nil {
 			return fmt.Errorf("privacy_class.provider_se_public_keys: %w", err)
 		}
+		if _, ok := c.RelayBlind.IdentityPublicKeys[providerID]; !ok {
+			return fmt.Errorf("privacy_class.provider_se_public_keys.%s requires relay_blind.identity_public_keys.%s", providerID, providerID)
+		}
 		decoded, err := base64.StdEncoding.Strict().DecodeString(encoded)
 		if err != nil || base64.StdEncoding.EncodeToString(decoded) != encoded || len(decoded) != 64 {
 			return fmt.Errorf("privacy_class.provider_se_public_keys.%s must be canonical standard base64 of a 64-byte P-256 point", providerID)
@@ -4377,17 +4412,39 @@ func (c Config) validatePrivacyClass() error {
 			live++
 		}
 	}
+	seenDenied := make(map[string]struct{}, len(pc.DeniedCodeCDHashes))
+	for i, cdhash := range pc.DeniedCodeCDHashes {
+		if !privacyCDHash(cdhash) {
+			return fmt.Errorf("privacy_class.denied_code_cdhashes[%d] must be 40 lowercase hex characters", i)
+		}
+		if _, dup := seenDenied[cdhash]; dup {
+			return fmt.Errorf("privacy_class.denied_code_cdhashes[%d] is a duplicate", i)
+		}
+		seenDenied[cdhash] = struct{}{}
+	}
+	release := pc.ReleaseCodeIdentities
+	if release.Configured() {
+		if !filepath.IsAbs(strings.TrimSpace(release.MetadataDir)) || !filepath.IsAbs(strings.TrimSpace(release.PublicKeyPath)) {
+			return fmt.Errorf("privacy_class.release_code_identities.metadata_dir and public_key_path must both be absolute paths")
+		}
+	}
+	if pc.Directory.TTLSeconds < 60 || pc.Directory.TTLSeconds > 3600 {
+		return fmt.Errorf("privacy_class.directory.ttl_seconds must be in [60,3600]")
+	}
+	if pc.Directory.SigningKeyPath != "" && !filepath.IsAbs(pc.Directory.SigningKeyPath) {
+		return fmt.Errorf("privacy_class.directory.signing_key_path must be an absolute path")
+	}
 	if !pc.Enabled {
 		return nil
 	}
 	if !c.RelayBlind.Enabled {
 		return fmt.Errorf("privacy_class.enabled requires relay_blind.enabled")
 	}
-	if len(pc.ProviderSEPublicKeys) == 0 {
-		return fmt.Errorf("privacy_class.provider_se_public_keys must contain at least one pin when enabled")
+	if live == 0 && !release.Configured() {
+		return fmt.Errorf("privacy_class.enabled requires release_code_identities or an unexpired approved_code_identities entry")
 	}
-	if live == 0 {
-		return fmt.Errorf("privacy_class.approved_code_identities must contain an unexpired identity when enabled")
+	if pc.Directory.SigningKeyPath == "" {
+		return fmt.Errorf("privacy_class.directory.signing_key_path must be set when enabled")
 	}
 	return nil
 }
