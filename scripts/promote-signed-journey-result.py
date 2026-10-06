@@ -21,6 +21,7 @@ from typing import Any
 from check_spec_governance import (
     JOURNEY_RESULT_ENVELOPE_SCHEMA,
     JOURNEY_RESULT_PUBLIC_KEY_SHA256,
+    PRIVACY_CLASS_BETA_JOURNEY_ID,
     TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID,
     TRUSTED_POOL_LAYER2_JOURNEY_ID,
     ValidationResult,
@@ -181,6 +182,8 @@ def promote_requirement_in_memory(
     requirement = matches[0]
     if journey_id == TRUSTED_POOL_LAYER2_JOURNEY_ID:
         die(f"{TRUSTED_POOL_LAYER2_JOURNEY_ID} is evidence-only and cannot promote full SPEC-042 requirement rows")
+    if journey_id == PRIVACY_CLASS_BETA_JOURNEY_ID:
+        die(f"{PRIVACY_CLASS_BETA_JOURNEY_ID} is evidence-only until SPEC-049-R023's staged canary and audits are recorded")
     require_valid_signed_result(root, requirement, evidence_source, commit, trusted_public_key_sha256, trusted_openssl)
     evidence_path = root / evidence_source
     digest = hashlib.sha256(evidence_path.read_bytes()).hexdigest()

@@ -1,0 +1,2 @@
+launch_shell_ulimit_c=unlimited (start_provider)
+posture_accepted_with_core_dumps_disabled=1

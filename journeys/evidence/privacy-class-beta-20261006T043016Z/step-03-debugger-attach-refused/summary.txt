@@ -1,0 +1,1 @@
+lldb_user_exit=1 lldb_root_exit=1 dtrace_root_exit=1 attached=0

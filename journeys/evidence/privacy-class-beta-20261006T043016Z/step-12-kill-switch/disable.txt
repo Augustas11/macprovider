@@ -1,0 +1,4 @@
+disabled=1
+reason=journey-1839 kill switch
+updated_at_unix=1791261377
+quarantine_count=0

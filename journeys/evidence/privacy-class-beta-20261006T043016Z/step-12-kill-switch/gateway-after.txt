@@ -1,0 +1,5 @@
+concurrency_reservations rows=11
+usage_events rows=10
+quota_reservations rows=11
+demo_usage_events rows=0
+wallet_session_reservations rows=0

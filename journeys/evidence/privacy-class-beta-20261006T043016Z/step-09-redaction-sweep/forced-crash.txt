@@ -1,0 +1,3 @@
+crashed_pid=96156
+crash_report=<lab-home>/Library/Logs/DiagnosticReports/macprovider-cli-2026-10-05-213146.ips
+core_file=none

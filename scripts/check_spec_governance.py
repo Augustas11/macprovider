@@ -166,6 +166,11 @@ BUYER_ENFORCE_PROMOTABLE_REQUIREMENT_IDS = {
     "SPEC-022-R011",
 }
 TRUSTED_POOL_LAYER2_JOURNEY_ID = "JOURNEY-TRUSTED-POOL-LAYER2-MVP"
+# SPEC-049-R023 keeps every SPEC-049 requirement non-conformant until a staged
+# canary and three-lane audits are recorded as well, so a signed privacy-class
+# beta result is evidence-only. Its closed contract lives in
+# scripts/privacy_class_beta_journey_evidence.py.
+PRIVACY_CLASS_BETA_JOURNEY_ID = "JOURNEY-PRIVACY-CLASS-BETA"
 TRUSTED_POOL_LAYER2_EXECUTION_MODE = "isolated-candidate-trusted-pool-layer2-mvp"
 TRUSTED_POOL_LAYER2_ARTIFACT_ID = "redacted-trusted-pool-layer2"
 TRUSTED_POOL_LAYER2_STEP_ID_ORDER = (
@@ -3350,6 +3355,25 @@ def _validate_byom_journey_requirement_ids(
 
 
 _BYOM_EVIDENCE_MODULE: Any = None
+_PRIVACY_CLASS_BETA_EVIDENCE_MODULE: Any = None
+
+
+def _privacy_class_beta_evidence_module() -> Any:
+    """Load the privacy-class beta evidence contract lazily (it imports this module)."""
+    global _PRIVACY_CLASS_BETA_EVIDENCE_MODULE
+    if _PRIVACY_CLASS_BETA_EVIDENCE_MODULE is None:
+        scripts_dir = str(Path(__file__).resolve().parent)
+        inserted = scripts_dir not in sys.path
+        if inserted:
+            sys.path.insert(0, scripts_dir)
+        sys.modules.setdefault("check_spec_governance", sys.modules[__name__])
+        try:
+            import privacy_class_beta_journey_evidence
+        finally:
+            if inserted:
+                sys.path.remove(scripts_dir)
+        _PRIVACY_CLASS_BETA_EVIDENCE_MODULE = privacy_class_beta_journey_evidence
+    return _PRIVACY_CLASS_BETA_EVIDENCE_MODULE
 
 
 def _byom_evidence_module() -> Any:
@@ -4040,6 +4064,17 @@ def _validate_signed_journey_result(
             result,
             root=root,
         )
+    if journey_id == PRIVACY_CLASS_BETA_JOURNEY_ID:
+        # Re-open the hash-bound evidence and its reviewed bundle, recompute every
+        # step and observation, and require the signed payload to equal the
+        # builder projection, so a hand-authored payload cannot overclaim.
+        for error in _privacy_class_beta_evidence_module().validate_signed_payload(
+            root,
+            signed,
+            requirement_id,
+            [item for item in journeys if isinstance(item, str)],
+        ):
+            result.error(f"{location}.signed", error)
 
     return len(result.errors) == before
 
@@ -4090,6 +4125,11 @@ def _signed_journey_result_satisfies(
             if _signed_journey_result_journey_id(root, source) == TRUSTED_POOL_LAYER2_JOURNEY_ID:
                 candidate_errors.append(
                     f"{location}.evidence[{index}].source: trusted-pool Layer 2 journey-result is evidence-only and cannot satisfy conformant requirements"
+                )
+                continue
+            if _signed_journey_result_journey_id(root, source) == PRIVACY_CLASS_BETA_JOURNEY_ID:
+                candidate_errors.append(
+                    f"{location}.evidence[{index}].source: privacy-class beta journey-result is evidence-only until SPEC-049-R023's staged canary and audits are recorded and cannot satisfy conformant requirements"
                 )
                 continue
             if _signed_journey_result_journey_id(root, source) == TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID:

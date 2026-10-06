@@ -1,0 +1,213 @@
+name: Build signed privacy-class beta journey evidence artifact
+
+# JOURNEY-PRIVACY-CLASS-BETA (SPEC-049). Validates the committed reviewed
+# redacted evidence and its bundle, signs the journey result with the
+# acceptance key in the protected environment, and exports it. It never
+# promotes conformance: SPEC-049-R023 keeps every SPEC-049 requirement
+# non-conformant until a staged canary and three-lane audits are recorded too,
+# and governance treats this journey result as evidence-only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: "Coordinator/gateway source commit bound by the evidence step-01 (the tested release commit)"
+        required: true
+        type: string
+      redacted_evidence_path:
+        description: "journeys/evidence/privacy-class-beta-<YYYYMMDDTHHMMSSZ>.redacted.json"
+        required: true
+        type: string
+      evidence_confirmed:
+        description: "Confirm the reviewed privacy-class beta evidence should be signed"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: signed-privacy-class-beta-journey-${{ github.event.inputs.source_sha }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build, sign, validate, and export privacy-class beta evidence
+    runs-on: ubuntu-latest
+    environment: production-release
+    steps:
+      - name: Checkout reviewed main controls
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate exact main source
+        id: request
+        shell: bash
+        env:
+          SOURCE_SHA_INPUT: ${{ github.event.inputs.source_sha }}
+          REDACTED_EVIDENCE_INPUT: ${{ github.event.inputs.redacted_evidence_path }}
+          EVIDENCE_CONFIRMED_INPUT: ${{ github.event.inputs.evidence_confirmed || 'false' }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] || { echo "::error::manual dispatch required" >&2; exit 1; }
+          [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "::error::workflow must run from main" >&2; exit 1; }
+          [[ "$SOURCE_SHA_INPUT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid source SHA" >&2; exit 1; }
+          [[ "$EVIDENCE_CONFIRMED_INPUT" == true ]] || { echo "::error::evidence confirmation is required" >&2; exit 1; }
+          [[ "$REDACTED_EVIDENCE_INPUT" =~ ^journeys/evidence/privacy-class-beta-[0-9]{8}T[0-9]{6}Z\.redacted\.json$ ]] || { echo "::error::invalid redacted evidence path" >&2; exit 1; }
+          [[ -f "$REDACTED_EVIDENCE_INPUT" && ! -L "$REDACTED_EVIDENCE_INPUT" ]] || { echo "::error::redacted evidence is absent or unsafe" >&2; exit 1; }
+          bundle="${REDACTED_EVIDENCE_INPUT%.redacted.json}"
+          [[ -d "$bundle" && ! -L "$bundle" ]] || { echo "::error::reviewed bundle is absent or unsafe" >&2; exit 1; }
+          git fetch --quiet origin refs/heads/main:refs/remotes/origin/main
+          main_sha="$(git rev-parse refs/remotes/origin/main)"
+          [[ "$main_sha" == "$GITHUB_SHA" ]] || { echo "::error::workflow commit is no longer origin/main" >&2; exit 1; }
+          git cat-file -e "${SOURCE_SHA_INPUT}^{commit}" || { echo "::error::source SHA is not reachable" >&2; exit 1; }
+          git merge-base --is-ancestor "$SOURCE_SHA_INPUT" "$GITHUB_SHA" || { echo "::error::source SHA must be an ancestor of the reviewed evidence commit" >&2; exit 1; }
+          envelope="${REDACTED_EVIDENCE_INPUT%.redacted.json}.journey-result.signed.json"
+          payload="$RUNNER_TEMP/privacy-class-beta-journey-result.unsigned.json"
+          printf 'source_sha=%s\n' "$SOURCE_SHA_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'evidence_sha=%s\n' "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          printf 'redacted=%s\n' "$REDACTED_EVIDENCE_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'bundle=%s\n' "$bundle" >> "$GITHUB_OUTPUT"
+          printf 'payload=%s\n' "$payload" >> "$GITHUB_OUTPUT"
+          printf 'envelope=%s\n' "$envelope" >> "$GITHUB_OUTPUT"
+
+      - name: Build unsigned privacy-class beta journey-result payload
+        id: payload
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          EVIDENCE_SHA: ${{ steps.request.outputs.evidence_sha }}
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          PAYLOAD: ${{ steps.request.outputs.payload }}
+        run: |
+          set -euo pipefail
+          python3 scripts/build-privacy-class-beta-journey-result.py \
+            --source-sha "$SOURCE_SHA" \
+            --evidence-sha "$EVIDENCE_SHA" \
+            --output "$PAYLOAD" \
+            "$REDACTED"
+          requirement_ids="$(python3 -c 'import json, sys; print(",".join(json.load(open(sys.argv[1], encoding="utf-8"))["requirement_ids"]))' "$PAYLOAD")"
+          [[ "$requirement_ids" =~ ^SPEC-[0-9]{3}-R[0-9]{3}(,SPEC-[0-9]{3}-R[0-9]{3})*$ ]] || { echo "::error::invalid derived requirement IDs" >&2; exit 1; }
+          printf 'requirement_ids=%s\n' "$requirement_ids" >> "$GITHUB_OUTPUT"
+
+      - name: Preflight selector freshness before signing
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          REQUIREMENT_IDS: ${{ steps.payload.outputs.requirement_ids }}
+        run: |
+          set -euo pipefail
+          python3 scripts/preflight-signed-journey-promotion.py \
+            --source-sha "$SOURCE_SHA" \
+            --requirement-ids "$REQUIREMENT_IDS" \
+            --journey-id JOURNEY-PRIVACY-CLASS-BETA
+
+      - name: Verify protected environment and repository posture
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        run: bash scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" production-release 28995904
+
+      - name: Sign journey-result payload
+        shell: bash
+        env:
+          MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM }}
+          PAYLOAD: ${{ steps.request.outputs.payload }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+        run: |
+          set -euo pipefail
+          python3 scripts/sign-journey-result.py \
+            --input "$PAYLOAD" \
+            --output "$ENVELOPE" \
+            --verifier ".github/workflows/promote-signed-privacy-class-beta-journey.yml:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+
+      - name: Validate signed evidence without conformance promotion
+        shell: bash
+        env:
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+          REQUIREMENT_IDS: ${{ steps.payload.outputs.requirement_ids }}
+        run: |
+          set -euo pipefail
+          python3 scripts/validate-signed-journey-result.py \
+            --requirement-ids "$REQUIREMENT_IDS" \
+            "$ENVELOPE"
+
+      - name: Verify signed evidence artifact set
+        shell: bash
+        env:
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+        run: |
+          set -euo pipefail
+          python3 -m json.tool "$REDACTED" >/dev/null
+          python3 -m json.tool "$ENVELOPE" >/dev/null
+          python3 -m json.tool specs/CONFORMANCE.json >/dev/null
+          python3 scripts/check_spec_governance.py --base-ref origin/main
+          git diff --check
+          git diff --quiet -- specs/CONFORMANCE.json || { echo "::error::conformance ledger must not change" >&2; exit 1; }
+          python3 - "$ENVELOPE" <<'PY'
+          import pathlib
+          import sys
+
+          envelope = pathlib.Path(sys.argv[1]).as_posix()
+          prefix = pathlib.Path(envelope).name.removesuffix(".journey-result.signed.json")
+          for path in pathlib.Path("journeys/evidence").glob(f"{prefix}*"):
+              name = path.name
+              if name.endswith(".candidate.json") or name.endswith(".journey-result.unsigned.json"):
+                  raise SystemExit(f"non-committed intermediate remains: {path}")
+          PY
+
+      - name: Export signed evidence artifact
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          EVIDENCE_SHA: ${{ steps.request.outputs.evidence_sha }}
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          BUNDLE: ${{ steps.request.outputs.bundle }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+          REQUIREMENT_IDS: ${{ steps.payload.outputs.requirement_ids }}
+        run: |
+          set -euo pipefail
+          export_dir="$RUNNER_TEMP/signed-privacy-class-beta-journey-evidence"
+          mkdir -p "$export_dir/journeys/evidence"
+          cp "$REDACTED" "$export_dir/$REDACTED"
+          cp "$ENVELOPE" "$export_dir/$ENVELOPE"
+          python3 - "$export_dir/evidence-manifest.json" "$SOURCE_SHA" "$EVIDENCE_SHA" "$REDACTED" "$BUNDLE" "$ENVELOPE" "$REQUIREMENT_IDS" <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import sys
+
+          output, source_sha, evidence_sha, redacted, bundle, envelope, requirement_ids = sys.argv[1:]
+          root = pathlib.Path(".")
+          manifest = {
+              "schema_version": "macprovider.signed-privacy-class-beta-journey-evidence.v1",
+              "source_sha": source_sha,
+              "evidence_sha": evidence_sha,
+              "requirement_ids": [item for item in requirement_ids.split(",") if item],
+              "journey_id": "JOURNEY-PRIVACY-CLASS-BETA",
+              "redacted_artifact": redacted,
+              "redacted_sha256": hashlib.sha256((root / redacted).read_bytes()).hexdigest(),
+              "redaction_manifest": f"{bundle}/MANIFEST.sha256",
+              "redaction_manifest_sha256": hashlib.sha256((root / bundle / "MANIFEST.sha256").read_bytes()).hexdigest(),
+              "signed_envelope": envelope,
+              "signed_envelope_sha256": hashlib.sha256((root / envelope).read_bytes()).hexdigest(),
+              "workflow_run_id": os.environ["GITHUB_RUN_ID"],
+              "workflow_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+          }
+          pathlib.Path(output).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Upload signed evidence artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: signed-privacy-class-beta-journey-evidence-${{ steps.request.outputs.source_sha }}
+          path: ${{ runner.temp }}/signed-privacy-class-beta-journey-evidence/
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 1

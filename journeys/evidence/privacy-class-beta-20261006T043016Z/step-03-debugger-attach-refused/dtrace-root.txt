@@ -1,0 +1,2 @@
+dtrace: system integrity protection is on, some features will not be available
+dtrace: failed to grab pid 96156: (null)

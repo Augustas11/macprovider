@@ -1,0 +1,1 @@
+FATAL privacy_class_hardening_failed reasons=missing_cs_runtime,get_task_allow,team_id_missing,missing_cs_hard,cs_get_task_allow,entitlement_get_task_allow

@@ -1,0 +1,21 @@
+2026-10-06T04:30:16Z	step-00a-isolation-preflight	PASS	journey ports free; live provider identity recorded
+2026-10-06T04:30:17Z	step-00b-verify-candidate	PASS	checksums, pearl-release + acceptance signatures, compat id, approved identity (expires 2026-10-20T04:30:17Z)
+2026-10-06T04:30:18Z	step-00c-install-cli	PASS	installed <lab-home>/journey-1839/bin/macprovider-cli sha256=d8327fdbbc8f64690015debec2774c22f3d1573669a1b2239cf5ebe8fee37c83 version=1.8.215
+2026-10-06T04:30:19Z	step-01-bind-signed-release	PASS	team YF7XNRJUG4, live.malibu.provider.cli, hardened runtime, notarized, no refused entitlements, cdhash 3214ffcc6b706507f9a268cfb400da5c74287ff6 approved
+2026-10-06T04:30:25Z	step-01b-isolated-stack	PASS	identities (file SE keys under J/home), model adopted, coordinator :19301/:19302, gateway :19310, proxy :19311
+2026-10-06T04:30:55Z	step-02-privacy-mode-start	PASS	privacy records accepted 9s after start; posture verified (probe satisfied); no key material on disk
+2026-10-06T04:31:38Z	step-03-debugger-attach-refused	PASS	user lldb, root lldb (control attach ok) and root dtrace attach refused; provider still eligible (P_TRACED/CS_DEBUGGED clear)
+2026-10-06T04:31:40Z	step-04-core-dump-and-env-refused	PASS	core dumps off via accepted posture; DYLD_* pruned by dyld (inert); 4 diagnostic vars, KV disk tier, loopback runtime, relay-blind off exit non-zero before network
+2026-10-06T04:31:43Z	step-05-unsigned-build-refused	PASS	ad-hoc re-signed release, unsigned release, and local debug build all exit non-zero before network
+2026-10-06T04:31:43Z	step-06-sip-off-refused	PASS	SIP-disabled lab Mac (MacBookAir10,1) exit 78 sip_disabled before network; zero connections
+2026-10-06T04:31:43Z	step-07-canary-stream	PASS	client decrypted and verified every frame (exit 0), disclosure exact, headers exact, completion canary echoed=yes
+2026-10-06T04:31:43Z	step-08-canary-nonstream	PASS	client decrypted and verified every frame (exit 0), disclosure exact, headers exact, completion canary echoed=no
+2026-10-06T04:33:39Z	step-09-redaction-sweep	PASS	zero canary/canary-hash/buyer-key matches in logs, SQLite, state, temp, crash reports; no core file; exactly one content-free relay-blind-settlement-v1 receipt per privacy attempt, no other receipt/telemetry row; crash report: present (<lab-home>/Library/Logs/DiagnosticReports/macprovider-cli-2026-10-05-213146.ips)
+2026-10-06T04:33:51Z	step-10-downgrade-negatives	PASS	strip/inject/plaintext/pool/replay rejected with R019 codes and zero dispatch; wrong key not sent; tamper+truncate -> do not resubmit; no failover
+2026-10-06T04:36:09Z	step-11-stale-posture-and-quarantine	PASS	stale posture ineligible without quarantine; unapproved cdhash quarantined + keys revoked, durable across restart; recovered
+2026-10-06T04:36:33Z	step-12-kill-switch	PASS	disable rejected held predispatch + next reservation (privacy_class_disabled, 0 dispatch); relay-blind and plaintext served; enable recovered
+2026-10-06T04:37:50Z	step-13-enforce-canary	PASS	enforce: stream+nonstream privacy canary and plain relay-blind each have a relay-blind snapshot (entrypoint+envelope basis) before dispatch, closed relay_blind_settled, payable credit, gateway debit == provider credit usage; verified/referral/reward counters delta 0
+2026-10-06T04:38:56Z	step-14-no-capability-provider-excluded	PASS	signed v1.8.214 (no relay_blind_settlement_receipt_v1; otherwise routable: hash verified, receipt key pinned, approved) never reserved: privacy_class_unavailable / relay_blind_provider_unsupported before quota; no reservation, snapshot, verdict or credit
+2026-10-06T04:44:43Z	step-15-tampered-receipt-quarantined	PASS	withheld (privacy, corrupted SPEC-008 end frame), bound-field tamper, v0.4 receipt_version and v0.4 member each closed quarantined, no payable credit, buyer refunded
+2026-10-06T04:44:43Z	step-99-live-provider-untouched	PASS	live provider pid, listener, config, SE key and install unchanged
+2026-10-06T04:44:43Z	step-16-redaction-review	MANUAL	automated sweep clean; a human must review every file in <lab-home>/journey-1839/evidence (private paths listed in <lab-home>/journey-1839/evidence/step-16-redaction-review/files-with-private-paths.txt) before building the redacted manifest and signing

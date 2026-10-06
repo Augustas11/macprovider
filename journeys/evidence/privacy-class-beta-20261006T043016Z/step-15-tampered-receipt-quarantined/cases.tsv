@@ -1,0 +1,4 @@
+ws-corrupted-end-frame-privacy	a9c6123b-4880-4872-8ba0-8963235bf54b	.
+fault-tamper-field	fc53f048-301c-4248-aef6-4bc43fec27f1	signature_verify_failed
+fault-v04	b5ab88df-371a-4b46-8a31-edce3797bc82	v04_receipt_on_relay_blind_snapshot
+fault-v04-member	8c85c646-3bc8-407c-81fd-c040cf344b65	.
