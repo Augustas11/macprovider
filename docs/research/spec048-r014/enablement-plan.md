@@ -69,6 +69,24 @@ The payoff R015 measured (quiet, 2026-10-06) is decode 1.19–1.28x and end to
 end 1.04–1.20x at one active row, 1.00 at two or more rows, Studio tuple only.
 Effort is in section 8.
 
+### Campaign items from the #1862 round-2 audit
+
+- **First commit after the rebase onto `main`:** the R015 analyzer must fail a
+  record closed when a request counted toward TPOT or decode has fewer than two
+  completion tokens (`scripts/native_mtp_r015_analyze.py`, MEDIUM, security
+  lane, from `245acc54b`). Done on this branch as `ad33a8669` with a regression
+  test; the formal R015 analysis (policy `e24cb7bc…`, JSONL `e1f3c42e…`)
+  reproduces byte-identically in JSON and Markdown. It is replayed first when
+  the branch is rebased.
+- **Carried LOWs** (not fixed in the campaign unless they become blocking):
+  1. the fork's Gated DeltaNet kernel assumes the key head dimension `Dk` is a
+     multiple of 32; Qwen3.5/3.6 satisfy it, any other family must be checked
+     before the pin admits it;
+  2. packed verification skips `MambaCache` mask preparation when no row is
+     right-padded; correct for the admitted tuple, but any new padding source
+     must re-prepare;
+  3. stale `UPSTREAM_WATCH` timestamps; refresh them at the next pin move.
+
 ## 1. Verified baseline
 
 | Fact | Source |
