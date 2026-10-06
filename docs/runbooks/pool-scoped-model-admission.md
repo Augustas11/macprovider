@@ -421,3 +421,48 @@ they land, a pool model joins the global catalog only through the ordinary
 intake (`macprovider.intake-decision.v1` with that intake's own evidence). Its
 pool binding keeps earning meanwhile; promotion to `recommendable` later
 supersedes it (`pool_manifest_catalog_superseded`).
+
+## 9. Signed journey capture (JOURNEY-TRUSTED-POOL-MODEL)
+
+The production run's evidence for SPEC-005-R015, SPEC-006-R018,
+SPEC-022-R013, SPEC-042-R015 and SPEC-042-R016 is
+[JOURNEY-TRUSTED-POOL-MODEL](../../journeys/JOURNEY-TRUSTED-POOL-MODEL.md).
+That file has the step list, the capture-directory layout, `run.json`, and the
+SQL; this section is the order of work. SPEC-047-R011 is not promoted by it
+(the probe-evidence record does not exist yet).
+
+1. Make a capture directory outside every checkout (`mkdir -m 0700`).
+2. Record `preconditions.json`, `deploy.json`, the live bounds
+   (`config/pricing-bounds.json`) and the owner-authority reload log fields
+   (`config/owner-authority-reload.json`).
+3. For every manifest you or the keeper sign, keep the `sign-manifest --out`
+   file as `pool/v<N>/manifest-accepted.json` and its
+   `policy-terms-digest` output as `pool/v<N>/policy-terms-digest.txt`. Right
+   after each of the six role manifests activates (native genesis, GGUF added
+   with the attestation, window-only rotation, price change, native entry
+   removal, GGUF attestation removal), save `get-pool` as
+   `pool/v<N>/get-pool.json` and write the six versions into `run.json`.
+4. Save both members' `models propose --json` bundles, then, with both
+   entries live, the pool and global `/v1/models` views.
+5. For each paid request directory, send the request with `curl -D
+   response.headers -o response.json` (streams: `-N -o response.sse`), wait
+   one pending deadline, then run the per-request SQL. Start each
+   `inflight` request (long `max_tokens`) just before its manifest's window
+   opens, and capture its rows after it settles.
+6. Capture the refusals, the window-boundary probe loop, the pause and
+   resume, both `pool-rollback-preflight` runs (stdout and exit status), the
+   restart times and the post-restart request, then the admission events, the
+   pool event counts, and the never-global count (aliased `AS n`).
+7. Build and review the redacted evidence locally:
+
+   ```bash
+   python3 scripts/build-trusted-pool-model-journey-result.py capture \
+     --capture-dir <capture dir> \
+     --output journeys/evidence/trusted-pool-model-<run>.redacted.json
+   ```
+
+   It fails on the first unmet expectation and names the file and field.
+   Commit only the `.redacted.json`, in a PR, never the
+   capture directory. After it merges, dispatch
+   `promote-signed-trusted-pool-model-journey.yml` with the deployed source
+   SHA, the evidence path and the requirement ids.

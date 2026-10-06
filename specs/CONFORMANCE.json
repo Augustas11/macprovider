@@ -11214,7 +11214,9 @@
         "phase4-coordinator/internal/buyer/spec1816_pool_model_route_test.go:TestSPEC1816PoolModelFreezesEconomicsAtDispatch",
         "test/integration/trusted_pool_model_journey_test.go:TestTrustedPoolModelJourney"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-MODEL"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "CODE_BUG",
@@ -11239,7 +11241,9 @@
         "phase5-gateway/internal/router/pool_model_disclosure_test.go:TestSanitizeModelsResponsePoolView",
         "phase5-gateway/internal/router/pool_model_disclosure_test.go:TestPoolModelDisclosureHeadersAllowlisted"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-MODEL"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "CODE_BUG",
@@ -11267,7 +11271,9 @@
         "phase7-verify/internal/verify/route_snapshot_v2_test.go:TestRouteSnapshotGoldenVectorsMatchCoordinator",
         "phase7-verify/internal/verify/route_snapshot_v2_test.go:TestVerifySettlementReceiptPoolModelRouteSnapshotV2"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-MODEL"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "CODE_BUG",
@@ -11316,7 +11322,9 @@
         "phase4-coordinator/internal/trustpool/pool_route_fence_test.go:TestPoolRouteFenceRequiresTheExactPoolManifestEntry",
         "test/integration/trusted_pool_model_journey_test.go:TestTrustedPoolModelJourney"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-MODEL"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "CODE_BUG",
@@ -11346,7 +11354,9 @@
         "test/integration/trusted_pool_model_r016_journey_test.go:TestTrustedPoolModelR016AttestationInLaterCore",
         "test/integration/trusted_pool_model_r016_journey_test.go:TestTrustedPoolModelR016WindowOnlyRotationKeepsMember"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-MODEL"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "CODE_BUG",
