@@ -1844,11 +1844,7 @@ struct AutotuneStaticInputs {
 
     init(
         fetch: @escaping (URL) async throws -> Data = { url in
-            let (data, response) = try await URLSession.shared.data(from: url)
-            if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
-                throw AutotuneRecommendError.invalidStaticJSON("HTTP \(http.statusCode)")
-            }
-            return data
+            try await AutotuneStaticInputs.fetchHonoringRateLimit(url)
         },
         trustedPublicKeys: [String: String] = Self.defaultTrustedPublicKeys,
         verifySignature: ((Data, Data) -> Bool)? = nil,
@@ -1858,6 +1854,30 @@ struct AutotuneStaticInputs {
         self.trustedPublicKeys = trustedPublicKeys
         self.verifySignature = verifySignature
         self.now = now
+    }
+
+    /// Every static feed shares the coordinator's per-client feed limiter
+    /// (10 requests/s, burst 10). A serve start fetches more than ten feeds
+    /// back to back (catalog, demand, rate card, artifact feed, CB policy,
+    /// native-MTP set, revocations, each with its signature), so a 429 is
+    /// retried after a one-second wait instead of falling back silently.
+    static let rateLimitRetries = 3
+    static let rateLimitRetryNanoseconds: UInt64 = 1_000_000_000
+
+    static func fetchHonoringRateLimit(
+        _ url: URL,
+        load: (URL) async throws -> (Data, URLResponse) = { try await URLSession.shared.data(from: $0) },
+        sleep: (UInt64) async throws -> Void = { try await Task.sleep(nanoseconds: $0) }
+    ) async throws -> Data {
+        var (data, response) = try await load(url)
+        for _ in 0..<rateLimitRetries where (response as? HTTPURLResponse)?.statusCode == 429 {
+            try await sleep(rateLimitRetryNanoseconds)
+            (data, response) = try await load(url)
+        }
+        if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
+            throw AutotuneRecommendError.invalidStaticJSON("HTTP \(http.statusCode)")
+        }
+        return data
     }
 
     func loadDemandRank() async -> AutotuneStaticSelection<DemandRank> {

@@ -64,4 +64,45 @@ final class StaticFeedOriginTests: XCTestCase {
             String(repeating: "a", count: 40)
         )
     }
+
+    func testStaticFeedFetchRetriesRateLimitedResponsesThenGivesUp() async throws {
+        let url = URL(string: "https://coordinator.malibu.tech/v1/continuous-batching-policy")!
+        func response(_ status: Int) -> HTTPURLResponse {
+            HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil)!
+        }
+        var statuses = [429, 429, 200]
+        var sleeps = 0
+        let data = try await AutotuneStaticInputs.fetchHonoringRateLimit(
+            url,
+            load: { _ in (Data("ok".utf8), response(statuses.removeFirst())) },
+            sleep: { _ in sleeps += 1 }
+        )
+        XCTAssertEqual(data, Data("ok".utf8))
+        XCTAssertEqual(sleeps, 2)
+
+        var loads = 0
+        do {
+            _ = try await AutotuneStaticInputs.fetchHonoringRateLimit(
+                url,
+                load: { _ in loads += 1; return (Data(), response(429)) },
+                sleep: { _ in }
+            )
+            XCTFail("a feed that stays rate limited must fail")
+        } catch {
+            XCTAssertEqual(loads, AutotuneStaticInputs.rateLimitRetries + 1)
+        }
+
+        var once = 0
+        do {
+            _ = try await AutotuneStaticInputs.fetchHonoringRateLimit(
+                url,
+                load: { _ in once += 1; return (Data(), response(503)) },
+                sleep: { _ in XCTFail("only a 429 is retried") }
+            )
+            XCTFail("a 503 must fail")
+        } catch {
+            XCTAssertEqual(once, 1)
+        }
+    }
 }
+

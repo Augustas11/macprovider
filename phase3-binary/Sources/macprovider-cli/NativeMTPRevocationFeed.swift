@@ -502,7 +502,7 @@ enum NativeMTPRevocationFeedManager {
     }
 
     static func defaultFetch(url: URL, maxBytes: Int) async throws -> NativeMTPRevocationFetchResponse {
-        guard url.scheme == "https",
+        guard url.scheme == "https" || StaticFeedOrigin.isLabLoopback(url),
               url.user == nil,
               url.password == nil,
               url.fragment == nil else {
@@ -532,9 +532,16 @@ enum NativeMTPRevocationFeedManager {
     private static func fetch(
         _ url: URL,
         maxBytes: Int,
-        fetcher: Fetcher
+        fetcher: Fetcher,
+        sleeper: Sleeper = defaultSleep
     ) async throws -> Data {
-        let response = try await fetcher(url, maxBytes)
+        var response = try await fetcher(url, maxBytes)
+        // The feed shares the coordinator's per-client static-feed limiter
+        // with every other feed a serve start fetches; a 429 is retried.
+        for _ in 0..<AutotuneStaticInputs.rateLimitRetries where response.statusCode == 429 {
+            try await sleeper(AutotuneStaticInputs.rateLimitRetryNanoseconds)
+            response = try await fetcher(url, maxBytes)
+        }
         if response.redirected || (response.statusCode >= 300 && response.statusCode < 400) {
             throw NativeMTPRevocationFeedError.redirectRejected
         }

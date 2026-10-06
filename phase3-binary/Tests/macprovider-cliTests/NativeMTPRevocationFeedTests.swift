@@ -407,6 +407,34 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         }
     }
 
+    func testNetworkFirstRetriesARateLimitedFeedFetch() async throws {
+        let signer = Curve25519.Signing.PrivateKey()
+        let now = Self.date("2026-09-28T12:00:00Z")
+        let tuple = Self.digest("01")
+        let feed = try Self.feedData(generation: 1, signerKeyID: "revoker-a", tuples: [tuple], now: now)
+        let signature = Self.signature(for: feed, signer: signer, keyID: "revoker-a")
+        let limited = NSLock()
+        var seen: Set<String> = []
+        let state = try await NativeMTPRevocationFeedManager.loadNetworkFirst(
+            pinnedSignerKeyID: "revoker-a",
+            verifier: Self.verifier(signer: signer),
+            store: MemoryRevocationStore(),
+            origin: URL(string: "https://example.test/v1/")!,
+            fetcher: { url, _ in
+                let first = limited.withLock { seen.insert(url.lastPathComponent).inserted }
+                if first {
+                    return NativeMTPRevocationFetchResponse(statusCode: 429, body: Data())
+                }
+                return NativeMTPRevocationFetchResponse(
+                    statusCode: 200,
+                    body: url.lastPathComponent.hasSuffix(".json.sig") ? signature : feed
+                )
+            },
+            now: now
+        )
+        XCTAssertTrue(state.isRevoked(tupleSHA256: tuple))
+    }
+
     func testNetworkFirstAcceptsFreshNetworkAndFallsBackToCurrentCacheOnTransportFailure() async throws {
         let signer = Curve25519.Signing.PrivateKey()
         let store = MemoryRevocationStore()
