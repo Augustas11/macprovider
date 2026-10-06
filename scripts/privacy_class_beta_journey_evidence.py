@@ -28,6 +28,7 @@ Nothing in this module signs or promotes anything.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import ipaddress
 import json
@@ -266,8 +267,8 @@ DATETIME_Z_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]
 COMPACT_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
 MANIFEST_LINE_RE = re.compile(r"^([0-9a-f]{64})  \./([A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*)$")
 SAFE_COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-MAX_BUNDLE_FILE_BYTES = 1 << 20
-MAX_BUNDLE_FILES = 512
+MAX_BUNDLE_FILE_BYTES = 8 << 20
+MAX_BUNDLE_FILES = 1024
 
 # Fail-closed scan of every reviewed bundle file. The review replaced the lab
 # home with `<lab-home>`; any home path, key block, credential shape, email,
@@ -495,6 +496,175 @@ def privacy_disclosure(fingerprint: str) -> str:
     )
     block += "".join(f"residual_risks: {risk}\n" for risk in PRIVACY_RESIDUAL_RISKS)
     return block + SETTLEMENT_DISCLOSURE
+
+
+
+# ---------------------------------------------------------------- primary helpers
+
+PRIMARY_SCHEMA = "macprovider.privacy-class-beta-primary.v1"
+REWARD_TABLE_RE = re.compile(r"(reward|emission|unlock|verified_work|referral_serving|referral_social_grants)", re.I)
+PRIVACY_KEY_ATTESTATION_DOMAIN = "macprovider/spec049/key-attestation/v1"
+
+
+def b64url_bytes(value: Any) -> bytes | None:
+    if not isinstance(value, str) or not value or not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        return None
+    try:
+        return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    except (ValueError, TypeError):
+        return None
+
+
+def b64url_hex(value: Any) -> str:
+    raw = b64url_bytes(value)
+    return raw.hex() if raw is not None and len(raw) == 32 else ""
+
+
+def utc_unix(value: Any) -> int | None:
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?", value.strip())
+    if not match:
+        return None
+    base = datetime.strptime(f"{match.group(1)}T{match.group(2)}", "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+    zone = match.group(4)
+    if zone and zone != "Z":
+        sign = 1 if zone[0] == "+" else -1
+        digits = zone[1:].replace(":", "")
+        base -= sign * timedelta(hours=int(digits[:2]), minutes=int(digits[2:]))
+    return int(base.timestamp())
+
+
+def privacy_posture(event: dict[str, Any]) -> int | None:
+    usage = event.get("usage_macprovider_privacy")
+    if not isinstance(usage, dict) or event.get("status") != 200:
+        return None
+    value = usage.get("posture_verified_at_unix")
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def attestation_framing(attestation: dict[str, Any]) -> bytes:
+    """SPEC-049 key-attestation signing input (relayblind PrivacyKeyAttestation.Framing)."""
+    framed = b""
+    for value in (
+        PRIVACY_KEY_ATTESTATION_DOMAIN,
+        attestation["version"],
+        attestation["key_record_digest"],
+        attestation["privacy_class"],
+        attestation["assurance"],
+        attestation["binary_version"],
+        attestation["code_cdhash"],
+    ):
+        if not isinstance(value, str):
+            raise TypeError("attestation string field")
+        data = value.encode("utf-8")
+        framed += len(data).to_bytes(4, "big") + data
+    for value in (attestation["not_before_unix"], attestation["expires_at_unix"]):
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise TypeError("attestation time field")
+        framed += (value & 0xFFFFFFFFFFFFFFFF).to_bytes(8, "big")
+    return framed
+
+
+# Ed25519 (RFC 8032 section 6 reference arithmetic); verification only needs
+# public data, so no third-party dependency is required.
+_ED_P = 2**255 - 19
+_ED_Q = 2**252 + 27742317777372353535851937790883648493
+_ED_D = -121665 * pow(121666, _ED_P - 2, _ED_P) % _ED_P
+_ED_I = pow(2, (_ED_P - 1) // 4, _ED_P)
+
+
+def _ed_add(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    x1, y1, z1, t1 = a
+    x2, y2, z2, t2 = b
+    A = (y1 - x1) * (y2 - x2) % _ED_P
+    B = (y1 + x1) * (y2 + x2) % _ED_P
+    C = t1 * 2 * _ED_D * t2 % _ED_P
+    D = z1 * 2 * z2 % _ED_P
+    E, F, G, H = B - A, D - C, D + C, B + A
+    return (E * F % _ED_P, G * H % _ED_P, F * G % _ED_P, E * H % _ED_P)
+
+
+def _ed_mul(s: int, point: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    result = (0, 1, 1, 0)
+    while s > 0:
+        if s & 1:
+            result = _ed_add(result, point)
+        point = _ed_add(point, point)
+        s >>= 1
+    return result
+
+
+def _ed_equal(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
+    return (a[0] * b[2] - b[0] * a[2]) % _ED_P == 0 and (a[1] * b[2] - b[1] * a[2]) % _ED_P == 0
+
+
+def _ed_recover_x(y: int, sign: int) -> int | None:
+    if y >= _ED_P:
+        return None
+    x2 = (y * y - 1) * pow(_ED_D * y * y + 1, _ED_P - 2, _ED_P)
+    if x2 == 0:
+        return None if sign else 0
+    x = pow(x2, (_ED_P + 3) // 8, _ED_P)
+    if (x * x - x2) % _ED_P != 0:
+        x = x * _ED_I % _ED_P
+    if (x * x - x2) % _ED_P != 0:
+        return None
+    if (x & 1) != sign:
+        x = _ED_P - x
+    return x
+
+
+_ED_GY = 4 * pow(5, _ED_P - 2, _ED_P) % _ED_P
+_ED_GX = _ed_recover_x(_ED_GY, 0)
+_ED_G = (_ED_GX, _ED_GY, 1, _ED_GX * _ED_GY % _ED_P)
+
+
+def _ed_compress(point: tuple[int, int, int, int]) -> bytes:
+    zinv = pow(point[2], _ED_P - 2, _ED_P)
+    x, y = point[0] * zinv % _ED_P, point[1] * zinv % _ED_P
+    return int.to_bytes(y | ((x & 1) << 255), 32, "little")
+
+
+def _ed_decompress(data: bytes) -> tuple[int, int, int, int] | None:
+    if len(data) != 32:
+        return None
+    y = int.from_bytes(data, "little")
+    sign = y >> 255
+    y &= (1 << 255) - 1
+    x = _ed_recover_x(y, sign)
+    return None if x is None else (x, y, 1, x * y % _ED_P)
+
+
+def _ed_hash_int(data: bytes) -> int:
+    return int.from_bytes(hashlib.sha512(data).digest(), "little")
+
+
+def ed25519_verify(public: bytes, message: bytes, signature: bytes) -> bool:
+    if len(public) != 32 or len(signature) != 64:
+        return False
+    point = _ed_decompress(public)
+    rs = _ed_decompress(signature[:32])
+    if point is None or rs is None:
+        return False
+    s = int.from_bytes(signature[32:], "little")
+    if s >= _ED_Q:
+        return False
+    h = _ed_hash_int(signature[:32] + public + message) % _ED_Q
+    return _ed_equal(_ed_mul(s, _ED_G), _ed_add(rs, _ed_mul(h, point)))
+
+
+def ed25519_sign(seed: bytes, message: bytes) -> tuple[bytes, bytes]:
+    """Test helper: (public key, signature) for a 32-byte seed."""
+    digest = hashlib.sha512(seed).digest()
+    a = int.from_bytes(digest[:32], "little")
+    a &= (1 << 254) - 8
+    a |= 1 << 254
+    public = _ed_compress(_ed_mul(a, _ED_G))
+    r = _ed_hash_int(digest[32:] + message) % _ED_Q
+    big_r = _ed_compress(_ed_mul(r, _ED_G))
+    s = (r + _ed_hash_int(big_r + public + message) * a) % _ED_Q
+    return public, big_r + int.to_bytes(s, 32, "little")
 
 
 class Checks:
@@ -1178,7 +1348,7 @@ class Checks:
         base = "step-16-redaction-review"
         # The sweep ran over every bundle file except the three step-16 wrote
         # after it (its own report, the private-path list, the observation draft).
-        errors.extend(self.sweep_clean(f"{base}/evidence-sweep.json", REVIEW_NEEDLE_CLASSES, minimum_files=len(self.b.files) - 3))
+        errors.extend(self.sweep_clean(f"{base}/evidence-sweep.json", REVIEW_NEEDLE_CLASSES, minimum_files=len([path for path in self.b.files if not path.startswith("primary/")]) - 3))
         listed = self.b.lines(f"{base}/files-with-private-paths.txt")
         expect(all(line.startswith("<lab-home>/journey-1839/evidence/") for line in listed), errors, "private-path list must itself be redacted")
         try:
@@ -1194,64 +1364,417 @@ class Checks:
         fields = parse_fields(before, "live-before.txt")
         expect(fields.get("launchctl_live_provider", "").isdigit() and fields.get("launchctl_live_provider") == fields.get("listener_8080_pid"), errors, "live provider pid and listener must be recorded")
 
+    # -- primary data (post-hoc exports under primary/, see
+    #    scripts/lab/privacy-class-beta/extract-primary-evidence.py)
+
+    def results_times(self) -> list[tuple[str, int]]:
+        rows = []
+        for line in self.b.lines("results.tsv"):
+            stamp, step = line.split("\t")[:2]
+            rows.append((step, int(parse_datetime(stamp, "results.tsv").timestamp())))
+        return rows
+
+    def window(self, step: str) -> tuple[int, int]:
+        """Inclusive [previous results row, own results row] in unix seconds."""
+        rows = self.results_times()
+        for index, (name, end) in enumerate(rows):
+            if name == step:
+                start = rows[index - 1][1] if index else end
+                return start, end
+        fail(f"results.tsv has no {step}")
+        raise AssertionError("unreachable")
+
+    def primary(self, relative: str) -> dict[str, Any]:
+        doc = self.b.json_object(f"primary/{relative}")
+        if doc.get("schema_version") != PRIMARY_SCHEMA:
+            fail(f"primary/{relative} is not a {PRIMARY_SCHEMA} export")
+        return doc
+
+    def rows(self, database: str, table: str) -> list[dict[str, Any]]:
+        doc = self.b.json_object(f"primary/db/{database}/{table}.json")
+        rows = doc.get("rows")
+        if doc.get("table") != table or not isinstance(rows, list) or doc.get("truncated") is not False:
+            fail(f"primary/db/{database}/{table}.json must be a complete row export")
+        return [row for row in rows if isinstance(row, dict)]
+
+    def reservations(self) -> list[dict[str, Any]]:
+        return self.rows("relay-blind.db", "relay_blind_reservations")
+
+    def snapshots(self) -> list[dict[str, Any]]:
+        rows = self.rows("coordinator.db", "settlement_route_snapshots")
+        if f"primary/db/coordinator.db.route-snapshots/settlement_route_snapshots.json" in self.b.files:
+            known = {(row.get("request_id"), row.get("provider_id"), row.get("route_snapshot_digest")) for row in rows}
+            for row in self.rows("coordinator.db.route-snapshots", "settlement_route_snapshots"):
+                if (row.get("request_id"), row.get("provider_id"), row.get("route_snapshot_digest")) not in known:
+                    rows.append(row)
+        return rows
+
+    def by_request(self, rows: list[dict[str, Any]], request_id: str) -> list[dict[str, Any]]:
+        return [row for row in rows if row.get("request_id") == request_id]
+
+    def proxy_events(self) -> list[dict[str, Any]]:
+        events = self.primary("logs/proxy-events.json").get("events")
+        if not isinstance(events, list):
+            fail("primary proxy events must be a list")
+        return [event for event in events if isinstance(event, dict)]
+
+    def coordinator_events(self) -> list[dict[str, Any]]:
+        events = self.primary("logs/coordinator-events.json").get("events")
+        if not isinstance(events, list):
+            fail("primary coordinator events must be a list")
+        return [event for event in events if isinstance(event, dict)]
+
+    def snapshot_checks(self, reservation: dict[str, Any], snapshot: dict[str, Any], errors: list[str], label: str) -> None:
+        envelope_hex = b64url_hex(reservation.get("envelope_digest"))
+        expect(snapshot.get("paid_entrypoint") == RB_ENTRYPOINT and snapshot.get("prompt_hash_basis") == RB_BASIS, errors, f"{label} snapshot must be the relay-blind entrypoint and envelope basis")
+        expect(bool(envelope_hex) and snapshot.get("prompt_hash") == envelope_hex, errors, f"{label} snapshot prompt_hash must be the envelope digest")
+        canonical = snapshot.get("route_snapshot_canonical_json")
+        expect(
+            isinstance(canonical, str) and hashlib.sha256(canonical.encode("utf-8")).hexdigest() == snapshot.get("route_snapshot_digest"),
+            errors,
+            f"{label} route_snapshot_digest must be the SHA-256 of its canonical JSON",
+        )
+
+    def p_primary_integrity(self, errors: list[str]) -> None:
+        summary = self.primary("summary.json")
+        expect(summary.get("log_utc_offset") == "-07:00", errors, "primary exports must declare the run log offset")
+        inventory = self.primary("db/inventory.json").get("databases") or {}
+        for database in ("coordinator.db", "gateway.db", "relay-blind.db", "provider_connection_events.db"):
+            expect(database in inventory, errors, f"primary inventory must cover {database}")
+        raw = self.primary("sweep/raw-files.json")
+        files = raw.get("files") or []
+        expect(bool(files) and raw.get("total_needle_matches") == 0 and all(item.get("needle_matches") == 0 for item in files), errors, "the raw run data must hold zero needle matches")
+        roots = {str(item.get("path", "")).split("/", 1)[0] for item in files}
+        expect({"db", "logs", "evidence"} <= roots, errors, "the raw sweep must cover db, logs, and evidence")
+        digests = self.primary("sweep/salted-needle-digests.json")
+        classes = {item.get("class") for item in digests.get("digests") or []}
+        expect(REVIEW_NEEDLE_CLASSES <= classes, errors, "salted digests must cover every review needle class")
+        expect(re.fullmatch(r"[0-9a-f]{64}", str(digests.get("salt", ""))) is not None, errors, "salted digests must publish a 32-byte salt")
+
+    def p_primary_canary_recheck(self, errors: list[str]) -> None:
+        doc = self.primary("sweep/salted-needle-digests.json")
+        salt = bytes.fromhex(str(doc.get("salt", "")))
+        by_length: dict[int, set[str]] = {}
+        for item in doc.get("digests") or []:
+            length, digest = item.get("length"), item.get("sha256")
+            if isinstance(length, int) and length > 0 and isinstance(digest, str):
+                by_length.setdefault(length, set()).add(digest)
+        expect(len(salt) == 32 and bool(by_length), errors, "salted needle digests are malformed")
+        if errors:
+            return
+        for path, data in sorted(self.b.files.items()):
+            if path == "primary/sweep/salted-needle-digests.json":
+                continue
+            for length, wanted in by_length.items():
+                for start in range(0, len(data) - length + 1):
+                    if hashlib.sha256(salt + data[start : start + length]).hexdigest() in wanted:
+                        errors.append(f"{path} contains a swept needle")
+                        return
+
+    def p_primary_key_attestation(self, errors: list[str]) -> None:
+        identity = self.identity("privacy")
+        public = b64url_bytes(identity.get("relay_blind_identity_public_key"))
+        values = self.binding()
+        privacy = self.provider_id("privacy")
+        start, end = self.window("step-02-privacy-mode-start")
+        rows = [row for row in self.rows("relay-blind.db", "relay_blind_key_records") if row.get("provider_id") == privacy]
+        privacy_rows = [row for row in rows if row.get("key_class") == "privacy"]
+        expect(bool(privacy_rows), errors, "the privacy provider must have privacy key records")
+        expect(any(start - 600 <= int(row.get("not_before_unix") or 0) <= end for row in privacy_rows), errors, "a privacy key must be minted by the step-02 start")
+        expect(all(row.get("key_class") == "privacy" for row in rows), errors, "the privacy provider must advertise only privacy key records")
+        for row in privacy_rows:
+            label = f"key {row.get('kid')}"
+            record = row.get("record_json")
+            attestation = row.get("privacy_attestation_json")
+            signature = row.get("privacy_attestation_signature")
+            if not isinstance(record, dict) or not isinstance(attestation, dict) or not isinstance(signature, str):
+                errors.append(f"{label} must export its key record, attestation, and signature")
+                continue
+            nb, exp = row.get("not_before_unix"), row.get("expires_at_unix")
+            expect(isinstance(nb, int) and isinstance(exp, int) and 0 < exp - nb <= 3600, errors, f"{label} lifetime must be at most 3600s")
+            expect(record.get("identity_fingerprint") == identity.get("relay_blind_fingerprint"), errors, f"{label} must name the pinned identity")
+            expect(record.get("key_record_digest") == row.get("key_record_digest") == attestation.get("key_record_digest"), errors, f"{label} attestation must bind the key record digest")
+            expect(record.get("not_before_unix") == nb == attestation.get("not_before_unix") and record.get("expires_at_unix") == exp == attestation.get("expires_at_unix"), errors, f"{label} attestation must bind the key window")
+            expect(attestation.get("version") == "privacy-key-attestation-v1" and attestation.get("privacy_class") == PRIVACY_CLASS and attestation.get("assurance") == PRIVACY_ASSURANCE, errors, f"{label} attestation must be the beta class")
+            expect(attestation.get("code_cdhash") == values["code_cdhash"] and attestation.get("binary_version") == values["binary_version"], errors, f"{label} attestation must name the release code identity")
+            try:
+                framing = attestation_framing(attestation)
+                ok = public is not None and ed25519_verify(public, framing, b64url_bytes(signature) or b"")
+            except (TypeError, ValueError):
+                ok = False
+            expect(ok, errors, f"{label} attestation signature must verify under the pinned identity key")
+
+    def p_primary_posture(self, errors: list[str]) -> None:
+        privacy = self.provider_id("privacy")
+        timing = self.b.fields("step-02-privacy-mode-start/timing.txt")
+        started = int(timing["provider_start_unix"])
+        stale_start, stale_end = self.window("step-11-stale-posture-and-quarantine")
+        for event in self.coordinator_events():
+            message = str(event.get("message") or event.get("msg") or "")
+            if event.get("provider_id") != privacy:
+                continue
+            if "privacy posture: response rejected" in message:
+                errors.append("the coordinator rejected a privacy posture of the privacy provider")
+            if "privacy posture: response timed out" in message:
+                stamp = utc_unix(event.get("time_utc"))
+                expect(stamp is not None and stale_start <= stamp <= stale_end + 60, errors, "posture timeouts may occur only around the step-11 freeze")
+        start, end = self.window("step-02-privacy-mode-start")
+        postures = [privacy_posture(event) for event in self.proxy_events() if start <= int(event.get("at_unix") or 0) <= end]
+        expect(any(value is not None and value >= started for value in postures), errors, "a coordinator-verified posture must follow the step-02 provider start")
+
+    def p_primary_posture_after_attach(self, errors: list[str]) -> None:
+        start, end = self.window("step-03-debugger-attach-refused")
+        postures = [privacy_posture(event) for event in self.proxy_events() if start <= int(event.get("at_unix") or 0) <= end]
+        # SPEC-049-R006 accepts a posture only with p_traced=false and
+        # cs_debugged=false; this one was verified after the attach attempts began.
+        expect(any(value is not None and value > start for value in postures), errors, "a posture verified after the attach attempts began must exist")
+
+    def p_primary_first_connect(self, errors: list[str]) -> None:
+        privacy = self.provider_id("privacy")
+        timing = self.b.fields("step-02-privacy-mode-start/timing.txt")
+        started = int(timing["provider_start_unix"])
+        start, end = self.window("step-02-privacy-mode-start")
+        accepted = [
+            utc_unix(event.get("time_utc"))
+            for event in self.coordinator_events()
+            if event.get("provider_id") == privacy and "auth_response accepted" in str(event.get("reason") or event.get("message") or "")
+        ]
+        in_step = [stamp for stamp in accepted if stamp is not None and start - 600 <= stamp <= end]
+        expect(bool(in_step) and min(in_step) >= started, errors, "the privacy provider's first accepted session must follow its start")
+
+    def p_primary_canary_completion(self, errors: list[str]) -> None:
+        privacy = self.provider_id("privacy")
+        start, _ = self.window("step-05-unsigned-build-refused")
+        _, end = self.window("step-08-canary-nonstream")
+        outputs = self.rows("coordinator.db", "settlement_attempt_outputs")
+        for stream in (1, 0):
+            matched = [
+                row for row in self.reservations()
+                if row.get("privacy_class") == 1 and row.get("provider_id") == privacy and row.get("stream") == stream
+                and row.get("dispatched_at_unix") is not None and start - 1 <= int(row.get("created_at_unix") or 0) <= end + 1
+            ]
+            expect(bool(matched), errors, f"a {'stream' if stream else 'non-stream'} canary reservation must be dispatched")
+            for row in matched:
+                done = self.by_request(outputs, str(row.get("internal_request_id")))
+                expect(len(done) == 1 and done[0].get("terminal_state") == "normal_done" and done[0].get("output_available") == 1, errors, "a canary attempt must complete normally at the coordinator")
+        chats = [event for event in self.proxy_events() if event.get("path") == "/v1/chat/completions" and start - 1 <= int(event.get("at_unix") or 0) <= end + 1 and privacy_posture(event) is not None]
+        expect(len(chats) >= 2 and all(event.get("status") == 200 and event.get("mutated") is False and int(event.get("body_len") or 0) > 0 for event in chats), errors, "both canary responses must reach the buyer unmodified")
+
+    def p_primary_receipts(self, errors: list[str]) -> None:
+        _, end = self.window("step-09-redaction-sweep")
+        reservations = [row for row in self.reservations() if row.get("privacy_class") == 1 and int(row.get("created_at_unix") or 0) <= end]
+        dispatched = [row for row in reservations if row.get("dispatched_at_unix") is not None and row.get("internal_request_id")]
+        expect(len(dispatched) >= 4, errors, "steps 02-08 must dispatch at least four privacy requests")
+        verdicts = self.rows("coordinator.db", "settlement_receipt_verdicts")
+        outputs = self.rows("coordinator.db", "settlement_attempt_outputs")
+        outbox = self.rows("coordinator.db", "settlement_receipt_audit_outbox")
+        snapshots = self.snapshots()
+        for row in dispatched:
+            request = str(row["internal_request_id"])
+            label = f"privacy request {request}"
+            found = self.by_request(verdicts, request)
+            shots = self.by_request(snapshots, request)
+            outs = self.by_request(outputs, request)
+            if len(found) != 1 or len(shots) != 1 or len(outs) != 1:
+                errors.append(f"{label} must have exactly one verdict, snapshot, and attempt output")
+                continue
+            verdict, shot, out = found[0], shots[0], outs[0]
+            facts = verdict.get("facts_json") if isinstance(verdict.get("facts_json"), dict) else {}
+            expect(verdict.get("receipt_present") == 1 and verdict.get("receipt_version") == RB_PROFILE and verdict.get("receipt_profile") == RB_PROFILE, errors, f"{label} must carry one {RB_PROFILE} receipt")
+            expect(verdict.get("settlement_outcome") == RB_SETTLED and verdict.get("closed") == 1 and verdict.get("receipt_result") == "valid", errors, f"{label} must settle closed {RB_SETTLED}")
+            self.snapshot_checks(row, shot, errors, label)
+            expect(verdict.get("prompt_hash") == shot.get("prompt_hash"), errors, f"{label} receipt must bind the envelope digest")
+            expect("prompt_hash" not in facts, errors, f"{label} receipt facts must carry no plaintext prompt hash")
+            expect(bool(verdict.get("output_hash")) and verdict.get("output_hash") == out.get("output_hash") == facts.get("output_hash"), errors, f"{label} response_body_sha256 must be the captured frame digest")
+            expect(out.get("settlement_output_canonical_json") in ("", None), errors, f"{label} attempt output must carry no content")
+            expect(all(item.get("settlement_receipt_verdict_id") == verdict.get("id") and item.get("receipt_version") in (None, "", RB_PROFILE) for item in self.by_request(outbox, request)), errors, f"{label} audit outbox must name only its one receipt")
+        undispatched = {str(value) for row in reservations if row.get("dispatched_at_unix") is None for value in (row.get("request_id"), row.get("internal_request_id")) if value}
+        expect(not any(row.get("request_id") in undispatched for row in verdicts), errors, "undispatched privacy requests must have no receipt verdict")
+        hits = self.primary("db/request-id-crossref.json").get("hits") or {}
+        for key in hits:
+            table = key.split(":", 1)[-1].split(".", 1)[0]
+            if re.search(r"receipt|telemetry|trace", table) and table not in ("settlement_receipt_verdicts", "settlement_receipt_audit_outbox"):
+                errors.append(f"{key} names a privacy request")
+        headers = [event for event in self.proxy_events() if any(str(name).lower() == "x-macprovider-receipt" for name in (event.get("response_macprovider_headers") or {}))]
+        expect(not headers, errors, "no X-MacProvider-Receipt header may reach the buyer")
+
+    def enforce_rows(self) -> list[dict[str, Any]]:
+        start, end = self.window("step-13-enforce-canary")
+        return [row for row in self.reservations() if start <= int(row.get("created_at_unix") or 0) <= end and row.get("dispatched_at_unix") is not None]
+
+    def p_primary_enforce(self, errors: list[str]) -> None:
+        rows = self.enforce_rows()
+        expect(sorted(row.get("privacy_class") for row in rows) == [0, 1, 1], errors, "step-13 must dispatch two privacy and one plain relay-blind request")
+        start, end = self.window("step-13-enforce-canary")
+        proxied = {event.get("request_envelope_sha256") for event in self.proxy_events() if start <= int(event.get("at_unix") or 0) <= end}
+        verdicts = self.rows("coordinator.db", "settlement_receipt_verdicts")
+        credits = self.rows("coordinator.db", "spec022_payable_request_credits")
+        quotas = self.rows("gateway.db", "quota_reservations")
+        usage = self.rows("gateway.db", "usage_events")
+        snapshots = self.snapshots()
+        for row in rows:
+            request, provider = str(row.get("internal_request_id")), row.get("provider_id")
+            label = f"enforce request {request}"
+            shots = [item for item in self.by_request(snapshots, request) if item.get("provider_id") == provider]
+            found = [item for item in self.by_request(verdicts, request) if item.get("provider_id") == provider]
+            paid = [item for item in self.by_request(credits, request) if item.get("provider_id") == provider]
+            if len(shots) != 1 or len(found) != 1 or len(paid) != 1:
+                errors.append(f"{label} must have one snapshot, verdict, and payable credit")
+                continue
+            shot, verdict, credit = shots[0], found[0], paid[0]
+            self.snapshot_checks(row, shot, errors, label)
+            expect(shot.get("route_snapshot_mode") == "enforce", errors, f"{label} snapshot must be enforce")
+            expect(shot.get("prompt_hash") in proxied, errors, f"{label} prompt_hash must be the SHA-256 of the proxied envelope bytes")
+            dispatched = int(row.get("dispatched_at_unix") or 0)
+            created = utc_unix(shot.get("created_at_utc"))
+            expect(created is not None and created <= dispatched + 1 and int(shot.get("route_decision_ts_unix_ms") or 0) <= (dispatched + 1) * 1000, errors, f"{label} snapshot must be committed before dispatch")
+            expect(verdict.get("settlement_outcome") == RB_SETTLED and verdict.get("closed") == 1 and verdict.get("receipt_result") == "valid", errors, f"{label} verdict must be closed {RB_SETTLED}")
+            expect(verdict.get("receipt_profile") == RB_PROFILE and verdict.get("receipt_version") == RB_PROFILE and verdict.get("route_snapshot_mode") == "enforce", errors, f"{label} verdict must be the enforce relay-blind profile")
+            expect(verdict.get("route_snapshot_digest") == shot.get("route_snapshot_digest"), errors, f"{label} verdict must bind the snapshot digest")
+            expect(credit.get("settlement_policy_mode") == "enforce" and int(credit.get("provider_credits") or 0) > 0, errors, f"{label} credit must be payable under enforce")
+            gateway = [item for item in quotas if item.get("relay_blind_internal_request_id") == request or (row.get("envelope_digest") and item.get("relay_blind_envelope_digest") == row.get("envelope_digest"))]
+            if len(gateway) != 1:
+                errors.append(f"{label} must have one gateway reservation")
+                continue
+            quota = gateway[0]
+            debits = [item for item in usage if item.get("account_id") == quota.get("account_id") and item.get("request_id") == quota.get("request_id")]
+            if len(debits) != 1:
+                errors.append(f"{label} must have one gateway usage row")
+                continue
+            debit = debits[0]
+            expect(quota.get("status") == "settled" and quota.get("relay_blind_settlement_mode", "enforce") == "enforce", errors, f"{label} gateway reservation must settle under enforce")
+            expect(debit.get("prompt_tokens") == credit.get("prompt_tokens") and debit.get("completion_tokens") == credit.get("completion_tokens"), errors, f"{label} buyer debit must equal the provider-credited usage")
+            expect(quota.get("settled_tokens") == debit.get("total_tokens") == int(debit.get("prompt_tokens") or 0) + int(debit.get("completion_tokens") or 0), errors, f"{label} settled tokens must equal the debited total")
+
+    def p_primary_counters(self, errors: list[str]) -> None:
+        start, _ = self.window("step-13-enforce-canary")
+        _, end = self.window("step-13-enforce-canary")
+        inventory = self.primary("db/inventory.json").get("databases") or {}
+        for database, tables in inventory.items():
+            for table in tables:
+                if not REWARD_TABLE_RE.search(table):
+                    continue
+                for row in self.rows(database, table):
+                    for column, value in row.items():
+                        stamp = utc_unix(value) if isinstance(value, str) and ("_at" in column or column.endswith("_utc")) else None
+                        if stamp is not None and start <= stamp <= end:
+                            errors.append(f"{database}:{table} gained a row during the enforce canary")
+                            break
+        verified = [row for row in self.rows("coordinator.db", "settlement_receipt_verdicts") if row.get("settlement_outcome") == "verified" and start * 1000 <= int(row.get("received_at_unix_ms") or 0) <= (end + 1) * 1000]
+        expect(not verified, errors, "no verified verdict may be recorded during the enforce canary")
+
+    def p_primary_kill_switch_refund(self, errors: list[str]) -> None:
+        start, end = self.window("step-12-kill-switch")
+        held = [row for row in self.reservations() if row.get("privacy_class") == 1 and start <= int(row.get("created_at_unix") or 0) <= end and row.get("terminal_code") == "privacy_class_disabled"]
+        expect(bool(held) and all(row.get("state") == "rejected" and row.get("dispatched_at_unix") is None for row in held), errors, "the held privacy reservation must be rejected predispatch")
+        quotas = self.rows("gateway.db", "quota_reservations")
+        usage = self.rows("gateway.db", "usage_events")
+        for row in held:
+            matched = [item for item in quotas if (row.get("internal_request_id") and item.get("relay_blind_internal_request_id") == row.get("internal_request_id")) or (row.get("envelope_digest") and item.get("relay_blind_envelope_digest") == row.get("envelope_digest"))]
+            for quota in matched:
+                expect(quota.get("status") == "refunded" or (quota.get("status") == "settled" and quota.get("settled_tokens") == 0), errors, "the held request's gateway reservation must be refunded")
+                expect(all(int(item.get("total_tokens") or 0) == 0 for item in usage if item.get("account_id") == quota.get("account_id") and item.get("request_id") == quota.get("request_id")), errors, "the held request must debit no usage")
+            if row.get("envelope_digest"):
+                expect(not any(item.get("relay_blind_envelope_digest") == row.get("envelope_digest") and int(item.get("total_tokens") or 0) > 0 for item in usage), errors, "the held request must debit no usage")
+
+    def p_primary_receipt_quarantine(self, errors: list[str]) -> None:
+        verdicts = self.rows("coordinator.db", "settlement_receipt_verdicts")
+        credits = self.rows("coordinator.db", "spec022_payable_request_credits")
+        quotas = self.rows("gateway.db", "quota_reservations")
+        usage = self.rows("gateway.db", "usage_events")
+        for row in self.b.lines("step-15-tampered-receipt-quarantined/cases.tsv"):
+            name, request, _ = row.split("\t")
+            reason = QUARANTINE_CASES.get(name)
+            found = self.by_request(verdicts, request)
+            expect(len(found) == 1 and found[0].get("closed") == 1 and found[0].get("settlement_outcome") == "quarantined" and found[0].get("reason") == reason, errors, f"{name} must be closed quarantined for {reason}")
+            expect(not self.by_request(credits, request), errors, f"{name} must have no payable credit")
+            gateway = [item for item in quotas if item.get("relay_blind_internal_request_id") == request]
+            expect(len(gateway) == 1 and (gateway[0].get("status") == "refunded" or (gateway[0].get("status") == "settled" and gateway[0].get("settled_tokens") == 0)), errors, f"{name} buyer reservation must be refunded")
+            for quota in gateway:
+                expect(all(int(item.get("total_tokens") or 0) == 0 for item in usage if item.get("account_id") == quota.get("account_id") and item.get("request_id") == quota.get("request_id")), errors, f"{name} must debit no usage")
+
+    def p_primary_fault_isolation(self, errors: list[str]) -> None:
+        plain = self.provider_id("plain")
+        start, end = self.window("step-15-tampered-receipt-quarantined")
+        urls = [line.get("text", "").split("coordinator_url:", 1)[1].strip() for line in self.primary("logs/provider-plain-lines.json").get("lines") or [] if "coordinator_url:" in str(line.get("text", ""))]
+        expect(bool(urls) and all(re.fullmatch(r"ws://127\.0\.0\.1:193[0-9]{2}/ws/provider", url) for url in urls), errors, "every plain/fault provider start must target the loopback journey coordinator")
+        accepted = [
+            utc_unix(event.get("time_utc"))
+            for event in self.coordinator_events()
+            if event.get("provider_id") == plain and "auth_response accepted" in str(event.get("reason") or event.get("message") or "")
+        ]
+        expect(any(stamp is not None and start <= stamp <= end for stamp in accepted), errors, "the fault build's session must be accepted by the isolated journey coordinator")
+
+    def p_primary_dyld_procedure(self, errors: list[str]) -> None:
+        record = self.primary("procedure/dyld.json")
+        script = record.get("kit_script") or {}
+        lines = [str(item.get("text", "")) for item in script.get("dyld_lines") or []]
+        expect(re.fullmatch(r"[0-9a-f]{64}", str(script.get("sha256", ""))) is not None, errors, "the DYLD procedure must name the kit script digest")
+        expect(any("DYLD_INSERT_LIBRARIES=" in line and "DYLD_PRINT_LIBRARIES=1" in line for line in lines) and any("--version" in line for line in lines), errors, "the kit must set DYLD_INSERT_LIBRARIES and DYLD_PRINT_LIBRARIES on the --version run")
+        captured = int(parse_datetime(self.b.lines("results.tsv")[0].split("\t")[0], "results.tsv").timestamp())
+        mtime = utc_unix(script.get("mtime_utc"))
+        expect(mtime is not None and mtime <= captured, errors, "the kit script must predate the run")
+
 
 STEP_PREDICATES: dict[str, tuple[str, ...]] = {
     "step-01-bind-signed-release": ("bind_release",),
-    "step-02-privacy-mode-start": ("privacy_start", "posture_verified", "key_memory_only"),
-    "step-03-debugger-attach-refused": ("debugger",),
-    "step-04-core-dump-and-env-refused": ("core_dumps", "diag_env", "config_refusals", "dyld"),
+    "step-02-privacy-mode-start": ("privacy_start", "posture_verified", "key_memory_only", "primary_key_attestation", "primary_posture", "primary_first_connect"),
+    "step-03-debugger-attach-refused": ("debugger", "primary_posture_after_attach"),
+    "step-04-core-dump-and-env-refused": ("core_dumps", "diag_env", "config_refusals", "dyld", "primary_dyld_procedure"),
     "step-05-unsigned-build-refused": ("unsigned",),
     "step-06-sip-off-refused": ("sip_off",),
-    "step-07-canary-stream": ("stream",),
-    "step-08-canary-nonstream": ("nonstream",),
-    "step-09-redaction-sweep": ("sweeps_clean", "receipts", "core_dumps"),
+    "step-07-canary-stream": ("stream", "primary_canary_completion"),
+    "step-08-canary-nonstream": ("nonstream", "primary_canary_completion"),
+    "step-09-redaction-sweep": ("sweeps_clean", "receipts", "core_dumps", "primary_integrity", "primary_receipts", "primary_canary_recheck"),
     "step-10-downgrade-negatives": ("downgrade", "tamper_truncate", "no_failover"),
     "step-11-stale-posture-and-quarantine": ("stale", "quarantine_durable"),
-    "step-12-kill-switch": ("kill_switch", "unaffected"),
-    "step-13-enforce-canary": ("enforce_config", "enforce_snapshot", "enforce_verdict", "enforce_credit", "enforce_debit", "counters", "sweeps_clean", "disclosure_exact"),
+    "step-12-kill-switch": ("kill_switch", "unaffected", "primary_kill_switch_refund"),
+    "step-13-enforce-canary": ("enforce_config", "enforce_snapshot", "enforce_verdict", "enforce_credit", "enforce_debit", "counters", "sweeps_clean", "disclosure_exact", "primary_enforce", "primary_counters"),
     "step-14-no-capability-provider-excluded": ("no_capability",),
-    "step-15-tampered-receipt-quarantined": ("receipt_quarantine", "isolated_fault_build"),
-    "step-16-redaction-review": ("review",),
+    "step-15-tampered-receipt-quarantined": ("receipt_quarantine", "isolated_fault_build", "primary_receipt_quarantine", "primary_fault_isolation"),
+    "step-16-redaction-review": ("review", "primary_integrity", "primary_canary_recheck"),
 }
 
 # A true observation holds when all its predicates hold. A must-be-false
-# observation is false only when all the predicates refuting it hold.
+# observation is false only when all the predicates refuting it hold. The
+# primary_* predicates recompute from the raw-row and log exports under
+# primary/; the others read the run kit's step artifacts.
 OBSERVATION_PREDICATES: dict[str, tuple[str, ...]] = {
-    "hardening_applied_before_network_verified": ("privacy_start", "posture_verified", "diag_env", "config_refusals", "unsigned", "sip_off"),
-    "privacy_key_memory_only_verified": ("key_memory_only",),
-    "posture_verified_by_coordinator": ("posture_verified",),
-    "debugger_attach_refused_verified": ("debugger",),
-    "core_dumps_disabled_verified": ("core_dumps",),
+    "hardening_applied_before_network_verified": ("privacy_start", "posture_verified", "diag_env", "config_refusals", "unsigned", "sip_off", "primary_first_connect"),
+    "privacy_key_memory_only_verified": ("key_memory_only", "primary_key_attestation"),
+    "posture_verified_by_coordinator": ("posture_verified", "primary_posture"),
+    "debugger_attach_refused_verified": ("debugger", "primary_posture_after_attach"),
+    "core_dumps_disabled_verified": ("core_dumps", "primary_posture"),
     "diagnostic_env_refused_verified": ("diag_env",),
-    "dyld_env_inert_verified": ("dyld",),
+    "dyld_env_inert_verified": ("dyld", "primary_dyld_procedure"),
     "unsigned_or_resigned_build_refused_verified": ("unsigned",),
     "sip_off_host_refused_verified": ("sip_off",),
-    "stream_frames_decrypted_and_verified": ("stream",),
-    "nonstream_frames_decrypted_and_verified": ("nonstream",),
+    "stream_frames_decrypted_and_verified": ("stream", "primary_canary_completion"),
+    "nonstream_frames_decrypted_and_verified": ("nonstream", "primary_canary_completion"),
     "disclosure_strings_exact_verified": ("disclosure_exact",),
-    "canary_absent_from_all_artifacts_verified": ("sweeps_clean", "review"),
+    "canary_absent_from_all_artifacts_verified": ("sweeps_clean", "review", "primary_integrity", "primary_canary_recheck"),
     "downgrade_attempts_rejected_verified": ("downgrade",),
     "tampered_or_truncated_response_rejected_verified": ("tamper_truncate",),
     "stale_posture_ineligible_verified": ("stale",),
     "quarantine_durable_across_restart_verified": ("quarantine_durable",),
-    "kill_switch_blocks_all_phases_verified": ("kill_switch",),
+    "kill_switch_blocks_all_phases_verified": ("kill_switch", "primary_kill_switch_refund"),
     "relay_blind_and_plaintext_unaffected_verified": ("unaffected",),
-    "exactly_one_content_free_settlement_receipt_verified": ("receipts",),
-    "enforce_snapshot_before_dispatch_verified": ("enforce_config", "enforce_snapshot"),
-    "relay_blind_settled_verdict_closed_verified": ("enforce_verdict",),
-    "relay_blind_credit_payable_verified": ("enforce_credit",),
-    "buyer_debit_equals_provider_credit_usage_verified": ("enforce_debit",),
-    "verified_count_delta_zero_verified": ("counters",),
+    "exactly_one_content_free_settlement_receipt_verified": ("receipts", "primary_receipts"),
+    "enforce_snapshot_before_dispatch_verified": ("enforce_config", "enforce_snapshot", "primary_enforce"),
+    "relay_blind_settled_verdict_closed_verified": ("enforce_verdict", "primary_enforce"),
+    "relay_blind_credit_payable_verified": ("enforce_credit", "primary_enforce"),
+    "buyer_debit_equals_provider_credit_usage_verified": ("enforce_debit", "primary_enforce"),
+    "verified_count_delta_zero_verified": ("counters", "primary_counters"),
     "no_capability_provider_excluded_verified": ("no_capability",),
-    "tampered_or_missing_receipt_quarantined_and_refunded_verified": ("receipt_quarantine",),
-    "plaintext_observed_at_relay": ("sweeps_clean", "stream", "nonstream"),
+    "tampered_or_missing_receipt_quarantined_and_refunded_verified": ("receipt_quarantine", "primary_receipt_quarantine"),
+    "plaintext_observed_at_relay": ("sweeps_clean", "stream", "nonstream", "primary_canary_recheck"),
     "failover_or_alternate_provider_observed": ("no_failover", "no_capability"),
     "silent_downgrade_observed": ("downgrade", "tamper_truncate"),
-    "plaintext_derived_receipt_or_telemetry_emitted_for_privacy_request": ("receipts", "sweeps_clean"),
-    "relay_blind_request_reported_as_verified": ("enforce_verdict", "counters", "disclosure_exact"),
+    "plaintext_derived_receipt_or_telemetry_emitted_for_privacy_request": ("receipts", "sweeps_clean", "primary_receipts"),
+    "relay_blind_request_reported_as_verified": ("enforce_verdict", "counters", "disclosure_exact", "primary_enforce", "primary_counters"),
     "privacy_key_written_to_disk": ("key_memory_only",),
-    "unreleased_local_binary_connected_to_live_coordinator": ("live_untouched", "isolated_fault_build", "unsigned", "sip_off"),
-    "secret_or_canary_persisted": ("sweeps_clean", "review"),
+    "unreleased_local_binary_connected_to_live_coordinator": ("live_untouched", "isolated_fault_build", "unsigned", "sip_off", "primary_fault_isolation"),
+    "secret_or_canary_persisted": ("sweeps_clean", "review", "primary_integrity", "primary_canary_recheck"),
 }
 
 
@@ -1285,8 +1808,24 @@ def parse_results(bundle: Bundle) -> tuple[str, dict[str, str]]:
     return first, rows
 
 
+_RECOMPUTE_CACHE: dict[str, tuple[dict[str, list[str]], dict[str, bool]]] = {}
+
+
 def recompute(bundle: Bundle) -> tuple[dict[str, list[str]], dict[str, bool]]:
-    """Return step failures and recomputed observations for a bundle."""
+    """Return step failures and recomputed observations for a bundle.
+
+    MANIFEST.sha256 binds every bundle file, so its digest keys a per-process
+    cache; the salted canary recheck is the slow part.
+    """
+    cached = _RECOMPUTE_CACHE.get(bundle.manifest_sha256)
+    if cached is not None:
+        return {step: list(errors) for step, errors in cached[0].items()}, dict(cached[1])
+    result = _recompute(bundle)
+    _RECOMPUTE_CACHE[bundle.manifest_sha256] = result
+    return {step: list(errors) for step, errors in result[0].items()}, dict(result[1])
+
+
+def _recompute(bundle: Bundle) -> tuple[dict[str, list[str]], dict[str, bool]]:
     checks = Checks(bundle)
     step_errors = {
         step: [error for name in STEP_PREDICATES[step] for error in checks.run(name)]

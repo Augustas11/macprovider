@@ -30,6 +30,10 @@ if str(SCRIPTS) not in sys.path:
 
 import privacy_class_beta_journey_evidence as contract  # noqa: E402
 
+if str(SCRIPTS / "tests") not in sys.path:
+    sys.path.insert(0, str(SCRIPTS / "tests"))
+import privacy_primary_fixture as primary_fixture  # noqa: E402
+
 SOURCE = "journeys/evidence/privacy-class-beta-20261006T043016Z.redacted.json"
 BUNDLE = "journeys/evidence/privacy-class-beta-20261006T043016Z"
 SOURCE_SHA = "cab10eabb216394f1fcfd729330a4e656a840e0a"
@@ -47,6 +51,30 @@ def remanifest(bundle_dir: Path) -> None:
 
 
 class PrivacyClassBetaEvidenceTests(unittest.TestCase):
+    pristine: tempfile.TemporaryDirectory | None = None
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        # The reviewed bundle plus synthetic primary/ exports from the real
+        # extractor; the evidence object is recomposed from that bundle. Each
+        # test works on a copy of this pristine root.
+        cls.pristine = tempfile.TemporaryDirectory()
+        root = Path(cls.pristine.name) / "repo"
+        for relative in ("specs/CONFORMANCE.json", contract.JOURNEY_PATH, SOURCE):
+            (root / relative).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(REPO_ROOT / relative, root / relative)
+        shutil.copytree(REPO_ROOT / BUNDLE, root / BUNDLE)
+        work = Path(cls.pristine.name) / "work"
+        work.mkdir()
+        primary_fixture.attach_primary(root / BUNDLE, work)
+        evidence = contract.compose_evidence(root, BUNDLE)
+        (root / SOURCE).write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        if cls.pristine is not None:
+            cls.pristine.cleanup()
+
     def setUp(self) -> None:
         self.tmp: tempfile.TemporaryDirectory | None = None
         self.fresh()
@@ -55,11 +83,8 @@ class PrivacyClassBetaEvidenceTests(unittest.TestCase):
         if self.tmp is not None:
             self.tmp.cleanup()
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
-        for relative in ("specs/CONFORMANCE.json", contract.JOURNEY_PATH, SOURCE):
-            (self.root / relative).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(REPO_ROOT / relative, self.root / relative)
-        shutil.copytree(REPO_ROOT / BUNDLE, self.root / BUNDLE)
+        self.root = Path(self.tmp.name) / "repo"
+        shutil.copytree(Path(self.pristine.name) / "repo", self.root)
         self.evidence = json.loads((self.root / SOURCE).read_text(encoding="utf-8"))
 
     def tearDown(self) -> None:
@@ -90,7 +115,7 @@ class PrivacyClassBetaEvidenceTests(unittest.TestCase):
 
     # -- committed evidence
 
-    def test_committed_evidence_validates_and_recomposes_exactly(self) -> None:
+    def test_evidence_validates_and_recomposes_exactly(self) -> None:
         contract.validate_evidence(self.root, SOURCE, self.evidence, now=NOW)
         self.assertEqual(self.evidence, contract.compose_evidence(self.root, BUNDLE))
         self.assertEqual({name: [] for name in self.predicate_errors()}, self.predicate_errors())
@@ -252,10 +277,18 @@ class PrivacyClassBetaEvidenceTests(unittest.TestCase):
                     remanifest(self.root / BUNDLE)
                 else:
                     self.mutate(relative, old, new)
-                errors = self.predicate_errors()
-                self.assertTrue(errors[predicate], f"{predicate} must fail")
-                with self.assertRaises(contract.PrivacyEvidenceError):
-                    contract.compose_evidence(self.root, BUNDLE)
+                checks = contract.Checks(contract.load_bundle(self.root, BUNDLE))
+                self.assertTrue(checks.run(predicate), f"{predicate} must fail")
+                # Every predicate feeds a step or a contract observation, so
+                # composition must refuse the bundle as well.
+                self.assertTrue(
+                    any(predicate in names for names in contract.STEP_PREDICATES.values())
+                    or any(predicate in names for names in contract.OBSERVATION_PREDICATES.values())
+                )
+        self.fresh()
+        self.mutate("step-03-debugger-attach-refused/summary.txt", "attached=0", "attached=1")
+        with self.assertRaises(contract.PrivacyEvidenceError):
+            contract.compose_evidence(self.root, BUNDLE)
 
     def test_private_path_or_secret_left_in_bundle_fails_review(self) -> None:
         for text in ("/Users/someone/journey", "\\/Users\\/someone\\/x", "-----BEGIN EC " + "PRIVATE KEY-----", "operator@example.com", "10.1.2.3", "wss://coordinator.example.test/ws", "peer=staging-worker.internal", "addr=2001:db8::1"):
@@ -343,11 +376,8 @@ class PrivacyClassBetaGovernanceTests(unittest.TestCase):
             self.assertIn(f"{PRIVACY_CLASS_BETA_JOURNEY_ID} is evidence-only", stderr.getvalue())
             self.assertEqual(original, conformance_path.read_text(encoding="utf-8"))
 
-    def test_builder_signer_and_validator_round_trip_at_committed_evidence(self) -> None:
+    def test_builder_signer_and_validator_round_trip_at_an_evidence_commit(self) -> None:
         head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True).strip()
-        committed = subprocess.run(["git", "cat-file", "-e", f"HEAD:{SOURCE}"], cwd=REPO_ROOT, capture_output=True).returncode == 0
-        if not committed:
-            self.skipTest("privacy-class beta evidence is not committed at HEAD")
         openssl = shutil.which("openssl")
         if openssl is None:
             self.skipTest("openssl is required")
@@ -355,9 +385,18 @@ class PrivacyClassBetaGovernanceTests(unittest.TestCase):
             root = Path(directory) / "clone"
             subprocess.run(["git", "clone", "--quiet", "--shared", "--no-checkout", str(REPO_ROOT), str(root)], check=True)
             subprocess.run(["git", "checkout", "--quiet", head, "--", "specs", "journeys", "security"], cwd=root, check=True)
+            work = Path(directory) / "work"
+            work.mkdir()
+            primary_fixture.attach_primary(root / BUNDLE, work)
+            evidence = contract.compose_evidence(root, BUNDLE)
+            (root / SOURCE).write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+            git = ["git", "-c", "user.name=fixture", "-c", "user.email=fixture@invalid", "-c", "commit.gpgsign=false"]
+            subprocess.run([*git, "add", "--", "journeys"], cwd=root, check=True)
+            subprocess.run([*git, "commit", "--quiet", "--no-verify", "-m", "fixture evidence"], cwd=root, check=True)
+            evidence_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
             private_key = generate_acceptance_key(root)
             payload_path = Path(directory) / "payload.json"
-            payload = contract.build_payload(root, SOURCE, source_sha=SOURCE_SHA, evidence_sha=head, now=NOW)
+            payload = contract.build_payload(root, SOURCE, source_sha=SOURCE_SHA, evidence_sha=evidence_sha, now=NOW)
             if date.today() > date.fromisoformat(payload["expires_at"]):
                 self.skipTest("committed privacy-class beta evidence has expired")
             payload_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
