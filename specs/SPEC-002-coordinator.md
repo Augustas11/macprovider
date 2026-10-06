@@ -1,6 +1,6 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.7 (2026-10-03, atomic attempt-output evidence journal)
+**Version:** 1.6.8 (2026-10-06, cross-runtime throughput estimate)
 **Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9); SPEC-003 FR-C9.4 composed contract — base AuthState enum (`bearer_validated`, `self_minted`, `bearerless_duplicate`) introduced in v0.8.3; `mint_failed` reserved value added in v0.8.4.
 
 **Change log v1.6.5 (2026-10-02, issue #1793):** The primary money database
@@ -24,6 +24,14 @@ money-database transaction. The attempt-output projection is materialized
 asynchronously with bounded indexed work and on demand before receipt
 adjudication. Projection pressure no longer converts a durably journaled event
 into missing settlement evidence.
+
+**Change log v1.6.8 (2026-10-06, issue #1690):** Defines
+`throughput_tps_estimate`, which the `routing.min_provider_throughput_tps`
+floor, FR-R2 `fast` ordering and the default-mode tie-break all compare, as one
+cross-runtime quantity: completion tokens of a short fixed startup generation
+over the total elapsed request time (prefill, first token and decode), measured
+by the signed CLI the same way for native and loopback runtimes (SPEC-001 FR-17,
+FR-20), and 0 when unmeasured. Routing behavior is unchanged.
 
 **Change log v1.6.4 (2026-09-30, authenticated dispatch output limit):**
 The coordinator accepts `X-MacProvider-Internal-Max-Output-Tokens` only under
@@ -1989,6 +1997,19 @@ request header:
 
 Unknown values are silently ignored (treated as absent).
 
+**`throughput_tps_estimate` semantics (v1.6.8).** Every comparison of this
+field (the `routing.min_provider_throughput_tps` exclusion floor, `fast`
+ordering above, and the default-mode tie-break) treats it as one cross-runtime
+quantity: the completion tokens of a short fixed startup generation (SPEC-001
+FR-17: at most 8 tokens, one fixed prompt, temperature 0) divided by the total
+elapsed time of that request, prefill, first token and decode included. The
+signed CLI measures it once at `serve` startup with the same formula for a
+native MLX runtime and for every loopback runtime (SPEC-001 FR-20; a loopback
+count is the upstream's own, capped at the content deltas actually streamed).
+It is 0 when unmeasured (probe failed, did not run, or an autotune candidate),
+which sits below any positive floor. It is a provider-reported startup value,
+not a sustained decode benchmark, and not a billed or attested quantity.
+
 **FR-R3. Provider pinning via buyer header.**
 The buyer can pin to a specific provider via
 `X-MacProvider-Provider: <provider_id>`. **The header value is the
@@ -2415,7 +2436,8 @@ function route(request, pool, headers) -> provider | error:
 
 - **Default mode (utilization-favoring):** If two providers have the
   same `slots_free`, the one with higher `throughput_tps_estimate`
-  wins. If still tied, the one that connected earlier (`connected_at`)
+  (the cross-runtime startup quantity defined under FR-R2) wins. If
+  still tied, the one that connected earlier (`connected_at`)
   wins (stable sort).
 
 - **Fast mode:** If two providers have the same

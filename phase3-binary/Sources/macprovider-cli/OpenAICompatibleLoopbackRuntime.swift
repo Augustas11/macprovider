@@ -620,6 +620,10 @@ struct OpenAICompatibleStreamAccumulator {
     /// count (SPEC-001 FR-20 startup probe).
     var upstreamCompletionTokens: Int? { completionTokens }
 
+    /// Content-bearing deltas streamed so far (SPEC-001 FR-20 startup probe
+    /// cap: an upstream count above it is never believed).
+    var contentDeltaCount: Int { deltaEvents }
+
     /// True when the upstream attested the completion tokens through every
     /// content chunk so far (timings or `logprobs`).
     var hasPerChunkCompletionCounts: Bool { prefixCompletionTokens != nil && prefixCountSource != nil }
@@ -1291,9 +1295,11 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
     /// prompt and token budget) through the runtime's own chat-completions
     /// leg. The rate is the native probe's quantity: completion tokens over
     /// the whole request, start to stream end, so prefill and any upstream
-    /// model load count. Only the upstream's own count is used
-    /// (`usage.completion_tokens`, else llama-server's `timings.predicted_n`),
-    /// never the chunk count, and it is bounded by `maxTokens`. The bound
+    /// model load count. The count is the upstream's own
+    /// (`usage.completion_tokens`, else `timings.predicted_n` from llama-server
+    /// only), bounded by `maxTokens` and then capped at the content-bearing
+    /// deltas actually streamed, so a forged count can only lower the rate;
+    /// a stream without the upstream's count fails closed. The bound
     /// identity (llama-server's `/props` served file included) is checked
     /// immediately before and after the generation inside the same deadline.
     /// It never touches `ProviderStatus` (no usage, request log or billing),
@@ -1305,7 +1311,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
     ) async -> LoopbackStartupThroughputOutcome {
         let payload: [String: Any] = [
             "model": upstreamModelName,
-            "messages": [["role": "user", "content": "Reply with a short greeting."]],
+            "messages": [["role": "user", "content": ModelRuntime.startupThroughputProbePrompt]],
             "stream": true,
             "stream_options": ["include_usage": true],
             "temperature": 0.0,
@@ -1316,11 +1322,14 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         }
         let client = httpClient
         let url = chatCompletionsURL
+        let acceptsPredictedN = isLlamaCpp
         let timeouts = LoopbackGenerationTimeouts(firstByte: timeoutSeconds, idle: timeoutSeconds, overall: timeoutSeconds)
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         let outcome = await Self.bounded(until: deadline, cancelWithCaller: true) { [self] () async -> LoopbackStartupThroughputOutcome? in
             guard await self.probeServesBoundIdentity() else { return .failed(reason: "identity_unbound") }
-            let measured = await Self.runStartupThroughputProbe(client, url: url, body: body, maxTokens: maxTokens, timeouts: timeouts)
+            let measured = await Self.runStartupThroughputProbe(
+                client, url: url, body: body, maxTokens: maxTokens, acceptsPredictedN: acceptsPredictedN, timeouts: timeouts
+            )
             guard case .ok = measured else { return measured }
             guard await self.probeServesBoundIdentity() else { return .failed(reason: "identity_unbound") }
             return measured
@@ -1343,6 +1352,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         url: URL,
         body: Data,
         maxTokens: Int,
+        acceptsPredictedN: Bool,
         timeouts: LoopbackGenerationTimeouts
     ) async -> LoopbackStartupThroughputOutcome {
         let startedAt = ProcessInfo.processInfo.systemUptime
@@ -1362,7 +1372,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         var predictedN: Int?
         do {
             for try await line in response.lines {
-                if line.hasPrefix("data:"), line.contains("predicted_n"),
+                if acceptsPredictedN, line.hasPrefix("data:"), line.contains("predicted_n"),
                    case .object(let root)? = try? StrictJSONParser.parse(String(line.dropFirst(5))),
                    case .object(let timings)? = root["timings"],
                    let value = intValue(timings["predicted_n"]) {
@@ -1373,12 +1383,17 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             }
             let (result, _) = try accumulator.finish()
             let endedAt = ProcessInfo.processInfo.systemUptime
-            // A plain JSON body's count is its `usage` (0 when absent).
-            let attested = accumulator.decodedFromPlainBody
+            // A plain JSON body's count is its `usage` (0 when absent) and
+            // its content is one delta.
+            let plainBody = accumulator.decodedFromPlainBody
+            let attested = plainBody
                 ? result.completionTokens
                 : accumulator.upstreamCompletionTokens ?? predictedN
+            let contentDeltas = plainBody
+                ? (result.content.isEmpty ? 0 : 1)
+                : accumulator.contentDeltaCount
             return startupThroughputOutcome(
-                deliveredContent: !result.content.isEmpty,
+                contentDeltas: contentDeltas,
                 completionTokens: attested,
                 maxTokens: maxTokens,
                 elapsedSeconds: endedAt - startedAt
@@ -1392,22 +1407,26 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         }
     }
 
-    /// The startup rate, measured like `ModelRuntime.measureStartupThroughput`:
-    /// completion tokens over the total elapsed time of the request. The
-    /// claim is bounded: content must have streamed, the count must be the
-    /// upstream's own and at most `maxTokens`, and the elapsed time must be
-    /// finite and positive; anything else fails closed.
+    /// The startup rate through `ModelRuntime.startupThroughputRate`, the
+    /// native probe's formula. The claim is bounded: content must have
+    /// streamed, the count must be the upstream's own and at most
+    /// `maxTokens`, and the elapsed time must be finite and positive;
+    /// anything else fails closed. The counted tokens are the upstream count
+    /// capped at the content-bearing deltas, so a forged count fails low.
     static func startupThroughputOutcome(
-        deliveredContent: Bool,
+        contentDeltas: Int,
         completionTokens: Int?,
         maxTokens: Int,
         elapsedSeconds: TimeInterval
     ) -> LoopbackStartupThroughputOutcome {
-        guard deliveredContent else { return .failed(reason: "no_content") }
+        guard contentDeltas > 0 else { return .failed(reason: "no_content") }
         guard let completionTokens, completionTokens > 0 else { return .failed(reason: "no_tokens") }
         guard completionTokens <= maxTokens else { return .failed(reason: "usage_exceeds_max_tokens") }
         guard elapsedSeconds.isFinite, elapsedSeconds > 0 else { return .failed(reason: "no_elapsed_time") }
-        return .ok(tps: Double(completionTokens) / elapsedSeconds)
+        return .ok(tps: ModelRuntime.startupThroughputRate(
+            completionTokens: min(completionTokens, contentDeltas),
+            elapsedSeconds: elapsedSeconds
+        ))
     }
 
     /// Ends a line stream that will not be read: iterating it from a

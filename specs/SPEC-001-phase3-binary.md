@@ -9,9 +9,11 @@ startup probe through its upstream chat-completions leg instead of reporting
 `min_provider_throughput_tps` routing floor, so no loopback provider could
 route. The probe uses the native prompt and token budget, one streamed
 generation under a 60 s bound that also covers the identity checks before and
-after it. Its rate is the native probe's quantity: the upstream's own
-completion-token count over the total elapsed time of the request, prefill and
-any upstream model load included. It is never usage, billing or a receipt.
+after it. Its rate is the native probe's quantity, computed by the same
+formula: completion tokens over the total elapsed time of the request, prefill
+and any upstream model load included. The counted tokens are the upstream's own
+count capped at the content-bearing deltas actually streamed, so a forged count
+can only lower the rate. It is never usage, billing or a receipt.
 Success sets `throughput_source: startup_probe`; failure reports 0 with
 `none`, logs one `event=loopback_startup_throughput_probe` line with a reason
 code, and does not stop `serve`. The wire field is unchanged.
@@ -1170,7 +1172,8 @@ responsibility ends at sending accurate values.
 `serve` generates at most 8 tokens once after model load and divides the tokens
 produced by elapsed time including prefill (0 when the probe fails or does not
 run). A loopback runtime (v1.9.29) measures the same quantity through its
-upstream (FR-20). A warm swap carries the value forward without re-probing. Its wire
+upstream (FR-20) with the same formula, so the value is the one cross-runtime
+quantity SPEC-002 v1.6.8 routes on. A warm swap carries the value forward without re-probing. Its wire
 semantics are unchanged by v1.9.20.
 
 **Local capacity provenance (v1.9.20, capability `capacity_provenance_v1`).**
@@ -1620,12 +1623,17 @@ runs); a mismatch fails the probe. One 60 s bound covers both checks and the
 generation, and cancelling `serve` ends the probe and closes the upstream
 request. The estimate is the native quantity: completion tokens over the total
 elapsed time of the request, from request start to stream end, prefill and any
-upstream model load included. The count is the upstream's own
-`usage.completion_tokens`, else llama-server's `timings.predicted_n`; the
-streamed chunk count is never used, and an upstream rate such as
-`timings.predicted_per_second` is ignored. The probe fails closed when no
-content streamed, the upstream reports no count, the count exceeds the
-requested `max_tokens`, or the elapsed time is not finite and positive. The probe is never usage,
+upstream model load included, computed by the native probe's formula. The
+upstream count is its own `usage.completion_tokens`, else `timings.predicted_n`
+for `runtime_source: llamacpp_loopback` only (any other runtime's
+`predicted_n` is ignored); an upstream rate such as
+`timings.predicted_per_second` is ignored. The counted tokens are the minimum
+of that upstream count and the number of content-bearing deltas actually
+streamed (a plain JSON body is one delta), so a forged count fails low, never
+high; the chunk count alone is never a count. The probe fails closed when no
+content streamed (`no_content`), the upstream reports no count (`no_tokens`),
+the upstream count exceeds the requested `max_tokens` (checked before the
+cap), or the elapsed time is not finite and positive. The probe is never usage,
 billing, a request-log entry or a receipt, and no prompt or completion text is
 logged. Success reports `throughput_source: startup_probe` with the served
 model ref as `throughput_probe_model` and logs

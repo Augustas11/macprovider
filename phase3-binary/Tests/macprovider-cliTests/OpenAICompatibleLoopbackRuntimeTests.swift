@@ -1821,67 +1821,160 @@ extension OpenAICompatibleLoopbackRuntimeTests {
         XCTAssertFalse(line.contains("Hi") || line.contains("there") || line.contains("greeting"), line)
     }
 
+    private static let predictedNOnlySSE = Data("""
+    data: {"choices":[{"delta":{"content":"Hi"}}]}
+
+    data: {"choices":[{"delta":{},"finish_reason":"length"}],"timings":{"predicted_n":8,"predicted_ms":0.001,"predicted_per_second":1000000000}}
+
+    data: [DONE]
+
+    """.utf8)
+
     func testLoopbackStartupProbeIgnoresTheUpstreamRateAndCountsPredictedN() async throws {
-        let store = try makeStore()
         // llama-server without `usage`: `timings.predicted_n` is the count;
         // its self-reported `predicted_per_second` is never the result.
-        let sse = Data("""
-        data: {"choices":[{"delta":{"content":"Hi"}}]}
-
-        data: {"choices":[{"delta":{},"finish_reason":"length"}],"timings":{"predicted_n":8,"predicted_ms":0.001,"predicted_per_second":1000000000}}
-
-        data: [DONE]
-
-        """.utf8)
-        let runtime = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: sse), store: store)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("llamacpp-predicted-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("tiny-q4.gguf")
+        try (Data("GGUF".utf8) + Data(repeating: 0x5a, count: 4096)).write(to: file)
+        let client = LlamaCppStubClient(modelPath: file.resolvingSymlinksInPath().path, nCtx: 64, promptTokens: 40)
+        client.setChatResponse(Self.predictedNOnlySSE)
+        let runtime = try await OpenAICompatibleLoopbackRuntime.llamaCpp(
+            servedModelRef: "llamacpp:tiny-q4",
+            origin: "http://127.0.0.1:9191",
+            selector: BYOMLlamaCppArtifactSelector(root: nil, pinnedFile: file),
+            httpClient: client,
+            cache: BYOMArtifactDigestCache(url: root.appendingPathComponent("cache.json"))
+        )
         let outcome = await runtime.measureStartupThroughput()
         guard case .ok(let tps) = outcome else { return XCTFail("expected ok, got \(outcome)") }
         XCTAssertGreaterThan(tps, 0)
         XCTAssertNotEqual(tps, 1_000_000_000, "the upstream's own rate claim is ignored")
     }
 
+    func testLoopbackStartupProbeIgnoresPredictedNForANonLlamaRuntime() async throws {
+        // `timings.predicted_n` is llama-server's field; any other runtime
+        // sending it is not believed, and without `usage` the probe fails closed.
+        let store = try makeStore()
+        let runtime = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: Self.predictedNOnlySSE), store: store)
+        let runtimeSource = await runtime.runtimeSource
+        XCTAssertEqual(runtimeSource, OllamaLoopbackServeModel.runtimeSource)
+        let outcome = await runtime.measureStartupThroughput()
+        XCTAssertEqual(outcome, .failed(reason: "no_tokens"))
+        XCTAssertEqual(outcome.tps, 0)
+    }
+
+    func testLoopbackStartupProbeCapsAForgedUsageCountAtTheStreamedContentDeltas() async throws {
+        // One content fragment with a forged `usage.completion_tokens: 8`.
+        let sse = """
+        data: {"choices":[{"delta":{"content":"Hi there friend"}}]}
+
+        data: {"choices":[{"delta":{},"finish_reason":"length"}]}
+
+        data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":8}}
+
+        data: [DONE]
+
+        """
+        var accumulator = OpenAICompatibleStreamAccumulator()
+        for line in sse.components(separatedBy: "\n") {
+            _ = try accumulator.consume(line: line)
+        }
+        XCTAssertEqual(accumulator.upstreamCompletionTokens, 8)
+        XCTAssertEqual(accumulator.contentDeltaCount, 1)
+
+        // Counted = min(8, 1) = 1: the forged count never raises the rate.
+        XCTAssertEqual(
+            OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
+                contentDeltas: accumulator.contentDeltaCount,
+                completionTokens: accumulator.upstreamCompletionTokens,
+                maxTokens: 8,
+                elapsedSeconds: 1
+            ),
+            .ok(tps: 1)
+        )
+        // An honest per-token stream keeps its full count.
+        XCTAssertEqual(
+            OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
+                contentDeltas: 8, completionTokens: 8, maxTokens: 8, elapsedSeconds: 1
+            ),
+            .ok(tps: 8)
+        )
+        // The max_tokens bound applies to the upstream count before the cap.
+        XCTAssertEqual(
+            OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
+                contentDeltas: 1, completionTokens: 9, maxTokens: 8, elapsedSeconds: 1
+            ),
+            .failed(reason: "usage_exceeds_max_tokens")
+        )
+
+        // End to end the forged stream still succeeds, counted as one token.
+        let store = try makeStore()
+        let runtime = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: Data(sse.utf8)), store: store)
+        let outcome = await runtime.measureStartupThroughput(maxTokens: 8)
+        XCTAssertGreaterThan(outcome.tps, 0, "\(outcome)")
+    }
+
+    func testNativeAndLoopbackStartupProbesShareOneThroughputFormula() {
+        // SPEC-002 `throughput_tps_estimate` is one cross-runtime quantity:
+        // completion tokens over the whole request's elapsed time. The native
+        // probe returns `ModelRuntime.startupThroughputRate` directly; the
+        // loopback probe must give the identical value for identical inputs.
+        for (tokens, elapsed) in [(8, 32.0), (8, 0.08), (1, 1.0), (5, 2.5), (8, 0.0005)] {
+            XCTAssertEqual(
+                OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
+                    contentDeltas: tokens, completionTokens: tokens, maxTokens: 8, elapsedSeconds: elapsed
+                ).tps,
+                ModelRuntime.startupThroughputRate(completionTokens: tokens, elapsedSeconds: elapsed),
+                "tokens \(tokens) elapsed \(elapsed)"
+            )
+        }
+        XCTAssertEqual(ModelRuntime.startupThroughputRate(completionTokens: 8, elapsedSeconds: 32), 0.25)
+    }
+
     func testStartupThroughputIsTokensOverTotalElapsedLikeTheNativeProbe() {
         // 8 tokens; a 30 s cold load + prefill counts, as in the native probe.
         XCTAssertEqual(
             OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
-                deliveredContent: true, completionTokens: 8, maxTokens: 8, elapsedSeconds: 32
+                contentDeltas: 8, completionTokens: 8, maxTokens: 8, elapsedSeconds: 32
             ),
             .ok(tps: 0.25)
         )
         XCTAssertEqual(
             OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
-                deliveredContent: true, completionTokens: 8, maxTokens: 8, elapsedSeconds: 0.08
+                contentDeltas: 8, completionTokens: 8, maxTokens: 8, elapsedSeconds: 0.08
             ).tps,
             100, accuracy: 0.001
         )
         XCTAssertEqual(
             OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
-                deliveredContent: false, completionTokens: 8, maxTokens: 8, elapsedSeconds: 1
+                contentDeltas: 0, completionTokens: 8, maxTokens: 8, elapsedSeconds: 1
             ),
             .failed(reason: "no_content")
         )
         XCTAssertEqual(
             OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
-                deliveredContent: true, completionTokens: nil, maxTokens: 8, elapsedSeconds: 1
+                contentDeltas: 1, completionTokens: nil, maxTokens: 8, elapsedSeconds: 1
             ),
             .failed(reason: "no_tokens")
         )
         XCTAssertEqual(
             OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
-                deliveredContent: true, completionTokens: 0, maxTokens: 8, elapsedSeconds: 1
+                contentDeltas: 1, completionTokens: 0, maxTokens: 8, elapsedSeconds: 1
             ),
             .failed(reason: "no_tokens")
         )
         XCTAssertEqual(
             OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
-                deliveredContent: true, completionTokens: 9, maxTokens: 8, elapsedSeconds: 1
+                contentDeltas: 8, completionTokens: 9, maxTokens: 8, elapsedSeconds: 1
             ),
             .failed(reason: "usage_exceeds_max_tokens")
         )
         for elapsed in [0, -1, TimeInterval.nan, TimeInterval.infinity] {
             XCTAssertEqual(
                 OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
-                    deliveredContent: true, completionTokens: 8, maxTokens: 8, elapsedSeconds: elapsed
+                    contentDeltas: 8, completionTokens: 8, maxTokens: 8, elapsedSeconds: elapsed
                 ),
                 .failed(reason: "no_elapsed_time"),
                 "elapsed \(elapsed)"
