@@ -49,7 +49,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-038 | Continuous batching for concurrent provider inference | v0.3.8 | draft | complete | pending: 18 | [SPEC-038-continuous-batching.md](SPEC-038-continuous-batching.md) |
 | SPEC-039 | Paged KV / paged-attention engine | v0.1.14 | draft | complete | pending: 15 | [SPEC-039-paged-kv-attention-engine.md](SPEC-039-paged-kv-attention-engine.md) |
 | SPEC-040 | Wallet-Native Buyer Sessions | 0.1.9 | draft | complete | pending: 10 | [SPEC-040-wallet-native-buyer-sessions.md](SPEC-040-wallet-native-buyer-sessions.md) |
-| SPEC-041 | Relay-Blind Request Encryption | 0.4.0 | draft | complete | pending: 8 | [SPEC-041-relay-blind-request-encryption.md](SPEC-041-relay-blind-request-encryption.md) |
+| SPEC-041 | Relay-Blind Request Encryption | 0.5.0 | draft | complete | pending: 8 | [SPEC-041-relay-blind-request-encryption.md](SPEC-041-relay-blind-request-encryption.md) |
 | SPEC-042 | Pool Control Plane and Trusted-Pool Manifest | 0.0.41 | draft | complete | pending: 16 | [SPEC-042-pool-control-plane.md](SPEC-042-pool-control-plane.md) |
 | SPEC-043 | Trusted Pool Creator Onboarding MVP | 0.2.3 | normative | complete | pending: 14 | [SPEC-043-trusted-pool-creator-onboarding.md](SPEC-043-trusted-pool-creator-onboarding.md) |
 | SPEC-044 | Malibu Model Catalog Economics | 0.2.10 | draft | complete | pending: 12 | [SPEC-044-malibu-model-catalog-economics.md](SPEC-044-malibu-model-catalog-economics.md) |
@@ -57,7 +57,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-046 | Provider BYOM Discovery | 0.5.0 | draft | complete | conformant: 1, pending: 8 | [SPEC-046-provider-byom-discovery.md](SPEC-046-provider-byom-discovery.md) |
 | SPEC-047 | Network Model Admission | 0.2.7 | draft | complete | conformant: 2, pending: 10 | [SPEC-047-network-model-admission.md](SPEC-047-network-model-admission.md) |
 | SPEC-048 | Native Multi-Token Prediction Serving | 0.1.23 | draft | complete | pending: 16 | [SPEC-048-native-mtp-serving.md](SPEC-048-native-mtp-serving.md) |
-| SPEC-049 | Operator-Constrained Privacy Class | 0.1.4 | draft | complete | pending: 23 | [SPEC-049-operator-constrained-privacy-class.md](SPEC-049-operator-constrained-privacy-class.md) |
+| SPEC-049 | Operator-Constrained Privacy Class | 0.2.0 | draft | complete | pending: 23 | [SPEC-049-operator-constrained-privacy-class.md](SPEC-049-operator-constrained-privacy-class.md) |
 <!-- AUTOGEN:spec-index END -->
 
 **Version of record is each spec's own `**Version:**` header, not this table.**
