@@ -306,6 +306,12 @@ and silently never matching.
 
 ## Active candidate
 
+Shared-namespace reservation (2026-10-06): **v1.8.220** is reserved for the
+Codex privacy/Pearl runtime rollout carrying #1872. CLI candidate **1.8.219**
+remains staged; runtime **v1.8.218** and provider **v1.8.217** are published.
+See the active rollout in `coordinator-release-train.md` before consuming
+another shared identity.
+
 | Field | Value |
 |---|---|
 | Staged candidate | **v1.8.219** (Malibu build 219), staged from `main` after #1863 (`533d9856a`): loopback runtimes measure a startup throughput so external-engine providers (incl. the #1690 M1 Trusted Pool member) clear the coordinator routing floor. Native MTP stays default-off: the MTP step-overhead track is not PASS (operator decision 2026-10-06). Pearl runtime tag v1.8.218 is consumed, so 1.8.219 is the next free shared identity. Fleet recommendation stays on 1.8.207. |

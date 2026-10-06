@@ -78,6 +78,20 @@ A coordinator deploy compares the tag's catalog with live (`compare-live`):
 
 ## Live on Pearl
 
+### Active rollout — 2026-10-06
+
+Owner: Codex privacy/Pearl handoff session (`codex/privacy-pearl-20261006`).
+Reserved runtime identity: **v1.8.220**; CLI candidate 219 is already staged.
+Payload: current reviewed `main`, including #1872 privacy capacity waiting.
+Preflight at takeover: coordinator and gateway both report **v1.8.218**;
+catalog is `published-2026-10-01-artifact-feed-activation-v1`; recommendation
+remains 1.8.207. Both deployment locks are free and disk has 114 GB available.
+Use the signed runtime updater only. Expected outage is about two minutes for
+a required DB copy plus 40 seconds for restart; an unchanged signed schema
+fingerprint permits skipping the copy. Catalog activation is a separate gate.
+Publication, updater apply, and loaded buyer privacy verification are pending.
+
+The older release table below is historical and has not yet been reconciled.
 Probed 2026-10-02 (`/healthz`).
 
 | Field | Value |
