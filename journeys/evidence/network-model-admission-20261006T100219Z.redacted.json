@@ -1,7 +1,7 @@
 {
   "schema_version": "macprovider.network-model-admission-evidence.v1",
   "journey_id": "JOURNEY-NETWORK-MODEL-ADMISSION",
-  "run_id": "c98cc742db014e4aaa697def57b98f97",
+  "run_id": "3d922be6591b40ac939ba1be2c0fab17",
   "execution_mode": "provider-byom-network-admission",
   "requirement_ids": [
     "SPEC-047-R001",
@@ -15,9 +15,9 @@
   ],
   "repository": {
     "name": "Augustas11/macprovider",
-    "commit": "0f1fedbacb78c368549a8187a433c05d0f5ea8b9"
+    "commit": "2e1f0d188b9b1f154947d63fe0b634ff2f0c1cb2"
   },
-  "captured_at": "2026-10-06T09:28:43Z",
+  "captured_at": "2026-10-06T10:02:19Z",
   "expires_at": "2026-11-05",
   "operator": {
     "role": "release-operator",
@@ -35,7 +35,7 @@
   },
   "result": {
     "status": "pass",
-    "summary": "physical admission journey passed on an isolated loopback coordinator: settlement-capable MLX case, drift revocation, withdrawal re-entry, money-path zeros"
+    "summary": "physical admission journey passed on an isolated loopback coordinator: settlement-capable MLX case, drift revocation, withdrawal re-entry, GGUF-bound novel offer, money-path zeros"
   },
   "steps": [
     {
@@ -52,7 +52,7 @@
         {
           "id": "offer-dry-run",
           "schema": "model_admission_offer_dry_run.v1",
-          "sha256": "1132d15fa37649bd3ddbf6aae3b68ceb98c3179113aac3d815a59cc123118043",
+          "sha256": "7ebff6c6a6df0361d96cdb9ffbf5ab2a241b5c3737c228bbf84ea2db5beb271c",
           "bytes": 944
         }
       ]
@@ -72,7 +72,7 @@
         {
           "id": "offer-submitted-status",
           "schema": "model_admission_status.v1",
-          "sha256": "6e2046ebbbc03d6c4ee23a18a9de7f732aeb25f2d47c4fd3e67760cec3560c0b",
+          "sha256": "54409ad67d599b441133a2efbef20f655f8521101c45e612e4b6175b0a7245f2",
           "bytes": 1028
         }
       ]
@@ -92,7 +92,7 @@
         {
           "id": "opaque-endpoint-refused-status",
           "schema": "model_admission_status.v1",
-          "sha256": "b89a1227796c531742a1ffdd919ea5098d56f3c644ae082d191305174a0c63d7",
+          "sha256": "dbf4d895a999660297fe8ad882f4fac915ed516944a2be27c47013083d7f71cb",
           "bytes": 833
         }
       ]
@@ -114,7 +114,7 @@
         {
           "id": "sandbox-probe-only-status",
           "schema": "model_admission_status.v1",
-          "sha256": "4325dff770c9f18ce825e66d8ef87e4ec1020ded03f093208d6c2ab8bc2ab0af",
+          "sha256": "7cb0ba75045e50d00bcac187bdaace36a16230df53fc187dc3f70e6cf578a379",
           "bytes": 1028
         }
       ]
@@ -134,7 +134,7 @@
         {
           "id": "network-visible-unpriced-economics",
           "schema": "model_catalog_economics.v1",
-          "sha256": "451accb073291931246200239032592131d644a10810fb990d1e03814f7e0ab3",
+          "sha256": "cc82bff7aa72f35e24d9aa72bae9c379fe49c0d844772294be511c6e08f9a664",
           "bytes": 61312
         }
       ]
@@ -154,8 +154,8 @@
         {
           "id": "catalog-matched-economics",
           "schema": "model_catalog_economics.v1",
-          "sha256": "4982658a4598972e4fcb993b1b4676f5420e6191e61fdd6f46eb90b513aa8cb9",
-          "bytes": 61377
+          "sha256": "a092315552de802b09ac4d51aead61d7f48bda55349b4fee380799d8bb224d2d",
+          "bytes": 61376
         }
       ]
     },
@@ -173,8 +173,8 @@
         {
           "id": "revoked-status",
           "schema": "model_admission_status.v1",
-          "sha256": "bc455f1206cf234008e0bc88bab29707c1345ce759f12793c7bf9d8807af2cab",
-          "bytes": 934
+          "sha256": "a72e306d5a4ff62e7e9f18e2be67f4967c30dc357a241fd2368948d6d886f71e",
+          "bytes": 933
         }
       ]
     },
@@ -192,7 +192,7 @@
         {
           "id": "withdrawal-response",
           "schema": "model_admission_withdraw.v1",
-          "sha256": "bf1bb46dfa041fc42d99e95fc5af69997e822b767e45bf1e5602f045fb46f868",
+          "sha256": "12b583520727950cbd5d4f2556950d1fe837a937b288a89885a370d162fc4de5",
           "bytes": 1003
         }
       ]
@@ -212,8 +212,8 @@
         {
           "id": "settlement-capable-status",
           "schema": "model_admission_status.v1",
-          "sha256": "8eece6eebe2096944c40b04f1edc3a58e70070eb4ec5c3d1ac14e9901a837f72",
-          "bytes": 1000
+          "sha256": "9db8c6d968e3af9c9079e7d3c317b72012aadf8cc1db36705f7c6386bb3391bd",
+          "bytes": 999
         }
       ]
     },
@@ -232,7 +232,7 @@
         {
           "id": "novel-non-catalog-status",
           "schema": "model_admission_status.v1",
-          "sha256": "b14673c91e8d004405a55f86795b297e51e5355f54e6292d167c971e0c6ce4dc",
+          "sha256": "490663297bdc0bd2929208f96053c7bd997799975239919954876017d84e791b",
           "bytes": 1050
         }
       ]
@@ -252,8 +252,8 @@
         {
           "id": "re-entry-status",
           "schema": "model_admission_status.v1",
-          "sha256": "71202f9102a67f3d6f3ceb037018051724edb50be3ac8dfd30c28a03d6c53974",
-          "bytes": 1000
+          "sha256": "e27ad746cdc999fde69338b4fa75a93a24814d0842f3509ef77182cf870289c4",
+          "bytes": 999
         }
       ]
     },
@@ -272,8 +272,8 @@
         {
           "id": "redaction-review-status",
           "schema": "model_admission_status.v1",
-          "sha256": "6c785f58be2d3dfdf644f1f186c6fc48c835c0698d8d7e73f866a3ca81a7fe48",
-          "bytes": 1000
+          "sha256": "ae101851d533b7365e828c6f0c39d515c55fcbacd8031758693b4c89a1a81c1c",
+          "bytes": 999
         }
       ]
     }
