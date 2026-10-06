@@ -65,6 +65,9 @@ type externalRuntimeFixture struct {
 	// "none" returns numbers without a receipt (an old CLI whose loopback
 	// upstream omitted usage), "mismatched" signs different usage.
 	receipt string
+	// wsRelay, when set, routes the member over the WS tunnel and serves
+	// each dispatched attempt with the returned relay stream.
+	wsRelay func(h *externalRuntimeHarness, ctx context.Context, requestID string, meta *providerws.SettlementReceiptMetadata) *providerws.RelayStream
 }
 
 func defaultExternalRuntimeFixture() externalRuntimeFixture {
@@ -253,6 +256,9 @@ func newExternalRuntimeHarness(t *testing.T, fx externalRuntimeFixture) *externa
 	routeProvider.RuntimeSource = fx.helloSource
 	routeProvider.TrustedPoolV1 = true
 	routeProvider.AdmissionSandboxed = true // SPEC-032 FR-HG8: the hello sandbox stays set.
+	if fx.wsRelay != nil {
+		routeProvider.InferencePath = pool.InferencePathWSTunneled
+	}
 	registry.Register(&routeProvider, nil)
 	if fx.nativeMember {
 		registerSettlementProvider(registry, "p2", "session-2", upstream.URL, 30, bytes.Repeat([]byte{0x7a}, 32))
@@ -310,10 +316,7 @@ func newExternalRuntimeHarness(t *testing.T, fx externalRuntimeFixture) *externa
 		LaunchEnvironment:  "candidate",
 	}
 	loadTrustedPoolLayer2Snapshot(t, trustPools, 0, h.routeable)
-	h.server = buyer.NewServer(
-		registry,
-		zerolog.Nop(),
-		time.Unix(1716768000, 0).UTC(),
+	opts := []buyer.Option{
 		buyer.WithGatewayServiceToken("gateway-secret"),
 		buyer.WithRequireGatewayContext(true),
 		buyer.WithRequestLog(reqLog),
@@ -324,7 +327,19 @@ func newExternalRuntimeHarness(t *testing.T, fx externalRuntimeFixture) *externa
 		buyer.WithRoutingConfig(config.RoutingConfig{MaxRetries: 0}),
 		buyer.WithModelAdmissionStore(store),
 		buyer.WithModelAdmissionRouteGuard(testRouteGuard{registry: registry, store: store}),
-	)
+	}
+	if fx.wsRelay != nil {
+		opts = append(opts,
+			buyer.WithRelay(func(context.Context, pool.Provider, string, []byte, bool) (*providerws.RelayStream, error) {
+				t.Fatalf("pool attempt dispatched without settlement metadata")
+				return nil, nil
+			}, 5*time.Second),
+			buyer.WithSettlementRelay(func(ctx context.Context, _ pool.Provider, requestID string, _ []byte, _ bool, meta *providerws.SettlementReceiptMetadata) (*providerws.RelayStream, error) {
+				return fx.wsRelay(h, ctx, requestID, meta), nil
+			}),
+		)
+	}
+	h.server = buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0).UTC(), opts...)
 	h.dbPath = dbPath
 	h.poolID = poolID
 	h.registry = registry

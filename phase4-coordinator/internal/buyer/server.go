@@ -4177,6 +4177,9 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 	if streamingMode != streamingModeIncremental {
 		return s.forwardWSStreamingBuffered(w, r, requestID, provider, relay, streamingMode, streamingBuyer, state, billingAttemptN)
 	}
+	// A buyer_disconnected cancel tells the provider the delivered prefix
+	// this tracker binds (#1690 BUG-2).
+	relay.TrackDeliveredOutput(acct.deliveredOutputBytes)
 	coalescer := newConcatSafeToolStream()
 	commit := func() {
 		if committed {
@@ -4256,13 +4259,18 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		if n, err := w.Write([]byte(rewritten)); err != nil {
 			// Only the complete SSE events the writer accepted reached the
 			// buyer; a torn event does not count.
-			acct.written([]byte(rewritten)[:n])
+			relay.RecordDelivered(func() { acct.written([]byte(rewritten)[:n]) })
 			relay.Cancel("buyer_disconnected")
 			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer ws stream write failed")
 			markProviderDone()
 			return true, wsForwardCancelled
 		}
-		acct.written([]byte(rewritten))
+		if !relay.RecordDelivered(func() { acct.written([]byte(rewritten)) }) {
+			// A buyer_disconnected cancel already told the provider the
+			// delivered prefix; these bytes are past it.
+			markProviderDone()
+			return true, wsForwardCancelled
+		}
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -4550,6 +4558,7 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 		attempt := requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during buffered streaming", FaultFlag: billing.FaultNone, SettlementOutput: acct.output(billing.TerminalStateBuyerCancel)}
 		return awaitBuyerCancelTerminal(attempt, relay, acct.tracker, started, providerws.IsBYOMLoopbackRuntimeSource(provider.RuntimeSource))
 	}
+	relay.TrackDeliveredOutput(acct.deliveredOutputBytes)
 	for {
 		select {
 		case <-r.Context().Done():

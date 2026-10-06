@@ -733,6 +733,10 @@ type CancelRequest struct {
 	Type      string `json:"type"`
 	RequestID string `json:"request_id"`
 	Reason    string `json:"reason"`
+	// DeliveredOutputBytes is the canonical delivered output byte count the
+	// buyer received when a buyer_disconnected cancel retired the request
+	// (SPEC-001 §6.6, SPEC-015 §N.7). Omitted when unknown.
+	DeliveredOutputBytes *int64 `json:"delivered_output_bytes,omitempty"`
 }
 
 type NakError struct {
