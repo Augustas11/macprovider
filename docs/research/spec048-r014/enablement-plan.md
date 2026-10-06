@@ -13,62 +13,61 @@ depth 1, `qualified_slots` 8, `max_native_active_rows` 1, `max_prompt_tokens`
 4096 (R015 policy in
 `docs/research/spec048-r015/evidence-2026-10-06-a3b-amended-gates-quiet-26a434/`).
 
-## 0. Verdict
+## 0. Goal and decisions
 
-**Recommendation: do not start the build campaign (Phase B) now. Park native
-MTP enablement behind two written resume conditions. Land #1862 as planned.**
+**Goal (operator decision, 2026-10-06): native MTP live in production for the
+qualified tuple.** Phase B runs on this branch in the dependency order of
+section 3, one commit per gap, with tests.
 
-The rehearsal treated the delivery gaps as the blockers. They are real, but
-they are all buildable. Two other findings decide whether the build is worth
-doing, and both point the same way:
+Two facts shape the work beyond the R014 rehearsal list:
 
-1. **Production paid traffic is almost entirely ineligible.** The gateway
-   attaches an auto-prefix conversation key to every authenticated, non-demo
-   chat request that has a user message
+1. **G7 is required work: production paid traffic is almost entirely
+   ineligible today.** The gateway attaches an auto-prefix conversation key
+   to every authenticated, non-demo chat request that has a user message
    (`phase5-gateway/internal/router/chat_proxy.go:3549-3573`). The
    coordinator forwards it to the provider as `conversation_key`
-   (`phase4-coordinator/internal/buyer/server.go:3828-3832`). SPEC-048
-   R004/R009 then route the request ordinary
-   (`NativeMTP.swift:263-264`). SPEC-048 says this itself
-   (`SPEC-048:481-487`). R015 requires at least 10% of post-gateway requests
-   and of completion tokens to be eligible before the tuple can be enabled as
-   a throughput feature (`SPEC-048:1166-1177`). Without a SPEC-024/SPEC-048
-   amendment, the expected share is close to zero. In that case every build
-   step below delivers nothing to buyers.
-2. **Native MTP rides on continuous batching, and continuous batching is off
-   in production for this tuple.** Native rows run only inside the CB
-   scheduler (`ModelRuntime.swift:6150-6165`, `NativeMTP.swift:377-395`). The
-   live Studio provider reports `continuous_batching.active=false`,
-   `rollout_mode=off`, `authorized=false`
-   (read-only `GET 127.0.0.1:8080/v1/status`, 2026-10-06). The signed CB
-   policy has zero entries. The M7 decision keeps CB off
-   (`docs/runbooks/continuous-batching-m7-decision-2026-09-26.md`): Gate A5
-   is NOT GREEN, and M6 measured batch-8 worst TTFT at 9.55x–11.85x serial.
-   Enabling native MTP therefore first requires reopening and passing the CB
-   promotion decision for the tuple. That decision needs a signed 60-pair
-   Gate A5 window with three separate human signing roles.
+   (`phase4-coordinator/internal/buyer/server.go:3828-3832`), and SPEC-048
+   R004/R009 route the request ordinary (`NativeMTP.swift:263-264`,
+   `SPEC-048:481-487`). R015 requires at least 10% of post-gateway requests
+   and completion tokens to be eligible (`SPEC-048:1166-1177`). Without the
+   G7 amendment and code, enabling the tuple serves almost no paid traffic.
+2. **Continuous batching for the tuple is an input dependency (D-CB), not
+   campaign work.** Native rows run only inside the CB scheduler
+   (`ModelRuntime.swift:6150-6165`, `NativeMTP.swift:377-395`). The live
+   Studio reports `continuous_batching.active=false` with
+   `unsupported_reason: tuple_acceptance_coverage_unavailable` and policy
+   `decision_reason: tuple_identity_mismatch` (read-only
+   `GET 127.0.0.1:8080/v1/status`, 2026-10-06). Per the operator this is a
+   catalog-signing bug (the catalog mis-signed the CB tuple for this model),
+   fixed separately. This campaign does not edit the catalog CB tuple; it
+   consumes the corrected signed CB policy entry. See D-CB below.
 
-The payoff, even with both fixed, is narrow. R015 (quiet, 2026-10-06) shows
-decode ratios of 1.19–1.28 and end-to-end ratios of 1.04–1.20 at one active
-row. At two or more rows the result is 1.00. It applies to the Studio tuple
-only.
+### D-CB: corrected CB policy entry (input dependency)
 
-The total cost is about 5–7 engineer-weeks. It touches CLI, coordinator,
-catalog tooling, signing and journeys, and needs about 3–4 Studio lab days
-including 2–3 operator-approved pauses of the live provider.
+- **Who/what (2026-10-06 12:46Z).** No open PR or issue names it
+  (`gh pr list` / `gh issue list` for continuous-batching, catalog,
+  tuple_acceptance: only merged #1803, #1808, #1838, #1672). No remote branch
+  has touched `phase3-binary/catalog/autotune/continuous-batching-policy*` or
+  `scripts/catalog-release.py` since 2026-10-05. The only candidate is the
+  local session worktree
+  `/Users/augstar/macprovider-poc/.claude/worktrees/agent-a16d9bba3f1ea0e43`
+  on branch `ops/cb-activation-gates`, created 2026-10-06 12:44Z, no commits
+  yet. ListAgents is not available in this session, so the owner is
+  inferred, not confirmed.
+- **What the campaign needs from it.** A signed CB policy entry for
+  `qwen/qwen3.6-35b-a3b` whose tuple matches the provider's runtime tuple,
+  bound (`ContinuousBatchingSignedPolicy.swift:102-109`) to the CLI version
+  and `live_executable_cdhash` of **the campaign's CLI cut**. A fix that
+  binds only the current 1.8.217 CDHash does not carry over; the entry must
+  be re-issued for the cut, in the same catalog release that carries the
+  sidecar (section 4).
+- **What the campaign does meanwhile.** Every native path is exercised on
+  isolated lab builds where CB is authorized locally (as R014 and R015 did).
+  The post-cut confirmation (L5/L6) waits on D-CB.
 
-**Resume conditions** (both must be true before Phase B starts):
-
-- **R-1.** Probe P1 (section 7) shows that eligible traffic meets the R015
-  floor (at least 10% of requests and of completion tokens) on post-gateway
-  Studio-tuple traffic. Either current traffic already meets it, or an
-  accepted SPEC-024/SPEC-048 amendment (G7) makes it meet it.
-- **R-2.** The operator reopens the M7 CB decision for this tuple. That
-  requires reviewer principals for Gate A5 and accepted M6 tail-latency
-  economics.
-
-Sections 1–8 are the complete Phase B plan, written so it can start
-unchanged once both conditions hold.
+The payoff R015 measured (quiet, 2026-10-06) is decode 1.19–1.28x and end to
+end 1.04–1.20x at one active row, 1.00 at two or more rows, Studio tuple only.
+Effort is in section 8.
 
 ## 1. Verified baseline
 
@@ -262,36 +261,25 @@ artifact), SIGN (signing/workflow), PEARL (Pearl config) and SPEC.
   the origin is the joined coordinator origin; publication uses a pre-signed
   slot batch; state the emergency procedure.
 
-### G6. CB not qualified or authorized for the tuple (R014.5 FAIL)
+### G6. CB qualification for the tuple (R014.5 FAIL): input dependency D-CB
 
 - **Requirement.** SPEC-048-R014 item 5 `:937-938`; SPEC-038 FR-CB15
-  `:920-952`, Gate A5 `:944-1048`, FR-CB18 `:1168-1169`; SPEC-039 FR-PKV13
-  `:725-770`.
-- **Code.**
-  - `phase3-binary/catalog/autotune/continuous-batching-policy.json` has
-    `entries: []`.
-  - The authored source `continuous-batching-policy-source.json` has never
-    existed on any branch. It is consumed by `catalog-release.py:1402-1452`.
-  - An entry binds the CLI version and `live_executable_cdhash`
-    (`ContinuousBatchingSignedPolicy.swift:102-109, 346-372`).
-- **Root cause.** CB was never promoted. M7 kept it off, Gate A5 never had a
-  real signed window, and no FR-PKV13 record names this tuple. This is a
-  decision gap, not a code gap.
-- **Change.**
-  1. A packaged FR-CB15 / FR-PKV13 campaign on the signed RC: `msb-throughput`
-     plus `scripts/lab/cb-studio/m3-lab.sh`, with the overhead ceiling of
-     0.90x at 1 row and 1.0x at 2+ rows. Write the runbook record from the
-     `continuous-batching-enable-gate.md:420-460` template.
-  2. A real Gate A5 window of at least 60 pairs under a schema-v4 signed plan
-     with three disjoint principals (`measure_gate_a5_opoi_false_positives.py`).
-  3. Rerun the M6 economics.
-  4. A written M7-reopen decision.
-  5. Policy source: one entry with `cache_class: mixed`, `kv_dtype: fp16`,
-     `requires_moe: true`, the RC's metallib, kernel, version and CDHash, and
-     `rollout: canary`.
-- **Surface.** CAT, SIGN, a human decision. No SPEC change.
+  `:920-952`, FR-CB18 `:1168-1169`; SPEC-039 FR-PKV13 `:725-770`.
+- **State.** The live tuple reports `tuple_acceptance_coverage_unavailable`
+  / `tuple_identity_mismatch`. Per the operator, the root cause is the
+  catalog mis-signing the CB tuple for this model, fixed outside this
+  campaign (D-CB, section 0). An entry binds the CLI version and
+  `live_executable_cdhash` (`ContinuousBatchingSignedPolicy.swift:102-109,
+  346-372`), so the corrected entry must be re-issued for the campaign's CLI
+  cut.
+- **Campaign work.** None on the catalog CB tuple. The campaign records, in
+  the SERVING journey, the FR-CB15/FR-PKV13 evidence the corrected entry
+  cites for this tuple, and the R014 runner checks that the release's signed
+  policy contains an entry matching the cut. The same catalog release that
+  carries the sidecar carries the re-issued entry.
+- **Surface.** Consumed CAT input.
 
-### G7. Production eligibility (not in the rehearsal; decides worth)
+### G7. Production eligibility (required work; not in the rehearsal)
 
 - **Requirement.** SPEC-048-R004 `:432-501`, R009 `:755-769`, R015
   `:1166-1177`. SPEC-006-R012/R014 (gateway auto-prefix) and SPEC-024
@@ -312,8 +300,8 @@ artifact), SIGN (signing/workflow), PEARL (Pearl config) and SPEC.
   - Cost: that prefix loses future cache reuse while native serves it. A
     sticky key or a cache hit stays ordinary.
 - **Surface.** COORD, CLI, SPEC (SPEC-001, -024, -048).
-- **Gate.** Probe P1 first. If eligibility is already at or above 10%, drop
-  G7.
+- **Measurement.** Probe P1 sizes the share before and after the change; the
+  R015 post-gateway replay is the gate.
 
 ### G8. Native billing/accounting not exercised end to end (R014.3 accounting FAIL)
 
@@ -418,8 +406,8 @@ artifact), SIGN (signing/workflow), PEARL (Pearl config) and SPEC.
 ## 3. Dependency order
 
 ```text
-P1 eligibility probe ─┬─> (G7 SPEC decision if <10%) ──────────────────┐
-M7 reopen decision ───┘                                                │
+G7 SPEC amendments + code ────────────────────────────────────────────┐
+D-CB corrected CB entry (external) ─────────────────── consumed at catalog release
                                                                        v
 ca8c384c R003 close ─> G1 parity fix ─> G3/G5 CLI fetch + origin ─> campaign freeze commit
                        G3/G5 coordinator routes ──────────────────────┘      │
@@ -432,7 +420,7 @@ ca8c384c R003 close ─> G1 parity fix ─> G3/G5 CLI fetch + origin ─> campai
                                                                              │
                        three-lane freeze audit (0/0/0) ─> merge campaign PR
                                                                              │
-   CLI cut ─> RC CDHash ─> G2 release-input ─> G6 packaged CB campaign + A5 + policy entry
+   CLI cut ─> RC CDHash ─> G2 release-input + D-CB entry re-issued for the cut      
                                                                              │
    Pearl runtime apply (routes) ─> catalog release activation (+ nginx, yaml, revocation dir)
                                                                              │
@@ -463,21 +451,32 @@ later.
 
 The aim is that post-merge steps only confirm.
 
-- **CLI cut.** Build an off-train signed package from the campaign branch with
-  `acceptance-candidate.yml`. This is allowed by `lab-campaign-loop.md:77-80`;
-  never promote it and never put it on :8080. It gives a real Developer ID
-  CDHash and an installed compat-set, so `nativeMTPRunningBuildIdentity`
-  resolves. A lab build cannot do that (`running_build_identity_unavailable`).
-- **Catalog release.** `catalog-release.py generate` into a temp directory
-  under a rehearsal `release_id` (`rehearsal-native-mtp-<date>`), followed by
-  `verify-directory`. Sign it locally with the real v4 key at
-  `~/.config/macprovider/keys/autotune-static-v4.private.base64`; never print
-  it. The sidecar binds the off-train CDHash and the rehearsal `release_id`.
-  It cannot admit on any live provider: the cross-release check and the
-  CDHash mismatch both reject it. It is never published.
-  - A test key is not usable here. A release-built binary trusts only the
-    baked keyring, and injection is `#if DEBUG || MACPROVIDER_LAB_HARNESS`
-    (`ModelRuntime.swift:2532-2536`).
+Rehearsal signing uses a **test key only** (operator rule); the production
+v4 key is never used before the cut. A release-built binary trusts only its
+baked keyring (`AutotuneCatalog.generated.swift:17-22`), and keyring/build
+identity injection exists only under `#if DEBUG || MACPROVIDER_LAB_HARNESS`
+(`ModelRuntime.swift:2532-2536`). So the rehearsal splits in two:
+
+- **Positive path on a lab build.** A `-DMACPROVIDER_LAB_HARNESS` build of
+  the campaign commit, with a lab-only serve hook that injects the test-key
+  keyring and a test build identity, runs the whole chain against the
+  isolated coordinator: feed fetch and materialization, revocation from the
+  joined origin, admission, tuple offer, canary, billing, config
+  enable/disable, and an emergency revocation mid-run. Every artifact
+  (catalog, sidecar, manifest, self-test bank, CB policy, revocation slots)
+  is generated by the production tooling with `--signer-key-id` set to a
+  test key id and signed by a throwaway Ed25519 key created in the
+  scratchpad and deleted after the run.
+- **Identity and fail-closed path on a signed package.** An off-train signed
+  package from `acceptance-candidate.yml` (allowed by
+  `lab-campaign-loop.md:77-80`; never promoted, never on :8080) proves that
+  `nativeMTPRunningBuildIdentity` resolves the real CDHash, binary SHA-256 and
+  compat-set commit, that the CLI fetches and materializes the feeds from the
+  isolated coordinator, and that it rejects the test-key-signed sidecar and
+  revocation feed (`unexpected_key_id`) while ordinary decode keeps serving.
+- **Catalog release.** `catalog-release.py generate` into a scratch
+  directory under a rehearsal `release_id`, then `verify-directory` with the
+  test key in a scratch trusted-keys file. Never published.
 - **Pearl runtime apply.** The isolated coordinator and gateway built from the
   campaign branch on Studio loopback (193xx ports, SQLite, settlement
   observe), as in R014 `raw/isolated-coordinator-*.log`.
@@ -503,10 +502,11 @@ The aim is that post-merge steps only confirm.
   The SERVING result is built and validated. It is signed only post-merge,
   because the promote workflow runs on `main`.
 
-What cannot be fully rehearsed pre-merge, and is only re-confirmed after the
-cut: the final CDHash binding, the CB policy entry for that CDHash (the same
-procedure on the off-train CDHash is rehearsed), the live Pearl downtime, and
-the canary kickstart.
+What cannot be rehearsed pre-merge, and is first exercised after the cut: the
+production v4 signature on the sidecar, revocation slots and self-test bank
+as accepted by a release binary; the final CDHash binding; the D-CB entry for
+that CDHash; the live Pearl downtime; and the canary kickstart. Each is the
+same code path the lab build exercised with the test key.
 
 ## 6. Studio lab time
 
@@ -521,13 +521,12 @@ first; nothing here pauses it without that approval.
 | L2 | `ca8c384c` R003 gate (upstream GDN/MTP tests, fused harness, hardware E2E) | ~0.5 day | untouched |
 | L3 | R015 re-freeze: 6 cells × 10 blocks + 1800 s sustained, quiet | ~6–8 h | **pause** |
 | L4 | Full isolated rehearsal on the off-train package: R014 runner, SERVING lab steps, G8 accounting, revocation drill | ~0.5 day | untouched |
-| L5 | Post-cut G6 packaged FR-CB15 / FR-PKV13 campaign + Gate A5 window (≤3600 s) + M6 rerun | ~4–6 h | **pause** (throughput) |
+| L5 | Post-cut: signed RC with the D-CB entry and v4-signed sidecar on isolated loopback; SERVING journey buyer-path steps | ~4 h | untouched |
 | L6 | Post-cut RELEASE journey: RC isolated revalidation, renewal subset with 30-min sustained | ~3–4 h | **pause** for the sustained 30 min |
 | L7 | Enablement: install the cut on live and set `native_mtp_mode=auto` | ~0.5 h | operator-approved restart |
 
-Total: about 3–4 lab days, including 3 operator-approved pause windows of
-roughly 6–8 h, 4–6 h and 1 h. L5 and L6 can share one pause if they are
-sequenced in the same window.
+Total: about 3–4 lab days, including 2 operator-approved pause windows of
+roughly 6–8 h (L3) and 1 h (L6).
 
 ## 7. Risks and unknowns, each with the probe that resolves it
 
@@ -539,8 +538,7 @@ sequenced in the same window.
 | P4 | Whether pre-signed 10-minute revocation slots pass every client check (first-install age, generation, superset, expiry, rollback after an emergency batch). | Unit tests in `NativeMTPRevocationFeedTests` with a synthetic slot batch, plus a Studio isolated drill (L4). |
 | P5 | Whether the batched prefill forward returns usable per-row hidden states for B>1, and whether `mtpPositionDeltasKey` is ever non-nil for Qwen35. | Bridge test on Studio with the pinned fork (`Qwen35.swift:644-664`). Fall back to serial for the group only if deltas are present. |
 | P6 | Whether R015 evidence measured on the freeze commit still binds after the squash merge and cut (provider revision binding). | Read `native_mtp_r015_analyze.py` and the policy fields that bind provider revision. Compare the Swift tree hash of freeze and merge commits. |
-| P7 | Whether Gate A5 can be staffed with three disjoint `ssh-keygen` principals. | Operator decision. Name the principals before Phase B. |
-| P8 | CB tail latency for the tuple: M6 measured batch-8 worst TTFT at 9.55–11.85x serial. Can production accept it? | M6 economics rerun in L5. Pass criteria written before the run. |
+| P7 | When D-CB lands and whether its entry tooling can re-issue for a new CDHash without another fix. | Track `ops/cb-activation-gates`; read its diff when committed. |
 | P9 | Whether the Keychain generation anchor (`macprovider.native-mtp-revocation-generation`) is writable in the launchd GUI-domain context of the live provider. | Read-only check on Studio of Keychain access for the provider user. Then an isolated run under a GUI-domain LaunchAgent with a private label. |
 | P10 | Whether generic SPEC-031 canaries (temperature 0, no key) become native rows once admitted, and whether nonce-echo judging stays correct. | Isolated canary run in L4, checking the selector reason and the canary verdict. |
 | P11 | Whether weekly renewal plus a 14-day slot batch survives one missed run without disabling native. | Dry-run renewal and a slot-expiry simulation in the P4 test. |
@@ -556,17 +554,16 @@ sequenced in the same window.
 | G10 journey harness steps, result builders, promote workflows | 5–7 days |
 | G8 accounting harness, G9 canary config, G12 conformance and spec text | 2–3 days |
 | G11 R003 close, R015 re-freeze, post-gateway replay | 2–3 days (mostly lab) |
-| G6 packaged CB campaign, Gate A5, M6, policy entry | 2–3 days + reviewer custody |
+| G6: consume D-CB entry, re-issue for the cut | 0.5 day |
 | Freeze audit (three lanes, one round) + rehearsal + post-merge confirmation | 3–4 days |
-| G7 (only if P1 is under 10%): SPEC-001/024/048 amendment + coordinator + CLI | +5–8 days |
+| G7 SPEC-001/024/048 amendment + coordinator + CLI | 5–8 days |
 
-**Total: about 26–36 engineer-days without G7, 31–44 with it.** Calendar time
-is about 5–7 weeks once the human gates are counted (A5 principals, M7 reopen,
-operator pause windows, one Pearl actor at a time).
+**Total: about 29–40 engineer-days.** Calendar time is about 5–7 weeks once
+operator pause windows, D-CB, and one-Pearl-actor scheduling are counted.
 
 PRs:
 1. One campaign PR: CLI, coordinator, catalog tooling, renewal, presigner,
-   journeys, SPEC-023/048 text, and G7 if needed.
+   journeys, SPEC-001/023/024/048 text, and G7.
 2. One CLI-cut staging PR.
 3. One catalog-release PR (catalog files, policy source, sidecar inputs).
 4. One evidence and conformance PR (signed SERVING result, CONFORMANCE
@@ -574,19 +571,8 @@ PRs:
 
 That is 4 PRs, plus #1862 landing separately first.
 
-**Worth.** At one active row the gain is 1.19–1.28x decode (1.04–1.20x end to
-end). At two or more rows it is zero, on one host class, and only for
-requests without a conversation key. That is a small, conditional gain for
-about 6 engineer-weeks and three live-provider pauses. It also carries a
-standing operational cost: a weekly re-sign, a revocation slot directory
-that must never lapse, a 90-day journey renewal, and a sidecar entry per CLI
-cut.
-
-The gating facts are cheap to establish:
-- P1 and P2 are a read-only Pearl query.
-- R-2 is an operator decision.
-
-Until both resume conditions in section 0 hold, the campaign's expected
-buyer-visible return is near zero. Close the R015 work with #1862, keep native
-MTP default-off, and keep this plan as the playbook to execute once the
-resume conditions are met.
+**Payoff.** At one active row the gain is 1.19–1.28x decode (1.04–1.20x end
+to end); at two or more rows it is 1.00; Studio tuple only; and only for
+eligible requests, which G7 is required to make a material share. Standing
+operational cost: weekly sidecar re-sign, a revocation slot directory that
+must never lapse, 90-day journey renewal, and a sidecar entry per CLI cut.
