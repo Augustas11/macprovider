@@ -10,7 +10,7 @@ Audit history: v0.1.0 is the initial default-off Beta contract. It does not prom
 {
   "spec_id": "SPEC-049",
   "title": "Operator-Constrained Privacy Class",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -482,26 +482,34 @@ The authoritative mapping is `specs/CONFORMANCE.json`. All SPEC-049 requirements
 This is the one-time limited activation exception that `specs/PROCESS.md` allows and that SPEC-049-R023 requires before promotion. It is recorded in `beta/DECISION_CRITERIA.md` Entry 249. It does not mark any SPEC-049 requirement conformant, and this SPEC stays `draft`.
 
 - **Scope.** Production Pearl (`coordinator.malibu.tech`, `api.malibu.tech`), with every limit below:
-  - The coordinator sets `privacy_class.enabled: true`, `relay_blind.enabled: true` and `relay_blind.enforce_settlement_profile: relay-blind-settlement-v1` (SPEC-022 R-14). Exactly one provider is pinned in `provider_se_public_keys` and `relay_blind.identity_public_keys`: the operator's Mac Studio `mp-5aad6b654611666e16edf83dc0f326eb`.
-  - `approved_code_identities` holds exactly one entry: the signed and notarized release `1.8.217` (team `YF7XNRJUG4`, identifier `live.malibu.provider.cli`, cdhash `df44bcf4ef55e543eb49c75187e868b0fce1a8a2`, binary sha256 `a6ea51d7ad19359a21fac63995194523264035fbca2ab32dceeede9d9da739bb`). Its `expires_at` is no later than this exception's expiry.
-  - The gateway sets `features.relay_blind_requests.enabled` and `features.privacy_class.enabled`.
-  - Privacy-class buyers are limited to operator canary requests made with the reference `relay-blind-client --privacy-class` and an out-of-band identity pin. The class is not advertised to other buyers.
-  - Pool-scoped requests stay excluded (§2.5). Every other provider and buyer is unchanged.
+  - **Coordinator configuration:**
+    - `coordinator.require_gateway_context: true`;
+    - `settlement.verified_model_settlement_mode: enforce`;
+    - `relay_blind.enabled: true`, with a non-empty `relay_blind.sqlite_path` and `relay_blind.enforce_settlement_profile: relay-blind-settlement-v1` (SPEC-022 R-14);
+    - `privacy_class.enabled: true`, with `privacy_class.allowed_se_key_backends: [file, keychain]`.
+  - **One provider.** Exactly one provider is pinned in `privacy_class.provider_se_public_keys` and `relay_blind.identity_public_keys`, under the same provider id: the operator's Mac Studio `mp-5aad6b654611666e16edf83dc0f326eb`. Coordinator validation accepts more than one pin, so this one-provider limit is an operator configuration control, checked by the operator against this section before each restart. Any added pin requires a new dated exception.
+  - **One approved code identity.** `approved_code_identities` holds exactly one entry: the signed and notarized release `1.8.217` (team `YF7XNRJUG4`, identifier `live.malibu.provider.cli`, cdhash `df44bcf4ef55e543eb49c75187e868b0fce1a8a2`, binary sha256 `a6ea51d7ad19359a21fac63995194523264035fbca2ab32dceeede9d9da739bb`). Its `expires_at` is no later than this exception's expiry.
+  - **Gateway.** The gateway sets `features.relay_blind_requests.enabled` and `features.privacy_class.enabled`. The gateway has no per-buyer allowlist, so any authenticated non-demo buyer may request the class with the reference `relay-blind-client --privacy-class`, and `/v1/models` discloses it. Every such request is served only by the pinned provider, or fails with a typed SPEC-049 error; there is no fallback.
+  - **Exclusions.** Pool-scoped and demo requests stay excluded (§2.5). Every other provider is unchanged.
 - **Evidence.**
   - The signed `JOURNEY-PRIVACY-CLASS-BETA` result `journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json`, signed by protected run 37430812962 over the reviewed evidence from #1864. That evidence covers the physical run on the Mac Studio of the signed and notarized acceptance candidate `1.8.215` (cdhash `3214ffcc6b706507f9a268cfb400da5c74287ff6`, commit `cab10eabb`), and every contract step passed.
   - The automated SPEC-049 suites.
   - The three-lane audits of the implementation PRs, including #1853 (round 3 at 0/0/0).
   - The canary runs `1.8.217`, which carries the same privacy-class and relay-blind settlement code as `1.8.215` plus the fused A3B MoE decode path (#1832). The journey was not re-run on `1.8.217`; the staged canary is its production check.
 - **Rollback.**
-  - First, the durable kill switch `coordinator-cli privacy-class disable --reason ...`. It needs no restart; privacy-class requests then fail with `privacy_class_disabled`, while relay-blind and plaintext traffic are unaffected.
-  - `coordinator-cli privacy-class quarantine` for that provider.
-  - Then remove the `privacy_class` and `relay_blind` coordinator blocks and the gateway feature flags, and restart each service. The restart takes seconds and needs no runtime updater apply.
-  - Disable triggers: any posture rejection on the pinned provider, any typed downgrade or failover anomaly, any non-`relay_blind_settled` privacy settlement outcome, or any redaction or settlement finding.
+  1. Engage the durable kill switch: `coordinator-cli privacy-class disable --config /opt/macprovider/coordinator.yaml --reason ...`. It needs no restart. Privacy-class requests then fail with `privacy_class_disabled`, while relay-blind and plaintext traffic are unaffected.
+  2. If needed, quarantine the provider: `coordinator-cli privacy-class quarantine --config /opt/macprovider/coordinator.yaml --provider mp-5aad6b654611666e16edf83dc0f326eb --reason ... --seconds ...`.
+  3. Remove the `privacy_class` and `relay_blind` coordinator blocks and the gateway feature flags, and restart each service. The restart takes seconds and needs no runtime updater apply.
+  4. Turn off `privacy_class_beta` and `relay_blind_enabled` on the provider, and restart it.
+
+  Disable triggers: any posture rejection on the pinned provider, any typed downgrade or failover anomaly, any non-`relay_blind_settled` privacy settlement outcome, or any redaction or settlement finding.
 - **Expiry.** `2026-10-20T00:00:00Z`. After that the kill switch is engaged and the configuration removed, unless a new dated exception, or promotion under SPEC-049-R023, replaces this one.
 - **Unresolved journey and residuals.** SPEC-049-R023 promotion still needs a signed result whose residuals are closed. These are carried from #1864:
   - five observations backed by indirect or procedure evidence: the hardening-complete time, the frame sequence, the posture challenge rows, P_TRACED/CS_DEBUGGED, and the DYLD environment;
   - the self-referential salted canary-needle commitment;
   - the startup outbound QUIC flow observed before the coordinator session.
+
+  - The signed journey covers the `1.8.215` binary, not the activated `1.8.217`. The shared privacy code is asserted from source lineage, not proven cryptographically, and the fused A3B decode path of `1.8.217` is not journey-tested. The staged canary on the pinned provider is the only production check for `1.8.217`.
 
   All are tracked on #1749.
 

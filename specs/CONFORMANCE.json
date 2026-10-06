@@ -1548,7 +1548,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "SPEC-049 v0.1.0 defines the default-off Beta operator-constrained privacy class. It is implemented locally, default-off in every component, with unit and integration tests. The signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence (SPEC-049-R023), the staged canary, and promotion remain pending; every requirement stays pending. No conformance or production promotion is made."
+        "rationale": "SPEC-049 v0.1.0 defines the default-off Beta operator-constrained privacy class. It is implemented, default-off in every component, with unit and integration tests. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249); the canary outcome and promotion remain pending; every requirement stays pending. No conformance or production promotion is made."
       }
     }
   ],
