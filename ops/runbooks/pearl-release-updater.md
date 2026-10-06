@@ -38,6 +38,15 @@ Pearl has four separate release/config sources of truth:
   which live fields may remain operator-owned; it does not publish or install
   runtime binaries.
 
+When an installed release's signed `pearl-release.json` carries
+`provider_code_identity`, the updater also writes that file and its
+signature, unchanged, to `/opt/macprovider/privacy-release-identities/`
+as `<tag>.json` and `<tag>.json.sig` (owner trusted uid, backend group,
+0640; directory 0750). The coordinator reads that directory as SPEC-049
+`privacy_class.release_code_identities.metadata_dir` and verifies each
+pair again before approving the provider code identity. The files are
+additive and stay after a rollback.
+
 The older catalog-bound Pearl bundle remains supported as
 `release_lane: "pearl_runtime_catalog"` for backwards-compatible releases that
 intentionally couple coordinator/gateway runtime assets with catalog/feed

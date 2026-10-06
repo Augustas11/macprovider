@@ -7265,11 +7265,14 @@
       "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/relayblind/authority.go:AcceptProviderKeys",
-        "phase3-binary/Sources/macprovider-cli/RelayBlindProvider.swift:open"
+        "phase3-binary/Sources/macprovider-cli/RelayBlindProvider.swift:open",
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:AcceptPrivacyKeysWithClaim",
+        "phase5-gateway/internal/relayblind/directory.go:PinForRecord"
       ],
       "tests": [
         "phase4-coordinator/internal/relayblind/store_test.go:TestAuthenticatedEmptyAdvertisementRevokesOutstandingReservation",
-        "phase5-gateway/internal/relayblind/crypto_test.go:TestKeyRecordRenewalAndSubstitution"
+        "phase5-gateway/internal/relayblind/crypto_test.go:TestKeyRecordRenewalAndSubstitution",
+        "phase5-gateway/internal/relayblind/directory_test.go:TestIdentityDirectoryPinForRecord"
       ],
       "journeys": [],
       "evidence": [],
@@ -10648,12 +10651,14 @@
         "phase4-coordinator/internal/config/config.go:validatePrivacyClass",
         "phase5-gateway/internal/config/config.go:PrivacyClassConfig",
         "phase5-gateway/internal/config/config.go:validatePrivacyClassConfig",
-        "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:privacyClassBeta"
+        "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:privacyClassBeta",
+        "phase3-binary/Sources/macprovider-cli/PrivacyAutoEnrollment.swift:mode"
       ],
       "tests": [
         "phase4-coordinator/internal/config/privacy_class_test.go:TestPrivacyClassDefaultOff",
         "phase5-gateway/internal/config/config_test.go:TestPrivacyClassDefaultOff",
-        "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testDefaultsOff"
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testDefaultsOff",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyAutoEnrollmentTests.swift:testModeResolutionAndOptOuts"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-BETA"
@@ -10723,11 +10728,14 @@
       "implementation": [
         "phase4-coordinator/internal/relayblind/privacy_authority.go:VerifyPosture",
         "phase4-coordinator/internal/relayblind/privacy_authority.go:verifySEPosture",
-        "phase4-coordinator/internal/relayblind/privacy_authority.go:verifyIdentityPosture"
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:verifyIdentityPosture",
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:resolveKeys"
       ],
       "tests": [
         "phase4-coordinator/internal/relayblind/privacy_test.go:TestPrivacyKeyAttestationBindsDigest",
-        "phase3-binary/Tests/macprovider-cliTests/PrivacyClassCryptoTests.swift:testKeyAttestationMatchesGo"
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyClassCryptoTests.swift:testKeyAttestationMatchesGo",
+        "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestOperatorPinsOverrideEnrollment",
+        "phase4-coordinator/internal/config/privacy_class_test.go:TestPrivacyClassAutomaticEnrollmentConfig"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-BETA"
@@ -10774,13 +10782,15 @@
       "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/relayblind/privacy_authority.go:identityMatches",
-        "phase4-coordinator/internal/relayblind/privacy_authority.go:codeApproved",
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:approve",
         "phase4-coordinator/internal/relayblind/privacy_authority.go:requiredPosture"
       ],
       "tests": [
         "phase4-coordinator/internal/config/privacy_class_test.go:TestPrivacyClassValidation",
         "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testEachRequiredFlagFalseFailsWithReason",
-        "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testUnsignedBuildFailsCodeIdentity"
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testUnsignedBuildFailsCodeIdentity",
+        "phase4-coordinator/internal/relayblind/privacy_authority_test.go:TestPostureUnapprovedIdentityIneligibleWithoutQuarantine",
+        "phase4-coordinator/internal/relayblind/privacy_authority_test.go:TestPostureDeniedCDHashQuarantinesAndRevokes"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-BETA"
@@ -11014,12 +11024,14 @@
       "state": "pending",
       "implementation": [
         "phase5-gateway/cmd/relay-blind-client/main.go:copyPrivacyResponse",
-        "phase5-gateway/cmd/relay-blind-client/main.go:requirePrivacyReservation"
+        "phase5-gateway/cmd/relay-blind-client/main.go:requirePrivacyReservation",
+        "phase5-gateway/cmd/relay-blind-client/main.go:fetchPrivacyDirectory"
       ],
       "tests": [
         "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientDecryptsStreamAndNonStream",
         "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientRejectsTruncatedMissingFinal",
-        "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientRejectsSeqGapReorderTamperAfterFinal"
+        "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientRejectsSeqGapReorderTamperAfterFinal",
+        "phase5-gateway/cmd/relay-blind-client/directory_test.go:TestPrivacyClientAutoPinsFromSignedDirectory"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-BETA"
@@ -11043,7 +11055,8 @@
       ],
       "tests": [
         "phase4-coordinator/cmd/coordinator-cli/privacy_class_test.go:TestPrivacyClassCLI",
-        "test/integration/privacy_class_integration_test.go:TestPrivacyClassAdversarial"
+        "test/integration/privacy_class_integration_test.go:TestPrivacyClassAdversarial",
+        "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestEnrollmentKeyChangeQuarantinesWithoutReplacing"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-BETA"
@@ -11067,7 +11080,8 @@
       "tests": [
         "phase4-coordinator/internal/buyer/privacy_class_test.go:TestKillSwitchBlocksAllPhases",
         "phase4-coordinator/internal/relayblind/privacy_authority_test.go:TestKillSwitchStoreErrorFailsClosed",
-        "test/integration/privacy_class_integration_test.go:TestPrivacyClassAdversarial"
+        "test/integration/privacy_class_integration_test.go:TestPrivacyClassAdversarial",
+        "phase4-coordinator/cmd/coordinator-cli/privacy_enrollment_test.go:TestPrivacyClassCLIReenrollAndDirectoryKeygen"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-BETA"
@@ -11138,7 +11152,10 @@
       "tests": [
         "test/integration/privacy_class_integration_test.go:TestPrivacyClassRedactionNoCanaryInAnyArtifact",
         "test/integration/privacy_class_integration_test.go:TestPrivacyClassAdversarial",
-        "test/integration/relay_blind_settlement_integration_test.go:TestPrivacyClassEnforceSettlesSwiftReceipts"
+        "test/integration/relay_blind_settlement_integration_test.go:TestPrivacyClassEnforceSettlesSwiftReceipts",
+        "test/integration/privacy_enrollment_integration_test.go:TestPrivacyClassAutoEnrolledSwiftProviderEndToEnd",
+        "test/integration/privacy_enrollment_integration_test.go:TestPrivacyClassEnrollmentKeyChangeQuarantines",
+        "test/integration/privacy_enrollment_integration_test.go:TestPrivacyClassDirectorySignedByAnotherKeyRejected"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-BETA"
@@ -11190,6 +11207,141 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
         "rationale": "SPEC-049 v0.1.0 (SPEC-049-R023): draft/not-deployed promotion gate is specified for the default-off Beta privacy class but not implemented, tested, or evidenced; it remains pending until implementation, automated tests, and a signed JOURNEY-PRIVACY-CLASS-BETA hardware result exist. The journey result is one input; staged canary and three-lane audits are also required."
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R024",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/PrivacyAutoEnrollment.swift:automaticEligibilityFailures",
+        "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:resolveServeConfig",
+        "phase3-binary/Sources/macprovider-cli/PrivacyPostureResponder.swift:enrollmentClaim"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyAutoEnrollmentTests.swift:testEligibleHostEntersPrivacyModeBeforeCredentials",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyAutoEnrollmentTests.swift:testIneligibleHostServesOrdinarilyWithoutHardening",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyAutoEnrollmentTests.swift:testHardeningFailureInAutomaticModeServesOrdinarily",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyAutoEnrollmentTests.swift:testAutomaticEligibilityIsReadOnlyAndNamesEveryFailure",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyPostureResponderTests.swift:testEnrollmentClaimIsPublicAndStopsWhenLatched"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "SPEC-049 v0.2.0 automatic enrollment is implemented locally with unit and integration tests; awaiting a signed JOURNEY-PRIVACY-CLASS-BETA result on a v0.2 release, a staged canary, and audits"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R025",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:VerifyPosture",
+        "phase4-coordinator/internal/relayblind/store_enrollment.go:EnrollPrivacyIdentity",
+        "phase4-coordinator/internal/relayblind/directory.go:ParsePrivacyEnrollmentClaim",
+        "phase4-coordinator/internal/ws/messages.go:parsePrivacyEnrollment"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestEnrollmentOnFirstVerifiedPosture",
+        "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestEnrollmentIsDurableAndBecomesThePin",
+        "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestEnrollmentNotCreatedWhenPostureFails",
+        "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestEnrollmentRejectsKeyActiveForAnotherProvider",
+        "phase4-coordinator/internal/ws/privacy_enrollment_parse_test.go:TestPrivacyEnrollmentClaimParses"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "SPEC-049 v0.2.0 automatic enrollment is implemented locally with unit and integration tests; awaiting a signed JOURNEY-PRIVACY-CLASS-BETA result on a v0.2 release, a staged canary, and audits"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R026",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/relayblind/store_enrollment.go:ReenrollPrivacyProvider",
+        "phase4-coordinator/cmd/coordinator-cli/privacy_class.go:runPrivacyClass"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestEnrollmentKeyChangeQuarantinesWithoutReplacing",
+        "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestEnrollmentPostureKeyChangeQuarantines",
+        "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestReenrollAllowsNewKeys"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "SPEC-049 v0.2.0 automatic enrollment is implemented locally with unit and integration tests; awaiting a signed JOURNEY-PRIVACY-CLASS-BETA result on a v0.2 release, a staged canary, and audits"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R027",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/relayblind/release_identities.go:LoadReleaseCodeIdentities",
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:RefreshReleaseIdentities",
+        "ops/pearl-updater/macprovider-pearl-update:install_privacy_release_identity"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestLoadReleaseCodeIdentities",
+        "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestReleaseDerivedApprovalAndOverrides",
+        "ops/pearl-updater/test_pearl_updater.py::PearlUpdaterTests"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "SPEC-049 v0.2.0 automatic enrollment is implemented locally with unit and integration tests; awaiting a signed JOURNEY-PRIVACY-CLASS-BETA result on a v0.2 release, a staged canary, and audits"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R028",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/relayblind/directory.go:SignIdentityDirectory",
+        "phase4-coordinator/internal/relayblind/directory_service.go:BuildIdentityDirectory",
+        "phase4-coordinator/internal/relayblind/directory_service.go:LoadIdentityDirectorySigningKey",
+        "phase4-coordinator/internal/buyer/privacy_class.go:handlePrivacyDirectory",
+        "phase5-gateway/internal/router/privacy_directory.go:handlePrivacyDirectory",
+        "phase5-gateway/internal/relayblind/directory.go:VerifyIdentityDirectory"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/relayblind/directory_test.go:TestIdentityDirectoryRejectsWrongKeyTamperAndStaleness",
+        "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestIdentityDirectoryBuildPublishesEnrollmentAndRevocation",
+        "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestIdentityDirectorySigningKeyCustody",
+        "phase4-coordinator/internal/buyer/privacy_directory_test.go:TestPrivacyDirectoryRoute",
+        "phase5-gateway/internal/router/privacy_directory_test.go:TestPrivacyDirectoryPassthrough",
+        "phase5-gateway/cmd/relay-blind-client/directory_test.go:TestPrivacyClientDirectoryRejections"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "SPEC-049 v0.2.0 automatic enrollment is implemented locally with unit and integration tests; awaiting a signed JOURNEY-PRIVACY-CLASS-BETA result on a v0.2 release, a staged canary, and audits"
       }
     },
     {
