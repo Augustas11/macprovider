@@ -1,0 +1,21 @@
+{
+  "binary": "lab 280f0e95d (release source minus version bump)",
+  "details": {
+    "basis": "R015 2026-10-06 gated cells (mixed ordinary/native load, staggered arrivals, same Swift source as the release)",
+    "gate": 0.1,
+    "ok": true,
+    "s2_p95_ttft_corrected_upper_bound": 0.0277,
+    "s8_p95_ttft_corrected_upper_bound": 0.0115,
+    "summary": "under mixed native/ordinary load the Holm-corrected p95 TTFT upper bound (ready wait + prefill) is +2.8% at s2 and +1.2% at s8, inside the R007 10% ordinary-row wait bound; no dedicated ready-to-decode-wait fixture exists in the release harness"
+  },
+  "evidence": [
+    "docs/research/spec048-r015/evidence-2026-10-06-a3b-fused-26a434/analysis.json"
+  ],
+  "item": "item3-fairness",
+  "recorded_at": "2026-10-06T11:33:31Z",
+  "schema": "macprovider.native-mtp-r014-rehearsal-check.v1",
+  "status": "PASS",
+  "sub_checks": {},
+  "summary": "under mixed native/ordinary load the Holm-corrected p95 TTFT upper bound (ready wait + prefill) is +2.8% at s2 and +1.2% at s8, inside the R007 10% ordinary-row wait bound; no dedicated ready-to-decode-wait fixture exists in the release harness",
+  "title": "R014.3 fairness"
+}

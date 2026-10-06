@@ -1,0 +1,38 @@
+{
+  "binary": "lab build of release source",
+  "details": {
+    "checks": {
+      "batch_depth_reached_qualified_slots": true,
+      "journey-mixed-0.ordinary_control_reproducible": true,
+      "journey-mixed-0.parity": false,
+      "journey-mixed-1.ordinary_control_reproducible": true,
+      "journey-mixed-1.parity": false,
+      "journey-mixed-2.ordinary_control_reproducible": true,
+      "journey-mixed-2.parity": false,
+      "journey-mixed-3.ordinary_control_reproducible": true,
+      "journey-mixed-3.parity": false,
+      "journey-mixed-4.ordinary_control_reproducible": true,
+      "journey-mixed-4.parity": true,
+      "journey-mixed-5.ordinary_control_reproducible": true,
+      "journey-mixed-5.parity": true,
+      "journey-mixed-6.ordinary_control_reproducible": true,
+      "journey-mixed-6.parity": true,
+      "journey-mixed-7.ordinary_control_reproducible": true,
+      "journey-mixed-7.parity": true,
+      "mixed_paths_in_one_batch": true
+    },
+    "status": "fail",
+    "uncovered_contract": []
+  },
+  "evidence": [
+    "records/lab-journey-result.json",
+    "raw/lab-journey.stderr"
+  ],
+  "item": "item3-mixed-row",
+  "recorded_at": "2026-10-06T11:33:31Z",
+  "schema": "macprovider.native-mtp-r014-rehearsal-check.v1",
+  "status": "FAIL",
+  "sub_checks": {},
+  "summary": "FAILED checks journey-mixed-0.parity, journey-mixed-1.parity, journey-mixed-2.parity, journey-mixed-3.parity \u2014 fixture: one 8-row batch mixes native, load-gated, and ineligible ordinary rows with per-row parity against the ordinary batched oracle",
+  "title": "R014.3 mixed-row"
+}

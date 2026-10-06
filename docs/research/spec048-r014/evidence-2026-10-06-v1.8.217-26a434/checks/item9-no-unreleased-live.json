@@ -1,0 +1,22 @@
+{
+  "binary": "all running",
+  "details": {
+    "published_binary_sha256_by_version": {
+      "1.8.217": "a6ea51d7ad19359a21fac63995194523264035fbca2ab32dceeede9d9da739bb",
+      "1.8.219": null
+    }
+  },
+  "evidence": [
+    "live-binaries.json"
+  ],
+  "item": "item9-no-unreleased-live",
+  "recorded_at": "2026-10-06T11:33:31Z",
+  "schema": "macprovider.native-mtp-r014-rehearsal-check.v1",
+  "status": "FAIL",
+  "sub_checks": {
+    "every_live_connected_binary_is_published_release": false,
+    "runner_processes_isolated": true
+  },
+  "summary": "2 live-connected process(es) run unreleased bytes",
+  "title": "R014.9 no unreleased local binary connected to the live coordinator"
+}

@@ -1,0 +1,325 @@
+{"level":"info","compatibility_policy":"unconfigured","recommended_compatibility_set_id":"","accepted_compatibility_set_count":0,"first_hop_bridge_set_count":0,"time":"2026-10-06T04:31:52-07:00","message":"provider compatibility-set admission policy initialized"}
+{"level":"info","time":"2026-10-06T04:31:52-07:00","message":"SPEC-017 stats DISABLED via config (default); /v1/stats/* not registered"}
+{"level":"info","time":"2026-10-06T04:31:52-07:00","message":"malibu_emission DISABLED via config (default)"}
+{"level":"info","allow_tokenless_provisional_bootstrap":false,"time":"2026-10-06T04:31:52-07:00","message":"provider WS token validation REQUIRED (auth.require_provider_tokens=true)"}
+{"level":"info","time":"2026-10-06T04:31:52-07:00","message":"trusted pools disabled; coordinator will not advertise pool support"}
+{"level":"info","billing.quarantine_resolution_force_void_enabled":false,"billing.quarantine_resolution_force_credit_enabled":false,"billing.force_credit_settlement_hold_seconds":0,"event":"spec005_v0_4_route_layer_flag_init","time":"2026-10-06T04:31:52-07:00","message":"quarantine force-void route-layer flag initialized"}
+{"level":"info","time":"2026-10-06T04:31:52-07:00","message":"payout pipeline disabled (payout.enabled=false); schema applied, handlers idle"}
+{"level":"info","time":"2026-10-06T04:31:52-07:00","message":"provider connection events bounds reconciled"}
+{"level":"info","next_prune_at":"2026-10-07T11:31:52Z","retention_days":30,"time":"2026-10-06T04:31:52-07:00","message":"admission state retention pruner armed"}
+{"level":"info","next_prune_at":"2026-10-06T12:31:52Z","time":"2026-10-06T04:31:52-07:00","message":"github auth state pruner armed"}
+{"level":"info","addr":"127.0.0.1:19302","time":"2026-10-06T04:31:52-07:00","message":"provider websocket server listening"}
+{"level":"info","config_path":"/Users/a1/mtp-r014-journey-217/work/isolated/run/coordinator-disabled.yaml","config_sha256":"d69b95e46807fdbd006c13668f655a6300d7564a35e4c864bb39845c311f9c89","overlay_path":"","overlay_sha256":"","source":"boot","version":"dev","event":"coordinator_config_applied","time":"2026-10-06T04:31:52-07:00","message":"coordinator config applied"}
+{"level":"info","addr":"127.0.0.1:19301","time":"2026-10-06T04:31:52-07:00","message":"buyer http server listening"}
+{"level":"warn","error":"create state dir: mkdir /run: read-only file system","path":"/run/macprovider/coordinator-applied-config.json","source":"boot","config_sha256":"d69b95e46807fdbd006c13668f655a6300d7564a35e4c864bb39845c311f9c89","overlay_sha256":"","event":"coordinator_applied_config_record_failed","time":"2026-10-06T04:31:52-07:00","message":"applied-config state file not written; config remains applied"}
+{"level":"info","duration":0.912667,"time":"2026-10-06T04:31:52-07:00","message":"billing startup scan completed"}
+{"level":"debug","time":"2026-10-06T04:31:53-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:31:53-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:31:53-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:31:53-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"info","event":"internal_bearer_accepted","key":"service_token","path":"","remote_addr":"127.0.0.1:53215","time":"2026-10-06T04:31:53-07:00","message":"internal bearer accepted"}
+{"level":"debug","time":"2026-10-06T04:31:54-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:31:54-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:31:54-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:31:54-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:31:55-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:31:55-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:31:55-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:31:55-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:31:56-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:31:56-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:31:56-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:31:56-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:31:57-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:31:57-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:31:57-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:31:57-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:31:58-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:31:58-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:31:58-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:31:58-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"info","event":"internal_bearer_accepted","key":"service_token","path":"","remote_addr":"127.0.0.1:53215","time":"2026-10-06T04:31:58-07:00","message":"internal bearer accepted"}
+{"level":"debug","time":"2026-10-06T04:31:59-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:31:59-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:31:59-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:31:59-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:00-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:00-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:00-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:00-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:01-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:01-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:01-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:01-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:02-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:02-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:02-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:02-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:03-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:03-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:03-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:03-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"info","event":"internal_bearer_accepted","key":"service_token","path":"","remote_addr":"127.0.0.1:53215","time":"2026-10-06T04:32:03-07:00","message":"internal bearer accepted"}
+{"level":"debug","time":"2026-10-06T04:32:04-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:04-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:04-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:04-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:05-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:05-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:05-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:05-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:06-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:06-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:06-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:06-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:07-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:07-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:07-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:07-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:08-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:08-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:08-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:08-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"info","event":"internal_bearer_accepted","key":"service_token","path":"","remote_addr":"127.0.0.1:53215","time":"2026-10-06T04:32:08-07:00","message":"internal bearer accepted"}
+{"level":"debug","time":"2026-10-06T04:32:09-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:09-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:09-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:09-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:10-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:10-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:10-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:10-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:11-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:11-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:11-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:11-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:12-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:12-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:12-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:12-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:13-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:13-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:13-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:13-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"info","event":"internal_bearer_accepted","key":"service_token","path":"","remote_addr":"127.0.0.1:53215","time":"2026-10-06T04:32:13-07:00","message":"internal bearer accepted"}
+{"level":"debug","time":"2026-10-06T04:32:14-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:14-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:14-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:14-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:15-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:15-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:15-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:15-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:16-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:16-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:16-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:16-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:17-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:17-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:17-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:17-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:18-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:18-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:18-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:18-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"info","event":"internal_bearer_accepted","key":"service_token","path":"","remote_addr":"127.0.0.1:53215","time":"2026-10-06T04:32:18-07:00","message":"internal bearer accepted"}
+{"level":"debug","time":"2026-10-06T04:32:19-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:19-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:19-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:19-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:20-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:20-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:20-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:20-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:21-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:21-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:21-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:21-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:22-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:22-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:22-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:22-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:23-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:23-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:23-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:23-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"info","event":"internal_bearer_accepted","key":"service_token","path":"","remote_addr":"127.0.0.1:53215","time":"2026-10-06T04:32:23-07:00","message":"internal bearer accepted"}
+{"level":"debug","time":"2026-10-06T04:32:24-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:24-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:24-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:24-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:25-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:25-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:25-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:25-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:26-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:26-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:26-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:26-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:27-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:27-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:27-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:27-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:28-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:28-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:28-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:28-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"info","event":"internal_bearer_accepted","key":"service_token","path":"","remote_addr":"127.0.0.1:53215","time":"2026-10-06T04:32:28-07:00","message":"internal bearer accepted"}
+{"level":"debug","time":"2026-10-06T04:32:29-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:29-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:29-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:29-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:30-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:30-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:30-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:30-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:31-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:31-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:31-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:31-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:32-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:32-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:32-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:32-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:33-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:33-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:33-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:33-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"info","event":"internal_bearer_accepted","key":"service_token","path":"","remote_addr":"127.0.0.1:53215","time":"2026-10-06T04:32:33-07:00","message":"internal bearer accepted"}
+{"level":"debug","time":"2026-10-06T04:32:34-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:34-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:34-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:34-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:35-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:35-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:35-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:35-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:36-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:36-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:36-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:36-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:37-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:37-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:37-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:37-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:38-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:38-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:38-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:38-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"info","event":"internal_bearer_accepted","key":"service_token","path":"","remote_addr":"127.0.0.1:53215","time":"2026-10-06T04:32:38-07:00","message":"internal bearer accepted"}
+{"level":"debug","time":"2026-10-06T04:32:39-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:39-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:39-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:39-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:40-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:40-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:40-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:40-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:41-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:41-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:41-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:41-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:42-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:42-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:42-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:42-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:43-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:43-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:43-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:43-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"info","event":"internal_bearer_accepted","key":"service_token","path":"","remote_addr":"127.0.0.1:53215","time":"2026-10-06T04:32:43-07:00","message":"internal bearer accepted"}
+{"level":"debug","time":"2026-10-06T04:32:44-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:44-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:44-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:44-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:45-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:45-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:45-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:45-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:46-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:46-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:46-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:46-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:47-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"info","event":"attestation_valid","category":"T2.C","severity":"INFO","provider_id":"r014-isolated-provider","pillar":"C","decision":"allow","reason":"se_p256_attested","config_flag":"tier2.attestation_formats","time":"2026-10-06T04:32:47-07:00","message":"tier2 attestation event"}
+{"level":"info","provider_id":"r014-isolated-provider","state":"ready","reason":"coordinator auth_response accepted","since":"2026-10-06T11:32:47Z","time":"2026-10-06T04:32:47-07:00","message":"provider state transition"}
+{"level":"debug","time":"2026-10-06T04:32:47-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:47-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:47-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:48-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:48-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:48-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:48-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"info","event":"internal_bearer_accepted","key":"service_token","path":"","remote_addr":"127.0.0.1:53215","time":"2026-10-06T04:32:48-07:00","message":"internal bearer accepted"}
+{"level":"info","event":"internal_bearer_accepted","key":"service_token","path":"","remote_addr":"","time":"2026-10-06T04:32:48-07:00","message":"internal bearer accepted"}
+{"level":"info","event":"routing_decision","request_id":"ae24f5f6-42fb-4db7-ba0b-5f05a04a51bb","objective":"default","candidate_count_before_filters":1,"candidate_count_after_filters":1,"candidate_set":[{"provider_id":"r014-isolated-provider","assigned_id":"2edc95cd-4ccc-4abd-bcba-140f29f4b2e7","objective_metric":46.05987129647932,"state":"ready","slots":8,"effective_throughput":46.05987129647932,"model_params":35,"connected_at":"2026-10-06T11:32:47.060Z","tier":"pinned","slots_free":8,"slots_total":8,"throughput_tps":46.05987129647932,"metric":46.05987129647932}],"tiebreak_mode":"deterministic","tiebreak_epsilon":0,"chosen_provider_id":"r014-isolated-provider","chosen_assigned_id":"2edc95cd-4ccc-4abd-bcba-140f29f4b2e7","attempt_index":0,"retry_count":0,"retried":0,"candidate_count":1,"epsilon":0,"seed":0,"draw":0,"reason":"deterministic","time":"2026-10-06T04:32:48-07:00","message":"routing decision"}
+{"level":"info","provider_id":"r014-isolated-provider","state":"ready","reason":"request_capacity_available","since":"2026-10-06T11:32:48Z","time":"2026-10-06T04:32:48-07:00","message":"provider state transition"}
+{"level":"debug","time":"2026-10-06T04:32:49-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","provider_id":"r014-isolated-provider","state":"ready","slots_free":7,"slots_total":8,"time":"2026-10-06T04:32:49-07:00","message":"provider heartbeat"}
+2026/10/06 04:32:49 INFO rate_card_normalized event=rate_card_normalized requested=qwen/qwen3.6-35b-a3b normalized=qwen3.6-35b-a3b matched=default
+{"level":"info","event":"routing_decision","request_id":"f19dec3b-607f-4c60-9c72-c83c9b6e728c","attempt_n":0,"provider_id":"r014-isolated-provider","provider_assigned_id":"2edc95cd-4ccc-4abd-bcba-140f29f4b2e7","cached_prompt_tokens":0,"sticky_result":"disabled","time":"2026-10-06T04:32:49-07:00","message":"routing_decision"}
+{"level":"info","event":"internal_bearer_accepted","key":"service_token","path":"","remote_addr":"127.0.0.1:53215","time":"2026-10-06T04:32:49-07:00","message":"internal bearer accepted"}
+{"level":"info","event":"internal_bearer_accepted","key":"service_token","path":"","remote_addr":"","time":"2026-10-06T04:32:49-07:00","message":"internal bearer accepted"}
+{"level":"info","event":"routing_decision","request_id":"4443d5af-057f-4860-8030-6f13b21e02d6","objective":"default","candidate_count_before_filters":1,"candidate_count_after_filters":1,"candidate_set":[{"provider_id":"r014-isolated-provider","assigned_id":"2edc95cd-4ccc-4abd-bcba-140f29f4b2e7","objective_metric":46.05987129647932,"state":"ready","slots":8,"effective_throughput":46.05987129647932,"model_params":35,"connected_at":"2026-10-06T11:32:47.060Z","tier":"pinned","slots_free":8,"slots_total":8,"throughput_tps":46.05987129647932,"metric":46.05987129647932}],"tiebreak_mode":"deterministic","tiebreak_epsilon":0,"chosen_provider_id":"r014-isolated-provider","chosen_assigned_id":"2edc95cd-4ccc-4abd-bcba-140f29f4b2e7","attempt_index":0,"retry_count":0,"retried":0,"candidate_count":1,"epsilon":0,"seed":0,"draw":0,"reason":"deterministic","time":"2026-10-06T04:32:49-07:00","message":"routing decision"}
+{"level":"info","provider_id":"r014-isolated-provider","state":"ready","reason":"request_capacity_available","since":"2026-10-06T11:32:49Z","time":"2026-10-06T04:32:49-07:00","message":"provider state transition"}
+{"level":"debug","time":"2026-10-06T04:32:49-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:49-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+2026/10/06 04:32:49 INFO rate_card_normalized event=rate_card_normalized requested=qwen/qwen3.6-35b-a3b normalized=qwen3.6-35b-a3b matched=default
+{"level":"info","event":"routing_decision","request_id":"a4504de3-03de-4c6a-8be8-6e809c59c327","attempt_n":0,"provider_id":"r014-isolated-provider","provider_assigned_id":"2edc95cd-4ccc-4abd-bcba-140f29f4b2e7","cached_prompt_tokens":0,"sticky_result":"disabled","time":"2026-10-06T04:32:49-07:00","message":"routing_decision"}
+{"level":"info","event":"internal_bearer_accepted","key":"service_token","path":"","remote_addr":"127.0.0.1:53215","time":"2026-10-06T04:32:49-07:00","message":"internal bearer accepted"}
+{"level":"info","event":"internal_bearer_accepted","key":"service_token","path":"","remote_addr":"","time":"2026-10-06T04:32:49-07:00","message":"internal bearer accepted"}
+{"level":"info","event":"routing_decision","request_id":"33e8dea9-d8d7-47bb-a462-2f1f7e43c1e9","objective":"default","candidate_count_before_filters":1,"candidate_count_after_filters":1,"candidate_set":[{"provider_id":"r014-isolated-provider","assigned_id":"2edc95cd-4ccc-4abd-bcba-140f29f4b2e7","objective_metric":46.05987129647932,"state":"ready","slots":8,"effective_throughput":46.05987129647932,"model_params":35,"connected_at":"2026-10-06T11:32:47.060Z","tier":"pinned","slots_free":8,"slots_total":8,"throughput_tps":46.05987129647932,"metric":46.05987129647932}],"tiebreak_mode":"deterministic","tiebreak_epsilon":0,"chosen_provider_id":"r014-isolated-provider","chosen_assigned_id":"2edc95cd-4ccc-4abd-bcba-140f29f4b2e7","attempt_index":0,"retry_count":0,"retried":0,"candidate_count":1,"epsilon":0,"seed":0,"draw":0,"reason":"deterministic","time":"2026-10-06T04:32:49-07:00","message":"routing decision"}
+{"level":"info","provider_id":"r014-isolated-provider","state":"ready","reason":"request_capacity_available","since":"2026-10-06T11:32:49Z","time":"2026-10-06T04:32:49-07:00","message":"provider state transition"}
+{"level":"debug","time":"2026-10-06T04:32:49-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:50-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:50-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:50-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"warn","provider_id":"r014-isolated-provider","request_id":"req-1b0af220-b07f-463f-afbb-3b6e2add6eb3","time":"2026-10-06T04:32:50-07:00","message":"late encrypted inference_response_end for retired request dropped"}
+{"level":"info","event":"internal_bearer_accepted","key":"service_token","path":"","remote_addr":"127.0.0.1:53282","time":"2026-10-06T04:32:50-07:00","message":"internal bearer accepted"}
+{"level":"info","event":"internal_bearer_accepted","key":"service_token","path":"","remote_addr":"","time":"2026-10-06T04:32:50-07:00","message":"internal bearer accepted"}
+{"level":"info","event":"routing_decision","request_id":"95b1bdc5-3775-49ec-8a9e-9a1676ecd22f","objective":"default","candidate_count_before_filters":1,"candidate_count_after_filters":1,"candidate_set":[{"provider_id":"r014-isolated-provider","assigned_id":"2edc95cd-4ccc-4abd-bcba-140f29f4b2e7","objective_metric":46.05987129647932,"state":"ready","slots":7,"effective_throughput":46.05987129647932,"model_params":35,"connected_at":"2026-10-06T11:32:47.060Z","tier":"pinned","slots_free":7,"slots_total":8,"throughput_tps":46.05987129647932,"metric":46.05987129647932}],"tiebreak_mode":"deterministic","tiebreak_epsilon":0,"chosen_provider_id":"r014-isolated-provider","chosen_assigned_id":"2edc95cd-4ccc-4abd-bcba-140f29f4b2e7","attempt_index":0,"retry_count":0,"retried":0,"candidate_count":1,"epsilon":0,"seed":0,"draw":0,"reason":"deterministic","time":"2026-10-06T04:32:50-07:00","message":"routing decision"}
+{"level":"info","provider_id":"r014-isolated-provider","state":"ready","reason":"request_capacity_available","since":"2026-10-06T11:32:50Z","time":"2026-10-06T04:32:50-07:00","message":"provider state transition"}
+{"level":"debug","time":"2026-10-06T04:32:50-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+2026/10/06 04:32:50 INFO rate_card_normalized event=rate_card_normalized requested=qwen/qwen3.6-35b-a3b normalized=qwen3.6-35b-a3b matched=default
+{"level":"info","event":"routing_decision","request_id":"4e6ecb28-6869-4c73-94ed-e34c4a676633","attempt_n":0,"provider_id":"r014-isolated-provider","provider_assigned_id":"2edc95cd-4ccc-4abd-bcba-140f29f4b2e7","cached_prompt_tokens":0,"sticky_result":"disabled","time":"2026-10-06T04:32:50-07:00","message":"routing_decision"}
+{"level":"info","event":"internal_bearer_accepted","key":"service_token","path":"","remote_addr":"127.0.0.1:53282","time":"2026-10-06T04:32:50-07:00","message":"internal bearer accepted"}
+{"level":"info","event":"internal_bearer_accepted","key":"service_token","path":"","remote_addr":"","time":"2026-10-06T04:32:50-07:00","message":"internal bearer accepted"}
+{"level":"info","event":"routing_decision","request_id":"c6803456-a6bb-4f15-b6a1-e6b01a6d9dba","objective":"default","candidate_count_before_filters":1,"candidate_count_after_filters":1,"candidate_set":[{"provider_id":"r014-isolated-provider","assigned_id":"2edc95cd-4ccc-4abd-bcba-140f29f4b2e7","objective_metric":46.05987129647932,"state":"ready","slots":7,"effective_throughput":46.05987129647932,"model_params":35,"connected_at":"2026-10-06T11:32:47.060Z","tier":"pinned","slots_free":7,"slots_total":8,"throughput_tps":46.05987129647932,"metric":46.05987129647932}],"tiebreak_mode":"deterministic","tiebreak_epsilon":0,"chosen_provider_id":"r014-isolated-provider","chosen_assigned_id":"2edc95cd-4ccc-4abd-bcba-140f29f4b2e7","attempt_index":0,"retry_count":0,"retried":0,"candidate_count":1,"epsilon":0,"seed":0,"draw":0,"reason":"deterministic","time":"2026-10-06T04:32:50-07:00","message":"routing decision"}
+{"level":"info","provider_id":"r014-isolated-provider","state":"ready","reason":"request_capacity_available","since":"2026-10-06T11:32:50Z","time":"2026-10-06T04:32:50-07:00","message":"provider state transition"}
+{"level":"debug","time":"2026-10-06T04:32:51-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","provider_id":"r014-isolated-provider","state":"ready","slots_free":6,"slots_total":8,"time":"2026-10-06T04:32:51-07:00","message":"provider heartbeat"}
+{"level":"debug","time":"2026-10-06T04:32:51-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+2026/10/06 04:32:51 INFO rate_card_normalized event=rate_card_normalized requested=qwen/qwen3.6-35b-a3b normalized=qwen3.6-35b-a3b matched=default
+{"level":"info","event":"routing_decision","request_id":"35d05869-3877-48e5-99c6-6a0b17ba5d89","attempt_n":0,"provider_id":"r014-isolated-provider","provider_assigned_id":"2edc95cd-4ccc-4abd-bcba-140f29f4b2e7","cached_prompt_tokens":0,"sticky_result":"disabled","time":"2026-10-06T04:32:51-07:00","message":"routing_decision"}
+{"level":"info","provider_id":"r014-isolated-provider","state":"ready","time":"2026-10-06T04:32:51-07:00","message":"pool check hit"}
+{"level":"info","provider_id":"r014-isolated-provider","state":"ready","reason":"request_capacity_available","since":"2026-10-06T11:32:51Z","time":"2026-10-06T04:32:51-07:00","message":"provider state transition"}
+{"level":"debug","time":"2026-10-06T04:32:51-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:51-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:52-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:52-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:52-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+2026/10/06 04:32:52 INFO rate_card_normalized event=rate_card_normalized requested=qwen/qwen3.6-35b-a3b normalized=qwen3.6-35b-a3b matched=default
+{"level":"info","event":"routing_decision","request_id":"1b0af220-b07f-463f-afbb-3b6e2add6eb3","attempt_n":0,"provider_id":"r014-isolated-provider","provider_assigned_id":"2edc95cd-4ccc-4abd-bcba-140f29f4b2e7","cached_prompt_tokens":0,"sticky_result":"disabled","time":"2026-10-06T04:32:52-07:00","message":"routing_decision"}
+{"level":"debug","time":"2026-10-06T04:32:52-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:52-07:00","message":"pool settlement expiry sweep skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:53-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","provider_id":"r014-isolated-provider","state":"ready","slots_free":8,"slots_total":8,"time":"2026-10-06T04:32:53-07:00","message":"provider heartbeat"}
+{"level":"debug","time":"2026-10-06T04:32:53-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:53-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:53-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:54-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:54-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:54-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:54-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","time":"2026-10-06T04:32:55-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"debug","provider_id":"r014-isolated-provider","state":"ready","slots_free":8,"slots_total":8,"time":"2026-10-06T04:32:55-07:00","message":"provider heartbeat"}
+{"level":"debug","time":"2026-10-06T04:32:55-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"info","provider_id":"r014-isolated-provider","state":"draining","reason":"SIGTERM received","since":"2026-10-06T11:32:55Z","time":"2026-10-06T04:32:55-07:00","message":"provider state transition"}
+{"level":"info","provider_id":"r014-isolated-provider","phase":"starting","inflight_requests":0,"estimated_drain_seconds":0,"time":"2026-10-06T04:32:55-07:00","message":"provider drain progress"}
+{"level":"info","provider_id":"r014-isolated-provider","phase":"in_progress","inflight_requests":0,"estimated_drain_seconds":0,"time":"2026-10-06T04:32:55-07:00","message":"provider drain progress"}
+{"level":"info","provider_id":"r014-isolated-provider","phase":"complete","inflight_requests":0,"estimated_drain_seconds":0,"time":"2026-10-06T04:32:55-07:00","message":"provider drain progress"}
+{"level":"warn","provider_id":"r014-isolated-provider","reason":"connection_closed","time":"2026-10-06T04:32:55-07:00","message":"provider websocket read failed"}
+{"level":"info","provider_id":"r014-isolated-provider","time":"2026-10-06T04:32:55-07:00","message":"draining provider removed after websocket close"}
+{"level":"debug","time":"2026-10-06T04:32:55-07:00","message":"route snapshot journal mirror skipped during active buyer money-path traffic"}
+{"level":"info","signal":"terminated","timeout":30000,"time":"2026-10-06T04:32:55-07:00","message":"coordinator shutdown requested"}
+{"level":"info","time":"2026-10-06T04:32:55-07:00","message":"coordinator shutdown complete"}

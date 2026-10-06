@@ -1,0 +1,26 @@
+{
+  "binary": "published v1.8.217 assets",
+  "details": {},
+  "evidence": [
+    "records/release-asset-identity.json",
+    "raw/verify-malibu-release-artifacts.log"
+  ],
+  "item": "item8-release-asset-identity",
+  "recorded_at": "2026-10-06T11:03:52Z",
+  "schema": "macprovider.native-mtp-r014-rehearsal-check.v1",
+  "status": "PASS",
+  "sub_checks": {
+    "app_embedded_cli_equals_tarball_cli": true,
+    "checksum_matches.Malibu-v1.8.217.dmg": true,
+    "checksum_matches.macprovider-cli-v1.8.217-darwin-arm64.tar.gz": true,
+    "code_identity.binary_sha256": true,
+    "code_identity.cdhash": true,
+    "code_identity.signing_identifier": true,
+    "code_identity.team_id": true,
+    "pearl_release_signature_verified": true,
+    "tarball_cli_equals_lab_host_signed_copy": true,
+    "verify_malibu_release_artifacts_script_passed": true
+  },
+  "summary": "published v1.8.217: Malibu.app-embedded CLI and tarball CLI are byte-identical (a6ea51d7ad19\u2026), signed code identity matches, checksums match",
+  "title": "R014.8 Malibu.app vs tarball CLI byte identity"
+}

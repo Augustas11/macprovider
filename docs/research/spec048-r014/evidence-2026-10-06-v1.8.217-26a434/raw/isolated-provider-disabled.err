@@ -1,0 +1,38 @@
+event=batching_unsupported action=serial_routed reason=local_batching_capability_unavailable
+event=continuous_batching_manual_tuple action=ignored reason=signed_policy_required
+event=continuous_batching_policy action=resolved status=absent_empty_off_fallback entries=0 rejected_runtime_provenance=0 emergency_off=false
+mlx_cache_limit_bytes=2147483648
+{"artifact_role":"sidecar","event":"native_mtp_serve_path_admission","reason_code":"revocation_state_unavailable","status":"rejected"}
+[paged-kv] moe-isolation first prefill=[271,271] serial=[271,271] decodeA=[248068] serialA=[248068] decodeB=[248068] serialB=[248068]
+[paged-kv] moe-isolation rejoin decodeA=[198] serialA=[198] decodeB=[248068] serialB=[248068]
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b challenge pair 0 not distinguishing; trying next
+[paged-kv] moe-isolation first prefill=[2943,414] serial=[2943,414] decodeA=[11] serialA=[11] decodeB=[11] serialB=[11]
+[paged-kv] moe-isolation rejoin decodeA=[4097] serialA=[4097] decodeB=[11] serialB=[11]
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b challenge pair 1 not distinguishing; trying next
+[paged-kv] moe-isolation first prefill=[264,198] serial=[264,198] decodeA=[478] serialA=[478] decodeB=[406] serialB=[406]
+[paged-kv] moe-isolation rejoin decodeA=[292] serialA=[292] decodeB=[406] serialB=[406]
+[paged-kv] parity model=qwen/qwen3.6-35b-a3b established=true nLayers=10 nNew=32 gatherKernelCalls=640 expectCalls=640 maxLogicalBlocks=18 nonIdentityPermutation=true
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b requiresMoE=true proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+[paged-kv] measure OK: runtime measurement complete, paged-KV attach eligible for model=qwen/qwen3.6-35b-a3b
+[paged-kv] runtime-identity model=qwen/qwen3.6-35b-a3b model_sha256=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1 hardware_class=apple-silicon:Apple M3 Ultra:ram-256gb metallib_sha256=84e487182336648a826132e50e7a4cd2cae0bc77ac6eafa89cc72f3a964fdbaf kernel_identifier=macprovider_paged_kv_gather_v1
+event=batching_unsupported action=serial_routed reason=tuple_acceptance_coverage_unavailable
+event=conv_cache action=miss key_hash=6d492a9f reason=cold_start
+{"event":"receipt_issued","model_id":"mlx-community\/Qwen3.6-35B-A3B-4bit","provider_id":"r014-isolated-provider","request_id":"req-f19dec3b-607f-4c60-9c72-c83c9b6e728c","tokens_out":2,"ttft_ms":190,"unix_ts":1791286369}
+{"cached_prompt_tokens":0,"completion_tokens":2,"event":"kv_cache_request_completed","finish_reason":"stop","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"mlx-community\/Qwen3.6-35B-A3B-4bit","prompt_tokens":16,"provider_id":"r014-isolated-provider","request_id":"req-f19dec3b-607f-4c60-9c72-c83c9b6e728c","stream":false}
+event=batching_unsupported action=serial_routed reason=tuple_acceptance_coverage_unavailable
+event=conv_cache action=miss key_hash=aaf715b6 reason=cold_start
+{"event":"receipt_issued","model_id":"mlx-community\/Qwen3.6-35B-A3B-4bit","provider_id":"r014-isolated-provider","request_id":"req-a4504de3-03de-4c6a-8be8-6e809c59c327","tokens_out":48,"ttft_ms":58,"unix_ts":1791286369}
+{"cached_prompt_tokens":0,"completion_tokens":48,"event":"kv_cache_request_completed","finish_reason":"stop","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"mlx-community\/Qwen3.6-35B-A3B-4bit","prompt_tokens":23,"provider_id":"r014-isolated-provider","request_id":"req-a4504de3-03de-4c6a-8be8-6e809c59c327","stream":false}
+event=batching_unsupported action=serial_routed reason=tuple_acceptance_coverage_unavailable
+event=conv_cache action=miss key_hash=e25cd497 reason=cold_start
+event=conv_cache action=cold_unattached key_hash=e25cd497
+{"event":"receipt_issued","model_id":"mlx-community\/Qwen3.6-35B-A3B-4bit","provider_id":"r014-isolated-provider","request_id":"req-1b0af220-b07f-463f-afbb-3b6e2add6eb3","tokens_out":96,"ttft_ms":0,"unix_ts":1791286370}
+event=batching_unsupported action=serial_routed reason=tuple_acceptance_coverage_unavailable
+event=conv_cache action=miss key_hash=2e715e36 reason=cold_start
+event=conv_cache action=cold_unattached key_hash=2e715e36
+{"event":"receipt_issued","model_id":"mlx-community\/Qwen3.6-35B-A3B-4bit","provider_id":"r014-isolated-provider","request_id":"req-4e6ecb28-6869-4c73-94ed-e34c4a676633","tokens_out":32,"ttft_ms":55,"unix_ts":1791286370}
+{"cached_prompt_tokens":0,"completion_tokens":32,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"mlx-community\/Qwen3.6-35B-A3B-4bit","prompt_tokens":19,"provider_id":"r014-isolated-provider","request_id":"req-4e6ecb28-6869-4c73-94ed-e34c4a676633","stream":false}
+event=batching_unsupported action=serial_routed reason=tuple_acceptance_coverage_unavailable
+event=conv_cache action=miss key_hash=aaf715b6 reason=cold_start
+{"event":"receipt_issued","model_id":"mlx-community\/Qwen3.6-35B-A3B-4bit","provider_id":"r014-isolated-provider","request_id":"req-35d05869-3877-48e5-99c6-6a0b17ba5d89","tokens_out":48,"ttft_ms":58,"unix_ts":1791286371}
+{"cached_prompt_tokens":0,"completion_tokens":48,"event":"kv_cache_request_completed","finish_reason":"stop","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"mlx-community\/Qwen3.6-35B-A3B-4bit","prompt_tokens":23,"provider_id":"r014-isolated-provider","request_id":"req-35d05869-3877-48e5-99c6-6a0b17ba5d89","stream":false}

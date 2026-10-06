@@ -1,0 +1,20 @@
+{
+  "binary": "lab build + signed release",
+  "details": {},
+  "evidence": [
+    "records/lab-journey-result.json",
+    "raw/lab-journey.stderr",
+    "records/isolated-coordinator.json"
+  ],
+  "item": "item3-accounting",
+  "recorded_at": "2026-10-06T11:33:31Z",
+  "schema": "macprovider.native-mtp-r014-rehearsal-check.v1",
+  "status": "FAIL",
+  "sub_checks": {
+    "isolated.buyer_usage_and_billing_recorded_for_ordinary": true,
+    "isolated.native_rows_billed_identically": false,
+    "lab.usage_and_terminal_parity_native_vs_ordinary": false
+  },
+  "summary": "usage tokens and terminal reasons match ordinary for every native row (lab); receipt/billing invariance for native rows cannot be exercised end to end because no released provider can admit the tuple (item1-revocation-feed, delivery-path.md)",
+  "title": "R014.3 accounting"
+}

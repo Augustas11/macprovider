@@ -1,0 +1,20 @@
+{
+  "bound_fields": {
+    "artifact_hash": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+    "live_executable_cdhash": "456789abcdef0123456789abcdef0123456789ab",
+    "max_native_active_rows": 2,
+    "provider_revision": "0123456789abcdef0123456789abcdef01234567",
+    "qualified_slots": 2,
+    "release_id": "native-mtp-hardware-e2e",
+    "reproducible_build_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "runtime_revision": "b181102984a4d1875efbd9e0eab3a7dfd1c012c5",
+    "signer_key_id": "native-mtp-hardware-e2e",
+    "source_commit": "0123456789abcdef0123456789abcdef01234567"
+  },
+  "generator_identity": {
+    "native_mtp_admission_tuple_sha256": [
+      "fbec5a58b6d4ceb9f608e6fe00e82cbfd610d55d67e1ac25028c57a3eb1fbf95"
+    ],
+    "sidecar_sha256": "8befb28c8b48d665a3d9e07b2c16f2694eedce314ff949a37513604f71cbc58b"
+  }
+}

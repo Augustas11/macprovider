@@ -1,0 +1,18 @@
+{
+  "binary": "signed release + isolated coordinator built from release source",
+  "details": {},
+  "evidence": [
+    "records/isolated-coordinator.json"
+  ],
+  "item": "item8-config-enable-disable",
+  "recorded_at": "2026-10-06T11:32:55Z",
+  "schema": "macprovider.native-mtp-r014-rehearsal-check.v1",
+  "status": "FAIL",
+  "sub_checks": {
+    "disable.ordinary_fallback_serves": true,
+    "enable.bank_loaded": true,
+    "enable.tuple_offered_and_selectable": false
+  },
+  "summary": "coordinator config-enable (pool.native_mtp_canary) loaded the signed bank but the tuple could not be enabled because the provider never offers it; disable leaves ordinary decode serving every request",
+  "title": "R014.8 config-enable the tuple, then disable and fall back to ordinary"
+}

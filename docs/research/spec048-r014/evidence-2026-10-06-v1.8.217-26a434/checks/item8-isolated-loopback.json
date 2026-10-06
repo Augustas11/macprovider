@@ -1,0 +1,25 @@
+{
+  "binary": "signed release",
+  "details": {
+    "note": "the R014.8 native self-test/oracle smoke and sidecar binding on the final binary need a production-signed sidecar; see item1-sidecar-tuple-binding"
+  },
+  "evidence": [
+    "records/signed-serve.json",
+    "raw/signed-s0-default.err"
+  ],
+  "item": "item8-isolated-loopback",
+  "recorded_at": "2026-10-06T11:33:31Z",
+  "schema": "macprovider.native-mtp-r014-rehearsal-check.v1",
+  "status": "PASS",
+  "sub_checks": {
+    "s0.cb_batch_depth_ge_2": true,
+    "s0.cb_paged_kv_attached": true,
+    "s0.native_mtp_default_off": true,
+    "s0.native_mtp_object_present": true,
+    "s0.nonstream_ok": true,
+    "s0.ordinary_concurrent_8_ok": true,
+    "s0.ready": true
+  },
+  "summary": "signed release serves no-join on isolated loopback: native MTP default-off, status object present, ordinary streaming/non-streaming and 8-way continuous batching on the tuple",
+  "title": "R014.8 release candidate revalidated in isolated loopback"
+}
