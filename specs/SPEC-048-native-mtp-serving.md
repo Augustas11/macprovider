@@ -1,6 +1,6 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.24
+**Version:** 0.1.25
 
 ```json
 {
@@ -984,7 +984,8 @@ window containing ordinary then MTP in randomized order; the bootstrap
 resamples whole blocks with 10,000 draws. Gates apply separately to every
 advertised `(hardware, artifact, slots, prompt/output stratum)` cell; no pooled
 pass may hide a failing cell. Holm correction at family-wise alpha 0.05 covers
-the throughput, TTFT, inter-token, and rejection hypotheses across all cells.
+the throughput, TTFT, per-output-token latency, worst-gap, and rejection
+hypotheses across all cells.
 
 **Run order.** The order is preregistered by the frozen policy seed: in each
 cell, half the measured blocks (rounded up) run native first, placed by a
@@ -1048,7 +1049,8 @@ exempt and never yield an admission verdict.
 
 **Cell classes.** The frozen `max_native_active_rows` splits the matrix. A
 cell whose slot count is at or below it is *native-eligible*: it carries the
-throughput, TTFT, inter-token, and rejection gates above, admits every row
+throughput, TTFT, per-output-token latency, worst-gap, and rejection gates
+above, admits every row
 native (a load-gate downgrade there fails the cell), and every native run
 must show proposals and target forwards. A cell above it is *gated*: it
 measures the R007 load gate, so admitted native rows may legitimately spend
@@ -1061,10 +1063,11 @@ at or above it; admissions plus downgrades account for every request; parity
 holds and fallback/error is zero; and native is non-inferior to ordinary at
 the mixed-load margins of this section — the Holm-corrected lower bound of
 the decode-throughput change at least -5%, the corrected upper bounds of p95
-TTFT and p95 inter-token regression at most 5%, and capacity rejection up by
+TTFT and p95 per-output-token latency regression at most 5%, the worst-gap
+bound below, and capacity rejection up by
 at most one percentage point. These margins are frozen in the policy
 thresholds (`gated_throughput_lower_bound_min` -0.05,
-`gated_ttft_p95_upper_bound_max` 0.05, `gated_itl_p95_upper_bound_max` 0.05)
+`gated_ttft_p95_upper_bound_max` 0.05, `gated_tpot_p95_upper_bound_max` 0.05)
 and join the same Holm family. A tuple whose bound is 1 therefore passes R015
 with a native gain at one slot and non-inferiority at its gated cells.
 
@@ -1086,7 +1089,8 @@ Zero proposals remain allowed for held rows.
 The campaign MUST report median and corrected confidence interval for
 aggregate and per-request decode throughput, aggregate committed tokens/s and
 per-request tokens/s end to end, p50/p95 TTFT and
-inter-token latency, proposed/accepted/per-position/mean acceptance, target
+inter-chunk gap, p95 per-output-token latency, p99 inter-chunk gap,
+proposed/accepted/per-position/mean acceptance, target
 forwards per committed token, peak/resident memory, capacity rejection,
 fallback/error rate, terminal parity, and thermal stability.
 
@@ -1108,8 +1112,40 @@ MUST be at least 15% in each cell at the intended advertised slot count; both
 paths use that same slot count, and the baseline is the best ordinary
 production-qualified configuration at that count. The corrected upper bound
 for native-MTP p95 TTFT regression MUST be no more than 10%, and the corrected
-upper bound for p95 inter-token regression MUST be no more than 0%; bare point
-estimates do not pass. Capacity rejection MUST increase by no more than one
+upper bound for p95 per-output-token latency (TPOT) regression MUST be no more
+than 0%; bare point estimates do not pass. A request's TPOT is its decode
+interval (first token to completion) divided by its completion tokens after
+the first: the token-weighted mean, over every streamed chunk after the first,
+of the chunk's gap divided by the tokens it carries. A run's statistic is the
+p95 of its requests' TPOT, compared native over ordinary per paired block like
+every other gate. TPOT is computed from the recorded per-request decode
+throughput, so it needs no per-chunk token count, which the stream does not
+expose. Every cell, native-eligible and gated, MUST also pass a worst-gap
+bound: the corrected upper bound of the paired-block ratio of native p99
+inter-chunk gap (over every gap of the run's requests) to ordinary p99
+inter-chunk gap MUST be no more than `proposal_depth + 1` (policy
+`chunk_gap_p99_upper_bound_max` 1.0, as ratio minus one, at the frozen depth
+1). A native chunk is one verify round that commits at most `proposal_depth +
+1` tokens, so even a round whose every token is a fresh target forward may take
+at most that many ordinary token-times; a tail beyond it is a stall or extra
+work that no per-token average excuses. A record without its inter-chunk gaps
+fails closed.
+
+*Gate amendment (0.1.25).* Through 0.1.24 the latency gate was the corrected
+upper bound of the p95 inter-chunk gap, native over ordinary, at most 0%
+(gated cells 5%). That compares one native verify round, which streams all of
+its committed tokens as one chunk (about 1.85-1.92 tokens at depth 1 on the
+A3B tuple), with one ordinary token, so it grows as the native path commits
+more tokens per round and cannot pass at any acceptance rate while accepted
+tokens are emitted together. The mismatch was first seen in the 2026-10-03
+fused-baseline R015 and is documented in both 2026-10-06 R015 runs, where
+native per-token latency fell (decode ratio 1.24-1.31) while the inter-chunk
+upper bound stayed at +37% to +57%. The amendment replaces that gate with the
+TPOT gate and the worst-gap bound above. It does not reinterpret any earlier
+run: every R015 verdict recorded under 0.1.24 or earlier stays as recorded
+(all of them FAIL), policies frozen with the inter-chunk gate are still judged
+by it, and the decode-throughput, TTFT, rejection, memory, and hard gates are
+unchanged. Inter-chunk p50/p95 remain reported. Capacity rejection MUST increase by no more than one
 percentage point. Measured peak process resident memory plus the frozen safety
 margin MUST remain within physical RAM, and system-wide available unified
 memory sampled at least once per second MUST retain at least 10% physical-RAM
@@ -1282,6 +1318,19 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.25 (2026-10-06)** — MTP-15 replaces the R015 inter-chunk p95 latency
+  gate with a per-output-token latency (TPOT) gate (p95 across a run's
+  requests, corrected upper bound <= 0%, gated cells <= 5%) and a worst-gap
+  bound in every cell (native p99 inter-chunk gap at most `proposal_depth + 1`
+  times ordinary's, corrected upper bound, frozen 1.0 as ratio minus one), in
+  the same Holm family and paired-block bootstrap (#1770). Motivation: the
+  structural mismatch between one multi-token native chunk and one ordinary
+  token, first seen 2026-10-03 and documented in the 2026-10-06 runs. Decode
+  throughput, TTFT, rejection, memory, and hard gates are unchanged; earlier
+  verdicts stay as recorded and legacy-gate policies are still judged by
+  their own gates. A new R015 must be frozen with the amended gates; native
+  MTP stays default-off.
 
 - **0.1.24 (2026-10-06)** — Moves the immutable fork candidate to
   `ca8c384c4fb6bc7d2fbb7c70a18c34b935701805` (parent `b1811029…`) to cut

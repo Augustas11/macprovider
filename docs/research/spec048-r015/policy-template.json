@@ -36,13 +36,14 @@
   "thresholds": {
     "throughput_lower_bound_min": 0.15,
     "ttft_p95_upper_bound_max": 0.1,
-    "itl_p95_upper_bound_max": 0.0,
+    "tpot_p95_upper_bound_max": 0.0,
+    "chunk_gap_p99_upper_bound_max": 1.0,
     "rejection_increase_max_pp": 1.0,
     "min_available_memory_fraction": 0.1,
     "bootstrap_draws": 10000,
     "alpha": 0.05,
     "gated_throughput_lower_bound_min": -0.05,
     "gated_ttft_p95_upper_bound_max": 0.05,
-    "gated_itl_p95_upper_bound_max": 0.05
+    "gated_tpot_p95_upper_bound_max": 0.05
   }
 }

@@ -111,7 +111,27 @@ FIXED_METHODOLOGY = {
     "exclusion_rules": "none",
     "confidence_method": "paired_block_bootstrap_holm_v1",
 }
+# SPEC-048 0.1.25 gate set. The latency gates are per-output-token latency
+# (TPOT) and a worst-chunk-gap bound; the inter-chunk p95 gate of earlier
+# versions compared one native verify step, which carries up to
+# proposal_depth + 1 tokens, against one ordinary token.
 FROZEN_THRESHOLDS = {
+    "throughput_lower_bound_min": 0.15,
+    "ttft_p95_upper_bound_max": 0.10,
+    "tpot_p95_upper_bound_max": 0.0,
+    "chunk_gap_p99_upper_bound_max": 1.0,
+    "rejection_increase_max_pp": 1.0,
+    "min_available_memory_fraction": 0.10,
+    "bootstrap_draws": 10000,
+    "alpha": 0.05,
+    "gated_throughput_lower_bound_min": -0.05,
+    "gated_ttft_p95_upper_bound_max": 0.05,
+    "gated_tpot_p95_upper_bound_max": 0.05,
+}
+# The SPEC-048 0.1.24-and-earlier gate set. Policies frozen with it are still
+# judged by it, so every recorded verdict reproduces unchanged; the bench no
+# longer accepts it for new runs.
+LEGACY_ITL_THRESHOLDS = {
     "throughput_lower_bound_min": 0.15,
     "ttft_p95_upper_bound_max": 0.10,
     "itl_p95_upper_bound_max": 0.0,
@@ -123,6 +143,30 @@ FROZEN_THRESHOLDS = {
     "gated_ttft_p95_upper_bound_max": 0.05,
     "gated_itl_p95_upper_bound_max": 0.05,
 }
+GATE_SET_AMENDED = "tpot_chunk_gap_v2"
+GATE_SET_LEGACY = "inter_chunk_itl_v1"
+GATE_METRICS = {
+    GATE_SET_AMENDED: ("throughput", "ttft", "tpot", "chunk_gap_p99", "rejection"),
+    GATE_SET_LEGACY: ("throughput", "ttft", "itl", "rejection"),
+}
+
+
+def _gate_set(thresholds: object) -> str | None:
+    """The frozen gate set a policy's threshold key set selects, if any."""
+    if not isinstance(thresholds, dict):
+        return None
+    if set(thresholds) == set(FROZEN_THRESHOLDS):
+        return GATE_SET_AMENDED
+    if set(thresholds) == set(LEGACY_ITL_THRESHOLDS):
+        return GATE_SET_LEGACY
+    return None
+
+
+def _frozen_values(gate_set: str) -> dict:
+    expected = dict(FROZEN_THRESHOLDS if gate_set == GATE_SET_AMENDED else LEGACY_ITL_THRESHOLDS)
+    # One draw count for both sets (tests lower it on FROZEN_THRESHOLDS).
+    expected["bootstrap_draws"] = FROZEN_THRESHOLDS["bootstrap_draws"]
+    return expected
 
 
 def _policy_contract_violations(policy: dict) -> list[str]:
@@ -164,10 +208,11 @@ def _policy_contract_violations(policy: dict) -> list[str]:
                 and len(set(values)) == len(values)):
             violations.append(f"field_invalid:{key}")
     thresholds = policy.get("thresholds")
-    if not isinstance(thresholds, dict) or set(thresholds) != set(FROZEN_THRESHOLDS):
+    gate_set = _gate_set(thresholds)
+    if gate_set is None:
         violations.append("thresholds_key_set_not_frozen")
     else:
-        for key, expected in FROZEN_THRESHOLDS.items():
+        for key, expected in _frozen_values(gate_set).items():
             value = thresholds[key]
             if isinstance(value, bool) or not isinstance(value, (int, float)) or abs(value - expected) >= 1e-7:
                 violations.append(f"threshold_not_frozen:{key}")
@@ -242,7 +287,6 @@ def _matrix_violations(policy: dict) -> list[str]:
 GATED_THRESHOLD_KEYS = (
     "gated_throughput_lower_bound_min",
     "gated_ttft_p95_upper_bound_max",
-    "gated_itl_p95_upper_bound_max",
 )
 _CELL_SLOTS = re.compile(r"^s(\d+)-")
 
@@ -439,7 +483,32 @@ def _is_count(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
-def _invalid_run_fields(run: dict) -> list[str]:
+def _chunk_gaps(run: dict) -> list[float] | None:
+    """Every inter-chunk gap of the run's requests, or None when the record
+    carries none or any is malformed."""
+    raw = run.get("raw_inter_token_gaps_seconds")
+    if not isinstance(raw, list) or not all(isinstance(item, list) for item in raw):
+        return None
+    gaps = [gap for item in raw for gap in item]
+    if not gaps or not all(_is_number(gap) for gap in gaps):
+        return None
+    return [float(gap) for gap in gaps]
+
+
+def _tpot_p95(run: dict) -> float:
+    """p95 across the run's requests of per-output-token latency: a request's
+    decode interval (first token to completion) over the tokens after its
+    first, which is the token-weighted mean of every later chunk's gap divided
+    by the tokens that chunk carries. Callers validate the record first."""
+    return _percentile([1.0 / float(v) for v in run["per_request_decode_tps"]], 0.95)  # type: ignore[return-value]
+
+
+def _chunk_gap_p99(run: dict) -> float:
+    """p99 of every inter-chunk gap in the run. Callers validate first."""
+    return _percentile(_chunk_gaps(run) or [], 0.99)  # type: ignore[return-value]
+
+
+def _invalid_run_fields(run: dict, require_chunk_gaps: bool = False) -> list[str]:
     invalid = [field for field in _REQUIRED_NUMBER_FIELDS if not _is_number(run.get(field))]
     invalid += [field for field in _REQUIRED_COUNT_FIELDS if not _is_count(run.get(field))]
     invalid += [
@@ -467,6 +536,10 @@ def _invalid_run_fields(run: dict) -> list[str]:
         or not all(_is_number(v) and v > 0 for v in per_request_decode)
     ):
         invalid.append("per_request_decode_tps")
+    # The worst-gap bound reads the recorded gaps; none, or one malformed,
+    # fails the record rather than reading as a stall-free run.
+    if require_chunk_gaps and _chunk_gaps(run) is None:
+        invalid.append("raw_inter_token_gaps_seconds")
     return sorted(set(invalid))
 
 
@@ -554,6 +627,10 @@ def _metric(pair: tuple[dict, dict], name: str) -> float:
         return _safe_ratio(float(native["ttft_p95_seconds"]), float(ordinary["ttft_p95_seconds"])) - 1.0
     if name == "itl":
         return _safe_ratio(float(native["inter_token_gap_p95_seconds"]), float(ordinary["inter_token_gap_p95_seconds"])) - 1.0
+    if name == "tpot":
+        return _safe_ratio(_tpot_p95(native), _tpot_p95(ordinary)) - 1.0
+    if name == "chunk_gap_p99":
+        return _safe_ratio(_chunk_gap_p99(native), _chunk_gap_p99(ordinary)) - 1.0
     if name == "rejection":
         ordinary_rate = float(ordinary["capacity_rejections"]) / float(ordinary["requests"])
         native_rate = float(native["capacity_rejections"]) / float(native["requests"])
@@ -563,7 +640,7 @@ def _metric(pair: tuple[dict, dict], name: str) -> float:
 
 # R015 reporting family: every metric the campaign must report with a median
 # and corrected confidence interval, per path, from the same paired blocks.
-def _reported_values(run: dict) -> dict[str, float | None]:
+def _reported_values(run: dict, amended: bool = True) -> dict[str, float | None]:
     requests = float(run["requests"])
     proposed = run.get("mtp_proposed_tokens")
     accepted = run.get("mtp_accepted_tokens")
@@ -591,14 +668,24 @@ def _reported_values(run: dict) -> dict[str, float | None]:
         "peak_phys_footprint_bytes": float(run["peak_phys_footprint_bytes"]),
         "capacity_rejection_rate": float(run["capacity_rejections"]) / requests,
         "fallback_error_rate": (float(run["fallbacks"]) + float(run["errors"])) / requests,
+        # Amended-gate latency series; absent under the legacy gate set so its
+        # corrected intervals reproduce unchanged.
+        **(
+            {
+                "tpot_p95_seconds": _tpot_p95(run),
+                "chunk_gap_p99_seconds": _chunk_gap_p99(run) if _chunk_gaps(run) is not None else None,
+            }
+            if amended
+            else {}
+        ),
     }
 
 
-def _report_metrics(pairs: list[tuple[dict, dict]], draws: int, alpha: float, seed: int) -> dict:
+def _report_metrics(pairs: list[tuple[dict, dict]], draws: int, alpha: float, seed: int, amended: bool = True) -> dict:
     """Median and Bonferroni-corrected two-sided percentile bootstrap CI over
     whole paired blocks for every reported metric and path."""
     per_block = [
-        {"ordinary": _reported_values(ordinary), "native_mtp": _reported_values(native)}
+        {"ordinary": _reported_values(ordinary, amended), "native_mtp": _reported_values(native, amended)}
         for ordinary, native in pairs
     ]
     series: dict[tuple[str, str], list[float]] = {}
@@ -643,9 +730,12 @@ def _holm_adjusted(p_values: list[float]) -> list[float]:
 def _bootstrap(pairs: list[tuple[dict, dict]], metric_name: str, draws: int, seed: int) -> list[float]:
     rng = random.Random(seed)
     n = len(pairs)
+    # A block's statistic is fixed, so compute it once per block; the draw
+    # sequence is unchanged.
+    per_block = [_metric(pair, metric_name) for pair in pairs]
     values: list[float] = []
     for _ in range(draws):
-        sample = [_metric(pairs[rng.randrange(n)], metric_name) for _ in range(n)]
+        sample = [per_block[rng.randrange(n)] for _ in range(n)]
         values.append(statistics.median(sample))
     return values
 
@@ -742,7 +832,10 @@ def _sustained_order_issues(sustained_runs: list[dict]) -> list[str]:
     return issues
 
 
-def analyze(jsonl_path: Path, policy_path: Path) -> dict:
+def analyze(jsonl_path: Path, policy_path: Path, exploratory_amended_gates: bool = False) -> dict:
+    """Judge the run against its frozen policy. `exploratory_amended_gates`
+    re-reads a legacy-gate policy's records under the amended (SPEC-048
+    0.1.25) gates for a sanity check; that result never carries a verdict."""
     policy = _load_policy(policy_path)
     policy_sha = _sha256(policy_path)
     header, runs = _load_jsonl(jsonl_path)
@@ -841,12 +934,41 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
         }
 
     thresholds = policy["thresholds"]
+    gate_set = _gate_set(thresholds)
+    if gate_set is None:
+        return {
+            "schema": "macprovider.native-mtp-r015-analysis.v1",
+            "overall_status": "FAIL",
+            "reason": "thresholds_key_set_not_frozen",
+            "cells": [],
+        }
+    reanalysis_of = None
+    if exploratory_amended_gates:
+        if gate_set != GATE_SET_LEGACY:
+            return {
+                "schema": "macprovider.native-mtp-r015-analysis.v1",
+                "overall_status": "FAIL",
+                "reason": "exploratory_reanalysis_needs_legacy_policy",
+                "cells": [],
+            }
+        reanalysis_of = gate_set
+        thresholds = {
+            **{key: value for key, value in FROZEN_THRESHOLDS.items()},
+            "bootstrap_draws": thresholds["bootstrap_draws"],
+            "alpha": thresholds["alpha"],
+        }
+        gate_set = GATE_SET_AMENDED
+    require_chunk_gaps = gate_set == GATE_SET_AMENDED
+
+    def invalid_fields(run: dict) -> list[str]:
+        return _invalid_run_fields(run, require_chunk_gaps)
+
     bound = _native_bound(policy)
     if any(_is_gated_cell(cell_id, bound) for cell_id in _observed_cells(policy)) and any(
         not isinstance(thresholds.get(key), (int, float))
         or isinstance(thresholds.get(key), bool)
         or not math.isfinite(thresholds[key])
-        for key in GATED_THRESHOLD_KEYS
+        for key in GATED_THRESHOLD_KEYS + ("gated_tpot_p95_upper_bound_max" if gate_set == GATE_SET_AMENDED else "gated_itl_p95_upper_bound_max",)
     ):
         return {
             "schema": "macprovider.native-mtp-r015-analysis.v1",
@@ -886,13 +1008,13 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
         invalid_records = [
             f"invalid_run_record:{run.get('path')}:{run.get('block_index')}:{','.join(fields)}"
             for run in hard_gate_runs
-            if (fields := _invalid_run_fields(run))
+            if (fields := invalid_fields(run))
         ]
         hard_failures.extend(invalid_records)
         # Only fully valid records feed any statistic; an invalid record has
         # already failed the cell above.
-        pairs = [pair for pair in pairs if not _invalid_run_fields(pair[0]) and not _invalid_run_fields(pair[1])]
-        sustained_runs = [run for run in sustained_runs if not _invalid_run_fields(run)]
+        pairs = [pair for pair in pairs if not invalid_fields(pair[0]) and not invalid_fields(pair[1])]
+        sustained_runs = [run for run in sustained_runs if not invalid_fields(run)]
         hard_gate_runs = [run for pair in pairs for run in pair] + sustained_runs
         parity_mismatches = sum(int(r["parity_mismatch"]) for r in hard_gate_runs)
         non_native_admissions = sum(r["non_native_admissions"] for r in hard_gate_runs)
@@ -1007,10 +1129,13 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
 
         metrics = {}
         usable_pairs = pairs if pairs else []
-        for metric_name in ("throughput", "ttft", "itl", "rejection"):
+        for metric_name in GATE_METRICS[gate_set]:
             observed = [_metric(pair, metric_name) for pair in usable_pairs]
             median = _median(observed)
-            boot = _bootstrap(usable_pairs, metric_name, draws, base_seed + cell_index * 17 + len(metric_name)) if usable_pairs else []
+            # Seeds of the original four metrics are unchanged so legacy
+            # analyses reproduce byte for byte.
+            seed = base_seed + cell_index * 17 + {"tpot": 307, "chunk_gap_p99": 401}.get(metric_name, len(metric_name))
+            boot = _bootstrap(usable_pairs, metric_name, draws, seed) if usable_pairs else []
             metrics[metric_name] = {"median": median, "draws": boot}
         # Prefill-inclusive throughput: reported, never gated (prefill is the
         # same work on both paths and is gated as TTFT).
@@ -1050,7 +1175,7 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
                 for _, r in pairs
                 if (value := _optional_ratio(float(r.get("target_forwards", 0)), float(r.get("committed_completion_tokens", 0)))) is not None
             ]),
-            "reported_metrics": _report_metrics(pairs, draws, alpha, base_seed + cell_index * 17 + 101),
+            "reported_metrics": _report_metrics(pairs, draws, alpha, base_seed + cell_index * 17 + 101, gate_set == GATE_SET_AMENDED),
             "peak_phys_footprint_bytes": max([r["peak_phys_footprint_bytes"] for r in hard_gate_runs] or [0]),
             "min_available_memory_fraction": min([float(r["min_available_memory_fraction"]) for r in hard_gate_runs] or [0]),
             "sustained_runs": len(sustained_runs),
@@ -1073,6 +1198,14 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
                 failing_side = sum(1 for x in draws_for_metric if x >= threshold)
             elif metric_name == "itl":
                 threshold = float(thresholds[prefix + "itl_p95_upper_bound_max"])
+                failing_side = sum(1 for x in draws_for_metric if x >= threshold)
+            elif metric_name == "tpot":
+                threshold = float(thresholds[prefix + "tpot_p95_upper_bound_max"])
+                failing_side = sum(1 for x in draws_for_metric if x >= threshold)
+            elif metric_name == "chunk_gap_p99":
+                # One structural bound for every cell class: a native chunk
+                # covers at most proposal_depth + 1 committed tokens.
+                threshold = float(thresholds["chunk_gap_p99_upper_bound_max"])
                 failing_side = sum(1 for x in draws_for_metric if x >= threshold)
             else:
                 threshold = float(thresholds["rejection_increase_max_pp"])
@@ -1137,9 +1270,13 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
             overall = "FAIL"
         else:
             overall = "EXPLORATORY_NO_VERDICT"
+    elif reanalysis_of is not None:
+        overall = "EXPLORATORY_NO_VERDICT"
     return {
         "schema": "macprovider.native-mtp-r015-analysis.v1",
         "overall_status": overall,
+        "gate_set": gate_set,
+        **({"exploratory_reanalysis_of_gate_set": reanalysis_of} if reanalysis_of else {}),
         "policy_sha256": policy_sha,
         "provider_commit": header.get("provider_commit"),
         "unavailable_metrics": header.get("unavailable_metrics", []),
@@ -1148,9 +1285,13 @@ def analyze(jsonl_path: Path, policy_path: Path) -> dict:
 
 
 def markdown_table(result: dict) -> str:
+    amended = result.get("gate_set") == GATE_SET_AMENDED
+    latency_header = "TPOT p95 UB | Gap p99 UB" if amended else "ITL UB"
     lines = [
-        "| Cell | Status | Blocks | Decode ratio | Decode LB | TTFT UB | ITL UB | Rejection UB | E2E ratio (info) | Hard failures |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        f"| Cell | Status | Blocks | Decode ratio | Decode LB | TTFT UB | {latency_header} | Rejection UB | E2E ratio (info) | Hard failures |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |"
+        if amended
+        else "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for cell in result.get("cells", []):
         metrics = cell["metrics"]
@@ -1166,7 +1307,11 @@ def markdown_table(result: dict) -> str:
                 thr=_fmt(metrics["throughput"].get("corrected_lower_bound")),
                 e2e=_fmt_ratio(cell["informational_metrics"]["end_to_end_throughput"]["median"]),
                 ttft=_fmt(metrics["ttft"].get("corrected_upper_bound")),
-                itl=_fmt(metrics["itl"].get("corrected_upper_bound")),
+                itl=(
+                    _fmt(metrics["tpot"].get("corrected_upper_bound")) + " | " + _fmt(metrics["chunk_gap_p99"].get("corrected_upper_bound"))
+                    if amended
+                    else _fmt(metrics["itl"].get("corrected_upper_bound"))
+                ),
                 rej=_fmt(metrics["rejection"].get("corrected_upper_bound")),
                 hard=hard,
             )
@@ -1193,8 +1338,13 @@ def main(argv: list[str] | None = None) -> int:
         default="json",
         help="json (default) prints one parseable JSON document; markdown prints the summary table.",
     )
+    parser.add_argument(
+        "--exploratory-amended-gates",
+        action="store_true",
+        help="re-read a legacy-gate policy's records under the SPEC-048 0.1.25 gates; never a verdict.",
+    )
     args = parser.parse_args(argv)
-    result = analyze(args.jsonl, args.policy)
+    result = analyze(args.jsonl, args.policy, exploratory_amended_gates=args.exploratory_amended_gates)
     if args.format == "json":
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
