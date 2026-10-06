@@ -1,6 +1,21 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.29 (2026-10-06, loopback startup throughput probe)
+**Version:** 1.9.30 (2026-10-06, cancel_request delivered-output boundary)
+
+**Change log v1.9.30 (2026-10-06, cancel_request delivered-output boundary):**
+`cancel_request` (§ 6.6) gains the optional integer `delivered_output_bytes`
+(#1690 BUG-2). The coordinator sends it on a `buyer_disconnected` cancel for a
+streaming attempt whose delivered output it tracks: the SPEC-015 §N.5
+canonical delivered byte count the buyer had received when the coordinator
+retired the request. Chunks the provider streamed after that point are dropped
+by the coordinator and never reach the buyer, so a provider that receives the
+field binds its `buyer_cancel` receipt to the prefix of the content it sent
+whose canonical byte length equals it (SPEC-015 §N.7). The prefix must end at
+the end of a content frame the provider sent, with no tool call opened;
+otherwise the provider issues no receipt. Without the field the provider
+binds everything it sent, as before. Older providers ignore the field;
+the frame stays tolerant of unknown fields. Relay-blind and other cancels
+omit it.
 
 **Change log v1.9.29 (2026-10-06, loopback startup throughput probe):** A
 loopback serving runtime (SPEC-046, SPEC-010-R007/R009) now runs the FR-20
@@ -3011,6 +3026,18 @@ times out.
 | `type` | string | Yes | Always `"cancel_request"` |
 | `request_id` | string | Yes | The `request_id` of the inference to cancel |
 | `reason` | string | Yes | One of: `"buyer_disconnected"`, `"timeout"`, `"coordinator_shutdown"` |
+| `delivered_output_bytes` | integer | No | (v1.9.30) On a `buyer_disconnected` cancel of a streaming attempt: the SPEC-015 §N.5 canonical delivered output bytes the buyer received before the coordinator retired the request. Absent when the coordinator does not track it (relay-blind, other reasons). |
+
+**Delivered-output boundary (v1.9.30, #1690 BUG-2).** When a
+`buyer_disconnected` `cancel_request` carries `delivered_output_bytes`, the
+provider's `buyer_cancel` receipt binds exactly the prefix of the content it
+sent whose SPEC-015 §N.5 canonical byte length equals that value, and its
+usage covers that prefix only (SPEC-015 §N.12 item 7). The prefix MUST end at
+the end of a content frame the provider sent, and no tool-call frame may have
+been sent; a value of `0` binds the empty prefix. When no sent content frame
+ends at the boundary, the provider MUST NOT issue a receipt for the attempt.
+Without the field the provider keeps the pre-v1.9.30 rule: it binds all
+content it sent.
 
 **Provider behavior on receipt (reconciled v1.9.19 — advertised-capacity relay, no queue):**
 1. If the `request_id` is currently being processed: abort inference,
