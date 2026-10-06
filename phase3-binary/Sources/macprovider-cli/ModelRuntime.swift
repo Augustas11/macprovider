@@ -8595,13 +8595,21 @@ actor ModelRuntime: ModelRuntimeServing {
         let canonicalBinaryURL = markerStore.resolveCanonicalInstallBinary(
             launchedExecutableURL: launchedExecutableURL
         )
-        guard let manifest = CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
+        let installedSourceCommit = CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
             launchedExecutableURL: launchedExecutableURL,
             canonicalBinaryURL: canonicalBinaryURL,
             expectedVersion: CoordinatorClient.binaryVersion,
             allowProviderVersionMismatch: false
-        ),
-              let sourceCommit = compatibilitySetSourceCommit(manifest.compatibilitySetID),
+        ).flatMap { compatibilitySetSourceCommit($0.compatibilitySetID) }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        // A lab build has no installed compatibility set; the rehearsal names
+        // the commit it was built from. The executable digest and live CDHash
+        // are still measured from the running process.
+        let resolvedSourceCommit = installedSourceCommit ?? labNativeMTPSourceCommit()
+        #else
+        let resolvedSourceCommit = installedSourceCommit
+        #endif
+        guard let sourceCommit = resolvedSourceCommit,
               let executableURL = CompatibilitySetManifest.resolvedExecutableURL(launchedExecutableURL),
               let executableSHA256 = try? sha256RegularFileNoFollow(executableURL),
               let liveCodeIdentity = nativeMTPLiveProcessCodeIdentity()
@@ -8615,6 +8623,19 @@ actor ModelRuntime: ModelRuntimeServing {
             upstreamMLXSwiftLMRevision: KVBuildIdentity.mlxSwiftLMRevision
         )
     }
+
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    static func labNativeMTPSourceCommit(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> String? {
+        guard let commit = environment["MACPROVIDER_LAB_NATIVE_MTP_SOURCE_COMMIT"],
+              commit.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil
+        else {
+            return nil
+        }
+        return commit
+    }
+    #endif
 
     static func nativeMTPRunningBuildIdentityForTest(
         launchedExecutableURL: URL?,

@@ -16,7 +16,7 @@ enum NativeMTPAdmissionFeed {
     static let bankFileName = "native-mtp-selftest-bank.json"
     static let bankSignatureFileName = "native-mtp-selftest-bank.json.sig"
     static let maxManifestBytes = 4 * 1024 * 1024
-    static let productionBaseURL = URL(string: "https://coordinator.malibu.tech")!
+    static var productionBaseURL: URL { StaticFeedOrigin.base }
 
     struct Members: Equatable {
         let sidecar: Data

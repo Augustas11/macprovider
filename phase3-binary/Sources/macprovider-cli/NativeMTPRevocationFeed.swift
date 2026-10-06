@@ -215,7 +215,7 @@ struct NativeMTPRevocationState: Equatable, Sendable {
 }
 
 enum NativeMTPRevocationFeedManager {
-    static let productionOrigin = URL(string: "https://coordinator.malibu.tech/v1/")!
+    static var productionOrigin: URL { StaticFeedOrigin.base.appendingPathComponent("v1/", isDirectory: true) }
     static let refreshIntervalSeconds: TimeInterval = 15 * 60
     typealias Fetcher = @Sendable (URL, Int) async throws -> NativeMTPRevocationFetchResponse
     typealias Sleeper = @Sendable (UInt64) async throws -> Void
@@ -330,7 +330,7 @@ enum NativeMTPRevocationFeedManager {
         guard pinnedSignerKeyID.utf8.allSatisfy({ $0 >= 0x21 && $0 <= 0x7e }),
               pinnedSignerKeyID.utf8.count <= 128,
               let encodedSignerKeyID = encodedPathSegment(pinnedSignerKeyID),
-              origin.scheme == "https",
+              origin.scheme == "https" || StaticFeedOrigin.isLabLoopback(origin),
               origin.host?.isEmpty == false,
               origin.user == nil,
               origin.password == nil,
@@ -348,8 +348,8 @@ enum NativeMTPRevocationFeedManager {
               )?.absoluteURL else {
             throw NativeMTPRevocationFeedError.invalidOrigin
         }
-        guard feed.scheme == "https",
-              signature.scheme == "https",
+        guard feed.scheme == origin.scheme,
+              signature.scheme == origin.scheme,
               feed.host == origin.host,
               signature.host == origin.host else {
             throw NativeMTPRevocationFeedError.invalidOrigin

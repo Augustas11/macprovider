@@ -30,6 +30,9 @@ LAB_HOOK_SYMBOLS = (
     "installLabNativeMTPProposalOverride",
     "labNativeMTPProposalOverride",
     "labTokenProbe",
+    "readLabStaticFeedOverride",
+    "labStaticFeedOriginKey",
+    "labNativeMTPSourceCommit",
 )
 
 
