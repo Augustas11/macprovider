@@ -598,6 +598,100 @@ final class InferenceRelayTests: XCTestCase {
         XCTAssertEqual(keys, ["conv:sealed"])
     }
 
+    /// SPEC-048-R009 (G7): Tier-2 reads the cache-only marker only from the
+    /// sealed envelope, never from the outer frame.
+    func testTier2CacheOnlyMarkerComesFromTheSealedEnvelope() async throws {
+        for (sealed, forged, expected) in [(true, false, true), (false, true, false)] {
+            let runtime = FakeCompletionRuntime()
+            let status = ProviderStatus(
+                modelID: "mlx-community/Test-Model",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+            )
+            let session = try testTier2Session()
+            let recorder = FrameRecorder()
+            let relay = InferenceRelay(
+                modelRuntime: runtime,
+                providerStatus: status,
+                loadedModelID: "mlx-community/Test-Model",
+                maxActiveRequests: 1,
+                maxBodyBytes: 4096,
+                tier2Session: session,
+                sendFrame: { frame in
+                    await recorder.append(frame)
+                }
+            )
+            let body = #"{"model":"mlx-community/Test-Model","messages":[{"role":"user","content":"hello"}],"max_tokens":20,"stream":false}"#
+            var encrypted = try Tier2ProviderSession.sealRequestForTest(
+                session: session,
+                requestID: "req-encrypted-cache-only",
+                stream: false,
+                plaintext: body,
+                conversationKey: "conv:sealed",
+                conversationCacheOnly: sealed
+            )
+            encrypted["conversation_cache_only"] = forged
+
+            try await relay.handleInferenceRequest(encrypted)
+            _ = try await waitForFrames { frames in
+                frames.contains { $0["type"] as? String == "inference_response_end" }
+            } from: {
+                await recorder.frames
+            }
+            let flags = await runtime.observedConversationCacheOnlyFlags()
+            XCTAssertEqual(flags, [expected])
+        }
+    }
+
+    /// The plaintext relay accepts only a JSON boolean `true` as the marker,
+    /// and the marker means nothing without a key.
+    func testRelayCacheOnlyMarkerRequiresBooleanTrueAndAKey() async throws {
+        let cases: [(Any?, String?, Bool)] = [
+            (true, "conv:auto", true),
+            (false, "conv:auto", false),
+            (1, "conv:auto", false),
+            ("true", "conv:auto", false),
+            (nil, "conv:auto", false),
+            (true, nil, false),
+        ]
+        for (marker, key, expected) in cases {
+            let runtime = FakeCompletionRuntime()
+            let status = ProviderStatus(
+                modelID: "mlx-community/Test-Model",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+            )
+            let recorder = FrameRecorder()
+            let relay = InferenceRelay(
+                modelRuntime: runtime,
+                providerStatus: status,
+                loadedModelID: "mlx-community/Test-Model",
+                maxActiveRequests: 1,
+                maxBodyBytes: 4096,
+                sendFrame: { frame in
+                    await recorder.append(frame)
+                }
+            )
+            var message: [String: Any] = [
+                "type": "inference_request",
+                "request_id": "req-cache-only",
+                "stream": false,
+                "body": #"{"model":"mlx-community/Test-Model","messages":[{"role":"user","content":"hello"}],"max_tokens":20,"stream":false}"#,
+            ]
+            if let key { message["conversation_key"] = key }
+            if let marker { message["conversation_cache_only"] = marker }
+
+            try await relay.handleInferenceRequest(message)
+            _ = try await waitForFrames { frames in
+                frames.contains { $0["type"] as? String == "inference_response_end" }
+            } from: {
+                await recorder.frames
+            }
+            let flags = await runtime.observedConversationCacheOnlyFlags()
+            XCTAssertEqual(flags, [expected], "marker \(String(describing: marker)) key \(String(describing: key))")
+        }
+    }
+
     // SPEC-015 §M.0 / §M.2 — coordinator-WS-mediated non-streaming
     // receipt carries the 9-field v0.3 tuple with
     // `receipt_version == "3"` and `model_hash` matching the
@@ -2137,6 +2231,7 @@ private actor FakePreflightRejectRuntime: ModelRuntimeServing {
 
 private actor FakeCompletionRuntime: ModelRuntimeServing {
     private var conversationKeys: [String?] = []
+    private var conversationCacheOnlyFlags: [Bool] = []
 
     var loadedModelHash: String? { nil }
     var loadedModelHashAlgorithm: String? { nil }
@@ -2150,11 +2245,16 @@ private actor FakeCompletionRuntime: ModelRuntimeServing {
         conversationKeys
     }
 
+    func observedConversationCacheOnlyFlags() -> [Bool] {
+        conversationCacheOnlyFlags
+    }
+
     func complete(
         _ request: ChatCompletionRequest,
         shouldCancel: @escaping @Sendable () -> Bool
     ) async throws -> CompletionResult {
         conversationKeys.append(request.conversationKey)
+        conversationCacheOnlyFlags.append(request.conversationCacheOnly)
         return CompletionResult(content: "encrypted answer", finishReason: "stop", promptTokens: 5, completionTokens: 2, settlementDisposition: .eligibleOwner)
     }
 
@@ -2175,6 +2275,7 @@ private actor FakeCompletionRuntime: ModelRuntimeServing {
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
         conversationKeys.append(request.conversationKey)
+        conversationCacheOnlyFlags.append(request.conversationCacheOnly)
         onChunk(.content("encrypted answer"))
         return CompletionResult(content: "encrypted answer", finishReason: "stop", promptTokens: 5, completionTokens: 2, settlementDisposition: .eligibleOwner)
     }

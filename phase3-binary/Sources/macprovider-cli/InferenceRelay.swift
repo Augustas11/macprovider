@@ -93,6 +93,7 @@ actor InferenceRelay {
         let body: String
         let maxOutputTokens: Int?
         let decryptedConversationKey: String?
+        let decryptedConversationCacheOnly: Bool
         let bodyEncoding: String?
         let relayBlindContextObject: [String: Any]?
         // SPEC-001-R005: the raw `relay_blind_settlement` member. Under SPEC-008
@@ -112,6 +113,7 @@ actor InferenceRelay {
                 body = payload.body
                 maxOutputTokens = payload.maxOutputTokens
                 decryptedConversationKey = payload.conversationKey
+                decryptedConversationCacheOnly = payload.conversationCacheOnly
                 bodyEncoding = payload.bodyEncoding
                 relayBlindContextObject = payload.relayBlindContext
                 relayBlindSettlementWire = payload.relayBlindSettlement
@@ -135,6 +137,7 @@ actor InferenceRelay {
                 maxOutputTokens = nil
             }
             decryptedConversationKey = nil
+            decryptedConversationCacheOnly = false
             bodyEncoding = message["body_encoding"] as? String
             relayBlindContextObject = message["relay_blind_context"] as? [String: Any]
             relayBlindSettlementWire = message[RelayBlindSettlementMetadata.wireKey]
@@ -313,11 +316,14 @@ actor InferenceRelay {
             settlementMetadata = nil
         }
         let conversationKey: String?
+        let conversationCacheOnly: Bool
         if tier2Session != nil {
             conversationKey = decryptedConversationKey
+            conversationCacheOnly = decryptedConversationCacheOnly
         } else {
             conversationKey = (message["conversation_key"] as? String)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
+            conversationCacheOnly = Tier2ProviderSession.isJSONTrue(message["conversation_cache_only"])
         }
 
         let effectiveBodyLimit = relayBlindOpened == nil
@@ -386,6 +392,7 @@ actor InferenceRelay {
                 settlementMetadata: settlementMetadata,
                 maxOutputTokens: maxOutputTokens,
                 conversationKey: conversationKey?.isEmpty == false ? conversationKey : nil,
+                conversationCacheOnly: conversationCacheOnly,
                 startedAt: startedAt,
                 streamInterval: streamInterval,
                 relayBlindOpened: relayBlindOpened,
@@ -591,6 +598,7 @@ actor InferenceRelay {
         settlementMetadata: SettlementReceiptMetadata?,
         maxOutputTokens: Int?,
         conversationKey: String?,
+        conversationCacheOnly: Bool = false,
         startedAt: Date,
         streamInterval: Int = 1,
         relayBlindOpened: RelayBlindProviderRuntime.OpenedRequest?,
@@ -619,7 +627,7 @@ actor InferenceRelay {
                 }
             } else {
                 request = try ChatCompletionRequest.parse(data: requestData)
-                    .withConversationKey(conversationKey)
+                    .withConversationKey(conversationKey, cacheOnly: conversationCacheOnly)
                     .withRequestID(requestID)
                     .withIngestProvenance(ingestProvenance)
                 if let maxOutputTokens {

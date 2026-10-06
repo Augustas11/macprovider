@@ -1179,6 +1179,75 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         }
     }
 
+    /// SPEC-048-R009 (G7): a keyed native row on a hybrid runtime that
+    /// commits keyed rows in serial format hands back the same terminal
+    /// conversation-cache entry as the ordinary row: same tokens, same token
+    /// count, byte-identical attention KV and recurrent checkpoints. Serving
+    /// a cache-only miss natively therefore changes no cache outcome.
+    func testKeyedNativeRowCommitsTheOrdinarySerialConversationCacheEntry() async throws {
+        try requireMetal()
+        let prompt = Self.tinyPrompt(length: 12, salt: 21)
+        let budget = 10
+
+        func run(_ path: DecodePath) async throws -> ContinuousBatchSchedulerResult {
+            let tiny = try Self.tinyQwen35Native(dtype: .bfloat16)
+            let scheduler = try Self.makeScheduler(maxActiveRows: 2, backend: tiny.backend, maxPhysicalBlocks: 64)
+            let result = try await scheduler.submit(ContinuousBatchSchedulerRequest(
+                id: "keyed",
+                conversationKey: "conv:auto-prefix",
+                promptTokens: prompt,
+                maxOutputTokens: budget,
+                samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: "keyed"),
+                temperature: 0,
+                topP: 1,
+                recurrentCheckpointPositions: [4, 8],
+                modelHasRecurrentLayers: true,
+                decodePath: path,
+                nativeMTPMaximumProposalDepth: path == .nativeMTP ? 1 : 0,
+                nativeMTPCompleteWindowBytesByDepth: path == .nativeMTP ? [16, 16] : [],
+                nativeMTPTupleFence: path == .nativeMTP ? Self.nativeMTPFence() : nil
+            ))
+            if path == .nativeMTP {
+                XCTAssertTrue(
+                    tiny.backend.finalizedRounds().flatMap { $0 }.contains { $0.proposalTokenCount == 1 },
+                    "the keyed native row never verified a proposal"
+                )
+            }
+            return result
+        }
+
+        let ordinary = try await run(.ordinary)
+        let native = try await run(.nativeMTP)
+        XCTAssertEqual(native.generatedTokens, ordinary.generatedTokens)
+        let ordinaryCache = try XCTUnwrap(ordinary.serialConversationCache, "ordinary row published no entry")
+        let nativeCache = try XCTUnwrap(native.serialConversationCache, "native row published no entry")
+        XCTAssertEqual(nativeCache.tokenCount, ordinaryCache.tokenCount)
+        XCTAssertEqual(nativeCache.layers.count, ordinaryCache.layers.count)
+        for (index, (lhs, rhs)) in zip(nativeCache.layers, ordinaryCache.layers).enumerated() {
+            XCTAssertEqual(lhs.state.count, rhs.state.count, "layer \(index)")
+            for (a, b) in zip(lhs.state, rhs.state) {
+                XCTAssertTrue(arrayEqual(a, b).item(Bool.self), "layer \(index) KV differs")
+            }
+        }
+        XCTAssertEqual(
+            nativeCache.recurrentCheckpoints.map(\.tokenCount),
+            ordinaryCache.recurrentCheckpoints.map(\.tokenCount)
+        )
+        for (lhs, rhs) in zip(nativeCache.recurrentCheckpoints, ordinaryCache.recurrentCheckpoints) {
+            XCTAssertEqual(Set(lhs.states.keys), Set(rhs.states.keys))
+            for (layer, arrays) in lhs.states {
+                let other = try XCTUnwrap(rhs.states[layer])
+                XCTAssertEqual(arrays.count, other.count)
+                for (a, b) in zip(arrays, other) {
+                    XCTAssertTrue(
+                        arrayEqual(a, b).item(Bool.self),
+                        "checkpoint \(lhs.tokenCount) layer \(layer) differs"
+                    )
+                }
+            }
+        }
+    }
+
     /// End to end through the scheduler with a real (tiny, random-weight)
     /// hybrid Qwen3.5 target and its real MTP drafter: every native round is
     /// one packed verify, one staged target commit, and one packed drafter
@@ -1363,7 +1432,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     /// weights, so separate instances are independent replicas.
     private static func tinyQwen35Native(
         maxPhysicalBlocks: Int = 64,
-        nativeMTPDrafterColumnCap: Int = PagedKVSharedForwardBackend.defaultNativeMTPDrafterColumnCap
+        nativeMTPDrafterColumnCap: Int = PagedKVSharedForwardBackend.defaultNativeMTPDrafterColumnCap,
+        dtype: DType? = nil
     ) throws -> TinyQwen35Native {
         let configuration = try JSONDecoder().decode(
             Qwen35TextConfiguration.self,
@@ -1372,6 +1442,11 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         MLXRandom.seed(1770)
         let target = Qwen35TextModel(configuration)
         let drafter = Qwen35MTPDraftModel(configuration)
+        if let dtype {
+            // The serial conversation-cache format stores only fp16/bf16 KV.
+            target.update(parameters: target.parameters().mapValues { $0.asType(dtype) })
+            drafter.update(parameters: drafter.parameters().mapValues { $0.asType(dtype) })
+        }
         eval(target, drafter)
         let descriptor = Self.bridgeDescriptor(maxPhysicalBlocks: maxPhysicalBlocks)
         let backend = RuntimeBridgeRecordingNativeMTPBackend(PagedKVSharedForwardBackend(

@@ -3829,7 +3829,8 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 		// Auto-prefix cache key: set provider context but do NOT activate sticky.
 		// applySticky / stickyStore only read X-MacProvider-Internal-Conv; this
 		// header is intentionally invisible to them (SPEC-006-R012, SPEC-004).
-		ctx = providerws.ContextWithConversationKey(ctx, key)
+		// The provider learns it is cache-only (SPEC-048-R009).
+		ctx = providerws.ContextWithConversationCacheOnlyKey(ctx, key)
 		if state != nil {
 			state.conversationCacheOnly = true
 		}

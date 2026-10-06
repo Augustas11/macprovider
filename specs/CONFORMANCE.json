@@ -91,7 +91,7 @@
     {
       "spec_id": "SPEC-004",
       "title": "Smart Router",
-      "version": "0.3.5",
+      "version": "0.3.6",
       "path": "specs/SPEC-004-smart-router.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -694,7 +694,7 @@
     {
       "spec_id": "SPEC-024",
       "title": "Prefix-cache billing and provider-local cache isolation",
-      "version": "0.2.9",
+      "version": "0.2.10",
       "path": "specs/SPEC-024-prefix-cache-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1474,7 +1474,7 @@
     {
       "spec_id": "SPEC-048",
       "title": "Native Multi-Token Prediction Serving",
-      "version": "0.1.25",
+      "version": "0.1.26",
       "path": "specs/SPEC-048-native-mtp-serving.md",
       "status": "draft",
       "owner": "@Augustas11",

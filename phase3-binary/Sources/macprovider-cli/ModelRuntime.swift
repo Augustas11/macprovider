@@ -6235,7 +6235,6 @@ actor ModelRuntime: ModelRuntimeServing {
             admitted: nativeMTPAdmission,
             resolved: tokenBoundedNativeMTPAdmission
         )
-        let nativeMTPAdmission = tokenBoundedNativeMTPAdmission
         let preparedPromptTokenIDs = prepared.promptTokens.map(Int32.init)
         let batchKVBits = Self.effectiveKVBits(
             configured: kvBitsOverride,
@@ -6243,7 +6242,9 @@ actor ModelRuntime: ModelRuntimeServing {
         )
         let conversationCacheAllowed = Self.allowsConversationCacheLease(
             provenance: request.ingestProvenance,
-            nativeAllows: nativeMTPAdmission.allowsConversationCacheLease
+            nativeAllows: tokenBoundedNativeMTPAdmission.allowsConversationCacheLease(
+                cacheOnlyKey: request.conversationCacheOnly
+            )
         )
         let lease = conversationCacheAllowed
             ? await conversationCache.begin(
@@ -6263,6 +6264,17 @@ actor ModelRuntime: ModelRuntimeServing {
         ) {
             return nil
         }
+        let nativeMTPAdmission = tokenBoundedNativeMTPAdmission.resolvingConversationCacheLease(
+            hasConversationKey: Self.nonEmpty(request.conversationKey) != nil,
+            leaseAllowed: conversationCacheAllowed,
+            cachedPromptTokens: lease?.cachedPromptTokens,
+            keyedRowsCommitSerialFormat: prepared.modelHasRecurrentLayers && !continuousBatchingCachedTurns
+        )
+        recordNativeMTPTokenBoundDowngrade(
+            requestID: request.requestID,
+            admitted: tokenBoundedNativeMTPAdmission,
+            resolved: nativeMTPAdmission
+        )
         // SPEC-038 AC-6c: the scheduler row owns the one canonical serial
         // tool boundary; every duplicate and terminal replay receives it.
         let serialToolStop = Self.continuousBatchSerialToolStopObserver(
@@ -6551,7 +6563,6 @@ actor ModelRuntime: ModelRuntimeServing {
             admitted: nativeMTPAdmission,
             resolved: tokenBoundedNativeMTPAdmission
         )
-        let nativeMTPAdmission = tokenBoundedNativeMTPAdmission
         let preparedPromptTokenIDs = prepared.promptTokens.map(Int32.init)
         let batchKVBits = Self.effectiveKVBits(
             configured: kvBitsOverride,
@@ -6559,7 +6570,9 @@ actor ModelRuntime: ModelRuntimeServing {
         )
         let conversationCacheAllowed = Self.allowsConversationCacheLease(
             provenance: request.ingestProvenance,
-            nativeAllows: nativeMTPAdmission.allowsConversationCacheLease
+            nativeAllows: tokenBoundedNativeMTPAdmission.allowsConversationCacheLease(
+                cacheOnlyKey: request.conversationCacheOnly
+            )
         )
         let lease = conversationCacheAllowed
             ? await conversationCache.begin(
@@ -6578,6 +6591,17 @@ actor ModelRuntime: ModelRuntimeServing {
         ) {
             return nil
         }
+        let nativeMTPAdmission = tokenBoundedNativeMTPAdmission.resolvingConversationCacheLease(
+            hasConversationKey: Self.nonEmpty(request.conversationKey) != nil,
+            leaseAllowed: conversationCacheAllowed,
+            cachedPromptTokens: lease?.cachedPromptTokens,
+            keyedRowsCommitSerialFormat: prepared.modelHasRecurrentLayers && !continuousBatchingCachedTurns
+        )
+        recordNativeMTPTokenBoundDowngrade(
+            requestID: request.requestID,
+            admitted: tokenBoundedNativeMTPAdmission,
+            resolved: nativeMTPAdmission
+        )
         let submission = try Self.continuousBatchSubmission(
             for: request,
             promptTokens: prepared.promptTokens,

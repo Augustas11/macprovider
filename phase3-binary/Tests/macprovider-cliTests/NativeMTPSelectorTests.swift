@@ -501,6 +501,100 @@ final class NativeMTPSelectorTests: XCTestCase {
         XCTAssertTrue(admission.allowsConversationCacheLease)
     }
 
+    /// SPEC-048-R009 (G7): a cache-only auto-prefix key stays eligible at
+    /// selection and may take a lease; a sticky key still selects ordinary.
+    func testCacheOnlyConversationKeyStaysEligibleAndMayLease() throws {
+        let cacheOnly = try makeRequest().withConversationKey("conv:auto", cacheOnly: true)
+        XCTAssertTrue(cacheOnly.conversationCacheOnly)
+        let admission = ModelRuntime.nativeMTPRuntimeAdmission(
+            for: cacheOnly,
+            draftConfigured: false,
+            draftLoaded: false,
+            numDraftTokens: nil,
+            nativeMTPMode: .auto,
+            nativeMTPCapability: admittedCapability(),
+            schedulerSupportsNativeMTP: true
+        )
+        XCTAssertEqual(admission.selection.path, .nativeMTP)
+        XCTAssertEqual(admission.selection.nativeMTPReason, .eligible)
+        XCTAssertTrue(admission.usesNativeMTP)
+        XCTAssertFalse(admission.allowsConversationCacheLease)
+        XCTAssertTrue(admission.allowsConversationCacheLease(cacheOnlyKey: true))
+        XCTAssertFalse(admission.allowsConversationCacheLease(cacheOnlyKey: false))
+
+        let sticky = ModelRuntime.nativeMTPRuntimeAdmission(
+            for: try makeRequest().withConversationKey("conv:sticky", cacheOnly: false),
+            draftConfigured: false,
+            draftLoaded: false,
+            numDraftTokens: nil,
+            nativeMTPMode: .auto,
+            nativeMTPCapability: admittedCapability(),
+            schedulerSupportsNativeMTP: true
+        )
+        XCTAssertEqual(sticky.selection.nativeMTPReason, .conversationKey)
+        XCTAssertFalse(sticky.usesNativeMTP)
+    }
+
+    /// The cache-only flag never outlives its key and survives every copy.
+    func testConversationCacheOnlyFollowsTheKeyThroughRequestCopies() throws {
+        let request = try makeRequest()
+            .withConversationKey("conv:auto", cacheOnly: true)
+            .withRequestID("req-1")
+            .withIngestProvenance(.relay)
+            .withMaxTokensLimit(4)
+        XCTAssertTrue(request.conversationCacheOnly)
+        XCTAssertFalse(try makeRequest().withConversationKey(nil, cacheOnly: true).conversationCacheOnly)
+        XCTAssertFalse(try makeRequest().withConversationKey("  ", cacheOnly: true).conversationCacheOnly)
+        XCTAssertFalse(request.withConversationKey(nil).conversationCacheOnly)
+        XCTAssertFalse(request.withConversationKey("conv:auto").conversationCacheOnly)
+    }
+
+    /// The lease decides a cache-only native row: only a miss on a runtime
+    /// that commits keyed rows in serial format stays native.
+    func testCacheOnlyNativeAdmissionResolvesOnTheLease() throws {
+        let native = ModelRuntime.nativeMTPRuntimeAdmission(
+            for: try makeRequest().withConversationKey("conv:auto", cacheOnly: true),
+            draftConfigured: false,
+            draftLoaded: false,
+            numDraftTokens: nil,
+            nativeMTPMode: .auto,
+            nativeMTPCapability: admittedCapability(),
+            schedulerSupportsNativeMTP: true
+        )
+        func resolve(key: Bool = true, allowed: Bool = true, cached: Int?, serial: Bool = true) -> NativeMTPRuntimeAdmission {
+            native.resolvingConversationCacheLease(
+                hasConversationKey: key,
+                leaseAllowed: allowed,
+                cachedPromptTokens: cached,
+                keyedRowsCommitSerialFormat: serial
+            )
+        }
+        XCTAssertTrue(resolve(cached: 0).usesNativeMTP)
+        XCTAssertTrue(resolve(key: false, cached: nil).usesNativeMTP)
+        XCTAssertTrue(resolve(allowed: false, cached: nil).usesNativeMTP)
+        for downgraded in [resolve(cached: 12), resolve(cached: nil), resolve(cached: 0, serial: false)] {
+            XCTAssertFalse(downgraded.usesNativeMTP)
+            XCTAssertEqual(downgraded.selection.path, .ordinary)
+            XCTAssertEqual(downgraded.selection.nativeMTPReason, .conversationKey)
+            XCTAssertTrue(downgraded.allowsConversationCacheLease)
+        }
+        let ordinary = ModelRuntime.nativeMTPRuntimeAdmission(
+            for: try makeRequest().withConversationKey("conv:sticky"),
+            draftConfigured: false,
+            draftLoaded: false,
+            numDraftTokens: nil,
+            nativeMTPMode: .auto,
+            nativeMTPCapability: admittedCapability(),
+            schedulerSupportsNativeMTP: true
+        )
+        XCTAssertEqual(
+            ordinary.resolvingConversationCacheLease(
+                hasConversationKey: true, leaseAllowed: true, cachedPromptTokens: 0, keyedRowsCommitSerialFormat: true
+            ).selection,
+            ordinary.selection
+        )
+    }
+
     func testNonStreamingEntryPathUsesInjectedNativeMTPAdmissionAndMaxCompletionTokens() async throws {
         let recorder = NativeMTPAdmissionRecorder()
         let runtime = ModelRuntime(
