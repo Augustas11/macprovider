@@ -34,7 +34,9 @@ or that any mapped requirement is conformant.
 SPEC-005-R015 (entry pricing within bounds), SPEC-006-R018 (pool `/v1/models`
 view and disclosure), SPEC-022-R013 (pool-manifest route-snapshot identity),
 SPEC-042-R015 (pool model entries) and SPEC-042-R016 (attested non-creator
-members).
+members). SPEC-042-R016 is promotable only when the run also captured
+`rotation/attestation-removal/inflight/` (the settlement-time revocation of an
+attested member); without it the evidence covers the other four.
 
 SPEC-047-R011 is **not** promotable by this journey. Its promotion also needs
 the coordinator-owned `model_admission_probe_evidence.v1` record linked from
@@ -45,6 +47,35 @@ signed-manifest actor (with whether an unmatched pre-bind state preceded the
 bind), serves and settles on its pool route, never reaches
 `settlement_capable`, and is absent from global routing. R011 stays mapped
 only to JOURNEY-NETWORK-MODEL-ADMISSION.
+
+## Trust model
+
+The trust anchors are the same as every signed journey in this repo
+(JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME, the payout and buyer paid-path
+journeys): an operator with read-only production access captures the runtime
+rows, a reviewed PR commits the redacted evidence, and the protected
+`production-release` signing workflow signs it. The builder proves the rows
+are mutually consistent and complete (exact joins, recomputed credits and
+digests, timing, closed schema); it does not prove that an operator did not
+forge a consistent set. Two parts are verified cryptographically with the
+coordinator's own code instead of trusted: the signed manifest chain
+(`verify-manifest`, re-run in CI) and every route snapshot digest
+(`verify-route-snapshot`, at capture). Coordinator- or gateway-signed exports
+of the other rows do not exist; adding them is a separate design, carried by
+design here.
+
+Two coordinator facts the journey reflects rather than requires otherwise:
+
+- A native `mlx_cache` pool route snapshot carries no `pool_member_account_id`
+  (nor `runtime_source` or `pool_operator_account_id`): the coordinator records
+  them only for loopback routes (`buyer/pool_model_route.go`), so the native
+  delegated member's serving account is not in the route snapshot. The journey
+  requires the fields absent; whether SPEC-022 R-13.2 should require them on
+  native routes is an open coordinator/SPEC question.
+- A binding revocation is appended with actor `coordinator` and carries the
+  ended binding's pool entry, generation and core, not the revoking core. The
+  journey ties each revocation to its revoking manifest by time (after that
+  manifest's `not_before`) and generation (an earlier binding).
 
 ## Out of scope
 
@@ -89,17 +120,13 @@ only to JOURNEY-NETWORK-MODEL-ADMISSION.
   member re-delegates and resubmits its offer, which binds
   (`pool_manifest_bound`) under the `price_change` terms
   (`test/e2e-1816/vm/s5-rotation.sh` `reoffer_5`).
-- Keeper rotations between roles are fine. Every captured manifest that is
-  not a role manifest must be a window-only rotation of the latest role at or
-  below it (equal terms digest, entries and attestations). Every manifest
-  version a route snapshot, a binding the journey relies on, or the pool
-  `/v1/models` view names must be captured (`pool/v<N>/manifest-accepted.json`).
-- Manifests are verified, not trusted: the builder runs
-  `coordinator-cli trust-pool-admin verify-manifest` (the root registration's
-  proof of possession, each event's root signature and snapshot, each core's
-  R001/R015/R016 acceptance grammar, and one chain) and derives every entry,
-  attestation, digest, terms digest and `not_before` from its output.
-  `get-pool` must equal the verified core.
+- The captured `pool/current/manifest-accepted.json` is the pool's current
+  manifest. Its snapshot carries every accepted policy, so `verify-manifest`
+  proves the complete, contiguous, chained history 1..current from it alone
+  (root signature, snapshot replay, R001/R015/R016 grammar of every core), and
+  the current `get-pool` must show that version and digest. Every captured
+  version that is not a role manifest must be a window-only rotation of the
+  latest role at or below it (equal terms digest, entries and attestations).
 
 ## Physical steps
 
@@ -110,14 +137,19 @@ only to JOURNEY-NETWORK-MODEL-ADMISSION.
    six-key int64 object with each min at most its max and each max times
    1,048,576 times the routes' multiplier inside int64; their recomputed
    SPEC-005-R015 digest is the `pool_model_pricing_bounds_sha256` every pool
-   route carries; every rate of every verified core sits inside them; the
-   reload applied the owner map, and the captured
+   route carries; every rate of every verified core sits inside them; each
+   route's frozen multiplier and provider share equal its
+   `pool_model_config_snapshot_id` ledger config snapshot, and the live
+   `rewards.global_multiplier` / `rewards.provider_share` equal the newest
+   one; the reload applied the owner map, and the captured
    `trusted_pools.provider_owner_account_ids` map recomputes the logged digest
    and provider count.
-3. `step-03-pool-genesis-with-entries` - the verified chain belongs to the
-   journey pool and creator, candidate, enforce, v2, `llamacpp_loopback`
-   allowlisted; `native_genesis` carries exactly the native entry (exact hash,
-   algorithm, sorted runtime set paired with the hash format, licence,
+3. `step-03-pool-genesis-with-entries` - the verified history is complete and
+   contiguous 1..current, chained from the zero hash, and the current
+   `get-pool` is its newest version; it belongs to the journey pool and
+   creator, candidate, enforce, v2, `llamacpp_loopback` allowlisted;
+   `native_genesis` carries exactly the native entry (exact hash, algorithm,
+   sorted runtime set paired with the hash format, a pinned SPDX licence,
    `paid_serving_attested`, `pool_attested_unverified`, context 1..2^20);
    `get-pool` at every role version equals its verified core and the pool is
    active and routeable at genesis.
@@ -129,45 +161,57 @@ only to JOURNEY-NETWORK-MODEL-ADMISSION.
 5. `step-05-proposal-bundles` - each `pool_model_proposal.v1` bundle names
    the pool, its runtime, no catalog key, null licence and paid-serving flag,
    and exactly the signed entry's id, hash and algorithm.
-6. `step-06-offer-binding` - each member's first `pool_manifest_bound`
-   binding is `catalog_priced`, `binding_scope=pool`, for its exact entry,
-   with actor exactly `pool_manifest:<pool>:<version>:<core digest>` of a
-   verified core and created after that core's `not_before`; every pool
-   binding's actor names its own version and core; no `settlement_capable`.
+6. `step-06-offer-binding` - admission actors are from the closed vocabulary
+   (provider, coordinator, operator, or the exact pool-manifest actor); every
+   pool binding is the exact entry identity with actor
+   `pool_manifest:<pool>:<version>:<core digest>` of its own version; each
+   member's first `pool_manifest_bound` names a verified core and follows its
+   `not_before`; no `settlement_capable`.
 7. `step-07-pool-models-disclosure` - the pool view lists exactly the signed
-   entries of one verified manifest, each `object: model` with the closed
-   12-field `macprovider_pool_model` object equal to the signed entry (ids,
-   hash, version and digest, runtime subset, disclosure, context, the three
-   rates and the routes' multiplier), no duplicate or foreign id; the global
-   view has no `pool/` id or pool object; the never-global count is 0.
+   entries of one verified manifest and nothing else, each `object: model`
+   with the closed 12-field `macprovider_pool_model` object equal to the
+   signed entry (ids, hash, version and digest, `runtime_sources` equal to the
+   entry's `allowed_runtime_sources`, disclosure, context, the three rates and
+   the routes' multiplier), no duplicate or foreign id; the global view has no
+   `pool/` id or pool object; the never-global count is 0.
 8. `step-08-native-entry-paid` - for each native request: 200 with
    `X-MacProvider-Engine: mlx_cache`, the disclosure header and the core
-   digest header; the X-Request-ID maps through `request_log` to exact
-   `(request_id, attempt_n)` keys that join the route snapshot, attempt
-   output, receipt verdict, ledger row and payable view, and the gateway
-   reservation and usage event are the X-Request-ID's; the snapshot is
-   `pool_manifest`-sourced, v2, enforce, for the exact entry, with expected
-   and provider-reported hash and algorithm equal to the entry, a positive
+   digest header; the X-Request-ID maps through `request_log` (pool and model)
+   to exact `(request_id, attempt_n)` keys, each with exactly one route
+   snapshot, and the attempt output, receipt verdict, ledger row and payable
+   view join those keys; the gateway reservation (the journey buyer's) and
+   usage event are the X-Request-ID's; the stored `route_snapshot_json` is the
+   coordinator's digest preimage (recomputed by `verify-route-snapshot`) and is
+   `pool_manifest`-sourced, v2, enforce, for the exact entry, with expected and
+   provider-reported hash and algorithm equal to the entry, a positive
    `pool_generation`, the version's core digest, and the signed entry rates;
-   the verdict binds the snapshot digest, the hashes and `model_id =
-   pool_model_id`, and is `valid`, `verified`, label `verified`, closed; the
-   single payable unquarantined ledger row's gross and provider credits equal
-   the SPEC-005 recomputation (round half even) from the frozen snapshot
-   rates, multiplier and share; the reservation settles the debited tokens;
-   usage is `coordinator_observed`.
+   the verdict binds that digest, the hashes and `model_id = pool_model_id`,
+   and is `valid`, `verified`, label `verified`, closed; the single payable
+   unquarantined ledger row's gross and provider credits equal the SPEC-005
+   recomputation (round half even) from the frozen rates, multiplier and
+   share; the reservation settles the debited tokens; usage is
+   `coordinator_observed`. A re-added native entry serves only after its fresh
+   binding.
 9. `step-09-attested-member-paid` - the same for the GGUF entry,
    `llamacpp_loopback`, `pool_operator_attested`, with
    `pool_operator_account_id` the creator and `pool_member_account_id` the
    attested owner, attested at the snapshot's version.
-10. `step-10-refusals` - no pool header (404 `model_not_found`), another
-    authorized pool's header (404 `model_not_found`), a wrong engine selector
-    (503 `engine_unavailable`): no route snapshot, no ledger row, and exactly
-    one reservation for the X-Request-ID, `refunded`, zero tokens, no hold.
+10. `step-10-refusals` - each refusal's captured request (pool selector,
+    engine selector, model) is the scenario's: no pool header (404
+    `model_not_found`), another authorized pool's header (404
+    `model_not_found`), a disallowed engine selector on the GGUF entry (503
+    `engine_unavailable`); any `request_log` row is that request's; no
+    disclosure header, no route snapshot, no ledger row, and exactly one
+    reservation for the X-Request-ID, the journey buyer's, `refunded`, zero
+    tokens, no hold.
 11. `step-11-window-rotation-no-gap` - `window_rotation` keeps the terms
     digest, entries and attestations under a new core; the delegated native
-    member is `pool_manifest_rebound` at that version after activation;
-    probes are all 200 and fall on both sides of its `not_before`; a request
-    routed under the `window_rotation` terms after activation is paid.
+    member is `pool_manifest_rebound` at that version after activation; the
+    probes are real requests (X-Request-ID, `request_log`, one recomputed route
+    snapshot, the buyer's reservation), all 200, with coordinator route
+    decisions on both sides of the `not_before`: before it under an earlier
+    core, after it under the `window_rotation` terms; a request routed under
+    those terms after activation is paid.
 12. `step-12-price-change-in-flight` - `price_change` changes exactly one
     entry's rates and nothing else; the in-flight request was dispatched
     before the price change's `not_before` and settled after it, at the prior
@@ -178,11 +222,17 @@ only to JOURNEY-NETWORK-MODEL-ADMISSION.
     the native entry; the in-flight native request was dispatched before its
     `not_before` and settled after it; the native binding was revoked after
     activation (`pool_manifest_entry_revoked`, or `pool_membership_revoked`
-    when the term change voided the delegated grant first) from the binding it
-    held; the native model afterwards answers 404 `model_not_found` with no
-    snapshot. `attestation_removal` drops the attestation; the GGUF binding
-    was revoked `pool_membership_revoked` after activation; the GGUF model
-    afterwards is refused (404/503, a no-member code) with no snapshot.
+    when the term change voided the delegated grant first); every revocation
+    is actor `coordinator` and carries exactly the ended binding's entry,
+    hashes, generation and core; the native model afterwards answers 404
+    `model_not_found` with no snapshot. `attestation_removal` drops the
+    attestation; the GGUF binding was revoked `pool_membership_revoked` after
+    activation; the GGUF model afterwards is refused (404/503, a no-member
+    code) with no snapshot. For SPEC-042-R016: a GGUF request dispatched before
+    the attestation removal's `not_before` and settled after it is
+    zero-billed (verdict `quarantined` with
+    `pool_route_fence_not_settlement_eligible`, its ledger row zeroed and
+    quarantined, no payable credit, no buyer-final debit).
 14. `step-14-pause-resume-rollback` - while paused a pool request answers 503
     `pool_unavailable` and refunds; after resume a pool request is paid; the
     history has at least two `lifecycle_changed`; `pool-rollback-preflight
@@ -195,7 +245,8 @@ only to JOURNEY-NETWORK-MODEL-ADMISSION.
     observations are derived from the evidence, never free text; no prompt,
     completion, key, URL, host name, IP address or path; account, provider and
     other-pool ids are HMAC-SHA256 fingerprints under a per-run salt; every raw
-    capture file is kept only as `{sha256, bytes}`.
+    capture file is kept only as `{sha256, bytes}`; the committed manifest
+    bundle has no duplicate key, credential field or locator.
 
 ## Capture layout
 
@@ -216,10 +267,12 @@ capture/
                                            # {"bounds_set": true, "provider_owner_account_ids_applied": true,
                                            #  "provider_owner_account_ids_providers": <n>, "provider_owner_account_ids_sha256": "<64 hex>"}
   config/provider-owner-account-ids.json   # the live trusted_pools.provider_owner_account_ids map, whole: {"<account>": ["<provider>", ...]}
+  config/rewards.json                      # the live rewards economics: {"global_multiplier": <number>, "provider_share": <number>}
+  config/ledger-config-snapshots.json      # SQL below: every ledger_config_snapshots row a captured route names, plus the newest
   pool/root-issuer-registered.json         # the root_issuer_registered event (sign-root --out, or trustpool_events payload)
   pool/trustpool-events.json               # SELECT event_type, COUNT(*) AS n FROM trustpool_events WHERE pool_id='$POOL_ID' GROUP BY 1;
-  pool/v<N>/manifest-accepted.json         # every role version, every keeper version captured, and every version a
-                                           # snapshot, relied-on binding or the models view names (sign-manifest --out)
+  pool/current/manifest-accepted.json      # the pool's CURRENT manifest_accepted event (its snapshot proves versions 1..current)
+  pool/current/get-pool.json               # trust-pool-admin get-pool at capture end (must show that version and digest)
   pool/v<N>/get-pool.json                  # role versions only: trust-pool-admin get-pool right after that version activates
   proposals/native.json                    # macprovider-cli models propose ... --json (native member)
   proposals/gguf.json                      # same, GGUF member
@@ -229,12 +282,15 @@ capture/
   never-global.json                        # the runbook §6 never-global count, aliased: [{"n": 0}]
   requests/native-nonstream/  requests/native-stream/  requests/gguf-nonstream/  requests/gguf-stream/
   rotation/window-only/after/              # paid, routed under the window_rotation terms, after its not_before
-  rotation/window-only/probes.json         # [{"at": "...Z", "status": 200, "pool_model_id": "pool/<pool>/<slug>"}, ...]:
-                                           #  time order, at least one before and one after window_rotation's not_before
+  rotation/window-only/probes/<name>/      # one directory per probe ([a-z0-9-]): response.headers, request_log.json,
+                                           #  route_snapshots.json, quota_reservations.json; at least one probe routed before
+                                           #  and one after window_rotation's not_before (coordinator route decision time)
   rotation/price-change/inflight/          # paid, repriced entry, dispatched before price_change's not_before, settled after
   rotation/price-change/after/             # paid, repriced entry, routed under the price_change terms
   rotation/entry-removal/inflight/         # paid, native, dispatched before entry_removal's not_before, settled after
   rotation/entry-removal/after/            # refusal after entry_removal activates: 404 model_not_found
+  rotation/attestation-removal/inflight/   # OPTIONAL, needed for SPEC-042-R016: paid-shape directory, GGUF entry, dispatched
+                                           #  before attestation_removal's not_before and settled after (zero-billed)
   rotation/attestation-removal/after/      # refusal after attestation_removal activates (GGUF entry)
   refusals/no-pool-header/  refusals/other-pool/  refusals/wrong-engine/
   pause/paused/                            # refusal while paused: 503 pool_unavailable
@@ -250,9 +306,13 @@ A **paid request directory** holds `response.headers`, `response.json`
 `request_log.json`, `route_snapshots.json`, `attempt_outputs.json`,
 `receipt_verdicts.json`, `ledger.json`, `quota_reservations.json`,
 `usage_events.json`. A **refusal directory** holds `response.headers`,
-`response.json`, `route_snapshots.json`, `ledger.json` and
-`quota_reservations.json`. Capture verdict, ledger and reservation rows only
-after the attempt settled (at least one `pending_deadline_seconds`).
+`response.json`, `request.json`, `request_log.json` (may be empty),
+`route_snapshots.json`, `ledger.json` and `quota_reservations.json`, where
+`request.json` is the request the capture script sent:
+`{"pool_select": "<pool id>" | null, "engine_select": "<selector>" | null,
+"model": "pool/<pool>/<slug>", "stream": false}`. Capture verdict, ledger and
+reservation rows only after the attempt settled (at least one
+`pending_deadline_seconds`).
 
 `preconditions.json` is
 `{"<id>": {"status": "pass", "observed": {...}, "checked_at": "...Z"}}` with
@@ -304,26 +364,8 @@ C="sqlite3 -readonly -json /var/lib/macprovider/coordinator.db"
 G="sqlite3 -readonly -json /var/lib/macprovider/gateway.db"
 IDS=$(sqlite3 -readonly -noheader /var/lib/macprovider/coordinator.db \
   "SELECT group_concat(quote(request_id)) FROM request_log WHERE external_request_id='$RID';")
-$C "SELECT request_id, attempt_n, external_request_id, status, pool_id FROM request_log WHERE external_request_id='$RID';" > request_log.json
-$C "SELECT request_id, attempt_n, provider_id, route_snapshot_mode, route_snapshot_policy_version, route_snapshot_digest,
-           provider_reported_model_hash, expected_catalog_model_hash, model_id, route_decision_ts_unix_ms,
-           json_extract(route_snapshot_json,'\$.pool_id') pool_id,
-           json_extract(route_snapshot_json,'\$.expected_model_hash_source') expected_model_hash_source,
-           json_extract(route_snapshot_json,'\$.pool_model_id') pool_model_id,
-           json_extract(route_snapshot_json,'\$.manifest_version') manifest_version,
-           json_extract(route_snapshot_json,'\$.manifest_core_digest') manifest_core_digest,
-           json_extract(route_snapshot_json,'\$.pool_generation') pool_generation,
-           json_extract(route_snapshot_json,'\$.runtime_source') runtime_source,
-           json_extract(route_snapshot_json,'\$.pool_operator_account_id') pool_operator_account_id,
-           json_extract(route_snapshot_json,'\$.pool_member_account_id') pool_member_account_id,
-           json_extract(route_snapshot_json,'\$.expected_catalog_model_hash_algorithm') expected_catalog_model_hash_algorithm,
-           json_extract(route_snapshot_json,'\$.provider_reported_model_hash_algorithm') provider_reported_model_hash_algorithm,
-           json_extract(route_snapshot_json,'\$.pool_model_prompt_rate_per_mtok') pool_model_prompt_rate_per_mtok,
-           json_extract(route_snapshot_json,'\$.pool_model_prompt_cache_hit_rate_per_mtok') pool_model_prompt_cache_hit_rate_per_mtok,
-           json_extract(route_snapshot_json,'\$.pool_model_completion_rate_per_mtok') pool_model_completion_rate_per_mtok,
-           json_extract(route_snapshot_json,'\$.pool_model_pricing_bounds_sha256') pool_model_pricing_bounds_sha256,
-           json_extract(route_snapshot_json,'\$.pool_model_global_multiplier_ppm') pool_model_global_multiplier_ppm,
-           json_extract(route_snapshot_json,'\$.pool_model_provider_share_bps') pool_model_provider_share_bps
+$C "SELECT request_id, attempt_n, external_request_id, status, pool_id, model FROM request_log WHERE external_request_id='$RID';" > request_log.json
+$C "SELECT request_id, attempt_n, provider_id, route_snapshot_digest, route_snapshot_json, created_at_utc
     FROM settlement_route_snapshots WHERE request_id IN ($IDS);" > route_snapshots.json
 $C "SELECT request_id, attempt_n, provider_id, terminal_state, usage_source, terminal_state_ts_unix_ms
     FROM settlement_attempt_outputs WHERE request_id IN ($IDS);" > attempt_outputs.json
@@ -332,15 +374,25 @@ $C "SELECT request_id, attempt_n, provider_id, receipt_result, settlement_outcom
     FROM settlement_receipt_verdicts WHERE request_id IN ($IDS);" > receipt_verdicts.json
 $C "SELECT l.id, l.request_id, l.attempt_n, l.provider_id, l.status, l.charged_prompt_tokens, l.cached_prompt_tokens,
            l.completion_tokens, l.estimated_completion_tokens, l.usage_source, l.prompt_rate_per_mtok, l.completion_rate_per_mtok,
-           l.global_multiplier_ppm, l.gross_credits, l.provider_share_bps, l.provider_credits, l.quarantined, (p.id IS NOT NULL) payable
+           l.global_multiplier_ppm, l.gross_credits, l.provider_share_bps, l.provider_credits, l.quarantined, l.quarantine_reason,
+           (p.id IS NOT NULL) payable
     FROM ledger_request_credits l LEFT JOIN spec022_payable_request_credits p ON p.id = l.id
     WHERE l.request_id IN ($IDS);" > ledger.json
-$G "SELECT request_id, status, settled_tokens, settlement_hold FROM quota_reservations WHERE request_id='$RID';" > quota_reservations.json
+$G "SELECT request_id, account_id, status, settled_tokens, settlement_hold FROM quota_reservations WHERE request_id='$RID';" > quota_reservations.json
 $G "SELECT request_id, prompt_tokens, completion_tokens, token_source, outcome FROM usage_events WHERE request_id='$RID';" > usage_events.json
 ```
 
-A refusal directory uses the same `route_snapshots.json`, `ledger.json` and
-`quota_reservations.json` queries.
+A refusal directory uses the same `request_log.json`, `route_snapshots.json`,
+`ledger.json` and `quota_reservations.json` queries; a probe directory uses
+the `request_log.json`, `route_snapshots.json` and `quota_reservations.json`
+queries.
+
+Ledger config snapshots (economics provenance):
+
+```bash
+$C "SELECT id, effective_at_utc, config_hash, provider_share_bps, global_multiplier_ppm
+    FROM ledger_config_snapshots ORDER BY id;" > config/ledger-config-snapshots.json
+```
 
 Admission events (both members, every row, id order):
 
@@ -362,13 +414,15 @@ python3 scripts/build-trusted-pool-model-journey-result.py capture --capture-dir
 ```
 
 `capture` verifies the signed events, normalizes every record into the closed
-redacted evidence (schema `macprovider.trusted-pool-model-evidence.v2`), runs
-the full semantic validator over it, and writes it with the signed event
-bundle beside it: `journeys/evidence/trusted-pool-model-<run>.manifests/`
-(`root-issuer-registered.json` and `v<N>.json`). Commit both. The bundle is
-the signed public policy record; it carries the creator and attested-member
-account ids in the clear (they are signed into the root registration and the
-cores), but no prompt, output, key or token.
+redacted evidence (schema `macprovider.trusted-pool-model-evidence.v3`),
+recomputes every route snapshot digest with `verify-route-snapshot`, runs the
+full semantic validator over it, and writes it with the signed event bundle
+beside it: `journeys/evidence/trusted-pool-model-<run>.manifests/`
+(`root-issuer-registered.json` and the current `v<N>.json`). Commit both. The
+bundle is the signed public policy record; it carries the creator and
+attested-member account ids in the clear (they are signed into the root
+registration and the cores), but no prompt, output, key or token, and the
+builder refuses duplicate keys, credential-shaped fields and locators in it.
 
 The signing workflow builds `coordinator-cli` from its own reviewed `main`
 checkout (the deployed `source_sha` predates `verify-manifest`) and runs
@@ -378,7 +432,8 @@ with the CLI and requires the verified cores to equal the evidence, then
 builds the unsigned `macprovider.journey-result.v1` payload:
 
 - `journey_id` `JOURNEY-TRUSTED-POOL-MODEL`, `requirement_ids` (a subset of
-  the five above), `run_id`, the deployed source commit, operator role and
+  the evidence's: all five, or four without SPEC-042-R016 when the
+  attestation-removal in-flight request was not captured), `run_id`, the deployed source commit, operator role and
   identity fingerprint, and UTC timestamps;
 - `execution_mode` and `environment.class` `production-operator-internal-pool`;
 - the derived result and one derived step entry per physical step, in order,
@@ -399,7 +454,8 @@ builds the unsigned `macprovider.journey-result.v1` payload:
   `pricing_bounds_sha256`, and `fingerprint_salt`.
 
 At promotion, `check_spec_governance.py` re-runs the same semantic validator
-over the committed evidence the signed result names. The payload is signed in
+over the committed evidence the signed result names and requires the promoted
+requirement to be one the evidence covers. The payload is signed in
 CI (`production-release`, `MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM`, key id
 `macprovider-acceptance-p256-v1`) and promoted with
 `promote-signed-journey-result.py`.

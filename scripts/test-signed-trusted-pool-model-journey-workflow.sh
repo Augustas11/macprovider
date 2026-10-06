@@ -157,9 +157,9 @@ for index, line in enumerate(lines):
         raise SystemExit("GitHub expression is interpolated directly into a shell block")
 
 required_builder = [
-    'JOURNEY_ID = "JOURNEY-TRUSTED-POOL-MODEL"',
-    'EVIDENCE_SCHEMA = "macprovider.trusted-pool-model-evidence.v2"',
-    'ARTIFACT_ID = "redacted-trusted-pool-model"',
+    'JOURNEY_ID = TRUSTED_POOL_MODEL_JOURNEY_ID',
+    'EVIDENCE_SCHEMA = "macprovider.trusted-pool-model-evidence.v3"',
+    'ARTIFACT_ID = TRUSTED_POOL_MODEL_ARTIFACT_ID',
     "require_git_file_matches",
     "must be pending and mapped",
     "TRUSTED_POOL_MODEL_STEP_ID_ORDER",
@@ -177,6 +177,7 @@ required_builder = [
     "observations = validate_evidence(evidence, now=datetime.now(timezone.utc))",
     "reverify_bundle(root, source, evidence, cli, evidence_sha)",
     '"trust-pool-admin", "verify-manifest"',
+    '"trust-pool-admin", "verify-route-snapshot"',
     '"result": {"status": "pass", "summary": SUMMARY}',
     "reject_raw_identifiers",
     "require_candidate_identity",

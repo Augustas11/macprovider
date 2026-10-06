@@ -2291,7 +2291,9 @@ def _validate_trusted_pool_external_runtime_journey_result(
         )
 
 
-def _revalidate_trusted_pool_model_evidence(root: Path, artifacts: list[Any], location: str, result: ValidationResult) -> None:
+def _revalidate_trusted_pool_model_evidence(
+    root: Path, artifacts: list[Any], location: str, result: ValidationResult, requirement_id: str | None = None
+) -> None:
     """Promotion-time revalidation: the committed redacted evidence a signed
     trusted-pool model result names must still pass the journey's full
     semantic validator (closed schema, cross-record joins, derived result)."""
@@ -2324,7 +2326,7 @@ def _revalidate_trusted_pool_model_evidence(root: Path, artifacts: list[Any], lo
             with contextlib.redirect_stderr(stderr):
                 builder = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(builder)
-                builder.validate_committed_evidence(payload)
+                builder.validate_committed_evidence(payload, requirement_id)
         except SystemExit:
             result.error(f"{location}.signed.artifacts[{index}]", "redacted evidence fails the journey validator: " + stderr.getvalue().strip())
         finally:
@@ -2427,7 +2429,7 @@ def _validate_trusted_pool_model_journey_result(
             f"{label} physical steps must be ordered as {list(TRUSTED_POOL_MODEL_STEP_ID_ORDER)}",
         )
     if root is not None:
-        _revalidate_trusted_pool_model_evidence(root, artifacts, location, result)
+        _revalidate_trusted_pool_model_evidence(root, artifacts, location, result, requirement_id)
 
 
 def _validate_trusted_pool_layer2_no_overclaim_text(value: Any, location: str, result: ValidationResult) -> None:

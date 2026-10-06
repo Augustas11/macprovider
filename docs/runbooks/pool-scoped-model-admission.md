@@ -433,19 +433,22 @@ SQL; this section is the order of work. SPEC-047-R011 is not promoted by it
 
 1. Make a capture directory outside every checkout (`mkdir -m 0700`).
 2. Record `preconditions.json` (exact facts in the journey file),
-   `deploy.json`, the live bounds (`config/pricing-bounds.json`), the whole
-   live `trusted_pools.provider_owner_account_ids` map
+   `deploy.json`, the live bounds (`config/pricing-bounds.json`), the live
+   `rewards.global_multiplier` and `rewards.provider_share`
+   (`config/rewards.json`), the `ledger_config_snapshots` rows, the whole live
+   `trusted_pools.provider_owner_account_ids` map
    (`config/provider-owner-account-ids.json`), and the owner-authority reload
    log fields (`config/owner-authority-reload.json`).
 3. Save the pool's `root_issuer_registered` event as
-   `pool/root-issuer-registered.json`. For every manifest you or the keeper
-   sign, keep the `sign-manifest --out` file as
-   `pool/v<N>/manifest-accepted.json`; every version a route snapshot or a
-   relied-on binding names must be there. Right after each of the six role
+   `pool/root-issuer-registered.json`. Right after each of the six role
    manifests activates (native genesis, window-only rotation, price change,
    native entry removal, GGUF added with the attestation, GGUF attestation
    removal; the journey file has the ordering rules), save `get-pool` as
-   `pool/v<N>/get-pool.json` and write the six versions into `run.json`.
+   `pool/v<N>/get-pool.json` and write the six versions into `run.json`. At
+   the end, save the CURRENT manifest's `sign-manifest --out` event as
+   `pool/current/manifest-accepted.json` and `get-pool` as
+   `pool/current/get-pool.json`; its snapshot proves every earlier version, so
+   older events are not needed.
 4. Save both members' `models propose --json` bundles, then, with both
    entries live, the pool and global `/v1/models` views.
 5. For each paid request directory, send the request with `curl -D
@@ -454,13 +457,16 @@ SQL; this section is the order of work. SPEC-047-R011 is not promoted by it
    request (long `max_tokens`) just before its manifest's `not_before`, so it
    is dispatched before and settles after the boundary, and capture its rows
    after it settles. After the price change, the delegated member re-delegates
-   and resubmits its offer (re-delegation alone does not rebind).
-6. Capture the refusals (each refusal's reservation row too), the
-   window-boundary probe loop (probes on both sides of the boundary, each
-   naming the `pool_model_id`), the pause and resume, both
-   `pool-rollback-preflight` runs (stdout and exit status), the restart times
-   and a request dispatched after the gateway restart, then the admission
-   events, the pool event counts, and the never-global count (aliased `AS n`).
+   and resubmits its offer (re-delegation alone does not rebind). To promote
+   SPEC-042-R016, also run `rotation/attestation-removal/inflight/` the same
+   way across the attestation removal (it must settle zero-billed).
+6. Capture the refusals (each with the `request.json` the script sent, and
+   its `request_log` and reservation rows), the window-boundary probes (one
+   directory per probe request, routed on both sides of the boundary), the
+   pause and resume, both `pool-rollback-preflight` runs (stdout and exit
+   status), the restart times and a request dispatched after the gateway
+   restart, then the admission events, the pool event counts, and the
+   never-global count (aliased `AS n`).
 7. Build `coordinator-cli` from the reviewed `main` commit and build the
    redacted evidence locally:
 

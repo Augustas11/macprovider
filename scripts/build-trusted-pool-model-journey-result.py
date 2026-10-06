@@ -27,7 +27,9 @@ import secrets
 import struct
 import subprocess
 import sys
+import tempfile
 from copy import deepcopy
+from decimal import Decimal
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -75,11 +77,11 @@ sha256_hex = base.sha256_hex
 fingerprint = base.fingerprint
 
 
-EVIDENCE_SCHEMA = "macprovider.trusted-pool-model-evidence.v2"
-VERIFICATION_SCHEMA = "macprovider.trust-pool-manifest-verification.v1"
-JOURNEY_ID = "JOURNEY-TRUSTED-POOL-MODEL"
+EVIDENCE_SCHEMA = "macprovider.trusted-pool-model-evidence.v3"
+VERIFICATION_SCHEMA = "macprovider.trust-pool-manifest-verification.v2"
+JOURNEY_ID = TRUSTED_POOL_MODEL_JOURNEY_ID
 REPOSITORY = "Augustas11/macprovider"
-ARTIFACT_ID = "redacted-trusted-pool-model"
+ARTIFACT_ID = TRUSTED_POOL_MODEL_ARTIFACT_ID
 EVIDENCE_PREFIX = "journeys/evidence/trusted-pool-model-"
 BUNDLE_ROOT_FILE = "root-issuer-registered.json"
 ROUTE_SNAPSHOT_V2 = "spec022-route-snapshot-v2"
@@ -100,12 +102,25 @@ REQUIREMENT_RE = re.compile(r"^SPEC-[0-9]{3}-R[0-9]{3}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 DATETIME_Z_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+BASE64_BLOB_RE = re.compile(r"^[A-Za-z0-9+/]{40,}={0,2}$")
 RFC3339_RE = re.compile(r"^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$")
 DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 RUN_ID_RE = re.compile(r"^trusted-pool-model-[0-9]{8}T[0-9]{6}Z$")
 POOL_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
-LICENSE_RE = re.compile(r"^(?:LicenseRef-[A-Za-z0-9][A-Za-z0-9.-]{0,63}|[A-Za-z0-9][A-Za-z0-9.+-]{0,63})$")
+# poolmanifest.pinnedSPDXLicenseIDs. A LicenseRef-* licence needs its text in
+# the pool's reviewed disclosure bundle, which this journey does not capture,
+# so it is refused here rather than promoted unreviewed.
+PINNED_SPDX_LICENSES = frozenset({
+    "0BSD", "AFL-3.0", "AGPL-3.0-only", "AGPL-3.0-or-later", "Apache-2.0", "Artistic-2.0", "BSD-2-Clause", "BSD-3-Clause",
+    "BSL-1.0", "CC-BY-3.0", "CC-BY-4.0", "CC-BY-NC-4.0", "CC-BY-NC-SA-4.0", "CC-BY-SA-3.0", "CC-BY-SA-4.0", "CC0-1.0",
+    "CDLA-Permissive-2.0", "ECL-2.0", "EPL-2.0", "EUPL-1.2", "GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only",
+    "GPL-3.0-or-later", "ISC", "LGPL-2.1-only", "LGPL-2.1-or-later", "LGPL-3.0-only", "LGPL-3.0-or-later", "MIT", "MIT-0",
+    "MPL-2.0", "NCSA", "OpenRAIL", "OSL-3.0", "PostgreSQL", "Unlicense", "UPL-1.0", "Zlib",
+})
+FENCE_REASON = "pool_route_fence_not_settlement_eligible"
+ATTESTATION_INFLIGHT = "rotation/attestation-removal/inflight"
+ATTESTATION_INFLIGHT_REQUIREMENT = "SPEC-042-R016"
 TOKEN_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 VERSION_RE = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
@@ -332,6 +347,8 @@ class Capture:
     def __init__(self, root: Path) -> None:
         self.root = root
         self.raw: dict[str, dict[str, Any]] = {}
+        # (where, route_snapshot_json bytes, stored digest) for verify-route-snapshot.
+        self.snapshots: list[tuple[str, bytes, str]] = []
 
     def read(self, relative: str) -> bytes:
         payload = base.read_capture_file(self.root, relative)
@@ -446,7 +463,7 @@ def normalize_verification(output: Any, salt: str) -> tuple[dict[str, Any], list
     compare the reviewed CLI's fresh output with the committed evidence."""
     output = obj(output, {
         "schema", "pool_id", "creator_account_id", "launch_environment", "root_issuer_key_id",
-        "root_issuer_public_key_fingerprint", "root_event_sha256", "manifests",
+        "root_issuer_public_key_fingerprint", "root_event_sha256", "newest_manifest_version", "manifests",
     }, "verify-manifest output")
     require(output["schema"] == VERIFICATION_SCHEMA, f"verify-manifest output schema must be {VERIFICATION_SCHEMA}")
     root = {
@@ -455,6 +472,7 @@ def normalize_verification(output: Any, salt: str) -> tuple[dict[str, Any], list
         "launch_environment": output["launch_environment"],
         "root_issuer_public_key_fingerprint": hex64(output["root_issuer_public_key_fingerprint"], "verify-manifest root fingerprint"),
         "root_event_sha256": hex64(output["root_event_sha256"], "verify-manifest root_event_sha256"),
+        "newest_manifest_version": int_in(output["newest_manifest_version"], "verify-manifest newest_manifest_version", 1),
     }
     manifests = []
     for index, item in enumerate(list_of(output["manifests"], "verify-manifest manifests")):
@@ -481,6 +499,33 @@ def normalize_verification(output: Any, salt: str) -> tuple[dict[str, Any], list
     return root, manifests
 
 
+def run_verify_route_snapshots(cli: str, snapshots: list[tuple[str, bytes, str]]) -> int:
+    """Recompute every captured route snapshot digest with the coordinator's
+    own canonicalization (`verify-route-snapshot`) and require each equal to
+    the digest the coordinator stored."""
+    if not snapshots:
+        return 0
+    with tempfile.TemporaryDirectory() as tmp:
+        command = [cli, "trust-pool-admin", "verify-route-snapshot"]
+        for index, (_, payload, _) in enumerate(snapshots):
+            path = Path(tmp) / f"snapshot-{index}.json"
+            path.write_bytes(payload)
+            command += ["--snapshot", str(path)]
+        try:
+            completed = subprocess.run(command, capture_output=True, check=False, timeout=300)
+        except OSError as exc:
+            die(f"could not run coordinator-cli verify-route-snapshot: {exc}")
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", "replace").strip().splitlines()
+        die(f"coordinator-cli verify-route-snapshot refused a captured route snapshot: {detail[-1] if detail else 'no output'}")
+    results = base.parse_json_bytes(completed.stdout, "verify-route-snapshot output")
+    require(isinstance(results, list) and len(results) == len(snapshots), "verify-route-snapshot must answer every snapshot")
+    for (where, _, stored), item in zip(snapshots, results):
+        recomputed = obj(item, {"route_snapshot_digest"}, f"{where} recomputed digest")["route_snapshot_digest"]
+        require(recomputed == stored, f"{where}: the recomputed route snapshot digest must equal the stored route_snapshot_digest")
+    return len(snapshots)
+
+
 def run_verify_manifest(cli: str, root_path: Path, manifest_paths: list[Path]) -> Any:
     command = [cli, "trust-pool-admin", "verify-manifest", "--root", str(root_path)]
     for path in manifest_paths:
@@ -496,28 +541,45 @@ def run_verify_manifest(cli: str, root_path: Path, manifest_paths: list[Path]) -
 
 
 def capture_manifests(capture: Capture, cli: str, salt: str) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, bytes]]:
-    pool_dir = capture.root / "pool"
-    versions = sorted(
-        int(child.name[1:]) for child in (pool_dir.iterdir() if pool_dir.is_dir() else [])
-        if re.fullmatch(r"v[1-9][0-9]{0,8}", child.name) and child.is_dir()
-    )
-    require(bool(versions), "pool/v<N>/manifest-accepted.json must be captured")
-    bundle = {BUNDLE_ROOT_FILE: capture.read(f"pool/{BUNDLE_ROOT_FILE}")}
-    paths = []
-    for version in versions:
-        relative = f"pool/v{version}/manifest-accepted.json"
-        payload = capture.read(relative)
-        event = base.parse_json_bytes(payload, relative)
-        require(isinstance(event, dict) and event.get("event_type") == "manifest_accepted", f"{relative} must be a manifest_accepted event")
-        require(event.get("manifest_version") == version, f"{relative} must be version {version}")
-        bundle[f"v{version}.json"] = payload
-        paths.append(capture.root / relative)
-    root, manifests = normalize_verification(run_verify_manifest(cli, capture.root / "pool" / BUNDLE_ROOT_FILE, paths), salt)
+    """The root registration and the current manifest_accepted event. The
+    current event's snapshot carries every accepted version, so the verified
+    history is complete and contiguous by construction."""
+    root_payload = capture.read(f"pool/{BUNDLE_ROOT_FILE}")
+    current = capture.read("pool/current/manifest-accepted.json")
+    event = base.parse_json_bytes(current, "pool/current/manifest-accepted.json")
+    require(isinstance(event, dict) and event.get("event_type") == "manifest_accepted", "pool/current/manifest-accepted.json must be a manifest_accepted event")
+    version = int_in(event.get("manifest_version"), "pool/current/manifest-accepted.json manifest_version", 1)
+    root, manifests = normalize_verification(
+        run_verify_manifest(cli, capture.root / "pool" / BUNDLE_ROOT_FILE, [capture.root / "pool" / "current" / "manifest-accepted.json"]), salt)
+    require(root["newest_manifest_version"] == version, "verify-manifest must report the current event as the newest version")
+    bundle = {BUNDLE_ROOT_FILE: root_payload, f"v{version}.json": current}
+    for name, payload in bundle.items():
+        check_bundle_file(payload, name)
     return root, manifests, bundle
 
 
-def capture_pool_state(capture: Capture, run: dict[str, Any], version: int, salt: str) -> dict[str, Any]:
-    where = f"pool/v{version}/get-pool.json"
+def check_bundle_file(payload: bytes, name: str) -> None:
+    """The committed bundle is signed public policy: no duplicate key, no
+    credential-shaped field or value, and no locator outside base64 blobs."""
+    event = base.parse_json_bytes(payload, f"bundle {name}")
+    base.reject_forbidden_secret_keys(event, f"bundle.{name}")
+
+    def scan(value: Any, where: str) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                scan(key, f"{where}.<key>")
+                scan(item, f"{where}.{key}")
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                scan(item, f"{where}[{index}]")
+        elif isinstance(value, str) and not BASE64_BLOB_RE.fullmatch(value):
+            if any(pattern.search(value) for pattern in LOCATOR_PATTERNS):
+                die(f"bundle {name} {where} contains a URL, host, IP address or path")
+
+    scan(event, "$")
+
+
+def capture_pool_state(capture: Capture, run: dict[str, Any], where: str, salt: str) -> dict[str, Any]:
     pool = capture.object(where).get("pool")
     if not isinstance(pool, dict):
         die(f"{where}.pool must be an object")
@@ -607,6 +669,83 @@ def capture_body(capture: Capture, base_dir: str, stream: bool) -> dict[str, Any
     }
 
 
+def capture_request_log(capture: Capture, run: dict[str, Any], base_dir: str) -> list[dict[str, Any]]:
+    rows = []
+    for row in capture.rows(f"{base_dir}/request_log.json"):
+        where = f"{base_dir} request_log"
+        rows.append({
+            "request_id": row.get("request_id"), "attempt_n": as_int(row.get("attempt_n"), f"{where}.attempt_n"),
+            "external_request_id": row.get("external_request_id"), "pool": pool_label(run, row.get("pool_id"), where),
+            "model": row.get("model"), "status": as_int(row.get("status"), f"{where}.status"),
+        })
+    return rows
+
+
+def pool_label(run: dict[str, Any], pool_id: Any, where: str) -> str | None:
+    if pool_id in (None, ""):
+        return None
+    if pool_id == run["pool_id"]:
+        return "journey"
+    if pool_id == run["other_pool_id"]:
+        return "other"
+    die(f"{where}: pool must be the journey pool, the other authorized pool, or none")
+    raise AssertionError
+
+
+def capture_reservations(capture: Capture, salt: str, base_dir: str) -> list[dict[str, Any]]:
+    rows = []
+    for row in capture.rows(f"{base_dir}/quota_reservations.json"):
+        where = f"{base_dir} quota_reservations"
+        rows.append({
+            "request_id": row.get("request_id"), "account_fp": account_fp(row.get("account_id"), salt), "status": row.get("status"),
+            "settled_tokens": as_int(row.get("settled_tokens"), f"{where}.settled_tokens"),
+            "settlement_hold": as_int(row.get("settlement_hold"), f"{where}.settlement_hold"),
+        })
+    return rows
+
+
+def capture_snapshots(capture: Capture, run: dict[str, Any], salt: str, base_dir: str) -> list[dict[str, Any]]:
+    """Route snapshots come from the stored route_snapshot_json (the digest
+    preimage); every field the journey checks is read from it, and its stored
+    digest is recomputed with the coordinator's canonicalization."""
+    out = []
+    for index, row in enumerate(capture.rows(f"{base_dir}/route_snapshots.json")):
+        where = f"{base_dir} route_snapshots[{index}]"
+        text = row.get("route_snapshot_json")
+        require(isinstance(text, str), f"{where}.route_snapshot_json must be the stored JSON text")
+        snap = base.parse_json_bytes(text.encode("utf-8"), f"{where}.route_snapshot_json")
+        require(isinstance(snap, dict), f"{where}.route_snapshot_json must be an object")
+        digest = hex64(row.get("route_snapshot_digest"), f"{where}.route_snapshot_digest")
+        for field in ("request_id", "attempt_n", "provider_id"):
+            require(row.get(field) == snap.get(field), f"{where}: the row's {field} must equal the snapshot's")
+        capture.snapshots.append((where, text.encode("utf-8"), digest))
+        get = snap.get
+        out.append({
+            "request_id": get("request_id"), "attempt_n": as_int(get("attempt_n"), f"{where}.attempt_n"),
+            "provider": provider_kind(run, get("provider_id"), where),
+            "route_snapshot_mode": get("route_snapshot_mode"), "route_snapshot_policy_version": get("route_snapshot_policy_version"),
+            "route_snapshot_digest": digest, "pool": pool_label(run, get("pool_id"), where), "model_id": get("model_id"),
+            "expected_model_hash_source": get("expected_model_hash_source"), "pool_model_id": get("pool_model_id"),
+            "manifest_version": as_int(get("manifest_version"), f"{where}.manifest_version"),
+            "manifest_core_digest": get("manifest_core_digest"),
+            "pool_generation": as_int(get("pool_generation"), f"{where}.pool_generation"),
+            "runtime_source": get("runtime_source") or None,
+            "pool_operator_account_fp": account_fp(get("pool_operator_account_id"), salt),
+            "pool_member_account_fp": account_fp(get("pool_member_account_id"), salt),
+            "expected_catalog_model_hash": get("expected_catalog_model_hash"),
+            "expected_catalog_model_hash_algorithm": get("expected_catalog_model_hash_algorithm"),
+            "provider_reported_model_hash": get("provider_reported_model_hash"),
+            "provider_reported_model_hash_algorithm": get("provider_reported_model_hash_algorithm"),
+            **{f"pool_model_{rate}": as_int(get(f"pool_model_{rate}"), f"{where}.pool_model_{rate}") for rate in RATE_KEYS},
+            "pool_model_pricing_bounds_sha256": get("pool_model_pricing_bounds_sha256"),
+            "pool_model_global_multiplier_ppm": as_int(get("pool_model_global_multiplier_ppm"), f"{where}.pool_model_global_multiplier_ppm"),
+            "pool_model_provider_share_bps": as_int(get("pool_model_provider_share_bps"), f"{where}.pool_model_provider_share_bps"),
+            "pool_model_config_snapshot_id": as_int(get("pool_model_config_snapshot_id"), f"{where}.pool_model_config_snapshot_id"),
+            "route_decision_ts_unix_ms": as_int(get("route_decision_ts_unix_ms"), f"{where}.route_decision_ts_unix_ms"),
+        })
+    return out
+
+
 def capture_paid(capture: Capture, run: dict[str, Any], salt: str, base_dir: str, stream: bool) -> dict[str, Any]:
     status, headers = parse_headers(capture.read(f"{base_dir}/response.headers"), f"{base_dir}/response.headers")
     rid = require_string(headers.get("x-request-id"), REQUEST_ID_RE, f"{base_dir} X-Request-ID")
@@ -620,47 +759,14 @@ def capture_paid(capture: Capture, run: dict[str, Any], salt: str, base_dir: str
             "pool_manifest_core_digest": headers.get("x-macprovider-pool-manifest-core-digest"),
         },
         "body": capture_body(capture, base_dir, stream),
-        "request_log": [],
-        "route_snapshots": [],
+        "request_log": capture_request_log(capture, run, base_dir),
+        "route_snapshots": capture_snapshots(capture, run, salt, base_dir),
         "attempt_outputs": [],
         "receipt_verdicts": [],
         "ledger": [],
-        "quota_reservations": [],
+        "quota_reservations": capture_reservations(capture, salt, base_dir),
         "usage_events": [],
     }
-    for row in capture.rows(f"{base_dir}/request_log.json"):
-        record["request_log"].append({
-            "request_id": row.get("request_id"), "attempt_n": as_int(row.get("attempt_n"), f"{base_dir} request_log.attempt_n"),
-            "external_request_id": row.get("external_request_id"), "pool_id": row.get("pool_id"),
-            "status": as_int(row.get("status"), f"{base_dir} request_log.status"),
-        })
-    for row in capture.rows(f"{base_dir}/route_snapshots.json"):
-        where = f"{base_dir} route_snapshots"
-        record["route_snapshots"].append({
-            "request_id": row.get("request_id"), "attempt_n": as_int(row.get("attempt_n"), f"{where}.attempt_n"),
-            "provider": provider_kind(run, row.get("provider_id"), where),
-            "route_snapshot_mode": row.get("route_snapshot_mode"),
-            "route_snapshot_policy_version": row.get("route_snapshot_policy_version"),
-            "route_snapshot_digest": row.get("route_snapshot_digest"),
-            "pool_id": row.get("pool_id"), "model_id": row.get("model_id"),
-            "expected_model_hash_source": row.get("expected_model_hash_source"),
-            "pool_model_id": row.get("pool_model_id"),
-            "manifest_version": as_int(row.get("manifest_version"), f"{where}.manifest_version"),
-            "manifest_core_digest": row.get("manifest_core_digest"),
-            "pool_generation": as_int(row.get("pool_generation"), f"{where}.pool_generation"),
-            "runtime_source": row.get("runtime_source") or None,
-            "pool_operator_account_fp": account_fp(row.get("pool_operator_account_id"), salt),
-            "pool_member_account_fp": account_fp(row.get("pool_member_account_id"), salt),
-            "expected_catalog_model_hash": row.get("expected_catalog_model_hash"),
-            "expected_catalog_model_hash_algorithm": row.get("expected_catalog_model_hash_algorithm"),
-            "provider_reported_model_hash": row.get("provider_reported_model_hash"),
-            "provider_reported_model_hash_algorithm": row.get("provider_reported_model_hash_algorithm"),
-            **{f"pool_model_{rate}": as_int(row.get(f"pool_model_{rate}"), f"{where}.pool_model_{rate}") for rate in RATE_KEYS},
-            "pool_model_pricing_bounds_sha256": row.get("pool_model_pricing_bounds_sha256"),
-            "pool_model_global_multiplier_ppm": as_int(row.get("pool_model_global_multiplier_ppm"), f"{where}.pool_model_global_multiplier_ppm"),
-            "pool_model_provider_share_bps": as_int(row.get("pool_model_provider_share_bps"), f"{where}.pool_model_provider_share_bps"),
-            "route_decision_ts_unix_ms": as_int(row.get("route_decision_ts_unix_ms"), f"{where}.route_decision_ts_unix_ms"),
-        })
     for row in capture.rows(f"{base_dir}/attempt_outputs.json"):
         where = f"{base_dir} attempt_outputs"
         record["attempt_outputs"].append({
@@ -694,13 +800,7 @@ def capture_paid(capture: Capture, run: dict[str, Any], salt: str, base_dir: str
             **{field: as_int(row.get(field), f"{where}.{field}") for field in (
                 "prompt_rate_per_mtok", "completion_rate_per_mtok", "global_multiplier_ppm", "gross_credits",
                 "provider_share_bps", "provider_credits", "quarantined", "payable")},
-        })
-    for row in capture.rows(f"{base_dir}/quota_reservations.json"):
-        where = f"{base_dir} quota_reservations"
-        record["quota_reservations"].append({
-            "request_id": row.get("request_id"), "status": row.get("status"),
-            "settled_tokens": as_int(row.get("settled_tokens"), f"{where}.settled_tokens"),
-            "settlement_hold": as_int(row.get("settlement_hold"), f"{where}.settlement_hold"),
+            "quarantine_reason": row.get("quarantine_reason") or None,
         })
     for row in capture.rows(f"{base_dir}/usage_events.json"):
         where = f"{base_dir} usage_events"
@@ -713,37 +813,106 @@ def capture_paid(capture: Capture, run: dict[str, Any], salt: str, base_dir: str
     return record
 
 
-def capture_refusal(capture: Capture, base_dir: str) -> dict[str, Any]:
+def capture_request_meta(capture: Capture, run: dict[str, Any], base_dir: str) -> dict[str, Any]:
+    """The canonical request a scenario sent: pool selector, engine selector,
+    model and stream flag, as the operator's capture script sent them."""
+    meta = obj(capture.object(f"{base_dir}/request.json"), {"pool_select", "engine_select", "model", "stream"}, f"{base_dir}/request.json")
+    engine = meta["engine_select"]
+    require(engine is None or (isinstance(engine, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,31}", engine) is not None),
+            f"{base_dir}/request.json engine_select must be a selector token or null")
+    kind = None
+    for candidate in ENTRY_KINDS:
+        if meta["model"] == run["entries"][candidate]["pool_model_id"]:
+            kind = candidate
+    require(kind is not None, f"{base_dir}/request.json model must be one of the journey's entries")
+    return {"pool": pool_label(run, meta["pool_select"], f"{base_dir}/request.json pool_select"), "engine_select": engine,
+            "model_kind": kind, "stream": bool_of(meta["stream"], f"{base_dir}/request.json stream")}
+
+
+def capture_refusal(capture: Capture, run: dict[str, Any], salt: str, base_dir: str) -> dict[str, Any]:
     status, headers = parse_headers(capture.read(f"{base_dir}/response.headers"), f"{base_dir}/response.headers")
     body = base.parse_json_bytes(capture.read(f"{base_dir}/response.json"), f"{base_dir}/response.json")
     error = body.get("error") if isinstance(body, dict) else None
     require(isinstance(error, dict), f"{base_dir} body must carry an error object")
-    reservations = []
-    for row in capture.rows(f"{base_dir}/quota_reservations.json"):
-        reservations.append({
-            "request_id": row.get("request_id"), "status": row.get("status"),
-            "settled_tokens": as_int(row.get("settled_tokens"), f"{base_dir} settled_tokens"),
-            "settlement_hold": as_int(row.get("settlement_hold"), f"{base_dir} settlement_hold"),
-        })
+    log = capture_request_log(capture, run, base_dir)
+    for row in log:
+        for kind in ENTRY_KINDS:
+            if row["model"] == run["entries"][kind]["pool_model_id"]:
+                row["model"] = kind
     return {
         "x_request_id": require_string(headers.get("x-request-id"), REQUEST_ID_RE, f"{base_dir} X-Request-ID"),
         "date_unix": date_header_seconds(headers, base_dir),
         "status": status,
         "error_code": token(error.get("code"), f"{base_dir} error.code"),
+        "disclosure_headers": sorted(h for h in headers if h in ("x-macprovider-model-disclosure", "x-macprovider-pool-manifest-core-digest")),
+        "request": capture_request_meta(capture, run, base_dir),
+        "request_log": log,
         "route_snapshot_count": len(capture.rows(f"{base_dir}/route_snapshots.json")),
         "ledger_row_count": len(capture.rows(f"{base_dir}/ledger.json")),
-        "quota_reservations": reservations,
+        "quota_reservations": capture_reservations(capture, salt, base_dir),
+    }
+
+
+def capture_probes(capture: Capture, run: dict[str, Any], salt: str) -> list[dict[str, Any]]:
+    """Window-boundary probes are real requests: each probe directory holds
+    its response headers, request_log rows, route snapshots and reservation."""
+    root = capture.root / "rotation" / "window-only" / "probes"
+    require(root.is_dir() and not root.is_symlink(), "rotation/window-only/probes/ must hold the probe request directories")
+    probes = []
+    for child in sorted(root.iterdir()):
+        require(child.is_dir() and not child.is_symlink() and re.fullmatch(r"[a-z0-9-]{1,32}", child.name) is not None,
+                f"rotation/window-only/probes/{child.name} must be a probe directory")
+        base_dir = f"rotation/window-only/probes/{child.name}"
+        status, headers = parse_headers(capture.read(f"{base_dir}/response.headers"), f"{base_dir}/response.headers")
+        probes.append({
+            "x_request_id": require_string(headers.get("x-request-id"), REQUEST_ID_RE, f"{base_dir} X-Request-ID"),
+            "date_unix": date_header_seconds(headers, base_dir),
+            "status": status,
+            "request_log": capture_request_log(capture, run, base_dir),
+            "route_snapshots": capture_snapshots(capture, run, salt, base_dir),
+            "quota_reservations": capture_reservations(capture, salt, base_dir),
+        })
+    return probes
+
+
+def capture_economics(capture: Capture) -> dict[str, Any]:
+    """The live rewards economics and the coordinator's ledger config
+    snapshots, from which pool routes freeze multiplier and provider share."""
+    rewards = obj(capture.object("config/rewards.json"), {"global_multiplier", "provider_share"}, "config/rewards.json")
+    for key in ("global_multiplier", "provider_share"):
+        require(isinstance(rewards[key], (int, float)) and not isinstance(rewards[key], bool) and rewards[key] >= 0,
+                f"config/rewards.json {key} must be a number")
+    rows = []
+    for row in capture.rows("config/ledger-config-snapshots.json"):
+        row = obj(row, {"id", "effective_at_utc", "config_hash", "provider_share_bps", "global_multiplier_ppm"}, "ledger-config-snapshots row")
+        rows.append({
+            "id": as_int(row["id"], "ledger-config-snapshots.id"),
+            "effective_at_unix_ms": rfc3339_ms(row["effective_at_utc"], "ledger-config-snapshots.effective_at_utc"),
+            "config_hash": row["config_hash"],
+            "provider_share_bps": as_int(row["provider_share_bps"], "ledger-config-snapshots.provider_share_bps"),
+            "global_multiplier_ppm": as_int(row["global_multiplier_ppm"], "ledger-config-snapshots.global_multiplier_ppm"),
+        })
+    return {
+        # billing.ParseMultiplierPPM / ParseShareBps: math.Round half away from zero.
+        "live_global_multiplier_ppm": int(Decimal(str(rewards["global_multiplier"])) * 1_000_000 + Decimal("0.5")),
+        "live_provider_share_bps": int(Decimal(str(rewards["provider_share"])) * 10_000 + Decimal("0.5")),
+        "config_snapshots": rows,
     }
 
 
 def capture_admission(capture: Capture, run: dict[str, Any]) -> list[dict[str, Any]]:
-    actor_re = re.compile(rf"^pool_manifest:{re.escape(run['pool_id'])}:[0-9]{{1,10}}:[0-9a-f]{{64}}$")
+    """Admission rows with a closed actor vocabulary: provider, coordinator,
+    an operator (redacted to "operator"), or the exact signed-manifest actor of
+    the journey pool. Anything else fails capture."""
+    actor_re = re.compile(rf"^pool_manifest:{re.escape(run['pool_id'])}:[1-9][0-9]{{0,9}}:[0-9a-f]{{64}}$")
     out = []
     for row in capture.rows("admission/model-admission-events.json"):
-        where = "model-admission-events"
+        where = f"model-admission-events id {row.get('id')}"
         actor = row.get("actor")
-        if not (isinstance(actor, str) and (actor_re.fullmatch(actor) or TOKEN_RE.fullmatch(actor))):
-            actor = "other"
+        if isinstance(actor, str) and actor.startswith("operator:") and len(actor) > len("operator:"):
+            actor = "operator"
+        elif not (isinstance(actor, str) and (actor in ("provider", "coordinator") or actor_re.fullmatch(actor))):
+            die(f"{where}: actor must be provider, coordinator, operator:<id> or the journey pool's exact pool_manifest actor")
         version = row.get("pool_manifest_version")
         out.append({
             "id": as_int(row.get("id"), f"{where}.id"),
@@ -751,13 +920,13 @@ def capture_admission(capture: Capture, run: dict[str, Any]) -> list[dict[str, A
             "state": token(row.get("state"), f"{where}.state"),
             "reason_code": None if row.get("reason_code") in (None, "") else token(row.get("reason_code"), f"{where}.reason_code"),
             "actor": actor,
-            "binding_scope": row.get("binding_scope"),
-            "pool_id": row.get("pool_id"),
-            "pool_model_id": row.get("pool_model_id"),
-            "pool_manifest_version": None if version is None else as_int(version, f"{where}.pool_manifest_version"),
-            "pool_manifest_core_digest": row.get("pool_manifest_core_digest"),
-            "expected_catalog_model_hash_algorithm": row.get("expected_catalog_model_hash_algorithm"),
-            "expected_catalog_model_hash": row.get("expected_catalog_model_hash"),
+            "binding_scope": row.get("binding_scope") or None,
+            "pool": pool_label(run, row.get("pool_id"), where),
+            "pool_model_id": row.get("pool_model_id") or None,
+            "pool_manifest_version": None if version in (None, 0) else as_int(version, f"{where}.pool_manifest_version"),
+            "pool_manifest_core_digest": row.get("pool_manifest_core_digest") or None,
+            "expected_catalog_model_hash_algorithm": row.get("expected_catalog_model_hash_algorithm") or None,
+            "expected_catalog_model_hash": row.get("expected_catalog_model_hash") or None,
             "created_at_unix_ms": rfc3339_ms(row.get("created_at_utc"), f"{where}.created_at_utc"),
         })
     return out
@@ -861,16 +1030,18 @@ def build_evidence(capture_dir: Path, cli: str) -> tuple[dict[str, Any], dict[st
         }
     deploy = capture.object("deploy.json")
     restart = capture.object("restart/order.json")
-    probes = []
-    for index, probe in enumerate(capture.rows("rotation/window-only/probes.json")):
-        probe = obj(probe, {"at", "status", "pool_model_id"}, f"probes[{index}]")
-        probes.append({"at_unix": z_seconds(probe["at"], f"probes[{index}].at"), "status": as_int(probe["status"], f"probes[{index}].status"),
-                       "pool_model_id": probe["pool_model_id"]})
+    require(len(restart) == 2 and len(deploy) == 4, "deploy.json and restart/order.json must hold exactly their timestamps")
+    # R016 settlement-time revocation is optional for the run; SPEC-042-R016
+    # is promotable only when it was captured.
+    inflight = None
+    if (capture.root / ATTESTATION_INFLIGHT).is_dir():
+        inflight = capture_paid(capture, run, salt, ATTESTATION_INFLIGHT, False)
+    requirement_ids = sorted(TRUSTED_POOL_MODEL_PROMOTABLE_REQUIREMENT_IDS - (set() if inflight else {ATTESTATION_INFLIGHT_REQUIREMENT}))
     evidence = {
         "schema_version": EVIDENCE_SCHEMA,
         "journey_id": JOURNEY_ID,
         "run_id": run["run_id"],
-        "requirement_ids": sorted(TRUSTED_POOL_MODEL_PROMOTABLE_REQUIREMENT_IDS),
+        "requirement_ids": requirement_ids,
         "repository": {"name": REPOSITORY, "commit": run["source_commit"]},
         "captured_at": run["captured_at"],
         "expires_at": run["expires_at"],
@@ -896,22 +1067,26 @@ def build_evidence(capture_dir: Path, cli: str) -> tuple[dict[str, Any], dict[st
         "deploy_order": {key: z_seconds(deploy.get(key), f"deploy.{key}") for key in (
             "coordinator_deployed_at", "gateway_deployed_at", "native_member_cli_installed_at", "gguf_member_cli_installed_at")},
         "pricing_bounds": dict(capture.object("config/pricing-bounds.json")),
+        "economics": capture_economics(capture),
         "owner_authority": capture_owner_authority(capture, run, salt),
         "manifest_root": manifest_root,
         "manifests": manifests,
-        "pool_state": {str(run["roles"][role]): capture_pool_state(capture, run, run["roles"][role], salt) for role in MANIFEST_ROLES},
+        "pool_state": {str(run["roles"][role]): capture_pool_state(capture, run, f"pool/v{run['roles'][role]}/get-pool.json", salt)
+                       for role in MANIFEST_ROLES},
+        "current_pool_state": capture_pool_state(capture, run, "pool/current/get-pool.json", salt),
         "event_counts": dict(sorted(counts.items())),
         "proposals": proposals,
         "admission": capture_admission(capture, run),
         "models": capture_models(capture),
         "requests": {name: capture_paid(capture, run, salt, name, stream) for name, (_, stream) in PAID_REQUESTS.items()},
-        "refusals": {name: capture_refusal(capture, name) for name in REFUSALS},
-        "window_probes": probes,
+        "attestation_removal_inflight": inflight,
+        "refusals": {name: capture_refusal(capture, run, salt, name) for name in REFUSALS},
+        "window_probes": capture_probes(capture, run, salt),
         "rollback_preflight": capture_rollback(capture),
         "restart": {key: z_seconds(restart.get(key), f"restart.{key}") for key in ("coordinator_restarted_at", "gateway_restarted_at")},
+        "route_snapshot_digests_recomputed": run_verify_route_snapshots(cli, capture.snapshots),
         "raw_documents": None,
     }
-    require(len(restart) == 2 and len(deploy) == 4, "deploy.json and restart/order.json must hold exactly their timestamps")
     evidence["raw_documents"] = dict(sorted(capture.raw.items()))
     latest = max(manifests, key=lambda m: m["manifest_version"])
     bounds = evidence["pricing_bounds"]
@@ -936,9 +1111,6 @@ def build_evidence(capture_dir: Path, cli: str) -> tuple[dict[str, Any], dict[st
     # The observations are derived by the validator; fill them, then check.
     evidence["observations"] = validate_evidence(evidence, now=datetime.now(timezone.utc), fill_observations=True)
     reject_raw_identifiers(evidence, run)
-    for name, payload in bundle.items():
-        event = base.parse_json_bytes(payload, name)
-        base.reject_forbidden_secret_keys(event, f"bundle.{name}")
     return evidence, bundle
 
 
@@ -1011,14 +1183,17 @@ def check_header(ev: dict[str, Any], now: datetime) -> None:
     obj(ev, {
         "schema_version", "journey_id", "run_id", "requirement_ids", "repository", "captured_at", "expires_at", "operator",
         "environment", "result", "steps", "redaction", "observations", "candidate_identity", "identities", "entries", "roles",
-        "preconditions", "deploy_order", "pricing_bounds", "owner_authority", "manifest_root", "manifests", "pool_state",
-        "event_counts", "proposals", "admission", "models", "requests", "refusals", "window_probes", "rollback_preflight",
-        "restart", "raw_documents",
+        "preconditions", "deploy_order", "pricing_bounds", "economics", "owner_authority", "manifest_root", "manifests",
+        "pool_state", "current_pool_state", "event_counts", "proposals", "admission", "models", "requests",
+        "attestation_removal_inflight", "refusals", "window_probes", "rollback_preflight", "restart",
+        "route_snapshot_digests_recomputed", "raw_documents",
     }, "evidence")
     require(ev["schema_version"] == EVIDENCE_SCHEMA, f"schema_version must equal {EVIDENCE_SCHEMA!r}")
     require(ev["journey_id"] == JOURNEY_ID, f"journey_id must equal {JOURNEY_ID!r}")
     require_string(ev["run_id"], RUN_ID_RE, "run_id")
-    require(ev["requirement_ids"] == sorted(TRUSTED_POOL_MODEL_PROMOTABLE_REQUIREMENT_IDS), "requirement_ids must be the journey's promotable set")
+    want_ids = TRUSTED_POOL_MODEL_PROMOTABLE_REQUIREMENT_IDS - (set() if ev["attestation_removal_inflight"] else {ATTESTATION_INFLIGHT_REQUIREMENT})
+    require(ev["requirement_ids"] == sorted(want_ids),
+            "requirement_ids must be the promotable set (SPEC-042-R016 only with the attestation-removal in-flight request)")
     repository = obj(ev["repository"], {"name", "commit"}, "repository")
     require(repository["name"] == REPOSITORY, f"repository.name must equal {REPOSITORY!r}")
     require_string(repository["commit"], COMMIT_RE, "repository.commit")
@@ -1094,7 +1269,7 @@ def check_entry_grammar(entry: dict[str, Any], manifest: dict[str, Any], where: 
     for source in sources:
         require(RUNTIME_FORMAT.get(source) == entry["artifact_hash_algorithm"], f"{where}: runtime {source!r} does not pair with the hash format")
         require(source == NATIVE_RUNTIME or source in manifest["runtime_allowlist"], f"{where}: loopback runtime {source!r} must be allowlisted")
-    require_string(entry["license"], LICENSE_RE, f"{where}.license")
+    require(entry["license"] in PINNED_SPDX_LICENSES, f"{where}.license must be a pinned SPDX id (a LicenseRef-* needs its reviewed disclosure bundle)")
     require(entry["paid_serving_attested"] is True, f"{where}.paid_serving_attested must be true")
     for rate in RATE_KEYS:
         int_in(entry[rate], f"{where}.{rate}")
@@ -1104,15 +1279,17 @@ def check_entry_grammar(entry: dict[str, Any], manifest: dict[str, Any], where: 
 
 
 def check_manifests(j: Journey, ev: dict[str, Any]) -> None:
-    root = obj(ev["manifest_root"], {"pool_id", "creator_fingerprint", "launch_environment",
-                                     "root_issuer_public_key_fingerprint", "root_event_sha256"}, "manifest_root")
+    root = obj(ev["manifest_root"], {"pool_id", "creator_fingerprint", "launch_environment", "root_issuer_public_key_fingerprint",
+                                     "root_event_sha256", "newest_manifest_version"}, "manifest_root")
     require(root["pool_id"] == j.pool_id, "the root registration must be the journey pool's")
     require(root["creator_fingerprint"] == j.ids["creator_fingerprint"], "the root registration's creator must be the journey creator")
     require(root["launch_environment"] == "candidate", "the root registration must be a candidate pool")
     hex64(root["root_issuer_public_key_fingerprint"], "manifest_root.root_issuer_public_key_fingerprint")
     hex64(root["root_event_sha256"], "manifest_root.root_event_sha256")
     versions = [m.get("manifest_version") if isinstance(m, dict) else None for m in list_of(ev["manifests"], "manifests")]
-    require(all(is_int(v) and v >= 1 for v in versions) and versions == sorted(set(versions)), "manifests must be unique and in version order")
+    newest = int_in(root["newest_manifest_version"], "manifest_root.newest_manifest_version", 1)
+    # The complete accepted history: every version 1..newest, chained.
+    require(versions == list(range(1, newest + 1)), "manifests must be the complete contiguous history 1..newest")
     for version, manifest in j.manifests.items():
         where = f"manifests[v{version}]"
         obj(manifest, {
@@ -1120,8 +1297,12 @@ def check_manifests(j: Journey, ev: dict[str, Any]) -> None:
             "not_before_unix", "expires_at_unix", "encoding", "settlement_mode", "runtime_allowlist", "model_entries",
             "attested_members",
         }, where)
-        for field in ("manifest_core_digest", "manifest_terms_digest", "prev_manifest_core_hash", "event_sha256"):
+        for field in ("manifest_core_digest", "manifest_terms_digest", "prev_manifest_core_hash"):
             hex64(manifest[field], f"{where}.{field}")
+        if version == newest or manifest["event_sha256"] is not None:
+            hex64(manifest["event_sha256"], f"{where}.event_sha256")
+        if version == 1:
+            require(manifest["prev_manifest_core_hash"] == "0" * 64, f"{where}: genesis must have the zero predecessor hash")
         start = int_in(manifest["not_before_unix"], f"{where}.not_before_unix", 1)
         require(int_in(manifest["expires_at_unix"], f"{where}.expires_at_unix", 1) > start, f"{where}: window must be non-empty")
         require(manifest["encoding"] == 2, f"{where}: the core must be a v2 policy core")
@@ -1157,6 +1338,11 @@ def check_manifests(j: Journey, ev: dict[str, Any]) -> None:
         require(manifest["model_entries"] == source["model_entries"] and manifest["attested_members"] == source["attested_members"],
                 f"manifests[v{version}]: a keeper rotation must keep the {role} manifest's entries and attestations")
     latest = j.manifests[max(j.manifests)]
+    # The newest verified manifest is the pool's current core.
+    current = ev["current_pool_state"]
+    require(isinstance(current, dict) and current.get("manifest_version") == latest["manifest_version"]
+            and current.get("manifest_core_digest") == latest["manifest_core_digest"],
+            "the newest verified manifest must be the current get-pool manifest version and digest")
     identity = ev["candidate_identity"]
     require(identity["manifest_version"] == latest["manifest_version"] and identity["manifest_core_digest"] == latest["manifest_core_digest"],
             "candidate_identity manifest must be the newest verified manifest")
@@ -1220,10 +1406,11 @@ def check_manifests(j: Journey, ev: dict[str, Any]) -> None:
 
 def check_pool_state(j: Journey, ev: dict[str, Any]) -> None:
     states = obj(ev["pool_state"], {str(j.roles[role]) for role in MANIFEST_ROLES}, "pool_state")
-    for role in MANIFEST_ROLES:
-        version = j.roles[role]
-        where = f"pool_state[v{version}]"
-        state = obj(states[str(version)], {
+    newest = max(j.manifests)
+    for label, version, state in [(f"pool_state[v{j.roles[r]}]", j.roles[r], states[str(j.roles[r])]) for r in MANIFEST_ROLES] + [
+            ("current_pool_state", newest, ev["current_pool_state"])]:
+        where = label
+        state = obj(state, {
             "manifest_version", "manifest_core_digest", "lifecycle", "routeable", "launch_environment", "settlement_mode",
             "runtime_allowlist", "creator_fingerprint", "pool_is_journey_pool", "model_entries", "attested_members",
             "member_fingerprints", "revoked_count", "buyer_authorized",
@@ -1297,6 +1484,24 @@ def check_pricing(j: Journey, ev: dict[str, Any]) -> dict[str, Any]:
                 f"pricing bounds max_{rate} times the context ceiling and multiplier must fit int64")
     digest = bounds_digest(bounds)
     require(ev["candidate_identity"]["pricing_bounds_sha256"] == digest, "candidate_identity.pricing_bounds_sha256 must be the recomputed bounds digest")
+    # SPEC-005-R015 economics provenance: a pool route freezes the multiplier
+    # and provider share of the coordinator's committed ledger config snapshot
+    # (rewards.global_multiplier / rewards.provider_share) at dispatch.
+    economics = obj(ev["economics"], {"live_global_multiplier_ppm", "live_provider_share_bps", "config_snapshots"}, "economics")
+    configs: dict[int, dict[str, Any]] = {}
+    for index, row in enumerate(list_of(economics["config_snapshots"], "economics.config_snapshots")):
+        row = obj(row, {"id", "effective_at_unix_ms", "config_hash", "provider_share_bps", "global_multiplier_ppm"}, f"economics.config_snapshots[{index}]")
+        require(int_in(row["id"], "config snapshot id", 1) not in configs, "config snapshot ids must be unique")
+        int_in(row["effective_at_unix_ms"], "config snapshot effective_at", 1)
+        hex64(row["config_hash"], f"economics.config_snapshots[{index}].config_hash")
+        int_in(row["provider_share_bps"], "config snapshot provider_share_bps", 0, 10000)
+        int_in(row["global_multiplier_ppm"], "config snapshot global_multiplier_ppm", 1)
+        configs[row["id"]] = row
+    require(bool(configs), "economics must hold the ledger config snapshots the routes froze")
+    newest_config = max(configs.values(), key=lambda r: (r["effective_at_unix_ms"], r["id"]))
+    require(economics["live_global_multiplier_ppm"] == newest_config["global_multiplier_ppm"]
+            and economics["live_provider_share_bps"] == newest_config["provider_share_bps"],
+            "the live rewards multiplier and provider share must equal the newest ledger config snapshot")
     for version, manifest in j.manifests.items():
         for entry in manifest["model_entries"]:
             for rate in RATE_KEYS:
@@ -1312,7 +1517,7 @@ def check_pricing(j: Journey, ev: dict[str, Any]) -> dict[str, Any]:
     # SPEC-042-R016 owner join: provider -> recorded owner -> attested account.
     require(owner["gguf_provider_owner_fingerprint"] == j.ids["gguf_account_fingerprint"],
             "the GGUF member's recorded owner account must be the attested account")
-    return {"bounds_digest": digest, "multiplier": multiplier}
+    return {"bounds_digest": digest, "multiplier": multiplier, "configs": configs}
 
 
 def check_proposals(j: Journey, ev: dict[str, Any]) -> None:
@@ -1341,48 +1546,75 @@ def exact_actor(j: Journey, row: dict[str, Any], where: str) -> None:
 def check_admission(j: Journey, ev: dict[str, Any]) -> dict[str, Any]:
     rows = list_of(ev["admission"], "admission")
     for index, row in enumerate(rows):
-        obj(row, {"id", "provider", "state", "reason_code", "actor", "binding_scope", "pool_id", "pool_model_id",
+        where = f"admission[{index}]"
+        obj(row, {"id", "provider", "state", "reason_code", "actor", "binding_scope", "pool", "pool_model_id",
                   "pool_manifest_version", "pool_manifest_core_digest", "expected_catalog_model_hash_algorithm",
-                  "expected_catalog_model_hash", "created_at_unix_ms"}, f"admission[{index}]")
-        require(row["provider"] in ENTRY_KINDS, f"admission[{index}].provider")
-        token(row["state"], f"admission[{index}].state")
+                  "expected_catalog_model_hash", "created_at_unix_ms"}, where)
+        int_in(row["id"], f"{where}.id", 1)
+        require(row["provider"] in ENTRY_KINDS, f"{where}.provider")
+        token(row["state"], f"{where}.state")
         if row["reason_code"] is not None:
-            token(row["reason_code"], f"admission[{index}].reason_code")
-        int_in(row["created_at_unix_ms"], f"admission[{index}].created_at_unix_ms", 1)
-        require(row["pool_id"] in (None, j.pool_id), f"admission[{index}]: no foreign pool binding")
+            token(row["reason_code"], f"{where}.reason_code")
+        int_in(row["created_at_unix_ms"], f"{where}.created_at_unix_ms", 1)
+        require(row["pool"] in (None, "journey"), f"{where}: no foreign pool binding")
+        require(row["actor"] in ("provider", "coordinator", "operator")
+                or re.fullmatch(rf"pool_manifest:{re.escape(j.pool_id)}:[1-9][0-9]{{0,9}}:[0-9a-f]{{64}}", str(row["actor"])) is not None,
+                f"{where}: actor must be from the closed actor vocabulary")
+        if row["pool_manifest_version"] is not None:
+            int_in(row["pool_manifest_version"], f"{where}.pool_manifest_version", 1)
     ids = [row["id"] for row in rows]
-    require(all(is_int(i) for i in ids) and ids == sorted(set(ids)), "admission events must be unique and in id order")
+    require(ids == sorted(set(ids)), "admission events must be unique and in id order")
     out: dict[str, Any] = {}
 
-    def binds(row: dict[str, Any], kind: str, reason: str) -> bool:
+    def binds(row: dict[str, Any], kind: str, reasons: tuple[str, ...]) -> bool:
         entry = j.entries[kind]
-        return (row["state"] == "catalog_priced" and row["binding_scope"] == "pool" and row["reason_code"] == reason
-                and row["pool_id"] == j.pool_id and row["pool_model_id"] == entry["pool_model_id"]
+        return (row["state"] == "catalog_priced" and row["binding_scope"] == "pool" and row["reason_code"] in reasons
+                and row["pool"] == "journey" and row["pool_model_id"] == entry["pool_model_id"]
                 and row["expected_catalog_model_hash"] == entry["artifact_hash"]
                 and row["expected_catalog_model_hash_algorithm"] == entry["algorithm"])
 
-    def head_of(revoked: dict[str, Any], mine: list[dict[str, Any]]) -> bool:
-        earlier = [r for r in mine if r["id"] < revoked["id"] and r["state"] == "catalog_priced"]
-        return bool(earlier) and all(earlier[-1][f] == revoked[f] for f in (
-            "pool_model_id", "pool_manifest_version", "pool_manifest_core_digest"))
+    def predecessor(revoked: dict[str, Any], mine: list[dict[str, Any]]) -> dict[str, Any] | None:
+        earlier = [r for r in mine if r["id"] < revoked["id"]]
+        return earlier[-1] if earlier else None
 
+    # Every revocation the coordinator appends is actor "coordinator" (the
+    # revocation records the binding it ends, not the revoking core) and must
+    # carry exactly its predecessor binding's pool entry and generation.
     for kind in ENTRY_KINDS:
         mine = [row for row in rows if row["provider"] == kind]
-        require(all(row["state"] != "settlement_capable" for row in mine), f"the {kind} member must never reach settlement_capable")
-        bound = [row for row in mine if binds(row, kind, "pool_manifest_bound")]
-        require(bool(bound), f"the {kind} member's offer must bind pool-scoped catalog_priced under the signed-manifest actor")
         for row in mine:
             if row["state"] == "catalog_priced":
+                require(binds(row, kind, ("pool_manifest_bound", "pool_manifest_rebound")),
+                        f"admission id {row['id']}: a pool binding must be the {kind} entry's exact identity")
                 require(row["actor"] == f"pool_manifest:{j.pool_id}:{row['pool_manifest_version']}:{row['pool_manifest_core_digest']}",
                         f"admission id {row['id']}: a pool binding's actor must name its own pool, version and core")
+            if row["state"] == "revoked":
+                head = predecessor(row, mine)
+                require(head is not None and head["state"] == "catalog_priced", f"admission id {row['id']}: a revocation must end a pool binding")
+                require(row["actor"] == "coordinator", f"admission id {row['id']}: a revocation's actor must be coordinator")
+                for field in ("binding_scope", "pool", "pool_model_id", "pool_manifest_version", "pool_manifest_core_digest",
+                              "expected_catalog_model_hash", "expected_catalog_model_hash_algorithm"):
+                    require(row[field] == head[field], f"admission id {row['id']}: a revocation's {field} must equal the binding it ends")
+        require(all(row["state"] != "settlement_capable" for row in mine), f"the {kind} member must never reach settlement_capable")
+        bound = [row for row in mine if binds(row, kind, ("pool_manifest_bound",))]
+        require(bool(bound), f"the {kind} member's offer must bind pool-scoped catalog_priced under the signed-manifest actor")
         exact_actor(j, bound[0], f"admission id {bound[0]['id']}")
         out[kind] = {
             "bound": True,
             "unmatched_offer_before_bind": any(r["state"] in PRE_BIND_STATES and r["id"] < bound[0]["id"] for r in mine),
         }
+
+    def revoked_by(role: str, kind: str, reasons: tuple[str, ...]) -> list[dict[str, Any]]:
+        """Revocations caused by a role manifest: after its activation, of a
+        binding to an earlier generation."""
+        on, version = j.activation_ms(role), j.roles[role]
+        return [r for r in rows if r["provider"] == kind and r["state"] == "revoked" and r["reason_code"] in reasons
+                and r["pool_model_id"] == j.entries[kind]["pool_model_id"]
+                and r["created_at_unix_ms"] >= on and r["pool_manifest_version"] < version]
+
     native_rows = [row for row in rows if row["provider"] == "native"]
     window_version = j.roles["window_rotation"]
-    rebound = [row for row in native_rows if binds(row, "native", "pool_manifest_rebound") and row["pool_manifest_version"] == window_version]
+    rebound = [row for row in native_rows if binds(row, "native", ("pool_manifest_rebound",)) and row["pool_manifest_version"] == window_version]
     require(bool(rebound), "the delegated native member must be rebound at the window_rotation version")
     exact_actor(j, rebound[0], f"admission id {rebound[0]['id']}")
 
@@ -1391,15 +1623,13 @@ def check_admission(j: Journey, ev: dict[str, Any]) -> dict[str, Any]:
     # under the price_change terms.
     changed_kind = j.entry_kind(j.price_changed, "price_change")
     mine = [row for row in rows if row["provider"] == changed_kind]
-    price_on, removal_on = j.activation_ms("price_change"), j.activation_ms("entry_removal")
     rebind = None
-    for revoked in (r for r in mine if r["state"] == "revoked" and r["reason_code"] == "pool_membership_revoked"
-                    and price_on <= r["created_at_unix_ms"] and head_of(r, mine)):
+    for revoked in revoked_by("price_change", changed_kind, ("pool_membership_revoked",)):
         offers = [r for r in mine if r["state"] == "offer_submitted" and r["id"] > revoked["id"]]
         if not offers:
             continue
         for bound in mine:
-            if bound["id"] > offers[0]["id"] and binds(bound, changed_kind, "pool_manifest_bound") \
+            if bound["id"] > offers[0]["id"] and binds(bound, changed_kind, ("pool_manifest_bound",)) \
                     and j.role_of(bound["pool_manifest_version"], "price-change rebind") == "price_change":
                 exact_actor(j, bound, f"admission id {bound['id']}")
                 rebind = bound["pool_manifest_version"]
@@ -1411,20 +1641,24 @@ def check_admission(j: Journey, ev: dict[str, Any]) -> dict[str, Any]:
     # Entry removal: a delegated member's binding is revoked by the removal
     # (pool_manifest_entry_revoked) or, when the term change voided its grant
     # first, by pool_membership_revoked; either way after activation.
-    removal = [r for r in native_rows if r["state"] == "revoked" and r["pool_model_id"] == j.entries["native"]["pool_model_id"]
-               and r["reason_code"] in ("pool_manifest_entry_revoked", "pool_membership_revoked")
-               and r["created_at_unix_ms"] >= removal_on and head_of(r, native_rows)]
+    removal = revoked_by("entry_removal", "native", ("pool_manifest_entry_revoked", "pool_membership_revoked"))
     require(bool(removal), "entry removal must revoke the native binding after the removal activates")
-    attestation_on = j.activation_ms("attestation_removal")
-    gguf_rows = [row for row in rows if row["provider"] == "gguf"]
-    revoked_member = [r for r in gguf_rows if r["state"] == "revoked" and r["reason_code"] == "pool_membership_revoked"
-                      and r["created_at_unix_ms"] >= attestation_on and head_of(r, gguf_rows)]
+    revoked_member = revoked_by("attestation_removal", "gguf", ("pool_membership_revoked",))
     require(bool(revoked_member), "attestation removal must revoke the GGUF binding with pool_membership_revoked after it activates")
+    # A native entry re-added after its removal needs a fresh binding.
+    readd_ms = None
+    if j.roles["entry_removal"] < j.roles["gguf_added"]:
+        fresh = [r for r in native_rows if binds(r, "native", ("pool_manifest_bound", "pool_manifest_rebound"))
+                 and r["pool_manifest_version"] >= j.roles["gguf_added"] and r["created_at_unix_ms"] >= j.activation_ms("gguf_added")]
+        require(bool(fresh), "the re-added native entry must be bound again after gguf_added activates")
+        exact_actor(j, fresh[0], f"admission id {fresh[0]['id']}")
+        readd_ms = fresh[0]["created_at_unix_ms"]
     out.update({
         "window_rotation_rebound_version": window_version,
         "price_change_reoffer_bound_version": rebind,
         "entry_removal_revoked_reason": removal[0]["reason_code"],
         "attestation_removal_revoked_reason": "pool_membership_revoked",
+        "native_readd_bound_ms": readd_ms,
     })
     return out
 
@@ -1457,8 +1691,7 @@ def check_models(j: Journey, ev: dict[str, Any]) -> dict[str, Any]:
                 and model["price_source"] == PRICE_SOURCE, f"{where}: pool-attested disclosure")
         require(model["max_context_tokens"] == entry["max_context_tokens"], f"{where}: max_context_tokens must be the signed entry's")
         sources = list_of(model["runtime_sources"], f"{where}.runtime_sources")
-        require(bool(sources) and sources == sorted(set(sources)) and set(sources) <= set(entry["allowed_runtime_sources"]),
-                f"{where}: runtime_sources must be a sorted subset of the entry's")
+        require(sources == entry["allowed_runtime_sources"], f"{where}: runtime_sources must equal the signed entry's allowed_runtime_sources")
         price = obj(model["price"], {*RATE_KEYS, "global_multiplier_ppm"}, f"{where}.price")
         for rate in RATE_KEYS:
             require(price[rate] == entry[rate], f"{where}: price.{rate} must equal the signed entry rate")
@@ -1468,15 +1701,98 @@ def check_models(j: Journey, ev: dict[str, Any]) -> dict[str, Any]:
     want = sorted(e["pool_model_id"] for e in j.manifests[version]["model_entries"])
     require(sorted(ids) == want, "the pool models view must list exactly the signed entries of its manifest")
     require(want == sorted(e["pool_model_id"] for e in j.entries.values()), "the pool models view must be captured while both entries are live")
-    int_in(models["pool_view_other_count"], "models.pool_view_other_count")
+    require(models["pool_view_other_count"] == 0, "the selected-pool models view must list only the pool's entries")
     require(models["global_view_pool_ids"] == [] and models["global_view_pool_objects"] == 0, "the global models view must list no pool model")
     require(models["never_global_count"] == 0, "never-global: no route snapshot may carry a pool_model_id without a pool")
     return {"manifest_version": version}
 
 
-def check_paid(j: Journey, ev: dict[str, Any], name: str, want_kind: str | None, stream: bool, pricing: dict[str, Any]) -> dict[str, Any]:
-    r = obj(ev["requests"][name], {"x_request_id", "date_unix", "status", "headers", "body", "request_log", "route_snapshots",
-                                   "attempt_outputs", "receipt_verdicts", "ledger", "quota_reservations", "usage_events"}, name)
+SNAPSHOT_KEYS = {
+    "request_id", "attempt_n", "provider", "route_snapshot_mode", "route_snapshot_policy_version", "route_snapshot_digest",
+    "pool", "model_id", "expected_model_hash_source", "pool_model_id", "manifest_version", "manifest_core_digest",
+    "pool_generation", "runtime_source", "pool_operator_account_fp", "pool_member_account_fp",
+    "expected_catalog_model_hash", "expected_catalog_model_hash_algorithm", "provider_reported_model_hash",
+    "provider_reported_model_hash_algorithm", *(f"pool_model_{rate}" for rate in RATE_KEYS), "pool_model_pricing_bounds_sha256",
+    "pool_model_global_multiplier_ppm", "pool_model_provider_share_bps", "pool_model_config_snapshot_id", "route_decision_ts_unix_ms",
+}
+REQUEST_LOG_KEYS = {"request_id", "attempt_n", "external_request_id", "pool", "model", "status"}
+RESERVATION_KEYS = {"request_id", "account_fp", "status", "settled_tokens", "settlement_hold"}
+
+
+def check_request_log(j: Journey, log: Any, rid: str, model: str, name: str) -> set[tuple[str, int]]:
+    """X-Request-ID -> request_log -> the exact (request_id, attempt_n) keys."""
+    keys = set()
+    for row in list_of(log, f"{name}.request_log"):
+        obj(row, REQUEST_LOG_KEYS, f"{name}.request_log")
+        require(row["external_request_id"] == rid, f"{name}: every request_log row must carry the X-Request-ID")
+        require(row["pool"] == "journey", f"{name}: request_log must show the pool")
+        require(row["model"] == model, f"{name}: request_log model must be the requested pool model")
+        require_string(row["request_id"], REQUEST_ID_RE, f"{name}.request_log.request_id")
+        int_in(row["attempt_n"], f"{name}.request_log.attempt_n")
+        int_in(row["status"], f"{name}.request_log.status", 100, 599)
+        require((row["request_id"], row["attempt_n"]) not in keys, f"{name}: request_log repeats an attempt")
+        keys.add((row["request_id"], row["attempt_n"]))
+    require(bool(keys), f"{name} request_log must map the X-Request-ID")
+    return keys
+
+
+def check_route_snapshot(j: Journey, row: Any, kind: str, where: str, pricing: dict[str, Any]) -> dict[str, Any]:
+    spec, entry = ENTRY_KINDS[kind], j.entries[kind]
+    obj(row, SNAPSHOT_KEYS, where)
+    require_string(row["request_id"], REQUEST_ID_RE, f"{where}.request_id")
+    int_in(row["attempt_n"], f"{where}.attempt_n")
+    require(row["provider"] == kind, f"{where}: provider must be the {kind} member")
+    require(row["pool"] == "journey" and row["expected_model_hash_source"] == "pool_manifest", f"{where}: a pool_manifest-sourced pool route")
+    require(row["pool_model_id"] == entry["pool_model_id"] and row["model_id"] == entry["pool_model_id"], f"{where}: the exact entry")
+    require(row["expected_catalog_model_hash"] == entry["artifact_hash"] and row["provider_reported_model_hash"] == entry["artifact_hash"],
+            f"{where}: expected and provider-reported hashes must be the entry's artifact_hash")
+    require(row["expected_catalog_model_hash_algorithm"] == entry["algorithm"] and row["provider_reported_model_hash_algorithm"] == entry["algorithm"],
+            f"{where}: hash algorithms must be {entry['algorithm']}")
+    require(row["route_snapshot_policy_version"] == ROUTE_SNAPSHOT_V2 and row["route_snapshot_mode"] == "enforce", f"{where}: v2 enforce snapshot")
+    hex64(row["route_snapshot_digest"], f"{where}.route_snapshot_digest")
+    int_in(row["pool_generation"], f"{where}.pool_generation", 1)
+    int_in(row["route_decision_ts_unix_ms"], f"{where}.route_decision_ts_unix_ms", 1)
+    version = int_in(row["manifest_version"], f"{where}.manifest_version", 1)
+    j.role_of(version, where)
+    require(row["manifest_core_digest"] == j.manifests[version]["manifest_core_digest"], f"{where}: manifest_core_digest must be version {version}'s")
+    signed = j.entry_at(version, entry["pool_model_id"], where)
+    for rate in RATE_KEYS:
+        require(row[f"pool_model_{rate}"] == signed[rate], f"{where}: pool_model_{rate} must equal the signed entry rate")
+    require(row["pool_model_pricing_bounds_sha256"] == pricing["bounds_digest"], f"{where}: the route must carry the recomputed bounds digest")
+    config = pricing["configs"].get(row["pool_model_config_snapshot_id"])
+    require(config is not None, f"{where}: pool_model_config_snapshot_id must be a captured ledger config snapshot")
+    require(row["pool_model_global_multiplier_ppm"] == config["global_multiplier_ppm"] == pricing["multiplier"]
+            and row["pool_model_provider_share_bps"] == config["provider_share_bps"],
+            f"{where}: the frozen multiplier and provider share must be its ledger config snapshot's")
+    if spec["route_runtime_source"] is None:
+        # SPEC-022 R-13.5: the coordinator records no runtime_source, operator
+        # or member account on a native mlx_cache pool route.
+        for field in ("runtime_source", "pool_operator_account_fp", "pool_member_account_fp"):
+            require(row[field] is None, f"{where}: a native route carries no {field}")
+    else:
+        require(row["runtime_source"] == spec["route_runtime_source"], f"{where}: runtime_source must be {spec['route_runtime_source']}")
+        require(row["pool_operator_account_fp"] == j.ids["creator_fingerprint"], f"{where}: pool_operator_account must be the creator")
+        require(row["pool_member_account_fp"] == j.ids["gguf_account_fingerprint"], f"{where}: pool_member_account must be the attested owner")
+        require("llamacpp_loopback" in j.attested_at(version).get(j.ids["gguf_account_fingerprint"], []),
+                f"{where}: the member's owner must be attested for llamacpp_loopback at version {version}")
+    return row
+
+
+def check_reservation(j: Journey, reservations: Any, rid: str, name: str) -> dict[str, Any]:
+    rows = list_of(reservations, f"{name}.quota_reservations")
+    require(len(rows) == 1, f"{name} must have exactly one gateway reservation")
+    reservation = obj(rows[0], RESERVATION_KEYS, f"{name}.quota_reservations")
+    require(reservation["request_id"] == rid, f"{name}: the reservation must be the X-Request-ID's")
+    require(reservation["account_fp"] == j.ids["buyer_fingerprint"], f"{name}: the reservation must be the journey buyer's")
+    int_in(reservation["settled_tokens"], f"{name}.settled_tokens")
+    require(reservation["settlement_hold"] == 0, f"{name}: the reservation must not be held")
+    return reservation
+
+
+def check_paid(j: Journey, r: Any, name: str, want_kind: str | None, stream: bool, pricing: dict[str, Any],
+               zero_billed: bool = False) -> dict[str, Any]:
+    r = obj(r, {"x_request_id", "date_unix", "status", "headers", "body", "request_log", "route_snapshots",
+                "attempt_outputs", "receipt_verdicts", "ledger", "quota_reservations", "usage_events"}, name)
     rid = require_string(r["x_request_id"], REQUEST_ID_RE, f"{name}.x_request_id")
     int_in(r["date_unix"], f"{name}.date_unix", 1)
     require(r["status"] == 200, f"{name} response status must be 200")
@@ -1485,91 +1801,63 @@ def check_paid(j: Journey, ev: dict[str, Any], name: str, want_kind: str | None,
     token(body["finish_reason"], f"{name}.finish_reason")
     hex64(body["content_sha256"], f"{name}.content_sha256")
     usage = obj(body["usage"], {"prompt_tokens", "completion_tokens"}, f"{name}.usage")
+    int_in(usage["prompt_tokens"], f"{name}.usage.prompt_tokens")
+    int_in(usage["completion_tokens"], f"{name}.usage.completion_tokens")
 
-    # Exact join: X-Request-ID -> request_log -> (request_id, attempt_n).
-    log = list_of(r["request_log"], f"{name}.request_log")
-    require(bool(log), f"{name} request_log must map the X-Request-ID")
-    keys = set()
-    for row in log:
-        obj(row, {"request_id", "attempt_n", "external_request_id", "pool_id", "status"}, f"{name}.request_log")
-        require(row["external_request_id"] == rid, f"{name}: every request_log row must carry the X-Request-ID")
-        require(row["pool_id"] == j.pool_id, f"{name}: request_log must show the pool")
-        require_string(row["request_id"], REQUEST_ID_RE, f"{name}.request_log.request_id")
-        keys.add((row["request_id"], row["attempt_n"]))
     snapshots = list_of(r["route_snapshots"], f"{name}.route_snapshots")
-    require(bool(snapshots), f"{name} must have route snapshots")
+    require(bool(snapshots) and all(isinstance(row, dict) for row in snapshots), f"{name} must have route snapshots")
     kind = j.entry_kind(snapshots[0].get("pool_model_id"), name)
     if want_kind is not None:
         require(kind == want_kind, f"{name} must be served from the {want_kind} entry")
     spec, entry = ENTRY_KINDS[kind], j.entries[kind]
+    keys = check_request_log(j, r["request_log"], rid, entry["pool_model_id"], name)
     headers = obj(r["headers"], {"engine", "model_disclosure", "pool_manifest_core_digest"}, f"{name}.headers")
     require(headers["engine"] == spec["engine"], f"{name} X-MacProvider-Engine must be {spec['engine']}")
     require(headers["model_disclosure"] == DISCLOSURE_CLASS, f"{name} X-MacProvider-Model-Disclosure must be {DISCLOSURE_CLASS}")
     by_key = {}
     for row in snapshots:
         where = f"{name} route snapshot attempt {row.get('attempt_n')}"
-        obj(row, {
-            "request_id", "attempt_n", "provider", "route_snapshot_mode", "route_snapshot_policy_version", "route_snapshot_digest",
-            "pool_id", "model_id", "expected_model_hash_source", "pool_model_id", "manifest_version", "manifest_core_digest",
-            "pool_generation", "runtime_source", "pool_operator_account_fp", "pool_member_account_fp",
-            "expected_catalog_model_hash", "expected_catalog_model_hash_algorithm", "provider_reported_model_hash",
-            "provider_reported_model_hash_algorithm", *(f"pool_model_{rate}" for rate in RATE_KEYS), "pool_model_pricing_bounds_sha256",
-            "pool_model_global_multiplier_ppm", "pool_model_provider_share_bps", "route_decision_ts_unix_ms",
-        }, where)
+        check_route_snapshot(j, row, kind, where, pricing)
         key = (row["request_id"], row["attempt_n"])
         require(key in keys, f"{where}: the snapshot must belong to the mapped request")
         require(key not in by_key, f"{where}: one snapshot per attempt")
         by_key[key] = row
-        require(row["provider"] == kind, f"{where}: provider must be the {kind} member")
-        require(row["pool_id"] == j.pool_id and row["expected_model_hash_source"] == "pool_manifest", f"{where}: a pool_manifest-sourced pool route")
-        require(row["pool_model_id"] == entry["pool_model_id"] and row["model_id"] == entry["pool_model_id"], f"{where}: the exact entry")
-        require(row["expected_catalog_model_hash"] == entry["artifact_hash"] and row["provider_reported_model_hash"] == entry["artifact_hash"],
-                f"{where}: expected and provider-reported hashes must be the entry's artifact_hash")
-        require(row["expected_catalog_model_hash_algorithm"] == entry["algorithm"] and row["provider_reported_model_hash_algorithm"] == entry["algorithm"],
-                f"{where}: hash algorithms must be {entry['algorithm']}")
-        require(row["route_snapshot_policy_version"] == ROUTE_SNAPSHOT_V2 and row["route_snapshot_mode"] == "enforce", f"{where}: v2 enforce snapshot")
-        hex64(row["route_snapshot_digest"], f"{where}.route_snapshot_digest")
-        int_in(row["pool_generation"], f"{where}.pool_generation", 1)
-        int_in(row["route_decision_ts_unix_ms"], f"{where}.route_decision_ts_unix_ms", 1)
-        version = row["manifest_version"]
-        j.role_of(version, where)
-        require(row["manifest_core_digest"] == j.manifests[version]["manifest_core_digest"], f"{where}: manifest_core_digest must be version {version}'s")
-        signed = j.entry_at(version, entry["pool_model_id"], where)
-        for rate in RATE_KEYS:
-            require(row[f"pool_model_{rate}"] == signed[rate], f"{where}: pool_model_{rate} must equal the signed entry rate")
-        require(row["pool_model_pricing_bounds_sha256"] == pricing["bounds_digest"], f"{where}: the route must carry the recomputed bounds digest")
-        require(row["pool_model_global_multiplier_ppm"] == pricing["multiplier"], f"{where}: the route multiplier")
-        int_in(row["pool_model_provider_share_bps"], f"{where}.pool_model_provider_share_bps", 0, 10000)
-        if spec["route_runtime_source"] is None:
-            # SPEC-022 R-13.5: a native mlx_cache route carries no runtime_source.
-            for field in ("runtime_source", "pool_operator_account_fp", "pool_member_account_fp"):
-                require(row[field] is None, f"{where}: a native route carries no {field}")
-        else:
-            require(row["runtime_source"] == spec["route_runtime_source"], f"{where}: runtime_source must be {spec['route_runtime_source']}")
-            require(row["pool_operator_account_fp"] == j.ids["creator_fingerprint"], f"{where}: pool_operator_account must be the creator")
-            require(row["pool_member_account_fp"] == j.ids["gguf_account_fingerprint"], f"{where}: pool_member_account must be the attested owner")
-            require("llamacpp_loopback" in j.attested_at(version).get(j.ids["gguf_account_fingerprint"], []),
-                    f"{where}: the member's owner must be attested for llamacpp_loopback at version {version}")
+    require(set(by_key) == keys, f"{name}: every mapped attempt must have exactly one route snapshot")
 
     outputs = list_of(r["attempt_outputs"], f"{name}.attempt_outputs")
+    output_keys = set()
     for row in outputs:
         obj(row, {"request_id", "attempt_n", "provider", "terminal_state", "usage_source", "terminal_state_ts_unix_ms"}, f"{name}.attempt_outputs")
-        require((row["request_id"], row["attempt_n"]) in by_key, f"{name}: every attempt output must join a route snapshot")
+        key = (row["request_id"], row["attempt_n"])
+        require(key in by_key and key not in output_keys, f"{name}: every attempt output must join exactly one route snapshot")
+        output_keys.add(key)
+        require(row["provider"] == by_key[key]["provider"], f"{name}: an attempt output's provider must be its snapshot's")
+        require(row["terminal_state"] in ("normal_done", "provider_error", "buyer_cancel", "gateway_timeout", "upstream_transport_disconnect"),
+                f"{name}: terminal_state")
+        require(row["usage_source"] in ("coordinator_observed", "byte_estimated", "pool_operator_attested"), f"{name}: usage_source")
+        int_in(row["terminal_state_ts_unix_ms"], f"{name}.terminal_state_ts_unix_ms", 1)
     settled = [row for row in outputs if row["usage_source"] == spec["usage_source"] and row["terminal_state"] == "normal_done"]
     require(len(settled) == 1, f"{name} must have exactly one {spec['usage_source']} normal_done attempt output")
     key = (settled[0]["request_id"], settled[0]["attempt_n"])
     snapshot = by_key[key]
-    require(settled[0]["provider"] == kind, f"{name}: the settled attempt must be the {kind} member's")
-    verdicts = [row for row in list_of(r["receipt_verdicts"], f"{name}.receipt_verdicts")
-                if (obj(row, {"request_id", "attempt_n", "provider", "receipt_result", "settlement_outcome", "reason", "closed",
-                              "pool_label_status", "route_snapshot_digest", "provider_reported_model_hash",
-                              "expected_catalog_model_hash", "model_id", "model_hash", "received_at_unix_ms"}, f"{name}.receipt_verdicts")
-                    and (row["request_id"], row["attempt_n"]) == key)]
+    verdict_keys = {"request_id", "attempt_n", "provider", "receipt_result", "settlement_outcome", "reason", "closed",
+                    "pool_label_status", "route_snapshot_digest", "provider_reported_model_hash",
+                    "expected_catalog_model_hash", "model_id", "model_hash", "received_at_unix_ms"}
+    verdicts = []
+    for row in list_of(r["receipt_verdicts"], f"{name}.receipt_verdicts"):
+        obj(row, verdict_keys, f"{name}.receipt_verdicts")
+        require((row["request_id"], row["attempt_n"]) in by_key, f"{name}: every receipt verdict must join a route snapshot")
+        if (row["request_id"], row["attempt_n"]) == key:
+            verdicts.append(row)
     require(len(verdicts) == 1, f"{name} settled attempt must have exactly one receipt verdict")
     verdict = verdicts[0]
-    for field, want in (("receipt_result", "valid"), ("settlement_outcome", "verified"), ("pool_label_status", "verified"), ("closed", 1),
-                        ("provider", kind)):
+    want_outcome = ("quarantined", FENCE_REASON) if zero_billed else ("verified", None)
+    for field, want in (("receipt_result", "valid"), ("settlement_outcome", want_outcome[0]), ("closed", 1), ("provider", kind)):
         require(verdict[field] == want, f"{name} receipt verdict {field} must be {want!r}")
+    if zero_billed:
+        require(verdict["reason"] == FENCE_REASON, f"{name}: the verdict must quarantine with {FENCE_REASON}")
+    else:
+        require(verdict["pool_label_status"] == "verified", f"{name} receipt verdict pool_label_status must be 'verified'")
     require(verdict["route_snapshot_digest"] == snapshot["route_snapshot_digest"], f"{name}: the verdict must bind the settled attempt's route snapshot digest")
     require(verdict["provider_reported_model_hash"] == entry["artifact_hash"] and verdict["expected_catalog_model_hash"] == entry["artifact_hash"],
             f"{name}: the verdict hashes must be the entry's artifact_hash")
@@ -1581,10 +1869,41 @@ def check_paid(j: Journey, ev: dict[str, Any], name: str, want_kind: str | None,
     ledger = list_of(r["ledger"], f"{name}.ledger")
     ledger_keys = {"id", "request_id", "attempt_n", "provider", "status", "charged_prompt_tokens", "cached_prompt_tokens", "completion_tokens",
                    "estimated_completion_tokens", "usage_source", "prompt_rate_per_mtok", "completion_rate_per_mtok", "global_multiplier_ppm",
-                   "gross_credits", "provider_share_bps", "provider_credits", "quarantined", "payable"}
+                   "gross_credits", "provider_share_bps", "provider_credits", "quarantined", "payable", "quarantine_reason"}
+    seen_ledger = set()
     for row in ledger:
         obj(row, ledger_keys, f"{name}.ledger")
-        require((row["request_id"], row["attempt_n"]) in by_key, f"{name}: every ledger row must join a route snapshot")
+        lkey = (row["request_id"], row["attempt_n"])
+        require(lkey in by_key and lkey not in seen_ledger, f"{name}: every ledger row must join exactly one route snapshot")
+        seen_ledger.add(lkey)
+        require(row["payable"] in (0, 1) and row["quarantined"] in (0, 1), f"{name}: ledger payable/quarantined flags")
+    events = list_of(r["usage_events"], f"{name}.usage_events")
+    for event in events:
+        obj(event, {"request_id", "prompt_tokens", "completion_tokens", "token_source", "outcome"}, f"{name}.usage_events")
+        require(event["request_id"] == rid, f"{name}: the usage event must be the X-Request-ID's")
+    reservation = check_reservation(j, r["quota_reservations"], rid, name)
+    result = {
+        "kind": kind,
+        "version": snapshot["manifest_version"],
+        "role": j.role_of(snapshot["manifest_version"], name),
+        "rates": {rate: snapshot[f"pool_model_{rate}"] for rate in RATE_KEYS},
+        "dispatch_ms": snapshot["route_decision_ts_unix_ms"],
+        "settled_ms": verdict["received_at_unix_ms"],
+    }
+    if zero_billed:
+        # SPEC-042-R015 in-flight rule: the R016 attestation removed between
+        # routing and settlement zero-bills the attempt: no payable credit, no
+        # provider credit, no buyer-final debit.
+        require(not any(row["payable"] == 1 for row in ledger), f"{name}: a fenced attempt must have no payable credit")
+        mine = [row for row in ledger if (row["request_id"], row["attempt_n"]) == key]
+        require(len(mine) == 1 and mine[0]["provider_credits"] == 0 and mine[0]["quarantined"] == 1
+                and mine[0]["quarantine_reason"] == FENCE_REASON, f"{name}: the fenced attempt's ledger row must be zeroed and quarantined with {FENCE_REASON}")
+        require(all(e["prompt_tokens"] == 0 and e["completion_tokens"] == 0 for e in events), f"{name}: no buyer-final debit")
+        require(reservation["status"] == "refunded" or (reservation["status"] == "settled" and reservation["settled_tokens"] == 0),
+                f"{name}: the reservation must be refunded or settled at zero")
+        result["usage_equal"] = True
+        return result
+
     payable = [row for row in ledger if row["payable"] == 1]
     require(len(payable) == 1, f"{name} must have exactly one payable ledger row")
     credit = payable[0]
@@ -1611,61 +1930,89 @@ def check_paid(j: Journey, ev: dict[str, Any], name: str, want_kind: str | None,
     require(credit["gross_credits"] == gross, f"{name}: gross_credits {credit['gross_credits']} must equal the SPEC-005 recomputation {gross}")
     require(credit["provider_credits"] == provider_credits and provider_credits > 0,
             f"{name}: provider_credits {credit['provider_credits']} must equal the recomputation {provider_credits} and be positive")
-
-    reservations = list_of(r["quota_reservations"], f"{name}.quota_reservations")
-    require(len(reservations) == 1, f"{name} must have exactly one gateway reservation")
-    reservation = obj(reservations[0], {"request_id", "status", "settled_tokens", "settlement_hold"}, f"{name}.quota_reservations")
-    require(reservation["request_id"] == rid and reservation["status"] == "settled" and reservation["settlement_hold"] == 0,
-            f"{name}: the X-Request-ID's reservation must be settled with no hold")
-    events = list_of(r["usage_events"], f"{name}.usage_events")
+    require(reservation["status"] == "settled", f"{name}: the X-Request-ID's reservation must be settled")
     require(len(events) == 1, f"{name} must have exactly one gateway usage event")
-    event = obj(events[0], {"request_id", "prompt_tokens", "completion_tokens", "token_source", "outcome"}, f"{name}.usage_events")
-    require(event["request_id"] == rid, f"{name}: the usage event must be the X-Request-ID's")
+    event = events[0]
     require(event["token_source"] == spec["usage_source"], f"{name} usage event token_source must be {spec['usage_source']}")
     debit = (event["prompt_tokens"], event["completion_tokens"])
     require(debit == (prompt, completion), f"{name} debit {debit} and ledger {(prompt, completion)} tokens must be equal")
     require(reservation["settled_tokens"] == prompt + completion, f"{name}: the reservation must settle the debited tokens")
     require(headers["pool_manifest_core_digest"] == snapshot["manifest_core_digest"],
             f"{name} X-MacProvider-Pool-Manifest-Core-Digest must equal the route snapshot's digest")
-    return {
-        "kind": kind,
-        "version": snapshot["manifest_version"],
-        "role": j.role_of(snapshot["manifest_version"], name),
-        "rates": {rate: snapshot[f"pool_model_{rate}"] for rate in RATE_KEYS},
-        "dispatch_ms": snapshot["route_decision_ts_unix_ms"],
-        "settled_ms": verdict["received_at_unix_ms"],
-        "usage_equal": (usage["prompt_tokens"], usage["completion_tokens"]) == debit,
-    }
+    result["usage_equal"] = (usage["prompt_tokens"], usage["completion_tokens"]) == debit
+    return result
 
 
-def check_refusal(ev: dict[str, Any], name: str, statuses: tuple[int, ...], codes: tuple[str, ...]) -> dict[str, Any]:
-    r = obj(ev["refusals"][name], {"x_request_id", "date_unix", "status", "error_code", "route_snapshot_count", "ledger_row_count",
-                                   "quota_reservations"}, name)
+# scenario -> (pool selector, model kind or None for either, engine rule)
+REFUSAL_REQUESTS = {
+    "refusals/no-pool-header": (None, None, "any"),
+    "refusals/other-pool": ("other", None, "any"),
+    "refusals/wrong-engine": ("journey", "gguf", "wrong"),
+    "pause/paused": ("journey", None, "any"),
+    "rotation/entry-removal/after": ("journey", "native", "any"),
+    "rotation/attestation-removal/after": ("journey", "gguf", "any"),
+}
+
+
+def check_refusal(j: Journey, ev: dict[str, Any], name: str, statuses: tuple[int, ...], codes: tuple[str, ...]) -> dict[str, Any]:
+    r = obj(ev["refusals"][name], {"x_request_id", "date_unix", "status", "error_code", "disclosure_headers", "request", "request_log",
+                                   "route_snapshot_count", "ledger_row_count", "quota_reservations"}, name)
     rid = require_string(r["x_request_id"], REQUEST_ID_RE, f"{name}.x_request_id")
     require(r["status"] in statuses, f"{name} status must be one of {list(statuses)}, got {r['status']}")
     require(r["error_code"] in codes, f"{name} error.code must be one of {list(codes)}, got {r['error_code']!r}")
+    require(r["disclosure_headers"] == [], f"{name}: a refusal must carry no pool-model disclosure header")
+    request = obj(r["request"], {"pool", "engine_select", "model_kind", "stream"}, f"{name}.request")
+    want_pool, want_kind, engine_rule = REFUSAL_REQUESTS[name]
+    require(request["pool"] == want_pool, f"{name}: the request must use pool selector {want_pool!r}")
+    require(request["model_kind"] in ENTRY_KINDS and (want_kind is None or request["model_kind"] == want_kind),
+            f"{name}: the request must name the {want_kind or 'journey'} entry")
+    if engine_rule == "wrong":
+        require(isinstance(request["engine_select"], str) and request["engine_select"] != "llamacpp",
+                f"{name}: the request must select an engine the entry does not allow")
+    require(isinstance(request["stream"], bool), f"{name}.request.stream")
+    for row in list_of(r["request_log"], f"{name}.request_log"):
+        obj(row, REQUEST_LOG_KEYS, f"{name}.request_log")
+        require(row["external_request_id"] == rid and row["model"] == request["model_kind"] and row["pool"] == request["pool"],
+                f"{name}: a request_log row must be this request's (X-Request-ID, model and pool)")
     require(r["route_snapshot_count"] == 0, f"{name} must leave no route snapshot")
     require(r["ledger_row_count"] == 0, f"{name} must leave no ledger row")
-    reservations = list_of(r["quota_reservations"], f"{name}.quota_reservations")
-    require(len(reservations) == 1, f"{name} must have exactly one reservation, refunded")
-    reservation = obj(reservations[0], {"request_id", "status", "settled_tokens", "settlement_hold"}, f"{name}.quota_reservations")
-    require(reservation["request_id"] == rid and reservation["status"] == "refunded" and reservation["settled_tokens"] == 0
-            and reservation["settlement_hold"] == 0, f"{name}: the X-Request-ID's reservation must be refunded")
+    reservation = check_reservation(j, r["quota_reservations"], rid, name)
+    require(reservation["status"] == "refunded" and reservation["settled_tokens"] == 0, f"{name}: the X-Request-ID's reservation must be refunded")
     return {"date_unix": int_in(r["date_unix"], f"{name}.date_unix", 1)}
 
 
-def check_probes(j: Journey, ev: dict[str, Any]) -> None:
+def check_probes(j: Journey, ev: dict[str, Any], pricing: dict[str, Any]) -> None:
+    """Probes are real requests: each joins X-Request-ID -> request_log ->
+    one route snapshot. The boundary is proven with the coordinator's route
+    decision times and the snapshots' manifest generations."""
     probes = list_of(ev["window_probes"], "window_probes")
-    boundary = j.activation_ms("window_rotation") // 1000
-    at = []
-    window_entries = {e["pool_model_id"] for e in j.manifests[j.roles["window_rotation"]]["model_entries"]}
+    activation = j.activation_ms("window_rotation")
+    window = j.roles["window_rotation"]
+    before = after = 0
+    decided = []
     for index, probe in enumerate(probes):
-        probe = obj(probe, {"at_unix", "status", "pool_model_id"}, f"window_probes[{index}]")
-        at.append(int_in(probe["at_unix"], f"window_probes[{index}].at_unix", 1))
-        require(probe["status"] == 200, f"window_probes[{index}]: a window-only rotation must not gap (status 200)")
-        require(probe["pool_model_id"] in window_entries, f"window_probes[{index}]: the probe must request an entry of the rotated core")
-    require(at == sorted(at), "window probes must be in time order")
-    require(any(t < boundary for t in at) and any(t >= boundary for t in at), "window probes must fall on both sides of the window boundary")
+        name = f"window_probes[{index}]"
+        probe = obj(probe, {"x_request_id", "date_unix", "status", "request_log", "route_snapshots", "quota_reservations"}, name)
+        rid = require_string(probe["x_request_id"], REQUEST_ID_RE, f"{name}.x_request_id")
+        int_in(probe["date_unix"], f"{name}.date_unix", 1)
+        require(probe["status"] == 200, f"{name}: a window-only rotation must not gap (status 200)")
+        snapshots = list_of(probe["route_snapshots"], f"{name}.route_snapshots")
+        require(len(snapshots) == 1 and isinstance(snapshots[0], dict), f"{name}: a served probe has exactly one route snapshot")
+        kind = j.entry_kind(snapshots[0].get("pool_model_id"), name)
+        keys = check_request_log(j, probe["request_log"], rid, j.entries[kind]["pool_model_id"], name)
+        snap = check_route_snapshot(j, snapshots[0], kind, f"{name} route snapshot", pricing)
+        require({(snap["request_id"], snap["attempt_n"])} == keys, f"{name}: the snapshot must be the mapped request's")
+        reservation = check_reservation(j, probe["quota_reservations"], rid, name)
+        require(reservation["status"] in ("active", "settled"), f"{name}: the probe's reservation must be live or settled")
+        if snap["route_decision_ts_unix_ms"] < activation:
+            require(snap["manifest_version"] < window, f"{name}: a probe before the boundary must route under an earlier core")
+            before += 1
+        else:
+            require(j.role_of(snap["manifest_version"], name) == "window_rotation", f"{name}: a probe after the boundary must route under the window_rotation terms")
+            after += 1
+        decided.append(snap["route_decision_ts_unix_ms"])
+    require(decided == sorted(decided), "window probes must be in route-decision order")
+    require(before >= 1 and after >= 1, "window probes must fall on both sides of the window boundary (coordinator route decision times)")
 
 
 def check_rollback(ev: dict[str, Any]) -> None:
@@ -1718,6 +2065,10 @@ def validate_evidence(ev: Any, *, now: datetime, fill_observations: bool = False
     if not isinstance(ev, dict):
         die("evidence must be an object")
     check_header(ev, now)
+    require(isinstance(ev["window_probes"], list) and all(isinstance(p, dict) and isinstance(p.get("route_snapshots"), list)
+                                                          for p in ev["window_probes"]), "window_probes must be request records")
+    require(ev["attestation_removal_inflight"] is None or (isinstance(ev["attestation_removal_inflight"], dict)
+            and isinstance(ev["attestation_removal_inflight"].get("route_snapshots"), list)), "attestation_removal_inflight must be a request record")
     j = Journey(ev)
     check_roles(j)
     check_preconditions(j, ev)
@@ -1732,14 +2083,31 @@ def validate_evidence(ev: Any, *, now: datetime, fill_observations: bool = False
     check_proposals(j, ev)
     admission = check_admission(j, ev)
     models = check_models(j, ev)
-    paid = {name: check_paid(j, ev, name, kind, stream, pricing) for name, (kind, stream) in PAID_REQUESTS.items()}
+    paid = {name: check_paid(j, requests[name], name, kind, stream, pricing) for name, (kind, stream) in PAID_REQUESTS.items()}
     obj(ev["refusals"], set(REFUSALS), "refusals")
-    refusals = {name: check_refusal(ev, name, statuses, codes) for name, (statuses, codes) in REFUSALS.items()}
+    refusals = {name: check_refusal(j, ev, name, statuses, codes) for name, (statuses, codes) in REFUSALS.items()}
+    # A re-added native entry serves only behind its fresh binding.
+    if admission["native_readd_bound_ms"] is not None:
+        for name, item in paid.items():
+            if item["kind"] == "native" and item["version"] >= j.roles["gguf_added"]:
+                require(item["dispatch_ms"] >= admission["native_readd_bound_ms"], f"{name}: a re-added native entry must serve after its fresh binding")
+    # R016 settlement-time revocation (optional; SPEC-042-R016 needs it).
+    if ev["attestation_removal_inflight"] is not None:
+        fenced = check_paid(j, ev["attestation_removal_inflight"], ATTESTATION_INFLIGHT, "gguf", False, pricing, zero_billed=True)
+        attestation_on = j.activation_ms("attestation_removal")
+        require(fenced["dispatch_ms"] < attestation_on <= fenced["settled_ms"],
+                f"{ATTESTATION_INFLIGHT} must be dispatched before the attestation removal activates and settle after it")
+        require(j.roles[fenced["role"]] < j.roles["attestation_removal"], f"{ATTESTATION_INFLIGHT} must route under the attested terms")
+    snapshot_count = sum(len(item["route_snapshots"]) for item in requests.values()) + sum(
+        len(probe["route_snapshots"]) for probe in ev["window_probes"]) + (
+        len(ev["attestation_removal_inflight"]["route_snapshots"]) if ev["attestation_removal_inflight"] else 0)
+    require(ev["route_snapshot_digests_recomputed"] == snapshot_count,
+            "every captured route snapshot digest must have been recomputed by coordinator-cli verify-route-snapshot")
 
     # step-11: window rotation.
     require(paid["rotation/window-only/after"]["role"] == "window_rotation", "rotation/window-only/after must route under the window_rotation terms")
     require(paid["rotation/window-only/after"]["dispatch_ms"] >= j.activation_ms("window_rotation"), "rotation/window-only/after must follow the boundary")
-    check_probes(j, ev)
+    check_probes(j, ev, pricing)
     # step-12: price change in flight.
     inflight, after = paid["rotation/price-change/inflight"], paid["rotation/price-change/after"]
     changed = j.price_changed
@@ -1783,7 +2151,7 @@ def validate_evidence(ev: Any, *, now: datetime, fill_observations: bool = False
         "native_entry_served": native_served,
         "attested_member_served": attested_served,
         "global_route_absent": models is not None and ev["models"]["never_global_count"] == 0,
-        "current_generation_revocation": bool(admission["entry_removal_revoked_reason"]),
+        "current_generation_revocation": bool(admission["entry_removal_revoked_reason"] and admission["attestation_removal_revoked_reason"]),
         "buyer_visible_usage_equals_debit": all(item["usage_equal"] for item in paid.values()),
     }
     for field, want in TRUSTED_POOL_MODEL_FIXED_OBSERVATIONS.items():
@@ -1865,14 +2233,16 @@ def reverify_bundle(root: Path, source: str, evidence: dict[str, Any], cli: str,
     if bundle_path.is_symlink() or not bundle_path.is_dir():
         die(f"the signed manifest bundle {bundle} must be committed beside the evidence")
     names = sorted(child.name for child in bundle_path.iterdir())
-    want = sorted([BUNDLE_ROOT_FILE] + [f"v{m['manifest_version']}.json" for m in evidence["manifests"]])
+    newest = evidence["manifest_root"]["newest_manifest_version"]
+    want = sorted([BUNDLE_ROOT_FILE, f"v{newest}.json"])
     require(names == want, f"the manifest bundle must hold exactly {want}")
     for name in names:
         path = bundle_path / name
         require(path.is_file() and not path.is_symlink(), f"bundle file {name} is unsafe")
-        base.require_git_file_matches(root, evidence_sha, f"{bundle}/{name}", path.read_bytes())
-    manifests = sorted(evidence["manifests"], key=lambda m: m["manifest_version"])
-    output = run_verify_manifest(cli, bundle_path / BUNDLE_ROOT_FILE, [bundle_path / f"v{m['manifest_version']}.json" for m in manifests])
+        payload = path.read_bytes()
+        base.require_git_file_matches(root, evidence_sha, f"{bundle}/{name}", payload)
+        check_bundle_file(payload, name)
+    output = run_verify_manifest(cli, bundle_path / BUNDLE_ROOT_FILE, [bundle_path / f"v{newest}.json"])
     fresh_root, fresh = normalize_verification(output, evidence["candidate_identity"]["fingerprint_salt"])
     require(fresh_root == evidence["manifest_root"], "the re-verified root registration must equal the evidence's")
     require(fresh == evidence["manifests"], "the re-verified manifests must equal the evidence's verified cores")
@@ -1884,8 +2254,6 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
     source, path = require_evidence_source(root, source)
     evidence_bytes = path.read_bytes()
     evidence = base.parse_json_bytes(evidence_bytes, source)
-    if JOURNEY_ID != TRUSTED_POOL_MODEL_JOURNEY_ID or ARTIFACT_ID != TRUSTED_POOL_MODEL_ARTIFACT_ID:
-        die("builder constants drifted from check_spec_governance")
     observations = validate_evidence(evidence, now=datetime.now(timezone.utc))
     for label, commit in (("--source-sha", source_sha), ("--evidence-sha", evidence_sha)):
         if not base.git_ok(root, "cat-file", "-e", f"{commit}^{{commit}}"):
@@ -1922,10 +2290,14 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
     }
 
 
-def validate_committed_evidence(payload: bytes) -> None:
+def validate_committed_evidence(payload: bytes, requirement_id: str | None = None) -> None:
     """Promotion-time revalidation (check_spec_governance): the full semantic
-    validator over committed evidence bytes, without the CLI re-verify."""
-    validate_evidence(base.parse_json_bytes(payload, "trusted-pool model redacted evidence"), now=datetime.now(timezone.utc))
+    validator over committed evidence bytes, without the CLI re-verify, and
+    the promoted requirement must be one the evidence covers."""
+    evidence = base.parse_json_bytes(payload, "trusted-pool model redacted evidence")
+    validate_evidence(evidence, now=datetime.now(timezone.utc))
+    if requirement_id is not None:
+        require(requirement_id in evidence["requirement_ids"], f"the committed evidence does not cover {requirement_id}")
 
 
 def write_bundle(output: Path, bundle: dict[str, bytes]) -> Path:
