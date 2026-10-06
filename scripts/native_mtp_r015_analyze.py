@@ -36,10 +36,19 @@ def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
     return dict(pairs)
 
 
+def _reject_non_finite_constant(token: str) -> object:
+    raise ValueError(f"non-finite JSON constant: {token}")
+
+
 def _strict_loads(text: str) -> object:
     """json.loads that rejects duplicate object keys (last-key-wins would let
-    one hash-bound record mean two things)."""
-    return json.loads(text, object_pairs_hook=_reject_duplicate_keys)
+    one hash-bound record mean two things) and NaN/Infinity constants (a NaN
+    threshold compares false against every bound)."""
+    return json.loads(
+        text,
+        object_pairs_hook=_reject_duplicate_keys,
+        parse_constant=_reject_non_finite_constant,
+    )
 
 
 def _load_policy(path: Path) -> dict:
@@ -214,7 +223,12 @@ def _policy_contract_violations(policy: dict) -> list[str]:
     else:
         for key, expected in _frozen_values(gate_set).items():
             value = thresholds[key]
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or abs(value - expected) >= 1e-7:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or abs(value - expected) >= 1e-7
+            ):
                 violations.append(f"threshold_not_frozen:{key}")
     return violations
 
@@ -402,6 +416,8 @@ def _load_jsonl(path: Path) -> tuple[dict, list[dict]]:
             if not line:
                 continue
             record = _strict_loads(line)
+            if not isinstance(record, dict):
+                raise ValueError(f"{path}:{lineno}: record is not a JSON object")
             if record.get("schema") != SCHEMA:
                 raise ValueError(f"{path}:{lineno}: unexpected schema {record.get('schema')!r}")
             if record.get("record_type") == "header":

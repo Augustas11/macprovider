@@ -166,6 +166,30 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         legacy = self._run_case(native_overrides={"raw_inter_token_gaps_seconds": self._DELETE}, legacy_gates=True)
         self.assertEqual(legacy["overall_status"], "PASS")
 
+    def test_non_finite_policy_constants_and_non_object_records_are_rejected(self):
+        for token in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(token=token), tempfile.TemporaryDirectory() as tmp:
+                jsonl_path, policy_path = self._write_case(Path(tmp))
+                text = policy_path.read_text("utf-8")
+                self.assertIn('"alpha": 0.05', text)
+                policy_path.write_text(text.replace('"alpha": 0.05', f'"alpha": {token}'), "utf-8")
+                with self.assertRaises(ValueError):
+                    analyze(jsonl_path, policy_path)
+        # A literal that overflows to infinity parses; the frozen-value check
+        # still refuses it.
+        with tempfile.TemporaryDirectory() as tmp:
+            jsonl_path, policy_path = self._write_case(Path(tmp))
+            text = policy_path.read_text("utf-8").replace('"alpha": 0.05', '"alpha": 1e999')
+            policy_path.write_text(text, "utf-8")
+            result = analyze(jsonl_path, policy_path)
+            self.assertEqual(result["overall_status"], "FAIL")
+            self.assertIn("threshold_not_frozen:alpha", result["matrix_violations"])
+        with tempfile.TemporaryDirectory() as tmp:
+            jsonl_path, policy_path = self._write_case(Path(tmp))
+            jsonl_path.write_text(jsonl_path.read_text("utf-8") + "[]\n", "utf-8")
+            with self.assertRaises(ValueError):
+                analyze(jsonl_path, policy_path)
+
     def test_exploratory_amended_reanalysis_never_yields_a_verdict(self):
         with tempfile.TemporaryDirectory() as tmp:
             jsonl_path, policy_path = self._write_case(Path(tmp), native_itl=0.016, legacy_gates=True)
@@ -641,9 +665,13 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
                 ), result["cells"][0]["hard_failures"])
 
     def test_wrong_typed_or_non_finite_fields_fail_closed(self):
+        # A NaN or Infinity constant is refused when the JSONL is read.
+        for value in (float("nan"), float("inf")):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self._run_case(native_overrides={"inter_token_gap_p95_seconds": value})
         for field, value in (
             ("ttft_p95_seconds", "0.1"),
-            ("inter_token_gap_p95_seconds", float("nan")),
+            ("inter_token_gap_p95_seconds", -1.0),
             ("aggregate_committed_tps", -1.0),
             ("requests", 0),
             ("errors", 1.5),
@@ -705,6 +733,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
             self.assertIn(name, reported["native_mtp"])
 
     _DELETE = object()
+
     SLOTS = (1,)
     # s1 cells are native-eligible; s2 cells are gated (SPEC-048-R015).
     BOUND = 1
