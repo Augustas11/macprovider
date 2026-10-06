@@ -89,7 +89,14 @@ remains 1.8.207. Both deployment locks are free and disk has 114 GB available.
 Use the signed runtime updater only. Expected outage is about two minutes for
 a required DB copy plus 40 seconds for restart; an unchanged signed schema
 fingerprint permits skipping the copy. Catalog activation is a separate gate.
-Publication, updater apply, and loaded buyer privacy verification are pending.
+Signed tag **v1.8.220** targets `6d49a4f16`; local `git verify-tag` passed.
+Runtime [run 37468267969](https://github.com/Augustas11/macprovider/actions/runs/37468267969)
+is waiting at the protected `production-release` environment for independent
+`antfleet-ops` approval. GitHub reports the dispatching identity cannot approve.
+No runtime is published or applied; Pearl remains on v1.8.218. The session has
+released Pearl without changing production. After approval, require successful
+publication, signed updater `--plan --tag v1.8.220`, and a fresh lock/health
+preflight before applying. Loaded buyer privacy verification remains pending.
 
 The older release table below is historical and has not yet been reconciled.
 Probed 2026-10-02 (`/healthz`).
