@@ -353,6 +353,19 @@ class Rehearsal:
 
     # ------------------------------------------------------------ phases
 
+    def raw_stream(self, label: str) -> None:
+        """Keep the exact SSE bytes of one greedy stream through the gateway."""
+        import http.client
+        import uuid
+        conn = http.client.HTTPConnection("127.0.0.1", self.ports["gateway_port"], timeout=900)
+        headers = {"Content-Type": "application/json", "X-Request-ID": str(uuid.uuid4())}
+        headers.update(self.auth())
+        conn.request("POST", "/v1/chat/completions", json.dumps(chat(PROMPTS[2], MAX_TOKENS, stream=True)).encode(),
+                     headers)
+        resp = conn.getresponse()
+        (self.work / f"logs/stream-{label}.sse").write_bytes(resp.read())
+        conn.close()
+
     def requests(self) -> list:
         out = []
         for prompt in PROMPTS:
@@ -437,6 +450,7 @@ class Rehearsal:
             phase["status_after"] = native_status(self.ports["serve_port"])
             after = self.db_snapshot()
             phase["accounting_delta"] = self.delta(before, after)
+            self.raw_stream("native")
             phase["coordinator_canary"] = self.coordinator_canary(wait_s=180)
         else:
             phase["delivery"] = self.delivery_evidence("native")
@@ -452,6 +466,7 @@ class Rehearsal:
             phase["status_after"] = native_status(self.ports["serve_port"])
             after = self.db_snapshot()
             phase["accounting_delta"] = self.delta(before, after)
+            self.raw_stream("ordinary")
         self.result["phases"]["ordinary"] = phase
         self.stop_provider()
 

@@ -1,0 +1,1054 @@
+{
+  "checks": {
+    "delivery.admission_set_materialized": true,
+    "delivery.canary_passed": true,
+    "delivery.drafter_fetched": true,
+    "delivery.lab_override_active": true,
+    "delivery.native_admitted": true,
+    "delivery.static_feeds_served": true,
+    "delivery.tuple_offered": true,
+    "drill.ordinary_serves_after": true,
+    "drill.tuple_disabled": true,
+    "g8.accounting_deltas_identical": false,
+    "g8.greedy_content_identical": true,
+    "g8.ordinary_all_200": true,
+    "g8.usage_identical": true,
+    "serving.all_200": true,
+    "serving.native_rows_served": true
+  },
+  "credentials_import_exit": 0,
+  "finished_at": "2026-10-06T17:00:54Z",
+  "identity": {
+    "key_id": "native-mtp-rehearsal-test-v1",
+    "lab_cli_sha256": "b2438f7799d80deb5ee12a1e9ca6d3db9b4d3537d3e6c289773588e8ce48c1a7",
+    "native_mtp_admission_tuple_sha256": [
+      "9c47b47a287d74adf606d491d379e45634787497c2b5f12e66151d8d75c0c2a0"
+    ],
+    "release_id": "published-2026-10-06-native-mtp-rehearsal-v1",
+    "sidecar_sha256": "311a89757fa79c974acc939b6ae4b8ec3da36f2c2e0709047b644420eb48c52f"
+  },
+  "lab_lock": {
+    "acquired_at": "2026-10-06T16:40:49Z",
+    "dir": "/Users/a1/.lab-window.lock",
+    "released_at": "2026-10-06T17:00:54Z"
+  },
+  "phases": {
+    "drill": {
+      "admission_events": [],
+      "after_request": {
+        "status": 200,
+        "usage": {
+          "cached_prompt_tokens": 0,
+          "completion_tokens": 48,
+          "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+          "prompt_tokens": 23,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 71
+        }
+      },
+      "before": {
+        "continuous_batching": {
+          "active": true,
+          "cache_class": "mixed",
+          "mode": "canary",
+          "paged_kv_decision": "attached",
+          "policy": {
+            "authorization_source": "coordinator",
+            "authorized": true,
+            "cached_turns_authorized": false,
+            "decision_reason": "authorized",
+            "emergency_off_override": false,
+            "expires_at": "2026-12-25T00:00:00Z",
+            "load_status": "live_verified",
+            "local_proof_result": "passed",
+            "policy_sha256": "1892156dda9fa25e2a2152eae44fb17b30982f9afec0b56aa7b438bcdeb55845",
+            "policy_version": "autotune-policy-v1",
+            "release_id": "published-2026-10-06-native-mtp-rehearsal-v1",
+            "rollout_mode": "canary",
+            "signer_key_id": "native-mtp-rehearsal-test-v1",
+            "tuple_sha256": "cd67b503636044d46d303ff1a1fb70876192b28d91289cec4a11bb721703d8fc"
+          },
+          "scheduler": {
+            "active_decode_rows": 0,
+            "max_observed_batch_depth": 1,
+            "slots_free": 8,
+            "slots_total": 8,
+            "waiting_count": 0
+          },
+          "unsupported_reason": null
+        },
+        "native_mtp": {
+          "accepted_by_position": [
+            1
+          ],
+          "accepted_tokens": 1,
+          "bonus_tokens": 0,
+          "capacity_rejections": 0,
+          "committed_tokens": 2,
+          "enabled": true,
+          "family": "qwen3_5_mtp_v1",
+          "last_reason": "active",
+          "mean_accepted_length": 0.5,
+          "mode": "eligible",
+          "mtp_forwards": 2,
+          "postoutput_failures": 0,
+          "preoutput_fallbacks": 0,
+          "proposal_depth": 1,
+          "proposed_tokens": 2,
+          "rejected_tokens": 1,
+          "requests_since_reset": 1,
+          "reset_generation": 2,
+          "supported": true,
+          "target_forwards": 2,
+          "throughput_delta_ppm": 14,
+          "verification_overhead_ms": 32
+        },
+        "status_advertises_native_mtp_status_v1": true,
+        "status_top_level_keys": [
+          "active_request_id_count",
+          "admission_identity",
+          "binary_version",
+          "buyer_serving_authority",
+          "buyer_serving_hold",
+          "capacity",
+          "catalog",
+          "compatibility_set_id",
+          "compatibility_set_sha256",
+          "continuous_batching",
+          "coordinator",
+          "coordinator_origin",
+          "credential",
+          "errors_total",
+          "input_tokens_all_time",
+          "input_tokens_today",
+          "lifecycle",
+          "lifecycle_lease",
+          "local_status_contract",
+          "memory_pressure",
+          "memory_rss_mb",
+          "model",
+          "model_hash",
+          "model_hash_algorithm",
+          "model_liveness",
+          "model_loaded",
+          "native_mtp",
+          "network_state",
+          "observation",
+          "output_tokens_all_time",
+          "output_tokens_today",
+          "provider_id",
+          "requests_in_flight",
+          "requests_queued",
+          "requests_today",
+          "requests_total",
+          "restart_count",
+          "safety_telemetry",
+          "service_instance",
+          "spec_decode_acceptance_rate",
+          "spec_decode_accepted_tokens_since_last",
+          "spec_decode_draft_model_id",
+          "spec_decode_drafted_tokens_since_last",
+          "spec_decode_enabled",
+          "spec_decode_num_draft_tokens",
+          "status",
+          "thermal_state",
+          "thermally_throttled",
+          "uptime_s",
+          "weights_manifest_algorithm",
+          "weights_manifest_sha256"
+        ],
+        "version": "1.8.219"
+      },
+      "disabled_at": "2026-10-06T17:00:53Z",
+      "observations": [
+        {
+          "at": "2026-10-06T16:58:53Z",
+          "native_mtp": {
+            "accepted_by_position": [
+              30
+            ],
+            "accepted_tokens": 30,
+            "bonus_tokens": 29,
+            "capacity_rejections": 0,
+            "committed_tokens": 65,
+            "enabled": true,
+            "family": "qwen3_5_mtp_v1",
+            "last_reason": "active",
+            "mean_accepted_length": 0.8333333333333334,
+            "mode": "eligible",
+            "mtp_forwards": 36,
+            "postoutput_failures": 0,
+            "preoutput_fallbacks": 0,
+            "proposal_depth": 1,
+            "proposed_tokens": 35,
+            "rejected_tokens": 5,
+            "requests_since_reset": 2,
+            "reset_generation": 2,
+            "supported": true,
+            "target_forwards": 36,
+            "throughput_delta_ppm": 14,
+            "verification_overhead_ms": 548
+          }
+        },
+        {
+          "at": "2026-10-06T16:59:23Z",
+          "native_mtp": {
+            "accepted_by_position": [
+              30
+            ],
+            "accepted_tokens": 30,
+            "bonus_tokens": 29,
+            "capacity_rejections": 0,
+            "committed_tokens": 65,
+            "enabled": true,
+            "family": "qwen3_5_mtp_v1",
+            "last_reason": "active",
+            "mean_accepted_length": 0.8333333333333334,
+            "mode": "eligible",
+            "mtp_forwards": 36,
+            "postoutput_failures": 0,
+            "preoutput_fallbacks": 0,
+            "proposal_depth": 1,
+            "proposed_tokens": 35,
+            "rejected_tokens": 5,
+            "requests_since_reset": 2,
+            "reset_generation": 2,
+            "supported": true,
+            "target_forwards": 36,
+            "throughput_delta_ppm": 14,
+            "verification_overhead_ms": 548
+          }
+        },
+        {
+          "at": "2026-10-06T16:59:53Z",
+          "native_mtp": {
+            "accepted_by_position": [
+              30
+            ],
+            "accepted_tokens": 30,
+            "bonus_tokens": 29,
+            "capacity_rejections": 0,
+            "committed_tokens": 65,
+            "enabled": true,
+            "family": "qwen3_5_mtp_v1",
+            "last_reason": "active",
+            "mean_accepted_length": 0.8333333333333334,
+            "mode": "eligible",
+            "mtp_forwards": 36,
+            "postoutput_failures": 0,
+            "preoutput_fallbacks": 0,
+            "proposal_depth": 1,
+            "proposed_tokens": 35,
+            "rejected_tokens": 5,
+            "requests_since_reset": 2,
+            "reset_generation": 2,
+            "supported": true,
+            "target_forwards": 36,
+            "throughput_delta_ppm": 14,
+            "verification_overhead_ms": 548
+          }
+        },
+        {
+          "at": "2026-10-06T17:00:23Z",
+          "native_mtp": {
+            "accepted_by_position": [
+              30
+            ],
+            "accepted_tokens": 30,
+            "bonus_tokens": 29,
+            "capacity_rejections": 0,
+            "committed_tokens": 65,
+            "enabled": true,
+            "family": "qwen3_5_mtp_v1",
+            "last_reason": "active",
+            "mean_accepted_length": 0.8333333333333334,
+            "mode": "eligible",
+            "mtp_forwards": 36,
+            "postoutput_failures": 0,
+            "preoutput_fallbacks": 0,
+            "proposal_depth": 1,
+            "proposed_tokens": 35,
+            "rejected_tokens": 5,
+            "requests_since_reset": 2,
+            "reset_generation": 2,
+            "supported": true,
+            "target_forwards": 36,
+            "throughput_delta_ppm": 14,
+            "verification_overhead_ms": 548
+          }
+        },
+        {
+          "at": "2026-10-06T17:00:53Z",
+          "native_mtp": {
+            "accepted_by_position": [],
+            "accepted_tokens": 0,
+            "bonus_tokens": 0,
+            "capacity_rejections": 0,
+            "committed_tokens": 0,
+            "enabled": false,
+            "family": "unknown",
+            "last_reason": "tuple_revoked",
+            "mean_accepted_length": 0,
+            "mode": "off",
+            "mtp_forwards": 0,
+            "postoutput_failures": 0,
+            "preoutput_fallbacks": 0,
+            "proposal_depth": 0,
+            "proposed_tokens": 0,
+            "rejected_tokens": 0,
+            "requests_since_reset": 0,
+            "reset_generation": 0,
+            "supported": false,
+            "target_forwards": 0,
+            "throughput_delta_ppm": 0,
+            "verification_overhead_ms": 0
+          }
+        }
+      ],
+      "provider": {
+        "native_mode": "auto",
+        "provider_exit": null,
+        "readiness_probes": 18,
+        "routable": true,
+        "seconds_to_routable": 85.4
+      },
+      "swapped_at": "2026-10-06T16:45:52Z"
+    },
+    "native": {
+      "accounting_delta": {
+        "coordinator.ledger_operator_credits": {
+          "rows": 5,
+          "sum(gross_credits)": 234,
+          "sum(operator_credits)": 24
+        },
+        "coordinator.ledger_provider_identity_snapshots": {
+          "rows": 5,
+          "sum(provider_reported_prompt_tokens)": 105
+        },
+        "coordinator.ledger_request_credits": {
+          "rows": 5,
+          "sum(cached_prompt_tokens)": 0,
+          "sum(charged_prompt_tokens)": 105,
+          "sum(completion_tokens)": 357,
+          "sum(estimated_completion_tokens)": 1599,
+          "sum(gross_credits)": 234,
+          "sum(prompt_tokens)": 105,
+          "sum(provider_credits)": 210,
+          "sum(provider_reported_prompt_tokens)": 105
+        },
+        "coordinator.request_log": {
+          "rows": 5,
+          "sum(cached_prompt_tokens)": 0,
+          "sum(completion_tokens)": 357,
+          "sum(estimated_completion_tokens)": 1599,
+          "sum(prompt_tokens)": 105,
+          "sum(relay_blind_max_output_tokens)": 0,
+          "sum(total_tokens)": 462
+        },
+        "gateway.demand_events": {
+          "rows": 5,
+          "sum(cached_prompt_tokens)": 0,
+          "sum(completion_tokens)": 357,
+          "sum(max_output_tokens)": 480,
+          "sum(prompt_tokens)": 141,
+          "sum(requested_output_tokens)": 480,
+          "sum(requested_prompt_tokens)": 245,
+          "sum(requested_total_tokens)": 725,
+          "sum(total_tokens)": 498
+        },
+        "gateway.quota_reservations": {
+          "rows": 5,
+          "sum(max_output_tokens)": 0
+        },
+        "gateway.usage_events": {
+          "rows": 5,
+          "sum(completion_tokens)": 357,
+          "sum(max_output_tokens)": 0,
+          "sum(prompt_tokens)": 141,
+          "sum(total_tokens)": 498
+        }
+      },
+      "coordinator_canary": {
+        "http_status": 200,
+        "model_hash": null,
+        "model_id": "mlx-community/Qwen3.6-35B-A3B-4bit",
+        "native_mtp_canary": {
+          "artifact_digest": "fa01beecb6c1e76845e9880623c3b5a009baa602c52e9e9b5d12edc489a23fd2",
+          "cache_namespace": "native_mtp:9c47b47a287d74adf606d491d379e45634787497c2b5f12e66151d8d75c0c2a0:native-mtp-selftest-journey-0001",
+          "challenge_bank_release_id": "published-2026-10-06-native-mtp-rehearsal-v1",
+          "challenge_bank_sha256": "2b2414ff9bca3befba78da68d44b5256aa397a56dc1ea5198d1f81583bfe01cf",
+          "challenge_corpus_sha256": "2b2414ff9bca3befba78da68d44b5256aa397a56dc1ea5198d1f81583bfe01cf",
+          "disabled_at": "0001-01-01T00:00:00Z",
+          "fresh_until": "2026-10-06T17:27:26.258791186Z",
+          "last_checked_at": "2026-10-06T16:42:51.372397Z",
+          "last_outcome": "pass",
+          "last_reason": "passed",
+          "manifest_digest": "7b38a336fa246a285ee23cc990351989bf2ee6c040506a2b793ee24e463f35a7",
+          "model_hash": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+          "model_hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_id": "qwen/qwen3.6-35b-a3b",
+          "native_mtp_admission_tuple_sha256": "9c47b47a287d74adf606d491d379e45634787497c2b5f12e66151d8d75c0c2a0",
+          "native_mtp_runtime_tuple_sha256": "ab2b51e039ebbe86cdf1494af67ecfa59dd1c4186a56540fb5826ffe34620783",
+          "next_due_at": "2026-10-06T17:05:08.815594093Z",
+          "offered": true,
+          "offered_at": "2026-10-06T16:42:32.257295Z",
+          "proposal_depth": 1,
+          "provider_binary_sha256": "b2438f7799d80deb5ee12a1e9ca6d3db9b4d3537d3e6c289773588e8ce48c1a7",
+          "provider_revision": "84a28cadc1c37bec15bc83cd267b6e26b54c54d8",
+          "runtime_cdhash": "9d33390c43fdece665ae126543892793964795a1",
+          "runtime_revision": "ca8c384c4fb6bc7d2fbb7c70a18c34b935701805",
+          "served_snapshot_id": "512986da1d761eb762be427aa9c52b59fd941cff3d5461498b691dfff46d5f77",
+          "sidecar_digest": "311a89757fa79c974acc939b6ae4b8ec3da36f2c2e0709047b644420eb48c52f",
+          "state_digest": "f22fa3608f515a2171cc71d25368192de8e7411cd0aab36bb2876ea34b09239f",
+          "status": "fresh",
+          "target_generation": 1,
+          "tokenizer_digest": "87a7830d63fcf43bf241c3c5242e96e62dd3fdc29224ca26fed8ea333db72de4",
+          "tuple_disable_sent_at": "0001-01-01T00:00:00Z"
+        }
+      },
+      "delivery": {
+        "coordinator_cb_policy_lines": [],
+        "coordinator_native_mtp_lines": [
+          "{\"level\":\"info\",\"autotune_catalog_version\":\"published-2026-10-06-native-mtp-rehearsal-v1\",\"autotune_compatible_previous_releases\":0,\"autotune_catalog_signer_key_id\":\"native-mtp-rehearsal-test-v1\",\"tier2_catalog_id\":\"\",\"tier2_sha256\":\"\",\"autotune_provider_admission_enforced\":true,\"time\":\"2026-10-06T09:40:50-07:00\",\"message\":\"provider catalog compatibility enabled\"}",
+          "{\"level\":\"info\",\"event\":\"attestation_valid\",\"category\":\"T2.C\",\"severity\":\"INFO\",\"provider_id\":\"native-mtp-rehearsal-provider\",\"pillar\":\"C\",\"decision\":\"allow\",\"reason\":\"se_p256_attested\",\"config_flag\":\"tier2.attestation_formats\",\"time\":\"2026-10-06T09:42:32-07:00\",\"message\":\"tier2 attestation event\"}",
+          "{\"level\":\"info\",\"provider_id\":\"native-mtp-rehearsal-provider\",\"identity_generation\":1,\"time\":\"2026-10-06T09:42:32-07:00\",\"message\":\"durable admission identity enrolled\"}",
+          "{\"level\":\"info\",\"provider_id\":\"native-mtp-rehearsal-provider\",\"state\":\"ready\",\"reason\":\"coordinator auth_response accepted\",\"since\":\"2026-10-06T16:42:32Z\",\"time\":\"2026-10-06T09:42:32-07:00\",\"message\":\"provider state transition\"}",
+          "{\"level\":\"info\",\"provider_id\":\"native-mtp-rehearsal-provider\",\"state\":\"ready\",\"time\":\"2026-10-06T09:42:32-07:00\",\"message\":\"pool check hit\"}",
+          "{\"level\":\"debug\",\"provider_id\":\"native-mtp-rehearsal-provider\",\"state\":\"ready\",\"slots_free\":8,\"slots_total\":8,\"time\":\"2026-10-06T09:42:34-07:00\",\"message\":\"provider heartbeat\"}",
+          "{\"level\":\"debug\",\"provider_id\":\"native-mtp-rehearsal-provider\",\"state\":\"ready\",\"slots_free\":8,\"slots_total\":8,\"time\":\"2026-10-06T09:42:36-07:00\",\"message\":\"provider heartbeat\"}",
+          "{\"level\":\"info\",\"event\":\"routing_decision\",\"request_id\":\"11d7bfc2-84cb-4953-9bf6-15fffc1366b1\",\"objective\":\"default\",\"candidate_count_before_filters\":1,\"candidate_count_after_filters\":1,\"candidate_set\":[{\"provider_id\":\"native-mtp-rehearsal-provider\",\"assigned_id\":\"9053bf6a-52ce-4bd8-8cf6-85f8044a1aa3\",\"objective_metric\":65.25078271150713,\"state\":\"ready\",\"slots\":8,\"effective_throughput\":65.25078271",
+          "{\"level\":\"info\",\"provider_id\":\"native-mtp-rehearsal-provider\",\"state\":\"ready\",\"reason\":\"request_capacity_available\",\"since\":\"2026-10-06T16:42:36Z\",\"time\":\"2026-10-06T09:42:36-07:00\",\"message\":\"provider state transition\"}",
+          "{\"level\":\"info\",\"event\":\"routing_decision\",\"request_id\":\"fe0989f3-221b-412d-a0e7-f80f6bdaa0ff\",\"attempt_n\":0,\"provider_id\":\"native-mtp-rehearsal-provider\",\"provider_assigned_id\":\"9053bf6a-52ce-4bd8-8cf6-85f8044a1aa3\",\"cached_prompt_tokens\":0,\"sticky_result\":\"disabled\",\"time\":\"2026-10-06T09:42:37-07:00\",\"message\":\"routing_decision\"}",
+          "{\"level\":\"info\",\"provider_id\":\"native-mtp-rehearsal-provider\",\"state\":\"ready\",\"reason\":\"request_capacity_available\",\"since\":\"2026-10-06T16:42:37Z\",\"time\":\"2026-10-06T09:42:37-07:00\",\"message\":\"provider state transition\"}",
+          "{\"level\":\"debug\",\"provider_id\":\"native-mtp-rehearsal-provider\",\"state\":\"ready\",\"slots_free\":8,\"slots_total\":8,\"time\":\"2026-10-06T09:42:38-07:00\",\"message\":\"provider heartbeat\"}",
+          "{\"level\":\"debug\",\"provider_id\":\"native-mtp-rehearsal-provider\",\"state\":\"ready\",\"slots_free\":8,\"slots_total\":8,\"time\":\"2026-10-06T09:42:40-07:00\",\"message\":\"provider heartbeat\"}",
+          "{\"level\":\"debug\",\"provider_id\":\"native-mtp-rehearsal-provider\",\"state\":\"ready\",\"slots_free\":8,\"slots_total\":8,\"time\":\"2026-10-06T09:42:42-07:00\",\"message\":\"provider heartbeat\"}",
+          "{\"level\":\"debug\",\"provider_id\":\"native-mtp-rehearsal-provider\",\"state\":\"ready\",\"slots_free\":8,\"slots_total\":8,\"time\":\"2026-10-06T09:42:44-07:00\",\"message\":\"provider heartbeat\"}",
+          "{\"level\":\"debug\",\"provider_id\":\"native-mtp-rehearsal-provider\",\"state\":\"ready\",\"slots_free\":8,\"slots_total\":8,\"time\":\"2026-10-06T09:42:46-07:00\",\"message\":\"provider heartbeat\"}"
+        ],
+        "drafter_fetched_into_lab_store": true,
+        "drafter_files": [
+          ".gitattributes",
+          "README.md",
+          "config.json",
+          "model.safetensors",
+          "model.safetensors.index.json",
+          "tokenizer.json",
+          "tokenizer_config.json",
+          "vocab.json"
+        ],
+        "lab_override_active": true,
+        "materialized_members": [
+          "b60c5c1698e9ed8f78d0c4db0e1564240d3a6ba94cc6aaa77288d8824d45f1b4",
+          "b60c5c1698e9ed8f78d0c4db0e1564240d3a6ba94cc6aaa77288d8824d45f1b4/native-mtp-admission.json",
+          "b60c5c1698e9ed8f78d0c4db0e1564240d3a6ba94cc6aaa77288d8824d45f1b4/native-mtp-admission.json.sig",
+          "b60c5c1698e9ed8f78d0c4db0e1564240d3a6ba94cc6aaa77288d8824d45f1b4/native-mtp-artifact-manifest.json",
+          "b60c5c1698e9ed8f78d0c4db0e1564240d3a6ba94cc6aaa77288d8824d45f1b4/native-mtp-selftest-bank.json",
+          "b60c5c1698e9ed8f78d0c4db0e1564240d3a6ba94cc6aaa77288d8824d45f1b4/native-mtp-selftest-bank.json.sig"
+        ],
+        "provider_status": {
+          "continuous_batching": {
+            "active": true,
+            "cache_class": "mixed",
+            "mode": "canary",
+            "paged_kv_decision": "attached",
+            "policy": {
+              "authorization_source": "coordinator",
+              "authorized": true,
+              "cached_turns_authorized": false,
+              "decision_reason": "authorized",
+              "emergency_off_override": false,
+              "expires_at": "2026-12-25T00:00:00Z",
+              "load_status": "live_verified",
+              "local_proof_result": "passed",
+              "policy_sha256": "1892156dda9fa25e2a2152eae44fb17b30982f9afec0b56aa7b438bcdeb55845",
+              "policy_version": "autotune-policy-v1",
+              "release_id": "published-2026-10-06-native-mtp-rehearsal-v1",
+              "rollout_mode": "canary",
+              "signer_key_id": "native-mtp-rehearsal-test-v1",
+              "tuple_sha256": "cd67b503636044d46d303ff1a1fb70876192b28d91289cec4a11bb721703d8fc"
+            },
+            "scheduler": {
+              "active_decode_rows": 0,
+              "max_observed_batch_depth": 1,
+              "slots_free": 8,
+              "slots_total": 8,
+              "waiting_count": 0
+            },
+            "unsupported_reason": null
+          },
+          "native_mtp": {
+            "accepted_by_position": [
+              1
+            ],
+            "accepted_tokens": 1,
+            "bonus_tokens": 0,
+            "capacity_rejections": 0,
+            "committed_tokens": 2,
+            "enabled": true,
+            "family": "qwen3_5_mtp_v1",
+            "last_reason": "active",
+            "mean_accepted_length": 0.5,
+            "mode": "eligible",
+            "mtp_forwards": 2,
+            "postoutput_failures": 0,
+            "preoutput_fallbacks": 0,
+            "proposal_depth": 1,
+            "proposed_tokens": 2,
+            "rejected_tokens": 1,
+            "requests_since_reset": 1,
+            "reset_generation": 2,
+            "supported": true,
+            "target_forwards": 2,
+            "throughput_delta_ppm": 14,
+            "verification_overhead_ms": 32
+          },
+          "status_advertises_native_mtp_status_v1": true,
+          "status_top_level_keys": [
+            "active_request_id_count",
+            "admission_identity",
+            "binary_version",
+            "buyer_serving_authority",
+            "buyer_serving_hold",
+            "capacity",
+            "catalog",
+            "compatibility_set_id",
+            "compatibility_set_sha256",
+            "continuous_batching",
+            "coordinator",
+            "coordinator_origin",
+            "credential",
+            "errors_total",
+            "input_tokens_all_time",
+            "input_tokens_today",
+            "lifecycle",
+            "lifecycle_lease",
+            "local_status_contract",
+            "memory_pressure",
+            "memory_rss_mb",
+            "model",
+            "model_hash",
+            "model_hash_algorithm",
+            "model_liveness",
+            "model_loaded",
+            "native_mtp",
+            "network_state",
+            "observation",
+            "output_tokens_all_time",
+            "output_tokens_today",
+            "provider_id",
+            "requests_in_flight",
+            "requests_queued",
+            "requests_today",
+            "requests_total",
+            "restart_count",
+            "safety_telemetry",
+            "service_instance",
+            "spec_decode_acceptance_rate",
+            "spec_decode_accepted_tokens_since_last",
+            "spec_decode_draft_model_id",
+            "spec_decode_drafted_tokens_since_last",
+            "spec_decode_enabled",
+            "spec_decode_num_draft_tokens",
+            "status",
+            "thermal_state",
+            "thermally_throttled",
+            "uptime_s",
+            "weights_manifest_algorithm",
+            "weights_manifest_sha256"
+          ],
+          "version": "1.8.219"
+        },
+        "runtime_identity_lines": [
+          "[paged-kv] runtime-identity model=qwen/qwen3.6-35b-a3b model_sha256=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1 hardware_class=apple-silicon:Apple M3 Ultra:ram-256gb metallib_sha256=84e487182336648a826132e50e7a4cd2cae0bc77ac6eafa89cc72f3a964fdbaf kernel_identifier=macprovider_paged_kv_gather_v1"
+        ],
+        "serve_path_admission_events": [],
+        "tuple_offer_received": false
+      },
+      "provider": {
+        "native_mode": "auto",
+        "provider_exit": null,
+        "readiness_probes": 22,
+        "routable": true,
+        "seconds_to_routable": 105.5
+      },
+      "requests": [
+        {
+          "content_sha256": "cacb4c1e3fd912b61b26f3c4879a33c5ab8bf6b4fe25069b813e72ac0dd0c599",
+          "finish_reason": "stop",
+          "kind": "nonstream_greedy",
+          "prompt_sha256": "042809a5583c4c0b0fe6139047a545e71d7da777a38ea70f020a6ab2e81f496b",
+          "status": 200,
+          "usage": {
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 48,
+            "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+            "prompt_tokens": 23,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 71
+          }
+        },
+        {
+          "content_sha256": "690f74fca51a231d442c8556c74d050f85fdff37d560e8491e992de77f2d73e5",
+          "finish_reason": "length",
+          "kind": "nonstream_greedy",
+          "prompt_sha256": "ae95a85061d63fc93b1cbe5883c1c944f739a376e1f1a08b3108951d2b294422",
+          "status": 200,
+          "usage": {
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 96,
+            "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+            "prompt_tokens": 18,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 114
+          }
+        },
+        {
+          "content_sha256": "c50419296b13e9c2fdc0464c811eb1a7812402200d9601bb31e8ab9fc566d443",
+          "finish_reason": "stop",
+          "kind": "nonstream_greedy",
+          "prompt_sha256": "e7d348b8b9921465761875382bf1c43e4ff22355add6e6c87dbbd419c0fb5b02",
+          "status": 200,
+          "usage": {
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 21,
+            "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+            "prompt_tokens": 21,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 42
+          }
+        },
+        {
+          "content_sha256": "ec0e87a671f5b3136823eba93e364a69baa696e8b012be884d55ef31ce15337c",
+          "finish_reason": "length",
+          "kind": "nonstream_greedy",
+          "prompt_sha256": "8544e8582fec9bed2b0f03715d27bee1f279fecdd3798591faff6efb1bae179d",
+          "status": 200,
+          "usage": {
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 96,
+            "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+            "prompt_tokens": 25,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 121
+          }
+        },
+        {
+          "content_sha256": "690f74fca51a231d442c8556c74d050f85fdff37d560e8491e992de77f2d73e5",
+          "finish_reason": "length",
+          "frames": 97,
+          "kind": "stream_greedy",
+          "status": 200,
+          "usage": {
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 96,
+            "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+            "prompt_tokens": 18,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 114
+          }
+        }
+      ],
+      "status_after": {
+        "continuous_batching": {
+          "active": true,
+          "cache_class": "mixed",
+          "mode": "canary",
+          "paged_kv_decision": "attached",
+          "policy": {
+            "authorization_source": "coordinator",
+            "authorized": true,
+            "cached_turns_authorized": false,
+            "decision_reason": "authorized",
+            "emergency_off_override": false,
+            "expires_at": "2026-12-25T00:00:00Z",
+            "load_status": "live_verified",
+            "local_proof_result": "passed",
+            "policy_sha256": "1892156dda9fa25e2a2152eae44fb17b30982f9afec0b56aa7b438bcdeb55845",
+            "policy_version": "autotune-policy-v1",
+            "release_id": "published-2026-10-06-native-mtp-rehearsal-v1",
+            "rollout_mode": "canary",
+            "signer_key_id": "native-mtp-rehearsal-test-v1",
+            "tuple_sha256": "cd67b503636044d46d303ff1a1fb70876192b28d91289cec4a11bb721703d8fc"
+          },
+          "scheduler": {
+            "active_decode_rows": 0,
+            "max_observed_batch_depth": 1,
+            "slots_free": 8,
+            "slots_total": 8,
+            "waiting_count": 0
+          },
+          "unsupported_reason": null
+        },
+        "native_mtp": {
+          "accepted_by_position": [
+            193
+          ],
+          "accepted_tokens": 193,
+          "bonus_tokens": 191,
+          "capacity_rejections": 0,
+          "committed_tokens": 419,
+          "enabled": true,
+          "family": "qwen3_5_mtp_v1",
+          "last_reason": "active",
+          "mean_accepted_length": 0.8464912280701754,
+          "mode": "eligible",
+          "mtp_forwards": 228,
+          "postoutput_failures": 0,
+          "preoutput_fallbacks": 0,
+          "proposal_depth": 1,
+          "proposed_tokens": 225,
+          "rejected_tokens": 32,
+          "requests_since_reset": 7,
+          "reset_generation": 2,
+          "supported": true,
+          "target_forwards": 228,
+          "throughput_delta_ppm": 14,
+          "verification_overhead_ms": 3444
+        },
+        "status_advertises_native_mtp_status_v1": true,
+        "status_top_level_keys": [
+          "active_request_id_count",
+          "admission_identity",
+          "binary_version",
+          "buyer_serving_authority",
+          "buyer_serving_hold",
+          "capacity",
+          "catalog",
+          "compatibility_set_id",
+          "compatibility_set_sha256",
+          "continuous_batching",
+          "coordinator",
+          "coordinator_origin",
+          "credential",
+          "errors_total",
+          "input_tokens_all_time",
+          "input_tokens_today",
+          "lifecycle",
+          "lifecycle_lease",
+          "local_status_contract",
+          "memory_pressure",
+          "memory_rss_mb",
+          "model",
+          "model_hash",
+          "model_hash_algorithm",
+          "model_liveness",
+          "model_loaded",
+          "native_mtp",
+          "network_state",
+          "observation",
+          "output_tokens_all_time",
+          "output_tokens_today",
+          "provider_id",
+          "requests_in_flight",
+          "requests_queued",
+          "requests_today",
+          "requests_total",
+          "restart_count",
+          "safety_telemetry",
+          "service_instance",
+          "spec_decode_acceptance_rate",
+          "spec_decode_accepted_tokens_since_last",
+          "spec_decode_draft_model_id",
+          "spec_decode_drafted_tokens_since_last",
+          "spec_decode_enabled",
+          "spec_decode_num_draft_tokens",
+          "status",
+          "thermal_state",
+          "thermally_throttled",
+          "uptime_s",
+          "weights_manifest_algorithm",
+          "weights_manifest_sha256"
+        ],
+        "version": "1.8.219"
+      }
+    },
+    "ordinary": {
+      "accounting_delta": {
+        "coordinator.ledger_operator_credits": {
+          "rows": 5,
+          "sum(gross_credits)": 234,
+          "sum(operator_credits)": 24
+        },
+        "coordinator.ledger_provider_identity_snapshots": {
+          "rows": 5,
+          "sum(provider_reported_prompt_tokens)": 105
+        },
+        "coordinator.ledger_request_credits": {
+          "rows": 5,
+          "sum(cached_prompt_tokens)": 0,
+          "sum(charged_prompt_tokens)": 105,
+          "sum(completion_tokens)": 357,
+          "sum(estimated_completion_tokens)": 189,
+          "sum(gross_credits)": 234,
+          "sum(prompt_tokens)": 105,
+          "sum(provider_credits)": 210,
+          "sum(provider_reported_prompt_tokens)": 105
+        },
+        "coordinator.request_log": {
+          "rows": 5,
+          "sum(cached_prompt_tokens)": 0,
+          "sum(completion_tokens)": 357,
+          "sum(estimated_completion_tokens)": 189,
+          "sum(prompt_tokens)": 105,
+          "sum(relay_blind_max_output_tokens)": 0,
+          "sum(total_tokens)": 462
+        },
+        "gateway.demand_events": {
+          "rows": 5,
+          "sum(cached_prompt_tokens)": 0,
+          "sum(completion_tokens)": 357,
+          "sum(max_output_tokens)": 480,
+          "sum(prompt_tokens)": 141,
+          "sum(requested_output_tokens)": 480,
+          "sum(requested_prompt_tokens)": 245,
+          "sum(requested_total_tokens)": 725,
+          "sum(total_tokens)": 498
+        },
+        "gateway.quota_reservations": {
+          "rows": 5,
+          "sum(max_output_tokens)": 0
+        },
+        "gateway.usage_events": {
+          "rows": 5,
+          "sum(completion_tokens)": 357,
+          "sum(max_output_tokens)": 0,
+          "sum(prompt_tokens)": 141,
+          "sum(total_tokens)": 498
+        }
+      },
+      "provider": {
+        "native_mode": "off",
+        "provider_exit": null,
+        "readiness_probes": 12,
+        "routable": true,
+        "seconds_to_routable": 55.4
+      },
+      "requests": [
+        {
+          "content_sha256": "cacb4c1e3fd912b61b26f3c4879a33c5ab8bf6b4fe25069b813e72ac0dd0c599",
+          "finish_reason": "stop",
+          "kind": "nonstream_greedy",
+          "prompt_sha256": "042809a5583c4c0b0fe6139047a545e71d7da777a38ea70f020a6ab2e81f496b",
+          "status": 200,
+          "usage": {
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 48,
+            "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+            "prompt_tokens": 23,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 71
+          }
+        },
+        {
+          "content_sha256": "690f74fca51a231d442c8556c74d050f85fdff37d560e8491e992de77f2d73e5",
+          "finish_reason": "length",
+          "kind": "nonstream_greedy",
+          "prompt_sha256": "ae95a85061d63fc93b1cbe5883c1c944f739a376e1f1a08b3108951d2b294422",
+          "status": 200,
+          "usage": {
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 96,
+            "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+            "prompt_tokens": 18,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 114
+          }
+        },
+        {
+          "content_sha256": "c50419296b13e9c2fdc0464c811eb1a7812402200d9601bb31e8ab9fc566d443",
+          "finish_reason": "stop",
+          "kind": "nonstream_greedy",
+          "prompt_sha256": "e7d348b8b9921465761875382bf1c43e4ff22355add6e6c87dbbd419c0fb5b02",
+          "status": 200,
+          "usage": {
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 21,
+            "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+            "prompt_tokens": 21,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 42
+          }
+        },
+        {
+          "content_sha256": "ec0e87a671f5b3136823eba93e364a69baa696e8b012be884d55ef31ce15337c",
+          "finish_reason": "length",
+          "kind": "nonstream_greedy",
+          "prompt_sha256": "8544e8582fec9bed2b0f03715d27bee1f279fecdd3798591faff6efb1bae179d",
+          "status": 200,
+          "usage": {
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 96,
+            "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+            "prompt_tokens": 25,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 121
+          }
+        },
+        {
+          "content_sha256": "690f74fca51a231d442c8556c74d050f85fdff37d560e8491e992de77f2d73e5",
+          "finish_reason": "length",
+          "frames": 97,
+          "kind": "stream_greedy",
+          "status": 200,
+          "usage": {
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 96,
+            "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+            "prompt_tokens": 18,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 114
+          }
+        }
+      ],
+      "status_after": {
+        "continuous_batching": {
+          "active": true,
+          "cache_class": "mixed",
+          "mode": "canary",
+          "paged_kv_decision": "attached",
+          "policy": {
+            "authorization_source": "coordinator",
+            "authorized": true,
+            "cached_turns_authorized": false,
+            "decision_reason": "authorized",
+            "emergency_off_override": false,
+            "expires_at": "2026-12-25T00:00:00Z",
+            "load_status": "live_verified",
+            "local_proof_result": "passed",
+            "policy_sha256": "1892156dda9fa25e2a2152eae44fb17b30982f9afec0b56aa7b438bcdeb55845",
+            "policy_version": "autotune-policy-v1",
+            "release_id": "published-2026-10-06-native-mtp-rehearsal-v1",
+            "rollout_mode": "canary",
+            "signer_key_id": "native-mtp-rehearsal-test-v1",
+            "tuple_sha256": "cd67b503636044d46d303ff1a1fb70876192b28d91289cec4a11bb721703d8fc"
+          },
+          "scheduler": {
+            "active_decode_rows": 0,
+            "max_observed_batch_depth": 1,
+            "slots_free": 8,
+            "slots_total": 8,
+            "waiting_count": 0
+          },
+          "unsupported_reason": null
+        },
+        "native_mtp": {
+          "accepted_by_position": [],
+          "accepted_tokens": 0,
+          "bonus_tokens": 0,
+          "capacity_rejections": 0,
+          "committed_tokens": 0,
+          "enabled": false,
+          "family": "unknown",
+          "last_reason": "disabled_by_default",
+          "mean_accepted_length": 0,
+          "mode": "off",
+          "mtp_forwards": 0,
+          "postoutput_failures": 0,
+          "preoutput_fallbacks": 0,
+          "proposal_depth": 0,
+          "proposed_tokens": 0,
+          "rejected_tokens": 0,
+          "requests_since_reset": 0,
+          "reset_generation": 1,
+          "supported": false,
+          "target_forwards": 0,
+          "throughput_delta_ppm": 0,
+          "verification_overhead_ms": 0
+        },
+        "status_advertises_native_mtp_status_v1": true,
+        "status_top_level_keys": [
+          "active_request_id_count",
+          "admission_identity",
+          "binary_version",
+          "buyer_serving_authority",
+          "buyer_serving_hold",
+          "capacity",
+          "catalog",
+          "compatibility_set_id",
+          "compatibility_set_sha256",
+          "continuous_batching",
+          "coordinator",
+          "coordinator_origin",
+          "credential",
+          "errors_total",
+          "input_tokens_all_time",
+          "input_tokens_today",
+          "lifecycle",
+          "lifecycle_lease",
+          "local_status_contract",
+          "memory_pressure",
+          "memory_rss_mb",
+          "model",
+          "model_hash",
+          "model_hash_algorithm",
+          "model_liveness",
+          "model_loaded",
+          "native_mtp",
+          "network_state",
+          "observation",
+          "output_tokens_all_time",
+          "output_tokens_today",
+          "provider_id",
+          "requests_in_flight",
+          "requests_queued",
+          "requests_today",
+          "requests_total",
+          "restart_count",
+          "safety_telemetry",
+          "service_instance",
+          "spec_decode_acceptance_rate",
+          "spec_decode_accepted_tokens_since_last",
+          "spec_decode_draft_model_id",
+          "spec_decode_drafted_tokens_since_last",
+          "spec_decode_enabled",
+          "spec_decode_num_draft_tokens",
+          "status",
+          "thermal_state",
+          "thermally_throttled",
+          "uptime_s",
+          "weights_manifest_algorithm",
+          "weights_manifest_sha256"
+        ],
+        "version": "1.8.219"
+      }
+    }
+  },
+  "schema_version": "macprovider.native-mtp-enablement-rehearsal.v1",
+  "services": {
+    "coordinator_up": true,
+    "gateway_up": true,
+    "static_feed_status": {
+      "autotune-candidates": 200,
+      "catalog-artifacts": 200,
+      "continuous-batching-policy": 200,
+      "native-mtp-admission": 200,
+      "native-mtp-artifact-manifest": 200,
+      "native-mtp-revocations.native-mtp-rehearsal-test-v1.json": 200,
+      "native-mtp-selftest-bank": 200
+    }
+  },
+  "started_at": "2026-10-06T16:40:49Z"
+}
