@@ -4219,8 +4219,14 @@
       "requirement_id": "SPEC-031-R033",
       "spec_id": "SPEC-031",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/ws/native_mtp_canary.go:EvaluateNativeMTPCanaryCoreResult",
+        "phase4-coordinator/internal/ws/native_mtp_canary_integration.go:loadVerifiedNativeMTPChallengeBank"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/ws/native_mtp_canary_test.go:TestNativeMTPCanaryCoreRequestAndResultEvaluation",
+        "phase4-coordinator/internal/ws/native_mtp_canary_test.go:TestNativeMTPCanaryStoreIsTupleScopedAndReplaySafe"
+      ],
       "journeys": [
         "JOURNEY-NATIVE-MTP-SERVING"
       ],
@@ -4229,7 +4235,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "The dedicated bounded native-MTP tuple canary and tuple-only disablement lifecycle are specified but not implemented or evidenced."
+        "rationale": "The coordinator canary (bounded signed challenge bank, one in-flight probe, tuple-only disablement, observe-only trust) is implemented and unit-tested, and its operator configuration is in docs/runbooks/native-mtp-enablement.md. It stays pending until the signed JOURNEY-NATIVE-MTP-SERVING result exercises it on hardware (step 12, coordinator half)."
       }
     },
     {
@@ -10476,8 +10482,14 @@
       "requirement_id": "SPEC-048-R009",
       "spec_id": "SPEC-048",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/NativeMTP.swift:resolvingConversationCacheLease",
+        "phase4-coordinator/internal/ws/relay.go:ContextWithConversationCacheOnlyKey"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPSelectorTests.swift:testCacheOnlyNativeAdmissionResolvesOnTheLease",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testKeyedNativeRowCommitsTheOrdinarySerialConversationCacheEntry"
+      ],
       "journeys": [
         "JOURNEY-NATIVE-MTP-SERVING"
       ],
@@ -10486,7 +10498,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "The native-MTP cache lease, promotion, reuse, and commit exclusion is not implemented or tested."
+        "rationale": "SPEC-048 0.1.26: sticky keys stay ordinary; a cache-only auto-prefix key runs native only on the miss its ordinary lease would report and publishes the ordinary serial-format entry (byte-identical KV and checkpoints on a tiny bf16 Qwen3.5). Pending until the signed serving journey covers it on hardware."
       }
     },
     {
@@ -10518,8 +10530,13 @@
       "requirement_id": "SPEC-048-R011",
       "spec_id": "SPEC-048",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/NativeMTP.swift:NativeMTPRuntimeAdmission"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAccountingInvarianceTests.swift:testNativeMTPBuyerUsageReportsOnlyOrdinaryTokenCounts",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAccountingInvarianceTests.swift:testPostoutputUnattestedFailureCannotEmitSuccessTokenUsage"
+      ],
       "journeys": [
         "JOURNEY-NATIVE-MTP-SERVING"
       ],
@@ -10528,7 +10545,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "Buyer, receipt, usage, billing, and settlement invariance has not been demonstrated."
+        "rationale": "Usage, receipt, and failure-path invariance is unit-tested on the provider; the coordinator and gateway carry no native-MTP field. Pending until journey step 11 compares native and ordinary ledger, request-log, usage, and receipt rows end to end on the isolated stack."
       }
     },
     {
@@ -10553,13 +10570,16 @@
       "spec_id": "SPEC-048",
       "state": "pending",
       "implementation": [
+        "phase3-binary/Sources/macprovider-cli/NativeMTPAdmissionFeed.swift:enum NativeMTPAdmissionFeed",
+        "phase3-binary/Sources/macprovider-cli/NativeMTPAdmissionSidecar.swift:struct NativeMTPResolvedArtifactAuthority",
         "phase3-binary/Sources/macprovider-cli/NativeMTPRevocationFeed.swift:struct NativeMTPRevocationFeed",
-        "phase3-binary/Sources/macprovider-cli/NativeMTPAdmissionSidecar.swift:struct NativeMTPResolvedArtifactAuthority"
+        "scripts/catalog-release.py:resolve_native_mtp_admission"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testProductionLoaderRejectsLegacyObjectSchema",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPRevocationFeedTests.swift:testAcceptsSignedFeedAndPersistsRecoverableAnchor",
-        "phase3-binary/Tests/macprovider-cliTests/NativeMTPRevocationFeedTests.swift:testRejectsRollbackReplayAndRevokedSetRegression"
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPRevocationFeedTests.swift:testRejectsRollbackReplayAndRevokedSetRegression",
+        "scripts/tests/test_catalog_native_mtp_admission.py:NativeMTPAdmissionReleaseTest"
       ],
       "journeys": [
         "JOURNEY-NATIVE-MTP-SERVING"
@@ -10569,7 +10589,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "The strict consumer side of signed admission is implemented: the SPEC-023-R024 sidecar parser and resolved artifact authority (mapped under SPEC-023-R024) and the signed tuple revocation feed with rollback/replay protection. The signed catalog/autotune admission generator, release-ledger binding, and immutable evidence records do not exist yet. Native MTP ships default-off; the pending candidate pin is ca8c384c4fb6bc7d2fbb7c70a18c34b935701805, whose parent b181102984a4d1875efbd9e0eab3a7dfd1c012c5 is the approved fused-MoE baseline; stays pending until a fresh fused-baseline R015 passes and signed JOURNEY-NATIVE-MTP-SERVING evidence exists."
+        "rationale": "The consumer side (sidecar parser, resolved artifact authority, revocation feed) and the producer side (catalog-release.py builds and ledger-v4-binds the sidecar; resign signs it; the coordinator serves it; the provider fetches it into a private release directory) are implemented and tested. Pending until a catalog release binds a real sidecar with immutable evidence digests for the tuple and the signed serving journey covers it."
       }
     },
     {
@@ -10625,8 +10645,14 @@
       "requirement_id": "SPEC-048-R016",
       "spec_id": "SPEC-048",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/NativeMTPSelfTest.swift:NativeMTPSelfTestChallenge",
+        "phase3-binary/Sources/macprovider-cli/NativeMTPSelfTest.swift:NativeMTPSelfTestRuntimeTuple"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPSelfTestTests.swift:testChallengeBankParsesExactRecordAndPassingExecutionEvaluatesTupleOnlyPass",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPSelfTestTests.swift:testEvaluatorRejectsEachRuntimeMismatch"
+      ],
       "journeys": [
         "JOURNEY-NATIVE-MTP-SERVING"
       ],
@@ -10635,7 +10661,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "No signed native-path greedy integrity challenge or fail-closed canary adapter exists."
+        "rationale": "The provider-local native_mtp_selftest_v1 challenge parser and evaluator and the coordinator native_mtp_canary_v1 plumbing exist and are unit-tested; the R014 rehearsal ran the local self-test half on hardware. Pending until the signed serving journey covers both halves for the exact tuple."
       }
     },
     {
