@@ -69,13 +69,14 @@ var (
 //   - (poolID, nil)    an authorized, capability-satisfied pool to emit;
 //   - ("", selErr)     a typed rejection.
 //
-// Ordering is load-bearing (see the design doc decision table): static
-// account_pools mode rejects unauthorized callers BEFORE any coordinator
-// capability roundtrip (row 5), so latency cannot reveal whether the named pool
-// exists (SPEC-042-R010). SPEC-043 creator self-service deployments may opt
-// into coordinator_authorizes: the gateway refreshes the coordinator's internal
-// account->pool authorization projection, evaluates the selected pool locally
-// from that projection, and only then emits the internal authority header.
+// Ordering is load-bearing: every pool-selected request performs the same
+// selector-independent /internal/routing refresh before any authorization or
+// routeability check, so latency cannot reveal whether the named pool exists
+// or why it was refused (SPEC-042-R010, SPEC-043-R007). Static account_pools
+// mode authorizes from config; SPEC-043 creator self-service deployments may
+// opt into coordinator_authorizes, which also accepts the coordinator's
+// account->pool projection. The selector is evaluated locally in both modes
+// and only then emitted as the internal authority header.
 func (s *Server) resolvePoolSelection(ctx context.Context, headers http.Header, accountID string, poolSelectionAllowed bool) (string, *poolSelectionError) {
 	tp := s.cfg.Features.TrustedPools
 
@@ -134,27 +135,24 @@ func (s *Server) resolvePoolSelection(ctx context.Context, headers http.Header, 
 		return "", errPoolUnavailable
 	}
 
-	// Row 4: credential authorization. Static mode is a pure local config lookup:
-	// an account absent from the config, or a pool outside its authorized set, is
-	// denied with the generic non-disclosing code before any coordinator
-	// capability call. Coordinator-authorized mode refreshes the service-token
-	// protected /internal/routing projection, then performs an equivalent local
-	// map lookup against creator-authored buyer scopes. The request-specific
-	// selector is never sent to the coordinator for authorization lookup.
-	if !tp.CoordinatorAuthorizes {
-		if !tp.Authorizes(accountID, selector) {
-			return "", errPoolUnavailable
-		}
-		if md, ok := s.coordinatorRoutingMetadataFresh(ctx); !ok || !md.Pools.Enabled {
-			return "", errPoolUnavailable
-		}
-		return selector, nil
-	}
+	// Row 4: credential authorization. Every pool-selected request, in both
+	// modes and for every selector, first refreshes the service-token protected
+	// /internal/routing projection and only then evaluates every check locally,
+	// so unknown, unauthorized, paused/draining/retired/created,
+	// candidate-blocked and creator-agreement-expired selections all perform the
+	// identical lookup and share one floored rejection (SPEC-043-R007). A
+	// rejection that returned before the fetch would be faster than one that
+	// returned after it by up to the fetch latency, which the timing floor cannot
+	// hide once that latency exceeds the floor. The request-specific selector is
+	// never sent to the coordinator. Static mode authorizes from config only;
+	// coordinator-authorized mode also accepts creator-authored buyer scopes.
 	md, ok := s.coordinatorRoutingMetadataFresh(ctx)
-	if !ok || !md.Pools.Enabled {
-		return "", errPoolUnavailable
+	authorized := tp.Authorizes(accountID, selector)
+	if tp.CoordinatorAuthorizes && ok && md.Pools.Authorizes(accountID, selector) {
+		authorized = true
 	}
-	if !tp.Authorizes(accountID, selector) && !md.Pools.Authorizes(accountID, selector) {
+	routeable := ok && md.Pools.Enabled && md.Pools.Routeable(selector)
+	if !authorized || !routeable {
 		return "", errPoolUnavailable
 	}
 

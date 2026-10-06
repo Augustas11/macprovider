@@ -550,6 +550,28 @@ final class OpenAICompatibleLoopbackRuntimeTests: XCTestCase {
         XCTAssertEqual(mixed.cancelledResult(upstreamPromptTokens: 9).settlementDisposition, .usageUnattested)
     }
 
+    // #1690: a non-SSE JSON body carries no per-chunk counts, so a cancel
+    // that delivered only a prefix of its content never keeps the whole
+    // completion's usage: the prefix is unattested and never signed.
+    func testPlainBodyPartialCancelPrefixIsUnattested() throws {
+        var accumulator = OpenAICompatibleStreamAccumulator()
+        let body = try XCTUnwrap(String(data: Self.completionJSON(content: "Once upon a time", completionTokens: 4), encoding: .utf8))
+        _ = try accumulator.consume(line: body)
+        let (result, late) = try accumulator.finish()
+        XCTAssertTrue(accumulator.decodedFromPlainBody)
+        XCTAssertEqual(late.count, 1)
+        XCTAssertEqual(result.completionTokens, 4)
+        XCTAssertEqual(result.settlementDisposition, .notEligible)
+        XCTAssertEqual(result.loopbackPrefixCompletionTokens, [:])
+        for prefix in ["Once upon", ""] {
+            let cancelled = result.cancelledPrefixUsage(deliveredContent: prefix)
+            XCTAssertEqual(cancelled.settlementDisposition, .usageUnattested, "prefix \(prefix.debugDescription)")
+            XCTAssertNil(InferenceRelay.usage(cancelled)["completion_tokens"])
+        }
+        XCTAssertEqual(result.cancelledPrefixUsage(deliveredContent: nil).settlementDisposition, .usageUnattested)
+        XCTAssertEqual(result.cancelledPrefixUsage(deliveredContent: "Once upon a time").completionTokens, 4, "whole content delivered")
+    }
+
     // #1690 M9: mlx_lm.server reports no per-chunk usage, so the cancelled
     // stream's completion tokens are the served snapshot tokenizer's count of
     // the whole received content, bound to that content only.

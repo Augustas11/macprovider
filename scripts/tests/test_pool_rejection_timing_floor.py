@@ -3,10 +3,15 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
+import random
 import tempfile
+import threading
 import unittest
 from contextlib import redirect_stdout
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -142,6 +147,133 @@ class PoolRejectionTimingFloorTests(unittest.TestCase):
             allow_production=True,
         )
         self.assertFalse(json_on_prod_env["production_remeasure_complete"])
+
+
+class _PoolUnavailableHandler(BaseHTTPRequestHandler):
+    seen: list[tuple[str, str, str]] = []
+
+    def do_POST(self):  # noqa: N802 - http.server API
+        length = int(self.headers.get("Content-Length", "0"))
+        self.rfile.read(length)
+        type(self).seen.append(
+            (
+                self.headers.get("Authorization", ""),
+                self.headers.get("X-MacProvider-Account", ""),
+                self.headers.get("X-MacProvider-Pool-Select", ""),
+            )
+        )
+        body = b'{"error":{"code":"pool_unavailable","message":"Pool unavailable"}}'
+        self.send_response(503)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        return
+
+
+class PoolRejectionTimingCredentialTests(unittest.TestCase):
+    def setUp(self):
+        self.mod = load_module()
+
+    def args(self, argv):
+        return self.mod.parse_args(argv)
+
+    def test_bearer_keys_come_from_named_env_vars(self):
+        with mock.patch.dict(os.environ, {"AUTH_KEY": "sk-auth", "UNAUTH_KEY": "sk-other"}):
+            plan = self.mod.plan_from_args(
+                self.args(
+                    [
+                        "--pool-id", "pausedpoolxxxxxxxxxxxx",
+                        "--authorized-key-env", "AUTH_KEY",
+                        "--unauthorized-key-env", "UNAUTH_KEY",
+                    ]
+                )
+            )
+        self.assertEqual(plan["unknown"][0], {"Authorization": "Bearer sk-auth"})
+        self.assertEqual(plan["disabled"], ({"Authorization": "Bearer sk-auth"}, "pausedpoolxxxxxxxxxxxx"))
+        self.assertEqual(plan["unauthorized"], ({"Authorization": "Bearer sk-other"}, "pausedpoolxxxxxxxxxxxx"))
+
+    def test_unauthorized_pool_id_covers_class_with_one_credential(self):
+        with mock.patch.dict(os.environ, {"AUTH_KEY": "sk-auth"}):
+            plan = self.mod.plan_from_args(
+                self.args(
+                    [
+                        "--pool-id", "pausedpoolxxxxxxxxxxxx",
+                        "--unauthorized-pool-id", "foreignpoolxxxxxxxxxxx",
+                        "--authorized-key-env", "AUTH_KEY",
+                    ]
+                )
+            )
+        self.assertEqual(plan["unauthorized"], ({"Authorization": "Bearer sk-auth"}, "foreignpoolxxxxxxxxxxx"))
+
+    def test_unset_key_env_fails_closed_without_echoing_a_value(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(SystemExit) as raised:
+                self.mod.plan_from_args(
+                    self.args(["--pool-id", "p", "--unauthorized-pool-id", "q", "--authorized-key-env", "MISSING_KEY"])
+                )
+        self.assertIn("MISSING_KEY", str(raised.exception))
+
+    def test_mixed_credential_modes_refused(self):
+        with mock.patch.dict(os.environ, {"AUTH_KEY": "sk-auth"}):
+            with self.assertRaises(SystemExit) as raised:
+                self.mod.plan_from_args(
+                    self.args(
+                        ["--pool-id", "p", "--authorized-key-env", "AUTH_KEY", "--unauthorized-account", "acct-b"]
+                    )
+                )
+        self.assertIn("not both", str(raised.exception))
+
+    def test_unauthorized_class_requires_a_source(self):
+        with mock.patch.dict(os.environ, {"AUTH_KEY": "sk-auth"}):
+            with self.assertRaises(SystemExit) as raised:
+                self.mod.plan_from_args(self.args(["--pool-id", "p", "--authorized-key-env", "AUTH_KEY"]))
+        self.assertIn("--unauthorized-pool-id", str(raised.exception))
+
+    def test_lab_account_header_mode_kept(self):
+        plan = self.mod.plan_from_args(
+            self.args(["--pool-id", "p", "--authorized-account", "acct-a", "--unauthorized-account", "acct-b"])
+        )
+        self.assertEqual(plan["unauthorized"], ({"X-MacProvider-Account": "acct-b"}, "p"))
+        self.assertEqual(plan["disabled"], ({"X-MacProvider-Account": "acct-a"}, "p"))
+
+    def test_measure_http_sends_bearer_and_shuffles_class_order(self):
+        _PoolUnavailableHandler.seen = []
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _PoolUnavailableHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            plan = self.mod.class_plan(
+                unknown_pool_id="unknownpoolxxxxxxxxxxx",
+                pool_id="pausedpoolxxxxxxxxxxxx",
+                unauthorized_pool_id="foreignpoolxxxxxxxxxxx",
+                authorized={"Authorization": "Bearer sk-auth"},
+                unauthorized=None,
+            )
+            measured = self.mod.measure_http(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                plan=plan,
+                samples=8,
+                timeout_s=5,
+                rng=random.Random(7),
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertEqual({k: len(v) for k, v in measured.items()}, {"unknown": 8, "unauthorized": 8, "disabled": 8})
+        seen = _PoolUnavailableHandler.seen
+        self.assertEqual(len(seen), 24)
+        self.assertTrue(all(auth == "Bearer sk-auth" and account == "" for auth, account, _ in seen))
+        pool_to_class = {
+            "unknownpoolxxxxxxxxxxx": "unknown",
+            "foreignpoolxxxxxxxxxxx": "unauthorized",
+            "pausedpoolxxxxxxxxxxxx": "disabled",
+        }
+        rounds = [tuple(pool_to_class[pool] for _, _, pool in seen[i : i + 3]) for i in range(0, 24, 3)]
+        self.assertTrue(all(sorted(r) == ["disabled", "unauthorized", "unknown"] for r in rounds))
+        self.assertGreater(len(set(rounds)), 1, "class order must vary across rounds")
 
 
 if __name__ == "__main__":

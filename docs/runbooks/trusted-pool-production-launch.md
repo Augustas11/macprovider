@@ -310,17 +310,41 @@ This is separate from the digest-bound `reviewed-distribution-artifact` upsert.
 
 Run the R007 rejection timing floor against the **production gateway** (not the
 raw coordinator, which returns `401 Gateway context is required`, and not a
-candidate/offline run — those do not count):
+candidate/offline run — those do not count). Production gateways authenticate
+buyers with `Authorization: Bearer <api key>`; pass the **names** of env vars
+holding the keys, never key literals. `--base-url` is the gateway origin
+without `/v1` (the script appends `/v1/chat/completions`).
+
+Prepare, per class:
+
+- `unknown`: `--unknown-pool-id`, a well-formed id no pool has.
+- `unauthorized`: `--unauthorized-pool-id`, an existing pool the authorized
+  buyer is **not** a buyer of. This lets one buyer account cover the class.
+  Alternatively export a second, unauthorized buyer key and pass
+  `--unauthorized-key-env`; it is then measured against `--pool-id`.
+- `disabled`: `--pool-id`, a pool the authorized buyer **is** a buyer of, paused
+  for the run.
 
 ```bash
+export R007_AUTHORIZED_KEY=...   # from the operator secret store; never on argv
 python3 scripts/measure-pool-rejection-timing-floor.py \
   --environment production --allow-production \
-  --base-url https://<production gateway base url>/v1 \
-  --pool-id <id> \
+  --base-url https://<production gateway origin> \
+  --pool-id <paused pool the buyer is authorized for> \
+  --unauthorized-pool-id <existing pool the buyer is not authorized for> \
   --unknown-pool-id <nonexistent> \
-  --authorized-account <authorized> \
-  --unauthorized-account <unauthorized>
+  --authorized-key-env R007_AUTHORIZED_KEY \
+  --samples 24
 ```
+
+Class order is shuffled every round. All three classes must answer
+`pool_unavailable`. The gateway refuses all three on one local lookup against
+the coordinator's buyer-authorization projection, which omits non-active pools.
+If `disabled` is slower than the other two, check that the coordinator build
+omits non-active pools from `/internal/routing` `pools.account_pools`. A gateway with static `account_pools` grants
+for the paused pool forwards it to the coordinator and fails this check. The
+lab `--authorized-account` / `--unauthorized-account` (`X-MacProvider-Account`)
+mode is for isolated harnesses only.
 
 The floor must hold across unknown/unauthorized/disabled classes. Record the
 result as an R012 launch artifact.
