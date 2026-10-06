@@ -11225,15 +11225,13 @@
         "phase3-binary/Tests/macprovider-cliTests/PrivacyAutoEnrollmentTests.swift:testAutomaticEligibilityIsReadOnlyAndNamesEveryFailure",
         "phase3-binary/Tests/macprovider-cliTests/PrivacyPostureResponderTests.swift:testEnrollmentClaimIsPublicAndStopsWhenLatched"
       ],
-      "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
-      ],
+      "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "SPEC-049 v0.2.0 automatic enrollment is implemented locally with unit and integration tests; awaiting a signed JOURNEY-PRIVACY-CLASS-BETA result on a v0.2 release, a staged canary, and audits"
+        "rationale": "SPEC-049 v0.2.0 automatic enrollment is implemented locally with unit and integration tests. JOURNEY-PRIVACY-CLASS-BETA and its committed signed evidence cover the v0.1 requirement set; a v0.2 journey revision on a signed v0.2 release, a staged canary, and audits are pending"
       }
     },
     {
@@ -11253,15 +11251,13 @@
         "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestEnrollmentRejectsKeyActiveForAnotherProvider",
         "phase4-coordinator/internal/ws/privacy_enrollment_parse_test.go:TestPrivacyEnrollmentClaimParses"
       ],
-      "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
-      ],
+      "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "SPEC-049 v0.2.0 automatic enrollment is implemented locally with unit and integration tests; awaiting a signed JOURNEY-PRIVACY-CLASS-BETA result on a v0.2 release, a staged canary, and audits"
+        "rationale": "SPEC-049 v0.2.0 automatic enrollment is implemented locally with unit and integration tests. JOURNEY-PRIVACY-CLASS-BETA and its committed signed evidence cover the v0.1 requirement set; a v0.2 journey revision on a signed v0.2 release, a staged canary, and audits are pending"
       }
     },
     {
@@ -11277,15 +11273,13 @@
         "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestEnrollmentPostureKeyChangeQuarantines",
         "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestReenrollAllowsNewKeys"
       ],
-      "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
-      ],
+      "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "SPEC-049 v0.2.0 automatic enrollment is implemented locally with unit and integration tests; awaiting a signed JOURNEY-PRIVACY-CLASS-BETA result on a v0.2 release, a staged canary, and audits"
+        "rationale": "SPEC-049 v0.2.0 automatic enrollment is implemented locally with unit and integration tests. JOURNEY-PRIVACY-CLASS-BETA and its committed signed evidence cover the v0.1 requirement set; a v0.2 journey revision on a signed v0.2 release, a staged canary, and audits are pending"
       }
     },
     {
@@ -11302,15 +11296,13 @@
         "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestReleaseDerivedApprovalAndOverrides",
         "ops/pearl-updater/test_pearl_updater.py::PearlUpdaterTests"
       ],
-      "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
-      ],
+      "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "SPEC-049 v0.2.0 automatic enrollment is implemented locally with unit and integration tests; awaiting a signed JOURNEY-PRIVACY-CLASS-BETA result on a v0.2 release, a staged canary, and audits"
+        "rationale": "SPEC-049 v0.2.0 automatic enrollment is implemented locally with unit and integration tests. JOURNEY-PRIVACY-CLASS-BETA and its committed signed evidence cover the v0.1 requirement set; a v0.2 journey revision on a signed v0.2 release, a staged canary, and audits are pending"
       }
     },
     {
@@ -11333,15 +11325,13 @@
         "phase5-gateway/internal/router/privacy_directory_test.go:TestPrivacyDirectoryPassthrough",
         "phase5-gateway/cmd/relay-blind-client/directory_test.go:TestPrivacyClientDirectoryRejections"
       ],
-      "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
-      ],
+      "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "SPEC-049 v0.2.0 automatic enrollment is implemented locally with unit and integration tests; awaiting a signed JOURNEY-PRIVACY-CLASS-BETA result on a v0.2 release, a staged canary, and audits"
+        "rationale": "SPEC-049 v0.2.0 automatic enrollment is implemented locally with unit and integration tests. JOURNEY-PRIVACY-CLASS-BETA and its committed signed evidence cover the v0.1 requirement set; a v0.2 journey revision on a signed v0.2 release, a staged canary, and audits are pending"
       }
     },
     {
