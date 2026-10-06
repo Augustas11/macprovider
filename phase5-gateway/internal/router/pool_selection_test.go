@@ -222,9 +222,11 @@ func TestPoolSelection_FeatureOffPoolNamed_FailsClosed(t *testing.T) {
 	}
 }
 
-// Unauthorized pool -> generic non-disclosing pool_unavailable, chat NOT
-// dispatched, and — the timing-oracle guard (SPEC-042-R010) — the coordinator
-// capability endpoint is NEVER consulted, so latency cannot reveal existence.
+// A selector that is not a canonical pool id -> generic non-disclosing
+// pool_unavailable, chat NOT dispatched, refused on its shape alone before the
+// metadata refresh. Well-formed unknown/unauthorized/non-routeable selectors
+// all take the same refresh-then-local-check path (SPEC-043-R007); see
+// TestPoolRejectionTimingFloor_StaticScopeClassesShareOneLookupPath.
 func TestPoolSelection_Unauthorized_FailsClosedWithoutCapabilityFetch(t *testing.T) {
 	h, cap, key := newPoolHarness(t, `{"pools":{"enabled":true,"routeable_pools":["abcdefghijklmnopqrstuv"]}}`, nil)
 	resp := postChat(t, h, key, poolChatBody, selectHeader("pooUNKNOWN"))
