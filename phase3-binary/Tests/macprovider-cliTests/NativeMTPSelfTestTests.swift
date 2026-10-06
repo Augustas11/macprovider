@@ -65,6 +65,22 @@ final class NativeMTPSelfTestTests: XCTestCase {
         }
     }
 
+    /// The scheduler commits one token fewer than it emits (the first token
+    /// comes from the prefill forward). A hardware-measured record (64 tokens,
+    /// committed 63, depth 1) must parse; the coordinator applies the same bound.
+    func testCommittedCountMatchesTheSchedulerCounting() {
+        let cases: [(UInt64, UInt64, UInt64, Bool)] = [
+            (64, 63, 1, true), (64, 64, 1, true), (64, 65, 1, false), (64, 62, 1, false),
+            (1, 0, 1, true), (0, 0, 1, true), (0, 1, 1, false), (8, 10, 3, true), (8, 11, 3, false),
+        ]
+        for (tokens, committed, depth, ok) in cases {
+            XCTAssertEqual(
+                NativeMTPSelfTest.committedCountConsistent(tokens: tokens, committed: committed, depth: depth),
+                ok, "tokens=\(tokens) committed=\(committed) depth=\(depth)"
+            )
+        }
+    }
+
     func testParserRejectsInvalidBankTimeBounds() throws {
         let fixture = makeBankFixture()
         var expired = fixture.bank
