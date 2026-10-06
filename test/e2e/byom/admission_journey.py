@@ -98,6 +98,10 @@ PROVIDER_ID = re.compile(r"^[a-zA-Z0-9_.-]{1,64}$")
 # the CLI's BYOMWithdrawalBuilder.stableCandidatePattern is the same string).
 CANDIDATE_ID = re.compile(r"^byom_[a-z2-7]{52}$")
 COORDINATOR_EVENT_ID = re.compile(r"^[0-9a-f]{64}$")
+# The GGUF loopback runtime classes (SPEC-046-R002 adapters that serve a local
+# GGUF file). Step 10's novel candidate must be one of these, so a signed
+# journey cannot claim GGUF evidence for a candidate of another runtime class.
+GGUF_LOOPBACK_RUNTIME_SOURCES = frozenset({"llamacpp_loopback", "ollama_loopback", "lmstudio_loopback"})
 PENDING_DECISION_ID = re.compile(r"^[0-9a-f]{32}$")
 IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 # The four operator reasons the journey records, all inside the grammar.
@@ -892,11 +896,27 @@ class AdmissionJourneyRunner:
         # makes its status coordinator-backed. Without the offer the status is a
         # local_default `not_offered` that cannot assert offer history. The opaque
         # endpoint is not a substitute; it never reaches the coordinator (step 3).
+        # Bind the novel candidate to the claimed GGUF input before offering it:
+        # the CLI's own discovery must list exactly one candidate for the ref,
+        # of a GGUF loopback runtime class.
+        discovery = self.rig.cli(["models", "discover", "--json", *self.config.discovery_args])
+        listed = [c for c in discovery.get("candidates", []) if isinstance(c, dict) and c.get("served_model_ref") == self.gguf.served_model_ref]
+        assert_true(len(listed) == 1, "step 10: discovery does not list the GGUF candidate exactly once")
+        assert_true(listed[0].get("runtime_source") in GGUF_LOOPBACK_RUNTIME_SOURCES, f"step 10: the novel candidate's runtime_source {listed[0].get('runtime_source')!r} is not a GGUF loopback runtime")
+        discovered_id = listed[0].get("candidate_id")
+        assert_true(isinstance(discovered_id, str) and bool(CANDIDATE_ID.fullmatch(discovered_id)), "step 10: the discovered GGUF candidate has no stable byom_ id")
         novel_submit = self.rig.cli(["models", "offer", self.gguf.served_model_ref, "--yes", *self._common()])
         assert_true(novel_submit.get("schema") == "model_admission_status.v1", "novel offer did not return the submit document")
         assert_true(novel_submit.get("admission_state_source") == "coordinator", "novel offer was not coordinator-backed")
         assert_true(novel_submit.get("admission_state") in ("offer_submitted", "sandbox_probe_only", "network_admitted_unsettled", "revoked"), "novel offer did not land in a coordinator-backed post-offer state")
-        assert_true(bool(novel_submit.get("coordinator_event_id")), "accepted novel offer carries no coordinator event id")
+        submit_event = novel_submit.get("coordinator_event_id")
+        assert_true(isinstance(submit_event, str) and bool(COORDINATOR_EVENT_ID.fullmatch(submit_event)), "accepted novel offer carries no 64-hex coordinator event id")
+        # An event id names one event of one candidate; the settleable
+        # candidate's head can never be the novel offer's event.
+        assert_true(submit_event != matched.get("coordinator_event_id"), "step 10: the novel offer reuses the settleable candidate's coordinator event id")
+        expected_identity = (self.settleable.provider_id, discovered_id, self.gguf.served_model_ref)
+        assert_true((novel_submit.get("provider_id"), novel_submit.get("candidate_id"), novel_submit.get("served_model_ref")) == expected_identity,
+                    "step 10: the novel offer response names a different provider, candidate or served model ref than the GGUF input")
         # The live session serves the settleable MLX candidate, not this GGUF
         # runtime. The coordinator runs its offer-time synthetic probe inside
         # the offer request, and only against a session that serves the
@@ -906,6 +926,10 @@ class AdmissionJourneyRunner:
         # synthetic_probe_failed. Either is a coordinator-backed novel-offer
         # history with no catalog key; the assertions below are what R008 asks.
         novel = self.wait_for_states(self.gguf, ("offer_submitted", "sandbox_probe_only", "network_admitted_unsettled", "revoked"), "step 10 (novel offer probe)")
+        assert_true((novel.get("provider_id"), novel.get("candidate_id"), novel.get("served_model_ref")) == expected_identity,
+                    "step 10: the novel candidate's status names a different provider, candidate or served model ref than the GGUF input")
+        final_event = novel.get("coordinator_event_id")
+        assert_true(isinstance(final_event, str) and bool(COORDINATOR_EVENT_ID.fullmatch(final_event)), "step 10: the novel candidate's status carries no 64-hex coordinator event id")
         assert_true(novel["admission_state_source"] == "coordinator", "novel candidate status is not coordinator-backed after the offer; an unoffered local_default status cannot stand as the novel non-catalog offer")
         assert_true(novel.get("catalog_model_key") is None, "the novel candidate resolved to a catalog key; an unmatched offer must yield catalog_model_key null")
         assert_true(novel["provider_guidance"]["earning_path_class"] == "no_earning_path_in_v0_1", f"novel candidate status reports {novel['provider_guidance']['earning_path_class']!r}, not no_earning_path_in_v0_1")
@@ -913,7 +937,9 @@ class AdmissionJourneyRunner:
             reason = (novel.get("provider_guidance") or {}).get("transition_reason_code")
             assert_true(reason == "synthetic_probe_failed", f"step 10: novel candidate was revoked for a reason other than a failed coordinator probe ({reason!r})")
         elif novel["admission_state"] == "offer_submitted":
-            assert_true(novel.get("coordinator_event_id") == novel_submit.get("coordinator_event_id"), "step 10: the novel candidate's head moved past its offer without leaving offer_submitted")
+            # Head stability: an unprobed offer is the candidate's only event,
+            # so the status head must be the very event the offer appended.
+            assert_true(final_event == submit_event, "step 10: the novel candidate's head moved past its offer without leaving offer_submitted")
         for document in (matched, novel):
             guidance = document["provider_guidance"]
             assert_true(guidance.get("state_meaning_key") and guidance.get("next_action"), "status lacks state meaning or next action")
