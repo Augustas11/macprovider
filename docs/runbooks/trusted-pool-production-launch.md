@@ -117,7 +117,138 @@ never promotes or routes a pool whose root `launch_environment` is `candidate`.
 
 `production_activation` is default-blocked: absent or mismatched config keeps the
 fail-closed `launch_environment_not_candidate` behavior. Restart the coordinator
-after the config change.
+after the config change. On a coordinator that already has accepted manifests,
+add `manifest_acceptance_witness_path` only through §3a.
+
+### 3a. Bootstrap the manifest-acceptance witness (coordinator with accepted manifests)
+
+`manifest_acceptance_witness_path` is startup-only (a SIGHUP that changes it is
+rejected). When the file is missing while `coordinator.db` already holds
+accepted-manifest high-water (Pearl has accepted pool manifests), startup does
+**not** crash: `loadTrustedPools` logs `trusted pools durable migration failed;
+pool support disabled` and the coordinator keeps serving with **every trusted
+pool disabled** while `/healthz` still answers. So write the first witness
+explicitly, then prove pools still route after the restart.
+
+The bootstrap is **trust-on-first-use of the live DB**: the witness records
+whatever high-water `coordinator.db` holds at that moment. Run it only on the
+live host, never after any `coordinator.db` restore (an updater rollback
+included) until the restore's re-apply step in §9 "Carried risk: whole-database
+rollback" is done, and only inside one locked step that also edits the config
+and restarts. No manifest submission, pool admin write, updater run, or DB
+restore may happen between the bootstrap and the restart: hold both Pearl locks
+for the whole step, and be the only Pearl actor.
+
+`manifest-witness-init` takes no DB path. It loads the same `--config` /
+`--config-overlay` the coordinator unit uses, reads `storage.db_path` from it
+(which must be absolute), opens that DB read-only, writes `--out` (absolute;
+must not exist; must equal `trusted_pools.manifest_acceptance_witness_path` if
+the config already sets it) with mode `0600`, and prints `db=`, `witness=`,
+`pools=` and one line per pool with `manifest_version`, `operation_id`,
+`accepted_at_utc` and a `manifest_core_digest` prefix. The subcommand ships
+with the coordinator release that carries it; an older `coordinator-cli`
+answers `unknown trust-pool-admin subcommand`.
+
+Before the step, stage the new overlay at
+`/etc/macprovider/coordinator.pearl-overlays.yaml.witness`: the live overlay
+plus only `trusted_pools.manifest_acceptance_witness_path:
+/var/lib/macprovider/trustpool-manifest-witness.json`, edited with a YAML tool
+and reviewed with `diff`. Then, as one locked step:
+
+```bash
+ssh pearl sudo bash -s <<'WITNESS'
+set -euo pipefail
+exec 8</run/lock/macprovider-pearl-updater.lock
+flock -n 8 || { echo "Pearl updater lock held; not mutating" >&2; exit 1; }
+exec 9</opt/macprovider/.coordinator-deploy.lock
+flock -n 9 || { echo "coordinator deploy lock held; not mutating" >&2; exit 1; }
+cfg=/opt/macprovider/coordinator.yaml
+live=/etc/macprovider/coordinator.pearl-overlays.yaml
+staged=$live.witness
+witness=/var/lib/macprovider/trustpool-manifest-witness.json
+asmp() { sudo -u macprovider bash -c "set -a; . /etc/macprovider/coordinator.env; set +a; $*"; }
+admin="/opt/macprovider/coordinator-cli trust-pool-admin"
+adminf="--admin-url http://127.0.0.1:8444 --operator-key-env MACPROVIDER_OPERATOR_KEY"
+# On any failure: before the swap, the key is not live, so remove the new
+# witness; after the swap, put the pre-key config back and restart, and leave
+# the witness (unused while the key is absent).
+stage=pre-bootstrap
+cleanup() {
+  rc=$?
+  [ "$rc" -eq 0 ] && return
+  case "$stage" in
+    bootstrapped) mv -f "$witness" "$witness.unused-$(date -u +%Y%m%dT%H%M%SZ)" ;;
+    swapped) mv -f "$live.pre-witness" "$live"; systemctl restart macprovider-coordinator ;;
+  esac
+  echo "witness step failed at stage=$stage (rc=$rc); cleaned up" >&2
+}
+trap cleanup EXIT
+
+# 1. Bootstrap from the live DB the running coordinator uses.
+asmp "$admin manifest-witness-init --config $cfg --config-overlay $live --out $witness" > /root/witness-bootstrap.txt
+[ -e "$witness" ] && stage=bootstrapped
+cat /root/witness-bootstrap.txt
+# 2. Compare: each pool's manifest_version must equal what the running
+#    coordinator serves, and every pool list-pools reports with a manifest
+#    must be in the witness.
+asmp "$admin list-pools $adminf" > /root/witness-pools-before.json
+python3 - /root/witness-bootstrap.txt /root/witness-pools-before.json <<'PY'
+import json, re, sys
+boot = dict(re.findall(r"^pool_id=(\S+) manifest_version=(\d+)", open(sys.argv[1]).read(), re.M))
+pools = json.load(open(sys.argv[2]))["pools"]
+live = {p["pool_id"]: str(p["manifest_version"]) for p in pools if p["manifest_version"]}
+if boot != live:
+    sys.exit(f"witness high-water {boot} != served {live}; stop")
+print("high-water matches served manifests:", boot)
+PY
+curl -s http://127.0.0.1:8443/healthz > /root/witness-healthz-before.json
+# 3. Validate the staged config, swap it in, restart.
+asmp "/opt/macprovider/coordinator --config $cfg --config-overlay $staged --validate-config"
+cp -p "$live" "$live.pre-witness"
+stage=swapped
+mv -f "$staged" "$live"
+systemctl restart macprovider-coordinator
+sleep 10
+curl -sf http://127.0.0.1:8443/healthz > /dev/null
+WITNESS
+```
+
+The `EXIT` trap handles every failure inside the step. If the bootstrap,
+compare, `--validate-config` or backup fails, the key was never live: the trap
+moves the new witness aside, so a retry bootstraps again. If the swap, restart
+or health probe fails, the trap restores
+`/etc/macprovider/coordinator.pearl-overlays.yaml.pre-witness` and restarts.
+It leaves the witness in place, which is harmless while the key is absent.
+Move it aside (`mv
+/var/lib/macprovider/trustpool-manifest-witness.json{,.unused-<UTC>}`) before
+the next attempt. A failing bootstrap that refuses an existing file means an
+earlier attempt left one; move it aside the same way, then retry.
+
+**Mandatory post-restart check.** All three must hold:
+
+1. `journalctl -u macprovider-coordinator --since "<restart time>"` shows no
+   `manifest acceptance witness` error and no `pool support disabled`.
+2. `trust-pool-admin get-pool --pool-id <id>` for every pool that was active
+   before shows `routeable: true` and the same `manifest_version`.
+3. `curl -s http://127.0.0.1:8443/healthz` shows `pool_policy_ready` unchanged
+   from `/root/witness-healthz-before.json` (after providers reconnect).
+
+If any fails, roll back under both locks: `mv
+/etc/macprovider/coordinator.pearl-overlays.yaml{.pre-witness,}`, restart, and
+confirm pools route again. The witness can stay (unused without the key); move
+it aside before the next attempt.
+
+Limits. A manifest the coordinator accepts after the restart advances the
+witness inside the acceptance transaction, before COMMIT. If that COMMIT then
+fails, the witness is ahead of the DB and the next startup logs `pool support
+disabled`: compare the witness against the DB high-water and, if the DB is the
+truth, move the witness aside and re-run this section. Startup refuses a
+missing witness, or one ahead of or inconsistent with the DB. The coordinator
+process must be able to write the witness to advance it, so the `macprovider`
+account (or anything running as it) can delete the file and re-bootstrap from
+an older DB; this guard does not stop a compromised daemon or a host-level DB
+restore. The independent WORM/transparency witness in §9 "Carried risk:
+whole-database rollback" is still the real fix.
 
 ## 4. Create the production pool
 
