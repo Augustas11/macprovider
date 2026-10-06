@@ -195,6 +195,15 @@ def verify_directory(args: argparse.Namespace) -> None:
             "continuous-batching-policy.json",
             "continuous-batching-policy.json.sig",
         },
+        # SPEC-023 §12.5 Stage A: the sidecar is release-bound; its projection
+        # manifest and signed challenge bank travel with it.
+        "native-mtp-admission.json": {
+            "native-mtp-admission.json",
+            "native-mtp-admission.json.sig",
+            "native-mtp-artifact-manifest.json",
+            "native-mtp-selftest-bank.json",
+            "native-mtp-selftest-bank.json.sig",
+        },
     }
     bound_feed_records = {
         feed_name: record

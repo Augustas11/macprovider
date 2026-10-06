@@ -381,6 +381,11 @@ names = ["release.json", "trusted-keys.json", "tier2-catalog.json",
          "continuous-batching-policy.json", "continuous-batching-policy.json.sig"]
 if "autotune-artifacts.json" in json.loads((d / "release.json").read_bytes())["feeds"]:
     names += ["autotune-artifacts.json", "autotune-artifacts.json.sig"]
+# SPEC-023 §12.5: same order deploy-pearl-vps.sh hashes the native-MTP set in.
+if "native-mtp-admission.json" in json.loads((d / "release.json").read_bytes())["feeds"]:
+    names += ["native-mtp-admission.json", "native-mtp-admission.json.sig",
+              "native-mtp-artifact-manifest.json",
+              "native-mtp-selftest-bank.json", "native-mtp-selftest-bank.json.sig"]
 h = hashlib.sha256()
 for n in names:
     h.update(n.encode()); h.update(b"\0")
@@ -486,6 +491,12 @@ pf_assemble() {
   if [ "$REL_BOUND" = bound ]; then
     for name in autotune-artifacts.json autotune-artifacts.json.sig; do
       cp "$a/phase3-binary/dist/static/$name" "$REL/$name" || { record release_assembled 0 "release.json binds $name but the commit lacks it"; return 1; }
+    done
+  fi
+  # SPEC-023 §12.5: a native-MTP-bound release carries its admission set.
+  if python3 -c 'import json,sys; sys.exit(0 if "native-mtp-admission.json" in json.load(open(sys.argv[1]))["feeds"] else 1)' "$REL/release.json"; then
+    for name in native-mtp-admission.json native-mtp-admission.json.sig native-mtp-artifact-manifest.json native-mtp-selftest-bank.json native-mtp-selftest-bank.json.sig; do
+      cp "$a/phase3-binary/dist/static/$name" "$REL/$name" || { record release_assembled 0 "release.json binds the native-MTP set but the commit lacks $name"; return 1; }
     done
   fi
   cp "$a/phase3-binary/catalog/autotune/release-ledger.json" "$WORK/gate/release-ledger.json" 2>/dev/null &&
@@ -1324,7 +1335,7 @@ pf_artifact_feed_config() {
   if ! out="$(SSH python3 - "$COORD_CONFIG" "$COORD_OVERLAY" <<'PY'
 import os, re, sys
 values = {}
-field = re.compile(r"  (catalog_artifacts(?:_sig)?_path): *(?:\"([^\"]*)\"|'([^']*)'|([^#\s]*)) *(?:#.*)?")
+field = re.compile(r"  (catalog_artifacts(?:_sig)?_path|native_mtp_[a-z_]+): *(?:\"([^\"]*)\"|'([^']*)'|([^#\s]*)) *(?:#.*)?")
 for path in sys.argv[1:]:
     if not os.path.exists(path):
         continue
@@ -1338,13 +1349,27 @@ for path in sys.argv[1:]:
         if section == "autotune" and match:
             values[match.group(1)] = next((g for g in match.groups()[1:] if g is not None), "")
 print("ARTIFACTS=%s|%s" % (values.get("catalog_artifacts_path", ""), values.get("catalog_artifacts_sig_path", "")))
+print("NATIVE=%s" % "|".join(values.get(key, "") for key in (
+    "native_mtp_admission_path", "native_mtp_admission_sig_path", "native_mtp_artifact_manifest_path",
+    "native_mtp_selftest_bank_path", "native_mtp_selftest_bank_sig_path", "native_mtp_revocations_dir",
+)))
 PY
 )"; then
     record artifact_feed_config 0 "cannot read the coordinator artifact-feed config"; return 1
   fi
+  local native_out native_want="|||||"
+  native_out="$(printf '%s\n' "$out" | sed -n 's/^NATIVE=//p')"
   out="$(printf '%s\n' "$out" | sed -n 's/^ARTIFACTS=//p')"
   if [ "$out" != "$want_json|$want_sig" ]; then
     record artifact_feed_config 0 "live autotune.catalog_artifacts_path/_sig_path '$out' do not follow the $REL_BOUND release (want '$want_json|$want_sig'); change the binding through the Pearl updater"
+    return 1
+  fi
+  # SPEC-023 §12.5: the six native-MTP keys follow the release binding too.
+  if python3 -c 'import json,sys; sys.exit(0 if "native-mtp-admission.json" in json.load(open(sys.argv[1]))["feeds"] else 1)' "$REL/release.json"; then
+    native_want="$REMOTE_AUTOTUNE_DIR/current/native-mtp-admission.json|$REMOTE_AUTOTUNE_DIR/current/native-mtp-admission.json.sig|$REMOTE_AUTOTUNE_DIR/current/native-mtp-artifact-manifest.json|$REMOTE_AUTOTUNE_DIR/current/native-mtp-selftest-bank.json|$REMOTE_AUTOTUNE_DIR/current/native-mtp-selftest-bank.json.sig|/opt/macprovider/native-mtp-revocations/current"
+  fi
+  if [ "$native_out" != "$native_want" ]; then
+    record artifact_feed_config 0 "live autotune.native_mtp_* '$native_out' do not follow the release's native-MTP binding (want '$native_want'); change the binding through the Pearl updater"
     return 1
   fi
   record artifact_feed_config 1 "live artifact-feed config follows the $REL_BOUND release"
@@ -1426,6 +1451,7 @@ ev_a_served_bytes() {
   local spec path name deadline=$((SECONDS + SETTLE_SECONDS)) bad
   local specs="/v1/autotune-candidates|autotune-candidates.json /v1/autotune-candidates.sig|autotune-candidates.json.sig /v1/demand-rank|demand-rank.json /v1/demand-rank.sig|demand-rank.json.sig /v1/rate-card|rate-card.json /v1/rate-card.sig|rate-card.json.sig /v1/continuous-batching-policy|continuous-batching-policy.json /v1/continuous-batching-policy.sig|continuous-batching-policy.json.sig"
   [ "$REL_BOUND" != bound ] || specs="$specs /v1/catalog-artifacts|autotune-artifacts.json /v1/catalog-artifacts.sig|autotune-artifacts.json.sig"
+  [ ! -f "$REL/native-mtp-admission.json" ] || specs="$specs /v1/native-mtp-admission|native-mtp-admission.json /v1/native-mtp-admission.sig|native-mtp-admission.json.sig /v1/native-mtp-artifact-manifest|native-mtp-artifact-manifest.json /v1/native-mtp-selftest-bank|native-mtp-selftest-bank.json /v1/native-mtp-selftest-bank.sig|native-mtp-selftest-bank.json.sig"
   while :; do
     bad=""
     if ! coord_get /v1/autotune-release "$WORK/ev-release.json" ||

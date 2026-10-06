@@ -332,6 +332,7 @@ else:
     artifact_assets = {"autotune-artifacts.json", "autotune-artifacts.json.sig"}
     artifact_bound = False
     artifact_record = None
+    release_feeds = None
     try:
         release_feeds = json.loads((directory / "release.json").read_text(encoding="utf-8")).get("feeds")
         artifact_bound = isinstance(release_feeds, dict) and "autotune-artifacts.json" in release_feeds
@@ -347,6 +348,24 @@ else:
             data = feed_path.read_bytes()
             if artifact_record.get("sha256") != hashlib.sha256(data).hexdigest() or artifact_record.get("bytes") != len(data):
                 fail("autotune-artifacts.json does not match its release.json binding")
+    # SPEC-023 §12.5 Stage A: a native-MTP-bound release carries the admission
+    # sidecar (bound by release.json) and its projection manifest and signed
+    # challenge bank (bound by the sidecar's digests) as five more assets.
+    native_assets = {
+        "native-mtp-admission.json", "native-mtp-admission.json.sig",
+        "native-mtp-artifact-manifest.json",
+        "native-mtp-selftest-bank.json", "native-mtp-selftest-bank.json.sig",
+    }
+    native_record = release_feeds.get("native-mtp-admission.json") if isinstance(release_feeds, dict) else None
+    if native_record is not None:
+        expected_catalog_assets = expected_catalog_assets | native_assets
+        if not isinstance(native_record, dict):
+            fail("release.json native-MTP admission record is invalid")
+        sidecar_path = directory / "native-mtp-admission.json"
+        if sidecar_path.is_file():
+            data = sidecar_path.read_bytes()
+            if native_record.get("sha256") != hashlib.sha256(data).hexdigest() or native_record.get("bytes") != len(data):
+                fail("native-mtp-admission.json does not match its release.json binding")
     if bound_names != expected_catalog_assets:
         if bound_names == expected_catalog_assets ^ artifact_assets:
             fail("pearl-release.json catalog file set disagrees with release.json feeds on the artifact feed")
@@ -609,6 +628,39 @@ if missing:
 PY
     gh release download "$tag" --repo "$repository" --dir "$work/assets" \
       --pattern autotune-artifacts.json --pattern autotune-artifacts.json.sig --clobber >/dev/null
+  fi
+  # SPEC-023 §12.5 Stage A: likewise the native-MTP admission set.
+  native_mtp_state="$(python3 - "$work/assets/release.json" <<'PY'
+import json, sys
+try:
+    feeds = json.load(open(sys.argv[1], encoding="utf-8")).get("feeds")
+    print("bound" if isinstance(feeds, dict) and "native-mtp-admission.json" in feeds else "unbound")
+except Exception:
+    print("unbound")
+PY
+)"
+  NATIVE_MTP_ASSETS="native-mtp-admission.json native-mtp-admission.json.sig native-mtp-artifact-manifest.json native-mtp-selftest-bank.json native-mtp-selftest-bank.json.sig"
+  PEARL_RELEASE_VIEW="$work/release.json" NATIVE_MTP_STATE="$native_mtp_state" NATIVE_MTP_ASSETS="$NATIVE_MTP_ASSETS" python3 - <<'PY'
+import json
+import os
+
+payload = json.loads(open(os.environ["PEARL_RELEASE_VIEW"], encoding="utf-8").read())
+names = {row.get("name") for row in payload.get("assets") if isinstance(row, dict)}
+native = set(os.environ["NATIVE_MTP_ASSETS"].split())
+if os.environ["NATIVE_MTP_STATE"] == "bound":
+    missing = sorted(native - names)
+    if missing:
+        raise SystemExit("[verify-pearl-runtime-release] ERROR: missing native-MTP asset(s): " + " ".join(missing))
+elif names & native:
+    raise SystemExit(
+        "[verify-pearl-runtime-release] ERROR: release publishes native-MTP asset(s) release.json does not bind: "
+        + " ".join(sorted(names & native))
+    )
+PY
+  if [[ "$native_mtp_state" == bound ]]; then
+    native_patterns=()
+    for native_name in $NATIVE_MTP_ASSETS; do native_patterns+=(--pattern "$native_name"); done
+    gh release download "$tag" --repo "$repository" --dir "$work/assets" "${native_patterns[@]}" --clobber >/dev/null
   fi
 else
   PEARL_RELEASE_VIEW="$work/release.json" python3 - <<'PY'
