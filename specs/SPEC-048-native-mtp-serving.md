@@ -590,8 +590,13 @@ depth-zero finalizes would have fed the MTP adapter. Only before the row's
 next native proposal do they advance its proposal state, in one packed step,
 so a restored row proposes from the same committed prefix as one that was
 never gated. A held row MUST NOT advance its proposal state inside the shared
-ordinary rounds: a row held until it finishes adds no MTP-adapter forward to
-them. The buffer is bounded by the row's admitted completion budget. The
+ordinary rounds, except at the column cap: a row held until it finishes within
+1024 committed columns adds no MTP-adapter forward to them. A held row MUST
+NOT buffer more than 1024 columns; one whose next ordinary window would pass
+the cap advances its proposal state first, in one packed step, so a long held
+completion pays one catch-up per 1024 tokens and its buffer stays bounded.
+Each buffered hidden state MUST own its storage rather than view the shared
+batch output, which would keep every row's state of that round alive. The
 emitted tokens are ordinary decode's by construction.
 
 Transactions MUST preserve row identity across proposal, packed verification,
@@ -1027,13 +1032,14 @@ advertised `qualified_slots` (2...8), its `max_native_active_rows`
   at a load between the two. The inference rests on the gated cost model:
   above the bound, the only work native MTP adds to a round is buffering the
   committed columns (MTP-6) and admission bookkeeping of at most `bound` held
-  rows, plus one drafter catch-up when a held row's depth returns, which does
-  not grow with the ordinary rows, while the ordinary round time does not
-  shrink as rows are added; the relative regression is therefore largest at
-  bound + 1, and `qualified_slots` adds the full-load scheduling and memory
-  point. A runtime change that adds per-row native work above the bound (for
-  example drafting for downgraded rows) invalidates the model and requires
-  every gated slot count to be measured.
+  rows, plus one drafter catch-up when a held row's depth returns or its
+  buffer reaches the 1024-column cap (beyond the gated cells' 512 tokens),
+  which does not grow with the ordinary rows, while the ordinary round time
+  does not shrink as rows are added; the relative regression is therefore
+  largest at bound + 1, and `qualified_slots` adds the full-load scheduling
+  and memory point. A runtime change that adds per-row native work above the
+  bound (for example drafting for downgraded rows) invalidates the model and
+  requires every gated slot count to be measured.
 - *Sustained window* of at least 1800 s on the cell at `qualified_slots`,
   prompt 1536, output 512 (`s<qualified_slots>-p1536-o512`, staggered):
   production-shaped full load. It is a separate bench phase on the same frozen
@@ -1338,7 +1344,12 @@ requests.
   native proposal. An interleaved s2 control (2026-10-06) showed the periodic
   catch-up as a ~10 ms stall in the shared round every 64 tokens, on both
   rows, in every gated native run of both the 10-06 and step-overhead
-  binaries.
+  binaries. A held row's buffer is capped at 1024 columns (an early
+  catch-up when its next window would pass the cap), and each buffered
+  hidden state is a copy of its own row: an uncapped buffer of batch-output
+  views kept `B x 4 KiB` per committed token alive outside the paged-KV
+  accounting, up to 32 GiB for a held row at `B = 8` and the 1,048,576-token
+  completion budget. The cap is above every R015 cell's 512 tokens.
   The R015 frozen on `e1103712d` with these gates (policy `e24cb7bc…`, quiet
   window, live provider paused by operator authorization) passed every cell
   on 2026-10-06. That is lab evidence for one tuple on one host: R015
