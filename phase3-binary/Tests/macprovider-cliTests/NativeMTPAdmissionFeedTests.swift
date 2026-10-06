@@ -145,4 +145,103 @@ final class NativeMTPAdmissionFeedTests: XCTestCase {
             XCTAssertFalse(FileManager.default.fileExists(atPath: root.path), broken)
         }
     }
+
+    // MARK: - Store-layout projection (drafter delivery)
+
+    private let targetRevision = String(repeating: "1", count: 40)
+    private let drafterRevision = String(repeating: "2", count: 40)
+    private let targetSHA = String(repeating: "a", count: 64)
+    private let drafterSHA = String(repeating: "b", count: 64)
+
+    private func storeManifest(targetPath: String? = nil, mtpPath: String? = nil) throws -> Data {
+        let target = targetPath ?? "mlx-community--Qwen3.6-35B-A3B-4bit/\(targetRevision)/\(targetSHA)"
+        let mtp = mtpPath ?? "mlx-community--Qwen3.6-35B-A3B-MTP-4bit/\(drafterRevision)/\(drafterSHA)"
+        return try JSONSerialization.data(withJSONObject: [
+            "schema_version": "macprovider.native-mtp-artifact-projection.v1",
+            "artifacts": [
+                "target": ["path": target, "sha256": targetSHA],
+                "mtp": ["path": mtp, "sha256": drafterSHA],
+                "tokenizer": ["path": target + "/tokenizer.json", "sha256": String(repeating: "c", count: 64)],
+                "manifest": ["path": mtp + "/config.json", "sha256": String(repeating: "d", count: 64)],
+            ],
+        ])
+    }
+
+    func testStoreProjectionMemberReversesTheStoreEscapingExactly() {
+        let path = "mlx-community--Qwen3.6-35B-A3B-MTP-4bit/\(drafterRevision)/\(drafterSHA)"
+        XCTAssertEqual(
+            NativeMTPStoreProjection.member(path: path, sha256: drafterSHA),
+            .init(repoID: "mlx-community/Qwen3.6-35B-A3B-MTP-4bit", revision: drafterRevision, sha256: drafterSHA)
+        )
+        for bad in [
+            "mlx-community--Qwen3.6-MTP/\(drafterRevision)/\(targetSHA)",     // digest is not the member's
+            "mlx-community--Qwen3.6-MTP/main/\(drafterSHA)",                  // revision is not pinned
+            "mlx-community/Qwen3.6-MTP/\(drafterRevision)/\(drafterSHA)",     // four components
+            "mlx-community--a--b/\(drafterRevision)/\(drafterSHA)",          // ambiguous escaping
+            "Qwen3.6-MTP/\(drafterRevision)/\(drafterSHA)",                  // no owner
+            "..--x/\(drafterRevision)/\(drafterSHA)",                        // traversal
+            "mlx-community---x/\(drafterRevision)/\(drafterSHA)",            // owner ends in '-'
+        ] {
+            XCTAssertNil(NativeMTPStoreProjection.member(path: bad, sha256: drafterSHA), bad)
+        }
+    }
+
+    func testStoreProjectionFetchesTheDrafterAndReturnsTheStoreRoot() async throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("store-\(UUID().uuidString)")
+        let resolver = CachedModelArtifactResolver(durableRoot: root)
+        let served = root.appendingPathComponent("mlx-community--Qwen3.6-35B-A3B-4bit/\(targetRevision)/\(targetSHA)")
+        let drafterURL = root.appendingPathComponent("mlx-community--Qwen3.6-35B-A3B-MTP-4bit/\(drafterRevision)/\(drafterSHA)")
+        var requested: CandidateCatalog.Row?
+        let prepared = await NativeMTPStoreProjection.prepare(
+            manifest: try storeManifest(),
+            servedTargetURL: served,
+            resolver: resolver,
+            fetchDrafter: { _, row, _ in
+                requested = row
+                return VerifiedModelArtifact(
+                    modelArgument: drafterURL.path, sha256: row.modelSHA256!, sizeBytes: 1,
+                    configJSONData: nil, configSHA256: nil
+                )
+            }
+        )
+        XCTAssertEqual(prepared?.path, root.standardizedFileURL.path)
+        XCTAssertEqual(requested?.modelID, "mlx-community/Qwen3.6-35B-A3B-MTP-4bit")
+        XCTAssertEqual(requested?.modelRevision, drafterRevision)
+        XCTAssertEqual(requested?.modelSHA256, drafterSHA)
+    }
+
+    func testStoreProjectionStaysOrdinaryUnlessTargetAndDrafterBothBind() async throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("store-\(UUID().uuidString)")
+        let resolver = CachedModelArtifactResolver(durableRoot: root)
+        let served = root.appendingPathComponent("mlx-community--Qwen3.6-35B-A3B-4bit/\(targetRevision)/\(targetSHA)")
+        let drafterURL = root.appendingPathComponent("mlx-community--Qwen3.6-35B-A3B-MTP-4bit/\(drafterRevision)/\(drafterSHA)")
+        func fetched(_ path: URL, sha: String? = nil) -> (CachedModelArtifactResolver, CandidateCatalog.Row, Date) async throws -> VerifiedModelArtifact {
+            { _, row, _ in
+                VerifiedModelArtifact(modelArgument: path.path, sha256: sha ?? row.modelSHA256!, sizeBytes: 1,
+                                      configJSONData: nil, configSHA256: nil)
+            }
+        }
+        // The projection's target is not the artifact being served.
+        let other = root.appendingPathComponent("other/\(targetRevision)/\(targetSHA)")
+        let notServed = await NativeMTPStoreProjection.prepare(
+            manifest: try storeManifest(), servedTargetURL: other, resolver: resolver, fetchDrafter: fetched(drafterURL))
+        XCTAssertNil(notServed)
+        // The drafter cannot be fetched.
+        let unreachable = await NativeMTPStoreProjection.prepare(
+            manifest: try storeManifest(), servedTargetURL: served, resolver: resolver,
+            fetchDrafter: { _, _, _ in throw AutotuneRecommendError.invalidArtifact("offline") })
+        XCTAssertNil(unreachable)
+        // The adopted drafter is not at the projected path, or not the projected bytes.
+        let misplaced = await NativeMTPStoreProjection.prepare(
+            manifest: try storeManifest(), servedTargetURL: served, resolver: resolver,
+            fetchDrafter: fetched(root.appendingPathComponent("elsewhere")))
+        XCTAssertNil(misplaced)
+        let wrongBytes = await NativeMTPStoreProjection.prepare(
+            manifest: try storeManifest(), servedTargetURL: served, resolver: resolver,
+            fetchDrafter: fetched(drafterURL, sha: String(repeating: "e", count: 64)))
+        XCTAssertNil(wrongBytes)
+        // A bundle-layout manifest is not a store projection.
+        XCTAssertNil(NativeMTPStoreProjection.members(manifest: try storeManifest(targetPath: "target", mtpPath: "mtp")))
+    }
 }
+

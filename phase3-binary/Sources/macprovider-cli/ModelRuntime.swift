@@ -1441,6 +1441,9 @@ actor ModelRuntime: ModelRuntimeServing {
     private let configuredDraftModelID: String?
     private let configuredDraftModelLoadPath: String?
     private let configuredNativeMTPAdmissionSidecarPath: String?
+    /// The durable model store root a fetched admission set's projection
+    /// resolves against; nil keeps the bundle layout.
+    private let configuredNativeMTPAdmissionArtifactRoot: String?
     private let configuredNativeMTPAdmissionSignaturePath: String?
     private let configuredNativeMTPTrustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring?
     private let configuredNativeMTPRunningBuildIdentity: NativeMTPRunningBuildIdentity?
@@ -2487,6 +2490,7 @@ actor ModelRuntime: ModelRuntimeServing {
         nativeMTPCapability: NativeMTPCapability? = nil,
         nativeMTPSchedulerSupported: Bool = false,
         nativeMTPAdmissionSidecarPath: String? = nil,
+        nativeMTPAdmissionArtifactRoot: String? = nil,
         nativeMTPAdmissionSignaturePath: String? = nil,
         nativeMTPTrustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring? = nil,
         nativeMTPRunningBuildIdentity: NativeMTPRunningBuildIdentity? = nil,
@@ -2524,6 +2528,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.configuredDraftModelID = normalizedDraftModelID
         self.configuredDraftModelLoadPath = normalizedDraftModelLoadPath
         self.configuredNativeMTPAdmissionSidecarPath = Self.nonEmpty(nativeMTPAdmissionSidecarPath)
+        self.configuredNativeMTPAdmissionArtifactRoot = Self.nonEmpty(nativeMTPAdmissionArtifactRoot)
         self.configuredNativeMTPAdmissionSignaturePath = Self.nonEmpty(nativeMTPAdmissionSignaturePath)
         self.configuredNativeMTPTrustedKeyring = nativeMTPTrustedKeyring ?? NativeMTPAdmissionSidecar.TrustedKeyring(
             publicKeysByKeyID: AutotuneStaticInputs.defaultTrustedPublicKeys,
@@ -2650,6 +2655,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     prefillStepSize: self.prefillStepSize,
                     slotCount: self.maxBatch,
                     sidecarPath: self.configuredNativeMTPAdmissionSidecarPath,
+                    artifactRoot: self.configuredNativeMTPAdmissionArtifactRoot,
                     signaturePath: self.configuredNativeMTPAdmissionSignaturePath,
                     trustedKeyring: self.configuredNativeMTPTrustedKeyring,
                     runningBuildIdentity: self.configuredNativeMTPRunningBuildIdentity,
@@ -2933,6 +2939,7 @@ actor ModelRuntime: ModelRuntimeServing {
         nativeMTPCapability: NativeMTPCapability? = nil,
         nativeMTPSchedulerSupported: Bool = false,
         nativeMTPAdmissionSidecarPath: String? = nil,
+        nativeMTPAdmissionArtifactRoot: String? = nil,
         nativeMTPAdmissionSignaturePath: String? = nil,
         nativeMTPTrustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring? = nil,
         nativeMTPRunningBuildIdentity: NativeMTPRunningBuildIdentity? = nil,
@@ -3005,6 +3012,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.configuredDraftModelID = normalizedDraftModelID
         self.configuredDraftModelLoadPath = nil
         self.configuredNativeMTPAdmissionSidecarPath = Self.nonEmpty(nativeMTPAdmissionSidecarPath)
+        self.configuredNativeMTPAdmissionArtifactRoot = Self.nonEmpty(nativeMTPAdmissionArtifactRoot)
         self.configuredNativeMTPAdmissionSignaturePath = Self.nonEmpty(nativeMTPAdmissionSignaturePath)
         self.configuredNativeMTPTrustedKeyring = nativeMTPTrustedKeyring
         #if DEBUG || MACPROVIDER_LAB_HARNESS
@@ -8750,6 +8758,7 @@ actor ModelRuntime: ModelRuntimeServing {
         prefillStepSize: Int,
         slotCount: Int,
         sidecarPath: String?,
+        artifactRoot: String? = nil,
         signaturePath: String?,
         trustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring?,
         runningBuildIdentity injectedRunningBuildIdentity: NativeMTPRunningBuildIdentity?,
@@ -8816,6 +8825,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 sidecarURL: sidecarURL,
                 signatureURL: signatureURL,
                 snapshotRoot: snapshotRoot,
+                artifactRoot: artifactRoot.map { URL(fileURLWithPath: $0, isDirectory: true) },
                 context: NativeMTPAdmissionSidecar.RuntimeContext(
                     modelID: targetModelID,
                     modelRevision: targetModelRevision,

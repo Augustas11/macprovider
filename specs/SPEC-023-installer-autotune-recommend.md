@@ -16,8 +16,14 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
   the other feeds of the same release; a provider fetches the set, pre-checks
   the detached signature and `release_id`, and writes the exact bytes into a
   private per-release `0700` Application Support directory that the
-  serve-path loader reads and fully re-verifies. A set placed next to the
-  model bundle keeps precedence. The emergency-revocation feed is served at
+  serve-path loader reads and fully re-verifies. A fetched set's projection
+  manifest names the target and the MTP drafter by content-addressed
+  durable-store path, `<owner>--<name>/<revision>/<snapshot-manifest sha256>`,
+  resolved against the provider's durable model store root: the projected
+  target must be the verified catalog artifact being served, and the drafter
+  is fetched from its pinned Hugging Face revision and adopted only when its
+  digest matches. A set placed next to the model bundle keeps precedence and
+  keeps the bundle layout. The emergency-revocation feed is served at
   `/v1/native-mtp-revocations.<revocation_signer_key_id>.json(.sig)` from a
   directory of pre-signed bodies, one per slot of at most 10 minutes, so a
   freshly installed provider always sees an `issued_at` within 15 minutes;
@@ -3382,7 +3388,22 @@ provider fetches the set from the static-feed origin, verifies the detached
 signature under the release signer and the body `release_id`, and writes the
 exact bytes into a private per-release `0700` Application Support directory
 (files `0600`), which the serve-path loader then reads and re-verifies in
-full. A set placed next to the model bundle keeps precedence. Stage B may add the pair only after a bridge CLI accepts the
+full. Because the set cannot carry weights, a fetched set's projection
+manifest names `target` and `mtp` by their content-addressed paths in the
+provider's durable model store, `<owner>--<name>/<40-hex revision>/<snapshot
+manifest sha256>` (the store's own `/` to `--` escaping, which is exact
+because Hugging Face repository ids never contain `--`), with `tokenizer` and
+`manifest` inside them; these paths resolve against the durable store root,
+not the member directory. The projected target MUST be the verified catalog
+artifact the provider serves. The provider fetches the drafter from that
+pinned revision when the store holds no copy with that digest, and adopts it
+only after its snapshot-manifest digest matches; any failure leaves the
+provider ordinary. This is the content-addressed SPEC-023 member route of
+SPEC-048's separately stored MTP artifact. Every projected byte is still
+verified and loaded only from the private capture; the unmanifested-file
+sweep applies to the bundle layout only, since the store root holds other
+models. A set placed next to the model bundle keeps precedence and keeps the
+bundle layout. Stage B may add the pair only after a bridge CLI accepts the
 final enlarged exact catalog-file set and the previous-stable floor is at that
 bridge. The exact target set depends on whether the artifact-feed pair has also
 completed its own Stage B; no implementation may hardcode an assumed 11- or

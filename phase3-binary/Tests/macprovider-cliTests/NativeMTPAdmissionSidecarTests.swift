@@ -1466,6 +1466,80 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         XCTAssertEqual(try MLXSnapshotIdentity.compute(directory: captured.targetURL).digest, fixture.authority.hash)
     }
 
+    /// SPEC-023 §12.5 Stage A store layout: a fetched set keeps its members in
+    /// a private directory, and its projection names the target and the
+    /// drafter by content-addressed durable-store path.
+    func testReleaseEnvelopeResolvesAStoreLayoutProjectionAgainstTheArtifactRoot() throws {
+        var storeRoot = URL(fileURLWithPath: "/")
+        var targetPath = ""
+        let revision = String(repeating: "e", count: 40)
+        let fixture = try makeReleaseEnvelopeFixture(prepareSnapshot: { base in
+            storeRoot = base.root.appendingPathComponent("store", isDirectory: true)
+            func place(_ repoID: String, _ files: [(String, String)]) throws -> (path: String, sha256: String) {
+                let staging = base.root.appendingPathComponent("staging-\(UUID().uuidString)", isDirectory: true)
+                try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+                for (from, to) in files {
+                    try FileManager.default.moveItem(
+                        at: base.snapshot.appendingPathComponent(from),
+                        to: staging.appendingPathComponent(to)
+                    )
+                }
+                let digest = try MLXSnapshotIdentity.compute(directory: staging).digest
+                let path = "\(repoID.replacingOccurrences(of: "/", with: "--"))/\(revision)/\(digest)"
+                let destination = storeRoot.appendingPathComponent(path, isDirectory: true)
+                try FileManager.default.createDirectory(
+                    at: destination.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                try FileManager.default.moveItem(at: staging, to: destination)
+                return (path, digest)
+            }
+            let target = try place("mlx-community/Qwen3-MTP", [
+                ("target.safetensors", "model.safetensors"), ("tokenizer.json", "tokenizer.json"),
+            ])
+            let drafter = try place("mlx-community/Qwen3-MTP-drafter", [
+                ("mtp.safetensors", "model.safetensors"), ("mtp-manifest.json", "config.json"),
+            ])
+            targetPath = target.path
+            return ReleaseLayout(
+                targetPath: target.path,
+                targetSHA256: target.sha256,
+                mtpPath: drafter.path,
+                mtpSHA256: drafter.sha256,
+                tokenizerPath: target.path + "/tokenizer.json",
+                tokenizerSHA256: base.digests["tokenizer.json"]!,
+                manifestPath: drafter.path + "/config.json",
+                manifestSHA256: base.digests["mtp-manifest.json"]!
+            )
+        })
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+        let authority = fixture.authority(
+            targetURLPath: storeRoot.appendingPathComponent(targetPath, isDirectory: true).standardizedFileURL.path
+        )
+
+        // Resolved against the member directory, the store paths do not exist.
+        XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(fixture, authority: authority),
+            .liveTupleMismatch("$.artifact_authority.target_url")
+        )
+
+        let capability = try NativeMTPAdmissionSidecar.load(
+            sidecarData: fixture.sidecarData,
+            signatureData: fixture.signatureData,
+            snapshotRoot: fixture.base.snapshot,
+            artifactRoot: storeRoot,
+            context: fixture.context,
+            trustedKeyring: fixture.base.trustedKeyring,
+            resolvedArtifactAuthority: authority,
+            captureArtifacts: true
+        )
+        XCTAssertEqual(capability.targetArtifactSHA256, authority.hash)
+        let captured = try XCTUnwrap(capability.capturedArtifacts)
+        XCTAssertEqual(try MLXSnapshotIdentity.compute(directory: captured.targetURL).digest, authority.hash)
+        XCTAssertTrue(captured.manifestURL.path.hasPrefix(captured.mtpURL.path + "/"))
+        XCTAssertFalse(captured.targetURL.path.hasPrefix(storeRoot.path + "/"), "loads only the private capture")
+    }
+
     private func rejectedError(
         _ data: Data,
         signatureData: Data? = nil,

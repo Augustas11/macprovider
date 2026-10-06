@@ -420,6 +420,31 @@ artifact), SIGN (signing/workflow), PEARL (Pearl config) and SPEC.
   live-joined process must run published bytes; #1690 owns that. Record it
   as an activation precondition, not campaign work.
 
+### G14. Drafter delivery and the fetched set's projection root (found in the delivery rehearsal)
+
+- **Finding.** The G3 fetch materializes the admission members in a private
+  directory, and the loader resolved the projection manifest against that
+  same directory. The projected `target` must be the served artifact (same
+  inode as the catalog-verified store copy), and the MTP drafter
+  (`mlx-community/Qwen3.6-35B-A3B-MTP-4bit`, 472 MB, snapshot-manifest
+  `fa01beec…`) was not delivered anywhere: a production store holds only the
+  target. A fetched set therefore could never admit.
+- **Change.**
+  - The loader takes the member directory and an artifact root separately.
+    A fetched set resolves the projection against the durable model store
+    root; the bundle layout is unchanged.
+  - A fetched set's projection names `target` and `mtp` by store path,
+    `<owner>--<name>/<revision>/<sha256>`. The CLI requires the projected
+    target to be the served artifact, fetches the drafter from its pinned
+    revision (`0295b81421bf4d0fccca9a7c0fcfb1418dda3516`) when the store has
+    no verified copy, and adopts it only on a digest match. Any failure
+    leaves the provider ordinary.
+  - SPEC-023 v0.22.12 Stage A text names the store layout.
+  - The drafter is not an artifact-feed member: the feed lists servable
+    pricing identities, and a drafter hash must never price as the target.
+- **Release input.** The tuple's committed projection manifest uses the
+  store layout. The catalog release only binds its digest.
+
 ## 3. Dependency order
 
 ```text

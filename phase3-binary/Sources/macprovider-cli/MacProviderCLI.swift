@@ -934,11 +934,14 @@ struct ServeCommand: AsyncParsableCommand {
         let nativeMTPResolvedArtifactAuthority: NativeMTPResolvedArtifactAuthority?
         /// The sidecar the serve-path loader reads; nil uses the bundle lookup.
         var nativeMTPAdmissionSidecarPath: String? = nil
+        /// The durable store root a fetched set's projection resolves against.
+        var nativeMTPAdmissionArtifactRoot: String? = nil
     }
 
     struct NativeMTPResolvedAdmission {
         let authority: NativeMTPResolvedArtifactAuthority
         let sidecarPath: String?
+        var artifactRoot: String? = nil
     }
 
     struct ModelArtifactPreflightOutcome {
@@ -1114,7 +1117,8 @@ struct ServeCommand: AsyncParsableCommand {
                 catalogTrust: catalogTrust,
                 authorityPath: canonicalAuthorityPath,
                 authoritySHA256: actual,
-                staticInputs: staticInputs
+                staticInputs: staticInputs,
+                artifactResolver: artifactResolver
             )
             return ModelArtifactPreflightOutcome(
                 catalogTrust: catalogTrust,
@@ -1124,7 +1128,8 @@ struct ServeCommand: AsyncParsableCommand {
                     loadPath: canonicalLoadPath,
                     loadSHA256: runtimeLoadSHA256,
                     nativeMTPResolvedArtifactAuthority: nativeMTPResolvedAdmission?.authority,
-                    nativeMTPAdmissionSidecarPath: nativeMTPResolvedAdmission?.sidecarPath
+                    nativeMTPAdmissionSidecarPath: nativeMTPResolvedAdmission?.sidecarPath,
+                    nativeMTPAdmissionArtifactRoot: nativeMTPResolvedAdmission?.artifactRoot
                 )
             )
         }
@@ -1145,7 +1150,8 @@ struct ServeCommand: AsyncParsableCommand {
         catalogTrust: CatalogRuntimeTrust,
         authorityPath: String,
         authoritySHA256: String,
-        staticInputs: AutotuneStaticInputs
+        staticInputs: AutotuneStaticInputs,
+        artifactResolver: CachedModelArtifactResolver
     ) async -> NativeMTPResolvedAdmission? {
         guard config.nativeMTPMode == .auto,
               let modelKey = config.modelCatalogKey,
@@ -1182,6 +1188,7 @@ struct ServeCommand: AsyncParsableCommand {
             ? bundledSidecar
             : targetURL.appendingPathComponent("native-mtp-admission.json")
         let sidecarPath: String?
+        var artifactRoot: String?
         if FileManager.default.fileExists(atPath: localSidecarURL.path) {
             // An operator-placed set next to the bundle keeps the bundle lookup.
             sidecarPath = nil
@@ -1196,7 +1203,20 @@ struct ServeCommand: AsyncParsableCommand {
             ) else {
                 return nil
             }
+            // The fetched set projects the served target and the MTP drafter
+            // by durable-store path; the drafter is fetched here if missing.
+            guard let manifest = try? Data(contentsOf: fetched.deletingLastPathComponent()
+                    .appendingPathComponent(NativeMTPAdmissionFeed.manifestFileName)),
+                  let storeRoot = await NativeMTPStoreProjection.prepare(
+                    manifest: manifest,
+                    servedTargetURL: targetURL,
+                    resolver: artifactResolver
+                  )
+            else {
+                return nil
+            }
             sidecarPath = fetched.path
+            artifactRoot = storeRoot.path
         }
         guard let authority = try? qualified.nativeMTPResolvedArtifactAuthority(
             releaseID: catalogTrust.releaseID,
@@ -1207,7 +1227,7 @@ struct ServeCommand: AsyncParsableCommand {
         ) else {
             return nil
         }
-        return NativeMTPResolvedAdmission(authority: authority, sidecarPath: sidecarPath)
+        return NativeMTPResolvedAdmission(authority: authority, sidecarPath: sidecarPath, artifactRoot: artifactRoot)
     }
 
     /// The Build 1 private authority covers the complete upstream revision,
@@ -2680,6 +2700,7 @@ struct ServeCommand: AsyncParsableCommand {
                     continuousBatchingModeExplicitlyConfigured: resolved.continuousBatchingExplicitlyConfigured,
                     nativeMTPMode: resolved.nativeMTPMode,
                     nativeMTPAdmissionSidecarPath: startupPreflight.runtimeBinding?.nativeMTPAdmissionSidecarPath,
+                    nativeMTPAdmissionArtifactRoot: startupPreflight.runtimeBinding?.nativeMTPAdmissionArtifactRoot,
                     nativeMTPResolvedArtifactAuthority: startupPreflight.runtimeBinding?.nativeMTPResolvedArtifactAuthority,
                     warmSwapEnabled: resolved.enableWarmSwap,
                     swapDrainTimeoutSeconds: resolved.swapDrainTimeoutSeconds,
