@@ -313,6 +313,33 @@ curl -sS https://api.malibu.tech/v1/chat/completions \
 
 **Engines differ.** On a Mac Studio (M3 Ultra) serving Qwen3.6 27B, llama-server (Q4_K_M) reached 0.80x, 0.85x, and 0.70x of native throughput at 1, 4, and 8 concurrent requests. Under bursts it had a shorter time to first token than native serial decoding, because it interleaves requests. Quality follows the quantization: wikitext-2 perplexity 6.618 for Q4_K_M against 6.747 for native MLX 4-bit. The full numbers and method are in the [M0 benchmark evidence](runbooks/runtime-agnostic-m0-benchmark-evidence-2026-09-24.md). The GGUF engines (llama.cpp, LM Studio, Ollama) serve the GGUF quantization of a model; the MLX engines (native, mlx_lm.server, oMLX) serve its MLX snapshot. **Pricing does not depend on the engine:** a request is priced by its model.
 
+### Pool-only models
+
+A pool can also offer models that are not in the global catalog. They are signed
+into the pool's policy by the pool's creator and are only reachable inside that
+pool. Their `model` id is `pool/<pool-id>/<slug>`:
+
+```bash
+curl -sS -D - https://api.malibu.tech/v1/chat/completions \
+  -H "Authorization: Bearer $MALIBU_API_KEY" -H 'Content-Type: application/json' \
+  -H "X-MacProvider-Pool-Select: <pool-id>" -H 'X-MacProvider-Engine-Select: ollama' \
+  -d '{"model":"pool/<pool-id>/<slug>","messages":[{"role":"user","content":"hi"}]}'
+```
+
+- **Only inside the pool.** Without `X-MacProvider-Pool-Select` (or with another
+  pool's id) the model does not exist for you: `404 model_not_found`. It never
+  appears in the global `/v1/models` list. To see a pool's own models, call
+  `GET /v1/models` with `X-MacProvider-Pool-Select: <pool-id>`.
+- **Price.** A pool-only model is priced at the per-model rates the pool creator
+  signed into the pool's policy (prompt, cached prompt, completion per million
+  tokens), inside the bounds the network sets, under the same formula and
+  platform fee as every other request. Engine choice still does not change the
+  price; the model does.
+- **Disclosure.** Responses carry `X-MacProvider-Model-Disclosure:
+  pool_attested_unverified` and `X-MacProvider-Pool-Manifest-Core-Digest`
+  (the digest of the signed pool policy that authorized the route). The model's
+  identity is attested by the pool creator, not verified by the network.
+
 Running a pool yourself and want to serve it with your own engine? See [Serving a Trusted Pool with your own engine](runbooks/trusted-pool-external-engines.md).
 
 ## Header reference
@@ -321,8 +348,11 @@ Running a pool yourself and want to serve it with your own engine? See [Serving 
 |---|---|---|---|
 | `X-MacProvider-Conversation` | Request | Sticky-affinity tag for prefix-cache reuse | SPEC-004, SPEC-024 |
 | `X-MacProvider-Pin-Provider` | Request | Strict-pin to specific provider | SPEC-004 |
+| `X-MacProvider-Pool-Select` | Request | Route the request inside a Trusted Pool you are authorized for | SPEC-042 |
 | `X-MacProvider-Engine-Select` | Request | Choose the inference engine (`native`, `llamacpp`, `lmstudio`, `mlxlm`, `ollama`, `omlx`) | SPEC-006-R016, SPEC-042-R014 |
 | `X-MacProvider-Engine` | Response | Engine that served this (`mlx_cache`, `llamacpp_loopback`, `lmstudio_loopback`, `mlxlm_loopback`, `ollama_loopback`, `omlx_loopback`) | SPEC-006-R016 |
+| `X-MacProvider-Model-Disclosure` | Response | `pool_attested_unverified` on a pool-only model route | SPEC-006-R018 |
+| `X-MacProvider-Pool-Manifest-Core-Digest` | Response | Digest of the signed pool policy that authorized a pool-only model route | SPEC-006-R018 |
 | `X-MacProvider-Provider` | Response | Which provider actually served this | SPEC-002 |
 | `X-MacProvider-Receipt` | Response | ed25519-signed inference receipt | SPEC-015 v0.3 |
 
