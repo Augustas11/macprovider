@@ -1987,6 +1987,15 @@ struct ServeCommand: AsyncParsableCommand {
         automatic: PrivacyAutoEnrollmentHooks? = nil
     ) throws -> AppConfig {
         let bootstrap = try load(false)
+        // A fallback after the automatic check may serve only ordinary mode.
+        // A configuration that switched to forced privacy between the reads
+        // was never checked or hardened as such, so it refuses.
+        func ordinaryAfterAutomaticCheck(_ final: AppConfig) throws -> AppConfig {
+            guard !final.privacyClassBeta else {
+                throw PrivacyAutoEnrollmentError.configurationChanged
+            }
+            return final
+        }
         func ordinary() throws -> AppConfig {
             let resolved = try load(true)
             try canonicalReexec(resolved)
@@ -2022,7 +2031,7 @@ struct ServeCommand: AsyncParsableCommand {
                 // Process-wide hardening already applied stays applied; the
                 // provider serves ordinarily and never advertises privacy keys.
                 automatic.log(PrivacyAutoEnrollment.hardeningFailedLine(hardeningFailures))
-                return try load(true)
+                return try ordinaryAfterAutomaticCheck(try load(true))
             }
             let final = try load(true)
             // The checked snapshot must be the one that serves; a change
@@ -2030,7 +2039,7 @@ struct ServeCommand: AsyncParsableCommand {
             guard PrivacyAutoEnrollment.mode(final) == .automatic,
                   PrivacyAutoEnrollment.sameEligibilityInputs(candidate, PrivacyAutoEnrollment.enable(final)) else {
                 automatic.log(PrivacyAutoEnrollment.hardeningFailedLine([PrivacyHardeningCode.configurationChanged]))
-                return final
+                return try ordinaryAfterAutomaticCheck(final)
             }
             return PrivacyAutoEnrollment.enable(final)
         }

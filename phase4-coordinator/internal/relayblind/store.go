@@ -1099,8 +1099,18 @@ func (s *Store) Unquarantine(ctx context.Context, providerID string) error {
 	if s == nil || s.db == nil {
 		return ErrStoreUnavailable
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM privacy_class_quarantine WHERE provider_id=?`, providerID)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM privacy_class_quarantine WHERE provider_id=?`, providerID); err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	if err := markOperatorClear(ctx, tx, providerID, time.Now()); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
 	return nil

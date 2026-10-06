@@ -58,7 +58,7 @@ type PrivacyAuthority struct {
 	directory  *IdentityDirectoryService
 
 	mu                sync.Mutex
-	pendingQuarantine map[string]string
+	pendingQuarantine map[string]pendingQuarantine
 	sessions          map[privacySessionID]*privacySession
 	epochs            map[string]uint64
 	closedGen         map[privacySessionID]uint64
@@ -177,7 +177,7 @@ func NewPrivacyAuthority(store *Store, cfg config.PrivacyClassConfig, identityPi
 		sessions:          make(map[privacySessionID]*privacySession),
 		epochs:            make(map[string]uint64),
 		closedGen:         make(map[privacySessionID]uint64),
-		pendingQuarantine: make(map[string]string),
+		pendingQuarantine: make(map[string]pendingQuarantine),
 	}
 	// SPEC-049-R027: a configured release signing key that cannot be read
 	// or parsed is a startup failure, never a silent empty approval set.
@@ -606,25 +606,13 @@ func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, sessio
 		// still fresh may enroll. A replaced session, or one whose keys a
 		// concurrent reenroll revoked, cannot write an enrollment.
 		if !a.postureStillCurrent(id, snap) {
+			a.NoteChallengeTimeout(providerID, session)
 			return privacyReject("posture_closed")
 		}
-		if len(statement.PrivacyKeyRecordDigests) == 0 {
-			a.NoteChallengeTimeout(providerID, session)
-			return privacyReject("posture_keys_stale")
-		}
-		for _, digest := range statement.PrivacyKeyRecordDigests {
-			fresh, err := a.store.PrivacyKeyFresh(ctx, providerID, session, digest, now)
-			if err != nil {
-				a.NoteChallengeTimeout(providerID, session)
-				return err
-			}
-			if !fresh {
-				a.NoteChallengeTimeout(providerID, session)
-				return privacyReject("posture_keys_stale")
-			}
-		}
-		// The enrollment is durable before this posture counts as verified.
-		err := a.store.EnrollPrivacyIdentity(ctx, PrivacyEnrollment{
+		// The enrollment is durable before this posture counts as verified,
+		// and the store re-checks the listed keys' freshness inside the same
+		// transaction, so a concurrent reenroll cannot interleave.
+		err := a.store.EnrollPrivacyIdentityForSession(ctx, session, statement.PrivacyKeyRecordDigests, now, PrivacyEnrollment{
 			ProviderID:          providerID,
 			IdentityPublicKey:   encodeBase64URL(idPub),
 			IdentityFingerprint: PublicKeyFingerprint(idPub),
@@ -642,6 +630,9 @@ func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, sessio
 		case errors.Is(err, ErrEnrollmentKeyInUse):
 			a.NoteChallengeTimeout(providerID, session)
 			return privacyReject("privacy_enrollment_key_in_use")
+		case errors.Is(err, ErrEnrollmentKeysStale):
+			a.NoteChallengeTimeout(providerID, session)
+			return privacyReject("posture_keys_stale")
 		case err != nil:
 			a.NoteChallengeTimeout(providerID, session)
 			return err
@@ -831,7 +822,7 @@ func (a *PrivacyAuthority) recordQuarantine(ctx context.Context, providerID stri
 	// A failed durable write keeps an in-memory latch that blocks the
 	// provider and retries the write until it lands.
 	if writeErr != nil {
-		a.pendingQuarantine[providerID] = reason
+		a.pendingQuarantine[providerID] = pendingQuarantine{reason: reason, at: time.Now()}
 	} else {
 		delete(a.pendingQuarantine, providerID)
 	}
@@ -882,11 +873,19 @@ func (a *PrivacyAuthority) consumeChallenge(id privacySessionID, nonce, statemen
 // quarantined; each check retries the durable write.
 func (a *PrivacyAuthority) isQuarantined(ctx context.Context, providerID string, now time.Time) (bool, error) {
 	a.mu.Lock()
-	reason, latched := a.pendingQuarantine[providerID]
+	pending, latched := a.pendingQuarantine[providerID]
 	a.mu.Unlock()
 	if latched {
+		// An operator unquarantine or reenroll after the latch wins: the
+		// latch is dropped instead of re-creating the quarantine.
+		if cleared, err := a.store.OperatorClearedSince(ctx, providerID, pending.at); err == nil && cleared {
+			a.mu.Lock()
+			delete(a.pendingQuarantine, providerID)
+			a.mu.Unlock()
+			return a.store.IsQuarantined(ctx, providerID, now)
+		}
 		dur := time.Duration(a.quarantine) * time.Second
-		if err := a.store.QuarantineAndRevokePrivacy(ctx, providerID, reason, now, dur, a.replayRetention); err == nil {
+		if err := a.store.QuarantineAndRevokePrivacy(ctx, providerID, pending.reason, now, dur, a.replayRetention); err == nil {
 			a.mu.Lock()
 			delete(a.pendingQuarantine, providerID)
 			a.mu.Unlock()
@@ -894,6 +893,12 @@ func (a *PrivacyAuthority) isQuarantined(ctx context.Context, providerID string,
 		return true, nil
 	}
 	return a.store.IsQuarantined(ctx, providerID, now)
+}
+
+// pendingQuarantine is a quarantine whose durable write failed.
+type pendingQuarantine struct {
+	reason string
+	at     time.Time
 }
 
 // postureStillCurrent reports whether the session that received the

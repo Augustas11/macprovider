@@ -73,18 +73,29 @@ func LoadReleaseCodeIdentities(dir string, key *ecdsa.PublicKey) ([]config.Appro
 	if err != nil {
 		return nil, nil, fmt.Errorf("relayblind: read release identity directory: %w", err)
 	}
+	// Only names with a sibling signature count toward the bound, so stray
+	// unpaired files cannot crowd out signed releases.
+	present := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		present[entry.Name()] = struct{}{}
+	}
 	var names []string
+	var rejected []string
 	for _, entry := range entries {
 		name := entry.Name()
-		if strings.HasSuffix(name, ".json") && !strings.HasPrefix(name, ".") {
-			names = append(names, name)
+		if !strings.HasSuffix(name, ".json") || strings.HasPrefix(name, ".") {
+			continue
 		}
+		if _, ok := present[name+".sig"]; !ok {
+			rejected = append(rejected, name)
+			continue
+		}
+		names = append(names, name)
 	}
 	// Newest release first, so a directory that outgrows the bound drops
 	// only its oldest releases instead of every approval.
 	sort.Slice(names, func(i, j int) bool { return releaseNameNewer(names[i], names[j]) })
 	var identities []config.ApprovedCodeIdentity
-	var rejected []string
 	if len(names) > maxReleaseIdentityFiles {
 		rejected = append(rejected, names[maxReleaseIdentityFiles:]...)
 		names = names[:maxReleaseIdentityFiles]

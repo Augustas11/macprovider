@@ -395,6 +395,61 @@ func TestQuarantineWriteFailureLatchesUntilDurable(t *testing.T) {
 	}
 }
 
+// An operator unquarantine after a failed quarantine write wins over the
+// in-memory latch; the latch never re-creates a quarantine the operator lifted.
+func TestOperatorUnquarantineClearsQuarantineLatch(t *testing.T) {
+	f := newEnrollmentFixture(t, nil)
+	if err := f.acceptClaim(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.posture(0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.db.Exec(`DROP TABLE relay_blind_reservations`); err != nil {
+		t.Fatal(err)
+	}
+	f.rekey(0x65)
+	if err := f.acceptClaim(); err == nil {
+		t.Fatal("key change accepted while the quarantine write failed")
+	}
+	if err := f.store.migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.Unquarantine(context.Background(), f.providerID); err != nil {
+		t.Fatal(err)
+	}
+	if q, err := f.auth.isQuarantined(context.Background(), f.providerID, f.now); err != nil || q {
+		t.Fatalf("latch survived operator unquarantine = %v, %v", q, err)
+	}
+	if q, err := f.store.IsQuarantined(context.Background(), f.providerID, f.now); err != nil || q {
+		t.Fatalf("latch re-created the quarantine = %v, %v", q, err)
+	}
+}
+
+func TestEnrollForSessionChecksFreshnessInTransaction(t *testing.T) {
+	f := newEnrollmentFixture(t, nil)
+	if err := f.acceptClaim(); err != nil {
+		t.Fatal(err)
+	}
+	enrollment := PrivacyEnrollment{
+		ProviderID: f.providerID, IdentityPublicKey: f.claim().IdentityPublicKey, IdentityFingerprint: PublicKeyFingerprint(f.identity.Public().(ed25519.PublicKey)),
+		SEPublicKey: f.claim().SEPublicKey, SEFingerprint: PublicKeyFingerprint(f.seRaw), EnrolledAtUnix: f.now.Unix(),
+	}
+	if _, err := f.store.ReenrollPrivacyProvider(context.Background(), f.providerID, "operator", f.now, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	err := f.store.EnrollPrivacyIdentityForSession(context.Background(), f.session, []string{f.record.KeyRecord.KeyRecordDigest}, f.now, enrollment)
+	if !errors.Is(err, ErrEnrollmentKeysStale) {
+		t.Fatalf("enroll with revoked keys = %v", err)
+	}
+	if err := f.store.EnrollPrivacyIdentityForSession(context.Background(), f.session, nil, f.now, enrollment); !errors.Is(err, ErrEnrollmentKeysStale) {
+		t.Fatalf("enroll with no keys = %v", err)
+	}
+	if _, ok := activeEnrollment(t, f); ok {
+		t.Fatal("stale enrollment written")
+	}
+}
+
 func TestEnrollmentRejectsKeyActiveForAnotherProvider(t *testing.T) {
 	f := newEnrollmentFixture(t, nil)
 	if err := f.acceptClaim(); err != nil {

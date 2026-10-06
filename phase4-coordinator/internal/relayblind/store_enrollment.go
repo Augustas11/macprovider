@@ -20,6 +20,9 @@ var (
 	// ErrEnrollmentKeyInUse means a key is actively enrolled for another
 	// provider ID (SPEC-049-R025).
 	ErrEnrollmentKeyInUse = errors.New("relayblind: privacy enrollment key in use by another provider")
+	// ErrEnrollmentKeysStale means a key the enrolling posture listed is no
+	// longer fresh for that session, for example after a reenroll.
+	ErrEnrollmentKeysStale = errors.New("relayblind: privacy enrollment keys are not fresh")
 )
 
 // PrivacyEnrollment is one SPEC-049-R025 durable enrollment row. Keys are
@@ -59,7 +62,11 @@ CREATE TABLE IF NOT EXISTS privacy_class_enrollment (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_privacy_enrollment_active_provider ON privacy_class_enrollment(provider_id) WHERE revoked_at_unix IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_privacy_enrollment_active_identity ON privacy_class_enrollment(identity_fingerprint) WHERE revoked_at_unix IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_privacy_enrollment_active_se ON privacy_class_enrollment(se_fingerprint) WHERE revoked_at_unix IS NULL;
-CREATE INDEX IF NOT EXISTS idx_privacy_enrollment_revoked ON privacy_class_enrollment(revoked_at_unix);`)
+CREATE INDEX IF NOT EXISTS idx_privacy_enrollment_revoked ON privacy_class_enrollment(revoked_at_unix);
+CREATE TABLE IF NOT EXISTS privacy_class_operator_clear (
+  provider_id TEXT PRIMARY KEY,
+  cleared_at_unix INTEGER NOT NULL
+);`)
 	if err != nil {
 		return fmt.Errorf("%w: migrate privacy enrollment: %v", ErrStoreUnavailable, err)
 	}
@@ -94,6 +101,20 @@ func (s *Store) ActivePrivacyEnrollment(ctx context.Context, providerID string) 
 // ErrEnrollmentKeyChanged and is never overwritten; a key active for another
 // provider is ErrEnrollmentKeyInUse.
 func (s *Store) EnrollPrivacyIdentity(ctx context.Context, e PrivacyEnrollment) error {
+	return s.enrollPrivacyIdentity(ctx, e, "", nil, time.Time{})
+}
+
+// EnrollPrivacyIdentityForSession enrolls only if every listed key digest is
+// still fresh and unrevoked for assignedSession, checked inside the same
+// transaction as the insert (SPEC-049-R025).
+func (s *Store) EnrollPrivacyIdentityForSession(ctx context.Context, assignedSession string, digests []string, now time.Time, e PrivacyEnrollment) error {
+	if strings.TrimSpace(assignedSession) == "" || len(digests) == 0 {
+		return ErrEnrollmentKeysStale
+	}
+	return s.enrollPrivacyIdentity(ctx, e, assignedSession, digests, now)
+}
+
+func (s *Store) enrollPrivacyIdentity(ctx context.Context, e PrivacyEnrollment, assignedSession string, digests []string, now time.Time) error {
 	if s == nil || s.db == nil {
 		return ErrStoreUnavailable
 	}
@@ -105,6 +126,15 @@ func (s *Store) EnrollPrivacyIdentity(ctx context.Context, e PrivacyEnrollment) 
 		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
 	defer tx.Rollback()
+	for _, digest := range digests {
+		var fresh int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM relay_blind_key_records WHERE provider_id=? AND assigned_session=? AND key_record_digest=? AND key_class=? AND revoked_at_unix IS NULL AND not_before_unix<=? AND expires_at_unix>?`, e.ProviderID, assignedSession, digest, KeyClassPrivacy, now.Unix(), now.Unix()).Scan(&fresh); err != nil {
+			return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+		}
+		if fresh == 0 {
+			return ErrEnrollmentKeysStale
+		}
+	}
 	existing, err := scanEnrollment(tx.QueryRowContext(ctx, `SELECT `+enrollmentColumns+` FROM privacy_class_enrollment WHERE provider_id=? AND revoked_at_unix IS NULL`, e.ProviderID))
 	switch {
 	case err == nil:
@@ -167,10 +197,43 @@ func (s *Store) ReenrollPrivacyProvider(ctx context.Context, providerID, reason 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM privacy_class_quarantine WHERE provider_id=?`, providerID); err != nil {
 		return false, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
+	if err := markOperatorClear(ctx, tx, providerID, now); err != nil {
+		return false, err
+	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
 	return changed > 0, nil
+}
+
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// markOperatorClear records an operator unquarantine or reenroll, so an
+// in-memory quarantine latch from before it is dropped, not re-applied.
+func markOperatorClear(ctx context.Context, db execer, providerID string, now time.Time) error {
+	if _, err := db.ExecContext(ctx, `INSERT INTO privacy_class_operator_clear(provider_id,cleared_at_unix) VALUES(?,?) ON CONFLICT(provider_id) DO UPDATE SET cleared_at_unix=excluded.cleared_at_unix`, providerID, now.Unix()); err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	return nil
+}
+
+// OperatorClearedSince reports an operator unquarantine or reenroll of the
+// provider at or after since.
+func (s *Store) OperatorClearedSince(ctx context.Context, providerID string, since time.Time) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, ErrStoreUnavailable
+	}
+	var cleared int64
+	err := s.db.QueryRowContext(ctx, `SELECT cleared_at_unix FROM privacy_class_operator_clear WHERE provider_id=?`, providerID).Scan(&cleared)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	return cleared >= since.Unix(), nil
 }
 
 // ListPrivacyEnrollments returns every active enrollment and every

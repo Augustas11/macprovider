@@ -153,6 +153,27 @@ final class PrivacyAutoEnrollmentTests: XCTestCase {
         }
     }
 
+    func testFallbackRefusesAConfigurationThatTurnedForced() throws {
+        let checked = try autoTempConfig("")
+        let forced = try autoTempConfig("privacy_class_beta: true\n")
+        defer {
+            try? FileManager.default.removeItem(at: checked)
+            try? FileManager.default.removeItem(at: forced)
+        }
+        for hardening in [[PrivacyHardeningCode.ptDenyAttach], []] {
+            XCTAssertThrowsError(try ServeCommand.resolveServeConfig(
+                load: { resolveCredentials in
+                    try ConfigLoader.load(cli: CLIOverrides(configPath: (resolveCredentials ? forced : checked).path), environment: [:], resolveCredentials: resolveCredentials)
+                },
+                canonicalReexec: { _ in },
+                harden: { _ in XCTFail("forced-mode hardening ran in automatic mode") },
+                automatic: PrivacyAutoEnrollmentHooks(eligibility: { _ in [] }, harden: { _ in hardening }, log: { _ in })
+            )) { error in
+                XCTAssertEqual(error as? PrivacyAutoEnrollmentError, .configurationChanged)
+            }
+        }
+    }
+
     func testOptOutAndMissingHooksNeverRunAutomaticMode() throws {
         let yaml = try autoTempConfig("relay_blind_enabled: false\n")
         defer { try? FileManager.default.removeItem(at: yaml) }
