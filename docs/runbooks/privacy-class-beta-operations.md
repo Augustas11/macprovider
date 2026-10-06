@@ -27,7 +27,7 @@ Opt out with any one of these:
 - flag `--no-privacy-class-beta`
 - config `privacy_class_beta: false`
 - environment `MACPROVIDER_PRIVACY_CLASS_BETA=false`
-- an explicit `relay_blind_enabled: false` (flag, environment, or config)
+- any explicit `relay_blind_enabled` value (flag, environment, or config). `false` turns relay-blind off; `true` keeps plain SPEC-041 relay-blind with its pinned identity instead of the privacy class
 
 Force it on with `--privacy-class-beta`, `privacy_class_beta: true`, or `MACPROVIDER_PRIVACY_CLASS_BETA=true`. Forced mode turns relay-blind on unless it is explicitly off, which is a configuration error, and it exits non-zero with `FATAL privacy_class_hardening_failed` when the hardening fails.
 
