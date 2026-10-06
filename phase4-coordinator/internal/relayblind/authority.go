@@ -34,9 +34,9 @@ func NewAuthority(store *Store, configured map[string]string, maxRecords int, re
 		}
 		keys[providerID] = append(ed25519.PublicKey(nil), decoded...)
 	}
-	if len(keys) == 0 {
-		return nil, fmt.Errorf("relayblind: no operator identity pins")
-	}
+	// An empty pin set is valid only with the SPEC-049 privacy class, whose
+	// keys enroll automatically; config validation refuses it otherwise. It
+	// accepts no plain relay-blind key record.
 	replayRetention := 5 * time.Minute
 	if len(retention) > 0 && retention[0] > 0 {
 		replayRetention = retention[0]
