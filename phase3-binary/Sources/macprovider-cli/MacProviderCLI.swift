@@ -2723,26 +2723,41 @@ struct ServeCommand: AsyncParsableCommand {
             maxConcurrencyOverride: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride),
             maxContextSource: resolved.maxContextSource
         )
+        // A loopback runtime probes through its upstream chat-completions leg
+        // (SPEC-001 FR-20, #1690): a 0 estimate falls under the coordinator's
+        // routing throughput floor, so an unprobed loopback provider never routes.
+        var loopbackProbeSucceeded = false
         let throughputEstimate = await Self.startupThroughputEstimate(
             autotuneCandidate: autotuneCandidate,
-            // The loopback serving runtime has no local generation to measure;
-            // it reports a 0 startup estimate (advisory capacity only).
             measure: {
                 if let mlxRuntime = modelRuntime as? ModelRuntime {
                     return await mlxRuntime.measureStartupThroughput(
                         maxTokens: ModelRuntime.startupThroughputProbeMaxTokens
                     )
                 }
+                if let loopbackRuntime = modelRuntime as? OpenAICompatibleLoopbackRuntime {
+                    let outcome = await loopbackRuntime.measureStartupThroughput(
+                        maxTokens: ModelRuntime.startupThroughputProbeMaxTokens
+                    )
+                    print(outcome.logLine(runtimeSource: loopbackRuntime.runtimeSource))
+                    loopbackProbeSucceeded = outcome.tps > 0
+                    return outcome.tps
+                }
                 return 0
             }
         )
         // #1689: operator-visible provenance for the estimate above. `nil`
-        // means no probe ran (autotune candidate or loopback runtime).
+        // means no probe ran (autotune candidate) or a loopback probe failed.
         var startupThroughputProbe: StartupThroughputProbe?
         if !autotuneCandidate, let mlxRuntime = modelRuntime as? ModelRuntime {
             startupThroughputProbe = StartupThroughputProbe(
                 maxTokens: ModelRuntime.startupThroughputProbeMaxTokens,
                 modelID: await mlxRuntime.loadedModelID ?? resolved.model
+            )
+        } else if !autotuneCandidate, loopbackProbeSucceeded, let loopbackRuntime = modelRuntime as? OpenAICompatibleLoopbackRuntime {
+            startupThroughputProbe = StartupThroughputProbe(
+                maxTokens: ModelRuntime.startupThroughputProbeMaxTokens,
+                modelID: loopbackRuntime.servedModelRef
             )
         }
         let thermalGate = ThermalGate()

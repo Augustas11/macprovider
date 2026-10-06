@@ -1,6 +1,6 @@
 # #1690 M1: first production Trusted Pool activation plan (llama.cpp member)
 
-**Status:** prepared 2026-09-25, not executed. **Issue:** #1690 (epic PR #1719,
+**Status:** prepared 2026-09-25; executed on Pearl 2026-10-06 up to an active pool (see "Execution on 2026-10-06" below); the paid journey waits for a signed CLI with the loopback throughput probe. **Issue:** #1690 (epic PR #1719,
 merged as `747557cc`). **Governing rules:** SPEC-022 v0.2.4 R-12 / R-12.8,
 SPEC-042 0.0.36 (R001 policy-core/v2, R006 labels, R013, R014), SPEC-023
 v0.20.0 §3.7 (v0.19.1 added the GGUF Hugging Face consumer rule; v0.20.0
@@ -35,6 +35,54 @@ then runs strictly in this order: §3.3 (signed cut, deploy) → P7 →
 §3.5 (CLI candidate baking that release) → §5 (member, including §3.4
 `catalog_priced`) → §4.3 steps 7-9 → §5A. Do not start a later step before
 the earlier one passes.
+
+## Execution on 2026-10-06 (corrections to this plan)
+
+The plan ran on Pearl v1.8.218 with CLI 1.8.217 (`71f22d36c`) on the member.
+Pool `G2Nr74KPQN_FxLrrrAhtXQ` (manifest v1, core digest `c9e7b76a…`, v2 core,
+`enforce`, `runtime_allowlist: [llamacpp_loopback]`) is `active` and routeable,
+with member `mp-efd40f26117ac30554a00c6432e6e65e` and one first-party buyer.
+These steps differed from the text below. Each one was verified in code or on
+Pearl:
+
+1. **Catalog activation.** The artifact feed went live through
+   `deploy-pearl-vps.sh` at the running tag (04:05Z), not the updater.
+   The updater refuses an older promoted CLI release as a downgrade. The
+   deploy's canary proof only passes if the canary *process* restarts after
+   Pearl serves the new release, because the CLI's `/v1/status` catalog is
+   fixed at process start (`HTTPServer.swift` `let catalogStatus`). See
+   `pearl-coordinator-rollout.md`.
+2. **BYOM nginx route.** Pearl's vhost had lost
+   `location /v1/provider/model-admission/` → `127.0.0.1:8444`, so every
+   offer returned 404. It was restored on Pearl and is now in the repo
+   template (`check_nginx_model_admission_routes_test.sh`).
+3. **llama-server.** Start it with an **absolute** `-m` path. The CLI resolves
+   `/props.model_path` against its own working directory, so a relative path
+   breaks the pinned-file identity proof. M1 runs `-c 32768 -np 4`
+   (8192 tokens per slot) with `max_context_override: 8192` in the member
+   config, so the advertised context matches the server.
+4. **Offer.** `models offer` defaults `--llamacpp-origin` to
+   `http://127.0.0.1:8080`, which is the live native provider on the Studio.
+   Always pass `--llamacpp-origin http://127.0.0.1:18130` and pin
+   `--llamacpp-model-path`. On a fresh identity the dry run always reports
+   `candidate_id_unstable`, because it never creates the discovery salt;
+   submit with `--yes`.
+5. **`catalog_priced` is a single operator decision.** It uses the per-actor
+   credential (`OPERATOR_AUTH_POLICY_A`, actor `operator:spec026_a`), not dual
+   control; dual control applies only to `settlement_capable`. Read the head
+   from `GET /admin/model-admission/offers?provider_id=…`, then restart the
+   member's serve so its session binds.
+6. **Routing floor (blocker).** Pearl applies
+   `min_provider_throughput_tps: 1.0`. Loopback runtimes before the
+   startup-probe fix report `throughput_tps_estimate: 0`, so the member is
+   excluded (`provider_throughput_floor_excluded`) and pool requests answer
+   503 `no_provider_available` (refunded, nothing billed). The fix measures a
+   real startup throughput through the loopback upstream (SPEC-001 FR-20
+   v1.9.29). The member needs a signed CLI that carries it, accepted on Pearl.
+7. **Pearl actor.** Every Pearl write held both flock locks
+   (`/run/lock/macprovider-pearl-updater.lock`,
+   `/opt/macprovider/.coordinator-deploy.lock`). The lock files always exist,
+   so test them with `flock -n`, never with `-e`.
 
 ## 0. Scope decision: M1 is an operator-internal pool, `launch_environment: candidate`
 

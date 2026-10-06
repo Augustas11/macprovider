@@ -8210,6 +8210,17 @@ actor ModelRuntime: ModelRuntimeServing {
     /// so it is not a sustained decode benchmark (#1689).
     static let startupThroughputProbeMaxTokens = 8
 
+    /// The startup probe's fixed prompt, shared by native and loopback runtimes.
+    static let startupThroughputProbePrompt = "Reply with a short greeting."
+
+    /// The one `capacity.throughput_tps_estimate` formula for every runtime
+    /// (SPEC-001 FR-17/FR-20, SPEC-002): completion tokens of the startup
+    /// generation over the whole request's elapsed time (prefill, first
+    /// token and decode).
+    static func startupThroughputRate(completionTokens: Int, elapsedSeconds: TimeInterval) -> Double {
+        Double(completionTokens) / max(elapsedSeconds, 0.001)
+    }
+
     func measureStartupThroughput(maxTokens: Int = ModelRuntime.startupThroughputProbeMaxTokens) async -> Double {
         guard let container = currentContainer else {
             return 0.0
@@ -8223,7 +8234,7 @@ actor ModelRuntime: ModelRuntimeServing {
             let blockingInferenceExecutor = blockingInferenceExecutor
             let result: BlockingGenerateResult = try await inferenceGate.withPermit {
                 try await container.perform { context in
-                    let input = UserInput(chat: [.user("Reply with a short greeting.")])
+                    let input = UserInput(chat: [.user(Self.startupThroughputProbePrompt)])
                     let lmInput = try await context.processor.prepare(input: input)
                     let parameters = Self.makeServeGenerateParameters(
                         maxTokens: maxTokens,
@@ -8240,8 +8251,10 @@ actor ModelRuntime: ModelRuntimeServing {
                     }
                 }
             }
-            let elapsed = max(Date().timeIntervalSince(start), 0.001)
-            return Double(result.generationTokenCount) / elapsed
+            return Self.startupThroughputRate(
+                completionTokens: result.generationTokenCount,
+                elapsedSeconds: Date().timeIntervalSince(start)
+            )
         } catch {
             return 0.0
         }
