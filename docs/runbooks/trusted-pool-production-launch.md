@@ -169,9 +169,25 @@ witness=/var/lib/macprovider/trustpool-manifest-witness.json
 asmp() { sudo -u macprovider bash -c "set -a; . /etc/macprovider/coordinator.env; set +a; $*"; }
 admin="/opt/macprovider/coordinator-cli trust-pool-admin"
 adminf="--admin-url http://127.0.0.1:8444 --operator-key-env MACPROVIDER_OPERATOR_KEY"
+# On any failure: before the swap, the key is not live, so remove the new
+# witness; after the swap, put the pre-key config back and restart, and leave
+# the witness (unused while the key is absent).
+stage=pre-bootstrap
+cleanup() {
+  rc=$?
+  [ "$rc" -eq 0 ] && return
+  case "$stage" in
+    bootstrapped) mv -f "$witness" "$witness.unused-$(date -u +%Y%m%dT%H%M%SZ)" ;;
+    swapped) mv -f "$live.pre-witness" "$live"; systemctl restart macprovider-coordinator ;;
+  esac
+  echo "witness step failed at stage=$stage (rc=$rc); cleaned up" >&2
+}
+trap cleanup EXIT
 
 # 1. Bootstrap from the live DB the running coordinator uses.
-asmp "$admin manifest-witness-init --config $cfg --config-overlay $live --out $witness" | tee /root/witness-bootstrap.txt
+asmp "$admin manifest-witness-init --config $cfg --config-overlay $live --out $witness" > /root/witness-bootstrap.txt
+[ -e "$witness" ] && stage=bootstrapped
+cat /root/witness-bootstrap.txt
 # 2. Compare: each pool's manifest_version must equal what the running
 #    coordinator serves, and every pool list-pools reports with a manifest
 #    must be in the witness.
@@ -189,14 +205,24 @@ curl -s http://127.0.0.1:8443/healthz > /root/witness-healthz-before.json
 # 3. Validate the staged config, swap it in, restart.
 asmp "/opt/macprovider/coordinator --config $cfg --config-overlay $staged --validate-config"
 cp -p "$live" "$live.pre-witness"
+stage=swapped
 mv -f "$staged" "$live"
 systemctl restart macprovider-coordinator
+sleep 10
+curl -sf http://127.0.0.1:8443/healthz > /dev/null
 WITNESS
 ```
 
-If step 1 or 2 fails, nothing was enabled: move the witness aside (`mv
-/var/lib/macprovider/trustpool-manifest-witness.json{,.unused-<UTC>}`) and find
-out why before retrying.
+The `EXIT` trap handles every failure inside the step. If the bootstrap,
+compare, `--validate-config` or backup fails, the key was never live: the trap
+moves the new witness aside, so a retry bootstraps again. If the swap, restart
+or health probe fails, the trap restores
+`/etc/macprovider/coordinator.pearl-overlays.yaml.pre-witness` and restarts.
+It leaves the witness in place, which is harmless while the key is absent.
+Move it aside (`mv
+/var/lib/macprovider/trustpool-manifest-witness.json{,.unused-<UTC>}`) before
+the next attempt. A failing bootstrap that refuses an existing file means an
+earlier attempt left one; move it aside the same way, then retry.
 
 **Mandatory post-restart check.** All three must hold:
 
@@ -208,12 +234,15 @@ out why before retrying.
    from `/root/witness-healthz-before.json` (after providers reconnect).
 
 If any fails, roll back under both locks: `mv
-/etc/macprovider/coordinator.pearl-overlays.yaml{.pre-witness,}`, restart, move
-the witness aside as above, and confirm pools route again.
+/etc/macprovider/coordinator.pearl-overlays.yaml{.pre-witness,}`, restart, and
+confirm pools route again. The witness can stay (unused without the key); move
+it aside before the next attempt.
 
 Limits. A manifest the coordinator accepts after the restart advances the
-witness; startup also moves a witness forward to the DB high-water, so a
-missing or rolled-back witness is the only thing it refuses. The coordinator
+witness after its DB commit; if that write fails, the admin call answers 503
+`manifest_witness_publish_failed` (the manifest is committed), and retrying
+the same `operation_id` or a restart moves the witness forward. Startup refuses
+a missing witness, or one ahead of or inconsistent with the DB. The coordinator
 process must be able to write the witness to advance it, so the `macprovider`
 account (or anything running as it) can delete the file and re-bootstrap from
 an older DB; this guard does not stop a compromised daemon or a host-level DB

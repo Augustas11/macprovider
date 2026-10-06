@@ -66,6 +66,10 @@ var (
 	ErrSignedControlProofPath      = errors.New("trustpool: signed control proof requires signed control path")
 	ErrDeliveryDrainPending        = errors.New("trustpool: delivery drain pending")
 	ErrRootCompromiseFreeze        = errors.New("trustpool: root compromise freeze")
+	// ErrManifestAcceptanceWitnessPublish means a manifest_accepted event
+	// committed but its witness could not be written afterwards. Retrying the
+	// same operation_id (or a restart) moves the witness forward.
+	ErrManifestAcceptanceWitnessPublish = errors.New("trustpool: manifest acceptance witness publish failed after commit")
 )
 
 type PromotionPreconditionError struct {
@@ -1959,6 +1963,9 @@ func (s *Store) appendValidatedEvent(ctx context.Context, e DurableEvent, allowS
 	var reconstructed *ReconstructedState
 	var committed DurableEvent
 	var applied bool
+	// pendingWitness is published only after COMMIT: a witness ahead of the
+	// DB wedges startup, while one behind it is moved forward at startup.
+	var pendingWitness map[string]ManifestAcceptanceProjection
 	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
 		reconcileWitness := func() error {
 			highWater, err := manifestAcceptanceHighWaterFromQueryer(ctx, conn)
@@ -2109,9 +2116,18 @@ func (s *Store) appendValidatedEvent(ctx context.Context, e DurableEvent, allowS
 		if err := verifyManifestAcceptanceState(ctx, conn, next); err != nil {
 			return err
 		}
-		if e.EventType == EventManifestAccepted {
-			if err := reconcileWitness(); err != nil {
+		if e.EventType == EventManifestAccepted && s.manifestWitnessPath != "" {
+			highWater, err := manifestAcceptanceHighWaterFromQueryer(ctx, conn)
+			if err != nil {
 				return err
+			}
+			if pendingWitness, err = s.planManifestAcceptanceWitness(highWater); err != nil {
+				return err
+			}
+			if beforeManifestAcceptanceCommit != nil {
+				if err := beforeManifestAcceptanceCommit(); err != nil {
+					return err
+				}
 			}
 		}
 		reconstructed = state
@@ -2121,6 +2137,11 @@ func (s *Store) appendValidatedEvent(ctx context.Context, e DurableEvent, allowS
 	})
 	if err != nil {
 		return nil, DurableEvent{}, false, err
+	}
+	if pendingWitness != nil {
+		if err := publishManifestAcceptanceWitness(s.manifestWitnessPath, pendingWitness); err != nil {
+			return reconstructed, committed, applied, fmt.Errorf("%w: operation %q: %v", ErrManifestAcceptanceWitnessPublish, committed.OperationID, err)
+		}
 	}
 	return reconstructed, committed, applied, nil
 }
