@@ -78,7 +78,7 @@ A coordinator deploy compares the tag's catalog with live (`compare-live`):
 
 ## Live on Pearl
 
-### Active rollout — 2026-10-06
+### Runtime rollout — 2026-10-06
 
 Owner: Codex privacy/Pearl handoff session (`codex/privacy-pearl-20261006`).
 Applied runtime identity: **v1.8.220**; CLI candidate 219 is already staged.
@@ -101,13 +101,27 @@ the old durable release record had no schema fingerprint. Gateway stopped at
 13:18:20Z (2m12s). Catalog and recommendation remain unchanged; no provider
 process was restarted and the concurrency-8 buyer runner remained active.
 
-Loaded privacy canaries do **not** yet prove buyer success: non-stream rejected
-after a 3-second capacity wait with `relay_blind_provider_unsupported`; stream
-waited 3 seconds and dispatched, but the 90-second client deadline produced
-`relay_blind_execution_uncertain`. Neither returned `privacy class satisfied`.
-This confirms capacity is no longer mislabeled as posture-stale, but does not
-close the loaded buyer privacy acceptance gate. A fresh-session, five-minute
-stream canary is pending. Batching remains off under the empty signed policy.
+Loaded privacy verification: a fresh-session stream canary with the normal
+five-minute client budget passed, printed **`privacy class satisfied`**, and
+returned `ready`, `finish_reason=stop`, and usage 20 prompt / 1 completion token.
+The durable reservation is `terminal / relay_blind_satisfied`; elapsed time was
+216 seconds (13:24:20Z–13:27:56Z), with dispatch at 13:24:21Z. The concurrency-8
+buyer runner remained active. This confirms successful privacy under load.
+Non-stream canaries hit the bounded capacity queue and correctly returned
+`relay_blind_provider_unsupported`, rather than posture-stale; non-stream
+success remains unproven. No free-slot observation was seen during a bounded
+20-observation follow-up, with the runner unchanged. An earlier stream with an artificially short
+90-second client budget timed out as `relay_blind_execution_uncertain` and
+was not replayed. Batching remains off under the empty signed policy.
+
+The updater's post-commit snapshot `quick_check` is still running after serving
+gates completed. It checks the static rollback snapshot, not the live DB; no
+passing result is claimed yet. Runtime health is green. Follow-ups for CLI
+overlay support and the public SPEC/Entry 249 operator-ID scrub are combined in
+[PR #1875](https://github.com/Augustas11/macprovider/pull/1875): targeted tests,
+spec index/governance, and all three full-diff audits passed (0 Critical/High/Medium).
+Required GitHub CI and independent PR review remain pending. This code is not
+in v1.8.220, so the deployed privacy CLI still needs the prepared effective YAML.
 
 Probed 2026-10-06 (`/healthz`). Older rollout narrative below is historical.
 
