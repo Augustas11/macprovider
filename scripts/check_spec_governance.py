@@ -171,6 +171,8 @@ TRUSTED_POOL_LAYER2_JOURNEY_ID = "JOURNEY-TRUSTED-POOL-LAYER2-MVP"
 # beta result is evidence-only. Its closed contract lives in
 # scripts/privacy_class_beta_journey_evidence.py.
 PRIVACY_CLASS_BETA_JOURNEY_ID = "JOURNEY-PRIVACY-CLASS-BETA"
+# SPEC-048 native-MTP journeys; contract in scripts/native_mtp_journey_evidence.py.
+NATIVE_MTP_JOURNEY_IDS = ("JOURNEY-NATIVE-MTP-SERVING", "JOURNEY-NATIVE-MTP-RELEASE")
 TRUSTED_POOL_LAYER2_EXECUTION_MODE = "isolated-candidate-trusted-pool-layer2-mvp"
 TRUSTED_POOL_LAYER2_ARTIFACT_ID = "redacted-trusted-pool-layer2"
 TRUSTED_POOL_LAYER2_STEP_ID_ORDER = (
@@ -3614,6 +3616,20 @@ def _privacy_class_beta_evidence_module() -> Any:
     return _PRIVACY_CLASS_BETA_EVIDENCE_MODULE
 
 
+def _native_mtp_evidence_module() -> Any:
+    """Load the native-MTP journey evidence contract lazily."""
+    scripts_dir = str(Path(__file__).resolve().parent)
+    inserted = scripts_dir not in sys.path
+    if inserted:
+        sys.path.insert(0, scripts_dir)
+    try:
+        import native_mtp_journey_evidence
+    finally:
+        if inserted:
+            sys.path.remove(scripts_dir)
+    return native_mtp_journey_evidence
+
+
 def _byom_evidence_module() -> Any:
     """Load the BYOM evidence contract module lazily.
 
@@ -4318,6 +4334,16 @@ def _validate_signed_journey_result(
         # step and observation, and require the signed payload to equal the
         # builder projection, so a hand-authored payload cannot overclaim.
         for error in _privacy_class_beta_evidence_module().validate_signed_payload(
+            root,
+            signed,
+            requirement_id,
+            [item for item in journeys if isinstance(item, str)],
+        ):
+            result.error(f"{location}.signed", error)
+    if journey_id in NATIVE_MTP_JOURNEY_IDS:
+        # Same posture: reopen the committed evidence and its bundle, recompute
+        # every digest and observation, and require the builder projection.
+        for error in _native_mtp_evidence_module().validate_signed_payload(
             root,
             signed,
             requirement_id,
