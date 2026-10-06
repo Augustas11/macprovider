@@ -21,7 +21,7 @@ import sys
 import tempfile
 import types
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -94,6 +94,21 @@ TIER2_BOUND_LEDGER_FEEDS = LEGACY_LEDGER_FEEDS | {TIER2_CATALOG_FEED_NAME}
 RATE_CARD_BOUND_LEDGER_FEEDS = TIER2_BOUND_LEDGER_FEEDS | {RATE_CARD_FEED_NAME}
 CB_POLICY_BOUND_LEDGER_FEEDS = RATE_CARD_BOUND_LEDGER_FEEDS | {CB_POLICY_FEED_NAME}
 ARTIFACT_BOUND_LEDGER_FEEDS = CB_POLICY_BOUND_LEDGER_FEEDS | {ARTIFACT_FEED_NAME}
+# SPEC-023 §12.5 (R024): the native-MTP admission sidecar is a ledger-bound
+# release feed. Its companion files (projection manifest, signed challenge
+# bank) are bound by digest inside every sidecar entry, not as feeds.
+LEDGER_SCHEMA_V4 = "macprovider.autotune-release-ledger.v4"
+NATIVE_MTP_ADMISSION_FEED_NAME = "native-mtp-admission.json"
+NATIVE_MTP_MANIFEST_NAME = "native-mtp-artifact-manifest.json"
+NATIVE_MTP_BANK_NAME = "native-mtp-selftest-bank.json"
+NATIVE_MTP_TUPLE_INPUT_PATH = CATALOG_DIR / "native-mtp-admission-tuple.json"
+NATIVE_MTP_RELEASE_INPUT_PATH = CATALOG_DIR / "native-mtp-admission-release.json"
+NATIVE_MTP_BOUND_LEDGER_FEEDS = ARTIFACT_BOUND_LEDGER_FEEDS | {NATIVE_MTP_ADMISSION_FEED_NAME}
+# Every feed set that carries the artifact feed (and so artifact_bindings).
+ARTIFACT_BEARING_FEED_SETS = (ARTIFACT_BOUND_LEDGER_FEEDS, NATIVE_MTP_BOUND_LEDGER_FEEDS)
+NATIVE_MTP_SIDECAR_GENERATOR_PATH = ROOT / "scripts" / "native_mtp_admission_sidecar.py"
+# Below SPEC-023's 90-day sidecar maximum, so a weekly renewal never lapses.
+NATIVE_MTP_SIDECAR_VALIDITY_DAYS = 89
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 ARTIFACT_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -2288,7 +2303,15 @@ def artifact_bound_row(record: object) -> bool:
     return (
         isinstance(record, dict)
         and isinstance(record.get("feeds"), dict)
-        and set(record["feeds"]) == ARTIFACT_BOUND_LEDGER_FEEDS
+        and set(record["feeds"]) in ARTIFACT_BEARING_FEED_SETS
+    )
+
+
+def native_mtp_bound_row(record: object) -> bool:
+    return (
+        isinstance(record, dict)
+        and isinstance(record.get("feeds"), dict)
+        and set(record["feeds"]) == NATIVE_MTP_BOUND_LEDGER_FEEDS
     )
 
 
@@ -2379,10 +2402,11 @@ def load_previous_release(
             f"release is {expected_release_id!r}"
         )
     feeds = previous_manifest.get("feeds")
-    if not isinstance(feeds, dict) or set(feeds) != ARTIFACT_BOUND_LEDGER_FEEDS:
+    if not isinstance(feeds, dict) or set(feeds) not in ARTIFACT_BEARING_FEED_SETS:
         fail(
             f"--previous-release-dir {directory}: release.json must bind the artifact-bound "
-            f"six-feed set {sorted(ARTIFACT_BOUND_LEDGER_FEEDS)}"
+            f"six-feed set {sorted(ARTIFACT_BOUND_LEDGER_FEEDS)} (or it plus "
+            f"{NATIVE_MTP_ADMISSION_FEED_NAME})"
         )
     if feeds != record["feeds"]:
         fail(
@@ -2491,6 +2515,101 @@ def require_no_artifact_rebinding(
             )
 
 
+def load_native_mtp_sidecar_generator():
+    source = NATIVE_MTP_SIDECAR_GENERATOR_PATH.read_bytes()
+    module = types.ModuleType("native_mtp_admission_sidecar")
+    module.__file__ = str(NATIVE_MTP_SIDECAR_GENERATOR_PATH)
+    exec(compile(source, str(NATIVE_MTP_SIDECAR_GENERATOR_PATH), "exec"), module.__dict__)
+    return module
+
+
+def validate_native_mtp_admission(
+    sidecar: bytes,
+    manifest_bytes: bytes,
+    bank: bytes,
+    candidate_obj: dict,
+    artifact_obj: dict | None,
+    signer_key_id: str | None,
+    label: str = NATIVE_MTP_ADMISSION_FEED_NAME,
+) -> dict:
+    """SPEC-023 §12.5: the closed sidecar grammar (the generator's validator),
+    bound to this release, its signer, its verified artifacts, and the exact
+    projection-manifest and challenge-bank bytes every entry names."""
+    generator = load_native_mtp_sidecar_generator()
+    try:
+        body = generator.validate_sidecar(generator.strict_json_loads(sidecar.decode("utf-8")))
+    except (generator.SidecarError, UnicodeDecodeError) as error:
+        fail(f"{label}: {error}")
+    if generator.canonical_bytes(body) != sidecar:
+        fail(f"{label}: not canonical bytes")
+    if artifact_obj is None:
+        fail(f"{label}: a native-MTP admission requires the artifact-bound feed set")
+    if body["release_id"] != candidate_obj["version"]:
+        fail(f"{label}: release_id {body['release_id']!r} is not this release {candidate_obj['version']!r}")
+    if signer_key_id is not None and body["signer_key_id"] != signer_key_id:
+        fail(f"{label}: signer_key_id {body['signer_key_id']!r} is not the release signer {signer_key_id!r}")
+    verified = {
+        (model_key, artifact_id): artifact
+        for model_key, model in artifact_obj["models"].items()
+        for artifact_id, artifact in model["artifacts"].items()
+    }
+    for index, entry in enumerate(body["entries"]):
+        entry_label = f"{label} entries[{index}]"
+        artifact = verified.get((entry["model_key"], entry["artifact_id"]))
+        if (
+            artifact is None
+            or artifact.get("verification_status") != "verified"
+            or artifact["hash_algorithm"] != entry["hash_algorithm"]
+            or artifact["hash"] != entry["artifact_hash"]
+        ):
+            fail(f"{entry_label}: does not name a verified artifact of this release's artifact feed")
+        if entry["artifact_manifest_sha256"] != sha256(manifest_bytes):
+            fail(f"{entry_label}: artifact_manifest_sha256 does not match {NATIVE_MTP_MANIFEST_NAME}")
+        if entry["challenge_bank_sha256"] != sha256(bank):
+            fail(f"{entry_label}: challenge_bank_sha256 does not match {NATIVE_MTP_BANK_NAME}")
+    return body
+
+
+def resolve_native_mtp_admission(
+    candidate_obj: dict,
+    artifact_obj: dict | None,
+    signer_key_id: str | None,
+) -> tuple[bytes, dict, bytes, bytes] | None:
+    """Build the release's native-MTP admission sidecar from the committed
+    tuple input and the release input. Absent tuple input: no admission."""
+    tuple_present = NATIVE_MTP_TUPLE_INPUT_PATH.exists()
+    if tuple_present != NATIVE_MTP_RELEASE_INPUT_PATH.exists():
+        fail(
+            f"generate: {NATIVE_MTP_TUPLE_INPUT_PATH.name} and {NATIVE_MTP_RELEASE_INPUT_PATH.name} "
+            "must be committed together"
+        )
+    if not tuple_present:
+        return None
+    generator = load_native_mtp_sidecar_generator()
+    try:
+        sidecar = generator.build(
+            generator.strict_json_loads(NATIVE_MTP_TUPLE_INPUT_PATH.read_text("utf-8")),
+            generator.strict_json_loads(NATIVE_MTP_RELEASE_INPUT_PATH.read_text("utf-8")),
+        )
+    except generator.SidecarError as error:
+        fail(f"generate: native-MTP admission: {error}")
+    manifest_bytes = (CATALOG_DIR / NATIVE_MTP_MANIFEST_NAME).read_bytes()
+    bank = (CATALOG_DIR / NATIVE_MTP_BANK_NAME).read_bytes()
+    body = validate_native_mtp_admission(sidecar, manifest_bytes, bank, candidate_obj, artifact_obj, signer_key_id)
+    return sidecar, body, manifest_bytes, bank
+
+
+def verify_native_mtp_bank_signature(directory: pathlib.Path, bank: bytes, body: dict, keys: dict[str, bytes]) -> None:
+    sidecar_path = directory / f"{NATIVE_MTP_BANK_NAME}.sig"
+    key_id, signature = parse_sidecar(sidecar_path.read_bytes(), sidecar_path.name)
+    if key_id != body["challenge_bank_signer_key_id"]:
+        fail(f"{sidecar_path.name}: key_id {key_id!r} is not the sidecar challenge_bank_signer_key_id")
+    public_key = keys.get(key_id)
+    if public_key is None:
+        fail(f"{sidecar_path.name}: unknown or retired key_id {key_id}")
+    verify_ed25519(public_key, signature, bank, sidecar_path.name)
+
+
 def manifest(
     candidate: bytes,
     demand: bytes,
@@ -2507,12 +2626,18 @@ def manifest(
     tier2_signer_key_id: str | None = None,
     artifacts: bytes | None = None,
     artifact_obj: dict | None = None,
+    native_mtp: bytes | None = None,
+    native_mtp_obj: dict | None = None,
 ) -> bytes:
     validate_release_inputs(candidate_obj, demand_obj, rate_card_obj)
     validate_cb_policy(cb_policy, candidate, candidate_obj)
     static_feed_names = ["autotune-candidates.json", "demand-rank.json", RATE_CARD_FEED_NAME, CB_POLICY_FEED_NAME]
     if artifacts is not None:
         static_feed_names.append(ARTIFACT_FEED_NAME)
+    if native_mtp is not None:
+        if artifacts is None or native_mtp_obj is None:
+            fail("manifest: a native-MTP admission requires the artifact feed and its parsed body")
+        static_feed_names.append(NATIVE_MTP_ADMISSION_FEED_NAME)
     signer_ids = {}
     if signer_key_id is not None:
         signer_ids = {name: signer_key_id for name in static_feed_names}
@@ -2577,6 +2702,19 @@ def manifest(
             "sha256": sha256(artifacts), "bytes": len(artifacts), "version": artifact_obj["version"],
             "signer_key_id": signer_ids.get(ARTIFACT_FEED_NAME),
         }
+    if native_mtp is not None:
+        # SPEC-023 §12.5: the sidecar signer equals the candidate signer and
+        # the body's own signer_key_id; version is the release id.
+        native_signer = signer_ids.get(NATIVE_MTP_ADMISSION_FEED_NAME)
+        if native_signer is None:
+            fail("manifest: the native-MTP admission sidecar must be signed before binding")
+        require_artifact_signer_equality(native_signer, signer_ids.get("autotune-candidates.json"), "manifest")
+        if native_mtp_obj["signer_key_id"] != native_signer:
+            fail("manifest: native-MTP admission body signer_key_id differs from its signature key_id")
+        feeds[NATIVE_MTP_ADMISSION_FEED_NAME] = {
+            "sha256": sha256(native_mtp), "bytes": len(native_mtp), "version": native_mtp_obj["release_id"],
+            "signer_key_id": native_signer,
+        }
     value = {
         "schema_version": "macprovider.autotune-release.v1",
         "release_id": candidate_obj["version"],
@@ -2609,7 +2747,7 @@ def release_record(
         "policy_version": value["policy_version"],
         "feeds": value["feeds"],
     }
-    artifact_bound = set(value["feeds"]) == ARTIFACT_BOUND_LEDGER_FEEDS
+    artifact_bound = set(value["feeds"]) in ARTIFACT_BEARING_FEED_SETS
     if artifact_bound != (bindings is not None):
         fail(
             "release manifest: artifact_bindings are REQUIRED exactly when the release "
@@ -2620,6 +2758,9 @@ def release_record(
         # {generated_at, policy_version, feeds, artifact_bindings, intake_decision_sha256}.
         record["artifact_bindings"] = bindings
         record["intake_decision_sha256"] = intake_decision_sha256
+    if set(value["feeds"]) == NATIVE_MTP_BOUND_LEDGER_FEEDS:
+        # SPEC-023 §12.5: a v4 row adds the sidecar feed record's SHA-256.
+        record["native_mtp_admission_sha256"] = value["feeds"][NATIVE_MTP_ADMISSION_FEED_NAME]["sha256"]
     return release_id, record
 
 
@@ -2688,11 +2829,11 @@ def validate_release_ledger(data: bytes, label: str = "release ledger") -> dict[
     if schema_version == "macprovider.autotune-release-ledger.v1":
         exact_keys(value, {"schema_version", "releases"}, {"schema_version", "releases"}, label)
         value = {"releases": value["releases"], "tombstones": {}}
-    elif schema_version in (LEDGER_SCHEMA_V2, LEDGER_SCHEMA_V3):
+    elif schema_version in (LEDGER_SCHEMA_V2, LEDGER_SCHEMA_V3, LEDGER_SCHEMA_V4):
         exact_keys(value, {"schema_version", "releases", "tombstones"}, {"schema_version", "releases", "tombstones"}, label)
     else:
         fail(f"{label}: invalid schema")
-    document_schema = LEDGER_SCHEMA_V3 if schema_version == LEDGER_SCHEMA_V3 else LEDGER_SCHEMA_V2
+    document_schema = schema_version if schema_version in (LEDGER_SCHEMA_V3, LEDGER_SCHEMA_V4) else LEDGER_SCHEMA_V2
     if not isinstance(value["releases"], dict) or not isinstance(value["tombstones"], dict):
         fail(f"{label}: releases and tombstones must be objects")
     overlapping_release_ids = set(value["releases"]).intersection(value["tombstones"])
@@ -2708,13 +2849,21 @@ def validate_release_ledger(data: bytes, label: str = "release ledger") -> dict[
         # intake_decision_sha256 are REQUIRED exactly when the row's feed-name set
         # is the artifact-bound six-feed set, and PROHIBITED otherwise. A row
         # written under v1 or v2 keeps its exact three-key shape forever.
-        artifact_bound = isinstance(record.get("feeds"), dict) and set(record["feeds"]) == ARTIFACT_BOUND_LEDGER_FEEDS
+        artifact_bound = isinstance(record.get("feeds"), dict) and set(record["feeds"]) in ARTIFACT_BEARING_FEED_SETS
+        native_bound = native_mtp_bound_row(record)
         row_fields = artifact_row_fields if artifact_bound else base_row_fields
+        if native_bound:
+            row_fields = row_fields | {"native_mtp_admission_sha256"}
         exact_keys(record, row_fields, row_fields, f"{label} release {release_id}")
-        if artifact_bound and document_schema != LEDGER_SCHEMA_V3:
+        if artifact_bound and document_schema not in (LEDGER_SCHEMA_V3, LEDGER_SCHEMA_V4):
             fail(
                 f"{label}: release {release_id!r} binds the artifact-bound feed set but the "
                 f"ledger is serialized as {document_schema}; it must be {LEDGER_SCHEMA_V3}"
+            )
+        if native_bound and document_schema != LEDGER_SCHEMA_V4:
+            fail(
+                f"{label}: release {release_id!r} binds {NATIVE_MTP_ADMISSION_FEED_NAME} but the "
+                f"ledger is serialized as {document_schema}; it must be {LEDGER_SCHEMA_V4}"
             )
         if not isinstance(record["generated_at"], str) or (record["policy_version"] is not None and not isinstance(record["policy_version"], str)) or not isinstance(record["feeds"], dict):
             fail(f"{label}: invalid release entry {release_id!r}")
@@ -2725,14 +2874,15 @@ def validate_release_ledger(data: bytes, label: str = "release ledger") -> dict[
         # releases bind the signed CB policy as the fifth immutable SPEC-023
         # input, and artifact-bound releases add autotune-artifacts.json as the
         # sixth.
-        if feed_names not in (LEGACY_LEDGER_FEEDS, TIER2_BOUND_LEDGER_FEEDS, RATE_CARD_BOUND_LEDGER_FEEDS, CB_POLICY_BOUND_LEDGER_FEEDS, ARTIFACT_BOUND_LEDGER_FEEDS):
+        if feed_names not in (LEGACY_LEDGER_FEEDS, TIER2_BOUND_LEDGER_FEEDS, RATE_CARD_BOUND_LEDGER_FEEDS, CB_POLICY_BOUND_LEDGER_FEEDS, ARTIFACT_BOUND_LEDGER_FEEDS, NATIVE_MTP_BOUND_LEDGER_FEEDS):
             fail(
                 f"{label}: release {release_id!r} feeds must be exactly "
                 f"{sorted(LEGACY_LEDGER_FEEDS)} (historical) or "
                 f"{sorted(TIER2_BOUND_LEDGER_FEEDS)} (Tier-2 bound) or "
                 f"{sorted(RATE_CARD_BOUND_LEDGER_FEEDS)} (rate-card bound) or "
                 f"{sorted(CB_POLICY_BOUND_LEDGER_FEEDS)} (CB-policy bound) or "
-                f"{sorted(ARTIFACT_BOUND_LEDGER_FEEDS)} (artifact bound)"
+                f"{sorted(ARTIFACT_BOUND_LEDGER_FEEDS)} (artifact bound) or "
+                f"{sorted(NATIVE_MTP_BOUND_LEDGER_FEEDS)} (native-MTP bound)"
             )
         if artifact_bound:
             validate_artifact_binding_rows(record["artifact_bindings"], f"{label} release {release_id}")
@@ -2745,7 +2895,7 @@ def validate_release_ledger(data: bytes, label: str = "release ledger") -> dict[
             # content identities, not the autotune release train (see manifest()).
             if feed_name not in {TIER2_CATALOG_FEED_NAME, RATE_CARD_FEED_NAME} and feed["version"] != release_id:
                 fail(f"{label}: feed version does not match release ID {release_id!r}")
-        if feed_names in (CB_POLICY_BOUND_LEDGER_FEEDS, ARTIFACT_BOUND_LEDGER_FEEDS):
+        if feed_names in (CB_POLICY_BOUND_LEDGER_FEEDS, ARTIFACT_BOUND_LEDGER_FEEDS, NATIVE_MTP_BOUND_LEDGER_FEEDS):
             require_artifact_signer_equality(
                 record["feeds"][CB_POLICY_FEED_NAME]["signer_key_id"],
                 record["feeds"]["autotune-candidates.json"]["signer_key_id"],
@@ -2758,6 +2908,16 @@ def validate_release_ledger(data: bytes, label: str = "release ledger") -> dict[
                 record["feeds"]["autotune-candidates.json"]["signer_key_id"],
                 f"{label} release {release_id}",
             )
+        if native_bound:
+            # SPEC-023 §12.5: the sidecar signer equals the candidate signer,
+            # and the row digest equals the sidecar feed record's SHA-256.
+            require_artifact_signer_equality(
+                record["feeds"][NATIVE_MTP_ADMISSION_FEED_NAME]["signer_key_id"],
+                record["feeds"]["autotune-candidates.json"]["signer_key_id"],
+                f"{label} release {release_id}",
+            )
+            if record["native_mtp_admission_sha256"] != record["feeds"][NATIVE_MTP_ADMISSION_FEED_NAME]["sha256"]:
+                fail(f"{label}: release {release_id!r} native_mtp_admission_sha256 does not equal its feed record")
     # SPEC-023 §3.7.4 across the WHOLE document, not only within one row: an
     # `artifact_id` may not be rebound to different bytes in a later release
     # either. Enforced here, in the shared ledger validator, so `verify` rejects a
@@ -2910,10 +3070,15 @@ def require_ledger_evolution(base: dict, current: dict) -> None:
     # artifact-bound feed set the ledger is serialized as v3 forever, and every
     # NEW release row must itself be artifact-bound. A later ledger serialized as
     # v2, or a later release recorded without artifact_bindings, is a downgrade.
-    if base.get("schema_version") == LEDGER_SCHEMA_V3 and current.get("schema_version") != LEDGER_SCHEMA_V3:
+    if base.get("schema_version") == LEDGER_SCHEMA_V3 and current.get("schema_version") not in (LEDGER_SCHEMA_V3, LEDGER_SCHEMA_V4):
         fail(
             "release ledger: an artifact-bound ledger may not be downgraded from "
             f"{LEDGER_SCHEMA_V3} to {current.get('schema_version')}"
+        )
+    if base.get("schema_version") == LEDGER_SCHEMA_V4 and current.get("schema_version") != LEDGER_SCHEMA_V4:
+        fail(
+            "release ledger: a native-MTP-bound ledger may not be downgraded from "
+            f"{LEDGER_SCHEMA_V4} to {current.get('schema_version')}"
         )
     # Monotonicity over the COMPLETE current ledger in chronological order, not
     # only over rows the base already had: a single delta can introduce BOTH the
@@ -2925,7 +3090,17 @@ def require_ledger_evolution(base: dict, current: dict) -> None:
         key=lambda item: release_order_key(item[0], item[1], "release ledger"),
     )
     seen_activation: str | None = None
+    seen_native: str | None = None
     for release_id, record in ordered:
+        # SPEC-023 §12.5: after the first native-MTP-bound release a later
+        # release cannot drop the sidecar feed.
+        if native_mtp_bound_row(record):
+            seen_native = seen_native or release_id
+        elif seen_native is not None:
+            fail(
+                f"release ledger: release {release_id!r} drops {NATIVE_MTP_ADMISSION_FEED_NAME} after "
+                f"the native-MTP-bound release {seen_native!r}; it is mandatory from that release forward"
+            )
         if artifact_bound_row(record):
             if seen_activation is None:
                 seen_activation = release_id
@@ -2937,10 +3112,8 @@ def require_ledger_evolution(base: dict, current: dict) -> None:
                 f"release {seen_activation!r}; {sorted(ARTIFACT_BOUND_LEDGER_FEEDS)} is "
                 "mandatory from that release forward"
             )
-    activated = any(
-        set(record.get("feeds", {})) == ARTIFACT_BOUND_LEDGER_FEEDS
-        for record in base["releases"].values()
-    )
+    activated = any(artifact_bound_row(record) for record in base["releases"].values())
+    native_activated = any(native_mtp_bound_row(record) for record in base["releases"].values())
     for release_id, base_record in base["releases"].items():
         if release_id not in current["releases"]:
             fail(f"release ledger: published release {release_id!r} was removed")
@@ -2960,13 +3133,18 @@ def require_ledger_evolution(base: dict, current: dict) -> None:
         if release_id in base["releases"]:
             continue
         feed_names = set(current_record["feeds"])
-        if activated and feed_names != ARTIFACT_BOUND_LEDGER_FEEDS:
+        if native_activated and feed_names != NATIVE_MTP_BOUND_LEDGER_FEEDS:
+            fail(
+                f"release ledger: new release {release_id!r} drops {NATIVE_MTP_ADMISSION_FEED_NAME} "
+                "after the native-MTP-bound release"
+            )
+        if activated and feed_names not in ARTIFACT_BEARING_FEED_SETS:
             fail(
                 f"release ledger: new release {release_id!r} reverts to "
                 f"{sorted(feed_names)} after the artifact-bound activation release; "
                 f"{sorted(ARTIFACT_BOUND_LEDGER_FEEDS)} is mandatory from that release forward"
             )
-        if feed_names not in (CB_POLICY_BOUND_LEDGER_FEEDS, ARTIFACT_BOUND_LEDGER_FEEDS):
+        if feed_names not in (CB_POLICY_BOUND_LEDGER_FEEDS, ARTIFACT_BOUND_LEDGER_FEEDS, NATIVE_MTP_BOUND_LEDGER_FEEDS):
             fail(
                 f"release ledger: new release {release_id!r} is missing mandatory "
                 f"{sorted(CB_POLICY_BOUND_LEDGER_FEEDS)} feed membership"
@@ -3661,8 +3839,10 @@ def updated_release_ledger(
     ):
         fail(f"release ledger: release ID {release_id!r} is already bound to different content")
     schema_version = current["schema_version"]
-    if bindings is not None:
+    if bindings is not None and schema_version != LEDGER_SCHEMA_V4:
         schema_version = LEDGER_SCHEMA_V3
+    if "native_mtp_admission_sha256" in record:
+        schema_version = LEDGER_SCHEMA_V4
     updated = {
         "schema_version": schema_version,
         "releases": dict(current["releases"]),
@@ -4877,6 +5057,8 @@ def generate(
         fail(f"cannot generate for unknown or retired signer key ID: {signer_key_id}")
     cb_policy = default_cb_policy(candidate, candidate_obj, signer_key_id=signer_key_id)
     cb_policy_obj = validate_cb_policy(cb_policy, candidate, candidate_obj, signer_key_id=signer_key_id)
+    native_mtp_admission = resolve_native_mtp_admission(candidate_obj, artifact_obj, signer_key_id)
+    native_mtp, native_mtp_obj, native_mtp_manifest, native_mtp_bank = native_mtp_admission or (None, None, None, None)
     tier2, tier2_obj, tier2_signer_key_id = require_tier2_catalog()
     check_tier2_binding(candidate, tier2)
     # Compute every derived artifact before mutating on-disk release state so a
@@ -4885,6 +5067,7 @@ def generate(
         candidate, demand, rate_card, cb_policy, candidate_obj, demand_obj, rate_card_obj, cb_policy_obj,
         signer_key_id=signer_key_id, tier2=tier2, tier2_obj=tier2_obj,
         tier2_signer_key_id=tier2_signer_key_id, artifacts=artifacts, artifact_obj=artifact_obj,
+        native_mtp=native_mtp, native_mtp_obj=native_mtp_obj,
     )
     bindings = None
     intake_digest = intake_decision_digest()
@@ -4923,6 +5106,13 @@ def generate(
     if artifacts is not None:
         ARTIFACT_FEED_PATH.write_bytes(artifacts)
         (STATIC_DIR / ARTIFACT_FEED_NAME).write_bytes(artifacts)
+    if native_mtp is not None:
+        # The sidecar is generated; the manifest and bank are committed inputs
+        # published beside it (SPEC-023 §12.5 Stage A, external assets).
+        (CATALOG_DIR / NATIVE_MTP_ADMISSION_FEED_NAME).write_bytes(native_mtp)
+        (STATIC_DIR / NATIVE_MTP_ADMISSION_FEED_NAME).write_bytes(native_mtp)
+        (STATIC_DIR / NATIVE_MTP_MANIFEST_NAME).write_bytes(native_mtp_manifest)
+        (STATIC_DIR / NATIVE_MTP_BANK_NAME).write_bytes(native_mtp_bank)
     SWIFT_GENERATED.write_text(swift_text)
     MANIFEST_PATH.write_bytes(manifest_bytes)
     LEDGER_PATH.write_bytes(next_ledger)
@@ -4994,9 +5184,21 @@ def restamp(release_id: str, generated_at: str) -> None:
         value["generated_at"] = generated_at
         rate_card_path.write_bytes(canonical_bytes(value))
         restamped_rate_card = RATE_CARD_FEED_NAME
+    native_note = ""
+    if NATIVE_MTP_RELEASE_INPUT_PATH.exists():
+        # SPEC-023 §12.5 (G4): the admission sidecar binds this release_id and
+        # expires within 90 days, so a renewal re-binds it to the new release
+        # and restarts its window. Every tuple and binary field is unchanged.
+        native = strict_json(NATIVE_MTP_RELEASE_INPUT_PATH.read_bytes(), NATIVE_MTP_RELEASE_INPUT_PATH.name)
+        issued = parse_timestamp(generated_at, "restamp --generated-at").astimezone(timezone.utc)
+        native["release_id"] = release_id
+        native["issued_at"] = issued.strftime("%Y-%m-%dT%H:%M:%SZ")
+        native["expires_at"] = (issued + timedelta(days=NATIVE_MTP_SIDECAR_VALIDITY_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        NATIVE_MTP_RELEASE_INPUT_PATH.write_text(json.dumps(native, indent=2, sort_keys=True) + "\n")
+        native_note = f"; {NATIVE_MTP_RELEASE_INPUT_PATH.name} re-bound"
     print(
         f"catalog-release: re-stamped candidate/demand version={release_id} "
-        f"generated_at={generated_at} ({restamped_rate_card} date only)"
+        f"generated_at={generated_at} ({restamped_rate_card} date only){native_note}"
     )
 
 
@@ -5103,10 +5305,32 @@ def verify(previous_release_dir: pathlib.Path | None = None, intake_audit_dir: p
         fail(f"generated drift: {SWIFT_GENERATED}")
     tier2, tier2_obj, tier2_signer_key_id = require_tier2_catalog()
     check_tier2_binding(candidate, tier2)
+    native_mtp_admission = resolve_native_mtp_admission(candidate_obj, artifact_obj, None)
+    native_mtp = native_mtp_obj = native_mtp_bank = None
+    native_paths = (
+        STATIC_DIR / NATIVE_MTP_ADMISSION_FEED_NAME, STATIC_DIR / f"{NATIVE_MTP_ADMISSION_FEED_NAME}.sig",
+        STATIC_DIR / NATIVE_MTP_MANIFEST_NAME, STATIC_DIR / NATIVE_MTP_BANK_NAME, STATIC_DIR / f"{NATIVE_MTP_BANK_NAME}.sig",
+        CATALOG_DIR / NATIVE_MTP_ADMISSION_FEED_NAME,
+    )
+    if native_mtp_admission is None:
+        orphaned = [str(path) for path in native_paths if path.exists()]
+        if orphaned:
+            fail(f"{', '.join(orphaned)} exists but this release binds no native-MTP admission")
+    else:
+        native_mtp, native_mtp_obj, native_mtp_manifest, native_mtp_bank = native_mtp_admission
+        for path, body in (
+            (CATALOG_DIR / NATIVE_MTP_ADMISSION_FEED_NAME, native_mtp),
+            (STATIC_DIR / NATIVE_MTP_ADMISSION_FEED_NAME, native_mtp),
+            (STATIC_DIR / NATIVE_MTP_MANIFEST_NAME, native_mtp_manifest),
+            (STATIC_DIR / NATIVE_MTP_BANK_NAME, native_mtp_bank),
+        ):
+            if not path.exists() or path.read_bytes() != body:
+                fail(f"generated drift: {path}")
     expected_manifest = manifest(
         candidate, demand, rate_card, cb_policy, candidate_obj, demand_obj, rate_card_obj, cb_policy_obj,
         tier2=tier2, tier2_obj=tier2_obj, tier2_signer_key_id=tier2_signer_key_id,
         artifacts=artifacts, artifact_obj=artifact_obj,
+        native_mtp=native_mtp, native_mtp_obj=native_mtp_obj,
     )
     if MANIFEST_PATH.read_bytes() != expected_manifest:
         fail(f"generated drift: {MANIFEST_PATH}")
@@ -5177,7 +5401,11 @@ def verify(previous_release_dir: pathlib.Path | None = None, intake_audit_dir: p
                 "pass --previous-release-dir <previous signed release directory> to check it"
             )
     keys = keyring()
-    for path, body in expected.items():
+    signed = dict(expected)
+    if native_mtp is not None:
+        signed[STATIC_DIR / NATIVE_MTP_ADMISSION_FEED_NAME] = native_mtp
+        verify_native_mtp_bank_signature(STATIC_DIR, native_mtp_bank, native_mtp_obj, keys)
+    for path, body in signed.items():
         sidecar_path = pathlib.Path(str(path) + ".sig")
         key_id, signature = parse_sidecar(sidecar_path.read_bytes(), sidecar_path.name)
         public_key = keys.get(key_id)
@@ -5237,14 +5465,30 @@ def verify_directory(
             fail("release directory artifact feed is not deterministic canonical bytes")
         require_recommendable_rate_rows(candidate_obj, rate_card_obj)
         signed_feeds.append((artifact_path, artifacts))
+    native_mtp_path = directory / NATIVE_MTP_ADMISSION_FEED_NAME
+    native_mtp = native_mtp_obj = native_mtp_bank = None
+    if native_mtp_path.exists():
+        for name in (NATIVE_MTP_MANIFEST_NAME, NATIVE_MTP_BANK_NAME, f"{NATIVE_MTP_BANK_NAME}.sig"):
+            if not (directory / name).exists():
+                fail(f"release directory binds {NATIVE_MTP_ADMISSION_FEED_NAME} but is missing {name}")
+        native_mtp = native_mtp_path.read_bytes()
+        native_mtp_bank = (directory / NATIVE_MTP_BANK_NAME).read_bytes()
+        native_mtp_obj = validate_native_mtp_admission(
+            native_mtp, (directory / NATIVE_MTP_MANIFEST_NAME).read_bytes(), native_mtp_bank,
+            candidate_obj, artifact_obj, None,
+        )
+        signed_feeds.append((native_mtp_path, native_mtp))
     expected_manifest = manifest(
         candidate, demand, rate_card, cb_policy, candidate_obj, demand_obj, rate_card_obj, cb_policy_obj, directory,
         tier2=tier2, tier2_obj=tier2_obj, tier2_signer_key_id=tier2_signer_key_id,
         artifacts=artifacts, artifact_obj=artifact_obj,
+        native_mtp=native_mtp, native_mtp_obj=native_mtp_obj,
     )
     if (directory / "release.json").read_bytes() != expected_manifest:
         fail("release directory manifest does not bind the feed bytes")
     keys = keyring(directory / "trusted-keys.json")
+    if native_mtp is not None:
+        verify_native_mtp_bank_signature(directory, native_mtp_bank, native_mtp_obj, keys)
     for path, body in signed_feeds:
         sidecar_path = pathlib.Path(str(path) + ".sig")
         key_id, signature = parse_sidecar(sidecar_path.read_bytes(), sidecar_path.name)
@@ -5310,6 +5554,9 @@ RENEWAL_CONTINUITY_FEEDS = ("autotune-candidates.json", "demand-rank.json", RATE
 RENEWAL_ARTIFACT_RELEASE_FIELDS = ("version", "release_id", "generated_at", "candidate_catalog_sha256")
 
 
+RENEWAL_NATIVE_MTP_RELEASE_FIELDS = ("release_id", "issued_at", "expires_at")
+
+
 def feed_continuity_drift(incoming: pathlib.Path, live: pathlib.Path) -> list[str]:
     """Freshness-only guard for `renew-autotune-static-feed.sh` (dates-only delta).
 
@@ -5349,6 +5596,19 @@ def feed_continuity_drift(incoming: pathlib.Path, live: pathlib.Path) -> list[st
         live_feed, RENEWAL_ARTIFACT_RELEASE_FIELDS
     ):
         drift.append(ARTIFACT_FEED_NAME)
+    # SPEC-023 §12.5 (G4): a renewal re-binds the native-MTP sidecar to the
+    # new release and restarts its window; presence, every entry, the
+    # projection manifest, and the challenge bank must be unchanged.
+    incoming_native = incoming / NATIVE_MTP_ADMISSION_FEED_NAME
+    live_native = live / NATIVE_MTP_ADMISSION_FEED_NAME
+    if incoming_native.exists() != live_native.exists():
+        drift.append(NATIVE_MTP_ADMISSION_FEED_NAME)
+    elif incoming_native.exists():
+        if stripped(incoming_native, RENEWAL_NATIVE_MTP_RELEASE_FIELDS) != stripped(live_native, RENEWAL_NATIVE_MTP_RELEASE_FIELDS):
+            drift.append(NATIVE_MTP_ADMISSION_FEED_NAME)
+        for name in (NATIVE_MTP_MANIFEST_NAME, NATIVE_MTP_BANK_NAME):
+            if not (incoming / name).exists() or not (live / name).exists() or (incoming / name).read_bytes() != (live / name).read_bytes():
+                drift.append(name)
     if _tier2_content(incoming)[0] != _tier2_content(live)[0]:
         drift.append(TIER2_CATALOG_FEED_NAME)
     if (incoming / "trusted-keys.json").read_bytes() != (live / "trusted-keys.json").read_bytes():
@@ -5384,6 +5644,7 @@ _RELEASE_FEED_DERIVED_FIELDS = {
     CB_POLICY_FEED_NAME: ("version", "sha256", "bytes"),
     TIER2_CATALOG_FEED_NAME: ("version", "sha256", "bytes"),
     ARTIFACT_FEED_NAME: ("version", "sha256", "bytes"),
+    NATIVE_MTP_ADMISSION_FEED_NAME: ("version", "sha256", "bytes"),
 }
 # Tier-2 envelope fields that carry signing time/identity, not model content.
 _TIER2_ENVELOPE_FIELDS = ("issued_at", "expires_at", "signature", "catalog_id", "version")
@@ -5558,6 +5819,17 @@ def _live_matches_ledger_row(
             obj["generated_at"] = row["generated_at"]
             obj["candidate_catalog_sha256"] = feeds["autotune-candidates.json"]["sha256"]
             raw = canonical_sorted_bytes(obj)
+        elif name == NATIVE_MTP_ADMISSION_FEED_NAME and (sha256(raw), len(raw)) != (recorded["sha256"], recorded["bytes"]):
+            # A renewal rewrites the sidecar's release_id and validity window,
+            # which the row's digest cannot reverse. Live matches the row when
+            # the incoming sidecar IS the row's bytes and live equals it with
+            # those renewal fields stripped.
+            incoming_raw = (incoming / name).read_bytes()
+            if (sha256(incoming_raw), len(incoming_raw)) != (recorded["sha256"], recorded["bytes"]):
+                return False
+            if NATIVE_MTP_ADMISSION_FEED_NAME in feed_continuity_drift(incoming, live):
+                return False
+            continue
         elif name == TIER2_CATALOG_FEED_NAME and (sha256(raw), len(raw)) != (recorded["sha256"], recorded["bytes"]):
             if tier2_index is not None and tier2_index.get(recorded["sha256"]) == tier2_stripped_sha256(raw, f"{live}/{name}"):
                 continue
