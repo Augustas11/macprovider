@@ -380,6 +380,9 @@ class PrivacyClassBetaGovernanceTests(unittest.TestCase):
             shutil.rmtree(root / BUNDLE, ignore_errors=True)
             shutil.copytree(REPO_ROOT / BUNDLE, root / BUNDLE)
             shutil.copyfile(REPO_ROOT / SOURCE, root / SOURCE)
+            # The real signed result is committed at the same path; the fixture
+            # signs its own envelope there, so the signer must find it absent.
+            (root / SOURCE.replace(".redacted.json", ".journey-result.signed.json")).unlink(missing_ok=True)
             git = ["git", "-c", "user.name=fixture", "-c", "user.email=fixture@invalid", "-c", "commit.gpgsign=false"]
             subprocess.run([*git, "add", "--", "journeys"], cwd=root, check=True)
             subprocess.run([*git, "commit", "--quiet", "--no-verify", "-m", "fixture evidence"], cwd=root, check=True)
