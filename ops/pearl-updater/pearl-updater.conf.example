@@ -26,9 +26,20 @@ PEARL_UPDATER_GATEWAY_DRAIN_TIMEOUT_S=90
 PEARL_UPDATER_GATEWAY_DRAIN_STEADY_S=5
 PEARL_UPDATER_PROVIDER_RECOVERY_TIMEOUT_S=900
 PEARL_UPDATER_SERVICE_HEALTH_TIMEOUT_S=60
-# Bounds each SQLite snapshot step (.backup and PRAGMA integrity_check) while
-# traffic is stopped. Scale with the largest money DB; 60-3600 s.
+# Bounds each SQLite snapshot step: the .backup copy (the only step taken with
+# traffic stopped) and the later PRAGMA quick_check of that copy. Scale with the
+# largest money DB; 60-3600 s.
 PEARL_UPDATER_SQLITE_SNAPSHOT_TIMEOUT_S=900
+# SQLite CLI for .backup, quick_check, and schema reads. Unset selects
+# /opt/macprovider-tools/sqlite-3.53.2/bin/sqlite3 (the coordinator's embedded
+# SQLite version) when it exists and is executable, else sqlite3 from
+# /usr/local/bin:/usr/bin:/bin. The
+# binary and every ancestor directory must be root-owned and not writable by
+# group or other.
+#PEARL_UPDATER_SQLITE_BIN=/opt/macprovider-tools/sqlite-3.53.2/bin/sqlite3
+# Committed transactions whose databases/ snapshot payloads are kept; older
+# payloads are deleted after each successful commit. 1-100.
+PEARL_UPDATER_SNAPSHOT_RETENTION=3
 PEARL_UPDATER_CANARY_TIMEOUT_S=720
 # Defaults to required. Use disabled only during an explicitly sealed production
 # window where both canary enable gates are absent, the root-owned empty 0644

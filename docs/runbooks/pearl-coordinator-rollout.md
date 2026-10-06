@@ -40,7 +40,11 @@ ssh pearl 'df -h /; du -sh /var/lib/macprovider-pearl-updater/transactions;
   snapshots are never pruned. On 2026-10-06, 117 GB of snapshots had the disk at
   95%. Keep the two newest committed transactions, which are the live rollback
   points. Delete older ones only with the operator's OK. Below
-  `billing_compat_floor` they cannot be restored anyway.
+  `billing_compat_floor` they cannot be restored anyway. With the #1749 updater
+  installed, each successful apply prunes older `databases/` payloads to
+  `PEARL_UPDATER_SNAPSHOT_RETENTION` (default 3). An apply whose signed server
+  source is unchanged takes no DB copy (`ops/runbooks/pearl-release-updater.md`,
+  Database snapshots).
 - **Locks.** `/run/lock/macprovider-pearl-updater.lock` and
   `/opt/macprovider/.coordinator-deploy.lock` must both be free
   (`flock -n <lock> true`).
@@ -61,7 +65,11 @@ ssh pearl 'systemd-run --unit=mp-update-<ver> -p Environment=PYTHONDONTWRITEBYTE
   idx_srao_drained_retention`, and the apply rolls back. Put the 3.53.2 CLI
   first on `PATH`, as above; it was built from the sqlite.org amalgamation at
   `/opt/macprovider-tools/sqlite-3.53.2/bin`. Never `REINDEX` with the older
-  CLI: that corrupts the index for the coordinator's own engine.
+  CLI: that corrupts the index for the coordinator's own engine. The #1749
+  updater uses that binary by default (`PEARL_UPDATER_SQLITE_BIN` overrides it)
+  and needs it, and each of its directories, to be root-owned and not group- or
+  world-writable. It runs only `.backup` with traffic down, and checks the copy
+  with `quick_check` after commit.
 - **Timeouts.** Set `PEARL_UPDATER_SQLITE_SNAPSHOT_TIMEOUT_S=2400` for a DB over
   10 GB. Raise `PEARL_UPDATER_SERVICE_HEALTH_TIMEOUT_S` to 300 only when the
   release runs startup migrations on the money DB. Back up
