@@ -1,0 +1,17 @@
+lock_acquired 2026-10-06T11:40:26Z
+2026-10-06T11:44:25Z build exit=0
+new_sha256=fb26642bab82adc8caf6d5f7cbf6dd21e3c20d181085f885683f25eb5329cc52 old_sha256=ca12a90c889437acf23ac67e0f74dc765edf29c323c65a5f6e31b2087c531b5f metallib=84e487182336648a826132e50e7a4cd2cae0bc77ac6eafa89cc72f3a964fdbaf
+2026-10-06T11:45:41Z hardware_e2e exit=0
+2026-10-06T11:45:41Z start timing old1
+2026-10-06T11:50:48Z end timing old1 exit=0
+2026-10-06T11:50:48Z start timing new1
+2026-10-06T11:55:48Z end timing new1 exit=0
+2026-10-06T11:55:48Z start timing new2
+2026-10-06T12:00:48Z end timing new2 exit=0
+2026-10-06T12:00:48Z start timing old2
+2026-10-06T12:05:55Z end timing old2 exit=0
+2026-10-06T12:05:55Z start longgen new
+2026-10-06T12:11:13Z end longgen new exit=0
+2026-10-06T12:11:13Z start longgen old
+2026-10-06T12:16:35Z end longgen old exit=0
+DONE

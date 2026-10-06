@@ -156,3 +156,28 @@ chunk-gap p99 -0.050, -0.053, +0.009, -0.005. Without blocks 6-9 the median
 TPOT ratio would be +0.0009 instead of +0.0004, against the 0.05 gated margin.
 This attributes each overlap. It does not change the frozen
 `exclusion_rules: none`, and no block was excluded or rerun.
+
+## Post-R015 change: held-row column cap (`7b5fbd675`), outside the measured regime
+
+`7b5fbd675` changes code that this R015 did not run. It caps a held native
+row's buffered drafter columns at 1024, with an early drafter catch-up when the
+next ordinary window would pass the cap. It also copies each buffered hidden
+state out of the batch output instead of keeping a view (SPEC-048 0.1.25
+MTP-6). Every R015 cell generates at most 512 tokens, so the cap never fires in
+a measured cell. The only change on the measured path is one gather per
+held-row decode step. The verdict above stands for `e1103712d` and is not
+extended to `7b5fbd675`.
+
+An exploratory old/new/new/old control (`colcap-control/`) supports
+"no measurable difference":
+
+- s1-p1536-o512 native/ordinary paired decode median: 1.2895 (`e1103712d`)
+  vs 1.2885 (`7b5fbd675`).
+- s2-p1536-o512 native/ordinary median inter-chunk gap per block:
+  0.997–1.008 vs 0.995–1.004 in 9 of 10 blocks.
+- The s2 aggregate decode median is 1.0007 vs 0.9593. That gap comes from
+  foreign-load bursts that hit both arms of both binaries. No single-chunk
+  stall appears systematically on the new binary only.
+- The hardware e2e passes on the new binary.
+- Long gated generations show the catch-up near chunk 1000 and nowhere else.
+  Parity, errors, and fallbacks are 0 throughout.
