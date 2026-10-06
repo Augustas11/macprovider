@@ -898,20 +898,22 @@ class AdmissionJourneyRunner:
         assert_true(novel_submit.get("admission_state") in ("offer_submitted", "sandbox_probe_only", "network_admitted_unsettled", "revoked"), "novel offer did not land in a coordinator-backed post-offer state")
         assert_true(bool(novel_submit.get("coordinator_event_id")), "accepted novel offer carries no coordinator event id")
         # The live session serves the settleable MLX candidate, not this GGUF
-        # runtime. The coordinator's probe policy may therefore revoke the
-        # unmatched offer with synthetic_probe_failed; that is still a
-        # coordinator-backed novel-offer history with no catalog key.
-        # Give the coordinator's probe policy time to land. Do not treat
-        # offer_submitted as terminal here: a live session that cannot serve
-        # this GGUF runtime will revoke with synthetic_probe_failed shortly
-        # after the offer is accepted.
-        novel = self.wait_for_states(self.gguf, ("sandbox_probe_only", "network_admitted_unsettled", "revoked"), "step 10 (novel offer probe)")
+        # runtime. The coordinator runs its offer-time synthetic probe inside
+        # the offer request, and only against a session that serves the
+        # offered ref (#1576, server.go runModelAdmissionSyntheticProbe), so
+        # the accepted novel offer stays offer_submitted with no probe edge.
+        # An older coordinator probed the mismatched session and revoked with
+        # synthetic_probe_failed. Either is a coordinator-backed novel-offer
+        # history with no catalog key; the assertions below are what R008 asks.
+        novel = self.wait_for_states(self.gguf, ("offer_submitted", "sandbox_probe_only", "network_admitted_unsettled", "revoked"), "step 10 (novel offer probe)")
         assert_true(novel["admission_state_source"] == "coordinator", "novel candidate status is not coordinator-backed after the offer; an unoffered local_default status cannot stand as the novel non-catalog offer")
         assert_true(novel.get("catalog_model_key") is None, "the novel candidate resolved to a catalog key; an unmatched offer must yield catalog_model_key null")
         assert_true(novel["provider_guidance"]["earning_path_class"] == "no_earning_path_in_v0_1", f"novel candidate status reports {novel['provider_guidance']['earning_path_class']!r}, not no_earning_path_in_v0_1")
         if novel["admission_state"] == "revoked":
             reason = (novel.get("provider_guidance") or {}).get("transition_reason_code")
             assert_true(reason == "synthetic_probe_failed", f"step 10: novel candidate was revoked for a reason other than a failed coordinator probe ({reason!r})")
+        elif novel["admission_state"] == "offer_submitted":
+            assert_true(novel.get("coordinator_event_id") == novel_submit.get("coordinator_event_id"), "step 10: the novel candidate's head moved past its offer without leaving offer_submitted")
         for document in (matched, novel):
             guidance = document["provider_guidance"]
             assert_true(guidance.get("state_meaning_key") and guidance.get("next_action"), "status lacks state meaning or next action")

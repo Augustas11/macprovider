@@ -153,6 +153,10 @@ class FakeRig:
         self.mutate_on_duplicate_offer = mutate_on_duplicate_offer  # append an event while answering 409 (the bug step 2 must catch)
         self.skip_stale_head_check = skip_stale_head_check          # approve against a moved head (the bug step 9 must catch)
         self.gguf_earning = None  # fault-injection override for the GGUF earning; None => faithful state-based earning
+        # #1576 coordinator: the offer-time probe runs only against a session
+        # serving the offered ref, so a GGUF offer next to an MLX session
+        # stays offer_submitted with no probe edge.
+        self.novel_offer_unprobed = False
         self.request_log = 0
 
     def _event(self, ref: str) -> str:
@@ -281,7 +285,8 @@ class FakeRig:
             assert current in ("not_offered", "withdrawn", "revoked"), "fake: duplicate live offer must go through cli_raw"
             assert "offer_submitted" in ADMISSION_ALLOWED_NEXT_STATES.get(current, frozenset({"offer_submitted"})), f"fake: illegal offer from {current}"
             event = self._set(ref, "offer_submitted")
-            self._set(ref, "sandbox_probe_only", "synthetic_probe_required")
+            if not (ref == GGUF and self.novel_offer_unprobed):
+                self._set(ref, "sandbox_probe_only", "synthetic_probe_required")
             # `models offer submit` prints the coordinator status readback
             # (BYOMAdmissionStatusWire -> model_admission_status.v1), not the
             # model_admission_offer_submit.v1 request-package schema it signs and
@@ -590,6 +595,19 @@ class AdmissionJourneyRunnerTests(unittest.TestCase):
             aj.build_parser().parse_args(["--out", "x", "--cli-binary", "x", "--provider-config", "x", "--coordinator-admin-origin", "x",
                                           "--operator-actor-a", "a", "--operator-actor-b", "b", "--settleable-ref", "s", "--opaque-ref", "o",
                                           "--provider-log", "x", "--coordinator-log", "x"])
+
+    def test_step_10_accepts_an_unprobed_coordinator_backed_novel_offer(self):
+        rig = FakeRig()
+        rig.novel_offer_unprobed = True
+        manifest = self.run_journey(rig)
+        self.assertEqual(rig.state[GGUF], "offer_submitted")
+        self.assertTrue(manifest.is_file())
+        rig = FakeRig()
+        rig.novel_offer_unprobed = True
+        rig.gguf_earning = "local_inventory_only"
+        with self.assertRaises(aj.JourneyFailure) as caught:
+            self.run_journey(rig)
+        self.assertIn("not no_earning_path_in_v0_1", str(caught.exception))
 
     def test_redaction_review_covers_every_surface(self):
         # A leak in any one surface fails step 12 and publishes nothing; the
