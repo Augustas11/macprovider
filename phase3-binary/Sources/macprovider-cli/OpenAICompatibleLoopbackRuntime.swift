@@ -616,6 +616,10 @@ struct OpenAICompatibleStreamAccumulator {
     /// usage is counted over).
     var receivedContent: String { content }
 
+    /// The upstream's own `usage.completion_tokens`, never the delta-event
+    /// count (SPEC-001 FR-20 startup probe).
+    var upstreamCompletionTokens: Int? { completionTokens }
+
     /// True when the upstream attested the completion tokens through every
     /// content chunk so far (timings or `logprobs`).
     var hasPerChunkCompletionCounts: Bool { prefixCompletionTokens != nil && prefixCountSource != nil }
@@ -1276,26 +1280,29 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
 
     // MARK: Startup throughput probe (SPEC-001 FR-20, #1690)
 
-    /// Hard wall-clock bound on the whole startup probe, connection included.
-    /// It covers an upstream that lazily loads the model on first request
-    /// (Ollama); past it the probe fails and serve continues with 0.
+    /// Hard wall-clock bound on the whole startup probe: the identity checks
+    /// before and after the generation, the connection and the generation
+    /// itself. It covers an upstream that lazily loads the model on first
+    /// request (Ollama); past it the probe fails and serve continues with 0.
     static let startupThroughputProbeTimeoutSeconds: TimeInterval = 60
 
     /// The serve-time startup probe behind `capacity.throughput_tps_estimate`
     /// for a loopback runtime: one fixed short generation (the native probe's
     /// prompt and token budget) through the runtime's own chat-completions
-    /// leg. The rate is the upstream's own completion-token count over the
-    /// decode window (first to last streamed token), so a model load or
-    /// prefill on the upstream does not count; llama-server's own
-    /// `timings.predicted_per_second` wins when it reports one. It never
-    /// touches `ProviderStatus` (no usage, request log or billing), never
-    /// logs prompt or completion text, and any failure is an outcome, never
-    /// a thrown error, so serving is unaffected.
+    /// leg. The rate is the native probe's quantity: completion tokens over
+    /// the whole request, start to stream end, so prefill and any upstream
+    /// model load count. Only the upstream's own count is used
+    /// (`usage.completion_tokens`, else llama-server's `timings.predicted_n`),
+    /// never the chunk count, and it is bounded by `maxTokens`. The bound
+    /// identity (llama-server's `/props` served file included) is checked
+    /// immediately before and after the generation inside the same deadline.
+    /// It never touches `ProviderStatus` (no usage, request log or billing),
+    /// never logs prompt or completion text, and any failure is an outcome,
+    /// never a thrown error, so serving is unaffected.
     func measureStartupThroughput(
         maxTokens: Int = ModelRuntime.startupThroughputProbeMaxTokens,
         timeoutSeconds: TimeInterval = OpenAICompatibleLoopbackRuntime.startupThroughputProbeTimeoutSeconds
     ) async -> LoopbackStartupThroughputOutcome {
-        guard await servesBoundIdentity() else { return .failed(reason: "identity_unbound") }
         let payload: [String: Any] = [
             "model": upstreamModelName,
             "messages": [["role": "user", "content": "Reply with a short greeting."]],
@@ -1310,16 +1317,32 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         let client = httpClient
         let url = chatCompletionsURL
         let timeouts = LoopbackGenerationTimeouts(firstByte: timeoutSeconds, idle: timeoutSeconds, overall: timeoutSeconds)
-        let outcome = await Self.bounded(until: Date().addingTimeInterval(timeoutSeconds)) { () async -> LoopbackStartupThroughputOutcome? in
-            await Self.runStartupThroughputProbe(client, url: url, body: body, timeouts: timeouts)
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        let outcome = await Self.bounded(until: deadline, cancelWithCaller: true) { [self] () async -> LoopbackStartupThroughputOutcome? in
+            guard await self.probeServesBoundIdentity() else { return .failed(reason: "identity_unbound") }
+            let measured = await Self.runStartupThroughputProbe(client, url: url, body: body, maxTokens: maxTokens, timeouts: timeouts)
+            guard case .ok = measured else { return measured }
+            guard await self.probeServesBoundIdentity() else { return .failed(reason: "identity_unbound") }
+            return measured
         }
-        return outcome ?? .failed(reason: "timeout")
+        if let outcome { return outcome }
+        return .failed(reason: Task.isCancelled ? "cancelled" : "timeout")
+    }
+
+    /// The request-path identity checks plus, for llama.cpp, the `/props`
+    /// served-file check `upstreamContextGate` runs before every request.
+    private func probeServesBoundIdentity() async -> Bool {
+        guard await servesBoundIdentity() else { return false }
+        guard isLlamaCpp else { return true }
+        guard (try? await requireLlamaCppServesBoundFile()) != nil else { return false }
+        return identityIsValid()
     }
 
     private static func runStartupThroughputProbe(
         _ client: any BYOMDiscoveryHTTPClient,
         url: URL,
         body: Data,
+        maxTokens: Int,
         timeouts: LoopbackGenerationTimeouts
     ) async -> LoopbackStartupThroughputOutcome {
         let startedAt = ProcessInfo.processInfo.systemUptime
@@ -1332,42 +1355,34 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             return .failed(reason: "upstream_unavailable")
         }
         guard (200...299).contains(response.statusCode) else {
+            await closeLines(response.lines)
             return .failed(reason: "upstream_status_\(response.statusCode)")
         }
         var accumulator = OpenAICompatibleStreamAccumulator()
-        var firstDataAt: TimeInterval?
-        var lastDataAt: TimeInterval?
-        var predictedPerSecond: Double?
+        var predictedN: Int?
         do {
             for try await line in response.lines {
-                if line.hasPrefix("data:"), line.dropFirst(5).trimmingCharacters(in: .whitespaces) != "[DONE]" {
-                    let now = ProcessInfo.processInfo.systemUptime
-                    if firstDataAt == nil { firstDataAt = now }
-                    lastDataAt = now
-                    if line.contains("predicted_per_second"),
-                       case .object(let root)? = try? StrictJSONParser.parse(String(line.dropFirst(5))),
-                       case .object(let timings)? = root["timings"] {
-                        switch timings["predicted_per_second"] {
-                        case .double(let value)?: predictedPerSecond = value
-                        case .int(let value)?: predictedPerSecond = Double(value)
-                        default: break
-                        }
-                    }
+                if line.hasPrefix("data:"), line.contains("predicted_n"),
+                   case .object(let root)? = try? StrictJSONParser.parse(String(line.dropFirst(5))),
+                   case .object(let timings)? = root["timings"],
+                   let value = intValue(timings["predicted_n"]) {
+                    predictedN = value
                 }
                 _ = try accumulator.consume(line: line)
                 if accumulator.isDone { break }
             }
             let (result, _) = try accumulator.finish()
-            let tps = startupDecodeTPS(
-                completionTokens: result.completionTokens,
-                llamaPredictedPerSecond: predictedPerSecond,
-                firstTokenAt: firstDataAt,
-                lastTokenAt: lastDataAt,
-                startedAt: startedAt,
-                endedAt: ProcessInfo.processInfo.systemUptime
+            let endedAt = ProcessInfo.processInfo.systemUptime
+            // A plain JSON body's count is its `usage` (0 when absent).
+            let attested = accumulator.decodedFromPlainBody
+                ? result.completionTokens
+                : accumulator.upstreamCompletionTokens ?? predictedN
+            return startupThroughputOutcome(
+                deliveredContent: !result.content.isEmpty,
+                completionTokens: attested,
+                maxTokens: maxTokens,
+                elapsedSeconds: endedAt - startedAt
             )
-            guard tps > 0 else { return .failed(reason: "no_tokens") }
-            return .ok(tps: tps)
         } catch is CancellationError {
             return .failed(reason: "timeout")
         } catch let error as URLError where error.code == .timedOut {
@@ -1377,28 +1392,34 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         }
     }
 
-    /// Decode tokens/second of the startup probe. llama-server's own decode
-    /// rate wins; otherwise the first streamed token closes prefill, so the
-    /// remaining `completionTokens - 1` tokens span the first-to-last token
-    /// window. With fewer than two tokens or no measurable window (a buffered
-    /// body), it falls back to the native probe's tokens over the whole
-    /// elapsed time, prefill included.
-    static func startupDecodeTPS(
-        completionTokens: Int,
-        llamaPredictedPerSecond: Double?,
-        firstTokenAt: TimeInterval?,
-        lastTokenAt: TimeInterval?,
-        startedAt: TimeInterval,
-        endedAt: TimeInterval
-    ) -> Double {
-        guard completionTokens > 0 else { return 0 }
-        if let llamaPredictedPerSecond, llamaPredictedPerSecond.isFinite, llamaPredictedPerSecond > 0 {
-            return llamaPredictedPerSecond
+    /// The startup rate, measured like `ModelRuntime.measureStartupThroughput`:
+    /// completion tokens over the total elapsed time of the request. The
+    /// claim is bounded: content must have streamed, the count must be the
+    /// upstream's own and at most `maxTokens`, and the elapsed time must be
+    /// finite and positive; anything else fails closed.
+    static func startupThroughputOutcome(
+        deliveredContent: Bool,
+        completionTokens: Int?,
+        maxTokens: Int,
+        elapsedSeconds: TimeInterval
+    ) -> LoopbackStartupThroughputOutcome {
+        guard deliveredContent else { return .failed(reason: "no_content") }
+        guard let completionTokens, completionTokens > 0 else { return .failed(reason: "no_tokens") }
+        guard completionTokens <= maxTokens else { return .failed(reason: "usage_exceeds_max_tokens") }
+        guard elapsedSeconds.isFinite, elapsedSeconds > 0 else { return .failed(reason: "no_elapsed_time") }
+        return .ok(tps: Double(completionTokens) / elapsedSeconds)
+    }
+
+    /// Ends a line stream that will not be read: iterating it from a
+    /// cancelled task terminates it, which runs its `onTermination` (the
+    /// streaming client cancels the upstream request there).
+    private static func closeLines(_ lines: AsyncThrowingStream<String, Error>) async {
+        let drain = Task {
+            var iterator = lines.makeAsyncIterator()
+            _ = try? await iterator.next()
         }
-        if completionTokens >= 2, let firstTokenAt, let lastTokenAt, lastTokenAt - firstTokenAt >= 0.001 {
-            return Double(completionTokens - 1) / (lastTokenAt - firstTokenAt)
-        }
-        return Double(completionTokens) / max(endedAt - startedAt, 0.001)
+        drain.cancel()
+        await drain.value
     }
 
     // MARK: Internals
@@ -1485,6 +1506,20 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             return contextWindow
         }
         guard isLlamaCpp else { return nil }
+        let propsBody = try await requireLlamaCppServesBoundFile()
+        guard let contextWindow = BYOMDiscoveryJSON.llamaCppContextWindow(from: propsBody) else {
+            return nil
+        }
+        // max_tokens alone is checked before spending two loopback calls.
+        try Self.contextGate(promptTokens: nil, maxTokens: request.maxTokens, contextWindow: contextWindow)
+        let promptTokens = await countPromptTokens(request)
+        try Self.contextGate(promptTokens: promptTokens, maxTokens: request.maxTokens, contextWindow: contextWindow)
+        return contextWindow
+    }
+
+    /// llama.cpp: re-read `/props` and require llama-server still serves the
+    /// bound file. Returns the `/props` body.
+    private func requireLlamaCppServesBoundFile() async throws -> Data {
         let props: BYOMHTTPResponse
         do {
             props = try await httpClient.get(
@@ -1501,14 +1536,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         guard BYOMDiscoveryJSON.llamaCppServedArtifactPath(from: props.body) == runtimeArtifactPath else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
         }
-        guard let contextWindow = BYOMDiscoveryJSON.llamaCppContextWindow(from: props.body) else {
-            return nil
-        }
-        // max_tokens alone is checked before spending two loopback calls.
-        try Self.contextGate(promptTokens: nil, maxTokens: request.maxTokens, contextWindow: contextWindow)
-        let promptTokens = await countPromptTokens(request)
-        try Self.contextGate(promptTokens: promptTokens, maxTokens: request.maxTokens, contextWindow: contextWindow)
-        return contextWindow
+        return props.body
     }
 
     /// Exact prompt length as llama-server will see it: its own chat template
@@ -1776,22 +1804,43 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
     /// Runs `work` and returns its value, or nil at `deadline` without
     /// waiting for it: the work runs in an unstructured task, so a
     /// non-cancellable step (a tokenizer encode, a stuck socket) can never
-    /// hold the caller past the deadline.
-    static func bounded<T: Sendable>(until deadline: Date, _ work: @escaping @Sendable () async -> T?) async -> T? {
+    /// hold the caller past the deadline. With `cancelWithCaller`, cancelling
+    /// the caller also cancels the work and returns nil at once (the startup
+    /// probe). The post-cancel usage path leaves it off: it runs after a
+    /// buyer cancel and must still finish its count.
+    static func bounded<T: Sendable>(
+        until deadline: Date,
+        cancelWithCaller: Bool = false,
+        _ work: @escaping @Sendable () async -> T?
+    ) async -> T? {
         let gate = LoopbackResumeOnce()
-        return await withCheckedContinuation { (continuation: CheckedContinuation<T?, Never>) in
-            let worker = Task {
-                let value = await work()
-                if gate.claim() { continuation.resume(returning: value) }
-            }
-            Task {
-                let wait = max(0, deadline.timeIntervalSinceNow)
-                try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
-                if gate.claim() {
-                    worker.cancel()
-                    continuation.resume(returning: nil)
+        let callerCancel = LoopbackCancelAction()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<T?, Never>) in
+                let worker = Task {
+                    let value = await work()
+                    if gate.claim() { continuation.resume(returning: value) }
+                }
+                let timer = Task {
+                    let wait = max(0, deadline.timeIntervalSinceNow)
+                    try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                    if gate.claim() {
+                        worker.cancel()
+                        continuation.resume(returning: nil)
+                    }
+                }
+                if cancelWithCaller {
+                    callerCancel.install {
+                        if gate.claim() {
+                            worker.cancel()
+                            timer.cancel()
+                            continuation.resume(returning: nil)
+                        }
+                    }
                 }
             }
+        } onCancel: {
+            callerCancel.fire()
         }
     }
 
@@ -2152,6 +2201,34 @@ final class LoopbackResumeOnce: @unchecked Sendable {
         guard !claimed else { return false }
         claimed = true
         return true
+    }
+}
+
+/// A caller-cancellation action for `bounded`: runs once, immediately when
+/// the caller was cancelled before it was installed.
+final class LoopbackCancelAction: @unchecked Sendable {
+    private let lock = NSLock()
+    private var action: (() -> Void)?
+    private var fired = false
+
+    func install(_ action: @escaping () -> Void) {
+        lock.lock()
+        guard !fired else {
+            lock.unlock()
+            action()
+            return
+        }
+        self.action = action
+        lock.unlock()
+    }
+
+    func fire() {
+        lock.lock()
+        fired = true
+        let action = self.action
+        self.action = nil
+        lock.unlock()
+        action?()
     }
 }
 

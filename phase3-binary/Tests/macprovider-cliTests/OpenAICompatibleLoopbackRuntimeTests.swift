@@ -1427,7 +1427,17 @@ private final class CancelFlag: @unchecked Sendable {
 private final class EndlessStreamingLoopbackClient: BYOMLoopbackStreamingHTTPClient, @unchecked Sendable {
     private let lock = NSLock()
     private var terminated = false
+    private let statusCode: Int
+    private let retainsLines: Bool
+    private var retainedLines: AsyncThrowingStream<String, Error>?
     var wasTerminated: Bool { lock.lock(); defer { lock.unlock() }; return terminated }
+
+    /// `retainsLines` keeps the stream referenced here, so dropping it does
+    /// not close it and only an explicit close by the consumer ends it.
+    init(statusCode: Int = 200, retainsLines: Bool = false) {
+        self.statusCode = statusCode
+        self.retainsLines = retainsLines
+    }
 
     func get(_ url: URL, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
         throw BYOMDiscoveryAdapterError.rejectedNonLoopback
@@ -1462,7 +1472,12 @@ private final class EndlessStreamingLoopbackClient: BYOMLoopbackStreamingHTTPCli
                 self.lock.unlock()
             }
         }
-        return BYOMLoopbackLineResponse(statusCode: 200, lines: lines)
+        if retainsLines {
+            lock.lock()
+            retainedLines = lines
+            lock.unlock()
+        }
+        return BYOMLoopbackLineResponse(statusCode: statusCode, lines: lines)
     }
 }
 
@@ -1576,6 +1591,8 @@ private final class LlamaCppStubClient: BYOMDiscoveryHTTPClient, @unchecked Send
     private let nCtx: Int
     private let promptTokens: Int
     private var _chatPosts = 0
+    private var chatResponse: Data?
+    private var modelPathAfterChat: String?
 
     init(modelPath: String, nCtx: Int, promptTokens: Int) {
         self.modelPath = modelPath
@@ -1585,6 +1602,10 @@ private final class LlamaCppStubClient: BYOMDiscoveryHTTPClient, @unchecked Send
 
     var chatPosts: Int { lock.lock(); defer { lock.unlock() }; return _chatPosts }
     func setModelPath(_ path: String) { lock.lock(); modelPath = path; lock.unlock() }
+    /// Chat completions answer 200 with `body` (default: a bare 500).
+    func setChatResponse(_ body: Data) { lock.lock(); chatResponse = body; lock.unlock() }
+    /// The next chat completion re-points `/props` to `path` (a reload mid-generation).
+    func setModelPathAfterChat(_ path: String) { lock.lock(); modelPathAfterChat = path; lock.unlock() }
     private var currentModelPath: String { lock.lock(); defer { lock.unlock() }; return modelPath }
 
     func get(_ url: URL, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
@@ -1604,8 +1625,14 @@ private final class LlamaCppStubClient: BYOMDiscoveryHTTPClient, @unchecked Send
         default:
             lock.lock()
             _chatPosts += 1
+            let body = chatResponse
+            if let next = modelPathAfterChat {
+                modelPath = next
+                modelPathAfterChat = nil
+            }
             lock.unlock()
-            return BYOMHTTPResponse(statusCode: 500, headers: [], body: Data())
+            guard let body else { return BYOMHTTPResponse(statusCode: 500, headers: [], body: Data()) }
+            return BYOMHTTPResponse(statusCode: 200, headers: [], body: body)
         }
     }
 }
@@ -1794,48 +1821,151 @@ extension OpenAICompatibleLoopbackRuntimeTests {
         XCTAssertFalse(line.contains("Hi") || line.contains("there") || line.contains("greeting"), line)
     }
 
-    func testLoopbackStartupProbePrefersLlamaServerDecodeRate() async throws {
+    func testLoopbackStartupProbeIgnoresTheUpstreamRateAndCountsPredictedN() async throws {
         let store = try makeStore()
+        // llama-server without `usage`: `timings.predicted_n` is the count;
+        // its self-reported `predicted_per_second` is never the result.
         let sse = Data("""
         data: {"choices":[{"delta":{"content":"Hi"}}]}
 
-        data: {"choices":[{"delta":{},"finish_reason":"length"}],"timings":{"predicted_n":8,"predicted_ms":188.2,"predicted_per_second":42.5}}
-
-        data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":8}}
+        data: {"choices":[{"delta":{},"finish_reason":"length"}],"timings":{"predicted_n":8,"predicted_ms":0.001,"predicted_per_second":1000000000}}
 
         data: [DONE]
 
         """.utf8)
         let runtime = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: sse), store: store)
         let outcome = await runtime.measureStartupThroughput()
-        XCTAssertEqual(outcome, .ok(tps: 42.5))
+        guard case .ok(let tps) = outcome else { return XCTFail("expected ok, got \(outcome)") }
+        XCTAssertGreaterThan(tps, 0)
+        XCTAssertNotEqual(tps, 1_000_000_000, "the upstream's own rate claim is ignored")
     }
 
-    func testStartupDecodeRateExcludesPrefillAndUpstreamModelLoad() {
-        // 8 tokens; the first arrives after a 30 s cold load + prefill, the
-        // last 0.07 s later: 7 decode intervals -> 100 tok/s.
+    func testStartupThroughputIsTokensOverTotalElapsedLikeTheNativeProbe() {
+        // 8 tokens; a 30 s cold load + prefill counts, as in the native probe.
         XCTAssertEqual(
-            OpenAICompatibleLoopbackRuntime.startupDecodeTPS(
-                completionTokens: 8, llamaPredictedPerSecond: nil,
-                firstTokenAt: 130, lastTokenAt: 130.07, startedAt: 100, endedAt: 130.08
+            OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
+                deliveredContent: true, completionTokens: 8, maxTokens: 8, elapsedSeconds: 32
             ),
+            .ok(tps: 0.25)
+        )
+        XCTAssertEqual(
+            OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
+                deliveredContent: true, completionTokens: 8, maxTokens: 8, elapsedSeconds: 0.08
+            ).tps,
             100, accuracy: 0.001
         )
-        // No measurable window (buffered body): tokens over the whole elapsed.
         XCTAssertEqual(
-            OpenAICompatibleLoopbackRuntime.startupDecodeTPS(
-                completionTokens: 8, llamaPredictedPerSecond: nil,
-                firstTokenAt: 1, lastTokenAt: 1, startedAt: 0, endedAt: 2
+            OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
+                deliveredContent: false, completionTokens: 8, maxTokens: 8, elapsedSeconds: 1
             ),
-            4, accuracy: 0.001
+            .failed(reason: "no_content")
         )
         XCTAssertEqual(
-            OpenAICompatibleLoopbackRuntime.startupDecodeTPS(
-                completionTokens: 0, llamaPredictedPerSecond: 50,
-                firstTokenAt: nil, lastTokenAt: nil, startedAt: 0, endedAt: 1
+            OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
+                deliveredContent: true, completionTokens: nil, maxTokens: 8, elapsedSeconds: 1
             ),
-            0, "no generated tokens is no rate"
+            .failed(reason: "no_tokens")
         )
+        XCTAssertEqual(
+            OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
+                deliveredContent: true, completionTokens: 0, maxTokens: 8, elapsedSeconds: 1
+            ),
+            .failed(reason: "no_tokens")
+        )
+        XCTAssertEqual(
+            OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
+                deliveredContent: true, completionTokens: 9, maxTokens: 8, elapsedSeconds: 1
+            ),
+            .failed(reason: "usage_exceeds_max_tokens")
+        )
+        for elapsed in [0, -1, TimeInterval.nan, TimeInterval.infinity] {
+            XCTAssertEqual(
+                OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
+                    deliveredContent: true, completionTokens: 8, maxTokens: 8, elapsedSeconds: elapsed
+                ),
+                .failed(reason: "no_elapsed_time"),
+                "elapsed \(elapsed)"
+            )
+        }
+    }
+
+    func testLoopbackStartupProbeNeverCountsChunksWithoutUpstreamUsage() async throws {
+        let store = try makeStore()
+        let sse = Data("""
+        data: {"choices":[{"delta":{"content":"Hi"}}]}
+
+        data: {"choices":[{"delta":{"content":" there"}}]}
+
+        data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+
+        data: [DONE]
+
+        """.utf8)
+        let runtime = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: sse), store: store)
+        let outcome = await runtime.measureStartupThroughput()
+        XCTAssertEqual(outcome, .failed(reason: "no_tokens"))
+        XCTAssertEqual(outcome.tps, 0)
+    }
+
+    func testLoopbackStartupProbeRejectsUsageOnlyAndOverBudgetClaims() async throws {
+        let store = try makeStore()
+        let usageOnly = Data("""
+        data: {"choices":[{"delta":{},"finish_reason":"length"}]}
+
+        data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":8}}
+
+        data: [DONE]
+
+        """.utf8)
+        let usageOnlyRuntime = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: usageOnly), store: store)
+        let usageOnlyOutcome = await usageOnlyRuntime.measureStartupThroughput()
+        XCTAssertEqual(usageOnlyOutcome, .failed(reason: "no_content"))
+
+        let overBudget = Data("""
+        data: {"choices":[{"delta":{"content":"Hi"}}]}
+
+        data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":100000}}
+
+        data: [DONE]
+
+        """.utf8)
+        let overBudgetRuntime = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: overBudget), store: store)
+        let overBudgetOutcome = await overBudgetRuntime.measureStartupThroughput(maxTokens: 8)
+        XCTAssertEqual(overBudgetOutcome, .failed(reason: "usage_exceeds_max_tokens"))
+        XCTAssertEqual(overBudgetOutcome.tps, 0)
+    }
+
+    func testLoopbackStartupProbeChecksLlamaServerServesTheBoundFileBeforeAndAfter() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("llamacpp-probe-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("tiny-q4.gguf")
+        try (Data("GGUF".utf8) + Data(repeating: 0x5a, count: 4096)).write(to: file)
+        let servedPath = file.resolvingSymlinksInPath().path
+        let client = LlamaCppStubClient(modelPath: servedPath, nCtx: 64, promptTokens: 40)
+        client.setChatResponse(Self.probeSSE)
+        let runtime = try await OpenAICompatibleLoopbackRuntime.llamaCpp(
+            servedModelRef: "llamacpp:tiny-q4",
+            origin: "http://127.0.0.1:9191",
+            selector: BYOMLlamaCppArtifactSelector(root: nil, pinnedFile: file),
+            httpClient: client,
+            cache: BYOMArtifactDigestCache(url: root.appendingPathComponent("cache.json"))
+        )
+
+        let bound = await runtime.measureStartupThroughput()
+        XCTAssertGreaterThan(bound.tps, 0, "\(bound)")
+        XCTAssertEqual(client.chatPosts, 1)
+
+        // llama-server reloaded another GGUF during the generation.
+        client.setModelPathAfterChat("/tmp/other-q4.gguf")
+        let swappedDuring = await runtime.measureStartupThroughput()
+        XCTAssertEqual(swappedDuring, .failed(reason: "identity_unbound"))
+        XCTAssertEqual(client.chatPosts, 2)
+
+        // Already serving another GGUF: no generation at all.
+        let swappedBefore = await runtime.measureStartupThroughput()
+        XCTAssertEqual(swappedBefore, .failed(reason: "identity_unbound"))
+        XCTAssertEqual(client.chatPosts, 2, "an unbound upstream is never probed")
     }
 
     func testLoopbackStartupProbeFailureReportsZeroAndServingContinues() async throws {
@@ -1868,6 +1998,15 @@ extension OpenAICompatibleLoopbackRuntimeTests {
         XCTAssertEqual(emptyOutcome, .failed(reason: "malformed_response"))
     }
 
+    func testLoopbackStartupProbeClosesTheUpstreamStreamOnANon2xxStatus() async throws {
+        let store = try makeStore()
+        let client = EndlessStreamingLoopbackClient(statusCode: 503, retainsLines: true)
+        let runtime = try makeRuntime(httpClient: client, store: store)
+        let outcome = await runtime.measureStartupThroughput(maxTokens: 8, timeoutSeconds: 30)
+        XCTAssertEqual(outcome, .failed(reason: "upstream_status_503"))
+        XCTAssertTrue(client.wasTerminated, "the error body stream is closed before the probe returns")
+    }
+
     func testLoopbackStartupProbeIsBoundedByItsHardTimeout() async throws {
         let store = try makeStore()
         let client = EndlessStreamingLoopbackClient()
@@ -1880,6 +2019,23 @@ extension OpenAICompatibleLoopbackRuntimeTests {
             try await Task.sleep(nanoseconds: 20_000_000)
         }
         XCTAssertTrue(client.wasTerminated, "the abandoned probe closes the upstream stream")
+    }
+
+    func testLoopbackStartupProbeEndsPromptlyWhenTheCallerIsCancelled() async throws {
+        let store = try makeStore()
+        let client = EndlessStreamingLoopbackClient()
+        let runtime = try makeRuntime(httpClient: client, store: store)
+        let start = Date()
+        let probe = Task { await runtime.measureStartupThroughput(maxTokens: 8, timeoutSeconds: 30) }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        probe.cancel()
+        let outcome = await probe.value
+        XCTAssertEqual(outcome, .failed(reason: "cancelled"))
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5, "caller cancellation ends the probe well before its 30 s deadline")
+        for _ in 0..<50 where !client.wasTerminated {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertTrue(client.wasTerminated, "caller cancellation closes the upstream stream")
     }
 
     func testLoopbackStartupProbeIsNeverCountedAsUsage() async throws {
