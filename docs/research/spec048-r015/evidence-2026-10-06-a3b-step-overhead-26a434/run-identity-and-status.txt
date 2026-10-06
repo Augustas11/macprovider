@@ -1,0 +1,12 @@
+started_at=2026-10-06T05:12:18Z
+host=1deMac-Studio.local os_build=26A434 hw_model=Mac15,14
+policy_sha256=0c1b42bec091ab762ba56c9c8d460b9cf2ddc74950f9d98aa59d0af7b290aa87
+provider_commit=006a34ba845f3a5b2d306eb77356f0d5f6e59a07
+binary_sha256=3d5a1ed5df7be6e39f95897e977d7a97fe1dfaefae5beccd1106822825c30364
+metallib_sha256=84e487182336648a826132e50e7a4cd2cae0bc77ac6eafa89cc72f3a964fdbaf
+phase=hardware_e2e exit_code=0 at=2026-10-06T05:13:38Z
+matrix_started_at=2026-10-06T05:13:38Z
+phase=matrix exit_code=0 at=2026-10-06T05:41:49Z jsonl_sha256=86b7db2fc0821b998f2f064fee79e494c0ffefea1f1dc87f8135a0acafe19ec4 lines=133
+sustained_started_at=2026-10-06T05:41:49Z
+phase=sustained exit_code=0 at=2026-10-06T06:13:33Z jsonl_sha256=72e1e5bb45cdf28694f8c67c9e1554c382889a138c192c822901a94d35057d1e lines=201
+phase=all exit_code=0 finished_at=2026-10-06T06:13:33Z
