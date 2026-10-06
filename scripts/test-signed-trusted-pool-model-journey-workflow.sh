@@ -178,6 +178,9 @@ required_builder = [
     "reverify_bundle(root, source, evidence, cli, evidence_sha)",
     '"trust-pool-admin", "verify-manifest"',
     '"trust-pool-admin", "verify-route-snapshot"',
+    # SPEC-042 §4: R015/R016 need SPEC-042-R013 conformant (payload runs
+    # before the signing key is imported; the promote script re-checks).
+    "require_promotion_prerequisites(root, selected)",
     '"result": {"status": "pass", "summary": SUMMARY}',
     "reject_raw_identifiers",
     "require_candidate_identity",

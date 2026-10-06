@@ -336,6 +336,28 @@ TRUSTED_POOL_MODEL_CANDIDATE_IDENTITY_KEYS = {
     "pricing_bounds_sha256",
     "fingerprint_salt",
 }
+# SPEC-042 §4: a journey that relies on R015/R016 promotes only after the
+# R013 external-runtime prerequisite (fail-closed set and signed journey) is
+# conformant.
+TRUSTED_POOL_MODEL_PROMOTION_PREREQUISITES = {
+    "SPEC-042-R015": ("SPEC-042-R013",),
+    "SPEC-042-R016": ("SPEC-042-R013",),
+}
+
+
+def trusted_pool_model_prerequisite_error(conformance: Any, requirement_id: str) -> str | None:
+    """The SPEC-042 §4 prerequisite gate for JOURNEY-TRUSTED-POOL-MODEL."""
+    prerequisites = TRUSTED_POOL_MODEL_PROMOTION_PREREQUISITES.get(requirement_id, ())
+    rows = {}
+    if isinstance(conformance, dict) and isinstance(conformance.get("requirements"), list):
+        rows = {row.get("requirement_id"): row for row in conformance["requirements"] if isinstance(row, dict)}
+    missing = [item for item in prerequisites if rows.get(item, {}).get("state") != "conformant"]
+    if missing:
+        return (f"{requirement_id} cannot be promoted from {TRUSTED_POOL_MODEL_JOURNEY_ID} until "
+                f"{', '.join(missing)} is conformant (SPEC-042 §4 prerequisite)")
+    return None
+
+
 TRUSTED_POOL_MODEL_SHA256_IDENTITY_KEYS = (
     "native_member_cli_sha256",
     "gguf_member_cli_sha256",

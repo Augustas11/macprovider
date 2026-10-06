@@ -47,6 +47,7 @@ from check_spec_governance import (
     TRUSTED_POOL_MODEL_PROMOTABLE_REQUIREMENT_IDS,
     TRUSTED_POOL_MODEL_SHA256_IDENTITY_KEYS,
     TRUSTED_POOL_MODEL_STEP_ID_ORDER,
+    trusted_pool_model_prerequisite_error,
 )
 
 
@@ -119,6 +120,10 @@ PINNED_SPDX_LICENSES = frozenset({
     "MPL-2.0", "NCSA", "OpenRAIL", "OSL-3.0", "PostgreSQL", "Unlicense", "UPL-1.0", "Zlib",
 })
 FENCE_REASON = "pool_route_fence_not_settlement_eligible"
+# A route decided just after a window opens may still carry the previous core
+# until the coordinator's routeable snapshot refreshes (it rebinds within the
+# sweep interval); beyond this bound the route must name the active core.
+ACTIVATION_GRACE_MS = 60_000
 ATTESTATION_INFLIGHT = "rotation/attestation-removal/inflight"
 ATTESTATION_INFLIGHT_REQUIREMENT = "SPEC-042-R016"
 TOKEN_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -585,8 +590,8 @@ def capture_pool_state(capture: Capture, run: dict[str, Any], where: str, salt: 
         die(f"{where}.pool must be an object")
     members = list_of(pool.get("members"), f"{where}.members")
     buyers = list_of(pool.get("buyer_accounts"), f"{where}.buyer_accounts")
-    entries = pool.get("model_entries")
-    attested = pool.get("attested_members")
+    entries = list_of(pool.get("model_entries"), f"{where}.model_entries")
+    attested = list_of(pool.get("attested_members"), f"{where}.attested_members")
     return {
         "manifest_version": pool.get("manifest_version"),
         "manifest_core_digest": pool.get("manifest_core_digest"),
@@ -597,8 +602,8 @@ def capture_pool_state(capture: Capture, run: dict[str, Any], where: str, salt: 
         "runtime_allowlist": list(list_of(pool.get("runtime_allowlist"), f"{where}.runtime_allowlist")),
         "creator_fingerprint": fingerprint(require_string(pool.get("creator_account_id"), None, f"{where}.creator_account_id"), salt),
         "pool_is_journey_pool": pool.get("pool_id") == run["pool_id"],
-        "model_entries": [normalize_entry(e, f"{where}.model_entries[{i}]") for i, e in enumerate(entries or [])],
-        "attested_members": normalize_members(attested or [], salt, f"{where}.attested_members"),
+        "model_entries": [normalize_entry(e, f"{where}.model_entries[{i}]") for i, e in enumerate(entries)],
+        "attested_members": normalize_members(attested, salt, f"{where}.attested_members"),
         "member_fingerprints": sorted(fingerprint(require_string(m, None, f"{where}.members"), salt) for m in members),
         "revoked_count": len(list_of(pool.get("revoked") or [], f"{where}.revoked")),
         "buyer_authorized": run["buyer_account_id"] in buyers,
@@ -1154,6 +1159,15 @@ class Journey:
             die(f"{where}: manifest version {version} must be captured (pool/v{version}/) and verified")
         return self.manifests[version]
 
+    def active_version(self, ts_ms: int) -> int:
+        """The verified manifest whose window holds ts (the newest one whose
+        not_before has passed)."""
+        started = [v for v, m in self.manifests.items() if m["not_before_unix"] * 1000 <= ts_ms]
+        require(bool(started), "a route decision precedes every verified manifest window")
+        version = max(started)
+        require(ts_ms < self.manifests[version]["expires_at_unix"] * 1000, f"a route decision falls after manifest v{version} expired")
+        return version
+
     def activation_ms(self, role: str) -> int:
         return self.manifests[self.roles[role]]["not_before_unix"] * 1000
 
@@ -1498,10 +1512,17 @@ def check_pricing(j: Journey, ev: dict[str, Any]) -> dict[str, Any]:
         int_in(row["global_multiplier_ppm"], "config snapshot global_multiplier_ppm", 1)
         configs[row["id"]] = row
     require(bool(configs), "economics must hold the ledger config snapshots the routes froze")
-    newest_config = max(configs.values(), key=lambda r: (r["effective_at_unix_ms"], r["id"]))
-    require(economics["live_global_multiplier_ppm"] == newest_config["global_multiplier_ppm"]
-            and economics["live_provider_share_bps"] == newest_config["provider_share_bps"],
-            "the live rewards multiplier and provider share must equal the newest ledger config snapshot")
+    require(list(configs) == sorted(configs), "ledger config snapshots must be in id order")
+
+    def effective_config(ts_ms: int) -> dict[str, Any] | None:
+        """The latest ledger config snapshot effective at or before ts."""
+        candidates = [row for row in configs.values() if row["effective_at_unix_ms"] <= ts_ms]
+        return max(candidates, key=lambda r: (r["effective_at_unix_ms"], r["id"])) if candidates else None
+
+    live = effective_config(z_seconds(ev["captured_at"], "captured_at") * 1000)
+    require(live is not None and economics["live_global_multiplier_ppm"] == live["global_multiplier_ppm"]
+            and economics["live_provider_share_bps"] == live["provider_share_bps"],
+            "the live rewards multiplier and provider share must equal the ledger config snapshot effective at capture")
     for version, manifest in j.manifests.items():
         for entry in manifest["model_entries"]:
             for rate in RATE_KEYS:
@@ -1517,7 +1538,7 @@ def check_pricing(j: Journey, ev: dict[str, Any]) -> dict[str, Any]:
     # SPEC-042-R016 owner join: provider -> recorded owner -> attested account.
     require(owner["gguf_provider_owner_fingerprint"] == j.ids["gguf_account_fingerprint"],
             "the GGUF member's recorded owner account must be the attested account")
-    return {"bounds_digest": digest, "multiplier": multiplier, "configs": configs}
+    return {"bounds_digest": digest, "multiplier": multiplier, "configs": configs, "effective_config": effective_config}
 
 
 def check_proposals(j: Journey, ev: dict[str, Any]) -> None:
@@ -1588,6 +1609,16 @@ def check_admission(j: Journey, ev: dict[str, Any]) -> dict[str, Any]:
                         f"admission id {row['id']}: a pool binding must be the {kind} entry's exact identity")
                 require(row["actor"] == f"pool_manifest:{j.pool_id}:{row['pool_manifest_version']}:{row['pool_manifest_core_digest']}",
                         f"admission id {row['id']}: a pool binding's actor must name its own pool, version and core")
+                # The named core must hold the exact entry it binds (and the
+                # R016 attestation for a loopback member).
+                exact_actor(j, row, f"admission id {row['id']}")
+                bound_entry = j.entry_at(row["pool_manifest_version"], row["pool_model_id"], f"admission id {row['id']}")
+                require(bound_entry["artifact_hash"] == row["expected_catalog_model_hash"]
+                        and bound_entry["artifact_hash_algorithm"] == row["expected_catalog_model_hash_algorithm"],
+                        f"admission id {row['id']}: the binding must match the entry in its named core")
+                if ENTRY_KINDS[kind]["route_runtime_source"] is not None:
+                    require("llamacpp_loopback" in j.attested_at(row["pool_manifest_version"]).get(j.ids["gguf_account_fingerprint"], []),
+                            f"admission id {row['id']}: the binding's core must attest the member's owner")
             if row["state"] == "revoked":
                 head = predecessor(row, mine)
                 require(head is not None and head["state"] == "catalog_priced", f"admission id {row['id']}: a revocation must end a pool binding")
@@ -1761,6 +1792,14 @@ def check_route_snapshot(j: Journey, row: Any, kind: str, where: str, pricing: d
     require(row["pool_model_pricing_bounds_sha256"] == pricing["bounds_digest"], f"{where}: the route must carry the recomputed bounds digest")
     config = pricing["configs"].get(row["pool_model_config_snapshot_id"])
     require(config is not None, f"{where}: pool_model_config_snapshot_id must be a captured ledger config snapshot")
+    effective = pricing["effective_config"](row["route_decision_ts_unix_ms"])
+    require(effective is not None and effective["id"] == config["id"],
+            f"{where}: the frozen config snapshot must be the one effective at the route decision time")
+    # The route's core must be the manifest active at its decision time.
+    active = j.active_version(row["route_decision_ts_unix_ms"])
+    require(version == active or (version == active - 1 and row["route_decision_ts_unix_ms"]
+                                  < j.manifests[active]["not_before_unix"] * 1000 + ACTIVATION_GRACE_MS),
+            f"{where}: manifest_version {version} must be the manifest active at the route decision time (v{active})")
     require(row["pool_model_global_multiplier_ppm"] == config["global_multiplier_ppm"] == pricing["multiplier"]
             and row["pool_model_provider_share_bps"] == config["provider_share_bps"],
             f"{where}: the frozen multiplier and provider share must be its ledger config snapshot's")
@@ -1836,6 +1875,9 @@ def check_paid(j: Journey, r: Any, name: str, want_kind: str | None, stream: boo
                 f"{name}: terminal_state")
         require(row["usage_source"] in ("coordinator_observed", "byte_estimated", "pool_operator_attested"), f"{name}: usage_source")
         int_in(row["terminal_state_ts_unix_ms"], f"{name}.terminal_state_ts_unix_ms", 1)
+    # Closed per-attempt coverage: every routed attempt has exactly one
+    # terminal output, one receipt verdict and one ledger row.
+    require(output_keys == set(by_key), f"{name}: every routed attempt must have exactly one attempt output")
     settled = [row for row in outputs if row["usage_source"] == spec["usage_source"] and row["terminal_state"] == "normal_done"]
     require(len(settled) == 1, f"{name} must have exactly one {spec['usage_source']} normal_done attempt output")
     key = (settled[0]["request_id"], settled[0]["attempt_n"])
@@ -1844,11 +1886,15 @@ def check_paid(j: Journey, r: Any, name: str, want_kind: str | None, stream: boo
                     "pool_label_status", "route_snapshot_digest", "provider_reported_model_hash",
                     "expected_catalog_model_hash", "model_id", "model_hash", "received_at_unix_ms"}
     verdicts = []
+    verdict_seen = set()
     for row in list_of(r["receipt_verdicts"], f"{name}.receipt_verdicts"):
         obj(row, verdict_keys, f"{name}.receipt_verdicts")
-        require((row["request_id"], row["attempt_n"]) in by_key, f"{name}: every receipt verdict must join a route snapshot")
-        if (row["request_id"], row["attempt_n"]) == key:
+        vkey = (row["request_id"], row["attempt_n"])
+        require(vkey in by_key and vkey not in verdict_seen, f"{name}: every receipt verdict must join exactly one route snapshot")
+        verdict_seen.add(vkey)
+        if vkey == key:
             verdicts.append(row)
+    require(verdict_seen == set(by_key), f"{name}: every routed attempt must have exactly one receipt verdict")
     require(len(verdicts) == 1, f"{name} settled attempt must have exactly one receipt verdict")
     verdict = verdicts[0]
     want_outcome = ("quarantined", FENCE_REASON) if zero_billed else ("verified", None)
@@ -1877,6 +1923,10 @@ def check_paid(j: Journey, r: Any, name: str, want_kind: str | None, stream: boo
         require(lkey in by_key and lkey not in seen_ledger, f"{name}: every ledger row must join exactly one route snapshot")
         seen_ledger.add(lkey)
         require(row["payable"] in (0, 1) and row["quarantined"] in (0, 1), f"{name}: ledger payable/quarantined flags")
+    require(seen_ledger == set(by_key), f"{name}: every routed attempt must have exactly one ledger row")
+    for label in ("request_log", "route_snapshots", "attempt_outputs", "receipt_verdicts", "ledger"):
+        order = [(row["request_id"], row["attempt_n"]) for row in r[label]]
+        require(order == sorted(order), f"{name}.{label} must be in (request_id, attempt_n) order")
     events = list_of(r["usage_events"], f"{name}.usage_events")
     for event in events:
         obj(event, {"request_id", "prompt_tokens", "completion_tokens", "token_source", "outcome"}, f"{name}.usage_events")
@@ -2218,6 +2268,14 @@ def load_mapped_requirements(root: Path) -> set[str]:
     return mapped
 
 
+def require_promotion_prerequisites(root: Path, selected: list[str]) -> None:
+    conformance = base.load_object(root / "specs" / "CONFORMANCE.json", "spec conformance")
+    for requirement_id in selected:
+        error = trusted_pool_model_prerequisite_error(conformance, requirement_id)
+        if error:
+            die(error)
+
+
 def require_candidate_identity(value: Any) -> dict[str, Any]:
     identity = obj(value, TRUSTED_POOL_MODEL_CANDIDATE_IDENTITY_KEYS, "candidate_identity")
     for field in TRUSTED_POOL_MODEL_SHA256_IDENTITY_KEYS:
@@ -2268,6 +2326,7 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
     not_mapped = [item for item in selected if item not in load_mapped_requirements(root)]
     if not_mapped:
         die(f"requirement_ids must be pending and mapped to {JOURNEY_ID}: {', '.join(not_mapped)}")
+    require_promotion_prerequisites(root, selected)
     if date.fromisoformat(evidence["expires_at"]) < date.today():
         die("expires_at must not be in the past")
     return {

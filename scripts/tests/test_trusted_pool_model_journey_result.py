@@ -850,6 +850,42 @@ class TrustedPoolModelCaptureTests(CaptureCase):
         self.mutate_json("admission/model-admission-events.json", lambda rows: rows[6].update(actor="something-else"))
         self.assert_rejected("actor must be provider, coordinator")
 
+    def test_round3_closures(self) -> None:
+        nb = self.fixture.nb
+        for label, mutate, fragment in (
+            ("null entries", lambda: self.mutate_json("pool/v4/get-pool.json", lambda d: d["pool"].update(model_entries=None)), "must be a list"),
+            ("missing members", lambda: self.mutate_json("pool/v7/get-pool.json", lambda d: d["pool"].pop("attested_members")), "must be a list"),
+            ("attempt without output", lambda: (
+                self.mutate_json("requests/gguf-nonstream/request_log.json", lambda rows: rows.append(dict(rows[0], attempt_n=2))),
+                self.mutate_json("requests/gguf-nonstream/route_snapshots.json", lambda rows: rows.append(dict(
+                    rows[0], attempt_n=2, route_snapshot_json=json.dumps(dict(json.loads(rows[0]["route_snapshot_json"]), attempt_n=2),
+                                                                         sort_keys=True))))), "recomputed route snapshot digest"),
+            ("future config", lambda: self.mutate_rows("config/ledger-config-snapshots.json", effective_at_utc=iso(nb[6])),
+             "effective at the route decision time"),
+            ("stale core", lambda: self.mutate_snapshot("requests/native-stream/route_snapshots.json", manifest_version=5,
+                                                        manifest_core_digest=core(5)), "manifest active at the route decision time"),
+            ("binding without entry", lambda: self.mutate_json("admission/model-admission-events.json", lambda rows: rows[8].update(
+                pool_manifest_version=4, pool_manifest_core_digest=core(4), actor=f"pool_manifest:{POOL}:4:{core(4)}")),
+             "the entry must be in the version 4 core"),
+            ("unordered rows", lambda: self.mutate_json("requests/gguf-nonstream/request_log.json", lambda rows: rows.insert(
+                0, dict(rows[0], request_id="coord-zzz"))), "exactly one route snapshot"),
+        ):
+            with self.subTest(label=label):
+                self.setUp()
+                mutate()
+                self.assert_rejected(fragment)
+        # Exact coverage: a second routed attempt with a snapshot but no
+        # output, verdict or ledger row is refused.
+        self.setUp()
+        path = self.capture / "requests/gguf-nonstream"
+        self.mutate_json("requests/gguf-nonstream/request_log.json", lambda rows: rows.append(dict(rows[0], attempt_n=2)))
+        rows = json.loads((path / "route_snapshots.json").read_text())
+        snap = dict(json.loads(rows[0]["route_snapshot_json"]), attempt_n=2)
+        text = json.dumps(snap, sort_keys=True)
+        rows.append(dict(rows[0], attempt_n=2, route_snapshot_json=text, route_snapshot_digest=self.fixture.snapshot_digest(text)))
+        (path / "route_snapshots.json").write_text(json.dumps(rows))
+        self.assert_rejected("exactly one attempt output")
+
     def test_native_readd_needs_a_fresh_binding(self) -> None:
         self.mutate_json("admission/model-admission-events.json", lambda rows: rows.pop(10))
         self.assert_rejected("re-added native entry must be bound again")
@@ -976,12 +1012,16 @@ class TrustedPoolModelPayloadTests(CaptureCase):
     def git(self, root: Path, *args: str) -> str:
         return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True).stdout.strip()
 
-    def make_repo(self) -> tuple[Path, str, str, str]:
+    def make_repo(self, r013_state: str = "conformant") -> tuple[Path, str, str, str]:
         root = (self.root / "repo")
         root.mkdir()
         root = root.resolve()
         self.git(root, "init", "-q")
-        write(root / "specs/CONFORMANCE.json", (REPO_ROOT / "specs" / "CONFORMANCE.json").read_bytes())
+        conformance = json.loads((REPO_ROOT / "specs" / "CONFORMANCE.json").read_text())
+        for row in conformance["requirements"]:
+            if row["requirement_id"] == "SPEC-042-R013":
+                row["state"] = r013_state
+        write(root / "specs/CONFORMANCE.json", conformance)
         self.git(root, "add", "-A")
         self.git(root, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "source")
         source_sha = self.git(root, "rev-parse", "HEAD")
@@ -1010,6 +1050,29 @@ class TrustedPoolModelPayloadTests(CaptureCase):
         with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
             BUILDER.build_payload(root, source, source_sha=source_sha, evidence_sha=evidence_sha, requirement_ids=None, cli=str(self.fixture.cli))
         self.assertIn("must match --evidence-sha", stderr.getvalue())
+
+    def test_payload_refuses_r015_r016_until_r013_is_conformant(self) -> None:
+        # SPEC-042 §4 (architect R3 HIGH): the external-runtime prerequisite first.
+        root, source, source_sha, evidence_sha = self.make_repo(r013_state="pending")
+        for requirement_ids in ("SPEC-042-R015", "SPEC-042-R016"):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+                BUILDER.build_payload(root, source, source_sha=source_sha, evidence_sha=evidence_sha, requirement_ids=requirement_ids,
+                                      cli=str(self.fixture.cli))
+            self.assertIn("until SPEC-042-R013 is conformant", stderr.getvalue())
+        payload = BUILDER.build_payload(root, source, source_sha=source_sha, evidence_sha=evidence_sha,
+                                        requirement_ids="SPEC-022-R013,SPEC-005-R015", cli=str(self.fixture.cli))
+        self.assertEqual(["SPEC-022-R013", "SPEC-005-R015"], payload["requirement_ids"])
+
+    def test_promote_script_enforces_the_prerequisite(self) -> None:
+        from scripts.check_spec_governance import trusted_pool_model_prerequisite_error
+        pending = {"requirements": [{"requirement_id": "SPEC-042-R013", "state": "pending"}]}
+        conformant = {"requirements": [{"requirement_id": "SPEC-042-R013", "state": "conformant"}]}
+        self.assertIn("SPEC-042 §4", trusted_pool_model_prerequisite_error(pending, "SPEC-042-R016"))
+        self.assertIsNone(trusted_pool_model_prerequisite_error(conformant, "SPEC-042-R015"))
+        self.assertIsNone(trusted_pool_model_prerequisite_error(pending, "SPEC-006-R018"))
+        text = (REPO_ROOT / "scripts" / "promote-signed-journey-result.py").read_text()
+        self.assertIn("trusted_pool_model_prerequisite_error(conformance, requirement_id)", text)
 
     def test_requirement_ids_are_bounded(self) -> None:
         evidence = {"requirement_ids": sorted(TRUSTED_POOL_MODEL_PROMOTABLE_REQUIREMENT_IDS)}

@@ -139,9 +139,10 @@ Two coordinator facts the journey reflects rather than requires otherwise:
    SPEC-005-R015 digest is the `pool_model_pricing_bounds_sha256` every pool
    route carries; every rate of every verified core sits inside them; each
    route's frozen multiplier and provider share equal its
-   `pool_model_config_snapshot_id` ledger config snapshot, and the live
-   `rewards.global_multiplier` / `rewards.provider_share` equal the newest
-   one; the reload applied the owner map, and the captured
+   `pool_model_config_snapshot_id` ledger config snapshot, which must be the
+   latest one effective at the route decision time, and the live
+   `rewards.global_multiplier` / `rewards.provider_share` equal the one
+   effective at capture; the reload applied the owner map, and the captured
    `trusted_pools.provider_owner_account_ids` map recomputes the logged digest
    and provider count.
 3. `step-03-pool-genesis-with-entries` - the verified history is complete and
@@ -164,7 +165,9 @@ Two coordinator facts the journey reflects rather than requires otherwise:
 6. `step-06-offer-binding` - admission actors are from the closed vocabulary
    (provider, coordinator, operator, or the exact pool-manifest actor); every
    pool binding is the exact entry identity with actor
-   `pool_manifest:<pool>:<version>:<core digest>` of its own version; each
+   `pool_manifest:<pool>:<version>:<core digest>` of its own version, its
+   named core holds that exact entry (and, for the GGUF member, the owner's
+   attestation), and it follows that core's `not_before`; each
    member's first `pool_manifest_bound` names a verified core and follows its
    `not_before`; no `settlement_capable`.
 7. `step-07-pool-models-disclosure` - the pool view lists exactly the signed
@@ -178,11 +181,13 @@ Two coordinator facts the journey reflects rather than requires otherwise:
    `X-MacProvider-Engine: mlx_cache`, the disclosure header and the core
    digest header; the X-Request-ID maps through `request_log` (pool and model)
    to exact `(request_id, attempt_n)` keys, each with exactly one route
-   snapshot, and the attempt output, receipt verdict, ledger row and payable
-   view join those keys; the gateway reservation (the journey buyer's) and
+   snapshot, attempt output, receipt verdict and ledger row (exact per-attempt
+   coverage, rows in `(request_id, attempt_n)` order); the gateway reservation (the journey buyer's) and
    usage event are the X-Request-ID's; the stored `route_snapshot_json` is the
    coordinator's digest preimage (recomputed by `verify-route-snapshot`) and is
-   `pool_manifest`-sourced, v2, enforce, for the exact entry, with expected and
+   `pool_manifest`-sourced, v2, enforce, names the manifest active at its
+   route decision time (or the previous core within 60 seconds of a window
+   opening, while the routeable snapshot refreshes), for the exact entry, with expected and
    provider-reported hash and algorithm equal to the entry, a positive
    `pool_generation`, the version's core digest, and the signed entry rates;
    the verdict binds that digest, the hashes and `model_id = pool_model_id`,
@@ -270,7 +275,7 @@ capture/
   config/rewards.json                      # the live rewards economics: {"global_multiplier": <number>, "provider_share": <number>}
   config/ledger-config-snapshots.json      # SQL below: every ledger_config_snapshots row a captured route names, plus the newest
   pool/root-issuer-registered.json         # the root_issuer_registered event (sign-root --out, or trustpool_events payload)
-  pool/trustpool-events.json               # SELECT event_type, COUNT(*) AS n FROM trustpool_events WHERE pool_id='$POOL_ID' GROUP BY 1;
+  pool/trustpool-events.json               # SELECT event_type, COUNT(*) AS n FROM trustpool_events WHERE pool_id='$POOL_ID' GROUP BY 1 ORDER BY 1;
   pool/current/manifest-accepted.json      # the pool's CURRENT manifest_accepted event (its snapshot proves versions 1..current)
   pool/current/get-pool.json               # trust-pool-admin get-pool at capture end (must show that version and digest)
   pool/v<N>/get-pool.json                  # role versions only: trust-pool-admin get-pool right after that version activates
@@ -364,20 +369,20 @@ C="sqlite3 -readonly -json /var/lib/macprovider/coordinator.db"
 G="sqlite3 -readonly -json /var/lib/macprovider/gateway.db"
 IDS=$(sqlite3 -readonly -noheader /var/lib/macprovider/coordinator.db \
   "SELECT group_concat(quote(request_id)) FROM request_log WHERE external_request_id='$RID';")
-$C "SELECT request_id, attempt_n, external_request_id, status, pool_id, model FROM request_log WHERE external_request_id='$RID';" > request_log.json
+$C "SELECT request_id, attempt_n, external_request_id, status, pool_id, model FROM request_log WHERE external_request_id='$RID' ORDER BY request_id, attempt_n;" > request_log.json
 $C "SELECT request_id, attempt_n, provider_id, route_snapshot_digest, route_snapshot_json, created_at_utc
-    FROM settlement_route_snapshots WHERE request_id IN ($IDS);" > route_snapshots.json
+    FROM settlement_route_snapshots WHERE request_id IN ($IDS) ORDER BY request_id, attempt_n;" > route_snapshots.json
 $C "SELECT request_id, attempt_n, provider_id, terminal_state, usage_source, terminal_state_ts_unix_ms
-    FROM settlement_attempt_outputs WHERE request_id IN ($IDS);" > attempt_outputs.json
+    FROM settlement_attempt_outputs WHERE request_id IN ($IDS) ORDER BY request_id, attempt_n;" > attempt_outputs.json
 $C "SELECT request_id, attempt_n, provider_id, receipt_result, settlement_outcome, reason, closed, pool_label_status,
            route_snapshot_digest, provider_reported_model_hash, expected_catalog_model_hash, model_id, model_hash, received_at_unix_ms
-    FROM settlement_receipt_verdicts WHERE request_id IN ($IDS);" > receipt_verdicts.json
+    FROM settlement_receipt_verdicts WHERE request_id IN ($IDS) ORDER BY request_id, attempt_n;" > receipt_verdicts.json
 $C "SELECT l.id, l.request_id, l.attempt_n, l.provider_id, l.status, l.charged_prompt_tokens, l.cached_prompt_tokens,
            l.completion_tokens, l.estimated_completion_tokens, l.usage_source, l.prompt_rate_per_mtok, l.completion_rate_per_mtok,
            l.global_multiplier_ppm, l.gross_credits, l.provider_share_bps, l.provider_credits, l.quarantined, l.quarantine_reason,
            (p.id IS NOT NULL) payable
     FROM ledger_request_credits l LEFT JOIN spec022_payable_request_credits p ON p.id = l.id
-    WHERE l.request_id IN ($IDS);" > ledger.json
+    WHERE l.request_id IN ($IDS) ORDER BY l.request_id, l.attempt_n;" > ledger.json
 $G "SELECT request_id, account_id, status, settled_tokens, settlement_hold FROM quota_reservations WHERE request_id='$RID';" > quota_reservations.json
 $G "SELECT request_id, prompt_tokens, completion_tokens, token_source, outcome FROM usage_events WHERE request_id='$RID';" > usage_events.json
 ```
@@ -459,6 +464,14 @@ requirement to be one the evidence covers. The payload is signed in
 CI (`production-release`, `MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM`, key id
 `macprovider-acceptance-p256-v1`) and promoted with
 `promote-signed-journey-result.py`.
+
+## Promotion prerequisite
+
+SPEC-042 §4: SPEC-042-R015 and SPEC-042-R016 are promoted from this journey
+only once SPEC-042-R013 (the external-runtime fail-closed set and its signed
+JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME evidence) is `conformant`. `payload`
+and `promote-signed-journey-result.py` both refuse otherwise; the other three
+requirements are not gated.
 
 ## Pass criteria
 
