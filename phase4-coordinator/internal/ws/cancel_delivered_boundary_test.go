@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/gobwas/ws/wsutil"
 )
@@ -111,5 +112,71 @@ func TestRelayCancelOmitsDeliveredOutputBoundaryWhenUnknown(t *testing.T) {
 				t.Fatal("record refused without a sent boundary")
 			}
 		})
+	}
+}
+
+// A buyer-handler dispatch declares at dispatch time that it will register a
+// measure, so a context cancel that fires before TrackDeliveredOutput still
+// sends the boundary (0: nothing was written yet) and the late registration
+// records nothing past it.
+func TestRelayContextCancelBeforeRegistrationCarriesEmptyBoundary(t *testing.T) {
+	s, provider, providerConn := newCancelTerminalHarness(t)
+	ctx, cancel := context.WithCancel(WithDeliveredOutputTracking(context.Background()))
+	defer cancel()
+	relay, err := s.DispatchInference(ctx, *provider, "req-boundary-early", []byte(`{"model":"model-a"}`), true)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read inference_request: %v", err)
+	}
+	cancel()
+	raw := readCancelRequestRaw(t, providerConn)
+	if got, ok := raw["delivered_output_bytes"].(float64); !ok || got != 0 {
+		t.Fatalf("delivered_output_bytes = %v, want 0", raw["delivered_output_bytes"])
+	}
+	delivered := int64(0)
+	relay.TrackDeliveredOutput(func() int64 { return delivered })
+	if relay.RecordDelivered(func() { delivered = 40 }) {
+		t.Fatal("record after the boundary was sent must be refused")
+	}
+	if delivered != 0 {
+		t.Fatalf("delivered = %d, want 0 (equal to the sealed boundary)", delivered)
+	}
+}
+
+// A cancel that arrives while the buyer write is in flight waits for the
+// write's accepted bytes to be recorded: the boundary equals the recorded
+// delivered bytes and no accepted write is dropped from it.
+func TestRelayCancelDuringWriteSealsAfterTheAcceptedBytes(t *testing.T) {
+	s, provider, providerConn := newCancelTerminalHarness(t)
+	ctx, cancel := context.WithCancel(WithDeliveredOutputTracking(context.Background()))
+	defer cancel()
+	relay, err := s.DispatchInference(ctx, *provider, "req-boundary-window", []byte(`{"model":"model-a"}`), true)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read inference_request: %v", err)
+	}
+	delivered := int64(10)
+	relay.TrackDeliveredOutput(func() int64 { return delivered })
+	cancelStarted := make(chan struct{})
+	if !relay.RecordDelivered(func() {
+		// The buyer goes away while the write is in progress: the
+		// context watcher tries to seal now.
+		go func() {
+			close(cancelStarted)
+			cancel()
+		}()
+		<-cancelStarted
+		time.Sleep(20 * time.Millisecond)
+		delivered = 25 // the bytes this write accepted
+	}) {
+		t.Fatal("record refused before any cancel")
+	}
+	raw := readCancelRequestRaw(t, providerConn)
+	if got, ok := raw["delivered_output_bytes"].(float64); !ok || got != 25 {
+		t.Fatalf("delivered_output_bytes = %v, want 25 (the recorded bytes)", raw["delivered_output_bytes"])
 	}
 }
