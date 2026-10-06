@@ -175,6 +175,14 @@ CANARY_AUTHORITY_COMMIT = "9c78c9880a615725eb1da5b42b1193f1372da7f7"
 CANARY_UNIT_BUDGET_S = 180
 JOURNAL_SCHEMA_VERSION = 1
 CURRENT_RELEASE_SCHEMA_VERSION = 1
+# The coordinator embeds modernc SQLite 3.53.2; an older CLI disagrees with it
+# on julianday() rounding inside expression indexes (Pearl, 2026-10-05).
+DEFAULT_SQLITE_BIN = Path("/opt/macprovider-tools/sqlite-3.53.2/bin/sqlite3")
+SQLITE_CHECK_OUTPUT_LINES = 20
+TRANSACTION_DIRECTORY_RE = re.compile(r"^([0-9]+)-v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$")
+DATABASE_SNAPSHOT_RE = re.compile(r"^[0-9]+\.sqlite$")
+ROLLBACK_POINT_UNVERIFIED_ALERT = "macprovider-pearl-updater-alert@macprovider-pearl-updater-rollback-point-unverified.service"
+ROLLBACK_POINT_REFUSED_ALERT = "macprovider-pearl-updater-alert@macprovider-pearl-updater-rollback-point-refused.service"
 ROLLBACK_STEPS = (
     "quiescence",
     "binaries",
@@ -337,6 +345,8 @@ class Config:
     provider_recovery_timeout_s: int = 900
     service_health_timeout_s: int = 60
     sqlite_snapshot_timeout_s: int = 900
+    sqlite_bin: Path | None = None
+    snapshot_retention: int = 3
     canary_timeout_s: int = 720
     buyer_canary_mode: str = BUYER_CANARY_MODE_REQUIRED
     revoked_versions_file: Path = Path("/etc/macprovider/pearl-updater.revoked")
@@ -413,6 +423,9 @@ class Release:
     directory: Path
     release_lane: str = RELEASE_LANE_RUNTIME_WITH_CATALOG
     operator_artifacts: tuple[OperatorArtifact, ...] = ()
+    # Signed by the release workflow (scripts/pearl-database-schema-fingerprint.py);
+    # None means unknown, and the updater then always snapshots the databases.
+    database_schema_fingerprint: str | None = None
 
     @property
     def has_catalog(self) -> bool:
@@ -736,6 +749,8 @@ def load_config(path: Path, *, trusted_uid: int | None = None) -> Config:
         "PEARL_UPDATER_PROVIDER_RECOVERY_TIMEOUT_S",
         "PEARL_UPDATER_SERVICE_HEALTH_TIMEOUT_S",
         "PEARL_UPDATER_SQLITE_SNAPSHOT_TIMEOUT_S",
+        "PEARL_UPDATER_SQLITE_BIN",
+        "PEARL_UPDATER_SNAPSHOT_RETENTION",
         "PEARL_UPDATER_CANARY_TIMEOUT_S",
         "PEARL_UPDATER_BUYER_CANARY_MODE",
         "PEARL_UPDATER_REVOKED_VERSIONS_FILE",
@@ -777,6 +792,8 @@ def load_config(path: Path, *, trusted_uid: int | None = None) -> Config:
         provider_recovery_timeout_s=bounded_int(values.get("PEARL_UPDATER_PROVIDER_RECOVERY_TIMEOUT_S", "900"), "provider recovery timeout", 10, 900),
         service_health_timeout_s=bounded_int(values.get("PEARL_UPDATER_SERVICE_HEALTH_TIMEOUT_S", "60"), "service health timeout", 5, 300),
         sqlite_snapshot_timeout_s=bounded_int(values.get("PEARL_UPDATER_SQLITE_SNAPSHOT_TIMEOUT_S", "900"), "SQLite snapshot timeout", 60, 3600),
+        sqlite_bin=sqlite_bin_value(values.get("PEARL_UPDATER_SQLITE_BIN")),
+        snapshot_retention=bounded_int(values.get("PEARL_UPDATER_SNAPSHOT_RETENTION", "3"), "snapshot retention", 1, 100),
         canary_timeout_s=bounded_int(values.get("PEARL_UPDATER_CANARY_TIMEOUT_S", "720"), "canary timeout", 700, 1800),
         buyer_canary_mode=enum_value(
             values.get("PEARL_UPDATER_BUYER_CANARY_MODE", BUYER_CANARY_MODE_REQUIRED),
@@ -841,6 +858,14 @@ def load_config(path: Path, *, trusted_uid: int | None = None) -> Config:
             values.get("PEARL_UPDATER_RELEASE_MIRROR_ROOT", "/var/www/malibu-download/releases")
         ),
     )
+
+
+def sqlite_bin_value(value: str | None) -> Path | None:
+    if value is None or value == "":
+        return None
+    if not re.fullmatch(r"/[A-Za-z0-9._/-]+", value) or value != os.path.normpath(value) or ".." in Path(value).parts:
+        raise UpdateError("PEARL_UPDATER_SQLITE_BIN must be a normalized absolute path using safe characters")
+    return Path(value)
 
 
 def release_mirror_gate_value(value: str) -> str:
@@ -1020,6 +1045,7 @@ class Updater:
         self.journal: dict[str, Any] | None = None
         self.reconciling = False
         self.live_mutation_started = False
+        self._sqlite_binary: str | None = None
 
     def run_command(
         self,
@@ -2019,6 +2045,11 @@ class Updater:
             raise UpdateError("release metadata provider-admission rollout policy is invalid")
         if release_lane == RELEASE_LANE_RUNTIME and not strict_rollout:
             raise UpdateError("runtime-only Pearl release metadata must not bind provider admission bridge policy")
+        schema_fingerprint = metadata.get("database_schema_fingerprint")
+        if schema_fingerprint is not None and (
+            not isinstance(schema_fingerprint, str) or not SHA256_RE.fullmatch(schema_fingerprint)
+        ):
+            raise UpdateError("release metadata database schema fingerprint is invalid")
 
         return Release(
             tag,
@@ -2035,6 +2066,7 @@ class Updater:
             ),
             directory,
             release_lane,
+            database_schema_fingerprint=schema_fingerprint,
         )
 
     def revoked_versions(self) -> set[SemVer]:
@@ -4277,20 +4309,327 @@ class Updater:
         self.assert_unit_quiescent("macprovider-coordinator.service")
         self._journal_transition("traffic_quiesced")
 
+    def _assert_trusted_executable(self, path: Path) -> Path:
+        # The updater runs this binary as root, so neither it nor any ancestor
+        # may be writable by anyone but root (or the test owner).
+        try:
+            real = Path(os.path.realpath(path, strict=True))
+            entry = real.lstat()
+        except OSError as exc:
+            raise UpdateError(f"cannot inspect SQLite binary {path}: {exc}") from exc
+        trusted_owners = {0, self.trusted_uid}
+        if (
+            not stat.S_ISREG(entry.st_mode)
+            or entry.st_uid not in trusted_owners
+            or stat.S_IMODE(entry.st_mode) & 0o022
+            or not stat.S_IMODE(entry.st_mode) & 0o111
+        ):
+            raise UpdateError(f"SQLite binary must be a root-owned executable not writable by group or other: {real}")
+        for ancestor in real.parents:
+            try:
+                ancestor_entry = ancestor.lstat()
+            except OSError as exc:
+                raise UpdateError(f"cannot inspect SQLite binary ancestor {ancestor}: {exc}") from exc
+            ancestor_mode = stat.S_IMODE(ancestor_entry.st_mode)
+            # A root-owned sticky directory (/tmp) cannot have a trusted
+            # child renamed or replaced by another user.
+            sticky_root = ancestor_entry.st_uid == 0 and ancestor_mode & stat.S_ISVTX
+            if (
+                not stat.S_ISDIR(ancestor_entry.st_mode)
+                or ancestor_entry.st_uid not in trusted_owners
+                or (ancestor_mode & 0o022 and not sticky_root)
+            ):
+                raise UpdateError(f"SQLite binary ancestor is not a trusted directory: {ancestor}")
+        return real
+
+    def sqlite_binary(self) -> str:
+        """The one SQLite CLI used to snapshot, check, and read database schemas."""
+        if self._sqlite_binary is not None:
+            return self._sqlite_binary
+        if self.config.sqlite_bin is not None:
+            selected, source = self.config.sqlite_bin, "configured"
+        elif DEFAULT_SQLITE_BIN.is_file() and os.access(DEFAULT_SQLITE_BIN, os.X_OK):
+            selected, source = DEFAULT_SQLITE_BIN, "default"
+        else:
+            # A fixed root-owned search path, never the inherited PATH.
+            found = shutil.which("sqlite3", path="/usr/local/bin:/usr/bin:/bin")
+            if found is None:
+                raise UpdateError("no sqlite3 binary is available; set PEARL_UPDATER_SQLITE_BIN")
+            selected, source = Path(found), "path"
+        real = self._assert_trusted_executable(selected)
+        result = self.run_command([str(real), "-version"], check=False, timeout=10)
+        version_lines = result.stdout.strip().splitlines()
+        if result.returncode != 0 or not version_lines:
+            raise UpdateError(f"SQLite binary {real} did not report a version")
+        version = version_lines[0][:200]
+        self.audit("sqlite_binary_selected", "success", path=str(real), source=source, version=version)
+        print(f"macprovider-pearl-update: SQLite binary {real} ({source}): {version}", file=sys.stderr, flush=True)
+        self._sqlite_binary = str(real)
+        return self._sqlite_binary
+
+    @staticmethod
+    def _sqlite_read_only_uri(path: Path, *, immutable: bool) -> str:
+        # mode=ro never creates a missing file; immutable also skips locking and
+        # the -wal/-shm files, which a WAL-mode snapshot would otherwise need.
+        query = "mode=ro&immutable=1" if immutable else "mode=ro"
+        return f"file:{urllib.parse.quote(str(path), safe='/')}?{query}"
+
+    @staticmethod
+    def _output_head(result: subprocess.CompletedProcess[str]) -> list[str]:
+        lines = (result.stdout or "").splitlines() + (result.stderr or "").splitlines()
+        return [line[:500] for line in lines[:SQLITE_CHECK_OUTPUT_LINES]]
+
     def sqlite_backup(self, source: Path, destination: Path) -> None:
-        # Traffic is stopped for the whole snapshot. The integrity check scales
-        # with the money DB (a 5.2 GB coordinator.db exceeded 300 s on Pearl,
-        # #1775), so the bound is operator-configured rather than fixed.
+        # Only the page copy runs with traffic stopped; the copy is checked
+        # later (verify_rollback_point, or before any restore). The bound is
+        # operator-configured because the copy scales with the money DB.
         timeout = self.config.sqlite_snapshot_timeout_s
-        result = self.run_command(["sqlite3", "-bail", str(source), f".backup '{destination}'"], check=False, timeout=timeout)
+        result = self.run_command(
+            [self.sqlite_binary(), "-bail", str(source), f".backup '{destination}'"],
+            check=False,
+            timeout=timeout,
+        )
         if result.returncode != 0 or not destination.is_file():
-            raise UpdateError(f"SQLite snapshot failed for {source}: {result.stderr.strip()}")
-        check = self.run_command(["sqlite3", "-bail", str(destination), "PRAGMA integrity_check;"], check=False, timeout=timeout)
-        if check.returncode != 0 or check.stdout.strip() != "ok":
-            raise UpdateError(f"SQLite snapshot integrity check failed for {source}")
+            raise UpdateError(f"SQLite snapshot failed for {source}: {' | '.join(self._output_head(result))}")
         destination.chmod(0o600)
         with destination.open("rb") as handle:
             os.fsync(handle.fileno())
+
+    def sqlite_quick_check(self, path: Path) -> tuple[bool, list[str]]:
+        """PRAGMA quick_check of a static snapshot; returns (ok, first output lines)."""
+        try:
+            result = self.run_command(
+                [self.sqlite_binary(), "-bail", self._sqlite_read_only_uri(path, immutable=True), "PRAGMA quick_check;"],
+                check=False,
+                timeout=self.config.sqlite_snapshot_timeout_s,
+            )
+        except Exception as exc:
+            return False, [f"quick_check could not run: {exc}"[:500]]
+        ok = result.returncode == 0 and result.stdout.strip() == "ok"
+        lines = self._output_head(result)
+        if not ok:
+            print(
+                f"macprovider-pearl-update: SQLite quick_check failed for {path} (exit {result.returncode}):\n"
+                + "\n".join(lines),
+                file=sys.stderr,
+                flush=True,
+            )
+        return ok, lines
+
+    def database_schema_digest(self, path: Path) -> str:
+        """sha256 of a database's user_version, application_id, sqlite_master,
+        and the rows of every migration/schema-version tracking table (the
+        gateway's schema_migrations can advance without a DDL change)."""
+        entry = path.lstat()
+        if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1:
+            raise UpdateError(f"database is not a safe regular file: {path}")
+        uri = self._sqlite_read_only_uri(path, immutable=False)
+
+        def query(sql: str) -> str:
+            result = self.run_command(
+                [self.sqlite_binary(), "-bail", "-batch", uri, sql],
+                check=False,
+                timeout=60,
+            )
+            if result.returncode != 0 or not result.stdout:
+                raise UpdateError(f"could not read the schema of {path}: {' | '.join(self._output_head(result))}")
+            return result.stdout
+
+        marker = "--migration-tables--"
+        schema = query(
+            "PRAGMA user_version; PRAGMA application_id; "
+            "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name, tbl_name; "
+            f"SELECT '{marker}'; "
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND (name LIKE '%migration%' OR name LIKE '%schema_version%') ORDER BY name;"
+        )
+        lines = schema.splitlines()
+        if lines.count(marker) != 1:
+            raise UpdateError(f"could not read the schema of {path}: unexpected output")
+        tables = lines[lines.index(marker) + 1 :]
+        if any(not re.fullmatch(r"[A-Za-z0-9_]{1,128}", name) for name in tables):
+            raise UpdateError(f"could not read the schema of {path}: unexpected migration table name")
+        digest = hashlib.sha256(schema.encode("utf-8"))
+        for name in tables:
+            rows = query(f"SELECT '{name}'; SELECT * FROM \"{name}\";").splitlines()
+            digest.update("\n".join([rows[0], *sorted(rows[1:])]).encode("utf-8") + b"\n")
+        return digest.hexdigest()
+
+    def live_database_schema_digests(self) -> dict[str, str] | None:
+        """Schema digests recorded at commit; None (snapshot next time) on any doubt."""
+        if not self.databases:
+            return None
+        try:
+            return {str(path): self.database_schema_digest(path) for path in self.databases}
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                self.audit("database_schema_recorded", "failed", reason=str(exc))
+            return None
+
+    def database_snapshot_decision(self, release: Release, installed_hashes: dict[str, str]) -> tuple[bool, dict[str, object]]:
+        """(skip, evidence). Skips only when every check below proves the
+        candidate keeps the schema the live databases already have."""
+        evidence: dict[str, object] = {
+            "candidate_fingerprint": release.database_schema_fingerprint,
+            "databases": [str(path) for path in self.databases],
+        }
+
+        def take(reason: str) -> tuple[bool, dict[str, object]]:
+            evidence["reason"] = reason
+            return False, evidence
+
+        try:
+            if not self.databases:
+                return take("no databases are configured")
+            if release.database_schema_fingerprint is None:
+                return take("candidate metadata carries no database schema fingerprint")
+            state = self.state_root / "current-release.json"
+            if not _path_entry_exists(state):
+                return take("no durable installed-release record")
+            durable = json.loads(
+                _read_trusted_text(state, "installed release state", trusted_uid=self.trusted_uid, private=True)
+            )
+            if not isinstance(durable, dict):
+                return take("durable installed-release record is not an object")
+            for name in ("coordinator", "gateway"):
+                if durable.get(f"{name}_sha256") != installed_hashes.get(name):
+                    return take(f"installed {name} binary is not the one the durable record committed")
+            live_fingerprint = durable.get("database_schema_fingerprint")
+            evidence["live_fingerprint"] = live_fingerprint
+            if not isinstance(live_fingerprint, str) or not SHA256_RE.fullmatch(live_fingerprint):
+                return take("durable record carries no database schema fingerprint")
+            if live_fingerprint != release.database_schema_fingerprint:
+                return take("candidate database schema fingerprint differs from the installed release")
+            recorded = durable.get("database_schemas")
+            expected_paths = {str(path) for path in self.databases}
+            if (
+                not isinstance(recorded, dict)
+                or set(recorded) != expected_paths
+                or any(not isinstance(value, str) or not SHA256_RE.fullmatch(value) for value in recorded.values())
+            ):
+                return take("durable record does not cover exactly the live database set")
+            live_schemas = {str(path): self.database_schema_digest(path) for path in self.databases}
+            evidence["live_schemas"] = live_schemas
+            for path, digest in live_schemas.items():
+                if recorded[path] != digest:
+                    return take(f"live schema of {path} changed since the installed release committed")
+        except Exception as exc:
+            return take(f"schema evidence is unavailable: {exc}")
+        evidence["reason"] = "candidate and installed release share the schema fingerprint and the live schemas are unchanged"
+        return True, evidence
+
+    def raise_critical_alert(self, unit: str, **fields: object) -> bool:
+        try:
+            result = self.run_command(["systemctl", "start", "--no-block", unit], check=False, timeout=30)
+            delivered = result.returncode == 0
+            reason = result.stderr.strip()[:500]
+        except Exception as exc:
+            delivered, reason = False, str(exc)[:500]
+        with contextlib.suppress(Exception):
+            self.audit("critical_alert", "raised" if delivered else "failed", unit=unit, reason=reason, **fields)
+        return delivered
+
+    def _database_snapshot_rows(self, tx: Path) -> list[dict[str, Any]]:
+        rows = self._transaction_json(tx, "database-manifest.json")
+        if not isinstance(rows, list):
+            raise UpdateError("database manifest is invalid")
+        snapshots = []
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get("source"), str):
+                raise UpdateError("database manifest row is invalid")
+            if row.get("existed") is True:
+                if not isinstance(row.get("snapshot"), str) or not DATABASE_SNAPSHOT_RE.fullmatch(row["snapshot"]):
+                    raise UpdateError("database manifest snapshot name is invalid")
+                snapshots.append(row)
+        return snapshots
+
+    def _check_rollback_point(self, tx: Path) -> tuple[list[str], dict[str, list[str]]]:
+        checked: list[str] = []
+        failures: dict[str, list[str]] = {}
+        for row in self._database_snapshot_rows(tx):
+            ok, lines = self.sqlite_quick_check(tx / "databases" / row["snapshot"])
+            checked.append(row["source"])
+            if not ok:
+                failures[row["source"]] = lines
+        return checked, failures
+
+    def verify_rollback_point(self, tx: Path | None) -> None:
+        """After commit: quick_check the snapshot taken under quiesce. A bad
+        copy never rolls back the healthy release; it alerts instead."""
+        if tx is None:
+            return
+        try:
+            checked, failures = self._check_rollback_point(tx)
+        except Exception as exc:
+            checked, failures = [], {"transaction": [f"rollback point could not be checked: {exc}"[:500]]}
+        if not failures:
+            self.audit(
+                "rollback_point_verified",
+                "success" if checked else "skipped",
+                transaction=str(tx),
+                databases=checked,
+            )
+            return
+        self.audit("rollback_point_unverified", "failed", transaction=str(tx), failures=failures)
+        if not self.raise_critical_alert(ROLLBACK_POINT_UNVERIFIED_ALERT, transaction=str(tx)):
+            raise UpdateError(f"rollback point {tx} failed quick_check and the critical alert could not be raised")
+
+    def prune_transaction_snapshots(self) -> None:
+        """After commit: drop databases/ payloads of older transactions, keeping
+        the newest PEARL_UPDATER_SNAPSHOT_RETENTION that still hold one."""
+        transactions_root = self.state_root / "transactions"
+        if not _path_entry_exists(transactions_root):
+            return
+        _trusted_directory(transactions_root, "updater transaction directory", trusted_uid=self.trusted_uid)
+        protected: set[str] = set()
+        if self.transaction is not None:
+            protected.add(self.transaction.name)
+        journal = self._load_journal()
+        if journal is not None and isinstance(journal.get("transaction"), str):
+            protected.add(Path(journal["transaction"]).name)
+        state = self.state_root / "current-release.json"
+        if _path_entry_exists(state):
+            durable = json.loads(
+                _read_trusted_text(state, "installed release state", trusted_uid=self.trusted_uid, private=True)
+            )
+            if isinstance(durable, dict) and isinstance(durable.get("transaction"), str):
+                protected.add(Path(durable["transaction"]).name)
+        candidates: list[tuple[int, Path]] = []
+        for entry in transactions_root.iterdir():
+            match = TRANSACTION_DIRECTORY_RE.fullmatch(entry.name)
+            if match is not None:
+                candidates.append((int(match.group(1)), entry))
+        kept = 0
+        for _created, tx in sorted(candidates, reverse=True):
+            databases = tx / "databases"
+            if not _path_entry_exists(databases):
+                continue
+            _trusted_directory(tx, "updater transaction", trusted_uid=self.trusted_uid)
+            _trusted_directory(databases, "updater transaction databases", trusted_uid=self.trusted_uid)
+            payloads = sorted(
+                path
+                for path in databases.iterdir()
+                if DATABASE_SNAPSHOT_RE.fullmatch(path.name.removesuffix("-wal").removesuffix("-shm"))
+                and stat.S_ISREG(path.lstat().st_mode)
+            )
+            if not payloads:
+                continue
+            if tx.name in protected or kept < self.config.snapshot_retention:
+                kept += 1
+                continue
+            freed = 0
+            for payload in payloads:
+                freed += payload.lstat().st_size
+                payload.unlink()
+            _fsync_directory(databases)
+            self.audit(
+                "database_snapshot_pruned",
+                "success",
+                transaction=str(tx),
+                files=[path.name for path in payloads],
+                bytes_freed=freed,
+                retention=self.config.snapshot_retention,
+            )
 
     @staticmethod
     def _durable_copy(source: Path, destination: Path) -> None:
@@ -4434,7 +4773,12 @@ class Updater:
         db_dir = tx / "databases"
         db_dir.mkdir(mode=0o700)
         manifest = []
-        for index, source in enumerate(self.databases):
+        skip_databases, decision = self.database_snapshot_decision(release, component_manifest)
+        if skip_databases:
+            # An empty manifest makes rollback restore binaries, configuration,
+            # and state only; the live databases are left untouched.
+            self.audit("database_snapshot_skipped", "success", candidate=release.tag, transaction=str(tx), **decision)
+        for index, source in enumerate(() if skip_databases else self.databases):
             entry = source.lstat() if _path_entry_exists(source) else None
             if entry is not None:
                 if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1:
@@ -4454,6 +4798,15 @@ class Updater:
                 )
             else:
                 manifest.append({"source": str(source), "existed": False})
+        if not skip_databases:
+            self.audit(
+                "database_snapshot_taken",
+                "success",
+                candidate=release.tag,
+                transaction=str(tx),
+                snapshots=[row["source"] for row in manifest if row["existed"]],
+                **decision,
+            )
         self._write_json(tx / "database-manifest.json", manifest)
         self._write_json(tx / "component-manifest.json", component_manifest)
         for directory in (config_dir, db_dir, tx, transactions_root, self.state_root):
@@ -6486,6 +6839,21 @@ class Updater:
 
     def _restore_databases(self, tx: Path) -> None:
         manifest = self._transaction_json(tx, "database-manifest.json")
+        if not manifest:
+            self.audit("database_rollback", "skipped", transaction=str(tx), reason="no database snapshot was taken")
+            return
+        # The copy was taken under quiesce but checked only after the network
+        # came back, so check it before it can replace a live database. A copy
+        # that fails is never restored: the live databases stay as they are
+        # (all of them, so the set stays mutually consistent) and the rest of
+        # the rollback proceeds.
+        checked, failures = self._check_rollback_point(tx)
+        if failures:
+            self.audit("rollback_point_refused", "failed", transaction=str(tx), failures=failures)
+            self.raise_critical_alert(ROLLBACK_POINT_REFUSED_ALERT, transaction=str(tx))
+            return
+        if checked:
+            self.audit("rollback_point_verified", "success", transaction=str(tx), databases=checked)
         for row in manifest:
             destination = Path(row["source"])
             self._journal_transition(
@@ -6838,7 +7206,12 @@ class Updater:
         self.verify_rollout(release)
         self._journal_transition("committed_success_reverified")
 
-    def persist_success(self, release: Release, previous: SemVer) -> None:
+    def persist_success(
+        self,
+        release: Release,
+        previous: SemVer,
+        database_schemas: dict[str, str] | None = None,
+    ) -> None:
         path = self.state_root / "current-release.json"
         previous_state: dict[str, Any] | None = None
         if _path_entry_exists(path):
@@ -6865,6 +7238,11 @@ class Updater:
             "release_lane": release.release_lane,
             "transaction": str(self.transaction),
         }
+        # Both are evidence for the next rollout's snapshot skip; recording
+        # neither (unknown) makes that rollout snapshot as before.
+        if release.database_schema_fingerprint is not None and database_schemas:
+            state["database_schema_fingerprint"] = release.database_schema_fingerprint
+            state["database_schemas"] = dict(database_schemas)
         if release.catalog is not None:
             state.update(
                 {
@@ -6926,6 +7304,9 @@ class Updater:
         try:
             self.verify_buyer_canary_rollout_posture()
             self.capture_rollout_state()
+            if self.databases:
+                # Select, trust-check, and log the SQLite binary before traffic stops.
+                self.sqlite_binary()
             self.enter_deadman_maintenance()
             self.stop_for_rollout()
             self.audit("traffic_quiesced", "success", candidate=release.tag)
@@ -6942,7 +7323,10 @@ class Updater:
             self.audit("release_pair_installed", "success", candidate=release.tag)
             self.verify_rollout(release)
             self.audit("serving_gates_completed", "success", candidate=release.tag)
-            self.persist_success(release, previous)
+            database_schemas = (
+                self.live_database_schema_digests() if release.database_schema_fingerprint is not None else None
+            )
+            self.persist_success(release, previous, database_schemas)
             self.restore_deadman_monitoring()
             self.rollback_armed = False
             self.live_mutation_started = False
@@ -6991,6 +7375,17 @@ class Updater:
                 raise UpdateError(f"rollout failed: {exc}; {'; '.join(details)}") from exc
             self._clear_journal()
             raise
+        # Committed. Nothing below may roll back or stop the healthy release,
+        # so it runs outside the rollback handler above.
+        self.after_commit()
+
+    def after_commit(self) -> None:
+        try:
+            self.prune_transaction_snapshots()
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                self.audit("database_snapshot_pruned", "failed", reason=str(exc))
+        self.verify_rollback_point(self.transaction)
 
     def reconcile(self) -> bool:
         payload = self._load_journal()
@@ -7166,13 +7561,16 @@ class Updater:
             )
             self.audit("rollout_reconciliation", "success", recovered_phase=recovered_phase)
             self._clear_journal()
-            return True
         except Exception as exc:
             with contextlib.suppress(Exception):
                 self.audit("rollout_reconciliation", "failed", reason=str(exc))
             raise
         finally:
             self.reconciling = False
+        if success_persisted:
+            # A crash after the commit point skipped apply's post-commit work.
+            self.after_commit()
+        return True
 
 
 def test_path(default: Path, env_name: str, testing: bool) -> Path:
@@ -7410,6 +7808,9 @@ def main(argv: list[str]) -> int:
         if decision == "already_current":
             updater.skip_already_current_release(release, current)
             return 0
+        # Fail closed on an untrusted or missing SQLite binary before the phase
+        # journal or any service is touched.
+        updater.sqlite_binary()
         updater.apply(release, current)
         return 0
 

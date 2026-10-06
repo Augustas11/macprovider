@@ -1,0 +1,4 @@
+relay-blind satisfied; identity fingerprint=STO7YQd2at_vncvGxniX-ZqeghFzTMKMisKU8kFjm2w
+scope: request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays
+verified_model_settlement: unavailable_for_relay_blind_request
+usage_settlement: standard_usage_settlement_and_clear_cap_enforcement_still_apply

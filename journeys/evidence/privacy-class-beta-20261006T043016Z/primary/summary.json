@@ -1,0 +1,21 @@
+{
+ "databases": [
+  "coordinator-audit.db",
+  "coordinator.db",
+  "coordinator.db.route-snapshots",
+  "gateway.db",
+  "provider_connection_events.db",
+  "relay-blind.db"
+ ],
+ "log_utc_offset": "-07:00",
+ "not_recoverable": [
+  "hardening-complete timestamp: the 1.8.215 CLI logs no hardening success line",
+  "privacy frame sequence and final-frame count: neither proxy recorded frames",
+  "posture challenge/acceptance rows: the coordinator persists no posture and logs only rejections and timeouts",
+  "P_TRACED/CS_DEBUGGED: never logged; only posture acceptance after the attach attempts exists",
+  "DYLD invocation environment: not logged; procedure/dyld.json holds the kit lines only"
+ ],
+ "privacy_request_ids": 26,
+ "schema_version": "macprovider.privacy-class-beta-primary.v1",
+ "warnings": []
+}

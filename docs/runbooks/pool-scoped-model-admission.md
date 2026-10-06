@@ -91,6 +91,16 @@ multiplier 1.0, a maximum of at most 8,796,093). Anything else fails config
 load: the coordinator does not start, or a SIGHUP reload is rejected and the
 prior config stays in force. An entry also needs cache-hit ≤ prompt.
 
+**Manifest-acceptance witness.** Do not add
+`manifest_acceptance_witness_path` alone to a coordinator that already has
+accepted manifests (Pearl does): with the witness file missing, startup logs
+`pool support disabled` and keeps running with every trusted pool disabled. It
+does not crash. Follow
+[trusted-pool-production-launch.md](trusted-pool-production-launch.md) §3a:
+one locked step bootstraps the witness with `coordinator-cli trust-pool-admin
+manifest-witness-init`, swaps in the config and restarts, followed by the
+mandatory post-restart routeability check.
+
 A SIGHUP that changes the bounds or `provider_owner_account_ids` /
 `provider_owner_public_keys` applies them everywhere at once: manifest
 acceptance, binding, routing, the pool `/v1/models` view, and provider status.

@@ -1,0 +1,1283 @@
+diff --git a/Makefile b/Makefile
+index 613aa2c6c..41ae2ff94 100644
+--- a/Makefile
++++ b/Makefile
+@@ -197,6 +197,7 @@ test-dist:
+ 	bash phase4-coordinator/dist/test/check_nginx_catalog_routes_test.sh
+ 	bash phase4-coordinator/dist/test/check_nginx_stats_test.sh
+ 	bash phase4-coordinator/dist/test/check_nginx_mdm_enroll_routes_test.sh
++	bash phase4-coordinator/dist/test/check_nginx_model_admission_routes_test.sh
+ 	bash phase4-coordinator/dist/test/check_nginx_referral_routes_test.sh
+ 	bash phase4-coordinator/dist/test/check_stats_inventory_deploy_test.sh
+ 	bash phase4-coordinator/dist/test/check_stats_billing_mirror_deploy_test.sh
+diff --git a/docs/runbooks/trusted-pool-m1-activation-plan.md b/docs/runbooks/trusted-pool-m1-activation-plan.md
+index 0ce82e616..f5272a562 100644
+--- a/docs/runbooks/trusted-pool-m1-activation-plan.md
++++ b/docs/runbooks/trusted-pool-m1-activation-plan.md
+@@ -1,6 +1,6 @@
+ # #1690 M1: first production Trusted Pool activation plan (llama.cpp member)
+ 
+-**Status:** prepared 2026-09-25, not executed. **Issue:** #1690 (epic PR #1719,
++**Status:** prepared 2026-09-25; executed on Pearl 2026-10-06 up to an active pool (see "Execution on 2026-10-06" below); the paid journey waits for a signed CLI with the loopback throughput probe. **Issue:** #1690 (epic PR #1719,
+ merged as `747557cc`). **Governing rules:** SPEC-022 v0.2.4 R-12 / R-12.8,
+ SPEC-042 0.0.36 (R001 policy-core/v2, R006 labels, R013, R014), SPEC-023
+ v0.20.0 §3.7 (v0.19.1 added the GGUF Hugging Face consumer rule; v0.20.0
+@@ -36,6 +36,54 @@ then runs strictly in this order: §3.3 (signed cut, deploy) → P7 →
+ `catalog_priced`) → §4.3 steps 7-9 → §5A. Do not start a later step before
+ the earlier one passes.
+ 
++## Execution on 2026-10-06 (corrections to this plan)
++
++The plan ran on Pearl v1.8.218 with CLI 1.8.217 (`71f22d36c`) on the member.
++Pool `G2Nr74KPQN_FxLrrrAhtXQ` (manifest v1, core digest `c9e7b76a…`, v2 core,
++`enforce`, `runtime_allowlist: [llamacpp_loopback]`) is `active` and routeable,
++with member `mp-efd40f26117ac30554a00c6432e6e65e` and one first-party buyer.
++These steps differed from the text below. Each one was verified in code or on
++Pearl:
++
++1. **Catalog activation.** The artifact feed went live through
++   `deploy-pearl-vps.sh` at the running tag (04:05Z), not the updater.
++   The updater refuses an older promoted CLI release as a downgrade. The
++   deploy's canary proof only passes if the canary *process* restarts after
++   Pearl serves the new release, because the CLI's `/v1/status` catalog is
++   fixed at process start (`HTTPServer.swift` `let catalogStatus`). See
++   `pearl-coordinator-rollout.md`.
++2. **BYOM nginx route.** Pearl's vhost had lost
++   `location /v1/provider/model-admission/` → `127.0.0.1:8444`, so every
++   offer returned 404. It was restored on Pearl and is now in the repo
++   template (`check_nginx_model_admission_routes_test.sh`).
++3. **llama-server.** Start it with an **absolute** `-m` path. The CLI resolves
++   `/props.model_path` against its own working directory, so a relative path
++   breaks the pinned-file identity proof. M1 runs `-c 32768 -np 4`
++   (8192 tokens per slot) with `max_context_override: 8192` in the member
++   config, so the advertised context matches the server.
++4. **Offer.** `models offer` defaults `--llamacpp-origin` to
++   `http://127.0.0.1:8080`, which is the live native provider on the Studio.
++   Always pass `--llamacpp-origin http://127.0.0.1:18130` and pin
++   `--llamacpp-model-path`. On a fresh identity the dry run always reports
++   `candidate_id_unstable`, because it never creates the discovery salt;
++   submit with `--yes`.
++5. **`catalog_priced` is a single operator decision.** It uses the per-actor
++   credential (`OPERATOR_AUTH_POLICY_A`, actor `operator:spec026_a`), not dual
++   control; dual control applies only to `settlement_capable`. Read the head
++   from `GET /admin/model-admission/offers?provider_id=…`, then restart the
++   member's serve so its session binds.
++6. **Routing floor (blocker).** Pearl applies
++   `min_provider_throughput_tps: 1.0`. Loopback runtimes before the
++   startup-probe fix report `throughput_tps_estimate: 0`, so the member is
++   excluded (`provider_throughput_floor_excluded`) and pool requests answer
++   503 `no_provider_available` (refunded, nothing billed). The fix measures a
++   real startup throughput through the loopback upstream (SPEC-001 FR-20
++   v1.9.29). The member needs a signed CLI that carries it, accepted on Pearl.
++7. **Pearl actor.** Every Pearl write held both flock locks
++   (`/run/lock/macprovider-pearl-updater.lock`,
++   `/opt/macprovider/.coordinator-deploy.lock`). The lock files always exist,
++   so test them with `flock -n`, never with `-e`.
++
+ ## 0. Scope decision: M1 is an operator-internal pool, `launch_environment: candidate`
+ 
+ M1 runs on the production coordinator with a root whose `launch_environment`
+diff --git a/phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift b/phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift
+index 141119be0..0a4c1cd53 100644
+--- a/phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift
++++ b/phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift
+@@ -2723,27 +2723,42 @@ struct ServeCommand: AsyncParsableCommand {
+             maxConcurrencyOverride: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride),
+             maxContextSource: resolved.maxContextSource
+         )
++        // A loopback runtime probes through its upstream chat-completions leg
++        // (SPEC-001 FR-20, #1690): a 0 estimate falls under the coordinator's
++        // routing throughput floor, so an unprobed loopback provider never routes.
++        var loopbackProbeSucceeded = false
+         let throughputEstimate = await Self.startupThroughputEstimate(
+             autotuneCandidate: autotuneCandidate,
+-            // The loopback serving runtime has no local generation to measure;
+-            // it reports a 0 startup estimate (advisory capacity only).
+             measure: {
+                 if let mlxRuntime = modelRuntime as? ModelRuntime {
+                     return await mlxRuntime.measureStartupThroughput(
+                         maxTokens: ModelRuntime.startupThroughputProbeMaxTokens
+                     )
+                 }
++                if let loopbackRuntime = modelRuntime as? OpenAICompatibleLoopbackRuntime {
++                    let outcome = await loopbackRuntime.measureStartupThroughput(
++                        maxTokens: ModelRuntime.startupThroughputProbeMaxTokens
++                    )
++                    print(outcome.logLine(runtimeSource: loopbackRuntime.runtimeSource))
++                    loopbackProbeSucceeded = outcome.tps > 0
++                    return outcome.tps
++                }
+                 return 0
+             }
+         )
+         // #1689: operator-visible provenance for the estimate above. `nil`
+-        // means no probe ran (autotune candidate or loopback runtime).
++        // means no probe ran (autotune candidate) or a loopback probe failed.
+         var startupThroughputProbe: StartupThroughputProbe?
+         if !autotuneCandidate, let mlxRuntime = modelRuntime as? ModelRuntime {
+             startupThroughputProbe = StartupThroughputProbe(
+                 maxTokens: ModelRuntime.startupThroughputProbeMaxTokens,
+                 modelID: await mlxRuntime.loadedModelID ?? resolved.model
+             )
++        } else if !autotuneCandidate, loopbackProbeSucceeded, let loopbackRuntime = modelRuntime as? OpenAICompatibleLoopbackRuntime {
++            startupThroughputProbe = StartupThroughputProbe(
++                maxTokens: ModelRuntime.startupThroughputProbeMaxTokens,
++                modelID: loopbackRuntime.servedModelRef
++            )
+         }
+         let thermalGate = ThermalGate()
+         // `slots_free` in the log reflects the throttle-driven free-slot
+diff --git a/phase3-binary/Sources/macprovider-cli/ModelRuntime.swift b/phase3-binary/Sources/macprovider-cli/ModelRuntime.swift
+index da0b4f522..a57a3ec3c 100644
+--- a/phase3-binary/Sources/macprovider-cli/ModelRuntime.swift
++++ b/phase3-binary/Sources/macprovider-cli/ModelRuntime.swift
+@@ -8210,6 +8210,17 @@ actor ModelRuntime: ModelRuntimeServing {
+     /// so it is not a sustained decode benchmark (#1689).
+     static let startupThroughputProbeMaxTokens = 8
+ 
++    /// The startup probe's fixed prompt, shared by native and loopback runtimes.
++    static let startupThroughputProbePrompt = "Reply with a short greeting."
++
++    /// The one `capacity.throughput_tps_estimate` formula for every runtime
++    /// (SPEC-001 FR-17/FR-20, SPEC-002): completion tokens of the startup
++    /// generation over the whole request's elapsed time (prefill, first
++    /// token and decode).
++    static func startupThroughputRate(completionTokens: Int, elapsedSeconds: TimeInterval) -> Double {
++        Double(completionTokens) / max(elapsedSeconds, 0.001)
++    }
++
+     func measureStartupThroughput(maxTokens: Int = ModelRuntime.startupThroughputProbeMaxTokens) async -> Double {
+         guard let container = currentContainer else {
+             return 0.0
+@@ -8223,7 +8234,7 @@ actor ModelRuntime: ModelRuntimeServing {
+             let blockingInferenceExecutor = blockingInferenceExecutor
+             let result: BlockingGenerateResult = try await inferenceGate.withPermit {
+                 try await container.perform { context in
+-                    let input = UserInput(chat: [.user("Reply with a short greeting.")])
++                    let input = UserInput(chat: [.user(Self.startupThroughputProbePrompt)])
+                     let lmInput = try await context.processor.prepare(input: input)
+                     let parameters = Self.makeServeGenerateParameters(
+                         maxTokens: maxTokens,
+@@ -8240,8 +8251,10 @@ actor ModelRuntime: ModelRuntimeServing {
+                     }
+                 }
+             }
+-            let elapsed = max(Date().timeIntervalSince(start), 0.001)
+-            return Double(result.generationTokenCount) / elapsed
++            return Self.startupThroughputRate(
++                completionTokens: result.generationTokenCount,
++                elapsedSeconds: Date().timeIntervalSince(start)
++            )
+         } catch {
+             return 0.0
+         }
+diff --git a/phase3-binary/Sources/macprovider-cli/OpenAICompatibleLoopbackRuntime.swift b/phase3-binary/Sources/macprovider-cli/OpenAICompatibleLoopbackRuntime.swift
+index 3a25d8998..271319316 100644
+--- a/phase3-binary/Sources/macprovider-cli/OpenAICompatibleLoopbackRuntime.swift
++++ b/phase3-binary/Sources/macprovider-cli/OpenAICompatibleLoopbackRuntime.swift
+@@ -163,6 +163,28 @@ enum OpenAICompatibleLoopbackRuntimeError: Error, CustomStringConvertible, Equat
+     }
+ }
+ 
++/// The loopback startup throughput probe's result (SPEC-001 FR-20). A failure
++/// carries a closed reason code and reports a 0 estimate.
++enum LoopbackStartupThroughputOutcome: Equatable, Sendable {
++    case ok(tps: Double)
++    case failed(reason: String)
++
++    var tps: Double {
++        if case .ok(let tps) = self { return tps }
++        return 0
++    }
++
++    /// The one structured log line for the probe; never carries text.
++    func logLine(runtimeSource: String) -> String {
++        switch self {
++        case .ok(let tps):
++            return "event=loopback_startup_throughput_probe outcome=ok tps=\(String(format: "%.2f", tps)) runtime_source=\(runtimeSource)"
++        case .failed(let reason):
++            return "event=loopback_startup_throughput_probe outcome=failed reason=\(reason) runtime_source=\(runtimeSource)"
++        }
++    }
++}
++
+ /// A streamed loopback response: status, then the body split into lines
+ /// (blank lines preserved, so SSE event boundaries survive).
+ struct BYOMLoopbackLineResponse: Sendable {
+@@ -594,6 +616,14 @@ struct OpenAICompatibleStreamAccumulator {
+     /// usage is counted over).
+     var receivedContent: String { content }
+ 
++    /// The upstream's own `usage.completion_tokens`, never the delta-event
++    /// count (SPEC-001 FR-20 startup probe).
++    var upstreamCompletionTokens: Int? { completionTokens }
++
++    /// Content-bearing deltas streamed so far (SPEC-001 FR-20 startup probe
++    /// cap: an upstream count above it is never believed).
++    var contentDeltaCount: Int { deltaEvents }
++
+     /// True when the upstream attested the completion tokens through every
+     /// content chunk so far (timings or `logprobs`).
+     var hasPerChunkCompletionCounts: Bool { prefixCompletionTokens != nil && prefixCountSource != nil }
+@@ -1252,6 +1282,165 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
+         try await proxy(request, contextWindow: nil, shouldCancel: shouldCancel, onChunk: onChunk)
+     }
+ 
++    // MARK: Startup throughput probe (SPEC-001 FR-20, #1690)
++
++    /// Hard wall-clock bound on the whole startup probe: the identity checks
++    /// before and after the generation, the connection and the generation
++    /// itself. It covers an upstream that lazily loads the model on first
++    /// request (Ollama); past it the probe fails and serve continues with 0.
++    static let startupThroughputProbeTimeoutSeconds: TimeInterval = 60
++
++    /// The serve-time startup probe behind `capacity.throughput_tps_estimate`
++    /// for a loopback runtime: one fixed short generation (the native probe's
++    /// prompt and token budget) through the runtime's own chat-completions
++    /// leg. The rate is the native probe's quantity: completion tokens over
++    /// the whole request, start to stream end, so prefill and any upstream
++    /// model load count. The count is the upstream's own
++    /// (`usage.completion_tokens`, else `timings.predicted_n` from llama-server
++    /// only), bounded by `maxTokens` and then capped at the content-bearing
++    /// deltas actually streamed, so a forged count can only lower the rate;
++    /// a stream without the upstream's count fails closed. The bound
++    /// identity (llama-server's `/props` served file included) is checked
++    /// immediately before and after the generation inside the same deadline.
++    /// It never touches `ProviderStatus` (no usage, request log or billing),
++    /// never logs prompt or completion text, and any failure is an outcome,
++    /// never a thrown error, so serving is unaffected.
++    func measureStartupThroughput(
++        maxTokens: Int = ModelRuntime.startupThroughputProbeMaxTokens,
++        timeoutSeconds: TimeInterval = OpenAICompatibleLoopbackRuntime.startupThroughputProbeTimeoutSeconds
++    ) async -> LoopbackStartupThroughputOutcome {
++        let payload: [String: Any] = [
++            "model": upstreamModelName,
++            "messages": [["role": "user", "content": ModelRuntime.startupThroughputProbePrompt]],
++            "stream": true,
++            "stream_options": ["include_usage": true],
++            "temperature": 0.0,
++            "max_tokens": maxTokens,
++        ]
++        guard let body = try? JSONSerialization.data(withJSONObject: payload, options: [.withoutEscapingSlashes]) else {
++            return .failed(reason: "encode_failed")
++        }
++        let client = httpClient
++        let url = chatCompletionsURL
++        let acceptsPredictedN = isLlamaCpp
++        let timeouts = LoopbackGenerationTimeouts(firstByte: timeoutSeconds, idle: timeoutSeconds, overall: timeoutSeconds)
++        let deadline = Date().addingTimeInterval(timeoutSeconds)
++        let outcome = await Self.bounded(until: deadline, cancelWithCaller: true) { [self] () async -> LoopbackStartupThroughputOutcome? in
++            guard await self.probeServesBoundIdentity() else { return .failed(reason: "identity_unbound") }
++            let measured = await Self.runStartupThroughputProbe(
++                client, url: url, body: body, maxTokens: maxTokens, acceptsPredictedN: acceptsPredictedN, timeouts: timeouts
++            )
++            guard case .ok = measured else { return measured }
++            guard await self.probeServesBoundIdentity() else { return .failed(reason: "identity_unbound") }
++            return measured
++        }
++        if let outcome { return outcome }
++        return .failed(reason: Task.isCancelled ? "cancelled" : "timeout")
++    }
++
++    /// The request-path identity checks plus, for llama.cpp, the `/props`
++    /// served-file check `upstreamContextGate` runs before every request.
++    private func probeServesBoundIdentity() async -> Bool {
++        guard await servesBoundIdentity() else { return false }
++        guard isLlamaCpp else { return true }
++        guard (try? await requireLlamaCppServesBoundFile()) != nil else { return false }
++        return identityIsValid()
++    }
++
++    private static func runStartupThroughputProbe(
++        _ client: any BYOMDiscoveryHTTPClient,
++        url: URL,
++        body: Data,
++        maxTokens: Int,
++        acceptsPredictedN: Bool,
++        timeouts: LoopbackGenerationTimeouts
++    ) async -> LoopbackStartupThroughputOutcome {
++        let startedAt = ProcessInfo.processInfo.systemUptime
++        let response: BYOMLoopbackLineResponse
++        do {
++            response = try await openLines(client, url: url, body: body, timeouts: timeouts)
++        } catch let error as URLError where error.code == .timedOut {
++            return .failed(reason: "timeout")
++        } catch {
++            return .failed(reason: "upstream_unavailable")
++        }
++        guard (200...299).contains(response.statusCode) else {
++            await closeLines(response.lines)
++            return .failed(reason: "upstream_status_\(response.statusCode)")
++        }
++        var accumulator = OpenAICompatibleStreamAccumulator()
++        var predictedN: Int?
++        do {
++            for try await line in response.lines {
++                if acceptsPredictedN, line.hasPrefix("data:"), line.contains("predicted_n"),
++                   case .object(let root)? = try? StrictJSONParser.parse(String(line.dropFirst(5))),
++                   case .object(let timings)? = root["timings"],
++                   let value = intValue(timings["predicted_n"]) {
++                    predictedN = value
++                }
++                _ = try accumulator.consume(line: line)
++                if accumulator.isDone { break }
++            }
++            let (result, _) = try accumulator.finish()
++            let endedAt = ProcessInfo.processInfo.systemUptime
++            // A plain JSON body's count is its `usage` (0 when absent) and
++            // its content is one delta.
++            let plainBody = accumulator.decodedFromPlainBody
++            let attested = plainBody
++                ? result.completionTokens
++                : accumulator.upstreamCompletionTokens ?? predictedN
++            let contentDeltas = plainBody
++                ? (result.content.isEmpty ? 0 : 1)
++                : accumulator.contentDeltaCount
++            return startupThroughputOutcome(
++                contentDeltas: contentDeltas,
++                completionTokens: attested,
++                maxTokens: maxTokens,
++                elapsedSeconds: endedAt - startedAt
++            )
++        } catch is CancellationError {
++            return .failed(reason: "timeout")
++        } catch let error as URLError where error.code == .timedOut {
++            return .failed(reason: "timeout")
++        } catch {
++            return .failed(reason: "malformed_response")
++        }
++    }
++
++    /// The startup rate through `ModelRuntime.startupThroughputRate`, the
++    /// native probe's formula. The claim is bounded: content must have
++    /// streamed, the count must be the upstream's own and at most
++    /// `maxTokens`, and the elapsed time must be finite and positive;
++    /// anything else fails closed. The counted tokens are the upstream count
++    /// capped at the content-bearing deltas, so a forged count fails low.
++    static func startupThroughputOutcome(
++        contentDeltas: Int,
++        completionTokens: Int?,
++        maxTokens: Int,
++        elapsedSeconds: TimeInterval
++    ) -> LoopbackStartupThroughputOutcome {
++        guard contentDeltas > 0 else { return .failed(reason: "no_content") }
++        guard let completionTokens, completionTokens > 0 else { return .failed(reason: "no_tokens") }
++        guard completionTokens <= maxTokens else { return .failed(reason: "usage_exceeds_max_tokens") }
++        guard elapsedSeconds.isFinite, elapsedSeconds > 0 else { return .failed(reason: "no_elapsed_time") }
++        return .ok(tps: ModelRuntime.startupThroughputRate(
++            completionTokens: min(completionTokens, contentDeltas),
++            elapsedSeconds: elapsedSeconds
++        ))
++    }
++
++    /// Ends a line stream that will not be read: iterating it from a
++    /// cancelled task terminates it, which runs its `onTermination` (the
++    /// streaming client cancels the upstream request there).
++    private static func closeLines(_ lines: AsyncThrowingStream<String, Error>) async {
++        let drain = Task {
++            var iterator = lines.makeAsyncIterator()
++            _ = try? await iterator.next()
++        }
++        drain.cancel()
++        await drain.value
++    }
++
+     // MARK: Internals
+ 
+     /// Re-resolve the served ref through the locator and confirm the file's
+@@ -1336,6 +1525,20 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
+             return contextWindow
+         }
+         guard isLlamaCpp else { return nil }
++        let propsBody = try await requireLlamaCppServesBoundFile()
++        guard let contextWindow = BYOMDiscoveryJSON.llamaCppContextWindow(from: propsBody) else {
++            return nil
++        }
++        // max_tokens alone is checked before spending two loopback calls.
++        try Self.contextGate(promptTokens: nil, maxTokens: request.maxTokens, contextWindow: contextWindow)
++        let promptTokens = await countPromptTokens(request)
++        try Self.contextGate(promptTokens: promptTokens, maxTokens: request.maxTokens, contextWindow: contextWindow)
++        return contextWindow
++    }
++
++    /// llama.cpp: re-read `/props` and require llama-server still serves the
++    /// bound file. Returns the `/props` body.
++    private func requireLlamaCppServesBoundFile() async throws -> Data {
+         let props: BYOMHTTPResponse
+         do {
+             props = try await httpClient.get(
+@@ -1352,14 +1555,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
+         guard BYOMDiscoveryJSON.llamaCppServedArtifactPath(from: props.body) == runtimeArtifactPath else {
+             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
+         }
+-        guard let contextWindow = BYOMDiscoveryJSON.llamaCppContextWindow(from: props.body) else {
+-            return nil
+-        }
+-        // max_tokens alone is checked before spending two loopback calls.
+-        try Self.contextGate(promptTokens: nil, maxTokens: request.maxTokens, contextWindow: contextWindow)
+-        let promptTokens = await countPromptTokens(request)
+-        try Self.contextGate(promptTokens: promptTokens, maxTokens: request.maxTokens, contextWindow: contextWindow)
+-        return contextWindow
++        return props.body
+     }
+ 
+     /// Exact prompt length as llama-server will see it: its own chat template
+@@ -1627,22 +1823,43 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
+     /// Runs `work` and returns its value, or nil at `deadline` without
+     /// waiting for it: the work runs in an unstructured task, so a
+     /// non-cancellable step (a tokenizer encode, a stuck socket) can never
+-    /// hold the caller past the deadline.
+-    static func bounded<T: Sendable>(until deadline: Date, _ work: @escaping @Sendable () async -> T?) async -> T? {
++    /// hold the caller past the deadline. With `cancelWithCaller`, cancelling
++    /// the caller also cancels the work and returns nil at once (the startup
++    /// probe). The post-cancel usage path leaves it off: it runs after a
++    /// buyer cancel and must still finish its count.
++    static func bounded<T: Sendable>(
++        until deadline: Date,
++        cancelWithCaller: Bool = false,
++        _ work: @escaping @Sendable () async -> T?
++    ) async -> T? {
+         let gate = LoopbackResumeOnce()
+-        return await withCheckedContinuation { (continuation: CheckedContinuation<T?, Never>) in
+-            let worker = Task {
+-                let value = await work()
+-                if gate.claim() { continuation.resume(returning: value) }
+-            }
+-            Task {
+-                let wait = max(0, deadline.timeIntervalSinceNow)
+-                try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+-                if gate.claim() {
+-                    worker.cancel()
+-                    continuation.resume(returning: nil)
++        let callerCancel = LoopbackCancelAction()
++        return await withTaskCancellationHandler {
++            await withCheckedContinuation { (continuation: CheckedContinuation<T?, Never>) in
++                let worker = Task {
++                    let value = await work()
++                    if gate.claim() { continuation.resume(returning: value) }
++                }
++                let timer = Task {
++                    let wait = max(0, deadline.timeIntervalSinceNow)
++                    try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
++                    if gate.claim() {
++                        worker.cancel()
++                        continuation.resume(returning: nil)
++                    }
++                }
++                if cancelWithCaller {
++                    callerCancel.install {
++                        if gate.claim() {
++                            worker.cancel()
++                            timer.cancel()
++                            continuation.resume(returning: nil)
++                        }
++                    }
+                 }
+             }
++        } onCancel: {
++            callerCancel.fire()
+         }
+     }
+ 
+@@ -2006,6 +2223,34 @@ final class LoopbackResumeOnce: @unchecked Sendable {
+     }
+ }
+ 
++/// A caller-cancellation action for `bounded`: runs once, immediately when
++/// the caller was cancelled before it was installed.
++final class LoopbackCancelAction: @unchecked Sendable {
++    private let lock = NSLock()
++    private var action: (() -> Void)?
++    private var fired = false
++
++    func install(_ action: @escaping () -> Void) {
++        lock.lock()
++        guard !fired else {
++            lock.unlock()
++            action()
++            return
++        }
++        self.action = action
++        lock.unlock()
++    }
++
++    func fire() {
++        lock.lock()
++        fired = true
++        let action = self.action
++        self.action = nil
++        lock.unlock()
++        action?()
++    }
++}
++
+ /// The stream accumulator shared by the reader and the cancel path.
+ private final class LoopbackStreamState: @unchecked Sendable {
+     private let lock = NSLock()
+diff --git a/phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift b/phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift
+index 173a5687c..c487ba8e6 100644
+--- a/phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift
++++ b/phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift
+@@ -1427,8 +1427,18 @@ private final class CancelFlag: @unchecked Sendable {
+ private final class EndlessStreamingLoopbackClient: BYOMLoopbackStreamingHTTPClient, @unchecked Sendable {
+     private let lock = NSLock()
+     private var terminated = false
++    private let statusCode: Int
++    private let retainsLines: Bool
++    private var retainedLines: AsyncThrowingStream<String, Error>?
+     var wasTerminated: Bool { lock.lock(); defer { lock.unlock() }; return terminated }
+ 
++    /// `retainsLines` keeps the stream referenced here, so dropping it does
++    /// not close it and only an explicit close by the consumer ends it.
++    init(statusCode: Int = 200, retainsLines: Bool = false) {
++        self.statusCode = statusCode
++        self.retainsLines = retainsLines
++    }
++
+     func get(_ url: URL, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
+         throw BYOMDiscoveryAdapterError.rejectedNonLoopback
+     }
+@@ -1462,7 +1472,12 @@ private final class EndlessStreamingLoopbackClient: BYOMLoopbackStreamingHTTPCli
+                 self.lock.unlock()
+             }
+         }
+-        return BYOMLoopbackLineResponse(statusCode: 200, lines: lines)
++        if retainsLines {
++            lock.lock()
++            retainedLines = lines
++            lock.unlock()
++        }
++        return BYOMLoopbackLineResponse(statusCode: statusCode, lines: lines)
+     }
+ }
+ 
+@@ -1576,6 +1591,8 @@ private final class LlamaCppStubClient: BYOMDiscoveryHTTPClient, @unchecked Send
+     private let nCtx: Int
+     private let promptTokens: Int
+     private var _chatPosts = 0
++    private var chatResponse: Data?
++    private var modelPathAfterChat: String?
+ 
+     init(modelPath: String, nCtx: Int, promptTokens: Int) {
+         self.modelPath = modelPath
+@@ -1585,6 +1602,10 @@ private final class LlamaCppStubClient: BYOMDiscoveryHTTPClient, @unchecked Send
+ 
+     var chatPosts: Int { lock.lock(); defer { lock.unlock() }; return _chatPosts }
+     func setModelPath(_ path: String) { lock.lock(); modelPath = path; lock.unlock() }
++    /// Chat completions answer 200 with `body` (default: a bare 500).
++    func setChatResponse(_ body: Data) { lock.lock(); chatResponse = body; lock.unlock() }
++    /// The next chat completion re-points `/props` to `path` (a reload mid-generation).
++    func setModelPathAfterChat(_ path: String) { lock.lock(); modelPathAfterChat = path; lock.unlock() }
+     private var currentModelPath: String { lock.lock(); defer { lock.unlock() }; return modelPath }
+ 
+     func get(_ url: URL, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
+@@ -1604,8 +1625,14 @@ private final class LlamaCppStubClient: BYOMDiscoveryHTTPClient, @unchecked Send
+         default:
+             lock.lock()
+             _chatPosts += 1
++            let body = chatResponse
++            if let next = modelPathAfterChat {
++                modelPath = next
++                modelPathAfterChat = nil
++            }
+             lock.unlock()
+-            return BYOMHTTPResponse(statusCode: 500, headers: [], body: Data())
++            guard let body else { return BYOMHTTPResponse(statusCode: 500, headers: [], body: Data()) }
++            return BYOMHTTPResponse(statusCode: 200, headers: [], body: body)
+         }
+     }
+ }
+@@ -1750,3 +1777,408 @@ private final class ScriptedLoopbackClient: BYOMLoopbackStreamingHTTPClient, @un
+         }
+     }
+ }
++
++// MARK: #1690 — loopback startup throughput probe (SPEC-001 FR-20)
++
++extension OpenAICompatibleLoopbackRuntimeTests {
++    private static let probeSSE = Data("""
++    data: {"choices":[{"delta":{"role":"assistant","content":"Hi"}}]}
++
++    data: {"choices":[{"delta":{"content":" there"}}]}
++
++    data: {"choices":[{"delta":{},"finish_reason":"length"}]}
++
++    data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":8}}
++
++    data: [DONE]
++
++    """.utf8)
++
++    func testLoopbackStartupProbeReportsAPositiveRateFromUpstreamUsage() async throws {
++        let store = try makeStore()
++        let client = StubLoopbackHTTPClient(responseBody: Self.probeSSE)
++        let runtime = try makeRuntime(httpClient: client, store: store)
++
++        let outcome = await runtime.measureStartupThroughput(maxTokens: ModelRuntime.startupThroughputProbeMaxTokens)
++        guard case .ok(let tps) = outcome else { return XCTFail("expected ok, got \(outcome)") }
++        XCTAssertGreaterThan(tps, 1, "a successful probe clears the coordinator's 1 tok/s routing floor")
++        XCTAssertEqual(outcome.tps, tps)
++        XCTAssertEqual(client.postCount, 1, "exactly one probe generation")
++
++        // One fixed short generation through the runtime's own leg: the
++        // upstream model name, the native token budget, streamed with usage.
++        XCTAssertEqual(client.lastURL?.absoluteString, "http://127.0.0.1:11434/v1/chat/completions")
++        let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(client.lastBody)) as? [String: Any])
++        XCTAssertEqual(sent["model"] as? String, "gemma3:270m")
++        XCTAssertEqual(sent["max_tokens"] as? Int, ModelRuntime.startupThroughputProbeMaxTokens)
++        XCTAssertEqual(sent["stream"] as? Bool, true)
++        XCTAssertEqual((sent["stream_options"] as? [String: Any])?["include_usage"] as? Bool, true)
++
++        // The log line names the rate and runtime, never the completion text.
++        let line = outcome.logLine(runtimeSource: OllamaLoopbackServeModel.runtimeSource)
++        XCTAssertTrue(line.hasPrefix("event=loopback_startup_throughput_probe outcome=ok tps="), line)
++        XCTAssertTrue(line.hasSuffix(" runtime_source=ollama_loopback"), line)
++        XCTAssertFalse(line.contains("Hi") || line.contains("there") || line.contains("greeting"), line)
++    }
++
++    private static let predictedNOnlySSE = Data("""
++    data: {"choices":[{"delta":{"content":"Hi"}}]}
++
++    data: {"choices":[{"delta":{},"finish_reason":"length"}],"timings":{"predicted_n":8,"predicted_ms":0.001,"predicted_per_second":1000000000}}
++
++    data: [DONE]
++
++    """.utf8)
++
++    func testLoopbackStartupProbeIgnoresTheUpstreamRateAndCountsPredictedN() async throws {
++        // llama-server without `usage`: `timings.predicted_n` is the count;
++        // its self-reported `predicted_per_second` is never the result.
++        let root = FileManager.default.temporaryDirectory.appendingPathComponent("llamacpp-predicted-\(UUID().uuidString)")
++        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
++        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
++        let file = root.appendingPathComponent("tiny-q4.gguf")
++        try (Data("GGUF".utf8) + Data(repeating: 0x5a, count: 4096)).write(to: file)
++        let client = LlamaCppStubClient(modelPath: file.resolvingSymlinksInPath().path, nCtx: 64, promptTokens: 40)
++        client.setChatResponse(Self.predictedNOnlySSE)
++        let runtime = try await OpenAICompatibleLoopbackRuntime.llamaCpp(
++            servedModelRef: "llamacpp:tiny-q4",
++            origin: "http://127.0.0.1:9191",
++            selector: BYOMLlamaCppArtifactSelector(root: nil, pinnedFile: file),
++            httpClient: client,
++            cache: BYOMArtifactDigestCache(url: root.appendingPathComponent("cache.json"))
++        )
++        let outcome = await runtime.measureStartupThroughput()
++        guard case .ok(let tps) = outcome else { return XCTFail("expected ok, got \(outcome)") }
++        XCTAssertGreaterThan(tps, 0)
++        XCTAssertNotEqual(tps, 1_000_000_000, "the upstream's own rate claim is ignored")
++    }
++
++    func testLoopbackStartupProbeIgnoresPredictedNForANonLlamaRuntime() async throws {
++        // `timings.predicted_n` is llama-server's field; any other runtime
++        // sending it is not believed, and without `usage` the probe fails closed.
++        let store = try makeStore()
++        let runtime = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: Self.predictedNOnlySSE), store: store)
++        let runtimeSource = await runtime.runtimeSource
++        XCTAssertEqual(runtimeSource, OllamaLoopbackServeModel.runtimeSource)
++        let outcome = await runtime.measureStartupThroughput()
++        XCTAssertEqual(outcome, .failed(reason: "no_tokens"))
++        XCTAssertEqual(outcome.tps, 0)
++    }
++
++    func testLoopbackStartupProbeCapsAForgedUsageCountAtTheStreamedContentDeltas() async throws {
++        // One content fragment with a forged `usage.completion_tokens: 8`.
++        let sse = """
++        data: {"choices":[{"delta":{"content":"Hi there friend"}}]}
++
++        data: {"choices":[{"delta":{},"finish_reason":"length"}]}
++
++        data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":8}}
++
++        data: [DONE]
++
++        """
++        var accumulator = OpenAICompatibleStreamAccumulator()
++        for line in sse.components(separatedBy: "\n") {
++            _ = try accumulator.consume(line: line)
++        }
++        XCTAssertEqual(accumulator.upstreamCompletionTokens, 8)
++        XCTAssertEqual(accumulator.contentDeltaCount, 1)
++
++        // Counted = min(8, 1) = 1: the forged count never raises the rate.
++        XCTAssertEqual(
++            OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
++                contentDeltas: accumulator.contentDeltaCount,
++                completionTokens: accumulator.upstreamCompletionTokens,
++                maxTokens: 8,
++                elapsedSeconds: 1
++            ),
++            .ok(tps: 1)
++        )
++        // An honest per-token stream keeps its full count.
++        XCTAssertEqual(
++            OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
++                contentDeltas: 8, completionTokens: 8, maxTokens: 8, elapsedSeconds: 1
++            ),
++            .ok(tps: 8)
++        )
++        // The max_tokens bound applies to the upstream count before the cap.
++        XCTAssertEqual(
++            OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
++                contentDeltas: 1, completionTokens: 9, maxTokens: 8, elapsedSeconds: 1
++            ),
++            .failed(reason: "usage_exceeds_max_tokens")
++        )
++
++        // End to end the forged stream still succeeds, counted as one token.
++        let store = try makeStore()
++        let runtime = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: Data(sse.utf8)), store: store)
++        let outcome = await runtime.measureStartupThroughput(maxTokens: 8)
++        XCTAssertGreaterThan(outcome.tps, 0, "\(outcome)")
++    }
++
++    func testNativeAndLoopbackStartupProbesShareOneThroughputFormula() {
++        // SPEC-002 `throughput_tps_estimate` is one cross-runtime quantity:
++        // completion tokens over the whole request's elapsed time. The native
++        // probe returns `ModelRuntime.startupThroughputRate` directly; the
++        // loopback probe must give the identical value for identical inputs.
++        for (tokens, elapsed) in [(8, 32.0), (8, 0.08), (1, 1.0), (5, 2.5), (8, 0.0005)] {
++            XCTAssertEqual(
++                OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
++                    contentDeltas: tokens, completionTokens: tokens, maxTokens: 8, elapsedSeconds: elapsed
++                ).tps,
++                ModelRuntime.startupThroughputRate(completionTokens: tokens, elapsedSeconds: elapsed),
++                "tokens \(tokens) elapsed \(elapsed)"
++            )
++        }
++        XCTAssertEqual(ModelRuntime.startupThroughputRate(completionTokens: 8, elapsedSeconds: 32), 0.25)
++    }
++
++    func testStartupThroughputIsTokensOverTotalElapsedLikeTheNativeProbe() {
++        // 8 tokens; a 30 s cold load + prefill counts, as in the native probe.
++        XCTAssertEqual(
++            OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
++                contentDeltas: 8, completionTokens: 8, maxTokens: 8, elapsedSeconds: 32
++            ),
++            .ok(tps: 0.25)
++        )
++        XCTAssertEqual(
++            OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
++                contentDeltas: 8, completionTokens: 8, maxTokens: 8, elapsedSeconds: 0.08
++            ).tps,
++            100, accuracy: 0.001
++        )
++        XCTAssertEqual(
++            OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
++                contentDeltas: 0, completionTokens: 8, maxTokens: 8, elapsedSeconds: 1
++            ),
++            .failed(reason: "no_content")
++        )
++        XCTAssertEqual(
++            OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
++                contentDeltas: 1, completionTokens: nil, maxTokens: 8, elapsedSeconds: 1
++            ),
++            .failed(reason: "no_tokens")
++        )
++        XCTAssertEqual(
++            OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
++                contentDeltas: 1, completionTokens: 0, maxTokens: 8, elapsedSeconds: 1
++            ),
++            .failed(reason: "no_tokens")
++        )
++        XCTAssertEqual(
++            OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
++                contentDeltas: 8, completionTokens: 9, maxTokens: 8, elapsedSeconds: 1
++            ),
++            .failed(reason: "usage_exceeds_max_tokens")
++        )
++        for elapsed in [0, -1, TimeInterval.nan, TimeInterval.infinity] {
++            XCTAssertEqual(
++                OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
++                    contentDeltas: 8, completionTokens: 8, maxTokens: 8, elapsedSeconds: elapsed
++                ),
++                .failed(reason: "no_elapsed_time"),
++                "elapsed \(elapsed)"
++            )
++        }
++    }
++
++    func testLoopbackStartupProbeNeverCountsChunksWithoutUpstreamUsage() async throws {
++        let store = try makeStore()
++        let sse = Data("""
++        data: {"choices":[{"delta":{"content":"Hi"}}]}
++
++        data: {"choices":[{"delta":{"content":" there"}}]}
++
++        data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
++
++        data: [DONE]
++
++        """.utf8)
++        let runtime = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: sse), store: store)
++        let outcome = await runtime.measureStartupThroughput()
++        XCTAssertEqual(outcome, .failed(reason: "no_tokens"))
++        XCTAssertEqual(outcome.tps, 0)
++    }
++
++    func testLoopbackStartupProbeRejectsUsageOnlyAndOverBudgetClaims() async throws {
++        let store = try makeStore()
++        let usageOnly = Data("""
++        data: {"choices":[{"delta":{},"finish_reason":"length"}]}
++
++        data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":8}}
++
++        data: [DONE]
++
++        """.utf8)
++        let usageOnlyRuntime = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: usageOnly), store: store)
++        let usageOnlyOutcome = await usageOnlyRuntime.measureStartupThroughput()
++        XCTAssertEqual(usageOnlyOutcome, .failed(reason: "no_content"))
++
++        let overBudget = Data("""
++        data: {"choices":[{"delta":{"content":"Hi"}}]}
++
++        data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":100000}}
++
++        data: [DONE]
++
++        """.utf8)
++        let overBudgetRuntime = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: overBudget), store: store)
++        let overBudgetOutcome = await overBudgetRuntime.measureStartupThroughput(maxTokens: 8)
++        XCTAssertEqual(overBudgetOutcome, .failed(reason: "usage_exceeds_max_tokens"))
++        XCTAssertEqual(overBudgetOutcome.tps, 0)
++    }
++
++    func testLoopbackStartupProbeChecksLlamaServerServesTheBoundFileBeforeAndAfter() async throws {
++        let root = FileManager.default.temporaryDirectory.appendingPathComponent("llamacpp-probe-\(UUID().uuidString)")
++        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
++        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
++        let file = root.appendingPathComponent("tiny-q4.gguf")
++        try (Data("GGUF".utf8) + Data(repeating: 0x5a, count: 4096)).write(to: file)
++        let servedPath = file.resolvingSymlinksInPath().path
++        let client = LlamaCppStubClient(modelPath: servedPath, nCtx: 64, promptTokens: 40)
++        client.setChatResponse(Self.probeSSE)
++        let runtime = try await OpenAICompatibleLoopbackRuntime.llamaCpp(
++            servedModelRef: "llamacpp:tiny-q4",
++            origin: "http://127.0.0.1:9191",
++            selector: BYOMLlamaCppArtifactSelector(root: nil, pinnedFile: file),
++            httpClient: client,
++            cache: BYOMArtifactDigestCache(url: root.appendingPathComponent("cache.json"))
++        )
++
++        let bound = await runtime.measureStartupThroughput()
++        XCTAssertGreaterThan(bound.tps, 0, "\(bound)")
++        XCTAssertEqual(client.chatPosts, 1)
++
++        // llama-server reloaded another GGUF during the generation.
++        client.setModelPathAfterChat("/tmp/other-q4.gguf")
++        let swappedDuring = await runtime.measureStartupThroughput()
++        XCTAssertEqual(swappedDuring, .failed(reason: "identity_unbound"))
++        XCTAssertEqual(client.chatPosts, 2)
++
++        // Already serving another GGUF: no generation at all.
++        let swappedBefore = await runtime.measureStartupThroughput()
++        XCTAssertEqual(swappedBefore, .failed(reason: "identity_unbound"))
++        XCTAssertEqual(client.chatPosts, 2, "an unbound upstream is never probed")
++    }
++
++    func testLoopbackStartupProbeFailureReportsZeroAndServingContinues() async throws {
++        let store = try makeStore()
++        let client = FailFirstPostLoopbackClient(
++            failStatus: 503,
++            then: Self.completionJSON(content: "ok", completionTokens: 3, promptTokens: 11)
++        )
++        let runtime = try makeRuntime(httpClient: client, store: store)
++
++        let outcome = await runtime.measureStartupThroughput()
++        XCTAssertEqual(outcome, .failed(reason: "upstream_status_503"))
++        XCTAssertEqual(outcome.tps, 0)
++        XCTAssertEqual(
++            outcome.logLine(runtimeSource: OllamaLoopbackServeModel.runtimeSource),
++            "event=loopback_startup_throughput_probe outcome=failed reason=upstream_status_503 runtime_source=ollama_loopback"
++        )
++
++        // The failed probe leaves the runtime serving.
++        let result = try await runtime.complete(try makeRequest(model: "ollama:gemma3:270m"))
++        XCTAssertEqual(result.content, "ok")
++        XCTAssertEqual(result.completionTokens, 3)
++
++        // Transport failures map to closed reason codes, never a throw.
++        let timedOut = try makeRuntime(httpClient: ScriptedLoopbackClient(failure: .openTimesOut), store: store)
++        let timedOutOutcome = await timedOut.measureStartupThroughput()
++        XCTAssertEqual(timedOutOutcome, .failed(reason: "timeout"))
++        let empty = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: Data()), store: store)
++        let emptyOutcome = await empty.measureStartupThroughput()
++        XCTAssertEqual(emptyOutcome, .failed(reason: "malformed_response"))
++    }
++
++    func testLoopbackStartupProbeClosesTheUpstreamStreamOnANon2xxStatus() async throws {
++        let store = try makeStore()
++        let client = EndlessStreamingLoopbackClient(statusCode: 503, retainsLines: true)
++        let runtime = try makeRuntime(httpClient: client, store: store)
++        let outcome = await runtime.measureStartupThroughput(maxTokens: 8, timeoutSeconds: 30)
++        XCTAssertEqual(outcome, .failed(reason: "upstream_status_503"))
++        XCTAssertTrue(client.wasTerminated, "the error body stream is closed before the probe returns")
++    }
++
++    func testLoopbackStartupProbeIsBoundedByItsHardTimeout() async throws {
++        let store = try makeStore()
++        let client = EndlessStreamingLoopbackClient()
++        let runtime = try makeRuntime(httpClient: client, store: store)
++        let start = Date()
++        let outcome = await runtime.measureStartupThroughput(maxTokens: 8, timeoutSeconds: 0.3)
++        XCTAssertEqual(outcome, .failed(reason: "timeout"))
++        XCTAssertLessThan(Date().timeIntervalSince(start), 5, "the probe never holds serve startup past its bound")
++        for _ in 0..<50 where !client.wasTerminated {
++            try await Task.sleep(nanoseconds: 20_000_000)
++        }
++        XCTAssertTrue(client.wasTerminated, "the abandoned probe closes the upstream stream")
++    }
++
++    func testLoopbackStartupProbeEndsPromptlyWhenTheCallerIsCancelled() async throws {
++        let store = try makeStore()
++        let client = EndlessStreamingLoopbackClient()
++        let runtime = try makeRuntime(httpClient: client, store: store)
++        let start = Date()
++        let probe = Task { await runtime.measureStartupThroughput(maxTokens: 8, timeoutSeconds: 30) }
++        try await Task.sleep(nanoseconds: 200_000_000)
++        probe.cancel()
++        let outcome = await probe.value
++        XCTAssertEqual(outcome, .failed(reason: "cancelled"))
++        XCTAssertLessThan(Date().timeIntervalSince(start), 5, "caller cancellation ends the probe well before its 30 s deadline")
++        for _ in 0..<50 where !client.wasTerminated {
++            try await Task.sleep(nanoseconds: 20_000_000)
++        }
++        XCTAssertTrue(client.wasTerminated, "caller cancellation closes the upstream stream")
++    }
++
++    func testLoopbackStartupProbeIsNeverCountedAsUsage() async throws {
++        let store = try makeStore()
++        let runtime = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: Self.probeSSE), store: store)
++        let status = ProviderStatus(
++            modelID: "ollama:gemma3:270m",
++            modelLoaded: true,
++            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
++        )
++        await runtime.setProviderStatus(status)
++        let before = await status.snapshot()
++
++        let outcome = await runtime.measureStartupThroughput()
++        XCTAssertGreaterThan(outcome.tps, 0)
++
++        let after = await status.snapshot()
++        XCTAssertEqual(after.requestsTotal, before.requestsTotal)
++        XCTAssertEqual(after.inputTokensAllTime, before.inputTokensAllTime)
++        XCTAssertEqual(after.outputTokensAllTime, before.outputTokensAllTime)
++        XCTAssertEqual(after.errorsTotal, before.errorsTotal)
++    }
++}
++
++/// The first post answers `failStatus`; every later post answers `then`.
++private final class FailFirstPostLoopbackClient: BYOMDiscoveryHTTPClient, @unchecked Sendable {
++    private let lock = NSLock()
++    private let failStatus: Int
++    private let body: Data
++    private var posts = 0
++
++    init(failStatus: Int, then body: Data) {
++        self.failStatus = failStatus
++        self.body = body
++    }
++
++    func get(_ url: URL, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
++        throw BYOMDiscoveryAdapterError.rejectedNonLoopback
++    }
++
++    func post(_ url: URL, jsonBody: Data, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
++        return nextIsFirst()
++            ? BYOMHTTPResponse(statusCode: failStatus, headers: [], body: Data(#"{"error":{"message":"loading"}}"#.utf8))
++            : BYOMHTTPResponse(statusCode: 200, headers: [], body: body)
++    }
++
++    private func nextIsFirst() -> Bool {
++        lock.lock()
++        defer { lock.unlock() }
++        posts += 1
++        return posts == 1
++    }
++}
+diff --git a/phase4-coordinator/dist/deploy-pearl-vps.sh b/phase4-coordinator/dist/deploy-pearl-vps.sh
+index 87b3ea6af..1361f6206 100755
+--- a/phase4-coordinator/dist/deploy-pearl-vps.sh
++++ b/phase4-coordinator/dist/deploy-pearl-vps.sh
+@@ -1795,6 +1795,11 @@ fi
+ bash "$DIST_DIR/test/check_nginx_catalog_routes_test.sh" || {
+   echo "aborting deploy: nginx /catalog/ routes missing or misconfigured" >&2; exit 5;
+ }
++# #1690 M1: the BYOM model-admission route, checked against the exact vhost
++# file uploaded below ($NGINX_SITE may be the pinned dist copy).
++bash "$DIST_DIR/test/check_nginx_model_admission_routes_test.sh" "$NGINX_SITE" || {
++  echo "aborting deploy: nginx /v1/provider/model-admission/ route missing or misconfigured" >&2; exit 5;
++}
+ 
+ CATALOG_REMOTE_PATH="$(yaml_tier2_value catalog_path)"
+ CATALOG_PUBLIC_KEY="$(yaml_tier2_value catalog_public_key)"
+diff --git a/phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf b/phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf
+index a7277f8de..628ca5544 100644
+--- a/phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf
++++ b/phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf
+@@ -765,6 +765,19 @@ server {
+     # and the /v1/stats/* exceptions above are public read-only surfaces.
+     # /v1/enroll is the MDM enrollment exception (exact location above).
+     # ---------------------------------------------------------------------
++    # BYOM model-admission (SPEC-046/047, #1569) provider endpoints on the
++    # provider mux (8444): offers, withdrawals, status. Pearl carried this block
++    # by hand only, so a vhost rewrite dropped it and every BYOM offer 404'd
++    # (#1690 M1, 2026-10-06). MUST precede the catch-all location /v1/ 404 block.
++    location /v1/provider/model-admission/ {
++        proxy_pass http://127.0.0.1:8444;
++        proxy_set_header Host $host;
++        proxy_set_header X-Real-IP $remote_addr;
++        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
++        proxy_set_header Authorization $http_authorization;
++        proxy_read_timeout 30s;
++    }
++
+     location /v1/ {
+         return 404;
+     }
+diff --git a/phase4-coordinator/dist/test/check_nginx_model_admission_routes_test.sh b/phase4-coordinator/dist/test/check_nginx_model_admission_routes_test.sh
+new file mode 100644
+index 000000000..68dec514d
+--- /dev/null
++++ b/phase4-coordinator/dist/test/check_nginx_model_admission_routes_test.sh
+@@ -0,0 +1,33 @@
++#!/usr/bin/env bash
++# BYOM model-admission (SPEC-046/047) provider endpoints must reach the
++# coordinator provider mux (8444) ahead of the /v1/ 404 catch-all. Pearl once
++# carried this block only by hand; a vhost rewrite dropped it and every BYOM
++# offer returned 404 (#1690 M1, 2026-10-06).
++#
++# Usage: check_nginx_model_admission_routes_test.sh [vhost-config]
++# The default is the repo template. deploy-pearl-vps.sh passes the exact
++# vhost file it uploads, so a stale pinned vhost fails the deploy pre-upload.
++set -euo pipefail
++
++root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
++config="${1:-$root/dist/nginx-coordinator.malibu.tech.conf}"
++test -f "$config" || { echo "FAIL: $config: missing" >&2; exit 1; }
++active="$(sed 's/[[:space:]]*#.*$//' "$config")"
++
++test "$(grep -cE '^[[:space:]]*location[[:space:]]+/v1/provider/model-admission/[[:space:]]*[{]' <<<"$active")" -eq 1
++block="$(grep -A8 -E '^[[:space:]]*location[[:space:]]+/v1/provider/model-admission/' <<<"$active")"
++grep -qE '^[[:space:]]*proxy_pass http://127\.0\.0\.1:8444;' <<<"$block"
++grep -q 'proxy_set_header Authorization \$http_authorization;' <<<"$block"
++
++route_line="$(grep -nE '^[[:space:]]*location[[:space:]]+/v1/provider/model-admission/' <<<"$active" | cut -d: -f1)"
++catchall_line="$(grep -nE '^[[:space:]]*location[[:space:]]+/v1/[[:space:]]*[{]' <<<"$active" | cut -d: -f1)"
++test "$route_line" -lt "$catchall_line"
++
++# Repo mode also pins the deploy wiring: the pre-upload gate checks the
++# uploaded vhost, not the template.
++if [ "$#" -eq 0 ]; then
++  grep -qE '^bash "\$DIST_DIR/test/check_nginx_model_admission_routes_test\.sh" "\$NGINX_SITE" \|\| \{' \
++    "$root/dist/deploy-pearl-vps.sh"
++fi
++
++echo "nginx BYOM model-admission route checks passed ($config)"
+diff --git a/scripts/tests/test_byom_contract_lock.py b/scripts/tests/test_byom_contract_lock.py
+index 24b894850..4248dfc3c 100644
+--- a/scripts/tests/test_byom_contract_lock.py
++++ b/scripts/tests/test_byom_contract_lock.py
+@@ -321,11 +321,11 @@ class BYOMContractLockTests(unittest.TestCase):
+         readme = read_text("specs/README.md")
+         conformance = json.loads(read_text("specs/CONFORMANCE.json"))
+ 
+-        self.assertIn("**Version:** 1.9.28", spec001)
++        self.assertIn("**Version:** 1.9.29", spec001)
+         self.assertIn("**Version:** 0.2.10", spec044)
+         self.assertIn('"version": "0.2.10"', spec044)
+         self.assertIn("SPEC-044 v0.2.10", spec001)
+-        self.assertIn("| SPEC-001 | Phase 3 Binary: Mac Provider Inference CLI | 1.9.28 |", readme)
++        self.assertIn("| SPEC-001 | Phase 3 Binary: Mac Provider Inference CLI | 1.9.29 |", readme)
+         self.assertIn("| SPEC-044 | Malibu Model Catalog Economics | 0.2.10 |", readme)
+         current_spec044 = spec044.split("## 8. Changelog and history", 1)[0]
+         self.assertNotIn("v0.2.7", current_spec044)
+@@ -335,7 +335,7 @@ class BYOMContractLockTests(unittest.TestCase):
+         spec001_record = next(
+             record for record in conformance["specs"] if record["spec_id"] == "SPEC-001"
+         )
+-        self.assertEqual(spec001_record["version"], "1.9.28")
++        self.assertEqual(spec001_record["version"], "1.9.29")
+         spec_record = next(
+             record for record in conformance["specs"] if record["spec_id"] == "SPEC-044"
+         )
+diff --git a/specs/CONFORMANCE.json b/specs/CONFORMANCE.json
+index 4e9f02251..0a64ef50c 100644
+--- a/specs/CONFORMANCE.json
++++ b/specs/CONFORMANCE.json
+@@ -9,7 +9,7 @@
+     {
+       "spec_id": "SPEC-001",
+       "title": "Phase 3 Binary: Mac Provider Inference CLI",
+-      "version": "1.9.28",
++      "version": "1.9.29",
+       "path": "specs/SPEC-001-phase3-binary.md",
+       "status": "normative",
+       "owner": "@Augustas11",
+@@ -35,7 +35,7 @@
+     {
+       "spec_id": "SPEC-002",
+       "title": "Phase 4 Coordinator: Mac Provider Request Router",
+-      "version": "1.6.7",
++      "version": "1.6.8",
+       "path": "specs/SPEC-002-coordinator.md",
+       "status": "normative",
+       "owner": "@Augustas11",
+diff --git a/specs/README.md b/specs/README.md
+index ba737a7cc..ae9471b83 100644
+--- a/specs/README.md
++++ b/specs/README.md
+@@ -9,8 +9,8 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
+ <!-- AUTOGEN:spec-index START — regenerated by scripts/gen_spec_index.py; do not edit between markers -->
+ | SPEC | Title | Version | Lifecycle | ID migration | Conformance | Link |
+ |---|---|---|---|---|---|---|
+-| SPEC-001 | Phase 3 Binary: Mac Provider Inference CLI | 1.9.28 | normative | pending | pending: 5 | [SPEC-001-phase3-binary.md](SPEC-001-phase3-binary.md) |
+-| SPEC-002 | Phase 4 Coordinator: Mac Provider Request Router | 1.6.7 | normative | pending | pending: 3 | [SPEC-002-coordinator.md](SPEC-002-coordinator.md) |
++| SPEC-001 | Phase 3 Binary: Mac Provider Inference CLI | 1.9.29 | normative | pending | pending: 5 | [SPEC-001-phase3-binary.md](SPEC-001-phase3-binary.md) |
++| SPEC-002 | Phase 4 Coordinator: Mac Provider Request Router | 1.6.8 | normative | pending | pending: 3 | [SPEC-002-coordinator.md](SPEC-002-coordinator.md) |
+ | SPEC-003 | Open Onboarding: Distribution, Lifecycle & Onboarding UX | 0.12.0 | normative | pending | pending: 5 | [SPEC-003-open-onboarding.md](SPEC-003-open-onboarding.md) |
+ | SPEC-004 | Smart Router | 0.3.5 | normative | pending | pending corpus migration | [SPEC-004-smart-router.md](SPEC-004-smart-router.md) |
+ | SPEC-005 | Billing, Settlement, and Provider Rewards | 0.6.17 | normative | complete | conformant: 2, pending: 13 | [SPEC-005-billing.md](SPEC-005-billing.md) |
+diff --git a/specs/SPEC-001-phase3-binary.md b/specs/SPEC-001-phase3-binary.md
+index e89797259..a8a9597ed 100644
+--- a/specs/SPEC-001-phase3-binary.md
++++ b/specs/SPEC-001-phase3-binary.md
+@@ -1,6 +1,22 @@
+ # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
+ 
+-**Version:** 1.9.28 (2026-10-05, relay-blind settlement receipt wire)
++**Version:** 1.9.29 (2026-10-06, loopback startup throughput probe)
++
++**Change log v1.9.29 (2026-10-06, loopback startup throughput probe):** A
++loopback serving runtime (SPEC-046, SPEC-010-R007/R009) now runs the FR-20
++startup probe through its upstream chat-completions leg instead of reporting
++0 (#1690). A 0 estimate sits below the coordinator's
++`min_provider_throughput_tps` routing floor, so no loopback provider could
++route. The probe uses the native prompt and token budget, one streamed
++generation under a 60 s bound that also covers the identity checks before and
++after it. Its rate is the native probe's quantity, computed by the same
++formula: completion tokens over the total elapsed time of the request, prefill
++and any upstream model load included. The counted tokens are the upstream's own
++count capped at the content-bearing deltas actually streamed, so a forged count
++can only lower the rate. It is never usage, billing or a receipt.
++Success sets `throughput_source: startup_probe`; failure reports 0 with
++`none`, logs one `event=loopback_startup_throughput_probe` line with a reason
++code, and does not stop `serve`. The wire field is unchanged.
+ 
+ **Change log v1.9.28 (2026-10-05, relay-blind settlement receipt wire):**
+ Adds `SPEC-001-R005` (#1851) with three closed wire additions for the SPEC-022
+@@ -1155,7 +1171,9 @@ responsibility ends at sending accurate values.
+ `throughput_tps_estimate` is a startup-probe value, not a sustained benchmark:
+ `serve` generates at most 8 tokens once after model load and divides the tokens
+ produced by elapsed time including prefill (0 when the probe fails or does not
+-run). A warm swap carries the value forward without re-probing. Its wire
++run). A loopback runtime (v1.9.29) measures the same quantity through its
++upstream (FR-20) with the same formula, so the value is the one cross-runtime
++quantity SPEC-002 v1.6.8 routes on. A warm swap carries the value forward without re-probing. Its wire
+ semantics are unchanged by v1.9.20.
+ 
+ **Local capacity provenance (v1.9.20, capability `capacity_provenance_v1`).**
+@@ -1594,10 +1612,41 @@ startup probe once, at serve startup only: prompt `"Reply with a short greeting.
+ (`ModelRuntime.startupThroughputProbeMaxTokens`). Tokens produced divided by
+ elapsed time, prefill included, is the `throughput_tps_estimate` in FR-17; a
+ probe that fails or produces no tokens reports 0 and does not stop `serve`.
+-An autotune candidate `serve` and the loopback runtime do not probe: they
+-report 0 with `throughput_source: none`.
+-The standalone `self-test` command loads the model, runs the same probe with
+-at most 4 tokens, prints `self-test passed: throughput_tps=<n>`, and exits
++An autotune candidate `serve` does not probe: it reports 0 with
++`throughput_source: none`.
++A loopback serving runtime (v1.9.29, #1690) runs the same probe once at
++startup through its upstream `/v1/chat/completions` leg: the same prompt and
++token budget, streamed with `stream_options.include_usage`, temperature 0.
++The bound identity is checked immediately before the generation and again
++after it (for llama.cpp including the `/props` served-file check every request
++runs); a mismatch fails the probe. One 60 s bound covers both checks and the
++generation, and cancelling `serve` ends the probe and closes the upstream
++request. The estimate is the native quantity: completion tokens over the total
++elapsed time of the request, from request start to stream end, prefill and any
++upstream model load included, computed by the native probe's formula. The
++upstream count is its own `usage.completion_tokens`, else `timings.predicted_n`
++for `runtime_source: llamacpp_loopback` only (any other runtime's
++`predicted_n` is ignored); an upstream rate such as
++`timings.predicted_per_second` is ignored. The counted tokens are the minimum
++of that upstream count and the number of content-bearing deltas actually
++streamed (a plain JSON body is one delta), so a forged count fails low, never
++high; the chunk count alone is never a count. The probe fails closed when no
++content streamed (`no_content`), the upstream reports no count (`no_tokens`),
++the upstream count exceeds the requested `max_tokens` (checked before the
++cap), or the elapsed time is not finite and positive. The probe is never usage,
++billing, a request-log entry or a receipt, and no prompt or completion text is
++logged. Success reports `throughput_source: startup_probe` with the served
++model ref as `throughput_probe_model` and logs
++`event=loopback_startup_throughput_probe outcome=ok tps=<n> runtime_source=<rs>`.
++Failure (`identity_unbound`, `upstream_unavailable`, `upstream_status_<n>`,
++`malformed_response`, `no_content`, `no_tokens`, `usage_exceeds_max_tokens`,
++`no_elapsed_time`, `timeout`, `cancelled`, `encode_failed`) reports 0 with
++`throughput_source: none`, logs
++`event=loopback_startup_throughput_probe outcome=failed reason=<code> runtime_source=<rs>`,
++and does not stop `serve`.
++The loopback probe runs at `serve` startup only. The standalone `self-test`
++command loads a catalog (MLX) model, runs the native probe with at most 4
++tokens, prints `self-test passed: throughput_tps=<n>`, and exits
+ nonzero when the model does not load or the probe produces no tokens.
+ 
+ **FR-20a. Post-change verification (`provider verify`, v1.9.22).**
+diff --git a/specs/SPEC-002-coordinator.md b/specs/SPEC-002-coordinator.md
+index 0d0964ffd..700f84516 100644
+--- a/specs/SPEC-002-coordinator.md
++++ b/specs/SPEC-002-coordinator.md
+@@ -1,6 +1,6 @@
+ # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
+ 
+-**Version:** 1.6.7 (2026-10-03, atomic attempt-output evidence journal)
++**Version:** 1.6.8 (2026-10-06, cross-runtime throughput estimate)
+ **Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9); SPEC-003 FR-C9.4 composed contract — base AuthState enum (`bearer_validated`, `self_minted`, `bearerless_duplicate`) introduced in v0.8.3; `mint_failed` reserved value added in v0.8.4.
+ 
+ **Change log v1.6.5 (2026-10-02, issue #1793):** The primary money database
+@@ -25,6 +25,14 @@ asynchronously with bounded indexed work and on demand before receipt
+ adjudication. Projection pressure no longer converts a durably journaled event
+ into missing settlement evidence.
+ 
++**Change log v1.6.8 (2026-10-06, issue #1690):** Defines
++`throughput_tps_estimate`, which the `routing.min_provider_throughput_tps`
++floor, FR-R2 `fast` ordering and the default-mode tie-break all compare, as one
++cross-runtime quantity: completion tokens of a short fixed startup generation
++over the total elapsed request time (prefill, first token and decode), measured
++by the signed CLI the same way for native and loopback runtimes (SPEC-001 FR-17,
++FR-20), and 0 when unmeasured. Routing behavior is unchanged.
++
+ **Change log v1.6.4 (2026-09-30, authenticated dispatch output limit):**
+ The coordinator accepts `X-MacProvider-Internal-Max-Output-Tokens` only under
+ the existing authenticated gateway context, validates it as a non-negative
+@@ -1989,6 +1997,19 @@ request header:
+ 
+ Unknown values are silently ignored (treated as absent).
+ 
++**`throughput_tps_estimate` semantics (v1.6.8).** Every comparison of this
++field (the `routing.min_provider_throughput_tps` exclusion floor, `fast`
++ordering above, and the default-mode tie-break) treats it as one cross-runtime
++quantity: the completion tokens of a short fixed startup generation (SPEC-001
++FR-17: at most 8 tokens, one fixed prompt, temperature 0) divided by the total
++elapsed time of that request, prefill, first token and decode included. The
++signed CLI measures it once at `serve` startup with the same formula for a
++native MLX runtime and for every loopback runtime (SPEC-001 FR-20; a loopback
++count is the upstream's own, capped at the content deltas actually streamed).
++It is 0 when unmeasured (probe failed, did not run, or an autotune candidate),
++which sits below any positive floor. It is a provider-reported startup value,
++not a sustained decode benchmark, and not a billed or attested quantity.
++
+ **FR-R3. Provider pinning via buyer header.**
+ The buyer can pin to a specific provider via
+ `X-MacProvider-Provider: <provider_id>`. **The header value is the
+@@ -2415,7 +2436,8 @@ function route(request, pool, headers) -> provider | error:
+ 
+ - **Default mode (utilization-favoring):** If two providers have the
+   same `slots_free`, the one with higher `throughput_tps_estimate`
+-  wins. If still tied, the one that connected earlier (`connected_at`)
++  (the cross-runtime startup quantity defined under FR-R2) wins. If
++  still tied, the one that connected earlier (`connected_at`)
+   wins (stable sort).
+ 
+ - **Fast mode:** If two providers have the same

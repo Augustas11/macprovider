@@ -1,0 +1,35 @@
+{
+  "match_count": 0,
+  "matches": [],
+  "needle_classes": [
+    "buyer_api_key",
+    "buyer_ephemeral_key",
+    "canary_prompt_sha256_b64",
+    "canary_prompt_sha256_b64url",
+    "canary_prompt_sha256_hex",
+    "canary_prompt_sha256_hex_upper",
+    "completion_canary",
+    "completion_canary_sha256_b64",
+    "completion_canary_sha256_b64url",
+    "completion_canary_sha256_hex",
+    "completion_canary_sha256_hex_upper",
+    "journey_secret_demo_secret",
+    "journey_secret_gateway_service_token",
+    "journey_secret_key_hash_secret",
+    "journey_secret_operator_key",
+    "prompt_canary",
+    "prompt_canary_sha256_b64",
+    "prompt_canary_sha256_b64url",
+    "prompt_canary_sha256_hex",
+    "prompt_canary_sha256_hex_upper",
+    "provider_token"
+  ],
+  "roots": [
+    {
+      "files_scanned": 216,
+      "present": true,
+      "root": "<lab-home>/journey-1839/evidence",
+      "unreadable": 0
+    }
+  ]
+}

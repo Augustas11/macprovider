@@ -1,0 +1,1 @@
+FATAL privacy_class_hardening_failed reasons=diagnostic_env,env_macprovider_cb_trace

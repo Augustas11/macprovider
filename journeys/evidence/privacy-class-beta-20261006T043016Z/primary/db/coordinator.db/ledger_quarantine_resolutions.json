@@ -1,0 +1,17 @@
+{
+ "columns": [
+  "id",
+  "request_credit_id",
+  "resolution_kind",
+  "operator_id",
+  "resolution_reason",
+  "created_at_utc",
+  "force_credit_matures_at_utc",
+  "correction_deadline_at_utc"
+ ],
+ "dropped_columns": [],
+ "row_count": 0,
+ "rows": [],
+ "table": "ledger_quarantine_resolutions",
+ "truncated": false
+}

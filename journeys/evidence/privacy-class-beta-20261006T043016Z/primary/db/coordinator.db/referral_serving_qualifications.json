@@ -1,0 +1,15 @@
+{
+ "columns": [
+  "campaign",
+  "provider_id",
+  "evidence_id",
+  "evidence_at",
+  "qualified_at",
+  "issuer_id"
+ ],
+ "dropped_columns": [],
+ "row_count": 0,
+ "rows": [],
+ "table": "referral_serving_qualifications",
+ "truncated": false
+}

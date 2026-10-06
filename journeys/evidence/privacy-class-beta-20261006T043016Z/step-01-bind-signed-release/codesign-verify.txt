@@ -1,0 +1,2 @@
+<lab-home>/journey-1839/bin/macprovider-cli: valid on disk
+<lab-home>/journey-1839/bin/macprovider-cli: satisfies its Designated Requirement

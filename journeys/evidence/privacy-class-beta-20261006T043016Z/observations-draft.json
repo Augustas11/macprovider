@@ -1,0 +1,157 @@
+{
+  "derived_from_step_results": {
+    "buyer_debit_equals_provider_credit_usage_verified": [
+      "step-13-enforce-canary"
+    ],
+    "canary_absent_from_all_artifacts_verified": [
+      "step-09-redaction-sweep",
+      "step-13-enforce-canary"
+    ],
+    "core_dumps_disabled_verified": [
+      "step-04-core-dump-and-env-refused",
+      "step-09-redaction-sweep"
+    ],
+    "debugger_attach_refused_verified": [
+      "step-03-debugger-attach-refused"
+    ],
+    "diagnostic_env_refused_verified": [
+      "step-04-core-dump-and-env-refused"
+    ],
+    "disclosure_strings_exact_verified": [
+      "step-07-canary-stream",
+      "step-08-canary-nonstream"
+    ],
+    "downgrade_attempts_rejected_verified": [
+      "step-10-downgrade-negatives"
+    ],
+    "dyld_env_inert_verified": [
+      "step-04-core-dump-and-env-refused"
+    ],
+    "enforce_snapshot_before_dispatch_verified": [
+      "step-13-enforce-canary"
+    ],
+    "exactly_one_content_free_settlement_receipt_verified": [
+      "step-09-redaction-sweep"
+    ],
+    "failover_or_alternate_provider_observed": [
+      "step-10-downgrade-negatives"
+    ],
+    "hardening_applied_before_network_verified": [
+      "step-02-privacy-mode-start",
+      "step-04-core-dump-and-env-refused",
+      "step-05-unsigned-build-refused"
+    ],
+    "kill_switch_blocks_all_phases_verified": [
+      "step-12-kill-switch"
+    ],
+    "no_capability_provider_excluded_verified": [
+      "step-14-no-capability-provider-excluded"
+    ],
+    "nonstream_frames_decrypted_and_verified": [
+      "step-08-canary-nonstream"
+    ],
+    "plaintext_derived_receipt_or_telemetry_emitted_for_privacy_request": [
+      "step-09-redaction-sweep",
+      "step-13-enforce-canary"
+    ],
+    "plaintext_observed_at_relay": [
+      "step-07-canary-stream",
+      "step-08-canary-nonstream",
+      "step-09-redaction-sweep"
+    ],
+    "posture_verified_by_coordinator": [
+      "step-02-privacy-mode-start"
+    ],
+    "privacy_key_memory_only_verified": [
+      "step-02-privacy-mode-start"
+    ],
+    "privacy_key_written_to_disk": [
+      "step-02-privacy-mode-start"
+    ],
+    "quarantine_durable_across_restart_verified": [
+      "step-11-stale-posture-and-quarantine"
+    ],
+    "relay_blind_and_plaintext_unaffected_verified": [
+      "step-12-kill-switch"
+    ],
+    "relay_blind_credit_payable_verified": [
+      "step-13-enforce-canary"
+    ],
+    "relay_blind_request_reported_as_verified": [
+      "step-13-enforce-canary"
+    ],
+    "relay_blind_settled_verdict_closed_verified": [
+      "step-13-enforce-canary"
+    ],
+    "secret_or_canary_persisted": [
+      "step-09-redaction-sweep",
+      "step-13-enforce-canary"
+    ],
+    "silent_downgrade_observed": [
+      "step-10-downgrade-negatives"
+    ],
+    "sip_off_host_refused_verified": [
+      "step-06-sip-off-refused"
+    ],
+    "stale_posture_ineligible_verified": [
+      "step-11-stale-posture-and-quarantine"
+    ],
+    "stream_frames_decrypted_and_verified": [
+      "step-07-canary-stream"
+    ],
+    "tampered_or_missing_receipt_quarantined_and_refunded_verified": [
+      "step-15-tampered-receipt-quarantined"
+    ],
+    "tampered_or_truncated_response_rejected_verified": [
+      "step-10-downgrade-negatives"
+    ],
+    "unreleased_local_binary_connected_to_live_coordinator": [
+      "step-99-live-provider-untouched",
+      "step-15-tampered-receipt-quarantined"
+    ],
+    "unsigned_or_resigned_build_refused_verified": [
+      "step-05-unsigned-build-refused"
+    ],
+    "verified_count_delta_zero_verified": [
+      "step-13-enforce-canary"
+    ]
+  },
+  "note": "draft; step-16 evidence sweep must also be clean for secret_or_canary_persisted; null = undetermined",
+  "observations": {
+    "buyer_debit_equals_provider_credit_usage_verified": true,
+    "canary_absent_from_all_artifacts_verified": true,
+    "core_dumps_disabled_verified": true,
+    "debugger_attach_refused_verified": true,
+    "diagnostic_env_refused_verified": true,
+    "disclosure_strings_exact_verified": true,
+    "downgrade_attempts_rejected_verified": true,
+    "dyld_env_inert_verified": true,
+    "enforce_snapshot_before_dispatch_verified": true,
+    "exactly_one_content_free_settlement_receipt_verified": true,
+    "failover_or_alternate_provider_observed": false,
+    "hardening_applied_before_network_verified": true,
+    "kill_switch_blocks_all_phases_verified": true,
+    "no_capability_provider_excluded_verified": true,
+    "nonstream_frames_decrypted_and_verified": true,
+    "plaintext_derived_receipt_or_telemetry_emitted_for_privacy_request": false,
+    "plaintext_observed_at_relay": false,
+    "posture_verified_by_coordinator": true,
+    "privacy_key_memory_only_verified": true,
+    "privacy_key_written_to_disk": false,
+    "quarantine_durable_across_restart_verified": true,
+    "relay_blind_and_plaintext_unaffected_verified": true,
+    "relay_blind_credit_payable_verified": true,
+    "relay_blind_request_reported_as_verified": false,
+    "relay_blind_settled_verdict_closed_verified": true,
+    "secret_or_canary_persisted": false,
+    "silent_downgrade_observed": false,
+    "sip_off_host_refused_verified": true,
+    "stale_posture_ineligible_verified": true,
+    "stream_frames_decrypted_and_verified": true,
+    "tampered_or_missing_receipt_quarantined_and_refunded_verified": true,
+    "tampered_or_truncated_response_rejected_verified": true,
+    "unreleased_local_binary_connected_to_live_coordinator": false,
+    "unsigned_or_resigned_build_refused_verified": true,
+    "verified_count_delta_zero_verified": true
+  }
+}

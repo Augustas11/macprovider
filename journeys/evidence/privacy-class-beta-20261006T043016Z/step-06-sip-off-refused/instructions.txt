@@ -1,0 +1,14 @@
+This Studio has SIP enabled and runs the live provider; it must not be used.
+On a dedicated lab Mac with SIP disabled (Recovery: csrutil disable; physical
+presence required), that never joins a live coordinator:
+  1. copy candidate/macprovider-cli-v1.8.215-darwin-arm64.tar.gz and verify its
+     sha256 against candidate/checksums.txt;
+  2. csrutil status > sip.txt; sysctl hw.model machdep.cpu.brand_string > host.txt
+  3. mkdir -m 700 /tmp/sipoff-state-parent/state (parent not world-writable),
+     write a config with coordinator_url ws://127.0.0.1:19399/ws/provider,
+     relay_blind_enabled: true, privacy_class_beta: true,
+     relay_blind_state_directory: <that dir>, and nc -lk 19399 > conns.txt &
+  4. ./macprovider-cli serve --config <config> --privacy-class-beta --relay-blind-enabled
+     -> must exit 78 with "FATAL privacy_class_hardening_failed reasons=...sip_disabled..."
+     and conns.txt must stay empty.
+Copy sip.txt, host.txt, the stderr and conns.txt into <lab-home>/journey-1839/evidence/step-06-sip-off-refused/.

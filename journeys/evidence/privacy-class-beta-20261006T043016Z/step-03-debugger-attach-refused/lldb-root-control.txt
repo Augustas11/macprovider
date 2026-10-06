@@ -1,0 +1,15 @@
+(lldb) process attach --pid 96385
+Process 96385 stopped
+* thread #1, stop reason = signal SIGSTOP
+    frame #0: 0x00000001027ecbf0 dyld`_dyld_start
+dyld`_dyld_start:
+->  0x1027ecbf0 <+0>:  mov    x0, sp
+    0x1027ecbf4 <+4>:  and    sp, x0, #0xfffffffffffffff0
+    0x1027ecbf8 <+8>:  mov    x29, #0x0                 ; =0 
+    0x1027ecbfc <+12>: mov    x30, #0x0                 ; =0 
+Target 0: (control-sleep) stopped.
+Executable binary set to "<lab-home>/journey-1839/tmp/control-sleep".
+Architecture set to: arm64e-apple-macosx-.
+(lldb) process detach
+Process 96385 detached
+control_attach=ok exit=0

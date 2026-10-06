@@ -1,0 +1,8 @@
+disabled=0
+reason=
+updated_at_unix=0
+quarantine_count=1
+quarantine.provider_id=journey-1839-privacy
+quarantine.reason=posture_unapproved_code_identity
+quarantine.quarantined_at_unix=1791261282
+quarantine.expires_at_unix=1791347682

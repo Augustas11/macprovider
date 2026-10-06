@@ -1795,6 +1795,11 @@ fi
 bash "$DIST_DIR/test/check_nginx_catalog_routes_test.sh" || {
   echo "aborting deploy: nginx /catalog/ routes missing or misconfigured" >&2; exit 5;
 }
+# #1690 M1: the BYOM model-admission route, checked against the exact vhost
+# file uploaded below ($NGINX_SITE may be the pinned dist copy).
+bash "$DIST_DIR/test/check_nginx_model_admission_routes_test.sh" "$NGINX_SITE" || {
+  echo "aborting deploy: nginx /v1/provider/model-admission/ route missing or misconfigured" >&2; exit 5;
+}
 
 CATALOG_REMOTE_PATH="$(yaml_tier2_value catalog_path)"
 CATALOG_PUBLIC_KEY="$(yaml_tier2_value catalog_public_key)"

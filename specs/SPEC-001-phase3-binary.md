@@ -1,6 +1,22 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.28 (2026-10-05, relay-blind settlement receipt wire)
+**Version:** 1.9.29 (2026-10-06, loopback startup throughput probe)
+
+**Change log v1.9.29 (2026-10-06, loopback startup throughput probe):** A
+loopback serving runtime (SPEC-046, SPEC-010-R007/R009) now runs the FR-20
+startup probe through its upstream chat-completions leg instead of reporting
+0 (#1690). A 0 estimate sits below the coordinator's
+`min_provider_throughput_tps` routing floor, so no loopback provider could
+route. The probe uses the native prompt and token budget, one streamed
+generation under a 60 s bound that also covers the identity checks before and
+after it. Its rate is the native probe's quantity, computed by the same
+formula: completion tokens over the total elapsed time of the request, prefill
+and any upstream model load included. The counted tokens are the upstream's own
+count capped at the content-bearing deltas actually streamed, so a forged count
+can only lower the rate. It is never usage, billing or a receipt.
+Success sets `throughput_source: startup_probe`; failure reports 0 with
+`none`, logs one `event=loopback_startup_throughput_probe` line with a reason
+code, and does not stop `serve`. The wire field is unchanged.
 
 **Change log v1.9.28 (2026-10-05, relay-blind settlement receipt wire):**
 Adds `SPEC-001-R005` (#1851) with three closed wire additions for the SPEC-022
@@ -1155,7 +1171,9 @@ responsibility ends at sending accurate values.
 `throughput_tps_estimate` is a startup-probe value, not a sustained benchmark:
 `serve` generates at most 8 tokens once after model load and divides the tokens
 produced by elapsed time including prefill (0 when the probe fails or does not
-run). A warm swap carries the value forward without re-probing. Its wire
+run). A loopback runtime (v1.9.29) measures the same quantity through its
+upstream (FR-20) with the same formula, so the value is the one cross-runtime
+quantity SPEC-002 v1.6.8 routes on. A warm swap carries the value forward without re-probing. Its wire
 semantics are unchanged by v1.9.20.
 
 **Local capacity provenance (v1.9.20, capability `capacity_provenance_v1`).**
@@ -1594,10 +1612,41 @@ startup probe once, at serve startup only: prompt `"Reply with a short greeting.
 (`ModelRuntime.startupThroughputProbeMaxTokens`). Tokens produced divided by
 elapsed time, prefill included, is the `throughput_tps_estimate` in FR-17; a
 probe that fails or produces no tokens reports 0 and does not stop `serve`.
-An autotune candidate `serve` and the loopback runtime do not probe: they
-report 0 with `throughput_source: none`.
-The standalone `self-test` command loads the model, runs the same probe with
-at most 4 tokens, prints `self-test passed: throughput_tps=<n>`, and exits
+An autotune candidate `serve` does not probe: it reports 0 with
+`throughput_source: none`.
+A loopback serving runtime (v1.9.29, #1690) runs the same probe once at
+startup through its upstream `/v1/chat/completions` leg: the same prompt and
+token budget, streamed with `stream_options.include_usage`, temperature 0.
+The bound identity is checked immediately before the generation and again
+after it (for llama.cpp including the `/props` served-file check every request
+runs); a mismatch fails the probe. One 60 s bound covers both checks and the
+generation, and cancelling `serve` ends the probe and closes the upstream
+request. The estimate is the native quantity: completion tokens over the total
+elapsed time of the request, from request start to stream end, prefill and any
+upstream model load included, computed by the native probe's formula. The
+upstream count is its own `usage.completion_tokens`, else `timings.predicted_n`
+for `runtime_source: llamacpp_loopback` only (any other runtime's
+`predicted_n` is ignored); an upstream rate such as
+`timings.predicted_per_second` is ignored. The counted tokens are the minimum
+of that upstream count and the number of content-bearing deltas actually
+streamed (a plain JSON body is one delta), so a forged count fails low, never
+high; the chunk count alone is never a count. The probe fails closed when no
+content streamed (`no_content`), the upstream reports no count (`no_tokens`),
+the upstream count exceeds the requested `max_tokens` (checked before the
+cap), or the elapsed time is not finite and positive. The probe is never usage,
+billing, a request-log entry or a receipt, and no prompt or completion text is
+logged. Success reports `throughput_source: startup_probe` with the served
+model ref as `throughput_probe_model` and logs
+`event=loopback_startup_throughput_probe outcome=ok tps=<n> runtime_source=<rs>`.
+Failure (`identity_unbound`, `upstream_unavailable`, `upstream_status_<n>`,
+`malformed_response`, `no_content`, `no_tokens`, `usage_exceeds_max_tokens`,
+`no_elapsed_time`, `timeout`, `cancelled`, `encode_failed`) reports 0 with
+`throughput_source: none`, logs
+`event=loopback_startup_throughput_probe outcome=failed reason=<code> runtime_source=<rs>`,
+and does not stop `serve`.
+The loopback probe runs at `serve` startup only. The standalone `self-test`
+command loads a catalog (MLX) model, runs the native probe with at most 4
+tokens, prints `self-test passed: throughput_tps=<n>`, and exits
 nonzero when the model does not load or the probe produces no tokens.
 
 **FR-20a. Post-change verification (`provider verify`, v1.9.22).**

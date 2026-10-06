@@ -1,0 +1,3 @@
+  pending_deadline_seconds: 60
+  verified_model_settlement_mode: enforce
+  enforce_settlement_profile: relay-blind-settlement-v1

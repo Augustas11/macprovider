@@ -1,0 +1,1 @@
+installed <lab-home>/journey-1839/bin-old/macprovider-cli sha256=2e8d3ce4e8e74040e12f36abbc9e66aa3854624566dc5b95c65101e21104f88f version=1.8.214 compat=Augustas11/macprovider:v1.8.214@b0b1645894f3cf424bba13cab6f22f3098e86797

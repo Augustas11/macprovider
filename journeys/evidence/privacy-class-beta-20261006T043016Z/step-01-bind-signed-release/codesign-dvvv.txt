@@ -1,0 +1,23 @@
+Executable=<lab-home>/journey-1839/bin/macprovider-cli
+Identifier=live.malibu.provider.cli
+Format=Mach-O thin (arm64)
+CodeDirectory v=20500 size=540356 flags=0x10000(runtime) hashes=16880+2 location=embedded
+Hash type=sha256 size=32
+CandidateCDHash sha256=3214ffcc6b706507f9a268cfb400da5c74287ff6
+CandidateCDHashFull sha256=3214ffcc6b706507f9a268cfb400da5c74287ff62bd7c5351b17fa8d1a89fec2
+Hash choices=sha256
+CMSDigest=3214ffcc6b706507f9a268cfb400da5c74287ff62bd7c5351b17fa8d1a89fec2
+CMSDigestType=2
+CDHash=3214ffcc6b706507f9a268cfb400da5c74287ff6
+Signature size=9092
+Authority=Developer ID Application: Superposition Technologies Pte. Ltd. (YF7XNRJUG4)
+Authority=Developer ID Certification Authority
+Authority=Apple Root CA
+Timestamp=5 Oct 2026 at 5:14:42 AM
+Info.plist=not bound
+TeamIdentifier=YF7XNRJUG4
+Runtime Version=15.5.0
+Sealed Resources=none
+Internal requirements count=1 size=184
+Total signatures=1
+Chosen signature=1

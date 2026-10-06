@@ -109,6 +109,7 @@ test-dist:
 	bash scripts/test-signed-trusted-pool-creator-mvp-journey-workflow.sh
 	bash scripts/test-signed-trusted-pool-layer2-journey-workflow.sh
 	bash scripts/test-signed-trusted-pool-external-runtime-journey-workflow.sh
+	bash scripts/test-signed-privacy-class-beta-journey-workflow.sh
 	bash scripts/test-signed-pool-promotion-transition-workflow.sh
 	bash scripts/test-spec043-production-release-key-provision.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_provider_prebeta_journey_result
@@ -120,6 +121,8 @@ test-dist:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_trusted_pool_creator_mvp_journey_result
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_trusted_pool_layer2_journey_result
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_trusted_pool_external_runtime_journey_result
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_privacy_class_beta_journey_result
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_privacy_class_beta_primary_evidence
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_pool_promotion_transition
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_pool_rejection_timing_floor
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_journey_result_tools
@@ -162,6 +165,7 @@ test-dist:
 	bash -n scripts/lib/catalog-canary-token.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_autotune_feed_freshness
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_pearl_autotune_deploy_lock
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_pearl_database_schema_fingerprint
 	bash scripts/test-tier2-provider-artifact.sh
 	bash scripts/test-tier2-provider-release.sh
 	bash scripts/test-tier2-activation-safety.sh
@@ -196,6 +200,7 @@ test-dist:
 	bash phase4-coordinator/dist/test/check_nginx_catalog_routes_test.sh
 	bash phase4-coordinator/dist/test/check_nginx_stats_test.sh
 	bash phase4-coordinator/dist/test/check_nginx_mdm_enroll_routes_test.sh
+	bash phase4-coordinator/dist/test/check_nginx_model_admission_routes_test.sh
 	bash phase4-coordinator/dist/test/check_nginx_referral_routes_test.sh
 	bash phase4-coordinator/dist/test/check_stats_inventory_deploy_test.sh
 	bash phase4-coordinator/dist/test/check_stats_billing_mirror_deploy_test.sh

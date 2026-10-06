@@ -1,0 +1,2 @@
+hw.model: MacBookAir10,1
+machdep.cpu.brand_string: Apple M1

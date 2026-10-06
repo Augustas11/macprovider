@@ -1,0 +1,157 @@
+{
+ "lines": [
+  {
+   "line": 59,
+   "text": "malibu-cli config"
+  },
+  {
+   "line": 60,
+   "text": "  port: 19321"
+  },
+  {
+   "line": 61,
+   "text": "  model: meta-llama/llama-3.2-3b-instruct"
+  },
+  {
+   "line": 65,
+   "text": "  coordinator_url: ws://127.0.0.1:19302/ws/provider"
+  },
+  {
+   "line": 66,
+   "text": "  provider_id: journey-1839-plain"
+  },
+  {
+   "line": 69,
+   "text": "  log_level: info"
+  },
+  {
+   "line": 70,
+   "text": "  log_format: json"
+  },
+  {
+   "line": 82,
+   "text": "  privacy_class_beta: false"
+  },
+  {
+   "line": 93,
+   "text": "Coordinator tier: provisional"
+  },
+  {
+   "line": 94,
+   "text": "Coordinator tier: provisional"
+  },
+  {
+   "line": 95,
+   "text": "Coordinator tier: provisional"
+  },
+  {
+   "line": 105,
+   "text": "malibu-cli config"
+  },
+  {
+   "line": 106,
+   "text": "  port: 19321"
+  },
+  {
+   "line": 107,
+   "text": "  model: meta-llama/llama-3.2-3b-instruct"
+  },
+  {
+   "line": 111,
+   "text": "  coordinator_url: ws://127.0.0.1:19302/ws/provider"
+  },
+  {
+   "line": 112,
+   "text": "  provider_id: journey-1839-plain"
+  },
+  {
+   "line": 115,
+   "text": "  log_level: info"
+  },
+  {
+   "line": 116,
+   "text": "  log_format: json"
+  },
+  {
+   "line": 128,
+   "text": "  privacy_class_beta: false"
+  },
+  {
+   "line": 139,
+   "text": "Coordinator tier: provisional"
+  },
+  {
+   "line": 145,
+   "text": "malibu-cli config"
+  },
+  {
+   "line": 146,
+   "text": "  port: 19321"
+  },
+  {
+   "line": 147,
+   "text": "  model: meta-llama/llama-3.2-3b-instruct"
+  },
+  {
+   "line": 151,
+   "text": "  coordinator_url: ws://127.0.0.1:19302/ws/provider"
+  },
+  {
+   "line": 152,
+   "text": "  provider_id: journey-1839-plain"
+  },
+  {
+   "line": 155,
+   "text": "  log_level: info"
+  },
+  {
+   "line": 156,
+   "text": "  log_format: json"
+  },
+  {
+   "line": 168,
+   "text": "  privacy_class_beta: false"
+  },
+  {
+   "line": 179,
+   "text": "Coordinator tier: provisional"
+  },
+  {
+   "line": 245,
+   "text": "malibu-cli config"
+  },
+  {
+   "line": 246,
+   "text": "  port: 19321"
+  },
+  {
+   "line": 247,
+   "text": "  model: meta-llama/llama-3.2-3b-instruct"
+  },
+  {
+   "line": 251,
+   "text": "  coordinator_url: ws://127.0.0.1:19302/ws/provider"
+  },
+  {
+   "line": 252,
+   "text": "  provider_id: journey-1839-plain"
+  },
+  {
+   "line": 255,
+   "text": "  log_level: info"
+  },
+  {
+   "line": 256,
+   "text": "  log_format: json"
+  },
+  {
+   "line": 268,
+   "text": "  privacy_class_beta: false"
+  },
+  {
+   "line": 279,
+   "text": "Coordinator tier: provisional"
+  }
+ ],
+ "schema_version": "macprovider.privacy-class-beta-primary.v1"
+}

@@ -1,0 +1,581 @@
+{
+ "events": [
+  {
+   "level": "info",
+   "line": 9,
+   "message": "quarantine force-void route-layer flag initialized",
+   "time": "2026-10-05T21:30:24-07:00",
+   "time_utc": "2026-10-06T04:30:24.000000Z"
+  },
+  {
+   "level": "info",
+   "line": 49,
+   "message": "provider state transition",
+   "provider_id": "journey-1839-privacy",
+   "reason": "coordinator auth_response accepted",
+   "state": "ready",
+   "time": "2026-10-05T21:30:31-07:00",
+   "time_utc": "2026-10-06T04:30:31.000000Z"
+  },
+  {
+   "level": "warn",
+   "line": 214,
+   "message": "provider websocket disconnected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:31:45-07:00",
+   "time_utc": "2026-10-06T04:31:45.000000Z"
+  },
+  {
+   "level": "warn",
+   "line": 247,
+   "message": "provider removed after disconnect grace period",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:32:15-07:00",
+   "time_utc": "2026-10-06T04:32:15.000000Z"
+  },
+  {
+   "level": "info",
+   "line": 250,
+   "message": "provider state transition",
+   "provider_id": "journey-1839-privacy",
+   "reason": "coordinator auth_response accepted",
+   "state": "ready",
+   "time": "2026-10-05T21:33:35-07:00",
+   "time_utc": "2026-10-06T04:33:35.000000Z"
+  },
+  {
+   "level": "info",
+   "line": 259,
+   "message": "provider state transition",
+   "provider_id": "journey-1839-plain",
+   "reason": "coordinator auth_response accepted",
+   "state": "ready",
+   "time": "2026-10-05T21:33:44-07:00",
+   "time_utc": "2026-10-06T04:33:44.000000Z"
+  },
+  {
+   "level": "warn",
+   "line": 347,
+   "message": "privacy posture: response timed out",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:33:59-07:00",
+   "time_utc": "2026-10-06T04:33:59.000000Z"
+  },
+  {
+   "level": "warn",
+   "line": 365,
+   "message": "privacy posture: response timed out",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:34:14-07:00",
+   "time_utc": "2026-10-06T04:34:14.000000Z"
+  },
+  {
+   "level": "warn",
+   "line": 374,
+   "message": "privacy posture: response timed out",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:34:29-07:00",
+   "time_utc": "2026-10-06T04:34:29.000000Z"
+  },
+  {
+   "level": "warn",
+   "line": 379,
+   "message": "provider websocket disconnected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:34:31-07:00",
+   "time_utc": "2026-10-06T04:34:31.000000Z"
+  },
+  {
+   "level": "info",
+   "line": 403,
+   "message": "provider state transition",
+   "provider_id": "journey-1839-privacy",
+   "reason": "coordinator auth_response accepted",
+   "state": "ready",
+   "time": "2026-10-05T21:34:36-07:00",
+   "time_utc": "2026-10-06T04:34:36.000000Z"
+  },
+  {
+   "level": "info",
+   "line": 457,
+   "message": "quarantine force-void route-layer flag initialized",
+   "time": "2026-10-05T21:34:41-07:00",
+   "time_utc": "2026-10-06T04:34:41.000000Z"
+  },
+  {
+   "error": "relayblind: privacy provider quarantined: posture_unapproved_code_identity",
+   "level": "warn",
+   "line": 481,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:34:42-07:00",
+   "time_utc": "2026-10-06T04:34:42.000000Z"
+  },
+  {
+   "level": "info",
+   "line": 482,
+   "message": "provider state transition",
+   "provider_id": "journey-1839-plain",
+   "reason": "coordinator auth_response accepted",
+   "state": "ready",
+   "time": "2026-10-05T21:34:42-07:00",
+   "time_utc": "2026-10-06T04:34:42.000000Z"
+  },
+  {
+   "level": "info",
+   "line": 484,
+   "message": "provider state transition",
+   "provider_id": "journey-1839-privacy",
+   "reason": "coordinator auth_response accepted",
+   "state": "ready",
+   "time": "2026-10-05T21:34:42-07:00",
+   "time_utc": "2026-10-06T04:34:42.000000Z"
+  },
+  {
+   "error": "relayblind: privacy provider quarantined",
+   "level": "warn",
+   "line": 495,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:34:44-07:00",
+   "time_utc": "2026-10-06T04:34:44.000000Z"
+  },
+  {
+   "level": "info",
+   "line": 523,
+   "message": "quarantine force-void route-layer flag initialized",
+   "time": "2026-10-05T21:34:46-07:00",
+   "time_utc": "2026-10-06T04:34:46.000000Z"
+  },
+  {
+   "error": "relayblind: privacy provider quarantined",
+   "level": "warn",
+   "line": 549,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:34:48-07:00",
+   "time_utc": "2026-10-06T04:34:48.000000Z"
+  },
+  {
+   "level": "info",
+   "line": 550,
+   "message": "provider state transition",
+   "provider_id": "journey-1839-privacy",
+   "reason": "coordinator auth_response accepted",
+   "state": "ready",
+   "time": "2026-10-05T21:34:48-07:00",
+   "time_utc": "2026-10-06T04:34:48.000000Z"
+  },
+  {
+   "level": "info",
+   "line": 556,
+   "message": "provider state transition",
+   "provider_id": "journey-1839-plain",
+   "reason": "coordinator auth_response accepted",
+   "state": "ready",
+   "time": "2026-10-05T21:34:49-07:00",
+   "time_utc": "2026-10-06T04:34:49.000000Z"
+  },
+  {
+   "error": "relayblind: privacy provider quarantined",
+   "level": "warn",
+   "line": 564,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:34:50-07:00",
+   "time_utc": "2026-10-06T04:34:50.000000Z"
+  },
+  {
+   "error": "relayblind: privacy provider quarantined",
+   "level": "warn",
+   "line": 575,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:34:53-07:00",
+   "time_utc": "2026-10-06T04:34:53.000000Z"
+  },
+  {
+   "error": "relayblind: privacy provider quarantined",
+   "level": "warn",
+   "line": 587,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:34:55-07:00",
+   "time_utc": "2026-10-06T04:34:55.000000Z"
+  },
+  {
+   "error": "relayblind: privacy provider quarantined",
+   "level": "warn",
+   "line": 597,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:34:57-07:00",
+   "time_utc": "2026-10-06T04:34:57.000000Z"
+  },
+  {
+   "error": "relayblind: privacy provider quarantined",
+   "level": "warn",
+   "line": 600,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:34:59-07:00",
+   "time_utc": "2026-10-06T04:34:59.000000Z"
+  },
+  {
+   "error": "relayblind: privacy provider quarantined",
+   "level": "warn",
+   "line": 603,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:01-07:00",
+   "time_utc": "2026-10-06T04:35:01.000000Z"
+  },
+  {
+   "error": "relayblind: privacy provider quarantined",
+   "level": "warn",
+   "line": 606,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:03-07:00",
+   "time_utc": "2026-10-06T04:35:03.000000Z"
+  },
+  {
+   "error": "relayblind: privacy provider quarantined",
+   "level": "warn",
+   "line": 611,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:05-07:00",
+   "time_utc": "2026-10-06T04:35:05.000000Z"
+  },
+  {
+   "error": "relayblind: privacy provider quarantined",
+   "level": "warn",
+   "line": 614,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:07-07:00",
+   "time_utc": "2026-10-06T04:35:07.000000Z"
+  },
+  {
+   "error": "relayblind: privacy provider quarantined",
+   "level": "warn",
+   "line": 617,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:09-07:00",
+   "time_utc": "2026-10-06T04:35:09.000000Z"
+  },
+  {
+   "error": "relayblind: privacy provider quarantined",
+   "level": "warn",
+   "line": 620,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:11-07:00",
+   "time_utc": "2026-10-06T04:35:11.000000Z"
+  },
+  {
+   "error": "relayblind: privacy provider quarantined",
+   "level": "warn",
+   "line": 623,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:13-07:00",
+   "time_utc": "2026-10-06T04:35:13.000000Z"
+  },
+  {
+   "error": "relayblind: privacy provider quarantined",
+   "level": "warn",
+   "line": 626,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:15-07:00",
+   "time_utc": "2026-10-06T04:35:15.000000Z"
+  },
+  {
+   "error": "relayblind: key revoked",
+   "level": "warn",
+   "line": 634,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:18-07:00",
+   "time_utc": "2026-10-06T04:35:18.000000Z"
+  },
+  {
+   "error": "relayblind: key revoked",
+   "level": "warn",
+   "line": 648,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:20-07:00",
+   "time_utc": "2026-10-06T04:35:20.000000Z"
+  },
+  {
+   "error": "relayblind: key revoked",
+   "level": "warn",
+   "line": 660,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:22-07:00",
+   "time_utc": "2026-10-06T04:35:22.000000Z"
+  },
+  {
+   "error": "relayblind: key revoked",
+   "level": "warn",
+   "line": 671,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:24-07:00",
+   "time_utc": "2026-10-06T04:35:24.000000Z"
+  },
+  {
+   "error": "relayblind: key revoked",
+   "level": "warn",
+   "line": 683,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:26-07:00",
+   "time_utc": "2026-10-06T04:35:26.000000Z"
+  },
+  {
+   "error": "relayblind: key revoked",
+   "level": "warn",
+   "line": 686,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:28-07:00",
+   "time_utc": "2026-10-06T04:35:28.000000Z"
+  },
+  {
+   "error": "relayblind: key revoked",
+   "level": "warn",
+   "line": 689,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:31-07:00",
+   "time_utc": "2026-10-06T04:35:31.000000Z"
+  },
+  {
+   "error": "relayblind: key revoked",
+   "level": "warn",
+   "line": 692,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:33-07:00",
+   "time_utc": "2026-10-06T04:35:33.000000Z"
+  },
+  {
+   "error": "relayblind: key revoked",
+   "level": "warn",
+   "line": 697,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:35-07:00",
+   "time_utc": "2026-10-06T04:35:35.000000Z"
+  },
+  {
+   "error": "relayblind: key revoked",
+   "level": "warn",
+   "line": 700,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:37-07:00",
+   "time_utc": "2026-10-06T04:35:37.000000Z"
+  },
+  {
+   "error": "relayblind: key revoked",
+   "level": "warn",
+   "line": 703,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:39-07:00",
+   "time_utc": "2026-10-06T04:35:39.000000Z"
+  },
+  {
+   "error": "relayblind: key revoked",
+   "level": "warn",
+   "line": 706,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:41-07:00",
+   "time_utc": "2026-10-06T04:35:41.000000Z"
+  },
+  {
+   "error": "relayblind: key revoked",
+   "level": "warn",
+   "line": 709,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:43-07:00",
+   "time_utc": "2026-10-06T04:35:43.000000Z"
+  },
+  {
+   "error": "relayblind: key revoked",
+   "level": "warn",
+   "line": 712,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:45-07:00",
+   "time_utc": "2026-10-06T04:35:45.000000Z"
+  },
+  {
+   "error": "relayblind: key revoked",
+   "level": "warn",
+   "line": 715,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:47-07:00",
+   "time_utc": "2026-10-06T04:35:47.000000Z"
+  },
+  {
+   "error": "relayblind: key revoked",
+   "level": "warn",
+   "line": 720,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:50-07:00",
+   "time_utc": "2026-10-06T04:35:50.000000Z"
+  },
+  {
+   "error": "relayblind: key revoked",
+   "level": "warn",
+   "line": 723,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:52-07:00",
+   "time_utc": "2026-10-06T04:35:52.000000Z"
+  },
+  {
+   "error": "relayblind: key revoked",
+   "level": "warn",
+   "line": 726,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:54-07:00",
+   "time_utc": "2026-10-06T04:35:54.000000Z"
+  },
+  {
+   "error": "relayblind: key revoked",
+   "level": "warn",
+   "line": 729,
+   "message": "privacy key advertisement rejected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:35:56-07:00",
+   "time_utc": "2026-10-06T04:35:56.000000Z"
+  },
+  {
+   "level": "info",
+   "line": 777,
+   "message": "provider state transition",
+   "provider_id": "journey-1839-privacy",
+   "reason": "coordinator auth_response accepted",
+   "state": "ready",
+   "time": "2026-10-05T21:36:05-07:00",
+   "time_utc": "2026-10-06T04:36:05.000000Z"
+  },
+  {
+   "level": "info",
+   "line": 1153,
+   "message": "quarantine force-void route-layer flag initialized",
+   "time": "2026-10-05T21:37:53-07:00",
+   "time_utc": "2026-10-06T04:37:53.000000Z"
+  },
+  {
+   "level": "info",
+   "line": 1218,
+   "message": "provider state transition",
+   "provider_id": "journey-1839-old",
+   "reason": "coordinator auth_response accepted",
+   "state": "ready",
+   "time": "2026-10-05T21:38:03-07:00",
+   "time_utc": "2026-10-06T04:38:03.000000Z"
+  },
+  {
+   "level": "info",
+   "line": 1263,
+   "message": "provider state transition",
+   "provider_id": "journey-1839-old",
+   "reason": "coordinator auth_response accepted",
+   "state": "ready",
+   "time": "2026-10-05T21:38:34-07:00",
+   "time_utc": "2026-10-06T04:38:34.000000Z"
+  },
+  {
+   "level": "info",
+   "line": 1309,
+   "message": "quarantine force-void route-layer flag initialized",
+   "time": "2026-10-05T21:38:41-07:00",
+   "time_utc": "2026-10-06T04:38:41.000000Z"
+  },
+  {
+   "level": "info",
+   "line": 1356,
+   "message": "provider state transition",
+   "provider_id": "journey-1839-privacy",
+   "reason": "coordinator auth_response accepted",
+   "state": "ready",
+   "time": "2026-10-05T21:38:46-07:00",
+   "time_utc": "2026-10-06T04:38:46.000000Z"
+  },
+  {
+   "level": "info",
+   "line": 1358,
+   "message": "provider state transition",
+   "provider_id": "journey-1839-plain",
+   "reason": "coordinator auth_response accepted",
+   "state": "ready",
+   "time": "2026-10-05T21:38:46-07:00",
+   "time_utc": "2026-10-06T04:38:46.000000Z"
+  },
+  {
+   "level": "info",
+   "line": 1399,
+   "message": "provider state transition",
+   "provider_id": "journey-1839-privacy",
+   "reason": "coordinator auth_response accepted",
+   "state": "ready",
+   "time": "2026-10-05T21:39:01-07:00",
+   "time_utc": "2026-10-06T04:39:01.000000Z"
+  },
+  {
+   "level": "warn",
+   "line": 1434,
+   "message": "provider websocket disconnected",
+   "provider_id": "journey-1839-privacy",
+   "time": "2026-10-05T21:39:26-07:00",
+   "time_utc": "2026-10-06T04:39:26.000000Z"
+  },
+  {
+   "level": "info",
+   "line": 1465,
+   "message": "provider state transition",
+   "provider_id": "journey-1839-privacy",
+   "reason": "coordinator auth_response accepted",
+   "state": "ready",
+   "time": "2026-10-05T21:39:30-07:00",
+   "time_utc": "2026-10-06T04:39:30.000000Z"
+  },
+  {
+   "level": "info",
+   "line": 1481,
+   "message": "provider state transition",
+   "provider_id": "journey-1839-plain",
+   "reason": "coordinator auth_response accepted",
+   "state": "ready",
+   "time": "2026-10-05T21:39:33-07:00",
+   "time_utc": "2026-10-06T04:39:33.000000Z"
+  },
+  {
+   "level": "info",
+   "line": 1593,
+   "message": "provider state transition",
+   "provider_id": "journey-1839-plain",
+   "reason": "coordinator auth_response accepted",
+   "state": "ready",
+   "time": "2026-10-05T21:39:59-07:00",
+   "time_utc": "2026-10-06T04:39:59.000000Z"
+  }
+ ],
+ "schema_version": "macprovider.privacy-class-beta-primary.v1"
+}
