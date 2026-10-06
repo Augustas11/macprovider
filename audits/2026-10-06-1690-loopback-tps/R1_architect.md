@@ -1,0 +1,19 @@
+
+```text
+No CRITICAL or HIGH findings.
+
+- **MEDIUM — incompatible throughput semantics.** `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:8219`, `phase3-binary/Sources/macprovider-cli/OpenAICompatibleLoopbackRuntime.swift:1284`, `phase4-coordinator/internal/buyer/server.go:641`. Native throughput includes prefill/model load; loopback excludes both. The coordinator applies the same field to the hard routing floor and fast-mode ordering (`specs/SPEC-002-coordinator.md:1986`, `2416`). A cold loopback can advertise ~100 TPS while a similarly cold native runtime reports below 1 TPS. Fix: make FR-17’s metric semantically uniform across runtimes, with coordinator documentation/tests matching that definition.
+
+- **MEDIUM — chunk-count fallback is used as an authoritative probe rate.** `phase3-binary/Sources/macprovider-cli/OpenAICompatibleLoopbackRuntime.swift:599`, `:1360`. When upstream usage is absent, `deltaEvents` counts SSE chunks, not tokens. Existing tests explicitly model plain mlx_lm/oMLX-style chunks without usage (`OpenAICompatibleLoopbackRuntimeTests.swift:479`, `:1485`). Identical output can therefore pass or fail the coordinator floor based only on chunking. Fix: require authoritative usage/timing/tokenizer counts; return zero when unavailable instead of using the display-only fallback.
+
+- **MEDIUM — deploy verification does not validate the artifact actually uploaded.** `phase4-coordinator/dist/deploy-pearl-vps.sh:607`, `:701`, `:1795`, `:3513`; `phase4-coordinator/dist/test/check_nginx_model_admission_routes_test.sh:8`. The new test is wired into `make test-dist` (`Makefile:199`), but Pearl deploy only runs the catalog-route check and uploads `PINNED_DIST_DIR`’s vhost. A stale pinned vhost can therefore ship without the model-admission route and reproduce the 404 incident. Fix: parameterize the route test by config path and run it against `$NGINX_SITE` before upload.
+
+- **LOW — probe timestamps are data-event timestamps, not token timestamps.** `phase3-binary/Sources/macprovider-cli/OpenAICompatibleLoopbackRuntime.swift:1342`, `:1398`. Role-only, finish, and usage-only SSE events update `firstDataAt`/`lastDataAt`; the fixture contains all of these (`OpenAICompatibleLoopbackRuntimeTests.swift:1758`). Delayed metadata or an initial role event changes the reported decode rate. Fix: timestamp only content-bearing events or use upstream timing metadata.
+
+- **LOW — probe contract is still coupled to concrete runtime types and duplicates the prompt.** `phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:2733`, `:2738`; `ModelRuntime.swift:13`, `:8226`; `OpenAICompatibleLoopbackRuntime.swift:1295`, `:1301`. The token budget is shared, but the prompt and measurement contract are duplicated, and `ServeCommand` downcasts the existential to two concrete actors. A new conforming runtime can serve successfully yet silently report zero throughput. Fix: introduce a shared probe specification/measurer protocol and dispatch through it.
+
+Focused nginx test passed; `git diff --check` passed.
+
+C=0 H=0 M=3 L=2
+
+
