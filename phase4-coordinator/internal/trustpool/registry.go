@@ -1173,6 +1173,16 @@ func (r *Registry) RouteableSnapshots() []RouteableSnapshot {
 // gateway-side pool-scope checks. It is intentionally pool-opaque: the gateway
 // gets only credential scope, then the coordinator still enforces routeability,
 // membership, generation, and freshness on dispatch.
+//
+// A pool whose durable lifecycle is not active (created, paused, draining,
+// retired, or candidate-blocked) is omitted, so the gateway refuses it on the
+// same local lookup path as unknown and unauthorized pools (SPEC-043-R007
+// identical lookup path and timing). Forwarding it instead stacked the
+// coordinator round trip and the coordinator's own rejection floor on top of
+// the gateway's, which made "disabled" measurably slower than "unknown". A
+// creator-agreement-expired pool stays projected: its authorized buyers keep
+// the coordinator's authorized-only pool_policy_stale answer. The coordinator
+// still rejects a pool paused after the gateway's last projection fetch.
 func (r *Registry) BuyerAuthorizations() (map[string][]string, uint64) {
 	if r == nil {
 		return nil, 0
@@ -1181,6 +1191,9 @@ func (r *Registry) BuyerAuthorizations() (map[string][]string, uint64) {
 	defer r.mu.RUnlock()
 	accounts := make(map[string][]string)
 	for poolID, ps := range r.pools {
+		if !ps.routeable && !ps.routeableExpired {
+			continue
+		}
 		for accountID := range ps.buyers {
 			if !r.buyerAllowedByCreatorCeilingLocked(ps.creatorAccountID, accountID) {
 				continue

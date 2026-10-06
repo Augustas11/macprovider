@@ -78,6 +78,13 @@ func TestInternalRoutingAdvertisesBuyerAuthorizationProjection(t *testing.T) {
 		SettlementMode: "observe",
 		Routeable:      false,
 		Generation:     8,
+	}, {
+		PoolID:           "expiredpoolxxxxxxxxxxx",
+		BuyerAccounts:    []string{"acct-b"},
+		SettlementMode:   "observe",
+		Routeable:        false,
+		RouteableExpired: true,
+		Generation:       9,
 	}}); err != nil {
 		t.Fatalf("LoadRouteableSnapshotsAtRevision: %v", err)
 	}
@@ -111,10 +118,14 @@ func TestInternalRoutingAdvertisesBuyerAuthorizationProjection(t *testing.T) {
 	if got.Pools.BuyerAuthorizationGeneration != 7 {
 		t.Fatalf("buyer_authorization_generation=%d, want registry revision 7", got.Pools.BuyerAuthorizationGeneration)
 	}
-	if len(got.Pools.AccountPools["acct-a"]) != 2 || got.Pools.AccountPools["acct-a"][0] != "ABCDEFGHIJKLMNOPQRSTUV" || got.Pools.AccountPools["acct-a"][1] != "abcdefghijklmnopqrstuv" {
-		t.Fatalf("acct-a pools=%v, want sorted two-pool projection", got.Pools.AccountPools["acct-a"])
+	// SPEC-043-R007: the non-active (paused) pool is omitted so the gateway
+	// refuses it on the same local lookup path as unknown/unauthorized pools.
+	if len(got.Pools.AccountPools["acct-a"]) != 1 || got.Pools.AccountPools["acct-a"][0] != "abcdefghijklmnopqrstuv" {
+		t.Fatalf("acct-a pools=%v, want only the routeable pool", got.Pools.AccountPools["acct-a"])
 	}
-	if len(got.Pools.AccountPools["acct-b"]) != 1 || got.Pools.AccountPools["acct-b"][0] != "abcdefghijklmnopqrstuv" {
-		t.Fatalf("acct-b pools=%v, want one-pool projection", got.Pools.AccountPools["acct-b"])
+	// A creator-agreement-expired pool stays projected so its authorized
+	// buyers still reach the coordinator's pool_policy_stale answer.
+	if len(got.Pools.AccountPools["acct-b"]) != 2 || got.Pools.AccountPools["acct-b"][0] != "abcdefghijklmnopqrstuv" || got.Pools.AccountPools["acct-b"][1] != "expiredpoolxxxxxxxxxxx" {
+		t.Fatalf("acct-b pools=%v, want sorted routeable + expired projection", got.Pools.AccountPools["acct-b"])
 	}
 }
