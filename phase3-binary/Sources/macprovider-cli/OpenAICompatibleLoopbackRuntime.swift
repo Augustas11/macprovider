@@ -163,6 +163,28 @@ enum OpenAICompatibleLoopbackRuntimeError: Error, CustomStringConvertible, Equat
     }
 }
 
+/// The loopback startup throughput probe's result (SPEC-001 FR-20). A failure
+/// carries a closed reason code and reports a 0 estimate.
+enum LoopbackStartupThroughputOutcome: Equatable, Sendable {
+    case ok(tps: Double)
+    case failed(reason: String)
+
+    var tps: Double {
+        if case .ok(let tps) = self { return tps }
+        return 0
+    }
+
+    /// The one structured log line for the probe; never carries text.
+    func logLine(runtimeSource: String) -> String {
+        switch self {
+        case .ok(let tps):
+            return "event=loopback_startup_throughput_probe outcome=ok tps=\(String(format: "%.2f", tps)) runtime_source=\(runtimeSource)"
+        case .failed(let reason):
+            return "event=loopback_startup_throughput_probe outcome=failed reason=\(reason) runtime_source=\(runtimeSource)"
+        }
+    }
+}
+
 /// A streamed loopback response: status, then the body split into lines
 /// (blank lines preserved, so SSE event boundaries survive).
 struct BYOMLoopbackLineResponse: Sendable {
@@ -1250,6 +1272,133 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         // it arrives (content and tool-call deltas). The context gate already
         // ran in preflight(); the relay and HTTP paths always call it first.
         try await proxy(request, contextWindow: nil, shouldCancel: shouldCancel, onChunk: onChunk)
+    }
+
+    // MARK: Startup throughput probe (SPEC-001 FR-20, #1690)
+
+    /// Hard wall-clock bound on the whole startup probe, connection included.
+    /// It covers an upstream that lazily loads the model on first request
+    /// (Ollama); past it the probe fails and serve continues with 0.
+    static let startupThroughputProbeTimeoutSeconds: TimeInterval = 60
+
+    /// The serve-time startup probe behind `capacity.throughput_tps_estimate`
+    /// for a loopback runtime: one fixed short generation (the native probe's
+    /// prompt and token budget) through the runtime's own chat-completions
+    /// leg. The rate is the upstream's own completion-token count over the
+    /// decode window (first to last streamed token), so a model load or
+    /// prefill on the upstream does not count; llama-server's own
+    /// `timings.predicted_per_second` wins when it reports one. It never
+    /// touches `ProviderStatus` (no usage, request log or billing), never
+    /// logs prompt or completion text, and any failure is an outcome, never
+    /// a thrown error, so serving is unaffected.
+    func measureStartupThroughput(
+        maxTokens: Int = ModelRuntime.startupThroughputProbeMaxTokens,
+        timeoutSeconds: TimeInterval = OpenAICompatibleLoopbackRuntime.startupThroughputProbeTimeoutSeconds
+    ) async -> LoopbackStartupThroughputOutcome {
+        guard await servesBoundIdentity() else { return .failed(reason: "identity_unbound") }
+        let payload: [String: Any] = [
+            "model": upstreamModelName,
+            "messages": [["role": "user", "content": "Reply with a short greeting."]],
+            "stream": true,
+            "stream_options": ["include_usage": true],
+            "temperature": 0.0,
+            "max_tokens": maxTokens,
+        ]
+        guard let body = try? JSONSerialization.data(withJSONObject: payload, options: [.withoutEscapingSlashes]) else {
+            return .failed(reason: "encode_failed")
+        }
+        let client = httpClient
+        let url = chatCompletionsURL
+        let timeouts = LoopbackGenerationTimeouts(firstByte: timeoutSeconds, idle: timeoutSeconds, overall: timeoutSeconds)
+        let outcome = await Self.bounded(until: Date().addingTimeInterval(timeoutSeconds)) { () async -> LoopbackStartupThroughputOutcome? in
+            await Self.runStartupThroughputProbe(client, url: url, body: body, timeouts: timeouts)
+        }
+        return outcome ?? .failed(reason: "timeout")
+    }
+
+    private static func runStartupThroughputProbe(
+        _ client: any BYOMDiscoveryHTTPClient,
+        url: URL,
+        body: Data,
+        timeouts: LoopbackGenerationTimeouts
+    ) async -> LoopbackStartupThroughputOutcome {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let response: BYOMLoopbackLineResponse
+        do {
+            response = try await openLines(client, url: url, body: body, timeouts: timeouts)
+        } catch let error as URLError where error.code == .timedOut {
+            return .failed(reason: "timeout")
+        } catch {
+            return .failed(reason: "upstream_unavailable")
+        }
+        guard (200...299).contains(response.statusCode) else {
+            return .failed(reason: "upstream_status_\(response.statusCode)")
+        }
+        var accumulator = OpenAICompatibleStreamAccumulator()
+        var firstDataAt: TimeInterval?
+        var lastDataAt: TimeInterval?
+        var predictedPerSecond: Double?
+        do {
+            for try await line in response.lines {
+                if line.hasPrefix("data:"), line.dropFirst(5).trimmingCharacters(in: .whitespaces) != "[DONE]" {
+                    let now = ProcessInfo.processInfo.systemUptime
+                    if firstDataAt == nil { firstDataAt = now }
+                    lastDataAt = now
+                    if line.contains("predicted_per_second"),
+                       case .object(let root)? = try? StrictJSONParser.parse(String(line.dropFirst(5))),
+                       case .object(let timings)? = root["timings"] {
+                        switch timings["predicted_per_second"] {
+                        case .double(let value)?: predictedPerSecond = value
+                        case .int(let value)?: predictedPerSecond = Double(value)
+                        default: break
+                        }
+                    }
+                }
+                _ = try accumulator.consume(line: line)
+                if accumulator.isDone { break }
+            }
+            let (result, _) = try accumulator.finish()
+            let tps = startupDecodeTPS(
+                completionTokens: result.completionTokens,
+                llamaPredictedPerSecond: predictedPerSecond,
+                firstTokenAt: firstDataAt,
+                lastTokenAt: lastDataAt,
+                startedAt: startedAt,
+                endedAt: ProcessInfo.processInfo.systemUptime
+            )
+            guard tps > 0 else { return .failed(reason: "no_tokens") }
+            return .ok(tps: tps)
+        } catch is CancellationError {
+            return .failed(reason: "timeout")
+        } catch let error as URLError where error.code == .timedOut {
+            return .failed(reason: "timeout")
+        } catch {
+            return .failed(reason: "malformed_response")
+        }
+    }
+
+    /// Decode tokens/second of the startup probe. llama-server's own decode
+    /// rate wins; otherwise the first streamed token closes prefill, so the
+    /// remaining `completionTokens - 1` tokens span the first-to-last token
+    /// window. With fewer than two tokens or no measurable window (a buffered
+    /// body), it falls back to the native probe's tokens over the whole
+    /// elapsed time, prefill included.
+    static func startupDecodeTPS(
+        completionTokens: Int,
+        llamaPredictedPerSecond: Double?,
+        firstTokenAt: TimeInterval?,
+        lastTokenAt: TimeInterval?,
+        startedAt: TimeInterval,
+        endedAt: TimeInterval
+    ) -> Double {
+        guard completionTokens > 0 else { return 0 }
+        if let llamaPredictedPerSecond, llamaPredictedPerSecond.isFinite, llamaPredictedPerSecond > 0 {
+            return llamaPredictedPerSecond
+        }
+        if completionTokens >= 2, let firstTokenAt, let lastTokenAt, lastTokenAt - firstTokenAt >= 0.001 {
+            return Double(completionTokens - 1) / (lastTokenAt - firstTokenAt)
+        }
+        return Double(completionTokens) / max(endedAt - startedAt, 0.001)
     }
 
     // MARK: Internals

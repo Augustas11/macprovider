@@ -1750,3 +1750,186 @@ private final class ScriptedLoopbackClient: BYOMLoopbackStreamingHTTPClient, @un
         }
     }
 }
+
+// MARK: #1690 — loopback startup throughput probe (SPEC-001 FR-20)
+
+extension OpenAICompatibleLoopbackRuntimeTests {
+    private static let probeSSE = Data("""
+    data: {"choices":[{"delta":{"role":"assistant","content":"Hi"}}]}
+
+    data: {"choices":[{"delta":{"content":" there"}}]}
+
+    data: {"choices":[{"delta":{},"finish_reason":"length"}]}
+
+    data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":8}}
+
+    data: [DONE]
+
+    """.utf8)
+
+    func testLoopbackStartupProbeReportsAPositiveRateFromUpstreamUsage() async throws {
+        let store = try makeStore()
+        let client = StubLoopbackHTTPClient(responseBody: Self.probeSSE)
+        let runtime = try makeRuntime(httpClient: client, store: store)
+
+        let outcome = await runtime.measureStartupThroughput(maxTokens: ModelRuntime.startupThroughputProbeMaxTokens)
+        guard case .ok(let tps) = outcome else { return XCTFail("expected ok, got \(outcome)") }
+        XCTAssertGreaterThan(tps, 1, "a successful probe clears the coordinator's 1 tok/s routing floor")
+        XCTAssertEqual(outcome.tps, tps)
+        XCTAssertEqual(client.postCount, 1, "exactly one probe generation")
+
+        // One fixed short generation through the runtime's own leg: the
+        // upstream model name, the native token budget, streamed with usage.
+        XCTAssertEqual(client.lastURL?.absoluteString, "http://127.0.0.1:11434/v1/chat/completions")
+        let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(client.lastBody)) as? [String: Any])
+        XCTAssertEqual(sent["model"] as? String, "gemma3:270m")
+        XCTAssertEqual(sent["max_tokens"] as? Int, ModelRuntime.startupThroughputProbeMaxTokens)
+        XCTAssertEqual(sent["stream"] as? Bool, true)
+        XCTAssertEqual((sent["stream_options"] as? [String: Any])?["include_usage"] as? Bool, true)
+
+        // The log line names the rate and runtime, never the completion text.
+        let line = outcome.logLine(runtimeSource: OllamaLoopbackServeModel.runtimeSource)
+        XCTAssertTrue(line.hasPrefix("event=loopback_startup_throughput_probe outcome=ok tps="), line)
+        XCTAssertTrue(line.hasSuffix(" runtime_source=ollama_loopback"), line)
+        XCTAssertFalse(line.contains("Hi") || line.contains("there") || line.contains("greeting"), line)
+    }
+
+    func testLoopbackStartupProbePrefersLlamaServerDecodeRate() async throws {
+        let store = try makeStore()
+        let sse = Data("""
+        data: {"choices":[{"delta":{"content":"Hi"}}]}
+
+        data: {"choices":[{"delta":{},"finish_reason":"length"}],"timings":{"predicted_n":8,"predicted_ms":188.2,"predicted_per_second":42.5}}
+
+        data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":8}}
+
+        data: [DONE]
+
+        """.utf8)
+        let runtime = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: sse), store: store)
+        let outcome = await runtime.measureStartupThroughput()
+        XCTAssertEqual(outcome, .ok(tps: 42.5))
+    }
+
+    func testStartupDecodeRateExcludesPrefillAndUpstreamModelLoad() {
+        // 8 tokens; the first arrives after a 30 s cold load + prefill, the
+        // last 0.07 s later: 7 decode intervals -> 100 tok/s.
+        XCTAssertEqual(
+            OpenAICompatibleLoopbackRuntime.startupDecodeTPS(
+                completionTokens: 8, llamaPredictedPerSecond: nil,
+                firstTokenAt: 130, lastTokenAt: 130.07, startedAt: 100, endedAt: 130.08
+            ),
+            100, accuracy: 0.001
+        )
+        // No measurable window (buffered body): tokens over the whole elapsed.
+        XCTAssertEqual(
+            OpenAICompatibleLoopbackRuntime.startupDecodeTPS(
+                completionTokens: 8, llamaPredictedPerSecond: nil,
+                firstTokenAt: 1, lastTokenAt: 1, startedAt: 0, endedAt: 2
+            ),
+            4, accuracy: 0.001
+        )
+        XCTAssertEqual(
+            OpenAICompatibleLoopbackRuntime.startupDecodeTPS(
+                completionTokens: 0, llamaPredictedPerSecond: 50,
+                firstTokenAt: nil, lastTokenAt: nil, startedAt: 0, endedAt: 1
+            ),
+            0, "no generated tokens is no rate"
+        )
+    }
+
+    func testLoopbackStartupProbeFailureReportsZeroAndServingContinues() async throws {
+        let store = try makeStore()
+        let client = FailFirstPostLoopbackClient(
+            failStatus: 503,
+            then: Self.completionJSON(content: "ok", completionTokens: 3, promptTokens: 11)
+        )
+        let runtime = try makeRuntime(httpClient: client, store: store)
+
+        let outcome = await runtime.measureStartupThroughput()
+        XCTAssertEqual(outcome, .failed(reason: "upstream_status_503"))
+        XCTAssertEqual(outcome.tps, 0)
+        XCTAssertEqual(
+            outcome.logLine(runtimeSource: OllamaLoopbackServeModel.runtimeSource),
+            "event=loopback_startup_throughput_probe outcome=failed reason=upstream_status_503 runtime_source=ollama_loopback"
+        )
+
+        // The failed probe leaves the runtime serving.
+        let result = try await runtime.complete(try makeRequest(model: "ollama:gemma3:270m"))
+        XCTAssertEqual(result.content, "ok")
+        XCTAssertEqual(result.completionTokens, 3)
+
+        // Transport failures map to closed reason codes, never a throw.
+        let timedOut = try makeRuntime(httpClient: ScriptedLoopbackClient(failure: .openTimesOut), store: store)
+        let timedOutOutcome = await timedOut.measureStartupThroughput()
+        XCTAssertEqual(timedOutOutcome, .failed(reason: "timeout"))
+        let empty = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: Data()), store: store)
+        let emptyOutcome = await empty.measureStartupThroughput()
+        XCTAssertEqual(emptyOutcome, .failed(reason: "malformed_response"))
+    }
+
+    func testLoopbackStartupProbeIsBoundedByItsHardTimeout() async throws {
+        let store = try makeStore()
+        let client = EndlessStreamingLoopbackClient()
+        let runtime = try makeRuntime(httpClient: client, store: store)
+        let start = Date()
+        let outcome = await runtime.measureStartupThroughput(maxTokens: 8, timeoutSeconds: 0.3)
+        XCTAssertEqual(outcome, .failed(reason: "timeout"))
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5, "the probe never holds serve startup past its bound")
+        for _ in 0..<50 where !client.wasTerminated {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertTrue(client.wasTerminated, "the abandoned probe closes the upstream stream")
+    }
+
+    func testLoopbackStartupProbeIsNeverCountedAsUsage() async throws {
+        let store = try makeStore()
+        let runtime = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: Self.probeSSE), store: store)
+        let status = ProviderStatus(
+            modelID: "ollama:gemma3:270m",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        )
+        await runtime.setProviderStatus(status)
+        let before = await status.snapshot()
+
+        let outcome = await runtime.measureStartupThroughput()
+        XCTAssertGreaterThan(outcome.tps, 0)
+
+        let after = await status.snapshot()
+        XCTAssertEqual(after.requestsTotal, before.requestsTotal)
+        XCTAssertEqual(after.inputTokensAllTime, before.inputTokensAllTime)
+        XCTAssertEqual(after.outputTokensAllTime, before.outputTokensAllTime)
+        XCTAssertEqual(after.errorsTotal, before.errorsTotal)
+    }
+}
+
+/// The first post answers `failStatus`; every later post answers `then`.
+private final class FailFirstPostLoopbackClient: BYOMDiscoveryHTTPClient, @unchecked Sendable {
+    private let lock = NSLock()
+    private let failStatus: Int
+    private let body: Data
+    private var posts = 0
+
+    init(failStatus: Int, then body: Data) {
+        self.failStatus = failStatus
+        self.body = body
+    }
+
+    func get(_ url: URL, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
+        throw BYOMDiscoveryAdapterError.rejectedNonLoopback
+    }
+
+    func post(_ url: URL, jsonBody: Data, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
+        return nextIsFirst()
+            ? BYOMHTTPResponse(statusCode: failStatus, headers: [], body: Data(#"{"error":{"message":"loading"}}"#.utf8))
+            : BYOMHTTPResponse(statusCode: 200, headers: [], body: body)
+    }
+
+    private func nextIsFirst() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        posts += 1
+        return posts == 1
+    }
+}

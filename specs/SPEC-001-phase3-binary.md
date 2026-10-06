@@ -1,6 +1,19 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.28 (2026-10-05, relay-blind settlement receipt wire)
+**Version:** 1.9.29 (2026-10-06, loopback startup throughput probe)
+
+**Change log v1.9.29 (2026-10-06, loopback startup throughput probe):** A
+loopback serving runtime (SPEC-046, SPEC-010-R007/R009) now runs the FR-20
+startup probe through its upstream chat-completions leg instead of reporting
+0 (#1690). A 0 estimate sits below the coordinator's
+`min_provider_throughput_tps` routing floor, so no loopback provider could
+route. The probe uses the native prompt and token budget, one streamed
+generation under a 60 s bound; its rate is the upstream's completion-token
+count over the first-to-last streamed token window (llama-server's own
+`timings.predicted_per_second` when reported). It is never usage, billing or
+a receipt. Success sets `throughput_source: startup_probe`; failure reports 0
+with `none`, logs one `event=loopback_startup_throughput_probe` line with a
+reason code, and does not stop `serve`. The wire field is unchanged.
 
 **Change log v1.9.28 (2026-10-05, relay-blind settlement receipt wire):**
 Adds `SPEC-001-R005` (#1851) with three closed wire additions for the SPEC-022
@@ -1155,7 +1168,7 @@ responsibility ends at sending accurate values.
 `throughput_tps_estimate` is a startup-probe value, not a sustained benchmark:
 `serve` generates at most 8 tokens once after model load and divides the tokens
 produced by elapsed time including prefill (0 when the probe fails or does not
-run). A warm swap carries the value forward without re-probing. Its wire
+run). A loopback runtime (v1.9.29) measures the decode window instead (FR-20). A warm swap carries the value forward without re-probing. Its wire
 semantics are unchanged by v1.9.20.
 
 **Local capacity provenance (v1.9.20, capability `capacity_provenance_v1`).**
@@ -1594,8 +1607,24 @@ startup probe once, at serve startup only: prompt `"Reply with a short greeting.
 (`ModelRuntime.startupThroughputProbeMaxTokens`). Tokens produced divided by
 elapsed time, prefill included, is the `throughput_tps_estimate` in FR-17; a
 probe that fails or produces no tokens reports 0 and does not stop `serve`.
-An autotune candidate `serve` and the loopback runtime do not probe: they
-report 0 with `throughput_source: none`.
+An autotune candidate `serve` does not probe: it reports 0 with
+`throughput_source: none`.
+A loopback serving runtime (v1.9.29, #1690) runs the same probe once at
+startup through its upstream `/v1/chat/completions` leg: the same prompt and
+token budget, streamed with `stream_options.include_usage`, temperature 0,
+bounded to 60 s in total. The estimate is the upstream's own completion-token
+count (or llama-server's `timings.predicted_per_second` when present) over the
+decode window, first to last streamed token, so an upstream model load or
+prefill is excluded. With fewer than two tokens or no measurable window, it
+falls back to tokens over total elapsed time. The probe is never usage,
+billing, a request-log entry or a receipt, and no prompt or completion text is
+logged. Success reports `throughput_source: startup_probe` with the served
+model ref as `throughput_probe_model` and logs
+`event=loopback_startup_throughput_probe outcome=ok tps=<n> runtime_source=<rs>`.
+Failure (unbound identity, upstream error or status, malformed stream, no
+tokens, timeout) reports 0 with `throughput_source: none`, logs
+`event=loopback_startup_throughput_probe outcome=failed reason=<code> runtime_source=<rs>`,
+and does not stop `serve`.
 The standalone `self-test` command loads the model, runs the same probe with
 at most 4 tokens, prints `self-test passed: throughput_tps=<n>`, and exits
 nonzero when the model does not load or the probe produces no tokens.
