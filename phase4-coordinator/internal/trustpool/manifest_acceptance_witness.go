@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -118,7 +119,48 @@ func readManifestAcceptanceWitness(path string) (map[string]ManifestAcceptancePr
 	return out, true, nil
 }
 
+// BootstrapManifestAcceptanceWitness writes the first witness for a
+// coordinator whose database already holds accepted-manifest high-water, so
+// manifest_acceptance_witness_path can be enabled on it. It is an explicit
+// operator step: store startup never creates a witness over existing
+// high-water, so deleting the file stays fail-closed. It reads db only,
+// refuses a relative path, and never replaces an existing file.
+func BootstrapManifestAcceptanceWitness(ctx context.Context, db *sql.DB, path string) ([]ManifestAcceptanceProjection, error) {
+	if !filepath.IsAbs(path) {
+		return nil, fmt.Errorf("manifest acceptance witness path %q must be absolute", path)
+	}
+	if _, err := os.Lstat(path); err == nil {
+		return nil, fmt.Errorf("manifest acceptance witness %q already exists; refusing to overwrite", path)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	var highWater map[string]ManifestAcceptanceProjection
+	if err := withManifestAcceptanceWitnessConn(ctx, db, func(ctx context.Context, conn *sql.Conn) error {
+		var err error
+		highWater, err = manifestAcceptanceHighWaterFromQueryer(ctx, conn)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	if err := writeManifestAcceptanceWitnessFile(path, highWater, true); err != nil {
+		return nil, err
+	}
+	out := make([]ManifestAcceptanceProjection, 0, len(highWater))
+	for _, p := range highWater {
+		out = append(out, p)
+	}
+	slices.SortFunc(out, func(a, b ManifestAcceptanceProjection) int { return strings.Compare(a.PoolID, b.PoolID) })
+	return out, nil
+}
+
 func writeManifestAcceptanceWitness(path string, highWater map[string]ManifestAcceptanceProjection) error {
+	return writeManifestAcceptanceWitnessFile(path, highWater, false)
+}
+
+// writeManifestAcceptanceWitnessFile publishes the witness through a synced
+// temp file. noClobber links instead of renaming, so an existing file is
+// never replaced.
+func writeManifestAcceptanceWitnessFile(path string, highWater map[string]ManifestAcceptanceProjection, noClobber bool) error {
 	file := manifestAcceptanceWitnessFile{
 		SchemaVersion: manifestAcceptanceWitnessSchema,
 		Pools:         make([]manifestAcceptanceWitnessEntry, 0, len(highWater)),
@@ -161,7 +203,26 @@ func writeManifestAcceptanceWitness(path string, highWater map[string]ManifestAc
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, path)
+	if noClobber {
+		if err := os.Link(tmpName, path); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				return fmt.Errorf("manifest acceptance witness %q already exists; refusing to overwrite", path)
+			}
+			return err
+		}
+	} else if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	return syncManifestAcceptanceWitnessDir(dir)
+}
+
+func syncManifestAcceptanceWitnessDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 func witnessEntryFromProjection(p ManifestAcceptanceProjection) manifestAcceptanceWitnessEntry {

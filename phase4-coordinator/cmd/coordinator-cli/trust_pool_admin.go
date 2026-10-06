@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -10,9 +12,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 	"github.com/augstar/macprovider-coordinator/internal/trustpool"
 )
 
@@ -78,6 +82,8 @@ func trustPoolAdmin(args []string, getenv func(string) string, stdin io.Reader, 
 		return trustPoolAdminSignManifest(args[1:], stdout)
 	case "policy-terms-digest":
 		return trustPoolAdminPolicyTermsDigest(args[1:], stdout)
+	case "manifest-witness-init":
+		return trustPoolAdminManifestWitnessInit(args[1:], stdout)
 	case "rotate-signer-set":
 		return fmt.Errorf("rotate-signer-set is not implemented in the SPEC-043 candidate surface; submit a signed SPEC-042 authority-log event through append-event after signer-set support lands")
 	default:
@@ -495,6 +501,60 @@ func trustPoolAdminRequest(method, target, operatorKey, operationID string, body
 		_, err = fmt.Fprintln(stdout)
 	}
 	return err
+}
+
+// trustPoolAdminManifestWitnessInit writes the first manifest-acceptance
+// witness from a coordinator DB that already has accepted manifests. It runs
+// on the coordinator host while the coordinator is up, so it opens the DB
+// read-only and never writes to it.
+func trustPoolAdminManifestWitnessInit(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("trust-pool-admin manifest-witness-init", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	dbPath := fs.String("db", "", "path to the coordinator SQLite database")
+	out := fs.String("out", "", "absolute path for the new witness file; must not exist")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected positional arguments")
+	}
+	db := strings.TrimSpace(*dbPath)
+	if db == "" {
+		return fmt.Errorf("--db is required")
+	}
+	witnessPath := strings.TrimSpace(*out)
+	if witnessPath == "" {
+		return fmt.Errorf("--out is required")
+	}
+	if !filepath.IsAbs(witnessPath) {
+		return fmt.Errorf("--out must be an absolute path")
+	}
+	if _, err := os.Stat(db); err != nil {
+		return fmt.Errorf("coordinator DB %q: %w", db, err)
+	}
+	handle, err := sql.Open("sqlite", sqliteutil.ReadOnlyDSN(db))
+	if err != nil {
+		return err
+	}
+	defer handle.Close()
+	handle.SetMaxOpenConns(1)
+	pools, err := trustpool.BootstrapManifestAcceptanceWitness(context.Background(), handle, witnessPath)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(stdout, "wrote manifest acceptance witness %s (pools=%d)\n", witnessPath, len(pools)); err != nil {
+		return err
+	}
+	for _, p := range pools {
+		digest := p.ManifestCoreDigest
+		if len(digest) > 12 {
+			digest = digest[:12]
+		}
+		if _, err := fmt.Fprintf(stdout, "pool_id=%s manifest_version=%d manifest_core_digest=%s...\n", p.PoolID, p.ManifestVersion, digest); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func readCLIInput(path string, stdin io.Reader) ([]byte, error) {

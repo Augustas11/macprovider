@@ -83,14 +83,17 @@ Pearl:
    (`/run/lock/macprovider-pearl-updater.lock`,
    `/opt/macprovider/.coordinator-deploy.lock`). The lock files always exist,
    so test them with `flock -n`, never with `-e`.
-8. **Do not set `trusted_pools.manifest_acceptance_witness_path` on Pearl
-   yet.** With M1's manifest already accepted and no witness file, the
-   trustpool store refuses to load
-   (`manifest_acceptance_witness.go`: "witness missing while coordinator db
-   already has accepted manifest high-water"). No tool writes the first
-   witness for an existing pool. `production_activation` requires the witness
-   path, so a SPEC-043 production launch of any pool on this coordinator needs
-   that bootstrap first.
+8. **Bootstrap the witness before setting
+   `trusted_pools.manifest_acceptance_witness_path` on Pearl.** With M1's
+   manifest already accepted and no witness file, the trustpool store refuses
+   to load (`manifest_acceptance_witness.go`: "witness missing while
+   coordinator db already has accepted manifest high-water").
+   `coordinator-cli trust-pool-admin manifest-witness-init` writes the first
+   witness from the DB; run it before adding the key and restarting
+   ([pool-scoped-model-admission.md](pool-scoped-model-admission.md) §1).
+   `production_activation` requires the witness path, so a SPEC-043
+   production launch of any pool on this coordinator needs that bootstrap
+   first.
 
 ## 0. Scope decision: M1 is an operator-internal pool, `launch_environment: candidate`
 

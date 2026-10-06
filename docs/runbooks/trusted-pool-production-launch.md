@@ -111,6 +111,31 @@ trusted_pools:
       "<same hash>": "<hsm | mpc | other>"
 ```
 
+**Manifest-acceptance witness on a coordinator that already has accepted
+manifests.** `manifest_acceptance_witness_path` is startup-only, and the store
+refuses to start when the witness file is missing while `coordinator.db`
+already holds accepted-manifest high-water. Adding the key alone to such a
+coordinator (Pearl has accepted pool manifests) crash-loops it. Write the first
+witness explicitly before adding the key, on Pearl as the `macprovider` user,
+while the coordinator keeps running:
+
+```bash
+sudo -u macprovider /opt/macprovider/coordinator-cli trust-pool-admin manifest-witness-init \
+  --db /var/lib/macprovider/coordinator.db \
+  --out /var/lib/macprovider/trustpool-manifest-witness.json
+```
+
+The subcommand ships with the coordinator release that carries this
+bootstrap; an older `coordinator-cli` answers `unknown trust-pool-admin
+subcommand`. It opens the DB read-only, writes the file with mode `0600`,
+refuses a relative `--out` or an existing file, and prints the pool count
+with each pool's `manifest_version` and a `manifest_core_digest` prefix. Then
+add the key and restart the coordinator (a SIGHUP that changes the key is
+rejected). A manifest accepted between the bootstrap and the restart is fine:
+startup moves the witness forward to the DB high-water. Once the key is set, a
+missing or rolled-back witness still refuses startup by design; do not delete
+the file to get past it.
+
 Every approved custody hash needs a class. `software` is rejected until a
 signed-exception path exists. A coordinator with `production_activation` set
 never promotes or routes a pool whose root `launch_environment` is `candidate`.
