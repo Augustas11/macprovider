@@ -140,3 +140,19 @@ matrix record is clean.
 
 The request times come from each llama-server's relative-time log, anchored
 at the file's modification time (±1 s), and from ollama's wall-clock log.
+
+What each overlap can reach. The analyzer builds its paired statistics
+(decode throughput, TTFT, TPOT p95, chunk-gap p99, rejection) from matrix
+blocks only and drops sustained records from the pairs. The sustained window
+feeds only the hard gates: parity, admissions, errors, and minimum available
+memory. Its 76 records show 0 parity mismatches and 0 errors, and minimum
+available memory never fell below 0.656 (the floor is 0.10). Foreign load
+can only lower available memory, so it biases that gate toward FAIL, never
+toward PASS. The one overlap that reaches the statistics is the unidentified
+CPU-only process during matrix s8 blocks 6-9. Each block runs both arms back
+to back, so the process loaded both arms of the pair. Per-block native/ordinary
+ratios for those blocks are TPOT -0.019, -0.005, +0.005, +0.001 and
+chunk-gap p99 -0.050, -0.053, +0.009, -0.005. Without blocks 6-9 the median
+TPOT ratio would be +0.0009 instead of +0.0004, against the 0.05 gated margin.
+This attributes each overlap. It does not change the frozen
+`exclusion_rules: none`, and no block was excluded or rerun.
