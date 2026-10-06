@@ -589,4 +589,42 @@ artifact_guard unbound "$artifact_guard_dir/unbound.yaml" || fail "unbound relea
 ! artifact_guard bound "$artifact_guard_dir/unbound.yaml" || fail "bound release without the pair must abort"
 ! artifact_guard unbound "$artifact_guard_dir/bound.yaml" || fail "unbound release with the pair must abort"
 
+# The post-restart smoke rebuilds the release from the served feeds and runs
+# verify-directory on it. Rebuild that directory from the smoke's own spec list
+# against the repository release: an artifact-bound release.json only verifies
+# when the served artifact feed is included (Pearl 10-01 activation rollback).
+repo_root="$SCRIPT_DIR/../../.."
+smoke_names() { # <all|base> - feed names the deploy smoke fetches
+  awk -v mode="$1" '
+    /^STATIC_SMOKE_SPECS=\(/ { inside = 1; next }
+    /^  STATIC_SMOKE_SPECS\+=\(/ { inside = (mode == "all"); next }
+    inside && /^ *\)/ { inside = 0; next }
+    inside { split($0, part, "|"); print part[2] }
+  ' "$DEPLOY_SH"
+}
+grep -q '"/v1/catalog-artifacts|autotune-artifacts.json|$STATIC_ARTIFACTS_JSON"' "$DEPLOY_SH" &&
+  grep -q '"/v1/catalog-artifacts.sig|autotune-artifacts.json.sig|$STATIC_ARTIFACTS_SIG"' "$DEPLOY_SH" ||
+  fail "deploy smoke must fetch the served artifact feed for an artifact-bound release"
+smoke_release() { # <all|base> <dir>
+  local name
+  for name in $(smoke_names "$1"); do
+    cp "$repo_root/phase3-binary/dist/static/$name" "$2/$name"
+  done
+  for name in release.json trusted-keys.json tier2-catalog.json; do
+    cp "$repo_root/phase3-binary/catalog/autotune/$name" "$2/$name"
+  done
+}
+if python3 -c 'import json, sys; sys.exit(0 if "autotune-artifacts.json" in json.load(open(sys.argv[1]))["feeds"] else 1)' \
+  "$repo_root/phase3-binary/catalog/autotune/release.json"; then
+  mkdir "$artifact_guard_dir/smoke-all" "$artifact_guard_dir/smoke-base"
+  smoke_release all "$artifact_guard_dir/smoke-all"
+  smoke_release base "$artifact_guard_dir/smoke-base"
+  [ "$(smoke_names all | wc -l)" -eq 10 ] && [ "$(smoke_names base | wc -l)" -eq 8 ] ||
+    fail "deploy smoke spec list did not parse"
+  python3 "$repo_root/scripts/catalog-release.py" verify-directory --directory "$artifact_guard_dir/smoke-all" >/dev/null ||
+    fail "deploy smoke directory must verify for the artifact-bound repository release"
+  ! python3 "$repo_root/scripts/catalog-release.py" verify-directory --directory "$artifact_guard_dir/smoke-base" >/dev/null 2>&1 ||
+    fail "smoke directory without the artifact feed must not verify an artifact-bound release"
+fi
+
 echo "PASS: deploy autotune feed access guards present"

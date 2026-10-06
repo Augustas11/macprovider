@@ -4501,15 +4501,26 @@ STATIC_SMOKE_DIR=$(umask 077 && mktemp -d -t macprovider-autotune-probe.XXXXXXXX
   echo "aborting smoke: mktemp -d failed for autotune feed probe" >&2
   exit 1
 }
-for STATIC_SPEC in \
-    "/v1/rate-card|rate-card.json|$STATIC_RATE_CARD_JSON" \
-    "/v1/rate-card.sig|rate-card.json.sig|$STATIC_RATE_CARD_SIG" \
-    "/v1/continuous-batching-policy|continuous-batching-policy.json|$STATIC_CB_POLICY_JSON" \
-    "/v1/continuous-batching-policy.sig|continuous-batching-policy.json.sig|$STATIC_CB_POLICY_SIG" \
-    "/v1/demand-rank|demand-rank.json|$STATIC_DEMAND_JSON" \
-    "/v1/demand-rank.sig|demand-rank.json.sig|$STATIC_DEMAND_SIG" \
-    "/v1/autotune-candidates|autotune-candidates.json|$STATIC_AUTOTUNE_JSON" \
-    "/v1/autotune-candidates.sig|autotune-candidates.json.sig|$STATIC_AUTOTUNE_SIG"; do
+STATIC_SMOKE_SPECS=(
+  "/v1/rate-card|rate-card.json|$STATIC_RATE_CARD_JSON"
+  "/v1/rate-card.sig|rate-card.json.sig|$STATIC_RATE_CARD_SIG"
+  "/v1/continuous-batching-policy|continuous-batching-policy.json|$STATIC_CB_POLICY_JSON"
+  "/v1/continuous-batching-policy.sig|continuous-batching-policy.json.sig|$STATIC_CB_POLICY_SIG"
+  "/v1/demand-rank|demand-rank.json|$STATIC_DEMAND_JSON"
+  "/v1/demand-rank.sig|demand-rank.json.sig|$STATIC_DEMAND_SIG"
+  "/v1/autotune-candidates|autotune-candidates.json|$STATIC_AUTOTUNE_JSON"
+  "/v1/autotune-candidates.sig|autotune-candidates.json.sig|$STATIC_AUTOTUNE_SIG"
+)
+# An artifact-bound release.json binds autotune-artifacts.json, so the
+# verify-directory below cannot reproduce the manifest without the served
+# artifact feed beside the other feeds (first hit activating 2026-10-01).
+if [ "$AUTOTUNE_ARTIFACT_BOUND" = "bound" ]; then
+  STATIC_SMOKE_SPECS+=(
+    "/v1/catalog-artifacts|autotune-artifacts.json|$STATIC_ARTIFACTS_JSON"
+    "/v1/catalog-artifacts.sig|autotune-artifacts.json.sig|$STATIC_ARTIFACTS_SIG"
+  )
+fi
+for STATIC_SPEC in "${STATIC_SMOKE_SPECS[@]}"; do
   STATIC_PATH="${STATIC_SPEC%%|*}"
   STATIC_REST="${STATIC_SPEC#*|}"
   STATIC_NAME="${STATIC_REST%%|*}"
