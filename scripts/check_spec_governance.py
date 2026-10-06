@@ -2291,6 +2291,47 @@ def _validate_trusted_pool_external_runtime_journey_result(
         )
 
 
+def _revalidate_trusted_pool_model_evidence(root: Path, artifacts: list[Any], location: str, result: ValidationResult) -> None:
+    """Promotion-time revalidation: the committed redacted evidence a signed
+    trusted-pool model result names must still pass the journey's full
+    semantic validator (closed schema, cross-record joins, derived result)."""
+    import contextlib
+    import importlib.util
+    import io
+
+    for index, artifact in enumerate(artifacts):
+        if not isinstance(artifact, dict) or not isinstance(artifact.get("source"), str):
+            continue
+        path = root / artifact["source"]
+        if path.is_symlink() or not path.is_file():
+            result.error(f"{location}.signed.artifacts[{index}].source", "redacted evidence must be committed")
+            continue
+        payload = path.read_bytes()
+        if hashlib.sha256(payload).hexdigest() != artifact.get("sha256"):
+            result.error(f"{location}.signed.artifacts[{index}].sha256", "must equal the committed redacted evidence")
+            continue
+        builder_path = Path(__file__).resolve().with_name("build-trusted-pool-model-journey-result.py")
+        spec = importlib.util.spec_from_file_location("trusted_pool_model_builder_for_governance", builder_path)
+        if spec is None or spec.loader is None:
+            result.error(location, "trusted-pool model evidence validator is unavailable")
+            continue
+        stderr = io.StringIO()
+        scripts_dir = str(builder_path.parent)
+        inserted = scripts_dir not in sys.path
+        if inserted:
+            sys.path.insert(0, scripts_dir)
+        try:
+            with contextlib.redirect_stderr(stderr):
+                builder = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(builder)
+                builder.validate_committed_evidence(payload)
+        except SystemExit:
+            result.error(f"{location}.signed.artifacts[{index}]", "redacted evidence fails the journey validator: " + stderr.getvalue().strip())
+        finally:
+            if inserted:
+                sys.path.remove(scripts_dir)
+
+
 def _validate_trusted_pool_model_journey_result(
     signed: dict[str, Any],
     requirement_id: str,
@@ -2299,6 +2340,8 @@ def _validate_trusted_pool_model_journey_result(
     steps: list[Any],
     location: str,
     result: ValidationResult,
+    *,
+    root: Path | None = None,
 ) -> None:
     label = "trusted-pool model"
     if signed.get("journey_id") != TRUSTED_POOL_MODEL_JOURNEY_ID:
@@ -2383,6 +2426,8 @@ def _validate_trusted_pool_model_journey_result(
             f"{location}.signed.steps",
             f"{label} physical steps must be ordered as {list(TRUSTED_POOL_MODEL_STEP_ID_ORDER)}",
         )
+    if root is not None:
+        _revalidate_trusted_pool_model_evidence(root, artifacts, location, result)
 
 
 def _validate_trusted_pool_layer2_no_overclaim_text(value: Any, location: str, result: ValidationResult) -> None:
@@ -4201,6 +4246,7 @@ def _validate_signed_journey_result(
             steps,
             location,
             result,
+            root=root,
         )
     if journey_id == LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID:
         _validate_local_consumer_endpoint_journey_result(

@@ -432,38 +432,47 @@ SQL; this section is the order of work. SPEC-047-R011 is not promoted by it
 (the probe-evidence record does not exist yet).
 
 1. Make a capture directory outside every checkout (`mkdir -m 0700`).
-2. Record `preconditions.json`, `deploy.json`, the live bounds
-   (`config/pricing-bounds.json`) and the owner-authority reload log fields
-   (`config/owner-authority-reload.json`).
-3. For every manifest you or the keeper sign, keep the `sign-manifest --out`
-   file as `pool/v<N>/manifest-accepted.json` and its
-   `policy-terms-digest` output as `pool/v<N>/policy-terms-digest.txt`. Right
-   after each of the six role manifests activates (native genesis, window-only
-   rotation, price change, native entry removal, GGUF added with the
-   attestation, GGUF attestation removal; the journey file has the ordering
-   rules), save `get-pool` as
+2. Record `preconditions.json` (exact facts in the journey file),
+   `deploy.json`, the live bounds (`config/pricing-bounds.json`), the whole
+   live `trusted_pools.provider_owner_account_ids` map
+   (`config/provider-owner-account-ids.json`), and the owner-authority reload
+   log fields (`config/owner-authority-reload.json`).
+3. Save the pool's `root_issuer_registered` event as
+   `pool/root-issuer-registered.json`. For every manifest you or the keeper
+   sign, keep the `sign-manifest --out` file as
+   `pool/v<N>/manifest-accepted.json`; every version a route snapshot or a
+   relied-on binding names must be there. Right after each of the six role
+   manifests activates (native genesis, window-only rotation, price change,
+   native entry removal, GGUF added with the attestation, GGUF attestation
+   removal; the journey file has the ordering rules), save `get-pool` as
    `pool/v<N>/get-pool.json` and write the six versions into `run.json`.
 4. Save both members' `models propose --json` bundles, then, with both
    entries live, the pool and global `/v1/models` views.
 5. For each paid request directory, send the request with `curl -D
    response.headers -o response.json` (streams: `-N -o response.sse`), wait
-   one pending deadline, then run the per-request SQL. Start each
-   `inflight` request (long `max_tokens`) just before its manifest's window
-   opens, and capture its rows after it settles.
-6. Capture the refusals, the window-boundary probe loop, the pause and
-   resume, both `pool-rollback-preflight` runs (stdout and exit status), the
-   restart times and the post-restart request, then the admission events, the
-   pool event counts, and the never-global count (aliased `AS n`).
-7. Build and review the redacted evidence locally:
+   one pending deadline, then run the per-request SQL. Start each `inflight`
+   request (long `max_tokens`) just before its manifest's `not_before`, so it
+   is dispatched before and settles after the boundary, and capture its rows
+   after it settles. After the price change, the delegated member re-delegates
+   and resubmits its offer (re-delegation alone does not rebind).
+6. Capture the refusals (each refusal's reservation row too), the
+   window-boundary probe loop (probes on both sides of the boundary, each
+   naming the `pool_model_id`), the pause and resume, both
+   `pool-rollback-preflight` runs (stdout and exit status), the restart times
+   and a request dispatched after the gateway restart, then the admission
+   events, the pool event counts, and the never-global count (aliased `AS n`).
+7. Build `coordinator-cli` from the reviewed `main` commit and build the
+   redacted evidence locally:
 
    ```bash
+   (cd phase4-coordinator && go build -o /tmp/coordinator-cli ./cmd/coordinator-cli)
    python3 scripts/build-trusted-pool-model-journey-result.py capture \
-     --capture-dir <capture dir> \
+     --capture-dir <capture dir> --coordinator-cli /tmp/coordinator-cli \
      --output journeys/evidence/trusted-pool-model-<run>.redacted.json
    ```
 
-   It fails on the first unmet expectation and names the file and field.
-   Commit only the `.redacted.json`, in a PR, never the
-   capture directory. After it merges, dispatch
-   `promote-signed-trusted-pool-model-journey.yml` with the deployed source
-   SHA, the evidence path and the requirement ids.
+   It verifies the signed events, then fails on the first unmet expectation
+   and names the file and field. Commit the `.redacted.json` and the
+   `.manifests/` bundle beside it, in a PR, never the capture directory.
+   After it merges, dispatch `promote-signed-trusted-pool-model-journey.yml`
+   with the deployed source SHA, the evidence path and the requirement ids.

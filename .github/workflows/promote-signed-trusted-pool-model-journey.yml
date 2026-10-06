@@ -41,6 +41,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: phase4-coordinator/go.mod
+          cache: false
+
       - name: Validate exact main source
         id: request
         shell: bash
@@ -77,6 +83,15 @@ jobs:
           printf 'payload=%s\n' "$payload" >> "$GITHUB_OUTPUT"
           printf 'envelope=%s\n' "$envelope" >> "$GITHUB_OUTPUT"
 
+      # The verifier is the reviewed main commit's coordinator-cli: the
+      # deployed source_sha predates verify-manifest, and this checkout is the
+      # code the signature attests to.
+      - name: Build reviewed coordinator-cli verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd phase4-coordinator && go build -trimpath -o "$RUNNER_TEMP/coordinator-cli" ./cmd/coordinator-cli)
+
       - name: Build unsigned trusted-pool-model journey-result payload
         shell: bash
         env:
@@ -91,6 +106,7 @@ jobs:
             --source-sha "$SOURCE_SHA" \
             --evidence-sha "$EVIDENCE_SHA" \
             --requirement-ids "$REQUIREMENT_IDS" \
+            --coordinator-cli "$RUNNER_TEMP/coordinator-cli" \
             --output "$PAYLOAD" \
             "$REDACTED"
 
@@ -208,6 +224,7 @@ jobs:
           export_dir="$RUNNER_TEMP/signed-trusted-pool-model-journey-promotion"
           mkdir -p "$export_dir/journeys/evidence" "$export_dir/specs"
           cp "$REDACTED" "$export_dir/$REDACTED"
+          cp -R "${REDACTED%.redacted.json}.manifests" "$export_dir/journeys/evidence/"
           cp "$ENVELOPE" "$export_dir/$ENVELOPE"
           cp specs/CONFORMANCE.json "$export_dir/specs/CONFORMANCE.json"
           python3 - "$export_dir/promotion-manifest.json" "$SOURCE_SHA" "$EVIDENCE_SHA" "$REDACTED" "$ENVELOPE" "$REQUIREMENT_IDS" <<'PY'

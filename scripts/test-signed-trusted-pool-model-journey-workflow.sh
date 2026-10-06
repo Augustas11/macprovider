@@ -56,6 +56,10 @@ required_workflow = [
     "signed-trusted-pool-model-journey-promotion-${{ steps.request.outputs.source_sha }}-${{ steps.request.outputs.requirement_slug }}",
     "macprovider.signed-trusted-pool-model-journey-promotion.v1",
     "JOURNEY-TRUSTED-POOL-MODEL",
+    "actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e",
+    "go build -trimpath -o \"$RUNNER_TEMP/coordinator-cli\" ./cmd/coordinator-cli",
+    '--coordinator-cli "$RUNNER_TEMP/coordinator-cli"',
+    'cp -R "${REDACTED%.redacted.json}.manifests" "$export_dir/journeys/evidence/"',
 ]
 for value in required_workflow:
     if value not in workflow:
@@ -154,30 +158,48 @@ for index, line in enumerate(lines):
 
 required_builder = [
     'JOURNEY_ID = "JOURNEY-TRUSTED-POOL-MODEL"',
-    'EVIDENCE_SCHEMA = "macprovider.trusted-pool-model-evidence.v1"',
+    'EVIDENCE_SCHEMA = "macprovider.trusted-pool-model-evidence.v2"',
     'ARTIFACT_ID = "redacted-trusted-pool-model"',
     "require_git_file_matches",
     "must be pending and mapped",
     "TRUSTED_POOL_MODEL_STEP_ID_ORDER",
     "TRUSTED_POOL_MODEL_PROMOTABLE_REQUIREMENT_IDS",
-    "redaction.{field} must be true",
+    "redaction must be the fixed redaction record",
     "repository.commit must exactly match --source-sha",
     "--source-sha must be an ancestor of --evidence-sha",
     # Byte-equality, secret-key and secret-value scans come from the
     # external-runtime builder, loaded as `base`.
     "build-trusted-pool-external-runtime-journey-result.py",
     "base.require_git_file_matches(root, evidence_sha, source, evidence_bytes)",
-    "base.reject_forbidden_secret_keys(evidence)",
+    "base.reject_forbidden_secret_keys(ev)",
     "reject_locators",
-    "require_no_raw_identity_fields",
     "raw_documents",
+    "observations = validate_evidence(evidence, now=datetime.now(timezone.utc))",
+    "reverify_bundle(root, source, evidence, cli, evidence_sha)",
+    '"trust-pool-admin", "verify-manifest"',
+    '"result": {"status": "pass", "summary": SUMMARY}',
     "reject_raw_identifiers",
     "require_candidate_identity",
-    "require_observations",
+    "observations must equal the values derived from the evidence",
 ]
 for value in required_builder:
     if value not in builder:
         raise SystemExit(f"builder contract is missing: {value}")
+
+# Structural check (code R1 LOW): the YAML parses, is dispatch-only, and the
+# verifier is built before the payload step uses it.
+try:
+    import yaml
+except ImportError:
+    print("[test-signed-trusted-pool-model-journey-workflow] note: PyYAML absent; structural YAML check skipped")
+else:
+    doc = yaml.safe_load(workflow)
+    triggers = doc.get(True, doc.get("on"))
+    if set(triggers) != {"workflow_dispatch"}:
+        raise SystemExit("workflow must be dispatch-only")
+    names = [step.get("name") for step in doc["jobs"]["promote"]["steps"]]
+    if names.index("Build reviewed coordinator-cli verifier") > names.index("Build unsigned trusted-pool-model journey-result payload"):
+        raise SystemExit("the verifier must be built before the payload step")
 
 print("[test-signed-trusted-pool-model-journey-workflow] ok: protected trusted-pool-model signer exports a short-lived artifact")
 PY
