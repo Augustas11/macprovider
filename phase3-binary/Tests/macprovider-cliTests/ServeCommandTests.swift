@@ -611,6 +611,22 @@ final class ServeCommandTests: XCTestCase {
         ))
     }
 
+    func testLabJoinRunsTheCatalogPreflightOnlyWithALabStaticFeedOrigin() {
+        let loopback = "ws://127.0.0.1:19302/ws/provider"
+        XCTAssertTrue(ServeCommand.skipsCatalogPreflightForLabJoin(
+            isolateLifecycle: true, coordinatorURL: loopback, labStaticFeedOverrideActive: false))
+        XCTAssertFalse(ServeCommand.skipsCatalogPreflightForLabJoin(
+            isolateLifecycle: true, coordinatorURL: loopback, labStaticFeedOverrideActive: true),
+            "a lab join with its own signed static-feed origin runs the real preflight")
+        XCTAssertFalse(ServeCommand.skipsCatalogPreflightForLabJoin(
+            isolateLifecycle: true, coordinatorURL: "wss://coordinator.malibu.tech/ws/provider",
+            labStaticFeedOverrideActive: false))
+        XCTAssertFalse(ServeCommand.skipsCatalogPreflightForLabJoin(
+            isolateLifecycle: false, coordinatorURL: loopback, labStaticFeedOverrideActive: false))
+        XCTAssertNil(StaticFeedOrigin.labOverride, "the test process has no lab override")
+        XCTAssertTrue(ServeCommand.skipsCatalogPreflightForLabJoin(isolateLifecycle: true, coordinatorURL: loopback))
+    }
+
     func testLabLoopbackReadinessWaiverRequiresEveryIsolatedLabCondition() {
         let loopback = "ws://127.0.0.1:19082/ws/provider"
         XCTAssertTrue(ServeCommand.waivesLabLoopbackCatalogReadiness(

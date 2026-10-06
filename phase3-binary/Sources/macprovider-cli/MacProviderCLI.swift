@@ -1078,7 +1078,7 @@ struct ServeCommand: AsyncParsableCommand {
         // coordinator matches that hash against the pool manifest and is the
         // only authority that admits it, so the catalog preflight is skipped
         // for that join alone. Donor mode keeps its catalog gate.
-        if resolved.donorMode || (joiningCoordinator && !servesPoolModelEntry && !relaxesJoinAdmissionForLab(
+        if resolved.donorMode || (joiningCoordinator && !servesPoolModelEntry && !skipsCatalogPreflightForLabJoin(
             isolateLifecycle: isolateLifecycle,
             coordinatorURL: resolved.coordinatorURL
         )) {
@@ -1971,6 +1971,21 @@ struct ServeCommand: AsyncParsableCommand {
         coordinatorURL: String?
     ) -> Bool {
         isolateLifecycle && isLoopbackCoordinatorURL(coordinatorURL)
+    }
+
+    /// The isolated lab join skips the catalog preflight because it cannot
+    /// reach the production static feeds. A lab build whose static feeds are
+    /// redirected to a loopback origin signed by a test key
+    /// (`StaticFeedOrigin.labOverride`) has its own signed catalog, so it runs
+    /// the real preflight and native-MTP admission fetch: the delivery-path
+    /// rehearsal (SPEC-048 R014, #1770). Release builds have no override.
+    static func skipsCatalogPreflightForLabJoin(
+        isolateLifecycle: Bool,
+        coordinatorURL: String?,
+        labStaticFeedOverrideActive: Bool = StaticFeedOrigin.labOverride != nil
+    ) -> Bool {
+        relaxesJoinAdmissionForLab(isolateLifecycle: isolateLifecycle, coordinatorURL: coordinatorURL)
+            && !labStaticFeedOverrideActive
     }
 
     /// The isolated lab join skips the catalog preflight (`relaxesJoinAdmissionForLab`),
