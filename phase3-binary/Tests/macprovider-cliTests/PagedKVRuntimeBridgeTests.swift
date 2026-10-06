@@ -2017,6 +2017,31 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(buyerAfter.generatedTokens, [31, 32])
     }
 
+    /// The self-test probe ID is deterministic (`native-mtp-selftest-<challenge>`)
+    /// and the replay authority is durable across restarts. A probe that
+    /// claimed it would find its own earlier claim after the next restart,
+    /// fail as a replay, and leave the tuple unadmitted for good.
+    func testNativeMTPIntegrityProbeDoesNotClaimTheDurableReplayWindow() async throws {
+        let durable = RuntimeBridgeReplayAuthority()
+        for restart in 0..<2 {
+            let backend = RuntimeBridgeScriptedBackend(
+                scripts: ["native-mtp-selftest-probe": [11]],
+                nativeProposalScripts: ["native-mtp-selftest-probe": [[12]]]
+            )
+            let scheduler = try Self.makeScheduler(maxActiveRows: 1, backend: backend, replayAuthority: durable)
+            let probe = try await scheduler.submitNativeMTPIntegrityProbe(Self.schedulerRequest(
+                id: "native-mtp-selftest-probe",
+                promptTokens: [10],
+                maxOutputTokens: 3,
+                decodePath: .nativeMTP,
+                nativeMTPMaximumProposalDepth: 1,
+                nativeMTPTupleFence: Self.nativeMTPFence(),
+                nativeMTPIntegrityProbe: true
+            ))
+            XCTAssertEqual(probe.terminalStatus, .length, "start \(restart)")
+        }
+    }
+
     func testNativeMTPCountersAggregateAcrossRounds() async throws {
         let backend = RuntimeBridgeScriptedBackend(
             scripts: ["multi": [11]],
@@ -3332,7 +3357,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         maxActiveRows: Int,
         backend: any ContinuousBatchSchedulerBackend,
         maxPhysicalBlocks: Int = 16,
-        maxPromptChunkTokens: Int = 256
+        maxPromptChunkTokens: Int = 256,
+        replayAuthority: any ContinuousBatchSchedulerReplayAuthority = RuntimeBridgeReplayAuthority()
     ) throws -> ContinuousBatchScheduler {
         let descriptor = PagedKVDescriptor(
             blockSizeTokens: 4,
@@ -3377,7 +3403,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             ),
             allocator: try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: maxPhysicalBlocks),
             backend: backend,
-            replayAuthority: RuntimeBridgeReplayAuthority()
+            replayAuthority: replayAuthority
         )
     }
 

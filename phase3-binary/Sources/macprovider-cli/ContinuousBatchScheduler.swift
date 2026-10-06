@@ -2271,6 +2271,11 @@ actor ContinuousBatchScheduler {
             continuation.resume(throwing: ContinuousBatchSchedulerError.backpressure)
             return
         }
+        // A native-MTP integrity probe is local: it never settles and never
+        // reaches a buyer, and its ID is deterministic per challenge. Claiming
+        // it in the durable replay window would make the next process's
+        // self-test a replay and keep the tuple unadmitted after a restart.
+        if !request.nativeMTPIntegrityProbe {
         do {
             switch try replayAuthority.claim(ContinuousBatchSchedulerReplayKey(
                 requestID: request.id,
@@ -2294,6 +2299,7 @@ actor ContinuousBatchScheduler {
             scheduleDiscardUnacceptedRetainedCache(for: request)
             continuation.resume(throwing: ContinuousBatchSchedulerError.idempotencyAuthorityUnavailable)
             return
+        }
         }
         knownRequests[request.id] = requestFingerprint
         requestAdmissionSequences[request.id] = admissionSequence
@@ -2380,7 +2386,7 @@ actor ContinuousBatchScheduler {
         // `retryable: true` with a 409 instead, and churn a claim file for
         // work that never happened. Released before the waiters are resumed
         // so a retry cannot race ahead of the release.
-        if let fingerprint = knownRequests[requestID] {
+        if let fingerprint = knownRequests[requestID], !request.nativeMTPIntegrityProbe {
             replayAuthority.release(ContinuousBatchSchedulerReplayKey(
                 requestID: requestID,
                 fingerprintSHA256: fingerprint.sha256
