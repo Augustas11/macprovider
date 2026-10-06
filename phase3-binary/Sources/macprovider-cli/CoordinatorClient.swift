@@ -6691,8 +6691,11 @@ actor CoordinatorClient {
         appendPrivacyKeyRecords(to: &payload)
         var specDecodeTelemetryMatchesRuntime = true
         var specDecodeTelemetryRuntimeEligible = true
+        let runtimeSnapshot = await modelRuntime.currentSnapshot()
+        payload["continuous_batching"] = RouterHandler.continuousBatchingHeartbeatFields(
+            runtimeSnapshot.continuousBatching
+        )
         if warmSwapEnabled {
-            let runtimeSnapshot = await modelRuntime.currentSnapshot()
             let runtimeModelID = runtimeSnapshot.modelID
             let runtimeWireModelID = coordinatorWireModelID(for: runtimeModelID)
             if catalogReleaseID != nil {

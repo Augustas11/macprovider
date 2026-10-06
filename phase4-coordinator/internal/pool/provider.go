@@ -286,6 +286,11 @@ type Provider struct {
 	// operators so remote canaries can enforce queue, memory, thermal, restart,
 	// and runtime invariants without a provider-local network route.
 	SafetyTelemetry *ProviderSafetyTelemetry `json:"safety_telemetry,omitempty"`
+	// ContinuousBatching is the provider's self-reported continuous-batching
+	// state from its latest heartbeat. Observability only: it never gates
+	// routing. nil when the provider's CLI predates the field. Operator
+	// catalog-activation and CLI-promotion gates read it from /poolz.
+	ContinuousBatching *ProviderContinuousBatching `json:"continuous_batching,omitempty"`
 	// Proof of Weights W2 — coordinator-side autotune admission cap derived
 	// from latest verified hardware-evidence benchmarks. Empty/zero when
 	// evidence observation is not wired or provider admitted before W2 rollout.
@@ -504,6 +509,59 @@ type ProviderSafetyTelemetry struct {
 }
 
 func cloneProviderSafetyTelemetry(in *ProviderSafetyTelemetry) *ProviderSafetyTelemetry {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
+}
+
+// ProviderContinuousBatching mirrors the provider's `continuous_batching`
+// heartbeat object. RuntimeTuple is the exact runtime identity the signed
+// continuous-batching policy must authorize for the provider to batch.
+type ProviderContinuousBatching struct {
+	Active               bool                            `json:"active"`
+	Mode                 string                          `json:"mode"`
+	UnsupportedReason    string                          `json:"unsupported_reason,omitempty"`
+	AuthorizationSource  string                          `json:"authorization_source"`
+	PolicyAuthorized     bool                            `json:"policy_authorized"`
+	PolicyDecisionReason string                          `json:"policy_decision_reason,omitempty"`
+	RuntimeTuple         *ContinuousBatchingRuntimeTuple `json:"runtime_tuple"`
+	// ObservedAt is the coordinator receipt time of the heartbeat.
+	ObservedAt string `json:"observed_at"`
+}
+
+type ContinuousBatchingRuntimeTuple struct {
+	ModelID              string  `json:"model_id"`
+	ModelSHA256          string  `json:"model_sha256"`
+	TokenizerSHA256      *string `json:"tokenizer_sha256"`
+	ChatTemplateSHA256   *string `json:"chat_template_sha256"`
+	CacheClass           string  `json:"cache_class"`
+	KVDType              string  `json:"kv_dtype"`
+	RequiresMoE          bool    `json:"requires_moe"`
+	HardwareClass        string  `json:"hardware_class"`
+	MetallibSHA256       string  `json:"metallib_sha256"`
+	KernelIdentifier     string  `json:"kernel_identifier"`
+	ProviderCLIVersion   string  `json:"provider_cli_version"`
+	LiveExecutableCDHash *string `json:"live_executable_cdhash"`
+}
+
+func cloneProviderContinuousBatching(in *ProviderContinuousBatching) *ProviderContinuousBatching {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if in.RuntimeTuple != nil {
+		tuple := *in.RuntimeTuple
+		tuple.TokenizerSHA256 = cloneStringPtr(in.RuntimeTuple.TokenizerSHA256)
+		tuple.ChatTemplateSHA256 = cloneStringPtr(in.RuntimeTuple.ChatTemplateSHA256)
+		tuple.LiveExecutableCDHash = cloneStringPtr(in.RuntimeTuple.LiveExecutableCDHash)
+		out.RuntimeTuple = &tuple
+	}
+	return &out
+}
+
+func cloneStringPtr(in *string) *string {
 	if in == nil {
 		return nil
 	}
@@ -2763,7 +2821,10 @@ type HeartbeatUpdate struct {
 	LastAutoupdateEvent json.RawMessage
 	HardwareCapacity    *ProviderHardwareCapacity
 	SafetyTelemetry     *ProviderSafetyTelemetry
-	At                  time.Time
+	// ContinuousBatching replaces the stored state on every heartbeat; nil
+	// (field absent) clears it so a downgraded CLI never shows stale state.
+	ContinuousBatching *ProviderContinuousBatching
+	At                 time.Time
 }
 
 func (r *Registry) ApplyHeartbeat(providerID, assignedID string, hb HeartbeatUpdate) (*Provider, time.Duration, bool) {
@@ -2900,6 +2961,12 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	}
 	if hb.HardwareCapacity != nil {
 		p.HardwareCapacity = sanitizeProviderHardwareCapacity(hb.HardwareCapacity)
+	}
+	if hb.ContinuousBatching == nil {
+		p.ContinuousBatching = nil
+	} else {
+		p.ContinuousBatching = cloneProviderContinuousBatching(hb.ContinuousBatching)
+		p.ContinuousBatching.ObservedAt = hb.At.UTC().Format(time.RFC3339Nano)
 	}
 	if hb.SafetyTelemetry == nil {
 		p.SafetyTelemetry = nil
@@ -3306,6 +3373,7 @@ func (r *Registry) Snapshot() []Provider {
 		cp.conn = nil
 		cp.HardwareCapacity = cloneProviderHardwareCapacity(p.HardwareCapacity)
 		cp.SafetyTelemetry = cloneProviderSafetyTelemetry(p.SafetyTelemetry)
+		cp.ContinuousBatching = cloneProviderContinuousBatching(p.ContinuousBatching)
 		cp.NativeMTPCanary = cloneNativeMTPCanaryDiagnostics(p.NativeMTPCanary)
 		out = append(out, cp)
 	}

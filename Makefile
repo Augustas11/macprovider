@@ -211,12 +211,14 @@ test-dist:
 	bash phase4-coordinator/dist/test/check_deploy_static_feed_access.test.sh
 	bash phase4-coordinator/dist/test/deploy_catalog_verifier_closure.test.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_autotune_window
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_cb_activation_gate
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_catalog_compare_live
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_catalog_content_gate
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_catalog_pricing_lane
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_coordinator_config_guard
 	bash phase4-coordinator/dist/test/deploy_catalog_compare_live.test.sh
 	bash phase4-coordinator/dist/test/deploy_catalog_window_coverage.test.sh
+	bash phase4-coordinator/dist/test/deploy_cb_activation_gate.test.sh
 	bash phase4-coordinator/dist/test/coord_deploy_restart_readiness.test.sh
 	bash phase4-coordinator/dist/test/coordinator_deploy_recovery.test.sh
 	bash phase4-coordinator/dist/test/coordinator_pricing_recover.test.sh

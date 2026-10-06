@@ -2407,7 +2407,48 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 "slots_total": scheduler?.slotsTotal ?? 0,
                 "slots_free": scheduler?.slotsFree ?? 0,
             ],
+            "runtime_tuple": continuousBatchingRuntimeTupleFields(snapshot?.runtimeTuple),
         ]
+    }
+
+    /// The heartbeat `continuous_batching` object (observability only; the
+    /// coordinator drops a malformed one and exposes it on operator /poolz).
+    /// Content-free: state, reason codes and the runtime identity digests.
+    static func continuousBatchingHeartbeatFields(
+        _ snapshot: RuntimeContinuousBatchingSnapshot?
+    ) -> [String: Any] {
+        let policy = snapshot?.policy
+        return [
+            "active": snapshot?.active ?? false,
+            "mode": snapshot?.mode.rawValue ?? ContinuousBatchingMode.off.rawValue,
+            "unsupported_reason": jsonNullable(snapshot?.unsupportedReason),
+            "authorization_source": policy?.authorizationSource ?? "none",
+            "policy_authorized": policy?.authorized ?? false,
+            "policy_decision_reason": policy?.decisionReason ?? "policy_absent",
+            "runtime_tuple": continuousBatchingRuntimeTupleFields(snapshot?.runtimeTuple),
+        ]
+    }
+
+    static func continuousBatchingRuntimeTupleFields(
+        _ tuple: RuntimeContinuousBatchingTupleSnapshot?
+    ) -> Any {
+        guard let tuple else {
+            return NSNull()
+        }
+        return [
+            "model_id": tuple.modelID,
+            "model_sha256": tuple.modelSHA256,
+            "tokenizer_sha256": jsonNullable(tuple.tokenizerSHA256),
+            "chat_template_sha256": jsonNullable(tuple.chatTemplateSHA256),
+            "cache_class": tuple.cacheClass,
+            "kv_dtype": tuple.kvDType,
+            "requires_moe": tuple.requiresMoE,
+            "hardware_class": tuple.hardwareClass,
+            "metallib_sha256": tuple.metallibSHA256,
+            "kernel_identifier": tuple.kernelIdentifier,
+            "provider_cli_version": tuple.providerCLIVersion,
+            "live_executable_cdhash": jsonNullable(tuple.liveExecutableCDHash),
+        ] as [String: Any]
     }
 
     private static func build1LaneAStatusEvidence(

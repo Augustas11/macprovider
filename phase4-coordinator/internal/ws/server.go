@@ -6224,6 +6224,7 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 			LastAutoupdateEvent:       hb.LastAutoupdateEvent,
 			HardwareCapacity:          poolHardwareCapacity(hb.HardwareSummary),
 			SafetyTelemetry:           hb.SafetyTelemetry,
+			ContinuousBatching:        hb.ContinuousBatching,
 			At:                        s.now(),
 		})
 		if heartbeatResult.OK {
@@ -7174,6 +7175,11 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 		// Issue #764 — additive per-binary_version TTFT/TPS + capacity
 		// breakdown. New key only; the six fields above keep their shapes.
 		ByBinaryVersion map[string]poolzVersionSegment `json:"by_binary_version"`
+		// Additive: providers reporting continuous_batching on heartbeats,
+		// and how many of them report it active. Key presence tells operator
+		// gates the coordinator carries the per-provider field.
+		ContinuousBatchingReporting int `json:"continuous_batching_reporting"`
+		ContinuousBatchingActive    int `json:"continuous_batching_active"`
 	}{TotalProviders: len(providers), ByBinaryVersion: poolzVersionSegments(providers)}
 	cfg := s.tier2Config()
 	for _, p := range providers {
@@ -7191,6 +7197,12 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 			summary.PolicyReady++
 		}
 		summary.TotalSlots += p.SlotsTotal
+		if p.ContinuousBatching != nil {
+			summary.ContinuousBatchingReporting++
+			if p.ContinuousBatching.Active {
+				summary.ContinuousBatchingActive++
+			}
+		}
 		if _, ok := modelSet[p.ModelID]; !ok {
 			modelSet[p.ModelID] = struct{}{}
 			summary.Models = append(summary.Models, p.ModelID)

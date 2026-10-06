@@ -909,6 +909,33 @@ if [ -n "$CATALOG_WINDOW_OVERRIDE_REASON" ]; then
   fi
   CATALOG_WINDOW_OVERRIDE_B64="$(printf '%s' "$CATALOG_WINDOW_OVERRIDE_REASON" | base64 | tr -d '\n')"
 fi
+# Operator override for a continuous-batching refusal (the incoming signed CB
+# policy would de-authorize a runtime tuple live providers are batching on).
+# Same rules; the reason and the at-risk tuples land in the override log.
+CATALOG_CB_DEAUTHORIZE_OVERRIDE_REASON="${CATALOG_CB_DEAUTHORIZE_OVERRIDE_REASON:-}"
+CATALOG_CB_DEAUTHORIZE_OVERRIDE_B64=""
+if [ -n "$CATALOG_CB_DEAUTHORIZE_OVERRIDE_REASON" ]; then
+  case "$CATALOG_CB_DEAUTHORIZE_OVERRIDE_REASON" in
+    *$'\n'*|*$'\r'*)
+      echo "aborting deploy: CATALOG_CB_DEAUTHORIZE_OVERRIDE_REASON must be a single line" >&2
+      exit 1
+      ;;
+  esac
+  if ! printf '%s' "$CATALOG_CB_DEAUTHORIZE_OVERRIDE_REASON" | LC_ALL=C grep -Eq '^[ -~]{1,200}$'; then
+    echo "aborting deploy: CATALOG_CB_DEAUTHORIZE_OVERRIDE_REASON must be 1-200 printable ASCII characters" >&2
+    exit 1
+  fi
+  CATALOG_CB_DEAUTHORIZE_OVERRIDE_B64="$(printf '%s' "$CATALOG_CB_DEAUTHORIZE_OVERRIDE_REASON" | base64 | tr -d '\n')"
+fi
+# Post-activation continuous-batching capacity check tolerances.
+CB_CAPACITY_RECOVERY_SECONDS="${CB_CAPACITY_RECOVERY_SECONDS:-300}"
+CB_CAPACITY_MAX_FREE_SLOTS_DROP_PCT="${CB_CAPACITY_MAX_FREE_SLOTS_DROP_PCT:-25}"
+CB_CAPACITY_FREE_SLOTS_SLACK="${CB_CAPACITY_FREE_SLOTS_SLACK:-2}"
+for _cb_n in "$CB_CAPACITY_RECOVERY_SECONDS" "$CB_CAPACITY_MAX_FREE_SLOTS_DROP_PCT" "$CB_CAPACITY_FREE_SLOTS_SLACK"; do
+  case "$_cb_n" in ""|*[!0-9]*) echo "aborting deploy: CB_CAPACITY_* must be whole numbers" >&2; exit 1 ;; esac
+done
+[ "$CB_CAPACITY_MAX_FREE_SLOTS_DROP_PCT" -le 100 ] && [ "$CB_CAPACITY_FREE_SLOTS_SLACK" -le 100 ] ||
+  { echo "aborting deploy: CB_CAPACITY_MAX_FREE_SLOTS_DROP_PCT and CB_CAPACITY_FREE_SLOTS_SLACK must be 0-100" >&2; exit 1; }
 # Appends one catalog override record to Pearl's root-only 0600 JSONL audit
 # log (O_APPEND|O_NOFOLLOW, regular file only, fsync). $1 = base64 of the
 # record JSON object without "ts"; $2 = fixed logger message. The append
@@ -916,6 +943,21 @@ fi
 # with the catalog-content lane.
 _append_catalog_window_override() {
   $SSH "$(cwo_override_remote_command "$1" "$2" macprovider-deploy)"
+}
+
+# _cb_fetch_poolz <out>: operator /poolz over Pearl loopback into a local
+# 0600 file. The operator key rides SSH stdin into curl --config only.
+_cb_fetch_poolz() {
+  local raw="$1.raw" status
+  rm -f "$raw" "$1"
+  (umask 077 && : > "$raw") || return 1
+  printf 'header = "Authorization: Bearer %s"\n' "$CATALOG_CANARY_AUTH_TOKEN" |
+    $SSH "curl --config - -sS --noproxy '*' --max-time 10 --max-filesize 16777216 -w '\n%{http_code}' http://127.0.0.1:8444/poolz" >"$raw" 2>/dev/null ||
+    { rm -f "$raw"; return 1; }
+  status="$(tail -n 1 "$raw")"
+  [ "$status" = 200 ] || { rm -f "$raw"; return 1; }
+  (umask 077 && sed '$d' "$raw" >"$1")
+  rm -f "$raw"
 }
 
 # coordinator-cli is required ALONGSIDE the daemon (SPEC-003 v0.8.3
@@ -1298,6 +1340,7 @@ trap '
   rm -f "${TCP_INPUT_MANIFEST_TMP:-}"
   rm -rf "${PINNED_DEPLOY_INPUT_DIR:-}"
   rm -rf "${STATIC_SMOKE_DIR:-}"
+  rm -rf "${CB_GATE_DIR:-}"
   if [ -n "${DEPLOY_TMP:-}" ]; then
     $SSH "rm -rf $DEPLOY_TMP" 2>/dev/null || true
   fi
@@ -4323,6 +4366,78 @@ PY
   *) echo "aborting deploy: unknown compare-live verdict" >&2; exit 1 ;;
 esac
 
+# Continuous-batching activation gate: before current changes, prove the
+# incoming release's signed continuous-batching policy still authorizes every
+# runtime tuple connected providers are batching on (scripts/cb_activation_gate.py).
+# Unreadable /poolz or policy fails closed; a coordinator that predates the
+# per-provider field is judged by the live->incoming policy diff and warned.
+# The snapshot taken here is the baseline for the post-activation check.
+CB_GATE_DIR=""
+CB_DEAUTHORIZE_ACCEPTED=0
+case "$CATALOG_VERDICT" in
+  descends|regression)
+    log "  checking that the incoming continuous-batching policy keeps every active batching tuple authorized"
+    CB_GATE_DIR="$(umask 077 && mktemp -d -t macprovider-cb-gate.XXXXXXXX)" ||
+      { echo "aborting deploy: mktemp failed for the continuous-batching gate" >&2; exit 1; }
+    _cb_fetch_poolz "$CB_GATE_DIR/poolz-before.json" ||
+      { echo "aborting deploy: coordinator /poolz is unreadable; cannot prove continuous batching survives this activation" >&2; exit 1; }
+    (umask 077 && $SSH "f=/opt/macprovider/autotune/$CATALOG_LIVE_TARGET/continuous-batching-policy.json; [ ! -e \"\$f\" ] || head -c 1048577 \"\$f\"" >"$CB_GATE_DIR/live-policy.json") ||
+      { echo "aborting deploy: cannot read the live continuous-batching policy" >&2; exit 1; }
+    CB_LIVE_POLICY_ARGS=()
+    [ ! -s "$CB_GATE_DIR/live-policy.json" ] || CB_LIVE_POLICY_ARGS=(--live-policy-json "$CB_GATE_DIR/live-policy.json")
+    CB_GATE_RC=0
+    python3 -I "$PINNED_SCRIPTS_DIR/cb_activation_gate.py" preflight --poolz-json "$CB_GATE_DIR/poolz-before.json" \
+      --incoming-policy-json "$STATIC_CB_POLICY_JSON" ${CB_LIVE_POLICY_ARGS[@]+"${CB_LIVE_POLICY_ARGS[@]}"} \
+      >"$CB_GATE_DIR/preflight.json" || CB_GATE_RC=$?
+    if [ "$CB_GATE_RC" != 0 ] && [ "$CB_GATE_RC" != 4 ]; then
+      echo "aborting deploy: the continuous-batching gate could not judge this activation (rc=$CB_GATE_RC); refusing to change autotune/current" >&2
+      exit 1
+    fi
+    python3 - "$CB_GATE_DIR/preflight.json" <<'PY' || { echo "aborting deploy: continuous-batching gate output is malformed" >&2; exit 1; }
+import json, sys
+r = json.load(open(sys.argv[1]))
+print(f"    continuous batching: {r['cb_active']} active provider(s), {r['providers_reporting']}/{r['providers_total']} reporting, "
+      f"{r['incoming_authorized_tuples']} incoming / {r['live_authorized_tuples']} live authorized tuple(s), {len(r['at_risk'])} at risk", file=sys.stderr)
+if not r["coordinator_reports_cb"]:
+    print("    WARNING: the live coordinator predates per-provider continuous_batching on /poolz; only the policy diff was checked", file=sys.stderr)
+for w in r["warnings"]:
+    print(f"    WARNING: {w}", file=sys.stderr)
+for a in r["at_risk"]:
+    print(f"      AT RISK {a['kind']} model={a.get('model_id')} providers={a.get('providers', [a.get('provider_id')])}", file=sys.stderr)
+PY
+    if [ "$CB_GATE_RC" = 4 ]; then
+      if [ -z "$CATALOG_CB_DEAUTHORIZE_OVERRIDE_B64" ]; then
+        echo "aborting deploy: activating $AUTOTUNE_RELEASE_ID would de-authorize continuous batching that live providers are using;" >&2
+        echo "  they would fall back to serial serving. Ship a policy that authorizes their tuples, or set" >&2
+        echo "  CATALOG_CB_DEAUTHORIZE_OVERRIDE_REASON='<why>' to activate anyway (logged on Pearl)." >&2
+        exit 1
+      fi
+      log "  CONTINUOUS-BATCHING OVERRIDE: activating $AUTOTUNE_RELEASE_ID although it de-authorizes active batching tuples"
+      CB_OVERRIDE_RECORD_B64="$(python3 - "$CATALOG_CB_DEAUTHORIZE_OVERRIDE_B64" "$CB_GATE_DIR/preflight.json" "$AUTOTUNE_RELEASE_DIR_NAME" "$CATALOG_LIVE_TARGET" "$CATALOG_LIVE_RELEASE_ID" "$COORDINATOR_RELEASE_VERSION" "$COORDINATOR_RELEASE_COMMIT" <<'PY'
+import base64, json, sys
+reason_b64, report, incoming, live_target, live_id, tag, commit = sys.argv[1:]
+record = {
+    "kind": "continuous_batching_deauthorize",
+    "reason": base64.b64decode(reason_b64, validate=True).decode("ascii"),
+    "at_risk": json.load(open(report))["at_risk"],
+    "incoming": incoming,
+    "live": {"target": live_target, "release_id": live_id},
+    "tag": tag,
+    "commit": commit,
+}
+print(base64.b64encode(json.dumps(record, sort_keys=True).encode("ascii")).decode("ascii"))
+PY
+)" || { echo "aborting deploy: could not build the continuous-batching override record" >&2; exit 1; }
+      _append_catalog_window_override "$CB_OVERRIDE_RECORD_B64" "catalog continuous-batching override used for $AUTOTUNE_RELEASE_DIR_NAME"
+      log "  AUDIT TRAIL: continuous-batching override appended to the catalog override log"
+      CB_DEAUTHORIZE_ACCEPTED="$(python3 -c 'import json,sys; print(sum(1 for a in json.load(open(sys.argv[1]))["at_risk"] if a["kind"].startswith("active_tuple_")))' "$CB_GATE_DIR/preflight.json")"
+    fi
+    python3 -I "$PINNED_SCRIPTS_DIR/cb_activation_gate.py" snapshot --poolz-json "$CB_GATE_DIR/poolz-before.json" >"$CB_GATE_DIR/snapshot-before.json" ||
+      { echo "aborting deploy: could not snapshot pre-activation continuous-batching capacity" >&2; exit 1; }
+    rm -f "$CB_GATE_DIR/poolz-before.json"
+    ;;
+esac
+
 if [ "$CATALOG_VERDICT" = "equivalent" ]; then
   # #1688 A2: content-equivalent live catalog. No current swap, no window
   # apply; the immutable release staged above stays for forensics/rollback.
@@ -4969,6 +5084,47 @@ then
   exit 1
 fi
 echo "  SPEC-023 live-catalog canary OK: selected provider's live process loaded the verified release from the coordinator"
+
+# Post-activation continuous-batching capacity check. Compare CB-active
+# providers and aggregate free slots against the pre-activation snapshot,
+# polling while providers reconnect after the restart. A drop beyond the
+# tolerance at the deadline fails the deploy, which the armed EXIT trap rolls
+# back. Overridden de-authorizations are the tolerated CB drop.
+if [ -n "$CB_GATE_DIR" ]; then
+  log "  verifying continuous-batching capacity recovered (deadline ${CB_CAPACITY_RECOVERY_SECONDS}s)"
+  CB_CAPACITY_DEADLINE=$((SECONDS + CB_CAPACITY_RECOVERY_SECONDS))
+  while :; do
+    CB_COMPARE_RC=1
+    if _cb_fetch_poolz "$CB_GATE_DIR/poolz-after.json" &&
+       python3 -I "$PINNED_SCRIPTS_DIR/cb_activation_gate.py" snapshot --poolz-json "$CB_GATE_DIR/poolz-after.json" >"$CB_GATE_DIR/snapshot-after.json"; then
+      CB_COMPARE_RC=0
+      python3 -I "$PINNED_SCRIPTS_DIR/cb_activation_gate.py" compare --before "$CB_GATE_DIR/snapshot-before.json" \
+        --after "$CB_GATE_DIR/snapshot-after.json" --max-cb-active-drop "$CB_DEAUTHORIZE_ACCEPTED" \
+        --max-free-slots-drop-pct "$CB_CAPACITY_MAX_FREE_SLOTS_DROP_PCT" --free-slots-slack "$CB_CAPACITY_FREE_SLOTS_SLACK" \
+        >"$CB_GATE_DIR/compare.json" || CB_COMPARE_RC=$?
+    fi
+    rm -f "$CB_GATE_DIR/poolz-after.json"
+    [ "$CB_COMPARE_RC" != 0 ] || break
+    if [ "$SECONDS" -ge "$CB_CAPACITY_DEADLINE" ]; then
+      if [ "$CB_COMPARE_RC" = 5 ]; then
+        echo "aborting deploy: continuous-batching capacity dropped after activating $AUTOTUNE_RELEASE_ID; rolling back" >&2
+        head -c 4096 "$CB_GATE_DIR/compare.json" >&2
+        echo >&2
+      else
+        echo "aborting deploy: could not read post-activation continuous-batching capacity (rc=$CB_COMPARE_RC); rolling back" >&2
+      fi
+      exit 1
+    fi
+    sleep 15
+  done
+  python3 - "$CB_GATE_DIR/compare.json" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))
+judged = "" if c["cb_judged"] else " (CB count not judged: the pre-activation coordinator did not report it)"
+print(f"  continuous-batching capacity OK: CB-active {c['cb_active_before']} -> {c['cb_active_after']}, "
+      f"free slots {c['free_slots_before']} -> {c['free_slots_after']}{judged}")
+PY
+fi
 
 # R3+R4+R5 stats smoke check on STATS_DOMAIN.
 #

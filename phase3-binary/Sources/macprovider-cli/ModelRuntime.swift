@@ -273,6 +273,25 @@ public struct RuntimeContinuousBatchingPolicySnapshot: Sendable, Equatable {
     public let decisionReason: String
 }
 
+/// The exact runtime identity a signed continuous-batching policy entry must
+/// match (tuple fields plus the provider CLI version and live executable
+/// cdhash). Reported on heartbeats so operator gates can tell whether an
+/// incoming policy still authorizes what this provider is batching.
+public struct RuntimeContinuousBatchingTupleSnapshot: Sendable, Equatable {
+    public let modelID: String
+    public let modelSHA256: String
+    public let tokenizerSHA256: String?
+    public let chatTemplateSHA256: String?
+    public let cacheClass: String
+    public let kvDType: String
+    public let requiresMoE: Bool
+    public let hardwareClass: String
+    public let metallibSHA256: String
+    public let kernelIdentifier: String
+    public let providerCLIVersion: String
+    public let liveExecutableCDHash: String?
+}
+
 public struct RuntimeContinuousBatchingSnapshot: Sendable, Equatable {
     public let mode: ContinuousBatchingMode
     public let active: Bool
@@ -281,6 +300,7 @@ public struct RuntimeContinuousBatchingSnapshot: Sendable, Equatable {
     public let cacheClass: String
     public let policy: RuntimeContinuousBatchingPolicySnapshot
     public let scheduler: RuntimeContinuousBatchingSchedulerSnapshot?
+    public var runtimeTuple: RuntimeContinuousBatchingTupleSnapshot? = nil
 }
 
 public struct RuntimeSnapshot: @unchecked Sendable {
@@ -3220,6 +3240,22 @@ actor ModelRuntime: ModelRuntimeServing {
                         maxObservedBatchDepth: $0.maxObservedBatchDepth,
                         slotsTotal: $0.slotsTotal,
                         slotsFree: $0.slotsFree
+                    )
+                },
+                runtimeTuple: continuousBatchingRequestedTuple().map { tuple in
+                    RuntimeContinuousBatchingTupleSnapshot(
+                        modelID: tuple.modelID,
+                        modelSHA256: tuple.modelSHA256,
+                        tokenizerSHA256: tuple.tokenizerSHA256,
+                        chatTemplateSHA256: tuple.chatTemplateSHA256,
+                        cacheClass: tuple.cacheClass,
+                        kvDType: tuple.kvDType.rawValue,
+                        requiresMoE: tuple.requiresMoE,
+                        hardwareClass: tuple.hardwareClass,
+                        metallibSHA256: tuple.metallibSHA256,
+                        kernelIdentifier: tuple.kernelIdentifier,
+                        providerCLIVersion: CoordinatorClient.binaryVersion,
+                        liveExecutableCDHash: continuousBatchingRunningBuildIdentity?.liveExecutableCDHash
                     )
                 }
             ),

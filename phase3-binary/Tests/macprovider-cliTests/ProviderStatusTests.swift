@@ -1436,6 +1436,69 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertEqual(scheduler["max_observed_batch_depth"] as? Int, 4)
         XCTAssertEqual(scheduler["slots_total"] as? Int, 8)
         XCTAssertEqual(scheduler["slots_free"] as? Int, 5)
+        XCTAssertTrue(continuousBatching["runtime_tuple"] is NSNull)
+    }
+
+    func testContinuousBatchingHeartbeatFieldsCarryRuntimeTuple() throws {
+        let hex = String(repeating: "c", count: 64)
+        let snapshot = RuntimeContinuousBatchingSnapshot(
+            mode: .canary,
+            active: true,
+            unsupportedReason: nil,
+            pagedKVDecision: "attached",
+            cacheClass: "mixed",
+            policy: RuntimeContinuousBatchingPolicySnapshot(
+                authorizationSource: "coordinator",
+                loadStatus: "live_verified",
+                releaseID: "release-a",
+                policyVersion: "policy-a",
+                signerKeyID: "key-a",
+                policySHA256: hex,
+                expiresAt: "2026-10-01T00:00:00Z",
+                rolloutMode: "canary",
+                tupleSHA256: hex,
+                authorized: true,
+                cachedTurnsAuthorized: false,
+                emergencyOffOverride: false,
+                localProofResult: "passed",
+                decisionReason: "authorized"
+            ),
+            scheduler: nil,
+            runtimeTuple: RuntimeContinuousBatchingTupleSnapshot(
+                modelID: "model-a",
+                modelSHA256: hex,
+                tokenizerSHA256: hex,
+                chatTemplateSHA256: nil,
+                cacheClass: "mixed",
+                kvDType: "fp16",
+                requiresMoE: true,
+                hardwareClass: "hardware-a",
+                metallibSHA256: hex,
+                kernelIdentifier: "kernel-a",
+                providerCLIVersion: "1.8.300",
+                liveExecutableCDHash: String(repeating: "d", count: 40)
+            )
+        )
+
+        let fields = RouterHandler.continuousBatchingHeartbeatFields(snapshot)
+        XCTAssertEqual(
+            Set(fields.keys),
+            ["active", "mode", "unsupported_reason", "authorization_source", "policy_authorized", "policy_decision_reason", "runtime_tuple"]
+        )
+        XCTAssertEqual(fields["active"] as? Bool, true)
+        XCTAssertEqual(fields["authorization_source"] as? String, "coordinator")
+        XCTAssertTrue(fields["unsupported_reason"] is NSNull)
+        let tuple = try XCTUnwrap(fields["runtime_tuple"] as? [String: Any])
+        XCTAssertEqual(tuple["model_sha256"] as? String, hex)
+        XCTAssertTrue(tuple["chat_template_sha256"] is NSNull)
+        XCTAssertEqual(tuple["requires_moe"] as? Bool, true)
+        XCTAssertEqual(tuple["provider_cli_version"] as? String, "1.8.300")
+        XCTAssertTrue(JSONSerialization.isValidJSONObject(fields))
+
+        let absent = RouterHandler.continuousBatchingHeartbeatFields(nil)
+        XCTAssertEqual(absent["active"] as? Bool, false)
+        XCTAssertEqual(absent["mode"] as? String, "off")
+        XCTAssertTrue(absent["runtime_tuple"] is NSNull)
     }
 
     func testStatusSeparatesLiveCatalogTrustFromBuyerServing() async {

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -336,6 +337,9 @@ type Heartbeat struct {
 	SafetyTelemetry         *pool.ProviderSafetyTelemetry `json:"safety_telemetry,omitempty"`
 	RelayBlindKeyRecords    []relayblind.KeyRecord        `json:"relay_blind_key_records,omitempty"`
 	PrivacyKeyRecords       []relayblind.PrivacyKeyRecord `json:"privacy_key_records,omitempty"`
+	// ContinuousBatching is observability-only and best-effort (like
+	// last_supervisor_event): a malformed value is dropped, never rejected.
+	ContinuousBatching *pool.ProviderContinuousBatching `json:"continuous_batching,omitempty"`
 }
 
 type HeartbeatPresence struct {
@@ -1690,6 +1694,9 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 			}
 		}
 	}
+	if v, ok := raw["continuous_batching"]; ok && string(v) != "null" {
+		hb.ContinuousBatching = parseHeartbeatContinuousBatching(v)
+	}
 	if v, ok := raw["safety_telemetry"]; ok && string(v) != "null" {
 		var telemetryRaw map[string]json.RawMessage
 		if err := json.Unmarshal(v, &telemetryRaw); err != nil {
@@ -1995,6 +2002,111 @@ func ParseStateUpdate(payload []byte) (StateUpdate, string, error) {
 	}
 	return update, "", nil
 }
+
+const maxHeartbeatContinuousBatchingBytes = 4096
+
+// parseHeartbeatContinuousBatching returns the provider's continuous-batching
+// state, or nil when the object is oversized, has unknown or missing fields,
+// or carries an out-of-grammar value. Strings are bounded printable tokens
+// and digests are lowercase hex, so nothing provider-controlled reaches
+// /poolz or logs unbounded.
+func parseHeartbeatContinuousBatching(raw json.RawMessage) *pool.ProviderContinuousBatching {
+	if len(raw) > maxHeartbeatContinuousBatchingBytes {
+		return nil
+	}
+	type wireTuple struct {
+		ModelID              *string `json:"model_id"`
+		ModelSHA256          *string `json:"model_sha256"`
+		TokenizerSHA256      *string `json:"tokenizer_sha256"`
+		ChatTemplateSHA256   *string `json:"chat_template_sha256"`
+		CacheClass           *string `json:"cache_class"`
+		KVDType              *string `json:"kv_dtype"`
+		RequiresMoE          *bool   `json:"requires_moe"`
+		HardwareClass        *string `json:"hardware_class"`
+		MetallibSHA256       *string `json:"metallib_sha256"`
+		KernelIdentifier     *string `json:"kernel_identifier"`
+		ProviderCLIVersion   *string `json:"provider_cli_version"`
+		LiveExecutableCDHash *string `json:"live_executable_cdhash"`
+	}
+	type wire struct {
+		Active               *bool      `json:"active"`
+		Mode                 *string    `json:"mode"`
+		UnsupportedReason    *string    `json:"unsupported_reason"`
+		AuthorizationSource  *string    `json:"authorization_source"`
+		PolicyAuthorized     *bool      `json:"policy_authorized"`
+		PolicyDecisionReason *string    `json:"policy_decision_reason"`
+		RuntimeTuple         *wireTuple `json:"runtime_tuple"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var in wire
+	if err := dec.Decode(&in); err != nil || dec.More() {
+		return nil
+	}
+	token := func(s *string, required bool) (string, bool) {
+		if s == nil {
+			return "", !required
+		}
+		return *s, *s != "" && len(*s) <= 128 && heartbeatTokenPattern.MatchString(*s)
+	}
+	if in.Active == nil || in.PolicyAuthorized == nil {
+		return nil
+	}
+	mode, ok := token(in.Mode, true)
+	if !ok || (mode != "off" && mode != "canary" && mode != "on") {
+		return nil
+	}
+	out := &pool.ProviderContinuousBatching{Active: *in.Active, Mode: mode, PolicyAuthorized: *in.PolicyAuthorized}
+	if out.UnsupportedReason, ok = token(in.UnsupportedReason, false); !ok {
+		return nil
+	}
+	if out.AuthorizationSource, ok = token(in.AuthorizationSource, true); !ok {
+		return nil
+	}
+	if out.PolicyDecisionReason, ok = token(in.PolicyDecisionReason, false); !ok {
+		return nil
+	}
+	if t := in.RuntimeTuple; t != nil {
+		tuple := &pool.ContinuousBatchingRuntimeTuple{}
+		for _, field := range []struct {
+			in  *string
+			out *string
+		}{
+			{t.ModelID, &tuple.ModelID}, {t.CacheClass, &tuple.CacheClass}, {t.KVDType, &tuple.KVDType},
+			{t.HardwareClass, &tuple.HardwareClass}, {t.KernelIdentifier, &tuple.KernelIdentifier},
+			{t.ProviderCLIVersion, &tuple.ProviderCLIVersion},
+		} {
+			if *field.out, ok = token(field.in, true); !ok {
+				return nil
+			}
+		}
+		if t.RequiresMoE == nil || t.ModelSHA256 == nil || !modelidentity.ValidSHA256(*t.ModelSHA256) ||
+			t.MetallibSHA256 == nil || !modelidentity.ValidSHA256(*t.MetallibSHA256) {
+			return nil
+		}
+		for _, digest := range []*string{t.TokenizerSHA256, t.ChatTemplateSHA256} {
+			if digest != nil && !modelidentity.ValidSHA256(*digest) {
+				return nil
+			}
+		}
+		if t.LiveExecutableCDHash != nil && !heartbeatCDHashPattern.MatchString(*t.LiveExecutableCDHash) {
+			return nil
+		}
+		tuple.RequiresMoE = *t.RequiresMoE
+		tuple.ModelSHA256 = *t.ModelSHA256
+		tuple.MetallibSHA256 = *t.MetallibSHA256
+		tuple.TokenizerSHA256 = t.TokenizerSHA256
+		tuple.ChatTemplateSHA256 = t.ChatTemplateSHA256
+		tuple.LiveExecutableCDHash = t.LiveExecutableCDHash
+		out.RuntimeTuple = tuple
+	}
+	return out
+}
+
+var (
+	heartbeatTokenPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:/@+-]*$`)
+	heartbeatCDHashPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
+)
 
 func validAutoupdateEventObject(raw json.RawMessage) bool {
 	if len(raw) == 0 || len(raw) > 4096 {
