@@ -45,49 +45,31 @@ func (s *Store) verifyManifestAcceptanceWitness(ctx context.Context) error {
 	})
 }
 
-// Test seams: beforeManifestAcceptanceCommit runs inside the acceptance
-// transaction after the witness is planned; publishManifestAcceptanceWitness
-// writes it after COMMIT.
-var (
-	beforeManifestAcceptanceCommit   func() error
-	publishManifestAcceptanceWitness = writeManifestAcceptanceWitness
-)
-
 func (s *Store) reconcileManifestAcceptanceWitness(highWater map[string]ManifestAcceptanceProjection) error {
 	if s == nil || s.manifestWitnessPath == "" {
 		return nil
 	}
-	next, err := s.planManifestAcceptanceWitness(highWater)
+	witness, found, err := readManifestAcceptanceWitness(s.manifestWitnessPath)
 	if err != nil {
 		return err
 	}
-	return writeManifestAcceptanceWitness(s.manifestWitnessPath, next)
-}
-
-// planManifestAcceptanceWitness checks the witness against highWater and
-// returns the witness content to write, without writing it.
-func (s *Store) planManifestAcceptanceWitness(highWater map[string]ManifestAcceptanceProjection) (map[string]ManifestAcceptanceProjection, error) {
-	witness, found, err := readManifestAcceptanceWitness(s.manifestWitnessPath)
-	if err != nil {
-		return nil, err
-	}
 	if !found {
 		if len(highWater) > 0 {
-			return nil, fmt.Errorf("%w: manifest acceptance witness %q missing while coordinator db already has accepted manifest high-water", ErrMalformedDurableEvent, s.manifestWitnessPath)
+			return fmt.Errorf("%w: manifest acceptance witness %q missing while coordinator db already has accepted manifest high-water", ErrMalformedDurableEvent, s.manifestWitnessPath)
 		}
-		return highWater, nil
+		return writeManifestAcceptanceWitness(s.manifestWitnessPath, highWater)
 	}
 	next := make(map[string]ManifestAcceptanceProjection, len(witness))
 	for poolID, witnessed := range witness {
 		current, ok := highWater[poolID]
 		if !ok {
-			return nil, fmt.Errorf("%w: manifest acceptance witness pool %q missing from coordinator db", ErrMalformedDurableEvent, poolID)
+			return fmt.Errorf("%w: manifest acceptance witness pool %q missing from coordinator db", ErrMalformedDurableEvent, poolID)
 		}
 		switch {
 		case current.ManifestVersion < witnessed.ManifestVersion:
-			return nil, fmt.Errorf("%w: manifest acceptance witness pool %q version rollback %d < %d", ErrMalformedDurableEvent, poolID, current.ManifestVersion, witnessed.ManifestVersion)
+			return fmt.Errorf("%w: manifest acceptance witness pool %q version rollback %d < %d", ErrMalformedDurableEvent, poolID, current.ManifestVersion, witnessed.ManifestVersion)
 		case current.ManifestVersion == witnessed.ManifestVersion && !manifestAcceptanceProjectionEqual(current, witnessed):
-			return nil, fmt.Errorf("%w: manifest acceptance witness pool %q high-water mismatch at version %d", ErrMalformedDurableEvent, poolID, current.ManifestVersion)
+			return fmt.Errorf("%w: manifest acceptance witness pool %q high-water mismatch at version %d", ErrMalformedDurableEvent, poolID, current.ManifestVersion)
 		}
 		next[poolID] = current
 	}
@@ -96,7 +78,7 @@ func (s *Store) planManifestAcceptanceWitness(highWater map[string]ManifestAccep
 			next[poolID] = current
 		}
 	}
-	return next, nil
+	return writeManifestAcceptanceWitness(s.manifestWitnessPath, next)
 }
 
 func withManifestAcceptanceWitnessConn(ctx context.Context, db *sql.DB, fn func(context.Context, *sql.Conn) error) error {
@@ -222,9 +204,9 @@ func writeManifestAcceptanceWitnessFile(path string, highWater map[string]Manife
 		return err
 	}
 	if !noClobber {
-		// The runtime path runs inside the manifest-acceptance DB transaction;
-		// keep its error surface to the rename so a post-publish failure can
-		// never roll the DB back behind an already-advanced witness.
+		// Runtime path, unchanged from #1854: it runs inside the
+		// manifest-acceptance transaction before COMMIT, so a failed COMMIT
+		// can leave the witness ahead of the DB. Startup then fails closed.
 		return os.Rename(tmpName, path)
 	}
 	if err := os.Link(tmpName, path); err != nil {
@@ -233,7 +215,13 @@ func writeManifestAcceptanceWitnessFile(path string, highWater map[string]Manife
 		}
 		return err
 	}
-	return syncManifestAcceptanceWitnessDir(dir)
+	if err := syncManifestAcceptanceWitnessDir(dir); err != nil {
+		// Remove the new link so a bootstrap retry starts clean; the deferred
+		// cleanup removes the temp name.
+		_ = os.Remove(path)
+		return err
+	}
+	return nil
 }
 
 func syncManifestAcceptanceWitnessDir(dir string) error {

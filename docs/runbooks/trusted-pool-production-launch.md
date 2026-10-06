@@ -239,10 +239,11 @@ confirm pools route again. The witness can stay (unused without the key); move
 it aside before the next attempt.
 
 Limits. A manifest the coordinator accepts after the restart advances the
-witness after its DB commit; if that write fails, the admin call answers 503
-`manifest_witness_publish_failed` (the manifest is committed), and retrying
-the same `operation_id` or a restart moves the witness forward. Startup refuses
-a missing witness, or one ahead of or inconsistent with the DB. The coordinator
+witness inside the acceptance transaction, before COMMIT. If that COMMIT then
+fails, the witness is ahead of the DB and the next startup logs `pool support
+disabled`: compare the witness against the DB high-water and, if the DB is the
+truth, move the witness aside and re-run this section. Startup refuses a
+missing witness, or one ahead of or inconsistent with the DB. The coordinator
 process must be able to write the witness to advance it, so the `macprovider`
 account (or anything running as it) can delete the file and re-bootstrap from
 an older DB; this guard does not stop a compromised daemon or a host-level DB

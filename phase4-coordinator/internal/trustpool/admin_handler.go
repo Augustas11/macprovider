@@ -1699,9 +1699,6 @@ func (h *adminHandler) writeMutationErrorResponse(w http.ResponseWriter, err err
 		return
 	}
 	switch {
-	case errors.Is(err, ErrManifestAcceptanceWitnessPublish):
-		slog.Error("trust pool manifest committed but witness publish failed; retry the same operation_id", "event", "trusted_pool_manifest_witness_publish_failed", "error", err.Error())
-		writeAdminJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]string{"code": "manifest_witness_publish_failed"}})
 	case errors.Is(err, ErrConflictingOperationID):
 		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "operation_conflict"}})
 	case errors.Is(err, errCreatorBoundary):
