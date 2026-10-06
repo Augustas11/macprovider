@@ -30,7 +30,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-019 | Structured output (`response_format: json_schema`) | 0.2.6 | normative | pending | pending corpus migration | [SPEC-019-structured-output.md](SPEC-019-structured-output.md) |
 | SPEC-020 | Provider autoupdate | v0.1.20 | normative | pending | pending: 6 | [SPEC-020-provider-autoupdate.md](SPEC-020-provider-autoupdate.md) |
 | SPEC-021 | MALIBU rewards emission ledger | 0.4.0 | draft | complete | pending: 10 | [SPEC-021-malibu-emission-ledger.md](SPEC-021-malibu-emission-ledger.md) |
-| SPEC-022 | Verified model settlement | v0.3.0 | draft | complete | conformant: 1, pending: 13 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
+| SPEC-022 | Verified model settlement | v0.3.1 | draft | complete | conformant: 1, pending: 13 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
 | SPEC-023 | Installer-Integrated Autotune Recommend | v0.22.11 | normative | pending | conformant: 2, pending: 23 | [SPEC-023-installer-autotune-recommend.md](SPEC-023-installer-autotune-recommend.md) |
 | SPEC-024 | Prefix-cache billing and provider-local cache isolation | 0.2.9 | normative | pending | pending: 3 | [SPEC-024-prefix-cache-billing.md](SPEC-024-prefix-cache-billing.md) |
 | SPEC-025 | Native Mac App (signed `.dmg` + menu bar wrapper) | v0.30 | draft | pending | pending corpus migration | [SPEC-025-native-mac-app.md](SPEC-025-native-mac-app.md) |
@@ -57,7 +57,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-046 | Provider BYOM Discovery | 0.5.0 | draft | complete | conformant: 1, pending: 8 | [SPEC-046-provider-byom-discovery.md](SPEC-046-provider-byom-discovery.md) |
 | SPEC-047 | Network Model Admission | 0.2.7 | draft | complete | conformant: 2, pending: 10 | [SPEC-047-network-model-admission.md](SPEC-047-network-model-admission.md) |
 | SPEC-048 | Native Multi-Token Prediction Serving | 0.1.23 | draft | complete | pending: 16 | [SPEC-048-native-mtp-serving.md](SPEC-048-native-mtp-serving.md) |
-| SPEC-049 | Operator-Constrained Privacy Class | 0.1.3 | draft | complete | pending: 23 | [SPEC-049-operator-constrained-privacy-class.md](SPEC-049-operator-constrained-privacy-class.md) |
+| SPEC-049 | Operator-Constrained Privacy Class | 0.1.4 | draft | complete | pending: 23 | [SPEC-049-operator-constrained-privacy-class.md](SPEC-049-operator-constrained-privacy-class.md) |
 <!-- AUTOGEN:spec-index END -->
 
 **Version of record is each spec's own `**Version:**` header, not this table.**
