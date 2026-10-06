@@ -237,6 +237,7 @@ class PearlUpdaterTests(unittest.TestCase):
         runtime_only: bool = False,
         stats_sidecars: bool = False,
         artifact_feed: bool = True,
+        provider_code_identity: dict | None = None,
         ):
         tag = "v" + version
         advertised_version = advertised_version or version
@@ -342,6 +343,8 @@ class PearlUpdaterTests(unittest.TestCase):
             metadata["provider_advertised_version"] = advertised_version
         if channel is not None:
             metadata["channel"] = channel
+        if provider_code_identity is not None:
+            metadata["provider_code_identity"] = provider_code_identity
         metadata_path = self.bundle / "pearl-release.json"
         metadata_path.write_text(json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n")
         self.sign(metadata_path, self.bundle / "pearl-release.json.sig")
@@ -5756,6 +5759,52 @@ class PearlUpdaterTests(unittest.TestCase):
             ["coordinator", "gateway", "coordinator-cli", "stats-inventory-sync",
              "stats-billing-mirror", "stats-hardware-verifier"],
         )
+
+    def test_install_release_stages_signed_privacy_release_identity(self):
+        # SPEC-049-R027: a release carrying provider_code_identity leaves its
+        # signed metadata pair, byte for byte, where the coordinator reads it.
+        identity = {
+            "asset": "macprovider-cli-v1.8.27-darwin-arm64.tar.gz",
+            "member": "macprovider-cli",
+            "binary_version": "1.8.27",
+            "binary_sha256": "b" * 64,
+            "team_id": "AB12CD34EF",
+            "signing_identifier": "live.malibu.provider.cli",
+            "slices": [{"arch": "arm64", "code_cdhash": "c" * 40}],
+        }
+        self.make_bundle(runtime_only=True, provider_code_identity=identity)
+        release = self.stage(self.verify())
+        install, _stats = self.operator_artifact_install_fixture(release)
+        self.updater.snapshot(release)
+        self.updater.audit = mock.Mock()
+
+        self.updater.install_release(release)
+
+        directory = install / updater_module.PRIVACY_RELEASE_IDENTITY_DIRNAME
+        self.assertEqual(directory.stat().st_mode & 0o7777, 0o750)
+        staged = directory / "v1.8.27.json"
+        signature = directory / "v1.8.27.json.sig"
+        self.assertEqual(staged.read_bytes(), (release.directory / "pearl-release.json").read_bytes())
+        self.assertEqual(signature.read_bytes(), (release.directory / "pearl-release.json.sig").read_bytes())
+        for path in (staged, signature):
+            self.assertEqual(path.stat().st_mode & 0o7777, 0o640)
+            self.assertEqual(path.stat().st_uid, self.updater.trusted_uid)
+        self.updater.verify_signature(staged, signature)
+        events = [call.args[:2] for call in self.updater.audit.call_args_list if call.args[0] == "privacy_release_identity"]
+        self.assertEqual(events, [("privacy_release_identity", "staged")])
+
+    def test_install_release_skips_privacy_identity_without_provider_code_identity(self):
+        self.make_bundle(runtime_only=True)
+        release = self.stage(self.verify())
+        install, _stats = self.operator_artifact_install_fixture(release)
+        self.updater.snapshot(release)
+        self.updater.audit = mock.Mock()
+
+        self.updater.install_release(release)
+
+        self.assertFalse((install / updater_module.PRIVACY_RELEASE_IDENTITY_DIRNAME).exists())
+        events = [call.args[:2] for call in self.updater.audit.call_args_list if call.args[0] == "privacy_release_identity"]
+        self.assertEqual(events, [("privacy_release_identity", "skipped_no_provider_code_identity")])
 
     def test_rollback_restores_prior_operator_artifacts_and_removes_new_ones(self):
         self.make_bundle(runtime_only=True, stats_sidecars=True)
