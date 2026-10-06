@@ -124,6 +124,25 @@ HOME_RE = re.compile(r"(?<![A-Za-z0-9_.>-])/(?:Users|home)/[^/\s\"'\\<>]+")
 ESCAPED_HOME_RE = re.compile(r"(?<![A-Za-z0-9_.>-])\\/(?:Users|home)\\/[^\\\s\"'<>]+")
 
 
+RAW_ROOT: pathlib.Path | None = None
+
+
+def contained(path: pathlib.Path) -> bool:
+    """A raw input must be a regular file under RAW_ROOT reached without symlinks."""
+    if RAW_ROOT is None:
+        return False
+    try:
+        relative = path.relative_to(RAW_ROOT)
+    except ValueError:
+        return False
+    candidate = RAW_ROOT
+    for part in relative.parts:
+        candidate = candidate / part
+        if candidate.is_symlink():
+            return False
+    return path.is_file() and path.resolve().is_relative_to(RAW_ROOT)
+
+
 def die(message: str) -> None:
     print(f"extract-primary-evidence: {message}", file=sys.stderr)
     raise SystemExit(1)
@@ -213,7 +232,10 @@ def export_databases(raw: pathlib.Path, out: pathlib.Path, redactor: Redactor, w
     inventory: dict[str, dict[str, int | str]] = {}
     privacy_ids: set[str] = set()
     db_dir = raw / "db"
-    files = sorted(path for path in db_dir.iterdir() if path.is_file() and not path.name.endswith(("-wal", "-shm", "-journal"))) if db_dir.is_dir() else []
+    files = sorted(path for path in db_dir.iterdir() if contained(path) and not path.name.endswith(("-wal", "-shm", "-journal"))) if db_dir.is_dir() else []
+    for path in sorted(db_dir.iterdir()) if db_dir.is_dir() else []:
+        if path.is_symlink():
+            warnings.append(f"db/{path.name}: symlink refused")
     for path in files:
         try:
             db = open_db(path)
@@ -253,7 +275,7 @@ def export_databases(raw: pathlib.Path, out: pathlib.Path, redactor: Redactor, w
 def crossref(raw: pathlib.Path, out: pathlib.Path, privacy_ids: set[str], warnings: list[str]) -> None:
     hits: dict[str, int] = {}
     for path in sorted((raw / "db").iterdir()) if (raw / "db").is_dir() else []:
-        if not path.is_file() or path.name.endswith(("-wal", "-shm", "-journal")):
+        if not contained(path) or path.name.endswith(("-wal", "-shm", "-journal")):
             continue
         try:
             db = open_db(path)
@@ -304,8 +326,8 @@ def parse_local(ts: str, offset: timedelta) -> str | None:
 
 def json_log_events(path: pathlib.Path, pattern: re.Pattern[str], offset: timedelta, redactor: Redactor, warnings: list[str]) -> list[dict]:
     events: list[dict] = []
-    if not path.is_file():
-        warnings.append(f"logs/{path.name}: absent")
+    if not contained(path):
+        warnings.append(f"logs/{path.name}: absent or not a regular contained file")
         return events
     with path.open("r", encoding="utf-8", errors="replace") as handle:
         for number, line in enumerate(handle, start=1):
@@ -341,7 +363,7 @@ def json_log_events(path: pathlib.Path, pattern: re.Pattern[str], offset: timede
 
 def provider_lines(path: pathlib.Path, redactor: Redactor) -> list[dict]:
     lines: list[dict] = []
-    if not path.is_file():
+    if not contained(path):
         return lines
     with path.open("r", encoding="utf-8", errors="replace") as handle:
         for number, line in enumerate(handle, start=1):
@@ -355,7 +377,7 @@ def unified_events(path: pathlib.Path, offset: timedelta, redactor: Redactor) ->
     first = last = None
     network: list[dict] = []
     total = 0
-    if path.is_file():
+    if contained(path):
         with path.open("r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
                 match = UNIFIED_LINE_RE.match(line.rstrip("\n"))
@@ -380,7 +402,7 @@ def unified_events(path: pathlib.Path, offset: timedelta, redactor: Redactor) ->
 
 def jsonl(path: pathlib.Path, redactor: Redactor) -> list:
     rows: list = []
-    if not path.is_file():
+    if not contained(path):
         return rows
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         try:
@@ -403,8 +425,8 @@ def export_logs(raw: pathlib.Path, out: pathlib.Path, offset: timedelta, redacto
     blackhole = logs / "blackhole.log"
     write_json(out / "logs" / "blackhole.json", {
         "schema_version": SCHEMA,
-        "present": blackhole.is_file(),
-        "lines": [line for line in (blackhole.read_text(errors="replace").splitlines() if blackhole.is_file() else []) if re.fullmatch(r"\d+ connection", line)],
+        "present": contained(blackhole),
+        "lines": [line for line in (blackhole.read_text(errors="replace").splitlines() if contained(blackhole) else []) if re.fullmatch(r"\d+ connection", line)],
     })
 
 
@@ -472,7 +494,7 @@ def export_sweep(raw: pathlib.Path, out: pathlib.Path, needles: list[tuple[str, 
         if not base.is_dir():
             continue
         for path in sorted(base.rglob("*")):
-            if path.is_symlink() or not path.is_file():
+            if not contained(path):
                 continue
             data = path.read_bytes()
             files.append({
@@ -515,10 +537,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--log-utc-offset", default="-07:00")
     args = parser.parse_args(argv)
 
+    if pathlib.Path(args.raw).is_symlink():
+        die("raw directory must not be a symlink")
     raw = pathlib.Path(args.raw).resolve()
     out_root = pathlib.Path(args.out)
     if not raw.is_dir():
         die(f"raw directory absent: {raw}")
+    global RAW_ROOT
+    RAW_ROOT = raw
     if out_root.exists():
         die(f"output directory must not exist: {out_root}")
     if out_root.resolve().is_relative_to(raw):

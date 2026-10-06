@@ -137,7 +137,7 @@ e60be5ea15783aabfff61ac16499371b77f28ad808e1de1c70f8b13058fdb57e  ./step-09-reda
 ab38b9dd6ebfe576a44fdbc3613d930a096818f50930239e10ac359e5e89e2a8  ./step-09-redaction-sweep/receipts.json
 2e4d47541766a7818b193916f1cc8909692c363a512107cd96514968340e6279  ./step-09-redaction-sweep/sweep-journey.json
 4bf1b12e7633d42e9e7ec394a170f440499e862a7483df92f12dfe22ff85d242  ./step-09-redaction-sweep/sweep-journey.txt
-51f8ea8c3c45f7e9ac570ec956b6ec00c633f1a1a0ab5a11a6eaf08f535f4782  ./step-09-redaction-sweep/sweep-system.json
+f4a18a85dd572c14e59460aa0a8aa34de4e0b555468c8efb951c39cb6b14dde4  ./step-09-redaction-sweep/sweep-system.json
 e2e408b6d017ab5a6e07f6720204d3d10fe2eb68570aaf2da75ae092645b1f4d  ./step-09-redaction-sweep/sweep-system.txt
 cde90fdab682064654659ff77854e95729d4dab3adfdbb1968431f3d62a324a7  ./step-10-downgrade-negatives/engine-select.code.json
 e4df891c484d7abb985dadf539fa1883a646dab6337af5cae4159c587b7050cc  ./step-10-downgrade-negatives/engine-select.status

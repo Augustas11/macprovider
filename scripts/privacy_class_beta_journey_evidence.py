@@ -277,6 +277,7 @@ BUNDLE_FORBIDDEN_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("a home path", re.compile(r"(?<![A-Za-z0-9_.>-])/(?:Users|home)/")),
     ("a JSON-escaped home path", re.compile(r"\\/(?:Users|home)\\/")),
     ("a home-relative path", re.compile(r"(?:^|[\s\"'=,;(\[])~/")),
+    ("a per-user temporary path", re.compile(r"(?:/private)?/var/folders/")),
     ("a private key block", re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")),
     ("a bearer credential", re.compile(r"(?i)\bbearer\s+(?!redacted\b)[A-Za-z0-9._~+/=-]{8,}")),
     ("an API key", re.compile(r"\bmp_[A-Za-z0-9_-]{16,}\b")),
@@ -289,8 +290,11 @@ BUNDLE_FORBIDDEN_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 # a known extension, an Apple reverse-DNS subsystem id, or one of the fixed
 # non-host identifiers the run records. Unknown suffixes fail closed.
 DNS_TOKEN_RE = re.compile(
-    r"(?<![A-Za-z0-9_.-])((?:[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?\.)+([A-Za-z]{2,63}))(?![A-Za-z0-9_-])"
+    r"(?<![A-Za-z0-9_.-])((?:[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?\.)+([A-Za-z]{1,63}))(?![A-Za-z0-9_-])"
 )
+VERSION_TOKEN_RE = re.compile(r"^[vV]?[0-9]+(?:\.[0-9]+)+$")
+# tcp_input flag sets in Apple network logs, such as S.E or P.E.
+TCP_FLAGS_TOKEN_RE = re.compile(r"^[A-Z](?:\.[A-Z])+$")
 NON_HOST_SUFFIXES = frozenset({
     "txt", "json", "jsonl", "tsv", "db", "log", "meta", "stderr", "stdout", "status", "sig", "err", "yaml", "yml",
     "gz", "dmg", "ips", "xml", "plist", "dylib", "sh", "py", "md", "pem", "metallib", "bundle", "patch", "tar",
@@ -475,6 +479,8 @@ def assert_bundle_redacted(bundle: Bundle) -> None:
         for match in DNS_TOKEN_RE.finditer(text):
             token, suffix = match.group(1), match.group(2)
             if suffix.lower() in NON_HOST_SUFFIXES or token in NON_HOST_TOKENS or token == "com.apple" or token.startswith("com.apple."):
+                continue
+            if VERSION_TOKEN_RE.fullmatch(token) or TCP_FLAGS_TOKEN_RE.fullmatch(token):
                 continue
             fail(f"reviewed bundle file {path} contains a hostname-shaped token")
         for match in IPV6_CANDIDATE_RE.finditer(text):
@@ -1573,7 +1579,18 @@ class Checks:
                 digest_ok = record_ok = False
             expect(digest_ok, errors, f"{label} key_record_digest must be the SHA-256 of its signed framing")
             expect(record_ok, errors, f"{label} key record signature must verify under the pinned identity key")
-            expect(record.get("endpoint_families") == ["chat_completions"] and bool(record.get("models")), errors, f"{label} key record scope must be chat completions for named models")
+            models = record.get("models")
+            expect(
+                isinstance(models, list) and bool(models) and len(set(map(str, models))) == len(models) and all(isinstance(item, str) and item.strip() == item and item for item in models),
+                errors,
+                f"{label} key record must name unique non-empty models",
+            )
+            expect(record.get("endpoint_families") == ["chat_completions"], errors, f"{label} key record scope must be chat completions")
+            expect(record.get("alg") == "x25519-hkdf-sha256-a256gcm-v1" and record.get("signature_algorithm") == "ed25519", errors, f"{label} key record algorithms must be the SPEC-041 suite")
+            size = record.get("max_encrypted_request_bytes")
+            expect(isinstance(size, int) and not isinstance(size, bool) and 0 < size <= 16 << 20, errors, f"{label} key record request limit must be positive")
+            kid = b64url_bytes(record.get("kid"))
+            expect(kid is not None and len(kid) == 16 and record.get("kid") == row.get("kid"), errors, f"{label} key record kid must be the 16-byte row kid")
 
     def p_primary_posture(self, errors: list[str]) -> None:
         privacy = self.provider_id("privacy")
@@ -1723,7 +1740,12 @@ class Checks:
             facts = verdict.get("facts_json") if isinstance(verdict.get("facts_json"), dict) else {}
             issued = facts.get("issued_at_unix_ms")
             expect(checks.get("signature_verified") is True and checks.get("route_snapshot_matched") is True, errors, f"{label} provider-signed receipt must bind the snapshot digest")
-            expect(isinstance(issued, int) and int(shot.get("route_decision_ts_unix_ms") or 0) < issued, errors, f"{label} snapshot route decision must precede the signed receipt")
+            decided = shot.get("route_decision_ts_unix_ms")
+            expect(
+                isinstance(issued, int) and not isinstance(issued, bool) and isinstance(decided, int) and not isinstance(decided, bool) and 0 < decided < issued,
+                errors,
+                f"{label} snapshot route decision must precede the signed receipt",
+            )
             expect(verdict.get("settlement_outcome") == RB_SETTLED and verdict.get("closed") == 1 and verdict.get("receipt_result") == "valid", errors, f"{label} verdict must be closed {RB_SETTLED}")
             expect(verdict.get("receipt_profile") == RB_PROFILE and verdict.get("receipt_version") == RB_PROFILE and verdict.get("route_snapshot_mode") == "enforce", errors, f"{label} verdict must be the enforce relay-blind profile")
             expect(verdict.get("route_snapshot_digest") == shot.get("route_snapshot_digest"), errors, f"{label} verdict must bind the snapshot digest")
@@ -1760,7 +1782,11 @@ class Checks:
         expect(not verified, errors, "no verified verdict may be recorded during the enforce canary")
         requests = {str(row.get("internal_request_id")) for row in self.enforce_rows()}
         credits = [row for row in self.rows("coordinator.db", "ledger_request_credits") if row.get("request_id") in requests]
-        expect(len(credits) == len(requests) and len(requests) == 3, errors, "every enforce request must have one ledger credit")
+        expect(
+            len(requests) == 3 and sorted(str(row.get("request_id")) for row in credits) == sorted(requests),
+            errors,
+            "every enforce request must have exactly one ledger credit",
+        )
         expect(
             all(row.get("rewards_excluded") == 1 and row.get("positive_verification_excluded") == 1 for row in credits),
             errors,

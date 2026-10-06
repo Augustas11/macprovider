@@ -40,13 +40,13 @@
     {
       "files_scanned": 19,
       "present": true,
-      "root": "/var/folders/r1/g0r55c9n5pqg1n1sfvqss9t00000gn/T/",
+      "root": "<user-temp-dir>/",
       "unreadable": 0
     },
     {
       "files_scanned": 5,
       "present": true,
-      "root": "/var/folders/r1/g0r55c9n5pqg1n1sfvqss9t00000gn/C/",
+      "root": "<user-cache-dir>/",
       "unreadable": 0
     }
   ]

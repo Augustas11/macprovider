@@ -161,6 +161,24 @@ class ExtractorTests(unittest.TestCase):
         finally:
             log.write_text(original)
 
+    def test_does_not_follow_symlinked_raw_inputs(self) -> None:
+        outside = Path(self.fx.tmp.name) / "outside.db"
+        with sqlite3.connect(outside) as db:
+            db.execute("CREATE TABLE relay_blind_reservations (privacy_class INTEGER, request_id TEXT, internal_request_id TEXT)")
+            db.execute("INSERT INTO relay_blind_reservations VALUES (1, 'outside-secret-id', 'outside-secret-id')")
+        db.close()
+        link = self.fx.raw / "db" / "linked.db"
+        link.symlink_to(outside)
+        try:
+            out = Path(self.fx.tmp.name) / "symlinked"
+            completed = run_extractor(self.fx.raw, out, self.fx.facts)
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertIn("symlink refused", completed.stderr)
+            blob = "\n".join(path.read_text() for path in out.rglob("*.json"))
+            self.assertNotIn("outside-secret-id", blob)
+        finally:
+            link.unlink()
+
     def test_refuses_an_existing_output_directory(self) -> None:
         self.assertNotEqual(0, run_extractor(self.fx.raw, self.fx.out, self.fx.facts).returncode)
 
@@ -334,6 +352,29 @@ class PrimaryPredicateTests(unittest.TestCase):
             with self.assertRaises(contract.PrivacyEvidenceError):
                 contract.assert_bundle_redacted(contract.Bundle("x", {"a.txt": text}, b""))
         contract.assert_bundle_redacted(contract.Bundle("x", {"a.txt": b"live.malibu.provider.cli results.tsv com.apple.network\n"}, b""))
+
+    def test_missing_route_decision_time_fails(self) -> None:
+        request = self.fx.facts["enforce"][0]["internal_request_id"]
+
+        def drop(doc):
+            next(row for row in doc["rows"] if row["request_id"] == request)["route_decision_ts_unix_ms"] = None
+
+        self.fx.edit_json("db/coordinator.db/settlement_route_snapshots.json", drop)
+        self.assertTrue(any("must precede the signed receipt" in error for error in self.fx.errors("primary_enforce")))
+
+    def test_key_record_structure_is_enforced(self) -> None:
+        def blank(doc):
+            row = next(row for row in doc["rows"] if row["key_class"] == "privacy")
+            row["record_json"]["kid"] = "short"
+
+        self.fx.edit_json("db/relay-blind.db/relay_blind_key_records.json", blank)
+        self.assertTrue(any("kid" in error for error in self.fx.errors("primary_key_attestation")))
+
+    def test_private_temp_paths_and_single_letter_hosts_fail_redaction(self) -> None:
+        for text in (b"root /var/folders/ab/xyz/T/\n", b"peer=node.a\n"):
+            with self.assertRaises(contract.PrivacyEvidenceError):
+                contract.assert_bundle_redacted(contract.Bundle("x", {"a.txt": text}, b""))
+        contract.assert_bundle_redacted(contract.Bundle("x", {"a.txt": b"tcp_input flags=[S.E] v1.8.215 3.2\n"}, b""))
 
     def test_missing_primary_exports_fail_closed(self) -> None:
         shutil.rmtree(self.fx.bundle / "primary" / "db")

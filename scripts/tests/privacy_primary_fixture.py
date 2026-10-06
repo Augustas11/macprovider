@@ -185,7 +185,8 @@ def build_raw(raw: Path, bundle: Path, *, needles: dict[str, str] | None = None)
     # Key records: one attested privacy key for step-02, plain relay-blind keys.
     public, _ = contract.ed25519_sign(SEED, b"")
     nb = start + 5
-    record = {"alg": "x25519", "public_key": b64url(secrets.token_bytes(32)), "identity_fingerprint": identity["relay_blind_fingerprint"], "models": ["m"], "max_encrypted_request_bytes": 4096, "endpoint_families": ["chat_completions"], "signature_algorithm": "ed25519", "not_before_unix": nb, "expires_at_unix": nb + 3600, "kid": "kid-privacy-1"}
+    kid = b64url(secrets.token_bytes(16))
+    record = {"alg": "x25519-hkdf-sha256-a256gcm-v1", "public_key": b64url(secrets.token_bytes(32)), "identity_fingerprint": identity["relay_blind_fingerprint"], "models": ["m"], "max_encrypted_request_bytes": 4096, "endpoint_families": ["chat_completions"], "signature_algorithm": "ed25519", "not_before_unix": nb, "expires_at_unix": nb + 3600, "kid": kid}
     signed = contract.key_record_signed_framing(record)
     record_digest = b64url(hashlib.sha256(signed).digest())
     record["key_record_digest"] = record_digest
@@ -193,7 +194,7 @@ def build_raw(raw: Path, bundle: Path, *, needles: dict[str, str] | None = None)
     attestation = {"version": "privacy-key-attestation-v1", "key_record_digest": record_digest, "privacy_class": contract.PRIVACY_CLASS, "assurance": contract.PRIVACY_ASSURANCE, "binary_version": binding["binary_version"], "code_cdhash": binding["code_cdhash"], "not_before_unix": nb, "expires_at_unix": nb + 3600}
     _, signature = contract.ed25519_sign(SEED, contract.attestation_framing(attestation))
     keys = [
-        {"provider_id": privacy, "kid": "kid-privacy-1", "assigned_session": "s", "record_json": json.dumps(record).encode(), "key_record_digest": record_digest, "immutable_digest": "d", "not_before_unix": nb, "expires_at_unix": nb + 3600, "accepted_at_unix": nb + 1, "revoked_at_unix": t["step-11-stale-posture-and-quarantine"] - 80, "key_class": "privacy", "privacy_attestation_json": json.dumps(attestation), "privacy_attestation_signature": b64url(signature)},
+        {"provider_id": privacy, "kid": kid, "assigned_session": "s", "record_json": json.dumps(record).encode(), "key_record_digest": record_digest, "immutable_digest": "d", "not_before_unix": nb, "expires_at_unix": nb + 3600, "accepted_at_unix": nb + 1, "revoked_at_unix": t["step-11-stale-posture-and-quarantine"] - 80, "key_class": "privacy", "privacy_attestation_json": json.dumps(attestation), "privacy_attestation_signature": b64url(signature)},
         {"provider_id": plain, "kid": "kid-plain-1", "assigned_session": "s", "record_json": json.dumps({"kid": "kid-plain-1"}).encode(), "key_record_digest": "p", "immutable_digest": "d", "not_before_unix": nb, "expires_at_unix": nb + 86400, "accepted_at_unix": nb, "revoked_at_unix": None, "key_class": "relay_blind", "privacy_attestation_json": None, "privacy_attestation_signature": None},
     ]
     facts.update(public=public, attestation=attestation)
