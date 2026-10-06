@@ -291,6 +291,37 @@ func TestEnrollmentNotCreatedWhenPostureFails(t *testing.T) {
 	})
 }
 
+// Before enrollment a session cannot swap its claim: the records verified
+// under the first claim are revoked and the new claim is refused, so no
+// posture can enroll one identity beside records signed by another.
+func TestUnenrolledSessionClaimChangeRevokes(t *testing.T) {
+	f := newEnrollmentFixture(t, nil)
+	if err := f.acceptClaim(); err != nil {
+		t.Fatal(err)
+	}
+	firstDigest := f.record.KeyRecord.KeyRecordDigest
+	f.rekey(0x63)
+	mustReject(t, f.acceptClaim(), "privacy_enrollment_claim_changed")
+	fresh, err := f.store.PrivacyKeyFresh(context.Background(), f.providerID, f.session, firstDigest, f.now)
+	if err != nil || fresh {
+		t.Fatalf("first-claim key fresh = %v, %v", fresh, err)
+	}
+	if q, err := f.store.IsQuarantined(context.Background(), f.providerID, f.now); err != nil || q {
+		t.Fatalf("unenrolled claim change quarantined = %v, %v", q, err)
+	}
+	// The forgotten advertisement lets the session start over cleanly.
+	if err := f.acceptClaim(); err != nil {
+		t.Fatalf("re-advertisement after reset: %v", err)
+	}
+	if err := f.posture(0); err != nil {
+		t.Fatalf("posture after reset: %v", err)
+	}
+	enrollment, ok := activeEnrollment(t, f)
+	if !ok || enrollment.IdentityPublicKey != f.claim().IdentityPublicKey {
+		t.Fatalf("enrollment = %+v %v", enrollment, ok)
+	}
+}
+
 func TestEnrollmentRejectsKeyActiveForAnotherProvider(t *testing.T) {
 	f := newEnrollmentFixture(t, nil)
 	if err := f.acceptClaim(); err != nil {

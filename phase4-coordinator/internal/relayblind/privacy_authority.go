@@ -294,6 +294,17 @@ func (a *PrivacyAuthority) AcceptPrivacyKeysWithClaim(ctx context.Context, provi
 	if changed {
 		return a.failQuarantine(ctx, providerID, now, "privacy_enrollment_key_changed")
 	}
+	// Before enrollment the claim is this session's only key source, so it
+	// must not change mid-session: records verified under an earlier claim
+	// would otherwise sit beside a posture enrolled under a later one.
+	if keys.needsEnrollment() && a.sessionClaimChanged(id, claim) {
+		revokeErr := a.store.RevokeMissingKeys(ctx, providerID, nil, now, a.replayRetention, KeyClassPrivacy)
+		a.forgetAdvertisement(id)
+		if revokeErr != nil {
+			return revokeErr
+		}
+		return privacyReject("privacy_enrollment_claim_changed")
+	}
 	publicKey := keys.identity
 	if publicKey == nil {
 		return fmt.Errorf("%w: provider has no operator pin, enrollment, or claim", ErrInvalidPin)
@@ -868,6 +879,19 @@ func (a *PrivacyAuthority) verifiedCDHash(id privacySessionID) (string, bool) {
 		return "", false
 	}
 	return entry.cdhash, true
+}
+
+// sessionClaimChanged reports a claim that differs from the one this session
+// already advertised. A first claim, or a repeat of the same one, is not a
+// change.
+func (a *PrivacyAuthority) sessionClaimChanged(id privacySessionID, claim *PrivacyEnrollmentClaim) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	entry := a.sessions[id]
+	if entry == nil || entry.claim == nil {
+		return false
+	}
+	return claim == nil || *entry.claim != *claim
 }
 
 func (a *PrivacyAuthority) storeAdvertisement(id privacySessionID, attestations map[string]string, claim *PrivacyEnrollmentClaim) {
