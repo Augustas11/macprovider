@@ -3394,10 +3394,10 @@ actor ModelRuntime: ModelRuntimeServing {
         currentNativeMTPTupleOffer = nil
         currentNativeMTPSelfTestInput = nil
         currentNativeMTPDrafterContainer = nil
-        currentNativeMTPStatusSink = NativeMTPStatusSink.disabled(
+        currentNativeMTPStatusSink.adopt(NativeMTPStatusSink.disabled(
             resetGeneration: UInt64(max(0, currentSpecDecodeGeneration)),
             reason: reason
-        )
+        ))
     }
 
     private func startNativeMTPRevocationRefresh(load: NativeMTPRuntimeLoadResult) {
@@ -4448,26 +4448,26 @@ actor ModelRuntime: ModelRuntimeServing {
         reasonIfDisabled: NativeMTPStatusReason = .warmSwap
     ) {
         guard nativeMTPStatusResetGeneration < UInt64.max else {
-            currentNativeMTPStatusSink = NativeMTPStatusSink.disabled(
+            currentNativeMTPStatusSink.adopt(NativeMTPStatusSink.disabled(
                 resetGeneration: UInt64.max,
                 reason: .runtimeFailure
-            )
+            ))
             return
         }
         nativeMTPStatusResetGeneration += 1
         if capability == nil || admissionCapability == nil {
-            currentNativeMTPStatusSink = NativeMTPStatusSink.disabled(
+            currentNativeMTPStatusSink.adopt(NativeMTPStatusSink.disabled(
                 resetGeneration: nativeMTPStatusResetGeneration,
                 reason: nativeMTPMode == .auto ? reasonIfDisabled : .disabledByDefault
-            )
+            ))
             return
         }
-        currentNativeMTPStatusSink = Self.nativeMTPStatusSink(
+        currentNativeMTPStatusSink.adopt(Self.nativeMTPStatusSink(
             capability: capability,
             admissionCapability: admissionCapability,
             mode: nativeMTPMode,
             resetGeneration: nativeMTPStatusResetGeneration
-        )
+        ))
     }
 
     /// The serve path's scheduler configuration, shared by initial load and
@@ -6278,6 +6278,7 @@ actor ModelRuntime: ModelRuntimeServing {
             cachedPromptTokens: lease?.cachedPromptTokens,
             keyedRowsCommitSerialFormat: prepared.modelHasRecurrentLayers && !continuousBatchingCachedTurns
         )
+        CBTrace.log(schedulerRequestID, "rt_native path=\(nativeMTPAdmission.effectivePath.rawValue) reason=\(nativeMTPAdmission.selection.nativeMTPReason?.rawValue ?? "-") cache_only=\(request.conversationCacheOnly)")
         recordNativeMTPTokenBoundDowngrade(
             requestID: request.requestID,
             admitted: tokenBoundedNativeMTPAdmission,
@@ -6605,6 +6606,7 @@ actor ModelRuntime: ModelRuntimeServing {
             cachedPromptTokens: lease?.cachedPromptTokens,
             keyedRowsCommitSerialFormat: prepared.modelHasRecurrentLayers && !continuousBatchingCachedTurns
         )
+        CBTrace.log(schedulerRequestID, "rt_native path=\(nativeMTPAdmission.effectivePath.rawValue) reason=\(nativeMTPAdmission.selection.nativeMTPReason?.rawValue ?? "-") cache_only=\(request.conversationCacheOnly)")
         recordNativeMTPTokenBoundDowngrade(
             requestID: request.requestID,
             admitted: tokenBoundedNativeMTPAdmission,

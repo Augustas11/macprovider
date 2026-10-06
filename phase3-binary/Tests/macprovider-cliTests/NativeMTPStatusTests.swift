@@ -53,6 +53,45 @@ final class NativeMTPStatusTests: XCTestCase {
         )
     }
 
+    /// The scheduler keeps the sink it was built with. Publishing the tuple
+    /// after the self-test must reach that same instance, or every native
+    /// round is recorded into an object status never reads.
+    func testAdoptRepublishesIntoTheInstanceTheSchedulerHolds() {
+        let schedulerHeld = NativeMTPStatusSink.disabled(resetGeneration: 1, reason: .tupleNotAdmitted)
+        schedulerHeld.adopt(NativeMTPStatusSink(
+            supported: true,
+            enabled: true,
+            family: "qwen3_5_mtp_v1",
+            proposalDepth: 1,
+            throughputDeltaPPM: 14,
+            resetGeneration: 2,
+            lastReason: .active
+        ))
+        var snapshot = schedulerHeld.snapshot()
+        XCTAssertTrue(snapshot.enabled)
+        XCTAssertEqual(snapshot.resetGeneration, 2)
+        XCTAssertEqual(snapshot.acceptedByPosition, [0])
+        schedulerHeld.recordNativeMTPAdmission()
+        schedulerHeld.recordRound(NativeMTPStatusSink.Round(
+            requestedDepths: [1],
+            proposedTokens: 1,
+            acceptedTokens: 1,
+            bonusTokens: 1,
+            committedTokens: 2,
+            acceptedProposalTokensByRow: [1],
+            verificationOverheadMS: 0
+        ))
+        snapshot = schedulerHeld.snapshot()
+        XCTAssertEqual(snapshot.requestsSinceReset, 1)
+        XCTAssertEqual(snapshot.committedTokens, 2)
+
+        schedulerHeld.adopt(NativeMTPStatusSink.disabled(resetGeneration: 3, reason: .tupleRevoked))
+        snapshot = schedulerHeld.snapshot()
+        XCTAssertFalse(snapshot.enabled)
+        XCTAssertEqual(snapshot.lastReason, .tupleRevoked)
+        XCTAssertEqual(snapshot.requestsSinceReset, 0)
+    }
+
     func testRequestsSinceResetCountsNativeAdmissionOnceAcrossMultipleRounds() {
         let sink = NativeMTPStatusSink(
             supported: true,
