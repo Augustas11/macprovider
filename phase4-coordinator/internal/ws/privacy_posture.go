@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -11,6 +12,8 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/relayblind"
 )
+
+var errPrivacySessionReplaced = errors.New("privacy posture: session replaced before verification")
 
 // runPrivacyPostureLoop probes sessions that hold fresh privacy keys.
 // Eligibility is entirely in the authority; this loop only delivers challenges.
@@ -117,7 +120,19 @@ func (s *Server) runPrivacyPostureProbe(provider pool.Provider) {
 	defer timer.Stop()
 	select {
 	case payload := <-ch:
-		if err := s.privacyAuthority.VerifyPosture(context.Background(), provider.ProviderID, provider.AssignedID, nonce, payload, provider.SEPublicKey, s.now()); err != nil {
+		// Session replacement holds the provider section, so verifying (and
+		// possibly enrolling) inside it with a current-session check means a
+		// replaced session can never write an enrollment (SPEC-049-R025).
+		var err error
+		s.withProviderSection(provider.ProviderID, func(*providerSection) {
+			if _, ok := s.pool.Resolve(provider.ProviderID, provider.AssignedID); !ok {
+				s.privacyAuthority.NoteChallengeTimeout(provider.ProviderID, provider.AssignedID)
+				err = errPrivacySessionReplaced
+				return
+			}
+			err = s.privacyAuthority.VerifyPosture(context.Background(), provider.ProviderID, provider.AssignedID, nonce, payload, provider.SEPublicKey, s.now())
+		})
+		if err != nil {
 			s.log.Warn().Err(err).Str("provider_id", provider.ProviderID).Msg("privacy posture: response rejected")
 		}
 	case <-timer.C:

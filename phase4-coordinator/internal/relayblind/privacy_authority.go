@@ -57,11 +57,12 @@ type PrivacyAuthority struct {
 	releaseKey *ecdsa.PublicKey
 	directory  *IdentityDirectoryService
 
-	mu         sync.Mutex
-	sessions   map[privacySessionID]*privacySession
-	epochs     map[string]uint64
-	closedGen  map[privacySessionID]uint64
-	generation uint64
+	mu                sync.Mutex
+	pendingQuarantine map[string]string
+	sessions          map[privacySessionID]*privacySession
+	epochs            map[string]uint64
+	closedGen         map[privacySessionID]uint64
+	generation        uint64
 }
 
 type privacySessionID struct {
@@ -161,21 +162,22 @@ func NewPrivacyAuthority(store *Store, cfg config.PrivacyClassConfig, identityPi
 		quarantine = 86400
 	}
 	authority := &PrivacyAuthority{
-		store:           store,
-		sePins:          sePins,
-		identity:        identity,
-		identities:      append([]config.ApprovedCodeIdentity(nil), cfg.ApprovedCodeIdentities...),
-		denied:          denied,
-		backends:        backends,
-		interval:        interval,
-		maxAge:          maxAge,
-		timeout:         timeout,
-		quarantine:      quarantine,
-		maxRecords:      maxRecords,
-		replayRetention: replayRetention,
-		sessions:        make(map[privacySessionID]*privacySession),
-		epochs:          make(map[string]uint64),
-		closedGen:       make(map[privacySessionID]uint64),
+		store:             store,
+		sePins:            sePins,
+		identity:          identity,
+		identities:        append([]config.ApprovedCodeIdentity(nil), cfg.ApprovedCodeIdentities...),
+		denied:            denied,
+		backends:          backends,
+		interval:          interval,
+		maxAge:            maxAge,
+		timeout:           timeout,
+		quarantine:        quarantine,
+		maxRecords:        maxRecords,
+		replayRetention:   replayRetention,
+		sessions:          make(map[privacySessionID]*privacySession),
+		epochs:            make(map[string]uint64),
+		closedGen:         make(map[privacySessionID]uint64),
+		pendingQuarantine: make(map[string]string),
 	}
 	// SPEC-049-R027: a configured release signing key that cannot be read
 	// or parsed is a startup failure, never a silent empty approval set.
@@ -280,7 +282,7 @@ func (a *PrivacyAuthority) AcceptPrivacyKeysWithClaim(ctx context.Context, provi
 	if len(recs) > a.maxRecords {
 		return ErrCapacity
 	}
-	quarantined, err := a.store.IsQuarantined(ctx, providerID, now)
+	quarantined, err := a.isQuarantined(ctx, providerID, now)
 	if err != nil {
 		return err
 	}
@@ -590,7 +592,7 @@ func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, sessio
 		a.NoteChallengeTimeout(providerID, session)
 		return privacyReject("privacy_class_disabled")
 	}
-	quarantined, err := a.store.IsQuarantined(ctx, providerID, now)
+	quarantined, err := a.isQuarantined(ctx, providerID, now)
 	if err != nil {
 		a.NoteChallengeTimeout(providerID, session)
 		return err
@@ -600,8 +602,28 @@ func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, sessio
 		return ErrPrivacyQuarantined
 	}
 	if keys.needsEnrollment() {
-		// SPEC-049-R025: the enrollment is durable before this posture
-		// counts as verified.
+		// SPEC-049-R025: only a still-current session whose listed keys are
+		// still fresh may enroll. A replaced session, or one whose keys a
+		// concurrent reenroll revoked, cannot write an enrollment.
+		if !a.postureStillCurrent(id, snap) {
+			return privacyReject("posture_closed")
+		}
+		if len(statement.PrivacyKeyRecordDigests) == 0 {
+			a.NoteChallengeTimeout(providerID, session)
+			return privacyReject("posture_keys_stale")
+		}
+		for _, digest := range statement.PrivacyKeyRecordDigests {
+			fresh, err := a.store.PrivacyKeyFresh(ctx, providerID, session, digest, now)
+			if err != nil {
+				a.NoteChallengeTimeout(providerID, session)
+				return err
+			}
+			if !fresh {
+				a.NoteChallengeTimeout(providerID, session)
+				return privacyReject("posture_keys_stale")
+			}
+		}
+		// The enrollment is durable before this posture counts as verified.
 		err := a.store.EnrollPrivacyIdentity(ctx, PrivacyEnrollment{
 			ProviderID:          providerID,
 			IdentityPublicKey:   encodeBase64URL(idPub),
@@ -657,7 +679,7 @@ func (a *PrivacyAuthority) Eligible(providerID, session, keyDigest string, now t
 	if err != nil || disabled {
 		return time.Time{}, false
 	}
-	quarantined, err := a.store.IsQuarantined(ctx, providerID, now)
+	quarantined, err := a.isQuarantined(ctx, providerID, now)
 	if err != nil || quarantined {
 		return time.Time{}, false
 	}
@@ -806,6 +828,13 @@ func (a *PrivacyAuthority) recordQuarantine(ctx context.Context, providerID stri
 	// posture failure never leaves the live session eligible.
 	writeErr := a.store.QuarantineAndRevokePrivacy(ctx, providerID, reason, now, dur, a.replayRetention)
 	a.mu.Lock()
+	// A failed durable write keeps an in-memory latch that blocks the
+	// provider and retries the write until it lands.
+	if writeErr != nil {
+		a.pendingQuarantine[providerID] = reason
+	} else {
+		delete(a.pendingQuarantine, providerID)
+	}
 	a.epochs[providerID]++
 	epoch := a.epochs[providerID]
 	for id, entry := range a.sessions {
@@ -846,6 +875,35 @@ func (a *PrivacyAuthority) consumeChallenge(id privacySessionID, nonce, statemen
 	entry.hasNonce = false
 	entry.nonce = ""
 	return snap, true
+}
+
+// isQuarantined is the durable quarantine plus the in-memory latch of a
+// quarantine whose durable write failed. A latched provider stays
+// quarantined; each check retries the durable write.
+func (a *PrivacyAuthority) isQuarantined(ctx context.Context, providerID string, now time.Time) (bool, error) {
+	a.mu.Lock()
+	reason, latched := a.pendingQuarantine[providerID]
+	a.mu.Unlock()
+	if latched {
+		dur := time.Duration(a.quarantine) * time.Second
+		if err := a.store.QuarantineAndRevokePrivacy(ctx, providerID, reason, now, dur, a.replayRetention); err == nil {
+			a.mu.Lock()
+			delete(a.pendingQuarantine, providerID)
+			a.mu.Unlock()
+		}
+		return true, nil
+	}
+	return a.store.IsQuarantined(ctx, providerID, now)
+}
+
+// postureStillCurrent reports whether the session that received the
+// challenge is still the live, unreplaced one the snapshot was taken from.
+func (a *PrivacyAuthority) postureStillCurrent(id privacySessionID, snap postureSnapshot) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	entry := a.sessions[id]
+	return entry != nil && entry.generation == snap.generation && entry.boundGen == snap.boundGen &&
+		entry.epoch == snap.epoch && a.epochs[id.providerID] == snap.epoch && a.closedGen[id] == snap.boundGen
 }
 
 func (a *PrivacyAuthority) commitPosture(id privacySessionID, snap postureSnapshot, statement PostureStatement, now time.Time) bool {

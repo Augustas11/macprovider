@@ -324,6 +324,77 @@ func TestUnenrolledSessionClaimChangeRevokes(t *testing.T) {
 	}
 }
 
+// A response from a session dropped (replaced) after its challenge, or whose
+// keys a concurrent reenroll revoked, never writes an enrollment.
+func TestEnrollmentFencedForStaleSessionAndRevokedKeys(t *testing.T) {
+	t.Run("dropped session", func(t *testing.T) {
+		f := newEnrollmentFixture(t, nil)
+		if err := f.acceptClaim(); err != nil {
+			t.Fatal(err)
+		}
+		nonce, issued, err := f.auth.BeginChallenge(f.providerID, f.session, f.now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.auth.DropSession(f.providerID, f.session)
+		err = f.auth.VerifyPosture(context.Background(), f.providerID, f.session, nonce, f.response(f.statement(nonce, 0, issued)), nil, f.now)
+		if err == nil {
+			t.Fatal("dropped session verified")
+		}
+		if _, ok := activeEnrollment(t, f); ok {
+			t.Fatal("dropped session enrolled")
+		}
+	})
+	t.Run("keys revoked by reenroll", func(t *testing.T) {
+		f := newEnrollmentFixture(t, nil)
+		if err := f.acceptClaim(); err != nil {
+			t.Fatal(err)
+		}
+		nonce, issued, err := f.auth.BeginChallenge(f.providerID, f.session, f.now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.store.ReenrollPrivacyProvider(context.Background(), f.providerID, "operator", f.now, 5*time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		mustReject(t, f.auth.VerifyPosture(context.Background(), f.providerID, f.session, nonce, f.response(f.statement(nonce, 0, issued)), nil, f.now), "posture_keys_stale")
+		if _, ok := activeEnrollment(t, f); ok {
+			t.Fatal("in-flight posture enrolled keys a reenroll revoked")
+		}
+	})
+}
+
+// A quarantine whose durable write fails is latched in memory: the provider
+// stays quarantined and the write is retried until it lands.
+func TestQuarantineWriteFailureLatchesUntilDurable(t *testing.T) {
+	f := newEnrollmentFixture(t, nil)
+	if err := f.acceptClaim(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.posture(0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.db.Exec(`DROP TABLE relay_blind_reservations`); err != nil {
+		t.Fatal(err)
+	}
+	f.rekey(0x64)
+	if err := f.acceptClaim(); err == nil {
+		t.Fatal("key change accepted while the quarantine write failed")
+	}
+	if q, err := f.auth.isQuarantined(context.Background(), f.providerID, f.now); err != nil || !q {
+		t.Fatalf("latched quarantine = %v, %v", q, err)
+	}
+	if err := f.store.migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if q, err := f.auth.isQuarantined(context.Background(), f.providerID, f.now); err != nil || !q {
+		t.Fatalf("retried quarantine = %v, %v", q, err)
+	}
+	if q, err := f.store.IsQuarantined(context.Background(), f.providerID, f.now); err != nil || !q {
+		t.Fatalf("durable quarantine after retry = %v, %v", q, err)
+	}
+}
+
 func TestEnrollmentRejectsKeyActiveForAnotherProvider(t *testing.T) {
 	f := newEnrollmentFixture(t, nil)
 	if err := f.acceptClaim(); err != nil {

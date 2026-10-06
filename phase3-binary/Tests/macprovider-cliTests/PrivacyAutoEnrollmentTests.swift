@@ -123,6 +123,36 @@ final class PrivacyAutoEnrollmentTests: XCTestCase {
         XCTAssertEqual(logged, ["privacy_class auto_hardening_failed reasons=pt_deny_attach\n"])
     }
 
+    func testConfigurationChangedBetweenReadsNeverServesUncheckedPrivacy() throws {
+        let checked = try autoTempConfig("")
+        let changed = try autoTempConfig("relay_blind_state_directory: /tmp/macprovider-other-state\n")
+        defer {
+            try? FileManager.default.removeItem(at: checked)
+            try? FileManager.default.removeItem(at: changed)
+        }
+        var logged: [String] = []
+        let resolved = try ServeCommand.resolveServeConfig(
+            load: { resolveCredentials in
+                try ConfigLoader.load(cli: CLIOverrides(configPath: (resolveCredentials ? changed : checked).path), environment: [:], resolveCredentials: resolveCredentials)
+            },
+            canonicalReexec: { _ in },
+            harden: { _ in XCTFail("forced-mode hardening ran in automatic mode") },
+            automatic: PrivacyAutoEnrollmentHooks(eligibility: { _ in [] }, harden: { _ in [] }, log: { logged.append($0) })
+        )
+        XCTAssertFalse(resolved.privacyClassBeta)
+        XCTAssertEqual(logged, ["privacy_class auto_hardening_failed reasons=configuration_changed\n"])
+
+        XCTAssertThrowsError(try ServeCommand.resolveServeConfig(
+            load: { resolveCredentials in
+                try ConfigLoader.load(cli: CLIOverrides(configPath: (resolveCredentials ? changed : checked).path, privacyClassBeta: true), environment: [:], resolveCredentials: resolveCredentials)
+            },
+            canonicalReexec: { _ in },
+            harden: { _ in }
+        )) { error in
+            XCTAssertEqual(error as? PrivacyAutoEnrollmentError, .configurationChanged)
+        }
+    }
+
     func testOptOutAndMissingHooksNeverRunAutomaticMode() throws {
         let yaml = try autoTempConfig("relay_blind_enabled: false\n")
         defer { try? FileManager.default.removeItem(at: yaml) }

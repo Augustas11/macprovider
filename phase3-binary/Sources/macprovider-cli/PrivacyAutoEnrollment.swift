@@ -21,7 +21,23 @@ struct PrivacyAutoEnrollmentHooks {
     var log: (String) -> Void
 }
 
+enum PrivacyAutoEnrollmentError: Error, Equatable {
+    /// The configuration changed between the checked read and the serving read.
+    case configurationChanged
+}
+
 enum PrivacyAutoEnrollment {
+    /// Every input the eligibility check and the R007 hardening read from
+    /// configuration. Two snapshots that agree here were checked equally.
+    static func sameEligibilityInputs(_ checked: AppConfig, _ serving: AppConfig) -> Bool {
+        checked.privacyClassBeta == serving.privacyClassBeta
+            && checked.relayBlindEnabled == serving.relayBlindEnabled
+            && checked.privacyClassRequested == serving.privacyClassRequested
+            && checked.relayBlindRequested == serving.relayBlindRequested
+            && checked.relayBlindStateDirectory == serving.relayBlindStateDirectory
+            && checked.kvDiskCache.enabled == serving.kvDiskCache.enabled
+            && checked.model == serving.model
+    }
     /// Default relay-blind state directory for automatic and forced mode
     /// when none is configured. It sits beside the provider config, outside
     /// any install or repository directory.
@@ -66,8 +82,11 @@ enum PrivacyAutoEnrollment {
         "privacy_class auto_hardening_failed reasons=\(reasons.isEmpty ? "unspecified" : reasons.joined(separator: ","))\n"
     }
 
-    /// Production hooks. Read-only checks run first, so a dev, unsigned, or
-    /// SIP-off host never creates a Secure Enclave key or state directory.
+    /// Production hooks. The process-state checks run first and never call
+    /// `ptrace` or `setrlimit`, so a dev, unsigned, or SIP-off host never
+    /// creates a Secure Enclave key or state directory. Only an eligible host
+    /// loads or creates them (SPEC-049-R024); they persist if the later
+    /// hardening fails, which is harmless for ordinary serving.
     static var live: PrivacyAutoEnrollmentHooks { PrivacyAutoEnrollmentHooks(
         eligibility: { config in
             var reasons = PrivacyRuntimeHardening.automaticEligibilityFailures(syscalls: .live, config: config)

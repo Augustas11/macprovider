@@ -77,6 +77,7 @@ enum PrivacyHardeningCode {
     static let notArm64 = "not_arm64"
     static let seIdentityUnavailable = "se_identity_unavailable"
     static let stateDirectoryUnavailable = "state_directory_unavailable"
+    static let configurationChanged = "configuration_changed"
 }
 
 enum PrivacySIP {

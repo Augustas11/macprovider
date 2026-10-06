@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
 )
@@ -109,7 +110,7 @@ func readReleaseIdentityFile(path string) ([]byte, error) {
 	if err != nil || !info.Mode().IsRegular() || info.Size() > maxReleaseIdentityFileBytes {
 		return nil, errors.New("not a bounded regular file")
 	}
-	file, err := os.Open(path)
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}

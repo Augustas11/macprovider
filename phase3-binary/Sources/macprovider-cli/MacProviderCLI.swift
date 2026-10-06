@@ -2000,7 +2000,12 @@ struct ServeCommand: AsyncParsableCommand {
             let candidate = PrivacyAutoEnrollment.withStateDirectory(bootstrap)
             try canonicalReexec(candidate)
             try harden(candidate)
-            return PrivacyAutoEnrollment.withStateDirectory(try load(true))
+            let final = PrivacyAutoEnrollment.withStateDirectory(try load(true))
+            // The checked snapshot must be the one that serves.
+            guard PrivacyAutoEnrollment.sameEligibilityInputs(candidate, final) else {
+                throw PrivacyAutoEnrollmentError.configurationChanged
+            }
+            return final
         case .off:
             return try ordinary()
         case .automatic:
@@ -2019,7 +2024,15 @@ struct ServeCommand: AsyncParsableCommand {
                 automatic.log(PrivacyAutoEnrollment.hardeningFailedLine(hardeningFailures))
                 return try load(true)
             }
-            return PrivacyAutoEnrollment.enable(try load(true))
+            let final = try load(true)
+            // The checked snapshot must be the one that serves; a change
+            // between the two reads falls back to ordinary serving.
+            guard PrivacyAutoEnrollment.mode(final) == .automatic,
+                  PrivacyAutoEnrollment.sameEligibilityInputs(candidate, PrivacyAutoEnrollment.enable(final)) else {
+                automatic.log(PrivacyAutoEnrollment.hardeningFailedLine([PrivacyHardeningCode.configurationChanged]))
+                return final
+            }
+            return PrivacyAutoEnrollment.enable(final)
         }
     }
 

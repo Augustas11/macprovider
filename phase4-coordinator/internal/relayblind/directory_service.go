@@ -247,6 +247,12 @@ func GenerateIdentityDirectorySigningKey(path string) (ed25519.PublicKey, error)
 		_ = os.Remove(path)
 		return nil, errors.New("relayblind: write directory signing key failed")
 	}
+	// Mode is fixed on the open descriptor, never by path after close.
+	if err := file.Chmod(0o600); err != nil {
+		file.Close()
+		_ = os.Remove(path)
+		return nil, errors.New("relayblind: chmod directory signing key failed")
+	}
 	if err := file.Sync(); err != nil {
 		file.Close()
 		_ = os.Remove(path)
@@ -255,10 +261,6 @@ func GenerateIdentityDirectorySigningKey(path string) (ed25519.PublicKey, error)
 	if err := file.Close(); err != nil {
 		_ = os.Remove(path)
 		return nil, errors.New("relayblind: close directory signing key failed")
-	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		_ = os.Remove(path)
-		return nil, errors.New("relayblind: chmod directory signing key failed")
 	}
 	return ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey), nil
 }
