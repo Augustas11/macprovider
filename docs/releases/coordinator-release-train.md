@@ -81,7 +81,7 @@ A coordinator deploy compares the tag's catalog with live (`compare-live`):
 ### Active rollout — 2026-10-06
 
 Owner: Codex privacy/Pearl handoff session (`codex/privacy-pearl-20261006`).
-Reserved runtime identity: **v1.8.220**; CLI candidate 219 is already staged.
+Applied runtime identity: **v1.8.220**; CLI candidate 219 is already staged.
 Payload: current reviewed `main`, including #1872 privacy capacity waiting.
 Preflight at takeover: coordinator and gateway both report **v1.8.218**;
 catalog is `published-2026-10-01-artifact-feed-activation-v1`; recommendation
@@ -91,23 +91,33 @@ a required DB copy plus 40 seconds for restart; an unchanged signed schema
 fingerprint permits skipping the copy. Catalog activation is a separate gate.
 Signed tag **v1.8.220** targets `6d49a4f16`; local `git verify-tag` passed.
 Runtime [run 37468267969](https://github.com/Augustas11/macprovider/actions/runs/37468267969)
-is waiting at the protected `production-release` environment for independent
-`antfleet-ops` approval. GitHub reports the dispatching identity cannot approve.
-No runtime is published or applied; Pearl remains on v1.8.218. The session has
-released Pearl without changing production. After approval, require successful
-publication, signed updater `--plan --tag v1.8.220`, and a fresh lock/health
-preflight before applying. Loaded buyer privacy verification remains pending.
+was approved through `antfleet-ops` under explicit operator instruction and
+published successfully at 13:14:48Z. The signed updater plan passed; apply
+started at 13:15:29Z and reported `rollout_completed success` at 13:18:43Z.
+Both public health endpoints report v1.8.220. The DB copy was required because
+the old durable release record had no schema fingerprint. Gateway stopped at
+13:15:39Z and started at 13:18:27Z (2m48s); public TLS health was verified at
+13:18:43Z (3m04s from stop). Coordinator stopped at 13:16:08Z and started at
+13:18:20Z (2m12s). Catalog and recommendation remain unchanged; no provider
+process was restarted and the concurrency-8 buyer runner remained active.
 
-The older release table below is historical and has not yet been reconciled.
-Probed 2026-10-02 (`/healthz`).
+Loaded privacy canaries do **not** yet prove buyer success: non-stream rejected
+after a 3-second capacity wait with `relay_blind_provider_unsupported`; stream
+waited 3 seconds and dispatched, but the 90-second client deadline produced
+`relay_blind_execution_uncertain`. Neither returned `privacy class satisfied`.
+This confirms capacity is no longer mislabeled as posture-stale, but does not
+close the loaded buyer privacy acceptance gate. A fresh-session, five-minute
+stream canary is pending. Batching remains off under the empty signed policy.
+
+Probed 2026-10-06 (`/healthz`). Older rollout narrative below is historical.
 
 | Field | Value |
 |---|---|
-| Coordinator | **v1.8.211** @ `5550efd47`. Applied 2026-10-02 at 13:12Z through the signed runtime updater; local and public `/healthz` reported `v1.8.211`. |
-| Gateway | **v1.8.211** (`gateway.db` schema 17; `coordinator.require_settlement_trailers: true`). The live `api.malibu.tech` nginx carries certbot TLS and `/ws/provider` routes absent from the repo template. **Never run the gateway `deploy-pearl-vps.sh`**; use the signed runtime updater for binary-only releases. |
-| Release | [Pearl runtime v1.8.211](https://github.com/Augustas11/macprovider/releases/tag/v1.8.211), immutable runtime-only prerelease; build run [37007168564](https://github.com/Augustas11/macprovider/actions/runs/37007168564). The apply preserved the live September 25 catalog; no full deploy followed it. |
+| Coordinator | **v1.8.220** @ `6d49a4f16`. Signed runtime updater completed 2026-10-06 at 13:18:43Z; public `/healthz` reports `v1.8.220`. |
+| Gateway | **v1.8.220**. The live nginx configuration was preserved. **Never run the gateway `deploy-pearl-vps.sh`**; use the signed runtime updater for binary-only releases. |
+| Release | [Pearl runtime v1.8.220](https://github.com/Augustas11/macprovider/releases/tag/v1.8.220), immutable runtime-only prerelease; build run [37468267969](https://github.com/Augustas11/macprovider/actions/runs/37468267969). The apply preserved the live October 1 artifact-feed catalog; no full deploy followed it. |
 | `recommended_binary_version` | 1.8.207 (CLI train owns this) |
-| Includes | Everything on `main` through `5550efd47`, including #1801, #1812, #1818, #1822/#1823/#1825, #1831 and #1833. |
+| Includes | Reviewed `main` through `6d49a4f16`, including #1872 relay-blind capacity waiting. |
 | nginx | `/v1/stats/routability` route added on Pearl 2026-09-24 10:24Z, additively and verbatim from `phase4-coordinator/dist` (backups `*.bak-routability-20260924T102404Z`). Pearl's nginx still lags the repo on `/v1/catalog-artifacts`, `/v1/portal/session` and `/v1/provider/malibu-reward-audit`, and carries a hand-deployed `/v1/provider/model-admission/` (BYOM) route the repo lacks, so **do not copy the repo site file over it**. |
 
 Signed prerelease `v1.8.189` at `0ac51afa` exists and is immutable, but it was
@@ -133,6 +143,8 @@ The canary Mac mp-26592d… now runs signed CLI candidate v1.8.195, whose payloa
 
 | Tag | Commit | Head PR |
 |---|---|---|
+| v1.8.220 | `6d49a4f16` | #1872 privacy capacity waiting — **live**, loaded buyer success still unproven |
+| v1.8.218 | `e158347ef` | Previous live runtime; October 1 artifact-feed activation |
 | v1.8.211 | `5550efd4` | #1833 crash-safe bounded settlement maintenance — **live** |
 | v1.8.210 | `6756706b` | #1831 bounded SQLite evidence maintenance; also #1801, #1812, #1818 and runtime dependency updates |
 | v1.8.209 | `5245dc9f` | #1804 Qwen3.6 OpenRouter capabilities |
