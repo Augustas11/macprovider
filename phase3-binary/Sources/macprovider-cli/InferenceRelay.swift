@@ -425,11 +425,29 @@ actor InferenceRelay {
         }
 
         // #1690 BUG-2: the coordinator names the delivered prefix it binds.
-        // A missing or malformed value leaves the pre-boundary behaviour.
-        let deliveredOutputBytes = (message["delivered_output_bytes"] as? NSNumber)
-            .flatMap { Int64(exactly: $0.doubleValue) }
-            .flatMap { $0 >= 0 ? $0 : nil }
+        // An absent field leaves the pre-boundary behaviour; a present value
+        // that is not an exact non-negative Int64 fails closed (no receipt).
+        var deliveredOutputBytes: Int64?
+        if let raw = message["delivered_output_bytes"] {
+            deliveredOutputBytes = Self.strictDeliveredOutputBytes(raw) ?? RelayRequestState.invalidDeliveredOutputBytes
+        }
         request.state.cancel(deliveredOutputBytes: deliveredOutputBytes)
+    }
+
+    /// An exact non-negative integer that fits Int64. JSON booleans (bridged
+    /// as CFBoolean), any floating-point number (the coordinator encodes an
+    /// integer literal), decimal numbers out of Int64 range, and strings are
+    /// rejected.
+    static func strictDeliveredOutputBytes(_ raw: Any) -> Int64? {
+        guard let number = raw as? NSNumber,
+              !(number is NSDecimalNumber),
+              CFGetTypeID(number) == CFNumberGetTypeID(),
+              !CFNumberIsFloatType(number) else { return nil }
+        let value = number.int64Value
+        // The decimal round trip rejects a value the bridge truncated or
+        // wrapped to fit Int64.
+        guard number.stringValue == String(value), value >= 0 else { return nil }
+        return value
     }
 
     func cancelAll() {
@@ -2273,8 +2291,13 @@ private final class RelayRequestState: @unchecked Sendable {
         return cancelled
     }
 
+    /// A cancel_request whose `delivered_output_bytes` was present but not an
+    /// exact non-negative Int64: no prefix matches it, so no receipt.
+    static let invalidDeliveredOutputBytes: Int64 = -1
+
     /// The coordinator's delivered-prefix boundary from cancel_request, in
-    /// canonical delivered output bytes; nil when it sent none.
+    /// canonical delivered output bytes; nil when it sent none, and
+    /// `invalidDeliveredOutputBytes` when it sent a malformed value.
     var deliveredOutputBytes: Int64? {
         lock.lock()
         defer { lock.unlock() }
@@ -2441,6 +2464,9 @@ final class RelayStreamBatcher: @unchecked Sendable {
     /// closed). Without a boundary this is `deliveredContent(sent:)`.
     func deliveredContent(sent: Int, deliveredOutputBytes: Int64?) -> String? {
         guard let boundary = deliveredOutputBytes else { return deliveredContent(sent: sent) }
+        // A malformed boundary (RelayRequestState.invalidDeliveredOutputBytes)
+        // binds nothing.
+        guard boundary >= 0 else { return nil }
         lock.lock()
         defer { lock.unlock() }
         guard !emittedToolCall else { return nil }

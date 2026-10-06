@@ -2329,13 +2329,16 @@ final class RelayStreamBatcherConcurrencyTests: XCTestCase {
 final class RelayCancelDeliveredBoundaryTests: XCTestCase {
     private static let hash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
 
-    private func cancelledEndFrame(deliveredOutputBytes: Any?) async throws -> (end: [String: Any], key: Curve25519.Signing.PrivateKey) {
+    private func cancelledEndFrame(
+        deliveredOutputBytes: Any?,
+        prefixTable: [Int: Int] = [0: 0, 4: 1, 9: 2, 11: 3, 16: 4]
+    ) async throws -> (end: [String: Any], key: Curve25519.Signing.PrivateKey) {
         let runtime = FakeBoundaryCancelRuntime(servedSnapshot: RuntimeSnapshot(
             state: .ready,
             container: nil,
             modelID: "mlx-community/Test-Model",
             modelHash: Self.hash
-        ))
+        ), prefixTable: prefixTable)
         let status = ProviderStatus(
             modelID: "mlx-community/Test-Model",
             modelLoaded: true,
@@ -2422,14 +2425,46 @@ final class RelayCancelDeliveredBoundaryTests: XCTestCase {
     }
 
     func testNoBoundaryKeepsSigningEverythingSent() async throws {
-        for missing in [nil, "9" as Any, -1 as Any] {
-            let (end, key) = try await cancelledEndFrame(deliveredOutputBytes: missing)
-            let tuple = try signedTuple(end, key: key)
-            let usage = try XCTUnwrap(tuple["usage"] as? [String: Any])
-            XCTAssertEqual((usage["delivered_output_bytes"] as? NSNumber)?.int64Value, 16)
-            XCTAssertEqual((usage["billable_output_tokens"] as? NSNumber)?.int64Value, 4)
-            XCTAssertEqual(tuple["output_hash"] as? String, try buyerCancelOutputHash(content: "Once upon a time", start: 0))
+        let (end, key) = try await cancelledEndFrame(deliveredOutputBytes: nil)
+        let tuple = try signedTuple(end, key: key)
+        let usage = try XCTUnwrap(tuple["usage"] as? [String: Any])
+        XCTAssertEqual((usage["delivered_output_bytes"] as? NSNumber)?.int64Value, 16)
+        XCTAssertEqual((usage["billable_output_tokens"] as? NSNumber)?.int64Value, 4)
+        XCTAssertEqual(tuple["output_hash"] as? String, try buyerCancelOutputHash(content: "Once upon a time", start: 0))
+    }
+
+    /// The value as the CLI receives it: decoded by JSONSerialization.
+    private static func jsonValue(_ literal: String) throws -> Any {
+        let object = try JSONSerialization.jsonObject(with: Data(#"{"v":\#(literal)}"#.utf8)) as? [String: Any]
+        return try XCTUnwrap(object?["v"])
+    }
+
+    func testStrictDeliveredOutputBytesDecoding() throws {
+        for (literal, want) in [("0", Int64(0)), ("9", 9), ("9223372036854775807", Int64.max)] {
+            XCTAssertEqual(InferenceRelay.strictDeliveredOutputBytes(try Self.jsonValue(literal)), want, literal)
         }
+        for literal in ["true", "false", "9.5", "9.0", "1e3", "-1", "9223372036854775808", "18446744073709551616",
+                        "1e30", #""9""#, "null", "[9]"] {
+            XCTAssertNil(InferenceRelay.strictDeliveredOutputBytes(try Self.jsonValue(literal)), literal)
+        }
+        XCTAssertNil(InferenceRelay.strictDeliveredOutputBytes(true))
+    }
+
+    func testMalformedBoundarySignsNoReceipt() async throws {
+        for literal in ["true", "false", "9.5", "9.0", "-1", "18446744073709551616", #""9""#, "null"] {
+            let (end, _) = try await cancelledEndFrame(deliveredOutputBytes: try Self.jsonValue(literal))
+            XCTAssertNil(end["receipt"], "a present but malformed boundary fails closed: \(literal)")
+        }
+    }
+
+    // #1690: a loopback upstream that answered with a plain JSON body has no
+    // per-chunk counts (an empty prefix table); a partial delivery is never
+    // signed with the whole completion's usage.
+    func testPartialBoundaryWithoutAPrefixTableSignsNoReceipt() async throws {
+        let (end, _) = try await cancelledEndFrame(deliveredOutputBytes: 9, prefixTable: [:])
+        XCTAssertNil(end["receipt"])
+        let relayed = try XCTUnwrap(end["usage"] as? [String: Any])
+        XCTAssertNil(relayed["completion_tokens"], "usage for the prefix is unattested")
     }
 
     func testBatcherBoundaryMatchesCanonicalBytesOfSentFramesOnly() {
@@ -2457,9 +2492,11 @@ final class RelayCancelDeliveredBoundaryTests: XCTestCase {
 /// per-chunk completion count, then waits for the cancel.
 private actor FakeBoundaryCancelRuntime: ModelRuntimeServing {
     private let servedSnapshot: RuntimeSnapshot
+    private let prefixTable: [Int: Int]
 
-    init(servedSnapshot: RuntimeSnapshot) {
+    init(servedSnapshot: RuntimeSnapshot, prefixTable: [Int: Int]) {
         self.servedSnapshot = servedSnapshot
+        self.prefixTable = prefixTable
     }
 
     var loadedModelHash: String? { nil }
@@ -2487,7 +2524,7 @@ private actor FakeBoundaryCancelRuntime: ModelRuntimeServing {
             promptTokens: 5,
             completionTokens: 4,
             settlementDisposition: .eligibleOwner,
-            loopbackPrefixCompletionTokens: [0: 0, 4: 1, 9: 2, 11: 3, 16: 4]
+            loopbackPrefixCompletionTokens: prefixTable
         )
     }
 

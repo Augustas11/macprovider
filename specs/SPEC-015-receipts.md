@@ -4259,6 +4259,8 @@ attempt, so the `buyer_cancel` settlement output it records has exactly that
 length. A provider that receives the boundary MUST sign the `buyer_cancel`
 receipt over the prefix of its sent content with that canonical length, and
 only when that prefix ends at a content frame it sent; otherwise it MUST NOT
+sign. A boundary value that is present but is not an exact non-negative
+integer fitting a signed 64-bit integer binds nothing: the provider MUST NOT
 sign. The receipt's `delivered_output_bytes` still has to equal the
 coordinator's delivered prefix length for its usage to count.
 

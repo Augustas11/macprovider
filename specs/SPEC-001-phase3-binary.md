@@ -3036,8 +3036,16 @@ usage covers that prefix only (SPEC-015 §N.12 item 7). The prefix MUST end at
 the end of a content frame the provider sent, and no tool-call frame may have
 been sent; a value of `0` binds the empty prefix. When no sent content frame
 ends at the boundary, the provider MUST NOT issue a receipt for the attempt.
-Without the field the provider keeps the pre-v1.9.30 rule: it binds all
-content it sent.
+The value MUST be an exact non-negative JSON integer that fits a signed 64-bit
+integer; a present value that is not (a boolean, a fraction or other
+floating-point number, a negative or out-of-range number, a string, or `null`)
+binds nothing, and the provider MUST NOT issue a receipt for the attempt.
+Only an absent field keeps the pre-v1.9.30 rule: the provider binds all
+content it sent. For a loopback runtime the receipt's usage MUST be the
+upstream's attested count through exactly the bound prefix; when the upstream
+attested no per-chunk count for it (for example a plain, non-SSE JSON body
+and a partial delivery), the usage is unattested and the provider MUST NOT
+issue a receipt.
 
 **Provider behavior on receipt (reconciled v1.9.19 — advertised-capacity relay, no queue):**
 1. If the `request_id` is currently being processed: abort inference,
