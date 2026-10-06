@@ -104,7 +104,15 @@ grep -qF 'for _f in $CATALOG_RELEASE_FILES; do cp $DEPLOY_TMP/\$_f \$_preflight/
 
 # Preflight and staging must see the same release file set.
 release_files="$(sed -n 's/^CATALOG_RELEASE_FILES="\([^$"]*\)"$/\1/p' "$DEPLOY")"
-bound_files="$(sed -n 's/^  CATALOG_RELEASE_FILES="\$CATALOG_RELEASE_FILES \([^"]*\)"$/\1/p' "$DEPLOY")"
+bound_files="$(sed -n 's/^  CATALOG_RELEASE_FILES="\$CATALOG_RELEASE_FILES \([^$"]*\)"$/\1/p' "$DEPLOY")"
+# SPEC-023 §12.5: the native-MTP set is staged by name from NATIVE_MTP_FILES.
+native_files="$(sed -n 's/^NATIVE_MTP_FILES="\([^"]*\)"$/\1/p' "$DEPLOY")"
+[ "$native_files" = "native-mtp-admission.json native-mtp-admission.json.sig native-mtp-artifact-manifest.json native-mtp-selftest-bank.json native-mtp-selftest-bank.json.sig" ] \
+  || fail "could not parse NATIVE_MTP_FILES"
+grep -qF '  CATALOG_RELEASE_FILES="$CATALOG_RELEASE_FILES $NATIVE_MTP_FILES"' "$DEPLOY" \
+  || fail "a native-MTP-bound release must add NATIVE_MTP_FILES to CATALOG_RELEASE_FILES"
+grep -qF '  install -o root -g macprovider -m 0640 $DEPLOY_TMP/$_native_file \$_autotune_stage/$_native_file"' "$DEPLOY" \
+  || fail "a native-MTP-bound release must stage every NATIVE_MTP_FILES member"
 [ -n "$release_files" ] && [ "$bound_files" = "autotune-artifacts.json autotune-artifacts.json.sig" ] \
   || fail "could not parse CATALOG_RELEASE_FILES (base and artifact-bound)"
 listed="$(printf '%s\n' $release_files $bound_files | sort)"

@@ -585,6 +585,32 @@ artifact_guard() { # <bound|unbound> <config>
     assert_artifact_feed_config_matches_release) >/dev/null 2>&1
 }
 artifact_guard bound "$artifact_guard_dir/bound.yaml" || fail "bound release with the pair must pass"
+# SPEC-023 §12.5: the six native-MTP keys follow the release binding too.
+python3 - "$artifact_guard_dir/bound.yaml" "$artifact_guard_dir/native.yaml" <<'PY'
+import sys
+lines = open(sys.argv[1]).read().splitlines()
+extra = [
+    "  native_mtp_admission_path: /opt/macprovider/autotune/current/native-mtp-admission.json",
+    "  native_mtp_admission_sig_path: /opt/macprovider/autotune/current/native-mtp-admission.json.sig",
+    "  native_mtp_artifact_manifest_path: /opt/macprovider/autotune/current/native-mtp-artifact-manifest.json",
+    "  native_mtp_selftest_bank_path: /opt/macprovider/autotune/current/native-mtp-selftest-bank.json",
+    "  native_mtp_selftest_bank_sig_path: /opt/macprovider/autotune/current/native-mtp-selftest-bank.json.sig",
+    "  native_mtp_revocations_dir: /opt/macprovider/native-mtp-revocations/current",
+]
+index = lines.index("tier2:")
+open(sys.argv[2], "w").write("\n".join(lines[:index] + extra + lines[index:]) + "\n")
+PY
+native_guard() { # <native bound|unbound> <config>
+  (AUTOTUNE_ARTIFACT_BOUND=bound AUTOTUNE_NATIVE_MTP_BOUND="$1" DEPLOY_CONFIG="$2"
+    # shellcheck disable=SC1091
+    . "$artifact_guard_dir/guard.sh"
+    assert_artifact_feed_config_matches_release) >/dev/null 2>&1
+}
+native_guard bound "$artifact_guard_dir/native.yaml" || fail "native-MTP-bound release with all six keys must pass"
+native_guard bound "$artifact_guard_dir/bound.yaml" && fail "native-MTP-bound release without its keys must fail"
+native_guard unbound "$artifact_guard_dir/native.yaml" && fail "native-MTP keys on an unbound release must fail"
+grep -v native_mtp_revocations_dir "$artifact_guard_dir/native.yaml" >"$artifact_guard_dir/native-partial.yaml"
+native_guard bound "$artifact_guard_dir/native-partial.yaml" && fail "a partial native-MTP key set must fail"
 artifact_guard unbound "$artifact_guard_dir/unbound.yaml" || fail "unbound release without the pair must pass"
 ! artifact_guard bound "$artifact_guard_dir/unbound.yaml" || fail "bound release without the pair must abort"
 ! artifact_guard unbound "$artifact_guard_dir/bound.yaml" || fail "unbound release with the pair must abort"
@@ -597,11 +623,16 @@ repo_root="$SCRIPT_DIR/../../.."
 smoke_names() { # <all|base> - feed names the deploy smoke fetches
   awk -v mode="$1" '
     /^STATIC_SMOKE_SPECS=\(/ { inside = 1; next }
-    /^  STATIC_SMOKE_SPECS\+=\(/ { inside = (mode == "all"); next }
+    /^  STATIC_SMOKE_SPECS\+=\(/ { inside = (mode == "all" || mode == "native"); next }
     inside && /^ *\)/ { inside = 0; next }
-    inside { split($0, part, "|"); print part[2] }
+    inside { split($0, part, "|"); if (mode == "native" || part[2] !~ /^native-mtp-/) print part[2] }
   ' "$DEPLOY_SH"
 }
+# SPEC-023 §12.5: a native-MTP-bound release smokes its admission set.
+[ "$(smoke_names native | grep -c '^native-mtp-')" -eq 5 ] ||
+  fail "deploy smoke must fetch the five native-MTP admission files for a native-MTP-bound release"
+grep -q 'native-MTP smoke failed: no current revocation slot' "$DEPLOY_SH" ||
+  fail "deploy smoke must require a current revocation slot for a native-MTP-bound release"
 grep -q '"/v1/catalog-artifacts|autotune-artifacts.json|$STATIC_ARTIFACTS_JSON"' "$DEPLOY_SH" &&
   grep -q '"/v1/catalog-artifacts.sig|autotune-artifacts.json.sig|$STATIC_ARTIFACTS_SIG"' "$DEPLOY_SH" ||
   fail "deploy smoke must fetch the served artifact feed for an artifact-bound release"

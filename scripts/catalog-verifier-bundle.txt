@@ -3,5 +3,6 @@
 # ship exactly this list; one repo-relative scripts/<name> path per line.
 scripts/catalog-release.py
 scripts/openrouter_pricing_engine.py
+scripts/native_mtp_admission_sidecar.py
 scripts/sign-catalog.go
 scripts/autotune_window.py

@@ -2523,6 +2523,11 @@ def load_native_mtp_sidecar_generator():
     return module
 
 
+# Loaded at import, like the pricing engine: the shipped verifier bundle must
+# carry the generator (scripts/catalog-verifier-bundle.txt).
+NATIVE_MTP_SIDECAR_GENERATOR = load_native_mtp_sidecar_generator()
+
+
 def validate_native_mtp_admission(
     sidecar: bytes,
     manifest_bytes: bytes,
@@ -2535,7 +2540,7 @@ def validate_native_mtp_admission(
     """SPEC-023 §12.5: the closed sidecar grammar (the generator's validator),
     bound to this release, its signer, its verified artifacts, and the exact
     projection-manifest and challenge-bank bytes every entry names."""
-    generator = load_native_mtp_sidecar_generator()
+    generator = NATIVE_MTP_SIDECAR_GENERATOR
     try:
         body = generator.validate_sidecar(generator.strict_json_loads(sidecar.decode("utf-8")))
     except (generator.SidecarError, UnicodeDecodeError) as error:
@@ -2585,7 +2590,7 @@ def resolve_native_mtp_admission(
         )
     if not tuple_present:
         return None
-    generator = load_native_mtp_sidecar_generator()
+    generator = NATIVE_MTP_SIDECAR_GENERATOR
     try:
         sidecar = generator.build(
             generator.strict_json_loads(NATIVE_MTP_TUPLE_INPUT_PATH.read_text("utf-8")),
