@@ -188,8 +188,12 @@ jobs:
           stats_inventory_sync_sha="$(shasum -a 256 stats-inventory-sync-linux-amd64 | awk '{print $1}')"
           stats_billing_mirror_sha="$(shasum -a 256 stats-billing-mirror-linux-amd64 | awk '{print $1}')"
           stats_hardware_verifier_sha="$(shasum -a 256 stats-hardware-verifier-linux-amd64 | awk '{print $1}')"
+          # Lets the Pearl updater skip its DB snapshot when the schema-bearing
+          # source is unchanged (ops/runbooks/pearl-release-updater.md).
+          database_schema_fingerprint="$(python3 scripts/pearl-database-schema-fingerprint.py --commit "$commit")"
           RELEASE_TAG="$tag" \
           RELEASE_COMMIT="$commit" \
+          DATABASE_SCHEMA_FINGERPRINT="$database_schema_fingerprint" \
           COORDINATOR_SHA="$coordinator_sha" \
           COORDINATOR_CLI_SHA="$coordinator_cli_sha" \
           GATEWAY_SHA="$gateway_sha" \
@@ -215,6 +219,7 @@ jobs:
               "commit": os.environ["RELEASE_COMMIT"],
               "architecture": "linux-amd64",
               "provider_admission_rollout": rollout,
+              "database_schema_fingerprint": os.environ["DATABASE_SCHEMA_FINGERPRINT"],
               "components": {
                   "coordinator": {
                       "asset": "coordinator-linux-amd64",

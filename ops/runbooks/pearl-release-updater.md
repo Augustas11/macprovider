@@ -535,7 +535,10 @@ to a steady zero, stops gateway
 then coordinator, and proves both inactive. Only after that full writer and
 service quiescence does it sequentially snapshot binaries, effective
 configuration, current release state, and SQLite databases and fsync the
-transaction. Every configured database gets an existence record, including
+transaction. Only the SQLite `.backup` copy runs with traffic stopped; the copy
+is checked after commit (see [Database snapshots](#database-snapshots)), and a
+release whose schema evidence is unchanged takes no database copy at all.
+Every snapshotted database gets an existence record, including
 databases that did not exist before the candidate. A pre-armed snapshot
 failure restores the exact captured backend versions, archive/stats units, and
 heartbeat state without touching a live binary, configuration file, or
@@ -613,6 +616,110 @@ or any service/file mutation. Once mutation begins, the phase journal and
 per-operation deadlines make reconciliation safe without an overriding
 systemd watchdog racing a bounded recovery step.
 
+## Database snapshots
+
+Measured on Pearl (2026-10-05/06), the 13 GB `coordinator.db` took ~2 minutes to
+`.backup` and 7-17 minutes to `PRAGMA integrity_check`, all with the network
+down. The updater now keeps only the copy inside the quiesced window.
+
+**SQLite binary.** One CLI runs `.backup`, `quick_check`, and schema reads:
+`PEARL_UPDATER_SQLITE_BIN` when set (a normalized absolute path), otherwise
+`/opt/macprovider-tools/sqlite-3.53.2/bin/sqlite3` when it exists and is
+executable, otherwise `sqlite3` from the fixed search path
+`/usr/local/bin:/usr/bin:/bin` (never the inherited `PATH`). The binary and every ancestor
+directory must be owned by root and not writable by group or other (a root-owned
+sticky directory is allowed). The updater selects it before traffic stops and
+logs the path, source, and `-version` output (audit event
+`sqlite_binary_selected`, plus stderr). Use the 3.53.2 build: the coordinator
+embeds modernc SQLite 3.53.2, and the system 3.45.1 CLI rounds `julianday()` of
+sub-millisecond timestamps differently, so its `integrity_check` falsely
+reported `idx_srao_drained_retention` rows missing and forced a rollback.
+
+**Check after commit.** The copy is checked with `PRAGMA quick_check` (not
+`integrity_check`), opened `mode=ro&immutable=1` so no `-wal`/`-shm` files are
+created beside it. The check runs after the release has passed every serving
+gate, success is persisted, the dead-man heartbeat is restored, and the phase
+journal is cleared. It runs then because the copy is only ever restored by a
+rollback of its own transaction, and that rollback checks the copy itself before
+restoring it (below). Checking before commit would add nothing to that
+rollback and would keep the healthy release armed for rollback, with the
+heartbeat paused, for the whole check. The updater still holds its lock, and
+therefore the deploy lock, until the check ends. If the updater crashes after
+the commit point, `--reconcile` carries the release forward and then runs the
+same pruning and check.
+
+- `rollback_point_verified`: every copy returned `ok`.
+- `rollback_point_unverified`: at least one copy failed or could not be checked.
+  The audit record carries the first 20 lines of output per database, and the
+  updater starts
+  `macprovider-pearl-updater-alert@macprovider-pearl-updater-rollback-point-unverified.service`,
+  which sends the critical Gmail alert. The committed release is never rolled
+  back or stopped for this. If the alert unit cannot be started, the updater
+  exits non-zero so its `OnFailure` alert fires instead. Then take a fresh
+  manual backup before the next rollout.
+
+**Restore-time check.** Before rollback restores any database, it runs
+`quick_check` on every copy in the transaction. If any copy fails, rollback
+restores none of them: the live databases, their WAL/SHM files, and any
+candidate-created database stay as they are, so the set stays consistent. It
+records `rollback_point_refused` with the output, starts
+`macprovider-pearl-updater-alert@macprovider-pearl-updater-rollback-point-refused.service`,
+and continues the rollback with binaries, configuration, and state. If the
+prior binaries cannot serve the candidate's schema, the serving proof fails and
+the normal rollback failure path and `OnFailure` alert apply.
+
+**Skip when the server source is unchanged.** The coordinator has no single
+schema version. Dozens of packages run idempotent DDL and backfills at startup,
+what the services persist also depends on code that never mentions SQL, and
+neither binary can report a target schema without migrating a database. So the
+evidence is a signed release-metadata field instead:
+`database_schema_fingerprint`. Both release workflows compute it with
+`scripts/pearl-database-schema-fingerprint.py` from the release commit. It is a
+sha256 over every tracked non-test file under `phase4-coordinator/` and
+`phase5-gateway/`: Go source, embedded assets, `.sql` files, and both modules'
+`go.mod`/`go.sum`. Equal fingerprints mean the server source is byte-identical,
+so the candidate cannot persist anything the installed release would not. In
+practice the copy is skipped for releases that change only the provider app,
+catalog, or other non-server files (for example v1.8.204 to v1.8.205 and
+v1.8.207 to v1.8.208). Run the script with `--explain` to list the files. The
+updater skips the database copy only when all of these hold. Otherwise it
+copies exactly as before.
+
+1. The candidate's signed metadata carries a fingerprint.
+2. `current-release.json` exists, and its `coordinator_sha256`/`gateway_sha256`
+   match the installed binaries. This rules out an out-of-band deploy.
+3. Its recorded `database_schema_fingerprint` equals the candidate's.
+4. Its recorded `database_schemas` names exactly the live database set. Each
+   live database's digest (read with `mode=ro` under quiesce) still equals the
+   digest recorded at that release's commit. The digest covers
+   `user_version`, `application_id`, `sqlite_master`, and the rows of every
+   table whose name contains `migration` or `schema_version` (for example the
+   gateway's `schema_migrations`, which can advance without DDL). This catches
+   a manual migration or a refused restore.
+
+Any error or missing piece means "copy". The decision is audited as
+`database_snapshot_skipped` or `database_snapshot_taken`, with the
+fingerprints, the schema digests, and the reason. A skipped transaction writes
+an empty `database-manifest.json`. Its rollback restores binaries,
+configuration, and state, and leaves the live databases untouched
+(`database_rollback skipped`). The fingerprint and the live schema digests are
+recorded in `current-release.json` at commit, but only when the release carries
+a fingerprint and every digest was readable. Releases published before this
+field existed, and the first rollout onto it, therefore always copy.
+
+**Retention.** After every successful commit, the updater keeps the
+`databases/` payloads (`N.sqlite` and any `-wal`/`-shm`) of the newest
+`PEARL_UPDATER_SNAPSHOT_RETENTION` transactions that still hold one (default 3,
+minimum 1). It deletes the payloads of older transactions under
+`/var/lib/macprovider-pearl-updater/transactions/<ns>-v<version>/`. The current
+release's own transaction, the transaction named in `current-release.json`, and
+any armed journal's transaction are never pruned. Manifests, binaries, and
+configuration copies stay for forensics. Each deletion is audited as
+`database_snapshot_pruned` with the files and bytes freed. A pruning error is
+audited and never fails the committed rollout. A pruned transaction can no
+longer pass `validate_transaction`; only the active transaction is ever
+restored automatically.
+
 ## Automatic rollback
 
 Any install, restart, semantic-health, provider-recovery, public-TLS, or buyer
@@ -625,9 +732,12 @@ ordered restore phase is journaled separately; reconciliation skips completed
 phases and idempotently retries the phase that was pending at a crash. After
 successful quiescence it atomically
 restores the previous
-binaries/configuration, removes SQLite WAL/SHM sidecars, restores integrity-
-checked pre-rollout database snapshots, and durably removes any database that
-the candidate created when it was absent before rollout. It starts the prior
+binaries/configuration, runs `PRAGMA quick_check` on every pre-rollout
+database copy, and only when all pass removes SQLite WAL/SHM sidecars, restores
+the copies, and durably removes any database that the candidate created when it
+was absent before rollout. If any copy fails the check, no database is touched
+(see [Database snapshots](#database-snapshots)). A transaction that skipped the
+database snapshot restores binaries, configuration, and state only. It starts the prior
 coordinator and proves its exact captured health version before starting and
 proving the prior gateway version; gateway remains stopped if coordinator
 restoration fails. Rollback then proves provider reconnect/warmup, gateway

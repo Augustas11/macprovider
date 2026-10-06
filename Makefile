@@ -162,6 +162,7 @@ test-dist:
 	bash -n scripts/lib/catalog-canary-token.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_autotune_feed_freshness
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_pearl_autotune_deploy_lock
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_pearl_database_schema_fingerprint
 	bash scripts/test-tier2-provider-artifact.sh
 	bash scripts/test-tier2-provider-release.sh
 	bash scripts/test-tier2-activation-safety.sh
