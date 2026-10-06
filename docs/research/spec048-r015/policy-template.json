@@ -11,7 +11,7 @@
   "xcode_build_version": "REPLACE_WITH_XCODE_BUILD_VERSION",
   "swift_version": "REPLACE_WITH_SWIFT_VERSION_FIRST_LINE",
   "provider_commit": "0000000000000000000000000000000000000000",
-  "mlx_fork_revision": "ca29e9544777068a0b53aad87310ff1cfaf3fd1d",
+  "mlx_fork_revision": "ca8c384c4fb6bc7d2fbb7c70a18c34b935701805",
   "quantization": "4bit",
   "cache_mode": "paged_kv_mixed",
   "proposal_depth": 1,
