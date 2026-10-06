@@ -1970,18 +1970,24 @@ struct ServeCommand: AsyncParsableCommand {
         return host == "localhost" || host == "127.0.0.1" || host == "::1"
     }
 
-    /// SPEC-049-R007 ordering. Privacy mode is decided from non-secret inputs
-    /// only (flag > `MACPROVIDER_PRIVACY_CLASS_BETA` > `privacy_class_beta`).
-    /// In privacy mode the canonical re-exec decision and hardening run on the
-    /// non-secret bootstrap before any provider credential is resolved.
-    /// Otherwise the order is unchanged: full load, then the re-exec decision.
+    /// SPEC-049-R007/R024 ordering. Privacy mode is decided from non-secret
+    /// inputs only (flag > `MACPROVIDER_PRIVACY_CLASS_BETA` > `privacy_class_beta`,
+    /// and an explicit `relay_blind_enabled: false` opts out). In privacy mode
+    /// the canonical re-exec decision and hardening run on the non-secret
+    /// bootstrap before any provider credential is resolved. Forced mode keeps
+    /// the hardening refusal. Automatic mode (unset, with `automatic` hooks)
+    /// enters privacy mode only when the read-only eligibility check and then
+    /// the hardening both pass, and otherwise serves ordinarily. Without hooks,
+    /// unset means off. Otherwise the order is unchanged: full load, then the
+    /// re-exec decision.
     static func resolveServeConfig(
         load: (_ resolveCredentials: Bool) throws -> AppConfig,
         canonicalReexec: (AppConfig) throws -> Void,
-        harden: (AppConfig) throws -> Void
+        harden: (AppConfig) throws -> Void,
+        automatic: PrivacyAutoEnrollmentHooks? = nil
     ) throws -> AppConfig {
         let bootstrap = try load(false)
-        guard bootstrap.privacyClassBeta else {
+        func ordinary() throws -> AppConfig {
             let resolved = try load(true)
             try canonicalReexec(resolved)
             if resolved.privacyClassBeta {
@@ -1989,9 +1995,32 @@ struct ServeCommand: AsyncParsableCommand {
             }
             return resolved
         }
-        try canonicalReexec(bootstrap)
-        try harden(bootstrap)
-        return try load(true)
+        switch PrivacyAutoEnrollment.mode(bootstrap) {
+        case .forced:
+            let candidate = PrivacyAutoEnrollment.withStateDirectory(bootstrap)
+            try canonicalReexec(candidate)
+            try harden(candidate)
+            return PrivacyAutoEnrollment.withStateDirectory(try load(true))
+        case .off:
+            return try ordinary()
+        case .automatic:
+            guard let automatic else { return try ordinary() }
+            let candidate = PrivacyAutoEnrollment.enable(bootstrap)
+            let ineligible = automatic.eligibility(candidate)
+            guard ineligible.isEmpty else {
+                automatic.log(PrivacyAutoEnrollment.ineligibleLine(ineligible))
+                return try ordinary()
+            }
+            try canonicalReexec(candidate)
+            let hardeningFailures = automatic.harden(candidate)
+            guard hardeningFailures.isEmpty else {
+                // Process-wide hardening already applied stays applied; the
+                // provider serves ordinarily and never advertises privacy keys.
+                automatic.log(PrivacyAutoEnrollment.hardeningFailedLine(hardeningFailures))
+                return try load(true)
+            }
+            return PrivacyAutoEnrollment.enable(try load(true))
+        }
     }
 
     func run() async throws {
@@ -2077,7 +2106,10 @@ struct ServeCommand: AsyncParsableCommand {
                     try? FileHandle.standardError.synchronize()
                     throw ExitCode(78)
                 }
-            }
+            },
+            // SPEC-049-R024: automatic mode only for a serving provider that
+            // joins the coordinator; autotune candidates and --no-join stay off.
+            automatic: autotuneCandidate || noJoin ? nil : PrivacyAutoEnrollment.live
         )
 
         // v1.8.53 can leave its one-shot reload helper alive long enough to

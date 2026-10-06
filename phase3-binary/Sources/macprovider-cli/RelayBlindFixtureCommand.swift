@@ -236,6 +236,10 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
             if let records = privacyResponder?.privacyKeyRecords() {
                 descriptor["privacy_key_records"] = records
             }
+            // SPEC-049 §4.10: the same claim the serving provider advertises.
+            if let claim = privacyResponder?.enrollmentClaim() {
+                descriptor["privacy_enrollment"] = claim
+            }
         }
         try await writer.write(descriptor)
 

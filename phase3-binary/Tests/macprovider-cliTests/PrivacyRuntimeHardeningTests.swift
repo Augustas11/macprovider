@@ -191,8 +191,16 @@ final class PrivacyRuntimeHardeningTests: XCTestCase {
         )
         XCTAssertTrue(cliOn.privacyClassBeta)
 
-        XCTAssertThrowsError(try ConfigLoader.load(
+        // SPEC-049-R024: forcing the class on turns relay-blind on unless it
+        // is explicitly off; explicitly off is a configuration error.
+        let forcedImplicitRelay = try ConfigLoader.load(
             cli: CLIOverrides(configPath: empty.path, privacyClassBeta: true),
+            environment: [:]
+        )
+        XCTAssertTrue(forcedImplicitRelay.privacyClassBeta)
+        XCTAssertTrue(forcedImplicitRelay.relayBlindEnabled)
+        XCTAssertThrowsError(try ConfigLoader.load(
+            cli: CLIOverrides(configPath: empty.path, relayBlindEnabled: false, privacyClassBeta: true),
             environment: [:]
         )) { error in
             guard case let ConfigError.invalidValue(key, value, _) = error else {

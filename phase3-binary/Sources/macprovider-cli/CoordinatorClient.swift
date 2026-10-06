@@ -7411,6 +7411,7 @@ actor CoordinatorClient {
     }
 
     /// Nil from the responder omits the field. An empty array is sent as an empty advertisement.
+    /// The SPEC-049 §4.10 enrollment claim rides beside a non-empty advertisement only.
     private func appendPrivacyKeyRecords(to message: inout [String: Any]) {
         guard appConfig.privacyClassBeta,
               let privacyPostureResponder,
@@ -7418,6 +7419,9 @@ actor CoordinatorClient {
             return
         }
         message["privacy_key_records"] = records
+        if !records.isEmpty, let claim = privacyPostureResponder.enrollmentClaim() {
+            message["privacy_enrollment"] = claim
+        }
     }
 
     /// Production SE failure exits. `CoordinatorClient.init` returning nil does not stop `serve`.

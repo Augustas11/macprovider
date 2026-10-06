@@ -149,6 +149,11 @@ final class PrivacyPostureResponderTests: XCTestCase {
             let attestation = try XCTUnwrap(records[0]["privacy_key_attestation"] as? [String: Any])
             XCTAssertEqual(attestation["code_cdhash"] as? String, probe.observation.codeCDHash)
             XCTAssertEqual(attestation["binary_version"] as? String, CoordinatorClient.binaryVersion)
+            // SPEC-049 §4.10: the enrollment claim rides beside the records.
+            let claim = try XCTUnwrap(message["privacy_enrollment"] as? [String: Any])
+            XCTAssertEqual(Set(claim.keys), ["version", "identity_public_key", "se_public_key"])
+            XCTAssertEqual(claim["version"] as? String, "privacy-enrollment-v1")
+            XCTAssertEqual(claim["se_public_key"] as? String, signer.publicKeyRaw.base64EncodedString())
         }
 
         await client.acceptAssignedSessionForTest(assignedID: "session-accepted")
@@ -174,6 +179,27 @@ final class PrivacyPostureResponderTests: XCTestCase {
         XCTAssertEqual(withdrawn["type"] as? String, "heartbeat")
         XCTAssertNil(withdrawn["relay_blind_key_records"])
         XCTAssertEqual(try XCTUnwrap(withdrawn["privacy_key_records"] as? [[String: Any]]).count, 0)
+        XCTAssertNil(withdrawn["privacy_enrollment"], "a withdrawn advertisement must not ask to be enrolled")
+    }
+
+    func testEnrollmentClaimIsPublicAndStopsWhenLatched() throws {
+        defer { PrivacyRuntimeHardening.resetDecryptRecheckForTest() }
+        let root = try makeStateRoot()
+        let runtime = try makeRuntime(directory: root, models: ["model-a"])
+        let signer = try SELivenessTestSigning.generate()
+        let probe = MutablePrivacyPostureProbe(greenPrivacyObservation())
+        let responder = makeResponder(runtime: runtime, signer: signer, probe: probe)
+        let claim = try XCTUnwrap(responder.enrollmentClaim())
+        XCTAssertEqual(claim["version"] as? String, PrivacyClassConstants.enrollmentVersion)
+        XCTAssertEqual(claim["identity_public_key"] as? String, runtime.keyManager.identityPublicKeyBase64URL())
+        let se = try XCTUnwrap(claim["se_public_key"] as? String)
+        XCTAssertEqual(Data(base64Encoded: se)?.count, 64)
+        XCTAssertEqual(se, signer.publicKeyRaw.base64EncodedString())
+        let encoded = try JSONSerialization.data(withJSONObject: claim)
+        XCTAssertLessThan(encoded.count, 512)
+
+        PrivacyRuntimeHardening.noteDecryptRecheckFailed()
+        XCTAssertNil(responder.enrollmentClaim())
     }
 
     func testStatementListsExactlyAdvertisedDigests() throws {
