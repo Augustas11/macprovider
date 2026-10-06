@@ -1,0 +1,20 @@
+{
+  "binary": "signed release",
+  "details": {},
+  "evidence": [
+    "records/isolated-coordinator.json"
+  ],
+  "item": "item8-native-admission-e2e",
+  "recorded_at": "2026-10-06T11:32:55Z",
+  "schema": "macprovider.native-mtp-r014-rehearsal-check.v1",
+  "status": "FAIL",
+  "sub_checks": {
+    "enabled.buyer_requests_200_via_gateway": true,
+    "enabled.coordinator_canary_bank_loaded": true,
+    "enabled.native_admitted_on_provider": false,
+    "enabled.provider_offered_native_tuple": false,
+    "enabled.stack_routable_with_signed_release": true
+  },
+  "summary": "signed release joined the isolated loopback coordinator and served real buyer requests through the gateway, but native MTP was never admitted: the release serve path rejects with revocation_state_unavailable and no tuple offer reached the coordinator",
+  "title": "R014.8 native admission end to end with buyer requests (isolated coordinator)"
+}

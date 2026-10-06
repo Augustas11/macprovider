@@ -1,0 +1,12 @@
+{
+  "binary": "n/a",
+  "details": {},
+  "evidence": [],
+  "item": "item7-audit",
+  "recorded_at": "2026-10-06T10:57:05Z",
+  "schema": "macprovider.native-mtp-r014-rehearsal-check.v1",
+  "status": "NOT_APPLICABLE",
+  "sub_checks": {},
+  "summary": "three-lane frozen-diff review runs at release freeze; out of scope for this rehearsal",
+  "title": "R014.7 frozen-diff three-lane review"
+}

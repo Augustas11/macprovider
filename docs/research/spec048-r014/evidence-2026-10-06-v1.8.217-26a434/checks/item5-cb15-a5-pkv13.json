@@ -1,0 +1,21 @@
+{
+  "binary": "signed release + repository records",
+  "details": {},
+  "evidence": [
+    "records/cb15-a5-pkv13.json",
+    "records/signed-serve.json"
+  ],
+  "item": "item5-cb15-a5-pkv13",
+  "recorded_at": "2026-10-06T11:33:31Z",
+  "schema": "macprovider.native-mtp-r014-rehearsal-check.v1",
+  "status": "FAIL",
+  "sub_checks": {
+    "committed_fr_cb15_or_fr_pkv13_evidence_for_tuple": false,
+    "gate_a5_green": false,
+    "release_signed_cb_policy_has_tuple_entry": false,
+    "s0.cb_batch_depth_ge_2": true,
+    "s0.cb_paged_kv_attached": true
+  },
+  "summary": "the signed release attaches paged KV and batches the tuple on the Studio, but the release's signed continuous-batching policy carries no entries, no committed FR-CB15/FR-PKV13 enable-gate record names qwen/qwen3.6-35b-a3b, and Gate A5 is recorded NOT GREEN (M7 decision)",
+  "title": "R014.5 SPEC-038 FR-CB15/Gate A5 and SPEC-039 FR-PKV13 for the tuple"
+}

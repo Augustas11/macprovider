@@ -1,0 +1,41 @@
+{
+  "binary": "lab build of release source",
+  "details": {
+    "checks": {
+      "acceptance_all_and_none_observed": true,
+      "greedy-0.token_ids_equal": true,
+      "greedy-1.token_ids_equal": true,
+      "greedy-2.token_ids_equal": true,
+      "journey-serial-greedy-0.native_admitted": true,
+      "journey-serial-greedy-0.parity": true,
+      "journey-serial-greedy-0.proposed": true,
+      "journey-serial-greedy-1.native_admitted": true,
+      "journey-serial-greedy-1.parity": true,
+      "journey-serial-greedy-1.proposed": true,
+      "journey-serial-greedy-2.native_admitted": true,
+      "journey-serial-greedy-2.parity": true,
+      "journey-serial-greedy-2.proposed": true,
+      "journey-serial-sampled-0.native_admitted": true,
+      "journey-serial-sampled-0.parity": true,
+      "journey-serial-sampled-0.proposed": true,
+      "journey-serial-sampled-1.native_admitted": true,
+      "journey-serial-sampled-1.parity": true,
+      "journey-serial-sampled-1.proposed": true
+    },
+    "status": "partial",
+    "uncovered_contract": [
+      "partial acceptance within a round (needs proposal depth >= 2)"
+    ]
+  },
+  "evidence": [
+    "records/lab-journey-result.json",
+    "raw/lab-journey.stderr"
+  ],
+  "item": "item3-greedy-parity",
+  "recorded_at": "2026-10-06T11:33:31Z",
+  "schema": "macprovider.native-mtp-r014-rehearsal-check.v1",
+  "status": "PASS",
+  "sub_checks": {},
+  "summary": "native output equals isolated ordinary output (token IDs, bytes, usage, terminal) for greedy and seeded-sampled rows",
+  "title": "R014.3 exact greedy parity"
+}

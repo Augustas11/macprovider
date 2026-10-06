@@ -1,0 +1,62 @@
+{
+  "binary": "lab build of release source",
+  "details": {
+    "step-06": {
+      "checks": {
+        "eos_terminal_observed": true,
+        "journey-stream-eos.native_admitted": true,
+        "journey-stream-eos.non_streaming_parity": true,
+        "journey-stream-eos.streamed_text_equals_content": true,
+        "journey-stream-eos.streaming_equals_non_streaming": true,
+        "journey-stream-eos.streaming_parity": true,
+        "journey-stream-length.native_admitted": true,
+        "journey-stream-length.non_streaming_parity": true,
+        "journey-stream-length.streamed_text_equals_content": true,
+        "journey-stream-length.streaming_equals_non_streaming": true,
+        "journey-stream-length.streaming_parity": true,
+        "journey-stream-sampled.native_admitted": true,
+        "journey-stream-sampled.non_streaming_parity": true,
+        "journey-stream-sampled.streamed_text_equals_content": true,
+        "journey-stream-sampled.streaming_parity": true,
+        "journey-stream-stop.native_admitted": true,
+        "journey-stream-stop.non_streaming_parity": true,
+        "journey-stream-stop.streamed_text_equals_content": true,
+        "journey-stream-stop.streaming_equals_non_streaming": true,
+        "journey-stream-stop.streaming_parity": true,
+        "length_terminal_observed": true,
+        "stop_terminal_observed": true
+      },
+      "status": "partial",
+      "uncovered_contract": [
+        "stop string verified to span a proposal/round boundary",
+        "early consumer stop (covered only as step-09 cancellation)",
+        "post-output injected failure with no retry or stitching"
+      ]
+    },
+    "step-09": {
+      "checks": {
+        "cancellation_threshold_reached": true,
+        "cancelled_not_completed": true,
+        "follow_up_native": true,
+        "follow_up_parity": true,
+        "native_admitted": true,
+        "scheduler_released_row": true
+      },
+      "status": "partial",
+      "uncovered_contract": [
+        "cancellation at the proposal, verification, and commit boundaries (only mid-stream is exercised)"
+      ]
+    }
+  },
+  "evidence": [
+    "records/lab-journey-result.json",
+    "raw/lab-journey.stderr"
+  ],
+  "item": "item3-termination",
+  "recorded_at": "2026-10-06T11:33:31Z",
+  "schema": "macprovider.native-mtp-r014-rehearsal-check.v1",
+  "status": "PASS",
+  "sub_checks": {},
+  "summary": "stream/non-stream stop parity and mid-stream cancellation release",
+  "title": "R014.3 termination"
+}

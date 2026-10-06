@@ -1,0 +1,14 @@
+{
+  "binary": "n/a",
+  "details": {
+    "quantization_kind": "mlx_affine"
+  },
+  "evidence": [],
+  "item": "item4-mxfp8",
+  "recorded_at": "2026-10-06T10:57:05Z",
+  "schema": "macprovider.native-mtp-r014-rehearsal-check.v1",
+  "status": "NOT_APPLICABLE",
+  "sub_checks": {},
+  "summary": "tuple quantization is mlx_affine 4-bit, not MXFP8; R012 MXFP8 gate does not apply",
+  "title": "R014.4 independent MXFP8 qualification"
+}

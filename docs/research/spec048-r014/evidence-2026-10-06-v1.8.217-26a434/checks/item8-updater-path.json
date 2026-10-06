@@ -1,0 +1,35 @@
+{
+  "binary": "published v1.8.207 -> v1.8.217",
+  "details": {
+    "check_stdout": "Already up to date (v1.8.207)",
+    "discovery_transport": {
+      "created_at": "2026-09-29T03:57:17Z",
+      "expires_at": "2026-10-13T02:03:59Z",
+      "issued_at": "2026-10-06T02:03:59Z",
+      "tag": "release-discovery-v1-2393341797793794",
+      "target_compatibility_set_id": "Augustas11/macprovider:v1.8.207@d98b74a6a158000dabaecb89d75886b6817e9d0f"
+    },
+    "installed_cli_sha256": null,
+    "installed_cli_version": null,
+    "post_update_status_exit": null,
+    "previous_cli_sha256": "67c0b158f3574b9cf165d404d579d681a7a38d5dbaf818a8455e92509d3f622a",
+    "previous_cli_version": "1.8.207"
+  },
+  "evidence": [
+    "records/updater-path.json",
+    "raw/updater-check.log",
+    "raw/updater-apply.log"
+  ],
+  "item": "item8-updater-path",
+  "recorded_at": "2026-10-06T11:30:10Z",
+  "schema": "macprovider.native-mtp-r014-rehearsal-check.v1",
+  "status": "FAIL",
+  "sub_checks": {
+    "installed_cli_is_published_release_bytes": false,
+    "previous_cli_is_previous_stable": true,
+    "signed_discovery_transport_offers_release": false,
+    "update_check_offers_release": false
+  },
+  "summary": "v1.8.207 updater reports it is up to date: the newest signed discovery transport (release-discovery-v1-2393341797793794) still targets v1.8.207@d98b74a6a158000dabaecb89d75886b6817e9d0f, so v1.8.217 is not offered to the previous stable until the post-publication rollout publishes its transport",
+  "title": "R014.8 previous-stable updater path"
+}

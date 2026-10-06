@@ -1,0 +1,25 @@
+{
+  "binary": "lab build of release source",
+  "details": {
+    "checks": {
+      "depth_zero_hold_observed": true,
+      "holds_resolved": true,
+      "prompt_cap.parity": true,
+      "prompt_cap.selected_ordinary": true,
+      "slots_unchanged": true
+    },
+    "status": "fail",
+    "uncovered_contract": []
+  },
+  "evidence": [
+    "records/lab-journey-result.json",
+    "raw/lab-journey.stderr"
+  ],
+  "item": "item3-capacity",
+  "recorded_at": "2026-10-06T11:33:31Z",
+  "schema": "macprovider.native-mtp-r014-rehearsal-check.v1",
+  "status": "PASS",
+  "sub_checks": {},
+  "summary": "load gate holds native rows at depth zero above the bound and resolves every hold; slots unchanged; prompt cap selects ordinary",
+  "title": "R014.3 capacity"
+}

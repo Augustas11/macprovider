@@ -1,0 +1,12 @@
+{
+  "evidence_hits": [],
+  "gate_a5_source": "docs/runbooks/continuous-batching-m7-decision-2026-09-26.md",
+  "signed_policy_entries": [],
+  "sub": {
+    "committed_fr_cb15_or_fr_pkv13_evidence_for_tuple": false,
+    "gate_a5_green": false,
+    "release_signed_cb_policy_has_tuple_entry": false,
+    "s0.cb_batch_depth_ge_2": true,
+    "s0.cb_paged_kv_attached": true
+  }
+}

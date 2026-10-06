@@ -1,0 +1,50 @@
+[
+  {
+    "connects_live": true,
+    "coordinator_url": "wss://coordinator.malibu.tech/ws/provider",
+    "exe": "/Users/a1/malibu-m1-pool/bin/cli-1.8.219/macprovider-cli",
+    "no_join": false,
+    "pid": 57027,
+    "published_binary_sha256_for_version": null,
+    "published_release_bytes": false,
+    "sha256": "c66be23cb0c41a0a53dd3967eedc4f96b7bef4ea59d2665848c57aa222525c82",
+    "team": "YF7XNRJUG4",
+    "version": "1.8.219"
+  },
+  {
+    "connects_live": true,
+    "coordinator_url": "wss://coordinator.malibu.tech/ws/provider",
+    "exe": "/Users/a1/malibu-m1-pool/bin/cli-1.8.219/macprovider-cli",
+    "no_join": false,
+    "pid": 63505,
+    "published_binary_sha256_for_version": null,
+    "published_release_bytes": false,
+    "sha256": "c66be23cb0c41a0a53dd3967eedc4f96b7bef4ea59d2665848c57aa222525c82",
+    "team": "YF7XNRJUG4",
+    "version": "1.8.219"
+  },
+  {
+    "connects_live": true,
+    "coordinator_url": "wss://coordinator.malibu.tech/ws/provider",
+    "exe": "/Users/a1/malibu-1816-native/bin/cli-1.8.217/macprovider-cli",
+    "no_join": false,
+    "pid": 66454,
+    "published_binary_sha256_for_version": "a6ea51d7ad19359a21fac63995194523264035fbca2ab32dceeede9d9da739bb",
+    "published_release_bytes": true,
+    "sha256": "a6ea51d7ad19359a21fac63995194523264035fbca2ab32dceeede9d9da739bb",
+    "team": "YF7XNRJUG4",
+    "version": "1.8.217"
+  },
+  {
+    "connects_live": true,
+    "coordinator_url": "wss://coordinator.malibu.tech/ws/provider",
+    "exe": "/Users/a1/macprovider/macprovider-cli",
+    "no_join": false,
+    "pid": 82372,
+    "published_binary_sha256_for_version": "a6ea51d7ad19359a21fac63995194523264035fbca2ab32dceeede9d9da739bb",
+    "published_release_bytes": true,
+    "sha256": "a6ea51d7ad19359a21fac63995194523264035fbca2ab32dceeede9d9da739bb",
+    "team": "YF7XNRJUG4",
+    "version": "1.8.217"
+  }
+]

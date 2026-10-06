@@ -1,0 +1,69 @@
+{
+  "binary": "signed release + lab build",
+  "details": {
+    "signed_rejections": {
+      "s0.rejections": [],
+      "s1.rejections": [
+        {
+          "artifact_role": "sidecar",
+          "event": "native_mtp_serve_path_admission",
+          "reason_code": "sidecar_missing",
+          "status": "rejected"
+        }
+      ],
+      "s2-foreign-signer.rejections": [
+        {
+          "artifact_role": "sidecar",
+          "event": "native_mtp_serve_path_admission",
+          "reason_code": "revocation_state_unavailable",
+          "status": "rejected"
+        }
+      ],
+      "s3-tampered.rejections": [
+        {
+          "artifact_role": "sidecar",
+          "event": "native_mtp_serve_path_admission",
+          "reason_code": "revocation_state_unavailable",
+          "status": "rejected"
+        }
+      ]
+    }
+  },
+  "evidence": [
+    "records/lab-manifest-negatives.json",
+    "records/signed-serve.json",
+    "raw/signed-s0-default.err",
+    "raw/signed-s1-auto-nosidecar.err",
+    "raw/signed-s2-foreign-signer.err",
+    "raw/signed-s3-tampered.err"
+  ],
+  "item": "item3-capability-negatives",
+  "recorded_at": "2026-10-06T11:33:31Z",
+  "schema": "macprovider.native-mtp-r014-rehearsal-check.v1",
+  "status": "PASS",
+  "sub_checks": {
+    "lab.duplicate-tensor-file.rejected_before_load": true,
+    "lab.extra-weight-file.rejected_before_load": true,
+    "lab.hidden-weight-file.rejected_before_load": true,
+    "lab.malformed-safetensors-header.rejected_before_load": true,
+    "lab.missing-weight-file.rejected_before_load": true,
+    "lab.symlink-weight-file.rejected_before_load": true,
+    "lab.wrong-quant-bits.rejected_before_load": true,
+    "signed.s1.native_not_enabled": true,
+    "signed.s1.ordinary_still_serves": true,
+    "signed.s1.ready": true,
+    "signed.s1.rejected_with_reason_code": true,
+    "signed.s2-foreign-signer.native_not_enabled": true,
+    "signed.s2-foreign-signer.ordinary_still_serves": true,
+    "signed.s2-foreign-signer.ready": true,
+    "signed.s2-foreign-signer.rejected_with_reason_code": true,
+    "signed.s2-foreign-signer.sidecar_was_found": true,
+    "signed.s3-tampered.native_not_enabled": true,
+    "signed.s3-tampered.ordinary_still_serves": true,
+    "signed.s3-tampered.ready": true,
+    "signed.s3-tampered.rejected_with_reason_code": true,
+    "signed.s3-tampered.sidecar_was_found": true
+  },
+  "summary": "21/21 negative sub-checks hold (lab manifest mutations on the hardware observer; release-binary serve-path rejections with ordinary decode still serving)",
+  "title": "R014.3 capability/manifest negatives"
+}

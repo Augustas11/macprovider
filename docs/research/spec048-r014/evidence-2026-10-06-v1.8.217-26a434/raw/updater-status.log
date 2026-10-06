@@ -1,0 +1,8 @@
+$ sandbox-exec -f /Users/a1/mtp-r014-journey-217/work/updater/sandbox.sb /Users/a1/mtp-r014-journey-217/work/updater/home/macprovider/macprovider-cli status --advanced
+exit=1
+--- stdout
+
+--- stderr
+Error: Error Domain=NSURLErrorDomain Code=-1004 "Could not connect to the server." UserInfo={_kCFStreamErrorCodeKey=61, NSUnderlyingError=0x7a24d48750 {Error Domain=kCFErrorDomainCFNetwork Code=-1004 "(null)" UserInfo={_NSURLErrorNWPathKey=satisfied (Path is satisfied), viable, interface: lo0, _kCFStreamErrorCodeKey=61, _kCFStreamErrorDomainKey=1}}, _NSURLErrorFailingURLSessionTaskErrorKey=LocalDataTask <231DB938-94BF-4A9A-B6BD-93A02785935C>.<1>, _NSURLErrorRelatedURLSessionTaskErrorKey=(
+    "LocalDataTask <231DB938-94BF-4A9A-B6BD-93A02785935C>.<1>"
+), NSLocalizedDescription=Could not connect to the server., NSErrorFailingURLStringKey=http://127.0.0.1:19399/v1/status, NSErrorFailingURLKey=http://127.0.0.1:19399/v1/status, _kCFStreamErrorDomainKey=1}

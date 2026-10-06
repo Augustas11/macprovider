@@ -1,0 +1,26 @@
+{
+  "binary": "release source",
+  "details": {
+    "evidence_dirs": [
+      "docs/research/spec048-fused-moe/evidence-2026-10-05/qualification-7d55924eb/",
+      "audits/2026-10-05-native-mtp-fused-freeze/"
+    ],
+    "pin": {
+      "revision": "b181102984a4d1875efbd9e0eab3a7dfd1c012c5"
+    },
+    "reviewed_revision": "b181102984a4d1875efbd9e0eab3a7dfd1c012c5"
+  },
+  "evidence": [
+    "records/package-resolved-mlx-swift-lm.json"
+  ],
+  "item": "item2-upstream-dependency",
+  "recorded_at": "2026-10-06T10:57:04Z",
+  "schema": "macprovider.native-mtp-r014-rehearsal-check.v1",
+  "status": "PASS",
+  "sub_checks": {
+    "pin_matches_reviewed_revision": true,
+    "review_closed_in_spec": true
+  },
+  "summary": "release source pins mlx-swift-lm b181102984a4; SPEC-048 at the release commit records the R003 review closed for it: True",
+  "title": "R014.2 immutable upstream dependency passes SPEC-048-R003"
+}
