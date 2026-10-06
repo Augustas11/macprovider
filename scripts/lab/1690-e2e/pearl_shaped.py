@@ -352,8 +352,7 @@ def ensure_other_account():
                    (OTHER_ACCOUNT, now))
         db.execute("INSERT INTO api_keys(key_id, account_id, key_hash, key_hash_prefix, status, created_at) VALUES(?, ?, ?, ?, 'active', ?)",
                    ("key_" + secrets.token_hex(16), OTHER_ACCOUNT, digest, key[:12], now))
-    out.write_text(key + "\n")
-    out.chmod(0o600)
+    lab_guard.write_file(str(LAB), f"keys/buyer-key-{OTHER_ACCOUNT}", key + "\n", 0o600)
 
 
 def probe(account, pool_id):
@@ -416,9 +415,7 @@ def paused_r007(engine, pid, samples):
         if st != 503 or code != "pool_unavailable":
             bad.append((name, st, code))
         measured[name].append(round(ms, 3))
-    OUT.mkdir(parents=True, exist_ok=True)
-    sj = OUT / f"r007-samples-{engine}.json"
-    sj.write_text(json.dumps(measured))
+    sj = pathlib.Path(lab_guard.write_file(str(LAB), f"pearl/r007-samples-{engine}.json", json.dumps(measured)))
     proc = subprocess.run([sys.executable, str(HERE.parent.parent / "measure-pool-rejection-timing-floor.py"), "--samples-json", str(sj)],
                           capture_output=True, text=True)
     p50 = {k: round(sorted(v)[len(v) // 2], 1) for k, v in measured.items()}
@@ -475,8 +472,7 @@ def cmd_cases(a):
             step()
         except Exception as err:  # a harness error is recorded, never counted as a pass
             result(e, name, "", False, "", error=f"{type(err).__name__}: {err}")
-    OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / f"{e}.json").write_text(json.dumps(RESULTS, indent=1, sort_keys=True, default=str))
+    lab_guard.write_file(str(LAB), f"pearl/{e}.json", json.dumps(RESULTS, indent=1, sort_keys=True, default=str))
     # Any FAIL or ERROR fails the run, after the results are written.
     return 0 if RESULTS and all(r["status"] == "PASS" for r in RESULTS) else 1
 
@@ -519,6 +515,7 @@ def main():
     a = p.parse_args()
     try:
         lab_guard.check(str(LAB))
+        lab_guard.check_tree(str(LAB), ("keys", "db", "logs", "pearl"))
     except ValueError as err:
         sys.exit(f"refusing: {err}")
     return {"cases": cmd_cases, "summary": cmd_summary}[a.cmd](a)

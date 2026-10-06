@@ -17,6 +17,8 @@ import lab_guard  # noqa: E402
 try:
     # Canonical and within LAB_ROOT before any key or config is written.
     LAB = pathlib.Path(lab_guard.check(os.environ.get("LAB", lab_guard.DEFAULT_ROOT)))
+    # Nothing it reads or writes below LAB may resolve through a symlink.
+    lab_guard.check_tree(str(LAB), ("keys", "run", "static", "db", "models"))
 except ValueError as err:
     sys.exit(f"refusing: {err}")
 PORTS = {"coord_buyer": 19101, "coord_provider": 19102, "gateway": 19110, "serve": 19120, "llama": 19130}
@@ -38,8 +40,7 @@ def secret_bundle():
         return json.loads(path.read_text())
     bundle = {name: secrets.token_hex(32) for name in (
         "operator_key", "operator_lab_a", "operator_lab_b", "gateway_service_token", "key_hash_secret", "demo_secret")}
-    path.write_text(json.dumps(bundle, indent=2))
-    path.chmod(0o600)
+    lab_guard.write_file(str(LAB), "keys/secrets.json", json.dumps(bundle, indent=2), 0o600)
     return bundle
 
 
@@ -160,10 +161,8 @@ def main():
             "min_completion_rate_per_mtok": 27000, "max_completion_rate_per_mtok": 850000}
         gateway["coordinator"]["require_settlement_trailers"] = True
         gateway["features"]["trusted_pools"] = {"enabled": True, "coordinator_authorizes": True}
-    (LAB / "run" / "coordinator.yaml").write_text(json.dumps(coord, indent=2))
-    (LAB / "run" / "gateway.yaml").write_text(json.dumps(gateway, indent=2))
-    for p in ("coordinator.yaml", "gateway.yaml"):
-        (LAB / "run" / p).chmod(0o600)
+    lab_guard.write_file(str(LAB), "run/coordinator.yaml", json.dumps(coord, indent=2), 0o600)
+    lab_guard.write_file(str(LAB), "run/gateway.yaml", json.dumps(gateway, indent=2), 0o600)
     print(json.dumps({"ports": PORTS, "provider_id": PROVIDER_ID, "buyer_account": BUYER_ACCOUNT,
                       "settlement_mode": coord["settlement"]["verified_model_settlement_mode"],
                       "require_settlement_trailers": gateway["coordinator"].get("require_settlement_trailers", False),

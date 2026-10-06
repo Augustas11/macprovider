@@ -48,9 +48,11 @@ set -euo pipefail
 LAB="${LAB:-/Users/a1/lab-1690-m6}"
 WT="${WT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 HERE="$WT/scripts/lab/1690-m6"
-# LAB must be canonical and within LAB_ROOT before anything below creates,
-# moves or deletes under it (lab_guard.py).
-LAB=$(python3 "$HERE/lab_guard.py" "$LAB") || exit 2
+# LAB must be canonical and within LAB_ROOT, and no directory the rig writes
+# into (nor any entry directly in it) may be a symlink, before anything below
+# creates, moves or deletes under it (lab_guard.py).
+LAB_WRITE_DIRS=(bin logs models keys db run static pools home tmp provider src src-spoof src-native)
+LAB=$(python3 "$HERE/lab_guard.py" "$LAB" "${LAB_WRITE_DIRS[@]}") || exit 2
 LLAMA_DIR="${LLAMA_DIR:-/Users/a1/bench-1690/llama.cpp-b11149/llama-b11149}"
 METALLIB="${METALLIB:-/Users/a1/bench-1690/run/mlx.metallib}"
 GO_BIN="${GO_BIN:-/Users/a1/sdk/go1.26.6/bin}"

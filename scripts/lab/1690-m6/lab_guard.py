@@ -6,10 +6,14 @@ be an absolute path with no `.`/`..` components that resolves to itself (no
 symlink anywhere on it) and lies within LAB_ROOT (default
 /Users/a1/lab-1690-m6, itself absolute and symlink-free).
 
-  lab_guard.py [--strict] <LAB>   print the canonical LAB, or exit 2
+  lab_guard.py [--strict] <LAB> [<SUBDIR>...]   print the canonical LAB, or exit 2
 
 --strict requires LAB strictly beneath the root (a caller that moves LAB
-aside must never move the root itself).
+aside must never move the root itself). Each SUBDIR (relative to LAB) is a
+directory the caller writes into: no existing component of LAB/SUBDIR and no
+entry directly inside it may be a symlink, so a shell redirect or cp into it
+cannot land outside LAB. Python writers use write_file, which opens every
+component with O_NOFOLLOW.
 """
 import os
 import sys
@@ -38,16 +42,73 @@ def check(lab, root=None, strict=False):
     return lab_n
 
 
+def _rel_parts(rel):
+    parts = [p for p in rel.split("/") if p]
+    if not parts or os.path.isabs(rel) or any(p in (".", "..") for p in parts):
+        raise ValueError(f"write target must be a relative path without . or ..: {rel!r}")
+    return parts
+
+
+def check_tree(lab, rels):
+    """Refuse when any existing component of LAB/<rel>, or any entry directly
+    inside an existing LAB/<rel> directory, is a symlink. LAB itself must
+    already have passed check()."""
+    for rel in rels:
+        path = lab
+        for part in _rel_parts(rel):
+            path = os.path.join(path, part)
+            if os.path.islink(path):
+                raise ValueError(f"write target must not traverse a symlink: {path}")
+            if not os.path.lexists(path):
+                break
+        else:
+            if os.path.isdir(path):
+                with os.scandir(path) as entries:
+                    for entry in entries:
+                        if entry.is_symlink():
+                            raise ValueError(f"write target must not contain a symlink: {entry.path}")
+
+
+def write_file(lab, rel, data, mode=0o644):
+    """Write data to LAB/<rel>, creating parent directories, without following
+    a symlink at any component: each directory is opened relative to its parent
+    with O_NOFOLLOW, so a symlink anywhere below LAB fails the write (ELOOP or
+    ENOTDIR) instead of redirecting it outside the lab."""
+    parts = _rel_parts(rel)
+    if isinstance(data, str):
+        data = data.encode()
+    nofollow_dir = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open(lab, nofollow_dir)
+    try:
+        for part in parts[:-1]:
+            try:
+                os.mkdir(part, 0o755, dir_fd=fd)
+            except FileExistsError:
+                pass
+            nxt = os.open(part, nofollow_dir, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+        out = os.open(parts[-1], os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, mode, dir_fd=fd)
+    finally:
+        os.close(fd)
+    with os.fdopen(out, "wb") as f:
+        os.fchmod(f.fileno(), mode)
+        f.write(data)
+    return os.path.join(lab, *parts)
+
+
 def main(argv):
     args = argv[1:]
     strict = bool(args) and args[0] == "--strict"
     if strict:
         args = args[1:]
-    if len(args) != 1:
-        print("usage: lab_guard.py [--strict] <LAB>", file=sys.stderr)
+    if not args:
+        print("usage: lab_guard.py [--strict] <LAB> [<SUBDIR>...]", file=sys.stderr)
         return 2
     try:
-        print(check(args[0], strict=strict))
+        lab = check(args[0], strict=strict)
+        check_tree(lab, args[1:])
+        print(lab)
     except ValueError as err:
         print(f"refusing: {err}", file=sys.stderr)
         return 2

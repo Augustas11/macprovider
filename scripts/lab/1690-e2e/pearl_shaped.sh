@@ -65,6 +65,9 @@ setup() {
     "$RIG" down >/dev/null 2>&1 || true
     mv "$LAB" "$LAB.prev-$(date -u +%Y%m%dT%H%M%SZ)"
   fi
+  # Refuse before mkdir/chmod/cp when any write directory (or an entry in it)
+  # is a symlink; only reachable when LAB was not moved aside.
+  python3 "$HERE/../1690-m6/lab_guard.py" --strict "$LAB" bin logs models keys db run static pools home tmp provider pearl ollama ollama-models >/dev/null || exit 2
   mkdir -p "$LAB"/{bin,logs,models,keys,db,run,static,pools,home,tmp,provider,pearl}
   chmod 700 "$LAB/keys" "$LAB/home"
   cp -c "$ASSETS/models/qwen2.5-0.5b-instruct-q4_k_m.gguf" "$LAB/models/"

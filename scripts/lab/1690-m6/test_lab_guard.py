@@ -50,6 +50,59 @@ class LabGuardTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             lab_guard.check(linked_root + "/x", linked_root)
 
+    def _outside_and_lab(self):
+        outside = os.path.join(self.base, "outside")
+        os.mkdir(outside)
+        lab = os.path.join(self.root, "lab")
+        os.mkdir(lab)
+        return outside, lab
+
+    def test_refuses_symlinked_descendant_write_dir(self):
+        outside, lab = self._outside_and_lab()
+        os.symlink(outside, os.path.join(lab, "keys"))
+        # LAB itself is canonical and contained; only the descendant escapes.
+        self.assertEqual(lab_guard.check(lab, self.root), lab)
+        for rels in (("keys",), ("keys/sub",), ("run", "keys")):
+            with self.assertRaises(ValueError, msg=rels):
+                lab_guard.check_tree(lab, rels)
+        with self.assertRaises(OSError):
+            lab_guard.write_file(lab, "keys/secrets.json", "{}", 0o600)
+        self.assertEqual(os.listdir(outside), [])
+
+    def test_refuses_symlinked_entry_inside_write_dir(self):
+        outside, lab = self._outside_and_lab()
+        os.mkdir(os.path.join(lab, "run"))
+        target = os.path.join(outside, "coordinator.yaml")
+        os.symlink(target, os.path.join(lab, "run", "coordinator.yaml"))
+        with self.assertRaises(ValueError):
+            lab_guard.check_tree(lab, ("run",))
+        with self.assertRaises(OSError):
+            lab_guard.write_file(lab, "run/coordinator.yaml", "{}")
+        self.assertFalse(os.path.lexists(target))
+        self.assertEqual(os.listdir(outside), [])
+
+    def test_write_file_creates_inside_lab_only(self):
+        _, lab = self._outside_and_lab()
+        lab_guard.check_tree(lab, ("keys", "run"))  # absent dirs are fine
+        path = lab_guard.write_file(lab, "keys/secrets.json", "{}", 0o600)
+        self.assertEqual(path, os.path.join(lab, "keys", "secrets.json"))
+        self.assertEqual(open(path).read(), "{}")
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        lab_guard.write_file(lab, "keys/secrets.json", "x", 0o600)  # truncates
+        self.assertEqual(open(path).read(), "x")
+        for rel in ("../x", "/abs", "a/./b", ""):
+            with self.assertRaises(ValueError, msg=rel):
+                lab_guard.write_file(lab, rel, "")
+
+    def test_cli_refuses_symlinked_subdir(self):
+        outside, lab = self._outside_and_lab()
+        os.symlink(outside, os.path.join(lab, "keys"))
+        os.environ["LAB_ROOT"] = self.root
+        self.addCleanup(os.environ.pop, "LAB_ROOT", None)
+        self.assertEqual(lab_guard.main(["lab_guard.py", lab, "bin", "logs"]), 0)
+        self.assertEqual(lab_guard.main(["lab_guard.py", lab, "bin", "keys"]), 2)
+        self.assertEqual(lab_guard.main(["lab_guard.py", "--strict", lab, "keys"]), 2)
+
     def test_cli_exit_status(self):
         self.assertEqual(lab_guard.main(["lab_guard.py", "/nonexistent-root/../x"]), 2)
         os.environ["LAB_ROOT"] = self.root
