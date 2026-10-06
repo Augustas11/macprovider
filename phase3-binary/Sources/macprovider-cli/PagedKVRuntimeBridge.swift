@@ -696,10 +696,24 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         inputs.flatMap(\.promptTokens).map(Int32.init)
                     ).reshaped([inputs.count, chunkLength])
                     let text = LMInput.Text(tokens: prompt)
-                    let output = withPreparedCache(cachesAsKV, lengths: text.sequenceLengths) {
-                        context.model(text, cache: cachesAsKV, state: nil)
+                    // Native rows join the same [B, L] forward as their
+                    // ordinary peers, so every row's target state matches the
+                    // MTP-disabled run of this group. The emit flag only adds
+                    // the prompt hidden states the drafters are seeded from.
+                    let hasNativeRows = inputs.contains(where: \.nativeMTPPromptPrefill)
+                    var sharedState: LMOutput.State?
+                    if hasNativeRows {
+                        var emit = LMOutput.State()
+                        emit[mtpEmitFlagKey] = true
+                        sharedState = emit
                     }
-                    if output.state == nil,
+                    let output = withPreparedCache(cachesAsKV, lengths: text.sequenceLengths) {
+                        context.model(text, cache: cachesAsKV, state: sharedState)
+                    }
+                    let promptHidden = hasNativeRows
+                        ? Self.sharedPrefillPromptHidden(output.state, rows: inputs.count, chunkLength: chunkLength)
+                        : nil
+                    if hasNativeRows ? promptHidden != nil : output.state == nil,
                        Self.hasValidBatchState(batchedCaches) {
                         let sampledTokens: [Int]?
                         if inputs.contains(where: \.sampleFirstToken) {
@@ -720,12 +734,36 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         for (index, input) in inputs.enumerated() {
                             try self.setRowState(rowStates[index], for: input.requestID, binding: input.binding)
                         }
+                        var drafterFailures = Set<Int>()
+                        if let promptHidden {
+                            for (index, input) in inputs.enumerated() where input.nativeMTPPromptPrefill {
+                                do {
+                                    try await self.seedNativeMTPDrafterFromPrefill(
+                                        targetModel: context.model,
+                                        input: input,
+                                        targetHidden: promptHidden.take(MLXArray([Int32(index)]), axis: 0),
+                                        positionDeltas: nil,
+                                        sampledToken: input.sampleFirstToken ? sampledTokens?[index] : nil
+                                    )
+                                } catch {
+                                    // The shared target forward stays committed
+                                    // for every peer; only this row fails.
+                                    self.removeRowState(for: input.requestID)
+                                    drafterFailures.insert(index)
+                                }
+                            }
+                        }
                         self.clearDecodeSession()
                         return inputs.enumerated().map { index, input in
-                            ContinuousBatchPrefillOutput(
-                                requestID: input.requestID,
-                                sampledToken: input.sampleFirstToken ? sampledTokens?[index] : nil
-                            )
+                            drafterFailures.contains(index)
+                                ? ContinuousBatchPrefillOutput(
+                                    requestID: input.requestID,
+                                    failureCode: "continuous_batching_prefill_failed"
+                                )
+                                : ContinuousBatchPrefillOutput(
+                                    requestID: input.requestID,
+                                    sampledToken: input.sampleFirstToken ? sampledTokens?[index] : nil
+                                )
                         }
                     }
                     // Backend-level LMOutput.State cannot be split safely by
@@ -765,38 +803,18 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                             sampledToken = nil
                         }
                         if input.nativeMTPPromptPrefill {
-                            let tailToken: Int
-                            if input.isFinalChunk {
-                                guard let sampledToken else {
-                                    throw ContinuousBatchSchedulerError.unsupported(
-                                        "native_mtp_missing_prompt_bonus_token"
-                                    )
-                                }
-                                tailToken = sampledToken
-                            } else {
-                                guard let nextPromptToken = input.nativeMTPNextPromptToken else {
-                                    throw ContinuousBatchSchedulerError.unsupported(
-                                        "native_mtp_missing_next_prompt_token"
-                                    )
-                                }
-                                tailToken = nextPromptToken
-                            }
-                            if input.promptTokenOffset == 0 && input.isFinalChunk {
-                                try await self.prepareNativeMTPDrafterState(
-                                    targetModel: context.model,
-                                    prompt: prompt,
-                                    output: output,
-                                    firstBonusToken: tailToken,
-                                    requestID: input.requestID
-                                )
-                            } else {
-                                try await self.advanceNativeMTPDrafterOverPromptChunk(
-                                    targetModel: context.model,
-                                    input: input,
-                                    output: output,
-                                    tailToken: tailToken
+                            guard let targetHidden = output.state?[mtpLastHiddenStatesKey] else {
+                                throw ContinuousBatchSchedulerError.unsupported(
+                                    "native_mtp_missing_prompt_hidden_state"
                                 )
                             }
+                            try await self.seedNativeMTPDrafterFromPrefill(
+                                targetModel: context.model,
+                                input: input,
+                                targetHidden: targetHidden,
+                                positionDeltas: output.state?[mtpPositionDeltasKey],
+                                sampledToken: sampledToken
+                            )
                         }
                         // Earlier chunks evaluate only cache state. The final
                         // chunk also evaluates its sampled token, matching
@@ -827,6 +845,71 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
     }
 
+    /// The `[B, >=L, hidden]` prompt hidden states of a shared prefill that
+    /// carried native rows, or nil when the output state is not exactly the
+    /// drafter emission the forward was asked for. Per-row position deltas
+    /// (mRoPE models) cannot be split by row here, so their presence keeps
+    /// the group on the serial path.
+    static func sharedPrefillPromptHidden(
+        _ state: LMOutput.State?,
+        rows: Int,
+        chunkLength: Int
+    ) -> MLXArray? {
+        guard let state,
+              state[mtpPositionDeltasKey] == nil,
+              let hidden = state[mtpLastHiddenStatesKey],
+              hidden.ndim == 3,
+              hidden.dim(0) == rows,
+              hidden.dim(1) >= chunkLength
+        else {
+            return nil
+        }
+        return hidden
+    }
+
+    /// Seeds or advances a native row's drafter over the prompt chunk just
+    /// prefilled, from that row's `[1, >=L, hidden]` target hidden states
+    /// (MTP-6). The tail token is the sampled first token for the final
+    /// chunk and the next prompt token otherwise.
+    private func seedNativeMTPDrafterFromPrefill(
+        targetModel: any LanguageModel,
+        input: ContinuousBatchPrefillInput,
+        targetHidden: MLXArray,
+        positionDeltas: MLXArray?,
+        sampledToken: Int?
+    ) async throws {
+        let tailToken: Int
+        if input.isFinalChunk {
+            guard let sampledToken else {
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_missing_prompt_bonus_token")
+            }
+            tailToken = sampledToken
+        } else {
+            guard let nextPromptToken = input.nativeMTPNextPromptToken else {
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_missing_next_prompt_token")
+            }
+            tailToken = nextPromptToken
+        }
+        if input.promptTokenOffset == 0 && input.isFinalChunk {
+            try await prepareNativeMTPDrafterState(
+                targetModel: targetModel,
+                prompt: MLXArray(input.promptTokens.map(Int32.init)).reshaped([1, input.promptTokens.count]),
+                targetHidden: targetHidden,
+                positionDeltas: positionDeltas,
+                firstBonusToken: tailToken,
+                requestID: input.requestID
+            )
+        } else {
+            try await advanceNativeMTPDrafterOverPromptChunk(
+                targetModel: targetModel,
+                input: input,
+                targetHidden: targetHidden,
+                positionDeltas: positionDeltas,
+                tailToken: tailToken
+            )
+        }
+    }
+
     private func makeBatchedCachesIfCompatible(
         from rowCaches: [[KVCache]]
     ) -> [PagedKVSharedLayerBatch]? {
@@ -842,11 +925,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
     }
 
-    private static func canSharePrefillForward(_ inputs: [ContinuousBatchPrefillInput]) -> Bool {
+    static func canSharePrefillForward(_ inputs: [ContinuousBatchPrefillInput]) -> Bool {
         guard inputs.count > 1, let first = inputs.first, !first.promptTokens.isEmpty else {
-            return false
-        }
-        guard inputs.allSatisfy({ !$0.nativeMTPPromptPrefill }) else {
             return false
         }
         let chunkLength = first.promptTokens.count
@@ -1765,14 +1845,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     private func prepareNativeMTPDrafterState(
         targetModel: any LanguageModel,
         prompt: MLXArray,
-        output: LMOutput,
+        targetHidden: MLXArray,
+        positionDeltas: MLXArray?,
         firstBonusToken: Int,
         requestID: String
     ) async throws {
         guard let drafterContainer else { return }
-        guard let targetHidden = output.state?[mtpLastHiddenStatesKey] else {
-            throw ContinuousBatchSchedulerError.unsupported("native_mtp_missing_prompt_hidden_state")
-        }
         guard targetHidden.ndim == 3,
               targetHidden.dim(0) == 1,
               targetHidden.dim(1) >= prompt.dim(1)
@@ -1780,9 +1858,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             throw ContinuousBatchSchedulerError.unsupported("native_mtp_invalid_prompt_hidden_state")
         }
         let prepared = try await drafterContainer.perform(
-            nonSendable: (targetModel, prompt, targetHidden, firstBonusToken, output.state)
+            nonSendable: (targetModel, prompt, targetHidden, firstBonusToken, positionDeltas)
         ) { drafterContext, values in
-            let (targetModel, prompt, targetHidden, firstBonusToken, outputState) = values
+            let (targetModel, prompt, targetHidden, firstBonusToken, positionDeltas) = values
             guard let statefulDrafter = drafterContext.model as? any StatefulMTPDrafterModel else {
                 throw ContinuousBatchSchedulerError.unsupported("native_mtp_stateful_drafter_required")
             }
@@ -1793,7 +1871,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 promptTokens: prompt,
                 targetHidden: targetHidden,
                 firstBonus: MLXArray([Int32(firstBonusToken)]),
-                positionDeltas: outputState?[mtpPositionDeltasKey],
+                positionDeltas: positionDeltas,
                 state: &state,
                 sampler: sampler
             )
@@ -1814,13 +1892,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     private func advanceNativeMTPDrafterOverPromptChunk(
         targetModel: any LanguageModel,
         input: ContinuousBatchPrefillInput,
-        output: LMOutput,
+        targetHidden: MLXArray,
+        positionDeltas: MLXArray?,
         tailToken: Int
     ) async throws {
         guard let drafterContainer else { return }
         let chunkCount = input.promptTokens.count
-        guard let targetHidden = output.state?[mtpLastHiddenStatesKey],
-              targetHidden.ndim == 3,
+        guard targetHidden.ndim == 3,
               targetHidden.dim(0) == 1,
               targetHidden.dim(1) >= chunkCount
         else {
@@ -1841,7 +1919,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         let row = (
             hidden: targetHidden[0..., ..<chunkCount, 0...],
             acceptedTokens: Array(input.promptTokens.dropFirst()),
-            positionDeltas: output.state?[mtpPositionDeltasKey]
+            positionDeltas: positionDeltas
         )
         let advanced = try await drafterContainer.perform(
             nonSendable: (targetModel, row, priorState)

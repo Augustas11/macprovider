@@ -1002,6 +1002,183 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(drafter.preparedHiddenWidths(), [3])
     }
 
+    /// SPEC-048-R007 / SPEC-038 FR-CB2: a native row in an equal-length
+    /// prefill group shares the group's one `[B, L]` target forward; its
+    /// drafter is seeded from its own `[1, L]` slice of that forward's hidden
+    /// states. Before the fix one native row sent the whole group serial.
+    func testNativeRowSharesTheOrdinaryPrefillForwardOfItsGroup() async throws {
+        try requireMetal()
+        let descriptor = Self.bridgeDescriptor()
+        let model = RuntimeBridgeFakeModel(nextTokenByInput: [12: 13, 16: 17, 20: 21], emitsMTPState: true)
+        let drafter = RuntimeBridgeRecordingMTPDrafter()
+        let backend = PagedKVSharedForwardBackend(
+            container: ModelContainer(context: ModelContext(
+                configuration: ModelConfiguration(id: descriptor.modelID),
+                model: model,
+                processor: StandInUserInputProcessor(),
+                tokenizer: RuntimeBridgeFakeTokenizer()
+            )),
+            descriptor: descriptor,
+            layerCount: 1,
+            drafterContainer: MTPDrafterContainer(context: MTPDrafterContext(
+                configuration: ModelConfiguration(id: "mtp"),
+                model: drafter
+            ))
+        )
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: descriptor.blockSizeTokens, maxPhysicalBlocks: 16)
+        var inputs: [ContinuousBatchPrefillInput] = []
+        for (id, prompt, native) in [("native", [10, 11, 12], true), ("ord-1", [14, 15, 16], false), ("ord-2", [18, 19, 20], false)] {
+            let handle = try await allocator.allocate(conversationKey: id, maxTokens: 8)
+            _ = try await allocator.extend(handle, by: 3)
+            inputs.append(ContinuousBatchPrefillInput(
+                requestID: id,
+                promptTokens: prompt,
+                binding: try await allocator.binding(for: handle),
+                promptTokenOffset: 0,
+                committedKVTokenCount: 0,
+                targetKVTokenCount: 3,
+                isFinalChunk: true,
+                nativeMTPPromptPrefill: native
+            ))
+        }
+        XCTAssertTrue(PagedKVSharedForwardBackend.canSharePrefillForward(inputs))
+
+        let output = try await backend.prefill(rows: inputs)
+
+        XCTAssertEqual(output, [
+            ContinuousBatchPrefillOutput(requestID: "native", sampledToken: 13),
+            ContinuousBatchPrefillOutput(requestID: "ord-1", sampledToken: 17),
+            ContinuousBatchPrefillOutput(requestID: "ord-2", sampledToken: 21),
+        ])
+        XCTAssertEqual(model.forwardCallCount(), 1, "the group must run one shared forward")
+        XCTAssertEqual(drafter.preparedPromptWidths(), [3])
+        XCTAssertEqual(drafter.preparedHiddenWidths(), [3])
+        XCTAssertEqual(backend.retainedRowCountForTest(), 3)
+    }
+
+    /// A native row whose drafter cannot be seeded after the shared forward
+    /// fails alone; its peers keep the shared forward's results.
+    func testNativeDrafterSeedFailureAfterSharedPrefillFailsOnlyThatRow() async throws {
+        try requireMetal()
+        let descriptor = Self.bridgeDescriptor()
+        let model = RuntimeBridgeFakeModel(nextTokenByInput: [12: 13, 16: 17], emitsMTPState: true)
+        let drafter = RuntimeBridgeRecordingMTPDrafter()
+        let backend = PagedKVSharedForwardBackend(
+            container: ModelContainer(context: ModelContext(
+                configuration: ModelConfiguration(id: descriptor.modelID),
+                model: model,
+                processor: StandInUserInputProcessor(),
+                tokenizer: RuntimeBridgeFakeTokenizer()
+            )),
+            descriptor: descriptor,
+            layerCount: 1,
+            drafterContainer: MTPDrafterContainer(context: MTPDrafterContext(
+                configuration: ModelConfiguration(id: "mtp"),
+                model: drafter
+            ))
+        )
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: descriptor.blockSizeTokens, maxPhysicalBlocks: 16)
+        var inputs: [ContinuousBatchPrefillInput] = []
+        for (id, prompt, native) in [("native", [10, 11, 12], true), ("ord", [14, 15, 16], false)] {
+            let handle = try await allocator.allocate(conversationKey: id, maxTokens: 8)
+            _ = try await allocator.extend(handle, by: 3)
+            inputs.append(ContinuousBatchPrefillInput(
+                requestID: id,
+                promptTokens: prompt,
+                binding: try await allocator.binding(for: handle),
+                promptTokenOffset: 0,
+                committedKVTokenCount: 0,
+                targetKVTokenCount: 3,
+                isFinalChunk: true,
+                // A final native chunk without its sampled first token has
+                // no tail token to seed the drafter with.
+                sampleFirstToken: !native,
+                nativeMTPPromptPrefill: native
+            ))
+        }
+
+        let output = try await backend.prefill(rows: inputs)
+
+        XCTAssertEqual(output, [
+            ContinuousBatchPrefillOutput(requestID: "native", failureCode: "continuous_batching_prefill_failed"),
+            ContinuousBatchPrefillOutput(requestID: "ord", sampledToken: 17),
+        ])
+        XCTAssertEqual(model.forwardCallCount(), 1)
+        XCTAssertEqual(drafter.preparedPromptWidths(), [])
+        XCTAssertEqual(backend.retainedRowCountForTest(), 1)
+    }
+
+    /// The R014 mixed-row failure, in miniature: with a real hybrid target,
+    /// an equal-length group holding one native row must leave every row,
+    /// the native one included, with exactly the target state of the same
+    /// group prefilled with MTP off. Greedy decode continued from both
+    /// prefills emits identical tokens on every row.
+    func testRealQwen35NativeRowInSharedPrefillGroupMatchesMTPDisabledGroup() async throws {
+        try requireMetal()
+        let prompts = [11, 12, 13].map { Self.tinyPrompt(length: 12, salt: $0) }
+        let ids = ["native", "ord-1", "ord-2"]
+        let steps = 8
+
+        func run(nativeRow: Bool) async throws -> [String: [Int]] {
+            let tiny = try Self.tinyQwen35Native()
+            let backend = tiny.backend.base
+            let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 64)
+            var handles: [PagedKVBlockTableHandle] = []
+            var inputs: [ContinuousBatchPrefillInput] = []
+            for (index, id) in ids.enumerated() {
+                let handle = try await allocator.allocate(conversationKey: id, maxTokens: 32)
+                _ = try await allocator.extend(handle, by: prompts[index].count)
+                handles.append(handle)
+                inputs.append(ContinuousBatchPrefillInput(
+                    requestID: id,
+                    promptTokens: prompts[index],
+                    binding: try await allocator.binding(for: handle),
+                    promptTokenOffset: 0,
+                    committedKVTokenCount: 0,
+                    targetKVTokenCount: prompts[index].count,
+                    isFinalChunk: true,
+                    nativeMTPPromptPrefill: nativeRow && index == 0
+                ))
+            }
+            XCTAssertTrue(PagedKVSharedForwardBackend.canSharePrefillForward(inputs))
+            let prefill = try await backend.prefill(rows: inputs)
+            var tokens: [String: [Int]] = [:]
+            for output in prefill {
+                tokens[output.requestID] = [try XCTUnwrap(output.sampledToken, output.failureCode ?? "")]
+            }
+            if nativeRow {
+                XCTAssertNotNil(backend.nativeMTPDrafterSnapshotForTest(requestID: "native").state)
+            }
+            for step in 0 ..< steps {
+                var decodeInputs: [ContinuousBatchDecodeInput] = []
+                for (index, id) in ids.enumerated() {
+                    decodeInputs.append(try await Self.decodeInput(
+                        requestID: id,
+                        currentToken: try XCTUnwrap(tokens[id]?.last),
+                        handle: handles[index],
+                        allocator: allocator,
+                        committedKVTokenCount: prompts[index].count + step
+                    ))
+                }
+                let outcomes = try await backend.decode(rows: decodeInputs)
+                for handle in handles {
+                    try await allocator.endDecodeStep(handle)
+                }
+                for (id, token) in Self.tokens(from: outcomes) {
+                    tokens[id, default: []].append(token)
+                }
+            }
+            return tokens
+        }
+
+        let ordinary = try await run(nativeRow: false)
+        let mixed = try await run(nativeRow: true)
+        for id in ids {
+            XCTAssertEqual(ordinary[id]?.count, steps + 1, id)
+            XCTAssertEqual(mixed[id], ordinary[id], "\(id) diverged from the MTP-disabled group")
+        }
+    }
+
     /// End to end through the scheduler with a real (tiny, random-weight)
     /// hybrid Qwen3.5 target and its real MTP drafter: every native round is
     /// one packed verify, one staged target commit, and one packed drafter
