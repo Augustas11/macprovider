@@ -46,9 +46,15 @@ Provider. Requires relay-blind. Any one of these turns the class on:
 
 The flag overrides the environment variable and the config key.
 
-Coordinator. Requires `relay_blind.enabled: true`, at least one `provider_se_public_keys` entry, and one unexpired approved identity:
+Coordinator. Requires `coordinator.require_gateway_context: true`, `relay_blind.enabled: true` with a `sqlite_path`, at least one `provider_se_public_keys` entry, and one unexpired approved identity. Under `settlement.verified_model_settlement_mode: enforce`, relay-blind also requires the SPEC-022 R-14 profile:
 
 ```yaml
+relay_blind:
+  enabled: true
+  sqlite_path: /var/lib/macprovider/relay-blind.db
+  identity_public_keys:
+    <provider_id>: <relay_blind_identity_public_key>
+  enforce_settlement_profile: relay-blind-settlement-v1
 privacy_class:
   enabled: true
   provider_se_public_keys:
