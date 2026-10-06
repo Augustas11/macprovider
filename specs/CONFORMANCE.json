@@ -1474,7 +1474,7 @@
     {
       "spec_id": "SPEC-048",
       "title": "Native Multi-Token Prediction Serving",
-      "version": "0.1.23",
+      "version": "0.1.24",
       "path": "specs/SPEC-048-native-mtp-serving.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -10355,7 +10355,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "Candidate fork revision b181102984a4d1875efbd9e0eab3a7dfd1c012c5 retains the previously reviewed standalone Qwen MTP loading, public row-mapped cache transactions, packed target verification, strict row-local continuation state, serialized drafter-state access, packed recurrent Mamba transactions, and round-overhead reductions from ef4ff8568c38c640bc90a8176dc3acfe943a288d. It additionally introduces a default-on, kill-switchable fused Qwen3.6-35B-A3B MoE path only for the exact affine layout and decode- or verify-shaped calls of at most 7 tokens per row, run in chunks of at most 7 flattened tokens at any batch size, with stock for prefill-shaped rows. The exception for this revision was approved on 2026-10-05 after the fused ordinary-path Studio qualification (fork tests 133/133, hardware E2E pass, 0 parity mismatches and bit-identical run-to-run output in 36 paired blocks at one, two, and eight slots, ordinary decode 1.25x / 1.15x / 0.97x stock) and a three-lane freeze audit at 0 Critical/High/Medium. R003 stays pending for native serving: native-MTP R015 gates signing and activation of a native tuple, not this pin, and nothing here makes any production tuple eligible."
+        "rationale": "Candidate fork revision ca8c384c4fb6bc7d2fbb7c70a18c34b935701805 (pending review) adds to b181102984a4d1875efbd9e0eab3a7dfd1c012c5 only a single-pass checkpointed Gated DeltaNet verify kernel, bit-identical to the split recurrence, and an unmasked recurrent path when no packed verification row is padded; ordinary decode is unchanged. Parent revision b181102984a4d1875efbd9e0eab3a7dfd1c012c5 retains the previously reviewed standalone Qwen MTP loading, public row-mapped cache transactions, packed target verification, strict row-local continuation state, serialized drafter-state access, packed recurrent Mamba transactions, and round-overhead reductions from ef4ff8568c38c640bc90a8176dc3acfe943a288d. It additionally introduces a default-on, kill-switchable fused Qwen3.6-35B-A3B MoE path only for the exact affine layout and decode- or verify-shaped calls of at most 7 tokens per row, run in chunks of at most 7 flattened tokens at any batch size, with stock for prefill-shaped rows. The exception for the parent revision was approved on 2026-10-05 after the fused ordinary-path Studio qualification (fork tests 133/133, hardware E2E pass, 0 parity mismatches and bit-identical run-to-run output in 36 paired blocks at one, two, and eight slots, ordinary decode 1.25x / 1.15x / 0.97x stock) and a three-lane freeze audit at 0 Critical/High/Medium. R003 stays pending for native serving: native-MTP R015 gates signing and activation of a native tuple, not this pin, and nothing here makes any production tuple eligible."
       }
     },
     {

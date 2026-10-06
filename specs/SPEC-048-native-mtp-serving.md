@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.23
+**Version:** 0.1.24
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.23",
+  "version": "0.1.24",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -354,7 +354,9 @@ be built and tested while the review gate below is pending, but it MUST NOT be
 signed, activated, or treated as production-qualified until that gate closes:
 
 - repository: `https://github.com/Augustas11/mlx-swift-lm.git`;
-- revision: `b181102984a4d1875efbd9e0eab3a7dfd1c012c5`;
+- revision: `ca8c384c4fb6bc7d2fbb7c70a18c34b935701805` (candidate; parent
+  `b181102984a4d1875efbd9e0eab3a7dfd1c012c5`, whose review closed on
+  2026-10-05);
 - upstream base: `ml-explore/mlx-swift-lm@bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57`
   (`3.31.4`);
 - reviewed surface: `MTPKVCacheStorage`, `MTPKVCacheTransaction`,
@@ -382,7 +384,12 @@ signed, activated, or treated as production-qualified until that gate closes:
   chunked evaluation of decode- and verify-shaped calls above seven flattened
   tokens, stock fallback for rows longer than seven tokens, and exact
   dtype/shape validation of every packed weight, scale, and bias the fused
-  kernels index (any mismatch keeps the block on the stock path);
+  kernels index (any mismatch keeps the block on the stock path); plus
+  `gatedDeltaUpdateCheckpointed`, the single-pass Gated DeltaNet recurrence
+  that returns the state after `checkpointAfter` steps bit-identically to two
+  split `gatedDeltaUpdate` calls, used by the Qwen 3.5 verify-row checkpoint;
+  plus packed verification leaving recurrent caches unprepared (no SSM mask)
+  when no row is right-padded;
 - review date and owner: `2026-10-05`, `@Augustas11`;
 - mandatory exception re-review date: `2026-12-27`;
 - review gate: upstream-focused build-tests, MacProvider qualification and
@@ -395,7 +402,7 @@ signed, activated, or treated as production-qualified until that gate closes:
   stock kernel, followed by the frozen-diff audit. Native-MTP R015 evidence is
   not part of this gate; it gates signing and activation of a native tuple
   (R007, R015) and never the ordinary path;
-- review result (2026-10-05): closed for this revision. Mac Studio fused
+- review result (2026-10-05): closed for parent revision `b1811029…`. Mac Studio fused
   tests 133/133, hardware E2E pass, 0 ordinary/native parity mismatches and
   bit-identical run-to-run output in 36 paired blocks across one, two, and
   eight slots, ordinary decode throughput 1.25x / 1.15x / 0.97x stock, and a
@@ -403,6 +410,13 @@ signed, activated, or treated as production-qualified until that gate closes:
   (`docs/research/spec048-fused-moe/evidence-2026-10-05/qualification-7d55924eb/`,
   `audits/2026-10-05-native-mtp-fused-freeze/`). The exception is approved
   for the ordinary path; native MTP remains default-off and unqualified;
+- review result for `ca8c384c…`: pending. Its two commits change only the
+  native verify path (the checkpointed recurrence runs only when a verify row
+  requests a checkpoint, and the mask skip only inside packed verification),
+  so ordinary decode is unchanged. The gate is the upstream GDN and MTP
+  tests, the Mac Studio fused harness and hardware E2E with zero
+  ordinary/native parity mismatches, and the frozen-diff audit; until it
+  closes the pin is not signed or activated;
 - removal trigger: replace the fork pin with the first reviewed upstream tag
   that contains equivalent standalone-checkpoint loading, public transaction,
   packed target-verification, and hybrid recurrent-cache surfaces and passes
@@ -1268,6 +1282,17 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.24 (2026-10-06)** — Moves the immutable fork candidate to
+  `ca8c384c4fb6bc7d2fbb7c70a18c34b935701805` (parent `b1811029…`) to cut
+  native-step overhead (#1770): a single-pass checkpointed Gated DeltaNet
+  verify kernel, bit-identical to the split prefix/suffix recurrence, and no
+  all-true SSM mask when no packed verification row is padded. The provider
+  folds the drafter seed conversion into the round's staged evaluation. The
+  2026-10-06 R015 (policy `2c8a2344…`) showed native-step cost as the
+  one-slot limit; a new R015 must be frozen on this pin. The R003 review gate
+  for this revision is pending; ordinary decode is unchanged, and native MTP
+  stays default-off.
 
 - **0.1.23 (2026-10-05)** — Moves the immutable fork candidate to
   `b181102984a4d1875efbd9e0eab3a7dfd1c012c5` (chunked envelope at
