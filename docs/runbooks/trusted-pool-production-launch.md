@@ -19,8 +19,16 @@ Confirm all of the following, or stop:
 - The creator is an approved single-operator creator (SPEC-043-R001), membership
   is the creator's own admitted Macs only, buyers are on dedicated
   pool-authorized accounts, and distribution is reviewed-only.
-- Settlement stays observe/labels-only (`split_execution_status` remains
-  `declared_not_executed`) for the MVP.
+- Settlement is `enforce`: pool requests settle through SPEC-022 R-12 with
+  v0.4 pool-authorized receipts, and a policy core with a non-empty
+  `runtime_allowlist` must be `enforce` (SPEC-042-R001). There is no creator
+  revenue split: `split_execution_status` remains `declared_not_executed`.
+  Before launch, a settled enforce-mode pool journey (receipt `verified`,
+  provider ledger credit) must exist on the production build; on 2026-10-06
+  it did not (#1690 BUG-1/BUG-2).
+- An operator-internal pool that never leaves `launch_environment:
+  candidate` does not use this runbook; follow
+  [`trusted-pool-m1-activation-plan.md`](trusted-pool-m1-activation-plan.md).
 - You accept the residual launch blockers still open on #1233 (full R006
   re-verification, unresolved SPEC-042 rows) or have an explicit written
   decision to carry them.
