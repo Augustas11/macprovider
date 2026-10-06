@@ -66,6 +66,8 @@ var privacyResidualRisks = []string{
 	"secure_boot_level_not_evaluated",
 	"immutable_prompt_strings_not_zeroized",
 	"relays_observe_sizes_timing_and_token_counts",
+	"provider_identity_enrolled_on_first_attested_session",
+	"coordinator_operator_signs_provider_identity_directory",
 }
 
 // privacyUsageContext is the only privacy state attached to a chat execution.

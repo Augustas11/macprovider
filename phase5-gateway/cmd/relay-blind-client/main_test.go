@@ -402,7 +402,7 @@ func TestPrivacyClientDecryptsStreamAndNonStream(t *testing.T) {
 	if privacyScope != "request_and_response_content_hidden_from_relays; provider_runtime_reads_plaintext; ordinary_operator_access_paths_constrained_on_approved_signed_runtime; posture_self_attested_device_bound_not_code_bound" {
 		t.Fatal("privacy scope drifted from SPEC-049-R020")
 	}
-	if len(privacyProtects) != 9 || len(privacyDoesNotProtect) != 6 || len(privacyResidualRisks) != 11 {
+	if len(privacyProtects) != 9 || len(privacyDoesNotProtect) != 6 || len(privacyResidualRisks) != 13 {
 		t.Fatal("disclosure list length drifted")
 	}
 	for _, tc := range []struct {
@@ -608,6 +608,37 @@ type privacyClientSpec struct {
 	alterChunk                   func(map[string]any) map[string]any
 	headerHook                   func(http.Header)
 	reservation                  func(relayblind.ReservationResponse) relayblind.ReservationResponse
+	// directory switches the run to SPEC-049-R028 auto-pin: no pin file, a
+	// pinned directory key, and a signed directory served by the gateway.
+	directory       bool
+	directorySigner ed25519.PrivateKey
+	directoryEdit   func(*relayblind.IdentityDirectory)
+	directoryBytes  func([]byte) []byte
+}
+
+var cliDirectoryKey = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x44}, ed25519.SeedSize))
+
+func cliDirectory(t *testing.T, identity ed25519.PrivateKey, now time.Time, signer ed25519.PrivateKey, edit func(*relayblind.IdentityDirectory)) []byte {
+	t.Helper()
+	public := identity.Public().(ed25519.PublicKey)
+	se := sha256.Sum256([]byte("se"))
+	directory := relayblind.IdentityDirectory{
+		Version: relayblind.IdentityDirectoryVersion, PrivacyClass: relayblind.PrivacyClassV1,
+		IssuedAtUnix: now.Unix() - 5, ExpiresAtUnix: now.Unix() + 295,
+		Entries: []relayblind.IdentityDirectoryEntry{{
+			IdentityPublicKey: base64.RawURLEncoding.EncodeToString(public), Fingerprint: relayblind.PublicKeyFingerprint(public),
+			SEPublicKeyFingerprint: base64.RawURLEncoding.EncodeToString(se[:]), Source: relayblind.IdentityDirectorySourceEnrolled,
+			EnrolledAtUnix: now.Unix() - 100,
+		}},
+	}
+	if edit != nil {
+		edit(&directory)
+	}
+	raw, err := relayblind.SignIdentityDirectory(directory, signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }
 
 func runPrivacyClient(t *testing.T, spec privacyClientSpec) (string, string, int32, error) {
@@ -633,11 +664,26 @@ func runPrivacyClient(t *testing.T, spec privacyClientSpec) (string, string, int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		body, _ := io.ReadAll(r.Body)
-		if got := r.Header.Values("X-MacProvider-Privacy-Class"); len(got) != 1 || got[0] != relayblind.PrivacyClassV1 {
-			t.Errorf("privacy header=%v path=%s", got, r.URL.Path)
-		}
 		if spec.wallet {
 			verifyWalletRequest(t, r, body, "wallet-session-fixture", walletPublic)
+		}
+		if r.URL.Path == privacyDirectoryPath {
+			if r.Method != http.MethodGet || len(body) != 0 {
+				t.Errorf("directory request %s with %d body bytes", r.Method, len(body))
+			}
+			signer := spec.directorySigner
+			if signer == nil {
+				signer = cliDirectoryKey
+			}
+			raw := cliDirectory(t, identity, now, signer, spec.directoryEdit)
+			if spec.directoryBytes != nil {
+				raw = spec.directoryBytes(raw)
+			}
+			_, _ = w.Write(raw)
+			return
+		}
+		if got := r.Header.Values("X-MacProvider-Privacy-Class"); len(got) != 1 || got[0] != relayblind.PrivacyClassV1 {
+			t.Errorf("privacy header=%v path=%s", got, r.URL.Path)
 		}
 		switch r.URL.Path {
 		case "/v1/relay-blind/route-reservations":
@@ -666,6 +712,10 @@ func runPrivacyClient(t *testing.T, spec privacyClientSpec) (string, string, int
 	}
 	if spec.wallet {
 		opts.walletSessionID = "wallet-session-fixture"
+	}
+	if spec.directory {
+		opts.identityPin = ""
+		opts.directoryPublicKey = base64.RawURLEncoding.EncodeToString(cliDirectoryKey.Public().(ed25519.PublicKey))
 	}
 	getenv := func(name string) string {
 		switch name {
