@@ -81,6 +81,19 @@ class LabGuardTest(unittest.TestCase):
         self.assertFalse(os.path.lexists(target))
         self.assertEqual(os.listdir(outside), [])
 
+    def test_hard_linked_target_is_replaced_not_written_through(self):
+        outside, lab = self._outside_and_lab()
+        os.mkdir(os.path.join(lab, "keys"))
+        victim = os.path.join(outside, "victim")
+        with open(victim, "w") as f:
+            f.write("outside")
+        os.link(victim, os.path.join(lab, "keys", "secrets.json"))
+        lab_guard.write_file(lab, "keys/secrets.json", "lab", 0o600)
+        self.assertEqual(open(victim).read(), "outside")
+        self.assertEqual(open(os.path.join(lab, "keys", "secrets.json")).read(), "lab")
+        self.assertEqual(os.stat(victim).st_nlink, 1)
+        self.assertEqual([n for n in os.listdir(os.path.join(lab, "keys")) if n.startswith(".")], [])
+
     def test_write_file_creates_inside_lab_only(self):
         _, lab = self._outside_and_lab()
         lab_guard.check_tree(lab, ("keys", "run"))  # absent dirs are fine

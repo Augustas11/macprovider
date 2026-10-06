@@ -15,7 +15,9 @@ entry directly inside it may be a symlink, so a shell redirect or cp into it
 cannot land outside LAB. Python writers use write_file, which opens every
 component with O_NOFOLLOW.
 """
+import errno
 import os
+import stat
 import sys
 
 DEFAULT_ROOT = "/Users/a1/lab-1690-m6"
@@ -88,12 +90,30 @@ def write_file(lab, rel, data, mode=0o644):
             nxt = os.open(part, nofollow_dir, dir_fd=fd)
             os.close(fd)
             fd = nxt
-        out = os.open(parts[-1], os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, mode, dir_fd=fd)
+        # Write a fresh file and rename it over the target, never truncating
+        # an existing inode: a hard link planted at the target would otherwise
+        # carry the write to its other name outside the lab.
+        try:
+            existing = os.stat(parts[-1], dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and stat.S_ISLNK(existing.st_mode):
+            raise OSError(errno.ELOOP, "write target is a symlink", os.path.join(lab, *parts))
+        tmp = f".{parts[-1]}.lab-guard-{os.getpid()}"
+        out = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=fd)
+        try:
+            with os.fdopen(out, "wb") as f:
+                os.fchmod(f.fileno(), mode)
+                f.write(data)
+            os.rename(tmp, parts[-1], src_dir_fd=fd, dst_dir_fd=fd)
+        except BaseException:
+            try:
+                os.unlink(tmp, dir_fd=fd)
+            except FileNotFoundError:
+                pass
+            raise
     finally:
         os.close(fd)
-    with os.fdopen(out, "wb") as f:
-        os.fchmod(f.fileno(), mode)
-        f.write(data)
     return os.path.join(lab, *parts)
 
 
