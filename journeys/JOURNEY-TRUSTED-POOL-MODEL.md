@@ -72,12 +72,26 @@ only to JOURNEY-NETWORK-MODEL-ADMISSION.
   `llamacpp_loopback`, served by a **non-creator member whose owner account
   is attested** in `pool_attested_members/v1`. GGUF routes settle
   `pool_operator_attested` and carry the creator and member accounts.
-- Six role manifests, in `run.json.manifest_versions`:
-  `native_genesis` (native entry) < `gguf_added` (both entries, GGUF owner
-  attested) < `window_rotation` (window-only: same terms digest) <
-  `price_change` (exactly one entry's rates change, nothing else), then
-  `entry_removal` (native entry removed) and `attestation_removal` (GGUF
-  owner's attestation removed), both after `price_change`, in either order.
+- Six role manifests, six different versions, in
+  `run.json.manifest_versions`: `native_genesis` (the native entry),
+  `window_rotation` (window-only: the same terms digest and byte-equal
+  entries as the role manifest before it), `price_change` (exactly one
+  entry's rates change against the role manifest before it, nothing else),
+  `entry_removal` (the native entry removed; zero entries and no extension
+  is fine), `gguf_added` (both entries, the GGUF owner attested for
+  `llamacpp_loopback`), and `attestation_removal` (the GGUF owner's
+  attestation removed).
+- The only ordering rules: `native_genesis` is the smallest version;
+  `window_rotation` < `price_change` < `entry_removal`; and
+  `attestation_removal` comes after `gguf_added`. `gguf_added` may come before the window rotation or after
+  the entry removal (the Pearl run: v1 genesis, v2 window, v3 price change,
+  v4 entry removal, v5 GGUF added with the native entry re-added, keeper
+  versions, then the attestation removal).
+- A price change is substantive: the delegated member's binding is revoked
+  (`pool_membership_revoked`), and re-delegation alone does not rebind. The
+  member re-delegates and resubmits its offer, which binds
+  (`pool_manifest_bound`) under the `price_change` terms
+  (`test/e2e-1816/vm/s5-rotation.sh` `reoffer_5`).
 - Keeper rotations between them are fine. A route snapshot or `/v1/models`
   digest at any version needs that version's `pool/v<N>/` directory, and its
   terms digest must equal the latest role manifest at or below it.
@@ -145,9 +159,11 @@ only to JOURNEY-NETWORK-MODEL-ADMISSION.
     probe loop across the boundary is all 200; a request routed under the
     `window_rotation` terms is paid as in step 08/09.
 12. `step-12-price-change-in-flight` - `price_change` changes exactly one
-    entry's rates and nothing else; a request for that entry routed under the
-    prior terms settles at the old rates (snapshot and ledger), and a request
-    routed under the `price_change` terms settles at the new rates.
+    entry's rates and nothing else; the entry's member is revoked
+    (`pool_membership_revoked`), re-offers, and binds under the `price_change`
+    terms; a request for that entry routed under the prior terms settles at
+    the old rates (snapshot and ledger), and a request routed under the
+    `price_change` terms settles at the new rates.
 13. `step-13-current-generation-revocation` - `entry_removal` drops the
     native entry and the native binding is revoked with
     `pool_manifest_entry_revoked`; a native request routed before it settles
@@ -261,8 +277,8 @@ holds `response.headers`, `response.json`, `route_snapshots.json`,
   "gguf_member_account_id": "<its owner account, the attested one>",
   "native_entry": {"slug": "qwen25-05b-mlx8", "artifact_hash": "<64-hex snapshot-manifest hash>"},
   "gguf_entry": {"slug": "qwen25-05b-q8-gguf", "artifact_hash": "<64-hex gguf-file hash>"},
-  "manifest_versions": {"native_genesis": 1, "gguf_added": 3, "window_rotation": 4,
-                        "price_change": 5, "entry_removal": 7, "attestation_removal": 8}
+  "manifest_versions": {"native_genesis": 1, "window_rotation": 2, "price_change": 3,
+                        "entry_removal": 4, "gguf_added": 5, "attestation_removal": 7}
 }
 ```
 

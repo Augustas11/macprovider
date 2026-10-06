@@ -269,12 +269,14 @@ def load_run(capture: Capture) -> dict[str, Any]:
     versions = require_object(run.get("manifest_versions"), "run.json.manifest_versions")
     require(set(versions) == set(MANIFEST_ROLES), f"run.json.manifest_versions must name exactly {list(MANIFEST_ROLES)}")
     roles = {role: as_int(versions[role], f"run.json.manifest_versions.{role}") for role in MANIFEST_ROLES}
-    ordered = [roles[role] for role in MANIFEST_ROLES[:4]]
-    require(all(1 <= a < b for a, b in zip(ordered, ordered[1:])),
-            "manifest_versions native_genesis < gguf_added < window_rotation < price_change must be increasing")
-    for role in ("entry_removal", "attestation_removal"):
-        require(roles[role] > roles["price_change"], f"manifest_versions.{role} must follow price_change")
-    require(roles["entry_removal"] != roles["attestation_removal"], "entry_removal and attestation_removal must be separate manifests")
+    # Only these orderings are fixed; gguf_added may come before or after the
+    # window rotation, the price change and the entry removal.
+    require(len(set(roles.values())) == len(roles), "manifest_versions must name six different manifests")
+    require(all(roles[role] >= 1 for role in MANIFEST_ROLES), "manifest_versions must be positive")
+    require(all(roles["native_genesis"] < roles[role] for role in MANIFEST_ROLES[1:]), "manifest_versions.native_genesis must be the smallest")
+    require(roles["window_rotation"] < roles["price_change"] < roles["entry_removal"],
+            "manifest_versions must order window_rotation < price_change < entry_removal")
+    require(roles["attestation_removal"] > roles["gguf_added"], "manifest_versions.attestation_removal must follow gguf_added")
     run["entries"] = entries
     run["roles"] = roles
     return run
@@ -404,6 +406,7 @@ def load_role_pool(capture: Capture, run: dict[str, Any], role: str, manifest: d
     allowlist = pool.get("runtime_allowlist")
     require(isinstance(allowlist, list) and "llamacpp_loopback" in allowlist, f"{where}: runtime_allowlist must include llamacpp_loopback")
     entries_raw = pool.get("model_entries")
+    entries_raw = [] if entries_raw is None else entries_raw
     require(isinstance(entries_raw, list), f"{where}: model_entries must be a list")
     entries = {}
     for index, item in enumerate(entries_raw):
@@ -411,6 +414,7 @@ def load_role_pool(capture: Capture, run: dict[str, Any], role: str, manifest: d
         require(entry["pool_model_id"] not in entries, f"{where}: duplicate model entry")
         entries[entry["pool_model_id"]] = entry
     attested_raw = pool.get("attested_members")
+    attested_raw = [] if attested_raw is None else attested_raw
     require(isinstance(attested_raw, list), f"{where}: attested_members must be a list")
     attested: dict[str, list[str]] = {}
     for index, item in enumerate(attested_raw):
@@ -474,13 +478,22 @@ def check_pool(capture: Capture, run: dict[str, Any], bounds: dict[str, int]) ->
     require(run["native_member_account_id"] not in added["attested"], "the native member is delegated, not R016-attested")
     for kind in ENTRY_KINDS:
         require(run[f"{kind}_member_provider_id"] in added["members"], f"gguf_added get-pool members must include the {kind} member")
-    # step-11: a window-only rotation keeps the terms and the entries byte-equal.
+    def prior_role(role: str) -> dict[str, Any]:
+        earlier = [r for r in MANIFEST_ROLES if roles[r] < roles[role]]
+        return pools[max(earlier, key=lambda r: roles[r])]
+
+    # step-11: a window-only rotation keeps the terms and the entries byte-equal
+    # with the role manifest before it.
     window = pools["window_rotation"]
-    require(window["manifest_terms_digest"] == added["manifest_terms_digest"], "window_rotation must keep the policy terms digest")
-    require(window["manifest_core_digest"] != added["manifest_core_digest"], "window_rotation must be a new core")
-    require(window["entries"] == added["entries"] and window["attested"] == added["attested"], "window_rotation must keep entries and attestations")
-    # step-12: the price change changes exactly one entry's rates.
+    before_window = prior_role("window_rotation")
+    require(window["manifest_terms_digest"] == before_window["manifest_terms_digest"], "window_rotation must keep the policy terms digest")
+    require(window["manifest_core_digest"] != before_window["manifest_core_digest"], "window_rotation must be a new core")
+    require(window["entries"] == before_window["entries"] and window["attested"] == before_window["attested"],
+            "window_rotation must keep entries and attestations")
+    # step-12: the price change changes exactly one entry's rates against the
+    # role manifest before it.
     price = pools["price_change"]
+    window = prior_role("price_change")
     require(price["manifest_terms_digest"] != window["manifest_terms_digest"], "price_change must change the policy terms digest")
     require(set(price["entries"]) == set(window["entries"]) and price["attested"] == window["attested"], "price_change must keep entries and attestations")
     changed = [
@@ -495,12 +508,9 @@ def check_pool(capture: Capture, run: dict[str, Any], bounds: dict[str, int]) ->
     # step-13: entry removal drops the native entry; attestation removal drops the GGUF owner.
     require(native_id not in pools["entry_removal"]["entries"], "entry_removal core must not carry the native entry")
     require(gguf_account not in pools["attestation_removal"]["attested"], "attestation_removal core must not attest the GGUF member's owner")
-    for role in ("entry_removal", "attestation_removal"):
-        prior = max((r for r in MANIFEST_ROLES if roles[r] < roles[role]), key=lambda r: roles[r])
-        if role == "entry_removal":
-            require(native_id in pools[prior]["entries"], "the native entry must be present in the manifest before entry_removal")
-        else:
-            require(gguf_account in pools[prior]["attested"], "the GGUF owner must be attested in the manifest before attestation_removal")
+    require(native_id in prior_role("entry_removal")["entries"], "the native entry must be present in the manifest before entry_removal")
+    require(gguf_account in prior_role("attestation_removal")["attested"],
+            "the GGUF owner must be attested in the manifest before attestation_removal")
     # step-02: every signed rate sits inside the configured bounds.
     for role, pool in pools.items():
         for entry_id, entry in pool["entries"].items():
@@ -769,10 +779,12 @@ def check_proposals(capture: Capture, run: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def check_admission(capture: Capture, run: dict[str, Any]) -> dict[str, Any]:
+def check_admission(capture: Capture, run: dict[str, Any], pool: dict[str, Any]) -> dict[str, Any]:
     rows = capture.rows("admission/model-admission-events.json")
     ids = [as_int(row.get("id"), "model-admission-events.id") for row in rows]
     require(ids == sorted(ids) and len(set(ids)) == len(ids), "model-admission-events must be ordered by id ascending")
+    for row, row_id in zip(rows, ids):
+        row["id"] = row_id
     actor_prefix = f"pool_manifest:{run['pool_id']}:"
     out: dict[str, Any] = {}
     for kind in ENTRY_KINDS:
@@ -820,6 +832,31 @@ def check_admission(capture: Capture, run: dict[str, Any]) -> dict[str, Any]:
         and row.get("reason_code") == "pool_membership_revoked"
     ]
     require(bool(revoked_member), "attestation removal must revoke the GGUF binding with pool_membership_revoked")
+    # A substantive change (the price change) revokes a delegated member's
+    # binding; re-delegation alone does not rebind, so the member re-offers
+    # and the offer binds under the price_change terms.
+    changed_id = pool["price_changed_entry"]
+    changed_kind = entry_kind_for(run, changed_id, "price_change")
+    changed_provider = run[f"{changed_kind}_member_provider_id"]
+    mine = [row for row in rows if row.get("provider_id") == changed_provider]
+    rebind = None
+    for revoked in (r for r in mine if r.get("state") == "revoked" and r.get("reason_code") == "pool_membership_revoked"):
+        offers = [r for r in mine if r.get("state") == "offer_submitted" and r["id"] > revoked["id"]]
+        if not offers:
+            continue
+        for bound in mine:
+            if (bound["id"] > offers[0]["id"] and bound.get("state") == "catalog_priced"
+                    and bound.get("reason_code") == "pool_manifest_bound" and bound.get("pool_model_id") == changed_id
+                    and bound.get("pool_manifest_version") is not None):
+                version = as_int(bound["pool_manifest_version"], "price-change rebind pool_manifest_version")
+                if resolve_version(capture, run, pool, version, "price-change rebind")["role"] == "price_change":
+                    rebind = version
+                    break
+        if rebind is not None:
+            break
+    require(rebind is not None,
+            "after price_change the repriced entry's member must be revoked (pool_membership_revoked), re-offer, and bind under the price_change terms")
+    out["price_change_reoffer_bound_version"] = rebind
     out["window_rotation_rebound"] = True
     out["entry_removal_revoked"] = "pool_manifest_entry_revoked"
     out["attestation_removal_revoked"] = "pool_membership_revoked"
@@ -1025,7 +1062,7 @@ def build_evidence(capture_dir: Path) -> dict[str, Any]:
     bounds, reload = check_bounds(capture)
     pool = check_pool(capture, run, bounds)
     proposals = check_proposals(capture, run)
-    admission = check_admission(capture, run)
+    admission = check_admission(capture, run, pool)
     models = check_models(capture, run, pool)
     requests = {
         name: check_paid_request(capture, run, pool, name, kind, stream)

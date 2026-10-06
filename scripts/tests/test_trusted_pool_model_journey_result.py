@@ -32,12 +32,15 @@ GGUF_HASH = "b2" * 32
 NATIVE_ID = f"pool/{POOL}/qwen25-05b-mlx8"
 GGUF_ID = f"pool/{POOL}/qwen25-05b-q8-gguf"
 BOUNDS_DIGEST = "c3" * 32
-ROLES = {"native_genesis": 1, "gguf_added": 3, "window_rotation": 4, "price_change": 5, "entry_removal": 7, "attestation_removal": 8}
-# version -> terms digest; 2 and 6 are keeper (window-only) rotations.
-TERMS = {1: "11" * 32, 2: "11" * 32, 3: "22" * 32, 4: "22" * 32, 5: "33" * 32, 6: "33" * 32, 7: "44" * 32, 8: "55" * 32}
+# The Pearl #1816 order: genesis (native only), keeper window rotation, native
+# price change, native entry removal (zero entries), GGUF added (native re-added,
+# GGUF entry, R016 attestation), keeper rotation, attestation removal.
+ROLES = {"native_genesis": 1, "window_rotation": 2, "price_change": 3, "entry_removal": 4, "gguf_added": 5, "attestation_removal": 7}
+# version -> terms digest; 6 is a keeper (window-only) rotation of gguf_added.
+TERMS = {1: "11" * 32, 2: "11" * 32, 3: "33" * 32, 4: "44" * 32, 5: "55" * 32, 6: "55" * 32, 7: "77" * 32}
 NATIVE_RATES = {"prompt_rate_per_mtok": 20000, "prompt_cache_hit_rate_per_mtok": 5000, "completion_rate_per_mtok": 40000}
-GGUF_RATES = {"prompt_rate_per_mtok": 30000, "prompt_cache_hit_rate_per_mtok": 7500, "completion_rate_per_mtok": 60000}
-GGUF_NEW_RATES = {"prompt_rate_per_mtok": 35000, "prompt_cache_hit_rate_per_mtok": 8000, "completion_rate_per_mtok": 70000}
+NATIVE_NEW_RATES = {"prompt_rate_per_mtok": 30000, "prompt_cache_hit_rate_per_mtok": 7500, "completion_rate_per_mtok": 60000}
+GGUF_RATES = {"prompt_rate_per_mtok": 25000, "prompt_cache_hit_rate_per_mtok": 6000, "completion_rate_per_mtok": 50000}
 
 
 def load_builder():
@@ -103,12 +106,14 @@ def entry(kind: str, rates: dict) -> dict:
 def pool_state(version: int) -> dict:
     entries, attested, members = [entry("native", NATIVE_RATES)], [], [NATIVE_PROV]
     if version >= 3:
+        entries = [entry("native", NATIVE_NEW_RATES)]
+    if version == 4:
+        entries = []
+    if version >= 5:
         members = [GGUF_PROV, NATIVE_PROV]
         attested = [{"provider_account_id": GGUF_ACCT, "runtime_classes": ["llamacpp_loopback"]}]
-        entries = [entry("native", NATIVE_RATES), entry("gguf", GGUF_RATES if version < 5 else GGUF_NEW_RATES)]
+        entries = [entry("native", NATIVE_NEW_RATES), entry("gguf", GGUF_RATES)]
     if version >= 7:
-        entries = [entry("gguf", GGUF_NEW_RATES)]
-    if version >= 8:
         attested = []
     return {"pool": {
         "pool_id": POOL, "creator_account_id": CREATOR, "lifecycle": "active", "routeable": True,
@@ -230,7 +235,7 @@ def make_capture(root: Path) -> Path:
         write(capture / f"pool/v{version}/get-pool.json", pool_state(version))
     write(capture / "pool/trustpool-events.json", [
         {"event_type": "pool_created", "n": 1}, {"event_type": "root_issuer_registered", "n": 1},
-        {"event_type": "manifest_accepted", "n": 8}, {"event_type": "member_admitted", "n": 3},
+        {"event_type": "manifest_accepted", "n": 7}, {"event_type": "member_admitted", "n": 3},
         {"event_type": "buyer_authorized", "n": 1}, {"event_type": "delegation_granted", "n": 3},
         {"event_type": "lifecycle_changed", "n": 2},
     ])
@@ -251,14 +256,21 @@ def make_capture(root: Path) -> Path:
                 "pool_manifest_version": version, "pool_manifest_core_digest": core(version) if version else None,
                 "expected_catalog_model_hash_algorithm": algo, "expected_catalog_model_hash": h}
 
+    snap, gguf_algo = "macprovider.snapshot-manifest.v1", "macprovider.gguf-file.v1"
     write(capture / "admission/model-admission-events.json", [
         event(1, NATIVE_PROV, "offer_submitted", "offer_submitted"),
-        event(2, NATIVE_PROV, "catalog_priced", "pool_manifest_bound", NATIVE_ID, 1, NATIVE_HASH, "macprovider.snapshot-manifest.v1"),
-        event(3, GGUF_PROV, "offer_submitted", "offer_submitted"),
-        event(4, GGUF_PROV, "catalog_priced", "pool_manifest_bound", GGUF_ID, 3, GGUF_HASH, "macprovider.gguf-file.v1"),
-        event(5, NATIVE_PROV, "catalog_priced", "pool_manifest_rebound", NATIVE_ID, 4, NATIVE_HASH, "macprovider.snapshot-manifest.v1"),
-        event(6, NATIVE_PROV, "revoked", "pool_manifest_entry_revoked", NATIVE_ID, 7, NATIVE_HASH, "macprovider.snapshot-manifest.v1"),
-        event(7, GGUF_PROV, "revoked", "pool_membership_revoked", GGUF_ID, 8, GGUF_HASH, "macprovider.gguf-file.v1"),
+        event(2, NATIVE_PROV, "catalog_priced", "pool_manifest_bound", NATIVE_ID, 1, NATIVE_HASH, snap),
+        event(3, NATIVE_PROV, "catalog_priced", "pool_manifest_rebound", NATIVE_ID, 2, NATIVE_HASH, snap),
+        # the price change revokes the delegated member; it re-delegates and re-offers
+        event(4, NATIVE_PROV, "revoked", "pool_membership_revoked", NATIVE_ID, 2, NATIVE_HASH, snap),
+        event(5, NATIVE_PROV, "offer_submitted", "offer_submitted"),
+        event(6, NATIVE_PROV, "catalog_priced", "pool_manifest_bound", NATIVE_ID, 3, NATIVE_HASH, snap),
+        event(7, NATIVE_PROV, "revoked", "pool_manifest_entry_revoked", NATIVE_ID, 3, NATIVE_HASH, snap),
+        event(8, GGUF_PROV, "offer_submitted", "offer_submitted"),
+        event(9, GGUF_PROV, "catalog_priced", "pool_manifest_bound", GGUF_ID, 5, GGUF_HASH, gguf_algo),
+        event(10, NATIVE_PROV, "offer_submitted", "offer_submitted"),
+        event(11, NATIVE_PROV, "catalog_priced", "pool_manifest_bound", NATIVE_ID, 5, NATIVE_HASH, snap),
+        event(12, GGUF_PROV, "revoked", "pool_membership_revoked", GGUF_ID, 7, GGUF_HASH, gguf_algo),
     ])
 
     def listed(kind, rates):
@@ -266,25 +278,25 @@ def make_capture(root: Path) -> Path:
         return {"id": NATIVE_ID if native else GGUF_ID, "object": "model", "owned_by": "macprovider", "macprovider_pool_model": {
             "pool_id": POOL, "pool_model_id": NATIVE_ID if native else GGUF_ID,
             "artifact_hash_algorithm": "macprovider.snapshot-manifest.v1" if native else "macprovider.gguf-file.v1",
-            "artifact_hash": NATIVE_HASH if native else GGUF_HASH, "manifest_core_digest": core(4), "manifest_version": 4,
+            "artifact_hash": NATIVE_HASH if native else GGUF_HASH, "manifest_core_digest": core(5), "manifest_version": 5,
             "runtime_sources": ["mlx_cache" if native else "llamacpp_loopback"], "disclosure_class": "pool_attested_unverified",
             "disclosure_text": "Pool-attested, not network-verified", "price_source": "pool_creator_signed",
             "max_context_tokens": 8192, "price": {**rates, "global_multiplier_ppm": 1000000},
         }}
 
-    write(capture / "models/pool.json", {"object": "list", "data": [listed("native", NATIVE_RATES), listed("gguf", GGUF_RATES)]})
+    write(capture / "models/pool.json", {"object": "list", "data": [listed("native", NATIVE_NEW_RATES), listed("gguf", GGUF_RATES)]})
     write(capture / "models/global.json", {"object": "list", "data": [{"id": "qwen3.6-27b", "object": "model"}]})
     write(capture / "never-global.json", [{"n": 0}])
-    write_paid(capture, "requests/native-nonstream", "native", 4, NATIVE_RATES)
-    write_paid(capture, "requests/native-stream", "native", 2, NATIVE_RATES, stream=True)
-    write_paid(capture, "requests/gguf-nonstream", "gguf", 3, GGUF_RATES)
-    write_paid(capture, "requests/gguf-stream", "gguf", 3, GGUF_RATES, stream=True)
-    write_paid(capture, "rotation/window-only/after", "gguf", 4, GGUF_RATES)
-    write_paid(capture, "rotation/price-change/inflight", "gguf", 4, GGUF_RATES)
-    write_paid(capture, "rotation/price-change/after", "gguf", 6, GGUF_NEW_RATES)
-    write_paid(capture, "rotation/entry-removal/inflight", "native", 6, NATIVE_RATES)
-    write_paid(capture, "pause/resumed", "gguf", 5, GGUF_NEW_RATES)
-    write_paid(capture, "restart/after", "native", 4, NATIVE_RATES)
+    write_paid(capture, "requests/native-nonstream", "native", 1, NATIVE_RATES)
+    write_paid(capture, "requests/native-stream", "native", 6, NATIVE_NEW_RATES, stream=True)
+    write_paid(capture, "requests/gguf-nonstream", "gguf", 5, GGUF_RATES)
+    write_paid(capture, "requests/gguf-stream", "gguf", 6, GGUF_RATES, stream=True)
+    write_paid(capture, "rotation/window-only/after", "native", 2, NATIVE_RATES)
+    write_paid(capture, "rotation/price-change/inflight", "native", 2, NATIVE_RATES)
+    write_paid(capture, "rotation/price-change/after", "native", 3, NATIVE_NEW_RATES)
+    write_paid(capture, "rotation/entry-removal/inflight", "native", 3, NATIVE_NEW_RATES)
+    write_paid(capture, "pause/resumed", "gguf", 5, GGUF_RATES)
+    write_paid(capture, "restart/after", "native", 6, NATIVE_NEW_RATES)
     write_refusal(capture, "refusals/no-pool-header", 404, "model_not_found")
     write_refusal(capture, "refusals/other-pool", 404, "model_not_found")
     write_refusal(capture, "refusals/wrong-engine", 503, "engine_unavailable")
@@ -298,13 +310,13 @@ def make_capture(root: Path) -> Path:
     write(capture / "rollback/preflight-m9.rc", "3\n")
     write(capture / "rollback/preflight-m9.json", {
         "pool_route_snapshots": 12, "open_pool_verdicts": 0, "in_window_pool_attempts_without_verdict": 0, "rollback_blocked": True,
-        "manifest_history": {"target_tier": "m9", "manifests": 8, "v2_snapshots": 8, "runtime_classes": ["llamacpp_loopback"],
+        "manifest_history": {"target_tier": "m9", "manifests": 7, "v2_snapshots": 7, "runtime_classes": ["llamacpp_loopback"],
                              "extensions": ["pool_model_entries/v1"], "cannot_replay": ["pool_model_entries/v1"]},
     })
     write(capture / "rollback/preflight-p1816.rc", "0\n")
     write(capture / "rollback/preflight-p1816.json", {
         "pool_route_snapshots": 12, "open_pool_verdicts": 0, "in_window_pool_attempts_without_verdict": 0, "rollback_blocked": False,
-        "manifest_history": {"target_tier": "p1816", "manifests": 8, "v2_snapshots": 8, "runtime_classes": ["llamacpp_loopback"],
+        "manifest_history": {"target_tier": "p1816", "manifests": 7, "v2_snapshots": 7, "runtime_classes": ["llamacpp_loopback"],
                              "extensions": ["pool_model_entries/v1"], "cannot_replay": []},
     })
     write(capture / "restart/order.json", {"coordinator_restarted_at": "2026-10-06T02:00:00Z", "gateway_restarted_at": "2026-10-06T02:01:00Z"})
@@ -329,8 +341,8 @@ def valid_signed(**overrides):
             "native_artifact_hash": NATIVE_HASH,
             "gguf_pool_model_id": GGUF_ID,
             "gguf_artifact_hash": GGUF_HASH,
-            "manifest_version": 8,
-            "manifest_core_digest": core(8),
+            "manifest_version": 7,
+            "manifest_core_digest": core(7),
             "pricing_bounds_sha256": BOUNDS_DIGEST,
             "fingerprint_salt": "f" * 64,
         },
@@ -451,8 +463,10 @@ class TrustedPoolModelCaptureTests(unittest.TestCase):
         self.assertEqual("coordinator_observed", evidence["requests"]["requests/native-nonstream"]["usage_source"])
         self.assertEqual("pool_operator_attested", evidence["requests"]["requests/gguf-stream"]["usage_source"])
         self.assertEqual("price_change", evidence["requests"]["rotation/price-change/after"]["manifest_role"])
-        self.assertEqual(GGUF_RATES, evidence["requests"]["rotation/price-change/inflight"]["rates"])
-        self.assertEqual([2, 6], evidence["pool"]["keeper_versions"])
+        self.assertEqual(NATIVE_RATES, evidence["requests"]["rotation/price-change/inflight"]["rates"])
+        self.assertEqual(NATIVE_NEW_RATES, evidence["requests"]["rotation/entry-removal/inflight"]["rates"])
+        self.assertEqual([6], evidence["pool"]["keeper_versions"])
+        self.assertEqual(3, evidence["admission"]["price_change_reoffer_bound_version"])
         self.assertTrue(evidence["admission"]["native"]["unmatched_offer_before_bind"])
         self.assertIn("run.json", evidence["raw_documents"])
         text = json.dumps(evidence)
@@ -475,7 +489,7 @@ class TrustedPoolModelCaptureTests(unittest.TestCase):
         self.assert_rejected("signed entry rate")
 
     def test_rejects_ledger_rate_not_from_snapshot(self) -> None:
-        self.mutate_rows("rotation/price-change/inflight/ledger.json", completion_rate_per_mtok=GGUF_NEW_RATES["completion_rate_per_mtok"])
+        self.mutate_rows("rotation/price-change/inflight/ledger.json", completion_rate_per_mtok=NATIVE_NEW_RATES["completion_rate_per_mtok"])
         self.assert_rejected("ledger completion_rate_per_mtok")
 
     def test_rejects_global_identity_source(self) -> None:
@@ -513,14 +527,14 @@ class TrustedPoolModelCaptureTests(unittest.TestCase):
         self.assert_rejected("pool/v9")
 
     def test_rejects_window_rotation_that_changes_terms(self) -> None:
-        path = self.capture / "pool/v4/policy-terms-digest.txt"
-        path.write_text(path.read_text().replace(TERMS[4], "98" * 32))
+        path = self.capture / "pool/v2/policy-terms-digest.txt"
+        path.write_text(path.read_text().replace(TERMS[2], "98" * 32))
         self.assert_rejected("window_rotation must keep the policy terms digest")
 
     def test_rejects_price_change_that_changes_more(self) -> None:
         def mutate(pool):
             pool["model_entries"][0]["max_context_tokens"] = 4096
-        self.mutate_pool(5, mutate)
+        self.mutate_pool(3, mutate)
         self.assert_rejected("price_change")
 
     def test_rejects_rate_outside_bounds(self) -> None:
@@ -571,13 +585,45 @@ class TrustedPoolModelCaptureTests(unittest.TestCase):
         self.assert_rejected("settlement_capable")
 
     def test_rejects_price_inflight_after_change(self) -> None:
-        self.mutate_rows("rotation/price-change/inflight/route_snapshots.json", manifest_version=5, manifest_core_digest=core(5),
-                         **{f"pool_model_{k}": v for k, v in GGUF_NEW_RATES.items()})
-        self.mutate_rows("rotation/price-change/inflight/ledger.json", prompt_rate_per_mtok=GGUF_NEW_RATES["prompt_rate_per_mtok"],
-                         completion_rate_per_mtok=GGUF_NEW_RATES["completion_rate_per_mtok"])
+        self.mutate_rows("rotation/price-change/inflight/route_snapshots.json", manifest_version=3, manifest_core_digest=core(3),
+                         **{f"pool_model_{k}": v for k, v in NATIVE_NEW_RATES.items()})
+        self.mutate_rows("rotation/price-change/inflight/ledger.json", prompt_rate_per_mtok=NATIVE_NEW_RATES["prompt_rate_per_mtok"],
+                         completion_rate_per_mtok=NATIVE_NEW_RATES["completion_rate_per_mtok"])
         path = self.capture / "rotation/price-change/inflight/response.headers"
-        path.write_text(path.read_text().replace(core(4), core(5)))
+        path.write_text(path.read_text().replace(core(2), core(3)))
         self.assert_rejected("before the price change")
+
+    def test_rejects_price_change_without_reoffer(self) -> None:
+        # Re-delegation alone does not rebind after a term change: the member
+        # must resubmit its offer (test/e2e-1816/vm/s5-rotation.sh reoffer_5).
+        path = self.capture / "admission/model-admission-events.json"
+        rows = [row for row in json.loads(path.read_text()) if row["id"] != 5]
+        path.write_text(json.dumps(rows))
+        self.assert_rejected("re-offer")
+
+    def test_rejects_entry_removal_before_price_change(self) -> None:
+        path = self.capture / "run.json"
+        value = json.loads(path.read_text())
+        value["manifest_versions"] = {**ROLES, "price_change": 4, "entry_removal": 3}
+        path.write_text(json.dumps(value))
+        self.assert_rejected("window_rotation < price_change < entry_removal")
+
+    def test_accepts_gguf_added_before_window_rotation(self) -> None:
+        # Only native_genesis-first, window < price < removal, and
+        # attestation_removal > gguf_added are fixed.
+        evidence = BUILDER.load_run(BUILDER.Capture(self.capture))
+        self.assertEqual(ROLES, evidence["roles"])
+        path = self.capture / "run.json"
+        value = json.loads(path.read_text())
+        value["manifest_versions"] = {"native_genesis": 1, "gguf_added": 2, "window_rotation": 3, "price_change": 4,
+                                      "entry_removal": 5, "attestation_removal": 6}
+        path.write_text(json.dumps(value))
+        self.assertEqual(2, BUILDER.load_run(BUILDER.Capture(self.capture))["roles"]["gguf_added"])
+        value["manifest_versions"]["attestation_removal"] = 1
+        path.write_text(json.dumps(value))
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+            BUILDER.load_run(BUILDER.Capture(self.capture))
 
     def test_rejects_gap_in_window_rotation(self) -> None:
         write(self.capture / "rotation/window-only/probes.json", [

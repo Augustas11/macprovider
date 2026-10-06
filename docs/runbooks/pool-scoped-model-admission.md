@@ -438,9 +438,10 @@ SQL; this section is the order of work. SPEC-047-R011 is not promoted by it
 3. For every manifest you or the keeper sign, keep the `sign-manifest --out`
    file as `pool/v<N>/manifest-accepted.json` and its
    `policy-terms-digest` output as `pool/v<N>/policy-terms-digest.txt`. Right
-   after each of the six role manifests activates (native genesis, GGUF added
-   with the attestation, window-only rotation, price change, native entry
-   removal, GGUF attestation removal), save `get-pool` as
+   after each of the six role manifests activates (native genesis, window-only
+   rotation, price change, native entry removal, GGUF added with the
+   attestation, GGUF attestation removal; the journey file has the ordering
+   rules), save `get-pool` as
    `pool/v<N>/get-pool.json` and write the six versions into `run.json`.
 4. Save both members' `models propose --json` bundles, then, with both
    entries live, the pool and global `/v1/models` views.
