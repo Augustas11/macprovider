@@ -4348,6 +4348,11 @@ if [ "$CATALOG_VERDICT" = "equivalent" ]; then
   STATIC_RATE_CARD_SIG="$CATALOG_LIVE_SNAPSHOT/rate-card.json.sig"
   STATIC_CB_POLICY_JSON="$CATALOG_LIVE_SNAPSHOT/continuous-batching-policy.json"
   STATIC_CB_POLICY_SIG="$CATALOG_LIVE_SNAPSHOT/continuous-batching-policy.json.sig"
+  # An equivalent live release has the incoming feed set, so a bound one carries
+  # the artifact pair in CATALOG_RELEASE_FILES; the smoke compares the served
+  # feed against these live bytes, not the tag's possibly restamped copy.
+  STATIC_ARTIFACTS_JSON="$CATALOG_LIVE_SNAPSHOT/autotune-artifacts.json"
+  STATIC_ARTIFACTS_SIG="$CATALOG_LIVE_SNAPSHOT/autotune-artifacts.json.sig"
   AUTOTUNE_RELEASE_MANIFEST="$CATALOG_LIVE_SNAPSHOT/release.json"
   AUTOTUNE_TRUSTED_KEYS="$CATALOG_LIVE_SNAPSHOT/trusted-keys.json"
   AUTOTUNE_TIER2_JSON="$CATALOG_LIVE_SNAPSHOT/tier2-catalog.json"
@@ -4493,6 +4498,10 @@ $SSH "set -e
   sudo -u macprovider test -r /opt/macprovider/autotune/current/demand-rank.json
   sudo -u macprovider test -r /opt/macprovider/autotune/current/rate-card.json
   sudo -u macprovider test -r /opt/macprovider/autotune/current/continuous-batching-policy.json
+  if [ '$AUTOTUNE_ARTIFACT_BOUND' = bound ]; then
+    sudo -u macprovider test -r /opt/macprovider/autotune/current/autotune-artifacts.json
+    sudo -u macprovider test -r /opt/macprovider/autotune/current/autotune-artifacts.json.sig
+  fi
 " || {
   echo "aborting smoke: macprovider cannot read /opt/macprovider/autotune/*" >&2
   exit 1
@@ -4551,12 +4560,15 @@ if [ "$STATUS" != "200" ]; then
   echo "SPEC-023 autotune release status failed: status=$STATUS body=$(head -c 200 "$AUTOTUNE_STATUS_BODY")" >&2
   exit 1
 fi
-python3 - "$AUTOTUNE_STATUS_BODY" "$AUTOTUNE_RELEASE_ID" <<'PY'
+python3 - "$AUTOTUNE_STATUS_BODY" "$AUTOTUNE_RELEASE_ID" "$AUTOTUNE_ARTIFACT_BOUND" <<'PY'
 import json, sys
 status = json.load(open(sys.argv[1], encoding="utf-8"))
 if status.get("status") != "live_verified" or status.get("release_id") != sys.argv[2]:
     raise SystemExit("coordinator autotune release metadata does not match activated release")
-for name in ("autotune_candidates", "demand_rank", "rate_card", "continuous_batching_policy"):
+names = ["autotune_candidates", "demand_rank", "rate_card", "continuous_batching_policy"]
+if sys.argv[3] == "bound":
+    names.append("catalog_artifacts")
+for name in names:
     feed = status.get("feeds", {}).get(name, {})
     if len(feed.get("sha256", "")) != 64 or not feed.get("signer_key_id"):
         raise SystemExit(f"coordinator autotune release metadata is incomplete for {name}")

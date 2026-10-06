@@ -605,6 +605,11 @@ smoke_names() { # <all|base> - feed names the deploy smoke fetches
 grep -q '"/v1/catalog-artifacts|autotune-artifacts.json|$STATIC_ARTIFACTS_JSON"' "$DEPLOY_SH" &&
   grep -q '"/v1/catalog-artifacts.sig|autotune-artifacts.json.sig|$STATIC_ARTIFACTS_SIG"' "$DEPLOY_SH" ||
   fail "deploy smoke must fetch the served artifact feed for an artifact-bound release"
+grep -q '^  STATIC_ARTIFACTS_JSON="$CATALOG_LIVE_SNAPSHOT/autotune-artifacts.json"$' "$DEPLOY_SH" &&
+  grep -q '^  STATIC_ARTIFACTS_SIG="$CATALOG_LIVE_SNAPSHOT/autotune-artifacts.json.sig"$' "$DEPLOY_SH" ||
+  fail "equivalent-catalog deploys must smoke the artifact feed against the live snapshot"
+grep -q '    names.append("catalog_artifacts")' "$DEPLOY_SH" ||
+  fail "deploy smoke must require catalog_artifacts release status for an artifact-bound release"
 smoke_release() { # <all|base> <dir>
   local name
   for name in $(smoke_names "$1"); do
