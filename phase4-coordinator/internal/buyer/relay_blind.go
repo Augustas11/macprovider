@@ -301,6 +301,88 @@ func relayBlindBindable(p pool.Provider) bool {
 	return p.ServingCapable() && !p.HandshakeAckPending
 }
 
+// relayBlindSessionUsable is the session half of RoutingEligible for a
+// pinned relay-blind dispatch: everything except free-slot capacity, which
+// awaitRelayBlindSlot acquires separately.
+func relayBlindSessionUsable(p pool.Provider) bool {
+	return relayBlindBindable(p) && !p.CatalogRecheckPending
+}
+
+type relayBlindSlotOutcome int
+
+const (
+	relayBlindSlotAcquired relayBlindSlotOutcome = iota
+	relayBlindSlotSessionLost
+	relayBlindSlotUnavailable
+)
+
+// awaitRelayBlindSlot takes a coordinator slot lease on the reserved session.
+// It waits in that session's slot queue, bounded by the slot-queue deadline
+// and the reservation expiry. On success the lease is recorded in state for
+// noteProviderAcceptedRequest and releaseQueuedSlotReservation.
+func (s *Server) awaitRelayBlindSlot(ctx context.Context, reservation relayblind.Reservation, state *forwardState) (pool.Provider, relayBlindSlotOutcome) {
+	resolve := func() (pool.Provider, bool) {
+		provider, live := s.pool.Resolve(reservation.ProviderID, reservation.AssignedSession)
+		return provider, live && provider.AssignedID == reservation.AssignedSession && relayBlindSessionUsable(provider) && provider.IsWSTunneled()
+	}
+	acquired := func(provider pool.Provider) (pool.Provider, relayBlindSlotOutcome) {
+		state.provider = provider
+		state.queuedSlotProviderID = provider.ProviderID
+		return provider, relayBlindSlotAcquired
+	}
+	provider, usable := resolve()
+	if !usable {
+		return pool.Provider{}, relayBlindSlotSessionLost
+	}
+	if s.slotQueue == nil {
+		if provider.RoutingEligible() {
+			state.provider = provider
+			return provider, relayBlindSlotAcquired
+		}
+		return pool.Provider{}, relayBlindSlotUnavailable
+	}
+	if provider.RoutingEligible() && s.slotQueue.reserveProvider(provider.ProviderID, provider.SlotsFree) {
+		return acquired(provider)
+	}
+	deadline := s.slotQueueDeadline
+	if deadline <= 0 {
+		deadline = slotQueueDefaultDeadline
+	}
+	if untilExpiry := time.Unix(reservation.ExpiresAtUnix, 0).Sub(s.now()); untilExpiry < deadline {
+		deadline = untilExpiry
+	}
+	if deadline <= 0 {
+		return pool.Provider{}, relayBlindSlotUnavailable
+	}
+	pollInterval := s.slotQueuePollInterval
+	if pollInterval <= 0 {
+		pollInterval = slotQueueDefaultPollInterval
+	}
+	waiter, ok := s.slotQueue.enter(provider.ProviderID)
+	if !ok {
+		return pool.Provider{}, relayBlindSlotUnavailable
+	}
+	defer s.slotQueue.leave(waiter)
+	waitCtx, cancel := context.WithTimeout(ctx, deadline)
+	defer cancel()
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-waitCtx.Done():
+			return pool.Provider{}, relayBlindSlotUnavailable
+		case <-ticker.C:
+		}
+		provider, usable = resolve()
+		if !usable {
+			return pool.Provider{}, relayBlindSlotSessionLost
+		}
+		if provider.RoutingEligible() && s.slotQueue.reserveHead(waiter, provider.SlotsFree) {
+			return acquired(provider)
+		}
+	}
+}
+
 func (s *Server) selectRelayBlindProvider(ctx context.Context, model string, encryptedBytes int64, requireFree bool, class string) (pool.Provider, relayblind.KeyRecord, bool) {
 	providers := s.pool.Snapshot()
 	sort.Slice(providers, func(i, j int) bool { return providers[i].AssignedID < providers[j].AssignedID })
@@ -552,7 +634,7 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 			writePrivacyClassError(w, privacyClassDisabled, "")
 			return
 		}
-		if !s.relayBlindAvailable() || !live || !provider.RoutingEligible() || !provider.IsWSTunneled() || keyErr != nil || s.relayBlindSettlementPrerequisite(provider) != "" {
+		if !s.relayBlindAvailable() || !live || !relayBlindSessionUsable(provider) || !provider.IsWSTunneled() || keyErr != nil || s.relayBlindSettlementPrerequisite(provider) != "" {
 			_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, privacyClassStale, s.now())
 			writePrivacyClassError(w, privacyClassStale, "")
 			return
@@ -568,11 +650,35 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 			writeRelayBlindError(w, "relay_blind_required_unavailable", "Relay-blind execution is unavailable")
 			return
 		}
-		if !live || !provider.RoutingEligible() || !provider.IsWSTunneled() || keyErr != nil || s.relayBlindSettlementPrerequisite(provider) != "" {
+		if !live || !relayBlindSessionUsable(provider) || !provider.IsWSTunneled() || keyErr != nil || s.relayBlindSettlementPrerequisite(provider) != "" {
 			_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, "relay_blind_key_expired", s.now())
 			writeRelayBlindError(w, "relay_blind_key_expired", "Relay-blind provider session or key expired")
 			return
 		}
+	}
+	// SPEC-041-R004 / SPEC-002: provider capacity is acquired at dispatch. A
+	// session with no free slot is a capacity condition, not a lost session,
+	// a stale posture, or an expired key. Wait on the pinned session's slot
+	// queue like plaintext routing; never move to another provider.
+	slotState := &forwardState{}
+	defer s.releaseQueuedSlotReservation(slotState)
+	defer s.restoreConsumedForwardedSlot(slotState)
+	provider, slotOutcome := s.awaitRelayBlindSlot(r.Context(), reservation, slotState)
+	switch slotOutcome {
+	case relayBlindSlotAcquired:
+	case relayBlindSlotSessionLost:
+		if reservation.PrivacyClass {
+			_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, privacyClassStale, s.now())
+			writePrivacyClassError(w, privacyClassStale, "")
+			return
+		}
+		_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, "relay_blind_key_expired", s.now())
+		writeRelayBlindError(w, "relay_blind_key_expired", "Relay-blind provider session or key expired")
+		return
+	default:
+		_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, "relay_blind_provider_unsupported", s.now())
+		writeRelayBlindError(w, "relay_blind_provider_unsupported", "Relay-blind provider capacity is unavailable")
+		return
 	}
 	quotaMetered := false
 	if s.admission != nil {
@@ -654,6 +760,9 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		privacyVerifiedAt = verifiedAt
 	}
 	relay, err := s.relayBlind.relay(ctx, provider, envelope.RequestID, body, envelope.Stream, relayContext)
+	if err == nil {
+		s.noteProviderAcceptedRequest(slotState)
+	}
 	if err != nil {
 		_ = s.relayBlind.store.RejectArmedPredispatch(r.Context(), reservation.ProviderBinding, "relay_blind_provider_unsupported", s.now())
 		if quotaMetered {
