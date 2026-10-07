@@ -702,10 +702,6 @@ private final class NativeMTPJourneyRunner {
             ("journey-cancel-after-verify", .afterVerify),
             ("journey-cancel-before-finalize", .beforeFinalize),
         ]
-        step.uncovered = [
-            "after-proposal pre-backend cancellation does not emit before/after abort digest events",
-            "independent deterministic drafter recomputation after cancellation; observer proves pre/post abort stability but does not recompute drafter state independently",
-        ]
         for (id, phase) in phaseCases {
             let stateObserver = NativeMTPStateDigestObserver()
             let observerInstalled = await native.installLabNativeMTPStateDigestObserver(stateObserver)
@@ -748,6 +744,9 @@ private final class NativeMTPJourneyRunner {
             step.check("\(id).no_later_native_phase_after_cancel", !hasLaterPhaseEvent(events: events, requestID: id, phase: phase))
             step.check("\(id).pre_post_abort_digest_observed", !beforeAbort.isEmpty && !afterAbort.isEmpty)
             step.check("\(id).pre_post_abort_cache_and_drafter_stable", abortStateStable)
+            step.check("\(id).after_abort_fresh_drafter_recomputation", !afterAbort.isEmpty && afterAbort.allSatisfy {
+                $0.drafterDigestSHA256 != nil && $0.drafterRecomputeDigestSHA256 == $0.drafterDigestSHA256
+            })
             step.check("\(id).scheduler_released_row", idle)
             step.details["\(id).events"] = phaseEventDetails(events)
             step.details["\(id).abort_state"] = [

@@ -658,6 +658,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     private var nativeMTPDrafterRecomputeDigests: [String: String] = [:]
     private var labNativeMTPCommittedPrefixTokens: [String: [Int]] = [:]
     private var labNativeMTPCommittedPrefixHidden: [String: [MLXArray]] = [:]
+    private var labNativeMTPCommittedPrefixTargetBonus: [String: Int] = [:]
     private var labNativeMTPPrefixPositionDeltasUnsupported: Set<String> = []
     #endif
 
@@ -1254,6 +1255,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     inputs: inputs,
                     transactions: transactions
                 )
+                for input in inputs {
+                    self.labClearNativeMTPDrafterRecomputeDigest(requestID: input.requestID)
+                    try await self.labRecomputeNativeMTPDrafterDigest(
+                        targetModel: context.model,
+                        requestID: input.requestID
+                    )
+                }
                 try self.recordNativeMTPStateDigest(
                     phase: .afterAbort,
                     inputs: inputs,
@@ -1316,7 +1324,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                             transaction.targetState.lastHidden,
                             count: input.committedInputTokenCount
                         ),
-                        positionDeltas: transaction.targetState.positionDeltas
+                        positionDeltas: transaction.targetState.positionDeltas,
+                        targetBonusToken: input.acceptedTokenIDs.last ?? {
+                            throw ContinuousBatchSchedulerError.unsupported("native_mtp_finalize_accepted_tokens_mismatch")
+                        }()
                     )
                     try await self.labRecomputeNativeMTPDrafterDigest(
                         targetModel: context.model,
@@ -1346,7 +1357,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     }
 
     func recordLabNativeMTPOrdinaryStateDigest(requestIDs: [String]) async throws {
-        try recordLabNativeMTPStateDigest(phase: .ordinaryAfterDecode, requestIDs: requestIDs)
+        try await recordLabNativeMTPStateDigest(phase: .ordinaryAfterDecode, requestIDs: requestIDs)
     }
 
     func recordLabNativeMTPStateDigest(
@@ -1357,6 +1368,17 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         let observer = labNativeMTPStateDigestObserver
         lock.unlock()
         guard let observer else { return }
+        if phase == .afterAbort, !requestIDs.isEmpty {
+            try await container.perform(nonSendable: requestIDs) { context, requestIDs in
+                for requestID in requestIDs {
+                    self.labClearNativeMTPDrafterRecomputeDigest(requestID: requestID)
+                    try await self.labRecomputeNativeMTPDrafterDigest(
+                        targetModel: context.model,
+                        requestID: requestID
+                    )
+                }
+            }
+        }
         for requestID in requestIDs {
             let digest = try nativeMTPStateDigest(requestID: requestID, transaction: nil)
             observer.record(NativeMTPStateDigestRecord(
@@ -1529,6 +1551,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             nativeMTPDrafterRecomputeDigests.removeAll()
             labNativeMTPCommittedPrefixTokens.removeAll()
             labNativeMTPCommittedPrefixHidden.removeAll()
+            labNativeMTPCommittedPrefixTargetBonus.removeAll()
             labNativeMTPPrefixPositionDeltasUnsupported.removeAll()
             #endif
             if activeOperations == 0 {
@@ -1979,7 +2002,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         requestID: String,
         tokens: [Int],
         hidden: [MLXArray],
-        positionDeltas: MLXArray?
+        positionDeltas: MLXArray?,
+        targetBonusToken: Int
     ) throws {
         guard labNativeMTPObserverInstalled(), !tokens.isEmpty else { return }
         guard tokens.count == hidden.count else {
@@ -1989,6 +2013,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         lock.lock()
         labNativeMTPCommittedPrefixTokens[requestID, default: []].append(contentsOf: tokens)
         labNativeMTPCommittedPrefixHidden[requestID, default: []].append(contentsOf: hidden)
+        labNativeMTPCommittedPrefixTargetBonus[requestID] = targetBonusToken
         if positionDeltas != nil {
             labNativeMTPPrefixPositionDeltasUnsupported.insert(requestID)
         }
@@ -2010,6 +2035,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         return snapshot
     }
 
+    private func labClearNativeMTPDrafterRecomputeDigest(requestID: String) {
+        lock.lock()
+        nativeMTPDrafterRecomputeDigests.removeValue(forKey: requestID)
+        lock.unlock()
+    }
+
     private func labRecomputeNativeMTPDrafterDigest(
         targetModel: any LanguageModel,
         requestID: String
@@ -2019,9 +2050,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         let tokens = labNativeMTPCommittedPrefixTokens[requestID] ?? []
         let hidden = labNativeMTPCommittedPrefixHidden[requestID] ?? []
         let unsupportedPositionDeltas = labNativeMTPPrefixPositionDeltasUnsupported.contains(requestID)
-        let seed = nativeMTPDrafterSeedTokens[requestID]
+        let targetBonus = labNativeMTPCommittedPrefixTargetBonus[requestID]
+        let actualSeed = nativeMTPDrafterSeedTokens[requestID]
         lock.unlock()
-        guard let seed, !tokens.isEmpty else { return }
+        guard actualSeed != nil, let targetBonus, !tokens.isEmpty else { return }
         guard tokens.count == hidden.count else {
             throw ContinuousBatchSchedulerError.unsupported("native_mtp_drafter_recompute_shape_mismatch")
         }
@@ -2031,9 +2063,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         let prompt = MLXArray(tokens.map(Int32.init)).reshaped([1, tokens.count])
         let targetHidden = hidden.count == 1 ? hidden[0] : concatenated(hidden, axis: 1)
         let recomputed = try await drafterContainer.perform(
-            nonSendable: (targetModel, prompt, targetHidden, seed)
+            nonSendable: (targetModel, prompt, targetHidden, targetBonus)
         ) { drafterContext, values in
-            let (targetModel, prompt, targetHidden, seed) = values
+            let (targetModel, prompt, targetHidden, targetBonus) = values
             guard let drafter = drafterContext.model as? any StatefulMTPDrafterModel else {
                 throw ContinuousBatchSchedulerError.unsupported("native_mtp_stateful_drafter_required")
             }
@@ -2042,17 +2074,20 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 target: targetModel,
                 promptTokens: prompt,
                 targetHidden: targetHidden,
-                firstBonus: MLXArray([Int32(seed)]),
+                firstBonus: MLXArray([Int32(targetBonus)]),
                 positionDeltas: nil,
                 state: &state,
                 sampler: GenerateParameters(temperature: 0).sampler()
             )
             eval(state.cache.flatMap(\.state) + (state.seedToken.map { [$0] } ?? []))
-            return state
+            return (
+                state: state,
+                seed: state.seedToken?.asType(.int32).asArray(Int32.self).first.map(Int.init)
+            )
         }
         let recomputedDigest = try Self.nativeMTPDrafterStateDigest(
-            state: recomputed,
-            seed: seed,
+            state: recomputed.state,
+            seed: recomputed.seed,
             pendingColumns: []
         )
         let actualDigest = try nativeMTPDrafterDigest(requestID: requestID)
@@ -2132,7 +2167,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             requestID: requestID,
             tokens: prompt.asArray(Int32.self).map(Int.init),
             hidden: try Self.labHiddenColumns(targetHidden, count: prompt.dim(1)),
-            positionDeltas: positionDeltas
+            positionDeltas: positionDeltas,
+            targetBonusToken: firstBonusToken
         )
         try await labRecomputeNativeMTPDrafterDigest(targetModel: targetModel, requestID: requestID)
         #endif
@@ -2217,7 +2253,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             requestID: input.requestID,
             tokens: input.promptTokens,
             hidden: try Self.labHiddenColumns(targetHidden, count: chunkCount),
-            positionDeltas: positionDeltas
+            positionDeltas: positionDeltas,
+            targetBonusToken: tailToken
         )
         try await labRecomputeNativeMTPDrafterDigest(targetModel: targetModel, requestID: input.requestID)
         #endif
@@ -2330,7 +2367,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 requestID: requestID,
                 tokens: columns.map(\.token),
                 hidden: columns.map(\.hidden),
-                positionDeltas: nil
+                positionDeltas: nil,
+                targetBonusToken: columns.last?.token ?? {
+                    throw ContinuousBatchSchedulerError.unsupported("native_mtp_missing_drafter_column")
+                }()
             )
             try await labRecomputeNativeMTPDrafterDigest(targetModel: targetModel, requestID: requestID)
         }
@@ -2514,6 +2554,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         nativeMTPDrafterRecomputeDigests.removeValue(forKey: requestID)
         labNativeMTPCommittedPrefixTokens.removeValue(forKey: requestID)
         labNativeMTPCommittedPrefixHidden.removeValue(forKey: requestID)
+        labNativeMTPCommittedPrefixTargetBonus.removeValue(forKey: requestID)
         labNativeMTPPrefixPositionDeltasUnsupported.remove(requestID)
         #endif
         lock.unlock()
