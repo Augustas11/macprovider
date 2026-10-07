@@ -1,4 +1,5 @@
 import XCTest
+import Darwin
 @testable import Malibu
 
 /// Pins the wall-clock budget the App gives `macprovider-cli autotune
@@ -90,11 +91,8 @@ final class AutotuneRecommendationRunnerTimeoutTests: XCTestCase {
         // Do NOT use `sleep … & wait`: on some /bin/sh builds, an ignored
         // SIGTERM still interrupts `wait`, so the script exits before grace
         // and the wall-clock assertion flakes (CI saw ~0.06s elapsed).
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", "trap '' 15; while :; do sleep 1; done"]
-        try process.run()
-        Thread.sleep(forTimeInterval: 0.1)
+        let process = try startSIGTERMIgnoringProcess()
+        defer { stopTestProcess(process) }
         let before = Date()
         AutotuneRecommendationRunner.terminateAutotuneSubtree(
             process: process,
@@ -102,6 +100,10 @@ final class AutotuneRecommendationRunnerTimeoutTests: XCTestCase {
         )
         let elapsed = Date().timeIntervalSince(before)
         XCTAssertFalse(process.isRunning)
+        if !process.isRunning {
+            XCTAssertEqual(process.terminationReason, .uncaughtSignal)
+            XCTAssertEqual(process.terminationStatus, SIGKILL)
+        }
         // Must have waited at least the grace window before escalating.
         XCTAssertGreaterThanOrEqual(elapsed, 0.4)
         // And must not have waited absurdly long (i.e. SIGKILL landed).
@@ -128,11 +130,8 @@ final class AutotuneRecommendationRunnerTimeoutTests: XCTestCase {
 
     func testTerminateWithoutSIGKILLEscalationLeavesUncooperativeChildAlive() throws {
         // Recovery path must not SIGKILL before the CLI can restore launchd.
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", "trap '' 15; while :; do sleep 1; done"]
-        try process.run()
-        Thread.sleep(forTimeInterval: 0.1)
+        let process = try startSIGTERMIgnoringProcess()
+        defer { stopTestProcess(process) }
         AutotuneRecommendationRunner.terminateAutotuneSubtree(
             process: process,
             graceSeconds: 0.3,
@@ -149,6 +148,44 @@ final class AutotuneRecommendationRunnerTimeoutTests: XCTestCase {
             escalateToSIGKILL: true
         )
         XCTAssertFalse(process.isRunning)
+    }
+
+    private func startSIGTERMIgnoringProcess() throws -> Process {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("autotune-signal-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let ready = directory.appendingPathComponent("ready")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        // Publish readiness only after the shell installs its signal disposition.
+        // A fixed startup sleep can race exec/trap setup on a busy CI runner.
+        process.arguments = [
+            "-c", "trap '' 15; printf ready > \"$1\"; while :; do sleep 1; done",
+            "autotune-signal-test", ready.path,
+        ]
+        try process.run()
+        let deadline = Date().addingTimeInterval(5)
+        while process.isRunning && Date() < deadline {
+            if FileManager.default.fileExists(atPath: ready.path) { return process }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        stopTestProcess(process)
+        throw NSError(
+            domain: "AutotuneRecommendationRunnerTimeoutTests",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "SIGTERM-ignoring fixture did not become ready"]
+        )
+    }
+
+    private func stopTestProcess(_ process: Process) {
+        guard process.isRunning else { return }
+        _ = Darwin.kill(process.processIdentifier, SIGKILL)
+        process.waitUntilExit()
     }
 
     func testBestEffortBootstrapOnlyAfterCorrectiveRecovery() {
