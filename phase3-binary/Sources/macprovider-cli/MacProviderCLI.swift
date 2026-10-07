@@ -3174,7 +3174,7 @@ struct ServeCommand: AsyncParsableCommand {
         let labScopedPrivacySESigner: (any SEBlobSigner)?
         let labScopedSELivenessSigner: (any SELivenessSigning)?
         let labScopedAttestationGenerator: Tier2AttestationTokenGenerating?
-        if let privacyLabIdentityScope, resolved.privacyClassBeta {
+        if let privacyLabIdentityScope {
             #if arch(arm64)
             do {
                 let identity = try SecureEnclaveIdentity.loadOrCreate(
@@ -3182,16 +3182,29 @@ struct ServeCommand: AsyncParsableCommand {
                     quiet: true,
                     fileBackedURL: privacyLabIdentityScope.secureEnclaveFileURL
                 )
-                labScopedPrivacySESigner = identity
+                labScopedPrivacySESigner = resolved.privacyClassBeta ? identity : nil
                 labScopedSELivenessSigner = identity
                 labScopedAttestationGenerator = SecureEnclaveAttestationGenerator(signer: identity)
             } catch {
-                FileHandle.standardError.write(Data("FATAL privacy_class_se_identity_failed\n".utf8))
-                throw ExitCode(78)
+                if resolved.privacyClassBeta {
+                    FileHandle.standardError.write(Data("FATAL privacy_class_se_identity_failed\n".utf8))
+                    throw ExitCode(78)
+                } else {
+                    labScopedPrivacySESigner = nil
+                    labScopedSELivenessSigner = nil
+                    labScopedAttestationGenerator = nil
+                    FileHandle.standardError.write(Data("WARN privacy_lab_scoped_identity_unavailable ordinary_mode_omits_se_identity\n".utf8))
+                }
             }
             #else
-            FileHandle.standardError.write(Data("FATAL privacy_class_se_identity_failed\n".utf8))
-            throw ExitCode(78)
+            if resolved.privacyClassBeta {
+                FileHandle.standardError.write(Data("FATAL privacy_class_se_identity_failed\n".utf8))
+                throw ExitCode(78)
+            } else {
+                labScopedPrivacySESigner = nil
+                labScopedSELivenessSigner = nil
+                labScopedAttestationGenerator = nil
+            }
             #endif
         } else {
             labScopedPrivacySESigner = nil
@@ -3213,13 +3226,16 @@ struct ServeCommand: AsyncParsableCommand {
                 modelRuntime: modelRuntime,
                 providerStatus: providerStatus,
                 runtimeSource: helloRuntimeSource,
-                attestationGenerator: labScopedAttestationGenerator ?? {
-                    #if arch(arm64)
-                    if let seGen = SecureEnclaveAttestationGenerator.loadIfAvailable() {
-                        return seGen
+                attestationGenerator: {
+                    if privacyLabIdentityScope != nil {
+                        return labScopedAttestationGenerator
                     }
-                    #endif
+                    #if arch(arm64)
+                    return SecureEnclaveAttestationGenerator.loadIfAvailable()
+                        ?? ManagedDeviceAttestationGenerator(artifactPath: resolved.tier2MDAArtifactPath)
+                    #else
                     return ManagedDeviceAttestationGenerator(artifactPath: resolved.tier2MDAArtifactPath)
+                    #endif
                 }(),
                 seLivenessSignerOverride: labScopedSELivenessSigner,
                 privacySESignerOverride: labScopedPrivacySESigner,

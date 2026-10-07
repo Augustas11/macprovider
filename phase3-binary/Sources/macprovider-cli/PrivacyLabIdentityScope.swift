@@ -51,6 +51,13 @@ struct PrivacyLabIdentityScope: Equatable, Sendable {
         isolateLifecycle: Bool
     ) throws -> PrivacyLabIdentityScope {
         guard config.privacyClassBeta else { throw PrivacyLabIdentityScopeError.privacyClassOff }
+        return try validatedIsolation(config: config, isolateLifecycle: isolateLifecycle)
+    }
+
+    static func validatedIsolation(
+        config: AppConfig,
+        isolateLifecycle: Bool
+    ) throws -> PrivacyLabIdentityScope {
         guard isolateLifecycle else { throw PrivacyLabIdentityScopeError.isolateLifecycleRequired }
         guard config.credentialStore == .protectedFile else {
             throw PrivacyLabIdentityScopeError.protectedFileRequired
@@ -90,8 +97,8 @@ struct PrivacyLabIdentityScope: Equatable, Sendable {
         isolateLifecycle: Bool,
         requested: Bool
     ) throws -> PrivacyLabIdentityScope? {
-        guard requested, config.privacyClassBeta else { return nil }
-        return try validated(config: config, isolateLifecycle: isolateLifecycle)
+        guard requested else { return nil }
+        return try validatedIsolation(config: config, isolateLifecycle: isolateLifecycle)
     }
 
     private static func coordinatorIsLiteralLoopback(_ raw: String?) -> Bool {

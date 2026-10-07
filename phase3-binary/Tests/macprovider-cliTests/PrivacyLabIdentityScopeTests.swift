@@ -34,11 +34,54 @@ final class PrivacyLabIdentityScopeTests: XCTestCase {
         }
 
         config.privacyClassBeta = false
-        XCTAssertNil(try PrivacyLabIdentityScope.validatedIfRequested(
+        XCTAssertThrowsError(try PrivacyLabIdentityScope.validatedIfRequested(
             config: config,
             isolateLifecycle: false,
             requested: true
+        )) {
+            XCTAssertEqual($0 as? PrivacyLabIdentityScopeError, .isolateLifecycleRequired)
+        }
+    }
+
+    func testRequestedLabScopeValidatesIsolationWhenPrivacyIsOff() throws {
+        let root = try makeOwnerOnlyRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var config = labConfig(root: root)
+        config.privacyClassBeta = false
+
+        let scope = try XCTUnwrap(PrivacyLabIdentityScope.validatedIfRequested(
+            config: config,
+            isolateLifecycle: true,
+            requested: true
         ))
+        XCTAssertEqual(scope.stateRoot.path, root.path)
+        XCTAssertThrowsError(try PrivacyLabIdentityScope.validated(config: config, isolateLifecycle: true)) {
+            XCTAssertEqual($0 as? PrivacyLabIdentityScopeError, .privacyClassOff)
+        }
+    }
+
+    func testRequestedLabScopeValidatesIsolationAcrossResolvedStep17Outcomes() throws {
+        let root = try makeOwnerOnlyRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        for (name, privacy, relayBlind) in [
+            ("automatic-eligible", true, true),
+            ("automatic-ineligible", false, false),
+            ("automatic-hardening-fallback", false, false),
+            ("explicit-optout", false, false),
+            ("explicit-relay-blind", false, true),
+        ] {
+            var config = labConfig(root: root)
+            config.privacyClassBeta = privacy
+            config.relayBlindEnabled = relayBlind
+            let scope = try XCTUnwrap(PrivacyLabIdentityScope.validatedIfRequested(
+                config: config,
+                isolateLifecycle: true,
+                requested: true
+            ), name)
+            XCTAssertEqual(scope.stateRoot.path, root.path, name)
+        }
     }
 
     func testValidatedScopeIsStableForSameRootAndDistinctAcrossRoots() throws {

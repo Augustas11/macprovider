@@ -852,10 +852,6 @@ actor CoordinatorClient {
         // we fall back to a per-instance UUID (dev/test only — production coordinators
         // will reject with close code 4002 unknown_provider_id).
         self.providerID = config.providerID ?? UUID().uuidString
-        if privacyLabIdentityScope != nil && !config.privacyClassBeta {
-            FileHandle.standardError.write(Data("FATAL privacy_lab_identity_scope_requires_privacy_class\n".utf8))
-            return nil
-        }
         if config.privacyClassBeta && !config.relayBlindEnabled {
             FileHandle.standardError.write(Data("FATAL privacy_class_requires_relay_blind\n".utf8))
             return nil
@@ -971,6 +967,8 @@ actor CoordinatorClient {
             FileHandle.standardError.write(Data("FATAL privacy_class_se_identity_failed\n".utf8))
             return nil
             #endif
+        } else if privacyLabIdentityScope != nil {
+            self.attestationGenerator = ManagedDeviceAttestationGenerator(artifactPath: nil, environment: [:])
         } else {
             #if arch(arm64)
             if let seGen = SecureEnclaveAttestationGenerator.loadIfAvailable() {
@@ -7215,7 +7213,7 @@ actor CoordinatorClient {
 
         // Lazily load the SE identity on arm64; use injected signer in tests.
         if seLivenessSigner == nil {
-            if appConfig.privacyClassBeta, privacyLabIdentityScope != nil {
+            if privacyLabIdentityScope != nil {
                 print("WARN SE liveness challenge received without scoped privacy SE signer — ignoring")
                 return
             }
