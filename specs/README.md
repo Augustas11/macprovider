@@ -30,7 +30,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-019 | Structured output (`response_format: json_schema`) | 0.2.6 | normative | pending | pending corpus migration | [SPEC-019-structured-output.md](SPEC-019-structured-output.md) |
 | SPEC-020 | Provider autoupdate | v0.1.20 | normative | pending | pending: 6 | [SPEC-020-provider-autoupdate.md](SPEC-020-provider-autoupdate.md) |
 | SPEC-021 | MALIBU rewards emission ledger | 0.4.0 | draft | complete | pending: 10 | [SPEC-021-malibu-emission-ledger.md](SPEC-021-malibu-emission-ledger.md) |
-| SPEC-022 | Verified model settlement | v0.3.1 | draft | complete | conformant: 1, pending: 13 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
+| SPEC-022 | Verified model settlement | v0.3.1 | draft | complete | conformant: 2, pending: 12 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
 | SPEC-023 | Installer-Integrated Autotune Recommend | v0.22.12 | normative | pending | conformant: 2, pending: 23 | [SPEC-023-installer-autotune-recommend.md](SPEC-023-installer-autotune-recommend.md) |
 | SPEC-024 | Prefix-cache billing and provider-local cache isolation | 0.2.10 | normative | pending | pending: 3 | [SPEC-024-prefix-cache-billing.md](SPEC-024-prefix-cache-billing.md) |
 | SPEC-025 | Native Mac App (signed `.dmg` + menu bar wrapper) | v0.30 | draft | pending | pending corpus migration | [SPEC-025-native-mac-app.md](SPEC-025-native-mac-app.md) |
@@ -50,7 +50,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-039 | Paged KV / paged-attention engine | v0.1.14 | draft | complete | pending: 15 | [SPEC-039-paged-kv-attention-engine.md](SPEC-039-paged-kv-attention-engine.md) |
 | SPEC-040 | Wallet-Native Buyer Sessions | 0.1.9 | draft | complete | pending: 10 | [SPEC-040-wallet-native-buyer-sessions.md](SPEC-040-wallet-native-buyer-sessions.md) |
 | SPEC-041 | Relay-Blind Request Encryption | 0.4.0 | draft | complete | pending: 8 | [SPEC-041-relay-blind-request-encryption.md](SPEC-041-relay-blind-request-encryption.md) |
-| SPEC-042 | Pool Control Plane and Trusted-Pool Manifest | 0.0.41 | draft | complete | pending: 16 | [SPEC-042-pool-control-plane.md](SPEC-042-pool-control-plane.md) |
+| SPEC-042 | Pool Control Plane and Trusted-Pool Manifest | 0.0.41 | draft | complete | conformant: 2, pending: 14 | [SPEC-042-pool-control-plane.md](SPEC-042-pool-control-plane.md) |
 | SPEC-043 | Trusted Pool Creator Onboarding MVP | 0.2.3 | normative | complete | pending: 14 | [SPEC-043-trusted-pool-creator-onboarding.md](SPEC-043-trusted-pool-creator-onboarding.md) |
 | SPEC-044 | Malibu Model Catalog Economics | 0.2.10 | draft | complete | pending: 12 | [SPEC-044-malibu-model-catalog-economics.md](SPEC-044-malibu-model-catalog-economics.md) |
 | SPEC-045 | Local Consumer Endpoint Mode | 0.1.0 | draft | complete | conformant: 4, pending: 4 | [SPEC-045-local-consumer-endpoint-mode.md](SPEC-045-local-consumer-endpoint-mode.md) |

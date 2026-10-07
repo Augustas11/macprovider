@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -298,12 +299,37 @@ class TrustedPoolExternalRuntimeValidatorTests(unittest.TestCase):
         for step_id in TRUSTED_POOL_EXTERNAL_RUNTIME_STEP_ID_ORDER:
             self.assertIn(f"`{step_id}`", text)
 
-    def test_conformance_maps_journey_without_promoting(self) -> None:
+    def test_conformance_maps_journey_with_signed_promotion_evidence(self) -> None:
         conformance = json.loads((REPO_ROOT / "specs" / "CONFORMANCE.json").read_text(encoding="utf-8"))
         rows = {row["requirement_id"]: row for row in conformance["requirements"]}
         for requirement_id in ("SPEC-022-R012", "SPEC-042-R013", "SPEC-042-R014"):
             self.assertIn(TRUSTED_POOL_EXTERNAL_RUNTIME_JOURNEY_ID, rows[requirement_id]["journeys"])
-            self.assertEqual("pending", rows[requirement_id]["state"])
+            row = rows[requirement_id]
+            self.assertEqual("conformant", row["state"])
+            self.assertIsNone(row["gap"])
+            signed_records = [
+                evidence for evidence in row["evidence"]
+                if isinstance(evidence.get("source"), str)
+                and evidence["source"].endswith(".journey-result.signed.json")
+            ]
+            self.assertTrue(signed_records, requirement_id)
+            for evidence in signed_records:
+                source = evidence["source"]
+                self.assertTrue(source.startswith("journeys/evidence/"))
+                self.assertNotIn("..", Path(source).parts)
+                payload = (REPO_ROOT / source).read_bytes()
+                self.assertEqual("sha256:" + hashlib.sha256(payload).hexdigest(), evidence["artifact"])
+                envelope = json.loads(payload)
+                signed = envelope["signed"]
+                self.assertEqual(TRUSTED_POOL_EXTERNAL_RUNTIME_JOURNEY_ID, signed["journey_id"])
+                self.assertIn(requirement_id, signed["requirement_ids"])
+                self.assertEqual(signed["expires_at"], evidence["expires_at"])
+                self.assertEqual(signed["captured_at"][:10], evidence["captured_at"])
+                self.assertTrue(envelope["signatures"])
+                self.assertTrue(any(
+                    item["artifact"] == "commit:" + signed["repository"]["commit"]
+                    and item["source"] is None for item in row["evidence"]
+                ))
 
 
 class TrustedPoolExternalRuntimeCaptureTests(unittest.TestCase):
