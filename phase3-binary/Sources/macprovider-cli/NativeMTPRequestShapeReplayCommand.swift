@@ -324,7 +324,7 @@ final class NativeMTPRequestShapeReplayRunner {
                     modelID: modelID,
                     requestID: row.requestID,
                     prompt: prompt,
-                    maxTokens: row.maxCompletionTokens,
+                    maxTokens: row.requestedMaxCompletionTokens,
                     temperature: row.temperature,
                     topP: row.topP,
                     stream: row.stream
@@ -469,19 +469,21 @@ final class NativeMTPRequestShapeReplayRunner {
         modelID: String,
         requestID: String,
         prompt: String,
-        maxTokens: Int,
+        maxTokens: Int?,
         temperature: Double,
         topP: Double,
         stream: Bool = true
     ) throws -> ChatCompletionRequest {
-        let object: [String: Any] = [
+        var object: [String: Any] = [
             "model": modelID,
             "messages": [["role": "user", "content": prompt]],
-            "max_tokens": maxTokens,
             "temperature": temperature,
             "top_p": topP,
             "stream": stream,
         ]
+        if let maxTokens {
+            object["max_tokens"] = maxTokens
+        }
         let data = try JSONSerialization.data(withJSONObject: object)
         return try ChatCompletionRequest.parse(data: data).withRequestID(requestID)
     }
@@ -494,35 +496,52 @@ final class NativeMTPRequestShapeReplayRunner {
         var object: [String: Any] = [
             "model": request.model,
             "messages": request.messages.map(Self.messageJSONObject),
-            "max_tokens": row.maxCompletionTokens,
             "temperature": row.temperature,
             "top_p": row.topP,
             "stream": row.stream,
         ]
+        if let requestedMaxCompletionTokens = row.requestedMaxCompletionTokens {
+            object["max_tokens"] = requestedMaxCompletionTokens
+        }
         switch standIn {
         case .logitControls:
-            object["presence_penalty"] = 0.1
+            Self.applyCapturedLogitControls(from: row, to: &object)
         case .structuredOutput:
             object["response_format"] = ["type": "json_object"]
-        case .tools:
-            object["tools"] = [[
-                "type": "function",
-                "function": [
-                    "name": "replay_tool",
-                    "description": "Synthetic replay-only tool shape.",
-                    "parameters": ["type": "object", "properties": [:]],
-                ],
-            ]]
         case .logprobs:
             object["logprobs"] = true
-        case .stopSequence:
-            object["stop"] = ["<replay-stop>"]
         case .unknownRequestField:
-            object["replay_unknown_selector_field"] = true
+            if row.boolFeature("unknown_top_level_keys_present") {
+                object["replay_unknown_selector_field"] = true
+            }
+            if row.boolFeature("unknown_stream_option_keys_present") {
+                object["stream_options"] = ["replay_unknown_stream_option": true]
+            }
         }
         return try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: object))
             .withRequestID(request.requestID)
             .withConversationKey(request.conversationKey, cacheOnly: request.conversationCacheOnly)
+    }
+
+    private static func applyCapturedLogitControls(
+        from row: NativeMTPRequestShapeReplayRow,
+        to object: inout [String: Any]
+    ) {
+        if row.boolFeature("top_k_present"), let value = row.jsonFeature("requested_top_k") {
+            object["top_k"] = value
+        }
+        if row.boolFeature("min_p_nonzero"), let value = row.jsonFeature("requested_min_p") {
+            object["min_p"] = value
+        }
+        if row.boolFeature("presence_penalty_nonzero"), let value = row.jsonFeature("requested_presence_penalty") {
+            object["presence_penalty"] = value
+        }
+        if row.boolFeature("frequency_penalty_nonzero"), let value = row.jsonFeature("requested_frequency_penalty") {
+            object["frequency_penalty"] = value
+        }
+        if row.boolFeature("repetition_penalty_nondefault"), let value = row.jsonFeature("requested_repetition_penalty") {
+            object["repetition_penalty"] = value
+        }
     }
 
     private static func messageJSONObject(_ message: ChatMessage) -> [String: Any] {
@@ -566,11 +585,20 @@ final class NativeMTPRequestShapeReplayRunner {
         let handle = try await runtime.acquireRequestHandle(request)
         let completion: CompletionResult
         do {
-            completion = try await runtime.stream(
-                request,
-                with: handle,
-                shouldCancel: { false }
-            ) { _ in }
+            if request.stream {
+                completion = try await runtime.stream(
+                    request,
+                    with: handle,
+                    shouldCancel: { false }
+                ) { _ in }
+            } else {
+                let (result, _) = try await runtime.completeWithServedSnapshot(
+                    request,
+                    with: handle,
+                    shouldCancel: { false }
+                )
+                completion = result
+            }
         } catch {
             await runtime.unregisterInFlight(handle.registrationID)
             throw error
@@ -660,14 +688,6 @@ struct NativeMTPPostGatewayReplayPolicy {
             preregistrationDigestSHA256: try hex64(object, "preregistration_digest_sha256"),
             privacyReviewID: try string(object, "privacy_review_id")
         )
-    }
-
-    private static func hex64(_ object: [String: Any], _ key: String) throws -> String {
-        let value = try string(object, key)
-        guard value.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
-            throw NativeMTPRequestShapeReplayError.invalidCapture("\(key) must be lowercase 64-hex")
-        }
-        return value
     }
 
     private static func string(_ object: [String: Any], _ key: String) throws -> String {
@@ -901,7 +921,7 @@ struct NativeMTPRequestShapeReplayShape {
         return NativeMTPSelectorReason.eligible.rawValue
     }
 
-    private func boolFeature(_ key: String) -> Bool {
+    func boolFeature(_ key: String) -> Bool {
         features[key] as? Bool ?? false
     }
 
@@ -909,8 +929,17 @@ struct NativeMTPRequestShapeReplayShape {
         (features[key] as? NSNumber)?.intValue ?? 0
     }
 
+    func stringFeature(_ key: String) -> String? {
+        features[key] as? String
+    }
+
+    func jsonFeature(_ key: String) -> Any? {
+        guard let value = features[key], !(value is NSNull) else { return nil }
+        return value
+    }
+
     var sanitizedExport: [String: Any] {
-        [
+        var object: [String: Any] = [
             "shape_id": shapeID,
             "served_model_hash_sha256": servedModelHashSHA256,
             "served_weights_manifest_sha256": servedWeightsManifestSHA256,
@@ -933,15 +962,24 @@ struct NativeMTPRequestShapeReplayShape {
             "conversation_cache_retained_handoff": conversationCacheRetainedHandoff,
             "anonymous_cache_group_sha256": anonymousCacheGroupSHA256 as Any,
         ]
+        for (key, value) in features {
+            object[key] = value
+        }
+        return object
     }
 
     private static func sanitizedFeatures(_ object: [String: Any]) -> [String: Any] {
         let keys = [
-            "stop_sequences", "sampling_requested", "multiple_completions_requested",
+            "stop_sequences", "stop_sequence_utf8_length_buckets",
+            "sampling_requested", "multiple_completions_requested",
+            "requested_top_k", "requested_min_p", "requested_presence_penalty",
+            "requested_frequency_penalty", "requested_repetition_penalty", "requested_n",
             "top_k_present", "min_p_nonzero", "frequency_penalty_nonzero",
             "presence_penalty_nonzero", "repetition_penalty_nondefault",
-            "logit_bias_present", "tools_present", "tool_choice_present",
-            "tool_turn_state_present", "structured_output_requested", "response_format_kind",
+            "logit_bias_present", "logit_bias_geometry", "tools_present", "tool_count",
+            "tool_choice_present", "tool_choice_kind", "tool_turn_state_present",
+            "tool_message_count", "assistant_tool_call_count",
+            "structured_output_requested", "response_format_kind", "response_schema_geometry",
             "logprobs_requested", "top_logprobs_requested", "logit_controls_requested",
             "reasoning_or_template_model", "multimodal_requested",
             "unknown_request_fields_present", "unknown_top_level_keys_present",
@@ -1174,6 +1212,7 @@ struct NativeMTPRequestShapeReplayRow {
     let pendingReason: String?
     let expectedSelectorReason: String
     let syntheticStandIn: NativeMTPReplaySyntheticStandIn?
+    let replayFeatures: [String: Any]
     let metricsClass: NativeMTPRequestShapeReplayMetricsClass
     let exportedShape: [String: Any]
 
@@ -1208,11 +1247,14 @@ struct NativeMTPRequestShapeReplayRow {
             self.pendingReason = "multimodal_shape_requires_sanitized_part_geometry:\(shape.shapeID)"
         } else if projectedReason == NativeMTPSelectorReason.reasoningOrTemplate.rawValue {
             self.pendingReason = "reasoning_or_template_requires_served_model_family:\(shape.shapeID)"
+        } else if let geometryPendingReason = NativeMTPReplaySyntheticStandIn.pendingReason(shape: shape) {
+            self.pendingReason = geometryPendingReason
         } else {
             self.pendingReason = nil
         }
         self.expectedSelectorReason = projectedReason
         self.syntheticStandIn = NativeMTPReplaySyntheticStandIn(reason: projectedReason, shape: shape)
+        self.replayFeatures = shape.features
         self.metricsClass = shape.metricsClass
         self.exportedShape = shape.sanitizedExport
     }
@@ -1236,6 +1278,7 @@ struct NativeMTPRequestShapeReplayRow {
             pendingReason: pendingReason,
             expectedSelectorReason: expectedSelectorReason,
             syntheticStandIn: syntheticStandIn,
+            replayFeatures: replayFeatures,
             metricsClass: metricsClass,
             exportedShape: exportedShape
         )
@@ -1259,6 +1302,7 @@ struct NativeMTPRequestShapeReplayRow {
         pendingReason: String?,
         expectedSelectorReason: String,
         syntheticStandIn: NativeMTPReplaySyntheticStandIn?,
+        replayFeatures: [String: Any],
         metricsClass: NativeMTPRequestShapeReplayMetricsClass,
         exportedShape: [String: Any]
     ) {
@@ -1279,47 +1323,101 @@ struct NativeMTPRequestShapeReplayRow {
         self.pendingReason = pendingReason
         self.expectedSelectorReason = expectedSelectorReason
         self.syntheticStandIn = syntheticStandIn
+        self.replayFeatures = replayFeatures
         self.metricsClass = metricsClass
         self.exportedShape = exportedShape
     }
+
+    func boolFeature(_ key: String) -> Bool {
+        replayFeatures[key] as? Bool ?? false
+    }
+
+    func intFeature(_ key: String) -> Int {
+        (replayFeatures[key] as? NSNumber)?.intValue ?? 0
+    }
+
+    func stringFeature(_ key: String) -> String? {
+        replayFeatures[key] as? String
+    }
+
+    func jsonFeature(_ key: String) -> Any? {
+        guard let value = replayFeatures[key], !(value is NSNull) else { return nil }
+        return value
+    }
+
 }
 
 enum NativeMTPReplaySyntheticStandIn {
     static let disclosure: [String: Any] = [
-        "logit_controls": ["presence_penalty": 0.1],
-        "structured_output": ["response_format": "json_object"],
-        "tools": ["tool_count": 1, "function_name": "replay_tool", "parameters_shape": "empty_object"],
+        "logit_controls": "replays exact sanitized numeric top_k/min_p/penalty controls when present; logit_bias rows stay pending because token IDs are not exported",
+        "structured_output": "replays json_object exactly; json_schema rows stay pending until a safe schema fixture API exists",
         "logprobs": ["logprobs": true],
-        "stop_sequence": ["stop_count": 1, "stop_literal": "<replay-stop>"],
-        "unknown_request_field": ["top_level_key": "replay_unknown_selector_field", "value_type": "boolean"],
+        "unknown_request_field": [
+            "top_level_key": "replay_unknown_selector_field",
+            "stream_option_key": "replay_unknown_stream_option",
+            "value_type": "boolean",
+        ],
+        "pending_geometry": [
+            "stop_sequences": "requires safe stop literals or selector fixture",
+            "tools": "requires safe tool/schema and tool-turn fixture",
+            "top_logprobs": "requires exact requested top_logprobs value",
+        ],
     ]
 
     case logitControls
     case structuredOutput
-    case tools
     case logprobs
-    case stopSequence
     case unknownRequestField
 
     init?(reason: String, shape: NativeMTPRequestShapeReplayShape) {
-        if shape.intFeature("stop_sequences") > 0 {
-            self = .stopSequence
-            return
-        }
         switch reason {
         case NativeMTPSelectorReason.logitControls.rawValue:
             self = .logitControls
         case NativeMTPSelectorReason.structuredOutput.rawValue:
+            guard shape.stringFeature("response_format_kind") == "json_object" else { return nil }
             self = .structuredOutput
-        case NativeMTPSelectorReason.tools.rawValue:
-            self = .tools
         case NativeMTPSelectorReason.logprobs.rawValue:
+            guard !shape.boolFeature("top_logprobs_requested") else { return nil }
             self = .logprobs
         case NativeMTPSelectorReason.unknownRequestField.rawValue:
             self = .unknownRequestField
         default:
             return nil
         }
+    }
+
+    static func pendingReason(shape: NativeMTPRequestShapeReplayShape) -> String? {
+        if shape.intFeature("stop_sequences") > 0 {
+            return "stop_sequence_replay_requires_safe_literals:\(shape.shapeID)"
+        }
+        if shape.boolFeature("logit_bias_present") {
+            return "logit_bias_replay_requires_safe_token_geometry:\(shape.shapeID)"
+        }
+        if shape.boolFeature("top_k_present") && shape.jsonFeature("requested_top_k") == nil {
+            return "top_k_replay_requires_exact_numeric_value:\(shape.shapeID)"
+        }
+        if shape.boolFeature("min_p_nonzero") && shape.jsonFeature("requested_min_p") == nil {
+            return "min_p_replay_requires_exact_numeric_value:\(shape.shapeID)"
+        }
+        if shape.boolFeature("presence_penalty_nonzero") && shape.jsonFeature("requested_presence_penalty") == nil {
+            return "presence_penalty_replay_requires_exact_numeric_value:\(shape.shapeID)"
+        }
+        if shape.boolFeature("frequency_penalty_nonzero") && shape.jsonFeature("requested_frequency_penalty") == nil {
+            return "frequency_penalty_replay_requires_exact_numeric_value:\(shape.shapeID)"
+        }
+        if shape.boolFeature("repetition_penalty_nondefault") && shape.jsonFeature("requested_repetition_penalty") == nil {
+            return "repetition_penalty_replay_requires_exact_numeric_value:\(shape.shapeID)"
+        }
+        if shape.boolFeature("tools_present") || shape.boolFeature("tool_choice_present") || shape.boolFeature("tool_turn_state_present") {
+            return "tool_shape_replay_requires_safe_tool_fixture:\(shape.shapeID)"
+        }
+        if shape.boolFeature("structured_output_requested") && shape.stringFeature("response_format_kind") != "json_object" {
+            return "response_schema_replay_requires_safe_schema_fixture:\(shape.shapeID)"
+        }
+        if shape.boolFeature("top_logprobs_requested") {
+            return "top_logprobs_replay_requires_exact_value:\(shape.shapeID)"
+        }
+        return nil
     }
 }
 
@@ -1400,7 +1498,15 @@ struct NativeMTPRequestShapeReplayRunResult {
     let admissionProjections: [[String: Any]]
 
     func record(policySHA256: String, benchPolicySHA256: String, captureSHA256: String) -> [String: Any] {
-        [
+        let projectionMatches = admissionProjections.allSatisfy { row in
+            (row["matches"] as? Bool) == true && (row["reproduced"] as? Bool) == true
+        }
+        let qualified = sampleCoverageComplete
+            && missingAdmissionRequestIDs.isEmpty
+            && targetMismatchRequestIDs.isEmpty
+            && requests.allSatisfy(\.committedTimingComplete)
+            && projectionMatches
+        return [
             "schema": NativeMTPRequestShapeReplayRunner.schema,
             "record_type": "run",
             "policy_sha256": policySHA256,
@@ -1417,7 +1523,7 @@ struct NativeMTPRequestShapeReplayRunResult {
             "ordinary_observed_throughput_tps": ordinaryObservedThroughputTPS,
             "aggregate_completion_tokens": aggregateCompletionTokens,
             "aggregate_throughput_tps": aggregateThroughputTPS,
-            "qualification_status": sampleCoverageComplete && missingAdmissionRequestIDs.isEmpty && targetMismatchRequestIDs.isEmpty && requests.allSatisfy(\.committedTimingComplete) ? "qualified" : "pending",
+            "qualification_status": qualified ? "qualified" : "pending",
             "sample_coverage_complete": sampleCoverageComplete,
             "admission_observation_complete": missingAdmissionRequestIDs.isEmpty,
             "missing_admission_request_ids": missingAdmissionRequestIDs,

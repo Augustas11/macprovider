@@ -184,6 +184,63 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
         XCTAssertEqual(capture.shapes.first?.features["unknown_top_level_keys_present"] as? Bool, true)
     }
 
+    func testNullableRequestedMaxCompletionStaysNilWhileEffectiveBudgetRemainsBound() throws {
+        let url = try writeCapture([
+            shape("nil-max", extra: ["requested_max_completion_tokens": NSNull(), "effective_max_output_tokens": 96]),
+        ])
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
+        let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
+        XCTAssertNil(plan.blocks[0].rows[0].requestedMaxCompletionTokens)
+        XCTAssertEqual(plan.blocks[0].rows[0].maxCompletionTokens, 96)
+    }
+
+    func testCapturedNumericControlsArePreservedAndRunnableWhenExactValuesExist() throws {
+        let url = try writeCapture([
+            shape("numeric-controls", extra: [
+                "requested_top_k": 40,
+                "requested_min_p": 0.05,
+                "requested_presence_penalty": 0.25,
+                "requested_frequency_penalty": -0.25,
+                "requested_repetition_penalty": 1.1,
+                "top_k_present": true,
+                "min_p_nonzero": true,
+                "presence_penalty_nonzero": true,
+                "frequency_penalty_nonzero": true,
+                "repetition_penalty_nondefault": true,
+                "logit_controls_requested": true,
+            ]),
+        ])
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
+        let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
+        XCTAssertNil(plan.pendingReason)
+        let row = plan.blocks[0].rows[0]
+        XCTAssertEqual(row.expectedSelectorReason, "logit_controls")
+        XCTAssertNotNil(row.syntheticStandIn)
+        XCTAssertEqual((row.replayFeatures["requested_top_k"] as? NSNumber)?.intValue, 40)
+        let exported = try XCTUnwrap(capture.shapes.first?.sanitizedExport)
+        XCTAssertEqual((exported["requested_repetition_penalty"] as? NSNumber)?.doubleValue, 1.1)
+    }
+
+    func testGeometryOnlyControlsStayPendingUntilSafeReplayFixturesExist() throws {
+        let url = try writeCapture([
+            shape("stop", extra: ["stop_sequences": 1, "stop_sequence_utf8_length_buckets": ["1_8": 1]]),
+            shape("bias", extra: ["logit_bias_present": true, "logit_controls_requested": true]),
+            shape("tool", extra: ["tools_present": true, "tool_count": 1]),
+            shape("schema", extra: [
+                "structured_output_requested": true,
+                "response_format_kind": "json_schema",
+                "response_schema_geometry": ["byte_count": 48, "max_depth": 2, "object_count": 1, "array_count": 0, "property_count": 1],
+            ]),
+        ])
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
+        let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
+        XCTAssertEqual(plan.runnableRowsPerBlock, 0)
+        XCTAssertTrue(plan.pendingSampleReasons.contains("stop_sequence_replay_requires_safe_literals:stop"))
+        XCTAssertTrue(plan.pendingSampleReasons.contains("logit_bias_replay_requires_safe_token_geometry:bias"))
+        XCTAssertTrue(plan.pendingSampleReasons.contains("tool_shape_replay_requires_safe_tool_fixture:tool"))
+        XCTAssertTrue(plan.pendingSampleReasons.contains("response_schema_replay_requires_safe_schema_fixture:schema"))
+    }
+
     func testUnknownRequestShapeRemainsRunnableAsRepresentativeFallbackRow() throws {
         let url = try writeCapture([
             shape("unknown", extra: ["unknown_top_level_keys_present": true]),
@@ -255,8 +312,14 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
             "native_mtp_target_generation": 1,
             "stream": true,
             "stop_sequences": 0,
+            "stop_sequence_utf8_length_buckets": [:],
             "requested_temperature": 0.0,
             "requested_top_p": 1.0,
+            "requested_top_k": NSNull(),
+            "requested_min_p": NSNull(),
+            "requested_presence_penalty": 0.0,
+            "requested_frequency_penalty": 0.0,
+            "requested_repetition_penalty": NSNull(),
             "requested_n": 1,
             "requested_max_completion_tokens": 128,
             "effective_max_output_tokens": 64,
@@ -268,11 +331,17 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
             "presence_penalty_nonzero": false,
             "repetition_penalty_nondefault": false,
             "logit_bias_present": false,
+            "logit_bias_geometry": ["entry_count": 0, "numeric_value_count": 0, "positive_count": 0, "negative_count": 0, "zero_count": 0, "min_value": NSNull(), "max_value": NSNull(), "max_abs_bucket": "none"],
             "tools_present": false,
+            "tool_count": 0,
             "tool_choice_present": false,
+            "tool_choice_kind": "absent",
             "tool_turn_state_present": false,
+            "tool_message_count": 0,
+            "assistant_tool_call_count": 0,
             "structured_output_requested": false,
             "response_format_kind": "text",
+            "response_schema_geometry": ["byte_count": 0, "max_depth": 0, "object_count": 0, "array_count": 0, "property_count": 0],
             "logprobs_requested": false,
             "top_logprobs_requested": false,
             "logit_controls_requested": false,
