@@ -600,8 +600,10 @@ def export_v2_sources(raw: pathlib.Path, out: pathlib.Path, redactor: Redactor, 
     rejects the whole output if those exact bytes contain secrets or host paths.
     """
     source_dir = raw / "evidence" / "v2-source"
-    if not source_dir.exists():
-        warnings.append("evidence/v2-source absent: v2 source-fact exports not written")
+    if not source_dir.exists() and not source_dir.is_symlink():
+        # Historical v1 runs have no v2 source tree. Absence selects the v1
+        # extraction path; once the directory exists, the closed v2 inventory
+        # below is mandatory and validated fail closed.
         return
     if source_dir.is_symlink() or not source_dir.is_dir():
         die("evidence/v2-source must be a real directory")

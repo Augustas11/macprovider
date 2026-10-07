@@ -120,6 +120,7 @@ class ExtractorTests(unittest.TestCase):
             self.assertTrue((primary / relative).is_file(), relative)
         summary = json.loads((primary / "summary.json").read_text())
         self.assertEqual(5, len(summary["not_recoverable"]))
+        self.assertEqual([], summary["warnings"])
 
     def test_never_exports_credentials_needles_or_home_paths(self) -> None:
         primary = self.fx.out / "primary"
@@ -146,6 +147,30 @@ class ExtractorTests(unittest.TestCase):
         out = Path(self.fx.tmp.name) / "again"
         self.assertEqual(0, run_extractor(self.fx.raw, out, self.fx.facts).returncode)
         self.assertEqual(before, {path.name: path.read_bytes() for path in (self.fx.raw / "db").iterdir()})
+
+    def test_present_v2_source_directory_requires_complete_inventory(self) -> None:
+        source_dir = self.fx.raw / "evidence" / "v2-source"
+        source_dir.mkdir()
+        try:
+            out = Path(self.fx.tmp.name) / "incomplete-v2"
+            completed = run_extractor(self.fx.raw, out, self.fx.facts)
+            self.assertNotEqual(0, completed.returncode)
+            self.assertIn("must contain exactly", completed.stderr)
+            self.assertFalse(out.exists())
+        finally:
+            source_dir.rmdir()
+
+    def test_refuses_dangling_v2_source_symlink(self) -> None:
+        source_dir = self.fx.raw / "evidence" / "v2-source"
+        source_dir.symlink_to(self.fx.raw / "absent-v2-source", target_is_directory=True)
+        try:
+            out = Path(self.fx.tmp.name) / "dangling-v2"
+            completed = run_extractor(self.fx.raw, out, self.fx.facts)
+            self.assertNotEqual(0, completed.returncode)
+            self.assertIn("v2-source must be a real directory", completed.stderr)
+            self.assertFalse(out.exists())
+        finally:
+            source_dir.unlink()
 
     def test_refuses_and_removes_output_when_a_needle_would_be_exported(self) -> None:
         needle = self.fx.facts["needles"]["prompt_canary"]

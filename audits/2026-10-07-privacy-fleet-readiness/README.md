@@ -61,7 +61,7 @@ separate G004 hardware campaign; this record grants no merge authority.
 | A newer latch could be deleted by completion of an older retry | Correctness | Closed at the frozen SHA | Targeted regression passed; final code, architecture, and security reviews found no blocking issue. |
 | Same-store concurrency regression tests self-deadlocked | **MEDIUM** | Closed at the frozen SHA | Database-connection and `sync.Once` hook deadlocks were corrected; ordinary, race, and independent reviewer reruns passed. Earlier timeouts remain recorded as failed diagnostic attempts. |
 | Final audit lanes previously reviewed a moving candidate | Gate/watch | Closed at the frozen SHA | All three final reviews covered the same full combined 63-file diff; each reports 0 CRITICAL, 0 HIGH, and 0 MEDIUM findings. |
-| `gofmt` alignment in `test/integration/harness_test.go:227` | LOW | Carried explicitly | Address in the subsequent landing candidate freeze. Repository policy permits an explicitly carried LOW; it does not block current G001 completion. |
+| `gofmt` alignment in `test/integration/harness_test.go:227` | LOW | Resolved in later freeze `dda5168d1fad38207c51203b20d3250f9042d762` | The explicit carry did not block G001; later formatting correction closed it. |
 
 ## G001 completion proof
 
@@ -75,11 +75,11 @@ G001 completed against frozen code SHA
 4. Formal ops review approved the same actual source SHA.
 5. The draft PR head and this record remain bound to the reviewed SHA.
 
-The carried LOW formatting finding remains explicit for the subsequent landing
-candidate. G001 PASS does **not** authorize merging, release, deployment,
-production activation, or transition out of draft status. G004 hardware
-acceptance and the new activation exception remain pending and are tracked
-separately.
+The carried LOW formatting finding was resolved in the later `dda5168` freeze;
+that later resolution does not alter the source-bound G001 proof above. G001
+PASS does **not** authorize merging, release, deployment, production activation,
+or transition out of draft status. G004 hardware acceptance and the new
+activation exception remain pending and are tracked separately.
 
 ## G002 fleet reconciliation proof
 
@@ -112,9 +112,11 @@ privacy rollout by G002.
 
 Decision: **IN PROGRESS**
 
-The earlier frozen partial v2 scaffold was not accepted. The current working
-diff implements the versioned full v2 journey profile while preserving exact
-historical v1 recomposition, but it is not yet a frozen candidate.
+Two successive G003 freezes, `dda5168d1fad38207c51203b20d3250f9042d762` and
+`9b8e6ecfab519623ede13cec0d54fd016aaee633`, are now historical evidence rather
+than accepted candidates. The current combined corrections await a new frozen
+SHA, fresh full audits, and fresh CI. Exact historical v1 recomposition remains
+a required invariant of the versioned full v2 journey profile.
 
 Two interim review findings drove the latest corrections:
 
@@ -148,10 +150,8 @@ schema-invalid evidence, directory tampering, pin expiry, revocation, and
 parity. Expected stderr from negative extractor cases is not a test failure.
 
 Python compilation checks for the changed scripts and the diff whitespace check
-also passed. These are targeted results for the current working diff, not final
-frozen-candidate proof. G003 remains pending a fresh full audit and CI against a
-new frozen SHA. No G003 pass, hardware proof, rollout clearance, production
-change, or activation authorization is claimed.
+also passed at that stage. These are targeted historical results, not final
+frozen-candidate proof.
 
 ### `dda5168d1fad38207c51203b20d3250f9042d762` audit and CI disposition
 
@@ -172,3 +172,37 @@ public verification to the existing trusted public API helper without weakening
 the signing guard. G003 remains pending a new frozen SHA, replacement validation,
 fresh full audits, and successful CI. The `dda5168d1fad38207c51203b20d3250f9042d762`
 review results are retained as historical evidence and are not a G003 pass.
+
+### `9b8e6ecfab519623ede13cec0d54fd016aaee633` audit and CI disposition
+
+The initial full 74-file frozen-SHA reviews reported:
+
+- Security: CLEAR, 0 CRITICAL / 0 HIGH / 0 MEDIUM.
+- Architecture: CLEAR, 0 CRITICAL / 0 HIGH / 0 MEDIUM.
+- Code: 0 findings at every severity, with a COMMENT pending fresh CI compile
+  evidence because LSP was unavailable. The COMMENT was not approval.
+
+A later bounded architecture review recorded a WATCH: the protected
+journey-signing workflow still used a v1-hardcoded evidence ID. Governance run
+`37558555936` completed successfully, but required CI run `37558555948` did not
+pass. Deploy job `112590503053` failed the historical v1 primary-evidence check
+because absence of the optional v2-source directory added a warning. The module
+ran 34 tests in 17.026s: 32 passed, 1 failed, and 1 errored. The failure and error
+are not counted as a partial pass.
+
+The primary recompute correction changes the warning predicate so default v1
+absence of the optional v2-source directory is not a warning, while a present
+v2-source directory remains strict and explicit v2 still rejects missing proof.
+Four targeted tests passed in 4.203s, covering both legacy CI failures, the
+present-but-empty v2 inventory negative case, and bound-provenance extraction. A
+separate v1 exports regression passed in 0.273s. The `p_primary_integrity`
+warnings guard is unchanged, and no contract was edited.
+
+The workflow correction is frozen across two files. It routes derived-payload
+journeys through an exact v1/v2 evidence-ID whitelist shared by preflight and
+export. Its focused checks pass, and the static guard was enhanced rather than
+weakened.
+
+G003 remains pending a new combined SHA, fresh complete audits, and successful
+CI. No physical v2 hardware pass, rollout clearance, production change,
+activation authorization, or G003 pass is claimed.
