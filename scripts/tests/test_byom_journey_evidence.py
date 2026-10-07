@@ -49,12 +49,10 @@ ADMISSION_SIGNED_SOURCE = (
     "spec-047-r005-spec-047-r006-spec-047-r007-spec-047-r008."
     "journey-result.signed.json"
 )
-# #1830 moved these selectors and #1874 moved them again after the fresh
-# 2026-10-06 discovery run; they stay pending until a newer signed run.
-STALE_SELECTOR_PROMOTED_REQUIREMENT_IDS = frozenset({
-    "SPEC-046-R001",
-    "SPEC-046-R008",
-})
+FRESH_DISCOVERY_SIGNED_SOURCE = (
+    "journeys/evidence/provider-byom-discovery-20261007T043046Z."
+    "spec-046-r001-spec-046-r008.journey-result.signed.json"
+)
 # #1816: rows #1830 demoted, restored by fresh signed journeys.
 RESTORED_DISCOVERY_SIGNED_SOURCE = (
     "journeys/evidence/provider-byom-discovery-20261006T080928Z."
@@ -67,6 +65,7 @@ RESTORED_ADMISSION_SIGNED_SOURCE = (
     "spec-047-r006-spec-047-r008.journey-result.signed.json"
 )
 RESTORED_REQUIREMENT_SOURCES = {
+    **{f"SPEC-046-R{i:03d}": FRESH_DISCOVERY_SIGNED_SOURCE for i in (1, 8)},
     **{f"SPEC-046-R{i:03d}": RESTORED_DISCOVERY_SIGNED_SOURCE for i in (3, 4, 5, 6, 7)},
     **{f"SPEC-047-R{i:03d}": RESTORED_ADMISSION_SIGNED_SOURCE for i in (1, 2, 3, 4, 6, 8)},
 }
@@ -1837,13 +1836,8 @@ class BYOMJourneyConformanceMappingTests(unittest.TestCase):
                 digest = hashlib.sha256(signed_path.read_bytes()).hexdigest()
                 row = rows[requirement_id]
                 self.assertIn(journey_id, row["journeys"], requirement_id)
-                if requirement_id in STALE_SELECTOR_PROMOTED_REQUIREMENT_IDS:
-                    self.assertEqual("pending", row["state"], requirement_id)
-                    self.assertIsNotNone(row["gap"], requirement_id)
-                    self.assertIn("fresh independently trusted", row["gap"]["rationale"], requirement_id)
-                else:
-                    self.assertEqual("conformant", row["state"], requirement_id)
-                    self.assertIsNone(row["gap"], requirement_id)
+                self.assertEqual("conformant", row["state"], requirement_id)
+                self.assertIsNone(row["gap"], requirement_id)
                 sha_items = [
                     item
                     for item in row["evidence"]
