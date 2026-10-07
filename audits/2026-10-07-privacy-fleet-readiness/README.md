@@ -112,6 +112,45 @@ privacy rollout by G002.
 
 Decision: **IN PROGRESS**
 
+### Current pre-next-freeze evidence
+
+Published SHA `eb8f6e63cdeb353aa99886a51a12933a95d8cbe3` is the latest
+source-bound G003 tooling freeze. Full code, security, and architecture audits
+covered the complete 77-file diff at that SHA. Security and architecture were
+CLEAR with 0 CRITICAL / 0 HIGH / 0 MEDIUM findings. Code review reported 0
+findings with a COMMENT because required CI was not green.
+
+Governance run `37559346376` completed successfully. Required CI run
+`37559346356` remains in progress overall: Swift is SUCCESS, deploy is pending,
+and coordinator job `112592958252` failed in the pre-existing settlement
+contention fixture
+`TestInsertSettlementAttemptOutputSurvivesConcurrentRouteSnapshotWriter` with
+`SQLITE_BUSY`. The relay-blind package passed separately in that run, but it is
+not used here to infer the failed coordinator gate or the overall privacy
+status.
+
+Commit `7a8cb3e75` is an unpublished ancestor of current local HEAD and contains
+a test-only correction for that settlement fixture. It sets up the dedicated
+route journal through the production-equivalent path while preserving the
+existing busy-timeout behavior and assertions. The module-local two-test billing
+selector passed in 0.883s. This result has not run through required CI.
+
+Current local HEAD `07176b6eb05b8e82f873eb7bd114120b148dd458` adds the limited
+Secure Enclave lab-evidence scope. Full-diff audits for `07176b6eb` are running
+and are not yet complete; architecture review covered the full 83-file diff at
+that SHA and is CLEAR with 0 CRITICAL / 0 HIGH / 0 MEDIUM. Code and security
+audits remain pending. The scope remains limited to lab proof. Local
+parser/static validation has passed, including actual-host IPv6 bracket parsing
+and scoped-file `lstat` checks for owner, private-mode, regular file, and
+symlink-negative handling. No full test suite was run for this scope. Intended
+scope constraints are: default off, explicit `--lab-identity-scope` flag
+required, loopback-protected source, current user/euid-owned `0700`
+protected-file handling, and no production or general Tier 2 behavior change.
+Final source freeze, final audits, CI, and hardware evidence remain pending.
+
+No physical hardware PASS, G003 completion, ops activation authorization, merge,
+release, rollout, stronger `#1749` closure, or production change is claimed.
+
 Two successive G003 freezes, `dda5168d1fad38207c51203b20d3250f9042d762` and
 `9b8e6ecfab519623ede13cec0d54fd016aaee633`, are now historical evidence rather
 than accepted candidates. The current combined corrections await a new frozen

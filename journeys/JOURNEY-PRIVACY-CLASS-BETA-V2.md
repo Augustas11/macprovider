@@ -37,6 +37,11 @@ same baseline contract as `JOURNEY-PRIVACY-CLASS-BETA`.
 18. `step-18-auto-enrollment-distinct-identities` proves durable enrollment for
     at least two distinct provider identities, posture-after-commit ordering,
     failed posture non-enrollment, and cross-provider key-reuse refusal.
+    A same-provider key-change campaign uses a new isolated lab state root
+    validated under explicit `--isolate-lifecycle` and `--lab-identity-scope`
+    opt-ins, `protected_file`, literal loopback coordinator, and current
+    user/euid-owned 0700 directory gates; it never deletes or regenerates the
+    production Secure Enclave identity.
 19. `step-19-key-change-quarantine-reenroll` proves key-change quarantine,
     privacy key-record revocation, no implicit replacement, repeated quarantine
     after expiry, operator reenroll, held-reservation rejection, and enrollment
