@@ -11,6 +11,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
+	"github.com/augstar/macprovider-coordinator/internal/sourceevidence"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 )
 
@@ -1180,6 +1181,57 @@ func (b *billingRecorder) logRow(
 	retried int,
 ) {
 	_ = b.recordRow(providerAssignedID, "", "", status, promptTok, nil, completionTok, errMsg, errCode, retried, nil, billing.FaultNone, nil)
+}
+
+func (b *billingRecorder) logNoDispatchClosure(terminalKind string, status int, msg string) {
+	if b == nil {
+		return
+	}
+	if b.server == nil || b.server.sourceEvidence == nil || b.server.reqLogStore == nil || b.state == nil || b.req == nil {
+		b.logBuyerFailure(status, msg)
+		return
+	}
+	row := requestlog.Row{
+		TSUtc:                 b.startedAt,
+		RequestID:             b.requestID,
+		ExternalRequestID:     b.externalRequestID,
+		AccountID:             b.accountID,
+		PoolID:                b.state.poolID,
+		Model:                 sanitizeRequestLogText(b.model),
+		LatencyMs:             float64(time.Since(b.startedAt).Milliseconds()),
+		RoutingMs:             float64(b.state.routingDone.Sub(b.startedAt).Milliseconds()),
+		QueueWaitMs:           float64(b.state.queueWait.Milliseconds()),
+		Status:                status,
+		Stream:                b.stream,
+		BuyerIP:               buyerIP(b.req.RemoteAddr),
+		Error:                 sanitizeRequestLogText(msg),
+		CacheQuarantineReason: "",
+		PrefHeader:            sanitizeRequestLogText(b.req.Header.Get("X-MacProvider-Pref")),
+		ProviderHeader:        sanitizeRequestLogText(b.req.Header.Get("X-MacProvider-Provider")),
+		Retried:               0,
+	}
+	if terminalKind == sourceevidence.TerminalModelNotFound {
+		row.Model = ""
+	}
+	if b.relayBlind != nil {
+		inputCap, outputCap := b.relayBlind.InputTokenUpperBound, b.relayBlind.MaxOutputTokens
+		row.RequestedPrivacyMode = "relay_blind_required"
+		row.EffectivePrivacyOutcome = b.relayBlind.Outcome
+		row.RelayBlindEnvelopeDigest = b.relayBlind.EnvelopeDigest
+		row.RelayBlindKeyRecordDigest = b.relayBlind.KeyRecordDigest
+		row.RelayBlindKID = b.relayBlind.KID
+		row.RelayBlindProviderBindingDigest = b.relayBlind.ProviderBindingDigest
+		row.RelayBlindInputTokenUpperBound = &inputCap
+		row.RelayBlindMaxOutputTokens = &outputCap
+		row.PositiveVerificationExcluded = true
+		row.RewardsExcluded = true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
+	defer cancel()
+	if err := b.server.sourceEvidence.RecordNoDispatch(ctx, sourceevidence.ClosureInput{TerminalKind: terminalKind, Row: row}); err != nil {
+		b.server.log.Warn().Err(err).Str("event", "source_evidence_closure_skipped").Msg("source evidence no-dispatch closure skipped")
+		b.logBuyerFailure(status, msg)
+	}
 }
 
 // logBuyerFailure mirrors the pre-refactor `logBuyerFailure` closure.

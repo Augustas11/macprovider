@@ -1,7 +1,10 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.46 (2026-10-07, source-export authenticity foundation)
+**Version:** 0.9.47 (2026-10-07, coordinator no-dispatch source exports)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.47 (2026-10-07, issue #1880 — coordinator no-dispatch source exports):**
+- §5.4.3.2 defines a private operator-authenticated coordinator export for strictly bounded no-dispatch terminals, with immutable source provenance, atomic terminal fencing and closed fact projections. This does not promote acceptance or permit raw rejected-input disclosure.
 
 **Change log v0.9.46 (2026-10-07, issue #1880 — source-export authenticity foundation):**
 - §5.4.3.1 defines the producer-signed export envelope and reviewed key registry used as an authenticity building block for pool-model evidence. An authenticated envelope alone proves no refusal, accounting outcome, complete snapshot, or conformance. This version introduces no producer endpoint and no exception to SPEC-017 unserved-input redaction.
@@ -2037,6 +2040,64 @@ endpoint or acceptance integration is enabled by this foundation, and
 SPEC-006-R018 remains pending. SPEC-017's blank unserved model rule is
 unchanged; raw rejected model/selector/account input MUST NOT be persisted or
 published through this envelope as a workaround.
+
+#### 5.4.3.2 Coordinator no-dispatch source exports (v0.9.47, #1880)
+
+The coordinator MAY provide `POST /admin/evidence/source-exports/coordinator-v1`
+on its existing private administrative surface, authenticated only by its
+operator-only credential. Buyer, provider, gateway-service, portal and creator
+credentials MUST NOT authorize export. The surface is disabled by default,
+bounded, non-cacheable, and does not broaden public gateway access. Invalid
+or unavailable export requests return constant errors without reflecting raw
+inputs. The closed request, snapshot and record contracts are
+`schemas/coordinator-source-export-request-v1.schema.json`,
+`schemas/coordinator-source-snapshot-v1.schema.json`, and
+`schemas/coordinator-no-dispatch-record-v1.schema.json`.
+
+The request supplies only a run ID, fresh challenge nonce, and bounded private
+lookup scopes binding authenticated account, external request ID, exact
+coordinator internal request ID and a stale-request time fence. These lookup
+identities are ephemeral administrative input and MUST NOT appear in exported
+records, responses, diagnostics or public evidence. Source SHA, instance,
+signer identity, registry and its digest, signature domain and source freshness
+policy are producer-owned reviewed build/release facts, never request or
+reloadable-config selectors. Missing immutable source provenance, fixed
+reviewed registry authorization or matching signing material fails closed.
+The signer uses §5.4.3.1 unchanged with producer `coordinator` and role
+`no_dispatch_refusal`; producer-specific facts belong in its closed snapshot.
+
+This first producer supports only two no-dispatch chat terminals: unknown
+unserved model (`model_not_found_no_dispatch`, status 404), and pool
+unavailability before provider selection (`pool_unavailable_no_dispatch`,
+status 503). Both persist a blank unserved model and the existing constant
+failure message under SPEC-017 §5.2b.2. Historical blank `error_code` is not
+terminal authority. Raw rejected model, prompt, message, selector, account or
+request-identity material MUST NOT be copied into exported evidence. Export
+identity uses distinct domain-separated HMAC commitments over unambiguous
+length-prefixed private identity tuples; a caller's time fence is excluded
+from the source-owned terminal identity.
+
+A `closed_terminal` record requires the request-log row and immutable terminal
+closure to be committed atomically, with exactly one matching source request,
+no provider assignment and zero route, credit, output and receipt-verdict rows.
+A durable database fence MUST prevent subsequent request-scoped settlement
+inserts, updates or deletes. Merely observing zero current rows or an export
+watermark is insufficient. Export rechecks the exact source row, closure,
+active fence and zero settlement facts in one consistent source read
+transaction. Ambiguous, stale, missing, unclosed, changed or unavailable scopes
+fail the whole export; this version signs no partial or synthetic empty proof.
+Optional evidence failure MUST NOT manufacture a closure or change buyer
+accounting behavior.
+
+Every record is strictly schema-validated and binds the matching constant
+terminal kind/status, redaction facts, source-owned opaque identity, zero
+settlement facts and closure timestamp. Unknown fields or inconsistent facts
+fail validation. The first producer proves only those coordinator facts;
+gateway intent, quota/refund, no-forward pre-quota refusals, provider attempts,
+retry/failover, `/v1/models`, pool approval and acceptance finality remain
+separate source obligations. No protected acceptance integration or conformance
+promotion follows from a producer signature alone; SPEC-006-R018 stays pending
+until the complete joined, released and signed journey passes.
 
 ### 5.5 `GET /v1/usage`
 

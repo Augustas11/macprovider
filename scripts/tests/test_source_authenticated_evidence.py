@@ -86,6 +86,106 @@ class Fixture:
             ],
         }
 
+    def coordinator_expected(self):
+        return sae.ExpectedExport(
+            producer="coordinator",
+            role="no_dispatch_refusal",
+            instance_id="coordinator-prod-a",
+            source_sha=SOURCE_SHA,
+            run_id="run-1880",
+            challenge_nonce=NONCE,
+            domain=sae.SIGNATURE_DOMAIN_NAME,
+            now=NOW,
+            max_age_seconds=300,
+        )
+
+    def coordinator_registry(self):
+        registry = self.registry()
+        registry["keys"][0]["producer"] = "coordinator"
+        registry["keys"][0]["instance_id"] = "coordinator-prod-a"
+        registry["keys"][0]["permitted_roles"] = ["no_dispatch_refusal"]
+        return registry
+
+    def coordinator_snapshot(self):
+        return {
+            "schema_version": "macprovider.coordinator-source-snapshot.v1",
+            "producer_contract_version": "coordinator-no-dispatch-v1",
+            "registry_bundle_digest": "sha256:" + sae.sha256_hex(sae.canonical_bytes(self.coordinator_registry())),
+            "closure_table_schema": "coordinator_source_no_dispatch_closures.v1",
+            "db_fence_schema": "coordinator_source_no_dispatch_fence.v1",
+            "record_schema": "macprovider.coordinator-no-dispatch-record.v1",
+            "canonicalization": "ascii-jcs-subset-v1",
+            "scope_hmac": "hmac-sha256-length-prefixed-v1",
+        }
+
+    def coordinator_record(self, scope="0" * 64, terminal_kind="model_not_found_no_dispatch"):
+        status, error_class = {
+            "model_not_found_no_dispatch": (404, "no_provider_advertised_requested_model"),
+            "pool_unavailable_no_dispatch": (503, "pool_unavailable"),
+        }[terminal_kind]
+        return {
+            "schema_version": "macprovider.coordinator-no-dispatch-record.v1",
+            "source": "coordinator",
+            "record_kind": "no_dispatch_terminal",
+            "request_scope_commitment": scope,
+            "projection_status": "closed_terminal",
+            "terminal_kind": terminal_kind,
+            "privacy": {
+                "raw_account_id_emitted": False,
+                "raw_external_request_id_emitted": False,
+                "raw_internal_request_id_emitted": False,
+                "raw_rejected_model_emitted": False,
+                "request_log_model_blank_for_unserved": True,
+            },
+            "request_log_summary": {
+                "count": 1,
+                "status": status,
+                "attempt_n": 0,
+                "provider_assigned": False,
+                "error_message_class": error_class,
+                "terminal_kind_source": "coordinator_source_no_dispatch_closures.terminal_kind",
+            },
+            "settlement_absence": {
+                "fence": "sqlite_triggers_no_future_writes_v1",
+                "ledger_request_credits": {"count": 0, "max_id": 0},
+                "settlement_route_snapshots": {"count": 0, "max_id": 0},
+                "settlement_attempt_outputs": {"count": 0, "max_id": 0},
+                "settlement_receipt_verdicts": {"count": 0, "max_id": 0},
+            },
+            "closure": {
+                "schema_version": "macprovider.coordinator-no-dispatch-closure.v1",
+                "closed_at_utc": GENERATED,
+                "closure_id_hmac": "f" * 64,
+            },
+        }
+
+    def coordinator_signed(self):
+        return {
+            "schema_version": sae.SIGNED_SCHEMA,
+            "producer": "coordinator",
+            "role": "no_dispatch_refusal",
+            "instance_id": "coordinator-prod-a",
+            "source_sha": SOURCE_SHA,
+            "export_id": "123e4567-e89b-42d3-a456-426614174001",
+            "run_id": "run-1880",
+            "challenge_nonce": NONCE,
+            "generated_at": GENERATED,
+            "request_scopes": ["0" * 64, "1" * 64],
+            "snapshot": self.coordinator_snapshot(),
+            "records": [
+                self.coordinator_record("0" * 64, "model_not_found_no_dispatch"),
+                self.coordinator_record("1" * 64, "pool_unavailable_no_dispatch"),
+            ],
+        }
+
+    def coordinator_envelope(self, signed=None):
+        return self.envelope(self.coordinator_signed() if signed is None else signed)
+
+    def coordinator_validate(self, envelope=None, signed=None):
+        if envelope is None:
+            envelope = self.coordinator_envelope(signed)
+        return self.validate(envelope=envelope, registry=self.coordinator_registry(), expected=self.coordinator_expected())
+
     def sign(self, signed: dict) -> bytes:
         message = sae.SIGNATURE_DOMAIN + sae.canonical_bytes(signed)
         msg = self.tmp / "message.bin"
@@ -273,6 +373,79 @@ class SourceAuthenticatedEvidenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="other-key.") as other:
             other_fx = Fixture(pathlib.Path(other))
             self.assert_rejected("Ed25519 verification failed", mutate_registry=lambda r: r["keys"][0].__setitem__("public_key", b64url(other_fx.public)))
+
+    def test_coordinator_no_dispatch_projection_accepts_real_ed25519_closed_records(self):
+        result = self.fx.coordinator_validate()
+        self.assertEqual(result["key_id"], "source-key-1")
+        self.assertEqual(result["record_count"], 2)
+        self.assertEqual(result["typed_projection"], "coordinator_no_dispatch_closed_terminal_v1")
+        self.assertEqual(result["terminal_kinds"], ["model_not_found_no_dispatch", "pool_unavailable_no_dispatch"])
+
+    def test_coordinator_projection_rejects_missing_extra_partial_and_inconsistent_shapes(self):
+        def reject(fragment, mutate):
+            signed = self.fx.coordinator_signed()
+            mutate(signed)
+            with self.assertRaises(sae.EvidenceError) as cm:
+                self.fx.coordinator_validate(signed=signed)
+            self.assertIn(fragment, str(cm.exception))
+
+        reject("missing", lambda s: s["snapshot"].pop("db_fence_schema"))
+        reject("extra", lambda s: s["records"][0].__setitem__("raw_request_id", "leak"))
+        reject("one-for-one", lambda s: s["records"].pop())
+        reject("exactly equal sorted request_scopes", lambda s: s["records"][0].__setitem__("request_scope_commitment", "2" * 64))
+        reject("must contain closed records", lambda s: (s.__setitem__("request_scopes", []), s.__setitem__("records", [])))
+        reject("must equal macprovider.coordinator-no-dispatch-record.v1", lambda s: s["snapshot"].__setitem__("record_schema", "other"))
+
+    def test_coordinator_projection_rejects_nonclosed_or_nonprivate_record_claims(self):
+        def reject(fragment, mutate):
+            signed = self.fx.coordinator_signed()
+            mutate(signed["records"][0])
+            with self.assertRaises(sae.EvidenceError) as cm:
+                self.fx.coordinator_validate(signed=signed)
+            self.assertIn(fragment, str(cm.exception))
+
+        reject("closed_terminal", lambda r: r.__setitem__("projection_status", "snapshot_only_non_promotable"))
+        reject("must be false", lambda r: r["privacy"].__setitem__("raw_rejected_model_emitted", True))
+        reject("must be true", lambda r: r["privacy"].__setitem__("request_log_model_blank_for_unserved", False))
+        reject("integer in 0..0", lambda r: r["settlement_absence"]["ledger_request_credits"].__setitem__("count", 1))
+        reject("integer in 0..0", lambda r: r["settlement_absence"]["settlement_receipt_verdicts"].__setitem__("max_id", 42))
+        reject("provider_assigned", lambda r: r["request_log_summary"].__setitem__("provider_assigned", True))
+        reject("attempt_n", lambda r: r["request_log_summary"].__setitem__("attempt_n", 1))
+
+    def test_coordinator_projection_rejects_terminal_reason_mismatch_and_tamper(self):
+        signed = self.fx.coordinator_signed()
+        signed["records"][0]["request_log_summary"]["status"] = 503
+        with self.assertRaisesRegex(sae.EvidenceError, "must equal 404"):
+            self.fx.coordinator_validate(signed=signed)
+
+        signed = self.fx.coordinator_signed()
+        signed["records"][1]["request_log_summary"]["error_message_class"] = "no_provider_advertised_requested_model"
+        with self.assertRaisesRegex(sae.EvidenceError, "pool_unavailable"):
+            self.fx.coordinator_validate(signed=signed)
+
+        envelope = self.fx.coordinator_envelope()
+        envelope["signed"]["records"][0]["closure"]["closure_id_hmac"] = "e" * 64
+        with self.assertRaisesRegex(sae.EvidenceError, "does not match SHA256"):
+            self.fx.coordinator_validate(envelope=envelope)
+
+        signed = self.fx.coordinator_signed()
+        signed["snapshot"]["registry_bundle_digest"] = "sha256:" + "b" * 64
+        with self.assertRaisesRegex(sae.EvidenceError, "canonical registry bytes"):
+            self.fx.coordinator_validate(signed=signed)
+
+        signed = self.fx.coordinator_signed()
+        signed["records"][0]["closure"]["closed_at_utc"] = "2026-10-07T12:00:01.000Z"
+        with self.assertRaisesRegex(sae.EvidenceError, "generated_at"):
+            self.fx.coordinator_validate(signed=signed)
+
+    def test_other_roles_remain_opaque_authenticity_only(self):
+        result = self.fx.validate()
+        self.assertEqual(result["typed_projection"], "opaque_authenticity_only")
+        envelope = self.fx.envelope()
+        envelope["signed"]["records"][0]["schema_version"] = "not_a_known_schema"
+        envelope = self.fx.envelope(envelope["signed"])
+        result = self.fx.validate(envelope=envelope)
+        self.assertEqual(result["typed_projection"], "opaque_authenticity_only")
 
     def test_cli_uses_fixed_registry_path_and_fails_closed_without_reviewed_registry(self):
         with tempfile.TemporaryDirectory(prefix="source-cli.") as td:

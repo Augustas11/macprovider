@@ -44,6 +44,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/relayblind"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/rewards"
+	"github.com/augstar/macprovider-coordinator/internal/sourceevidence"
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 	"github.com/augstar/macprovider-coordinator/internal/stats"
 	statshardware "github.com/augstar/macprovider-coordinator/internal/stats/hardware"
@@ -359,6 +360,35 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "billing: %v\n", err)
 		os.Exit(1)
+	}
+	var sourceEvidenceStore *sourceevidence.Store
+	var sourceEvidenceProducer *sourceevidence.Producer
+	if cfg.SourceEvidence.Enabled {
+		if err := sourceevidence.Migrate(context.Background(), reqLogStore.DB()); err != nil {
+			fmt.Fprintf(os.Stderr, "source evidence migrations: %v\n", err)
+			os.Exit(1)
+		}
+		hmacKey, err := sourceevidence.LoadSecretBytes(cfg.SourceEvidence.ScopeHMACKeyPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "source evidence hmac key: %v\n", err)
+			os.Exit(1)
+		}
+		sourceEvidenceStore, err = sourceevidence.NewStore(reqLogStore.DB(), hmacKey, time.Now)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "source evidence store: %v\n", err)
+			os.Exit(1)
+		}
+		sourceEvidenceProducer, err = sourceevidence.NewProducer(sourceEvidenceStore, sourceevidence.Config{
+			Enabled:               true,
+			SigningPrivateKeyPath: cfg.SourceEvidence.SigningPrivateKeyPath,
+			ScopeHMACKeyPath:      cfg.SourceEvidence.ScopeHMACKeyPath,
+			MaxScopes:             cfg.SourceEvidence.MaxScopes,
+			MaxBodyBytes:          cfg.SourceEvidence.MaxBodyBytes,
+		}, sourceevidence.DefaultFixedProvenance())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "source evidence producer: %v\n", err)
+			os.Exit(1)
+		}
 	}
 	billingReadDB := reqLogStore.DB()
 	var billingReadStore *requestlog.Store
@@ -1094,6 +1124,7 @@ func main() {
 		buyer.WithAdmission(wsServer.Admission(), cfg.Admission.ProvisionalTierWeight),
 		buyer.WithRequestLog(reqLogStore),
 		buyer.WithBilling(billingStore, cfg.Rewards),
+		buyer.WithSourceEvidence(sourceEvidenceStore),
 		buyer.WithBillingSnapshotID(snapshotID),
 		buyer.WithRateCardUSDPerMillionCredits(cfg.Stats.Rollup.UsdPerMillionCredits),
 		buyer.WithAutotuneFeeds(autotuneFeeds),
@@ -1219,6 +1250,9 @@ func main() {
 	// session fail-closes before the SPEC-047-R003 hold is visible.
 	providerMux.Handle("/v1/pool/check", buyerServer.Handler())
 	providerMux.Handle("/internal/", buyerServer.InternalHandler())
+	if cfg.SourceEvidence.Enabled {
+		providerMux.Handle("/admin/evidence/source-exports/coordinator-v1", sourceevidence.NewHandler(cfg.Auth.OperatorKey, sourceEvidenceProducer, cfg.SourceEvidence.MaxBodyBytes))
+	}
 	var trustPoolAdminReloader trustpool.CreatorAdminConfigReloader
 	if cfg.TrustedPools.Enabled && trustPoolStore != nil && trustPoolRegistry != nil {
 		creatorAdminCredentials, err := trustPoolCreatorAdminCredentials(cfg.TrustedPools.CreatorAdminCredentials)

@@ -51,6 +51,13 @@ UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 B64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 UTCMS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
+COORDINATOR_NO_DISPATCH_ROLE = "no_dispatch_refusal"
+COORDINATOR_SOURCE_SNAPSHOT_SCHEMA = "macprovider.coordinator-source-snapshot.v1"
+COORDINATOR_NO_DISPATCH_RECORD_SCHEMA = "macprovider.coordinator-no-dispatch-record.v1"
+COORDINATOR_NO_DISPATCH_CLOSURE_SCHEMA = "macprovider.coordinator-no-dispatch-closure.v1"
+COORDINATOR_CONTRACT_VERSION = "coordinator-no-dispatch-v1"
+COORDINATOR_REGISTRY_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
 
 
 class EvidenceError(ValueError):
@@ -323,6 +330,181 @@ def _unique_ascii_array(value: Any, path: str, pattern: re.Pattern[str], *, max_
     return out
 
 
+def validate_typed_projection(signed: dict[str, Any], registry_digest: str) -> dict[str, Any]:
+    """Validate source-specific record meaning for roles this consumer knows.
+
+    B1a authenticity remains role-opaque by default. The first typed projection
+    is deliberately narrow: coordinator no-dispatch refusal exports may contain
+    only all-or-nothing closed_terminal records with exact settlement absence.
+    """
+    if signed["producer"] != "coordinator" or signed["role"] != COORDINATOR_NO_DISPATCH_ROLE:
+        return {"typed_projection": "opaque_authenticity_only"}
+    validate_coordinator_snapshot(signed["snapshot"], registry_digest)
+    generated_at = parse_timestamp_ms(signed["generated_at"])
+    scopes = signed["request_scopes"]
+    records = signed["records"]
+    if not records:
+        fail("$envelope.signed.records", "coordinator no-dispatch export must contain closed records; unavailable scopes are not signed")
+    if len(records) != len(scopes):
+        fail("$envelope.signed.records", "must match request_scopes one-for-one for closed all-or-nothing export")
+    record_scopes: list[str] = []
+    terminal_kinds: set[str] = set()
+    for i, record in enumerate(records):
+        validate_coordinator_no_dispatch_record(record, f"$envelope.signed.records[{i}]", generated_at)
+        record_scopes.append(record["request_scope_commitment"])
+        terminal_kinds.add(record["terminal_kind"])
+    if record_scopes != scopes:
+        fail("$envelope.signed.records", "record request_scope_commitment values must exactly equal sorted request_scopes")
+    return {
+        "typed_projection": "coordinator_no_dispatch_closed_terminal_v1",
+        "terminal_kinds": sorted(terminal_kinds),
+    }
+
+
+def validate_coordinator_snapshot(snapshot: Any, registry_digest: str) -> dict[str, Any]:
+    snap = exact_keys(
+        snapshot,
+        {
+            "schema_version",
+            "producer_contract_version",
+            "registry_bundle_digest",
+            "closure_table_schema",
+            "db_fence_schema",
+            "record_schema",
+            "canonicalization",
+            "scope_hmac",
+        },
+        "$envelope.signed.snapshot",
+    )
+    expected = {
+        "schema_version": COORDINATOR_SOURCE_SNAPSHOT_SCHEMA,
+        "producer_contract_version": COORDINATOR_CONTRACT_VERSION,
+        "closure_table_schema": "coordinator_source_no_dispatch_closures.v1",
+        "db_fence_schema": "coordinator_source_no_dispatch_fence.v1",
+        "record_schema": COORDINATOR_NO_DISPATCH_RECORD_SCHEMA,
+        "canonicalization": "ascii-jcs-subset-v1",
+        "scope_hmac": "hmac-sha256-length-prefixed-v1",
+    }
+    for key, want in expected.items():
+        if snap[key] != want:
+            fail(f"$envelope.signed.snapshot.{key}", f"must equal {want}")
+    require_ascii(snap["registry_bundle_digest"], "$envelope.signed.snapshot.registry_bundle_digest", pattern=COORDINATOR_REGISTRY_DIGEST_RE, max_len=71)
+    if snap["registry_bundle_digest"] != registry_digest:
+        fail("$envelope.signed.snapshot.registry_bundle_digest", "must equal sha256 of canonical registry bytes used by verifier")
+    return snap
+
+
+def validate_coordinator_no_dispatch_record(record: Any, path: str, generated_at: _dt.datetime) -> dict[str, Any]:
+    rec = exact_keys(
+        record,
+        {
+            "schema_version",
+            "source",
+            "record_kind",
+            "request_scope_commitment",
+            "projection_status",
+            "terminal_kind",
+            "privacy",
+            "request_log_summary",
+            "settlement_absence",
+            "closure",
+        },
+        path,
+    )
+    constants = {
+        "schema_version": COORDINATOR_NO_DISPATCH_RECORD_SCHEMA,
+        "source": "coordinator",
+        "record_kind": "no_dispatch_terminal",
+        "projection_status": "closed_terminal",
+    }
+    for key, want in constants.items():
+        if rec[key] != want:
+            fail(f"{path}.{key}", f"must equal {want}")
+    require_ascii(rec["request_scope_commitment"], f"{path}.request_scope_commitment", pattern=HEX64_RE, max_len=64)
+    terminal_kind = require_ascii(rec["terminal_kind"], f"{path}.terminal_kind", pattern=re.compile(r"^(model_not_found_no_dispatch|pool_unavailable_no_dispatch)$"), max_len=64)
+    validate_coordinator_privacy(rec["privacy"], f"{path}.privacy")
+    validate_coordinator_request_log_summary(rec["request_log_summary"], terminal_kind, f"{path}.request_log_summary")
+    validate_coordinator_settlement_absence(rec["settlement_absence"], f"{path}.settlement_absence")
+    validate_coordinator_closure(rec["closure"], generated_at, f"{path}.closure")
+    return rec
+
+
+def validate_coordinator_privacy(value: Any, path: str) -> None:
+    privacy = exact_keys(
+        value,
+        {
+            "raw_account_id_emitted",
+            "raw_external_request_id_emitted",
+            "raw_internal_request_id_emitted",
+            "raw_rejected_model_emitted",
+            "request_log_model_blank_for_unserved",
+        },
+        path,
+    )
+    false_fields = [
+        "raw_account_id_emitted",
+        "raw_external_request_id_emitted",
+        "raw_internal_request_id_emitted",
+        "raw_rejected_model_emitted",
+    ]
+    for field in false_fields:
+        if require_bool(privacy[field], f"{path}.{field}") is not False:
+            fail(f"{path}.{field}", "must be false")
+    if require_bool(privacy["request_log_model_blank_for_unserved"], f"{path}.request_log_model_blank_for_unserved") is not True:
+        fail(f"{path}.request_log_model_blank_for_unserved", "must be true")
+
+
+def validate_coordinator_request_log_summary(value: Any, terminal_kind: str, path: str) -> None:
+    summary = exact_keys(
+        value,
+        {"count", "status", "attempt_n", "provider_assigned", "error_message_class", "terminal_kind_source"},
+        path,
+    )
+    if require_int(summary["count"], f"{path}.count", 0, 1) != 1:
+        fail(f"{path}.count", "must equal 1")
+    if require_int(summary["attempt_n"], f"{path}.attempt_n", 0, 0) != 0:
+        fail(f"{path}.attempt_n", "must equal 0")
+    if require_bool(summary["provider_assigned"], f"{path}.provider_assigned") is not False:
+        fail(f"{path}.provider_assigned", "must be false")
+    if summary["terminal_kind_source"] != "coordinator_source_no_dispatch_closures.terminal_kind":
+        fail(f"{path}.terminal_kind_source", "must name closure terminal_kind source")
+    expected_by_kind = {
+        "model_not_found_no_dispatch": (404, "no_provider_advertised_requested_model"),
+        "pool_unavailable_no_dispatch": (503, "pool_unavailable"),
+    }
+    want_status, want_error = expected_by_kind[terminal_kind]
+    if require_int(summary["status"], f"{path}.status", 100, 599) != want_status:
+        fail(f"{path}.status", f"must equal {want_status} for {terminal_kind}")
+    if summary["error_message_class"] != want_error:
+        fail(f"{path}.error_message_class", f"must equal {want_error} for {terminal_kind}")
+
+
+def validate_coordinator_settlement_absence(value: Any, path: str) -> None:
+    absence = exact_keys(
+        value,
+        {"fence", "ledger_request_credits", "settlement_route_snapshots", "settlement_attempt_outputs", "settlement_receipt_verdicts"},
+        path,
+    )
+    if absence["fence"] != "sqlite_triggers_no_future_writes_v1":
+        fail(f"{path}.fence", "must equal sqlite_triggers_no_future_writes_v1")
+    for table in ["ledger_request_credits", "settlement_route_snapshots", "settlement_attempt_outputs", "settlement_receipt_verdicts"]:
+        row = exact_keys(absence[table], {"count", "max_id"}, f"{path}.{table}")
+        if require_int(row["count"], f"{path}.{table}.count", 0, 0) != 0:
+            fail(f"{path}.{table}.count", "must equal 0")
+        if require_int(row["max_id"], f"{path}.{table}.max_id", 0, 0) != 0:
+            fail(f"{path}.{table}.max_id", "must equal 0")
+
+
+def validate_coordinator_closure(value: Any, generated_at: _dt.datetime, path: str) -> None:
+    closure = exact_keys(value, {"schema_version", "closed_at_utc", "closure_id_hmac"}, path)
+    if closure["schema_version"] != COORDINATOR_NO_DISPATCH_CLOSURE_SCHEMA:
+        fail(f"{path}.schema_version", f"must equal {COORDINATOR_NO_DISPATCH_CLOSURE_SCHEMA}")
+    closed_at = parse_timestamp_ms(require_timestamp_ms(closure["closed_at_utc"], f"{path}.closed_at_utc"))
+    if closed_at > generated_at:
+        fail(f"{path}.closed_at_utc", "must not be after signed generated_at")
+    require_ascii(closure["closure_id_hmac"], f"{path}.closure_id_hmac", pattern=HEX64_RE, max_len=64)
+
+
 def validate_envelope(envelope: Any, registry: Any, expected: ExpectedExport, *, openssl_bin: str = "openssl") -> dict[str, Any]:
     if expected.now.tzinfo is None or expected.now.utcoffset() is None:
         fail("expected.now", "must be timezone-aware UTC")
@@ -333,6 +515,7 @@ def validate_envelope(envelope: Any, registry: Any, expected: ExpectedExport, *,
     if expected.domain != SIGNATURE_DOMAIN_NAME:
         fail("expected.domain", f"must equal actual signature domain {SIGNATURE_DOMAIN_NAME}")
     keys = validate_registry(registry, now=expected.now)
+    registry_digest = "sha256:" + sha256_hex(canonical_bytes(registry))
     env = exact_keys(envelope, {"schema_version", "signed", "signatures"}, "$envelope")
     if env["schema_version"] != ENVELOPE_SCHEMA:
         fail("$envelope.schema_version", f"must equal {ENVELOPE_SCHEMA}")
@@ -353,7 +536,8 @@ def validate_envelope(envelope: Any, registry: Any, expected: ExpectedExport, *,
     key = keys[key_id]
     authorize_key(key, signed, expected, key_id)
     verify_ed25519(openssl_bin, decode_b64url(key["public_key"], f"$registry.keys.{key_id}.public_key", 32), SIGNATURE_DOMAIN + signed_bytes, signature)
-    return {"signed_sha256": sig["signed_sha256"], "key_id": key_id, "record_count": len(signed["records"])}
+    projection = validate_typed_projection(signed, registry_digest)
+    return {"signed_sha256": sig["signed_sha256"], "key_id": key_id, "record_count": len(signed["records"]), **projection}
 
 
 def validate_signed(value: Any, expected: ExpectedExport) -> dict[str, Any]:

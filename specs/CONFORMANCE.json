@@ -152,7 +152,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.46",
+      "version": "0.9.47",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -11196,7 +11196,10 @@
         "phase4-coordinator/internal/buyer/pool_model_route.go:func (s *Server) poolModelListEntries",
         "phase5-gateway/internal/router/server.go:func sanitizePoolModelObject",
         "phase5-gateway/internal/router/engine_selection.go:func buyerVisiblePoolModelHeader",
-        "scripts/source_authenticated_evidence.py:def validate_envelope"
+        "scripts/source_authenticated_evidence.py:def validate_envelope",
+        "phase4-coordinator/internal/sourceevidence/store.go:func (s *Store) RecordNoDispatch",
+        "phase4-coordinator/internal/sourceevidence/producer.go:func (p *Producer) Export",
+        "phase4-coordinator/internal/sourceevidence/handler.go:func (h *Handler) ServeHTTP"
       ],
       "tests": [
         "phase4-coordinator/internal/buyer/spec1816_pool_model_route_test.go:TestSPEC1816PoolModelListing",
@@ -11204,7 +11207,9 @@
         "phase4-coordinator/internal/buyer/spec1816_pool_model_route_test.go:TestSPEC1816PoolModelExcludedOutsideItsPool",
         "phase5-gateway/internal/router/pool_model_disclosure_test.go:TestSanitizeModelsResponsePoolView",
         "phase5-gateway/internal/router/pool_model_disclosure_test.go:TestPoolModelDisclosureHeadersAllowlisted",
-        "scripts/tests/test_source_authenticated_evidence.py::SourceAuthenticatedEvidenceTests"
+        "scripts/tests/test_source_authenticated_evidence.py::SourceAuthenticatedEvidenceTests",
+        "phase4-coordinator/internal/sourceevidence/store_test.go:TestStoreClosesNoDispatchAndFencesSettlementWrites",
+        "phase4-coordinator/internal/sourceevidence/producer_test.go:TestProducerSignsSortedCoordinatorProjection"
       ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-MODEL"
@@ -11214,7 +11219,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1880",
-        "rationale": "#1816 shipped bounded pool serving and disclosure, but the complete 2026-10-07 production journey failed. #1880 clarifies and repairs selected-view exclusivity and served-route-only disclosure under SPEC-006 v0.9.45. Unknown-model request-log redaction remains required by SPEC-017; exact refusal binding and pre-quota zero-state proof need source-authenticated evidence. Pending until a fresh complete signed journey from reviewed deployed code satisfies all applicable prerequisites; unit tests do not promote this row. The source-export envelope and reviewed-key registry authenticity validator is a foundation only: producer exports, complete source projections, refusal intent/accounting joins, and protected promotion integration remain unimplemented."
+        "rationale": "#1816 shipped bounded pool serving, but the complete production journey failed. #1880 repairs selected-view listings, served-route-only disclosure, and eligibility wording. SPEC-006 v0.9.47 defines authenticated exports and bounded coordinator no-dispatch closure projections, which are implemented with default-disabled, fail-closed release provenance. Unknown-model redaction remains required by SPEC-017. Reviewed production provenance enrollment, gateway refusal intent and pre-quota proof, complete accounting joins for the remaining roles, protected promotion integration, and a fresh complete signed journey remain pending. Unit tests and partial source projections do not promote this row."
       }
     },
     {

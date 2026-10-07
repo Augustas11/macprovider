@@ -37,6 +37,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/routing"
 	"github.com/augstar/macprovider-coordinator/internal/routing/sticky"
+	"github.com/augstar/macprovider-coordinator/internal/sourceevidence"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	"github.com/augstar/macprovider-coordinator/internal/trustpool"
 	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
@@ -275,6 +276,7 @@ type Server struct {
 	modelVersionFloors    map[string]string
 	reqLog                requestLogInserter
 	reqLogStore           *requestlog.Store
+	sourceEvidence        *sourceevidence.Store
 	provisionalWeight     float64
 	maxChatBodyBytes      int64
 	recovering            sync.Map
@@ -751,6 +753,12 @@ func WithRequestLog(store requestLogInserter) Option {
 		if typed, ok := store.(*requestlog.Store); ok {
 			s.reqLogStore = typed
 		}
+	}
+}
+
+func WithSourceEvidence(store *sourceevidence.Store) Option {
+	return func(s *Server) {
+		s.sourceEvidence = store
 	}
 }
 
@@ -2554,17 +2562,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	rawPoolHeader := strings.TrimSpace(r.Header.Get("X-MacProvider-Pool"))
 	poolHeader := sanitizeAccountID(rawPoolHeader)
 	if rawPoolHeader != "" && poolHeader == "" {
-		rec.logBuyerFailure(http.StatusServiceUnavailable, "Pool unavailable")
+		rec.logNoDispatchClosure(sourceevidence.TerminalPoolUnavailable, http.StatusServiceUnavailable, "Pool unavailable")
 		s.writePoolUnavailable(w, startedAt)
 		return
 	}
 	if rawPoolHeader != "" && !hasAuthenticatedAccount {
-		rec.logBuyerFailure(http.StatusServiceUnavailable, "Pool unavailable")
+		rec.logNoDispatchClosure(sourceevidence.TerminalPoolUnavailable, http.StatusServiceUnavailable, "Pool unavailable")
 		s.writePoolUnavailable(w, startedAt)
 		return
 	}
 	if rawPoolHeader != "" && s.trustPools == nil {
-		rec.logBuyerFailure(http.StatusServiceUnavailable, "Pool unavailable")
+		rec.logNoDispatchClosure(sourceevidence.TerminalPoolUnavailable, http.StatusServiceUnavailable, "Pool unavailable")
 		s.writePoolUnavailable(w, startedAt)
 		return
 	}
@@ -2572,12 +2580,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		snap, authorized, err := s.authorizeTrustPoolFromDurableState(r.Context(), poolHeader, accountID)
 		if err != nil {
 			s.log.Warn().Err(err).Str("pool_id", poolHeader).Msg("trusted pool routing durable verification failed")
-			rec.logBuyerFailure(http.StatusServiceUnavailable, "Pool unavailable")
+			rec.logNoDispatchClosure(sourceevidence.TerminalPoolUnavailable, http.StatusServiceUnavailable, "Pool unavailable")
 			s.writePoolUnavailable(w, startedAt)
 			return
 		}
 		if !authorized || !snap.Exists {
-			rec.logBuyerFailure(http.StatusServiceUnavailable, "Pool unavailable")
+			rec.logNoDispatchClosure(sourceevidence.TerminalPoolUnavailable, http.StatusServiceUnavailable, "Pool unavailable")
 			s.writePoolUnavailable(w, startedAt)
 			return
 		}
@@ -2587,7 +2595,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusServiceUnavailable, "pool_policy_stale", "Pool policy/status freshness is stale")
 				return
 			}
-			rec.logBuyerFailure(http.StatusServiceUnavailable, "Pool unavailable")
+			rec.logNoDispatchClosure(sourceevidence.TerminalPoolUnavailable, http.StatusServiceUnavailable, "Pool unavailable")
 			s.writePoolUnavailable(w, startedAt)
 			return
 		}
@@ -2667,7 +2675,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if poolmanifest.IsPoolModelID(req.Model) {
 		if _, ok := requestedPoolModelEntry(req.Model, req.poolID, req.poolSnapshot); !ok || !req.poolSnapshotSet {
 			rec.setModel("")
-			rec.logBuyerFailure(http.StatusNotFound, "No provider has advertised the requested model")
+			rec.logNoDispatchClosure(sourceevidence.TerminalModelNotFound, http.StatusNotFound, "No provider has advertised the requested model")
 			writeError(w, http.StatusNotFound, "model_not_found", "No provider has advertised the requested model")
 			return
 		}
@@ -2677,7 +2685,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		// The buyer-supplied string of an unserved model is never persisted:
 		// the request-log row carries a blank model and a constant message.
 		rec.setModel("")
-		rec.logBuyerFailure(http.StatusNotFound, "No provider has advertised the requested model")
+		rec.logNoDispatchClosure(sourceevidence.TerminalModelNotFound, http.StatusNotFound, "No provider has advertised the requested model")
 		writeError(w, http.StatusNotFound, "model_not_found", "No provider has advertised the requested model")
 		return
 	}
