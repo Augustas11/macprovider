@@ -319,25 +319,68 @@ and silently never matching.
 
 ## Active candidate
 
-Shared-namespace update (2026-10-06): **v1.8.220** is published and applied for
-the Codex privacy/Pearl runtime rollout carrying #1872. CLI candidate **1.8.219**
-remains staged; runtime **v1.8.218** and provider **v1.8.217** are published.
-See the runtime rollout in `coordinator-release-train.md` before consuming
-another shared identity.
+Shared-namespace update (2026-10-07): runtime **v1.8.221** carries the deployed
+#1874 settlement fixes. Provider **v1.8.222** is a signed private acceptance
+candidate serving the #1690 pool members, not a public stable release. Provider
+**v1.8.217** remains published and the fleet recommendation remains **v1.8.207**.
+Refresh both release trains and remote tags before reserving another shared
+identity; this status update does not allocate a successor version.
 
 | Field | Value |
 |---|---|
-| Staged candidate | **v1.8.222** (Malibu build 222), staged from `main` after #1874 (`2fa09b09a`): Trusted Pool loopback settlement fixes for #1690 (provider side: cancel receipts sign exactly the coordinator-named delivered prefix, SPEC-001 1.9.30 / SPEC-015 0.4.14; strict boundary decoding; plain-body cancels fail closed) plus everything on main since 1.8.219, including native MTP (#1862, default-off). Runtime v1.8.220 and v1.8.221 are consumed, so 1.8.222 is the next free shared identity. 1.8.219 (`cea96dfcf`) stays the accepted #1690 member CLI until this is accepted. Fleet recommendation unchanged. |
-| Last built candidate | Promotion-ready private **v1.8.217** compatibility set `Augustas11/macprovider:v1.8.217@71f22d36c3ef11c99d3572f63bb0283f73f19aa5`, acceptance run [37389822832](https://github.com/Augustas11/macprovider/actions/runs/37389822832) (signed 2026-10-06 00:27Z), candidate/control commit `71f22d36c`, `checksums.txt` SHA-256 `f2e83cd76834b946ec209dad5a19ba88ad677d951fd5b33e96890525f7e9d2be`. Independently verified: every `checksums.txt` entry matches, the standalone CLI passes strict `codesign` verification and reports `1.8.217`, the DMG is stapled and Gatekeeper-accepted as Notarized Developer ID, and the embedded and standalone `macprovider-cli` are byte-identical (SHA-256 `a6ea51d7ad19359a21fac63995194523264035fbca2ab32dceeede9d9da739bb`). Not installed or launched yet. The signed acceptance set and run artifact expire 2026-10-07 00:27Z; promotion must run before then or the candidate is recut. Previous build v1.8.215 (run [37305423870](https://github.com/Augustas11/macprovider/actions/runs/37305423870)) was superseded before promotion because it predates #1832. Last promoted candidate remains **v1.8.207** @ `d98b74a6a`. |
+| Private acceptance candidate | **v1.8.222** (Malibu build 222), signed from reviewed-main source `7e68120b8ac0b92e8291a990c88b40f55bafcf5a`, acceptance run [37493026731](https://github.com/Augustas11/macprovider/actions/runs/37493026731). The serving pool-member CLI matches the packaged standalone SHA-256 `fc3e54691585a0b0fa9509225fcac51ae89b6dba10f172a2f098f271b94bedcc`. It carries #1874's Trusted Pool cancel-receipt fixes and passed the fresh 11-step production external-runtime capture. It predates #1879's reviewed startup-tokenizer fix; no public release, fleet promotion, or successor-candidate packaging/updater acceptance is claimed. See [the closeout evidence](../../audits/2026-10-07-1690-closeout/README.md). |
+| Historical 217 acceptance set | Then-private **v1.8.217** compatibility set `Augustas11/macprovider:v1.8.217@71f22d36c3ef11c99d3572f63bb0283f73f19aa5`, acceptance run [37389822832](https://github.com/Augustas11/macprovider/actions/runs/37389822832) (signed 2026-10-06 00:27Z), candidate/control commit `71f22d36c`, `checksums.txt` SHA-256 `f2e83cd76834b946ec209dad5a19ba88ad677d951fd5b33e96890525f7e9d2be`. Independently verified: every `checksums.txt` entry matches, the standalone CLI passes strict `codesign` verification and reports `1.8.217`, the DMG is stapled and Gatekeeper-accepted as Notarized Developer ID, and the embedded and standalone `macprovider-cli` are byte-identical (SHA-256 `a6ea51d7ad19359a21fac63995194523264035fbca2ab32dceeede9d9da739bb`). Subsequently installed and published; see the serving-canary and promotion rows below. The private acceptance set expired 2026-10-07 00:27Z and is not a successor promotion candidate. Previous build v1.8.215 (run [37305423870](https://github.com/Augustas11/macprovider/actions/runs/37305423870)) was superseded before promotion because it predates #1832. Fleet-recommended candidate remains **v1.8.207** @ `d98b74a6a`. |
 | Mac Studio serving canary | Signed public **217** @ `71f22d36c`, swapped in 2026-10-06 04:03–04:05Z through the established payload-only operator swap (config and LaunchAgents byte-identical; 213 payload kept at `/Users/a1/macprovider.pre-217-20261006T040351Z`). It serves `qwen/qwen3.6-35b-a3b` on the fused A3B MoE path (kill switch unset), joins under the 217 compatibility set on the 10-01 catalog, and resolves the signed CB policy (`live_verified`, zero entries, so CB stays off by policy). Buyer path down about 2m11s. |
 | Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
 | Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` @ `eb30981c` (BYOM #1576 `cdbb0257` + #1591 + #1590 + #1593); CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag); CLI `v1.8.172` @ `c512d342`; CLI `v1.8.174` @ `0c276ebb`; CLI `v1.8.175` @ `d02798db` |
 | Status | **207 promoted and live; 212 superseded without launch; 213 physically accepted but superseded without promotion by operator decision on 2026-10-04; 214 cut and journey-accepted but superseded without promotion on 2026-10-05, because relay-blind work was refused under production settlement `enforce` until #1853; 215 cut on 2026-10-05 but superseded without promotion because it predates #1832.** Pearl `target_id` and `latest_binary_version` remain 207. Public installer parity, consumer health, mirror byte identity, signed discovery rollout, Studio join, and a bounded real-buyer response are green for 207. |
-| Consumed identities | Runtime identities through **v1.8.218** and provider candidates through **v1.8.217** are consumed. CLI **v1.8.219** is staged/reserved. Runtime **v1.8.220** was signed at `6d49a4f16` by [run 37468267969](https://github.com/Augustas11/macprovider/actions/runs/37468267969) and applied successfully 2026-10-06 at 13:18:43Z. Do not reuse these identities; refresh both trains and remote tags before reserving the next number. |
+| Consumed identities | Runtime identities through **v1.8.221** and provider candidates through **v1.8.222** are consumed/reserved. The private 222 candidate must not be reused for the later #1879 source. Runtime **v1.8.220** was signed at `6d49a4f16` by [run 37468267969](https://github.com/Augustas11/macprovider/actions/runs/37468267969); deployed runtime 221 and private provider 222 are recorded in the [#1690 evidence](../../audits/2026-10-07-1690-closeout/README.md). Refresh both trains and remote tags before reserving the next number. |
 | Promotion candidate | **v1.8.217 is published** (immutable release [v1.8.217](https://github.com/Augustas11/macprovider/releases/tag/v1.8.217), promotion run [37412526946](https://github.com/Augustas11/macprovider/actions/runs/37412526946), published 2026-10-06 04:14:52Z). Verified after publication: `checksums.txt` SHA-256 `f2e83cd7…` equals the signed set, the tarball and DMG `macprovider-cli` are byte-identical (`a6ea51d7…`), download.malibu.tech serves identical tarball and checksums, and `get.malibu.tech/install.sh` matches `phase3-binary/dist/install.sh`. Physical acceptance: fused e2e on the signed binary (fused vs stock, batch invariance, cancellation, memory, kill switch) and the Studio install/join smoke above. **Operator decision 2026-10-06: the fleet recommendation stays on 1.8.207** (Pearl `target_id` / `latest_binary_version` unchanged, mirror `latest.json` stays v1.8.207). The next CLI candidate bundles the native-MTP step-overhead fixes (branch `mtp/step-overhead`, gated on a new R015) with the #1690 CLI fixes (branch `fix/1690-loopback-startup-throughput`), and that candidate is the one recommended to the fleet. |
 | Candidate 202 CB-canary confirmation (2026-09-28) | Isolated Studio loopback serve of the **signed** 202 binary (`--no-join`, ephemeral id, :8092, live :8080/201 untouched) confirmed `qwen/qwen3.6-35b-a3b` **paged-KV attach eligible** (runtime parity `established=true`, cross-row MoE isolation `proven=true`) and a keyless **scheduler-admitted batched 200** with a stable `X-Request-ID` (`event=batching_admitted action=scheduler_admitted`), hash `3fed776d…`. Measured throughput (harness, v1.8.201 same source): 2.86× aggregate vs serial at 8 rows, bit-exact parity. On candidate 202 the qwen3.5/qwen3.8 hybrids fail parity and are excluded; #1776 fixes them only in the deferred successor candidate. Buyer `continuous_batching` was already canary in live config; the 201→202 serving swap (operator-tools/swap-202.sh, 2026-09-28) made 202 the live Studio provider — a3b now served BATCHED (scheduler_admitted) at ~2.86x. |
 | Notable merges after candidate 186 | #1707 (`5ada77e1`, CLI); #1714 (`3abf42a8`, CLI + Malibu); #1706 (`2b352720`, catalog-lane file only — binary unchanged); #1713 (`57686a84`, node-operator UX — shipped in `v1.8.192`); #1742 (`03627cda`, shipped in Studio candidate `v1.8.195`); #1757 (`0197f379`, CB qualification closeout); #1745 (`ddaa551b`, China supply path); #1762 (`95a6563d`, batched prefill); #1658 (`3ec784c69`, Build 1 private staging path); #1753 (`9636a125`, signed provider-release discovery, merged after candidate 201); #1771 (`e29ea2976`, Qwen3.6 MoE paged-KV admission, shipped in candidate 202); #1776 (`38229a8c3`, Qwen3.5/Qwen3.8 exact CB parity, merged after candidate 202); #1785 (`5c09c5c9a`, keep-0 sliding-window paged KV, merged after candidate 202); #1808 (`1c7041800`, mixed-cache signed-policy admission); #1809 (`6d1810506`, recurrent-hybrid verifier lifecycle). Coordinator/gateway settlement recovery continued separately through #1728, live in Pearl runtime `v1.8.191`. |
 | Why candidate 186 exists | Prove #1700 final-answer rendering, strict-pinned buyer quality, eight-seat routing, and durable settlement on one signed Studio-only build (soak proof; live seats since reduced to one — see Mac Studio serving canary above). |
+
+### #1690 merged source and remaining release gates (2026-10-07)
+
+[PR #1879](https://github.com/Augustas11/macprovider/pull/1879) merged at
+`bc117360106d91055221e01f0f8b0de4cd2ac550`. It resolves startup throughput's
+stream-fragment counting with artifact-bound pinned tokenization and records
+the reviewed capability-aware Ollama qualification profile. Fresh
+[CI](https://github.com/Augustas11/macprovider/actions/runs/37592545986) and
+[spec-index](https://github.com/Augustas11/macprovider/actions/runs/37592546005)
+passed on the reviewed head; combined code, security, and architecture reviews
+finished with zero CRITICAL/HIGH/MEDIUM findings. This is merged source, not
+proof that the fix has shipped in the private 222 candidate or a public release.
+
+Layer2 [signing run 37597017902](https://github.com/Augustas11/macprovider/actions/runs/37597017902)
+and creator [signing run 37597062267](https://github.com/Augustas11/macprovider/actions/runs/37597062267)
+succeeded. External-runtime
+[signing/promotion run 37597012552](https://github.com/Augustas11/macprovider/actions/runs/37597012552)
+was still running at this update. Workflow success alone is not landed
+conformance: artifact verification and reviewed integration remain pending.
+These evidence-only workflows neither publish a CLI nor activate an external
+Creator launch.
+
+The release/closure gates still outstanding are:
+
+- Verify and land the protected signed evidence, plus fresh signed BYOM evidence
+  for the changed contract. The latest fresh BYOM attempt failed during
+  compilation and is not passing acceptance evidence.
+- Cut a reviewed signed CLI containing the merged startup fix; prove final
+  tarball/DMG embedded CLI byte identity, signing/notarization, and updater
+  acceptance from the previous stable version before publication/promotion.
+- Complete formal mixed-version rollout/rollback acceptance. Recorded
+  217/219/222 coexistence is not a rolling-restart proof; a refused v1-only
+  rollback preflight is not rollback readiness.
+- Complete the final closure audit and reconcile #1690's required gates.
+
+Current native/llama.cpp comparison and capability-aware Ollama measurements
+passed their scoped profiles. Ollama's cached API-counter measurements are not
+strict M0 token-ID/cache-free parity, runtime perplexity, billing authority, or
+release acceptance. Full measurements and limitations remain in the
+[closeout evidence](../../audits/2026-10-07-1690-closeout/README.md).
+No release identity, live binary, or fleet recommendation changes in this
+documentation update. #1690 remains open.
 
 ## E2E tracks (independent gates)
 
