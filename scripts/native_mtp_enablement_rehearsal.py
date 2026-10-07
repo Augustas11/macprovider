@@ -43,6 +43,7 @@ import secrets
 import shutil
 import signal
 import sqlite3
+import tempfile
 import subprocess
 import sys
 import time
@@ -66,6 +67,35 @@ PROMPTS = (
 )
 MAX_TOKENS = 96
 ANCHOR_SERVICE = "macprovider.native-mtp-revocation-generation"
+CANARY_NEGATIVE_FAULTS = ("wrong_digest", "actual_path", "fallback", "drop")
+CANARY_NEGATIVE_SOURCE_CI_ONLY_FAULTS = ("expiry",)
+CANARY_NEGATIVE_RELAY_FAULT = {
+    "wrong_digest": "wrong_digest",
+    "actual_path": "actual_path",
+    "fallback": "fallback",
+    "drop": "drop",
+    "expiry": "delay",
+}
+CANARY_NEGATIVE_EXPECTED_REASON = {
+    "wrong_digest": "expected_value_mismatch",
+    "actual_path": "unsupported_path_fallback",
+    "fallback": "unsupported_path_fallback",
+    "drop": "timeout",
+    "expiry": "expired_result",
+}
+MONEY_TABLE_PATTERNS = (
+    "request", "usage", "receipt", "settlement", "billing", "payout", "ledger", "credit", "quota", "reward"
+)
+KNOWN_MONEY_TABLES = {
+    "coordinator": (
+        "request_log", "provider_rewards", "provider_reward_events", "payout_attempts",
+        "settlement_receipts", "settlement_finality", "billing_events",
+    ),
+    "gateway": (
+        "usage_events", "demo_usage_events", "quota_reservations", "settlement_fallback_candidates",
+        "accounts", "api_keys",
+    ),
+}
 
 
 def utc() -> datetime:
@@ -82,14 +112,25 @@ class Rehearsal:
         self.gobin = Path(cfg["go_bin_dir"])
         self.ports = {k: int(cfg[k]) for k in ("coordinator_http_port", "coordinator_ws_port", "gateway_port",
                                                "serve_port")}
+        self.relay_port = int(cfg.get("canary_fault_relay_port", self._default_relay_port()))
         self.procs: dict = {}
         self.result: dict = {"schema_version": "macprovider.native-mtp-enablement-rehearsal.v1",
                              "started_at": now(), "phases": {}, "checks": {}}
 
+    def _default_relay_port(self) -> int:
+        used = set(self.ports.values())
+        for port in range(19300, 19400):
+            if port not in used and port not in FORBIDDEN_PORTS:
+                return port
+        raise SystemExit("no free 193xx relay port candidate")
+
     # ------------------------------------------------------------ guards
 
     def preflight(self) -> None:
-        for port in self.ports.values():
+        all_ports = [*self.ports.values(), self.relay_port]
+        if len(set(all_ports)) != len(all_ports):
+            raise SystemExit("isolated ports must be distinct, including canary_fault_relay_port")
+        for port in all_ports:
             if port in FORBIDDEN_PORTS or not 19300 <= port <= 19399:
                 raise SystemExit(f"port {port} is outside the isolated 193xx block")
             if not port_free(port):
@@ -215,7 +256,7 @@ class Rehearsal:
             "timeouts": {"coordinator_request_seconds": 600, "coordinator_header_timeout_seconds": 600},
         }
 
-    def provider_config(self, native_mode: str) -> Path:
+    def provider_config(self, native_mode: str, coordinator_url: str | None = None) -> Path:
         base = yaml.safe_load(Path(self.cfg["serve_config_template"]).read_text())
         for key in ("provider_token", "provider_token_file", "continuous_batching_accepted_tuples"):
             base.pop(key, None)
@@ -224,7 +265,7 @@ class Rehearsal:
             "port": p["serve_port"],
             "provider_id": self.provider_id,
             "credential_store": "protected_file",
-            "coordinator_url": f"ws://127.0.0.1:{p['coordinator_ws_port']}/ws/provider",
+            "coordinator_url": coordinator_url or f"ws://127.0.0.1:{p['coordinator_ws_port']}/ws/provider",
             "model_artifact_path": str(self.clone),
             "auto_update_enabled": False,
             "enable_receipts": True,
@@ -234,8 +275,11 @@ class Rehearsal:
         path = self.work / "provider" / "config.yaml"
         path.write_text(yaml.safe_dump(base, sort_keys=True))
         os.chmod(path, 0o600)
-        if f"127.0.0.1:{p['coordinator_ws_port']}" not in path.read_text():
+        config_text = path.read_text()
+        if coordinator_url is None and f"127.0.0.1:{p['coordinator_ws_port']}" not in config_text:
             raise SystemExit("provider config does not point at the isolated coordinator")
+        if coordinator_url is not None and f"127.0.0.1:{self.relay_port}" not in config_text:
+            raise SystemExit("provider config does not point at the isolated relay")
         return path
 
     def provider_env(self, config: Path) -> dict:
@@ -301,6 +345,21 @@ class Rehearsal:
         self.result["credentials_import_exit"] = imp.returncode
         self.provider_config("auto")  # rewritten without the token
 
+    def restart_coordinator_for_canary_negative(self) -> None:
+        """Reset the in-memory canary store without touching gateway DB/state.
+
+        The positive phase leaves the tuple fresh for the normal interval. Each
+        negative fault needs a newly issued coordinator canary, so the isolated
+        lab coordinator is restarted between provider runs. The coordinator DB,
+        provider token, gateway, static feeds, and loopback ports stay inside the
+        same rehearsal work directory.
+        """
+        stop(self.procs.pop("coordinator", None))
+        self.procs["coordinator"] = _start([str(self.gobin / "coordinator"), "-config",
+                                            str(self.work / "run/coordinator.yaml")], self.work / "logs/coordinator-negative-restart.log")
+        if not _wait_http(self.ports["coordinator_http_port"], "/healthz", self.procs["coordinator"], 60):
+            raise SystemExit("isolated coordinator did not restart for canary negative rehearsal")
+
     def start_services(self) -> None:
         p = self.ports
         self.procs["coordinator"] = _start([str(self.gobin / "coordinator"), "-config",
@@ -320,8 +379,8 @@ class Rehearsal:
             feeds[name] = status
         self.result["services"] = {"coordinator_up": ok_c, "gateway_up": ok_g, "static_feed_status": feeds}
 
-    def start_provider(self, label: str, native_mode: str) -> dict:
-        config = self.provider_config(native_mode)
+    def start_provider(self, label: str, native_mode: str, coordinator_url: str | None = None, readiness_probe: bool = True) -> dict:
+        config = self.provider_config(native_mode, coordinator_url=coordinator_url)
         err = self.work / f"logs/provider-{label}.err"
         self.procs["provider"] = subprocess.Popen(
             [str(self.lab_cli), "serve", "--config", str(config), "--isolate-lifecycle"],
@@ -330,6 +389,10 @@ class Rehearsal:
         started = time.time()
         routable, probes = False, 0
         end = started + int(self.cfg.get("serve_ready_timeout_s", 900))
+        if not readiness_probe:
+            return {"native_mode": native_mode, "routable": None, "readiness_probes": 0,
+                    "seconds_to_routable": None, "provider_exit": self.procs["provider"].poll(),
+                    "coordinator_url": coordinator_url or f"ws://127.0.0.1:{self.ports['coordinator_ws_port']}/ws/provider"}
         while time.time() < end and self.procs["provider"].poll() is None:
             try:
                 status, _ = http_json("POST", self.ports["gateway_port"], "/v1/chat/completions",
@@ -348,8 +411,134 @@ class Rehearsal:
     def stop_provider(self) -> None:
         stop(self.procs.pop("provider", None))
 
+    def start_canary_fault_relay(self, fault: str) -> Path:
+        status = self.work / f"run/canary-negative-{fault}-relay-status.json"
+        log = self.work / f"logs/canary-negative-{fault}-relay.log"
+        relay_fault = CANARY_NEGATIVE_RELAY_FAULT[fault]
+        args = [
+            sys.executable,
+            str(Path(__file__).resolve().parent / "native_mtp_canary_negative_rehearsal.py"),
+            "--listen-host", "127.0.0.1",
+            "--listen-port", str(self.relay_port),
+            "--upstream-url", f"ws://127.0.0.1:{self.ports['coordinator_ws_port']}/ws/provider",
+            "--fault", relay_fault,
+            "--status-path", str(status),
+        ]
+        if fault == "expiry":
+            args.extend(["--delay-seconds", str(float(self.cfg.get("canary_fault_expiry_delay_s", 65)))])
+        self.procs["canary_fault_relay"] = subprocess.Popen(
+            args,
+            stdout=open(log, "w"),
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        end = time.time() + 10
+        while time.time() < end:
+            if self.procs["canary_fault_relay"].poll() is not None:
+                raise SystemExit(f"canary fault relay exited early for {fault}")
+            if not port_free(self.relay_port):
+                return status
+            time.sleep(0.1)
+        raise SystemExit(f"canary fault relay did not bind port {self.relay_port}")
+
+    def stop_canary_fault_relay(self) -> None:
+        stop(self.procs.pop("canary_fault_relay", None))
+
     def auth(self) -> dict:
         return {"Authorization": f"Bearer {self.buyer_key}"}
+
+    # ------------------------------------------------------------ accounting snapshots
+
+    @staticmethod
+    def money_table_counts(db_path: Path, known_tables: tuple[str, ...]) -> dict:
+        if not db_path.exists():
+            raise RuntimeError(f"money snapshot database missing: {db_path}")
+        out = {}
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as db:
+            rows = db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            existing = {str(name) for (name,) in rows}
+            selected = sorted(
+                table for table in existing
+                if table in known_tables or any(pattern in table.lower() for pattern in MONEY_TABLE_PATTERNS)
+            )
+            missing_known = sorted(table for table in known_tables if table not in existing)
+            for name in selected:
+                cols = [str(row[1]) for row in db.execute(f'PRAGMA table_info("{name}")').fetchall()]
+                if not cols:
+                    raise RuntimeError(f"money snapshot table has no columns: {name}")
+                count = int(db.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0])
+                # Fingerprint deterministic ordered JSON rows. This never exports
+                # raw values; only the SHA-256 digest and count leave the process.
+                quoted_cols = ", ".join(f'"{col}"' for col in cols)
+                order_cols = ", ".join(f'"{col}"' for col in cols)
+                digest = hashlib.sha256()
+                for row in db.execute(f'SELECT {quoted_cols} FROM "{name}" ORDER BY {order_cols}'):
+                    digest.update(json.dumps(list(row), sort_keys=True, separators=(",", ":"), default=str).encode())
+                    digest.update(b"\n")
+                out[name] = {"count": count, "sha256": digest.hexdigest()}
+            for name in missing_known:
+                out[name] = {"missing": True}
+        return out
+
+    def money_snapshot(self) -> dict:
+        return {
+            "coordinator": self.money_table_counts(self.work / "db/coordinator.db", KNOWN_MONEY_TABLES["coordinator"]),
+            "gateway": self.money_table_counts(self.work / "db/gateway.db", KNOWN_MONEY_TABLES["gateway"]),
+        }
+
+    @staticmethod
+    def money_delta(before: dict, after: dict) -> dict:
+        out = {}
+        for db_name in sorted(set(before) | set(after)):
+            tables = {}
+            for table in sorted(set(before.get(db_name, {})) | set(after.get(db_name, {}))):
+                prior = before.get(db_name, {}).get(table, {"missing": True})
+                current = after.get(db_name, {}).get(table, {"missing": True})
+                if prior != current:
+                    tables[table] = {"before": prior, "after": current}
+            if tables:
+                out[db_name] = tables
+        return out
+
+    @staticmethod
+    def spec030_036_canary_evidence(native_diag: dict, canary: dict, relay_body: dict) -> str:
+        if not native_diag:
+            return "pending:no_native_mtp_canary_diagnostics"
+        if native_diag.get("trust_semantics") not in (None, "observe_only"):
+            return "pending:unexpected_trust_semantics"
+        # The current /poolz diagnostic shape does not expose trust_semantics;
+        # the coordinator implementation uses observe_only for native-MTP canary
+        # evaluation. Require relay evidence plus disabled tuple state before
+        # recording the path-mismatch question as inconclusive for this rehearsal.
+        if (relay_body or {}).get("canary_results_faulted", 0) < 1:
+            return "pending:relay_fault_not_observed"
+        if native_diag.get("status") != "disabled" or not native_diag.get("disabled_reason"):
+            return "pending:tuple_not_disabled"
+        if canary.get("http_status") != 200:
+            return "pending:poolz_unavailable"
+        return "inconclusive"
+
+    @staticmethod
+    def canary_negative_coverage_disposition(physical_faults: list[str] | tuple[str, ...]) -> dict:
+        physical = {fault: {
+            "proof_class": "physical_loopback_fault_relay",
+            "hardware_claim": False,
+            "expected_reason": CANARY_NEGATIVE_EXPECTED_REASON[fault],
+        } for fault in physical_faults}
+        source_ci = {
+            "expiry": {
+                "proof_class": "coordinator_source_ci_core_evaluation",
+                "hardware_claim": False,
+                "expected_reason": "expired_result",
+                "evidence": "phase4-coordinator/internal/ws/native_mtp_canary_test.go TestNativeMTPCanaryCoreRequestAndResultEvaluation",
+                "reason_not_physical": "loopback relay delay races the coordinator timeout sweep; late results are rejected after InFlight is cleared, so the relay cannot deterministically exercise expired_result without a production/test hook",
+            }
+        }
+        return {
+            "physical_loopback_faults": physical,
+            "source_ci_only_faults": source_ci,
+            "activation_claim_boundary": "physical relay evidence covers wrong_digest/actual_path/fallback/drop only; expiry must be supplied by the named coordinator source/CI gate and must not be claimed as hardware/physical expiry coverage",
+        }
 
     # ------------------------------------------------------------ phases
 
@@ -422,9 +611,10 @@ class Rehearsal:
                                             if "continuous_batching" in ln.lower()][-10:],
         }
 
-    def coordinator_canary(self, wait_s: int = 0) -> dict:
+    def coordinator_canary(self, wait_s: int = 0, expected_reason: str | None = None) -> dict:
         """The provider's native-MTP canary state from the operator /poolz,
-        polled until a canary outcome is recorded or `wait_s` elapses."""
+        polled until a canary outcome is recorded, an expected reason appears,
+        or `wait_s` elapses."""
         end = time.time() + wait_s
         while True:
             status, body = http_json("GET", self.ports["coordinator_ws_port"], "/poolz",
@@ -435,7 +625,11 @@ class Rehearsal:
             canary = mine.get("native_mtp_canary") or {}
             state = {"http_status": status, "model_id": mine.get("model_id"), "model_hash": mine.get("model_hash"),
                      "native_mtp_canary": canary}
-            if canary.get("last_outcome") or time.time() >= end:
+            if expected_reason and canary.get("disabled_reason") == expected_reason:
+                return state
+            if not expected_reason and canary.get("last_outcome"):
+                return state
+            if time.time() >= end:
                 return state
             time.sleep(10)
 
@@ -456,6 +650,90 @@ class Rehearsal:
             phase["delivery"] = self.delivery_evidence("native")
         self.result["phases"]["native"] = phase
         self.stop_provider()
+
+
+    def wait_for_ordinary_200(self, timeout_s: int = 240) -> dict:
+        end = time.time() + timeout_s
+        probes = 0
+        last = {"status": 0, "usage": None}
+        while time.time() < end and self.procs.get("provider") and self.procs["provider"].poll() is None:
+            try:
+                status, body = http_json("POST", self.ports["gateway_port"], "/v1/chat/completions",
+                                         chat("Reply with OK.", 4), headers=self.auth(), timeout=120)
+            except OSError:
+                status, body = 0, {}
+            probes += 1
+            last = {"status": status, "usage": body.get("usage") if isinstance(body, dict) else None,
+                    "probes": probes}
+            if status == 200:
+                return last
+            time.sleep(5)
+        return last
+
+    def phase_canary_negative(self) -> None:
+        configured = self.cfg.get("canary_negative_faults") or list(CANARY_NEGATIVE_FAULTS)
+        physical_faults = [fault for fault in configured if fault in CANARY_NEGATIVE_FAULTS]
+        source_ci_only = [fault for fault in configured if fault in CANARY_NEGATIVE_SOURCE_CI_ONLY_FAULTS]
+        unknown_faults = [fault for fault in configured if fault not in CANARY_NEGATIVE_FAULTS and fault not in CANARY_NEGATIVE_SOURCE_CI_ONLY_FAULTS]
+        if unknown_faults:
+            raise SystemExit(f"unknown canary negative fault(s): {', '.join(unknown_faults)}")
+        phase = {"relay_port": self.relay_port, "cases": [],
+                 "coverage_disposition": self.canary_negative_coverage_disposition(physical_faults)}
+        for fault in source_ci_only:
+            phase["cases"].append({
+                "fault": fault,
+                "expected_reason": CANARY_NEGATIVE_EXPECTED_REASON[fault],
+                "physical_negative_rehearsed": False,
+                "proof_class": "coordinator_source_ci_core_evaluation",
+                "tuple_disabled_only": None,
+                "diagnostic_no_billing_receipt_settlement_change": None,
+                "relay_status": {},
+                "spec030_036_path_mismatch": "pending:source_ci_only_no_physical_relay",
+                "note": phase["coverage_disposition"]["source_ci_only_faults"][fault]["reason_not_physical"],
+            })
+        for fault in physical_faults:
+            case = {"fault": fault, "expected_reason": CANARY_NEGATIVE_EXPECTED_REASON[fault],
+                    "physical_negative_rehearsed": True, "proof_class": "physical_loopback_fault_relay"}
+            relay_status = None
+            try:
+                self.restart_coordinator_for_canary_negative()
+                relay_status = self.start_canary_fault_relay(fault)
+                before = self.money_snapshot()
+                up = self.start_provider(
+                    f"canary-negative-{fault}",
+                    "auto",
+                    coordinator_url=f"ws://127.0.0.1:{self.relay_port}/ws/provider",
+                    readiness_probe=False,
+                )
+                case["provider"] = up
+                canary = self.coordinator_canary(
+                    wait_s=int(self.cfg.get("canary_negative_wait_s", 210)),
+                    expected_reason=CANARY_NEGATIVE_EXPECTED_REASON[fault],
+                )
+                after_canary = self.money_snapshot()
+                diag_delta = self.money_delta(before, after_canary)
+                ordinary = self.wait_for_ordinary_200(timeout_s=int(self.cfg.get("canary_negative_ordinary_wait_s", 240)))
+                relay_body = {}
+                if relay_status and relay_status.exists():
+                    relay_body = json.loads(relay_status.read_text())
+                native_diag = canary.get("native_mtp_canary") or {}
+                expected = CANARY_NEGATIVE_EXPECTED_REASON[fault]
+                case.update({
+                    "coordinator_canary": canary,
+                    "relay_status": relay_body,
+                    "diagnostic_money_delta": diag_delta,
+                    "ordinary_after_disable": ordinary,
+                    "tuple_disabled_only": native_diag.get("status") == "disabled"
+                    and native_diag.get("disabled_reason") == expected
+                    and ordinary.get("status") == 200,
+                    "diagnostic_no_billing_receipt_settlement_change": diag_delta == {},
+                    "spec030_036_path_mismatch": self.spec030_036_canary_evidence(native_diag, canary, relay_body),
+                })
+            finally:
+                self.stop_provider()
+                self.stop_canary_fault_relay()
+            phase["cases"].append(case)
+        self.result["phases"]["canary_negative"] = phase
 
     def phase_ordinary(self) -> None:
         up = self.start_provider("ordinary", "off")
@@ -518,6 +796,8 @@ class Rehearsal:
         delivery = native.get("delivery", {})
         nm = ((delivery.get("provider_status") or {}).get("native_mtp") or {})
         reqs_n, reqs_o = native.get("requests") or [], ordinary.get("requests") or []
+        negative = self.result["phases"].get("canary_negative", {})
+        negative_cases = negative.get("cases") or []
         self.result["checks"] = {
             "delivery.static_feeds_served": bool(self.result.get("services", {}).get("static_feed_status"))
             and all(v == 200 for v in self.result["services"]["static_feed_status"].values()),
@@ -542,6 +822,20 @@ class Rehearsal:
             "drill.tuple_disabled": drill.get("disabled_at") is not None,
             "drill.ordinary_serves_after": (drill.get("after_request") or {}).get("status") == 200,
         }
+        if "canary_negative" in self.result["phases"]:
+            configured_faults = self.cfg.get("canary_negative_faults") or list(CANARY_NEGATIVE_FAULTS)
+            expected_physical_faults = [f for f in configured_faults if f in CANARY_NEGATIVE_FAULTS]
+            physical_cases = [c for c in negative_cases if c.get("physical_negative_rehearsed") is True]
+            source_ci_cases = [c for c in negative_cases if c.get("proof_class") == "coordinator_source_ci_core_evaluation"]
+            self.result["checks"].update({
+                "canary_negative.all_configured_cases_classified": sorted(c.get("fault") for c in negative_cases) == sorted(configured_faults),
+                "canary_negative.physical_faults_observed": sorted(c.get("fault") for c in physical_cases) == sorted(expected_physical_faults),
+                "canary_negative.tuple_disabled_only": bool(physical_cases) and all(c.get("tuple_disabled_only") is True for c in physical_cases),
+                "canary_negative.diagnostic_no_money_delta": bool(physical_cases) and all(c.get("diagnostic_no_billing_receipt_settlement_change") is True for c in physical_cases),
+                "canary_negative.relay_faulted_each_physical_case": bool(physical_cases) and all((c.get("relay_status") or {}).get("canary_results_faulted", 0) >= 1 for c in physical_cases),
+                "canary_negative.spec030_036_inconclusive_for_physical": bool(physical_cases) and all(c.get("spec030_036_path_mismatch") == "inconclusive" for c in physical_cases),
+                "canary_negative.expiry_source_ci_only": all(c.get("physical_negative_rehearsed") is False for c in source_ci_cases),
+            })
 
     def cleanup(self) -> None:
         for name in list(self.procs):
@@ -564,9 +858,11 @@ class Rehearsal:
                 raise SystemExit("lab binary is not the one the rehearsal release binds")
             self.bootstrap_accounts()
             self.start_services()
-            phases = self.cfg.get("phases", ["native", "ordinary", "drill"])
+            phases = self.cfg.get("phases", ["native", "canary_negative", "ordinary", "drill"])
             if "native" in phases:
                 self.phase_native()
+            if "canary_negative" in phases:
+                self.phase_canary_negative()
             if "ordinary" in phases:
                 self.phase_ordinary()
             native = ((self.result["phases"].get("native", {}).get("delivery") or {}).get("provider_status") or {})
