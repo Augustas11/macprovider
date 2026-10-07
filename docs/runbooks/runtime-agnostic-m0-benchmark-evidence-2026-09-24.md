@@ -60,7 +60,7 @@ There is no model that buyers asked for and native cannot run. The demand signal
 - **TTFT.** Under bursts, llama-server has better TTFT than native serial, because it interleaves requests and native serial queues them. Native CB (the v1.8.192 Qwen3.6 canary) changes the native side; re-measure once CB is on for this key.
 - **Quality.** Perplexity differences follow the quant (Q4_K_M vs MLX 4-bit g64), not the engine. Disclosure should name the artifact and quant, not only the engine.
 - **Demand.** 30 days of logs show only capacity shortfalls on catalog models. Letting operators bring engines adds capacity, and that is the point.
-- **Harness.** The same harness (`msb-loopback`, `msb-perplexity`) is the qualification tool for every new engine: run it before an engine enters a pool allowlist.
+- **Harness.** The strict comparative harness (`msb-loopback`, `msb-perplexity`) remains the native/llama.cpp qualification profile. The operator-approved 2026-10-07 [capability-aware Ollama profile](runtime-agnostic-engine-qualification.md) measures available API capabilities separately, with exact-GGUF artifact quality and explicit unsupported capabilities; it must not be labeled an identical-workload M0 pass. Qualification remains required before an engine enters a pool allowlist.
 
 ## Process notes
 
