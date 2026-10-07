@@ -107,14 +107,17 @@ struct MSBOllamaLoopbackCommand: AsyncParsableCommand {
         let expectedEval = decodeTokens + 1
 
         var levels: [MSBOllamaLoopbackLevelReport] = []
+        let canonicalProfile = concurrency == [1, 4, 8] && promptTokens == 1024 && decodeTokens == 256 && runs == 5
         for level in concurrency {
             let rowPrompts = Array(prompts.prefix(level))
             _ = try await runRound(client: client, prompts: rowPrompts, expectedEval: expectedEval)
             var aggregateRuns: [Double] = []
             var perRowRuns: [Double] = []
             var ttfts: [Double] = []
+            var measuredSamples: [MSBOllamaLoopbackRequestSample] = []
             for _ in 0..<runs {
                 let samples = try await runRound(client: client, prompts: rowPrompts, expectedEval: expectedEval)
+                measuredSamples.append(contentsOf: samples)
                 let summary = try msbOllamaLoopbackSummarizeRound(samples)
                 aggregateRuns.append(summary.aggregateTokensPerSecond)
                 perRowRuns.append(summary.perRowTokensPerSecondP50)
@@ -128,7 +131,8 @@ struct MSBOllamaLoopbackCommand: AsyncParsableCommand {
                 perRowTPSp50: decodeBenchPercentileTPS(perRowRuns, p: 0.5),
                 ttftSecondsP50: decodeBenchPercentileTPS(ttfts, p: 0.5),
                 ttftSecondsP95: decodeBenchPercentileTPS(ttfts, p: 0.95),
-                ttftSamples: ttfts.count
+                ttftSamples: ttfts.count,
+                promptCacheVerification: msbOllamaPromptCacheVerification(measuredSamples)
             ))
         }
 
@@ -146,6 +150,9 @@ struct MSBOllamaLoopbackCommand: AsyncParsableCommand {
             runs: runs,
             promptSHA256: promptHashes,
             levels: levels,
+            countSource: "ollama_reported_operator_benchmark_only",
+            nativeIdenticalTokenSequences: false,
+            canonical1690Profile: canonicalProfile,
             billingEvidence: false,
             timestamp: ISO8601DateFormatter().string(from: Date())
         )
@@ -218,6 +225,7 @@ struct MSBOllamaLoopbackRequestSample: Sendable, Equatable {
     let endedAt: Date
     let evalCount: Int
     let promptEvalCount: Int
+    let promptEvalCachedCount: Int?
 }
 
 func msbOllamaRequireQualifiedCounts(_ sample: MSBOllamaLoopbackRequestSample, promptTokens: Int, evalTokens: Int) throws {
@@ -233,11 +241,17 @@ func msbOllamaRequireQualifiedCounts(_ sample: MSBOllamaLoopbackRequestSample, p
         ))
         throw ExitCode(1)
     }
+    guard (sample.promptEvalCachedCount ?? 0) == 0 else {
+        FileHandle.standardError.write(Data(
+            "msb-ollama-loopback: prompt_eval_cached_count \(sample.promptEvalCachedCount ?? 0); cached prompt eval is not qualified\n".utf8
+        ))
+        throw ExitCode(1)
+    }
 }
 
 enum MSBOllamaStreamEvent: Equatable {
     case token
-    case final(evalCount: Int?, promptEvalCount: Int?)
+    case final(evalCount: Int?, promptEvalCount: Int?, promptEvalCachedCount: Int?)
 }
 
 enum MSBOllamaLoopbackError: Error, CustomStringConvertible {
@@ -266,12 +280,14 @@ func msbOllamaParseStreamLine(_ line: String) throws -> MSBOllamaStreamEvent? {
     if object["done"] as? Bool == true {
         return .final(
             evalCount: object["eval_count"] as? Int,
-            promptEvalCount: object["prompt_eval_count"] as? Int
+            promptEvalCount: object["prompt_eval_count"] as? Int,
+            promptEvalCachedCount: object["prompt_eval_cached_count"] as? Int
         )
     }
-    if object["response"] is String {
+    if let response = object["response"] as? String, !response.isEmpty {
         return .token
     }
+    if object["response"] is String { return nil }
     throw MSBOllamaLoopbackError.malformed("stream event")
 }
 
@@ -313,26 +329,27 @@ struct MSBOllamaLoopbackClient: Sendable {
         guard http.statusCode == 200 else { throw MSBOllamaLoopbackError.http(http.statusCode) }
 
         var firstTokenAt: Date?
-        var final: (evalCount: Int?, promptEvalCount: Int?)?
+        var final: (evalCount: Int?, promptEvalCount: Int?, promptEvalCachedCount: Int?)?
         var splitter = LoopbackLineSplitter(
             maxLineBytes: MSBOllamaLoopbackBounds.maxStreamLineBytes,
             maxTotalBytes: MSBOllamaLoopbackBounds.maxStreamTotalBytes
         )
-        streaming: for try await byte in bytes {
+        for try await byte in bytes {
             guard let line = try splitter.append(byte) else { continue }
             switch try msbOllamaParseStreamLine(line) {
             case .token:
+                if final != nil { throw MSBOllamaLoopbackError.malformed("stream (token after done)") }
                 if firstTokenAt == nil { firstTokenAt = Date() }
-            case .final(let evalCount, let promptEvalCount):
-                final = (evalCount, promptEvalCount)
-                break streaming
+            case .final(let evalCount, let promptEvalCount, let promptEvalCachedCount):
+                guard final == nil else { throw MSBOllamaLoopbackError.malformed("stream (duplicate done event)") }
+                final = (evalCount, promptEvalCount, promptEvalCachedCount)
             case nil:
                 continue
             }
         }
         if final == nil, let last = splitter.finish(),
-           case .final(let evalCount, let promptEvalCount) = try msbOllamaParseStreamLine(last) {
-            final = (evalCount, promptEvalCount)
+           case .final(let evalCount, let promptEvalCount, let promptEvalCachedCount) = try msbOllamaParseStreamLine(last) {
+            final = (evalCount, promptEvalCount, promptEvalCachedCount)
         }
         let endedAt = Date()
         guard let firstTokenAt, let final, let evalCount = final.evalCount, let promptEvalCount = final.promptEvalCount else {
@@ -343,7 +360,8 @@ struct MSBOllamaLoopbackClient: Sendable {
             firstTokenAt: firstTokenAt,
             endedAt: endedAt,
             evalCount: evalCount,
-            promptEvalCount: promptEvalCount
+            promptEvalCount: promptEvalCount,
+            promptEvalCachedCount: final.promptEvalCachedCount
         )
     }
 }
@@ -373,6 +391,12 @@ func msbOllamaLoopbackSummarizeRound(_ samples: [MSBOllamaLoopbackRequestSample]
     )
 }
 
+func msbOllamaPromptCacheVerification(_ samples: [MSBOllamaLoopbackRequestSample]) -> String {
+    let reported = samples.filter { $0.promptEvalCachedCount != nil }
+    guard !reported.isEmpty else { return "not_reported_by_ollama" }
+    return reported.count == samples.count ? "reported_zero" : "mixed_reported_zero_and_not_reported"
+}
+
 struct MSBOllamaLoopbackLevelReport: Codable, Sendable, Equatable {
     let concurrency: Int
     let aggregateTPSRuns: [Double]
@@ -382,6 +406,7 @@ struct MSBOllamaLoopbackLevelReport: Codable, Sendable, Equatable {
     let ttftSecondsP50: Double
     let ttftSecondsP95: Double
     let ttftSamples: Int
+    let promptCacheVerification: String
 }
 
 struct MSBOllamaLoopbackReport: Codable, Sendable {
@@ -397,6 +422,9 @@ struct MSBOllamaLoopbackReport: Codable, Sendable {
     let runs: Int
     let promptSHA256: [String]
     let levels: [MSBOllamaLoopbackLevelReport]
+    let countSource: String
+    let nativeIdenticalTokenSequences: Bool
+    let canonical1690Profile: Bool
     let billingEvidence: Bool
     let timestamp: String
 

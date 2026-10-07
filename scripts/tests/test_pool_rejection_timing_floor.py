@@ -188,6 +188,71 @@ class _FakeHTTPResponse:
         return self.body
 
 
+class _FakeOpener:
+    def __init__(self, response: _FakeHTTPResponse):
+        self.response = response
+        self.requests = []
+
+    def open(self, request, *, timeout):
+        self.requests.append((request, timeout))
+        return self.response
+
+
+class _RedirectingHandler(BaseHTTPRequestHandler):
+    status_code = 302
+    location = ""
+    seen: list[tuple[str, str, str]] = []
+
+    def do_POST(self):  # noqa: N802 - http.server API
+        length = int(self.headers.get("Content-Length", "0"))
+        self.rfile.read(length)
+        type(self).seen.append(
+            (
+                self.headers.get("Authorization", ""),
+                self.headers.get("X-MacProvider-Account", ""),
+                self.headers.get("X-MacProvider-Pool-Select", ""),
+            )
+        )
+        self.send_response(type(self).status_code)
+        self.send_header("Location", type(self).location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *args):
+        return
+
+
+class _RedirectTargetHandler(BaseHTTPRequestHandler):
+    seen: list[tuple[str, str, str, str]] = []
+
+    def do_GET(self):  # noqa: N802 - http.server API
+        self._record()
+
+    def do_POST(self):  # noqa: N802 - http.server API
+        length = int(self.headers.get("Content-Length", "0"))
+        self.rfile.read(length)
+        self._record()
+
+    def _record(self):
+        type(self).seen.append(
+            (
+                self.command,
+                self.path,
+                self.headers.get("Authorization", ""),
+                self.headers.get("X-MacProvider-Account", ""),
+            )
+        )
+        body = b'{"error":{"code":"pool_unavailable","message":"target should not be reached"}}'
+        self.send_response(503)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        return
+
+
 class PoolRejectionTimingCredentialTests(unittest.TestCase):
     def setUp(self):
         self.mod = load_module()
@@ -299,10 +364,11 @@ class PoolRejectionTimingCredentialTests(unittest.TestCase):
             unauthorized=None,
         )
         body = b'{"error":{"code":"pool_unavailable","message":"Pool unavailable"}}'
+        fake_opener = _FakeOpener(_FakeHTTPResponse(status=404, body=body))
         with mock.patch.object(self.mod.ssl, "create_default_context", return_value=object()), mock.patch.object(
-            self.mod.urllib.request,
-            "urlopen",
-            return_value=_FakeHTTPResponse(status=404, body=body),
+            self.mod,
+            "build_url_opener",
+            return_value=fake_opener,
         ):
             with self.assertRaises(SystemExit) as raised:
                 self.mod.measure_http(
@@ -313,6 +379,7 @@ class PoolRejectionTimingCredentialTests(unittest.TestCase):
                     rng=random.Random(1),
                 )
         self.assertIn("status=404", str(raised.exception))
+        self.assertEqual(len(fake_opener.requests), 1)
 
     def test_measure_http_rejects_incidental_pool_unavailable_message(self):
         plan = self.mod.class_plan(
@@ -323,10 +390,11 @@ class PoolRejectionTimingCredentialTests(unittest.TestCase):
             unauthorized=None,
         )
         body = b'{"error":{"code":"rate_limited","message":"mentions pool_unavailable only in text"}}'
+        fake_opener = _FakeOpener(_FakeHTTPResponse(status=503, body=body))
         with mock.patch.object(self.mod.ssl, "create_default_context", return_value=object()), mock.patch.object(
-            self.mod.urllib.request,
-            "urlopen",
-            return_value=_FakeHTTPResponse(status=503, body=body),
+            self.mod,
+            "build_url_opener",
+            return_value=fake_opener,
         ):
             with self.assertRaises(SystemExit) as raised:
                 self.mod.measure_http(
@@ -337,6 +405,7 @@ class PoolRejectionTimingCredentialTests(unittest.TestCase):
                     rng=random.Random(1),
                 )
         self.assertIn("error.code='rate_limited'", str(raised.exception))
+        self.assertEqual(len(fake_opener.requests), 1)
 
     def test_measure_http_reuses_one_tls_context_for_all_samples(self):
         plan = self.mod.class_plan(
@@ -348,12 +417,13 @@ class PoolRejectionTimingCredentialTests(unittest.TestCase):
         )
         body = b'{"error":{"code":"pool_unavailable","message":"Pool unavailable"}}'
         tls_context = object()
+        fake_opener = _FakeOpener(_FakeHTTPResponse(status=503, body=body))
         with mock.patch.object(self.mod.ssl, "create_default_context", return_value=tls_context) as make_context:
             with mock.patch.object(
-                self.mod.urllib.request,
-                "urlopen",
-                return_value=_FakeHTTPResponse(status=503, body=body),
-            ) as urlopen:
+                self.mod,
+                "build_url_opener",
+                return_value=fake_opener,
+            ) as build_opener:
                 measured = self.mod.measure_http(
                     "https://gateway.example",
                     plan=plan,
@@ -362,9 +432,50 @@ class PoolRejectionTimingCredentialTests(unittest.TestCase):
                     rng=random.Random(1),
                 )
         self.assertEqual(make_context.call_count, 1)
-        self.assertEqual(urlopen.call_count, 6)
-        self.assertTrue(all(call.kwargs["context"] is tls_context for call in urlopen.call_args_list))
+        build_opener.assert_called_once_with(tls_context)
+        self.assertEqual(len(fake_opener.requests), 6)
         self.assertEqual({k: len(v) for k, v in measured.items()}, {"unknown": 2, "unauthorized": 2, "disabled": 2})
+
+    def test_measure_http_rejects_cross_origin_redirects_without_forwarding_credentials(self):
+        plan = self.mod.class_plan(
+            unknown_pool_id="unknownpoolxxxxxxxxxxx",
+            pool_id="pausedpoolxxxxxxxxxxxx",
+            unauthorized_pool_id="foreignpoolxxxxxxxxxxx",
+            authorized={"Authorization": "Bearer sk-auth"},
+            unauthorized=None,
+        )
+        for status_code in (301, 302, 303, 307, 308):
+            with self.subTest(status_code=status_code):
+                _RedirectTargetHandler.seen = []
+                target = ThreadingHTTPServer(("127.0.0.1", 0), _RedirectTargetHandler)
+                target_thread = threading.Thread(target=target.serve_forever, daemon=True)
+                target_thread.start()
+                try:
+                    _RedirectingHandler.status_code = status_code
+                    _RedirectingHandler.location = f"http://127.0.0.1:{target.server_address[1]}/redirected"
+                    _RedirectingHandler.seen = []
+                    origin = ThreadingHTTPServer(("127.0.0.1", 0), _RedirectingHandler)
+                    origin_thread = threading.Thread(target=origin.serve_forever, daemon=True)
+                    origin_thread.start()
+                    try:
+                        with self.assertRaises(SystemExit) as raised:
+                            self.mod.measure_http(
+                                f"http://127.0.0.1:{origin.server_address[1]}",
+                                plan=plan,
+                                samples=1,
+                                timeout_s=5,
+                                rng=random.Random(1),
+                            )
+                    finally:
+                        origin.shutdown()
+                        origin.server_close()
+                finally:
+                    target.shutdown()
+                    target.server_close()
+                self.assertIn(f"status={status_code}", str(raised.exception))
+                self.assertEqual(_RedirectTargetHandler.seen, [])
+                self.assertEqual(len(_RedirectingHandler.seen), 1)
+                self.assertEqual(_RedirectingHandler.seen[0][0], "Bearer sk-auth")
 
 
 if __name__ == "__main__":

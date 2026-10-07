@@ -253,6 +253,20 @@ def require_pool_unavailable_rejection(status: int, payload: bytes) -> None:
         raise SystemExit(f"unexpected rejection status={status} error.code={code!r} body={text[:300]}")
 
 
+class NoRedirectHTTPRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Fail closed on redirects so credentials never leave the requested origin."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102 - urllib hook signature
+        return None
+
+
+def build_url_opener(ctx: ssl.SSLContext) -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(
+        NoRedirectHTTPRedirectHandler,
+        urllib.request.HTTPSHandler(context=ctx),
+    )
+
+
 def measure_http(
     base_url: str,
     *,
@@ -265,6 +279,7 @@ def measure_http(
 
     rng = rng or random.SystemRandom()
     ctx = ssl.create_default_context()
+    opener = build_url_opener(ctx)
 
     def one(credential: dict[str, str], select_pool: str) -> float:
         body = json.dumps(
@@ -285,7 +300,7 @@ def measure_http(
         )
         start = time.perf_counter()
         try:
-            with urllib.request.urlopen(req, timeout=timeout_s, context=ctx) as resp:
+            with opener.open(req, timeout=timeout_s) as resp:
                 payload = resp.read()
                 status = resp.status
         except urllib.error.HTTPError as exc:

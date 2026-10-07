@@ -18,11 +18,19 @@ final class MSBOllamaLoopbackCommandTests: XCTestCase {
         XCTAssertEqual(try msbOllamaParseStreamLine(#"{"model":"m","response":"x","done":false}"#), .token)
         XCTAssertEqual(
             try msbOllamaParseStreamLine(#"{"model":"m","response":"","done":true,"eval_count":257,"prompt_eval_count":1024}"#),
-            .final(evalCount: 257, promptEvalCount: 1024)
+            .final(evalCount: 257, promptEvalCount: 1024, promptEvalCachedCount: nil)
+        )
+        XCTAssertEqual(
+            try msbOllamaParseStreamLine(#"{"model":"m","response":"","done":false}"#),
+            nil
         )
         XCTAssertEqual(
             try msbOllamaParseStreamLine(#"{"model":"m","response":"","done":true}"#),
-            .final(evalCount: nil, promptEvalCount: nil)
+            .final(evalCount: nil, promptEvalCount: nil, promptEvalCachedCount: nil)
+        )
+        XCTAssertEqual(
+            try msbOllamaParseStreamLine(#"{"model":"m","response":"","done":true,"eval_count":257,"prompt_eval_count":1024,"prompt_eval_cached_count":0}"#),
+            .final(evalCount: 257, promptEvalCount: 1024, promptEvalCachedCount: 0)
         )
     }
 
@@ -40,17 +48,19 @@ final class MSBOllamaLoopbackCommandTests: XCTestCase {
             MSBOllamaLoopbackRequestSample(
                 requestStartedAt: t0,
                 firstTokenAt: t0.addingTimeInterval(0.25),
-                endedAt: t0.addingTimeInterval(2.25),
-                evalCount: 257,
-                promptEvalCount: 1024
-            ),
+            endedAt: t0.addingTimeInterval(2.25),
+            evalCount: 257,
+            promptEvalCount: 1024,
+            promptEvalCachedCount: nil
+        ),
             MSBOllamaLoopbackRequestSample(
                 requestStartedAt: t0,
                 firstTokenAt: t0.addingTimeInterval(0.50),
-                endedAt: t0.addingTimeInterval(4.25),
-                evalCount: 257,
-                promptEvalCount: 1024
-            ),
+            endedAt: t0.addingTimeInterval(4.25),
+            evalCount: 257,
+            promptEvalCount: 1024,
+            promptEvalCachedCount: nil
+        ),
         ]
         let summary = try msbOllamaLoopbackSummarizeRound(samples)
         XCTAssertEqual(summary.aggregateTokensPerSecond, 128, accuracy: 1e-9)
@@ -64,11 +74,44 @@ final class MSBOllamaLoopbackCommandTests: XCTestCase {
             firstTokenAt: t0.addingTimeInterval(0.1),
             endedAt: t0.addingTimeInterval(1),
             evalCount: 257,
-            promptEvalCount: 1024
+            promptEvalCount: 1024,
+            promptEvalCachedCount: nil
         )
         try msbOllamaRequireQualifiedCounts(sample, promptTokens: 1024, evalTokens: 257)
         XCTAssertThrowsError(try msbOllamaRequireQualifiedCounts(sample, promptTokens: 1023, evalTokens: 257))
         XCTAssertThrowsError(try msbOllamaRequireQualifiedCounts(sample, promptTokens: 1024, evalTokens: 256))
+        let cached = MSBOllamaLoopbackRequestSample(
+            requestStartedAt: t0,
+            firstTokenAt: t0.addingTimeInterval(0.1),
+            endedAt: t0.addingTimeInterval(1),
+            evalCount: 257,
+            promptEvalCount: 1024,
+            promptEvalCachedCount: 1
+        )
+        XCTAssertThrowsError(try msbOllamaRequireQualifiedCounts(cached, promptTokens: 1024, evalTokens: 257))
+    }
+
+    func testPromptCacheVerificationNamesUnknownVsReportedZero() {
+        let t0 = Date(timeIntervalSinceReferenceDate: 1_000)
+        let unknown = MSBOllamaLoopbackRequestSample(
+            requestStartedAt: t0,
+            firstTokenAt: t0,
+            endedAt: t0,
+            evalCount: 257,
+            promptEvalCount: 1024,
+            promptEvalCachedCount: nil
+        )
+        let reported = MSBOllamaLoopbackRequestSample(
+            requestStartedAt: t0,
+            firstTokenAt: t0,
+            endedAt: t0,
+            evalCount: 257,
+            promptEvalCount: 1024,
+            promptEvalCachedCount: 0
+        )
+        XCTAssertEqual(msbOllamaPromptCacheVerification([unknown]), "not_reported_by_ollama")
+        XCTAssertEqual(msbOllamaPromptCacheVerification([reported]), "reported_zero")
+        XCTAssertEqual(msbOllamaPromptCacheVerification([unknown, reported]), "mixed_reported_zero_and_not_reported")
     }
 
     func testReportRedactsPromptModelAndPaths() throws {
@@ -85,6 +128,9 @@ final class MSBOllamaLoopbackCommandTests: XCTestCase {
             runs: 5,
             promptSHA256: [String(repeating: "c", count: 64)],
             levels: [],
+            countSource: "ollama_reported_operator_benchmark_only",
+            nativeIdenticalTokenSequences: false,
+            canonical1690Profile: true,
             billingEvidence: false,
             timestamp: "2026-10-07T00:00:00Z"
         )
@@ -94,6 +140,8 @@ final class MSBOllamaLoopbackCommandTests: XCTestCase {
         XCTAssertFalse(text.contains("/Users/"))
         XCTAssertFalse(text.contains("127.0.0.1"))
         XCTAssertFalse(text.contains("Authorization"))
+        XCTAssertTrue(text.contains(#""countSource" : "ollama_reported_operator_benchmark_only""#))
+        XCTAssertTrue(text.contains(#""nativeIdenticalTokenSequences" : false"#))
         XCTAssertTrue(text.contains(#""billingEvidence" : false"#))
     }
 
