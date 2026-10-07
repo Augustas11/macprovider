@@ -3073,6 +3073,7 @@ final class CoordinatorClientTests: XCTestCase {
 
     func testLabScopedPrivacyIdentityCarriesIntoBootstrapRecoveryClient() async throws {
         let directory = try Self.makeTemporaryDirectory(prefix: "bootstrap-recovery-lab-")
+            .resolvingSymlinksInPath()
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
         defer { try? FileManager.default.removeItem(at: directory) }
         let configURL = directory.appendingPathComponent("config.yaml")
