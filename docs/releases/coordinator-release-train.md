@@ -273,14 +273,31 @@ namespace.
 
 | Net change in coordinator / gateway / Pearl assets | Status | PR |
 |---|---|---|
-| Pool-scoped BYOM: admit, disclose, route and settle non-catalog models inside Trusted Pools; add route-snapshot v2, non-creator member payment, bounded pool pricing, artifact-feed activation, updater rollback/preflight support, and provider proposal surfaces. | Merged as `7b5c2bc6c` on 2026-10-05; accepted on Mac Studio and Lima; not active on Pearl | [#1830](https://github.com/Augustas11/macprovider/pull/1830) / [#1816](https://github.com/Augustas11/macprovider/issues/1816) |
+| Selected-pool model listings contain only that pool's eligible entries; successful disclosure binds to the actual served route, and pool-model refusals omit pool disclosure and blank unserved model logs. Add authenticated source verification and atomic no-dispatch closure exports with strict registry parsing, one export snapshot, and settlement-write fences. The exporter remains disabled and fails closed until reviewed production provenance is wired. | merged `00700349b` 2026-10-07; not released or deployed by this change | [#1883](https://github.com/Augustas11/macprovider/pull/1883) ([#1880](https://github.com/Augustas11/macprovider/issues/1880)) |
+| Pool-scoped BYOM: admit, disclose, route and settle non-catalog models inside Trusted Pools; add route-snapshot v2, non-creator member payment, bounded pool pricing, artifact-feed activation, updater rollback/preflight support, and provider proposal surfaces. | Merged as `7b5c2bc6c` on 2026-10-05; bounded production canary completed under #1816; full signed pool-model acceptance remains in #1880 | [#1830](https://github.com/Augustas11/macprovider/pull/1830) / [#1816](https://github.com/Augustas11/macprovider/issues/1816) |
 | Stage 3B deployment tranche: ship the merged Stage 3A money-path evidence journal so provider credit and compact attempt-output evidence commit atomically in SQLite; initialize indexed bounded materialization, poison-safe retention, receipt-time on-demand projection, fail-closed evidence checks, and journal health metrics on Pearl. | Stage 3A implementation merged as `502516d52` 2026-10-03; Stage 3B deployment not live | [#1835](https://github.com/Augustas11/macprovider/pull/1835) |
 
-### #1816 BYOM productionization sequence
+### BYOM canary completion and #1880 follow-ups
 
-#1830 completed the implementation campaign; merge is not production
-activation. Keep #1816 open until the real paid Pearl journey and its rollback
-evidence are complete.
+[#1816](https://github.com/Augustas11/macprovider/issues/1816) is closed for the
+bounded operator-run production canary. The 2026-10-07 recapture passed all ten
+native/GGUF paid-path checks, the in-flight attestation-removal zero-bill fence,
+role-state observations, rollback preflight, and restart checks. The complete
+signed pool-model journey failed; no pool-model conformance promotion or
+unrestricted product launch is claimed. See the
+[completion handoff](../handoffs/1816-completion-20261007.md).
+
+[#1883](https://github.com/Augustas11/macprovider/pull/1883) implements listing,
+disclosure, eligibility-copy, and authenticated evidence foundations. Its merge
+does not deploy those changes or complete the production journey. Remaining
+source provenance enrollment, gateway refusal/pre-quota proof, accounting and
+lifecycle findings, guided approval/recovery, actual scoped earnings visibility,
+adapter proof, and explicit catalog graduation are tracked in
+[#1880](https://github.com/Augustas11/macprovider/issues/1880).
+
+The original rollout sequence below remains the historical launch plan. Fresh
+release/acceptance work and any resulting conformance promotion belong to
+#1880 and require reviewed released code and complete signed evidence.
 
 1. **Close the launch gates.** Land the post-#1830 hardening PR: production
    Trusted Pool activation now requires an out-of-database manifest-acceptance
@@ -317,8 +334,8 @@ evidence are complete.
    pool-model 503s, route-snapshot pressure and settlement-hold age. Pass 38's
    isolated Lima 503 (48/49 rollover requests settled, followed by recovery)
    was accepted for merge, but a production recurrence must be attributable.
-7. **Widen only after evidence is signed.** Attach the canary evidence to
-   #1816, update CONFORMANCE, and then expand creators/providers. Global catalog
+7. **Widen only after evidence is signed.** Attach fresh complete acceptance evidence to
+   #1880, update CONFORMANCE, and then expand creators/providers. Global catalog
    graduation remains a separate explicit decision: implement the
    SPEC-047-R012 aggregate, SPEC-047-R011 probe-evidence record and
    `macprovider.intake-decision.v2`; permissionless global earning remains out
