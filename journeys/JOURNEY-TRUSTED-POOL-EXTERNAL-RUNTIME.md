@@ -200,7 +200,7 @@ SQL per request (`C` and `G` as in the run plan §5A; `-json` instead of
 
 ```bash
 IDS="SELECT request_id FROM request_log WHERE external_request_id='$RID'"
-$C "SELECT request_id, attempt_n, status, pool_id FROM request_log WHERE external_request_id='$RID';" > request_log.json
+$C "SELECT request_id, external_request_id, attempt_n, status, pool_id FROM request_log WHERE external_request_id='$RID';" > request_log.json
 $C "SELECT request_id, attempt_n, route_snapshot_mode,
            json_extract(route_snapshot_json,'\$.pool_id') pool_id,
            json_extract(route_snapshot_json,'\$.runtime_source') runtime_source,
@@ -215,7 +215,7 @@ $C "SELECT request_id, attempt_n, route_snapshot_mode,
 $C "SELECT request_id, attempt_n, terminal_state, usage_source FROM settlement_attempt_outputs WHERE request_id IN ($IDS);" > attempt_outputs.json
 $C "SELECT request_id, attempt_n, receipt_version, receipt_result, settlement_outcome, reason, closed, pool_label_status
     FROM settlement_receipt_verdicts WHERE request_id IN ($IDS);" > receipt_verdicts.json
-$C "SELECT l.id, l.request_id, l.provider_id, l.status, l.charged_prompt_tokens, l.completion_tokens, l.usage_source,
+$C "SELECT l.id, l.request_id, l.attempt_n, l.provider_id, l.status, l.charged_prompt_tokens, l.completion_tokens, l.usage_source,
            l.provider_credits, l.quarantined, l.settlement_policy_mode, (p.id IS NOT NULL) payable
     FROM ledger_request_credits l LEFT JOIN spec022_payable_request_credits p ON p.id = l.id
     WHERE l.request_id IN ($IDS);" > ledger.json
@@ -226,6 +226,13 @@ $G "SELECT request_id, prompt_tokens, completion_tokens, token_source, outcome F
 The controls use the same `route_snapshots.json` and `ledger.json` queries.
 Wait at least one `pending_deadline_seconds` before the verdict, ledger and
 finality captures.
+
+The builder derives the allowed coordinator `(request_id, attempt_n)` set only
+from `request_log.json` rows whose `external_request_id` equals the captured
+gateway `X-Request-ID`. Route snapshots, the settled attempt output, receipt
+verdict, payable ledger row and finality JSON must all bind back to that set;
+`/internal/settlement/finality` returns `request_id` and may include
+`attempt_n` in local captures, so `attempt_n` is checked when present.
 
 `gateway-holds.json` is versioned because historical global gateway state is
 not a forward acceptance invariant for SPEC-022-R012 / SPEC-042-R013 /

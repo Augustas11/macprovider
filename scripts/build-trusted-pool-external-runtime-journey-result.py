@@ -424,11 +424,22 @@ def check_response(capture: Path, kind: str, run: dict[str, Any]) -> dict[str, A
 def check_settlement(capture: Path, kind: str, run: dict[str, Any], pool: dict[str, Any], gateway_request_id: str) -> dict[str, Any]:
     base = f"requests/{kind}"
     request_log = load_capture_rows(capture, f"{base}/request_log.json")
-    require(any(row.get("pool_id") == run["pool_id"] for row in request_log), f"{kind} request_log must show the pool")
+    allowed_attempts: set[tuple[str, int]] = set()
+    for index, row in enumerate(request_log):
+        where = f"{kind} request_log[{index}]"
+        require(row.get("external_request_id") == gateway_request_id, f"{where}.external_request_id must equal the response X-Request-ID")
+        require(row.get("pool_id") == run["pool_id"], f"{where}.pool_id must show the pool")
+        request_id = require_string(row.get("request_id"), None, f"{where}.request_id")
+        attempt_n = as_int(row.get("attempt_n"), f"{where}.attempt_n")
+        allowed_attempts.add((request_id, attempt_n))
+    require(allowed_attempts, f"{kind} request_log must show the gateway request")
     snapshots = load_capture_rows(capture, f"{base}/route_snapshots.json")
     require(snapshots, f"{kind} must have route snapshots")
     for row in snapshots:
         where = f"{kind} route snapshot attempt {row.get('attempt_n')}"
+        snapshot_key = (require_string(row.get("request_id"), None, f"{where}.request_id"),
+                        as_int(row.get("attempt_n"), f"{where}.attempt_n"))
+        require(snapshot_key in allowed_attempts, f"{where}: request_id/attempt_n must come from request_log")
         require(row.get("pool_id") == run["pool_id"], f"{where}: pool_id must be the pool")
         require(row.get("runtime_source") == RUNTIME_SOURCE, f"{where}: runtime_source must be {RUNTIME_SOURCE}")
         require(as_int(row.get("manifest_version"), f"{where}.manifest_version") == pool["manifest_version"], f"{where}: manifest_version must match get-pool")
@@ -447,12 +458,12 @@ def check_settlement(capture: Path, kind: str, run: dict[str, Any], pool: dict[s
     ]
     require(len(attested) == 1, f"{kind} must have exactly one pool_operator_attested normal_done attempt output")
     settled_key = (attested[0].get("request_id"), as_int(attested[0].get("attempt_n"), f"{kind} attempt_n"))
-    verdicts = [
-        row for row in load_capture_rows(capture, f"{base}/receipt_verdicts.json")
-        if (row.get("request_id"), as_int(row.get("attempt_n"), f"{kind} verdict attempt_n")) == settled_key
-    ]
+    require(settled_key in allowed_attempts, f"{kind} settled attempt output request_id/attempt_n must come from request_log")
+    verdicts = load_capture_rows(capture, f"{base}/receipt_verdicts.json")
     require(len(verdicts) == 1, f"{kind} settled attempt must have exactly one receipt verdict")
     verdict = verdicts[0]
+    require((verdict.get("request_id"), as_int(verdict.get("attempt_n"), f"{kind} verdict attempt_n")) == settled_key,
+            f"{kind} receipt verdict request_id/attempt_n must equal the settled attempt")
     for field, want in (
         ("receipt_version", 4),
         ("receipt_result", "valid"),
@@ -470,6 +481,10 @@ def check_settlement(capture: Path, kind: str, run: dict[str, Any], pool: dict[s
     payable = [row for row in ledger if as_int(row.get("payable"), f"{kind} ledger.payable") == 1]
     require(len(payable) == 1, f"{kind} must have exactly one payable ledger row")
     credit = payable[0]
+    require(credit.get("request_id") == settled_key[0], f"{kind} payable ledger request_id must equal the settled attempt")
+    if "attempt_n" in credit:
+        require(as_int(credit.get("attempt_n"), f"{kind} ledger.attempt_n") == settled_key[1],
+                f"{kind} payable ledger attempt_n must equal the settled attempt")
     require(credit.get("provider_id") == run["member_provider_id"], f"{kind} ledger provider must be the member")
     require(as_int(credit.get("provider_credits"), f"{kind} ledger.provider_credits") > 0, f"{kind} ledger provider_credits must be positive")
     require(as_int(credit.get("quarantined"), f"{kind} ledger.quarantined") == 0, f"{kind} ledger row must not be quarantined")
@@ -482,6 +497,10 @@ def check_settlement(capture: Path, kind: str, run: dict[str, Any], pool: dict[s
     )
 
     finality = load_capture_object(capture, f"{base}/finality.json")
+    require(finality.get("request_id") == settled_key[0], f"{kind} finality request_id must equal the settled attempt")
+    if "attempt_n" in finality:
+        require(as_int(finality.get("attempt_n"), f"{kind} finality.attempt_n") == settled_key[1],
+                f"{kind} finality attempt_n must equal the settled attempt")
     require(finality.get("closed") is True, f"{kind} finality must be closed")
     require(finality.get("outcome") == "verified", f"{kind} finality outcome must be verified")
     require(finality.get("token_source") == POOL_OPERATOR_ATTESTED, f"{kind} finality token_source must be {POOL_OPERATOR_ATTESTED}")

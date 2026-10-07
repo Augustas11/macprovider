@@ -833,7 +833,7 @@ failure.
 C="sqlite3 -readonly -header /var/lib/macprovider/coordinator.db"
 G="sqlite3 -readonly -header /var/lib/macprovider/gateway.db"
 RID=<X-Request-ID of the buyer request>
-$C "SELECT request_id, attempt_n, status, pool_id FROM request_log WHERE external_request_id='$RID';"
+$C "SELECT request_id, external_request_id, attempt_n, status, pool_id FROM request_log WHERE external_request_id='$RID';"
 IDS=$($C -noheader "SELECT group_concat(quote(request_id)) FROM request_log WHERE external_request_id='$RID';")
 $C "SELECT request_id, attempt_n, json_extract(route_snapshot_json,'\$.pool_id') pool, json_extract(route_snapshot_json,'\$.runtime_source') rt,
            json_extract(route_snapshot_json,'\$.manifest_version') mv, json_extract(route_snapshot_json,'\$.pool_generation') gen,
@@ -844,7 +844,7 @@ $C "SELECT request_id, attempt_n, terminal_state, usage_source,
     FROM settlement_attempt_outputs WHERE request_id IN ($IDS);"
 $C "SELECT request_id, attempt_n, receipt_version, receipt_result, settlement_outcome, reason, closed, pool_label_status
     FROM settlement_receipt_verdicts WHERE request_id IN ($IDS);"
-$C "SELECT l.id, l.provider_id, l.status, l.charged_prompt_tokens, l.completion_tokens, l.usage_source, l.provider_credits,
+$C "SELECT l.id, l.request_id, l.attempt_n, l.provider_id, l.status, l.charged_prompt_tokens, l.completion_tokens, l.usage_source, l.provider_credits,
            l.quarantined, l.settlement_policy_mode, (p.id IS NOT NULL) payable
     FROM ledger_request_credits l LEFT JOIN spec022_payable_request_credits p ON p.id = l.id WHERE l.request_id IN ($IDS);"
 $G "SELECT request_id, status, settled_tokens, settlement_hold FROM quota_reservations WHERE request_id='$RID';"
@@ -868,6 +868,13 @@ allowed only as immutable rollback context: counts and the canonical held-row
 state hash match between `global_backlog.baseline` and `global_backlog.after`.
 This is not a global health claim. Wait at least one `pending_deadline_seconds`
 before reading verdicts as final.
+
+Request binding is part of the pass criteria. For each paid request, the
+builder derives the allowed coordinator `(request_id, attempt_n)` set from
+`request_log.external_request_id = $RID`; route snapshots, the settled attempt
+output, receipt verdict, payable ledger row and finality JSON must all bind to
+that set. The finality API returns `request_id`; `attempt_n` is checked if the
+capture includes it.
 
 ### Evidence for SPEC-022-R012 (CONFORMANCE)
 

@@ -159,7 +159,7 @@ def make_capture(root: Path) -> Path:
                 {"choices": [], "usage": {"prompt_tokens": tokens[0], "completion_tokens": tokens[1]}},
             ]
             write(base / "response.sse", "".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n")
-        write(base / "request_log.json", [{"request_id": coord, "attempt_n": 1, "status": "ok", "pool_id": POOL}])
+        write(base / "request_log.json", [{"request_id": coord, "external_request_id": rid, "attempt_n": 1, "status": "ok", "pool_id": POOL}])
         write(base / "route_snapshots.json", [{
             "request_id": coord, "attempt_n": 1, "route_snapshot_mode": "enforce", "pool_id": POOL,
             "runtime_source": "llamacpp_loopback", "manifest_version": 1, "manifest_core_digest": DIGEST,
@@ -173,14 +173,14 @@ def make_capture(root: Path) -> Path:
         }])
         write(base / "ledger.json", [{
             "id": 7, "request_id": coord, "provider_id": MEMBER, "status": "credited", "charged_prompt_tokens": tokens[0],
-            "completion_tokens": tokens[1], "usage_source": "provider_reported", "provider_credits": 900,
+            "completion_tokens": tokens[1], "usage_source": "provider_reported", "provider_credits": 900, "attempt_n": 1,
             "quarantined": 0, "settlement_policy_mode": "enforce", "payable": 1,
         }])
         write(base / "quota_reservations.json", [{"request_id": rid, "status": "settled", "settled_tokens": sum(tokens), "settlement_hold": 0}])
         write(base / "usage_events.json", [{"request_id": rid, "prompt_tokens": tokens[0], "completion_tokens": tokens[1], "token_source": "pool_operator_attested", "outcome": "settled"}])
         write(base / "finality.json", {
             "request_id": coord, "closed": True, "outcome": "verified", "token_source": "pool_operator_attested",
-            "prompt_tokens": tokens[0], "completion_tokens": tokens[1], "total_tokens": sum(tokens),
+            "attempt_n": 1, "prompt_tokens": tokens[0], "completion_tokens": tokens[1], "total_tokens": sum(tokens),
         })
     for name, (status, code) in BUILDER.NEGATIVE_CONTROLS.items():
         base = capture / "controls" / name
@@ -381,9 +381,17 @@ class TrustedPoolExternalRuntimeCaptureTests(unittest.TestCase):
         self.mutate_rows("requests/nonstream/receipt_verdicts.json", settlement_outcome="quarantined")
         self.assert_rejected("receipt verdict")
 
+    def test_rejects_transplanted_receipt_verdict(self) -> None:
+        self.mutate_rows("requests/nonstream/receipt_verdicts.json", request_id="coord-other")
+        self.assert_rejected("receipt verdict request_id")
+
     def test_rejects_global_or_observe_route(self) -> None:
         self.mutate_rows("requests/stream/route_snapshots.json", route_snapshot_mode="observe")
         self.assert_rejected("route_snapshot_mode")
+
+    def test_rejects_transplanted_route_snapshot_attempt(self) -> None:
+        self.mutate_rows("requests/nonstream/route_snapshots.json", request_id="coord-other")
+        self.assert_rejected("route snapshot attempt")
 
     def test_rejects_wrong_gguf_identity(self) -> None:
         self.mutate_rows("requests/stream/route_snapshots.json", artifact_hash="f" * 64)
@@ -412,6 +420,18 @@ class TrustedPoolExternalRuntimeCaptureTests(unittest.TestCase):
     def test_rejects_attempt_source_mutation(self) -> None:
         self.mutate_rows("requests/nonstream/attempt_outputs.json", usage_source="provider_reported")
         self.assert_rejected("pool_operator_attested normal_done attempt output")
+
+    def test_rejects_transplanted_attempt_output(self) -> None:
+        self.mutate_rows("requests/nonstream/attempt_outputs.json", request_id="coord-other")
+        self.assert_rejected("settled attempt output")
+
+    def test_rejects_transplanted_ledger_credit(self) -> None:
+        self.mutate_rows("requests/nonstream/ledger.json", request_id="coord-other")
+        self.assert_rejected("payable ledger request_id")
+
+    def test_rejects_transplanted_finality(self) -> None:
+        self.mutate_object("requests/nonstream/finality.json", request_id="coord-other")
+        self.assert_rejected("finality request_id")
 
     def test_rejects_held_reservation(self) -> None:
         self.mutate_rows("requests/stream/quota_reservations.json", settlement_hold=1)
