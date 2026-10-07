@@ -21,7 +21,7 @@ import subprocess
 import sys
 import tempfile
 from copy import deepcopy
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -46,13 +46,15 @@ JOURNEY_ID = "JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME"
 REPOSITORY = "Augustas11/macprovider"
 ARTIFACT_ID = "redacted-trusted-pool-external-runtime"
 EVIDENCE_PREFIX = "journeys/evidence/trusted-pool-external-runtime-"
+GATEWAY_HOLDS_SCHEMA = "macprovider.trusted-pool-external-runtime-gateway-holds.v2"
 RUNTIME_SOURCE = "llamacpp_loopback"
 GGUF_HASH_ALGORITHM = "macprovider.gguf-file.v1"
 POOL_OPERATOR_ATTESTED = "pool_operator_attested"
+LEDGER_PROVIDER_REPORTED = "provider_reported"
 REQUIREMENT_RE = re.compile(r"^SPEC-[0-9]{3}-R[0-9]{3}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-DATETIME_Z_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+DATETIME_Z_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z$")
 DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 # preconditions.*.observed is structured, never free text: an object of at
 # most 8 named facts. A name is a short snake_case word that names no
@@ -84,7 +86,7 @@ REQUEST_KINDS = ("nonstream", "stream")
 # name -> (HTTP status, error.code); run plan §5A negative controls.
 NEGATIVE_CONTROLS = {
     "no-pool-selector": (503, "engine_unavailable"),
-    "no-selector-no-pool": (503, "byom_non_settlement_unavailable"),
+    "pool-native-selector": (503, "engine_unavailable"),
     "pool-ollama-selector": (503, "engine_unavailable"),
     "uppercase-selector": (400, "invalid_engine_selection"),
 }
@@ -95,10 +97,10 @@ STEP_ASSERTIONS = {
     "step-04-stream-request": "streaming 200 served by llamacpp_loopback, finish_reason and [DONE]",
     "step-05-route-snapshots": "route snapshots carry pool, manifest, runtime_source, enforce mode and the GGUF identity",
     "step-06-receipts-and-attempts": "pool_operator_attested attempt output and a closed verified v4 receipt verdict",
-    "step-07-ledger-and-finality": "one payable enforce ledger credit to the member and closed verified finality",
+    "step-07-ledger-and-finality": "one payable enforce provider_reported ledger credit to the member and closed verified finality",
     "step-08-gateway-debit": "settled reservation with no hold; debit equals finality equals ledger tokens",
     "step-09-negative-controls": "four controls fail closed with zero route snapshots and zero ledger rows",
-    "step-10-gateway-holds": "zero held reservations and zero missing-trailer logs before and after",
+    "step-10-gateway-holds": "zero run-scoped held reservations and missing-trailer logs; global backlog unchanged as context",
     "step-11-redaction": "prompts, completions, keys and raw account ids absent; secret scan passes",
 }
 FORBIDDEN_KEY_FRAGMENTS = (
@@ -215,6 +217,14 @@ def require_string(value: Any, pattern: re.Pattern[str] | None, location: str) -
     if pattern is not None and not pattern.fullmatch(value):
         die(f"{location} has invalid format")
     return value
+
+
+def parse_datetime_z(value: Any, location: str) -> tuple[str, datetime]:
+    text = require_string(value, DATETIME_Z_RE, location)
+    try:
+        return text, datetime.fromisoformat(text.removesuffix("Z") + "+00:00")
+    except ValueError:
+        die(f"{location} must be a UTC timestamp")
 
 
 def require_object(value: Any, location: str) -> dict[str, Any]:
@@ -411,14 +421,27 @@ def check_response(capture: Path, kind: str, run: dict[str, Any]) -> dict[str, A
     return out
 
 
-def check_settlement(capture: Path, kind: str, run: dict[str, Any], pool: dict[str, Any]) -> dict[str, Any]:
+def check_settlement(capture: Path, kind: str, run: dict[str, Any], pool: dict[str, Any], gateway_request_id: str) -> dict[str, Any]:
     base = f"requests/{kind}"
     request_log = load_capture_rows(capture, f"{base}/request_log.json")
-    require(any(row.get("pool_id") == run["pool_id"] for row in request_log), f"{kind} request_log must show the pool")
+    allowed_attempts: set[tuple[str, int]] = set()
+    for index, row in enumerate(request_log):
+        where = f"{kind} request_log[{index}]"
+        require(row.get("external_request_id") == gateway_request_id, f"{where}.external_request_id must equal the response X-Request-ID")
+        require(row.get("pool_id") == run["pool_id"], f"{where}.pool_id must show the pool")
+        request_id = require_string(row.get("request_id"), None, f"{where}.request_id")
+        attempt_n = as_int(row.get("attempt_n"), f"{where}.attempt_n")
+        allowed_attempts.add((request_id, attempt_n))
+    require(allowed_attempts, f"{kind} request_log must show the gateway request")
     snapshots = load_capture_rows(capture, f"{base}/route_snapshots.json")
     require(snapshots, f"{kind} must have route snapshots")
+    snapshot_by_key: dict[tuple[str, int], dict[str, Any]] = {}
     for row in snapshots:
         where = f"{kind} route snapshot attempt {row.get('attempt_n')}"
+        snapshot_key = (require_string(row.get("request_id"), None, f"{where}.request_id"),
+                        as_int(row.get("attempt_n"), f"{where}.attempt_n"))
+        require(snapshot_key not in snapshot_by_key, f"{where}: duplicate route snapshot key")
+        require(snapshot_key in allowed_attempts, f"{where}: request_id/attempt_n must come from request_log")
         require(row.get("pool_id") == run["pool_id"], f"{where}: pool_id must be the pool")
         require(row.get("runtime_source") == RUNTIME_SOURCE, f"{where}: runtime_source must be {RUNTIME_SOURCE}")
         require(as_int(row.get("manifest_version"), f"{where}.manifest_version") == pool["manifest_version"], f"{where}: manifest_version must match get-pool")
@@ -429,6 +452,7 @@ def check_settlement(capture: Path, kind: str, run: dict[str, Any], pool: dict[s
         require(row.get("artifact_hash") == run["gguf_sha256"], f"{where}: artifact_hash must be the GGUF sha256")
         require(row.get("artifact_id") == run["gguf_artifact_id"], f"{where}: artifact_id must be {run['gguf_artifact_id']}")
         as_int(row.get("pool_generation"), f"{where}.pool_generation")
+        snapshot_by_key[snapshot_key] = row
 
     outputs = load_capture_rows(capture, f"{base}/attempt_outputs.json")
     attested = [
@@ -437,12 +461,14 @@ def check_settlement(capture: Path, kind: str, run: dict[str, Any], pool: dict[s
     ]
     require(len(attested) == 1, f"{kind} must have exactly one pool_operator_attested normal_done attempt output")
     settled_key = (attested[0].get("request_id"), as_int(attested[0].get("attempt_n"), f"{kind} attempt_n"))
-    verdicts = [
-        row for row in load_capture_rows(capture, f"{base}/receipt_verdicts.json")
-        if (row.get("request_id"), as_int(row.get("attempt_n"), f"{kind} verdict attempt_n")) == settled_key
-    ]
+    require(settled_key in allowed_attempts, f"{kind} settled attempt output request_id/attempt_n must come from request_log")
+    require(settled_key in snapshot_by_key, f"{kind} settled attempt must have a trusted route snapshot")
+    settled_snapshot = snapshot_by_key[settled_key]
+    verdicts = load_capture_rows(capture, f"{base}/receipt_verdicts.json")
     require(len(verdicts) == 1, f"{kind} settled attempt must have exactly one receipt verdict")
     verdict = verdicts[0]
+    require((verdict.get("request_id"), as_int(verdict.get("attempt_n"), f"{kind} verdict attempt_n")) == settled_key,
+            f"{kind} receipt verdict request_id/attempt_n must equal the settled attempt")
     for field, want in (
         ("receipt_version", 4),
         ("receipt_result", "valid"),
@@ -460,17 +486,25 @@ def check_settlement(capture: Path, kind: str, run: dict[str, Any], pool: dict[s
     payable = [row for row in ledger if as_int(row.get("payable"), f"{kind} ledger.payable") == 1]
     require(len(payable) == 1, f"{kind} must have exactly one payable ledger row")
     credit = payable[0]
+    require(credit.get("request_id") == settled_key[0], f"{kind} payable ledger request_id must equal the settled attempt")
+    require(as_int(credit.get("attempt_n"), f"{kind} ledger.attempt_n") == settled_key[1],
+            f"{kind} payable ledger attempt_n must equal the settled attempt")
     require(credit.get("provider_id") == run["member_provider_id"], f"{kind} ledger provider must be the member")
     require(as_int(credit.get("provider_credits"), f"{kind} ledger.provider_credits") > 0, f"{kind} ledger provider_credits must be positive")
     require(as_int(credit.get("quarantined"), f"{kind} ledger.quarantined") == 0, f"{kind} ledger row must not be quarantined")
     require(credit.get("settlement_policy_mode") == "enforce", f"{kind} ledger settlement_policy_mode must be enforce")
-    require(credit.get("usage_source") == POOL_OPERATOR_ATTESTED, f"{kind} ledger usage_source must be {POOL_OPERATOR_ATTESTED}")
+    require(credit.get("usage_source") == LEDGER_PROVIDER_REPORTED,
+            f"{kind} ledger usage_source must be {LEDGER_PROVIDER_REPORTED}")
     ledger_tokens = (
         as_int(credit.get("charged_prompt_tokens"), f"{kind} ledger.charged_prompt_tokens"),
         as_int(credit.get("completion_tokens"), f"{kind} ledger.completion_tokens"),
     )
 
     finality = load_capture_object(capture, f"{base}/finality.json")
+    require(finality.get("request_id") == settled_key[0], f"{kind} finality request_id must equal the settled attempt")
+    if "attempt_n" in finality:
+        require(as_int(finality.get("attempt_n"), f"{kind} finality.attempt_n") == settled_key[1],
+                f"{kind} finality attempt_n must equal the settled attempt")
     require(finality.get("closed") is True, f"{kind} finality must be closed")
     require(finality.get("outcome") == "verified", f"{kind} finality outcome must be verified")
     require(finality.get("token_source") == POOL_OPERATOR_ATTESTED, f"{kind} finality token_source must be {POOL_OPERATOR_ATTESTED}")
@@ -481,10 +515,14 @@ def check_settlement(capture: Path, kind: str, run: dict[str, Any], pool: dict[s
 
     reservations = load_capture_rows(capture, f"{base}/quota_reservations.json")
     require(len(reservations) == 1, f"{kind} must have exactly one gateway reservation")
+    require(reservations[0].get("request_id") == gateway_request_id,
+            f"{kind} reservation request_id must equal the response X-Request-ID")
     require(reservations[0].get("status") == "settled", f"{kind} reservation must be settled")
     require(as_int(reservations[0].get("settlement_hold"), f"{kind} settlement_hold") == 0, f"{kind} reservation must not be held")
     events = load_capture_rows(capture, f"{base}/usage_events.json")
     require(len(events) == 1, f"{kind} must have exactly one gateway usage event")
+    require(events[0].get("request_id") == gateway_request_id,
+            f"{kind} usage event request_id must equal the response X-Request-ID")
     require(events[0].get("token_source") == POOL_OPERATOR_ATTESTED, f"{kind} usage event token_source must be {POOL_OPERATOR_ATTESTED}")
     debit_tokens = (
         as_int(events[0].get("prompt_tokens"), f"{kind} usage_events.prompt_tokens"),
@@ -497,7 +535,7 @@ def check_settlement(capture: Path, kind: str, run: dict[str, Any], pool: dict[s
         "route_snapshot_count": len(snapshots),
         "runtime_source": RUNTIME_SOURCE,
         "route_snapshot_mode": "enforce",
-        "pool_generation": as_int(snapshots[-1].get("pool_generation"), f"{kind} pool_generation"),
+        "pool_generation": as_int(settled_snapshot.get("pool_generation"), f"{kind} settled pool_generation"),
         "settled_attempt_n": settled_key[1],
         "usage_source": POOL_OPERATOR_ATTESTED,
         "receipt_verdict": {
@@ -513,6 +551,7 @@ def check_settlement(capture: Path, kind: str, run: dict[str, Any], pool: dict[s
             "provider_fingerprint": fingerprint(run["member_provider_id"], run["fingerprint_salt"]),
             "provider_credits": as_int(credit.get("provider_credits"), f"{kind} ledger.provider_credits"),
             "settlement_policy_mode": "enforce",
+            "usage_source": LEDGER_PROVIDER_REPORTED,
         },
         "finality": {"closed": True, "outcome": "verified", "token_source": POOL_OPERATOR_ATTESTED},
         "gateway": {"reservation_status": "settled", "settlement_hold": 0, "token_source": POOL_OPERATOR_ATTESTED},
@@ -524,28 +563,154 @@ def check_controls(capture: Path) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for name, (want_status, want_code) in NEGATIVE_CONTROLS.items():
         base = f"controls/{name}"
-        status, _ = parse_headers(read_capture_file(capture, f"{base}/response.headers"), f"{base}/response.headers")
+        status, headers = parse_headers(read_capture_file(capture, f"{base}/response.headers"), f"{base}/response.headers")
         require(status == want_status, f"control {name} status must be {want_status}, got {status}")
+        request_id = require_string(headers.get("x-request-id"), None, f"control {name} X-Request-ID")
         body = require_object(parse_json_bytes(read_capture_file(capture, f"{base}/response.json"), f"{base}/response.json"), f"{name} body")
         code = require_object(body.get("error"), f"control {name} error").get("code")
         require(code == want_code, f"control {name} error.code must be {want_code}, got {code!r}")
         require(load_capture_rows(capture, f"{base}/route_snapshots.json") == [], f"control {name} must leave no route snapshot")
         require(load_capture_rows(capture, f"{base}/ledger.json") == [], f"control {name} must leave no ledger row")
-        out[name] = {"status": want_status, "error_code": want_code, "route_snapshots": 0, "ledger_rows": 0}
+        out[name] = {"status": want_status, "error_code": want_code, "request_id": request_id, "route_snapshots": 0, "ledger_rows": 0}
     return out
 
 
-def check_holds(capture: Path) -> dict[str, Any]:
+def require_hold_counts(value: Any, location: str, *, zero: bool) -> dict[str, int]:
+    item = require_object(value, location)
+    require(set(item) == {"held_reservations", "missing_trailer_log_count"}, f"{location} keys")
+    out = {
+        "held_reservations": as_int(item.get("held_reservations"), f"{location}.held_reservations"),
+        "missing_trailer_log_count": as_int(item.get("missing_trailer_log_count"), f"{location}.missing_trailer_log_count"),
+    }
+    for field, count in out.items():
+        require(count >= 0, f"{location}.{field} must be non-negative")
+        if zero:
+            require(count == 0, f"{location}.{field} must be 0")
+    return out
+
+
+def require_campaign_holds(value: Any, expected_request_ids: list[str], required_paid_ids: list[str], location: str, *, zero: bool) -> dict[str, Any]:
+    item = require_object(value, location)
+    require(set(item) == {"held_reservations", "missing_trailer_log_count", "window_buyer_request_ids"},
+            f"{location} keys")
+    counts = require_hold_counts({key: item[key] for key in ("held_reservations", "missing_trailer_log_count")},
+                                 location, zero=zero)
+    request_ids = require_request_id_list(item.get("window_buyer_request_ids"), f"{location}.window_buyer_request_ids")
+    require(set(request_ids).issubset(set(expected_request_ids)),
+            f"{location}.window_buyer_request_ids must be a subset of the six generated request IDs")
+    require(set(required_paid_ids).issubset(set(request_ids)),
+            f"{location}.window_buyer_request_ids must include the paid request IDs")
+    return {**counts, "window_buyer_request_ids": request_ids}
+
+
+def require_global_backlog_snapshot(value: Any, location: str) -> dict[str, Any]:
+    item = require_object(value, location)
+    require(set(item) == {"held_reservations", "missing_trailer_log_count", "held_rows_sha256"},
+            f"{location} keys")
+    counts = require_hold_counts({key: item[key] for key in ("held_reservations", "missing_trailer_log_count")},
+                                 location, zero=False)
+    return {**counts, "held_rows_sha256": require_string(item.get("held_rows_sha256"), SHA256_RE, f"{location}.held_rows_sha256")}
+
+
+def require_request_id_list(value: Any, location: str) -> list[str]:
+    if not isinstance(value, list) or not value:
+        die(f"{location} must be a non-empty list")
+    request_ids = [require_string(item, None, f"{location}[]") for item in value]
+    require(len(set(request_ids)) == len(request_ids), f"{location} must not contain duplicates")
+    return sorted(request_ids)
+
+
+def require_request_id_scope(value: Any, expected_request_ids: list[str], location: str) -> list[str]:
+    request_ids = require_request_id_list(value, location)
+    require(set(request_ids) == set(expected_request_ids), f"{location} must equal the six generated request IDs")
+    return request_ids
+
+
+def require_gateway_holds_evidence(value: Any, *, expected: dict[str, Any] | None = None) -> dict[str, Any]:
+    holds = require_object(value, "gateway_holds")
+    require(set(holds) == {"schema_version", "scope", "campaign", "global_backlog", "global_health_claim"},
+            "gateway_holds keys")
+    require(holds.get("schema_version") == GATEWAY_HOLDS_SCHEMA,
+            f"gateway_holds.schema_version must equal {GATEWAY_HOLDS_SCHEMA!r}")
+    scope = require_object(holds.get("scope"), "gateway_holds.scope")
+    require(set(scope) == {"run_id", "pool_id", "buyer_account_fingerprint", "request_ids", "window_started_at", "window_ended_at"},
+            "gateway_holds.scope keys")
+    require_string(scope.get("run_id"), RUN_ID_RE, "gateway_holds.scope.run_id")
+    require_string(scope.get("pool_id"), None, "gateway_holds.scope.pool_id")
+    require_string(scope.get("buyer_account_fingerprint"), SHA256_RE, "gateway_holds.scope.buyer_account_fingerprint")
+    request_ids = require_request_id_list(scope.get("request_ids"), "gateway_holds.scope.request_ids")
+    require(len(request_ids) == 6, "gateway_holds.scope.request_ids must contain all six generated request IDs")
+    started, started_at = parse_datetime_z(scope.get("window_started_at"), "gateway_holds.scope.window_started_at")
+    ended, ended_at = parse_datetime_z(scope.get("window_ended_at"), "gateway_holds.scope.window_ended_at")
+    require(started_at <= ended_at, "gateway_holds.scope window must be ordered")
+    if expected is not None:
+        require(scope["run_id"] == expected["run_id"], "gateway_holds.scope.run_id must match evidence.run_id")
+        require(scope["pool_id"] == expected["pool_id"], "gateway_holds.scope.pool_id must match candidate_identity.pool_id")
+        require(scope["buyer_account_fingerprint"] == expected["buyer_account_fingerprint"],
+                "gateway_holds.scope.buyer_account_fingerprint must match candidate_identity.buyer_account_fingerprint")
+        require(set(request_ids) == set(expected["request_ids"]), "gateway_holds.scope.request_ids must match evidence request IDs")
+        require(started_at <= expected["captured_at"] <= ended_at, "gateway_holds.scope window must cover captured_at")
+    required_paid_ids = expected["required_paid_ids"] if expected is not None else request_ids[:2]
+    campaign = require_campaign_holds(holds.get("campaign"), request_ids, required_paid_ids, "gateway_holds.campaign", zero=True)
+    global_backlog = require_object(holds.get("global_backlog"), "gateway_holds.global_backlog")
+    require(set(global_backlog) == {"baseline", "after", "unchanged"}, "gateway_holds.global_backlog keys")
+    baseline = require_global_backlog_snapshot(global_backlog.get("baseline"), "gateway_holds.global_backlog.baseline")
+    after = require_global_backlog_snapshot(global_backlog.get("after"), "gateway_holds.global_backlog.after")
+    require(after == baseline, "gateway_holds.global_backlog after must equal baseline")
+    require(global_backlog.get("unchanged") is True, "gateway_holds.global_backlog.unchanged must be true")
+    require(holds.get("global_health_claim") is False, "gateway_holds.global_health_claim must be false")
+    return {
+        "schema_version": GATEWAY_HOLDS_SCHEMA,
+        "scope": {
+            "run_id": scope["run_id"],
+            "pool_id": scope["pool_id"],
+            "buyer_account_fingerprint": scope["buyer_account_fingerprint"],
+            "request_ids": request_ids,
+            "window_started_at": started,
+            "window_ended_at": ended,
+        },
+        "campaign": campaign,
+        "global_backlog": {"baseline": baseline, "after": after, "unchanged": True},
+        "global_health_claim": False,
+    }
+
+
+def check_holds(capture: Path, run: dict[str, Any], expected_request_ids: list[str], required_paid_ids: list[str]) -> dict[str, Any]:
     raw = load_capture_object(capture, "gateway-holds.json")
-    require(set(raw) == {"before", "after"}, "gateway-holds.json must have before and after")
-    out: dict[str, Any] = {}
-    for phase in ("before", "after"):
-        item = require_object(raw[phase], f"gateway-holds.{phase}")
-        require(set(item) == {"held_reservations", "missing_trailer_log_count"}, f"gateway-holds.{phase} keys")
-        for field in ("held_reservations", "missing_trailer_log_count"):
-            require(as_int(item[field], f"gateway-holds.{phase}.{field}") == 0, f"gateway-holds.{phase}.{field} must be 0")
-        out[phase] = {"held_reservations": 0, "missing_trailer_log_count": 0}
-    return out
+    require(set(raw) == {"schema_version", "scope", "campaign", "global_backlog"}, "gateway-holds.json keys")
+    require(raw.get("schema_version") == GATEWAY_HOLDS_SCHEMA,
+            f"gateway-holds.schema_version must equal {GATEWAY_HOLDS_SCHEMA!r}")
+    scope = require_object(raw.get("scope"), "gateway-holds.scope")
+    require(set(scope) == {"run_id", "buyer_account_id", "pool_id", "request_ids", "window_started_at", "window_ended_at"},
+            "gateway-holds.scope keys")
+    require(scope.get("run_id") == run["run_id"], "gateway-holds.scope.run_id must match run.json")
+    require(scope.get("buyer_account_id") == run["buyer_account_id"], "gateway-holds.scope.buyer_account_id must match run.json")
+    require(scope.get("pool_id") == run["pool_id"], "gateway-holds.scope.pool_id must match run.json")
+    request_ids = require_request_id_scope(scope.get("request_ids"), expected_request_ids, "gateway-holds.scope.request_ids")
+    started, started_at = parse_datetime_z(scope.get("window_started_at"), "gateway-holds.scope.window_started_at")
+    ended, ended_at = parse_datetime_z(scope.get("window_ended_at"), "gateway-holds.scope.window_ended_at")
+    _, captured_at = parse_datetime_z(run["captured_at"], "run.json.captured_at")
+    require(started_at <= captured_at <= ended_at, "gateway-holds.scope window must cover run.json.captured_at")
+    campaign = require_campaign_holds(raw.get("campaign"), request_ids, required_paid_ids, "gateway-holds.campaign", zero=True)
+    global_backlog = require_object(raw.get("global_backlog"), "gateway-holds.global_backlog")
+    require(set(global_backlog) == {"baseline", "after"}, "gateway-holds.global_backlog keys")
+    baseline = require_global_backlog_snapshot(global_backlog.get("baseline"), "gateway-holds.global_backlog.baseline")
+    after = require_global_backlog_snapshot(global_backlog.get("after"), "gateway-holds.global_backlog.after")
+    require(after == baseline, "gateway-holds.global_backlog after must equal baseline")
+    return {
+        "schema_version": GATEWAY_HOLDS_SCHEMA,
+        "scope": {
+            "run_id": run["run_id"],
+            "pool_id": run["pool_id"],
+            "buyer_account_fingerprint": fingerprint(run["buyer_account_id"], run["fingerprint_salt"]),
+            "request_ids": request_ids,
+            "window_started_at": started,
+            "window_ended_at": ended,
+        },
+        "campaign": campaign,
+        "global_backlog": {"baseline": baseline, "after": after, "unchanged": True},
+        "global_health_claim": False,
+    }
 
 
 def reject_forbidden_secret_keys(value: Any, location: str = "$") -> None:
@@ -610,6 +775,26 @@ def revalidate_committed_evidence(evidence: dict[str, Any]) -> None:
         require_string(item["checked_at"], DATETIME_Z_RE, f"preconditions.{key}.checked_at")
     require_fingerprints_only(evidence)
     require_run_descriptors(evidence)
+    identity = require_object(evidence.get("candidate_identity"), "candidate_identity")
+    request_ids: list[str] = []
+    requests = require_object(evidence.get("requests"), "requests")
+    for kind in REQUEST_KINDS:
+        request = require_object(requests.get(kind), f"requests.{kind}")
+        response = require_object(request.get("response"), f"requests.{kind}.response")
+        request_ids.append(require_string(response.get("request_id"), None, f"requests.{kind}.response.request_id"))
+    controls = require_object(evidence.get("negative_controls"), "negative_controls")
+    for name in NEGATIVE_CONTROLS:
+        control = require_object(controls.get(name), f"negative_controls.{name}")
+        request_ids.append(require_string(control.get("request_id"), None, f"negative_controls.{name}.request_id"))
+    require_gateway_holds_evidence(evidence.get("gateway_holds"), expected={
+        "run_id": require_string(evidence.get("run_id"), RUN_ID_RE, "run_id"),
+        "captured_at": parse_datetime_z(evidence.get("captured_at"), "captured_at")[1],
+        "pool_id": require_string(identity.get("pool_id"), None, "candidate_identity.pool_id"),
+        "buyer_account_fingerprint": require_string(identity.get("buyer_account_fingerprint"), SHA256_RE,
+                                                     "candidate_identity.buyer_account_fingerprint"),
+        "request_ids": request_ids,
+        "required_paid_ids": request_ids[:2],
+    })
 
 
 def reject_raw_identifiers(evidence: dict[str, Any], run: dict[str, Any]) -> None:
@@ -629,17 +814,20 @@ def build_evidence(capture: Path) -> dict[str, Any]:
     preconditions = check_preconditions(capture)
     pool = check_pool(capture, run)
     requests: dict[str, Any] = {}
+    gateway_request_ids: list[str] = []
     usage_equal = True
     for kind in REQUEST_KINDS:
         response = check_response(capture, kind, run)
-        settlement = check_settlement(capture, kind, run, pool)
+        gateway_request_ids.append(response["request_id"])
+        settlement = check_settlement(capture, kind, run, pool, response["request_id"])
         visible = response["buyer_visible_usage"]
         debited = settlement["debited_tokens"]
         if (visible["prompt_tokens"], visible["completion_tokens"]) != (debited["prompt_tokens"], debited["completion_tokens"]):
             usage_equal = False
         requests[kind] = {"response": response, "settlement": settlement}
     controls = check_controls(capture)
-    holds = check_holds(capture)
+    gateway_request_ids.extend(control["request_id"] for control in controls.values())
+    holds = check_holds(capture, run, gateway_request_ids, [requests[kind]["response"]["request_id"] for kind in REQUEST_KINDS])
     evidence = {
         "schema_version": EVIDENCE_SCHEMA,
         "journey_id": JOURNEY_ID,
@@ -656,7 +844,7 @@ def build_evidence(capture: Path) -> dict[str, Any]:
         },
         "result": {
             "status": "pass",
-            "summary": "paid non-streaming and streaming requests on a candidate operator pool, served by llamacpp_loopback, settled verified / pool_operator_attested with debit equal to finality and ledger",
+            "summary": "paid non-streaming and streaming requests on a candidate operator pool, served by llamacpp_loopback, settled verified / pool_operator_attested with provider_reported ledger usage and debit equal to finality and ledger",
         },
         "steps": [
             {"id": step_id, "status": "pass", "assertion": STEP_ASSERTIONS[step_id], "artifacts": [ARTIFACT_ID]}
@@ -687,6 +875,7 @@ def build_evidence(capture: Path) -> dict[str, Any]:
             "gguf_artifact_id": run["gguf_artifact_id"],
             "model_id": run["model_id"],
             "pool_id": run["pool_id"],
+            "buyer_account_fingerprint": fingerprint(run["buyer_account_id"], run["fingerprint_salt"]),
             "manifest_version": pool["manifest_version"],
             "manifest_core_digest": pool["manifest_core_digest"],
             "runtime_source": RUNTIME_SOURCE,
@@ -863,7 +1052,7 @@ def require_candidate_identity(value: Any) -> dict[str, Any]:
     identity = require_object(value, "candidate_identity")
     if set(identity) != TRUSTED_POOL_EXTERNAL_RUNTIME_CANDIDATE_IDENTITY_KEYS:
         die(f"candidate_identity keys must be exactly {sorted(TRUSTED_POOL_EXTERNAL_RUNTIME_CANDIDATE_IDENTITY_KEYS)}")
-    for field in ("member_cli_sha256", "gguf_sha256", "manifest_core_digest", "fingerprint_salt"):
+    for field in ("member_cli_sha256", "gguf_sha256", "manifest_core_digest", "fingerprint_salt", "buyer_account_fingerprint"):
         require_string(identity.get(field), SHA256_RE, f"candidate_identity.{field}")
     require_string(identity.get("accepted_id"), ACCEPTED_ID_RE, "candidate_identity.accepted_id")
     for field in ("coordinator_version", "llama_server_build", "gguf_artifact_id", "model_id", "pool_id"):

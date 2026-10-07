@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "capture": "20261007T071549Z",
+  "status": "PASS",
+  "scope": "isolated nonbilling actual-token quality comparison; not live rollout or signed release acceptance",
+  "provenance": {
+    "cli_sha256": "222a714dd19af0ffd0bc859f3a1dbd52597d043de6bd6759163d777af64c8f2e",
+    "mlx_metallib_sha256": "84e487182336648a826132e50e7a4cd2cae0bc77ac6eafa89cc72f3a964fdbaf",
+    "candidate_scope": "local_unreleased_isolated_measurement_only",
+    "source_base_commit": "907bfb92183a19c2cb031228d2493135f5c97037",
+    "source_files_sha256": {
+      "MSBThroughputCommand.swift": "6d9d3ebb8dfe9ed745745314ce3c0b563a349fec2b0e7ad9817192b955263b22",
+      "MSBLoopbackCommand.swift": "4afebf4e8dc194f9836ac48703dd6f3d0347ff8f3e5962d2eff2dec5bcb1d560",
+      "MSBOllamaLoopbackCommand.swift": "5ea2c0b7893a329ec14d0b5f1a3c89617326d0d093d677d196cb4e48be10b59a",
+      "MSBPerplexityCommand.swift": "f14becf17bce788faf4b3141066b2b9b91b89f0c0ba36abf37be3f5f1105ecba"
+    },
+    "llama_server_sha256": "41df13c126456f8e5fab2057c86a790067a85ea1dfd8fbc0071cc45fbba56262",
+    "llama_perplexity_sha256": "8050ad909ddc0260cf685775291cb83f93e232a2f3beb97736e83ced0fe00869",
+    "ollama_binary_sha256": "5f0e245e8369a66b7b24654c51c8ec95f3eab9a1e263f6e95e20d2d4374b8e26",
+    "ollama_model_sha256": "c5396e06af294bd101b30dce59131a76d2b773e76950acc870eda801d3ab0515",
+    "llama_model_sha256": "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff",
+    "corpus_sha256": "173c87a53759e0201f33e0ccf978e510c2042d7f2cb78229d9a50d79b9e7dd08",
+    "corpus_chunks": 150,
+    "corpus_ctx": 512,
+    "ollama_strict_same_m0": false,
+    "ollama_runtime_perplexity_measured": false,
+    "buyer_billing": false
+  },
+  "llama32_3b": {
+    "comparison": {
+      "model_sha256": "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff",
+      "corpus_sha256": "173c87a53759e0201f33e0ccf978e510c2042d7f2cb78229d9a50d79b9e7dd08",
+      "gguf_policy": {
+        "tokenizer.ggml.bos_token_id": 128000
+      },
+      "observed_add_bos": true,
+      "add_eos": false,
+      "parse_special": false,
+      "ctx": 512,
+      "chunks": 150,
+      "first": 256,
+      "scored_tokens": 38250,
+      "text_tokens": 289077,
+      "token_ids_sha256": "083a3f5b3ad4e65359ea491bc4b5dff4f826f9343bbb96bd744087e9e504163f",
+      "evaluated_token_ids_sha256": "5abeb7af3c708919bb9be50aafa95a9928557367107b2c640ae7cc10c8af86ee",
+      "scored_target_ids_sha256": "d3a8fa1565741d961f11a2151f56393ec12c4423e42496422323155952205713",
+      "hash_schema": "macprovider.msb.prompt-token-ids.v1.le-int64",
+      "actual_token_parity": true,
+      "native_perplexity": 11.230704848287148,
+      "gguf_perplexity": 10.6216,
+      "gguf_runtime": "llama.cpp",
+      "ollama_runtime_perplexity": false
+    },
+    "native": {
+      "schemaVersion": 1,
+      "timestamp": "2026-10-07T07:17:18Z",
+      "mlxSwiftLMPin": "mlxlm-3.31.4",
+      "textTokens": 289077,
+      "ctx": 512,
+      "chunks": 150,
+      "scoredTokens": 38250,
+      "perplexity": 11.230704848287148,
+      "meanNLL": 2.418651531543607,
+      "tokenizationMode": "native_encode_addSpecialTokens_false_manual_bos_no_auto_eos",
+      "bosToken": 128000,
+      "firstScoredOffset": 256,
+      "corpusTokenSHA256": "083a3f5b3ad4e65359ea491bc4b5dff4f826f9343bbb96bd744087e9e504163f",
+      "evaluatedChunkTokenSHA256": "5abeb7af3c708919bb9be50aafa95a9928557367107b2c640ae7cc10c8af86ee",
+      "scoredTargetTokenSHA256": "d3a8fa1565741d961f11a2151f56393ec12c4423e42496422323155952205713"
+    }
+  },
+  "qwen25_05b_exact_ollama_artifact": {
+    "comparison": {
+      "model_sha256": "c5396e06af294bd101b30dce59131a76d2b773e76950acc870eda801d3ab0515",
+      "corpus_sha256": "173c87a53759e0201f33e0ccf978e510c2042d7f2cb78229d9a50d79b9e7dd08",
+      "gguf_policy": {
+        "tokenizer.ggml.bos_token_id": 151643,
+        "tokenizer.ggml.add_bos_token": false
+      },
+      "observed_add_bos": false,
+      "add_eos": false,
+      "parse_special": false,
+      "ctx": 512,
+      "chunks": 150,
+      "first": 256,
+      "scored_tokens": 38250,
+      "text_tokens": 299078,
+      "token_ids_sha256": "37a76be0c2d897ea9231bb6eaaca2ffa8264d1f38cb520ceb303c43830fa7d7c",
+      "evaluated_token_ids_sha256": "b1c328e4272dea03b3fafe2293d2c2583d87cad194239be0cae6e36367842778",
+      "scored_target_ids_sha256": "933687faf3ee947a159ae8c60b66716446e2c7c990635210767935ee01022027",
+      "hash_schema": "macprovider.msb.prompt-token-ids.v1.le-int64",
+      "actual_token_parity": true,
+      "native_perplexity": 17.76738466022288,
+      "gguf_perplexity": 15.1892,
+      "gguf_runtime": "llama.cpp",
+      "ollama_runtime_perplexity": false
+    },
+    "native": {
+      "schemaVersion": 1,
+      "timestamp": "2026-10-07T07:18:00Z",
+      "mlxSwiftLMPin": "mlxlm-3.31.4",
+      "textTokens": 299078,
+      "ctx": 512,
+      "chunks": 150,
+      "scoredTokens": 38250,
+      "perplexity": 17.76738466022288,
+      "meanNLL": 2.8773644540824144,
+      "tokenizationMode": "native_encode_addSpecialTokens_false_no_manual_bos_no_auto_eos",
+      "firstScoredOffset": 256,
+      "corpusTokenSHA256": "37a76be0c2d897ea9231bb6eaaca2ffa8264d1f38cb520ceb303c43830fa7d7c",
+      "evaluatedChunkTokenSHA256": "b1c328e4272dea03b3fafe2293d2c2583d87cad194239be0cae6e36367842778",
+      "scoredTargetTokenSHA256": "933687faf3ee947a159ae8c60b66716446e2c7c990635210767935ee01022027"
+    }
+  },
+  "limitations": [
+    "Qwen GGUF quality was measured using llama.cpp, not Ollama runtime.",
+    "Different quantizations are disclosed; quality differences are not isolated runtime effects.",
+    "Both comparisons use ctx512 and the first150 complete chunks, not the full corpus.",
+    "Native/llama.cpp actual corpus, evaluated inputs and scored targets are hash-matched; this does not establish Ollama API token parity."
+  ]
+}

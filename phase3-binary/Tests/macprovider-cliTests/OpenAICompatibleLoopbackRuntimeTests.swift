@@ -44,13 +44,28 @@ final class OpenAICompatibleLoopbackRuntimeTests: XCTestCase {
         servedModelRef: String = "ollama:gemma3:270m",
         origin: String = "http://127.0.0.1:11434",
         httpClient: any BYOMDiscoveryHTTPClient,
-        store: (root: URL, cacheURL: URL, blob: Data, locatorHex: String)
+        store: (root: URL, cacheURL: URL, blob: Data, locatorHex: String),
+        countTokens: (@Sendable (String) -> Int)? = nil
     ) throws -> OpenAICompatibleLoopbackRuntime {
-        try OpenAICompatibleLoopbackRuntime(
+        var siblingSnapshotSHA256: String?
+        var siblingSnapshotDirectories: [URL] = []
+        if countTokens != nil {
+            let directory = try makeSnapshotDirectory("startup-recount")
+            let snapshot = try MLXSnapshotIdentity.compute(directory: directory)
+            siblingSnapshotSHA256 = snapshot.digest
+            siblingSnapshotDirectories = [directory]
+        }
+        return try OpenAICompatibleLoopbackRuntime(
             servedModelRef: servedModelRef,
             origin: origin,
             httpClient: httpClient,
-            digestResolver: makeResolver(store)
+            digestResolver: makeResolver(store),
+            siblingSnapshotSHA256: siblingSnapshotSHA256,
+            siblingSnapshotDirectories: siblingSnapshotDirectories,
+            pinRecountTokenizer: { snapshot in
+                guard let countTokens else { return nil }
+                return PinnedSnapshotTokenizer(snapshot: snapshot, encode: countTokens)
+            }
         )
     }
 
@@ -1819,7 +1834,7 @@ extension OpenAICompatibleLoopbackRuntimeTests {
     func testLoopbackStartupProbeReportsAPositiveRateFromUpstreamUsage() async throws {
         let store = try makeStore()
         let client = StubLoopbackHTTPClient(responseBody: Self.probeSSE)
-        let runtime = try makeRuntime(httpClient: client, store: store)
+        let runtime = try makeRuntime(httpClient: client, store: store, countTokens: { _ in 8 })
 
         let outcome = await runtime.measureStartupThroughput(maxTokens: ModelRuntime.startupThroughputProbeMaxTokens)
         guard case .ok(let tps) = outcome else { return XCTFail("expected ok, got \(outcome)") }
@@ -1862,12 +1877,17 @@ extension OpenAICompatibleLoopbackRuntimeTests {
         try (Data("GGUF".utf8) + Data(repeating: 0x5a, count: 4096)).write(to: file)
         let client = LlamaCppStubClient(modelPath: file.resolvingSymlinksInPath().path, nCtx: 64, promptTokens: 40)
         client.setChatResponse(Self.predictedNOnlySSE)
+        let recountDirectory = try makeSnapshotDirectory("llamacpp-predicted")
+        let recountSnapshot = try MLXSnapshotIdentity.compute(directory: recountDirectory)
         let runtime = try await OpenAICompatibleLoopbackRuntime.llamaCpp(
             servedModelRef: "llamacpp:tiny-q4",
             origin: "http://127.0.0.1:9191",
             selector: BYOMLlamaCppArtifactSelector(root: nil, pinnedFile: file),
+            siblingSnapshotSHA256: recountSnapshot.digest,
+            siblingSnapshotDirectories: [recountDirectory],
             httpClient: client,
-            cache: BYOMArtifactDigestCache(url: root.appendingPathComponent("cache.json"))
+            cache: BYOMArtifactDigestCache(url: root.appendingPathComponent("cache.json")),
+            pinRecountTokenizer: { snapshot in PinnedSnapshotTokenizer(snapshot: snapshot, encode: { _ in 8 }) }
         )
         let outcome = await runtime.measureStartupThroughput()
         guard case .ok(let tps) = outcome else { return XCTFail("expected ok, got \(outcome)") }
@@ -1879,7 +1899,11 @@ extension OpenAICompatibleLoopbackRuntimeTests {
         // `timings.predicted_n` is llama-server's field; any other runtime
         // sending it is not believed, and without `usage` the probe fails closed.
         let store = try makeStore()
-        let runtime = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: Self.predictedNOnlySSE), store: store)
+        let runtime = try makeRuntime(
+            httpClient: StubLoopbackHTTPClient(responseBody: Self.predictedNOnlySSE),
+            store: store,
+            countTokens: { _ in 8 }
+        )
         let runtimeSource = await runtime.runtimeSource
         XCTAssertEqual(runtimeSource, OllamaLoopbackServeModel.runtimeSource)
         let outcome = await runtime.measureStartupThroughput()
@@ -1887,7 +1911,7 @@ extension OpenAICompatibleLoopbackRuntimeTests {
         XCTAssertEqual(outcome.tps, 0)
     }
 
-    func testLoopbackStartupProbeCapsAForgedUsageCountAtTheStreamedContentDeltas() async throws {
+    func testLoopbackStartupProbeCapsUsageAtTheTrustedTokenizerRecount() async throws {
         // One content fragment with a forged `usage.completion_tokens: 8`.
         let sse = """
         data: {"choices":[{"delta":{"content":"Hi there friend"}}]}
@@ -1906,11 +1930,13 @@ extension OpenAICompatibleLoopbackRuntimeTests {
         XCTAssertEqual(accumulator.upstreamCompletionTokens, 8)
         XCTAssertEqual(accumulator.contentDeltaCount, 1)
 
-        // Counted = min(8, 1) = 1: the forged count never raises the rate.
+        // Counted = min(upstream 8, trusted recount 1) = 1: neither source can
+        // inflate the rate alone, regardless of stream fragmentation.
         XCTAssertEqual(
             OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
-                contentDeltas: accumulator.contentDeltaCount,
-                completionTokens: accumulator.upstreamCompletionTokens,
+                contentPresent: true,
+                upstreamCompletionTokens: accumulator.upstreamCompletionTokens,
+                recountedCompletionTokens: 1,
                 maxTokens: 8,
                 elapsedSeconds: 1
             ),
@@ -1919,23 +1945,61 @@ extension OpenAICompatibleLoopbackRuntimeTests {
         // An honest per-token stream keeps its full count.
         XCTAssertEqual(
             OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
-                contentDeltas: 8, completionTokens: 8, maxTokens: 8, elapsedSeconds: 1
+                contentPresent: true,
+                upstreamCompletionTokens: 8,
+                recountedCompletionTokens: 8,
+                maxTokens: 8,
+                elapsedSeconds: 1
             ),
             .ok(tps: 8)
         )
         // The max_tokens bound applies to the upstream count before the cap.
         XCTAssertEqual(
             OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
-                contentDeltas: 1, completionTokens: 9, maxTokens: 8, elapsedSeconds: 1
+                contentPresent: true,
+                upstreamCompletionTokens: 9,
+                recountedCompletionTokens: 1,
+                maxTokens: 8,
+                elapsedSeconds: 1
             ),
             .failed(reason: "usage_exceeds_max_tokens")
         )
 
-        // End to end the forged stream still succeeds, counted as one token.
+        // End to end the forged stream still succeeds, counted as one trusted token.
         let store = try makeStore()
-        let runtime = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: Data(sse.utf8)), store: store)
+        let runtime = try makeRuntime(
+            httpClient: StubLoopbackHTTPClient(responseBody: Data(sse.utf8)),
+            store: store,
+            countTokens: { _ in 1 }
+        )
         let outcome = await runtime.measureStartupThroughput(maxTokens: 8)
         XCTAssertGreaterThan(outcome.tps, 0, "\(outcome)")
+    }
+
+    func testLoopbackStartupProbeCountsFragmentedStreamByTrustedRecount() throws {
+        var accumulator = OpenAICompatibleStreamAccumulator()
+        for _ in 0..<8 {
+            _ = try accumulator.consume(line: #"data: {"choices":[{"delta":{"content":"x"}}]}"#)
+            _ = try accumulator.consume(line: "")
+        }
+        _ = try accumulator.consume(line: #"data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":8}}"#)
+        _ = try accumulator.consume(line: "")
+        _ = try accumulator.consume(line: "data: [DONE]")
+        _ = try accumulator.consume(line: "")
+        let (result, _) = try accumulator.finish()
+        XCTAssertEqual(result.content, String(repeating: "x", count: 8))
+        XCTAssertEqual(accumulator.contentDeltaCount, 8)
+        XCTAssertEqual(accumulator.upstreamCompletionTokens, 8)
+        XCTAssertEqual(
+            OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
+                contentPresent: !result.content.isEmpty,
+                upstreamCompletionTokens: accumulator.upstreamCompletionTokens,
+                recountedCompletionTokens: 1,
+                maxTokens: 8,
+                elapsedSeconds: 1
+            ),
+            .ok(tps: 1)
+        )
     }
 
     func testNativeAndLoopbackStartupProbesShareOneThroughputFormula() {
@@ -1946,7 +2010,11 @@ extension OpenAICompatibleLoopbackRuntimeTests {
         for (tokens, elapsed) in [(8, 32.0), (8, 0.08), (1, 1.0), (5, 2.5), (8, 0.0005)] {
             XCTAssertEqual(
                 OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
-                    contentDeltas: tokens, completionTokens: tokens, maxTokens: 8, elapsedSeconds: elapsed
+                    contentPresent: true,
+                    upstreamCompletionTokens: tokens,
+                    recountedCompletionTokens: tokens,
+                    maxTokens: 8,
+                    elapsedSeconds: elapsed
                 ).tps,
                 ModelRuntime.startupThroughputRate(completionTokens: tokens, elapsedSeconds: elapsed),
                 "tokens \(tokens) elapsed \(elapsed)"
@@ -1959,44 +2027,82 @@ extension OpenAICompatibleLoopbackRuntimeTests {
         // 8 tokens; a 30 s cold load + prefill counts, as in the native probe.
         XCTAssertEqual(
             OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
-                contentDeltas: 8, completionTokens: 8, maxTokens: 8, elapsedSeconds: 32
+                contentPresent: true,
+                upstreamCompletionTokens: 8,
+                recountedCompletionTokens: 8,
+                maxTokens: 8,
+                elapsedSeconds: 32
             ),
             .ok(tps: 0.25)
         )
         XCTAssertEqual(
             OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
-                contentDeltas: 8, completionTokens: 8, maxTokens: 8, elapsedSeconds: 0.08
+                contentPresent: true,
+                upstreamCompletionTokens: 8,
+                recountedCompletionTokens: 8,
+                maxTokens: 8,
+                elapsedSeconds: 0.08
             ).tps,
             100, accuracy: 0.001
         )
         XCTAssertEqual(
             OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
-                contentDeltas: 0, completionTokens: 8, maxTokens: 8, elapsedSeconds: 1
+                contentPresent: false,
+                upstreamCompletionTokens: 8,
+                recountedCompletionTokens: 8,
+                maxTokens: 8,
+                elapsedSeconds: 1
             ),
             .failed(reason: "no_content")
         )
         XCTAssertEqual(
             OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
-                contentDeltas: 1, completionTokens: nil, maxTokens: 8, elapsedSeconds: 1
+                contentPresent: true,
+                upstreamCompletionTokens: nil,
+                recountedCompletionTokens: 8,
+                maxTokens: 8,
+                elapsedSeconds: 1
             ),
             .failed(reason: "no_tokens")
         )
         XCTAssertEqual(
             OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
-                contentDeltas: 1, completionTokens: 0, maxTokens: 8, elapsedSeconds: 1
+                contentPresent: true,
+                upstreamCompletionTokens: 0,
+                recountedCompletionTokens: 8,
+                maxTokens: 8,
+                elapsedSeconds: 1
             ),
             .failed(reason: "no_tokens")
         )
         XCTAssertEqual(
             OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
-                contentDeltas: 8, completionTokens: 9, maxTokens: 8, elapsedSeconds: 1
+                contentPresent: true,
+                upstreamCompletionTokens: 9,
+                recountedCompletionTokens: 8,
+                maxTokens: 8,
+                elapsedSeconds: 1
             ),
             .failed(reason: "usage_exceeds_max_tokens")
+        )
+        XCTAssertEqual(
+            OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
+                contentPresent: true,
+                upstreamCompletionTokens: 8,
+                recountedCompletionTokens: 9,
+                maxTokens: 8,
+                elapsedSeconds: 1
+            ),
+            .failed(reason: "recount_exceeds_max_tokens")
         )
         for elapsed in [0, -1, TimeInterval.nan, TimeInterval.infinity] {
             XCTAssertEqual(
                 OpenAICompatibleLoopbackRuntime.startupThroughputOutcome(
-                    contentDeltas: 8, completionTokens: 8, maxTokens: 8, elapsedSeconds: elapsed
+                    contentPresent: true,
+                    upstreamCompletionTokens: 8,
+                    recountedCompletionTokens: 8,
+                    maxTokens: 8,
+                    elapsedSeconds: elapsed
                 ),
                 .failed(reason: "no_elapsed_time"),
                 "elapsed \(elapsed)"
@@ -2016,7 +2122,7 @@ extension OpenAICompatibleLoopbackRuntimeTests {
         data: [DONE]
 
         """.utf8)
-        let runtime = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: sse), store: store)
+        let runtime = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: sse), store: store, countTokens: { _ in 8 })
         let outcome = await runtime.measureStartupThroughput()
         XCTAssertEqual(outcome, .failed(reason: "no_tokens"))
         XCTAssertEqual(outcome.tps, 0)
@@ -2032,7 +2138,11 @@ extension OpenAICompatibleLoopbackRuntimeTests {
         data: [DONE]
 
         """.utf8)
-        let usageOnlyRuntime = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: usageOnly), store: store)
+        let usageOnlyRuntime = try makeRuntime(
+            httpClient: StubLoopbackHTTPClient(responseBody: usageOnly),
+            store: store,
+            countTokens: { _ in 8 }
+        )
         let usageOnlyOutcome = await usageOnlyRuntime.measureStartupThroughput()
         XCTAssertEqual(usageOnlyOutcome, .failed(reason: "no_content"))
 
@@ -2044,10 +2154,106 @@ extension OpenAICompatibleLoopbackRuntimeTests {
         data: [DONE]
 
         """.utf8)
-        let overBudgetRuntime = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: overBudget), store: store)
+        let overBudgetRuntime = try makeRuntime(
+            httpClient: StubLoopbackHTTPClient(responseBody: overBudget),
+            store: store,
+            countTokens: { _ in 8 }
+        )
         let overBudgetOutcome = await overBudgetRuntime.measureStartupThroughput(maxTokens: 8)
         XCTAssertEqual(overBudgetOutcome, .failed(reason: "usage_exceeds_max_tokens"))
         XCTAssertEqual(overBudgetOutcome.tps, 0)
+    }
+
+    func testLoopbackStartupProbeRejectsToolBearingResults() async throws {
+        let store = try makeStore()
+        let toolOnly = Data("""
+        data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"f","arguments":"{}"}}]}}]}
+
+        data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+
+        data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":1}}
+
+        data: [DONE]
+
+        """.utf8)
+        let toolOnlyRuntime = try makeRuntime(
+            httpClient: StubLoopbackHTTPClient(responseBody: toolOnly),
+            store: store,
+            countTokens: { _ in 1 }
+        )
+        let toolOnlyOutcome = await toolOnlyRuntime.measureStartupThroughput()
+        XCTAssertEqual(toolOnlyOutcome, .failed(reason: "tool_calls"))
+
+        let mixed = Data("""
+        data: {"choices":[{"delta":{"content":"ok"}}]}
+
+        data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"f","arguments":"{}"}}]}}]}
+
+        data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+
+        data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":2}}
+
+        data: [DONE]
+
+        """.utf8)
+        let mixedRuntime = try makeRuntime(
+            httpClient: StubLoopbackHTTPClient(responseBody: mixed),
+            store: store,
+            countTokens: { _ in 2 }
+        )
+        let mixedOutcome = await mixedRuntime.measureStartupThroughput()
+        XCTAssertEqual(mixedOutcome, .failed(reason: "tool_calls"))
+    }
+
+    func testLoopbackStartupProbeMissingTrustedTokenizerDoesNotPOSTAndServingContinues() async throws {
+        let store = try makeStore()
+        let client = StubLoopbackHTTPClient(responseBody: Self.completionJSON(content: "ok", completionTokens: 3, promptTokens: 11))
+        let runtime = try makeRuntime(httpClient: client, store: store)
+
+        let outcome = await runtime.measureStartupThroughput()
+        XCTAssertEqual(outcome, .failed(reason: "tokenizer_unavailable"))
+        XCTAssertEqual(client.postCount, 0, "missing trusted tokenizer fails before the probe POST")
+
+        let served = try await runtime.complete(try makeRequest(model: "ollama:gemma3:270m"))
+        XCTAssertEqual(served.content, "ok")
+        XCTAssertEqual(served.completionTokens, 3)
+        XCTAssertEqual(client.postCount, 1, "ordinary serving is unaffected")
+    }
+
+    func testLoopbackStartupProbeRejectsTokenizerIdentityMutation() async throws {
+        let store = try makeStore()
+        let directory = try makeSnapshotDirectory("startup-recount-mutates")
+        let snapshot = try MLXSnapshotIdentity.compute(directory: directory)
+        let client = StubLoopbackHTTPClient(responseBody: Self.probeSSE)
+        let runtime = try OpenAICompatibleLoopbackRuntime(
+            servedModelRef: "ollama:gemma3:270m",
+            origin: "http://127.0.0.1:11434",
+            httpClient: client,
+            digestResolver: makeResolver(store),
+            siblingSnapshotSHA256: snapshot.digest,
+            siblingSnapshotDirectories: [directory],
+            pinRecountTokenizer: { pinned in
+                PinnedSnapshotTokenizer(snapshot: pinned) { text in
+                    try? Data(#"{"swapped":true}"#.utf8).write(to: directory.appendingPathComponent("tokenizer.json"))
+                    return text.count
+                }
+            }
+        )
+
+        let outcome = await runtime.measureStartupThroughput()
+        XCTAssertEqual(outcome, .failed(reason: "tokenizer_identity_changed"))
+        XCTAssertEqual(client.postCount, 1)
+    }
+
+    func testLoopbackStartupProbeAcceptsPlainBodyWithTrustedRecount() async throws {
+        let store = try makeStore()
+        let client = StubLoopbackHTTPClient(responseBody: Self.completionJSON(content: "ok!", completionTokens: 3))
+        let runtime = try makeRuntime(httpClient: client, store: store, countTokens: { _ in 3 })
+
+        let outcome = await runtime.measureStartupThroughput(maxTokens: 8)
+        guard case .ok(let tps) = outcome else { return XCTFail("expected ok, got \(outcome)") }
+        XCTAssertGreaterThan(tps, 0)
+        XCTAssertEqual(client.postCount, 1)
     }
 
     func testLoopbackStartupProbeChecksLlamaServerServesTheBoundFileBeforeAndAfter() async throws {
@@ -2059,12 +2265,17 @@ extension OpenAICompatibleLoopbackRuntimeTests {
         let servedPath = file.resolvingSymlinksInPath().path
         let client = LlamaCppStubClient(modelPath: servedPath, nCtx: 64, promptTokens: 40)
         client.setChatResponse(Self.probeSSE)
+        let recountDirectory = try makeSnapshotDirectory("llamacpp-probe")
+        let recountSnapshot = try MLXSnapshotIdentity.compute(directory: recountDirectory)
         let runtime = try await OpenAICompatibleLoopbackRuntime.llamaCpp(
             servedModelRef: "llamacpp:tiny-q4",
             origin: "http://127.0.0.1:9191",
             selector: BYOMLlamaCppArtifactSelector(root: nil, pinnedFile: file),
+            siblingSnapshotSHA256: recountSnapshot.digest,
+            siblingSnapshotDirectories: [recountDirectory],
             httpClient: client,
-            cache: BYOMArtifactDigestCache(url: root.appendingPathComponent("cache.json"))
+            cache: BYOMArtifactDigestCache(url: root.appendingPathComponent("cache.json")),
+            pinRecountTokenizer: { snapshot in PinnedSnapshotTokenizer(snapshot: snapshot, encode: { _ in 8 }) }
         )
 
         let bound = await runtime.measureStartupThroughput()
@@ -2089,7 +2300,7 @@ extension OpenAICompatibleLoopbackRuntimeTests {
             failStatus: 503,
             then: Self.completionJSON(content: "ok", completionTokens: 3, promptTokens: 11)
         )
-        let runtime = try makeRuntime(httpClient: client, store: store)
+        let runtime = try makeRuntime(httpClient: client, store: store, countTokens: { _ in 8 })
 
         let outcome = await runtime.measureStartupThroughput()
         XCTAssertEqual(outcome, .failed(reason: "upstream_status_503"))
@@ -2105,10 +2316,14 @@ extension OpenAICompatibleLoopbackRuntimeTests {
         XCTAssertEqual(result.completionTokens, 3)
 
         // Transport failures map to closed reason codes, never a throw.
-        let timedOut = try makeRuntime(httpClient: ScriptedLoopbackClient(failure: .openTimesOut), store: store)
+        let timedOut = try makeRuntime(
+            httpClient: ScriptedLoopbackClient(failure: .openTimesOut),
+            store: store,
+            countTokens: { _ in 8 }
+        )
         let timedOutOutcome = await timedOut.measureStartupThroughput()
         XCTAssertEqual(timedOutOutcome, .failed(reason: "timeout"))
-        let empty = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: Data()), store: store)
+        let empty = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: Data()), store: store, countTokens: { _ in 8 })
         let emptyOutcome = await empty.measureStartupThroughput()
         XCTAssertEqual(emptyOutcome, .failed(reason: "malformed_response"))
     }
@@ -2116,7 +2331,7 @@ extension OpenAICompatibleLoopbackRuntimeTests {
     func testLoopbackStartupProbeClosesTheUpstreamStreamOnANon2xxStatus() async throws {
         let store = try makeStore()
         let client = EndlessStreamingLoopbackClient(statusCode: 503, retainsLines: true)
-        let runtime = try makeRuntime(httpClient: client, store: store)
+        let runtime = try makeRuntime(httpClient: client, store: store, countTokens: { _ in 8 })
         let outcome = await runtime.measureStartupThroughput(maxTokens: 8, timeoutSeconds: 30)
         XCTAssertEqual(outcome, .failed(reason: "upstream_status_503"))
         XCTAssertTrue(client.wasTerminated, "the error body stream is closed before the probe returns")
@@ -2125,7 +2340,7 @@ extension OpenAICompatibleLoopbackRuntimeTests {
     func testLoopbackStartupProbeIsBoundedByItsHardTimeout() async throws {
         let store = try makeStore()
         let client = EndlessStreamingLoopbackClient()
-        let runtime = try makeRuntime(httpClient: client, store: store)
+        let runtime = try makeRuntime(httpClient: client, store: store, countTokens: { _ in 8 })
         let start = Date()
         let outcome = await runtime.measureStartupThroughput(maxTokens: 8, timeoutSeconds: 0.3)
         XCTAssertEqual(outcome, .failed(reason: "timeout"))
@@ -2139,7 +2354,7 @@ extension OpenAICompatibleLoopbackRuntimeTests {
     func testLoopbackStartupProbeEndsPromptlyWhenTheCallerIsCancelled() async throws {
         let store = try makeStore()
         let client = EndlessStreamingLoopbackClient()
-        let runtime = try makeRuntime(httpClient: client, store: store)
+        let runtime = try makeRuntime(httpClient: client, store: store, countTokens: { _ in 8 })
         let start = Date()
         let probe = Task { await runtime.measureStartupThroughput(maxTokens: 8, timeoutSeconds: 30) }
         try await Task.sleep(nanoseconds: 200_000_000)
@@ -2155,7 +2370,11 @@ extension OpenAICompatibleLoopbackRuntimeTests {
 
     func testLoopbackStartupProbeIsNeverCountedAsUsage() async throws {
         let store = try makeStore()
-        let runtime = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: Self.probeSSE), store: store)
+        let runtime = try makeRuntime(
+            httpClient: StubLoopbackHTTPClient(responseBody: Self.probeSSE),
+            store: store,
+            countTokens: { _ in 8 }
+        )
         let status = ProviderStatus(
             modelID: "ollama:gemma3:270m",
             modelLoaded: true,

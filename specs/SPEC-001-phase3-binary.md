@@ -1,6 +1,16 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.30 (2026-10-06, cancel_request delivered-output boundary)
+**Version:** 1.9.31 (2026-10-07, trusted loopback startup count)
+
+**Change log v1.9.31 (2026-10-07, trusted loopback startup count):**
+Tightens the v1.9.29 loopback FR-20 startup probe count authority. A loopback
+startup throughput estimate no longer uses content-delta count as an authority
+or cap. It counts the minimum of the upstream's own completion count
+(`usage.completion_tokens`, or llama.cpp `timings.predicted_n`) and the trusted
+pinned-tokenizer recount of the returned assistant content. Both counts must be
+positive and independently `<= max_tokens`. Tool-bearing results, unavailable
+trusted tokenizer, or pinned-tokenizer identity change fail closed to a 0
+estimate without sending buyer usage, billing, request-log, or receipt evidence.
 
 **Change log v1.9.30 (2026-10-06, cancel_request delivered-output boundary):**
 `cancel_request` (§ 6.6) gains the optional integer `delivered_output_bytes`
@@ -26,9 +36,8 @@ route. The probe uses the native prompt and token budget, one streamed
 generation under a 60 s bound that also covers the identity checks before and
 after it. Its rate is the native probe's quantity, computed by the same
 formula: completion tokens over the total elapsed time of the request, prefill
-and any upstream model load included. The counted tokens are the upstream's own
-count capped at the content-bearing deltas actually streamed, so a forged count
-can only lower the rate. It is never usage, billing or a receipt.
+and any upstream model load included. The v1.9.29 count authority was tightened
+by v1.9.31. It is never usage, billing or a receipt.
 Success sets `throughput_source: startup_probe`; failure reports 0 with
 `none`, logs one `event=loopback_startup_throughput_probe` line with a reason
 code, and does not stop `serve`. The wire field is unchanged.
@@ -1187,8 +1196,9 @@ responsibility ends at sending accurate values.
 `serve` generates at most 8 tokens once after model load and divides the tokens
 produced by elapsed time including prefill (0 when the probe fails or does not
 run). A loopback runtime (v1.9.29) measures the same quantity through its
-upstream (FR-20) with the same formula, so the value is the one cross-runtime
-quantity SPEC-002 v1.6.8 routes on. A warm swap carries the value forward without re-probing. Its wire
+upstream (FR-20) with the same formula and a trusted tokenizer recount of the
+assistant content, so the value is the one cross-runtime quantity SPEC-002
+v1.6.9 routes on. A warm swap carries the value forward without re-probing. Its wire
 semantics are unchanged by v1.9.20.
 
 **Local capacity provenance (v1.9.20, capability `capacity_provenance_v1`).**
@@ -1642,20 +1652,28 @@ upstream model load included, computed by the native probe's formula. The
 upstream count is its own `usage.completion_tokens`, else `timings.predicted_n`
 for `runtime_source: llamacpp_loopback` only (any other runtime's
 `predicted_n` is ignored); an upstream rate such as
-`timings.predicted_per_second` is ignored. The counted tokens are the minimum
-of that upstream count and the number of content-bearing deltas actually
-streamed (a plain JSON body is one delta), so a forged count fails low, never
-high; the chunk count alone is never a count. The probe fails closed when no
-content streamed (`no_content`), the upstream reports no count (`no_tokens`),
-the upstream count exceeds the requested `max_tokens` (checked before the
-cap), or the elapsed time is not finite and positive. The probe is never usage,
-billing, a request-log entry or a receipt, and no prompt or completion text is
-logged. Success reports `throughput_source: startup_probe` with the served
+`timings.predicted_per_second` is ignored. The second independent count is the
+served snapshot's trusted pinned tokenizer recount of the complete assistant
+content returned by the probe. The counted tokens are the minimum of the
+upstream count and that tokenizer recount; both counts must be positive and
+independently `<= max_tokens`, so neither the upstream usage nor tokenizer
+fragmentation can inflate the rate. The chunk count alone is never a count.
+The probe fails closed when no content streamed (`no_content`), the upstream
+reports no count (`no_tokens`), no trusted tokenizer is available before the
+probe deadline (`tokenizer_unavailable`, with no upstream POST), the tokenizer
+cannot count the content because the pinned identity changed
+(`tokenizer_identity_changed`), the result contains any `tool_calls`
+(`tool_calls`), either count exceeds the requested `max_tokens`, or the elapsed
+time is not finite and positive. The probe is never usage, billing, a
+request-log entry or a receipt, and no prompt or completion text is logged.
+Success reports `throughput_source: startup_probe` with the served
 model ref as `throughput_probe_model` and logs
 `event=loopback_startup_throughput_probe outcome=ok tps=<n> runtime_source=<rs>`.
 Failure (`identity_unbound`, `upstream_unavailable`, `upstream_status_<n>`,
-`malformed_response`, `no_content`, `no_tokens`, `usage_exceeds_max_tokens`,
-`no_elapsed_time`, `timeout`, `cancelled`, `encode_failed`) reports 0 with
+`malformed_response`, `no_content`, `no_tokens`, `tokenizer_unavailable`,
+`tokenizer_identity_changed`, `tool_calls`, `usage_exceeds_max_tokens`,
+`recount_exceeds_max_tokens`, `no_elapsed_time`, `timeout`, `cancelled`,
+`encode_failed`) reports 0 with
 `throughput_source: none`, logs
 `event=loopback_startup_throughput_probe outcome=failed reason=<code> runtime_source=<rs>`,
 and does not stop `serve`.

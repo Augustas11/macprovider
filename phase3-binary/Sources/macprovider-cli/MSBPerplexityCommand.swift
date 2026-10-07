@@ -5,13 +5,15 @@ import MLXLMCommon
 
 /// #1690 benchmark: native MLX perplexity using llama.cpp `llama-perplexity`'s
 /// chunking, so the GGUF-vs-native perplexity delta compares like for like on
-/// one text file. The text is tokenized once without special tokens. It is
-/// split into `--ctx`-token chunks, and each chunk runs with a fresh cache.
-/// Only the second half of each chunk is scored: logits at positions
-/// `ctx/2 ..< ctx-1` predict the next token. That matches llama-perplexity's
-/// default `first = n_ctx/2` for vocabularies without an auto-BOS (Qwen). The
-/// report records the token count, so a tokenizer mismatch between the two
-/// sides is visible rather than silently skewing the delta.
+/// one text file. The text is tokenized once with native
+/// `addSpecialTokens:false`. When `--bos-token` is provided, that operator-
+/// supplied token is prepended once to the full stream and placed at the first
+/// position of every evaluated chunk to mirror llama-perplexity's explicit
+/// add_bos path for a chosen tokenizer. No BOS auto-detection or external
+/// parity claim is made here. Each chunk runs with a fresh cache. Only the
+/// second half of each chunk is scored: logits at positions `ctx/2 ..< ctx-1`
+/// predict the next token. The report records token/hash metadata so a tokenizer
+/// or policy mismatch is visible rather than silently skewing the delta.
 struct MSBPerplexityCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "msb-perplexity",
@@ -31,6 +33,12 @@ struct MSBPerplexityCommand: AsyncParsableCommand {
     @Option(name: .customLong("max-chunks"), help: "Cap on scored chunks (llama-perplexity --chunks). Default all.")
     var maxChunks: Int?
 
+    @Option(
+        name: .customLong("bos-token"),
+        help: "Operator-supplied nonnegative Int32 BOS token for llama-perplexity add_bos compatibility. Default disabled."
+    )
+    var bosToken: Int?
+
     @Option(help: "Full output path for the JSON result file. Default: stdout only.")
     var output: String?
 
@@ -40,10 +48,14 @@ struct MSBPerplexityCommand: AsyncParsableCommand {
             FileHandle.standardError.write(Data("msb-perplexity: --model is required\n".utf8))
             throw ExitCode(2)
         }
-        guard ctx >= 4, maxChunks.map({ $0 >= 1 }) ?? true else {
-            FileHandle.standardError.write(Data("msb-perplexity: --ctx>=4 and --max-chunks>=1 required\n".utf8))
+        guard ctx >= 4, maxChunks.map({ $0 >= 1 }) ?? true,
+              MSBPerplexityTokenPolicy.validBOSToken(bosToken) else {
+            FileHandle.standardError.write(Data(
+                "msb-perplexity: --ctx>=4, --max-chunks>=1, and --bos-token in 0...\(Int32.max) required\n".utf8
+            ))
             throw ExitCode(2)
         }
+        let manualBOS = bosToken
         let text = try String(contentsOfFile: textFile, encoding: .utf8)
 
         let runtime = try await ModelRuntime(modelID: modelID)
@@ -52,9 +64,10 @@ struct MSBPerplexityCommand: AsyncParsableCommand {
             throw ExitCode(1)
         }
 
-        let tokens = await container.perform { context in
+        let baseTokens = await container.perform { context in
             context.tokenizer.encode(text: text, addSpecialTokens: false)
         }
+        let tokens = MSBPerplexityTokenPolicy.corpusTokens(baseTokens: baseTokens, bosToken: manualBOS)
         let available = tokens.count / ctx
         let chunks = min(available, maxChunks ?? available)
         guard chunks >= 1 else {
@@ -66,11 +79,18 @@ struct MSBPerplexityCommand: AsyncParsableCommand {
 
         let first = ctx / 2
         let context = ctx
+        let chunkWindows = MSBPerplexityTokenPolicy.evaluatedChunks(
+            corpusTokens: tokens,
+            ctx: context,
+            chunks: chunks,
+            bosToken: manualBOS
+        )
+        let scoredTargets = MSBPerplexityTokenPolicy.scoredTargetTokens(chunks: chunkWindows, firstScoredOffset: first)
         let started = Date()
         var totalNLL = 0.0
         var scored = 0
         for chunk in 0..<chunks {
-            let window = Array(tokens[(chunk * context)..<((chunk + 1) * context)])
+            let window = chunkWindows[chunk]
             let chunkNLL = try await container.perform { ctxt in
                 let cache = try ctxt.model.newCache(parameters: nil)
                 let input = MLXArray(window.map(Int32.init)).reshaped([1, context])
@@ -101,7 +121,13 @@ struct MSBPerplexityCommand: AsyncParsableCommand {
             meanNLL: totalNLL / Double(scored),
             elapsedSeconds: Date().timeIntervalSince(started),
             peakPhysFootprintMB: msbLifetimePeakPhysFootprintMB(pid: getpid()),
-            timestamp: ISO8601DateFormatter().string(from: Date())
+            timestamp: ISO8601DateFormatter().string(from: Date()),
+            tokenizationMode: MSBPerplexityTokenPolicy.tokenizationMode(bosToken: manualBOS),
+            bosToken: manualBOS,
+            firstScoredOffset: first,
+            corpusTokenSHA256: msbPromptTokenSHA256(tokens),
+            evaluatedChunkTokenSHA256: msbPromptTokenSHA256(chunkWindows.flatMap { $0 }),
+            scoredTargetTokenSHA256: msbPromptTokenSHA256(scoredTargets)
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -111,6 +137,51 @@ struct MSBPerplexityCommand: AsyncParsableCommand {
         if let output {
             try json.write(to: URL(fileURLWithPath: output), options: [.atomic])
         }
+    }
+}
+
+enum MSBPerplexityTokenPolicy {
+    static func validBOSToken(_ token: Int?) -> Bool {
+        guard let token else { return true }
+        return token >= 0 && token <= Int(Int32.max)
+    }
+
+    static func corpusTokens(baseTokens: [Int], bosToken: Int?) -> [Int] {
+        guard let bosToken else { return baseTokens }
+        return [bosToken] + baseTokens
+    }
+
+    static func evaluatedChunks(
+        corpusTokens: [Int],
+        ctx: Int,
+        chunks: Int,
+        bosToken: Int?
+    ) -> [[Int]] {
+        guard ctx > 0, chunks > 0 else { return [] }
+        let boundedChunks = min(chunks, corpusTokens.count / ctx)
+        var out: [[Int]] = []
+        out.reserveCapacity(boundedChunks)
+        for chunk in 0..<boundedChunks {
+            var window = Array(corpusTokens[(chunk * ctx)..<((chunk + 1) * ctx)])
+            if let bosToken {
+                window[0] = bosToken
+            }
+            out.append(window)
+        }
+        return out
+    }
+
+    static func scoredTargetTokens(chunks: [[Int]], firstScoredOffset: Int) -> [Int] {
+        chunks.flatMap { chunk -> [Int] in
+            guard firstScoredOffset + 1 < chunk.count else { return [] }
+            return Array(chunk[(firstScoredOffset + 1)..<chunk.count])
+        }
+    }
+
+    static func tokenizationMode(bosToken: Int?) -> String {
+        bosToken == nil
+            ? "native_encode_addSpecialTokens_false_no_manual_bos_no_auto_eos"
+            : "native_encode_addSpecialTokens_false_manual_bos_no_auto_eos"
     }
 }
 
@@ -128,4 +199,19 @@ struct MSBPerplexityReport: Codable, Sendable {
     let elapsedSeconds: Double
     let peakPhysFootprintMB: Int?
     let timestamp: String
+    /// Actual tokenizer/policy mode. This is metadata, not an external parity claim.
+    var tokenizationMode: String? = nil
+    /// Operator-supplied manual BOS token, if any.
+    var bosToken: Int? = nil
+    /// llama-perplexity first scored offset (`ctx / 2`).
+    var firstScoredOffset: Int? = nil
+    /// SHA-256 of corpus token IDs after the optional single manual BOS insertion.
+    /// Uses `msbPromptTokenSHA256`'s documented little-endian token-id encoding.
+    var corpusTokenSHA256: String? = nil
+    /// SHA-256 of evaluated chunk token IDs after per-chunk BOS placement.
+    /// Uses `msbPromptTokenSHA256`'s documented little-endian token-id encoding.
+    var evaluatedChunkTokenSHA256: String? = nil
+    /// SHA-256 of scored target token IDs, concatenated across evaluated chunks.
+    /// Uses `msbPromptTokenSHA256`'s documented little-endian token-id encoding.
+    var scoredTargetTokenSHA256: String? = nil
 }
