@@ -298,7 +298,7 @@ struct ModelSwitcherSheet: View {
                         row: row,
                         enabled: canAct,
                         byomEnabled: store.canPerformBYOMAction,
-                        poolBindingLine: store.poolBindings[row.id].map(row.poolBindingLine),
+                        poolEligibilityLine: row.poolEligibilityDisplayLine(binding: store.poolBindings[row.id]),
                         onAction: {
                             pendingSwitch = row
                             pendingOperationName = "switch"
@@ -353,7 +353,7 @@ private struct ModelRowView: View {
     let row: MalibuModelRow
     let enabled: Bool
     let byomEnabled: Bool
-    let poolBindingLine: String?
+    let poolEligibilityLine: String?
     let onAction: () -> Void
     let onWithdraw: () -> Void
     let onPropose: () -> Void
@@ -412,8 +412,8 @@ private struct ModelRowView: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                if let poolBindingLine {
-                    Text(poolBindingLine)
+                if let poolEligibilityLine {
+                    Text(poolEligibilityLine)
                         .font(.caption.weight(.medium))
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)

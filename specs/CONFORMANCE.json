@@ -10214,11 +10214,13 @@
         "phase3-binary/Sources/macprovider-cli/ModelsSubcommand.swift:func poolBindingNote",
         "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift:var earningVerdict",
         "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift:func poolBindingLine",
-        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift:var earningDisclosure"
+        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift:var earningDisclosure",
+        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift:func poolEligibilityDisplayLine"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/PoolScopedAdmissionTests.swift:func testStatusReadbackWordingIsPoolScopedAndHonest",
-        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift:func testPoolEarningRowUsesPoolCopyAndOnlyForCoordinatorCatalogPriced"
+        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift:func testPoolEarningRowUsesPoolCopyAndOnlyForCoordinatorCatalogPriced",
+        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift:func testPoolBindingReadbackFailuresLeaveBindingAwareUnavailableCopy"
       ],
       "journeys": [
         "JOURNEY-NETWORK-MODEL-ADMISSION"
@@ -10228,7 +10230,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1880",
-        "rationale": "Provider CLI and Malibu pool-qualified copy now describes conditional eligibility on qualifying settled requests, not actual or guaranteed income. The existing pool_attested_earning wire enum is unchanged. Full current-predicate enforcement and fresh signed JOURNEY-NETWORK-MODEL-ADMISSION proof remain pending under #1880; this wording change does not prove actual scoped earnings or complete guided creator approval and recovery."
+        "rationale": "Provider CLI and Malibu now describe conditional eligibility on qualifying settled requests only with a named pool binding, not actual or guaranteed income. Malibu suppresses positive claims when its binding status readback is unavailable or disagrees with the displayed row. The existing pool_attested_earning wire enum is unchanged. Full current-predicate enforcement and fresh signed JOURNEY-NETWORK-MODEL-ADMISSION proof remain pending under #1880; this change does not prove actual scoped earnings or complete guided creator approval and recovery."
       }
     },
     {

@@ -2751,9 +2751,11 @@ final class ModelManagementStore: ObservableObject {
         peerObservationFresh && peerEvidence.isFresh() && operation == .idle
     }
 
-    /// Reads the coordinator's pool binding for rows that disclose pool
-    /// earning, so Malibu can name the pool. Read-only; a failed read just
-    /// leaves the pool unnamed.
+    /// Reads the coordinator's pool binding for rows that need pool-scoped
+    /// copy, so Malibu can name the pool only when status readback matches the
+    /// displayed row. Read-only; failed, malformed, missing, or mismatched
+    /// status clears the prior binding and leaves the row in an unavailable
+    /// pool-eligibility state instead of showing an unnamed positive claim.
     private func refreshPoolBindings() async {
         var bindings: [String: MalibuBYOMPoolBinding] = [:]
         for row in rows where row.earningPathClass == "pool_attested_earning" || row.poolScopeCandidate {
@@ -2767,6 +2769,7 @@ final class ModelManagementStore: ObservableObject {
             ), result.exitCode == 0,
                 let status = try? Self.decodeStrict(MalibuBYOMAdmissionStatusDocument.self, from: result.stdout),
                 (try? status.validated(expectedCandidateID: row.id)) != nil,
+                status.providerGuidance.earningPathClass == row.earningPathClass,
                 let binding = status.validPoolBinding else { continue }
             bindings[row.id] = binding
         }
@@ -3577,7 +3580,7 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         case "local_inventory_only":
             return String(localized: "Local only — not offered to the network", comment: "BYOM local inventory verdict")
         case "pool_attested_earning":
-            return String(localized: "Eligible to earn in its Trusted Pool on qualifying settled requests — pool-attested, not network-verified", comment: "BYOM pool eligibility verdict")
+            return nil
         default:
             return nil
         }
@@ -3617,6 +3620,17 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
             : String(localized: "Bound to pool \(binding.poolID) as \(binding.poolModelID), but not currently eligible on this pool; pool-attested, not network-verified.", comment: "BYOM pool binding inactive line")
     }
 
+    /// Binding-aware pool display. The positive pool eligibility claim is only
+    /// emitted when the latest matching status readback supplied a valid named
+    /// binding; otherwise pool-scoped rows ask the operator to refresh status.
+    func poolEligibilityDisplayLine(binding: MalibuBYOMPoolBinding?) -> String? {
+        guard earningPathClass == "pool_attested_earning" || poolScopeCandidate else { return nil }
+        guard let binding else {
+            return String(localized: "Pool eligibility unavailable; refresh status.", comment: "BYOM pool eligibility unavailable")
+        }
+        return poolBindingLine(binding)
+    }
+
     private var nextActionLabel: String? {
         guard let guidanceNextAction else { return nil }
         switch guidanceNextAction {
@@ -3641,7 +3655,7 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         case "local_inventory_only":
             return String(localized: "Local only — not offered to the network, so it isn't earning.", comment: "BYOM local inventory disclosure")
         case "pool_attested_earning":
-            return String(localized: "Eligible to earn only on its Trusted Pool's routes for qualifying settled requests. It is not a network catalog model and is never globally eligible to earn.", comment: "BYOM pool eligibility disclosure")
+            return String(localized: "Pool-attested, not network-verified. This is not a network catalog model and is never globally eligible to earn.", comment: "BYOM pool eligibility disclosure")
         default:
             return nil
         }

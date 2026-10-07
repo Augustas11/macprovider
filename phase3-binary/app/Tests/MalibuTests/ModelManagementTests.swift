@@ -2615,28 +2615,30 @@ extension ModelManagementTests {
         )
         let row = try XCTUnwrap(try document.validated().rowsForMalibu(currentModelID: nil, warmSwapAvailable: true).first)
         XCTAssertEqual(row.earningPathClass, "pool_attested_earning", "the row passes per-row validation")
-        XCTAssertEqual(row.earningVerdict, "Eligible to earn in its Trusted Pool on qualifying settled requests — pool-attested, not network-verified")
+        XCTAssertNil(row.earningVerdict, "pool-positive copy must wait for binding-aware status readback so it can name the pool")
+        XCTAssertEqual(row.poolEligibilityDisplayLine(binding: nil), "Pool eligibility unavailable; refresh status.")
         XCTAssertTrue(row.earningDisclosure?.contains("not a network catalog model") == true)
-        XCTAssertTrue(row.earningDisclosure?.contains("qualifying settled requests") == true)
+        XCTAssertTrue((row.earningDisclosure ?? "").localizedCaseInsensitiveContains("pool-attested"))
+        XCTAssertFalse((row.earningDisclosure ?? "").localizedCaseInsensitiveContains("qualifying settled requests"))
         XCTAssertFalse((row.earningVerdict ?? "").localizedCaseInsensitiveContains("current earnings"))
         XCTAssertFalse((row.earningDisclosure ?? "").localizedCaseInsensitiveContains("guaranteed earnings"))
         XCTAssertEqual(row.blockReason, "Pool-priced by its Trusted Pool creator; no network catalog rate applies.")
         XCTAssertTrue(row.canWithdraw)
         XCTAssertFalse(row.canProposeToPool)
         let bindingStatus = try decodeStatus(Self.poolStatusJSON())
-        let line = row.poolBindingLine(try XCTUnwrap(bindingStatus.validPoolBinding))
-        XCTAssertTrue(line.contains("Eligible to earn on pool \(Self.poolID)"))
-        XCTAssertTrue(line.contains("qualifying settled requests"))
-        XCTAssertTrue(line.contains("pool-attested, not network-verified"))
+        let line = row.poolEligibilityDisplayLine(binding: try XCTUnwrap(bindingStatus.validPoolBinding))
+        XCTAssertTrue(try XCTUnwrap(line).contains("Eligible to earn on pool \(Self.poolID)"))
+        XCTAssertTrue(try XCTUnwrap(line).contains("qualifying settled requests"))
+        XCTAssertTrue(try XCTUnwrap(line).contains("pool-attested, not network-verified"))
 
         let inactiveDocument = try JSONDecoder().decode(
             MalibuModelCatalogEconomicsDocument.self,
             from: Data(catalogEconomicsJSON(rows: [coordinatorBYOMRowJSON(state: "catalog_priced", nextAction: "withdraw", earningPath: "no_earning_path_in_v0_1", observedAt: observedAt)], generatedAt: observedAt).utf8)
         )
         let inactiveRow = try XCTUnwrap(try inactiveDocument.validated().rowsForMalibu(currentModelID: nil, warmSwapAvailable: true).first)
-        let inactiveLine = inactiveRow.poolBindingLine(try XCTUnwrap(bindingStatus.validPoolBinding))
-        XCTAssertTrue(inactiveLine.contains("not currently eligible on this pool"))
-        XCTAssertFalse(inactiveLine.contains("not earning right now"))
+        let inactiveLine = inactiveRow.poolEligibilityDisplayLine(binding: try XCTUnwrap(bindingStatus.validPoolBinding))
+        XCTAssertTrue(try XCTUnwrap(inactiveLine).contains("not currently eligible on this pool"))
+        XCTAssertFalse(try XCTUnwrap(inactiveLine).contains("not earning right now"))
 
         // Pool eligibility never validates outside a coordinator catalog_priced binding.
         let forged = try JSONDecoder().decode(
@@ -2773,6 +2775,42 @@ extension ModelManagementTests {
         )
         XCTAssertEqual(cli.invocations[1].prefix(4), ["models", "admission", "status", Self.poolCandidateID])
         XCTAssertEqual(store.poolBindings[Self.poolCandidateID]?.poolModelID, "pool/\(Self.poolID)/my-model")
+        let refreshed = try XCTUnwrap(store.rows.first { $0.id == Self.poolCandidateID })
+        let displayLine = try XCTUnwrap(refreshed.poolEligibilityDisplayLine(binding: store.poolBindings[Self.poolCandidateID]))
+        XCTAssertTrue(displayLine.contains("Eligible to earn on pool \(Self.poolID)"))
+        XCTAssertTrue(displayLine.contains("qualifying settled requests"))
+        XCTAssertNil(refreshed.earningVerdict)
+    }
+
+    @MainActor
+    func testPoolBindingReadbackFailuresLeaveBindingAwareUnavailableCopy() async throws {
+        let timestamp = Self.recentTimestamp()
+        let row = coordinatorBYOMRowJSON(state: "catalog_priced", nextAction: "withdraw", earningPath: "pool_attested_earning", observedAt: timestamp)
+        let cases: [(name: String, status: ModelCLIResult)] = [
+            ("status failure", ModelCLIResult(exitCode: 2, stdout: "", stderr: "status failed")),
+            ("malformed", ModelCLIResult(exitCode: 0, stdout: "{}", stderr: "")),
+            ("no binding", ModelCLIResult(exitCode: 0, stdout: Self.poolStatusJSON(binding: nil), stderr: "")),
+            ("mismatched eligibility", ModelCLIResult(exitCode: 0, stdout: Self.poolStatusJSON(earningPath: "no_earning_path_in_v0_1"), stderr: "")),
+        ]
+        for item in cases {
+            let cli = FakeModelCLI(results: [
+                ModelCLIResult(exitCode: 0, stdout: catalogEconomicsJSON(rows: [row], generatedAt: timestamp), stderr: ""),
+                item.status,
+            ])
+            let store = ModelManagementStore(
+                cli: cli,
+                paths: testProviderPaths(),
+                defaults: UserDefaults(suiteName: "ModelManagementTests.poolBindingFailure.\(item.name).\(UUID().uuidString)")!
+            )
+            await store.refresh(
+                currentModelID: "other/model",
+                peer: peer(for: [MalibuModelCapabilityManifest.readySwitch, MalibuModelCapabilityManifest.catalogEconomics])
+            )
+            let refreshed = try XCTUnwrap(store.rows.first { $0.id == Self.poolCandidateID }, item.name)
+            XCTAssertNil(store.poolBindings[Self.poolCandidateID], item.name)
+            XCTAssertNil(refreshed.earningVerdict, item.name)
+            XCTAssertEqual(refreshed.poolEligibilityDisplayLine(binding: store.poolBindings[Self.poolCandidateID]), "Pool eligibility unavailable; refresh status.", item.name)
+        }
     }
 
     func testSafeCLIReasonStripsControlCharactersAndBoundsLength() {
