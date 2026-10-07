@@ -7,12 +7,12 @@ import XCTest
 
 final class PrivacyLabConfigChangeCheckpointTests: XCTestCase {
     func testSocketpairReadyAckRoundTrip() throws {
-        let pair = try makeSocketPair()
+        let pair = try Self.makeSocketPair()
         defer {
             Darwin.close(pair.0)
             Darwin.close(pair.1)
         }
-        let scope = try makeScope()
+        let scope = try Self.makeScope()
         let checkpoint = try PrivacyLabConfigChangeCheckpoint(fd: pair.0, nonceFactory: { "nonce-ok" })
         let done = DispatchSemaphore(value: 0)
         DispatchQueue.global(qos: .utility).async {
@@ -53,8 +53,8 @@ final class PrivacyLabConfigChangeCheckpointTests: XCTestCase {
     }
 
     func testWrongNonceAndMalformedAckAreRejected() throws {
-        let scope = try makeScope()
-        try withCheckpointPair(ack: [
+        let scope = try Self.makeScope()
+        try Self.withCheckpointPair(ack: [
             "event": PrivacyLabConfigChangeCheckpoint.ackEvent,
             "nonce": "wrong",
             "schema_version": PrivacyLabConfigChangeCheckpoint.schemaVersion,
@@ -64,7 +64,7 @@ final class PrivacyLabConfigChangeCheckpointTests: XCTestCase {
             }
         }
 
-        try withCheckpointPair(rawAck: Data("not-json\n".utf8)) { checkpoint in
+        try Self.withCheckpointPair(rawAck: Data("not-json\n".utf8)) { checkpoint in
             XCTAssertThrowsError(try checkpoint.signalReady(scope: scope)) {
                 XCTAssertEqual($0 as? PrivacyLabConfigChangeCheckpointError, .malformed)
             }
@@ -72,8 +72,8 @@ final class PrivacyLabConfigChangeCheckpointTests: XCTestCase {
     }
 
     func testAckRejectsExtraKeysAndWrongSchemaVersion() throws {
-        let scope = try makeScope()
-        try withCheckpointPair(ack: [
+        let scope = try Self.makeScope()
+        try Self.withCheckpointPair(ack: [
             "event": PrivacyLabConfigChangeCheckpoint.ackEvent,
             "nonce": "nonce-ok",
             "schema_version": PrivacyLabConfigChangeCheckpoint.schemaVersion,
@@ -84,7 +84,7 @@ final class PrivacyLabConfigChangeCheckpointTests: XCTestCase {
             }
         }
 
-        try withCheckpointPair(ack: [
+        try Self.withCheckpointPair(ack: [
             "event": PrivacyLabConfigChangeCheckpoint.ackEvent,
             "nonce": "nonce-ok",
             "schema_version": 0,
@@ -96,9 +96,9 @@ final class PrivacyLabConfigChangeCheckpointTests: XCTestCase {
     }
 
     func testOversizeAckIsRejected() throws {
-        let scope = try makeScope()
+        let scope = try Self.makeScope()
         let payload = Data(String(repeating: "x", count: PrivacyLabConfigChangeCheckpoint.maxFrameBytes + 1).utf8) + Data([0x0a])
-        try withCheckpointPair(rawAck: payload) { checkpoint in
+        try Self.withCheckpointPair(rawAck: payload) { checkpoint in
             XCTAssertThrowsError(try checkpoint.signalReady(scope: scope)) {
                 XCTAssertEqual($0 as? PrivacyLabConfigChangeCheckpointError, .oversized)
             }
@@ -106,8 +106,8 @@ final class PrivacyLabConfigChangeCheckpointTests: XCTestCase {
     }
 
     func testPeerClosedWriteFailsSafely() throws {
-        let pair = try makeSocketPair()
-        let scope = try makeScope()
+        let pair = try Self.makeSocketPair()
+        let scope = try Self.makeScope()
         let checkpoint = try PrivacyLabConfigChangeCheckpoint(fd: pair.0, nonceFactory: { "nonce-ok" })
         Darwin.close(pair.1)
         defer { Darwin.close(pair.0) }
@@ -118,8 +118,8 @@ final class PrivacyLabConfigChangeCheckpointTests: XCTestCase {
     }
 
     func testAckTimeoutAndEOFAreRejected() throws {
-        let scope = try makeScope()
-        let pair = try makeSocketPair()
+        let scope = try Self.makeScope()
+        let pair = try Self.makeSocketPair()
         defer {
             Darwin.close(pair.0)
             Darwin.close(pair.1)
@@ -132,7 +132,7 @@ final class PrivacyLabConfigChangeCheckpointTests: XCTestCase {
             XCTAssertEqual(error as? PrivacyLabConfigChangeCheckpointError, .timeout)
         }
 
-        try withCheckpointPair(closeAfterReady: true) { eofCheckpoint in
+        try Self.withCheckpointPair(closeAfterReady: true) { eofCheckpoint in
             XCTAssertThrowsError(try eofCheckpoint.signalReady(scope: scope)) {
                 XCTAssertEqual($0 as? PrivacyLabConfigChangeCheckpointError, .eof)
             }
@@ -140,8 +140,8 @@ final class PrivacyLabConfigChangeCheckpointTests: XCTestCase {
     }
 
     func testValidAckThenPeerCloseIsAccepted() throws {
-        let scope = try makeScope()
-        try withCheckpointPair(
+        let scope = try Self.makeScope()
+        try Self.withCheckpointPair(
             ack: [
                 "event": PrivacyLabConfigChangeCheckpoint.ackEvent,
                 "nonce": "nonce-ok",
@@ -154,8 +154,8 @@ final class PrivacyLabConfigChangeCheckpointTests: XCTestCase {
     }
 
     func testIncompleteAckThenPeerCloseIsRejected() throws {
-        let scope = try makeScope()
-        try withCheckpointPair(rawAck: Data("{\"event\"".utf8), closeAfterAck: true) { checkpoint in
+        let scope = try Self.makeScope()
+        try Self.withCheckpointPair(rawAck: Data("{\"event\"".utf8), closeAfterAck: true) { checkpoint in
             XCTAssertThrowsError(try checkpoint.signalReady(scope: scope)) {
                 XCTAssertEqual($0 as? PrivacyLabConfigChangeCheckpointError, .eof)
             }
@@ -163,7 +163,7 @@ final class PrivacyLabConfigChangeCheckpointTests: XCTestCase {
     }
 
     func testStalledReaderTimesOutReadyWrite() throws {
-        let pair = try makeSocketPair()
+        let pair = try Self.makeSocketPair()
         defer {
             Darwin.close(pair.0)
             Darwin.close(pair.1)
@@ -187,7 +187,7 @@ final class PrivacyLabConfigChangeCheckpointTests: XCTestCase {
             }
         }
 
-        let scope = try makeScope()
+        let scope = try Self.makeScope()
         let checkpoint = try PrivacyLabConfigChangeCheckpoint(fd: pair.0, nonceFactory: { "nonce-ok" })
         XCTAssertThrowsError(try checkpoint.signalReady(scope: scope)) { error in
             XCTAssertEqual(error as? PrivacyLabConfigChangeCheckpointError, .timeout)
@@ -215,14 +215,14 @@ final class PrivacyLabConfigChangeCheckpointTests: XCTestCase {
         closeAfterAck: Bool = false,
         body: (PrivacyLabConfigChangeCheckpoint) throws -> Void
     ) throws {
-        let pair = try makeSocketPair()
+        let pair = try Self.makeSocketPair()
         defer {
             Darwin.close(pair.0)
             Darwin.close(pair.1)
         }
         let checkpoint = try PrivacyLabConfigChangeCheckpoint(fd: pair.0, nonceFactory: { "nonce-ok" })
         DispatchQueue.global(qos: .utility).async {
-            _ = try? readFrame(pair.1)
+            _ = try? Self.readFrame(pair.1)
             if closeAfterReady {
                 Darwin.close(pair.1)
                 return
@@ -232,7 +232,7 @@ final class PrivacyLabConfigChangeCheckpointTests: XCTestCase {
                     Darwin.write(pair.1, raw.baseAddress, raw.count)
                 }
             } else if let ack {
-                writeFrame(ack, fd: pair.1)
+                Self.writeFrame(ack, fd: pair.1)
             }
             if closeAfterAck {
                 Darwin.close(pair.1)
@@ -245,7 +245,7 @@ final class PrivacyLabConfigChangeCheckpointTests: XCTestCase {
         let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
             .appendingPathComponent("privacy-lab-checkpoint-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-        let config = labConfig(root: root)
+        let config = Self.labConfig(root: root)
         return try PrivacyLabIdentityScope.validated(config: config, isolateLifecycle: true)
     }
 
