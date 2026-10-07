@@ -169,7 +169,9 @@ func clonePoolModelDisclosureRecorder(in *billingRecorder) *billingRecorder {
 	out := *in
 	snap := *in.settlementRouteSnapshot
 	out.settlementRouteSnapshot = &snap
-	state := *in.state
-	out.state = &state
+	out.state = &forwardState{
+		poolID:   in.state.poolID,
+		provider: in.state.provider,
+	}
 	return &out
 }
