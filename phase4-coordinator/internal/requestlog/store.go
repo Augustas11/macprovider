@@ -458,10 +458,25 @@ func (s *Store) InsertExec(ctx context.Context, db InsertQuerier, row Row) error
 	if db == nil {
 		return fmt.Errorf("db is required")
 	}
-	return insert(ctx, db, row)
+	_, err := insertReturningID(ctx, db, row)
+	return err
+}
+
+// InsertExecReturningID preserves InsertExec semantics while returning the
+// inserted request_log.id for same-transaction source-evidence closures.
+func InsertExecReturningID(ctx context.Context, db InsertQuerier, row Row) (int64, error) {
+	if db == nil {
+		return 0, fmt.Errorf("db is required")
+	}
+	return insertReturningID(ctx, db, row)
 }
 
 func insert(ctx context.Context, db execer, row Row) error {
+	_, err := insertReturningID(ctx, db, row)
+	return err
+}
+
+func insertReturningID(ctx context.Context, db execer, row Row) (int64, error) {
 	var totalTokens sql.NullInt64
 	if row.PromptTokens != nil && row.CompletionTokens != nil {
 		if *row.PromptTokens >= 0 && *row.CompletionTokens >= 0 && *row.PromptTokens <= math.MaxInt64-*row.CompletionTokens {
@@ -497,11 +512,11 @@ func insert(ctx context.Context, db execer, row Row) error {
 			accountIDArg, row.RequestID,
 		).Scan(&existing)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		attemptN = &existing
 	}
-	_, err := db.ExecContext(ctx, `
+	res, err := db.ExecContext(ctx, `
 INSERT INTO request_log (
     ts_utc,
     request_id,
@@ -579,7 +594,14 @@ INSERT INTO request_log (
 		boolInt(row.PositiveVerificationExcluded),
 		boolInt(row.RewardsExcluded),
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 func sqliteTimeText(t time.Time) string {

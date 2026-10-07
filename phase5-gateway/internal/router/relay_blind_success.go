@@ -413,9 +413,9 @@ func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, 
 	resp.Header.Del(privacyPostureVerifiedAtHeader)
 	timing.observeCoordinatorResponse(resp.Header, s.now())
 	if env.Stream {
-		s.forwardStreamingChat(w, r, resp, subject, validatedInput, env.ReservationTokenCap, env.MaxOutputTokens, env.Model, false, true, deadlines, false, window, timing)
+		s.forwardStreamingChat(w, r, resp, subject, validatedInput, env.ReservationTokenCap, env.MaxOutputTokens, env.Model, "", false, true, deadlines, false, window, timing)
 	} else {
-		s.forwardNonStreamingChat(w, r, resp, subject, validatedInput, env.ReservationTokenCap, env.MaxOutputTokens, false, true, window)
+		s.forwardNonStreamingChat(w, r, resp, subject, validatedInput, env.ReservationTokenCap, env.MaxOutputTokens, env.Model, "", false, true, window)
 	}
 }
 

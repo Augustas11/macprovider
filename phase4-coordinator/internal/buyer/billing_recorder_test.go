@@ -5,12 +5,16 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
+	"github.com/augstar/macprovider-coordinator/internal/sourceevidence"
+	"github.com/rs/zerolog"
 )
 
 func TestBoundedTokenPointerClampsUntrustedRelayBlindUsage(t *testing.T) {
@@ -473,4 +477,55 @@ func settlementAttemptOutputCount(t *testing.T, dbPath, requestID string) int {
 		t.Fatalf("count settlement attempt outputs: %v", err)
 	}
 	return count
+}
+
+func TestLogNoDispatchClosureFallbacksRedactRefusalModel(t *testing.T) {
+	tests := []struct {
+		name         string
+		withEvidence bool
+		terminalKind string
+		status       int
+		message      string
+	}{
+		{name: "default_disabled_model_not_found", terminalKind: sourceevidence.TerminalModelNotFound, status: http.StatusNotFound, message: "No provider has advertised the requested model"},
+		{name: "default_disabled_pool_unavailable", terminalKind: sourceevidence.TerminalPoolUnavailable, status: http.StatusServiceUnavailable, message: "Pool unavailable"},
+		{name: "enabled_closure_failure_model_not_found", withEvidence: true, terminalKind: sourceevidence.TerminalModelNotFound, status: http.StatusNotFound, message: "No provider has advertised the requested model"},
+		{name: "enabled_closure_failure_pool_unavailable", withEvidence: true, terminalKind: sourceevidence.TerminalPoolUnavailable, status: http.StatusServiceUnavailable, message: "Pool unavailable"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+			reqLog, err := requestlog.OpenStore(dbPath)
+			if err != nil {
+				t.Fatalf("requestlog.OpenStore: %v", err)
+			}
+			t.Cleanup(func() { _ = reqLog.Close() })
+			opts := []Option{WithRequestLog(reqLog)}
+			if test.withEvidence {
+				evidenceStore, err := sourceevidence.NewStore(reqLog.DB(), []byte("01234567890123456789012345678901"), func() time.Time { return time.Unix(1716768000, 0).UTC() })
+				if err != nil {
+					t.Fatalf("sourceevidence.NewStore: %v", err)
+				}
+				opts = append(opts, WithSourceEvidence(evidenceStore))
+			}
+			server := NewServer(nil, zerolog.Nop(), time.Unix(1716768000, 0), opts...)
+			startedAt := time.Unix(1716768000, 0).UTC()
+			state := newForwardState(startedAt)
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			requestID := "77777777-7777-4777-8777-777777777777"
+			rec := server.newBillingRecorder(req, state, startedAt, requestID, "external-default", "acct-default", requestlog.AuthenticatedAccount{}, false)
+			rec.setModel("private-unserved-model")
+			rec.logNoDispatchClosure(test.terminalKind, test.status, test.message)
+			var model, msg string
+			if err := reqLog.DB().QueryRow(`SELECT model, error FROM request_log WHERE request_id = ?`, requestID).Scan(&model, &msg); err != nil {
+				t.Fatalf("query request_log: %v", err)
+			}
+			if model != "" {
+				t.Fatalf("fallback request_log.model = %q, want blank", model)
+			}
+			if msg != test.message {
+				t.Fatalf("fallback request_log.error = %q, want %q", msg, test.message)
+			}
+		})
+	}
 }

@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Augustas11/macprovider/schemas/coordinator-source-snapshot-v1.schema.json",
+  "title": "MacProvider coordinator source snapshot v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "producer_contract_version",
+    "registry_bundle_digest",
+    "closure_table_schema",
+    "db_fence_schema",
+    "record_schema",
+    "canonicalization",
+    "scope_hmac"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "macprovider.coordinator-source-snapshot.v1"
+    },
+    "producer_contract_version": {
+      "const": "coordinator-no-dispatch-v1"
+    },
+    "registry_bundle_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "sha256 of the canonical ASCII/JCS-subset source-evidence key registry bytes actually used by the verifier."
+    },
+    "closure_table_schema": {
+      "const": "coordinator_source_no_dispatch_closures.v1"
+    },
+    "db_fence_schema": {
+      "const": "coordinator_source_no_dispatch_fence.v1"
+    },
+    "record_schema": {
+      "const": "macprovider.coordinator-no-dispatch-record.v1"
+    },
+    "canonicalization": {
+      "const": "ascii-jcs-subset-v1"
+    },
+    "scope_hmac": {
+      "const": "hmac-sha256-length-prefixed-v1"
+    }
+  }
+}

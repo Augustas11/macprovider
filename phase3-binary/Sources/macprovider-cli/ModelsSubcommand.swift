@@ -994,15 +994,15 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
 /// `admission_state_source: local_default` when coordinator state "is unavailable
 /// or has not been queried". Offer submission and withdrawal mutate coordinator
 /// state and keep requiring a coordinator URL through `loadModelAdmissionConfig`.
-/// SPEC-043-R014 / SPEC-047-R011 wording for a pool-scoped binding: it earns
-/// only on that pool's routes, and only while the coordinator says the pool
-/// predicates hold.
+/// SPEC-047-R010/R011 wording for a pool-scoped binding: it is eligible
+/// only on that pool's routes, only for qualifying settled requests, and only
+/// while the coordinator says the pool predicates hold.
 func poolBindingNote(_ status: BYOMAdmissionStatusWire) -> String? {
     guard status.isPoolScoped, let binding = status.poolBinding else { return nil }
-    let earning = status.providerGuidance.earningPathClass == "pool_attested_earning"
-        ? "earns only in pool \(binding.poolID)"
-        : "does not earn right now; the pool \(binding.poolID) predicates do not currently hold"
-    return "pool-scoped binding \(binding.poolModelID) (\(binding.runtimeSource)) \(earning). Pool-attested, not network-verified; never a global catalog model."
+    let eligibility = status.providerGuidance.earningPathClass == "pool_attested_earning"
+        ? "eligible to earn on pool \(binding.poolID) only for qualifying settled requests"
+        : "not currently eligible on this pool; the pool \(binding.poolID) predicates do not currently hold"
+    return "pool-scoped binding \(binding.poolModelID) (\(binding.runtimeSource)) \(eligibility). Pool-attested, not network-verified; never a global catalog model."
 }
 
 private func loadModelAdmissionStatusConfig(

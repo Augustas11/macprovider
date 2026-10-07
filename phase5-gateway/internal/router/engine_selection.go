@@ -127,6 +127,13 @@ func buyerVisiblePoolModelHeader(key string, values []string) (string, bool) {
 	return "", false
 }
 
+func poolModelDisclosureAllowed(poolID, modelID string, h http.Header) bool {
+	return poolID != "" &&
+		strings.HasPrefix(modelID, "pool/"+poolID+"/") &&
+		poolModelIDRe.MatchString(modelID) &&
+		strings.TrimSpace(h.Get("X-MacProvider-Provider")) != ""
+}
+
 func isLowerHex64Header(value string) bool {
 	if len(value) != 64 {
 		return false
