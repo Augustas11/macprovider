@@ -369,6 +369,16 @@ land on main. Workflow success alone is not landed conformance.
 These evidence-only workflows neither publish a CLI nor activate an external
 Creator launch.
 
+The reviewed captures landed in #1886 (`080eb8404`). Fresh Layer2
+[run 37625849934](https://github.com/Augustas11/macprovider/actions/runs/37625849934)
+and Creator
+[run 37625855687](https://github.com/Augustas11/macprovider/actions/runs/37625855687)
+then succeeded from that main commit. All 16 fresh signature, artifact-binding,
+expiry and current-selector mappings passed targeted integration verification.
+Fresh signatures remain evidence-only (Layer2 expiry 2026-10-14; Creator
+2026-10-07); reviewed integration is pending. No Layer2/Creator conformance
+promotion, external Creator launch or binary release is claimed.
+
 The release/closure gates still outstanding are:
 
 - Verify and land the protected signed evidence, plus fresh signed BYOM evidence
