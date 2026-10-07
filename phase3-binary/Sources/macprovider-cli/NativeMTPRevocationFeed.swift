@@ -215,7 +215,7 @@ struct NativeMTPRevocationState: Equatable, Sendable {
 }
 
 enum NativeMTPRevocationFeedManager {
-    static var productionOrigin: URL { StaticFeedOrigin.base.appendingPathComponent("v1/", isDirectory: true) }
+    static var productionOrigin: URL { StaticFeedOrigin.base.appendingPathComponent("v1", isDirectory: true) }
     static let refreshIntervalSeconds: TimeInterval = 15 * 60
     typealias Fetcher = @Sendable (URL, Int) async throws -> NativeMTPRevocationFetchResponse
     typealias Sleeper = @Sendable (UInt64) async throws -> Void
