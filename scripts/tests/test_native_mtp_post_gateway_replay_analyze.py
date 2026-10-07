@@ -86,7 +86,7 @@ class NativeMTPPostGatewayReplayAnalyzeTests(unittest.TestCase):
         self.assertEqual(result["reason"], "block_invalid")
         self.assertTrue(any("field_missing:conversation_key_cache_only" in f for f in result["block_failures"][0]["failures"]))
         result = self._run_case(eligible_blocks=0, ineligible_shape_overrides={"pre_capacity_selector_reason": "sampling"})
-        self.assertTrue(any("conversation_key_state_inconsistent" in f for f in result["block_failures"][0]["failures"]))
+        self.assertIn("eligible_request_fraction_below_floor", result["hard_failures"])
         result = self._run_case(eligible_blocks=0, ineligible_shape_overrides={"conversation_key_present": False})
         self.assertTrue(any("conversation_key_reason_without_key" in f for f in result["block_failures"][0]["failures"]))
 
@@ -163,6 +163,74 @@ class NativeMTPPostGatewayReplayAnalyzeTests(unittest.TestCase):
             "conversation_cache_retained_handoff": False,
         })
         self.assertEqual(result["overall_status"], "FAIL")
+        self.assertIn("eligible_request_fraction_below_floor", result["hard_failures"])
+
+    def test_conversation_cache_token_proof_is_strictly_typed_and_consistent(self):
+        cases = [
+            (
+                {"conversation_cache_cached_prompt_tokens": False},
+                "sticky_key_with_cached_prompt_tokens",
+                False,
+            ),
+            (
+                {
+                    "conversation_key_present": False,
+                    "conversation_cache_cached_prompt_tokens": False,
+                    "pre_capacity_selector_reason": "sampling",
+                },
+                "field_invalid:conversation_cache_cached_prompt_tokens",
+                False,
+            ),
+            (
+                {
+                    "conversation_key_present": True,
+                    "conversation_key_cache_only": True,
+                    "conversation_cache_lease": "miss",
+                    "conversation_cache_cached_prompt_tokens": 1,
+                    "conversation_cache_retained_handoff": False,
+                },
+                "conversation_cache_miss_with_cached_prompt_tokens",
+                True,
+            ),
+            (
+                {
+                    "conversation_key_present": True,
+                    "conversation_key_cache_only": True,
+                    "conversation_cache_lease": "missing",
+                    "conversation_cache_cached_prompt_tokens": 1,
+                    "conversation_cache_retained_handoff": False,
+                },
+                "conversation_cache_missing_with_cached_prompt_tokens",
+                True,
+            ),
+            (
+                {
+                    "conversation_key_present": True,
+                    "conversation_key_cache_only": True,
+                    "conversation_cache_lease": "hit",
+                    "conversation_cache_cached_prompt_tokens": 0,
+                    "conversation_cache_retained_handoff": False,
+                },
+                "conversation_cache_hit_without_cached_prompt_tokens",
+                True,
+            ),
+        ]
+        for overrides, expected, eligible_shape in cases:
+            with self.subTest(expected=expected):
+                result = self._run_case(
+                    shape_overrides=overrides if eligible_shape else None,
+                    eligible_blocks=2 if eligible_shape else 0,
+                    ineligible_shape_overrides=None if eligible_shape else overrides,
+                )
+                self.assertEqual(result["reason"], "block_invalid")
+                self.assertTrue(any(expected in f for f in result["block_failures"][0]["failures"]))
+
+    def test_keyed_requests_can_reject_for_earlier_selector_reasons(self):
+        result = self._run_case(eligible_blocks=0, ineligible_shape_overrides={
+            "conversation_key_present": True,
+            "conversation_key_cache_only": False,
+            "pre_capacity_selector_reason": "sampling",
+        })
         self.assertIn("eligible_request_fraction_below_floor", result["hard_failures"])
 
     def test_conversation_key_proof_must_match_paired_blocks(self):

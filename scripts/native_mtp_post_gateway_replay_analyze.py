@@ -178,6 +178,10 @@ def _is_count(value: object) -> bool:
     return _is_int(value) and value >= 0
 
 
+def _is_zero_count(value: object) -> bool:
+    return _is_int(value) and value == 0
+
+
 def _is_positive_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
 
@@ -320,7 +324,7 @@ def _shape_violations(shape: object, path: str, disabled_record: bool) -> list[s
             violations.append(f"{path}:field_invalid:conversation_key_cache_only")
         if lease is not None and lease != "not_applicable":
             violations.append(f"{path}:field_invalid:conversation_cache_lease")
-        if cached_tokens is not None and cached_tokens != 0:
+        if cached_tokens is not None and not _is_zero_count(cached_tokens):
             violations.append(f"{path}:field_invalid:conversation_cache_cached_prompt_tokens")
         if retained_handoff is not None and retained_handoff is not False:
             violations.append(f"{path}:field_invalid:conversation_cache_retained_handoff")
@@ -332,12 +336,18 @@ def _shape_violations(shape: object, path: str, disabled_record: bool) -> list[s
                 violations.append(f"{path}:field_invalid:conversation_cache_lease")
             if not _is_count(cached_tokens):
                 violations.append(f"{path}:field_invalid:conversation_cache_cached_prompt_tokens")
+            elif lease == "miss" and cached_tokens != 0:
+                violations.append(f"{path}:conversation_cache_miss_with_cached_prompt_tokens")
+            elif lease == "missing" and cached_tokens != 0:
+                violations.append(f"{path}:conversation_cache_missing_with_cached_prompt_tokens")
+            elif lease == "hit" and cached_tokens <= 0:
+                violations.append(f"{path}:conversation_cache_hit_without_cached_prompt_tokens")
             if not isinstance(retained_handoff, bool):
                 violations.append(f"{path}:field_invalid:conversation_cache_retained_handoff")
         else:
             if lease is not None and lease != "not_applicable":
                 violations.append(f"{path}:sticky_key_with_cache_lease")
-            if cached_tokens is not None and cached_tokens != 0:
+            if cached_tokens is not None and not _is_zero_count(cached_tokens):
                 violations.append(f"{path}:sticky_key_with_cached_prompt_tokens")
             if retained_handoff is not None and retained_handoff is not False:
                 violations.append(f"{path}:sticky_key_with_retained_handoff")
@@ -379,8 +389,6 @@ def _shape_violations(shape: object, path: str, disabled_record: bool) -> list[s
         if cache_only_miss:
             if eligible is False and reason == "conversation_key":
                 violations.append(f"{path}:conversation_key_cache_only_miss_rejected")
-        elif reason != "conversation_key" or eligible is not False:
-            violations.append(f"{path}:conversation_key_state_inconsistent")
     elif reason == "conversation_key":
         violations.append(f"{path}:conversation_key_reason_without_key")
     if effective == "native_mtp" and eligible is not True:
