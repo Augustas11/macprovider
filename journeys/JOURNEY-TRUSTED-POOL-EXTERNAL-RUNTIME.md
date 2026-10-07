@@ -231,6 +231,9 @@ The builder derives the allowed coordinator `(request_id, attempt_n)` set only
 from `request_log.json` rows whose `external_request_id` equals the captured
 gateway `X-Request-ID`. Route snapshots, the settled attempt output, receipt
 verdict, payable ledger row and finality JSON must all bind back to that set;
+the settled attempt itself must have the trusted route snapshot, and the
+evidence `pool_generation` is read from that settled snapshot, not another
+retry's snapshot.
 `/internal/settlement/finality` returns `request_id` and may include
 `attempt_n` in local captures, so `attempt_n` is checked when present.
 
@@ -270,11 +273,13 @@ SPEC-042-R014. The builder requires this exact shape:
 ```
 
 The window must cover `run.json.captured_at`. `campaign` is the exact
-buyer/pool/window/request-id scope: `window_buyer_request_ids` must equal the
-six generated ids and the two counts must be zero, so an unrelated same-buyer
-row in the window fails the run. `global_backlog` may be nonzero, but `after`
-must equal `baseline` by both count and held-row hash; it records rollback
-context only.
+buyer/pool/window/request-id scope: `window_buyer_request_ids` is the actual
+set of buyer quota rows observed in the bounded window. It must be a subset of
+the six generated response ids and must include both paid request ids; controls
+that fail before quota reservation may be absent. An unrelated same-buyer row in
+the window fails the run. `global_backlog` may be nonzero, but `after` must
+equal `baseline` by both count and held-row hash; it records rollback context
+only.
 
 ## Required journey-result contract
 

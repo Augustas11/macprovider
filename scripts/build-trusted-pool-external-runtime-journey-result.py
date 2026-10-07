@@ -435,10 +435,12 @@ def check_settlement(capture: Path, kind: str, run: dict[str, Any], pool: dict[s
     require(allowed_attempts, f"{kind} request_log must show the gateway request")
     snapshots = load_capture_rows(capture, f"{base}/route_snapshots.json")
     require(snapshots, f"{kind} must have route snapshots")
+    snapshot_by_key: dict[tuple[str, int], dict[str, Any]] = {}
     for row in snapshots:
         where = f"{kind} route snapshot attempt {row.get('attempt_n')}"
         snapshot_key = (require_string(row.get("request_id"), None, f"{where}.request_id"),
                         as_int(row.get("attempt_n"), f"{where}.attempt_n"))
+        require(snapshot_key not in snapshot_by_key, f"{where}: duplicate route snapshot key")
         require(snapshot_key in allowed_attempts, f"{where}: request_id/attempt_n must come from request_log")
         require(row.get("pool_id") == run["pool_id"], f"{where}: pool_id must be the pool")
         require(row.get("runtime_source") == RUNTIME_SOURCE, f"{where}: runtime_source must be {RUNTIME_SOURCE}")
@@ -450,6 +452,7 @@ def check_settlement(capture: Path, kind: str, run: dict[str, Any], pool: dict[s
         require(row.get("artifact_hash") == run["gguf_sha256"], f"{where}: artifact_hash must be the GGUF sha256")
         require(row.get("artifact_id") == run["gguf_artifact_id"], f"{where}: artifact_id must be {run['gguf_artifact_id']}")
         as_int(row.get("pool_generation"), f"{where}.pool_generation")
+        snapshot_by_key[snapshot_key] = row
 
     outputs = load_capture_rows(capture, f"{base}/attempt_outputs.json")
     attested = [
@@ -459,6 +462,8 @@ def check_settlement(capture: Path, kind: str, run: dict[str, Any], pool: dict[s
     require(len(attested) == 1, f"{kind} must have exactly one pool_operator_attested normal_done attempt output")
     settled_key = (attested[0].get("request_id"), as_int(attested[0].get("attempt_n"), f"{kind} attempt_n"))
     require(settled_key in allowed_attempts, f"{kind} settled attempt output request_id/attempt_n must come from request_log")
+    require(settled_key in snapshot_by_key, f"{kind} settled attempt must have a trusted route snapshot")
+    settled_snapshot = snapshot_by_key[settled_key]
     verdicts = load_capture_rows(capture, f"{base}/receipt_verdicts.json")
     require(len(verdicts) == 1, f"{kind} settled attempt must have exactly one receipt verdict")
     verdict = verdicts[0]
@@ -531,7 +536,7 @@ def check_settlement(capture: Path, kind: str, run: dict[str, Any], pool: dict[s
         "route_snapshot_count": len(snapshots),
         "runtime_source": RUNTIME_SOURCE,
         "route_snapshot_mode": "enforce",
-        "pool_generation": as_int(snapshots[-1].get("pool_generation"), f"{kind} pool_generation"),
+        "pool_generation": as_int(settled_snapshot.get("pool_generation"), f"{kind} settled pool_generation"),
         "settled_attempt_n": settled_key[1],
         "usage_source": POOL_OPERATOR_ATTESTED,
         "receipt_verdict": {
@@ -585,14 +590,17 @@ def require_hold_counts(value: Any, location: str, *, zero: bool) -> dict[str, i
     return out
 
 
-def require_campaign_holds(value: Any, expected_request_ids: list[str], location: str, *, zero: bool) -> dict[str, Any]:
+def require_campaign_holds(value: Any, expected_request_ids: list[str], required_paid_ids: list[str], location: str, *, zero: bool) -> dict[str, Any]:
     item = require_object(value, location)
     require(set(item) == {"held_reservations", "missing_trailer_log_count", "window_buyer_request_ids"},
             f"{location} keys")
     counts = require_hold_counts({key: item[key] for key in ("held_reservations", "missing_trailer_log_count")},
                                  location, zero=zero)
-    request_ids = require_request_id_scope(item.get("window_buyer_request_ids"), expected_request_ids,
-                                           f"{location}.window_buyer_request_ids")
+    request_ids = require_request_id_list(item.get("window_buyer_request_ids"), f"{location}.window_buyer_request_ids")
+    require(set(request_ids).issubset(set(expected_request_ids)),
+            f"{location}.window_buyer_request_ids must be a subset of the six generated request IDs")
+    require(set(required_paid_ids).issubset(set(request_ids)),
+            f"{location}.window_buyer_request_ids must include the paid request IDs")
     return {**counts, "window_buyer_request_ids": request_ids}
 
 
@@ -643,7 +651,8 @@ def require_gateway_holds_evidence(value: Any, *, expected: dict[str, Any] | Non
                 "gateway_holds.scope.buyer_account_fingerprint must match candidate_identity.buyer_account_fingerprint")
         require(set(request_ids) == set(expected["request_ids"]), "gateway_holds.scope.request_ids must match evidence request IDs")
         require(started_at <= expected["captured_at"] <= ended_at, "gateway_holds.scope window must cover captured_at")
-    campaign = require_campaign_holds(holds.get("campaign"), request_ids, "gateway_holds.campaign", zero=True)
+    required_paid_ids = expected["required_paid_ids"] if expected is not None else request_ids[:2]
+    campaign = require_campaign_holds(holds.get("campaign"), request_ids, required_paid_ids, "gateway_holds.campaign", zero=True)
     global_backlog = require_object(holds.get("global_backlog"), "gateway_holds.global_backlog")
     require(set(global_backlog) == {"baseline", "after", "unchanged"}, "gateway_holds.global_backlog keys")
     baseline = require_global_backlog_snapshot(global_backlog.get("baseline"), "gateway_holds.global_backlog.baseline")
@@ -667,7 +676,7 @@ def require_gateway_holds_evidence(value: Any, *, expected: dict[str, Any] | Non
     }
 
 
-def check_holds(capture: Path, run: dict[str, Any], expected_request_ids: list[str]) -> dict[str, Any]:
+def check_holds(capture: Path, run: dict[str, Any], expected_request_ids: list[str], required_paid_ids: list[str]) -> dict[str, Any]:
     raw = load_capture_object(capture, "gateway-holds.json")
     require(set(raw) == {"schema_version", "scope", "campaign", "global_backlog"}, "gateway-holds.json keys")
     require(raw.get("schema_version") == GATEWAY_HOLDS_SCHEMA,
@@ -683,7 +692,7 @@ def check_holds(capture: Path, run: dict[str, Any], expected_request_ids: list[s
     ended, ended_at = parse_datetime_z(scope.get("window_ended_at"), "gateway-holds.scope.window_ended_at")
     _, captured_at = parse_datetime_z(run["captured_at"], "run.json.captured_at")
     require(started_at <= captured_at <= ended_at, "gateway-holds.scope window must cover run.json.captured_at")
-    campaign = require_campaign_holds(raw.get("campaign"), request_ids, "gateway-holds.campaign", zero=True)
+    campaign = require_campaign_holds(raw.get("campaign"), request_ids, required_paid_ids, "gateway-holds.campaign", zero=True)
     global_backlog = require_object(raw.get("global_backlog"), "gateway-holds.global_backlog")
     require(set(global_backlog) == {"baseline", "after"}, "gateway-holds.global_backlog keys")
     baseline = require_global_backlog_snapshot(global_backlog.get("baseline"), "gateway-holds.global_backlog.baseline")
@@ -785,6 +794,7 @@ def revalidate_committed_evidence(evidence: dict[str, Any]) -> None:
         "buyer_account_fingerprint": require_string(identity.get("buyer_account_fingerprint"), SHA256_RE,
                                                      "candidate_identity.buyer_account_fingerprint"),
         "request_ids": request_ids,
+        "required_paid_ids": request_ids[:2],
     })
 
 
@@ -818,7 +828,7 @@ def build_evidence(capture: Path) -> dict[str, Any]:
         requests[kind] = {"response": response, "settlement": settlement}
     controls = check_controls(capture)
     gateway_request_ids.extend(control["request_id"] for control in controls.values())
-    holds = check_holds(capture, run, gateway_request_ids)
+    holds = check_holds(capture, run, gateway_request_ids, [requests[kind]["response"]["request_id"] for kind in REQUEST_KINDS])
     evidence = {
         "schema_version": EVIDENCE_SCHEMA,
         "journey_id": JOURNEY_ID,

@@ -425,6 +425,19 @@ class TrustedPoolExternalRuntimeCaptureTests(unittest.TestCase):
         self.mutate_rows("requests/nonstream/attempt_outputs.json", request_id="coord-other")
         self.assert_rejected("settled attempt output")
 
+    def test_rejects_settled_attempt_without_trusted_route_snapshot(self) -> None:
+        request_log = json.loads((self.capture / "requests/nonstream/request_log.json").read_text())
+        request_log.append({"request_id": "coord-nonstream-retry", "external_request_id": "req-ns-1", "attempt_n": 2, "status": "ok", "pool_id": POOL})
+        write(self.capture / "requests/nonstream/request_log.json", request_log)
+        for relative in (
+            "requests/nonstream/attempt_outputs.json",
+            "requests/nonstream/receipt_verdicts.json",
+            "requests/nonstream/ledger.json",
+        ):
+            self.mutate_rows(relative, request_id="coord-nonstream-retry", attempt_n=2)
+        self.mutate_object("requests/nonstream/finality.json", request_id="coord-nonstream-retry", attempt_n=2)
+        self.assert_rejected("settled attempt must have a trusted route snapshot")
+
     def test_rejects_transplanted_ledger_credit(self) -> None:
         self.mutate_rows("requests/nonstream/ledger.json", request_id="coord-other")
         self.assert_rejected("payable ledger request_id")
@@ -445,6 +458,14 @@ class TrustedPoolExternalRuntimeCaptureTests(unittest.TestCase):
         evidence = self.build()
         self.assertEqual({"held_reservations": 11, "missing_trailer_log_count": 7, "held_rows_sha256": "2" * 64},
                          evidence["gateway_holds"]["global_backlog"]["baseline"])
+
+    def test_accepts_window_quota_ids_for_paid_and_reserving_control_only(self) -> None:
+        value = json.loads((self.capture / "gateway-holds.json").read_text())
+        value["campaign"]["window_buyer_request_ids"] = ["req-ns-1", "req-st-1", "req-pool-ollama-selector"]
+        write(self.capture / "gateway-holds.json", value)
+        evidence = self.build()
+        self.assertEqual(["req-ns-1", "req-pool-ollama-selector", "req-st-1"],
+                         evidence["gateway_holds"]["campaign"]["window_buyer_request_ids"])
 
     def test_rejects_legacy_global_zero_holds_shape(self) -> None:
         write(self.capture / "gateway-holds.json", {
@@ -468,7 +489,13 @@ class TrustedPoolExternalRuntimeCaptureTests(unittest.TestCase):
         value = json.loads((self.capture / "gateway-holds.json").read_text())
         value["campaign"]["window_buyer_request_ids"].append("req-concurrent-buyer-row")
         write(self.capture / "gateway-holds.json", value)
-        self.assert_rejected("six generated request IDs")
+        self.assert_rejected("subset of the six generated request IDs")
+
+    def test_rejects_gateway_hold_missing_paid_quota_id(self) -> None:
+        value = json.loads((self.capture / "gateway-holds.json").read_text())
+        value["campaign"]["window_buyer_request_ids"] = ["req-ns-1", "req-pool-ollama-selector"]
+        write(self.capture / "gateway-holds.json", value)
+        self.assert_rejected("paid request IDs")
 
     def test_rejects_gateway_hold_window_outside_run(self) -> None:
         value = json.loads((self.capture / "gateway-holds.json").read_text())

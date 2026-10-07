@@ -863,18 +863,22 @@ ledger measurement source. The negative controls left no route or ledger rows.
 `gateway-holds.json` binds the two paid and four control `X-Request-ID` values
 to the buyer account, pool, and bounded capture window; campaign-scoped holds
 and `missing_settlement_finality_trailer` are zero, and the bounded-window
-buyer request ids are exactly those six ids. A historical global backlog is
-allowed only as immutable rollback context: counts and the canonical held-row
-state hash match between `global_backlog.baseline` and `global_backlog.after`.
-This is not a global health claim. Wait at least one `pending_deadline_seconds`
-before reading verdicts as final.
+buyer quota request ids are actual observations: they must be a subset of those
+six ids and must include both paid request ids, while controls that fail before
+quota reservation may be absent. A historical global backlog is allowed only as
+immutable rollback context: counts and the canonical held-row state hash match
+between `global_backlog.baseline` and `global_backlog.after`. This is not a
+global health claim. Wait at least one `pending_deadline_seconds` before
+reading verdicts as final.
 
 Request binding is part of the pass criteria. For each paid request, the
 builder derives the allowed coordinator `(request_id, attempt_n)` set from
 `request_log.external_request_id = $RID`; route snapshots, the settled attempt
 output, receipt verdict, payable ledger row and finality JSON must all bind to
-that set. The finality API returns `request_id`; `attempt_n` is checked if the
-capture includes it.
+that set. The settled attempt itself must have the trusted route snapshot, and
+the redacted evidence uses that settled snapshot's `pool_generation`. The
+finality API returns `request_id`; `attempt_n` is checked if the capture
+includes it.
 
 ### Evidence for SPEC-022-R012 (CONFORMANCE)
 
@@ -907,7 +911,8 @@ fixes the capture layout: file names, the `-json` form of the SQL above, and
 contains `run_id`, `buyer_account_id`, `pool_id`, the exact six generated
 gateway request ids, and `window_started_at` / `window_ended_at`; `campaign`
 has zero `held_reservations`, zero `missing_trailer_log_count`, and
-`window_buyer_request_ids` exactly equal to the six generated ids;
+`window_buyer_request_ids` equal to the actual bounded-window buyer quota rows
+(subset of the six generated ids, including both paid ids);
 `global_backlog.baseline` and `global_backlog.after` may be nonzero but must
 match by counts and `held_rows_sha256`.
 `scripts/build-trusted-pool-external-runtime-journey-result.py capture` checks
