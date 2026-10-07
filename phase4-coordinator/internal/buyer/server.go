@@ -2666,9 +2666,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	poolModelRequested := false
 	if poolmanifest.IsPoolModelID(req.Model) {
 		if _, ok := requestedPoolModelEntry(req.Model, req.poolID, req.poolSnapshot); !ok || !req.poolSnapshotSet {
-			if !shouldBindPoolModelRefusalToRequestLog(req.Model, req.poolID, req.poolSnapshot) {
-				rec.setModel("")
-			}
+			rec.setModel("")
 			rec.logBuyerFailure(http.StatusNotFound, "No provider has advertised the requested model")
 			writeError(w, http.StatusNotFound, "model_not_found", "No provider has advertised the requested model")
 			return
@@ -2740,6 +2738,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if routeErr != nil {
 		state.routingDone = s.now()
 		state.phaseTiming.markCoordRoutingDone(state.routingDone)
+		if poolModelRequested {
+			rec.setModel("")
+		}
 		rec.logRow("", routeErr.status, nil, nil, routeErr.message, "", 0)
 		writeRouteError(w, routeErr)
 		return

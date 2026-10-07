@@ -70,34 +70,6 @@ func requestedPoolModelEntry(model, poolID string, snap trustpool.Snapshot) (poo
 	return poolmanifest.PoolModelEntry{}, false
 }
 
-// shouldBindPoolModelRefusalToRequestLog reports whether an otherwise refused
-// pool/ request should keep the requested id in internal request_log evidence.
-// It never consults a foreign pool. The selected pool's current and immediately
-// prior entries are the only same-pool history this process can prove.
-func shouldBindPoolModelRefusalToRequestLog(model, selectedPoolID string, snap trustpool.Snapshot) bool {
-	if selectedPoolID == "" || !snap.Exists {
-		return false
-	}
-	idPool, _, ok := poolmanifest.ParsePoolModelID(model)
-	if !ok {
-		return false
-	}
-	if idPool != selectedPoolID {
-		return true
-	}
-	for _, entry := range snap.ModelEntries {
-		if entry.PoolModelID == model {
-			return true
-		}
-	}
-	for _, entry := range snap.PriorModelEntries {
-		if entry.PoolModelID == model {
-			return true
-		}
-	}
-	return false
-}
-
 // providerRuntimeClass is the coordinator runtime class of a session: an
 // absent runtime_source is native mlx_cache.
 func providerRuntimeClass(p pool.Provider) string {

@@ -6265,7 +6265,7 @@
       "implementation": [
         "phase5-gateway/internal/router/engine_selection.go:func resolveEngineSelection",
         "phase5-gateway/internal/router/engine_selection.go:func buyerVisibleEngineHeader",
-        "phase5-gateway/internal/router/server.go:func copyCleanHeadersWithReceipt",
+        "phase5-gateway/internal/router/server.go:func copyCleanHeadersFiltered",
         "phase5-gateway/internal/router/relay_blind_success.go:func relayBlindPoolSelected",
         "phase5-gateway/internal/router/idless_dedupe.go:func idlessRequestFingerprint",
         "phase4-coordinator/internal/buyer/engine_selection.go:func internalEngineSelection",
@@ -10035,10 +10035,10 @@
       ],
       "evidence": [
         {
-          "artifact": "commit:9b5ddbc14ebed939cf2297cc0e99d662ea52e96b",
+          "artifact": "commit:ff0fb0b97ee48da64b2f05c4d179d517fbd5788a",
           "source": null,
-          "captured_at": "2026-09-16",
-          "expires_at": "2026-10-16"
+          "captured_at": "2026-10-07",
+          "expires_at": "2026-11-06"
         },
         {
           "artifact": "sha256:3d524840e0996c735e84fcde0490c586178e32995282909aa600b6e946321220",
