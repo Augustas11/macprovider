@@ -244,4 +244,3 @@ final class NativeMTPAdmissionFeedTests: XCTestCase {
         XCTAssertNil(NativeMTPStoreProjection.members(manifest: try storeManifest(targetPath: "target", mtpPath: "mtp")))
     }
 }
-

@@ -462,7 +462,7 @@ ca8c384c R003 close ─> G1 parity fix ─> G3/G5 CLI fetch + origin ─> campai
                                                                              │
                        three-lane freeze audit (0/0/0) ─> merge campaign PR
                                                                              │
-   CLI cut ─> RC CDHash ─> G2 release-input + D-CB entry re-issued for the cut      
+   CLI cut ─> RC CDHash ─> G2 release-input + D-CB entry re-issued for the cut
                                                                              │
    Pearl runtime apply (routes) ─> catalog release activation (+ nginx, yaml, revocation dir)
                                                                              │

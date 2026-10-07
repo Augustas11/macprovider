@@ -110,4 +110,3 @@ final class StaticFeedOriginTests: XCTestCase {
         XCTAssertTrue(KeychainNativeMTPRevocationStore.live() is KeychainNativeMTPRevocationStore)
     }
 }
-
