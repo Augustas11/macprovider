@@ -3619,9 +3619,11 @@ actor ContinuousBatchScheduler {
             return
         }
 
+        let beforeFinalizeRequestIDs = prepared.map { $0.row.request.id }
+            .filter { !cancelledIDs.contains($0) }
         let beforeFinalizeCancelled = labNativeMTPPhaseTrap?.trigger(
             phase: .beforeFinalize,
-            requestIDs: prepared.map { $0.row.request.id }
+            requestIDs: beforeFinalizeRequestIDs
         ) ?? []
         if !beforeFinalizeCancelled.isEmpty {
             cancelledIDs.formUnion(beforeFinalizeCancelled)

@@ -763,9 +763,7 @@ private final class NativeMTPJourneyRunner {
             step.check("\(id).ordinary_peer_not_cancelled", events.allSatisfy { !$0.cancelledRequestIDs.contains(peerID) })
             step.check("\(id).ordinary_peer_completed", peerCompleted)
             step.check("\(id).cancelled_not_completed", failed && !completed)
-            if phase == .afterProposal {
-                step.check("\(id).no_later_native_phase_after_cancel", !hasLaterPhaseEvent(events: events, requestID: id, phase: phase))
-            }
+            step.check("\(id).no_later_native_phase_after_cancel", !hasLaterPhaseEvent(events: events, requestID: id, phase: phase))
             step.check("\(id).pre_post_abort_digest_observed", !beforeAbort.isEmpty && !afterAbort.isEmpty)
             step.check("\(id).pre_post_abort_cache_and_drafter_stable", abortStateStable)
             step.check("\(id).after_abort_fresh_drafter_recomputation", !afterAbort.isEmpty && afterAbort.allSatisfy {

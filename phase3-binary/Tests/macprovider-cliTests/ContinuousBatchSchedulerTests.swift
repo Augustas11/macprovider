@@ -5768,6 +5768,11 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 requestIDs: ["cancelled", "peer"],
                 cancelledRequestIDs: ["cancelled"]
             ),
+            NativeMTPLabPhaseTrap.Event(
+                phase: .beforeFinalize,
+                requestIDs: ["peer"],
+                cancelledRequestIDs: []
+            ),
         ])
         let reservedRoundBytes = await scheduler.nativeMTPReservedRoundBytesSnapshot()
         XCTAssertEqual(reservedRoundBytes, 0)
