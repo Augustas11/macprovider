@@ -3072,9 +3072,13 @@ final class CoordinatorClientTests: XCTestCase {
     }
 
     func testLabScopedPrivacyIdentityCarriesIntoBootstrapRecoveryClient() async throws {
-        let directory = try Self.makeTemporaryDirectory(prefix: "bootstrap-recovery-lab-")
-            .resolvingSymlinksInPath()
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        let directory = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+            .appendingPathComponent("bootstrap-recovery-lab-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
         defer { try? FileManager.default.removeItem(at: directory) }
         let configURL = directory.appendingPathComponent("config.yaml")
         let providerID = "mp-11223344556677889900aabbccddeeff"
