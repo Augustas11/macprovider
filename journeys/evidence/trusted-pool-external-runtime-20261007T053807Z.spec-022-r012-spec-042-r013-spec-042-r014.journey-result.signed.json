@@ -1,0 +1,171 @@
+{
+  "schema_version": "macprovider.journey-result-envelope.v1",
+  "signatures": [
+    {
+      "algorithm": "ecdsa-p256-sha256",
+      "key_id": "macprovider-acceptance-p256-v1",
+      "signature": "MEQCIDPk2TXpGejq+O+tRJ0+xYj3CKyffgMM20w9Hd94Riw6AiALEnNhXp8EwNZOORm7i9bfs9cPEokW0ECqFSjPi7Dnqg==",
+      "signed_sha256": "9ba605fc7eb220bbdefa81b982bfcef0503b0f0203640a9cff0aecc9e7abced7",
+      "verified_at": "2026-10-07T08:58:17Z",
+      "verifier": ".github/workflows/promote-signed-trusted-pool-external-runtime-journey.yml:37597012552:1"
+    }
+  ],
+  "signed": {
+    "schema_version": "macprovider.journey-result.v1",
+    "journey_id": "JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME",
+    "requirement_ids": [
+      "SPEC-022-R012",
+      "SPEC-042-R013",
+      "SPEC-042-R014"
+    ],
+    "repository": {
+      "name": "Augustas11/macprovider",
+      "commit": "2fa09b09a7bb96c521197222f7de3eaebb998184"
+    },
+    "captured_at": "2026-10-07T05:38:07Z",
+    "expires_at": "2026-10-14",
+    "operator": {
+      "role": "pearl-actor",
+      "identity_fingerprint": "ce20c8f530b7a66e5e6262902087366ed0b09c52ac06024428c3505d53fb30a8"
+    },
+    "environment": {
+      "class": "production-operator-internal-pool",
+      "hardware_profile": "mac-studio-m3-ultra",
+      "candidate": "Augustas11/macprovider:v1.8.222@7e68120b8ac0b92e8291a990c88b40f55bafcf5a"
+    },
+    "artifacts": [
+      {
+        "id": "redacted-trusted-pool-external-runtime",
+        "sha256": "f696f31eb981f47ba310c25c6e71313ada7f9678a289b2970f74e7e5d47f37db",
+        "source": "journeys/evidence/trusted-pool-external-runtime-20261007T053807Z.redacted.json"
+      }
+    ],
+    "result": {
+      "status": "pass",
+      "summary": "paid non-streaming and streaming requests on a candidate operator pool, served by llamacpp_loopback, settled verified / pool_operator_attested with provider_reported ledger usage and debit equal to finality and ledger"
+    },
+    "steps": [
+      {
+        "id": "step-01-preconditions",
+        "status": "pass",
+        "assertion": "P1-P8 and payout-disabled pass on the deployed build",
+        "artifacts": [
+          "redacted-trusted-pool-external-runtime"
+        ]
+      },
+      {
+        "id": "step-02-pool-policy",
+        "status": "pass",
+        "assertion": "pool active and routeable, candidate, one undelegated member, buyer authorized, manifest digest bound",
+        "artifacts": [
+          "redacted-trusted-pool-external-runtime"
+        ]
+      },
+      {
+        "id": "step-03-nonstream-request",
+        "status": "pass",
+        "assertion": "non-streaming 200 served by llamacpp_loopback on the pool member",
+        "artifacts": [
+          "redacted-trusted-pool-external-runtime"
+        ]
+      },
+      {
+        "id": "step-04-stream-request",
+        "status": "pass",
+        "assertion": "streaming 200 served by llamacpp_loopback, finish_reason and [DONE]",
+        "artifacts": [
+          "redacted-trusted-pool-external-runtime"
+        ]
+      },
+      {
+        "id": "step-05-route-snapshots",
+        "status": "pass",
+        "assertion": "route snapshots carry pool, manifest, runtime_source, enforce mode and the GGUF identity",
+        "artifacts": [
+          "redacted-trusted-pool-external-runtime"
+        ]
+      },
+      {
+        "id": "step-06-receipts-and-attempts",
+        "status": "pass",
+        "assertion": "pool_operator_attested attempt output and a closed verified v4 receipt verdict",
+        "artifacts": [
+          "redacted-trusted-pool-external-runtime"
+        ]
+      },
+      {
+        "id": "step-07-ledger-and-finality",
+        "status": "pass",
+        "assertion": "one payable enforce provider_reported ledger credit to the member and closed verified finality",
+        "artifacts": [
+          "redacted-trusted-pool-external-runtime"
+        ]
+      },
+      {
+        "id": "step-08-gateway-debit",
+        "status": "pass",
+        "assertion": "settled reservation with no hold; debit equals finality equals ledger tokens",
+        "artifacts": [
+          "redacted-trusted-pool-external-runtime"
+        ]
+      },
+      {
+        "id": "step-09-negative-controls",
+        "status": "pass",
+        "assertion": "four controls fail closed with zero route snapshots and zero ledger rows",
+        "artifacts": [
+          "redacted-trusted-pool-external-runtime"
+        ]
+      },
+      {
+        "id": "step-10-gateway-holds",
+        "status": "pass",
+        "assertion": "zero run-scoped held reservations and missing-trailer logs; global backlog unchanged as context",
+        "artifacts": [
+          "redacted-trusted-pool-external-runtime"
+        ]
+      },
+      {
+        "id": "step-11-redaction",
+        "status": "pass",
+        "assertion": "prompts, completions, keys and raw account ids absent; secret scan passes",
+        "artifacts": [
+          "redacted-trusted-pool-external-runtime"
+        ]
+      }
+    ],
+    "redaction": {
+      "secrets_redacted": true,
+      "operator_identity_redacted": true,
+      "local_account_names_redacted": true
+    },
+    "run_id": "trusted-pool-external-runtime-20261007T053807Z",
+    "execution_mode": "production-operator-internal-pool",
+    "observations": {
+      "settlement_mode": "enforce",
+      "enforce_activated": true,
+      "enforce_scope": "pool",
+      "production_coordinator": true,
+      "launch_environment": "candidate",
+      "payout_ready_mutated": false,
+      "raw_prompt_output_redacted": true,
+      "bearer_tokens_redacted": true,
+      "buyer_visible_usage_equals_debit": false
+    },
+    "candidate_identity": {
+      "coordinator_version": "v1.8.221",
+      "accepted_id": "Augustas11/macprovider:v1.8.222@7e68120b8ac0b92e8291a990c88b40f55bafcf5a",
+      "member_cli_sha256": "fc3e54691585a0b0fa9509225fcac51ae89b6dba10f172a2f098f271b94bedcc",
+      "llama_server_build": "b11149",
+      "gguf_sha256": "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff",
+      "gguf_artifact_id": "gguf-q4-k-m",
+      "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+      "pool_id": "G2Nr74KPQN_FxLrrrAhtXQ",
+      "buyer_account_fingerprint": "7d690d4ff0a1e559d71d56037a33a592a59511fe8a7c643a88d0a4206c7025ef",
+      "manifest_version": 1,
+      "manifest_core_digest": "c9e7b76a4cf7f2cfdef6a8ed45fe3971591e604d2bb294aac2e4d82b2dd27859",
+      "runtime_source": "llamacpp_loopback",
+      "fingerprint_salt": "9b3a9cb6a3dff0539986ea334e2248cb58d19dc3fb9eeb6c16eec8296f4025e7"
+    }
+  }
+}

@@ -843,6 +843,10 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
                 topP: 1.0
             ))
         }
+        // Creating a Task does not mean its request has reached the scheduler.
+        // Keep the first decode blocked until both submit continuations attach,
+        // otherwise serial-a can finish before serial-b joins on a busy runner.
+        try await Self.eventually { await scheduler.metrics().attachedWaiters == 2 }
         await gate.open()
 
         let a = try await aTask.value

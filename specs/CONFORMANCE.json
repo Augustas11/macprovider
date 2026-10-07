@@ -6865,7 +6865,7 @@
     {
       "requirement_id": "SPEC-022-R012",
       "spec_id": "SPEC-022",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/billing/route_snapshot.go:func (r RouteSnapshot) Value",
         "phase4-coordinator/internal/billing/pool_operator_attestation.go:func (s *Store) PoolOperatorAttestationEligible",
@@ -6964,13 +6964,21 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "DECISION_REQUIRED",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1690",
-        "rationale": "SPEC-022 v0.2.0 (#1690 M3) adds pool-scoped settlement eligibility. #1690 M4 implements it in the coordinator: runtime_source, pool_generation, and pool_operator_account_id on the route snapshot (digested only when runtime_source is non-empty), the pool_operator_attested usage source derived from the snapshot's digested values and the durable pool records, the verifier and receipt-ingestion handling (IngestPoolSettlementReceipt; exact usage match still required), the usage_source CHECK migration without row rewrites, and finality token_source from the persisted per-attempt sources. The #1690 M5 CLI signs pool-authorized receipts, and R-12.8's downgrade gate (coordinator pool-rollback-preflight, CheckPoolRollbackPreflight) blocks a rollback to a pre-v0.2.0 coordinator while any pool attempt can still settle. SPEC-022 v0.2.1 also tracks R-3.4.2, the pool_operator_attested exception to R-3.4.1, under this requirement. SPEC-022 v0.2.2 adds R-12.8 signed settlement finality: a gateway that advertises X-MacProvider-Internal-Settlement-Trailers under the service token gets delivered-only non-streaming recording and a finality tuple signed with an HMAC over the account, request id, coordinator internal request id and tuple (declared trailers, a signed legacy tuple without receipt state or route snapshot, and, when post-delivery settlement evidence fails, a signed closed refund with the provider credit quarantined (and reported closed quarantined by the finality lookup) under enforce route mode, or the signed legacy tuple with the payable credit kept otherwise); any other caller keeps the pre-v0.2.2 order and header finality, so mixed versions stay safe, and the gateway pin coordinator.require_settlement_trailers holds any 200 without signed finality (mapped above, with golden-vector, wire, mixed-pairing and builder-sweep tests). Pending until a signed enforce-mode pool journey (M6) shows a verified receipt and a provider ledger credit."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:2fa09b09a7bb96c521197222f7de3eaebb998184",
+          "source": null,
+          "captured_at": "2026-10-07",
+          "expires_at": "2026-10-14"
+        },
+        {
+          "artifact": "sha256:a2f113817f92238e23fba66418c2022cb7c268337be27f831cdc7cf48bf1e19f",
+          "source": "journeys/evidence/trusted-pool-external-runtime-20261007T053807Z.spec-022-r012-spec-042-r013-spec-042-r014.journey-result.signed.json",
+          "captured_at": "2026-10-07",
+          "expires_at": "2026-10-14"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-022-R014",
@@ -8256,7 +8264,7 @@
     {
       "requirement_id": "SPEC-042-R013",
       "spec_id": "SPEC-042",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/poolmanifest/manifest.go:func (pc PolicyCore) ValidateAcceptance",
         "phase4-coordinator/internal/buyer/pool_external_runtime.go:func (v poolRouteView) externalRuntimeCandidate",
@@ -8281,18 +8289,26 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "DECISION_REQUIRED",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1690",
-        "rationale": "SPEC-042 0.0.32 (#1690 M3) specifies external-runtime serving on Trusted Pools. The #1690 M4 coordinator side is implemented: policy-core/v2 encode/verify/replay with golden vectors, the route-time runtime-allowlist predicate at the five SPEC-042-R005 sites (the admission bar and the FR-HG8 hello sandbox stay unlifted), the SPEC-047-R003(iv) pool route-time member derivation, the SPEC-022-R012 route-snapshot members and pool_operator_attested usage source re-derived from durable pool records, and the route-time half of the fail-closed test set. The SPEC-015-R006 CLI per-request signing path and its older-CLI-never-signs test landed in #1690 M5 (mapped under SPEC-015-R006), and the slot queue now applies the same pool-scoped sandbox view as the candidate path. Pending: a signed enforce-mode pool journey with a verified receipt and a provider ledger credit (#1690 M6)."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:2fa09b09a7bb96c521197222f7de3eaebb998184",
+          "source": null,
+          "captured_at": "2026-10-07",
+          "expires_at": "2026-10-14"
+        },
+        {
+          "artifact": "sha256:a2f113817f92238e23fba66418c2022cb7c268337be27f831cdc7cf48bf1e19f",
+          "source": "journeys/evidence/trusted-pool-external-runtime-20261007T053807Z.spec-022-r012-spec-042-r013-spec-042-r014.journey-result.signed.json",
+          "captured_at": "2026-10-07",
+          "expires_at": "2026-10-14"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-042-R014",
       "spec_id": "SPEC-042",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/buyer/engine_selection.go:func engineRouteError",
         "phase4-coordinator/internal/buyer/engine_selection.go:func providersForEngine",
@@ -8313,13 +8329,21 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "DECISION_REQUIRED",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1690",
-        "rationale": "SPEC-042 0.0.33 (#1690 M7) specifies the buyer engine filter on pool routes. The #1690 M7 coordinator slice implements it: engine_unavailable for a non-native class on a global route or outside the active v2 allowlist, the filter on the candidate, pinned/self-route, and slot-queue paths (failover re-enters the same selection), no-spill when the scope has no session of the class for the model, and the X-MacProvider-Engine disclosure of the coordinator-recorded class. Settlement is unchanged. Pending until a signed journey serves engine=llamacpp on an allowlisting pool with pool_operator_attested settlement; the #1690 M7 lab e2e is local evidence only. SPEC-042 0.0.35 (#1690 M9) adds lmstudio_loopback to the selectable classes. SPEC-042 0.0.36 (#1690 M9) adds omlx_loopback to the selectable classes."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:2fa09b09a7bb96c521197222f7de3eaebb998184",
+          "source": null,
+          "captured_at": "2026-10-07",
+          "expires_at": "2026-10-14"
+        },
+        {
+          "artifact": "sha256:a2f113817f92238e23fba66418c2022cb7c268337be27f831cdc7cf48bf1e19f",
+          "source": "journeys/evidence/trusted-pool-external-runtime-20261007T053807Z.spec-022-r012-spec-042-r013-spec-042-r014.journey-result.signed.json",
+          "captured_at": "2026-10-07",
+          "expires_at": "2026-10-14"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-043-R001",

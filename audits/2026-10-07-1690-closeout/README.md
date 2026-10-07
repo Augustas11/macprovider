@@ -1,7 +1,8 @@
 # #1690 acceptance closeout — 2026-10-07
 
 This is an in-progress evidence record, not an issue-completion or production
-Creator-launch claim. Work continues in #1879. Existing coordinator v1.8.221
+Creator-launch claim. #1879 merged at `bc117360106d91055221e01f0f8b0de4cd2ac550`;
+signed-evidence integration and release acceptance continue under #1690. Existing coordinator v1.8.221
 and the existing signed member CLI reporting v1.8.222 remain the serving
 binaries. The latter is a private acceptance candidate, not a published stable
 release: run `37493026731`, reviewed-main source
@@ -25,8 +26,9 @@ HTTP handlers. No production activation or live-provider replacement occurred.
   Redacted artifact: `journeys/evidence/trusted-pool-creator-mvp-20261007T043959Z.redacted.json`.
   SHA-256: `7d3700d668ccd7caa086d2a29a70e2d3ebba119ddde8bf7595f41fdd6d2db664`.
 
-These are unsigned captures until the protected main signing workflows run.
-Neither capture fills production conformance or proves an external Creator launch.
+The protected main signing workflows subsequently signed both captures; see
+the signing record below. Neither capture fills production conformance or
+proves an external Creator launch.
 
 ## External-runtime capture correction
 
@@ -54,7 +56,46 @@ SHA-256: `f696f31eb981f47ba310c25c6e71313ada7f9678a289b2970f74e7e5d47f37db`.
 The operator-authored identity was qualified as `github-user:<login>` before
 redaction to avoid collision with the public repository owner in accepted IDs;
 the original metadata and all original HTTP/SQL captures remain private.
-This artifact is unsigned until the protected workflow signs reviewed main.
+The protected workflow subsequently signed this artifact; see the signing
+record below. Its production capture does not include the later #1879 CLI fix.
+
+## Protected signing and bounded conformance integration
+
+All three evidence-only workflows ran from reviewed main
+`bc117360106d91055221e01f0f8b0de4cd2ac550`, with explicit operator approval of
+the protected environment. No CLI publication or production activation occurs
+through these workflows.
+
+| Journey | Successful workflow | Signed envelope SHA-256 | Expiry |
+| --- | --- | --- | --- |
+| External runtime | [37597012552](https://github.com/Augustas11/macprovider/actions/runs/37597012552) | `a2f113817f92238e23fba66418c2022cb7c268337be27f831cdc7cf48bf1e19f` | 2026-10-14 |
+| Layer2 | [37597017902](https://github.com/Augustas11/macprovider/actions/runs/37597017902) | `01eb2d50a357e4cd7f356dbfeb3f000f3ffba9fec345a0cab95eded20f11ee8f` | 2026-10-14 |
+| Creator MVP | [37597062267](https://github.com/Augustas11/macprovider/actions/runs/37597062267) | `8fda5df88f98961101363a931b6a01a537d8b07a6cd899714ef4ca170b2169d6` | 2026-10-07 |
+
+Signed envelopes accompany the existing redacted captures under
+`journeys/evidence/`. Targeted integration verification passed the pinned public
+key signatures, payload/artifact binding, expiry and current implementation/test
+selector checks for all 19 covered requirements (3 external, 4 Layer2, 12
+creator) at the original integration base. Downloaded redacted captures match committed bytes; envelope hashes
+match workflow export manifests. External-runtime workflow output promotes only
+SPEC-022-R012 and SPEC-042-R013/R014. Other rows and spec-level status are
+preserved. Layer2 and creator remain evidence-only: their signatures do not
+promote full SPEC-042/043 rows or authorize a Creator launch. Short-lived
+isolated evidence must be recaptured after expiry, not extended by re-signing.
+
+Post-#1883/#1876 revalidation against `62a9a459de59f759e09fbe88a9015e738da367ae`
+still passes all three external-runtime promotion rows. The older Layer2
+SPEC-042-R010 gateway selector and creator SPEC-043-R007 buyer selector have
+changed, so those two signed captures are historical, not current-base evidence.
+No Layer2 or creator conformance claim is made from them.
+
+Fresh isolated captures passed on that exact merged source:
+`journeys/evidence/trusted-pool-layer2-20261007T122927Z.redacted.json` and
+`journeys/evidence/trusted-pool-creator-mvp-20261007T122939Z.redacted.json`.
+These are **unsigned** until their reviewed capture commit lands on main and
+the protected signing workflows run. They do not authorize conformance
+promotion, a live Creator launch, or deployment. Fresh protected signatures and
+their reviewed integration remain a follow-up gate for #1690.
 
 ## Production SPEC-043-R007 timing
 
@@ -119,8 +160,9 @@ derived by this collector. Original private snapshots remain operator-only.
 
 ## Still blocking completion
 
-- Protected signatures for the fresh isolated captures and signed production
-  external-runtime journey remain pending.
+- Protected signing completed as recorded above. Reviewed integration of the
+  signed envelopes and three external-runtime conformance rows is the current
+  gate; Layer2 and creator full-row production conformance is not claimed.
 - Before operator-approved cleanup, the gateway had 20 global ACTIVE
   settlement-held reservations. The scoped
   released-binary relay-blind reconciler returned `held=1`, `errors=0` for the
@@ -145,8 +187,10 @@ derived by this collector. Original private snapshots remain operator-only.
   `swift test --jobs 2 --filter OpenAICompatibleLoopbackRuntimeTests` on
   Studio exited 1 before running tests: the installed Command Line Tools
   toolchain lacks XCTest. Its generated lockfile change was restored. GitHub
-  macOS/Xcode verification, combined review, and reviewed signed rollout
-  remain pending; no unreviewed local binary has replaced a live provider.
+  macOS/Xcode verification and combined review subsequently passed for #1879
+  (CI `37592545986`, spec-index `37592546005`, zero C/H/M across all three
+  review lanes). Reviewed signed rollout remains pending; no unreviewed local
+  binary has replaced a live provider.
 - Final acceptance of the bounded mixed-version proof remains pending. Current
   Llama qualification and the amended capability-aware Ollama profile are
   evidenced below; this does not qualify future engine/model entries. Public external Creator launch is a separate SPEC-043 scope;
