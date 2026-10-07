@@ -61,7 +61,7 @@ All six requested refusal calls returned their expected refusal status. That
 fact alone does not satisfy the stronger evidence contract. The findings above
 remain open; the ten paid paths do not make the full journey a pass.
 
-## Restart and cleanup
+## Restart validation
 
 The coordinator became active at `2026-10-07T05:42:58Z`, then the gateway at
 `2026-10-07T05:43:07Z`, using the existing installed release. Both health checks
@@ -70,10 +70,6 @@ network interruption was announced as 10–20 seconds; continuous HTTP outage
 measurement was not captured, so the systemd timestamps are not an exact
 outage-duration measurement.
 
-Four owned test pools are paused. The three owned Studio test listeners on
-18140/18150/18160 were stopped; about 1.54 GiB of runtime/model copies were
-removed after archiving credentials, identity state, configurations, and logs.
-The primary provider on 8080 and unrelated M1/M6 resources were preserved.
 The protected private independent-check summary has SHA-256
 `9a4e41ee202c684ae7ca4205092bf7bbb763cdb8ccdafe708501304a32c78fdf`.
 
