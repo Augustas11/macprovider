@@ -265,6 +265,7 @@ TRUSTED_POOL_EXTERNAL_RUNTIME_CANDIDATE_IDENTITY_KEYS = {
     "gguf_artifact_id",
     "model_id",
     "pool_id",
+    "buyer_account_fingerprint",
     "manifest_version",
     "manifest_core_digest",
     "runtime_source",
@@ -2264,7 +2265,7 @@ def _validate_trusted_pool_external_runtime_journey_result(
             f"{location}.signed.candidate_identity",
             result,
         )
-        for field_name in ("member_cli_sha256", "gguf_sha256", "manifest_core_digest", "fingerprint_salt"):
+        for field_name in ("member_cli_sha256", "gguf_sha256", "manifest_core_digest", "fingerprint_salt", "buyer_account_fingerprint"):
             value = identity.get(field_name)
             if not isinstance(value, str) or not SHA256_HEX_RE.fullmatch(value):
                 result.error(f"{location}.signed.candidate_identity.{field_name}", "must be a 64-char hex fingerprint")

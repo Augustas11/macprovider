@@ -1,0 +1,311 @@
+{
+  "schema_version": 1,
+  "capture": "20261007T065853Z",
+  "scope": "isolated nonbilling operator qualification; not a release or live rollout",
+  "status": "PARTIAL",
+  "provenance": {
+    "cli_sha256": "a858705811e66ac006c8603dc4d1b2fe6eb12a18b4d730beca971bc1af36113b",
+    "mlx_metallib_sha256": "84e487182336648a826132e50e7a4cd2cae0bc77ac6eafa89cc72f3a964fdbaf",
+    "candidate_scope": "local_unreleased_isolated_measurement_only",
+    "source_base_commit": "e0667d4984d8dfe3f73542c6a6dc4ec68d379612",
+    "source_files_sha256": {
+      "MSBThroughputCommand.swift": "6d9d3ebb8dfe9ed745745314ce3c0b563a349fec2b0e7ad9817192b955263b22",
+      "MSBLoopbackCommand.swift": "4afebf4e8dc194f9836ac48703dd6f3d0347ff8f3e5962d2eff2dec5bcb1d560",
+      "MSBOllamaLoopbackCommand.swift": "5ea2c0b7893a329ec14d0b5f1a3c89617326d0d093d677d196cb4e48be10b59a",
+      "MSBPerplexityCommand.swift": "108c0ffa931f1ca6ab08394bf952104c5109e5449b0b7411333a827f06bcf1b3"
+    },
+    "llama_server_sha256": "41df13c126456f8e5fab2057c86a790067a85ea1dfd8fbc0071cc45fbba56262",
+    "llama_perplexity_sha256": "8050ad909ddc0260cf685775291cb83f93e232a2f3beb97736e83ced0fe00869",
+    "ollama_binary_sha256": "5f0e245e8369a66b7b24654c51c8ec95f3eab9a1e263f6e95e20d2d4374b8e26",
+    "ollama_model_sha256": "c5396e06af294bd101b30dce59131a76d2b773e76950acc870eda801d3ab0515",
+    "llama_model_sha256": "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff",
+    "corpus_sha256": "173c87a53759e0201f33e0ccf978e510c2042d7f2cb78229d9a50d79b9e7dd08",
+    "corpus_chunks": 150,
+    "corpus_ctx": 512,
+    "ollama_strict_same_m0": false,
+    "ollama_runtime_perplexity_measured": false,
+    "buyer_billing": false
+  },
+  "workload": {
+    "prompt_tokens": 1024,
+    "decode_tokens": 256,
+    "runs": 5,
+    "concurrency": [
+      1,
+      4,
+      8
+    ],
+    "temperature": 0,
+    "forced_decode": true,
+    "prompt_cache": false
+  },
+  "llama32_3b": {
+    "native_model": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+    "native_revision": "7f0dc925e0d0afb0322d96f9255cfddf2ba5636e",
+    "native_serial_baselines": [
+      {
+        "rows": 2,
+        "runs": 5,
+        "timestamp": "2026-10-07T07:00:28Z",
+        "promptTokensPerRow": 1024,
+        "decodeTokensPerRow": 256,
+        "productionSerialTPSp50": 223.35273869985147,
+        "productionSerialTPSRuns": [
+          222.96951851091984,
+          223.35273869985147,
+          224.52987404483898,
+          223.52261077230017,
+          222.65303746675212
+        ],
+        "productionSerialTTFTSecondsRuns": [
+          0.37709009647369385,
+          0.37728190422058105,
+          0.37640297412872314,
+          0.3760470151901245,
+          0.3768620491027832
+        ],
+        "productionSerialCVPct": 0.3194265844619339,
+        "promptTokenSHA256": [
+          "3ad3dc7aa3be0cf9b93c246c597d6c8f738738992e96971111a38888cb808e7c",
+          "fa43b95eeeab0971f84193cd65756658c22b554a6340eb39fe58466bcd4c9974"
+        ]
+      },
+      {
+        "rows": 4,
+        "runs": 5,
+        "timestamp": "2026-10-07T07:01:12Z",
+        "promptTokensPerRow": 1024,
+        "decodeTokensPerRow": 256,
+        "productionSerialTPSp50": 222.51138655645906,
+        "productionSerialTPSRuns": [
+          222.51138655645906,
+          222.20158363938233,
+          222.3127334042669,
+          222.91397105656733,
+          222.78925221190693
+        ],
+        "productionSerialTTFTSecondsRuns": [
+          0.37776899337768555,
+          0.3773980140686035,
+          0.37738311290740967,
+          0.37731099128723145,
+          0.37759697437286377
+        ],
+        "productionSerialCVPct": 0.13644287888403842,
+        "promptTokenSHA256": [
+          "3ad3dc7aa3be0cf9b93c246c597d6c8f738738992e96971111a38888cb808e7c",
+          "fa43b95eeeab0971f84193cd65756658c22b554a6340eb39fe58466bcd4c9974",
+          "735e49b050845fa91fa23b7624a93cdfdb76cd3550c3163bee73158b899d5a42",
+          "2d0a9f551c66cb560725072cc903e8e401d11cb7b33f95129d65322cf91a6ea3"
+        ]
+      },
+      {
+        "rows": 8,
+        "runs": 5,
+        "timestamp": "2026-10-07T07:02:14Z",
+        "promptTokensPerRow": 1024,
+        "decodeTokensPerRow": 256,
+        "productionSerialTPSp50": 222.46904165615607,
+        "productionSerialTPSRuns": [
+          222.46904165615607,
+          222.3494243409813,
+          222.57540704921115,
+          221.8453529320431,
+          222.72838888102376
+        ],
+        "productionSerialTTFTSecondsRuns": [
+          0.3775070905685425,
+          0.37778210639953613,
+          0.37750399112701416,
+          0.377174973487854,
+          0.3769420385360718
+        ],
+        "productionSerialCVPct": 0.1513795275996898,
+        "promptTokenSHA256": [
+          "3ad3dc7aa3be0cf9b93c246c597d6c8f738738992e96971111a38888cb808e7c",
+          "fa43b95eeeab0971f84193cd65756658c22b554a6340eb39fe58466bcd4c9974",
+          "735e49b050845fa91fa23b7624a93cdfdb76cd3550c3163bee73158b899d5a42",
+          "2d0a9f551c66cb560725072cc903e8e401d11cb7b33f95129d65322cf91a6ea3",
+          "7239c0fde766baeca074097f43d5c295ca9cab8a672e907fb3495e0bc8c20cde",
+          "e045395e03e23b951d9891df261bfc034dba3d765d82c844edf2d32c4f03617d",
+          "182e9ea0b4eeeb9ffcc9d9b3890feacc2b711dfcb36b085ec70eb3d9b722dee3",
+          "85304bdf3b094947b3deb663275012d0c94d83c1ad5c6fe66978040233fbccf6"
+        ]
+      }
+    ],
+    "llamacpp_levels": [
+      {
+        "aggregateCVPct": 0.4726620482022873,
+        "aggregateTPSRuns": [
+          166.25416852115345,
+          166.7673087923501,
+          165.77389812010583,
+          167.1664168168127,
+          167.80481639043973
+        ],
+        "aggregateTPSp50": 166.7673087923501,
+        "concurrency": 1,
+        "perRowTPSp50": 166.7673087923501,
+        "promptTokenSHA256": [
+          "3ad3dc7aa3be0cf9b93c246c597d6c8f738738992e96971111a38888cb808e7c"
+        ],
+        "ttftSamples": 5,
+        "ttftSecondsP50": 0.40701091289520264,
+        "ttftSecondsP95": 0.41542208194732666
+      },
+      {
+        "aggregateCVPct": 4.103042211720552,
+        "aggregateTPSRuns": [
+          197.97872535301673,
+          183.9830857642507,
+          197.82546456405385,
+          183.16109396749545,
+          198.07468994560836
+        ],
+        "aggregateTPSp50": 197.82546456405385,
+        "concurrency": 4,
+        "perRowTPSp50": 59.00947920653615,
+        "promptTokenSHA256": [
+          "3ad3dc7aa3be0cf9b93c246c597d6c8f738738992e96971111a38888cb808e7c",
+          "fa43b95eeeab0971f84193cd65756658c22b554a6340eb39fe58466bcd4c9974",
+          "735e49b050845fa91fa23b7624a93cdfdb76cd3550c3163bee73158b899d5a42",
+          "2d0a9f551c66cb560725072cc903e8e401d11cb7b33f95129d65322cf91a6ea3"
+        ],
+        "ttftSamples": 20,
+        "ttftSecondsP50": 1.6389530897140503,
+        "ttftSecondsP95": 1.6682889461517334
+      },
+      {
+        "aggregateCVPct": 1.739412606827953,
+        "aggregateTPSRuns": [
+          191.95446546190524,
+          192.36722883524754,
+          186.0672354634461,
+          192.1830846208365,
+          186.23044109113397
+        ],
+        "aggregateTPSp50": 191.95446546190524,
+        "concurrency": 8,
+        "perRowTPSp50": 28.650290200632273,
+        "promptTokenSHA256": [
+          "3ad3dc7aa3be0cf9b93c246c597d6c8f738738992e96971111a38888cb808e7c",
+          "fa43b95eeeab0971f84193cd65756658c22b554a6340eb39fe58466bcd4c9974",
+          "735e49b050845fa91fa23b7624a93cdfdb76cd3550c3163bee73158b899d5a42",
+          "2d0a9f551c66cb560725072cc903e8e401d11cb7b33f95129d65322cf91a6ea3",
+          "7239c0fde766baeca074097f43d5c295ca9cab8a672e907fb3495e0bc8c20cde",
+          "e045395e03e23b951d9891df261bfc034dba3d765d82c844edf2d32c4f03617d",
+          "182e9ea0b4eeeb9ffcc9d9b3890feacc2b711dfcb36b085ec70eb3d9b722dee3",
+          "85304bdf3b094947b3deb663275012d0c94d83c1ad5c6fe66978040233fbccf6"
+        ],
+        "ttftSamples": 40,
+        "ttftSecondsP50": 2.5029810667037964,
+        "ttftSecondsP95": 3.4747090339660645
+      }
+    ],
+    "actual_prompt_token_parity": true,
+    "perplexity_status": "superseded pending explicit BOS and corpus/evaluated/target token proofs"
+  },
+  "qwen25_05b": {
+    "native_model": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+    "native_revision": "a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3",
+    "native_serial_baselines": [
+      {
+        "rows": 2,
+        "runs": 5,
+        "timestamp": "2026-10-07T07:05:34Z",
+        "promptTokensPerRow": 1024,
+        "decodeTokensPerRow": 256,
+        "productionSerialTPSp50": 386.8261671926762,
+        "productionSerialTPSRuns": [
+          387.3405935672293,
+          386.4693222005326,
+          386.57207558473186,
+          386.8261671926762,
+          386.9916558737671
+        ],
+        "productionSerialTTFTSecondsRuns": [
+          0.06392800807952881,
+          0.06414103507995605,
+          0.0638200044631958,
+          0.06403100490570068,
+          0.06409800052642822
+        ],
+        "productionSerialCVPct": 0.08982534166521534,
+        "promptTokenSHA256": [
+          "add983c5656aedcd1c11e26dbc4e3d7ebab89d73b6292148be63902592678880",
+          "807b8b94e3c72e5efd17729a080a10e313675082a310d3999ce20ee0cdc3308a"
+        ]
+      },
+      {
+        "rows": 4,
+        "runs": 5,
+        "timestamp": "2026-10-07T07:05:52Z",
+        "promptTokensPerRow": 1024,
+        "decodeTokensPerRow": 256,
+        "productionSerialTPSp50": 389.18727979489177,
+        "productionSerialTPSRuns": [
+          389.18727979489177,
+          389.5912132951486,
+          389.0719233235311,
+          388.97918008179585,
+          389.52061808640985
+        ],
+        "productionSerialTTFTSecondsRuns": [
+          0.06324601173400879,
+          0.06376492977142334,
+          0.06354892253875732,
+          0.06393301486968994,
+          0.06385290622711182
+        ],
+        "productionSerialCVPct": 0.06995750856639239,
+        "promptTokenSHA256": [
+          "add983c5656aedcd1c11e26dbc4e3d7ebab89d73b6292148be63902592678880",
+          "807b8b94e3c72e5efd17729a080a10e313675082a310d3999ce20ee0cdc3308a",
+          "f33e4bf7ea428c3572a396730769adb1e01f929489fcb30b4427fd500b907bee",
+          "0ed6d8064809cbfc68f4e6f9926a42f752ec0a9309dc478f3439159a3dccfde4"
+        ]
+      },
+      {
+        "rows": 8,
+        "runs": 5,
+        "timestamp": "2026-10-07T07:06:13Z",
+        "promptTokensPerRow": 1024,
+        "decodeTokensPerRow": 256,
+        "productionSerialTPSp50": 388.59472545822405,
+        "productionSerialTPSRuns": [
+          388.4379102369679,
+          388.6165954574491,
+          388.33121333316217,
+          388.6389602530163,
+          388.59472545822405
+        ],
+        "productionSerialTTFTSecondsRuns": [
+          0.06402003765106201,
+          0.06373405456542969,
+          0.06421494483947754,
+          0.06373393535614014,
+          0.0636969804763794
+        ],
+        "productionSerialCVPct": 0.034380323987475425,
+        "promptTokenSHA256": [
+          "add983c5656aedcd1c11e26dbc4e3d7ebab89d73b6292148be63902592678880",
+          "807b8b94e3c72e5efd17729a080a10e313675082a310d3999ce20ee0cdc3308a",
+          "f33e4bf7ea428c3572a396730769adb1e01f929489fcb30b4427fd500b907bee",
+          "0ed6d8064809cbfc68f4e6f9926a42f752ec0a9309dc478f3439159a3dccfde4",
+          "ad9638f00e3b37ecf320b6bce9449b8d87f8f23937c3ded205b047d84ea9dae9",
+          "b082b64323362f14e697dfd57a5ed51ed548141ec993b0215c296a0cc60aeb68",
+          "fde6369b0140bac3c7744eb4cc79f6a8514346f65041daae13f3ae78c1c158e6",
+          "e6c8cffdff94494e38e45bbe630d3d84a66c81a2c92fc169a2bd58749a917d3b"
+        ]
+      }
+    ],
+    "ollama_status": "FAIL: reported prompt_eval_cached_count=1023; no cache-free throughput pass",
+    "ollama_strict_same_m0": false,
+    "ollama_runtime_perplexity_measured": false
+  },
+  "limitations": [
+    "Native contiguous-batched measurements are not presented as production serving performance.",
+    "No capability-limited Ollama measurement is promoted to strict M0.",
+    "The entire benchmark exited nonzero; passing subsets are reported individually."
+  ]
+}

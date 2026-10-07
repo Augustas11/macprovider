@@ -1009,6 +1009,9 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         siblingSnapshotDirectories: [URL] = [],
         httpClient: (any BYOMDiscoveryHTTPClient)? = nil,
         cache: BYOMArtifactDigestCache = BYOMArtifactDigestCache(url: BYOMArtifactDigestCache.defaultURL()),
+        pinRecountTokenizer: @escaping @Sendable (MLXSnapshotIdentity) async -> PinnedSnapshotTokenizer? = { snapshot in
+            await PinnedSnapshotTokenizer.load(snapshot: snapshot)
+        },
         deadline: Date? = nil
     ) async throws -> OpenAICompatibleLoopbackRuntime {
         guard let validatedOrigin = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin) else {
@@ -1043,6 +1046,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             digestResolver: resolver,
             siblingSnapshotSHA256: siblingSnapshotSHA256,
             siblingSnapshotDirectories: siblingSnapshotDirectories,
+            pinRecountTokenizer: pinRecountTokenizer,
             deadline: deadline
         )
     }
@@ -1169,6 +1173,9 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         siblingSnapshotDirectories: [URL] = [],
         httpClient: (any BYOMDiscoveryHTTPClient)? = nil,
         cache: BYOMArtifactDigestCache = BYOMArtifactDigestCache(url: BYOMArtifactDigestCache.defaultURL()),
+        pinRecountTokenizer: @escaping @Sendable (MLXSnapshotIdentity) async -> PinnedSnapshotTokenizer? = { snapshot in
+            await PinnedSnapshotTokenizer.load(snapshot: snapshot)
+        },
         deadline: Date? = nil
     ) async throws -> OpenAICompatibleLoopbackRuntime {
         guard let validatedOrigin = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin) else {
@@ -1213,6 +1220,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             lmStudioBinding: binding,
             siblingSnapshotSHA256: siblingSnapshotSHA256,
             siblingSnapshotDirectories: siblingSnapshotDirectories,
+            pinRecountTokenizer: pinRecountTokenizer,
             deadline: deadline
         )
     }
@@ -1309,16 +1317,17 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
     /// prompt and token budget) through the runtime's own chat-completions
     /// leg. The rate is the native probe's quantity: completion tokens over
     /// the whole request, start to stream end, so prefill and any upstream
-    /// model load count. The count is the upstream's own
-    /// (`usage.completion_tokens`, else `timings.predicted_n` from llama-server
-    /// only), bounded by `maxTokens` and then capped at the content-bearing
-    /// deltas actually streamed, so a forged count can only lower the rate;
-    /// a stream without the upstream's count fails closed. The bound
-    /// identity (llama-server's `/props` served file included) is checked
-    /// immediately before and after the generation inside the same deadline.
-    /// It never touches `ProviderStatus` (no usage, request log or billing),
-    /// never logs prompt or completion text, and any failure is an outcome,
-    /// never a thrown error, so serving is unaffected.
+    /// model load count. The counted tokens are the minimum of the upstream's
+    /// own count (`usage.completion_tokens`, else `timings.predicted_n` from
+    /// llama-server only) and the trusted pinned-tokenizer recount of the
+    /// returned assistant content. Both counts must be positive and
+    /// independently within `maxTokens`; tool calls and missing or changed
+    /// tokenizer identity fail closed. The bound identity (llama-server's
+    /// `/props` served file included) is checked immediately before and after
+    /// the generation inside the same deadline. It never touches
+    /// `ProviderStatus` (no usage, request log or billing), never logs prompt
+    /// or completion text, and any failure is an outcome, never a thrown error,
+    /// so serving is unaffected.
     func measureStartupThroughput(
         maxTokens: Int = ModelRuntime.startupThroughputProbeMaxTokens,
         timeoutSeconds: TimeInterval = OpenAICompatibleLoopbackRuntime.startupThroughputProbeTimeoutSeconds
@@ -1341,8 +1350,20 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         let outcome = await Self.bounded(until: deadline, cancelWithCaller: true) { [self] () async -> LoopbackStartupThroughputOutcome? in
             guard await self.probeServesBoundIdentity() else { return .failed(reason: "identity_unbound") }
+            guard let tokenizerTask = self.recountTokenizer else {
+                return .failed(reason: "tokenizer_unavailable")
+            }
+            guard let tokenizer = await tokenizerTask.value else {
+                return .failed(reason: "tokenizer_unavailable")
+            }
             let measured = await Self.runStartupThroughputProbe(
-                client, url: url, body: body, maxTokens: maxTokens, acceptsPredictedN: acceptsPredictedN, timeouts: timeouts
+                client,
+                url: url,
+                body: body,
+                maxTokens: maxTokens,
+                acceptsPredictedN: acceptsPredictedN,
+                recountTokenizer: tokenizer,
+                timeouts: timeouts
             )
             guard case .ok = measured else { return measured }
             guard await self.probeServesBoundIdentity() else { return .failed(reason: "identity_unbound") }
@@ -1367,6 +1388,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         body: Data,
         maxTokens: Int,
         acceptsPredictedN: Bool,
+        recountTokenizer: PinnedSnapshotTokenizer,
         timeouts: LoopbackGenerationTimeouts
     ) async -> LoopbackStartupThroughputOutcome {
         let startedAt = ProcessInfo.processInfo.systemUptime
@@ -1397,18 +1419,21 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             }
             let (result, _) = try accumulator.finish()
             let endedAt = ProcessInfo.processInfo.systemUptime
-            // A plain JSON body's count is its `usage` (0 when absent) and
-            // its content is one delta.
-            let plainBody = accumulator.decodedFromPlainBody
-            let attested = plainBody
+            if result.toolCalls?.isEmpty == false {
+                return .failed(reason: "tool_calls")
+            }
+            let contentPresent = !result.content.isEmpty
+            let recounted = contentPresent ? recountTokenizer.count(result.content) : nil
+            if contentPresent && recounted == nil {
+                return .failed(reason: "tokenizer_identity_changed")
+            }
+            let upstream = accumulator.decodedFromPlainBody
                 ? result.completionTokens
                 : accumulator.upstreamCompletionTokens ?? predictedN
-            let contentDeltas = plainBody
-                ? (result.content.isEmpty ? 0 : 1)
-                : accumulator.contentDeltaCount
             return startupThroughputOutcome(
-                contentDeltas: contentDeltas,
-                completionTokens: attested,
+                contentPresent: contentPresent,
+                upstreamCompletionTokens: upstream,
+                recountedCompletionTokens: recounted,
                 maxTokens: maxTokens,
                 elapsedSeconds: endedAt - startedAt
             )
@@ -1423,22 +1448,26 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
 
     /// The startup rate through `ModelRuntime.startupThroughputRate`, the
     /// native probe's formula. The claim is bounded: content must have
-    /// streamed, the count must be the upstream's own and at most
-    /// `maxTokens`, and the elapsed time must be finite and positive;
-    /// anything else fails closed. The counted tokens are the upstream count
-    /// capped at the content-bearing deltas, so a forged count fails low.
+    /// streamed, the upstream count and trusted recount must each be positive
+    /// and at most `maxTokens`, and the elapsed time must be finite and
+    /// positive; anything else fails closed.
     static func startupThroughputOutcome(
-        contentDeltas: Int,
-        completionTokens: Int?,
+        contentPresent: Bool,
+        upstreamCompletionTokens: Int?,
+        recountedCompletionTokens: Int?,
         maxTokens: Int,
         elapsedSeconds: TimeInterval
     ) -> LoopbackStartupThroughputOutcome {
-        guard contentDeltas > 0 else { return .failed(reason: "no_content") }
-        guard let completionTokens, completionTokens > 0 else { return .failed(reason: "no_tokens") }
-        guard completionTokens <= maxTokens else { return .failed(reason: "usage_exceeds_max_tokens") }
+        guard contentPresent else { return .failed(reason: "no_content") }
+        guard let upstreamCompletionTokens, upstreamCompletionTokens > 0 else { return .failed(reason: "no_tokens") }
+        guard upstreamCompletionTokens <= maxTokens else { return .failed(reason: "usage_exceeds_max_tokens") }
+        guard let recountedCompletionTokens, recountedCompletionTokens > 0 else {
+            return .failed(reason: "tokenizer_identity_changed")
+        }
+        guard recountedCompletionTokens <= maxTokens else { return .failed(reason: "recount_exceeds_max_tokens") }
         guard elapsedSeconds.isFinite, elapsedSeconds > 0 else { return .failed(reason: "no_elapsed_time") }
         return .ok(tps: ModelRuntime.startupThroughputRate(
-            completionTokens: min(completionTokens, contentDeltas),
+            completionTokens: min(upstreamCompletionTokens, recountedCompletionTokens),
             elapsedSeconds: elapsedSeconds
         ))
     }
