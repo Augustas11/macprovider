@@ -197,14 +197,26 @@ final class PrivacyLabConfigChangeCheckpointTests: XCTestCase {
             Darwin.close(pair.1)
         }
         var sendBuffer = 1
-        XCTAssertEqual(setsockopt(pair.0, SOL_SOCKET, SO_SNDBUF, &sendBuffer, socklen_t(MemoryLayout<Int32>.size)), 0)
+        guard setsockopt(pair.0, SOL_SOCKET, SO_SNDBUF, &sendBuffer, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+            throw POSIXError(.init(rawValue: errno) ?? .EIO)
+        }
+        // Bound the fixture itself: the checkpoint deadline cannot protect a
+        // prefill send that blocks before signalReady is called.
+        let flags = Darwin.fcntl(pair.0, F_GETFL)
+        guard flags >= 0, Darwin.fcntl(pair.0, F_SETFL, flags | O_NONBLOCK) == 0 else {
+            throw POSIXError(.init(rawValue: errno) ?? .EIO)
+        }
 
-        var bytes = [UInt8](repeating: 0x61, count: 4096)
-        while true {
+        let bytes = [UInt8](repeating: 0x61, count: 4096)
+        let prefillDeadline = DispatchTime.now().uptimeNanoseconds + 2_000_000_000
+        var bufferFull = false
+        for _ in 0..<1024 {
+            guard DispatchTime.now().uptimeNanoseconds < prefillDeadline else { break }
             let result = bytes.withUnsafeBytes { raw in
                 Darwin.send(pair.0, raw.baseAddress, raw.count, MSG_DONTWAIT | MSG_NOSIGNAL)
             }
             if result < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
+                bufferFull = true
                 break
             }
             if result < 0 && errno == EINTR {
@@ -213,6 +225,10 @@ final class PrivacyLabConfigChangeCheckpointTests: XCTestCase {
             if result <= 0 {
                 break
             }
+        }
+        guard bufferFull else {
+            XCTFail("socket prefill did not reach EAGAIN within its time/iteration budget")
+            return
         }
 
         let scope = try Self.makeScope()
