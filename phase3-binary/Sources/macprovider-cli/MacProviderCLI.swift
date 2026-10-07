@@ -3164,6 +3164,33 @@ struct ServeCommand: AsyncParsableCommand {
                     expectedProviderVersion: CoordinatorClient.binaryVersion
                 )
             }()
+        let labScopedPrivacySESigner: (any SEBlobSigner)?
+        let labScopedSELivenessSigner: (any SELivenessSigning)?
+        let labScopedAttestationGenerator: Tier2AttestationTokenGenerating?
+        if let privacyLabIdentityScope, resolved.privacyClassBeta {
+            #if arch(arm64)
+            do {
+                let identity = try SecureEnclaveIdentity.loadOrCreate(
+                    label: privacyLabIdentityScope.secureEnclaveLabel,
+                    quiet: true,
+                    fileBackedURL: privacyLabIdentityScope.secureEnclaveFileURL
+                )
+                labScopedPrivacySESigner = identity
+                labScopedSELivenessSigner = identity
+                labScopedAttestationGenerator = SecureEnclaveAttestationGenerator(signer: identity)
+            } catch {
+                FileHandle.standardError.write(Data("FATAL privacy_class_se_identity_failed\n".utf8))
+                throw ExitCode(78)
+            }
+            #else
+            FileHandle.standardError.write(Data("FATAL privacy_class_se_identity_failed\n".utf8))
+            throw ExitCode(78)
+            #endif
+        } else {
+            labScopedPrivacySESigner = nil
+            labScopedSELivenessSigner = nil
+            labScopedAttestationGenerator = nil
+        }
         if resolved.donorMode {
             FileHandle.standardError.write(Data("DONOR MODE: coordinator join disabled; serving local HTTP only.\n".utf8))
         }
@@ -3179,7 +3206,7 @@ struct ServeCommand: AsyncParsableCommand {
                 modelRuntime: modelRuntime,
                 providerStatus: providerStatus,
                 runtimeSource: helloRuntimeSource,
-                attestationGenerator: {
+                attestationGenerator: labScopedAttestationGenerator ?? {
                     #if arch(arm64)
                     if let seGen = SecureEnclaveAttestationGenerator.loadIfAvailable() {
                         return seGen
@@ -3187,6 +3214,7 @@ struct ServeCommand: AsyncParsableCommand {
                     #endif
                     return ManagedDeviceAttestationGenerator(artifactPath: resolved.tier2MDAArtifactPath)
                 }(),
+                seLivenessSignerOverride: labScopedSELivenessSigner,
                 providerReceiptPublicKey: providerReceiptPublicKey,
                 providerAdmissionPublicKey: providerAdmissionPublicKey,
                 providerAdmissionNextPublicKey: providerAdmissionNextPublicKey,
@@ -3220,6 +3248,7 @@ struct ServeCommand: AsyncParsableCommand {
                 providerCredentialSource: credentialSource,
                 credentialStatusRuntime: credentialStatusRuntime,
                 admissionIdentityStatusRuntime: admissionIdentityStatusRuntime,
+                privacySESignerOverride: labScopedPrivacySESigner,
                 privacyLabIdentityScope: privacyLabIdentityScope,
                 lifecycleStateStore: lifecycleStateStore,
                 lifecycleOperationID: lifecycleOperationID,

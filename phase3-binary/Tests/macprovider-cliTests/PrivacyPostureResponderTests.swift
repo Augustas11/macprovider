@@ -202,6 +202,104 @@ final class PrivacyPostureResponderTests: XCTestCase {
         XCTAssertNil(responder.enrollmentClaim())
     }
 
+    func testLabPrivacySignerIsReusedForSELivenessChallenge() async throws {
+        let root = try makeStateRoot()
+        let signer = try SELivenessTestSigning.generate()
+        let recorder = PrivacyFrameRecorder()
+        var config = AppConfig.defaults(configPath: root.appendingPathComponent("config.yaml").path)
+        config.coordinatorURL = "ws://127.0.0.1:19080/v2/provider"
+        config.providerID = "provider-test"
+        config.model = "model-a"
+        config.relayBlindEnabled = true
+        config.privacyClassBeta = true
+        config.credentialStore = .protectedFile
+        config.relayBlindStateDirectory = root.path
+        let scope = try PrivacyLabIdentityScope.validated(config: config, isolateLifecycle: true)
+
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: IdlePrivacyRuntime(),
+            providerStatus: ProviderStatus(
+                modelID: "model-a",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: 1)
+            ),
+            sendOverride: { frame in
+                await recorder.append(frame)
+            },
+            attestationGenerator: ManagedDeviceAttestationGenerator(),
+            privacyPostureProbeOverride: MutablePrivacyPostureProbe(greenPrivacyObservation()),
+            privacySESignerOverride: signer,
+            sleepAssertionFactory: { nil },
+            installedCompatibilityManifest: { _, _ in nil },
+            privacyLabIdentityScope: scope,
+            watchdogExitHook: { _ in }
+        ))
+
+        let challengeData = try JSONSerialization.data(withJSONObject: [
+            "type": "se_liveness_challenge",
+            "nonce": "nonce-lab",
+            "timestamp": "1700000000",
+        ])
+        try await client.handleForTest(.string(String(decoding: challengeData, as: UTF8.self)))
+
+        let frames = await recorder.frames()
+        let response = try XCTUnwrap(frames.first)
+        XCTAssertEqual(response["type"] as? String, "se_liveness_response")
+        XCTAssertEqual(response["public_key"] as? String, signer.publicKeyBase64)
+        XCTAssertEqual(
+            response["public_key"] as? String,
+            signer.publicKeyRaw.base64EncodedString(),
+            "privacy posture and SE liveness must expose the same scoped SE public key"
+        )
+
+        #if arch(arm64)
+        let authSurface = SecureEnclaveAttestationGenerator(signer: signer)
+        let maybeAuthEnvelope = await authSurface.makeAttestationToken(
+            challengeBase64URL: Data(repeating: 0x33, count: 32).base64URLUnpadded(),
+            authAttemptID: "attempt-lab",
+            providerID: "provider-test",
+            binaryVersion: CoordinatorClient.binaryVersion,
+            snapshot: await ProviderStatus(
+                modelID: "model-a",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: 1)
+            ).snapshot(),
+            providerECDHPublicKey: "ecdh-key"
+        )
+        let authEnvelope = try XCTUnwrap(maybeAuthEnvelope)
+        let tokenData = try Data(base64URLUnpadded: try XCTUnwrap(authEnvelope["token"] as? String))
+        let token = try XCTUnwrap(JSONSerialization.jsonObject(with: tokenData) as? [String: Any])
+        let attestation = try XCTUnwrap(token["attestation"] as? [String: Any])
+        XCTAssertEqual(attestation["publicKey"] as? String, signer.publicKeyRaw.base64EncodedString())
+        #endif
+    }
+
+    func testLabLivenessSelectorDoesNotUsePrivacySignerWithoutLabScope() throws {
+        let privacySigner = try SELivenessTestSigning.generate()
+        XCTAssertNil(CoordinatorClient.labScopedLivenessSignerForTest(
+            privacySigner: privacySigner,
+            explicitLivenessSigner: nil,
+            scope: nil
+        ))
+    }
+
+    func testLabLivenessSelectorRejectsMismatchedExplicitSigner() throws {
+        let root = try makeStateRoot()
+        var config = AppConfig.defaults(configPath: root.appendingPathComponent("config.yaml").path)
+        config.coordinatorURL = "ws://127.0.0.1:19080/v2/provider"
+        config.relayBlindEnabled = true
+        config.privacyClassBeta = true
+        config.credentialStore = .protectedFile
+        config.relayBlindStateDirectory = root.path
+        let scope = try PrivacyLabIdentityScope.validated(config: config, isolateLifecycle: true)
+        XCTAssertNil(CoordinatorClient.labScopedLivenessSignerForTest(
+            privacySigner: try SELivenessTestSigning.generate(),
+            explicitLivenessSigner: try SELivenessTestSigning.generate(),
+            scope: scope
+        ))
+    }
+
     func testStatementListsExactlyAdvertisedDigests() throws {
         let root = try makeStateRoot()
         let runtime = try makeRuntime(directory: root, models: ["model-b", "model-a"])
