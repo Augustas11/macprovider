@@ -2,7 +2,12 @@
 
 This is an in-progress evidence record, not an issue-completion or production
 Creator-launch claim. Work continues in #1879. Existing coordinator v1.8.221
-and signed member CLI v1.8.222 remain the production binaries.
+and the existing signed member CLI reporting v1.8.222 remain the serving
+binaries. The latter is a private acceptance candidate, not a published stable
+release: run `37493026731`, reviewed-main source
+`7e68120b8ac0b92e8291a990c88b40f55bafcf5a`, channel `acceptance`. Its packaged
+standalone CLI SHA-256 matches the serving member binary:
+`fc3e54691585a0b0fa9509225fcac51ae89b6dba10f172a2f098f271b94bedcc`.
 
 ## Fresh isolated journeys
 
@@ -147,6 +152,37 @@ derived by this collector. Original private snapshots remain operator-only.
   no named external operator or hardware-backed production root is fabricated.
 
 ## Freeze verification and carried limitations
+
+### Current-model measurements
+
+The isolated throughput capture
+[`current-model-throughput-20261007T065853Z.json`](current-model-throughput-20261007T065853Z.json)
+passes Llama-3.2-3B native/llama.cpp actual prompt-token parity at c=1/4/8,
+prompt1024/decode256, n=5. llama.cpp aggregate p50 is 166.77/197.83/191.95
+tok/s; the recorded production-native serial baseline is 222.47 tok/s.
+Native contiguous-batched figures are not presented as production throughput.
+The full capture exited nonzero because Ollama reported 1,023 cached prompt
+tokens; no cache-free Ollama pass is claimed.
+
+The quality-only confirmation
+[`current-model-quality-20261007T071549Z.json`](current-model-quality-20261007T071549Z.json)
+passes actual corpus, evaluated-input and scored-target token-hash equality.
+It uses ctx512, the first150 full chunks, and 38,250 scored targets. Llama
+requires BOS128000 once in the corpus and at each chunk's first position;
+corrected native PPL11.2307 vs llama.cpp10.6216 supersedes the incomparable
+no-BOS native result. Qwen2.5-0.5B uses no BOS: native PPL17.7674 vs exact
+Ollama GGUF artifact PPL15.1892, measured by llama.cpp, not Ollama runtime.
+Quantizations differ; these are artifact-aware comparisons, not isolated
+runtime-quality effects or proof of Ollama API token identity.
+
+The opt-in BOS fix built on the Studio in179.97s after an initial compile
+failure was corrected. New unit tests await GitHub CI. Three full-diff review
+lanes cleared the code increment at0C/H/M; published custom-corpus hashes carry
+the same equality/dictionary limitation as custom prompt hashes. Required
+checks, protected signing, mixed rollout and signed-release acceptance remain
+pending. Integration of newer main also requires fresh signed BYOM discovery
+evidence for the changed version-lock selector; historical signed captures are
+retained unchanged, not treated as proof of that changed selector.
 
 The focused Python regression command covering timing, external-runtime evidence,
 and BYOM contract locks passed 102 tests in 6.604s. A first invocation failed

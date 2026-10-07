@@ -49,22 +49,26 @@ ADMISSION_SIGNED_SOURCE = (
     "spec-047-r005-spec-047-r006-spec-047-r007-spec-047-r008."
     "journey-result.signed.json"
 )
-STALE_SELECTOR_PROMOTED_REQUIREMENT_IDS = frozenset({
-    "SPEC-046-R001",
-    # #1816 pool-scoped model changes moved these mapped selectors.
-    "SPEC-046-R003",
-    "SPEC-046-R004",
-    "SPEC-046-R005",
-    "SPEC-046-R006",
-    "SPEC-046-R007",
-    "SPEC-046-R008",
-    "SPEC-047-R001",
-    "SPEC-047-R002",
-    "SPEC-047-R003",
-    "SPEC-047-R004",
-    "SPEC-047-R006",
-    "SPEC-047-R008",
-})
+FRESH_DISCOVERY_SIGNED_SOURCE = (
+    "journeys/evidence/provider-byom-discovery-20261007T043046Z."
+    "spec-046-r001-spec-046-r008.journey-result.signed.json"
+)
+# #1816: rows #1830 demoted, restored by fresh signed journeys.
+RESTORED_DISCOVERY_SIGNED_SOURCE = (
+    "journeys/evidence/provider-byom-discovery-20261006T080928Z."
+    "spec-046-r001-spec-046-r003-spec-046-r004-spec-046-r005-"
+    "spec-046-r006-spec-046-r007-spec-046-r008.journey-result.signed.json"
+)
+RESTORED_ADMISSION_SIGNED_SOURCE = (
+    "journeys/evidence/network-model-admission-20261006T100219Z."
+    "spec-047-r001-spec-047-r002-spec-047-r003-spec-047-r004-"
+    "spec-047-r006-spec-047-r008.journey-result.signed.json"
+)
+RESTORED_REQUIREMENT_SOURCES = {
+    **{f"SPEC-046-R{i:03d}": FRESH_DISCOVERY_SIGNED_SOURCE for i in (1, 8)},
+    **{f"SPEC-046-R{i:03d}": RESTORED_DISCOVERY_SIGNED_SOURCE for i in (3, 4, 5, 6, 7)},
+    **{f"SPEC-047-R{i:03d}": RESTORED_ADMISSION_SIGNED_SOURCE for i in (1, 2, 3, 4, 6, 8)},
+}
 
 
 def load_module(name: str, filename: str):
@@ -1824,20 +1828,16 @@ class BYOMJourneyConformanceMappingTests(unittest.TestCase):
             (PROVIDER_BYOM_DISCOVERY_JOURNEY_ID, "SPEC-046", DISCOVERY_SIGNED_SOURCE),
             (NETWORK_MODEL_ADMISSION_JOURNEY_ID, "SPEC-047", ADMISSION_SIGNED_SOURCE),
         ):
-            signed_path = REPO_ROOT / signed_source
-            self.assertTrue(signed_path.is_file(), signed_source)
-            digest = hashlib.sha256(signed_path.read_bytes()).hexdigest()
             for index in range(1, 9):
                 requirement_id = f"{prefix}-R{index:03d}"
+                source = RESTORED_REQUIREMENT_SOURCES.get(requirement_id, signed_source)
+                signed_path = REPO_ROOT / source
+                self.assertTrue(signed_path.is_file(), source)
+                digest = hashlib.sha256(signed_path.read_bytes()).hexdigest()
                 row = rows[requirement_id]
                 self.assertIn(journey_id, row["journeys"], requirement_id)
-                if requirement_id in STALE_SELECTOR_PROMOTED_REQUIREMENT_IDS:
-                    self.assertEqual("pending", row["state"], requirement_id)
-                    self.assertIsNotNone(row["gap"], requirement_id)
-                    self.assertIn("fresh independently trusted", row["gap"]["rationale"], requirement_id)
-                else:
-                    self.assertEqual("conformant", row["state"], requirement_id)
-                    self.assertIsNone(row["gap"], requirement_id)
+                self.assertEqual("conformant", row["state"], requirement_id)
+                self.assertIsNone(row["gap"], requirement_id)
                 sha_items = [
                     item
                     for item in row["evidence"]
@@ -1845,7 +1845,7 @@ class BYOMJourneyConformanceMappingTests(unittest.TestCase):
                 ]
                 self.assertEqual(1, len(sha_items), requirement_id)
                 self.assertEqual(f"sha256:{digest}", sha_items[0]["artifact"], requirement_id)
-                self.assertEqual(signed_source, sha_items[0]["source"], requirement_id)
+                self.assertEqual(source, sha_items[0]["source"], requirement_id)
 
         r009 = rows["SPEC-047-R009"]
         self.assertEqual("pending", r009["state"])

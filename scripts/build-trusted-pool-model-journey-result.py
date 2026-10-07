@@ -119,7 +119,8 @@ PINNED_SPDX_LICENSES = frozenset({
     "GPL-3.0-or-later", "ISC", "LGPL-2.1-only", "LGPL-2.1-or-later", "LGPL-3.0-only", "LGPL-3.0-or-later", "MIT", "MIT-0",
     "MPL-2.0", "NCSA", "OpenRAIL", "OSL-3.0", "PostgreSQL", "Unlicense", "UPL-1.0", "Zlib",
 })
-FENCE_REASON = "pool_route_fence_not_settlement_eligible"
+RECEIPT_FENCE_REASON = "pool_route_fence_not_settlement_eligible"
+LEDGER_FENCE_REASON = "pool_manifest_route_not_settlement_eligible"
 # A route decided just after a window opens may still carry the previous core
 # until the coordinator's routeable snapshot refreshes (it rebinds within the
 # sweep interval); beyond this bound the route must name the active core.
@@ -382,7 +383,8 @@ class Capture:
 
 def parse_headers(payload: bytes, label: str) -> tuple[int, dict[str, str]]:
     """`curl -D` output; the last response block wins (skips 1xx). A repeated
-    header name fails closed rather than hiding a conflicting value."""
+    evidence header name fails closed rather than hiding a conflicting value.
+    Vary is a list-valued cache header and may span multiple field lines."""
     text = payload.decode("iso-8859-1").replace("\r\n", "\n")
     blocks = [block for block in text.split("\n\n") if block.strip().startswith("HTTP/")]
     if not blocks:
@@ -398,6 +400,9 @@ def parse_headers(payload: bytes, label: str) -> tuple[int, dict[str, str]]:
             die(f"{label}: malformed header line")
         key = name.strip().lower()
         if key in headers:
+            if key == "vary":
+                headers[key] += ", " + value.strip()
+                continue
             die(f"{label}: header {key!r} repeats")
         headers[key] = value.strip()
     return int(match.group(1)), headers
@@ -806,6 +811,7 @@ def capture_paid(capture: Capture, run: dict[str, Any], salt: str, base_dir: str
                 "prompt_rate_per_mtok", "completion_rate_per_mtok", "global_multiplier_ppm", "gross_credits",
                 "provider_share_bps", "provider_credits", "quarantined", "payable")},
             "quarantine_reason": row.get("quarantine_reason") or None,
+            "created_at_unix_ms": None if row.get("created_at_utc") in (None, "") else rfc3339_ms(row.get("created_at_utc"), f"{where}.created_at_utc"),
         })
     for row in capture.rows(f"{base_dir}/usage_events.json"):
         where = f"{base_dir} usage_events"
@@ -1876,12 +1882,13 @@ def check_paid(j: Journey, r: Any, name: str, want_kind: str | None, stream: boo
         require(row["usage_source"] in ("coordinator_observed", "byte_estimated", "pool_operator_attested"), f"{name}: usage_source")
         int_in(row["terminal_state_ts_unix_ms"], f"{name}.terminal_state_ts_unix_ms", 1)
     # Closed per-attempt coverage: every routed attempt has exactly one
-    # terminal output, one receipt verdict and one ledger row.
-    require(output_keys == set(by_key), f"{name}: every routed attempt must have exactly one attempt output")
+    # terminal output, one receipt verdict and one ledger row, except the
+    # closed ledger-only pool-manifest fence shape below.
+    ledger_only_fence = zero_billed and not outputs and not r["receipt_verdicts"]
+    require(ledger_only_fence or output_keys == set(by_key), f"{name}: every routed attempt must have exactly one attempt output")
     settled = [row for row in outputs if row["usage_source"] == spec["usage_source"] and row["terminal_state"] == "normal_done"]
-    require(len(settled) == 1, f"{name} must have exactly one {spec['usage_source']} normal_done attempt output")
-    key = (settled[0]["request_id"], settled[0]["attempt_n"])
-    snapshot = by_key[key]
+    require(ledger_only_fence or len(settled) == 1, f"{name} must have exactly one {spec['usage_source']} normal_done attempt output")
+    settled_key = (settled[0]["request_id"], settled[0]["attempt_n"]) if len(settled) == 1 else None
     verdict_keys = {"request_id", "attempt_n", "provider", "receipt_result", "settlement_outcome", "reason", "closed",
                     "pool_label_status", "route_snapshot_digest", "provider_reported_model_hash",
                     "expected_catalog_model_hash", "model_id", "model_hash", "received_at_unix_ms"}
@@ -1892,30 +1899,40 @@ def check_paid(j: Journey, r: Any, name: str, want_kind: str | None, stream: boo
         vkey = (row["request_id"], row["attempt_n"])
         require(vkey in by_key and vkey not in verdict_seen, f"{name}: every receipt verdict must join exactly one route snapshot")
         verdict_seen.add(vkey)
-        if vkey == key:
+        if settled_key is not None and vkey == settled_key:
             verdicts.append(row)
-    require(verdict_seen == set(by_key), f"{name}: every routed attempt must have exactly one receipt verdict")
-    require(len(verdicts) == 1, f"{name} settled attempt must have exactly one receipt verdict")
-    verdict = verdicts[0]
-    want_outcome = ("quarantined", FENCE_REASON) if zero_billed else ("verified", None)
-    for field, want in (("receipt_result", "valid"), ("settlement_outcome", want_outcome[0]), ("closed", 1), ("provider", kind)):
-        require(verdict[field] == want, f"{name} receipt verdict {field} must be {want!r}")
-    if zero_billed:
-        require(verdict["reason"] == FENCE_REASON, f"{name}: the verdict must quarantine with {FENCE_REASON}")
+    require(ledger_only_fence or verdict_seen == set(by_key), f"{name}: every routed attempt must have exactly one receipt verdict")
+    require(ledger_only_fence or len(verdicts) == 1, f"{name} settled attempt must have exactly one receipt verdict")
+    if ledger_only_fence:
+        require(len(by_key) == 1, f"{name}: a ledger-only pool-manifest fence must have exactly one routed attempt")
+        key = next(iter(by_key))
+        snapshot = by_key[key]
+        settled_ms = None
     else:
-        require(verdict["pool_label_status"] == "verified", f"{name} receipt verdict pool_label_status must be 'verified'")
-    require(verdict["route_snapshot_digest"] == snapshot["route_snapshot_digest"], f"{name}: the verdict must bind the settled attempt's route snapshot digest")
-    require(verdict["provider_reported_model_hash"] == entry["artifact_hash"] and verdict["expected_catalog_model_hash"] == entry["artifact_hash"],
-            f"{name}: the verdict hashes must be the entry's artifact_hash")
-    require(verdict["model_id"] == entry["pool_model_id"], f"{name}: the receipt model_id must be the pool_model_id (SPEC-022 R-13.3)")
-    require(verdict["model_hash"] in (None, entry["artifact_hash"]), f"{name}: the receipt model_hash must be the entry's artifact_hash")
-    require(int_in(verdict["received_at_unix_ms"], f"{name}.received_at_unix_ms", 1) >= snapshot["route_decision_ts_unix_ms"],
-            f"{name}: settlement must follow dispatch")
+        require(len(settled) == 1, f"{name}: a receipt-fenced attempt must have exactly one settled output")
+        require(len(verdicts) == 1, f"{name} settled attempt must have exactly one receipt verdict")
+        verdict = verdicts[0]
+        key = settled_key
+        snapshot = by_key[key]
+        want_outcome = ("quarantined", RECEIPT_FENCE_REASON) if zero_billed else ("verified", None)
+        for field, want in (("receipt_result", "valid"), ("settlement_outcome", want_outcome[0]), ("closed", 1), ("provider", kind)):
+            require(verdict[field] == want, f"{name} receipt verdict {field} must be {want!r}")
+        if zero_billed:
+            require(verdict["reason"] == RECEIPT_FENCE_REASON, f"{name}: the verdict must quarantine with {RECEIPT_FENCE_REASON}")
+        else:
+            require(verdict["pool_label_status"] == "verified", f"{name} receipt verdict pool_label_status must be 'verified'")
+        require(verdict["route_snapshot_digest"] == snapshot["route_snapshot_digest"], f"{name}: the verdict must bind the settled attempt's route snapshot digest")
+        require(verdict["provider_reported_model_hash"] == entry["artifact_hash"] and verdict["expected_catalog_model_hash"] == entry["artifact_hash"],
+                f"{name}: the verdict hashes must be the entry's artifact_hash")
+        require(verdict["model_id"] == entry["pool_model_id"], f"{name}: the receipt model_id must be the pool_model_id (SPEC-022 R-13.3)")
+        require(verdict["model_hash"] in (None, entry["artifact_hash"]), f"{name}: the receipt model_hash must be the entry's artifact_hash")
+        settled_ms = int_in(verdict["received_at_unix_ms"], f"{name}.received_at_unix_ms", 1)
+        require(settled_ms >= snapshot["route_decision_ts_unix_ms"], f"{name}: settlement must follow dispatch")
 
     ledger = list_of(r["ledger"], f"{name}.ledger")
     ledger_keys = {"id", "request_id", "attempt_n", "provider", "status", "charged_prompt_tokens", "cached_prompt_tokens", "completion_tokens",
                    "estimated_completion_tokens", "usage_source", "prompt_rate_per_mtok", "completion_rate_per_mtok", "global_multiplier_ppm",
-                   "gross_credits", "provider_share_bps", "provider_credits", "quarantined", "payable", "quarantine_reason"}
+                   "gross_credits", "provider_share_bps", "provider_credits", "quarantined", "payable", "quarantine_reason", "created_at_unix_ms"}
     seen_ledger = set()
     for row in ledger:
         obj(row, ledger_keys, f"{name}.ledger")
@@ -1938,7 +1955,7 @@ def check_paid(j: Journey, r: Any, name: str, want_kind: str | None, stream: boo
         "role": j.role_of(snapshot["manifest_version"], name),
         "rates": {rate: snapshot[f"pool_model_{rate}"] for rate in RATE_KEYS},
         "dispatch_ms": snapshot["route_decision_ts_unix_ms"],
-        "settled_ms": verdict["received_at_unix_ms"],
+        "settled_ms": settled_ms,
     }
     if zero_billed:
         # SPEC-042-R015 in-flight rule: the R016 attestation removed between
@@ -1946,11 +1963,19 @@ def check_paid(j: Journey, r: Any, name: str, want_kind: str | None, stream: boo
         # provider credit, no buyer-final debit.
         require(not any(row["payable"] == 1 for row in ledger), f"{name}: a fenced attempt must have no payable credit")
         mine = [row for row in ledger if (row["request_id"], row["attempt_n"]) == key]
-        require(len(mine) == 1 and mine[0]["provider_credits"] == 0 and mine[0]["quarantined"] == 1
-                and mine[0]["quarantine_reason"] == FENCE_REASON, f"{name}: the fenced attempt's ledger row must be zeroed and quarantined with {FENCE_REASON}")
+        require(len(mine) == 1 and mine[0]["gross_credits"] == 0 and mine[0]["provider_credits"] == 0
+                and mine[0]["quarantined"] == 1 and mine[0]["quarantine_reason"] in {RECEIPT_FENCE_REASON, LEDGER_FENCE_REASON},
+                f"{name}: the fenced attempt's ledger row must be zeroed and quarantined with a recognized pool fence reason")
         require(all(e["prompt_tokens"] == 0 and e["completion_tokens"] == 0 for e in events), f"{name}: no buyer-final debit")
         require(reservation["status"] == "refunded" or (reservation["status"] == "settled" and reservation["settled_tokens"] == 0),
                 f"{name}: the reservation must be refunded or settled at zero")
+        if mine[0]["quarantine_reason"] == LEDGER_FENCE_REASON:
+            require(not outputs and not verdicts and not events, f"{name}: a pool-manifest ledger fence must have no terminal output, receipt verdict or usage event rows")
+            require(mine[0]["usage_source"] == "byte_estimated", f"{name}: a pool-manifest ledger fence must be byte_estimated")
+            result["settled_ms"] = int_in(mine[0]["created_at_unix_ms"], f"{name}.ledger.created_at_unix_ms", snapshot["route_decision_ts_unix_ms"])
+        else:
+            require(bool(outputs) and bool(verdicts) and result["settled_ms"] is not None,
+                    f"{name}: a receipt pool-route fence must include terminal output and receipt verdict rows")
         result["usage_equal"] = True
         return result
 
