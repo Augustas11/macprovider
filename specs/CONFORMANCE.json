@@ -10016,7 +10016,7 @@
     {
       "requirement_id": "SPEC-047-R005",
       "spec_id": "SPEC-047",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/routing/filter.go:EligibleCandidates",
         "phase4-coordinator/internal/buyer/model_admission.go:func (s *Server) byomDefaultPaidRoutingEligible",
@@ -10033,21 +10033,13 @@
       "journeys": [
         "JOURNEY-NETWORK-MODEL-ADMISSION"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:ff0fb0b97ee48da64b2f05c4d179d517fbd5788a",
-          "source": null,
-          "captured_at": "2026-10-07",
-          "expires_at": "2026-11-06"
-        },
-        {
-          "artifact": "sha256:3d524840e0996c735e84fcde0490c586178e32995282909aa600b6e946321220",
-          "source": "journeys/evidence/network-model-admission-20260916T135000Z.spec-047-r001-spec-047-r002-spec-047-r003-spec-047-r004-spec-047-r005-spec-047-r006-spec-047-r007-spec-047-r008.journey-result.signed.json",
-          "captured_at": "2026-09-16",
-          "expires_at": "2026-10-16"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1880",
+        "rationale": "Non-settlement BYOM states remain excluded from default paid routing, with coordinator and gateway regression coverage. The pool-model refusal header fix changes the mapped gateway error fragment, so the historical 2026-09-16 signed network-model-admission journey at source commit 9b5ddbc14ebed939cf2297cc0e99d662ea52e96b no longer proves this exact implementation. A fresh signed JOURNEY-NETWORK-MODEL-ADMISSION is required before conformance restoration; historical evidence remains in journeys/evidence and is not relabeled."
+      }
     },
     {
       "requirement_id": "SPEC-047-R006",
