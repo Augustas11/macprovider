@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import sqlite3
@@ -14,6 +15,11 @@ SCRIPT = REPO_ROOT / "scripts" / "lab" / "privacy-class-beta" / "capture-v2-sour
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from privacy_class_beta_journey_evidence import V2_DB_COLUMNS, V2_DB_TABLES, V2_SOURCE_CONTRACT  # noqa: E402
+
+spec = importlib.util.spec_from_file_location("privacy_class_beta_v2_capture", SCRIPT)
+assert spec is not None and spec.loader is not None
+capture = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(capture)
 
 
 def run_capture(*args: str) -> subprocess.CompletedProcess[str]:
@@ -102,6 +108,66 @@ class CaptureV2SourceTests(unittest.TestCase):
         self.assertNotIn("do-not-export", json.dumps(first))
         self.assertEqual(0o700, self.out.stat().st_mode & 0o777)
         self.assertEqual(0o600, raw_path.stat().st_mode & 0o777)
+
+    def test_refuses_db_source_swap_when_sqlite_connection_opens(self) -> None:
+        db_path = self.root / "live.db"
+        attacker_path = self.root / "attacker.db"
+        create_db(db_path)
+        create_db(attacker_path)
+        original_connect = capture.sqlite3.connect
+
+        def swapping_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+            db_path.unlink()
+            attacker_path.rename(db_path)
+            return original_connect(*args, **kwargs)
+
+        fd, source, st = capture.open_source_fd(db_path, capture.MAX_DB_SOURCE_BYTES)
+        try:
+            capture.sqlite3.connect = swapping_connect
+            with self.assertRaises(capture.CaptureError):
+                capture.export_snapshot(source, fd, st)
+        finally:
+            capture.sqlite3.connect = original_connect
+            os.close(fd)
+
+    def test_refuses_db_source_replaced_before_sqlite_connection_opens(self) -> None:
+        db_path = self.root / "live.db"
+        attacker_path = self.root / "attacker.db"
+        create_db(db_path)
+        create_db(attacker_path)
+        fd, source, st = capture.open_source_fd(db_path, capture.MAX_DB_SOURCE_BYTES)
+        try:
+            db_path.unlink()
+            attacker_path.rename(db_path)
+            with self.assertRaises(capture.CaptureError):
+                capture.export_snapshot(source, fd, st)
+        finally:
+            os.close(fd)
+
+    def test_refuses_db_source_replaced_after_sqlite_connection_opens(self) -> None:
+        db_path = self.root / "live.db"
+        attacker_path = self.root / "attacker.db"
+        create_db(db_path)
+        create_db(attacker_path)
+        original_db_columns = capture.db_columns
+        replaced = False
+
+        def replacing_db_columns(db: sqlite3.Connection, table: str) -> list[str]:
+            nonlocal replaced
+            if not replaced:
+                db_path.unlink()
+                attacker_path.rename(db_path)
+                replaced = True
+            return original_db_columns(db, table)
+
+        fd, source, st = capture.open_source_fd(db_path, capture.MAX_DB_SOURCE_BYTES)
+        try:
+            capture.db_columns = replacing_db_columns
+            with self.assertRaises(capture.CaptureError):
+                capture.export_snapshot(source, fd, st)
+        finally:
+            capture.db_columns = original_db_columns
+            os.close(fd)
 
     def test_refuses_db_missing_required_allowlisted_column(self) -> None:
         db_path = self.root / "missing.db"

@@ -142,6 +142,32 @@ def _open_private_regular_at(root_fd: int, name: str, label: str) -> int:
         raise
 
 
+def _require_private_regular_stat(st: os.stat_result, label: str, name: str) -> None:
+    if not stat.S_ISREG(st.st_mode):
+        _die(f"{label} must be a regular file: {name}")
+    if st.st_uid != os.getuid():
+        _die(f"{label} must be owned by the current user: {name}")
+    if stat.S_IMODE(st.st_mode) != 0o600:
+        _die(f"{label} mode must be 0600: {name}")
+    if st.st_nlink != 1:
+        _die(f"{label} must not have hardlinks: {name}")
+    if st.st_size > MAX_CONFIG_BYTES:
+        _die(f"{label} exceeds size limit")
+
+
+def _require_name_matches_fd(root_fd: int, name: str, fd: int, label: str) -> os.stat_result:
+    st = os.fstat(fd)
+    try:
+        lst = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        _die(f"{label} is absent: {name}")
+    if (st.st_dev, st.st_ino) != (lst.st_dev, lst.st_ino):
+        _die(f"{label} changed before checkpoint mutation: {name}")
+    _require_private_regular_stat(st, label, name)
+    _require_private_regular_stat(lst, label, name)
+    return st
+
+
 def _sha256_fd(fd: int, label: str) -> str:
     st = os.fstat(fd)
     if st.st_size > MAX_CONFIG_BYTES:
@@ -351,13 +377,20 @@ def run_checkpoint(
             try:
                 if _sha256_fd(replacement_fd, "replacement") != replacement_sha256:
                     _die("replacement sha256 mismatch")
+                _require_name_matches_fd(root_fd, config_path.name, config_fd, "config")
+                _require_name_matches_fd(root_fd, replacement_path.name, replacement_fd, "replacement")
+                if _sha256_fd(replacement_fd, "replacement") != replacement_sha256:
+                    _die("replacement sha256 mismatch")
+                _remaining(deadline)
+                os.replace(replacement_path.name, config_path.name, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+                _require_name_matches_fd(root_fd, config_path.name, replacement_fd, "config")
+                if _sha256_fd(replacement_fd, "replacement") != replacement_sha256:
+                    _die("replacement sha256 mismatch")
             finally:
                 os.close(replacement_fd)
         finally:
             os.close(config_fd)
 
-        _remaining(deadline)
-        os.replace(replacement_path.name, config_path.name, src_dir_fd=root_fd, dst_dir_fd=root_fd)
         _write_ack(fd, nonce, deadline)
         return {"event": "privacy_lab_config_change_checkpoint_replaced", "pid": expected_pid, "root_digest": _root_digest(lab_root)}
     finally:

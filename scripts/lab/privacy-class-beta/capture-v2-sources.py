@@ -206,16 +206,40 @@ def open_source_fd(path: Path, max_bytes: int) -> tuple[int, Path, os.stat_resul
     except OSError as exc:
         die(f"source cannot be opened safely: {exc.strerror}")
     st = os.fstat(fd)
+    try:
+        validate_source_stat(st, max_bytes)
+    except CaptureError:
+        os.close(fd)
+        raise
+    return fd, path.resolve(), st
+
+
+def validate_source_stat(st: os.stat_result, max_bytes: int) -> None:
     if not stat.S_ISREG(st.st_mode):
-        os.close(fd)
         die("source must be a regular file")
+    if st.st_uid != os.getuid():
+        die("source must be owned by the current lab user")
+    if stat.S_IMODE(st.st_mode) & 0o022:
+        die("source must not be group- or world-writable")
     if st.st_nlink != 1:
-        os.close(fd)
         die("source must not be hard-linked")
     if st.st_size <= 0 or st.st_size > max_bytes:
-        os.close(fd)
         die(f"source must be between 1 and {max_bytes} bytes")
-    return fd, path.resolve(), st
+
+
+def require_source_path_matches_fd(path: Path, fd: int, expected: os.stat_result, max_bytes: int) -> None:
+    require_no_symlink_components(path, "source", allow_missing_leaf=False)
+    try:
+        current = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        die(f"source is absent: {path}")
+    validate_source_stat(current, max_bytes)
+    if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
+        die("source changed while capturing SQLite snapshot")
+    pinned = os.fstat(fd)
+    validate_source_stat(pinned, max_bytes)
+    if (pinned.st_dev, pinned.st_ino) != (expected.st_dev, expected.st_ino):
+        die("source changed while capturing SQLite snapshot")
 
 
 def read_source_bytes(path: Path, max_bytes: int) -> tuple[bytes, Path, os.stat_result]:
@@ -304,9 +328,15 @@ class SnapshotBudget:
             die(f"DB snapshot exceeds bounded raw-source budget while exporting {label}")
 
 
-def export_snapshot(path: Path) -> dict[str, Any]:
+def export_snapshot(path: Path, source_fd: int | None = None, source_st: os.stat_result | None = None) -> dict[str, Any]:
+    if (source_fd is None) != (source_st is None):
+        die("internal SQLite source identity mismatch")
+    if source_fd is not None and source_st is not None:
+        require_source_path_matches_fd(path, source_fd, source_st, MAX_DB_SOURCE_BYTES)
     db = open_readonly_db(path)
     try:
+        if source_fd is not None and source_st is not None:
+            require_source_path_matches_fd(path, source_fd, source_st, MAX_DB_SOURCE_BYTES)
         budget = SnapshotBudget(MAX_FILE_SOURCE_BYTES)
         tables: dict[str, Any] = {}
         existing = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
@@ -341,6 +371,8 @@ def export_snapshot(path: Path) -> dict[str, Any]:
             }
             budget.add({"table": table, "columns": allowed, "dropped_columns": dropped, "row_count": len(rows)}, table)
             tables[table] = export
+        if source_fd is not None and source_st is not None:
+            require_source_path_matches_fd(path, source_fd, source_st, MAX_DB_SOURCE_BYTES)
         return {"captured_at_unix": int(time.time()), "tables": tables}
     finally:
         try:
@@ -381,9 +413,12 @@ def capture_kind(args: argparse.Namespace) -> None:
     except ValueError:
         die("contract output path escaped output root")
     if args.kind in DB_SNAPSHOT_KINDS:
-        source = source_file(source_path, MAX_DB_SOURCE_BYTES)
-        snapshot = export_snapshot(source)
-        data = encode_bounded_json(snapshot, args.kind)
+        source_fd, source, source_st = open_source_fd(source_path, MAX_DB_SOURCE_BYTES)
+        try:
+            snapshot = export_snapshot(source, source_fd, source_st)
+            data = encode_bounded_json(snapshot, args.kind)
+        finally:
+            os.close(source_fd)
     else:
         data, source, _st = read_source_bytes(source_path, MAX_FILE_SOURCE_BYTES)
         validate_source_bytes(args.kind, relative, data)

@@ -320,6 +320,37 @@ class PrivacyLabConfigCheckpointTests(unittest.TestCase):
             peer.close()
             thread.join(timeout=2)
 
+    def test_replacement_swap_between_final_check_and_rename_is_not_acked(self) -> None:
+        left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        real_replace = checkpoint.os.replace
+
+        def swapping_replace(src: str, dst: str, *args: object, **kwargs: object) -> None:
+            self.replacement.unlink()
+            self.replacement.write_bytes(b"swapped-after-final-check\n")
+            os.chmod(self.replacement, 0o600)
+            real_replace(src, dst, *args, **kwargs)
+
+        try:
+            right.sendall(json.dumps(self.ready_frame()).encode() + b"\n")
+            checkpoint.os.replace = swapping_replace
+            with self.assertRaises(checkpoint.CheckpointError):
+                checkpoint.run_checkpoint(
+                    fd=left.fileno(),
+                    expected_pid=os.getpid(),
+                    lab_root=self.root,
+                    config_path=self.config,
+                    replacement_path=self.replacement,
+                    replacement_sha256=self.replacement_hash,
+                    timeout_seconds=0.25,
+                )
+            right.settimeout(0.1)
+            with self.assertRaises(TimeoutError):
+                right.recv(4096)
+        finally:
+            checkpoint.os.replace = real_replace
+            left.close()
+            right.close()
+
     def test_pinned_root_fd_prevents_path_redirected_mutation(self) -> None:
         peer, thread, state = self.run_controller_async()
         old_root = Path(self.tmp.name) / "lab.old"
