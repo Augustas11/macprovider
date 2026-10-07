@@ -144,8 +144,8 @@ final class MSBOllamaLoopbackCommandTests: XCTestCase {
         XCTAssertEqual(report.promptEvalCount, 1024)
         XCTAssertEqual(report.promptEvalCachedCount, 128)
         XCTAssertEqual(report.doneReason, "stop")
-        XCTAssertEqual(report.ttftSeconds, 0.2, accuracy: 1e-9)
-        XCTAssertEqual(report.requestSeconds, 1.2, accuracy: 1e-9)
+        XCTAssertEqual(try XCTUnwrap(report.ttftSeconds), 0.2, accuracy: 1e-9)
+        XCTAssertEqual(try XCTUnwrap(report.requestSeconds), 1.2, accuracy: 1e-9)
         XCTAssertEqual(msbOllamaPromptCacheVerification([sample]), "reported_cached_prompt_eval")
     }
 

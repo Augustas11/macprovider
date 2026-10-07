@@ -1,0 +1,684 @@
+{
+  "schema_version": 1,
+  "capture": "20261007T080540Z",
+  "status": "PASS",
+  "scope": "operator-approved capability-aware Ollama qualification; isolated nonbilling measurement, not strict M0 or release acceptance",
+  "protocol": "docs/runbooks/runtime-agnostic-engine-qualification.md",
+  "runtime_version": "0.34.4",
+  "model": "qwen2.5:0.5b",
+  "provenance": {
+    "cli_sha256": "05afcf05c20dfab7d17687cab0d97826a5b2c04b0a385877a356f83e69f41187",
+    "mlx_metallib_sha256": "84e487182336648a826132e50e7a4cd2cae0bc77ac6eafa89cc72f3a964fdbaf",
+    "candidate_scope": "local_unreleased_isolated_measurement_only",
+    "source_base_commit": "05781fe707ebab47b87d74dfc251f1d2aa94b9b6",
+    "source_files_sha256": {
+      "MSBThroughputCommand.swift": "6d9d3ebb8dfe9ed745745314ce3c0b563a349fec2b0e7ad9817192b955263b22",
+      "MSBLoopbackCommand.swift": "4afebf4e8dc194f9836ac48703dd6f3d0347ff8f3e5962d2eff2dec5bcb1d560",
+      "MSBOllamaLoopbackCommand.swift": "ae59f99c239c87b6b9dd114de141d7e0e5c59d839101198da4ea74d0382898e5",
+      "MSBPerplexityCommand.swift": "f14becf17bce788faf4b3141066b2b9b91b89f0c0ba36abf37be3f5f1105ecba"
+    },
+    "llama_server_sha256": "41df13c126456f8e5fab2057c86a790067a85ea1dfd8fbc0071cc45fbba56262",
+    "llama_perplexity_sha256": "8050ad909ddc0260cf685775291cb83f93e232a2f3beb97736e83ced0fe00869",
+    "ollama_binary_sha256": "5f0e245e8369a66b7b24654c51c8ec95f3eab9a1e263f6e95e20d2d4374b8e26",
+    "ollama_model_sha256": "c5396e06af294bd101b30dce59131a76d2b773e76950acc870eda801d3ab0515",
+    "llama_model_sha256": "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff",
+    "corpus_sha256": "173c87a53759e0201f33e0ccf978e510c2042d7f2cb78229d9a50d79b9e7dd08",
+    "corpus_chunks": 150,
+    "corpus_ctx": 512,
+    "ollama_strict_same_m0": false,
+    "ollama_runtime_perplexity_measured": false,
+    "ollama_capability_aware": true,
+    "buyer_billing": false
+  },
+  "measured_requests": 65,
+  "report_count_field_semantics": "promptTokensPerRow, evalTokensPerRow and timedDecodeTokensPerRow are requested workload targets; requestSamples contains achieved API-reported counts",
+  "quality_evidence": {
+    "source": "audits/2026-10-07-1690-closeout/current-model-quality-20261007T071549Z.json",
+    "sha256": "dd9e9325ba7a5ce509f16b6e104d4dfa6ced1b15baaa8cf3be211c28f406cd54",
+    "scope": "exact Ollama GGUF artifact quality measured by llama.cpp, not Ollama runtime perplexity"
+  },
+  "report": {
+    "artifactHashAlgorithm": "macprovider.gguf-file.v1",
+    "artifactSHA256": "c5396e06af294bd101b30dce59131a76d2b773e76950acc870eda801d3ab0515",
+    "billingEvidence": false,
+    "canonical1690Profile": false,
+    "countSource": "ollama_reported_operator_benchmark_only",
+    "evalTokensPerRow": 257,
+    "forcedDecodeTokensExact": false,
+    "levels": [
+      {
+        "aggregateCVPct": 3.7522002369102045,
+        "aggregateTPSRuns": [
+          274.2822974494426,
+          288.382785101958,
+          264.4841292303312,
+          289.88921463520387,
+          279.63839946913225
+        ],
+        "aggregateTPSp50": 279.63839946913225,
+        "concurrency": 1,
+        "endToEndEvalTPSRuns": [
+          272.66863119445674,
+          286.8511478983582,
+          263.2026353077224,
+          288.40240030297423,
+          278.2324963837957
+        ],
+        "endToEndEvalTPSp50": 278.2324963837957,
+        "perRowTPSp50": 279.63839946913225,
+        "promptCacheVerification": "reported_cached_prompt_eval",
+        "requestSamples": [
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 0.9425359964370728,
+            "ttftSeconds": 0.009191036224365234
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 0.89593505859375,
+            "ttftSeconds": 0.00822603702545166
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 0.9764339923858643,
+            "ttftSeconds": 0.008512020111083984
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 0.8911160230636597,
+            "ttftSeconds": 0.00802004337310791
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 0.9236879348754883,
+            "ttftSeconds": 0.00821995735168457
+          }
+        ],
+        "ttftSamples": 5,
+        "ttftSecondsP50": 0.00822603702545166,
+        "ttftSecondsP95": 0.009191036224365234
+      },
+      {
+        "aggregateCVPct": 0.500675753927174,
+        "aggregateTPSRuns": [
+          764.6515874563783,
+          769.9056721238068,
+          765.9894690359553,
+          761.3450891582659,
+          760.3535531087545
+        ],
+        "aggregateTPSp50": 764.6515874563783,
+        "concurrency": 4,
+        "endToEndEvalTPSRuns": [
+          759.2375359556461,
+          765.9164247204936,
+          761.4888646406013,
+          757.2900533049976,
+          756.3807199199367
+        ],
+        "endToEndEvalTPSp50": 759.2375359556461,
+        "perRowTPSp50": 191.21001091530326,
+        "promptCacheVerification": "reported_cached_prompt_eval",
+        "requestSamples": [
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.3536709547042847,
+            "ttftSeconds": 0.014781951904296875
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.3537819385528564,
+            "ttftSeconds": 0.01485598087310791
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.3538990020751953,
+            "ttftSeconds": 0.015056967735290527
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.3539899587631226,
+            "ttftSeconds": 0.015247941017150879
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.341836929321289,
+            "ttftSeconds": 0.012149930000305176
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.341940999031067,
+            "ttftSeconds": 0.012264013290405273
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.3419849872589111,
+            "ttftSeconds": 0.01243293285369873
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.342182993888855,
+            "ttftSeconds": 0.012622952461242676
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.3497068881988525,
+            "ttftSeconds": 0.013153910636901855
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.349795937538147,
+            "ttftSeconds": 0.013164997100830078
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.3498320579528809,
+            "ttftSeconds": 0.013226985931396484
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.3499869108200073,
+            "ttftSeconds": 0.013337969779968262
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.3571969270706177,
+            "ttftSeconds": 0.012483954429626465
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.3572919368743896,
+            "ttftSeconds": 0.012587904930114746
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.3573600053787231,
+            "ttftSeconds": 0.012777090072631836
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.3574680089950562,
+            "ttftSeconds": 0.012942075729370117
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.358821988105774,
+            "ttftSeconds": 0.01235806941986084
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.3589080572128296,
+            "ttftSeconds": 0.012389063835144043
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.359036922454834,
+            "ttftSeconds": 0.012434005737304688
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.3591039180755615,
+            "ttftSeconds": 0.012515902519226074
+          }
+        ],
+        "ttftSamples": 20,
+        "ttftSecondsP50": 0.012777090072631836,
+        "ttftSecondsP95": 0.015056967735290527
+      },
+      {
+        "aggregateCVPct": 0.0498466647766624,
+        "aggregateTPSRuns": [
+          1105.7652699912524,
+          1106.6507824782739,
+          1106.7075999568135,
+          1107.3029300953951,
+          1106.4833581188352
+        ],
+        "aggregateTPSp50": 1106.6507824782739,
+        "concurrency": 8,
+        "endToEndEvalTPSRuns": [
+          1097.2947389463336,
+          1100.8321993094116,
+          1101.2419874917855,
+          1101.792553541488,
+          1100.6730756847562
+        ],
+        "endToEndEvalTPSp50": 1100.8321993094116,
+        "perRowTPSp50": 138.3869817939987,
+        "promptCacheVerification": "reported_cached_prompt_eval",
+        "requestSamples": [
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8729289770126343,
+            "ttftSeconds": 0.021553993225097656
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8730570077896118,
+            "ttftSeconds": 0.021566033363342285
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8731069564819336,
+            "ttftSeconds": 0.021643996238708496
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8733049631118774,
+            "ttftSeconds": 0.021728038787841797
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8733989000320435,
+            "ttftSeconds": 0.0219649076461792
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8734989166259766,
+            "ttftSeconds": 0.02214789390563965
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.873641014099121,
+            "ttftSeconds": 0.022327065467834473
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8736989498138428,
+            "ttftSeconds": 0.022511959075927734
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8668138980865479,
+            "ttftSeconds": 0.017010927200317383
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8670860528945923,
+            "ttftSeconds": 0.01702296733856201
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.867258071899414,
+            "ttftSeconds": 0.017112016677856445
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8673360347747803,
+            "ttftSeconds": 0.017239093780517578
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.867440104484558,
+            "ttftSeconds": 0.01743602752685547
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8675329685211182,
+            "ttftSeconds": 0.017647981643676758
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8676090240478516,
+            "ttftSeconds": 0.017843961715698242
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8676729202270508,
+            "ttftSeconds": 0.018011927604675293
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.866014003753662,
+            "ttftSeconds": 0.016448974609375
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8661649227142334,
+            "ttftSeconds": 0.016448974609375
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8664089441299438,
+            "ttftSeconds": 0.016588926315307617
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8665668964385986,
+            "ttftSeconds": 0.01666998863220215
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8658100366592407,
+            "ttftSeconds": 0.015887975692749023
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8660060167312622,
+            "ttftSeconds": 0.016071081161499023
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.866104006767273,
+            "ttftSeconds": 0.016304969787597656
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.866150975227356,
+            "ttftSeconds": 0.016476035118103027
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8652509450912476,
+            "ttftSeconds": 0.016470909118652344
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8653969764709473,
+            "ttftSeconds": 0.016566991806030273
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8654630184173584,
+            "ttftSeconds": 0.01661098003387451
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8656039237976074,
+            "ttftSeconds": 0.01675701141357422
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.865684986114502,
+            "ttftSeconds": 0.0168759822845459
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8658900260925293,
+            "ttftSeconds": 0.01697707176208496
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.866014003753662,
+            "ttftSeconds": 0.017075061798095703
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8660500049591064,
+            "ttftSeconds": 0.01717197895050049
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8670819997787476,
+            "ttftSeconds": 0.01699697971343994
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8671590089797974,
+            "ttftSeconds": 0.016999006271362305
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8672800064086914,
+            "ttftSeconds": 0.01709604263305664
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.867527961730957,
+            "ttftSeconds": 0.0172119140625
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8677198886871338,
+            "ttftSeconds": 0.017416000366210938
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8678009510040283,
+            "ttftSeconds": 0.017647981643676758
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8678430318832397,
+            "ttftSeconds": 0.01781296730041504
+          },
+          {
+            "doneReason": "length",
+            "evalCount": 257,
+            "promptEvalCachedCount": 1023,
+            "promptEvalCount": 1024,
+            "requestSeconds": 1.8679479360580444,
+            "ttftSeconds": 0.018004894256591797
+          }
+        ],
+        "ttftSamples": 40,
+        "ttftSecondsP50": 0.017112016677856445,
+        "ttftSecondsP95": 0.02214789390563965
+      }
+    ],
+    "modelNameSHA256": "61034a40f1ba28fed906939f5fb842e55bfe781f1f533bbcd824a15b7de6012b",
+    "nativeIdenticalTokenSequences": false,
+    "operatorBenchmarkMode": "capability_aware",
+    "originClass": "loopback_http",
+    "promptCacheDisabled": false,
+    "promptSHA256": [
+      "cce68cc4007506004e147136a4debffa6901dbfd4ecacbdd041dc815bb892473",
+      "635dce343223ead6ff8d5433b67fccee4cc9736cd53b08d5af5d1fd576a3b91f",
+      "3751f82e9df1faf1a35b79fa3acb3540415995fc2d63e21ea95905f75a616109",
+      "ea75987fd9e520f11c878d39e4967d01716b4e090d3b03d6dc07a10c905c99ec",
+      "313123e7ff2bea2dfeb2adeb0c2d154b2595e3e01430a2b8a463dedea7993ad3",
+      "896b4dead5a3993e07ddbe7b00e22cc6f109f567fbd1c48ea13941e6102aa99b",
+      "e5f87c05cd4eb3dad8c4c893d6c6e609bf130a36821f83ab6076d5dc50770be7",
+      "eb1cc29eaa889faf90b607b4cc056efcb4f1648969ee65b2111cea16f80c3ed1"
+    ],
+    "promptTokensPerRow": 1024,
+    "requestedCanonical1690Profile": true,
+    "runs": 5,
+    "runtime": "ollama_loopback",
+    "runtimePerplexityEvidence": false,
+    "schemaVersion": 1,
+    "strictM0Qualified": false,
+    "timedDecodeTokensPerRow": 256,
+    "timestamp": "2026-10-07T08:07:10Z"
+  },
+  "limitations": [
+    "API-reported counters are operator benchmark inputs, not independently trusted settlement usage.",
+    "Cache hits are observed, not disabled or controlled; cache-free/native strict-M0 throughput ratios are not asserted.",
+    "First streamed text chunk may contain multiple tokens; legacy subtract-one throughput is a proxy. End-to-end TPS uses actual API-reported eval counts over the full request window.",
+    "Filesystem GGUF evidence does not cryptographically prove the loaded running process weights.",
+    "Prompt hashes reveal equality and possible dictionary matches; prompt and completion contents are omitted.",
+    "This fresh result does not retroactively promote the failed 20261007T065853Z attempt; signing, CI, release, updater and mixed-rollout gates remain independent."
+  ]
+}

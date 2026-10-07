@@ -147,8 +147,9 @@ derived by this collector. Original private snapshots remain operator-only.
   toolchain lacks XCTest. Its generated lockfile change was restored. GitHub
   macOS/Xcode verification, combined review, and reviewed signed rollout
   remain pending; no unreviewed local binary has replaced a live provider.
-- Final acceptance of the bounded mixed-version proof and qualification for
-  the current pool models remain pending. Public external Creator launch is a separate SPEC-043 scope;
+- Final acceptance of the bounded mixed-version proof remains pending. Current
+  Llama qualification and the amended capability-aware Ollama profile are
+  evidenced below; this does not qualify future engine/model entries. Public external Creator launch is a separate SPEC-043 scope;
   no named external operator or hardware-backed production root is fabricated.
 
 ## Freeze verification and carried limitations
@@ -202,3 +203,33 @@ tool is operator-only/nonbilling and is operational measurement, not strict
 same-M0 native-token/cache/perplexity qualification. None of these observations
 grants settlement trust, completes model qualification, or activates an external
 Creator launch.
+
+### Approved capability-aware Ollama qualification
+
+On 2026-10-07 the operator approved the separate
+[capability-aware protocol](../../docs/runbooks/runtime-agnostic-engine-qualification.md).
+The fresh
+[`current-model-ollama-capability-20261007T080540Z.json`](current-model-ollama-capability-20261007T080540Z.json)
+passes that profile: all 65 measured requests at c=1/4/8 and n=5 completed with
+1024 reported prompt tokens, 257 reported eval tokens, 1023 reported cached
+prompt tokens and `done_reason=length`. The isolated runtime is Ollama0.34.4,
+and the exact Qwen2.5-0.5B GGUF digest matches the earlier artifact-quality proof.
+
+| Concurrency | End-to-end API eval tokens/s, p50 | First-content TTFT p50 / p95 |
+|---|---|---|
+| 1 | 278.23 | 8.23 / 9.19 ms |
+| 4 | 759.24 | 12.78 / 15.06 ms |
+| 8 | 1100.83 | 17.11 / 22.15 ms |
+
+These are cached operational measurements, not an uncached native-M0 ratio.
+The first content chunk is not proven to contain exactly one token; the legacy
+subtract-one decode metric is a proxy. The primary end-to-end metric uses actual
+API-reported eval counts over each complete request round. Requested count fields
+are labeled as targets; per-request samples preserve achieved counters.
+
+This completes the amended current Ollama engine/model measurement and
+artifact-quality arms only. It does not retroactively pass the failed cached
+strict attempt, assert native token parity or Ollama runtime PPL, grant billing
+trust, or accept a release. The isolated source05781fe70 build passed in182.62s;
+new Swift tests and all required CI checks remain pending. Full combined
+code/security/architecture reviews cleared the tool at0C/H/M before measurement.
