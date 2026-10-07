@@ -50,7 +50,55 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
         XCTAssertEqual(plan.pendingReason, "cache_hit_replay_requires_runtime_warmup_proof:cache-hit")
     }
 
-    func testPlanPadsToMixedEightRowsAndCounterbalancesTenBlocks() throws {
+    func testAnonymousCacheGroupNullLoadsAsNil() throws {
+        let url = try writeCapture([
+            shape("ordinary-null", extra: ["anonymous_cache_group_sha256": NSNull()]),
+        ])
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
+        XCTAssertNil(capture.shapes.first?.anonymousCacheGroupSHA256)
+    }
+
+    func testNonStreamingRowsRemainRunnableWhenTargetMatchesBudget() throws {
+        let url = try writeCapture([
+            shape("nonstream", extra: ["stream": false]),
+        ])
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
+        let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
+        XCTAssertNil(plan.pendingReason)
+        XCTAssertFalse(plan.blocks[0].rows[0].stream)
+    }
+
+    func testShorterTargetThanAdmissionBudgetRemainsRunnableWithDecodeCapHook() throws {
+        let url = try writeCapture([
+            shape("short-target", extra: ["completion_tokens": 64, "generated_completion_tokens": 64, "effective_max_output_tokens": 128]),
+        ])
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
+        let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
+        XCTAssertNil(plan.pendingReason)
+        XCTAssertEqual(plan.blocks[0].rows[0].targetCompletionTokens, 64)
+        XCTAssertEqual(plan.blocks[0].rows[0].maxCompletionTokens, 128)
+    }
+
+    func testMultiFeatureSelectorRowsRemainRunnableForActualAdmissionProof() throws {
+        let url = try writeCapture([
+            shape("multi", extra: ["sampling_requested": true, "unknown_top_level_keys_present": true, "requested_temperature": 0.7]),
+        ])
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
+        let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
+        XCTAssertNil(plan.pendingReason)
+        XCTAssertEqual(plan.blocks[0].rows[0].expectedSelectorReason, "sampling")
+    }
+
+    func testOneTokenOrdinaryRowsStayPendingForITLMetric() throws {
+        let url = try writeCapture([
+            shape("one-token", extra: ["completion_tokens": 1, "generated_completion_tokens": 1]),
+        ])
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
+        let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
+        XCTAssertEqual(plan.pendingReason, "ordinary_itl_requires_target_completion_at_least_2:one-token")
+    }
+
+    func testPlanKeepsFullSampleRowsAndCounterbalancesTenBlocks() throws {
         let url = try writeCapture([
             shape("eligible-a"),
             shape("eligible-b"),
@@ -62,10 +110,61 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
         let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
         XCTAssertNil(plan.pendingReason)
         XCTAssertEqual(plan.blocks.count, 10)
-        XCTAssertTrue(plan.blocks.allSatisfy { $0.rows.count == 8 })
+        XCTAssertTrue(plan.blocks.allSatisfy { $0.rows.count == 3 })
         XCTAssertEqual(plan.blocks.filter(\.nativeFirst).count, 5)
         XCTAssertEqual(plan.blocks[3].rows[0].requestID, "mixed-b3-r0-eligible-a")
-        XCTAssertEqual(Set(plan.blocks[0].rows.map(\.requestID)).count, 8)
+        XCTAssertEqual(Set(plan.blocks[0].rows.map(\.requestID)).count, 3)
+    }
+
+    func testCaptureIdentityMismatchReportsShapeWithoutRewritingCapturedHash() throws {
+        let url = try writeCapture([
+            shape("identity"),
+        ])
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
+        let mismatches = capture.identityMismatches(targetSHA256: String(repeating: "a", count: 64))
+        XCTAssertEqual(mismatches.count, 1)
+        XCTAssertEqual(mismatches[0]["shape_id"] as? String, "identity")
+        XCTAssertEqual(mismatches[0]["served_model_hash_sha256"] as? String, String(repeating: "d", count: 64))
+    }
+
+    func testPlanPreservesMoreThanEightSampleRowsForOrderedWaves() throws {
+        let url = try writeCapture((0..<11).map { shape("eligible-\($0)") })
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
+        let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
+        XCTAssertNil(plan.pendingReason)
+        XCTAssertTrue(plan.sampleCoverageComplete)
+        XCTAssertEqual(plan.blocks[0].rows.count, 11)
+        XCTAssertEqual(plan.runnableRowsPerBlock, 11)
+        XCTAssertEqual(plan.runnableWavesPerBlock, 2)
+        XCTAssertEqual(plan.sampleCoverageExport["omitted_sample_shape_count"] as? Int, 0)
+        XCTAssertEqual(plan.blocks[0].rows.last?.requestID, "mixed-b0-r10-eligible-10")
+    }
+
+    func testRunnableWavesLimitEligibleNativeCandidatesToOnePerWave() throws {
+        let url = try writeCapture([
+            shape("eligible-a"),
+            shape("eligible-b"),
+            shape("ineligible", conversationKey: true, lease: "miss", extra: ["anonymous_cache_group_sha256": String(repeating: "f", count: 64)]),
+        ])
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
+        let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
+        XCTAssertEqual(plan.blocks[0].runnableWaves.count, 2)
+        XCTAssertEqual(plan.blocks[0].runnableWaves[0].map(\.shapeID), ["eligible-a"])
+        XCTAssertEqual(plan.blocks[0].runnableWaves[1].map(\.shapeID), ["eligible-b", "ineligible"])
+    }
+
+    func testRunnableWavesSerializeRepeatedAnonymousCacheGroups() throws {
+        let group = String(repeating: "d", count: 64)
+        let url = try writeCapture([
+            shape("cache-a", conversationKey: true, cacheOnly: true, lease: "miss", extra: ["anonymous_cache_group_sha256": group]),
+            shape("ordinary"),
+            shape("cache-b", conversationKey: true, cacheOnly: true, lease: "miss", extra: ["anonymous_cache_group_sha256": group]),
+        ])
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
+        let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
+        XCTAssertEqual(plan.blocks[0].runnableWaves.count, 2)
+        XCTAssertEqual(plan.blocks[0].runnableWaves[0].map(\.shapeID), ["cache-a", "ordinary"])
+        XCTAssertEqual(plan.blocks[0].runnableWaves[1].map(\.shapeID), ["cache-b"])
     }
 
     func testSanitizedExportDoesNotCarryRawOrRecoverableFields() throws {
@@ -83,6 +182,33 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
         XCTAssertNil(exported["cache_group"])
         XCTAssertEqual(exported["anonymous_cache_group_sha256"] as? String, String(repeating: "c", count: 64))
         XCTAssertEqual(capture.shapes.first?.features["unknown_top_level_keys_present"] as? Bool, true)
+    }
+
+    func testUnknownRequestShapeRemainsRunnableAsRepresentativeFallbackRow() throws {
+        let url = try writeCapture([
+            shape("unknown", extra: ["unknown_top_level_keys_present": true]),
+        ])
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
+        let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
+        XCTAssertNil(plan.pendingReason)
+        XCTAssertEqual(plan.runnableRowsPerBlock, 1)
+        XCTAssertEqual(plan.blocks[0].rows[0].expectedSelectorReason, "unknown_request_field")
+        XCTAssertNotNil(plan.blocks[0].rows[0].syntheticStandIn)
+    }
+
+    func testUnsupportedShapeRowsStayPendingWithoutBlockingEligibleFallbackRows() throws {
+        let url = try writeCapture([
+            shape("eligible"),
+            shape("multimodal", extra: ["multimodal_requested": true]),
+        ])
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
+        let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
+        XCTAssertEqual(plan.pendingReason, "multimodal_shape_requires_sanitized_part_geometry:multimodal")
+        XCTAssertGreaterThan(plan.runnableRowsPerBlock, 0)
+        XCTAssertLessThan(plan.runnableRowsPerBlock, plan.rowsPerBlock)
+        XCTAssertTrue(plan.blocks[0].runnableRows.contains { $0.shapeID == "eligible" })
+        XCTAssertFalse(plan.sampleCoverageComplete)
+        XCTAssertEqual(plan.sampleCoverageExport["pending_sample_shape_count"] as? Int, 1)
     }
 
     private func writeCapture(_ shapes: [[String: Any]]) throws -> URL {
@@ -133,7 +259,7 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
             "requested_top_p": 1.0,
             "requested_n": 1,
             "requested_max_completion_tokens": 128,
-            "resolved_max_completion_tokens": 128,
+            "effective_max_output_tokens": 64,
             "sampling_requested": false,
             "multiple_completions_requested": false,
             "top_k_present": false,

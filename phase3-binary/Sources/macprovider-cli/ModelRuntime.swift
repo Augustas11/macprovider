@@ -6088,6 +6088,16 @@ actor ModelRuntime: ModelRuntimeServing {
         nativeAllows && provenance != .privacy
     }
 
+    private static func nativeMTPCaptureEffectiveMaxOutputTokens(
+        request: ChatCompletionRequest,
+        completion: CompletionResult,
+        maxContextTokens: Int
+    ) -> Int? {
+        if let requested = request.maxTokens { return requested }
+        guard completion.promptTokens > 0 else { return nil }
+        return max(1, maxContextTokens - completion.promptTokens)
+    }
+
     private func serialRouteCanaryCachedHitMissingRetainedHandoff(
         _ lease: ConversationCacheLease?,
         capability: ContinuousBatchingCapability,
@@ -6435,6 +6445,16 @@ actor ModelRuntime: ModelRuntimeServing {
             } else if let lease {
                 await conversationCache.abort(lease)
             }
+            nativeMTPRequestShapeCapture?.record(
+                request: request,
+                snapshot: snapshot,
+                admission: nativeMTPAdmission,
+                lease: lease,
+                leaseAllowed: conversationCacheAllowed,
+                completion: completion,
+                stream: false,
+                resolvedMaxCompletionTokens: maxOutputTokens
+            )
             return completion
         } catch {
             if let retainedCache = result.retainedCache {
@@ -6451,6 +6471,14 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     #if DEBUG || MACPROVIDER_LAB_HARNESS
+    /// Replay stops at the observed output length while preserving the original
+    /// request budget used by admission and context validation.
+    func installLabNativeMTPDecodeOutputCap(_ cap: NativeMTPLabDecodeOutputCap?) async -> Bool {
+        guard let continuousBatchScheduler else { return false }
+        await continuousBatchScheduler.installLabNativeMTPDecodeOutputCap(cap)
+        return true
+    }
+
     /// Lab-only R015 hook: record the attached scheduler's in-flight load-gate
     /// decisions. Returns false when no scheduler is attached.
     func installLabNativeMTPLoadGateRecorder(_ recorder: NativeMTPLoadGateRecorder?) async -> Bool {
@@ -6893,6 +6921,16 @@ actor ModelRuntime: ModelRuntimeServing {
             } else if let lease {
                 await conversationCache.abort(lease)
             }
+            nativeMTPRequestShapeCapture?.record(
+                request: request,
+                snapshot: snapshot,
+                admission: nativeMTPAdmission,
+                lease: lease,
+                leaseAllowed: conversationCacheAllowed,
+                completion: validated,
+                stream: true,
+                resolvedMaxCompletionTokens: maxOutputTokens
+            )
             return validated
         } catch {
             if let retainedCache = result.retainedCache {
@@ -7116,15 +7154,6 @@ actor ModelRuntime: ModelRuntimeServing {
             shouldCancel: shouldCancel,
             drainCancelled: drainCancelled
         ) {
-            self.nativeMTPRequestShapeCapture?.record(
-                request: request,
-                snapshot: snapshot,
-                admission: nativeMTPAdmission,
-                lease: nil as ConversationCacheLease?,
-                leaseAllowed: false,
-                completion: completion,
-                stream: false
-            )
             return (completion, snapshot)
         }
         CBTrace.log(request.requestID, "rt_serial_path")
@@ -7148,7 +7177,12 @@ actor ModelRuntime: ModelRuntimeServing {
                     lease: nil as ConversationCacheLease?,
                     leaseAllowed: false,
                     completion: completion,
-                    stream: false
+                    stream: false,
+                    resolvedMaxCompletionTokens: Self.nativeMTPCaptureEffectiveMaxOutputTokens(
+                        request: request,
+                        completion: completion,
+                        maxContextTokens: maxContextTokens
+                    )
                 )
                 return (completion, snapshot)
             } catch let error as DrainCancelledError {
@@ -7172,7 +7206,12 @@ actor ModelRuntime: ModelRuntimeServing {
                 lease: nil as ConversationCacheLease?,
                 leaseAllowed: false,
                 completion: completion,
-                stream: false
+                stream: false,
+                resolvedMaxCompletionTokens: Self.nativeMTPCaptureEffectiveMaxOutputTokens(
+                    request: request,
+                    completion: completion,
+                    maxContextTokens: maxContextTokens
+                )
             )
             return (completion, snapshot)
         }
@@ -7728,16 +7767,6 @@ actor ModelRuntime: ModelRuntimeServing {
             )
         }
         if let completion = batchedCompletion {
-            self.nativeMTPRequestShapeCapture?.record(
-                request: request,
-                snapshot: snapshot,
-                admission: nativeMTPAdmission,
-                lease: nil as ConversationCacheLease?,
-                leaseAllowed: false,
-                completion: completion,
-                stream: true,
-                resolvedMaxCompletionTokens: request.maxTokens
-            )
             return completion
         }
         if speculativeCacheWrapValidated,
@@ -7772,7 +7801,12 @@ actor ModelRuntime: ModelRuntimeServing {
                 lease: nil as ConversationCacheLease?,
                 leaseAllowed: false,
                 completion: validated,
-                stream: true
+                stream: true,
+                resolvedMaxCompletionTokens: Self.nativeMTPCaptureEffectiveMaxOutputTokens(
+                    request: request,
+                    completion: validated,
+                    maxContextTokens: maxContextTokens
+                )
             )
             return validated
         }
@@ -7802,7 +7836,12 @@ actor ModelRuntime: ModelRuntimeServing {
                 lease: nil as ConversationCacheLease?,
                 leaseAllowed: false,
                 completion: validated,
-                stream: true
+                stream: true,
+                resolvedMaxCompletionTokens: Self.nativeMTPCaptureEffectiveMaxOutputTokens(
+                    request: request,
+                    completion: validated,
+                    maxContextTokens: maxContextTokens
+                )
             )
             return validated
         }

@@ -46,15 +46,149 @@ SANITIZED_TEXT_KEYS = {
     "prompt_tokens",
     "completion_tokens",
     "generated_completion_tokens",
-    "max_completion_tokens_requested",
     "requested_max_completion_tokens",
-    "resolved_max_completion_tokens",
+    "effective_max_output_tokens",
     "captured_completion_tokens",
+    "target_completion_tokens",
+    "tool_message_count",
+    "assistant_tool_call_count",
+    "min_eligible_completion_token_fraction",
     "maximum_prompt_tokens",
     "maximum_completion_tokens",
     "conversation_cache_cached_prompt_tokens",
 }
 LEASE_STATES = {"not_applicable", "miss", "hit", "missing"}
+
+REPLAY_RESULT_SCHEMA = "macprovider.native-mtp-request-shape-replay.v1"
+ANALYZER_JSONL_SCHEMA = "macprovider.native-mtp-post-gateway-replay.v1"
+ANALYZER_PATHS = {"ordinary": "mtp_disabled", "native_mtp": "observed_mixed"}
+EXPECTED_TARGET_STOP_CONTROL = "lab_decode_output_cap_by_request_id"
+EXPECTED_COMPLETION_LENGTH_BINDING = "effective_max_output_tokens drives admission; LAB decode output caps bind measured generation to target_completion_tokens without cancellation; exact measured match is required for qualification"
+REPLAY_HEADER_KEYS = {
+    "schema",
+    "record_type",
+    "provider_commit",
+    "model_id",
+    "target_sha256",
+    "mtp_sha256",
+    "tokenizer_sha256",
+    "policy_sha256",
+    "bench_policy_sha256",
+    "sample_digest_sha256",
+    "preregistration_digest_sha256",
+    "privacy_review_id",
+    "capture_sha256",
+    "capture_schema",
+    "capture_requires_native_mtp_off",
+    "run_order",
+    "mixed_rows",
+    "max_native_active_rows",
+    "cache_key_scope",
+    "exports_raw_prompt_text",
+    "exports_recoverable_cache_groups",
+    "completion_length_binding",
+    "target_stop_control",
+    "synthetic_stand_ins",
+    "run_metrics_version",
+    "sample_filter_included_count",
+    "sample_filter_excluded_count",
+    "request_shapes",
+}
+REPLAY_RUN_KEYS = {
+    "schema",
+    "record_type",
+    "policy_sha256",
+    "bench_policy_sha256",
+    "capture_sha256",
+    "block_index",
+    "path",
+    "order_position",
+    "requests",
+    "wall_seconds",
+    "ordinary_observed_requests",
+    "ordinary_observed_completion_tokens",
+    "ordinary_observed_interval_seconds",
+    "ordinary_observed_throughput_tps",
+    "aggregate_completion_tokens",
+    "aggregate_throughput_tps",
+    "qualification_status",
+    "sample_coverage_complete",
+    "admission_observation_complete",
+    "missing_admission_request_ids",
+    "target_completion_observation_complete",
+    "target_completion_mismatch_request_ids",
+    "committed_timing_observation_complete",
+    "completion_tokens_by_request",
+    "effective_paths",
+    "admission_projection",
+}
+REPLAY_SHAPE_KEYS = {
+    "shape_id",
+    "served_model_hash_sha256",
+    "served_weights_manifest_sha256",
+    "stream",
+    "requested_temperature",
+    "requested_top_p",
+    "requested_max_completion_tokens",
+    "effective_max_output_tokens",
+    "prompt_tokens",
+    "target_completion_tokens",
+    "completion_tokens",
+    "generated_completion_tokens",
+    "pre_capacity_selector_reason",
+    "pre_capacity_eligible",
+    "effective_path",
+    "conversation_key_present",
+    "conversation_key_cache_only",
+    "conversation_cache_lease",
+    "conversation_cache_cached_prompt_tokens",
+    "conversation_cache_retained_handoff",
+    "anonymous_cache_group_sha256",
+}
+REPLAY_COMPLETION_KEYS = {
+    "request_id",
+    "target_completion_tokens",
+    "completion_tokens",
+    "target_completion_matched",
+    "target_stop_triggered",
+    "generated_completion_tokens",
+    "committed_timing_events",
+    "ttft_seconds",
+    "inter_token_gaps",
+}
+REPLAY_ADMISSION_KEYS = {
+    "request_id",
+    "shape_id",
+    "target_completion_tokens",
+    "effective_max_output_tokens",
+    "expected_selector_reason",
+    "actual_selector_reason",
+    "expected_effective_path",
+    "actual_effective_path",
+    "matches",
+    "reproduced",
+    "pending_reason",
+}
+ANALYZER_HEADER_KEYS = {
+    "schema",
+    "record_type",
+    "policy_sha256",
+    "sample_digest_sha256",
+    "preregistration_digest_sha256",
+    "privacy_review_id",
+}
+ANALYZER_BLOCK_KEYS = {
+    "schema",
+    "record_type",
+    "policy_sha256",
+    "block_index",
+    "path",
+    "request_shapes",
+    "ordinary_row_p95_ttft_seconds",
+    "ordinary_row_p95_itl_seconds",
+    "ordinary_row_throughput_tps",
+    "end_to_end_aggregate_throughput_tps",
+}
 
 CAPTURE_HEADER_KEYS = {
     "schema",
@@ -62,9 +196,12 @@ CAPTURE_HEADER_KEYS = {
     "captured_at",
     "native_mtp_mode",
     "capture_requires_native_mtp_off",
+    "sample_method",
+    "sample_window_started_at",
     "served_identity",
     "build_source_commit",
     "build_cdhash",
+    "build_identity_complete",
     "cli_version",
     "max_records",
     "max_bytes",
@@ -82,11 +219,17 @@ CAPTURE_SHAPE_KEYS = {
     "native_mtp_target_generation",
     "stream",
     "stop_sequences",
+    "stop_sequence_utf8_length_buckets",
     "requested_temperature",
     "requested_top_p",
+    "requested_top_k",
+    "requested_min_p",
+    "requested_presence_penalty",
+    "requested_frequency_penalty",
+    "requested_repetition_penalty",
     "requested_n",
     "requested_max_completion_tokens",
-    "resolved_max_completion_tokens",
+    "effective_max_output_tokens",
     "sampling_requested",
     "multiple_completions_requested",
     "top_k_present",
@@ -95,11 +238,17 @@ CAPTURE_SHAPE_KEYS = {
     "presence_penalty_nonzero",
     "repetition_penalty_nondefault",
     "logit_bias_present",
+    "logit_bias_geometry",
     "tools_present",
+    "tool_count",
     "tool_choice_present",
+    "tool_choice_kind",
     "tool_turn_state_present",
+    "tool_message_count",
+    "assistant_tool_call_count",
     "structured_output_requested",
     "response_format_kind",
+    "response_schema_geometry",
     "logprobs_requested",
     "top_logprobs_requested",
     "logit_controls_requested",
@@ -113,10 +262,10 @@ CAPTURE_SHAPE_KEYS = {
     "conversation_cache_lease",
     "conversation_cache_cached_prompt_tokens",
     "conversation_cache_retained_handoff",
+    "anonymous_cache_group_sha256",
     "prompt_tokens",
     "completion_tokens",
     "generated_completion_tokens",
-    "max_completion_tokens_requested",
     "pre_capacity_selector_reason",
     "pre_capacity_eligible",
     "effective_path",
@@ -242,8 +391,8 @@ class CapturedShape:
     shape_id: str
     prompt_tokens: int
     completion_tokens: int
-    max_completion_tokens_requested: int
-    resolved_max_completion_tokens: int
+    requested_max_completion_tokens: int | None
+    effective_max_output_tokens: int
     conversation_key_present: bool
     conversation_key_cache_only: bool
     conversation_cache_lease: str
@@ -277,6 +426,7 @@ class CapturedShape:
     captured_pre_capacity_eligible: bool
     unknown_top_level_keys_present: bool
     unknown_stream_option_keys_present: bool
+    sanitized_geometry: dict[str, object]
 
 
 def _shape_from_record(record: object, path: str) -> tuple[CapturedShape | None, list[str]]:
@@ -291,8 +441,15 @@ def _shape_from_record(record: object, path: str) -> tuple[CapturedShape | None,
     prompt_tokens = _require_count(record, "prompt_tokens", path, failures, positive=True)
     completion_tokens = _require_count(record, "completion_tokens", path, failures, positive=True)
     _require_count(record, "generated_completion_tokens", path, failures)
-    max_completion_tokens_requested = _require_count(record, "max_completion_tokens_requested", path, failures)
-    resolved_max_completion_tokens = _require_count(record, "resolved_max_completion_tokens", path, failures, positive=True)
+    requested_max_completion_tokens_raw = record.get("requested_max_completion_tokens")
+    if requested_max_completion_tokens_raw is None:
+        requested_max_completion_tokens = None
+    elif _is_count(requested_max_completion_tokens_raw) and requested_max_completion_tokens_raw > 0:
+        requested_max_completion_tokens = requested_max_completion_tokens_raw
+    else:
+        failures.append(f"{path}.requested_max_completion_tokens:field_invalid")
+        requested_max_completion_tokens = None
+    effective_max_output_tokens = _require_count(record, "effective_max_output_tokens", path, failures, positive=True)
     key_present = _require_bool(record, "conversation_key_present", path, failures)
     cache_only = _require_bool(record, "conversation_key_cache_only", path, failures)
     retained = _require_bool(record, "conversation_cache_retained_handoff", path, failures)
@@ -355,12 +512,27 @@ def _shape_from_record(record: object, path: str) -> tuple[CapturedShape | None,
         failures.append(f"{path}.logprobs_requested_inconsistent")
     if bools["unknown_request_fields_present"] != (bools["unknown_top_level_keys_present"] or bools["unknown_stream_option_keys_present"]):
         failures.append(f"{path}.unknown_request_fields_present_inconsistent")
-    for key in ("requested_temperature", "requested_top_p"):
+    for key in ("requested_temperature", "requested_top_p", "requested_presence_penalty", "requested_frequency_penalty"):
         value = record.get(key)
         if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
             failures.append(f"{path}.{key}:field_invalid")
+    sanitized_geometry_keys = {
+        "stop_sequence_utf8_length_buckets",
+        "requested_top_k",
+        "requested_min_p",
+        "requested_presence_penalty",
+        "requested_frequency_penalty",
+        "requested_repetition_penalty",
+        "logit_bias_geometry",
+        "tool_count",
+        "tool_choice_kind",
+        "tool_message_count",
+        "assistant_tool_call_count",
+        "response_schema_geometry",
+        "anonymous_cache_group_sha256",
+    }
+    sanitized_geometry = {key: record.get(key) for key in sanitized_geometry_keys if key in record}
     requested_n = _require_count(record, "requested_n", path, failures, positive=True)
-    _require_count(record, "requested_max_completion_tokens", path, failures)
     response_format_kind = record.get("response_format_kind")
     if response_format_kind not in {"text", "json_object", "json_schema"}:
         failures.append(f"{path}.response_format_kind:field_invalid")
@@ -371,8 +543,8 @@ def _shape_from_record(record: object, path: str) -> tuple[CapturedShape | None,
         shape_id=record["shape_id"],
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
-        max_completion_tokens_requested=max_completion_tokens_requested,
-        resolved_max_completion_tokens=resolved_max_completion_tokens,
+        requested_max_completion_tokens=requested_max_completion_tokens,
+        effective_max_output_tokens=effective_max_output_tokens,
         conversation_key_present=key_present,
         conversation_key_cache_only=cache_only,
         conversation_cache_lease=lease,
@@ -385,6 +557,7 @@ def _shape_from_record(record: object, path: str) -> tuple[CapturedShape | None,
         response_format_kind=response_format_kind,
         captured_pre_capacity_selector_reason=captured_reason,
         captured_pre_capacity_eligible=captured_eligible,
+        sanitized_geometry=sanitized_geometry,
         **bools,
     ), []
 
@@ -481,9 +654,10 @@ def selector_reason(shape: CapturedShape, tuple_bounds: dict) -> str:
         return "capability_mismatch"
     if tuple_bounds["maximum_proposal_depth"] <= 0:
         return "insufficient_verification_capacity"
-    if shape.prompt_tokens > tuple_bounds["maximum_prompt_tokens"]:
-        return "capability_mismatch"
-    if shape.resolved_max_completion_tokens > tuple_bounds["maximum_completion_tokens"]:
+    if (
+        shape.requested_max_completion_tokens is not None
+        and shape.requested_max_completion_tokens > tuple_bounds["maximum_completion_tokens"]
+    ):
         return "capability_mismatch"
     if shape.stop_sequences > 0 and not tuple_bounds["supports_stop_sequences"]:
         return "capability_mismatch"
@@ -520,8 +694,16 @@ def selector_reason(shape: CapturedShape, tuple_bounds: dict) -> str:
         return "reasoning_or_template"
     if shape.conversation_key_present and shape.conversation_key_cache_only:
         if shape.conversation_cache_lease == "miss" and shape.conversation_cache_cached_prompt_tokens == 0 and not shape.conversation_cache_retained_handoff:
-            return "eligible"
+            return _eligible_or_bound_mismatch(shape, tuple_bounds)
         return "conversation_key"
+    return _eligible_or_bound_mismatch(shape, tuple_bounds)
+
+
+def _eligible_or_bound_mismatch(shape: CapturedShape, tuple_bounds: dict) -> str:
+    if shape.prompt_tokens > tuple_bounds["maximum_prompt_tokens"]:
+        return "capability_mismatch"
+    if shape.effective_max_output_tokens > tuple_bounds["maximum_completion_tokens"]:
+        return "capability_mismatch"
     return "eligible"
 
 
@@ -595,8 +777,8 @@ def project_capture(
             "shape_id": shape.shape_id,
             "prompt_tokens": shape.prompt_tokens,
             "completion_tokens": shape.completion_tokens,
-            "max_completion_tokens_requested": shape.max_completion_tokens_requested,
-            "resolved_max_completion_tokens": shape.resolved_max_completion_tokens,
+            "requested_max_completion_tokens": shape.requested_max_completion_tokens,
+            "effective_max_output_tokens": shape.effective_max_output_tokens,
             "conversation_key_present": shape.conversation_key_present,
             "conversation_key_cache_only": shape.conversation_key_cache_only,
             "conversation_cache_lease": shape.conversation_cache_lease,
@@ -607,6 +789,7 @@ def project_capture(
             "requested_temperature": shape.requested_temperature,
             "requested_top_p": shape.requested_top_p,
             "requested_n": shape.requested_n,
+            **shape.sanitized_geometry,
             "sampling_requested": shape.sampling_requested,
             "multiple_completions_requested": shape.multiple_completions_requested,
             "top_k_present": shape.top_k_present,
@@ -629,6 +812,7 @@ def project_capture(
             "unknown_top_level_keys_present": shape.unknown_top_level_keys_present,
             "unknown_stream_option_keys_present": shape.unknown_stream_option_keys_present,
             "pre_capacity_selector_reason": selector_reason(shape, tuple_bounds),
+            **shape.sanitized_geometry,
         }
         for shape in shapes
     ]
@@ -687,6 +871,480 @@ def project_capture(
     return policy, plan
 
 
+def _load_jsonl_records(path: Path) -> list[dict]:
+    records: list[dict] = []
+    with path.open("r", encoding="utf-8") as fh:
+        for lineno, line in enumerate(fh, 1):
+            line = line.strip()
+            if not line:
+                continue
+            record = _strict_loads(line)
+            if not isinstance(record, dict):
+                raise ValueError(f"{path}:{lineno}:record_not_object")
+            records.append(record)
+    if not records:
+        raise ValueError("replay evidence empty")
+    return records
+
+
+def _is_positive_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
+
+
+def _p95(values: list[float]) -> float:
+    if not values:
+        raise ValueError("missing timing samples")
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    pos = (len(ordered) - 1) * 0.95
+    lo = math.floor(pos)
+    hi = math.ceil(pos)
+    if lo == hi:
+        return ordered[lo]
+    return ordered[lo] + (ordered[hi] - ordered[lo]) * (pos - lo)
+
+
+def _load_policy_for_analyzer(path: Path) -> tuple[dict, str]:
+    policy = _read_json(path)
+    if not isinstance(policy, dict):
+        raise ValueError("policy must be an object")
+    failures = _strict_object(policy, {
+        "schema",
+        "issue",
+        "confidence_method",
+        "preregistration_digest_sha256",
+        "privacy_review_id",
+        "privacy_reviewed_at",
+        "sample_digest_sha256",
+        "seed",
+        "bootstrap_draws",
+        "alpha",
+        "min_paired_blocks",
+        "thresholds",
+    }, "policy")
+    failures.extend(_privacy_violations(policy, "policy"))
+    if policy.get("schema") != POLICY_SCHEMA:
+        failures.append("policy_schema_invalid")
+    for key in ("sample_digest_sha256", "preregistration_digest_sha256"):
+        if not (isinstance(policy.get(key), str) and HEX64.match(policy[key])):
+            failures.append(f"policy.{key}:field_invalid")
+    if not (isinstance(policy.get("privacy_review_id"), str) and SAFE_ID.match(policy["privacy_review_id"])):
+        failures.append("policy.privacy_review_id:field_invalid")
+    if failures:
+        raise ValueError("policy invalid: " + "; ".join(sorted(set(failures))))
+    return policy, _sha256_file(path)
+
+
+def _load_replay_runs(path: Path, policy: dict, policy_sha: str, capture_sha256: str | None) -> tuple[dict, list[dict]]:
+    records = _load_jsonl_records(path)
+    if records[0].get("schema") == PLAN_SCHEMA or records[0].get("projection_stage") == "offline_sanitized_shape_projection_only":
+        raise ValueError("replay evidence is projection-only, not actual NativeMTPRequestShapeReplayCommand output")
+    header: dict | None = None
+    runs: list[dict] = []
+    failures: list[str] = []
+    for index, record in enumerate(records, 1):
+        if record.get("schema") != REPLAY_RESULT_SCHEMA:
+            failures.append(f"line {index}:schema_invalid")
+            continue
+        record_type = record.get("record_type")
+        if record_type == "header":
+            if header is not None:
+                failures.append(f"line {index}:duplicate_header")
+            failures.extend(_strict_object(record, REPLAY_HEADER_KEYS, f"line {index}:header"))
+            header = record
+        elif record_type == "run":
+            failures.extend(_strict_object(record, REPLAY_RUN_KEYS, f"line {index}:run"))
+            runs.append(record)
+        elif record_type == "pending" or record.get("status") == "pending":
+            failures.append(f"line {index}:pending_replay_result")
+        else:
+            failures.append(f"line {index}:record_type_invalid")
+    if header is None:
+        failures.append("missing_replay_header")
+    else:
+        if header.get("policy_sha256") != policy_sha:
+            failures.append("header_policy_sha256_mismatch")
+        for key in ("sample_digest_sha256", "preregistration_digest_sha256", "privacy_review_id"):
+            if header.get(key) != policy.get(key):
+                failures.append(f"header_policy_field_mismatch:{key}")
+        if not (isinstance(header.get("bench_policy_sha256"), str) and HEX64.match(header["bench_policy_sha256"])):
+            failures.append("header_bench_policy_sha256_invalid")
+        if capture_sha256 is not None and header.get("capture_sha256") != capture_sha256:
+            failures.append("header_capture_sha256_mismatch")
+        if header.get("capture_schema") != CAPTURE_SCHEMA or header.get("capture_requires_native_mtp_off") is not True:
+            failures.append("header_capture_binding_invalid")
+        if header.get("exports_raw_prompt_text") is not False or header.get("exports_recoverable_cache_groups") is not False:
+            failures.append("header_privacy_exports_invalid")
+        if header.get("run_order") != "paired_random_counterbalanced":
+            failures.append("header_run_order_invalid")
+        if header.get("cache_key_scope") != "paired_block_and_path_isolated":
+            failures.append("header_cache_key_scope_invalid")
+        if header.get("completion_length_binding") != EXPECTED_COMPLETION_LENGTH_BINDING:
+            failures.append("header_completion_length_binding_invalid")
+        if header.get("target_stop_control") != EXPECTED_TARGET_STOP_CONTROL:
+            failures.append("header_target_stop_control_invalid")
+        if not isinstance(header.get("synthetic_stand_ins"), dict):
+            failures.append("header_synthetic_stand_ins_invalid")
+        if not (_is_count(header.get("mixed_rows")) and header["mixed_rows"] > 0):
+            failures.append("header_mixed_rows_invalid")
+        if not (_is_count(header.get("max_native_active_rows")) and header["max_native_active_rows"] > 0):
+            failures.append("header_max_native_active_rows_invalid")
+        request_shapes = header.get("request_shapes")
+        if not isinstance(request_shapes, list) or not request_shapes:
+            failures.append("header_request_shapes_invalid")
+        if not (_is_count(header.get("sample_filter_included_count")) and header["sample_filter_included_count"] == len(request_shapes or [])):
+            failures.append("header_sample_filter_included_count_invalid")
+        if not _is_count(header.get("sample_filter_excluded_count")):
+            failures.append("header_sample_filter_excluded_count_invalid")
+    if not runs:
+        failures.append("missing_replay_runs")
+    for run_index, run in enumerate(runs):
+        if run.get("policy_sha256") != policy_sha:
+            failures.append(f"run[{run_index}]:policy_sha256_mismatch")
+        if header is not None and run.get("bench_policy_sha256") != header.get("bench_policy_sha256"):
+            failures.append(f"run[{run_index}]:bench_policy_sha256_mismatch")
+        if header is not None and run.get("capture_sha256") != header.get("capture_sha256"):
+            failures.append(f"run[{run_index}]:capture_sha256_mismatch")
+        if run.get("path") not in ANALYZER_PATHS:
+            failures.append(f"run[{run_index}]:path_invalid")
+        if not _is_count(run.get("block_index")):
+            failures.append(f"run[{run_index}]:block_index_invalid")
+        if not _is_positive_number(run.get("wall_seconds")):
+            failures.append(f"run[{run_index}]:wall_seconds_invalid")
+        if not _is_positive_number(run.get("ordinary_observed_interval_seconds")):
+            failures.append(f"run[{run_index}]:ordinary_observed_interval_seconds_invalid")
+        if run.get("qualification_status") != "qualified":
+            failures.append(f"run[{run_index}]:qualification_status_not_qualified")
+        if run.get("sample_coverage_complete") is not True:
+            failures.append(f"run[{run_index}]:sample_coverage_incomplete")
+        if run.get("admission_observation_complete") is not True or run.get("missing_admission_request_ids") != []:
+            failures.append(f"run[{run_index}]:admission_observation_incomplete")
+        if run.get("target_completion_observation_complete") is not True or run.get("target_completion_mismatch_request_ids") != []:
+            failures.append(f"run[{run_index}]:target_completion_observation_incomplete")
+        if run.get("committed_timing_observation_complete") is not True:
+            failures.append(f"run[{run_index}]:committed_timing_observation_incomplete")
+        for key in ("completion_tokens_by_request", "admission_projection"):
+            if not isinstance(run.get(key), list) or not run[key]:
+                failures.append(f"run[{run_index}]:{key}_invalid")
+        if "effective_paths" in run and not isinstance(run.get("effective_paths"), list):
+            failures.append(f"run[{run_index}]:effective_paths_invalid")
+    if failures:
+        raise ValueError("replay evidence invalid: " + "; ".join(sorted(set(failures))))
+    return header or {}, runs
+
+
+def _request_shape_for_analyzer(shape: object, header: dict) -> dict:
+    failures = _strict_object(shape, REPLAY_SHAPE_KEYS, "request_shape")
+    if not isinstance(shape, dict):
+        raise ValueError("request_shape invalid: " + "; ".join(failures))
+    failures.extend(_privacy_violations(shape, "request_shape"))
+    shape_id = shape.get("shape_id")
+    if not (isinstance(shape_id, str) and SAFE_ID.match(shape_id)):
+        failures.append("shape_id_invalid")
+    served_model = shape.get("served_model_hash_sha256")
+    served_weights = shape.get("served_weights_manifest_sha256")
+    if not (isinstance(served_model, str) and HEX64.match(served_model)):
+        failures.append("served_model_hash_sha256_invalid")
+    elif served_model != header.get("target_sha256"):
+        failures.append("served_model_hash_sha256_not_target")
+    if not (isinstance(served_weights, str) and HEX64.match(served_weights)):
+        failures.append("served_weights_manifest_sha256_invalid")
+    target_completion_tokens = shape.get("target_completion_tokens")
+    if not (_is_count(target_completion_tokens) and target_completion_tokens > 0):
+        failures.append("target_completion_tokens_invalid")
+    key_present = shape.get("conversation_key_present")
+    cache_only = shape.get("conversation_key_cache_only")
+    lease = shape.get("conversation_cache_lease")
+    cached = shape.get("conversation_cache_cached_prompt_tokens")
+    retained = shape.get("conversation_cache_retained_handoff")
+    if not isinstance(key_present, bool):
+        failures.append("conversation_key_present_invalid")
+    if not isinstance(cache_only, bool):
+        failures.append("conversation_key_cache_only_invalid")
+    if lease not in LEASE_STATES:
+        failures.append("conversation_cache_lease_invalid")
+    if not _is_count(cached):
+        failures.append("conversation_cache_cached_prompt_tokens_invalid")
+    if not isinstance(retained, bool):
+        failures.append("conversation_cache_retained_handoff_invalid")
+    if key_present is False:
+        if cache_only or lease != "not_applicable" or cached != 0 or retained:
+            failures.append("cache_proof_inconsistent_without_key")
+    elif key_present is True and cache_only is True:
+        if lease == "not_applicable":
+            failures.append("cache_only_lease_missing")
+        if lease in {"miss", "missing"} and cached != 0:
+            failures.append(f"cache_{lease}_with_cached_prompt_tokens")
+        if lease == "hit" and cached <= 0:
+            failures.append("cache_hit_without_cached_prompt_tokens")
+    elif key_present is True:
+        if lease != "not_applicable" or cached != 0 or retained:
+            failures.append("sticky_key_with_cache_proof")
+    if shape.get("effective_path") != "ordinary":
+        failures.append("capture_shape_effective_path_not_ordinary")
+    if failures:
+        raise ValueError("request_shape invalid: " + "; ".join(sorted(set(failures))))
+    result = {
+        "shape_id": shape_id,
+        "conversation_key_present": key_present,
+        "completion_tokens": target_completion_tokens,
+        "pre_capacity_selector_reason": "PENDING_ACTUAL_ADMISSION",
+        "pre_capacity_eligible": False,
+        "effective_path": "PENDING_ACTUAL_PATH",
+    }
+    if key_present:
+        result.update({
+            "conversation_key_cache_only": cache_only,
+            "conversation_cache_lease": lease,
+            "conversation_cache_cached_prompt_tokens": cached,
+            "conversation_cache_retained_handoff": retained,
+        })
+    return result
+
+
+def _indexed_completion_timings(run: dict, run_label: str) -> dict[str, dict]:
+    timings: dict[str, dict] = {}
+    failures: list[str] = []
+    for index, item in enumerate(run.get("completion_tokens_by_request", [])):
+        failures.extend(_strict_object(item, REPLAY_COMPLETION_KEYS, f"{run_label}.completion[{index}]"))
+        if not isinstance(item, dict):
+            continue
+        request_id = item.get("request_id")
+        if not (isinstance(request_id, str) and SAFE_ID.match(request_id)):
+            failures.append(f"{run_label}.completion[{index}]:request_id_invalid")
+            continue
+        if request_id in timings:
+            failures.append(f"{run_label}.completion[{index}]:duplicate_request_id")
+        target_tokens = item.get("target_completion_tokens")
+        completion_tokens = item.get("completion_tokens")
+        committed_events = item.get("committed_timing_events")
+        ttft = item.get("ttft_seconds")
+        gaps = item.get("inter_token_gaps")
+        if not (_is_count(target_tokens) and target_tokens > 0):
+            failures.append(f"{run_label}.completion[{index}]:target_completion_tokens_invalid")
+        if not (_is_count(completion_tokens) and completion_tokens > 0):
+            failures.append(f"{run_label}.completion[{index}]:completion_tokens_invalid")
+        if completion_tokens != target_tokens or item.get("target_completion_matched") is not True:
+            failures.append(f"{run_label}.completion[{index}]:target_completion_mismatch")
+        target_stop = item.get("target_stop_triggered")
+        if target_stop is not True and target_stop is not False:
+            failures.append(f"{run_label}.completion[{index}]:target_stop_triggered_invalid")
+        if committed_events != completion_tokens:
+            failures.append(f"{run_label}.completion[{index}]:committed_timing_events_mismatch")
+        if not _is_positive_number(ttft):
+            failures.append(f"{run_label}.completion[{index}]:ttft_seconds_invalid")
+        if not isinstance(gaps, list) or len(gaps) != max(int(completion_tokens or 0) - 1, 0):
+            failures.append(f"{run_label}.completion[{index}]:inter_token_gaps_incomplete")
+        elif any(not _is_positive_number(gap) for gap in gaps):
+            failures.append(f"{run_label}.completion[{index}]:inter_token_gaps_invalid")
+        timings[request_id] = item
+    if failures:
+        raise ValueError("replay timing invalid: " + "; ".join(sorted(set(failures))))
+    return timings
+
+
+def _admission_rows(run: dict, run_label: str) -> list[dict]:
+    failures: list[str] = []
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for index, item in enumerate(run.get("admission_projection", [])):
+        failures.extend(_strict_object(item, REPLAY_ADMISSION_KEYS, f"{run_label}.admission[{index}]"))
+        if not isinstance(item, dict):
+            continue
+        request_id = item.get("request_id")
+        shape_id = item.get("shape_id")
+        if not (isinstance(request_id, str) and SAFE_ID.match(request_id)):
+            failures.append(f"{run_label}.admission[{index}]:request_id_invalid")
+        elif request_id in seen:
+            failures.append(f"{run_label}.admission[{index}]:duplicate_request_id")
+        else:
+            seen.add(request_id)
+        if not (isinstance(shape_id, str) and SAFE_ID.match(shape_id)):
+            failures.append(f"{run_label}.admission[{index}]:shape_id_invalid")
+        if item.get("pending_reason") not in {None, ""}:
+            failures.append(f"{run_label}.admission[{index}]:row_pending")
+        if item.get("reproduced") is not True:
+            failures.append(f"{run_label}.admission[{index}]:row_unreproduced")
+        if item.get("actual_selector_reason") in {None, "missing"} or item.get("actual_effective_path") in {None, "missing"}:
+            failures.append(f"{run_label}.admission[{index}]:actual_admission_missing")
+        if item.get("matches") is not True:
+            failures.append(f"{run_label}.admission[{index}]:actual_admission_mismatch")
+        if item.get("actual_effective_path") not in {"ordinary", "native_mtp"}:
+            failures.append(f"{run_label}.admission[{index}]:actual_effective_path_invalid")
+        if not isinstance(item.get("actual_selector_reason"), str):
+            failures.append(f"{run_label}.admission[{index}]:actual_selector_reason_invalid")
+        if not (_is_count(item.get("target_completion_tokens")) and item["target_completion_tokens"] > 0):
+            failures.append(f"{run_label}.admission[{index}]:target_completion_tokens_invalid")
+        rows.append(item)
+    if failures:
+        raise ValueError("replay admission invalid: " + "; ".join(sorted(set(failures))))
+    return rows
+
+
+def _metrics_from_run(run: dict, ordinary_request_ids: set[str], run_label: str) -> dict:
+    timings = _indexed_completion_timings(run, run_label)
+    wall_seconds = float(run["wall_seconds"])
+    if set(timings) != {row["request_id"] for row in _admission_rows(run, run_label)}:
+        raise ValueError(f"replay timing invalid: {run_label}:timing_admission_request_id_mismatch")
+    if not ordinary_request_ids:
+        raise ValueError(f"replay timing invalid: {run_label}:missing_ordinary_rows")
+    if not ordinary_request_ids.issubset(timings):
+        raise ValueError(f"replay timing invalid: {run_label}:ordinary_timing_missing")
+    ordinary_timings = [timings[request_id] for request_id in sorted(ordinary_request_ids)]
+    ordinary_tokens = sum(int(item["completion_tokens"]) for item in ordinary_timings)
+    ordinary_gaps = [float(gap) for item in ordinary_timings for gap in item["inter_token_gaps"]]
+    if not ordinary_gaps:
+        raise ValueError(f"replay timing invalid: {run_label}:ordinary_inter_token_gaps_missing")
+    if not _is_positive_number(run.get("ordinary_observed_throughput_tps")):
+        raise ValueError(f"replay timing invalid: {run_label}:ordinary_observed_throughput_tps_invalid")
+    if not _is_positive_number(run.get("aggregate_throughput_tps")):
+        raise ValueError(f"replay timing invalid: {run_label}:aggregate_throughput_tps_invalid")
+    ordinary_reported_tokens = run.get("ordinary_observed_completion_tokens")
+    if not (_is_count(ordinary_reported_tokens) and ordinary_reported_tokens == ordinary_tokens):
+        raise ValueError(f"replay timing invalid: {run_label}:ordinary_observed_completion_tokens_mismatch")
+    ordinary_interval = float(run["ordinary_observed_interval_seconds"])
+    if not (0 < ordinary_interval <= wall_seconds):
+        raise ValueError(f"replay timing invalid: {run_label}:ordinary_observed_interval_invalid")
+    expected_ordinary_tps = float(ordinary_reported_tokens) / ordinary_interval
+    if not math.isclose(float(run["ordinary_observed_throughput_tps"]), expected_ordinary_tps, rel_tol=1e-9, abs_tol=1e-9):
+        raise ValueError(f"replay timing invalid: {run_label}:ordinary_observed_throughput_tps_mismatch")
+    aggregate_tokens = sum(int(item["completion_tokens"]) for item in timings.values())
+    if run.get("aggregate_completion_tokens") != aggregate_tokens:
+        raise ValueError(f"replay timing invalid: {run_label}:aggregate_completion_tokens_mismatch")
+    expected_aggregate_tps = float(aggregate_tokens) / wall_seconds
+    if not math.isclose(float(run["aggregate_throughput_tps"]), expected_aggregate_tps, rel_tol=1e-9, abs_tol=1e-9):
+        raise ValueError(f"replay timing invalid: {run_label}:aggregate_throughput_tps_mismatch")
+    return {
+        "ordinary_row_p95_ttft_seconds": _p95([float(item["ttft_seconds"]) for item in ordinary_timings]),
+        "ordinary_row_p95_itl_seconds": _p95(ordinary_gaps),
+        "ordinary_row_throughput_tps": float(run["ordinary_observed_throughput_tps"]),
+        "end_to_end_aggregate_throughput_tps": float(run["aggregate_throughput_tps"]),
+    }
+
+
+def convert_replay_to_analyzer_jsonl(
+    replay_path: Path,
+    policy_path: Path,
+    *,
+    capture_sha256: str | None = None,
+) -> list[dict]:
+    policy, policy_sha = _load_policy_for_analyzer(policy_path)
+    header, runs = _load_replay_runs(replay_path, policy, policy_sha, capture_sha256)
+    shape_templates_by_id: dict[str, dict] = {}
+    ordered_shape_ids: list[str] = []
+    for shape in header["request_shapes"]:
+        template = _request_shape_for_analyzer(shape, header)
+        shape_id = template["shape_id"]
+        if shape_id in shape_templates_by_id:
+            raise ValueError(f"replay header duplicate shape_id: {shape_id}")
+        shape_templates_by_id[shape_id] = template
+        ordered_shape_ids.append(shape_id)
+    by_block: dict[int, dict[str, dict]] = {}
+    for run in runs:
+        block_runs = by_block.setdefault(run["block_index"], {})
+        if run["path"] in block_runs:
+            raise ValueError(f"replay conversion invalid: block {run['block_index']}:duplicate_path:{run['path']}")
+        block_runs[run["path"]] = run
+    records: list[dict] = [{
+        "schema": ANALYZER_JSONL_SCHEMA,
+        "record_type": "header",
+        "policy_sha256": policy_sha,
+        "sample_digest_sha256": policy["sample_digest_sha256"],
+        "preregistration_digest_sha256": policy["preregistration_digest_sha256"],
+        "privacy_review_id": policy["privacy_review_id"],
+    }]
+    failures: list[str] = []
+    for block_index in sorted(by_block):
+        paths = by_block[block_index]
+        missing = sorted(set(ANALYZER_PATHS) - set(paths))
+        if missing:
+            failures.append(f"block {block_index}:missing_path:{','.join(missing)}")
+            continue
+        extra = sorted(set(paths) - set(ANALYZER_PATHS))
+        if extra:
+            failures.append(f"block {block_index}:extra_path:{','.join(extra)}")
+            continue
+        mixed_rows = _admission_rows(paths["native_mtp"], f"block[{block_index}].native_mtp")
+        disabled_rows = _admission_rows(paths["ordinary"], f"block[{block_index}].ordinary")
+        mixed_by_shape: dict[str, list[dict]] = {}
+        disabled_by_shape: dict[str, list[dict]] = {}
+        for row in mixed_rows:
+            mixed_by_shape.setdefault(row["shape_id"], []).append(row)
+        for row in disabled_rows:
+            disabled_by_shape.setdefault(row["shape_id"], []).append(row)
+        if set(mixed_by_shape) != set(ordered_shape_ids) or set(disabled_by_shape) != set(ordered_shape_ids):
+            failures.append(f"block {block_index}:shape_set_mismatch")
+            continue
+        analyzer_shapes_mixed: list[dict] = []
+        analyzer_shapes_disabled: list[dict] = []
+        block_failed = False
+        for shape_id in ordered_shape_ids:
+            if len(mixed_by_shape[shape_id]) != 1 or len(disabled_by_shape[shape_id]) != 1:
+                failures.append(f"block {block_index}:shape {shape_id}:replay_count_not_one_per_captured_row")
+                block_failed = True
+                continue
+            mixed_actuals = {(row["actual_selector_reason"], row["actual_effective_path"], row["target_completion_tokens"]) for row in mixed_by_shape[shape_id]}
+            disabled_actuals = {(row["actual_selector_reason"], row["actual_effective_path"], row["target_completion_tokens"]) for row in disabled_by_shape[shape_id]}
+            if len(mixed_actuals) != 1 or len(disabled_actuals) != 1:
+                failures.append(f"block {block_index}:shape {shape_id}:admission_not_stable")
+                block_failed = True
+                continue
+            mixed_reason, mixed_path, mixed_tokens = next(iter(mixed_actuals))
+            disabled_reason, disabled_path, disabled_tokens = next(iter(disabled_actuals))
+            if disabled_reason != "mode_off" or disabled_path != "ordinary":
+                failures.append(f"block {block_index}:shape {shape_id}:disabled_actual_path_invalid")
+                block_failed = True
+            if mixed_tokens != disabled_tokens or mixed_tokens != shape_templates_by_id[shape_id]["completion_tokens"]:
+                failures.append(f"block {block_index}:shape {shape_id}:sample_completion_token_mismatch")
+                block_failed = True
+            eligible = mixed_reason == "eligible"
+            if mixed_path == "native_mtp" and not eligible:
+                failures.append(f"block {block_index}:shape {shape_id}:native_path_without_eligible_reason")
+                block_failed = True
+            if mixed_path == "ordinary" and eligible:
+                failures.append(f"block {block_index}:shape {shape_id}:eligible_reason_without_native_path")
+                block_failed = True
+            base = dict(shape_templates_by_id[shape_id])
+            base["pre_capacity_selector_reason"] = mixed_reason
+            base["pre_capacity_eligible"] = eligible
+            mixed_shape = dict(base)
+            mixed_shape["effective_path"] = mixed_path
+            disabled_shape = dict(base)
+            disabled_shape["effective_path"] = "ordinary"
+            analyzer_shapes_mixed.append(mixed_shape)
+            analyzer_shapes_disabled.append(disabled_shape)
+        if block_failed:
+            continue
+        disabled_ordinary_ids = {row["request_id"] for row in disabled_rows if row["actual_effective_path"] == "ordinary"}
+        mixed_ordinary_ids = {row["request_id"] for row in mixed_rows if row["actual_effective_path"] == "ordinary"}
+        disabled_metrics = _metrics_from_run(paths["ordinary"], disabled_ordinary_ids, f"block[{block_index}].ordinary")
+        mixed_metrics = _metrics_from_run(paths["native_mtp"], mixed_ordinary_ids, f"block[{block_index}].native_mtp")
+        for path_name, shapes, metrics in (
+            ("mtp_disabled", analyzer_shapes_disabled, disabled_metrics),
+            ("observed_mixed", analyzer_shapes_mixed, mixed_metrics),
+        ):
+            block = {
+                "schema": ANALYZER_JSONL_SCHEMA,
+                "record_type": "block",
+                "policy_sha256": policy_sha,
+                "block_index": block_index,
+                "path": path_name,
+                "request_shapes": shapes,
+                **metrics,
+            }
+            failures.extend(_strict_object(block, ANALYZER_BLOCK_KEYS, f"block[{block_index}].{path_name}"))
+            records.append(block)
+    if failures:
+        raise ValueError("replay conversion invalid: " + "; ".join(sorted(set(failures))))
+    return records
+
+
+def write_replay_analyzer_jsonl(records: list[dict], output_path: Path) -> None:
+    with output_path.open("w", encoding="utf-8") as fh:
+        for record in records:
+            fh.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -705,6 +1363,11 @@ def main(argv: list[str] | None = None) -> int:
     project.add_argument("--blocks", type=int, default=MIN_BLOCKS)
     run = sub.add_parser("run")
     run.add_argument("--plan", type=Path, required=False)
+    convert = sub.add_parser("convert")
+    convert.add_argument("--replay", type=Path, required=True)
+    convert.add_argument("--policy", type=Path, required=True)
+    convert.add_argument("--out", type=Path, required=True)
+    convert.add_argument("--capture-sha256", required=False)
     args = parser.parse_args(argv)
     try:
         if args.cmd == "project":
@@ -722,6 +1385,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             _write_json(args.policy_out, policy)
             _write_json(args.plan_out, plan)
+        elif args.cmd == "convert":
+            records = convert_replay_to_analyzer_jsonl(args.replay, args.policy, capture_sha256=args.capture_sha256)
+            write_replay_analyzer_jsonl(records, args.out)
+            print(json.dumps({"status": "OK", "records": len(records)}, sort_keys=True))
+            return 0
         else:
             print(json.dumps({"status": "PENDING", "error": "replay runner disabled until real lab mode/path/token/cache proof exists"}, sort_keys=True))
             return 2

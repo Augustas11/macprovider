@@ -58,7 +58,7 @@ struct MacProviderCLI: AsyncParsableCommand {
     /// MACPROVIDER_LAB_HARNESS builds; a plain release binary registers none.
     private static func labSubcommands() -> [ParsableCommand.Type] {
         #if DEBUG || MACPROVIDER_LAB_HARNESS
-        return [NativeMTPHardwareE2ECommand.self, NativeMTPBenchCommand.self, NativeMTPJourneyE2ECommand.self]
+        return [NativeMTPHardwareE2ECommand.self, NativeMTPBenchCommand.self, NativeMTPJourneyE2ECommand.self, NativeMTPRequestShapeReplayCommand.self]
         #else
         return []
         #endif
