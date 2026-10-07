@@ -1,6 +1,6 @@
 # SPEC-004 — Smart Router
 
-**Version:** 0.3.5 (2026-09-22, issue #1679 free-seat routing)
+**Version:** 0.3.6 (2026-10-06, issue #1770 cache-only key marker)
 **Extends:** SPEC-002 v1.6.2 § 5 (routing algorithm)
 **Depends on:** SPEC-001 v1.2.4 (Phase 3 binary wire protocol, locked), SPEC-003 v0.7, SPEC-006 v0.9.8 (Pillar A gated on SPEC-006 v0.8; the v0.3.2 FR-SR-2 provider-visibility carve-out is coordinated with SPEC-006 v0.9.8 / SPEC-008 v0.4.1)
 
@@ -10,6 +10,18 @@ deterministic equal-metric tie-breaking, one-shot F-4 failover only, exact
 model ID routing, and no sticky affinity.
 
 ## Changelog
+
+### v0.3.6 (2026-10-06)
+
+- **FR-SR-2 cache-only marker (#1770, SPEC-048-R009).** When the forwarded
+  `conversation_key` is a SPEC-006-R012 auto-prefix key (gateway header
+  `X-MacProvider-Internal-Conv-Cache`), the coordinator also sends the boolean
+  `conversation_cache_only: true` on the provider hop: top level on a clear
+  `inference_request`, inside the authenticated SPEC-008 plaintext on a Tier-2
+  one. It is never sent without a key and never for a sticky key. It reveals
+  only which of two existing key paths produced the key; sticky affinity,
+  routing, billing, and settlement do not read it. Providers that predate it
+  ignore it.
 
 ### v0.3.5 (2026-09-22)
 
@@ -258,6 +270,17 @@ grants by pinning the conversation to one provider — but MUST NOT be able to
 recover the raw buyer tag or `account_id` from the one-way HMAC value (SPEC-008
 §2.2, narrowed). No **raw** buyer secret or `account_id` is ever sent to the
 provider; only the derived opaque key.
+
+**Cache-only marker (v0.3.6).** When the key is a SPEC-006-R012 auto-prefix
+key rather than a sticky key, the coordinator MUST also send
+`conversation_cache_only: true` with it on the provider hop: at the top level
+of a clear `inference_request`, and only inside the authenticated SPEC-008
+plaintext of a Tier-2 request (never on the outer encrypted frame). The
+marker MUST be absent when no key is sent and for a sticky key. A provider
+MUST treat only a JSON boolean `true` as the marker, and on Tier-2 MUST read
+it only from the authenticated plaintext. Its sole consumer is the SPEC-048
+decode-path selector (SPEC-048-R009); routing, sticky affinity, billing,
+receipts, and settlement MUST NOT read it.
 
 The value namespace MUST make it impossible to collide with a SPEC-002
 `assigned_id`. SPEC-004 reserves `conv:<opaque-id>` for

@@ -547,10 +547,18 @@ def _per_request_misalignment(run: dict) -> list[str]:
             invalid.append("raw_inter_token_gaps_seconds")
         if item.get("decode_tps") != run["per_request_decode_tps"][index]:
             invalid.append("per_request_decode_tps")
-        # Every chunk carries at least one token, so a request has at most
+        # Decode throughput and TPOT are defined over the tokens after the
+        # first, so a request with fewer than two completion tokens has no
+        # decode interval: a positive decode rate on it is fabricated, and its
+        # empty gap series could hide behind another request's gaps. Every
+        # chunk carries at least one token, so a request has at most
         # completion_tokens - 1 gaps.
         tokens = item.get("completion_tokens")
-        if not _is_count(tokens) or (isinstance(gaps, list) and len(gaps) > max(0, tokens - 1)):
+        if (
+            not _is_count(tokens)
+            or tokens < 2
+            or (isinstance(gaps, list) and len(gaps) > tokens - 1)
+        ):
             invalid.append("request_metrics")
     return invalid
 

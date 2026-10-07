@@ -413,16 +413,19 @@ type DrainStatus struct {
 }
 
 type InferenceRequest struct {
-	Type              string                     `json:"type"`
-	RequestID         string                     `json:"request_id"`
-	Stream            bool                       `json:"stream"`
-	Body              string                     `json:"body"`
-	MaxOutputTokens   *int                       `json:"max_output_tokens,omitempty"`
-	Settlement        *SettlementReceiptMetadata `json:"settlement,omitempty"`
-	ConversationKey   string                     `json:"conversation_key,omitempty"`
-	BodyEncoding      string                     `json:"body_encoding,omitempty"`
-	RelayBlindContext *RelayBlindDispatchContext `json:"relay_blind_context,omitempty"`
-	PrivacyClass      string                     `json:"privacy_class,omitempty"`
+	Type            string                     `json:"type"`
+	RequestID       string                     `json:"request_id"`
+	Stream          bool                       `json:"stream"`
+	Body            string                     `json:"body"`
+	MaxOutputTokens *int                       `json:"max_output_tokens,omitempty"`
+	Settlement      *SettlementReceiptMetadata `json:"settlement,omitempty"`
+	ConversationKey string                     `json:"conversation_key,omitempty"`
+	// ConversationCacheOnly marks ConversationKey as a cache-only SPEC-006-R012
+	// auto-prefix key (SPEC-004 FR-SR-2, SPEC-048-R009). Never sent without a key.
+	ConversationCacheOnly bool                       `json:"conversation_cache_only,omitempty"`
+	BodyEncoding          string                     `json:"body_encoding,omitempty"`
+	RelayBlindContext     *RelayBlindDispatchContext `json:"relay_blind_context,omitempty"`
+	PrivacyClass          string                     `json:"privacy_class,omitempty"`
 	// RelayBlindSettlement is the SPEC-001-R005 closed metadata object. It
 	// rides only on a relay-blind dispatch that has a SPEC-022 R-14 route
 	// snapshot; under SPEC-008 it is inside the encrypted plaintext instead.

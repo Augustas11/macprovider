@@ -1,0 +1,50 @@
+{
+  "artifact_manifest_sha256": "2d06c6978f745b31cdfd88576d2bca4992e988ecef891961ed6933bf2e0e85e7",
+  "catalog_files": {
+    "autotune-artifacts.json": "b12e0756ba67c44f513ec1177386ce533a34dd387eb458506adb56990e0ff505",
+    "autotune-artifacts.json.sig": "e43d353186aef81fb75a696f61bf24fc84e45a2439eb063eb236171f03b6f98c",
+    "autotune-candidates.json": "0ddc3067cc2bf636c46cc5be4a90b1767ceb3dddb3177286a7fb55c511b2ea96",
+    "autotune-candidates.json.sig": "d5a6608bb9a60934d4b30e3f51a41d5ef7a54ef5bddbc6c4fa0a88f6c13c8336",
+    "continuous-batching-policy.json": "1892156dda9fa25e2a2152eae44fb17b30982f9afec0b56aa7b438bcdeb55845",
+    "continuous-batching-policy.json.sig": "fe99709c44c6a774ea951d8a49b413699016e30c8f3e91fc4eaac19ff1df5fff",
+    "demand-rank.json": "f5b5b18363b406122d06423cf567783ff83aafde3889c25090fa782bb2acc4ca",
+    "demand-rank.json.sig": "bc34c3c4d867311bb4bc9809082ea719c3180e73e82c3f11481ebd688df5be31",
+    "native-mtp-admission.json": "311a89757fa79c974acc939b6ae4b8ec3da36f2c2e0709047b644420eb48c52f",
+    "native-mtp-admission.json.sig": "2f247c36d9160b0016713281d05f71d1c1f8c6dbe1c1691e91345dcec5859349",
+    "native-mtp-artifact-manifest.json": "2d06c6978f745b31cdfd88576d2bca4992e988ecef891961ed6933bf2e0e85e7",
+    "native-mtp-selftest-bank.json": "2b2414ff9bca3befba78da68d44b5256aa397a56dc1ea5198d1f81583bfe01cf",
+    "native-mtp-selftest-bank.json.sig": "aa10658f4956743357c30b75440a4317627021bbc550976b2ce45fbf0d3091bc",
+    "rate-card.json": "f1af7be5f939ab42df37a3b8a3f47786482292d3a839cb9c92a5662d2ea3ca9a",
+    "rate-card.json.sig": "885ab2f11ae10c39c8ae0c244d59f8e8edc23ada1e13de4b145aeb4d4866fa31",
+    "release.json": "2c3a9f3c42c439a5442afd35a4bbc70217396bf60ccdea753721ba52c01d05fe",
+    "tier2-catalog.json": "5e5dbf2b9c3584d6382a03675e6936c18db6cc589c988f25b2caa2f55cf31009",
+    "trusted-keys.json": "cc974f4ebd61d9c79d9e752864b938ec8b96a86d51f2e194bfe9b62e875e10ff"
+  },
+  "challenge_bank_sha256": "2b2414ff9bca3befba78da68d44b5256aa397a56dc1ea5198d1f81583bfe01cf",
+  "drafter": {
+    "repo_id": "mlx-community/Qwen3.6-35B-A3B-MTP-4bit",
+    "revision": "0295b81421bf4d0fccca9a7c0fcfb1418dda3516",
+    "sha256": "fa01beecb6c1e76845e9880623c3b5a009baa602c52e9e9b5d12edc489a23fd2"
+  },
+  "facts": {
+    "binary_sha256": "b2438f7799d80deb5ee12a1e9ca6d3db9b4d3537d3e6c289773588e8ce48c1a7",
+    "chat_template_sha256": "9cf4f46deaa06769f3240ada331ac0f348694db48ec2e8b51068935f77bb18f9",
+    "hardware_class": "apple-silicon:Apple M3 Ultra:ram-256gb",
+    "kernel_identifier": "macprovider_paged_kv_gather_v1",
+    "live_executable_cdhash": "9d33390c43fdece665ae126543892793964795a1",
+    "metallib_sha256": "84e487182336648a826132e50e7a4cd2cae0bc77ac6eafa89cc72f3a964fdbaf",
+    "provider_cli_version": "1.8.219",
+    "source_commit": "84a28cadc1c37bec15bc83cd267b6e26b54c54d8",
+    "tokenizer_sha256": "eec97aac7c5f9ba9159d4784222300eccf5ff2e6b4aeb193c8c939c912633510"
+  },
+  "generated_at": "2026-10-06T16:40:46Z",
+  "key_id": "native-mtp-rehearsal-test-v1",
+  "native_mtp_admission_tuple_sha256": [
+    "9c47b47a287d74adf606d491d379e45634787497c2b5f12e66151d8d75c0c2a0"
+  ],
+  "public_key_base64": "qB4UIJtcTuH0BA+Opp0B0/t1R2e+3wNmMJ50Mf22x8A=",
+  "release_id": "published-2026-10-06-native-mtp-rehearsal-v1",
+  "revocation_slots": 144,
+  "schema_version": "macprovider.native-mtp-rehearsal-release.v1",
+  "sidecar_sha256": "311a89757fa79c974acc939b6ae4b8ec3da36f2c2e0709047b644420eb48c52f"
+}

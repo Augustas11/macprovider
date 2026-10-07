@@ -264,6 +264,26 @@ else
     [ -e "$stray" ] && fatal "release.json does not bind autotune-artifacts.json but $stray exists"
   done
 fi
+# SPEC-023 §12.5: a native-MTP-bound release also publishes the admission
+# sidecar, its projection manifest, and the signed challenge bank it pins.
+staged_native_bound="$(python3 - "$CAT_DIR/release.json" <<'PY'
+import json, pathlib, sys
+feeds = json.loads(pathlib.Path(sys.argv[1]).read_text())["feeds"]
+print("bound" if "native-mtp-admission.json" in feeds else "unbound")
+PY
+)"
+NATIVE_MTP_FILES="native-mtp-admission.json native-mtp-admission.json.sig native-mtp-artifact-manifest.json native-mtp-selftest-bank.json native-mtp-selftest-bank.json.sig"
+if [ "$staged_native_bound" = bound ]; then
+  for f in $NATIVE_MTP_FILES; do
+    [ -f "$STATIC_DIR/$f" ] || fatal "release.json binds native-mtp-admission.json but $STATIC_DIR/$f is missing"
+    install -m 0644 "$STATIC_DIR/$f" "$RELEASE_STAGE/$f"
+  done
+  log "staged native-MTP admission set"
+else
+  for f in $NATIVE_MTP_FILES; do
+    [ -e "$STATIC_DIR/$f" ] && fatal "release.json does not bind native-mtp-admission.json but $STATIC_DIR/$f exists"
+  done
+fi
 # Strip any macOS AppleDouble junk before it can reach the release dir.
 find "$RELEASE_STAGE" -name '._*' -delete 2>/dev/null || true
 
@@ -356,6 +376,16 @@ case "$live_artifact_state" in
   absent) ;;
   *) fatal "unexpected live artifact-feed state: $live_artifact_state" ;;
 esac
+live_native_state="$(SSH "if test -f '$REMOTE_AUTOTUNE_DIR/current/native-mtp-admission.json'; then echo present; else echo absent; fi")" \
+  || fatal "cannot determine whether the live release carries native-mtp-admission.json"
+case "$live_native_state" in
+  present)
+    for name in native-mtp-admission.json native-mtp-artifact-manifest.json native-mtp-selftest-bank.json; do
+      SSH "cat '$REMOTE_AUTOTUNE_DIR/current/$name'" > "$LIVE_SNAPSHOT/$name" || fatal "cannot read live $name"
+    done ;;
+  absent) ;;
+  *) fatal "unexpected live native-MTP state: $live_native_state" ;;
+esac
 ( cd "$WORKTREE" && python3 scripts/catalog-release.py continuity-check --incoming "$RELEASE_STAGE" --live "$LIVE_SNAPSHOT" ) \
   || fatal "content drift vs live feed — renewal is freshness-only; this is a content release — use the catalog-content lane, not freshness renewal"
 log "content continuity confirmed (dates-only delta)"
@@ -406,6 +436,19 @@ fi
 aa_post_activation_evidence renew_served_feed_evidence
 
 log "SUCCESS: coordinator now serving the renewed feed ${RELEASE_DIRNAME} (no restart, fleet undisturbed)."
+
+# SPEC-023 §12.5: a native-MTP-bound release keeps 14 days of pre-signed
+# emergency-revocation slots published. Same key; the slots carry the
+# committed revoked set. A failure here leaves the renewed release live and
+# the previous batch serving (it covers at least one more week).
+if [ "$staged_native_bound" = bound ]; then
+  log "publishing native-MTP revocation slots"
+  ( cd "$WORKTREE" && AUTOTUNE_STATIC_KEY_ID="$KEY_ID" \
+      AUTOTUNE_STATIC_PRIVATE_KEY_PATH="${AUTOTUNE_STATIC_PRIVATE_KEY_PATH:-$HOME/.config/macprovider/keys/autotune-static-${KEY_ID##*-}.private.base64}" \
+      PEARL_SSH="$PEARL_SSH" PEARL_SSH_IDENTITY="${PEARL_SSH_IDENTITY:-}" PEARL_SSH_KNOWN_HOSTS="${PEARL_SSH_KNOWN_HOSTS:-}" \
+      bash scripts/publish-native-mtp-revocations.sh --deploy ) \
+    || printf '::warning::native-MTP revocation slots were not republished; the previous batch keeps serving\n'
+fi
 log "previous release retained as .previous-target -> $CURRENT_TARGET"
 
 # ---------------------------------------------------------------------------

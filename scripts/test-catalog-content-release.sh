@@ -537,7 +537,9 @@ R="$T/repo"
 mkdir -p "$R/scripts/lib" "$R/ops/pearl-updater" "$R/phase3-binary/catalog/autotune" "$R/phase3-binary/dist/static"
 cp "$root/scripts/catalog-content-release.sh" "$root/scripts/pearl_autotune_deploy_lock.py" \
    "$root/scripts/catalog-verifier-bundle.txt" "$root/scripts/autotune_window.py" \
-   "$root/scripts/openrouter_pricing_engine.py" "$root/scripts/sign-catalog.go" "$R/scripts/"
+   "$root/scripts/openrouter_pricing_engine.py" "$root/scripts/native_mtp_admission_sidecar.py" \
+   "$root/scripts/native_mtp_revocation_slots.py" \
+   "$root/scripts/sign-catalog.go" "$R/scripts/"
 cp "$root/scripts/lib/autotune-activate.sh" "$root/scripts/lib/catalog-canary-token.sh" \
    "$root/scripts/lib/catalog-window-override.sh" "$root/scripts/lib/coordinator-config-guard.sh" "$R/scripts/lib/"
 cp "$root/ops/pearl-updater/catalog-canary-proof.py" "$R/ops/pearl-updater/"

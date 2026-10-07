@@ -863,6 +863,12 @@ func TestNginxAutotuneFeedsAllowThroughBeforeV1CatchAll(t *testing.T) {
 		"location = /v1/autotune-candidates.sig",
 		"location = /v1/catalog-artifacts",
 		"location = /v1/catalog-artifacts.sig",
+		"location = /v1/native-mtp-admission",
+		"location = /v1/native-mtp-admission.sig",
+		"location = /v1/native-mtp-artifact-manifest",
+		"location = /v1/native-mtp-selftest-bank",
+		"location = /v1/native-mtp-selftest-bank.sig",
+		"location ^~ /v1/native-mtp-revocations.",
 	} {
 		if !strings.Contains(beforeCatchAll, location) {
 			t.Fatalf("%s missing before /v1/ catch-all", location)

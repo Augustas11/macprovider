@@ -1,0 +1,25 @@
+$ bash <operator-home>/mtp-r014-journey-217/src/scripts/verify-malibu-release-artifacts.sh <operator-home>/mtp-r014-journey-217/work/release-assets/Malibu-v1.8.217.dmg --provider-tarball <operator-home>/mtp-r014-journey-217/work/release-assets/macprovider-cli-v1.8.217-darwin-arm64.tar.gz
+exit=0
+--- stdout
+verified Malibu 1.8.217 ships free of the frozen Sparkle trust anchor
+Processing: <operator-home>/mtp-r014-journey-217/work/release-assets/Malibu-v1.8.217.dmg
+The validate action worked!
+[verify-malibu-release] ok: <operator-home>/mtp-r014-journey-217/work/release-assets/Malibu-v1.8.217.dmg
+
+--- stderr
+hdiutil: WARNING: 'hdiutil attach -nobrowse -mountpoint ...' is deprecated. Please use 'diskutil image attach --mountOptions nobrowse --mountPoint ...' instead.
+--prepared:/private<operator-temp>
+--validated:/private<operator-temp>
+--prepared:/private<operator-temp>
+--validated:/private<operator-temp>
+--prepared:/private<operator-temp>
+--validated:/private<operator-temp>
+--prepared:/private<operator-temp>
+--validated:/private<operator-temp>
+<operator-temp> valid on disk
+<operator-temp> satisfies its Designated Requirement
+<operator-home>/mtp-r014-journey-217/work/release-assets/Malibu-v1.8.217.dmg: rejected
+source=Insufficient Context
+<operator-temp> accepted
+source=Notarized Developer ID
+origin=Developer ID Application: Superposition Technologies Pte. Ltd. (YF7XNRJUG4)

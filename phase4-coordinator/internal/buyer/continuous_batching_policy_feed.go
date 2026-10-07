@@ -11,6 +11,16 @@ import (
 
 const continuousBatchingPolicySchema = "macprovider.continuous-batching-policy.v1"
 
+// continuousBatchingPolicyCacheClasses is the closed SPEC-023 v0.22.1 cache_class
+// enum: exactly what scripts/catalog-release.py and the CLI's signed-policy
+// parser accept. `mixed` is the hybrid (recurrent plus paged attention)
+// identity #1808 admitted on the producer and provider sides; this is the
+// coordinator half of that admission.
+var continuousBatchingPolicyCacheClasses = map[string]struct{}{
+	"KVCacheSimple": {},
+	"mixed":         {},
+}
+
 type continuousBatchingPolicyFeed struct {
 	SchemaVersion          string                          `json:"schema_version"`
 	ReleaseID              string                          `json:"release_id"`
@@ -127,8 +137,8 @@ func validateContinuousBatchingPolicyEntry(feed continuousBatchingPolicyFeed, in
 	if !lowerHex64Pattern.MatchString(entry.ChatTemplateSHA256) {
 		return fmt.Errorf("%s.chat_template_sha256 must be lowercase 64-hex", label)
 	}
-	if entry.CacheClass != "KVCacheSimple" {
-		return fmt.Errorf("%s.cache_class must be %q", label, "KVCacheSimple")
+	if _, ok := continuousBatchingPolicyCacheClasses[entry.CacheClass]; !ok {
+		return fmt.Errorf("%s.cache_class must be KVCacheSimple or mixed", label)
 	}
 	if entry.KVDType != "fp16" && entry.KVDType != "bf16" {
 		return fmt.Errorf("%s.kv_dtype must be fp16 or bf16", label)

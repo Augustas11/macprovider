@@ -1,0 +1,15 @@
+{
+  "binary_class": "MACPROVIDER_LAB_HARNESS_isolated_no_join",
+  "binary_sha256": "e7d1db6ab35570069a225dc862d6497fc90b36dad10ba000a23e80f8e820ee97",
+  "build_result": "pass",
+  "build_seconds": 213.31,
+  "hardware_model": "Mac15,14",
+  "live_activation_status": "off",
+  "metallib_sha256": "84e487182336648a826132e50e7a4cd2cae0bc77ac6eafa89cc72f3a964fdbaf",
+  "mtp_sha256": "fa01beecb6c1e76845e9880623c3b5a009baa602c52e9e9b5d12edc489a23fd2",
+  "os_build": "26A434",
+  "qualification_status": "not_qualified",
+  "source_commit": "66c9090efed0572767742431d1c1767e8149cb60",
+  "target_sha256": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+  "tokenizer_sha256": "87a7830d63fcf43bf241c3c5242e96e62dd3fdc29224ca26fed8ea333db72de4"
+}

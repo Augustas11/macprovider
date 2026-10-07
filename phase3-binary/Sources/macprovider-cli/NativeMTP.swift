@@ -260,7 +260,11 @@ struct NativeMTPSelector: Sendable {
               absentOrOne(request.promptSource.repetitionPenaltyValue) else {
             return .logitControls
         }
-        guard request.conversationKey == nil else {
+        // SPEC-048-R009 (G7): a sticky key stays ordinary. A cache-only
+        // auto-prefix key stays eligible here; the conversation-cache lease
+        // decides before any native state exists
+        // (`resolvingConversationCacheLease`).
+        guard request.conversationKey == nil || request.conversationCacheOnly else {
             return .conversationKey
         }
         guard !request.containsNonTextMessageContentPart else {
@@ -372,6 +376,33 @@ struct NativeMTPRuntimeAdmission: Sendable, Equatable {
 
     var allowsConversationCacheLease: Bool {
         !usesNativeMTP
+    }
+
+    /// SPEC-048-R009 (G7): a native row may take a conversation-cache lease
+    /// only for a cache-only key, so the lease can decide its path.
+    func allowsConversationCacheLease(cacheOnlyKey: Bool) -> Bool {
+        !usesNativeMTP || cacheOnlyKey
+    }
+
+    /// SPEC-048-R009 (G7). A native admission that carries a cache-only key
+    /// stays native only when the lease the ordinary path would take is a
+    /// miss and the runtime publishes keyed rows in the serial conversation
+    /// cache format. Then serving the row natively changes no cache outcome:
+    /// no discount is forgone and the same entry kind is committed. Any hit,
+    /// missing lease, or retained paged-KV handoff reselects ordinary with
+    /// reason `conversation_key` before native state exists. A request whose
+    /// provenance forbids any lease (SPEC-049) has no cache outcome to change.
+    func resolvingConversationCacheLease(
+        hasConversationKey: Bool,
+        leaseAllowed: Bool,
+        cachedPromptTokens: Int?,
+        keyedRowsCommitSerialFormat: Bool
+    ) -> NativeMTPRuntimeAdmission {
+        guard usesNativeMTP, hasConversationKey, leaseAllowed else { return self }
+        guard keyedRowsCommitSerialFormat, cachedPromptTokens == 0 else {
+            return Self.ordinary(reason: .conversationKey)
+        }
+        return self
     }
 
     static func resolve(

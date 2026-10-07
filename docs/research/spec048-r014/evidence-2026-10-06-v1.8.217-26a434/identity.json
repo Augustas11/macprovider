@@ -1,0 +1,24 @@
+{
+  "compatibility_set_id": "Augustas11/macprovider:v1.8.217@71f22d36c3ef11c99d3572f63bb0283f73f19aa5",
+  "host": {
+    "hw_model": "Mac15,14",
+    "memsize": "274877906944",
+    "os_build": "26A434"
+  },
+  "lab_cli_has_journey_command": true,
+  "lab_cli_sha256": "3e2135b38cca06e2619499bf8ef7bec7884ca4567377117f132cfbfc468ceb98",
+  "lab_cli_source_commit": "71f22d36c3ef11c99d3572f63bb0283f73f19aa5",
+  "metallib_sha256": "84e487182336648a826132e50e7a4cd2cae0bc77ac6eafa89cc72f3a964fdbaf",
+  "release_source_commit": "71f22d36c3ef11c99d3572f63bb0283f73f19aa5",
+  "signed_cli_authority": [
+    "Developer ID Application: Superposition Technologies Pte. Ltd. (YF7XNRJUG4)",
+    "Developer ID Certification Authority",
+    "Apple Root CA"
+  ],
+  "signed_cli_cdhash": "df44bcf4ef55e543eb49c75187e868b0fce1a8a2",
+  "signed_cli_contains_lab_journey_command": false,
+  "signed_cli_expected_sha256": "a6ea51d7ad19359a21fac63995194523264035fbca2ab32dceeede9d9da739bb",
+  "signed_cli_sha256": "a6ea51d7ad19359a21fac63995194523264035fbca2ab32dceeede9d9da739bb",
+  "signed_cli_team": "YF7XNRJUG4",
+  "signed_cli_version": "1.8.217"
+}

@@ -1553,6 +1553,27 @@ jobs:
             cp "$catalog_artifacts_sig_src" autotune-artifacts.json.sig
             catalog_assets+=(autotune-artifacts.json autotune-artifacts.json.sig)
           fi
+          # SPEC-023 §12.5 Stage A: a native-MTP-bound release publishes the
+          # admission set as release assets (never payload members).
+          catalog_native_mtp_bound="$(python3 - "$catalog_manifest_src" <<'PY'
+          import json, pathlib, sys
+          feeds = json.loads(pathlib.Path(sys.argv[1]).read_text())["feeds"]
+          print("bound" if "native-mtp-admission.json" in feeds else "unbound")
+          PY
+          )"
+          if [ "$catalog_native_mtp_bound" = bound ]; then
+            python3 - "$catalog_manifest_src" phase3-binary/dist/static/native-mtp-admission.json <<'PY'
+          import hashlib, json, pathlib, sys
+          record = json.loads(pathlib.Path(sys.argv[1]).read_text())["feeds"]["native-mtp-admission.json"]
+          data = pathlib.Path(sys.argv[2]).read_bytes()
+          if record["sha256"] != hashlib.sha256(data).hexdigest() or record["bytes"] != len(data):
+              raise SystemExit("native-mtp-admission.json does not match its release.json binding")
+          PY
+            for native_name in native-mtp-admission.json native-mtp-admission.json.sig native-mtp-artifact-manifest.json native-mtp-selftest-bank.json native-mtp-selftest-bank.json.sig; do
+              cp "phase3-binary/dist/static/$native_name" "$native_name"
+              catalog_assets+=("$native_name")
+            done
+          fi
           release_assets+=("${catalog_assets[@]}")
           compatibility_manifest_src="phase3-binary/dist/compatibility-set.json"
           test -f "$compatibility_manifest_src"
@@ -1629,6 +1650,12 @@ jobs:
           )
           if "autotune-artifacts.json" in catalog_manifest["feeds"]:
               catalog_names += ("autotune-artifacts.json", "autotune-artifacts.json.sig")
+          if "native-mtp-admission.json" in catalog_manifest["feeds"]:
+              catalog_names += (
+                  "native-mtp-admission.json", "native-mtp-admission.json.sig",
+                  "native-mtp-artifact-manifest.json",
+                  "native-mtp-selftest-bank.json", "native-mtp-selftest-bank.json.sig",
+              )
           catalog_files = {
               name: hashlib.sha256(open(name, "rb").read()).hexdigest()
               for name in catalog_names

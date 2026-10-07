@@ -165,6 +165,13 @@ demand_sig="$TMP_DIR/demand-rank.json.sig"
 rate_card_sig="$TMP_DIR/rate-card.json.sig"
 cb_policy_sig="$TMP_DIR/continuous-batching-policy.json.sig"
 artifacts_sig="$TMP_DIR/autotune-artifacts.json.sig"
+# SPEC-023 §12.5: the native-MTP admission sidecar and the self-test challenge
+# bank it pins are signed by the same release key (the sidecar names this key
+# as signer and challenge-bank signer; catalog-release.py verifies both).
+native_mtp_json="$STATIC_DIR/native-mtp-admission.json"
+native_mtp_bank_json="$STATIC_DIR/native-mtp-selftest-bank.json"
+native_mtp_sig="$TMP_DIR/native-mtp-admission.json.sig"
+native_mtp_bank_sig="$TMP_DIR/native-mtp-selftest-bank.json.sig"
 
 sign_one "$candidate_json" "$candidate_sig"
 sign_one "$demand_json" "$demand_sig"
@@ -177,6 +184,13 @@ verify_one "$cb_policy_json" "$cb_policy_sig"
 if [ -f "$artifacts_json" ]; then
   sign_one "$artifacts_json" "$artifacts_sig"
   verify_one "$artifacts_json" "$artifacts_sig"
+fi
+if [ -f "$native_mtp_json" ]; then
+  [ -f "$native_mtp_bank_json" ] || fatal "native-mtp-admission.json is generated but the challenge bank is missing"
+  sign_one "$native_mtp_json" "$native_mtp_sig"
+  verify_one "$native_mtp_json" "$native_mtp_sig"
+  sign_one "$native_mtp_bank_json" "$native_mtp_bank_sig"
+  verify_one "$native_mtp_bank_json" "$native_mtp_bank_sig"
 fi
 
 # All signatures are verified before any generated sidecar is replaced.
@@ -191,6 +205,12 @@ mv "$STATIC_DIR/continuous-batching-policy.json.sig.new" "$STATIC_DIR/continuous
 if [ -f "$artifacts_json" ]; then
   install -m 0644 "$artifacts_sig" "$STATIC_DIR/autotune-artifacts.json.sig.new"
   mv "$STATIC_DIR/autotune-artifacts.json.sig.new" "$STATIC_DIR/autotune-artifacts.json.sig"
+fi
+if [ -f "$native_mtp_json" ]; then
+  install -m 0644 "$native_mtp_sig" "$STATIC_DIR/native-mtp-admission.json.sig.new"
+  install -m 0644 "$native_mtp_bank_sig" "$STATIC_DIR/native-mtp-selftest-bank.json.sig.new"
+  mv "$STATIC_DIR/native-mtp-admission.json.sig.new" "$STATIC_DIR/native-mtp-admission.json.sig"
+  mv "$STATIC_DIR/native-mtp-selftest-bank.json.sig.new" "$STATIC_DIR/native-mtp-selftest-bank.json.sig"
 fi
 
 # Regenerating the SAME release_id is idempotent: the state machine excludes this

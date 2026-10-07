@@ -22,14 +22,26 @@ LAB_COMMAND_TYPES = (
     "NativeMTPHardwareE2ECommand",
     "NativeMTPBenchCommand",
     "NativeMTPJourneyE2ECommand",
+    "NativeMTPRequestShapeReplayCommand",
 )
 # Lab-only hooks that change decode inputs or bypass serving: every
 # declaration and reference must also sit inside the lab guard.
 LAB_HOOK_SYMBOLS = (
     "NativeMTPLabProposalOverride",
+    "NativeMTPLabDecodeOutputCap",
+    "NativeMTPLabCommittedTokenTimingObserver",
+    "NativeMTPLabConversationCacheObserver",
+    "installLabNativeMTPConversationCacheObserver",
+    "labNativeMTPConversationCacheObserver",
+    "recordLabNativeMTPConversationCacheBegin",
+    "installLabNativeMTPDecodeOutputCap",
+    "installLabNativeMTPCommitTimingObserver",
     "installLabNativeMTPProposalOverride",
     "labNativeMTPProposalOverride",
     "labTokenProbe",
+    "readLabStaticFeedOverride",
+    "labStaticFeedOriginKey",
+    "labNativeMTPSourceCommit",
 )
 
 

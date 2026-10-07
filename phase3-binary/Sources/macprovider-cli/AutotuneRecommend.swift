@@ -1818,14 +1818,21 @@ struct AutotuneStaticSelection<T> {
 struct AutotuneStaticInputs {
     // Static feed public keys are committed under phase3-binary/dist/static/keys.
     // Private keys stay off-repo at ~/.config/macprovider/keys/ with mode 0600.
-    static let keyID = bakedCatalogSignerKeyID ?? "streamvc-autotune-static-v5"
+    static let keyID = StaticFeedOrigin.labOverride?.keyID ?? bakedCatalogSignerKeyID ?? "streamvc-autotune-static-v5"
     static let publicKeyName = keyID == "streamvc-autotune-static-v4"
         ? "autotune_static_json_ed25519_v4"
         : "autotune_static_json_ed25519_v5"
     static let autotune_static_json_ed25519_v4 = "zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU="
     static let autotune_static_json_ed25519_v5 = "vpTgWfvvrnbc1QhdTAxULFisoDU7jQ4mB1yZIHIGjBA="
-    static let publicKeyBase64 = generatedTrustedPublicKeys[keyID] ?? autotune_static_json_ed25519_v5
-    static let defaultTrustedPublicKeys = generatedTrustedPublicKeys
+    static let publicKeyBase64 = defaultTrustedPublicKeys[keyID] ?? autotune_static_json_ed25519_v5
+    /// The baked keyring; a lab build's static-feed override adds its test
+    /// key (`StaticFeedOrigin`). Release builds are exactly the baked keys.
+    static let defaultTrustedPublicKeys: [String: String] = {
+        guard let override = StaticFeedOrigin.labOverride else { return generatedTrustedPublicKeys }
+        var keys = generatedTrustedPublicKeys
+        keys[override.keyID] = override.publicKeyBase64
+        return keys
+    }()
     static let transitionMissingProvenanceCandidateRelease = "published-2026-07-10-catalog-recovery-v1"
     static let transitionMissingProvenanceCandidateSHA256 = "776182f6230eff098345b188322dba0c7fce47a6da46447432991ffdc37eabda"
     static let transitionDemandRankSHA256 = "27cdfc12a43b78db32710926ee16699aadce0c4ddd9d8282baca2532f780c5e2"
@@ -1837,11 +1844,7 @@ struct AutotuneStaticInputs {
 
     init(
         fetch: @escaping (URL) async throws -> Data = { url in
-            let (data, response) = try await URLSession.shared.data(from: url)
-            if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
-                throw AutotuneRecommendError.invalidStaticJSON("HTTP \(http.statusCode)")
-            }
-            return data
+            try await AutotuneStaticInputs.fetchHonoringRateLimit(url)
         },
         trustedPublicKeys: [String: String] = Self.defaultTrustedPublicKeys,
         verifySignature: ((Data, Data) -> Bool)? = nil,
@@ -1851,6 +1854,30 @@ struct AutotuneStaticInputs {
         self.trustedPublicKeys = trustedPublicKeys
         self.verifySignature = verifySignature
         self.now = now
+    }
+
+    /// Every static feed shares the coordinator's per-client feed limiter
+    /// (10 requests/s, burst 10). A serve start fetches more than ten feeds
+    /// back to back (catalog, demand, rate card, artifact feed, CB policy,
+    /// native-MTP set, revocations, each with its signature), so a 429 is
+    /// retried after a one-second wait instead of falling back silently.
+    static let rateLimitRetries = 3
+    static let rateLimitRetryNanoseconds: UInt64 = 1_000_000_000
+
+    static func fetchHonoringRateLimit(
+        _ url: URL,
+        load: (URL) async throws -> (Data, URLResponse) = { try await URLSession.shared.data(from: $0) },
+        sleep: (UInt64) async throws -> Void = { try await Task.sleep(nanoseconds: $0) }
+    ) async throws -> Data {
+        var (data, response) = try await load(url)
+        for _ in 0..<rateLimitRetries where (response as? HTTPURLResponse)?.statusCode == 429 {
+            try await sleep(rateLimitRetryNanoseconds)
+            (data, response) = try await load(url)
+        }
+        if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
+            throw AutotuneRecommendError.invalidStaticJSON("HTTP \(http.statusCode)")
+        }
+        return data
     }
 
     func loadDemandRank() async -> AutotuneStaticSelection<DemandRank> {
@@ -2040,7 +2067,7 @@ struct AutotuneStaticInputs {
         let bakedGeneratedAt = generatedAt(in: bakedBytes) ?? .distantFuture
         let jsonBytes: Data
         do {
-            let jsonURL = URL(string: "https://coordinator.malibu.tech/v1/\(name)")!
+            let jsonURL = Self.staticFeedURL(baseURL: StaticFeedOrigin.base, name: name)
             jsonBytes = try await fetch(jsonURL)
         } catch {
             return AutotuneStaticSelection(
@@ -2054,7 +2081,7 @@ struct AutotuneStaticInputs {
 
         let sigBytes: Data
         do {
-            let sigURL = URL(string: "https://coordinator.malibu.tech/v1/\(name).sig")!
+            let sigURL = Self.staticFeedURL(baseURL: StaticFeedOrigin.base, name: "\(name).sig")
             sigBytes = try await fetch(sigURL)
         } catch {
             return AutotuneStaticSelection(

@@ -215,7 +215,7 @@ struct NativeMTPRevocationState: Equatable, Sendable {
 }
 
 enum NativeMTPRevocationFeedManager {
-    static let productionOrigin = URL(string: "https://coordinator.malibu.tech/v1/")!
+    static var productionOrigin: URL { StaticFeedOrigin.base.appendingPathComponent("v1", isDirectory: true) }
     static let refreshIntervalSeconds: TimeInterval = 15 * 60
     typealias Fetcher = @Sendable (URL, Int) async throws -> NativeMTPRevocationFetchResponse
     typealias Sleeper = @Sendable (UInt64) async throws -> Void
@@ -330,7 +330,7 @@ enum NativeMTPRevocationFeedManager {
         guard pinnedSignerKeyID.utf8.allSatisfy({ $0 >= 0x21 && $0 <= 0x7e }),
               pinnedSignerKeyID.utf8.count <= 128,
               let encodedSignerKeyID = encodedPathSegment(pinnedSignerKeyID),
-              origin.scheme == "https",
+              origin.scheme == "https" || StaticFeedOrigin.isLabLoopback(origin),
               origin.host?.isEmpty == false,
               origin.user == nil,
               origin.password == nil,
@@ -348,8 +348,8 @@ enum NativeMTPRevocationFeedManager {
               )?.absoluteURL else {
             throw NativeMTPRevocationFeedError.invalidOrigin
         }
-        guard feed.scheme == "https",
-              signature.scheme == "https",
+        guard feed.scheme == origin.scheme,
+              signature.scheme == origin.scheme,
               feed.host == origin.host,
               signature.host == origin.host else {
             throw NativeMTPRevocationFeedError.invalidOrigin
@@ -502,7 +502,7 @@ enum NativeMTPRevocationFeedManager {
     }
 
     static func defaultFetch(url: URL, maxBytes: Int) async throws -> NativeMTPRevocationFetchResponse {
-        guard url.scheme == "https",
+        guard url.scheme == "https" || StaticFeedOrigin.isLabLoopback(url),
               url.user == nil,
               url.password == nil,
               url.fragment == nil else {
@@ -532,9 +532,16 @@ enum NativeMTPRevocationFeedManager {
     private static func fetch(
         _ url: URL,
         maxBytes: Int,
-        fetcher: Fetcher
+        fetcher: Fetcher,
+        sleeper: Sleeper = defaultSleep
     ) async throws -> Data {
-        let response = try await fetcher(url, maxBytes)
+        var response = try await fetcher(url, maxBytes)
+        // The feed shares the coordinator's per-client static-feed limiter
+        // with every other feed a serve start fetches; a 429 is retried.
+        for _ in 0..<AutotuneStaticInputs.rateLimitRetries where response.statusCode == 429 {
+            try await sleeper(AutotuneStaticInputs.rateLimitRetryNanoseconds)
+            response = try await fetcher(url, maxBytes)
+        }
         if response.redirected || (response.statusCode >= 300 && response.statusCode < 400) {
             throw NativeMTPRevocationFeedError.redirectRejected
         }
@@ -635,10 +642,10 @@ private extension NativeMTPRevocationFeedError {
     }
 }
 
-private final class NativeMTPRevocationNoRedirectDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+final class NativeMTPRevocationNoRedirectDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let lock = NSLock()
-    fileprivate var maxBytes = 0
-    fileprivate var continuation: CheckedContinuation<NativeMTPRevocationFetchResponse, Error>?
+    var maxBytes = 0
+    var continuation: CheckedContinuation<NativeMTPRevocationFetchResponse, Error>?
     private var statusCode: Int?
     private var body = Data()
     private var completed = false
@@ -669,7 +676,9 @@ private final class NativeMTPRevocationNoRedirectDelegate: NSObject, URLSessionD
             completionHandler(.cancel)
             return
         }
-        guard http.statusCode == 200 else {
+        // The caller owns bounded 429 retries; other failures keep their
+        // transport/HTTP classification for authenticated-cache fallback.
+        guard http.statusCode == 200 || http.statusCode == 429 else {
             resume(throwing: NativeMTPRevocationFeedError.invalidHTTPStatus(http.statusCode))
             completionHandler(.cancel)
             return
@@ -1210,6 +1219,21 @@ final class KeychainNativeMTPRevocationStore: NativeMTPRevocationStore, @uncheck
         let home = FileManager.default.homeDirectoryForCurrentUser
         return home
             .appendingPathComponent("Library/Application Support/macprovider/native-mtp-revocations", isDirectory: true)
+    }
+
+    /// The anchor store the serve path uses: the Keychain-anchored store.
+    /// A lab build with a static-feed override keeps the anchor in a file
+    /// under its isolated home instead: a rehearsal never writes the user's
+    /// login keychain, which an SSH session cannot unlock anyway.
+    static func live() -> NativeMTPRevocationStore {
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if StaticFeedOrigin.labOverride != nil {
+            return FileNativeMTPRevocationStore(
+                directory: defaultCacheDirectory().appendingPathComponent("lab-anchor", isDirectory: true)
+            )
+        }
+        #endif
+        return KeychainNativeMTPRevocationStore()
     }
 }
 

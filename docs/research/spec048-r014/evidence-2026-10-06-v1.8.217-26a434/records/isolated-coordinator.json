@@ -1,0 +1,599 @@
+{
+  "billing_ok": true,
+  "finished_at": "2026-10-06T11:32:55Z",
+  "started_at": "2026-10-06T11:30:49Z",
+  "steps": {
+    "disabled": {
+      "coordinator_db_tokens": {
+        "ledger_operator_credits": {
+          "rows": 10,
+          "sum(gross_credits)": 530,
+          "sum(operator_credits)": 52
+        },
+        "ledger_payout_ready": {
+          "rows": 0,
+          "sum(gross_credits)": 0,
+          "sum(min_payout_credits)": 0,
+          "sum(operator_credits)": 0,
+          "sum(provider_credits)": 0
+        },
+        "ledger_provider_identity_snapshots": {
+          "rows": 10,
+          "sum(provider_reported_prompt_tokens)": 198
+        },
+        "ledger_reconciliation_runs": {
+          "rows": 2,
+          "sum(buyer_equivalent_credits)": 0,
+          "sum(provider_gross_credits)": 0,
+          "sum(reconciliation_delta_credits)": 0
+        },
+        "ledger_request_credits": {
+          "rows": 10,
+          "sum(cached_prompt_tokens)": 0,
+          "sum(charged_prompt_tokens)": 198,
+          "sum(completion_tokens)": 452,
+          "sum(estimated_completion_tokens)": 291,
+          "sum(gross_credits)": 530,
+          "sum(prompt_tokens)": 198,
+          "sum(provider_credits)": 478,
+          "sum(provider_reported_prompt_tokens)": 198
+        },
+        "model_admission_events": {
+          "rows": 0,
+          "sum(synthetic_probe_completion_tokens)": 0
+        },
+        "payout_attempts": {
+          "rows": 0,
+          "sum(amount_base_units)": 0
+        },
+        "payout_hot_wallet_funding": {
+          "rows": 0,
+          "sum(amount_base_units)": 0
+        },
+        "payout_reorg_orphans": {
+          "rows": 0,
+          "sum(observed_amount_base_units)": 0,
+          "sum(observed_gross_credits)": 0,
+          "sum(observed_provider_credits)": 0
+        },
+        "referral_social_grants": {
+          "rows": 0,
+          "sum(amount)": 0
+        },
+        "request_log": {
+          "rows": 32,
+          "sum(cached_prompt_tokens)": 0,
+          "sum(completion_tokens)": 452,
+          "sum(estimated_completion_tokens)": 291,
+          "sum(prompt_tokens)": 198,
+          "sum(relay_blind_max_output_tokens)": 0,
+          "sum(total_tokens)": 650
+        },
+        "wholesale_period_statements": {
+          "rows": 0,
+          "sum(completion_tokens)": 0,
+          "sum(gross_credits)": 0,
+          "sum(prompt_tokens)": 0
+        },
+        "wholesale_statement_line_items": {
+          "rows": 0,
+          "sum(completion_tokens)": 0,
+          "sum(gross_credits)": 0,
+          "sum(prompt_tokens)": 0
+        }
+      },
+      "coordinator_native_mtp_log_lines": [],
+      "coordinator_up": true,
+      "gateway_db_tokens": {
+        "demand_events": {
+          "rows": 32,
+          "sum(cached_prompt_tokens)": 0,
+          "sum(completion_tokens)": 452,
+          "sum(max_output_tokens)": 736,
+          "sum(prompt_tokens)": 270,
+          "sum(requested_output_tokens)": 736,
+          "sum(requested_prompt_tokens)": 1380,
+          "sum(requested_total_tokens)": 2116,
+          "sum(total_tokens)": 722
+        },
+        "demo_usage_events": {
+          "rows": 0,
+          "sum(total_tokens)": 0
+        },
+        "quota_reservations": {
+          "rows": 32,
+          "sum(max_output_tokens)": 0
+        },
+        "settlement_fallback_candidates": {
+          "rows": 0,
+          "sum(completion_tokens)": 0,
+          "sum(max_output_tokens)": 0,
+          "sum(max_total_tokens)": 0,
+          "sum(prompt_tokens)": 0
+        },
+        "usage_events": {
+          "rows": 10,
+          "sum(completion_tokens)": 452,
+          "sum(max_output_tokens)": 0,
+          "sum(prompt_tokens)": 270,
+          "sum(total_tokens)": 722
+        }
+      },
+      "gateway_up": true,
+      "greedy_repeat_identical": true,
+      "native_mtp_canary_enabled": false,
+      "provider_rejections": [
+        {
+          "artifact_role": "sidecar",
+          "event": "native_mtp_serve_path_admission",
+          "reason_code": "revocation_state_unavailable",
+          "status": "rejected"
+        }
+      ],
+      "provider_routable": true,
+      "provider_status": {
+        "continuous_batching": {
+          "active": false,
+          "cache_class": "mixed",
+          "mode": "canary",
+          "paged_kv_decision": "attached",
+          "policy": {
+            "authorization_source": "baked_empty_off",
+            "authorized": false,
+            "cached_turns_authorized": false,
+            "decision_reason": "absent_empty_off_fallback",
+            "emergency_off_override": false,
+            "expires_at": null,
+            "load_status": "absent_empty_off_fallback",
+            "local_proof_result": "passed",
+            "policy_sha256": null,
+            "policy_version": null,
+            "release_id": null,
+            "rollout_mode": "off",
+            "signer_key_id": null,
+            "tuple_sha256": null
+          },
+          "scheduler": {
+            "active_decode_rows": 0,
+            "max_observed_batch_depth": 0,
+            "slots_free": 8,
+            "slots_total": 8,
+            "waiting_count": 0
+          },
+          "unsupported_reason": "tuple_acceptance_coverage_unavailable"
+        },
+        "native_mtp": {
+          "accepted_by_position": [],
+          "accepted_tokens": 0,
+          "bonus_tokens": 0,
+          "capacity_rejections": 0,
+          "committed_tokens": 0,
+          "enabled": false,
+          "family": "unknown",
+          "last_reason": "tuple_not_admitted",
+          "mean_accepted_length": 0,
+          "mode": "off",
+          "mtp_forwards": 0,
+          "postoutput_failures": 0,
+          "preoutput_fallbacks": 0,
+          "proposal_depth": 0,
+          "proposed_tokens": 0,
+          "rejected_tokens": 0,
+          "requests_since_reset": 0,
+          "reset_generation": 1,
+          "supported": false,
+          "target_forwards": 0,
+          "throughput_delta_ppm": 0,
+          "verification_overhead_ms": 0
+        },
+        "status_advertises_native_mtp_status_v1": true,
+        "status_top_level_keys": [
+          "active_request_id_count",
+          "admission_identity",
+          "binary_version",
+          "buyer_serving_authority",
+          "buyer_serving_hold",
+          "capacity",
+          "catalog",
+          "compatibility_set_id",
+          "compatibility_set_sha256",
+          "continuous_batching",
+          "coordinator",
+          "coordinator_origin",
+          "credential",
+          "errors_total",
+          "input_tokens_all_time",
+          "input_tokens_today",
+          "lifecycle",
+          "lifecycle_lease",
+          "local_status_contract",
+          "memory_pressure",
+          "memory_rss_mb",
+          "model",
+          "model_hash",
+          "model_hash_algorithm",
+          "model_liveness",
+          "model_loaded",
+          "native_mtp",
+          "network_state",
+          "observation",
+          "output_tokens_all_time",
+          "output_tokens_today",
+          "provider_id",
+          "requests_in_flight",
+          "requests_queued",
+          "requests_today",
+          "requests_total",
+          "restart_count",
+          "safety_telemetry",
+          "service_instance",
+          "spec_decode_acceptance_rate",
+          "spec_decode_accepted_tokens_since_last",
+          "spec_decode_draft_model_id",
+          "spec_decode_drafted_tokens_since_last",
+          "spec_decode_enabled",
+          "spec_decode_num_draft_tokens",
+          "status",
+          "thermal_state",
+          "thermally_throttled",
+          "uptime_s",
+          "weights_manifest_algorithm",
+          "weights_manifest_sha256"
+        ],
+        "version": "1.8.217"
+      },
+      "readiness_probes": 12,
+      "requests": [
+        {
+          "content_sha256": "cacb4c1e3fd912b61b26f3c4879a33c5ab8bf6b4fe25069b813e72ac0dd0c599",
+          "finish_reason": "stop",
+          "kind": "nonstream_greedy",
+          "status": 200,
+          "usage": {
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 48,
+            "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+            "prompt_tokens": 23,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 71
+          }
+        },
+        {
+          "content_sha256": "690f74fca51a231d442c8556c74d050f85fdff37d560e8491e992de77f2d73e5",
+          "finish_reason": "length",
+          "frames": 97,
+          "kind": "stream_greedy",
+          "status": 200,
+          "usage": {
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 96,
+            "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+            "prompt_tokens": 18,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 114
+          }
+        },
+        {
+          "kind": "nonstream_sampled",
+          "status": 200,
+          "usage": {
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 32,
+            "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+            "prompt_tokens": 19,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 51
+          }
+        }
+      ],
+      "tuple_offer_received": false
+    },
+    "enabled": {
+      "coordinator_db_tokens": {
+        "ledger_operator_credits": {
+          "rows": 5,
+          "sum(gross_credits)": 265,
+          "sum(operator_credits)": 26
+        },
+        "ledger_payout_ready": {
+          "rows": 0,
+          "sum(gross_credits)": 0,
+          "sum(min_payout_credits)": 0,
+          "sum(operator_credits)": 0,
+          "sum(provider_credits)": 0
+        },
+        "ledger_provider_identity_snapshots": {
+          "rows": 5,
+          "sum(provider_reported_prompt_tokens)": 99
+        },
+        "ledger_reconciliation_runs": {
+          "rows": 1,
+          "sum(buyer_equivalent_credits)": 0,
+          "sum(provider_gross_credits)": 0,
+          "sum(reconciliation_delta_credits)": 0
+        },
+        "ledger_request_credits": {
+          "rows": 5,
+          "sum(cached_prompt_tokens)": 0,
+          "sum(charged_prompt_tokens)": 99,
+          "sum(completion_tokens)": 226,
+          "sum(estimated_completion_tokens)": 147,
+          "sum(gross_credits)": 265,
+          "sum(prompt_tokens)": 99,
+          "sum(provider_credits)": 239,
+          "sum(provider_reported_prompt_tokens)": 99
+        },
+        "model_admission_events": {
+          "rows": 0,
+          "sum(synthetic_probe_completion_tokens)": 0
+        },
+        "payout_attempts": {
+          "rows": 0,
+          "sum(amount_base_units)": 0
+        },
+        "payout_hot_wallet_funding": {
+          "rows": 0,
+          "sum(amount_base_units)": 0
+        },
+        "payout_reorg_orphans": {
+          "rows": 0,
+          "sum(observed_amount_base_units)": 0,
+          "sum(observed_gross_credits)": 0,
+          "sum(observed_provider_credits)": 0
+        },
+        "referral_social_grants": {
+          "rows": 0,
+          "sum(amount)": 0
+        },
+        "request_log": {
+          "rows": 16,
+          "sum(cached_prompt_tokens)": 0,
+          "sum(completion_tokens)": 226,
+          "sum(estimated_completion_tokens)": 147,
+          "sum(prompt_tokens)": 99,
+          "sum(relay_blind_max_output_tokens)": 0,
+          "sum(total_tokens)": 325
+        },
+        "wholesale_period_statements": {
+          "rows": 0,
+          "sum(completion_tokens)": 0,
+          "sum(gross_credits)": 0,
+          "sum(prompt_tokens)": 0
+        },
+        "wholesale_statement_line_items": {
+          "rows": 0,
+          "sum(completion_tokens)": 0,
+          "sum(gross_credits)": 0,
+          "sum(prompt_tokens)": 0
+        }
+      },
+      "coordinator_native_mtp_log_lines": [],
+      "coordinator_up": true,
+      "gateway_db_tokens": {
+        "demand_events": {
+          "rows": 16,
+          "sum(cached_prompt_tokens)": 0,
+          "sum(completion_tokens)": 226,
+          "sum(max_output_tokens)": 368,
+          "sum(prompt_tokens)": 135,
+          "sum(requested_output_tokens)": 368,
+          "sum(requested_prompt_tokens)": 690,
+          "sum(requested_total_tokens)": 1058,
+          "sum(total_tokens)": 361
+        },
+        "demo_usage_events": {
+          "rows": 0,
+          "sum(total_tokens)": 0
+        },
+        "quota_reservations": {
+          "rows": 16,
+          "sum(max_output_tokens)": 0
+        },
+        "settlement_fallback_candidates": {
+          "rows": 0,
+          "sum(completion_tokens)": 0,
+          "sum(max_output_tokens)": 0,
+          "sum(max_total_tokens)": 0,
+          "sum(prompt_tokens)": 0
+        },
+        "usage_events": {
+          "rows": 5,
+          "sum(completion_tokens)": 226,
+          "sum(max_output_tokens)": 0,
+          "sum(prompt_tokens)": 135,
+          "sum(total_tokens)": 361
+        }
+      },
+      "gateway_up": true,
+      "greedy_repeat_identical": true,
+      "native_mtp_canary_enabled": true,
+      "provider_rejections": [
+        {
+          "artifact_role": "sidecar",
+          "event": "native_mtp_serve_path_admission",
+          "reason_code": "revocation_state_unavailable",
+          "status": "rejected"
+        }
+      ],
+      "provider_routable": true,
+      "provider_status": {
+        "continuous_batching": {
+          "active": false,
+          "cache_class": "mixed",
+          "mode": "canary",
+          "paged_kv_decision": "attached",
+          "policy": {
+            "authorization_source": "baked_empty_off",
+            "authorized": false,
+            "cached_turns_authorized": false,
+            "decision_reason": "absent_empty_off_fallback",
+            "emergency_off_override": false,
+            "expires_at": null,
+            "load_status": "absent_empty_off_fallback",
+            "local_proof_result": "passed",
+            "policy_sha256": null,
+            "policy_version": null,
+            "release_id": null,
+            "rollout_mode": "off",
+            "signer_key_id": null,
+            "tuple_sha256": null
+          },
+          "scheduler": {
+            "active_decode_rows": 0,
+            "max_observed_batch_depth": 0,
+            "slots_free": 8,
+            "slots_total": 8,
+            "waiting_count": 0
+          },
+          "unsupported_reason": "tuple_acceptance_coverage_unavailable"
+        },
+        "native_mtp": {
+          "accepted_by_position": [],
+          "accepted_tokens": 0,
+          "bonus_tokens": 0,
+          "capacity_rejections": 0,
+          "committed_tokens": 0,
+          "enabled": false,
+          "family": "unknown",
+          "last_reason": "tuple_not_admitted",
+          "mean_accepted_length": 0,
+          "mode": "off",
+          "mtp_forwards": 0,
+          "postoutput_failures": 0,
+          "preoutput_fallbacks": 0,
+          "proposal_depth": 0,
+          "proposed_tokens": 0,
+          "rejected_tokens": 0,
+          "requests_since_reset": 0,
+          "reset_generation": 1,
+          "supported": false,
+          "target_forwards": 0,
+          "throughput_delta_ppm": 0,
+          "verification_overhead_ms": 0
+        },
+        "status_advertises_native_mtp_status_v1": true,
+        "status_top_level_keys": [
+          "active_request_id_count",
+          "admission_identity",
+          "binary_version",
+          "buyer_serving_authority",
+          "buyer_serving_hold",
+          "capacity",
+          "catalog",
+          "compatibility_set_id",
+          "compatibility_set_sha256",
+          "continuous_batching",
+          "coordinator",
+          "coordinator_origin",
+          "credential",
+          "errors_total",
+          "input_tokens_all_time",
+          "input_tokens_today",
+          "lifecycle",
+          "lifecycle_lease",
+          "local_status_contract",
+          "memory_pressure",
+          "memory_rss_mb",
+          "model",
+          "model_hash",
+          "model_hash_algorithm",
+          "model_liveness",
+          "model_loaded",
+          "native_mtp",
+          "network_state",
+          "observation",
+          "output_tokens_all_time",
+          "output_tokens_today",
+          "provider_id",
+          "requests_in_flight",
+          "requests_queued",
+          "requests_today",
+          "requests_total",
+          "restart_count",
+          "safety_telemetry",
+          "service_instance",
+          "spec_decode_acceptance_rate",
+          "spec_decode_accepted_tokens_since_last",
+          "spec_decode_draft_model_id",
+          "spec_decode_drafted_tokens_since_last",
+          "spec_decode_enabled",
+          "spec_decode_num_draft_tokens",
+          "status",
+          "thermal_state",
+          "thermally_throttled",
+          "uptime_s",
+          "weights_manifest_algorithm",
+          "weights_manifest_sha256"
+        ],
+        "version": "1.8.217"
+      },
+      "readiness_probes": 12,
+      "requests": [
+        {
+          "content_sha256": "cacb4c1e3fd912b61b26f3c4879a33c5ab8bf6b4fe25069b813e72ac0dd0c599",
+          "finish_reason": "stop",
+          "kind": "nonstream_greedy",
+          "status": 200,
+          "usage": {
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 48,
+            "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+            "prompt_tokens": 23,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 71
+          }
+        },
+        {
+          "content_sha256": "690f74fca51a231d442c8556c74d050f85fdff37d560e8491e992de77f2d73e5",
+          "finish_reason": "length",
+          "frames": 97,
+          "kind": "stream_greedy",
+          "status": 200,
+          "usage": {
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 96,
+            "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+            "prompt_tokens": 18,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 114
+          }
+        },
+        {
+          "kind": "nonstream_sampled",
+          "status": 200,
+          "usage": {
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 32,
+            "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+            "prompt_tokens": 19,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 51
+          }
+        }
+      ],
+      "tuple_offer_received": false
+    }
+  },
+  "sub": {
+    "disabled.buyer_requests_200_via_gateway": true,
+    "disabled.ordinary_decode": true,
+    "enabled.buyer_requests_200_via_gateway": true,
+    "enabled.coordinator_canary_bank_loaded": true,
+    "enabled.native_admitted_on_provider": false,
+    "enabled.provider_offered_native_tuple": false,
+    "enabled.stack_routable_with_signed_release": true,
+    "usage_present_on_every_response": true
+  }
+}

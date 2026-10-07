@@ -1,0 +1,6 @@
+$ sandbox-exec -f <operator-home>/mtp-r014-journey-217/work/updater/sandbox.sb <operator-home>/mtp-r014-journey-217/work/updater/home/macprovider/macprovider-cli update --check
+exit=0
+--- stdout
+Already up to date (v1.8.207)
+
+--- stderr

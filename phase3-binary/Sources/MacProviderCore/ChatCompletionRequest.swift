@@ -34,6 +34,10 @@ public struct ChatCompletionRequest: Sendable {
     public let responseFormat: ResponseFormat
     public let promptSource: ChatCompletionPromptSource
     public let conversationKey: String?
+    /// SPEC-004 FR-SR-2 / SPEC-048-R009 (G7): the coordinator marked
+    /// `conversationKey` as a cache-only SPEC-006-R012 auto-prefix key, not a
+    /// sticky one. False whenever the key is absent.
+    public let conversationCacheOnly: Bool
     public let requestID: String?
     public let topLevelKeys: Set<String>
     public let streamOptionKeys: Set<String>
@@ -166,6 +170,7 @@ public struct ChatCompletionRequest: Sendable {
             responseFormat: responseFormat,
             promptSource: promptSource,
             conversationKey: nil,
+            conversationCacheOnly: false,
             requestID: nil,
             topLevelKeys: Set(dict.keys),
             streamOptionKeys: streamOptionKeys,
@@ -174,7 +179,10 @@ public struct ChatCompletionRequest: Sendable {
         )
     }
 
-    public func withConversationKey(_ key: String?) -> ChatCompletionRequest {
+    /// `cacheOnly` is the coordinator's SPEC-006-R012 auto-prefix marker; it
+    /// is kept only when the key itself is valid.
+    public func withConversationKey(_ key: String?, cacheOnly: Bool = false) -> ChatCompletionRequest {
+        let validKey = Self.validConversationKey(key)
         return ChatCompletionRequest(
             model: model,
             messages: messages,
@@ -189,7 +197,8 @@ public struct ChatCompletionRequest: Sendable {
             seed: seed,
             responseFormat: responseFormat,
             promptSource: promptSource,
-            conversationKey: Self.validConversationKey(key),
+            conversationKey: validKey,
+            conversationCacheOnly: validKey != nil && cacheOnly,
             requestID: requestID,
             topLevelKeys: topLevelKeys,
             streamOptionKeys: streamOptionKeys,
@@ -214,6 +223,7 @@ public struct ChatCompletionRequest: Sendable {
             responseFormat: responseFormat,
             promptSource: promptSource,
             conversationKey: conversationKey,
+            conversationCacheOnly: conversationCacheOnly,
             requestID: Self.validRequestID(id),
             topLevelKeys: topLevelKeys,
             streamOptionKeys: streamOptionKeys,
@@ -241,6 +251,7 @@ public struct ChatCompletionRequest: Sendable {
             responseFormat: responseFormat,
             promptSource: promptSource,
             conversationKey: conversationKey,
+            conversationCacheOnly: conversationCacheOnly,
             requestID: requestID,
             topLevelKeys: topLevelKeys,
             streamOptionKeys: streamOptionKeys,
@@ -267,6 +278,7 @@ public struct ChatCompletionRequest: Sendable {
             responseFormat: responseFormat,
             promptSource: promptSource,
             conversationKey: conversationKey,
+            conversationCacheOnly: conversationCacheOnly,
             requestID: requestID,
             topLevelKeys: topLevelKeys,
             streamOptionKeys: streamOptionKeys,
@@ -345,6 +357,7 @@ public struct ChatCompletionRequest: Sendable {
         responseFormat: ResponseFormat,
         promptSource: ChatCompletionPromptSource,
         conversationKey: String?,
+        conversationCacheOnly: Bool = false,
         requestID: String?,
         topLevelKeys: Set<String>,
         streamOptionKeys: Set<String>,
@@ -365,6 +378,7 @@ public struct ChatCompletionRequest: Sendable {
         self.responseFormat = responseFormat
         self.promptSource = promptSource
         self.conversationKey = conversationKey
+        self.conversationCacheOnly = conversationKey != nil && conversationCacheOnly
         self.requestID = requestID
         self.topLevelKeys = topLevelKeys
         self.streamOptionKeys = streamOptionKeys

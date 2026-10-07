@@ -64,6 +64,15 @@ CATALOG_ARTIFACT_FEED = "autotune-artifacts.json"
 CATALOG_ARTIFACT_NAMES = (CATALOG_ARTIFACT_FEED, CATALOG_ARTIFACT_FEED + ".sig")
 CATALOG_CB_POLICY_FEED = "continuous-batching-policy.json"
 CATALOG_CB_POLICY_NAMES = (CATALOG_CB_POLICY_FEED, CATALOG_CB_POLICY_FEED + ".sig")
+# SPEC-023 §12.5 Stage A: the native-MTP admission set crosses as external
+# release assets. release.json binds the sidecar; the sidecar binds the
+# projection manifest and challenge bank by digest (verify-directory).
+CATALOG_NATIVE_MTP_FEED = "native-mtp-admission.json"
+CATALOG_NATIVE_MTP_NAMES = (
+    CATALOG_NATIVE_MTP_FEED, CATALOG_NATIVE_MTP_FEED + ".sig",
+    "native-mtp-artifact-manifest.json",
+    "native-mtp-selftest-bank.json", "native-mtp-selftest-bank.json.sig",
+)
 LOCAL_COMPATIBILITY_NAMES = {
     "install.sh",
     "provider-launch-agent.plist.template",
@@ -320,16 +329,25 @@ def validate_unsigned(value: dict, assets: dict[str, pathlib.Path]) -> None:
         if archive_name in assets
         else None
     )
+    native_record = (
+        archived_release_feed_record(assets[archive_name], CATALOG_NATIVE_MTP_FEED)
+        if archive_name in assets
+        else None
+    )
     if artifact_record is not None:
         expected_names = expected_names | set(CATALOG_ARTIFACT_NAMES)
     if policy_record is not None:
         expected_names = expected_names | set(CATALOG_CB_POLICY_NAMES)
+    if native_record is not None:
+        expected_names = expected_names | set(CATALOG_NATIVE_MTP_NAMES)
     if set(assets) != expected_names:
         fail("unsigned manifest: supplied assets differ from the exact build boundary")
     if artifact_record is not None:
         require_artifact_feed_binding(artifact_record, assets[CATALOG_ARTIFACT_FEED], f"unsigned asset {CATALOG_ARTIFACT_FEED}")
     if policy_record is not None:
         require_release_feed_binding(policy_record, assets[CATALOG_CB_POLICY_FEED], f"unsigned asset {CATALOG_CB_POLICY_FEED}")
+    if native_record is not None:
+        require_release_feed_binding(native_record, assets[CATALOG_NATIVE_MTP_FEED], f"unsigned asset {CATALOG_NATIVE_MTP_FEED}")
     rows = value["assets"]
     if not isinstance(rows, dict) or set(rows) != expected_names:
         fail("unsigned manifest: recorded assets differ from the exact build boundary")
@@ -476,6 +494,9 @@ def build_pearl(args: argparse.Namespace) -> dict:
         if release_binds_feed(release, CATALOG_CB_POLICY_FEED):
             catalog_names += CATALOG_CB_POLICY_NAMES
             require_release_feed_binding(release["feeds"][CATALOG_CB_POLICY_FEED], catalog / CATALOG_CB_POLICY_FEED, f"catalog {CATALOG_CB_POLICY_FEED}")
+        if release_binds_feed(release, CATALOG_NATIVE_MTP_FEED):
+            catalog_names += CATALOG_NATIVE_MTP_NAMES
+            require_release_feed_binding(release["feeds"][CATALOG_NATIVE_MTP_FEED], catalog / CATALOG_NATIVE_MTP_FEED, f"catalog {CATALOG_NATIVE_MTP_FEED}")
         files = {name: sha256(catalog / name, f"catalog {name}") for name in catalog_names}
         release_id = release.get("release_id")
         policy_version = release.get("policy_version")
@@ -613,6 +634,8 @@ def command_validate_provider_payload(args: argparse.Namespace) -> None:
     if catalog_entries != set(CATALOG_NAMES):
         if set(CATALOG_CB_POLICY_NAMES) & catalog_entries:
             fail("provider payload: continuous-batching-policy.json is not a provider-payload member; it is an external release asset")
+        if set(CATALOG_NATIVE_MTP_NAMES) & catalog_entries:
+            fail("provider payload: the native-MTP admission set is not a provider-payload member at Stage A (SPEC-023 §12.5); it is an external release asset")
         if set(CATALOG_ARTIFACT_NAMES) & catalog_entries:
             fail("provider payload: autotune-artifacts.json is not a provider-payload member at Stage A (SPEC-023 §3.7.8); it is a release asset")
         fail("provider payload: catalog-release members differ from the exact compatibility set")

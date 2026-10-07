@@ -472,3 +472,28 @@ func mustUnmarshalNativeMTP(t *testing.T, raw []byte, v any) {
 		t.Fatal(err)
 	}
 }
+
+// The scheduler commits one token fewer than it emits: the first token comes
+// from the prefill forward, outside every verify round. A bank measured on
+// hardware (64 tokens, committed 63, depth 1) must parse.
+func TestNativeMTPChallengeBankCommittedCountMatchesTheScheduler(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		tokens, committed, depth uint64
+		ok                       bool
+	}{
+		{64, 63, 1, true},
+		{64, 64, 1, true},
+		{64, 65, 1, false},
+		{64, 62, 1, false},
+		{1, 0, 1, true},
+		{0, 0, 1, true},
+		{0, 1, 1, false},
+		{8, 10, 3, true},
+		{8, 11, 3, false},
+	} {
+		if got := nativeMTPCommittedCountConsistent(tc.tokens, tc.committed, tc.depth); got != tc.ok {
+			t.Errorf("tokens=%d committed=%d depth=%d: got %v want %v", tc.tokens, tc.committed, tc.depth, got, tc.ok)
+		}
+	}
+}

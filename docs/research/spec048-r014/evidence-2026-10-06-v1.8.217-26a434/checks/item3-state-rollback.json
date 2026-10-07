@@ -1,0 +1,35 @@
+{
+  "binary": "lab build of release source",
+  "details": {
+    "checks": {
+      "journey-boundary-0.every_forced_proposal_rejected": true,
+      "journey-boundary-0.forced_rejections_applied": true,
+      "journey-boundary-0.native_admitted": true,
+      "journey-boundary-0.parity": true,
+      "journey-boundary-1.every_forced_proposal_rejected": true,
+      "journey-boundary-1.forced_rejections_applied": true,
+      "journey-boundary-1.native_admitted": true,
+      "journey-boundary-1.parity": true,
+      "journey-reject-all-0.all_rejected": true,
+      "journey-reject-all-0.every_forced_proposal_rejected": true,
+      "journey-reject-all-0.forced_rejections_applied": true,
+      "journey-reject-all-0.native_admitted": true,
+      "journey-reject-all-0.parity": true
+    },
+    "status": "partial",
+    "uncovered_contract": [
+      "committed-state digest parity after each forced rejection (only output parity is compared)"
+    ]
+  },
+  "evidence": [
+    "records/lab-journey-result.json",
+    "raw/lab-journey.stderr"
+  ],
+  "item": "item3-state-rollback",
+  "recorded_at": "2026-10-06T11:33:31Z",
+  "schema": "macprovider.native-mtp-r014-rehearsal-check.v1",
+  "status": "PASS",
+  "sub_checks": {},
+  "summary": "forced rejection on every round and at the paged/hybrid block boundary keeps output parity",
+  "title": "R014.3 cache/state rollback"
+}

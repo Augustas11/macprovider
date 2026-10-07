@@ -58,7 +58,7 @@ struct MacProviderCLI: AsyncParsableCommand {
     /// MACPROVIDER_LAB_HARNESS builds; a plain release binary registers none.
     private static func labSubcommands() -> [ParsableCommand.Type] {
         #if DEBUG || MACPROVIDER_LAB_HARNESS
-        return [NativeMTPHardwareE2ECommand.self, NativeMTPBenchCommand.self, NativeMTPJourneyE2ECommand.self]
+        return [NativeMTPHardwareE2ECommand.self, NativeMTPBenchCommand.self, NativeMTPJourneyE2ECommand.self, NativeMTPRequestShapeReplayCommand.self]
         #else
         return []
         #endif
@@ -932,6 +932,16 @@ struct ServeCommand: AsyncParsableCommand {
         let loadPath: String
         let loadSHA256: String
         let nativeMTPResolvedArtifactAuthority: NativeMTPResolvedArtifactAuthority?
+        /// The sidecar the serve-path loader reads; nil uses the bundle lookup.
+        var nativeMTPAdmissionSidecarPath: String? = nil
+        /// The durable store root a fetched set's projection resolves against.
+        var nativeMTPAdmissionArtifactRoot: String? = nil
+    }
+
+    struct NativeMTPResolvedAdmission {
+        let authority: NativeMTPResolvedArtifactAuthority
+        let sidecarPath: String?
+        var artifactRoot: String? = nil
     }
 
     struct ModelArtifactPreflightOutcome {
@@ -1071,7 +1081,7 @@ struct ServeCommand: AsyncParsableCommand {
         // coordinator matches that hash against the pool manifest and is the
         // only authority that admits it, so the catalog preflight is skipped
         // for that join alone. Donor mode keeps its catalog gate.
-        if resolved.donorMode || (joiningCoordinator && !servesPoolModelEntry && !relaxesJoinAdmissionForLab(
+        if resolved.donorMode || (joiningCoordinator && !servesPoolModelEntry && !skipsCatalogPreflightForLabJoin(
             isolateLifecycle: isolateLifecycle,
             coordinatorURL: resolved.coordinatorURL
         )) {
@@ -1102,12 +1112,13 @@ struct ServeCommand: AsyncParsableCommand {
                 config: resolved,
                 artifactResolver: artifactResolver
             )
-            let nativeMTPResolvedArtifactAuthority = await resolveNativeMTPArtifactAuthority(
+            let nativeMTPResolvedAdmission = await resolveNativeMTPArtifactAuthority(
                 config: resolved,
                 catalogTrust: catalogTrust,
                 authorityPath: canonicalAuthorityPath,
                 authoritySHA256: actual,
-                staticInputs: staticInputs
+                staticInputs: staticInputs,
+                artifactResolver: artifactResolver
             )
             return ModelArtifactPreflightOutcome(
                 catalogTrust: catalogTrust,
@@ -1116,7 +1127,9 @@ struct ServeCommand: AsyncParsableCommand {
                     authoritySHA256: actual,
                     loadPath: canonicalLoadPath,
                     loadSHA256: runtimeLoadSHA256,
-                    nativeMTPResolvedArtifactAuthority: nativeMTPResolvedArtifactAuthority
+                    nativeMTPResolvedArtifactAuthority: nativeMTPResolvedAdmission?.authority,
+                    nativeMTPAdmissionSidecarPath: nativeMTPResolvedAdmission?.sidecarPath,
+                    nativeMTPAdmissionArtifactRoot: nativeMTPResolvedAdmission?.artifactRoot
                 )
             )
         }
@@ -1137,8 +1150,9 @@ struct ServeCommand: AsyncParsableCommand {
         catalogTrust: CatalogRuntimeTrust,
         authorityPath: String,
         authoritySHA256: String,
-        staticInputs: AutotuneStaticInputs
-    ) async -> NativeMTPResolvedArtifactAuthority? {
+        staticInputs: AutotuneStaticInputs,
+        artifactResolver: CachedModelArtifactResolver
+    ) async -> NativeMTPResolvedAdmission? {
         guard config.nativeMTPMode == .auto,
               let modelKey = config.modelCatalogKey,
               !modelKey.isEmpty,
@@ -1170,19 +1184,49 @@ struct ServeCommand: AsyncParsableCommand {
         let targetURL = URL(fileURLWithPath: authorityPath, isDirectory: true).standardizedFileURL
         let bundleRoot = targetURL.deletingLastPathComponent()
         let bundledSidecar = bundleRoot.appendingPathComponent("native-mtp-admission.json")
-        let sidecarURL = FileManager.default.fileExists(atPath: bundledSidecar.path)
+        let localSidecarURL = FileManager.default.fileExists(atPath: bundledSidecar.path)
             ? bundledSidecar
             : targetURL.appendingPathComponent("native-mtp-admission.json")
-        guard FileManager.default.fileExists(atPath: sidecarURL.path) else {
-            return nil
+        let sidecarPath: String?
+        var artifactRoot: String?
+        if FileManager.default.fileExists(atPath: localSidecarURL.path) {
+            // An operator-placed set next to the bundle keeps the bundle lookup.
+            sidecarPath = nil
+        } else {
+            // SPEC-023 §12.5 Stage A: the release's signed admission set,
+            // fetched from the static-feed origin into a private directory.
+            guard let fetched = try? await NativeMTPAdmissionFeed.fetchAndMaterialize(
+                releaseID: catalogTrust.releaseID,
+                signerKeyID: AutotuneStaticInputs.keyID,
+                trustedPublicKeys: staticInputs.trustedPublicKeys
+            ) else {
+                return nil
+            }
+            // The fetched set projects the served target and the MTP drafter
+            // by durable-store path; the drafter is fetched here if missing.
+            guard let manifest = try? Data(contentsOf: fetched.deletingLastPathComponent()
+                    .appendingPathComponent(NativeMTPAdmissionFeed.manifestFileName)),
+                  let storeRoot = await NativeMTPStoreProjection.prepare(
+                    manifest: manifest,
+                    servedTargetURL: targetURL,
+                    resolver: artifactResolver
+                  )
+            else {
+                return nil
+            }
+            sidecarPath = fetched.path
+            artifactRoot = storeRoot.path
         }
-        return try? qualified.nativeMTPResolvedArtifactAuthority(
+        guard let authority = try? qualified.nativeMTPResolvedArtifactAuthority(
             releaseID: catalogTrust.releaseID,
             modelKey: modelKey,
             artifactID: identity.artifactID,
             hash: identity.hash,
             preflightTargetURL: targetURL
-        )
+        ) else {
+            return nil
+        }
+        return NativeMTPResolvedAdmission(authority: authority, sidecarPath: sidecarPath, artifactRoot: artifactRoot)
     }
 
     /// The Build 1 private authority covers the complete upstream revision,
@@ -1948,6 +1992,21 @@ struct ServeCommand: AsyncParsableCommand {
         isolateLifecycle && isLoopbackCoordinatorURL(coordinatorURL)
     }
 
+    /// The isolated lab join skips the catalog preflight because it cannot
+    /// reach the production static feeds. A lab build whose static feeds are
+    /// redirected to a loopback origin signed by a test key
+    /// (`StaticFeedOrigin.labOverride`) has its own signed catalog, so it runs
+    /// the real preflight and native-MTP admission fetch: the delivery-path
+    /// rehearsal (SPEC-048 R014, #1770). Release builds have no override.
+    static func skipsCatalogPreflightForLabJoin(
+        isolateLifecycle: Bool,
+        coordinatorURL: String?,
+        labStaticFeedOverrideActive: Bool = StaticFeedOrigin.labOverride != nil
+    ) -> Bool {
+        relaxesJoinAdmissionForLab(isolateLifecycle: isolateLifecycle, coordinatorURL: coordinatorURL)
+            && !labStaticFeedOverrideActive
+    }
+
     /// The isolated lab join skips the catalog preflight (`relaxesJoinAdmissionForLab`),
     /// so it can never present the catalog envelope the buyer-serving
     /// readiness gate requires. Waive only that gate, only for that join.
@@ -2639,6 +2698,8 @@ struct ServeCommand: AsyncParsableCommand {
                     continuousBatchingEmergencyOffOverride: emergencyOffOverride,
                     continuousBatchingModeExplicitlyConfigured: resolved.continuousBatchingExplicitlyConfigured,
                     nativeMTPMode: resolved.nativeMTPMode,
+                    nativeMTPAdmissionSidecarPath: startupPreflight.runtimeBinding?.nativeMTPAdmissionSidecarPath,
+                    nativeMTPAdmissionArtifactRoot: startupPreflight.runtimeBinding?.nativeMTPAdmissionArtifactRoot,
                     nativeMTPResolvedArtifactAuthority: startupPreflight.runtimeBinding?.nativeMTPResolvedArtifactAuthority,
                     warmSwapEnabled: resolved.enableWarmSwap,
                     swapDrainTimeoutSeconds: resolved.swapDrainTimeoutSeconds,

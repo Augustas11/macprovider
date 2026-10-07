@@ -1,0 +1,54 @@
+{
+  "binary": "lab build of release source",
+  "details": {
+    "bound_fields": {
+      "artifact_hash": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+      "live_executable_cdhash": "456789abcdef0123456789abcdef0123456789ab",
+      "max_native_active_rows": 2,
+      "provider_revision": "0123456789abcdef0123456789abcdef01234567",
+      "qualified_slots": 2,
+      "release_id": "native-mtp-hardware-e2e",
+      "reproducible_build_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "runtime_revision": "b181102984a4d1875efbd9e0eab3a7dfd1c012c5",
+      "signer_key_id": "native-mtp-hardware-e2e",
+      "source_commit": "0123456789abcdef0123456789abcdef01234567"
+    },
+    "production_generator": {
+      "exit": 1,
+      "placeholder_fields": [
+        "batch_evidence_sha256",
+        "correctness_evidence_sha256",
+        "quality_evidence_sha256",
+        "security_negative_evidence_sha256",
+        "state_rollback_evidence_sha256"
+      ],
+      "stderr_tail": [
+        "native_mtp_admission_sidecar: $.entries[0].quality_evidence_sha256: is the pending-evidence placeholder; bind the real evidence digest"
+      ],
+      "tuple_benchmark_policy_sha256": "30934c07e5b6ca6dfa569505bbfdb2fd118be719cba81ddf99193a4ebe72d581",
+      "tuple_input": "docs/research/spec048-r015/evidence-2026-10-02-a3b-formal/admission-tuple-input.json",
+      "tuple_runtime_revision": "ef4ff8568c38c640bc90a8176dc3acfe943a288d"
+    }
+  },
+  "evidence": [
+    "raw/lab-hardware-e2e.log",
+    "records/lab-native-mtp-admission.json",
+    "records/lab-sidecar-identity.json",
+    "records/production-generator-rehearsal.json",
+    "delivery-path.md"
+  ],
+  "item": "item1-sidecar-tuple-binding",
+  "recorded_at": "2026-10-06T11:33:31Z",
+  "schema": "macprovider.native-mtp-r014-rehearsal-check.v1",
+  "status": "FAIL",
+  "sub_checks": {
+    "generator_recomputes_tuple_sha": true,
+    "lab_serve_path_loader_admitted_sidecar": true,
+    "production_generator_builds_release_sidecar": false,
+    "sidecar_binds_release_cdhash": false,
+    "sidecar_binds_release_source_commit": false,
+    "sidecar_binds_target_artifact": true
+  },
+  "summary": "lab-generated sidecar is admitted by the production serve-path loader and its tuple sha recomputes in the repository generator; but the only sidecar that can be generated today binds the lab harness identity (ephemeral key, lab provider revision), not the signed release CDHash/source commit, and no production generator input exists for this release (see delivery-path.md)",
+  "title": "R014.1 admission sidecar generation and its tuple-sha binding"
+}

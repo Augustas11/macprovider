@@ -1,8 +1,20 @@
 # SPEC-024 - Prefix-cache billing and provider-local cache isolation
 
-**Version:** 0.2.9 (2026-10-01, hybrid reply-end recurrent checkpoint)
+**Version:** 0.2.10 (2026-10-06, native MTP on cache-only misses)
 **Status:** **Billing arithmetic (§4 ledger / §5 rate card / §6 formula) MOVED to SPEC-005 v0.6** (canonical). SPEC-024 **retains** the `cached_prompt_tokens` **wire field** (§3, a SPEC-002 addendum), the **buyer-visible** mirror field (§8, a SPEC-006 addendum), the fraud model (§7), and the provider-local cache-**isolation** baseline (§11–§16) — none of which SPEC-005 **re-owns** (SPEC-005 §5.3.1 does fold in the §14 coordinator cross-check *gates* as billing-eligibility rules, but SPEC-024 remains their canonical home).
 **Depends on:** SPEC-002 v1.5.2 (coordinator-provider wire), SPEC-004 v0.3.2 (sticky affinity; FR-SR-2 provider-visibility carve-out), SPEC-005 v0.6.10 (billing — the canonical owner of prefix-cache billing arithmetic, formula, ledger columns, and rate-card keys), SPEC-006 v0.9.39 (buyer API; §1.3 conversation-key derivation + survivability (b) carve-out + OpenAI nested usage), SPEC-008 v0.4.1 (Tier-2 trust; §2.2 invariant (b) carve-out permitting the provider-visible derived conversation_key), SPEC-018 v0.2.4 (tool calling)
+
+**Change log v0.2.10 (2026-10-06, issue #1770 — native MTP on cache-only misses):**
+- **§11 decode-path order.** A request whose key the coordinator marked
+  cache-only (SPEC-004 v0.3.6 `conversation_cache_only`) may stay on
+  `native_mtp` through selection; the lease the ordinary path would take then
+  decides. A hit (`cached_prompt_tokens > 0`), a missing lease, or a runtime
+  that publishes a retained paged-KV handoff reselects `ordinary` before any
+  native state exists, so every discount path is unchanged. A miss stays
+  native, keeps its lease, and publishes the same serial-format hybrid entry
+  the ordinary row would publish. Sticky keys still route ordinary. Billing
+  arithmetic is unchanged: a miss reports `cached_prompt_tokens = 0` on both
+  paths.
 
 **Change log v0.2.9 (2026-10-01, issue #1791 — hybrid reply-end recurrent checkpoint):**
 - **FR-CI2 hybrid models.** The recurrent checkpoint set now includes the
@@ -363,6 +375,22 @@ also routes ordinary. SPEC-048 must measure eligibility after this derivation
 and cannot treat pre-gateway keyless requests as representative production
 coverage. Allowing native MTP to discard or bypass an auto-prefix key would
 require a later wire/billing amendment and is not authorized here.
+
+**Cache-only keys (v0.2.10).** The exception is a key the coordinator marked
+cache-only (SPEC-004 v0.3.6). Such a request MAY remain `native_mtp` through
+selection; it then takes exactly the lease the ordinary path would take, and
+that lease decides before any native state exists. The request MUST reselect
+`ordinary` (selector reason `conversation_key`) when the lease reports
+`cached_prompt_tokens > 0`, when no lease is granted, or when the runtime
+would hand back a retained paged-KV entry instead of a serial-format one. On
+a miss with serial-format publication it stays `native_mtp`, keeps the lease,
+reports `cached_prompt_tokens = 0`, and at a normal terminal publishes the
+serial-format entry built from its committed target state: the same tokens,
+token count, attention KV, and recurrent checkpoints the ordinary row would
+publish (SPEC-048-R006 committed state). A failed, cancelled, or fallen-back
+native row publishes nothing and aborts its lease. The key is never discarded
+or bypassed, no discount is forgone, and no MTP proposal, rejected, or
+drafter state enters the entry.
 
 The provider-local conversation/KV cache (`phase3-binary/.../ConversationCache.swift`) is an
 in-process, per-provider-process store. Its **isolation boundary is the `conversation_key`

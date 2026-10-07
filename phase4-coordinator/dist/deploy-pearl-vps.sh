@@ -779,6 +779,32 @@ if [ "$AUTOTUNE_ARTIFACT_BOUND" = "bound" ]; then
   AUTOTUNE_ARTIFACT_CONTENT_JSON="$STATIC_ARTIFACTS_JSON"
   AUTOTUNE_ARTIFACT_CONTENT_SIG="$STATIC_ARTIFACTS_SIG"
 fi
+# SPEC-023 §12.5: a native-MTP-bound release also carries the admission
+# sidecar, its projection manifest, and the signed challenge bank, beside the
+# other feeds of the immutable envelope.
+NATIVE_MTP_FILES="native-mtp-admission.json native-mtp-admission.json.sig native-mtp-artifact-manifest.json native-mtp-selftest-bank.json native-mtp-selftest-bank.json.sig"
+NATIVE_MTP_REVOCATIONS_DIR="/opt/macprovider/native-mtp-revocations/current"
+STATIC_NATIVE_MTP_DIR="$STATIC_FEEDS_DIR"
+AUTOTUNE_NATIVE_MTP_BOUND="$(python3 - "$AUTOTUNE_RELEASE_MANIFEST" <<'PY'
+import json, pathlib, sys
+feeds = json.loads(pathlib.Path(sys.argv[1]).read_text())["feeds"]
+print("bound" if "native-mtp-admission.json" in feeds else "unbound")
+PY
+)"
+AUTOTUNE_NATIVE_MTP_CONTENT_DIR=""
+if [ "$AUTOTUNE_NATIVE_MTP_BOUND" = "bound" ]; then
+  [ "$AUTOTUNE_ARTIFACT_BOUND" = "bound" ] || {
+    echo "aborting deploy: release.json binds native-mtp-admission.json without autotune-artifacts.json" >&2
+    exit 1
+  }
+  for _native_file in $NATIVE_MTP_FILES; do
+    [ -f "$STATIC_FEEDS_DIR/$_native_file" ] || {
+      echo "aborting deploy: release.json binds native-mtp-admission.json but $STATIC_FEEDS_DIR lacks $_native_file" >&2
+      exit 1
+    }
+  done
+  AUTOTUNE_NATIVE_MTP_CONTENT_DIR="$STATIC_FEEDS_DIR"
+fi
 AUTOTUNE_RELEASE_ID="$(python3 - "$AUTOTUNE_RELEASE_MANIFEST" <<'PY'
 import json, pathlib, sys
 print(json.loads(pathlib.Path(sys.argv[1]).read_text())["release_id"])
@@ -817,7 +843,8 @@ AUTOTUNE_RELEASE_CONTENT_SHA256="$(python3 - \
   "$STATIC_CB_POLICY_JSON" \
   "$STATIC_CB_POLICY_SIG" \
   "$AUTOTUNE_ARTIFACT_CONTENT_JSON" \
-  "$AUTOTUNE_ARTIFACT_CONTENT_SIG" <<'PY'
+  "$AUTOTUNE_ARTIFACT_CONTENT_SIG" \
+  "$AUTOTUNE_NATIVE_MTP_CONTENT_DIR" <<'PY'
 import hashlib
 import pathlib
 import sys
@@ -841,6 +868,18 @@ if sys.argv[12] or sys.argv[13]:
     assets += (
         ("autotune-artifacts.json", pathlib.Path(sys.argv[12])),
         ("autotune-artifacts.json.sig", pathlib.Path(sys.argv[13])),
+    )
+# Native-MTP-bound release (SPEC-023 §12.5): the admission set joins the
+# envelope; the argument is empty otherwise.
+if sys.argv[14]:
+    native = pathlib.Path(sys.argv[14])
+    assets += tuple(
+        (name, native / name)
+        for name in (
+            "native-mtp-admission.json", "native-mtp-admission.json.sig",
+            "native-mtp-artifact-manifest.json",
+            "native-mtp-selftest-bank.json", "native-mtp-selftest-bank.json.sig",
+        )
     )
 digest = hashlib.sha256()
 for name, path in assets:
@@ -1203,6 +1242,29 @@ assert_artifact_feed_config_matches_release() {
     echo "  See docs/runbooks/catalog-artifact-feed-release.md (Serving the feed)." >&2
     exit 5
   fi
+  # SPEC-023 §12.5: the native-MTP paths follow the release binding exactly,
+  # like the artifact pair: all six set for a bound release, none otherwise.
+  local key want got
+  for key in native_mtp_admission_path native_mtp_admission_sig_path native_mtp_artifact_manifest_path \
+    native_mtp_selftest_bank_path native_mtp_selftest_bank_sig_path native_mtp_revocations_dir; do
+    want=""
+    if [ "${AUTOTUNE_NATIVE_MTP_BOUND:-unbound}" = "bound" ]; then
+      case "$key" in
+        native_mtp_admission_path) want="/opt/macprovider/autotune/current/native-mtp-admission.json" ;;
+        native_mtp_admission_sig_path) want="/opt/macprovider/autotune/current/native-mtp-admission.json.sig" ;;
+        native_mtp_artifact_manifest_path) want="/opt/macprovider/autotune/current/native-mtp-artifact-manifest.json" ;;
+        native_mtp_selftest_bank_path) want="/opt/macprovider/autotune/current/native-mtp-selftest-bank.json" ;;
+        native_mtp_selftest_bank_sig_path) want="/opt/macprovider/autotune/current/native-mtp-selftest-bank.json.sig" ;;
+        native_mtp_revocations_dir) want="/opt/macprovider/native-mtp-revocations/current" ;;
+      esac
+    fi
+    got="$(yaml_file_block_value "$DEPLOY_CONFIG" autotune "$key")"
+    if [ "$got" != "$want" ]; then
+      echo "aborting deploy: effective autotune.$key ('$got') does not match the native-MTP ${AUTOTUNE_NATIVE_MTP_BOUND:-unbound} release (want '$want')." >&2
+      echo "  See docs/runbooks/native-mtp-enablement.md." >&2
+      exit 5
+    fi
+  done
 }
 
 # Issue #582 (MEDIUM #6) — stats-inventory-sync restore-on-failure state.
@@ -3482,6 +3544,11 @@ if [ "$AUTOTUNE_ARTIFACT_BOUND" = "bound" ]; then
   _append_deploy_input_digest "$STATIC_ARTIFACTS_JSON" "autotune-artifacts.json"
   _append_deploy_input_digest "$STATIC_ARTIFACTS_SIG" "autotune-artifacts.json.sig"
 fi
+if [ "$AUTOTUNE_NATIVE_MTP_BOUND" = "bound" ]; then
+  for _native_file in $NATIVE_MTP_FILES; do
+    _append_deploy_input_digest "$STATIC_FEEDS_DIR/$_native_file" "$_native_file"
+  done
+fi
 if [ -n "$CATALOG_REMOTE_PATH" ]; then
   _append_deploy_input_digest "$TMP_CATALOG_PINNED" "tier2-catalog.json"
   _append_deploy_input_digest "$TMP_CATALOG_PUBKEY" "tier2-catalog.pub"
@@ -3547,6 +3614,13 @@ if [ "$AUTOTUNE_ARTIFACT_BOUND" = "bound" ]; then
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/autotune-artifacts.json \$_autotune_stage/autotune-artifacts.json
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/autotune-artifacts.json.sig \$_autotune_stage/autotune-artifacts.json.sig"
 fi
+if [ "$AUTOTUNE_NATIVE_MTP_BOUND" = "bound" ]; then
+  for _native_file in $NATIVE_MTP_FILES; do
+    $SCP "$STATIC_FEEDS_DIR/$_native_file" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/$_native_file"
+    AUTOTUNE_ARTIFACT_INSTALL_LINES="$AUTOTUNE_ARTIFACT_INSTALL_LINES
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/$_native_file \$_autotune_stage/$_native_file"
+  done
+fi
 $SCP "$AUTOTUNE_RELEASE_MANIFEST" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/release.json"
 $SCP "$AUTOTUNE_TRUSTED_KEYS"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/trusted-keys.json"
 $SCP "$AUTOTUNE_RELEASE_LEDGER"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/release-ledger.json"
@@ -3580,6 +3654,9 @@ CATALOG_RELEASE_FILES="demand-rank.json demand-rank.json.sig autotune-candidates
 if [ "$AUTOTUNE_ARTIFACT_BOUND" = "bound" ]; then
   CATALOG_RELEASE_FILES="$CATALOG_RELEASE_FILES autotune-artifacts.json autotune-artifacts.json.sig"
 fi
+if [ "$AUTOTUNE_NATIVE_MTP_BOUND" = "bound" ]; then
+  CATALOG_RELEASE_FILES="$CATALOG_RELEASE_FILES $NATIVE_MTP_FILES"
+fi
 if ! $SSH "set -e
   _preflight=$DEPLOY_TMP/catalog-preflight
   rm -rf \$_preflight
@@ -3587,9 +3664,25 @@ if ! $SSH "set -e
   for _f in $CATALOG_RELEASE_FILES; do cp $DEPLOY_TMP/\$_f \$_preflight/\$_f; done
   _rc=0
   python3 -I $DEPLOY_TMP/scripts/catalog-release.py verify-directory --directory \$_preflight --tier2-public-key-file $DEPLOY_TMP/tier2-catalog.pub || _rc=\$?
+  if [ \$_rc -eq 0 ] && [ '$AUTOTUNE_NATIVE_MTP_BOUND' = bound ]; then
+    _native_preflight=\$(mktemp -d -t macprovider-native-mtp-preflight.XXXXXXXX)
+    trap 'rm -rf \"\$_preflight\" \"\$_native_preflight\"' EXIT
+    chmod 0755 \$_native_preflight
+    install -m 0755 $DEPLOY_TMP/scripts/native_mtp_revocation_slots.py \$_native_preflight/native_mtp_revocation_slots.py
+    install -m 0644 $DEPLOY_TMP/native-mtp-admission.json \$_native_preflight/native-mtp-admission.json
+    install -m 0644 $DEPLOY_TMP/trusted-keys.json \$_native_preflight/trusted-keys.json
+    sudo -u macprovider test -d $NATIVE_MTP_REVOCATIONS_DIR
+    sudo -u macprovider test -r $NATIVE_MTP_REVOCATIONS_DIR
+    sudo -u macprovider test -x $NATIVE_MTP_REVOCATIONS_DIR
+    sudo -u macprovider python3 -I \$_native_preflight/native_mtp_revocation_slots.py verify-current \
+      --dir $NATIVE_MTP_REVOCATIONS_DIR \
+      --admission \$_native_preflight/native-mtp-admission.json \
+      --trusted-keys \$_native_preflight/trusted-keys.json || _rc=\$?
+  fi
   rm -rf \$_preflight
+  [ -z \"\${_native_preflight:-}\" ] || rm -rf \$_native_preflight
   exit \$_rc"; then
-  echo "aborting deploy: staged catalog release failed remote verify-directory preflight on the VPS (before config backup or release staging)" >&2
+  echo "aborting deploy: staged catalog release failed remote verify-directory/native-MTP revocation preflight on the VPS (before config backup or release staging)" >&2
   exit 1
 fi
 
@@ -4358,6 +4451,7 @@ if [ "$CATALOG_VERDICT" = "equivalent" ]; then
   # feed against these live bytes, not the tag's possibly restamped copy.
   STATIC_ARTIFACTS_JSON="$CATALOG_LIVE_SNAPSHOT/autotune-artifacts.json"
   STATIC_ARTIFACTS_SIG="$CATALOG_LIVE_SNAPSHOT/autotune-artifacts.json.sig"
+  STATIC_NATIVE_MTP_DIR="$CATALOG_LIVE_SNAPSHOT"
   AUTOTUNE_RELEASE_MANIFEST="$CATALOG_LIVE_SNAPSHOT/release.json"
   AUTOTUNE_TRUSTED_KEYS="$CATALOG_LIVE_SNAPSHOT/trusted-keys.json"
   AUTOTUNE_TIER2_JSON="$CATALOG_LIVE_SNAPSHOT/tier2-catalog.json"
@@ -4507,6 +4601,10 @@ $SSH "set -e
     sudo -u macprovider test -r /opt/macprovider/autotune/current/autotune-artifacts.json
     sudo -u macprovider test -r /opt/macprovider/autotune/current/autotune-artifacts.json.sig
   fi
+  if [ '$AUTOTUNE_NATIVE_MTP_BOUND' = bound ]; then
+    for _f in $NATIVE_MTP_FILES; do sudo -u macprovider test -r /opt/macprovider/autotune/current/\$_f; done
+    sudo -u macprovider test -r $NATIVE_MTP_REVOCATIONS_DIR
+  fi
 " || {
   echo "aborting smoke: macprovider cannot read /opt/macprovider/autotune/*" >&2
   exit 1
@@ -4534,6 +4632,15 @@ if [ "$AUTOTUNE_ARTIFACT_BOUND" = "bound" ]; then
     "/v1/catalog-artifacts.sig|autotune-artifacts.json.sig|$STATIC_ARTIFACTS_SIG"
   )
 fi
+if [ "$AUTOTUNE_NATIVE_MTP_BOUND" = "bound" ]; then
+  STATIC_SMOKE_SPECS+=(
+    "/v1/native-mtp-admission|native-mtp-admission.json|$STATIC_NATIVE_MTP_DIR/native-mtp-admission.json"
+    "/v1/native-mtp-admission.sig|native-mtp-admission.json.sig|$STATIC_NATIVE_MTP_DIR/native-mtp-admission.json.sig"
+    "/v1/native-mtp-artifact-manifest|native-mtp-artifact-manifest.json|$STATIC_NATIVE_MTP_DIR/native-mtp-artifact-manifest.json"
+    "/v1/native-mtp-selftest-bank|native-mtp-selftest-bank.json|$STATIC_NATIVE_MTP_DIR/native-mtp-selftest-bank.json"
+    "/v1/native-mtp-selftest-bank.sig|native-mtp-selftest-bank.json.sig|$STATIC_NATIVE_MTP_DIR/native-mtp-selftest-bank.json.sig"
+  )
+fi
 for STATIC_SPEC in "${STATIC_SMOKE_SPECS[@]}"; do
   STATIC_PATH="${STATIC_SPEC%%|*}"
   STATIC_REST="${STATIC_SPEC#*|}"
@@ -4559,6 +4666,23 @@ cp "$STATIC_RATE_CARD_SIG" "$STATIC_SMOKE_DIR/rate-card.json.sig"
 cp "$STATIC_CB_POLICY_JSON" "$STATIC_SMOKE_DIR/continuous-batching-policy.json"
 cp "$STATIC_CB_POLICY_SIG" "$STATIC_SMOKE_DIR/continuous-batching-policy.json.sig"
 python3 "$AUTOTUNE_RELEASE_VERIFY" verify-directory --directory "$STATIC_SMOKE_DIR"
+# SPEC-023 §12.5: a native-MTP-bound release needs a current revocation slot,
+# or every provider fails closed with revocation_state_unavailable.
+if [ "$AUTOTUNE_NATIVE_MTP_BOUND" = "bound" ]; then
+  REVOCATION_KEY_ID="$(python3 - "$STATIC_NATIVE_MTP_DIR/native-mtp-admission.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["revocation_signer_key_id"])
+PY
+)"
+  case "$REVOCATION_KEY_ID" in ""|*[!A-Za-z0-9._-]*) echo "SPEC-023 native-MTP smoke failed: unsafe revocation key id" >&2; exit 1 ;; esac
+  STATUS=$(curl -sS -o "$STATIC_SMOKE_DIR/native-mtp-revocations.json" -w '%{http_code}' --max-time 10 --max-filesize 65536 \
+    "https://$DOMAIN/v1/native-mtp-revocations.$REVOCATION_KEY_ID.json")
+  if [ "$STATUS" != "200" ]; then
+    echo "SPEC-023 native-MTP smoke failed: no current revocation slot (status=$STATUS); run scripts/publish-native-mtp-revocations.sh --deploy" >&2
+    exit 1
+  fi
+  echo "  SPEC-023 native-MTP admission set and revocation feed served"
+fi
 AUTOTUNE_STATUS_BODY="$STATIC_SMOKE_DIR/autotune-release-status.json"
 STATUS=$(curl -sS -o "$AUTOTUNE_STATUS_BODY" -w '%{http_code}' --max-time 10 --max-filesize 65536 "https://$DOMAIN/v1/autotune-release")
 if [ "$STATUS" != "200" ]; then

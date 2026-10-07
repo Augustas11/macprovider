@@ -1,0 +1,10 @@
+{
+  "streamvc-autotune-static-v4": {
+    "http_status": 404,
+    "url": "https://coordinator.malibu.tech/v1/native-mtp-revocations.streamvc-autotune-static-v4.json"
+  },
+  "streamvc-autotune-static-v5": {
+    "http_status": 404,
+    "url": "https://coordinator.malibu.tech/v1/native-mtp-revocations.streamvc-autotune-static-v5.json"
+  }
+}

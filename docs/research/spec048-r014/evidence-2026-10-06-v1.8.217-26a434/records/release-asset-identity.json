@@ -1,0 +1,40 @@
+{
+  "details": {
+    "app_embedded_cli_paths": [
+      "Malibu.app/Contents/MacOS/macprovider-cli"
+    ],
+    "app_embedded_cli_sha256": "a6ea51d7ad19359a21fac63995194523264035fbca2ab32dceeede9d9da739bb",
+    "cdhash": "df44bcf4ef55e543eb49c75187e868b0fce1a8a2",
+    "checksums": {
+      "Malibu-v1.8.217.dmg": "c17412412b7923e26fdea98d373d8f4085d466a38a0fca9eaf9808af5975383e",
+      "macprovider-cli-v1.8.217-darwin-arm64.tar.gz": "e289109234b3bf71e2123c8fa009a222b534135fb2c7993536a7aca4c56b5e4a"
+    },
+    "provider_code_identity": {
+      "asset": "macprovider-cli-v1.8.217-darwin-arm64.tar.gz",
+      "binary_sha256": "a6ea51d7ad19359a21fac63995194523264035fbca2ab32dceeede9d9da739bb",
+      "binary_version": "1.8.217",
+      "member": "macprovider-cli",
+      "signing_identifier": "live.malibu.provider.cli",
+      "slices": [
+        {
+          "arch": "arm64",
+          "code_cdhash": "df44bcf4ef55e543eb49c75187e868b0fce1a8a2"
+        }
+      ],
+      "team_id": "YF7XNRJUG4"
+    },
+    "tarball_cli_sha256": "a6ea51d7ad19359a21fac63995194523264035fbca2ab32dceeede9d9da739bb"
+  },
+  "sub": {
+    "app_embedded_cli_equals_tarball_cli": true,
+    "checksum_matches.Malibu-v1.8.217.dmg": true,
+    "checksum_matches.macprovider-cli-v1.8.217-darwin-arm64.tar.gz": true,
+    "code_identity.binary_sha256": true,
+    "code_identity.cdhash": true,
+    "code_identity.signing_identifier": true,
+    "code_identity.team_id": true,
+    "pearl_release_signature_verified": true,
+    "tarball_cli_equals_lab_host_signed_copy": true,
+    "verify_malibu_release_artifacts_script_passed": true
+  }
+}

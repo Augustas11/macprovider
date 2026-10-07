@@ -80,6 +80,10 @@ BLOCK_KEYS = {
 SHAPE_KEYS = {
     "shape_id",
     "conversation_key_present",
+    "conversation_key_cache_only",
+    "conversation_cache_lease",
+    "conversation_cache_cached_prompt_tokens",
+    "conversation_cache_retained_handoff",
     "completion_tokens",
     "pre_capacity_selector_reason",
     "pre_capacity_eligible",
@@ -114,6 +118,9 @@ PRE_CAPACITY_REJECTED_REASONS = {
     "capacity_above_native_bound",
 }
 EFFECTIVE_PATHS = {"ordinary", "native_mtp"}
+CACHE_LEASE_STATES = {"not_applicable", "miss", "hit", "missing"}
+ALLOWED_CONVERSATION_KEY_FIELDS = {"conversation_key_present", "conversation_key_cache_only"}
+ALLOWED_SANITIZED_TEXT_FIELDS = {"conversation_cache_cached_prompt_tokens"}
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 ISO_DATEISH = re.compile(r"^\d{4}-\d{2}-\d{2}")
 SAFE_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
@@ -171,6 +178,10 @@ def _is_count(value: object) -> bool:
     return _is_int(value) and value >= 0
 
 
+def _is_zero_count(value: object) -> bool:
+    return _is_int(value) and value == 0
+
+
 def _is_positive_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
 
@@ -193,9 +204,9 @@ def _privacy_violations(value: object, path: str = "$") -> list[str]:
             lowered = key.lower()
             if lowered == "conversation_key":
                 violations.append(f"raw_conversation_key_field:{path}.{key}")
-            if lowered.startswith("conversation_key") and lowered != "conversation_key_present":
+            if lowered.startswith("conversation_key") and lowered not in ALLOWED_CONVERSATION_KEY_FIELDS:
                 violations.append(f"raw_conversation_key_field:{path}.{key}")
-            if any(part in lowered for part in RAW_TEXT_KEY_PARTS):
+            if lowered not in ALLOWED_SANITIZED_TEXT_FIELDS and any(part in lowered for part in RAW_TEXT_KEY_PARTS):
                 violations.append(f"raw_text_field:{path}.{key}")
             if any(part in lowered for part in SENSITIVE_KEY_PARTS):
                 violations.append(f"credential_field:{path}.{key}")
@@ -303,6 +314,43 @@ def _shape_violations(shape: object, path: str, disabled_record: bool) -> list[s
         violations.append(f"{path}:field_invalid:shape_id")
     if not isinstance(shape.get("conversation_key_present"), bool):
         violations.append(f"{path}:field_invalid:conversation_key_present")
+    key_present = shape.get("conversation_key_present")
+    cache_only = shape.get("conversation_key_cache_only")
+    lease = shape.get("conversation_cache_lease")
+    cached_tokens = shape.get("conversation_cache_cached_prompt_tokens")
+    retained_handoff = shape.get("conversation_cache_retained_handoff")
+    if key_present is False:
+        if cache_only is not None and cache_only is not False:
+            violations.append(f"{path}:field_invalid:conversation_key_cache_only")
+        if lease is not None and lease != "not_applicable":
+            violations.append(f"{path}:field_invalid:conversation_cache_lease")
+        if cached_tokens is not None and not _is_zero_count(cached_tokens):
+            violations.append(f"{path}:field_invalid:conversation_cache_cached_prompt_tokens")
+        if retained_handoff is not None and retained_handoff is not False:
+            violations.append(f"{path}:field_invalid:conversation_cache_retained_handoff")
+    elif key_present is True:
+        if not isinstance(cache_only, bool):
+            violations.append(f"{path}:field_missing:conversation_key_cache_only")
+        if cache_only is True:
+            if lease not in CACHE_LEASE_STATES - {"not_applicable"}:
+                violations.append(f"{path}:field_invalid:conversation_cache_lease")
+            if not _is_count(cached_tokens):
+                violations.append(f"{path}:field_invalid:conversation_cache_cached_prompt_tokens")
+            elif lease == "miss" and cached_tokens != 0:
+                violations.append(f"{path}:conversation_cache_miss_with_cached_prompt_tokens")
+            elif lease == "missing" and cached_tokens != 0:
+                violations.append(f"{path}:conversation_cache_missing_with_cached_prompt_tokens")
+            elif lease == "hit" and cached_tokens <= 0:
+                violations.append(f"{path}:conversation_cache_hit_without_cached_prompt_tokens")
+            if not isinstance(retained_handoff, bool):
+                violations.append(f"{path}:field_invalid:conversation_cache_retained_handoff")
+        else:
+            if lease is not None and lease != "not_applicable":
+                violations.append(f"{path}:sticky_key_with_cache_lease")
+            if cached_tokens is not None and not _is_zero_count(cached_tokens):
+                violations.append(f"{path}:sticky_key_with_cached_prompt_tokens")
+            if retained_handoff is not None and retained_handoff is not False:
+                violations.append(f"{path}:sticky_key_with_retained_handoff")
     if not (_is_count(shape.get("completion_tokens")) and shape["completion_tokens"] > 0):
         violations.append(f"{path}:field_invalid:completion_tokens")
     eligible = shape.get("pre_capacity_eligible")
@@ -320,11 +368,28 @@ def _shape_violations(shape: object, path: str, disabled_record: bool) -> list[s
         violations.append(f"{path}:selector_reason_inconsistent")
     if eligible is False and reason == ELIGIBLE_REASON:
         violations.append(f"{path}:selector_reason_inconsistent")
-    if eligible is True and shape.get("conversation_key_present") is not False:
-        violations.append(f"{path}:eligible_with_conversation_key")
-    if shape.get("conversation_key_present") is True and (reason != "conversation_key" or eligible is not False):
-        violations.append(f"{path}:conversation_key_state_inconsistent")
-    if reason == "conversation_key" and shape.get("conversation_key_present") is not True:
+    if key_present is True:
+        cache_only_miss = (
+            cache_only is True
+            and lease == "miss"
+            and cached_tokens == 0
+            and retained_handoff is False
+        )
+        if eligible is True and not cache_only_miss:
+            if cache_only is not True:
+                violations.append(f"{path}:eligible_with_sticky_conversation_key")
+            elif lease == "hit" or (_is_count(cached_tokens) and cached_tokens > 0):
+                violations.append(f"{path}:eligible_with_cache_hit")
+            elif lease == "missing":
+                violations.append(f"{path}:eligible_without_cache_lease")
+            elif retained_handoff is True:
+                violations.append(f"{path}:eligible_with_retained_handoff")
+            else:
+                violations.append(f"{path}:eligible_without_cache_only_miss_proof")
+        if cache_only_miss:
+            if eligible is False and reason == "conversation_key":
+                violations.append(f"{path}:conversation_key_cache_only_miss_rejected")
+    elif reason == "conversation_key":
         violations.append(f"{path}:conversation_key_reason_without_key")
     if effective == "native_mtp" and eligible is not True:
         violations.append(f"{path}:native_path_without_pre_capacity_eligibility")
@@ -384,6 +449,10 @@ def _shape_signature(shape: dict) -> tuple:
     return (
         shape.get("shape_id"),
         shape.get("conversation_key_present"),
+        shape.get("conversation_key_cache_only"),
+        shape.get("conversation_cache_lease"),
+        shape.get("conversation_cache_cached_prompt_tokens"),
+        shape.get("conversation_cache_retained_handoff"),
         shape.get("completion_tokens"),
         shape.get("pre_capacity_selector_reason"),
         shape.get("pre_capacity_eligible"),

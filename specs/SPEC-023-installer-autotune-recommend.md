@@ -1,12 +1,37 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.11
+version: v0.22.12
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.22.12 (2026-10-06)** — Names the R024 Stage A transport and the
+  revocation publication (#1770). The "external release asset" is served by
+  the static-feed origin on the coordinator buyer mux at
+  `/v1/native-mtp-admission(.sig)`, `/v1/native-mtp-artifact-manifest`, and
+  `/v1/native-mtp-selftest-bank(.sig)` from release-bound paths that load with
+  the other feeds of the same release; a provider fetches the set, pre-checks
+  the detached signature and `release_id`, and writes the exact bytes into a
+  private per-release `0700` Application Support directory that the
+  serve-path loader reads and fully re-verifies. A fetched set's projection
+  manifest names the target and the MTP drafter by content-addressed
+  durable-store path, `<owner>--<name>/<revision>/<snapshot-manifest sha256>`,
+  resolved against the provider's durable model store root: the projected
+  target must be the verified catalog artifact being served, and the drafter
+  is fetched from its pinned Hugging Face revision and adopted only when its
+  digest matches. A set placed next to the model bundle keeps precedence and
+  keeps the bundle layout. The emergency-revocation feed is served at
+  `/v1/native-mtp-revocations.<revocation_signer_key_id>.json(.sig)` from a
+  directory of pre-signed bodies, one per slot of at most 10 minutes, so a
+  freshly installed provider always sees an `issued_at` within 15 minutes;
+  the coordinator selects the newest issued, unexpired, correctly signed slot
+  and holds no key. The weekly signed renewal signs at least 14 days of slots.
+  An emergency revocation is a replacement slot directory, signed off-host,
+  whose generations exceed the current one and whose revoked set is a
+  superset. No parser, binding, or fail-closed rule changes.
 
 - **v0.22.11 (2026-10-05)** — Follows SPEC-048 0.1.23 (#1770). The pinned
   fused A3B MoE path now covers every call whose rows carry `1...7` tokens at
@@ -3354,7 +3379,31 @@ release, a later release cannot downgrade to v3 or five feeds.
 generates, signs, serves as an external release asset, and ledger-binds the
 sidecar, but MUST NOT add the sidecar pair to `components.catalog.files` or a
 provider payload; a compatible CLI remains ordinary when the external asset is
-missing or invalid. Stage B may add the pair only after a bridge CLI accepts the
+missing or invalid. The asset is served on the coordinator buyer mux at
+`/v1/native-mtp-admission` and `.sig`, beside its projection manifest
+(`/v1/native-mtp-artifact-manifest`) and signed self-test challenge bank
+(`/v1/native-mtp-selftest-bank` and `.sig`), from release-bound paths loaded
+and cross-checked with the candidate catalog of the same release. The
+provider fetches the set from the static-feed origin, verifies the detached
+signature under the release signer and the body `release_id`, and writes the
+exact bytes into a private per-release `0700` Application Support directory
+(files `0600`), which the serve-path loader then reads and re-verifies in
+full. Because the set cannot carry weights, a fetched set's projection
+manifest names `target` and `mtp` by their content-addressed paths in the
+provider's durable model store, `<owner>--<name>/<40-hex revision>/<snapshot
+manifest sha256>` (the store's own `/` to `--` escaping, which is exact
+because Hugging Face repository ids never contain `--`), with `tokenizer` and
+`manifest` inside them; these paths resolve against the durable store root,
+not the member directory. The projected target MUST be the verified catalog
+artifact the provider serves. The provider fetches the drafter from that
+pinned revision when the store holds no copy with that digest, and adopts it
+only after its snapshot-manifest digest matches; any failure leaves the
+provider ordinary. This is the content-addressed SPEC-023 member route of
+SPEC-048's separately stored MTP artifact. Every projected byte is still
+verified and loaded only from the private capture; the unmanifested-file
+sweep applies to the bundle layout only, since the store root holds other
+models. A set placed next to the model bundle keeps precedence and keeps the
+bundle layout. Stage B may add the pair only after a bridge CLI accepts the
 final enlarged exact catalog-file set and the previous-stable floor is at that
 bridge. The exact target set depends on whether the artifact-feed pair has also
 completed its own Stage B; no implementation may hardcode an assumed 11- or
@@ -3397,6 +3446,16 @@ be a superset of the last accepted array for that signer: revocation of one
 admission identity is permanent. Restoration requires a new release/sidecar
 and therefore a new `native_mtp_admission_tuple_sha256`; omission from a later
 feed never unrevokes the old identity.
+
+Publication: the canonical origin serves
+`/v1/native-mtp-revocations.<revocation_signer_key_id>.json` and `.sig` from a
+directory of pre-signed bodies, one per slot of at most 10 minutes with
+`issued_at` at the slot start, choosing the newest issued, unexpired,
+correctly signed slot (`Cache-Control: no-store`). Signing keys stay off the
+coordinator host. The signed weekly renewal signs at least 14 days of slots
+carrying the current revoked set. An emergency revocation is a replacement
+directory, signed off-host, whose generations exceed every served generation
+and whose revoked set is a superset; providers adopt it at their next poll.
 
 The monotonic anchor is the macOS Keychain generic-password item with service
 `macprovider.native-mtp-revocation-generation` and account equal to the pinned

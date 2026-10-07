@@ -739,10 +739,17 @@ enum NativeMTPAdmissionSidecar {
         let evidenceArtifactSHA256: [String]
     }
 
+    /// `snapshotRoot` holds the admission members (sidecar, projection
+    /// manifest, self-test bank). The projected artifacts resolve under
+    /// `artifactRoot`, which defaults to `snapshotRoot` (a set placed next to
+    /// the model bundle). A set fetched from the static-feed origin passes the
+    /// durable model store root: its projection then names the content-addressed
+    /// store paths of the target and the MTP drafter (SPEC-023 §12.5 Stage A).
     static func load(
         sidecarURL: URL,
         signatureURL: URL,
         snapshotRoot: URL,
+        artifactRoot: URL? = nil,
         context: RuntimeContext,
         trustedKeyring: TrustedKeyring,
         resolvedArtifactAuthority: NativeMTPResolvedArtifactAuthority? = nil,
@@ -763,6 +770,7 @@ enum NativeMTPAdmissionSidecar {
             sidecarData: bytes,
             signatureData: signatureBytes,
             snapshotRoot: snapshotRoot,
+            artifactRoot: artifactRoot,
             context: context,
             trustedKeyring: trustedKeyring,
             resolvedArtifactAuthority: resolvedArtifactAuthority,
@@ -775,6 +783,7 @@ enum NativeMTPAdmissionSidecar {
         sidecarData: Data,
         signatureData: Data,
         snapshotRoot: URL,
+        artifactRoot: URL? = nil,
         context: RuntimeContext,
         trustedKeyring: TrustedKeyring,
         resolvedArtifactAuthority: NativeMTPResolvedArtifactAuthority? = nil,
@@ -809,6 +818,7 @@ enum NativeMTPAdmissionSidecar {
             sidecarSHA256: sidecarSHA256,
             signatureKeyID: signatureKeyID,
             snapshotRoot: snapshotRoot,
+            artifactRoot: artifactRoot ?? snapshotRoot,
             context: context,
             trustedKeyring: trustedKeyring,
             resolvedArtifactAuthority: resolvedArtifactAuthority
@@ -816,6 +826,7 @@ enum NativeMTPAdmissionSidecar {
         return try validateParsedCapability(
             parsed,
             snapshotRoot: snapshotRoot,
+            artifactRoot: artifactRoot,
             context: context,
             trustedKeyring: trustedKeyring,
             captureArtifacts: captureArtifacts,
@@ -906,6 +917,7 @@ enum NativeMTPAdmissionSidecar {
     private static func validateParsedCapability(
         _ parsed: Parsed,
         snapshotRoot: URL,
+        artifactRoot: URL? = nil,
         context: RuntimeContext,
         trustedKeyring: TrustedKeyring,
         captureArtifacts: Bool,
@@ -915,9 +927,13 @@ enum NativeMTPAdmissionSidecar {
         try validateStaticSupport(parsed)
         try validateLiveTuple(parsed, context: context)
         try validateRevocation(parsed, context: context)
+        // A store-rooted projection shares its root with every other model in
+        // the store, so only the bundle layout is checked for unmanifested
+        // files; each projected directory is still digested in full.
         let capturedArtifacts = try validateArtifacts(
             parsed.artifacts,
-            snapshotRoot: snapshotRoot,
+            snapshotRoot: artifactRoot ?? snapshotRoot,
+            rejectUnmanifestedFiles: artifactRoot == nil,
             captureArtifacts: captureArtifacts,
             allowedAuxiliaryPaths: [
                 parsed.selfTest.challengeBankPath,
@@ -1176,6 +1192,7 @@ enum NativeMTPAdmissionSidecar {
         sidecarSHA256: String,
         signatureKeyID: String,
         snapshotRoot: URL,
+        artifactRoot: URL,
         context: RuntimeContext,
         trustedKeyring: TrustedKeyring,
         resolvedArtifactAuthority: NativeMTPResolvedArtifactAuthority?
@@ -1257,6 +1274,7 @@ enum NativeMTPAdmissionSidecar {
         )
         let artifacts = try parseArtifactProjectionManifest(
             snapshotRoot: snapshotRoot,
+            artifactRoot: artifactRoot,
             expectedSHA256: selected.entry.artifactManifestSHA256,
             authority: resolvedArtifactAuthority
         )
@@ -1613,6 +1631,7 @@ enum NativeMTPAdmissionSidecar {
 
     private static func parseArtifactProjectionManifest(
         snapshotRoot: URL,
+        artifactRoot: URL,
         expectedSHA256: String,
         authority: NativeMTPResolvedArtifactAuthority
     ) throws -> [String: Artifact] {
@@ -1643,7 +1662,8 @@ enum NativeMTPAdmissionSidecar {
         guard let target = artifacts["target"] else {
             throw NativeMTPAdmissionSidecarError.artifactNotManifested("target")
         }
-        let projectedTarget = root.appendingPathComponent(target.path, isDirectory: false).standardizedFileURL
+        let projectedTarget = artifactRoot.standardizedFileURL
+            .appendingPathComponent(target.path, isDirectory: false).standardizedFileURL
         guard projectedTarget.path == authority.targetURLPath else {
             throw NativeMTPAdmissionSidecarError.liveTupleMismatch("$.artifact_authority.target_url")
         }
@@ -1857,6 +1877,7 @@ enum NativeMTPAdmissionSidecar {
     private static func validateArtifacts(
         _ artifacts: [String: Artifact],
         snapshotRoot: URL,
+        rejectUnmanifestedFiles: Bool = true,
         captureArtifacts: Bool,
         allowedAuxiliaryPaths: Set<String>,
         fileManager: FileManager
@@ -1902,13 +1923,15 @@ enum NativeMTPAdmissionSidecar {
             }
             validatedByName[name] = validated
         }
-        try rejectUnmanifestedSnapshotArtifacts(
-            snapshotRoot: root,
-            manifestedPaths: Set(artifacts.values.map(\.path)),
-            manifestedDirectories: manifestedDirectories,
-            allowedAuxiliaryPaths: allowedAuxiliaryPaths,
-            fileManager: fileManager
-        )
+        if rejectUnmanifestedFiles {
+            try rejectUnmanifestedSnapshotArtifacts(
+                snapshotRoot: root,
+                manifestedPaths: Set(artifacts.values.map(\.path)),
+                manifestedDirectories: manifestedDirectories,
+                allowedAuxiliaryPaths: allowedAuxiliaryPaths,
+                fileManager: fileManager
+            )
+        }
         guard captureArtifacts else { return nil }
         return try captureValidatedArtifacts(
             artifacts: artifacts,

@@ -1,0 +1,37 @@
+{
+  "duplicate-tensor-file": {
+    "error_tail": "Error: malformed safetensors: duplicate tensor layers.0.self_attn.k_proj.weight",
+    "exit": 1,
+    "rejected": true
+  },
+  "extra-weight-file": {
+    "error_tail": "Error: incompatible safetensors headers: mtp tensor namespace mtp.extra.weight",
+    "exit": 1,
+    "rejected": true
+  },
+  "hidden-weight-file": {
+    "error_tail": "Error: malformed safetensors: hidden safetensors",
+    "exit": 1,
+    "rejected": true
+  },
+  "malformed-safetensors-header": {
+    "error_tail": "Error: malformed safetensors: bad.safetensors: header length 4611686018427387904",
+    "exit": 1,
+    "rejected": true
+  },
+  "missing-weight-file": {
+    "error_tail": "Error: missing safetensors weights",
+    "exit": 1,
+    "rejected": true
+  },
+  "symlink-weight-file": {
+    "error_tail": "Error: MLX snapshot directory is not a plain snapshot: not a regular single-link file",
+    "exit": 1,
+    "rejected": true
+  },
+  "wrong-quant-bits": {
+    "error_tail": "Error: unsupported quantization: mlx affine requires bits=4",
+    "exit": 1,
+    "rejected": true
+  }
+}

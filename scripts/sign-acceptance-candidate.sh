@@ -83,7 +83,7 @@ unsigned_manifest="$unsigned_dir/unsigned-acceptance-manifest.json"
 # SPEC-023 Stage A feeds remain outside the bridge-sensitive provider payload.
 # Discover every external feed that the archived release binds so its body and
 # signature cross the exact unsigned boundary as release assets.
-read -r catalog_artifact_bound catalog_cb_policy_bound < <(python3 - "$cli_unsigned" <<'PY'
+read -r catalog_artifact_bound catalog_cb_policy_bound catalog_native_mtp_bound < <(python3 - "$cli_unsigned" <<'PY'
 import json, pathlib, sys, tarfile
 try:
     with tarfile.open(sys.argv[1], "r:gz") as archive:
@@ -98,9 +98,13 @@ except (OSError, tarfile.TarError, ValueError, AttributeError):
 print(
     "bound" if "autotune-artifacts.json" in feeds else "unbound",
     "bound" if "continuous-batching-policy.json" in feeds else "unbound",
+    "bound" if "native-mtp-admission.json" in feeds else "unbound",
 )
 PY
 )
+# SPEC-023 §12.5 Stage A: the native-MTP admission set crosses as external
+# release assets beside the other release-bound feeds.
+native_mtp_names=(native-mtp-admission.json native-mtp-admission.json.sig native-mtp-artifact-manifest.json native-mtp-selftest-bank.json native-mtp-selftest-bank.json.sig)
 artifacts_unsigned="$unsigned_dir/autotune-artifacts.json"
 artifacts_sig_unsigned="$unsigned_dir/autotune-artifacts.json.sig"
 cb_policy_unsigned="$unsigned_dir/continuous-batching-policy.json"
@@ -124,6 +128,11 @@ if [[ "$catalog_cb_policy_bound" == bound ]]; then
     --asset "continuous-batching-policy.json=$cb_policy_unsigned"
     --asset "continuous-batching-policy.json.sig=$cb_policy_sig_unsigned"
   )
+fi
+if [[ "$catalog_native_mtp_bound" == bound ]]; then
+  for native_name in "${native_mtp_names[@]}"; do
+    unsigned_assets+=(--asset "$native_name=$unsigned_dir/$native_name")
+  done
 fi
 python3 "$metadata" verify-unsigned \
   --repository "$repository" \
@@ -208,6 +217,11 @@ fi
 if [[ "$catalog_cb_policy_bound" == bound ]]; then
   install -m 0644 "$cb_policy_unsigned" "$catalog_verify_dir/continuous-batching-policy.json"
   install -m 0644 "$cb_policy_sig_unsigned" "$catalog_verify_dir/continuous-batching-policy.json.sig"
+fi
+if [[ "$catalog_native_mtp_bound" == bound ]]; then
+  for native_name in "${native_mtp_names[@]}"; do
+    install -m 0644 "$unsigned_dir/$native_name" "$catalog_verify_dir/$native_name"
+  done
 fi
 CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER=1 \
   python3 "$root/scripts/catalog-release.py" verify-directory \
@@ -406,6 +420,11 @@ if [[ "$catalog_cb_policy_bound" == bound ]]; then
   install -m 0644 "$cb_policy_unsigned" "$output_dir/continuous-batching-policy.json"
   install -m 0644 "$cb_policy_sig_unsigned" "$output_dir/continuous-batching-policy.json.sig"
 fi
+if [[ "$catalog_native_mtp_bound" == bound ]]; then
+  for native_name in "${native_mtp_names[@]}"; do
+    install -m 0644 "$unsigned_dir/$native_name" "$output_dir/$native_name"
+  done
+fi
 
 python3 "$metadata" build-pearl \
   --repository "$repository" \
@@ -509,6 +528,11 @@ if [[ "$catalog_cb_policy_bound" == bound ]]; then
     "$output_dir/continuous-batching-policy.json"
     "$output_dir/continuous-batching-policy.json.sig"
   )
+fi
+if [[ "$catalog_native_mtp_bound" == bound ]]; then
+  for native_name in "${native_mtp_names[@]}"; do
+    release_assets+=("$output_dir/$native_name")
+  done
 fi
 python3 "$root/scripts/build-release-provenance.py" \
   "$tag" "$candidate_commit" "$repository" "$release_prerelease" \

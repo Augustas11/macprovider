@@ -78,6 +78,10 @@ RATE_CARD_BOUND_RELEASE_FEEDS = {
 LEGACY_ARTIFACT_BOUND_RELEASE_FEEDS = RATE_CARD_BOUND_RELEASE_FEEDS | {CATALOG_ARTIFACT_FEED}
 CB_POLICY_BOUND_RELEASE_FEEDS = RATE_CARD_BOUND_RELEASE_FEEDS | {CB_POLICY_FEED}
 ARTIFACT_BOUND_RELEASE_FEEDS = CB_POLICY_BOUND_RELEASE_FEEDS | {CATALOG_ARTIFACT_FEED}
+# SPEC-023 §12.5 Stage A: the native-MTP admission sidecar is release-bound
+# but an external release asset, never a provider-payload member.
+NATIVE_MTP_ADMISSION_FEED = "native-mtp-admission.json"
+NATIVE_MTP_BOUND_RELEASE_FEEDS = ARTIFACT_BOUND_RELEASE_FEEDS | {NATIVE_MTP_ADMISSION_FEED}
 LOCAL_ARTIFACT_FILES = {
     "install_contract": "install.sh",
     "provider_plist_template": "provider-launch-agent.plist.template",
@@ -580,6 +584,7 @@ def catalog_component(catalog_directory: pathlib.Path, catalog_feed_directory: p
         LEGACY_ARTIFACT_BOUND_RELEASE_FEEDS,
         CB_POLICY_BOUND_RELEASE_FEEDS,
         ARTIFACT_BOUND_RELEASE_FEEDS,
+        NATIVE_MTP_BOUND_RELEASE_FEEDS,
     )
     if feed_names in allowed_sets:
         for sidecar in sorted(feed_names - RATE_CARD_BOUND_RELEASE_FEEDS):

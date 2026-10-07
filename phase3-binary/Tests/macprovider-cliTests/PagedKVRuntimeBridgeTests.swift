@@ -1002,6 +1002,252 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(drafter.preparedHiddenWidths(), [3])
     }
 
+    /// SPEC-048-R007 / SPEC-038 FR-CB2: a native row in an equal-length
+    /// prefill group shares the group's one `[B, L]` target forward; its
+    /// drafter is seeded from its own `[1, L]` slice of that forward's hidden
+    /// states. Before the fix one native row sent the whole group serial.
+    func testNativeRowSharesTheOrdinaryPrefillForwardOfItsGroup() async throws {
+        try requireMetal()
+        let descriptor = Self.bridgeDescriptor()
+        let model = RuntimeBridgeFakeModel(nextTokenByInput: [12: 13, 16: 17, 20: 21], emitsMTPState: true)
+        let drafter = RuntimeBridgeRecordingMTPDrafter()
+        let backend = PagedKVSharedForwardBackend(
+            container: ModelContainer(context: ModelContext(
+                configuration: ModelConfiguration(id: descriptor.modelID),
+                model: model,
+                processor: StandInUserInputProcessor(),
+                tokenizer: RuntimeBridgeFakeTokenizer()
+            )),
+            descriptor: descriptor,
+            layerCount: 1,
+            drafterContainer: MTPDrafterContainer(context: MTPDrafterContext(
+                configuration: ModelConfiguration(id: "mtp"),
+                model: drafter
+            ))
+        )
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: descriptor.blockSizeTokens, maxPhysicalBlocks: 16)
+        var inputs: [ContinuousBatchPrefillInput] = []
+        for (id, prompt, native) in [("native", [10, 11, 12], true), ("ord-1", [14, 15, 16], false), ("ord-2", [18, 19, 20], false)] {
+            let handle = try await allocator.allocate(conversationKey: id, maxTokens: 8)
+            _ = try await allocator.extend(handle, by: 3)
+            inputs.append(ContinuousBatchPrefillInput(
+                requestID: id,
+                promptTokens: prompt,
+                binding: try await allocator.binding(for: handle),
+                promptTokenOffset: 0,
+                committedKVTokenCount: 0,
+                targetKVTokenCount: 3,
+                isFinalChunk: true,
+                nativeMTPPromptPrefill: native
+            ))
+        }
+        XCTAssertTrue(PagedKVSharedForwardBackend.canSharePrefillForward(inputs))
+
+        let output = try await backend.prefill(rows: inputs)
+
+        XCTAssertEqual(output, [
+            ContinuousBatchPrefillOutput(requestID: "native", sampledToken: 13),
+            ContinuousBatchPrefillOutput(requestID: "ord-1", sampledToken: 17),
+            ContinuousBatchPrefillOutput(requestID: "ord-2", sampledToken: 21),
+        ])
+        XCTAssertEqual(model.forwardCallCount(), 1, "the group must run one shared forward")
+        XCTAssertEqual(drafter.preparedPromptWidths(), [3])
+        XCTAssertEqual(drafter.preparedHiddenWidths(), [3])
+        XCTAssertEqual(backend.retainedRowCountForTest(), 3)
+    }
+
+    /// A native row whose drafter cannot be seeded after the shared forward
+    /// fails alone; its peers keep the shared forward's results.
+    func testNativeDrafterSeedFailureAfterSharedPrefillFailsOnlyThatRow() async throws {
+        try requireMetal()
+        let descriptor = Self.bridgeDescriptor()
+        let model = RuntimeBridgeFakeModel(nextTokenByInput: [12: 13, 16: 17], emitsMTPState: true)
+        let drafter = RuntimeBridgeRecordingMTPDrafter()
+        let backend = PagedKVSharedForwardBackend(
+            container: ModelContainer(context: ModelContext(
+                configuration: ModelConfiguration(id: descriptor.modelID),
+                model: model,
+                processor: StandInUserInputProcessor(),
+                tokenizer: RuntimeBridgeFakeTokenizer()
+            )),
+            descriptor: descriptor,
+            layerCount: 1,
+            drafterContainer: MTPDrafterContainer(context: MTPDrafterContext(
+                configuration: ModelConfiguration(id: "mtp"),
+                model: drafter
+            ))
+        )
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: descriptor.blockSizeTokens, maxPhysicalBlocks: 16)
+        var inputs: [ContinuousBatchPrefillInput] = []
+        for (id, prompt, native) in [("native", [10, 11, 12], true), ("ord", [14, 15, 16], false)] {
+            let handle = try await allocator.allocate(conversationKey: id, maxTokens: 8)
+            _ = try await allocator.extend(handle, by: 3)
+            inputs.append(ContinuousBatchPrefillInput(
+                requestID: id,
+                promptTokens: prompt,
+                binding: try await allocator.binding(for: handle),
+                promptTokenOffset: 0,
+                committedKVTokenCount: 0,
+                targetKVTokenCount: 3,
+                isFinalChunk: true,
+                // A final native chunk without its sampled first token has
+                // no tail token to seed the drafter with.
+                sampleFirstToken: !native,
+                nativeMTPPromptPrefill: native
+            ))
+        }
+
+        let output = try await backend.prefill(rows: inputs)
+
+        XCTAssertEqual(output, [
+            ContinuousBatchPrefillOutput(requestID: "native", failureCode: "continuous_batching_prefill_failed"),
+            ContinuousBatchPrefillOutput(requestID: "ord", sampledToken: 17),
+        ])
+        XCTAssertEqual(model.forwardCallCount(), 1)
+        XCTAssertEqual(drafter.preparedPromptWidths(), [])
+        XCTAssertEqual(backend.retainedRowCountForTest(), 1)
+    }
+
+    /// The R014 mixed-row failure, in miniature: with a real hybrid target,
+    /// an equal-length group holding one native row must leave every row,
+    /// the native one included, with exactly the target state of the same
+    /// group prefilled with MTP off. Greedy decode continued from both
+    /// prefills emits identical tokens on every row.
+    func testRealQwen35NativeRowInSharedPrefillGroupMatchesMTPDisabledGroup() async throws {
+        try requireMetal()
+        let prompts = [11, 12, 13].map { Self.tinyPrompt(length: 12, salt: $0) }
+        let ids = ["native", "ord-1", "ord-2"]
+        let steps = 8
+
+        func run(nativeRow: Bool) async throws -> [String: [Int]] {
+            let tiny = try Self.tinyQwen35Native()
+            let backend = tiny.backend.base
+            let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 64)
+            var handles: [PagedKVBlockTableHandle] = []
+            var inputs: [ContinuousBatchPrefillInput] = []
+            for (index, id) in ids.enumerated() {
+                let handle = try await allocator.allocate(conversationKey: id, maxTokens: 32)
+                _ = try await allocator.extend(handle, by: prompts[index].count)
+                handles.append(handle)
+                inputs.append(ContinuousBatchPrefillInput(
+                    requestID: id,
+                    promptTokens: prompts[index],
+                    binding: try await allocator.binding(for: handle),
+                    promptTokenOffset: 0,
+                    committedKVTokenCount: 0,
+                    targetKVTokenCount: prompts[index].count,
+                    isFinalChunk: true,
+                    nativeMTPPromptPrefill: nativeRow && index == 0
+                ))
+            }
+            XCTAssertTrue(PagedKVSharedForwardBackend.canSharePrefillForward(inputs))
+            let prefill = try await backend.prefill(rows: inputs)
+            var tokens: [String: [Int]] = [:]
+            for output in prefill {
+                tokens[output.requestID] = [try XCTUnwrap(output.sampledToken, output.failureCode ?? "")]
+            }
+            if nativeRow {
+                XCTAssertNotNil(backend.nativeMTPDrafterSnapshotForTest(requestID: "native").state)
+            }
+            for step in 0 ..< steps {
+                var decodeInputs: [ContinuousBatchDecodeInput] = []
+                for (index, id) in ids.enumerated() {
+                    decodeInputs.append(try await Self.decodeInput(
+                        requestID: id,
+                        currentToken: try XCTUnwrap(tokens[id]?.last),
+                        handle: handles[index],
+                        allocator: allocator,
+                        committedKVTokenCount: prompts[index].count + step
+                    ))
+                }
+                let outcomes = try await backend.decode(rows: decodeInputs)
+                for handle in handles {
+                    try await allocator.endDecodeStep(handle)
+                }
+                for (id, token) in Self.tokens(from: outcomes) {
+                    tokens[id, default: []].append(token)
+                }
+            }
+            return tokens
+        }
+
+        let ordinary = try await run(nativeRow: false)
+        let mixed = try await run(nativeRow: true)
+        for id in ids {
+            XCTAssertEqual(ordinary[id]?.count, steps + 1, id)
+            XCTAssertEqual(mixed[id], ordinary[id], "\(id) diverged from the MTP-disabled group")
+        }
+    }
+
+    /// SPEC-048-R009 (G7): a keyed native row on a hybrid runtime that
+    /// commits keyed rows in serial format hands back the same terminal
+    /// conversation-cache entry as the ordinary row: same tokens, same token
+    /// count, byte-identical attention KV and recurrent checkpoints. Serving
+    /// a cache-only miss natively therefore changes no cache outcome.
+    func testKeyedNativeRowCommitsTheOrdinarySerialConversationCacheEntry() async throws {
+        try requireMetal()
+        let prompt = Self.tinyPrompt(length: 12, salt: 21)
+        let budget = 10
+
+        func run(_ path: DecodePath) async throws -> ContinuousBatchSchedulerResult {
+            let tiny = try Self.tinyQwen35Native(dtype: .bfloat16)
+            let scheduler = try Self.makeScheduler(maxActiveRows: 2, backend: tiny.backend, maxPhysicalBlocks: 64)
+            let result = try await scheduler.submit(ContinuousBatchSchedulerRequest(
+                id: "keyed",
+                conversationKey: "conv:auto-prefix",
+                promptTokens: prompt,
+                maxOutputTokens: budget,
+                samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: "keyed"),
+                temperature: 0,
+                topP: 1,
+                recurrentCheckpointPositions: [4, 8],
+                modelHasRecurrentLayers: true,
+                decodePath: path,
+                nativeMTPMaximumProposalDepth: path == .nativeMTP ? 1 : 0,
+                nativeMTPCompleteWindowBytesByDepth: path == .nativeMTP ? [16, 16] : [],
+                nativeMTPTupleFence: path == .nativeMTP ? Self.nativeMTPFence() : nil
+            ))
+            if path == .nativeMTP {
+                XCTAssertTrue(
+                    tiny.backend.finalizedRounds().flatMap { $0 }.contains { $0.proposalTokenCount == 1 },
+                    "the keyed native row never verified a proposal"
+                )
+            }
+            return result
+        }
+
+        let ordinary = try await run(.ordinary)
+        let native = try await run(.nativeMTP)
+        XCTAssertEqual(native.generatedTokens, ordinary.generatedTokens)
+        let ordinaryCache = try XCTUnwrap(ordinary.serialConversationCache, "ordinary row published no entry")
+        let nativeCache = try XCTUnwrap(native.serialConversationCache, "native row published no entry")
+        XCTAssertEqual(nativeCache.tokenCount, ordinaryCache.tokenCount)
+        XCTAssertEqual(nativeCache.layers.count, ordinaryCache.layers.count)
+        for (index, (lhs, rhs)) in zip(nativeCache.layers, ordinaryCache.layers).enumerated() {
+            XCTAssertEqual(lhs.state.count, rhs.state.count, "layer \(index)")
+            for (a, b) in zip(lhs.state, rhs.state) {
+                XCTAssertTrue(arrayEqual(a, b).item(Bool.self), "layer \(index) KV differs")
+            }
+        }
+        XCTAssertEqual(
+            nativeCache.recurrentCheckpoints.map(\.tokenCount),
+            ordinaryCache.recurrentCheckpoints.map(\.tokenCount)
+        )
+        for (lhs, rhs) in zip(nativeCache.recurrentCheckpoints, ordinaryCache.recurrentCheckpoints) {
+            XCTAssertEqual(Set(lhs.states.keys), Set(rhs.states.keys))
+            for (layer, arrays) in lhs.states {
+                let other = try XCTUnwrap(rhs.states[layer])
+                XCTAssertEqual(arrays.count, other.count)
+                for (a, b) in zip(arrays, other) {
+                    XCTAssertTrue(
+                        arrayEqual(a, b).item(Bool.self),
+                        "checkpoint \(lhs.tokenCount) layer \(layer) differs"
+                    )
+                }
+            }
+        }
+    }
+
     /// End to end through the scheduler with a real (tiny, random-weight)
     /// hybrid Qwen3.5 target and its real MTP drafter: every native round is
     /// one packed verify, one staged target commit, and one packed drafter
@@ -1186,7 +1432,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     /// weights, so separate instances are independent replicas.
     private static func tinyQwen35Native(
         maxPhysicalBlocks: Int = 64,
-        nativeMTPDrafterColumnCap: Int = PagedKVSharedForwardBackend.defaultNativeMTPDrafterColumnCap
+        nativeMTPDrafterColumnCap: Int = PagedKVSharedForwardBackend.defaultNativeMTPDrafterColumnCap,
+        dtype: DType? = nil
     ) throws -> TinyQwen35Native {
         let configuration = try JSONDecoder().decode(
             Qwen35TextConfiguration.self,
@@ -1195,6 +1442,11 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         MLXRandom.seed(1770)
         let target = Qwen35TextModel(configuration)
         let drafter = Qwen35MTPDraftModel(configuration)
+        if let dtype {
+            // The serial conversation-cache format stores only fp16/bf16 KV.
+            target.update(parameters: target.parameters().mapValues { $0.asType(dtype) })
+            drafter.update(parameters: drafter.parameters().mapValues { $0.asType(dtype) })
+        }
         eval(target, drafter)
         let descriptor = Self.bridgeDescriptor(maxPhysicalBlocks: maxPhysicalBlocks)
         let backend = RuntimeBridgeRecordingNativeMTPBackend(PagedKVSharedForwardBackend(
@@ -1763,6 +2015,31 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         ))
         XCTAssertEqual(buyerAfter.terminalStatus, .length)
         XCTAssertEqual(buyerAfter.generatedTokens, [31, 32])
+    }
+
+    /// The self-test probe ID is deterministic (`native-mtp-selftest-<challenge>`)
+    /// and the replay authority is durable across restarts. A probe that
+    /// claimed it would find its own earlier claim after the next restart,
+    /// fail as a replay, and leave the tuple unadmitted for good.
+    func testNativeMTPIntegrityProbeDoesNotClaimTheDurableReplayWindow() async throws {
+        let durable = RuntimeBridgeReplayAuthority()
+        for restart in 0..<2 {
+            let backend = RuntimeBridgeScriptedBackend(
+                scripts: ["native-mtp-selftest-probe": [11]],
+                nativeProposalScripts: ["native-mtp-selftest-probe": [[12]]]
+            )
+            let scheduler = try Self.makeScheduler(maxActiveRows: 1, backend: backend, replayAuthority: durable)
+            let probe = try await scheduler.submitNativeMTPIntegrityProbe(Self.schedulerRequest(
+                id: "native-mtp-selftest-probe",
+                promptTokens: [10],
+                maxOutputTokens: 3,
+                decodePath: .nativeMTP,
+                nativeMTPMaximumProposalDepth: 1,
+                nativeMTPTupleFence: Self.nativeMTPFence(),
+                nativeMTPIntegrityProbe: true
+            ))
+            XCTAssertEqual(probe.terminalStatus, .length, "start \(restart)")
+        }
     }
 
     func testNativeMTPCountersAggregateAcrossRounds() async throws {
@@ -2528,6 +2805,166 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         _ = try await allocator.reattach(retained, conversationKey: "conv:a")
     }
 
+    func testLabStateDigestObserverRecordsPagedKVCacheLogicalPrefix() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
+        let descriptor = Self.bridgeDescriptor(blockSizeTokens: 4, maxPhysicalBlocks: 4)
+        let backend = PagedKVSharedForwardBackend(
+            container: ModelContainer(context: ModelContext(
+                configuration: ModelConfiguration(id: descriptor.modelID),
+                model: RuntimeBridgeFakeModel(nextTokenByInput: [:]),
+                processor: StandInUserInputProcessor(),
+                tokenizer: RuntimeBridgeFakeTokenizer()
+            )),
+            descriptor: descriptor,
+            layerCount: 1,
+            contiguousCacheBridge: RuntimeBridgeRecordingCacheBridge()
+        )
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks
+        )
+        let handle = try await allocator.allocate(conversationKey: "conv:digest", maxTokens: 8, initialTokens: 3)
+        let binding = try await allocator.binding(for: handle)
+        let paged = PagedKVCache(descriptor: descriptor, binding: binding)
+        paged.state = [
+            MLXArray([Float](repeating: 1, count: 6), [1, 2, 3, 1]),
+            MLXArray([Float](repeating: 2, count: 6), [1, 2, 3, 1]),
+        ]
+        XCTAssertEqual(paged.offset, 3)
+        XCTAssertEqual(paged.storedTokens, 3)
+        try backend.installRowStateForTest(caches: [paged], requestID: "digest-row", binding: binding)
+
+        let observer = NativeMTPStateDigestObserver()
+        backend.installLabNativeMTPStateDigestObserver(observer)
+        try await backend.recordLabNativeMTPStateDigest(phase: .ordinaryAfterDecode, requestIDs: ["digest-row"])
+
+        let records = observer.snapshot()
+        let record = try XCTUnwrap(records.first)
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(record.requestID, "digest-row")
+        XCTAssertEqual(record.phase, .ordinaryAfterDecode)
+        XCTAssertEqual(record.committedKVTokenCount, 3)
+        XCTAssertEqual(record.cacheDigestSHA256.count, 64)
+        XCTAssertEqual(record.digestSHA256.count, 64)
+    }
+
+    func testLabDrafterStateDigestIgnoresPhysicalPaddingBeyondCommittedPrefix() throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
+        let paddedKey = MLXArray([Float](arrayLiteral: 1, 2, 99, 100), [1, 1, 4, 1])
+        let paddedValue = MLXArray([Float](arrayLiteral: 3, 4, 101, 102), [1, 1, 4, 1])
+        let compactKey = MLXArray([Float](arrayLiteral: 1, 2), [1, 1, 2, 1])
+        let compactValue = MLXArray([Float](arrayLiteral: 3, 4), [1, 1, 2, 1])
+        let changedKey = MLXArray([Float](arrayLiteral: 1, 42), [1, 1, 2, 1])
+        let changedValue = MLXArray([Float](arrayLiteral: 3, 4), [1, 1, 2, 1])
+        let paddedCache = KVCacheSimple()
+        paddedCache.state = [paddedKey, paddedValue]
+        let compactCache = KVCacheSimple()
+        compactCache.state = [compactKey, compactValue]
+        let changedCache = KVCacheSimple()
+        changedCache.state = [changedKey, changedValue]
+        let padded = MTPDrafterState(cache: [paddedCache], nextPosition: 2, seedToken: nil, seedHidden: nil)
+        let compact = MTPDrafterState(cache: [compactCache], nextPosition: 2, seedToken: nil, seedHidden: nil)
+        let changed = MTPDrafterState(cache: [changedCache], nextPosition: 2, seedToken: nil, seedHidden: nil)
+
+        let paddedDigest = try PagedKVSharedForwardBackend.nativeMTPDrafterDigestForTest(state: padded, seed: 7)
+        let compactDigest = try PagedKVSharedForwardBackend.nativeMTPDrafterDigestForTest(state: compact, seed: 7)
+        let changedDigest = try PagedKVSharedForwardBackend.nativeMTPDrafterDigestForTest(state: changed, seed: 7)
+
+        XCTAssertEqual(paddedDigest, compactDigest)
+        XCTAssertNotEqual(paddedDigest, changedDigest)
+    }
+
+    func testLabStateDigestObserverFailsClosedForPagedSlidingWindowCache() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
+        let descriptor = Self.bridgeDescriptor(blockSizeTokens: 4, maxPhysicalBlocks: 4)
+        let backend = PagedKVSharedForwardBackend(
+            container: ModelContainer(context: ModelContext(
+                configuration: ModelConfiguration(id: descriptor.modelID),
+                model: RuntimeBridgeFakeModel(nextTokenByInput: [:]),
+                processor: StandInUserInputProcessor(),
+                tokenizer: RuntimeBridgeFakeTokenizer()
+            )),
+            descriptor: descriptor,
+            layerCount: 1,
+            contiguousCacheBridge: RuntimeBridgeRecordingCacheBridge()
+        )
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks
+        )
+        let handle = try await allocator.allocate(conversationKey: "conv:window", maxTokens: 8, initialTokens: 3)
+        let binding = try await allocator.binding(for: handle)
+        let paged = PagedKVCache(
+            descriptor: descriptor,
+            binding: binding,
+            attentionWindowTokens: 2
+        )
+        paged.state = [
+            MLXArray([Float](repeating: 1, count: 6), [1, 2, 3, 1]),
+            MLXArray([Float](repeating: 2, count: 6), [1, 2, 3, 1]),
+        ]
+        try backend.installRowStateForTest(caches: [paged], requestID: "window-row", binding: binding)
+
+        let observer = NativeMTPStateDigestObserver()
+        backend.installLabNativeMTPStateDigestObserver(observer)
+        do {
+            try await backend.recordLabNativeMTPStateDigest(phase: .ordinaryAfterDecode, requestIDs: ["window-row"])
+            XCTFail("sliding-window paged cache must stay fail-closed for state digesting")
+        } catch ContinuousBatchSchedulerError.unsupported(let reason) {
+            XCTAssertEqual(reason, "native_mtp_observer_unsupported_sliding_window_state")
+        }
+        XCTAssertEqual(observer.snapshot(), [])
+    }
+
+    func testLabStateDigestObserverFailsClosedForUnknownCacheKind() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
+        let descriptor = Self.bridgeDescriptor(blockSizeTokens: 4, maxPhysicalBlocks: 4)
+        let backend = PagedKVSharedForwardBackend(
+            container: ModelContainer(context: ModelContext(
+                configuration: ModelConfiguration(id: descriptor.modelID),
+                model: RuntimeBridgeFakeModel(nextTokenByInput: [:]),
+                processor: StandInUserInputProcessor(),
+                tokenizer: RuntimeBridgeFakeTokenizer()
+            )),
+            descriptor: descriptor,
+            layerCount: 1,
+            contiguousCacheBridge: RuntimeBridgeRecordingCacheBridge()
+        )
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks
+        )
+        let handle = try await allocator.allocate(conversationKey: "conv:unknown", maxTokens: 8, initialTokens: 3)
+        let binding = try await allocator.binding(for: handle)
+        let cache = RuntimeBridgeUnknownKVCache(offset: 3, state: [
+            MLXArray([Float](repeating: 1, count: 6), [1, 2, 3, 1]),
+            MLXArray([Float](repeating: 2, count: 6), [1, 2, 3, 1]),
+        ])
+        try backend.installRowStateForTest(caches: [cache], requestID: "unknown-row", binding: binding)
+
+        let observer = NativeMTPStateDigestObserver()
+        backend.installLabNativeMTPStateDigestObserver(observer)
+        do {
+            try await backend.recordLabNativeMTPStateDigest(phase: .ordinaryAfterDecode, requestIDs: ["unknown-row"])
+            XCTFail("unknown cache kind must stay fail-closed for state digesting")
+        } catch ContinuousBatchSchedulerError.unsupported(let reason) {
+            XCTAssertEqual(reason, "native_mtp_observer_unsupported_cache_kind")
+        }
+        XCTAssertEqual(observer.snapshot(), [])
+    }
+
     func testAttachedModelRuntimeServesFreshGreedyRequestsThroughScheduler() async throws {
         guard PagedKVMetallibGate.defaultMetallibExists() else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
@@ -3080,7 +3517,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         maxActiveRows: Int,
         backend: any ContinuousBatchSchedulerBackend,
         maxPhysicalBlocks: Int = 16,
-        maxPromptChunkTokens: Int = 256
+        maxPromptChunkTokens: Int = 256,
+        replayAuthority: any ContinuousBatchSchedulerReplayAuthority = RuntimeBridgeReplayAuthority()
     ) throws -> ContinuousBatchScheduler {
         let descriptor = PagedKVDescriptor(
             blockSizeTokens: 4,
@@ -3125,7 +3563,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             ),
             allocator: try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: maxPhysicalBlocks),
             backend: backend,
-            replayAuthority: RuntimeBridgeReplayAuthority()
+            replayAuthority: replayAuthority
         )
     }
 
@@ -3673,6 +4111,42 @@ private final class RuntimeBridgeRecordingNativeMTPBackend: ContinuousBatchSched
 
     func cancelInFlight() async {
         await base.cancelInFlight()
+    }
+}
+
+private final class RuntimeBridgeUnknownKVCache: KVCache {
+    var offset: Int
+    var maxSize: Int? { nil }
+    var state: [MLXArray]
+    var metaState: [String] = ["runtime_bridge_unknown_kv_cache"]
+    var isTrimmable: Bool { false }
+
+    init(offset: Int, state: [MLXArray]) {
+        self.offset = offset
+        self.state = state
+    }
+
+    func innerState() -> [MLXArray] { state }
+
+    func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+        offset += keys.ndim >= 3 ? keys.dim(keys.ndim - 2) : 0
+        state = [keys, values]
+        return (keys, values)
+    }
+
+    @discardableResult
+    func trim(_ n: Int) -> Int { 0 }
+
+    func makeMask(
+        n: Int,
+        windowSize: Int?,
+        returnArray: Bool
+    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        .none
+    }
+
+    func copy() -> any KVCache {
+        RuntimeBridgeUnknownKVCache(offset: offset, state: state)
     }
 }
 

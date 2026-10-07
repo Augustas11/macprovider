@@ -304,6 +304,20 @@ jobs:
               --asset "continuous-batching-policy.json.sig=$destination/continuous-batching-policy.json.sig"
             )
           fi
+          # SPEC-023 §12.5 Stage A: the native-MTP admission set is an external
+          # release asset set beside the release-bound feeds.
+          catalog_native_mtp_bound="$(python3 - candidate/phase3-binary/catalog/autotune/release.json <<'PY'
+          import json, pathlib, sys
+          feeds = json.loads(pathlib.Path(sys.argv[1]).read_text())["feeds"]
+          print("bound" if "native-mtp-admission.json" in feeds else "unbound")
+          PY
+          )"
+          if [ "$catalog_native_mtp_bound" = bound ]; then
+            for native_name in native-mtp-admission.json native-mtp-admission.json.sig native-mtp-artifact-manifest.json native-mtp-selftest-bank.json native-mtp-selftest-bank.json.sig; do
+              cp "candidate/phase3-binary/dist/static/$native_name" "$destination/"
+              unsigned_asset_arguments+=(--asset "$native_name=$destination/$native_name")
+            done
+          fi
           python3 control/scripts/acceptance-candidate-metadata.py build-unsigned \
             --repository "$GITHUB_REPOSITORY" \
             --tag "$TAG" \

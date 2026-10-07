@@ -1,0 +1,76 @@
+{
+  "binary": "lab 280f0e95d (release source minus version bump)",
+  "details": {
+    "cells": {
+      "s1-p1536-o128": {
+        "cell_class": "native_eligible",
+        "decode_corrected_lower_bound": 0.13524411261352953,
+        "metric_failures": [
+          "throughput",
+          "itl"
+        ],
+        "status": "FAIL",
+        "ttft_corrected_upper_bound": 0.04463818013831378
+      },
+      "s1-p1536-o512": {
+        "cell_class": "native_eligible",
+        "decode_corrected_lower_bound": 0.13574229266784843,
+        "metric_failures": [
+          "throughput",
+          "itl"
+        ],
+        "status": "FAIL",
+        "ttft_corrected_upper_bound": 0.04275396857964453
+      },
+      "s1-p4096-o128": {
+        "cell_class": "native_eligible",
+        "decode_corrected_lower_bound": 0.1101656582887548,
+        "metric_failures": [
+          "throughput",
+          "itl"
+        ],
+        "status": "FAIL",
+        "ttft_corrected_upper_bound": 0.05364447315567511
+      },
+      "s1-p4096-o512": {
+        "cell_class": "native_eligible",
+        "decode_corrected_lower_bound": 0.09977518836740384,
+        "metric_failures": [
+          "throughput",
+          "itl"
+        ],
+        "status": "FAIL",
+        "ttft_corrected_upper_bound": 0.05182156178418951
+      },
+      "s2-p1536-o512": {
+        "cell_class": "gated",
+        "decode_corrected_lower_bound": -0.08187667637138041,
+        "metric_failures": [
+          "throughput",
+          "itl"
+        ],
+        "status": "FAIL",
+        "ttft_corrected_upper_bound": 0.0277305190061794
+      },
+      "s8-p1536-o512": {
+        "cell_class": "gated",
+        "decode_corrected_lower_bound": -0.031260481758031755,
+        "metric_failures": [],
+        "status": "PASS",
+        "ttft_corrected_upper_bound": 0.011506561798797055
+      }
+    },
+    "overall_status": "FAIL",
+    "policy_sha256": "2c8a234462c1d3dcaff16268915e714774bbf3fff0aa944880208e807707e19a"
+  },
+  "evidence": [
+    "docs/research/spec048-r015/evidence-2026-10-06-a3b-fused-26a434/analysis.json"
+  ],
+  "item": "item5-r015",
+  "recorded_at": "2026-10-06T10:57:04Z",
+  "schema": "macprovider.native-mtp-r014-rehearsal-check.v1",
+  "status": "RECORDED",
+  "sub_checks": {},
+  "summary": "existing R015 evidence status FAIL (not re-run): one-slot decode-throughput corrected lower bounds +10.0% to +13.6% against the +15% gate (native step cost); s2 gated cell FAIL, s8 gated cell PASS; fix is draft PR #1862, out of scope",
+  "title": "R014.5 SPEC-048-R015 on every advertised tuple"
+}

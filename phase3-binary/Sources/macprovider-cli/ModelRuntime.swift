@@ -300,6 +300,8 @@ public struct RuntimeSnapshot: @unchecked Sendable {
     public let specDecodeGeneration: Int
     public let continuousBatching: RuntimeContinuousBatchingSnapshot?
     public let nativeMTPStatus: NativeMTPStatusSnapshot
+    let nativeMTPCapability: NativeMTPCapability?
+    let schedulerSupportsNativeMTP: Bool
     let nativeMTPTupleOffer: NativeMTPPublishedTupleOffer?
 
     init(
@@ -319,6 +321,8 @@ public struct RuntimeSnapshot: @unchecked Sendable {
         specDecodeGeneration: Int = 0,
         continuousBatching: RuntimeContinuousBatchingSnapshot? = nil,
         nativeMTPStatus: NativeMTPStatusSnapshot = NativeMTPStatusSink.disabled().snapshot(),
+        nativeMTPCapability: NativeMTPCapability? = nil,
+        schedulerSupportsNativeMTP: Bool = false,
         nativeMTPTupleOffer: NativeMTPPublishedTupleOffer? = nil
     ) {
         self.state = state
@@ -339,6 +343,8 @@ public struct RuntimeSnapshot: @unchecked Sendable {
         self.specDecodeGeneration = specDecodeGeneration
         self.continuousBatching = continuousBatching
         self.nativeMTPStatus = nativeMTPStatus
+        self.nativeMTPCapability = nativeMTPCapability
+        self.schedulerSupportsNativeMTP = schedulerSupportsNativeMTP
         self.nativeMTPTupleOffer = nativeMTPTupleOffer
     }
 
@@ -947,6 +953,34 @@ public struct WarmSwapDisabledError: Error, CustomStringConvertible {
 
 public struct DrainCancelledError: Error { }
 
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+private enum LabWarmSwapHookError: Error, CustomStringConvertible {
+    case invalidTargetIdentity
+    case artifactMismatch
+    case containerUnavailable
+    case runtimeNotReady(String)
+    case noInFlightRequest
+    case publicationMismatch
+
+    var description: String {
+        switch self {
+        case .invalidTargetIdentity:
+            return "lab warm-swap target identity is invalid"
+        case .artifactMismatch:
+            return "lab warm-swap artifact digest does not match the loaded runtime artifact"
+        case .containerUnavailable:
+            return "lab warm-swap requires a loaded container"
+        case .runtimeNotReady(let state):
+            return "lab warm-swap requires a ready runtime, got \(state)"
+        case .noInFlightRequest:
+            return "lab warm-swap requires an in-flight request"
+        case .publicationMismatch:
+            return "lab warm-swap publication did not expose the requested identity"
+        }
+    }
+}
+#endif
+
 struct ModelRuntimeLoadError: Error, CustomStringConvertible {
     let target: String
     let reason: String?
@@ -1245,10 +1279,6 @@ actor ModelRuntime: ModelRuntimeServing {
         for request: ChatCompletionRequest,
         snapshot: RuntimeSnapshot
     ) -> NativeMTPRuntimeAdmission {
-        let capability = currentNativeMTPCapability ?? nativeMTPCapability
-        let schedulerSupportsNativeMTP = currentNativeMTPDrafterContainer != nil
-            && continuousBatchScheduler != nil
-            || nativeMTPSchedulerSupported
         let otherActiveRows = inFlightCancellations.count - 1
         let admission = Self.nativeMTPRuntimeAdmission(
             for: request,
@@ -1256,9 +1286,9 @@ actor ModelRuntime: ModelRuntimeServing {
             draftLoaded: snapshot.hasTargetCompatibleDraft,
             numDraftTokens: snapshot.numDraftTokens,
             nativeMTPMode: nativeMTPMode,
-            nativeMTPCapability: capability,
-            schedulerSupportsNativeMTP: schedulerSupportsNativeMTP
-        ).binding(to: currentNativeMTPTupleOffer.map {
+            nativeMTPCapability: snapshot.nativeMTPCapability,
+            schedulerSupportsNativeMTP: snapshot.schedulerSupportsNativeMTP
+        ).binding(to: snapshot.nativeMTPTupleOffer.map {
             NativeMTPTupleFence(
                 admissionTupleSHA256: $0.nativeMTPAdmissionTupleSHA256,
                 servedSnapshotID: $0.servedSnapshotID,
@@ -1441,6 +1471,9 @@ actor ModelRuntime: ModelRuntimeServing {
     private let configuredDraftModelID: String?
     private let configuredDraftModelLoadPath: String?
     private let configuredNativeMTPAdmissionSidecarPath: String?
+    /// The durable model store root a fetched admission set's projection
+    /// resolves against; nil keeps the bundle layout.
+    private let configuredNativeMTPAdmissionArtifactRoot: String?
     private let configuredNativeMTPAdmissionSignaturePath: String?
     private let configuredNativeMTPTrustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring?
     private let configuredNativeMTPRunningBuildIdentity: NativeMTPRunningBuildIdentity?
@@ -1569,6 +1602,12 @@ actor ModelRuntime: ModelRuntimeServing {
     private let testStreamChunks: [StreamChunk]
     private let testSpeculativeCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)?
     private let testSpeculativeStream: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)?
+    private let nativeMTPRequestShapeCapture: NativeMTPRequestShapeCapture?
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    private var labNativeMTPCommitTimingObserver: NativeMTPLabCommittedTokenTimingObserver?
+    private var labNativeMTPDecodeOutputCap: NativeMTPLabDecodeOutputCap?
+    private var labNativeMTPConversationCacheObserver: NativeMTPLabConversationCacheObserver?
+    #endif
 
     var loadedModelID: String? {
         currentModelID
@@ -2487,6 +2526,7 @@ actor ModelRuntime: ModelRuntimeServing {
         nativeMTPCapability: NativeMTPCapability? = nil,
         nativeMTPSchedulerSupported: Bool = false,
         nativeMTPAdmissionSidecarPath: String? = nil,
+        nativeMTPAdmissionArtifactRoot: String? = nil,
         nativeMTPAdmissionSignaturePath: String? = nil,
         nativeMTPTrustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring? = nil,
         nativeMTPRunningBuildIdentity: NativeMTPRunningBuildIdentity? = nil,
@@ -2524,6 +2564,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.configuredDraftModelID = normalizedDraftModelID
         self.configuredDraftModelLoadPath = normalizedDraftModelLoadPath
         self.configuredNativeMTPAdmissionSidecarPath = Self.nonEmpty(nativeMTPAdmissionSidecarPath)
+        self.configuredNativeMTPAdmissionArtifactRoot = Self.nonEmpty(nativeMTPAdmissionArtifactRoot)
         self.configuredNativeMTPAdmissionSignaturePath = Self.nonEmpty(nativeMTPAdmissionSignaturePath)
         self.configuredNativeMTPTrustedKeyring = nativeMTPTrustedKeyring ?? NativeMTPAdmissionSidecar.TrustedKeyring(
             publicKeysByKeyID: AutotuneStaticInputs.defaultTrustedPublicKeys,
@@ -2553,6 +2594,20 @@ actor ModelRuntime: ModelRuntimeServing {
         self.nativeMTPMode = nativeMTPMode
         self.nativeMTPCapability = nativeMTPCapability
         self.nativeMTPSchedulerSupported = nativeMTPSchedulerSupported
+        do {
+            self.nativeMTPRequestShapeCapture = try NativeMTPRequestShapeCaptureConfig
+                .fromEnvironment()
+                .map {
+                    try NativeMTPRequestShapeCapture(
+                        config: $0,
+                        nativeMTPMode: nativeMTPMode,
+                        runningBuildIdentity: Self.nativeMTPRunningBuildIdentity()
+                    )
+                }
+        } catch {
+            fputs("event=native_mtp_request_shape_capture outcome=disabled reason=\(error)\n", stderr)
+            self.nativeMTPRequestShapeCapture = nil
+        }
         #if DEBUG || MACPROVIDER_LAB_HARNESS
         self.testNativeMTPAdmissionObserver = testNativeMTPAdmissionObserver
         self.testNativeMTPAdmissionRequestObserver = testNativeMTPAdmissionRequestObserver
@@ -2650,6 +2705,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     prefillStepSize: self.prefillStepSize,
                     slotCount: self.maxBatch,
                     sidecarPath: self.configuredNativeMTPAdmissionSidecarPath,
+                    artifactRoot: self.configuredNativeMTPAdmissionArtifactRoot,
                     signaturePath: self.configuredNativeMTPAdmissionSignaturePath,
                     trustedKeyring: self.configuredNativeMTPTrustedKeyring,
                     runningBuildIdentity: self.configuredNativeMTPRunningBuildIdentity,
@@ -2933,6 +2989,7 @@ actor ModelRuntime: ModelRuntimeServing {
         nativeMTPCapability: NativeMTPCapability? = nil,
         nativeMTPSchedulerSupported: Bool = false,
         nativeMTPAdmissionSidecarPath: String? = nil,
+        nativeMTPAdmissionArtifactRoot: String? = nil,
         nativeMTPAdmissionSignaturePath: String? = nil,
         nativeMTPTrustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring? = nil,
         nativeMTPRunningBuildIdentity: NativeMTPRunningBuildIdentity? = nil,
@@ -3005,6 +3062,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.configuredDraftModelID = normalizedDraftModelID
         self.configuredDraftModelLoadPath = nil
         self.configuredNativeMTPAdmissionSidecarPath = Self.nonEmpty(nativeMTPAdmissionSidecarPath)
+        self.configuredNativeMTPAdmissionArtifactRoot = Self.nonEmpty(nativeMTPAdmissionArtifactRoot)
         self.configuredNativeMTPAdmissionSignaturePath = Self.nonEmpty(nativeMTPAdmissionSignaturePath)
         self.configuredNativeMTPTrustedKeyring = nativeMTPTrustedKeyring
         #if DEBUG || MACPROVIDER_LAB_HARNESS
@@ -3071,6 +3129,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.nativeMTPMode = nativeMTPMode
         self.nativeMTPCapability = nativeMTPCapability
         self.nativeMTPSchedulerSupported = nativeMTPSchedulerSupported
+        self.nativeMTPRequestShapeCapture = nil
         #if DEBUG || MACPROVIDER_LAB_HARNESS
         self.testNativeMTPAdmissionObserver = testNativeMTPAdmissionObserver
         self.testNativeMTPAdmissionRequestObserver = testNativeMTPAdmissionRequestObserver
@@ -3224,6 +3283,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 }
             ),
             nativeMTPStatus: currentNativeMTPStatusSink.snapshot(),
+            nativeMTPCapability: currentNativeMTPCapability,
+            schedulerSupportsNativeMTP: currentServedSchedulerSupportsNativeMTP(),
             nativeMTPTupleOffer: currentNativeMTPTupleOffer
         )
     }
@@ -3314,6 +3375,7 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     private func requestStartSnapshot() -> RuntimeSnapshot {
+        let schedulerSupportsNativeMTP = currentServedSchedulerSupportsNativeMTP()
         if state == .loading {
             return RuntimeSnapshot(
                 state: .ready,
@@ -3330,6 +3392,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 templateSupportsPreserveThinking: currentTemplateSupportsPreserveThinking,
                 specDecodeGeneration: currentSpecDecodeGeneration,
                 nativeMTPStatus: currentNativeMTPStatusSink.snapshot(),
+                nativeMTPCapability: currentNativeMTPCapability,
+                schedulerSupportsNativeMTP: schedulerSupportsNativeMTP,
                 nativeMTPTupleOffer: currentNativeMTPTupleOffer
             )
         }
@@ -3348,8 +3412,14 @@ actor ModelRuntime: ModelRuntimeServing {
             templateSupportsPreserveThinking: currentTemplateSupportsPreserveThinking,
             specDecodeGeneration: currentSpecDecodeGeneration,
             nativeMTPStatus: currentNativeMTPStatusSink.snapshot(),
+            nativeMTPCapability: currentNativeMTPCapability,
+            schedulerSupportsNativeMTP: schedulerSupportsNativeMTP,
             nativeMTPTupleOffer: currentNativeMTPTupleOffer
         )
+    }
+
+    private func currentServedSchedulerSupportsNativeMTP() -> Bool {
+        currentNativeMTPDrafterContainer != nil && continuousBatchScheduler != nil
     }
 
     func swapSignals() -> AsyncStream<SwapSignal> {
@@ -3386,10 +3456,10 @@ actor ModelRuntime: ModelRuntimeServing {
         currentNativeMTPTupleOffer = nil
         currentNativeMTPSelfTestInput = nil
         currentNativeMTPDrafterContainer = nil
-        currentNativeMTPStatusSink = NativeMTPStatusSink.disabled(
+        currentNativeMTPStatusSink.adopt(NativeMTPStatusSink.disabled(
             resetGeneration: UInt64(max(0, currentSpecDecodeGeneration)),
             reason: reason
-        )
+        ))
     }
 
     private func startNativeMTPRevocationRefresh(load: NativeMTPRuntimeLoadResult) {
@@ -3402,7 +3472,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let servedSnapshotID = load.servedSnapshotID
         let targetGeneration = load.selfTestInput.servedSnapshot?.generation ?? 0
         let verifier = NativeMTPRevocationEd25519Verifier(publicKeysByKeyID: trustedKeyring.publicKeysByKeyID)
-        let store = KeychainNativeMTPRevocationStore()
+        let store = KeychainNativeMTPRevocationStore.live()
         nativeMTPRevocationRefreshTask = Task { [weak self] in
             await NativeMTPRevocationFeedManager.pollWhileActive(
                 pinnedSignerKeyID: signerKeyID,
@@ -4440,26 +4510,26 @@ actor ModelRuntime: ModelRuntimeServing {
         reasonIfDisabled: NativeMTPStatusReason = .warmSwap
     ) {
         guard nativeMTPStatusResetGeneration < UInt64.max else {
-            currentNativeMTPStatusSink = NativeMTPStatusSink.disabled(
+            currentNativeMTPStatusSink.adopt(NativeMTPStatusSink.disabled(
                 resetGeneration: UInt64.max,
                 reason: .runtimeFailure
-            )
+            ))
             return
         }
         nativeMTPStatusResetGeneration += 1
         if capability == nil || admissionCapability == nil {
-            currentNativeMTPStatusSink = NativeMTPStatusSink.disabled(
+            currentNativeMTPStatusSink.adopt(NativeMTPStatusSink.disabled(
                 resetGeneration: nativeMTPStatusResetGeneration,
                 reason: nativeMTPMode == .auto ? reasonIfDisabled : .disabledByDefault
-            )
+            ))
             return
         }
-        currentNativeMTPStatusSink = Self.nativeMTPStatusSink(
+        currentNativeMTPStatusSink.adopt(Self.nativeMTPStatusSink(
             capability: capability,
             admissionCapability: admissionCapability,
             mode: nativeMTPMode,
             resetGeneration: nativeMTPStatusResetGeneration
-        )
+        ))
     }
 
     /// The serve path's scheduler configuration, shared by initial load and
@@ -6036,6 +6106,16 @@ actor ModelRuntime: ModelRuntimeServing {
         nativeAllows && provenance != .privacy
     }
 
+    private static func nativeMTPCaptureEffectiveMaxOutputTokens(
+        request: ChatCompletionRequest,
+        completion: CompletionResult,
+        maxContextTokens: Int
+    ) -> Int? {
+        if let requested = request.maxTokens { return requested }
+        guard completion.promptTokens > 0 else { return nil }
+        return max(1, maxContextTokens - completion.promptTokens)
+    }
+
     private func serialRouteCanaryCachedHitMissingRetainedHandoff(
         _ lease: ConversationCacheLease?,
         capability: ContinuousBatchingCapability,
@@ -6235,7 +6315,6 @@ actor ModelRuntime: ModelRuntimeServing {
             admitted: nativeMTPAdmission,
             resolved: tokenBoundedNativeMTPAdmission
         )
-        let nativeMTPAdmission = tokenBoundedNativeMTPAdmission
         let preparedPromptTokenIDs = prepared.promptTokens.map(Int32.init)
         let batchKVBits = Self.effectiveKVBits(
             configured: kvBitsOverride,
@@ -6243,7 +6322,9 @@ actor ModelRuntime: ModelRuntimeServing {
         )
         let conversationCacheAllowed = Self.allowsConversationCacheLease(
             provenance: request.ingestProvenance,
-            nativeAllows: nativeMTPAdmission.allowsConversationCacheLease
+            nativeAllows: tokenBoundedNativeMTPAdmission.allowsConversationCacheLease(
+                cacheOnlyKey: request.conversationCacheOnly
+            )
         )
         let lease = conversationCacheAllowed
             ? await conversationCache.begin(
@@ -6254,6 +6335,15 @@ actor ModelRuntime: ModelRuntimeServing {
                 allowRetainedPagedKVHandoff: true
             )
             : nil
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        recordLabNativeMTPConversationCacheBegin(
+            request: request,
+            surface: "attached_complete",
+            leaseAllowed: conversationCacheAllowed,
+            lease: lease,
+            modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
+        )
+        #endif
         CBTrace.log(schedulerRequestID, "rt_cb_lease cached=\(lease?.cachedPromptTokens ?? -1)")
         if conversationCacheAllowed,
            try await serialRouteCanaryCachedHitMissingRetainedHandoff(
@@ -6263,6 +6353,18 @@ actor ModelRuntime: ModelRuntimeServing {
         ) {
             return nil
         }
+        let nativeMTPAdmission = tokenBoundedNativeMTPAdmission.resolvingConversationCacheLease(
+            hasConversationKey: Self.nonEmpty(request.conversationKey) != nil,
+            leaseAllowed: conversationCacheAllowed,
+            cachedPromptTokens: lease?.cachedPromptTokens,
+            keyedRowsCommitSerialFormat: prepared.modelHasRecurrentLayers && !continuousBatchingCachedTurns
+        )
+        CBTrace.log(schedulerRequestID, "rt_native path=\(nativeMTPAdmission.effectivePath.rawValue) reason=\(nativeMTPAdmission.selection.nativeMTPReason?.rawValue ?? "-") cache_only=\(request.conversationCacheOnly)")
+        recordNativeMTPTokenBoundDowngrade(
+            requestID: request.requestID,
+            admitted: tokenBoundedNativeMTPAdmission,
+            resolved: nativeMTPAdmission
+        )
         // SPEC-038 AC-6c: the scheduler row owns the one canonical serial
         // tool boundary; every duplicate and terminal replay receives it.
         let serialToolStop = Self.continuousBatchSerialToolStopObserver(
@@ -6370,6 +6472,16 @@ actor ModelRuntime: ModelRuntimeServing {
             } else if let lease {
                 await conversationCache.abort(lease)
             }
+            nativeMTPRequestShapeCapture?.record(
+                request: request,
+                snapshot: snapshot,
+                admission: nativeMTPAdmission,
+                lease: lease,
+                leaseAllowed: conversationCacheAllowed,
+                completion: completion,
+                stream: false,
+                resolvedMaxCompletionTokens: maxOutputTokens
+            )
             return completion
         } catch {
             if let retainedCache = result.retainedCache {
@@ -6386,6 +6498,16 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     #if DEBUG || MACPROVIDER_LAB_HARNESS
+    /// Replay stops at the observed output length while preserving the original
+    /// request budget used by admission and context validation.
+    func installLabNativeMTPDecodeOutputCap(_ cap: NativeMTPLabDecodeOutputCap?) async -> Bool {
+        labNativeMTPDecodeOutputCap = cap
+        if let continuousBatchScheduler {
+            await continuousBatchScheduler.installLabNativeMTPDecodeOutputCap(cap)
+        }
+        return true
+    }
+
     /// Lab-only R015 hook: record the attached scheduler's in-flight load-gate
     /// decisions. Returns false when no scheduler is attached.
     func installLabNativeMTPLoadGateRecorder(_ recorder: NativeMTPLoadGateRecorder?) async -> Bool {
@@ -6402,11 +6524,106 @@ actor ModelRuntime: ModelRuntimeServing {
         return true
     }
 
+    /// Lab-only journey hook: install the hidden-state digest observer on the
+    /// backend used by this runtime's scheduler.
+    func installLabNativeMTPStateDigestObserver(_ observer: NativeMTPStateDigestObserver?) async -> Bool {
+        guard let continuousBatchScheduler else { return false }
+        return await continuousBatchScheduler.installLabNativeMTPStateDigestObserver(observer)
+    }
+
+    /// Lab-only journey hook: inject cancellation at precise native-MTP round
+    /// boundaries before backend finalize commits.
+    func installLabNativeMTPPhaseTrap(_ trap: NativeMTPLabPhaseTrap?) async -> Bool {
+        guard let continuousBatchScheduler else { return false }
+        await continuousBatchScheduler.installLabNativeMTPPhaseTrap(trap)
+        return true
+    }
+
+    /// Lab-only journey hook: inject a failure after buyer-visible native output
+    /// so the harness can prove no retry stitching happens.
+    func installLabNativeMTPPostoutputFault(_ fault: NativeMTPLabPostoutputFault?) async -> Bool {
+        guard let continuousBatchScheduler else { return false }
+        await continuousBatchScheduler.installLabNativeMTPPostoutputFault(fault)
+        return true
+    }
+
+    /// Lab-only replay hook: record commit-time timestamps for buyer-visible
+    /// output tokens without exposing token values.
+    func installLabNativeMTPCommitTimingObserver(_ observer: NativeMTPLabCommittedTokenTimingObserver?) async -> Bool {
+        labNativeMTPCommitTimingObserver = observer
+        if let continuousBatchScheduler {
+            await continuousBatchScheduler.installLabNativeMTPCommitTimingObserver(observer)
+        }
+        return true
+    }
+
+    /// Lab-only replay hook: record sanitized conversation-cache begin outcomes
+    /// for normal runtime paths without exposing raw keys, prompts, or token IDs.
+    func installLabNativeMTPConversationCacheObserver(_ observer: NativeMTPLabConversationCacheObserver?) async -> Bool {
+        labNativeMTPConversationCacheObserver = observer
+        return true
+    }
+
     /// Lab-only journey hook: freeze one exact batch composition before any
     /// prefill/decode work starts. Returns false unless the scheduler is idle.
     func installLabBatchComposition(_ requestIDs: [String]?) async -> Bool {
         guard let continuousBatchScheduler else { return false }
         return await continuousBatchScheduler.installLabBatchComposition(requestIDs)
+    }
+
+    /// Lab-only JOURNEY-NATIVE-MTP-SERVING step-10 hook: publish a new
+    /// model identity through the same actor path used after warm-swap load
+    /// and drain, without contacting the control socket or reloading bytes.
+    /// It refuses to run unless real work is in flight, so the journey proves
+    /// that the old request's already-captured snapshot survives the same
+    /// runtime instance publishing a fresh identity with native-MTP cleared.
+    func labCompleteWarmSwapForNativeMTPJourney(
+        modelID newModelID: String,
+        artifactSHA256: String
+    ) async throws -> RuntimeSnapshot {
+        let trimmedModelID = newModelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedModelID.isEmpty else {
+            throw LabWarmSwapHookError.invalidTargetIdentity
+        }
+        guard artifactSHA256.count == 64, artifactSHA256.allSatisfy({ $0.isHexDigit }) else {
+            throw LabWarmSwapHookError.invalidTargetIdentity
+        }
+        guard artifactSHA256 == currentModelHash else {
+            throw LabWarmSwapHookError.artifactMismatch
+        }
+        guard trimmedModelID != currentModelID else {
+            throw LabWarmSwapHookError.invalidTargetIdentity
+        }
+        guard let container = currentContainer else {
+            throw LabWarmSwapHookError.containerUnavailable
+        }
+        guard state == .ready else {
+            throw LabWarmSwapHookError.runtimeNotReady(String(describing: state))
+        }
+        guard !inFlightCancellations.isEmpty else {
+            throw LabWarmSwapHookError.noInFlightRequest
+        }
+        try transitionToLoading(target: trimmedModelID)
+        try enterDrainPhase()
+        await completeSwapAtomically(
+            container: container,
+            modelID: trimmedModelID,
+            modelHash: artifactSHA256,
+            modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1,
+            weightsManifestSHA256: currentWeightsManifestSHA256,
+            tokenizerConfigSHA256: currentTokenizerConfigSHA256,
+            chatTemplateSHA256: currentChatTemplateSHA256,
+            draftModelID: nil,
+            draftContainer: nil,
+            draftFailureReason: nil,
+            modelCapabilities: currentPagedKVModelCapabilities,
+            adoptionKnobs: nil
+        )
+        let snapshot = await currentSnapshot()
+        guard snapshot.modelID == trimmedModelID, snapshot.modelHash == artifactSHA256 else {
+            throw LabWarmSwapHookError.publicationMismatch
+        }
+        return snapshot
     }
 
     /// Lab-only token-level probe through the attached scheduler, the same
@@ -6423,6 +6640,11 @@ actor ModelRuntime: ModelRuntimeServing {
         guard let continuousBatchScheduler else {
             throw ContinuousBatchSchedulerError.requestFailed("lab_probe_scheduler_unavailable")
         }
+        if nativeDepth != nil {
+            guard currentServedSchedulerSupportsNativeMTP(), currentNativeMTPCapability != nil else {
+                throw ContinuousBatchSchedulerError.requestFailed("lab_probe_native_mtp_unavailable")
+            }
+        }
         let base = ContinuousBatchSchedulerRequest(
             id: id,
             conversationKey: "",
@@ -6435,7 +6657,7 @@ actor ModelRuntime: ModelRuntimeServing {
             nativeMTPMaximumProposalDepth: nativeDepth ?? 0,
             nativeMTPCompleteWindowBytesByDepth: nativeDepth == nil
                 ? []
-                : ((currentNativeMTPCapability ?? nativeMTPCapability)?.completeWindowBytesByDepth ?? []),
+                : (currentNativeMTPCapability?.completeWindowBytesByDepth ?? []),
             nativeMTPTupleFence: nil,
             nativeMTPIntegrityProbe: nativeDepth != nil
         )
@@ -6551,7 +6773,6 @@ actor ModelRuntime: ModelRuntimeServing {
             admitted: nativeMTPAdmission,
             resolved: tokenBoundedNativeMTPAdmission
         )
-        let nativeMTPAdmission = tokenBoundedNativeMTPAdmission
         let preparedPromptTokenIDs = prepared.promptTokens.map(Int32.init)
         let batchKVBits = Self.effectiveKVBits(
             configured: kvBitsOverride,
@@ -6559,7 +6780,9 @@ actor ModelRuntime: ModelRuntimeServing {
         )
         let conversationCacheAllowed = Self.allowsConversationCacheLease(
             provenance: request.ingestProvenance,
-            nativeAllows: nativeMTPAdmission.allowsConversationCacheLease
+            nativeAllows: tokenBoundedNativeMTPAdmission.allowsConversationCacheLease(
+                cacheOnlyKey: request.conversationCacheOnly
+            )
         )
         let lease = conversationCacheAllowed
             ? await conversationCache.begin(
@@ -6570,6 +6793,15 @@ actor ModelRuntime: ModelRuntimeServing {
                 allowRetainedPagedKVHandoff: true
             )
             : nil
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        recordLabNativeMTPConversationCacheBegin(
+            request: request,
+            surface: "attached_stream",
+            leaseAllowed: conversationCacheAllowed,
+            lease: lease,
+            modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
+        )
+        #endif
         if conversationCacheAllowed,
            try await serialRouteCanaryCachedHitMissingRetainedHandoff(
             lease,
@@ -6578,6 +6810,18 @@ actor ModelRuntime: ModelRuntimeServing {
         ) {
             return nil
         }
+        let nativeMTPAdmission = tokenBoundedNativeMTPAdmission.resolvingConversationCacheLease(
+            hasConversationKey: Self.nonEmpty(request.conversationKey) != nil,
+            leaseAllowed: conversationCacheAllowed,
+            cachedPromptTokens: lease?.cachedPromptTokens,
+            keyedRowsCommitSerialFormat: prepared.modelHasRecurrentLayers && !continuousBatchingCachedTurns
+        )
+        CBTrace.log(schedulerRequestID, "rt_native path=\(nativeMTPAdmission.effectivePath.rawValue) reason=\(nativeMTPAdmission.selection.nativeMTPReason?.rawValue ?? "-") cache_only=\(request.conversationCacheOnly)")
+        recordNativeMTPTokenBoundDowngrade(
+            requestID: request.requestID,
+            admitted: tokenBoundedNativeMTPAdmission,
+            resolved: nativeMTPAdmission
+        )
         let submission = try Self.continuousBatchSubmission(
             for: request,
             promptTokens: prepared.promptTokens,
@@ -6729,6 +6973,16 @@ actor ModelRuntime: ModelRuntimeServing {
             } else if let lease {
                 await conversationCache.abort(lease)
             }
+            nativeMTPRequestShapeCapture?.record(
+                request: request,
+                snapshot: snapshot,
+                admission: nativeMTPAdmission,
+                lease: lease,
+                leaseAllowed: conversationCacheAllowed,
+                completion: validated,
+                stream: true,
+                resolvedMaxCompletionTokens: maxOutputTokens
+            )
             return validated
         } catch {
             if let retainedCache = result.retainedCache {
@@ -6966,7 +7220,23 @@ actor ModelRuntime: ModelRuntimeServing {
                 let result = try await Self.withDrainCancellation(drainCancelled) {
                     try await testSpeculativeCompletion(snapshot, request)
                 }
-                return (try Self.validateStructuredCompletion(result, request: request).withModelHashObservedIfMissing(Self.validObservedModelHash(snapshot.modelHash)), snapshot)
+                let completion = try Self.validateStructuredCompletion(result, request: request)
+                    .withModelHashObservedIfMissing(Self.validObservedModelHash(snapshot.modelHash))
+                self.nativeMTPRequestShapeCapture?.record(
+                    request: request,
+                    snapshot: snapshot,
+                    admission: nativeMTPAdmission,
+                    lease: nil as ConversationCacheLease?,
+                    leaseAllowed: false,
+                    completion: completion,
+                    stream: false,
+                    resolvedMaxCompletionTokens: Self.nativeMTPCaptureEffectiveMaxOutputTokens(
+                        request: request,
+                        completion: completion,
+                        maxContextTokens: maxContextTokens
+                    )
+                )
+                return (completion, snapshot)
             } catch let error as DrainCancelledError {
                 throw error
             } catch let error as CancellationError {
@@ -6979,10 +7249,39 @@ actor ModelRuntime: ModelRuntimeServing {
             let result = try await Self.withDrainCancellation(drainCancelled) {
                 try await testCompletion(snapshot, request)
             }
-            return (try Self.validateStructuredCompletion(result, request: request).withModelHashObservedIfMissing(Self.validObservedModelHash(snapshot.modelHash)), snapshot)
+            let completion = try Self.validateStructuredCompletion(result, request: request)
+                .withModelHashObservedIfMissing(Self.validObservedModelHash(snapshot.modelHash))
+            self.nativeMTPRequestShapeCapture?.record(
+                request: request,
+                snapshot: snapshot,
+                admission: nativeMTPAdmission,
+                lease: nil as ConversationCacheLease?,
+                leaseAllowed: false,
+                completion: completion,
+                stream: false,
+                resolvedMaxCompletionTokens: Self.nativeMTPCaptureEffectiveMaxOutputTokens(
+                    request: request,
+                    completion: completion,
+                    maxContextTokens: maxContextTokens
+                )
+            )
+            return (completion, snapshot)
         }
         guard let container = snapshot.container else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
+        }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        let labSerialHooks = try Self.labSerialDecodeHooks(
+            requestID: request.requestID,
+            outputCap: labNativeMTPDecodeOutputCap,
+            timingObserver: labNativeMTPCommitTimingObserver
+        )
+        let labConversationCacheObserver = labNativeMTPConversationCacheObserver
+        #else
+        let labSerialHooks: LabSerialDecodeHooks? = nil
+        #endif
+        if labSerialHooks != nil, HarmonyResponseParser.isHarmonyModelID(request.model) {
+            throw Self.labSerialDecodeHookUnsupported("harmony_visible_prefix_accounting")
         }
 
         let maxContextTokens = maxContextTokens
@@ -7016,7 +7315,10 @@ actor ModelRuntime: ModelRuntimeServing {
                     let lmInput = try await context.processor.prepare(input: input)
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                     let parameters = Self.makeServeGenerateParameters(
-                        maxTokens: request.maxTokens,
+                        maxTokens: Self.labSerialEffectiveMaxTokens(
+                            requestMaxTokens: request.maxTokens,
+                            labOutputCap: labSerialHooks?.outputCap
+                        ),
                         maxContextTokens: maxContextTokens,
                         kvBitsOverride: kvBitsOverride,
                         prefillStepSize: prefillStepSize,
@@ -7033,6 +7335,7 @@ actor ModelRuntime: ModelRuntimeServing {
                        let draftContainer = snapshot.draftContainer,
                        let numDraftTokens = snapshot.numDraftTokens,
                        speculativeCacheWrapValidated,
+                       labSerialHooks == nil,
                        Self.speculativeCacheWindowSafe(
                            promptTokens: promptTokenIds.count,
                            maxTokens: request.maxTokens,
@@ -7081,6 +7384,19 @@ actor ModelRuntime: ModelRuntimeServing {
                             cold: coldContext
                         )
                         : nil
+                    #if DEBUG || MACPROVIDER_LAB_HARNESS
+                    if let labConversationCacheObserver {
+                        labConversationCacheObserver.record(NativeMTPLabConversationCacheObserver.event(
+                            requestID: request.requestID,
+                            surface: "serial_complete",
+                            keyPresent: Self.nonEmpty(request.conversationKey) != nil,
+                            cacheOnly: request.conversationCacheOnly,
+                            leaseAllowed: conversationCacheAllowed,
+                            lease: lease,
+                            modelHasRecurrentLayers: ConversationCacheLayers.hasRecurrentLayers(context.model.newCache(parameters: nil))
+                        ))
+                    }
+                    #endif
                         do {
                             let generationContext = Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
                             let kvCache: [KVCache]
@@ -7115,6 +7431,14 @@ actor ModelRuntime: ModelRuntimeServing {
                                 allowedFunctionNames: Self.toolFunctionNames(from: request.promptSource.tools)
                             )
                             let serialToolStopApplies = Self.serialToolStopApplies(request)
+                            #if DEBUG || MACPROVIDER_LAB_HARNESS
+                            let labCommitTracker = labSerialHooks.map {
+                                LabSerialCommitTracker(requestID: $0.requestID, observer: $0.timingObserver)
+                            }
+                            #else
+                            let labCommitTracker: LabSerialCommitTracker? = nil
+                            #endif
+                            var labSerialHookError: APIError?
                             let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
                                 BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
                                     if !tokens.isEmpty {
@@ -7127,6 +7451,29 @@ actor ModelRuntime: ModelRuntimeServing {
                                     if HarmonyResponseParser.isHarmonyModelID(request.model),
                                        tokens.last.map(Self.isHarmonyTerminalToken) == true {
                                         return GenerateDisposition.stop
+                                    }
+                                    if let labSerialHooks, let labCommitTracker {
+                                        let outputCount: Int
+                                        do {
+                                        outputCount = try Self.labSerialVisibleCommitCount(
+                                            modelID: request.model,
+                                            generatedTokenIDs: tokens,
+                                            decodedText: generationContext.tokenizer.decode(tokenIds: tokens),
+                                            emittedText: nil,
+                                            stopTokenFilter: stopTokenFilter,
+                                            requestStops: request.stop
+                                        )
+                                        } catch let error as APIError {
+                                            labSerialHookError = error
+                                            return GenerateDisposition.stop
+                                        } catch {
+                                            labSerialHookError = Self.labSerialDecodeHookUnsupported("visible_prefix_accounting")
+                                            return GenerateDisposition.stop
+                                        }
+                                        labCommitTracker.record(outputCount: outputCount)
+                                        if let outputCap = labSerialHooks.outputCap, outputCount >= outputCap {
+                                            return GenerateDisposition.stop
+                                        }
                                     }
                                     if serialToolStopApplies,
                                        Self.observeSerialToolStop(
@@ -7143,6 +7490,9 @@ actor ModelRuntime: ModelRuntimeServing {
                             }
                             try drainCancelled.check()
                             try Task.checkCancellation()
+                            if let labSerialHookError {
+                                throw labSerialHookError
+                            }
                             if shouldCancel() {
                                 throw CancellationError()
                             }
@@ -7165,7 +7515,11 @@ actor ModelRuntime: ModelRuntimeServing {
                             requestStops: request.stop
                         )
 
-                        let rawLengthFinish = request.maxTokens.map { result.generationTokenCount >= $0 } ?? false
+                        let rawLengthFinish = Self.labSerialLengthFinish(
+                            generatedCompletionTokens: result.generationTokenCount,
+                            requestMaxTokens: request.maxTokens,
+                            labOutputCap: labSerialHooks?.outputCap
+                        )
                         let harmonyTerminalFinish = Self.isHarmonyTerminalFinish(
                             modelID: request.model,
                             generatedTokenIDs: resultTokenIDs
@@ -7220,6 +7574,16 @@ actor ModelRuntime: ModelRuntimeServing {
                             modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
                             settlementDisposition: .eligibleOwner
                         ), request: request)
+                        self.nativeMTPRequestShapeCapture?.record(
+                            request: request,
+                            snapshot: snapshot,
+                            admission: nativeMTPAdmission,
+                            lease: lease,
+                            leaseAllowed: conversationCacheAllowed,
+                            completion: completion,
+                            stream: false,
+                            resolvedMaxCompletionTokens: request.maxTokens ?? max(1, maxContextTokens - promptTokenIds.count)
+                        )
                         if let lease {
                             let fullTokens = promptTokenIds + resultTokenIDs.map(Int32.init)
                             guard Self.serialHybridCacheCanPublishTerminalCheckpoint(
@@ -7545,11 +7909,26 @@ actor ModelRuntime: ModelRuntimeServing {
                 idleState.noteContent()
                 onChunk(.content(completion.content))
             }
-            return try Self.validateStructuredStreamingCompletion(
+            let validated = try Self.validateStructuredStreamingCompletion(
                 completion,
                 request: request,
                 buyerVisibleContent: structuredAccumulator.content
             )
+            self.nativeMTPRequestShapeCapture?.record(
+                request: request,
+                snapshot: snapshot,
+                admission: nativeMTPAdmission,
+                lease: nil as ConversationCacheLease?,
+                leaseAllowed: false,
+                completion: validated,
+                stream: true,
+                resolvedMaxCompletionTokens: Self.nativeMTPCaptureEffectiveMaxOutputTokens(
+                    request: request,
+                    completion: validated,
+                    maxContextTokens: maxContextTokens
+                )
+            )
+            return validated
         }
         if let testCompletion {
             let completion = try await Self.withDrainCancellation(drainCancelled) {
@@ -7565,14 +7944,42 @@ actor ModelRuntime: ModelRuntimeServing {
                 idleState.noteContent()
                 onChunk(.content(completion.content))
             }
-            return try Self.validateStructuredStreamingCompletion(
+            let validated = try Self.validateStructuredStreamingCompletion(
                 completion,
                 request: request,
                 buyerVisibleContent: structuredAccumulator.content
             )
+            self.nativeMTPRequestShapeCapture?.record(
+                request: request,
+                snapshot: snapshot,
+                admission: nativeMTPAdmission,
+                lease: nil as ConversationCacheLease?,
+                leaseAllowed: false,
+                completion: validated,
+                stream: true,
+                resolvedMaxCompletionTokens: Self.nativeMTPCaptureEffectiveMaxOutputTokens(
+                    request: request,
+                    completion: validated,
+                    maxContextTokens: maxContextTokens
+                )
+            )
+            return validated
         }
         guard let container = snapshot.container else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
+        }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        let labSerialHooks = try Self.labSerialDecodeHooks(
+            requestID: request.requestID,
+            outputCap: labNativeMTPDecodeOutputCap,
+            timingObserver: labNativeMTPCommitTimingObserver
+        )
+        let labConversationCacheObserver = labNativeMTPConversationCacheObserver
+        #else
+        let labSerialHooks: LabSerialDecodeHooks? = nil
+        #endif
+        if labSerialHooks != nil, HarmonyResponseParser.isHarmonyModelID(request.model) {
+            throw Self.labSerialDecodeHookUnsupported("harmony_visible_prefix_accounting")
         }
 
         // T2-01: compiled decode env-flag wire-in. When enabled, the
@@ -7627,7 +8034,10 @@ actor ModelRuntime: ModelRuntimeServing {
                     let lmInput = try await context.processor.prepare(input: input)
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                     let parameters = Self.makeServeGenerateParameters(
-                        maxTokens: request.maxTokens,
+                        maxTokens: Self.labSerialEffectiveMaxTokens(
+                            requestMaxTokens: request.maxTokens,
+                            labOutputCap: labSerialHooks?.outputCap
+                        ),
                         maxContextTokens: maxContextTokens,
                         kvBitsOverride: kvBitsOverride,
                         prefillStepSize: prefillStepSize,
@@ -7662,6 +8072,7 @@ actor ModelRuntime: ModelRuntimeServing {
                        let draftContainer = snapshot.draftContainer,
                        let numDraftTokens = snapshot.numDraftTokens,
                        speculativeCacheWrapValidated,
+                       labSerialHooks == nil,
                        Self.speculativeCacheWindowSafe(
                            promptTokens: promptTokenIds.count,
                            maxTokens: request.maxTokens,
@@ -7760,6 +8171,19 @@ actor ModelRuntime: ModelRuntimeServing {
                             cold: coldContext
                         )
                         : nil
+                    #if DEBUG || MACPROVIDER_LAB_HARNESS
+                    if let labConversationCacheObserver {
+                        labConversationCacheObserver.record(NativeMTPLabConversationCacheObserver.event(
+                            requestID: request.requestID,
+                            surface: "serial_stream",
+                            keyPresent: Self.nonEmpty(request.conversationKey) != nil,
+                            cacheOnly: request.conversationCacheOnly,
+                            leaseAllowed: conversationCacheAllowed,
+                            lease: lease,
+                            modelHasRecurrentLayers: ConversationCacheLayers.hasRecurrentLayers(generationContext.model.newCache(parameters: nil))
+                        ))
+                    }
+                    #endif
                     let kvCache: [KVCache]
                     var iteratorInput: LMInput
                     if let reusableCache = lease?.reusableCache, let lcp = lease?.lcp {
@@ -7788,6 +8212,14 @@ actor ModelRuntime: ModelRuntimeServing {
                     var streamingParseError: APIError?
                     var harmonyObservedFinalTokenCount = 0
                     var harmonyObservedTokenCount = 0
+                    var labSerialHookError: APIError?
+                    #if DEBUG || MACPROVIDER_LAB_HARNESS
+                    let labCommitTracker = labSerialHooks.map {
+                        LabSerialCommitTracker(requestID: $0.requestID, observer: $0.timingObserver)
+                    }
+                    #else
+                    let labCommitTracker: LabSerialCommitTracker? = nil
+                    #endif
 
                     // SPEC-037 FR-KVP2.5: speculative-decode routing is determined
                     // BEFORE conversationCache.begin() (block above, ahead of the
@@ -7870,12 +8302,36 @@ actor ModelRuntime: ModelRuntimeServing {
                                     stopTokenFilter: stopTokenFilter,
                                     requestStops: request.stop
                                 )
-                                switch textEmitter.step(
+                                let step = textEmitter.step(
                                     candidate: candidate,
                                     structuredAccumulator: structuredAccumulator,
                                     idleState: idleState,
                                     onChunk: onChunk
-                                ) {
+                                )
+                                if let labSerialHooks, let labCommitTracker {
+                                    let outputCount: Int
+                                    do {
+                                        outputCount = try Self.labSerialVisibleCommitCount(
+                                            modelID: request.model,
+                                            generatedTokenIDs: tokens,
+                                            decodedText: decoded,
+                                            emittedText: textEmitter.emittedContent,
+                                            stopTokenFilter: stopTokenFilter,
+                                            requestStops: request.stop
+                                        )
+                                    } catch let error as APIError {
+                                        labSerialHookError = error
+                                        return .stop
+                                    } catch {
+                                        labSerialHookError = Self.labSerialDecodeHookUnsupported("visible_prefix_accounting")
+                                        return .stop
+                                    }
+                                    labCommitTracker.record(outputCount: outputCount)
+                                    if let outputCap = labSerialHooks.outputCap, outputCount >= outputCap {
+                                        return .stop
+                                    }
+                                }
+                                switch step {
                                 case .more:
                                     return .more
                                 case .requestStop:
@@ -7898,6 +8354,9 @@ actor ModelRuntime: ModelRuntimeServing {
                         let generationMS = decodeTimer.durationMilliseconds(until: decodeEndedAt)
                         try drainCancelled.check()
                         try Task.checkCancellation()
+                        if let labSerialHookError {
+                            throw labSerialHookError
+                        }
                         if shouldCancel() {
                             throw CancellationError()
                         }
@@ -7911,7 +8370,11 @@ actor ModelRuntime: ModelRuntimeServing {
                             stopTokenFilter: stopTokenFilter,
                             requestStops: request.stop
                         )
-                        let rawLengthFinish = request.maxTokens.map { result.generationTokenCount >= $0 } ?? false
+                        let rawLengthFinish = Self.labSerialLengthFinish(
+                            generatedCompletionTokens: result.generationTokenCount,
+                            requestMaxTokens: request.maxTokens,
+                            labOutputCap: labSerialHooks?.outputCap
+                        )
                         let harmonyTerminalFinish = Self.isHarmonyTerminalFinish(
                             modelID: request.model,
                             generatedTokenIDs: resultTokenIDs
@@ -7985,6 +8448,16 @@ actor ModelRuntime: ModelRuntimeServing {
                             completion,
                             request: request,
                             buyerVisibleContent: structuredAccumulator.content
+                        )
+                        self.nativeMTPRequestShapeCapture?.record(
+                            request: request,
+                            snapshot: snapshot,
+                            admission: nativeMTPAdmission,
+                            lease: lease,
+                            leaseAllowed: conversationCacheAllowed,
+                            completion: validated,
+                            stream: true,
+                            resolvedMaxCompletionTokens: request.maxTokens ?? max(1, maxContextTokens - promptTokenIds.count)
                         )
                         if let lease {
                             let fullTokens = promptTokenIds + resultTokenIDs.map(Int32.init)
@@ -8571,13 +9044,21 @@ actor ModelRuntime: ModelRuntimeServing {
         let canonicalBinaryURL = markerStore.resolveCanonicalInstallBinary(
             launchedExecutableURL: launchedExecutableURL
         )
-        guard let manifest = CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
+        let installedSourceCommit = CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
             launchedExecutableURL: launchedExecutableURL,
             canonicalBinaryURL: canonicalBinaryURL,
             expectedVersion: CoordinatorClient.binaryVersion,
             allowProviderVersionMismatch: false
-        ),
-              let sourceCommit = compatibilitySetSourceCommit(manifest.compatibilitySetID),
+        ).flatMap { compatibilitySetSourceCommit($0.compatibilitySetID) }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        // A lab build has no installed compatibility set; the rehearsal names
+        // the commit it was built from. The executable digest and live CDHash
+        // are still measured from the running process.
+        let resolvedSourceCommit = installedSourceCommit ?? labNativeMTPSourceCommit()
+        #else
+        let resolvedSourceCommit = installedSourceCommit
+        #endif
+        guard let sourceCommit = resolvedSourceCommit,
               let executableURL = CompatibilitySetManifest.resolvedExecutableURL(launchedExecutableURL),
               let executableSHA256 = try? sha256RegularFileNoFollow(executableURL),
               let liveCodeIdentity = nativeMTPLiveProcessCodeIdentity()
@@ -8591,6 +9072,19 @@ actor ModelRuntime: ModelRuntimeServing {
             upstreamMLXSwiftLMRevision: KVBuildIdentity.mlxSwiftLMRevision
         )
     }
+
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    static func labNativeMTPSourceCommit(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> String? {
+        guard let commit = environment["MACPROVIDER_LAB_NATIVE_MTP_SOURCE_COMMIT"],
+              commit.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil
+        else {
+            return nil
+        }
+        return commit
+    }
+    #endif
 
     static func nativeMTPRunningBuildIdentityForTest(
         launchedExecutableURL: URL?,
@@ -8705,6 +9199,7 @@ actor ModelRuntime: ModelRuntimeServing {
         prefillStepSize: Int,
         slotCount: Int,
         sidecarPath: String?,
+        artifactRoot: String? = nil,
         signaturePath: String?,
         trustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring?,
         runningBuildIdentity injectedRunningBuildIdentity: NativeMTPRunningBuildIdentity?,
@@ -8771,6 +9266,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 sidecarURL: sidecarURL,
                 signatureURL: signatureURL,
                 snapshotRoot: snapshotRoot,
+                artifactRoot: artifactRoot.map { URL(fileURLWithPath: $0, isDirectory: true) },
                 context: NativeMTPAdmissionSidecar.RuntimeContext(
                     modelID: targetModelID,
                     modelRevision: targetModelRevision,
@@ -9109,7 +9605,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 signatureData: signatureData,
                 trustedKeyring: trustedKeyring
             )
-            let store = KeychainNativeMTPRevocationStore()
+            let store = KeychainNativeMTPRevocationStore.live()
             let verifier = NativeMTPRevocationEd25519Verifier(publicKeysByKeyID: trustedKeyring.publicKeysByKeyID)
             let state = try await NativeMTPRevocationFeedManager.loadNetworkFirst(
                 pinnedSignerKeyID: revocationSignerKeyID,
@@ -9831,6 +10327,143 @@ actor ModelRuntime: ModelRuntimeServing {
             return (String(stripped[..<earliestStop]), true)
         }
         return (stripped, false)
+    }
+
+    struct LabSerialDecodeHooks: Sendable {
+        let requestID: String
+        let outputCap: Int?
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        let timingObserver: NativeMTPLabCommittedTokenTimingObserver?
+        #endif
+    }
+
+    final class LabSerialCommitTracker: @unchecked Sendable {
+        private let requestID: String
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        private let observer: NativeMTPLabCommittedTokenTimingObserver?
+        #endif
+        private var committedOutputCount = 0
+
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        init(requestID: String, observer: NativeMTPLabCommittedTokenTimingObserver?) {
+            self.requestID = requestID
+            self.observer = observer
+        }
+        #else
+        init(requestID: String) {
+            self.requestID = requestID
+        }
+        #endif
+
+        func record(outputCount: Int) {
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            guard let observer else {
+                committedOutputCount = max(committedOutputCount, outputCount)
+                return
+            }
+            let boundedOutputCount = max(committedOutputCount, outputCount)
+            guard boundedOutputCount > committedOutputCount else { return }
+            for ordinal in committedOutputCount ..< boundedOutputCount {
+                observer.record(requestID: requestID, ordinal: ordinal, outputCount: ordinal + 1)
+            }
+            committedOutputCount = boundedOutputCount
+            #else
+            committedOutputCount = max(committedOutputCount, outputCount)
+            _ = requestID
+            #endif
+        }
+    }
+
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    private func recordLabNativeMTPConversationCacheBegin(
+        request: ChatCompletionRequest,
+        surface: String,
+        leaseAllowed: Bool,
+        lease: ConversationCacheLease?,
+        modelHasRecurrentLayers: Bool
+    ) {
+        guard let observer = labNativeMTPConversationCacheObserver else { return }
+        observer.record(NativeMTPLabConversationCacheObserver.event(
+            requestID: request.requestID,
+            surface: surface,
+            keyPresent: Self.nonEmpty(request.conversationKey) != nil,
+            cacheOnly: request.conversationCacheOnly,
+            leaseAllowed: leaseAllowed,
+            lease: lease,
+            modelHasRecurrentLayers: modelHasRecurrentLayers
+        ))
+    }
+    #endif
+
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    static func labSerialDecodeHooks(
+        requestID: String?,
+        outputCap: NativeMTPLabDecodeOutputCap?,
+        timingObserver: NativeMTPLabCommittedTokenTimingObserver?
+    ) throws -> LabSerialDecodeHooks? {
+        guard outputCap != nil || timingObserver != nil else { return nil }
+        guard let requestID, !requestID.isEmpty else {
+            throw labSerialDecodeHookUnsupported("missing_request_id")
+        }
+        return LabSerialDecodeHooks(
+            requestID: requestID,
+            outputCap: outputCap?.cap(requestID: requestID),
+            timingObserver: timingObserver
+        )
+    }
+    #endif
+
+    static func labSerialVisibleCommitCount(
+        modelID: String,
+        generatedTokenIDs: [Int],
+        decodedText: String,
+        emittedText: String?,
+        stopTokenFilter: StopTokenFilter,
+        requestStops: [String]
+    ) throws -> Int {
+        guard !HarmonyResponseParser.isHarmonyModelID(modelID) else {
+            throw labSerialDecodeHookUnsupported("harmony_visible_prefix_accounting")
+        }
+        let filtered = applyOutputFilters(
+            decodedText,
+            stopTokenFilter: stopTokenFilter,
+            requestStops: requestStops
+        )
+        guard !filtered.hitStop, filtered.text == decodedText else {
+            throw labSerialDecodeHookUnsupported("filtered_visible_prefix_accounting")
+        }
+        if let emittedText, emittedText != decodedText {
+            throw labSerialDecodeHookUnsupported("emitted_visible_prefix_accounting")
+        }
+        return generatedTokenIDs.count
+    }
+
+    static func labSerialLengthFinish(
+        generatedCompletionTokens: Int,
+        requestMaxTokens: Int?,
+        labOutputCap: Int?
+    ) -> Bool {
+        if let labOutputCap {
+            return generatedCompletionTokens >= labOutputCap
+        }
+        return requestMaxTokens.map { generatedCompletionTokens >= $0 } ?? false
+    }
+
+    static func labSerialEffectiveMaxTokens(requestMaxTokens: Int?, labOutputCap: Int?) -> Int? {
+        guard let labOutputCap else { return requestMaxTokens }
+        guard let requestMaxTokens else { return labOutputCap }
+        return min(requestMaxTokens, labOutputCap)
+    }
+
+    private static func labSerialDecodeHookUnsupported(_ reason: String) -> APIError {
+        APIError(
+            status: 502,
+            message: "LAB serial decode replay hook unsupported for this request: \(reason)",
+            type: "upstream_provider_error",
+            code: "lab_serial_decode_hook_unsupported",
+            inferenceRan: false,
+            settlementRan: false
+        )
     }
 
     /// SPEC-024 FR-CI2 hybrid reuse. For a keyed serial request on a model with

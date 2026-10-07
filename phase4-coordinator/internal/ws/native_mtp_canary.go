@@ -435,10 +435,22 @@ func parseNativeMTPChallengeRecord(raw json.RawMessage, binding NativeMTPChallen
 	if record.ExpectedTokenIDSHA256 != digestTokenIDs(record.ExpectedTokenIDs) {
 		return NativeMTPChallengeRecord{}, fmt.Errorf("%w: expected_token_id_sha256 mismatch", errNativeMTPChallengeBankInvalid)
 	}
-	if record.ExpectedCounters.Committed != uint64(len(record.ExpectedTokenIDs)) {
+	if !nativeMTPCommittedCountConsistent(uint64(len(record.ExpectedTokenIDs)), record.ExpectedCounters.Committed, uint64(record.FixedProposalDepth)) {
 		return NativeMTPChallengeRecord{}, fmt.Errorf("%w: inconsistent counters", errNativeMTPChallengeBankInvalid)
 	}
 	return record, nil
+}
+
+// nativeMTPCommittedCountConsistent bounds `expected_counters.committed` by
+// the expected token sequence (SPEC-031 §R033). The first output token is
+// sampled by the prefill forward, outside every verify round, so the
+// scheduler commits one token fewer than it emits; a round that ends on a
+// terminal may commit up to `depth` candidates past the emitted sequence.
+func nativeMTPCommittedCountConsistent(tokens, committed, depth uint64) bool {
+	if tokens == 0 {
+		return committed == 0
+	}
+	return committed+1 >= tokens && committed+1 <= tokens+depth
 }
 
 func strictObject(raw []byte, allowed []string, out *map[string]json.RawMessage) error {

@@ -67,9 +67,13 @@ RFC3339 UTC seconds and expiry is no later than 30 days after capture; and
 missing, duplicate, out-of-order, or wrong-typed fields fail before signing.
 
 The review subject is the complete frozen implementation plus serving-evidence
-change, excluding only the subsequently generated
-`native-mtp-release-*.redacted.json`, its detached signature, and the three
-review-verdict artifacts whose hashes that manifest carries. `head_commit` is
+change, excluding only what is generated after the reviews: the
+`native-mtp-release-*.redacted.json` manifest, its detached signature, and its
+reviewed bundle directory `native-mtp-release-<ts>/`. That bundle holds the
+three review-verdict artifacts whose hashes the manifest carries, the
+post-cut step artifacts (steps 3-6 run on the final signed candidate, after
+the freeze), and the target-ref attestation; none of them can exist when the
+reviews run. `head_commit` is
 the final candidate source/evidence commit. `production_repository` is exactly
 `Augustas11/macprovider`, `production_ref` is exactly `refs/heads/main`, and
 `target_commit` is the protected ref tip captured immediately before the
@@ -105,8 +109,8 @@ and `critical`, `high`, and `medium` are zero. The three artifacts MUST bind the
 same values recorded in the release manifest. After the first review artifact
 is produced, any mutation to a reviewed path invalidates all three verdicts and
 requires every lane to rerun. The release-evidence generator may then write
-only the excluded manifest, signatures, and verdict artifacts; any other dirty
-path or any index/worktree difference at signing fails closed.
+only the excluded manifest, signature, and bundle; any other dirty path or any
+index/worktree difference at signing fails closed.
 
 The signed generic journey result MUST name only SPEC-048-R014 and bind this
 manifest digest. Only this result may promote R014 to conformant. Expiry or a

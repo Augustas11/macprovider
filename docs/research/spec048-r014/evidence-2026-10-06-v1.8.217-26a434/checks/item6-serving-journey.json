@@ -1,0 +1,34 @@
+{
+  "binary": "lab build of release source",
+  "details": {
+    "covered_steps": [
+      "step-04-serial-token-oracle",
+      "step-05-cache-state-boundary",
+      "step-06-streaming-stop",
+      "step-07-mixed-multirow",
+      "step-08-capacity-and-depth-zero",
+      "step-09-cancellation",
+      "step-12-native-canary (provider-local self-test half)"
+    ],
+    "pending_steps": [
+      "step-01-bind-tuple",
+      "step-02-capability-negatives",
+      "step-03-artifact-security-negatives",
+      "step-10-warm-swap",
+      "step-11-accounting",
+      "step-12-native-canary (coordinator SPEC-031-R033 half)",
+      "step-14-studio-and-tier-benchmark",
+      "step-15-redaction-review"
+    ]
+  },
+  "evidence": [
+    "records/lab-journey-result.json"
+  ],
+  "item": "item6-serving-journey",
+  "recorded_at": "2026-10-06T11:33:31Z",
+  "schema": "macprovider.native-mtp-r014-rehearsal-check.v1",
+  "status": "FAIL",
+  "sub_checks": {},
+  "summary": "no signed JOURNEY-NATIVE-MTP-SERVING result exists for the tuple; the lab hardware steps report executed_steps_status=fail journey_complete=False, and steps 01-03, 10, 11, the coordinator canary half of 12, 14, and 15 are pending in the harness",
+  "title": "R014.6 signed JOURNEY-NATIVE-MTP-SERVING result"
+}

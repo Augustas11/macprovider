@@ -1,0 +1,6 @@
+$ /Library/Developer/CommandLineTools/usr/bin/python3 <operator-home>/mtp-r014-journey-217/repo/scripts/native_mtp_admission_sidecar.py build --tuple <operator-home>/mtp-r014-journey-217/repo/docs/research/spec048-r015/evidence-2026-10-02-a3b-formal/admission-tuple-input.json --release <operator-home>/mtp-r014-journey-217/work/rehearsal-release-input.json --out <operator-home>/mtp-r014-journey-217/work/rehearsal-sidecar.json
+exit=1
+--- stdout
+
+--- stderr
+native_mtp_admission_sidecar: $.entries[0].quality_evidence_sha256: is the pending-evidence placeholder; bind the real evidence digest

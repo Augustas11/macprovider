@@ -942,6 +942,12 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/v1/catalog-artifacts", s.handleCatalogArtifacts)
 	r.Get("/v1/catalog-artifacts.sig", s.handleCatalogArtifactsSig)
 	r.Get("/v1/autotune-release", s.handleAutotuneRelease)
+	r.Get("/v1/native-mtp-admission", s.handleNativeMTPAdmission)
+	r.Get("/v1/native-mtp-admission.sig", s.handleNativeMTPAdmissionSig)
+	r.Get("/v1/native-mtp-artifact-manifest", s.handleNativeMTPArtifactManifest)
+	r.Get("/v1/native-mtp-selftest-bank", s.handleNativeMTPSelftestBank)
+	r.Get("/v1/native-mtp-selftest-bank.sig", s.handleNativeMTPSelftestBankSig)
+	r.Get("/v1/native-mtp-revocations.*", s.handleNativeMTPRevocations)
 	r.Get("/v1/public/trust-pools/{pool_id}/pool_policy.json", s.handlePublicTrustPoolPolicy)
 	r.Get("/v1/public/trust-pools/{pool_id}/policy", s.handlePublicTrustPoolPolicy)
 	r.Get("/v1/public/trust-pools/{pool_id}/pool_status.json", s.handlePublicTrustPoolStatus)
@@ -3842,7 +3848,8 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 		// Auto-prefix cache key: set provider context but do NOT activate sticky.
 		// applySticky / stickyStore only read X-MacProvider-Internal-Conv; this
 		// header is intentionally invisible to them (SPEC-006-R012, SPEC-004).
-		ctx = providerws.ContextWithConversationKey(ctx, key)
+		// The provider learns it is cache-only (SPEC-048-R009).
+		ctx = providerws.ContextWithConversationCacheOnlyKey(ctx, key)
 		if state != nil {
 			state.conversationCacheOnly = true
 		}

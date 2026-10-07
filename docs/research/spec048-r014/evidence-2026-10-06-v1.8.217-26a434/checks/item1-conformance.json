@@ -1,0 +1,39 @@
+{
+  "binary": "n/a (repository state)",
+  "details": {
+    "repo_commit": "feadca96d410a1496cc27ef1b90fd13934d51f3d",
+    "states": {
+      "SPEC-023-R024": "pending",
+      "SPEC-030-R021": "pending",
+      "SPEC-031-R033": "pending",
+      "SPEC-036-R018": "pending",
+      "SPEC-038-R018": "pending",
+      "SPEC-039-R015": "pending",
+      "SPEC-048-R001": "pending",
+      "SPEC-048-R002": "pending",
+      "SPEC-048-R003": "pending",
+      "SPEC-048-R004": "pending",
+      "SPEC-048-R005": "pending",
+      "SPEC-048-R006": "pending",
+      "SPEC-048-R007": "pending",
+      "SPEC-048-R008": "pending",
+      "SPEC-048-R009": "pending",
+      "SPEC-048-R010": "pending",
+      "SPEC-048-R011": "pending",
+      "SPEC-048-R012": "pending",
+      "SPEC-048-R013": "pending",
+      "SPEC-048-R015": "pending",
+      "SPEC-048-R016": "pending"
+    }
+  },
+  "evidence": [
+    "records/conformance-states.json"
+  ],
+  "item": "item1-conformance",
+  "recorded_at": "2026-10-06T10:57:04Z",
+  "schema": "macprovider.native-mtp-r014-rehearsal-check.v1",
+  "status": "FAIL",
+  "sub_checks": {},
+  "summary": "0/21 required requirements conformant; 21 pending (operator promotion gate, expected before a native release)",
+  "title": "R014.1 owner requirements conformant in CONFORMANCE.json"
+}

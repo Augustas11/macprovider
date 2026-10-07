@@ -20,6 +20,9 @@ final class Tier2ProviderSession: @unchecked Sendable {
         let body: String
         let maxOutputTokens: Int?
         let conversationKey: String?
+        /// SPEC-004 FR-SR-2 / SPEC-048-R009: the key is a cache-only
+        /// auto-prefix key. Anything but a JSON `true` reads as false.
+        let conversationCacheOnly: Bool
         let bodyEncoding: String?
         let relayBlindContext: [String: Any]?
         /// SPEC-049 §4.7. The field lives inside the SPEC-008 plaintext envelope.
@@ -29,6 +32,15 @@ final class Tier2ProviderSession: @unchecked Sendable {
         /// SPEC-001-R005 `relay_blind_settlement`, raw. Nil only when absent;
         /// a JSON null is `NSNull` and fails the strict parse.
         let relayBlindSettlement: Any?
+    }
+
+    /// True only for a JSON boolean `true`; NSNumber 1 is not a boolean.
+    static func isJSONTrue(_ value: Any?) -> Bool {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) == CFBooleanGetTypeID() else {
+            return false
+        }
+        return number.boolValue
     }
 
     struct LosslessnessProbePayload {
@@ -247,6 +259,7 @@ final class Tier2ProviderSession: @unchecked Sendable {
             body: envelopeBody,
             maxOutputTokens: maxOutputTokens,
             conversationKey: conversationKey?.isEmpty == false ? conversationKey : nil,
+            conversationCacheOnly: Self.isJSONTrue(envelope["conversation_cache_only"]),
             bodyEncoding: envelope["body_encoding"] as? String,
             relayBlindContext: envelope["relay_blind_context"] as? [String: Any],
             privacyClass: privacyClass,
@@ -433,6 +446,7 @@ final class Tier2ProviderSession: @unchecked Sendable {
         plaintext: String,
         maxOutputTokens: Int? = nil,
         conversationKey: String? = nil,
+        conversationCacheOnly: Bool = false,
         bodyEncoding: String? = nil,
         relayBlindContext: [String: Any]? = nil,
         privacyClass: String? = nil,
@@ -455,6 +469,7 @@ final class Tier2ProviderSession: @unchecked Sendable {
         if let maxOutputTokens { plaintextEnvelope["max_output_tokens"] = maxOutputTokens }
         if let conversationKey = conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines), !conversationKey.isEmpty {
             plaintextEnvelope["conversation_key"] = conversationKey
+            if conversationCacheOnly { plaintextEnvelope["conversation_cache_only"] = true }
         }
         if let bodyEncoding { plaintextEnvelope["body_encoding"] = bodyEncoding }
         if let relayBlindContext { plaintextEnvelope["relay_blind_context"] = relayBlindContext }

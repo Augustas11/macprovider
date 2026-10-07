@@ -1417,6 +1417,73 @@ final class ModelRuntimeSwapTests: XCTestCase {
         XCTAssertEqual(snapshot.modelHash, "new-hash")
     }
 
+    func testConstructorNativeCapabilityDoesNotAdmitNewRequestAfterWarmSwap() async throws {
+        let recorder = ModelRuntimeSwapNativeMTPAdmissionRecorder()
+        let probe = InFlightProbe()
+        let providerStatus = makeProviderStatus(modelID: "old-model", modelHash: "old-hash")
+        let runtime = ModelRuntime(
+            modelID: "old-model",
+            modelHash: "old-hash",
+            nativeMTPMode: .auto,
+            nativeMTPCapability: makeNativeMTPCapability(maximumProposalDepth: 2),
+            nativeMTPSchedulerSupported: true,
+            testNativeMTPAdmissionObserver: { admission in
+                recorder.append(admission)
+            },
+            warmSwapEnabled: true,
+            loader: { _ in throw TestError.unexpectedContainerLoader },
+            testLoader: { target in (target, "new-hash") },
+            testCompletion: { snapshot, _ in
+                await probe.markStarted(modelID: snapshot.modelID)
+                while await !probe.canFinish {
+                    try await Task.sleep(nanoseconds: 5_000_000)
+                }
+                return CompletionResult(
+                    content: snapshot.modelID ?? "<nil>",
+                    finishReason: "stop",
+                    promptTokens: 1,
+                    completionTokens: 1,
+                    settlementDisposition: .eligibleOwner
+                )
+            }
+        )
+        await runtime.setProviderStatus(providerStatus)
+        let startedAt = await providerStatus.beginRequest()
+        let oldRequest = try makeRequest(model: "old-model")
+        let oldTask = Task {
+            do {
+                let completion = try await runtime.complete(oldRequest)
+                await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false)
+                return completion
+            } catch {
+                await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
+                throw error
+            }
+        }
+        try await waitUntil {
+            await probe.startedModelID != nil
+        }
+
+        let swapTask = try await runtime.beginSwap(targetModelID: "new-model")
+        await probe.allowFinish()
+        let oldCompletion = try await oldTask.value
+        try await swapTask.value
+        let postSwap = await runtime.currentSnapshot()
+
+        XCTAssertEqual(oldCompletion.content, "old-model")
+        XCTAssertEqual(postSwap.modelID, "new-model")
+        XCTAssertFalse(postSwap.nativeMTPStatus.supported)
+        XCTAssertFalse(postSwap.nativeMTPStatus.enabled)
+        XCTAssertEqual(postSwap.nativeMTPStatus.lastReason, .warmSwap)
+
+        await probe.allowFinish()
+        let newRequest = try makeRequest(model: "new-model")
+        _ = try await runtime.complete(newRequest)
+        let postSwapAdmission = try XCTUnwrap(recorder.last())
+        XCTAssertEqual(postSwapAdmission.effectivePath, .ordinary)
+        XCTAssertEqual(postSwapAdmission.selection.nativeMTPReason, .capabilityMismatch)
+    }
+
     func testHandleAcquiredInReadyStateSurvivesSwapToLoading() async throws {
         let probe = InFlightProbe()
         let runtime = makeRuntime(
@@ -1733,6 +1800,25 @@ final class ModelRuntimeSwapTests: XCTestCase {
         return try ChatCompletionRequest.parse(data: data)
     }
 
+    private func makeNativeMTPCapability(maximumProposalDepth: Int) -> NativeMTPCapability {
+        NativeMTPCapability(
+            admitted: true,
+            revoked: false,
+            revocationStateAvailable: true,
+            supportsCurrentProcessor: true,
+            supportsCurrentStateCache: true,
+            supportsStreaming: true,
+            supportsNonStreaming: true,
+            supportsStopSequences: false,
+            hasQualifiedRowMappedTransactions: true,
+            maximumProposalDepth: maximumProposalDepth,
+            maximumPromptTokens: 4096,
+            maximumCompletionTokens: 256,
+            maximumNativeActiveRows: 2,
+            supportsSampling: false
+        )
+    }
+
     private func makeProviderStatus(modelID: String?, modelHash: String?) -> ProviderStatus {
         ProviderStatus(
             modelID: modelID,
@@ -1848,6 +1934,23 @@ private final class LockedCounter: @unchecked Sendable {
         lock.lock()
         count += 1
         lock.unlock()
+    }
+}
+
+private final class ModelRuntimeSwapNativeMTPAdmissionRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var admissions: [NativeMTPRuntimeAdmission] = []
+
+    func append(_ admission: NativeMTPRuntimeAdmission) {
+        lock.lock()
+        admissions.append(admission)
+        lock.unlock()
+    }
+
+    func last() -> NativeMTPRuntimeAdmission? {
+        lock.lock()
+        defer { lock.unlock() }
+        return admissions.last
     }
 }
 

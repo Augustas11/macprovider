@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.25
+**Version:** 0.1.26
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.25",
+  "version": "0.1.26",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -454,7 +454,8 @@ path treats it as a documented no-op (the continuous-batching row sampler
 seeds from the scheduler request identity, not the buyer `seed`). Legacy completions, `echo`,
 `suffix`, an unknown top-level key, or any generation-affecting key/value not
 explicitly admitted above routes ordinary. A nonempty `conversation_key` also
-routes ordinary. Prompt length is bounded only by the selected SPEC-023-R024
+routes ordinary unless the coordinator marked it cache-only (SPEC-004 v0.3.6
+`conversation_cache_only`); a cache-only key is resolved by R009. Prompt length is bounded only by the selected SPEC-023-R024
 entry's signed `max_prompt_tokens`; a longer prompt selects ordinary with
 reason `capability_mismatch`. A prompt longer than one prefill chunk is
 prefilled in chunks with per-chunk drafter seeding (MTP-6), and the prefill
@@ -479,12 +480,13 @@ Reason strings are local diagnostics, at most 48 ASCII bytes, and do not enter
 buyer, receipt, or coordinator wire surfaces.
 
 Current gateway reality is explicit: the authenticated paid gateway assigns an
-auto-prefix conversation key to ordinary user-message traffic, so most such
-traffic is ineligible under this revision even when the buyer did not request
-sticky affinity. R015 MUST measure eligibility from post-gateway provider-bound
-requests with their real key state; a synthetic keyless corpus cannot satisfy
-the production-eligibility floor. This spec does not silently discard that key
-or its possible SPEC-024 discount to inflate MTP coverage.
+auto-prefix conversation key to ordinary user-message traffic. Through 0.1.25
+that made most paid traffic ineligible; from 0.1.26 such a key arrives marked
+cache-only and R009 lets a cache miss run native without changing its cache
+outcome. R015 MUST measure eligibility from post-gateway provider-bound
+requests with their real key state and marker; a synthetic keyless corpus
+cannot satisfy the production-eligibility floor. This spec does not discard
+that key or forgo its possible SPEC-024 discount to inflate MTP coverage.
 
 A recoverable native-MTP failure MAY fall back once before buyer-visible
 output only after restoring exact pre-request state and proving that no SSE
@@ -752,21 +754,42 @@ padding. Relay and gateway observers may still infer timing/burst metadata;
 SPEC-041 does not claim to hide that side channel. Status and buyer output MUST
 NOT make the inference more explicit.
 
-### MTP-9 — cache-reuse and persistence exclusion (SPEC-048-R009)
+### MTP-9 — cache-reuse and persistence boundary (SPEC-048-R009)
 
-Until SPEC-024 and SPEC-037 explicitly admit native-MTP state, the unified
-decode-path selector MUST classify any request with a nonempty
+Until SPEC-024 and SPEC-037 admit native-MTP state for reuse, the unified
+decode-path selector MUST classify a request with a nonempty sticky
 `conversation_key` as ordinary before continuous-batch admission or any
-conversation-cache/disk-cache `begin()`, lease, promotion, reuse, or commit. A
-native-MTP request therefore has no conversation key, MUST acquire no lease,
-must commit no reusable entry, and must leave no key busy. `cached_prompt_tokens`
-MUST remain zero for the native-MTP attempt.
+conversation-cache/disk-cache `begin()`, lease, promotion, reuse, or commit.
 
-This exclusion applies to both streaming and non-streaming paths and to
-pre-output failures, cancellations, and successful completions. A future
-cache-reuse amendment must prove target KV plus every MTP/recurrent state
-component and must preserve SPEC-024 billing isolation before changing this
-requirement.
+A key the coordinator marked cache-only (SPEC-004 v0.3.6, a SPEC-006-R012
+auto-prefix key) MAY stay `native_mtp` through selection. It then takes
+exactly the conversation-cache lease the ordinary path would take, and that
+lease decides the path before the first native proposal or target-state
+mutation, so the change is a selection and never a fallback:
+
+- a lease reporting `cached_prompt_tokens > 0`, no lease, or a runtime that
+  would hand back a retained paged-KV entry rather than a serial-format one
+  reselects `ordinary` with reason `conversation_key`, keeping the ordinary
+  cache-hit decision and discount;
+- otherwise (a miss on a runtime that publishes keyed rows in the SPEC-038
+  FR-CB4 serial conversation-cache format) the row stays `native_mtp`, keeps
+  the lease, and reports `cached_prompt_tokens = 0`.
+
+Such a native row runs the shared prompt prefill of R007 (the same forward as
+its ordinary peers) and captures the same prompt recurrent checkpoints. At a
+normal terminal it publishes the serial-format entry built from its committed
+target state only: tokens, token count, attention KV, and recurrent
+checkpoints, which MUST equal the ordinary row's entry for the same request.
+No proposal, rejected position, staged state, or drafter state may enter the
+entry. A failed, cancelled, or pre-output-fallback native row publishes
+nothing and aborts its lease. SPEC-037 disk persistence is unchanged: hybrid
+entries are not persisted. A request with no key behaves as before: no lease,
+no commit, no busy key.
+
+This applies to streaming and non-streaming paths. A future amendment that
+reuses native-MTP state, or publishes retained paged-KV handoffs from native
+rows, must prove target KV plus every MTP/recurrent state component and
+preserve SPEC-024 billing isolation.
 
 ### MTP-10 — observability and warm-swap isolation (SPEC-048-R010)
 
@@ -826,9 +849,10 @@ against the oldest supported coordinator.
 Native MTP MUST NOT add or change any buyer request/response, model identity,
 usage, receipt, billing, reward, trust-tier, route, or settlement field. Prompt,
 cached-prompt, completion, and total token accounting MUST equal ordinary decode
-under the same eligibility decision. Because every nonempty conversation key
-routes ordinary under R004/R009, a cache-eligible request retains its ordinary
-cache-hit decision and discount; it is never converted into an MTP cache miss.
+under the same eligibility decision. Because a sticky key routes ordinary and a
+cache-only key runs native only on the miss its ordinary lease would also
+report (R004/R009), a cache-eligible request retains its ordinary cache-hit
+decision and discount; it is never converted into an MTP cache miss.
 SPEC-015 receipts bind only the final target-authoritative output and
 existing usage object; no proposed, rejected, internal MTP, acceptance, or
 decode-path field may enter the receipt.
@@ -1290,8 +1314,8 @@ the journey must include its independent and combined evidence.
 | First Qwen-family MTP artifact | `UNKNOWN` | `@Augustas11` | `#1770` | Legally/provenance-clean immutable model, tokenizer, MTP manifest, and exact hashes. |
 | Upstream MLX Swift release | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | A reviewed fork exception is pinned for this campaign; replacement by an upstream tag remains required by the re-review/removal trigger. |
 | First MLX-native MXFP8 artifact | `UNKNOWN` | `@Augustas11` | `#1770` | SPEC-023/SPEC-010 format, fit, quality, license, provenance, and hardware evidence. |
-| Batched-verify numerical parity | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | On the Mac Studio M3 Ultra, MLX `get_qmv_batch_limit` switches quantized matmul from qmv to qmm once the packed verify reaches 12 tokens for K/N above 4096. Qwen3.5-9B stayed bit-exact at 5 slots (10 packed tokens) and drifted by one bf16 step from 6 slots, flipping near-tied argmaxes. R005 as written forbids any such divergence, so multi-row verification at >=12 packed tokens cannot pass it. Decide between a bounded drift allowance and kernel-matched verification. |
-| Depth-1 throughput value | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | 2026-09-29 Studio pilot, Qwen3.6-35B-A3B, 384-token greedy prompts: native MTP 0.66x/0.61x/0.57x ordinary continuous batching at 2/4/8 slots with 87-90% acceptance. Profiling projects about 1.3x at 2 slots and break-even at 8 after overhead fixes. Evidence and parked work: branch `park/native-mtp-perf-2026-09-29`. |
+| Batched-verify numerical parity | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The qmv-to-qmm switch at 12 packed verify tokens cannot occur for the first tuple: `max_native_active_rows` is 1 and depth is 1, so a packed verify is at most 2 tokens, and rows above the bound ride the ordinary forward at depth zero. A tuple whose bound times `proposal_depth + 1` reaches 12 must decide between a bounded drift allowance and kernel-matched verification before it can be signed. |
+| Depth-1 throughput value | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The 2026-10-06 quiet R015 (policy `e24cb7bc…`, amended 0.1.25 gates) passed every cell for the A3B Studio tuple: one-slot decode ratio 1.19-1.28 with corrected lower bounds +18% to +26%, gated s2/s8 cells non-inferior. The value is one-slot only; the R007 bound of 1 keeps native off above it. |
 
 ## 7. Evidence
 
@@ -1327,6 +1351,21 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.26 (2026-10-06)** — Production eligibility for auto-prefix traffic
+  (#1770). MTP-4/MTP-9/MTP-11: a key the coordinator marks cache-only
+  (SPEC-004 v0.3.6 `conversation_cache_only`, SPEC-024 v0.2.10) stays eligible
+  through selection; the ordinary path's own lease then decides before native
+  state exists. A hit, a missing lease, or a retained paged-KV runtime
+  reselects ordinary with reason `conversation_key`; a miss on a
+  serial-format runtime stays native, keeps the lease, and publishes the same
+  serial-format entry the ordinary row would, from committed target state
+  only. Sticky keys stay ordinary. Without this the gateway's auto-prefix key
+  made nearly all paid traffic ineligible, so R015's 10% post-gateway floor
+  could not be met. MTP-7: a native row in an equal-length prefill group now
+  shares the group's `[B, L]` target forward (R014 rehearsal mixed-row
+  failure); its drafter is seeded from its own slice of that forward's hidden
+  states.
 
 - **0.1.25 (2026-10-06)** — MTP-15 replaces the R015 inter-chunk p95 latency
   gate with a per-output-token latency (TPOT) gate (p95 across a run's

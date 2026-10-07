@@ -84,11 +84,174 @@ class NativeMTPPostGatewayReplayAnalyzeTests(unittest.TestCase):
     def test_exact_conversation_key_semantics(self):
         result = self._run_case(shape_overrides={"conversation_key_present": True})
         self.assertEqual(result["reason"], "block_invalid")
-        self.assertTrue(any("eligible_with_conversation_key" in f for f in result["block_failures"][0]["failures"]))
+        self.assertTrue(any("field_missing:conversation_key_cache_only" in f for f in result["block_failures"][0]["failures"]))
         result = self._run_case(eligible_blocks=0, ineligible_shape_overrides={"pre_capacity_selector_reason": "sampling"})
-        self.assertTrue(any("conversation_key_state_inconsistent" in f for f in result["block_failures"][0]["failures"]))
+        self.assertIn("eligible_request_fraction_below_floor", result["hard_failures"])
         result = self._run_case(eligible_blocks=0, ineligible_shape_overrides={"conversation_key_present": False})
         self.assertTrue(any("conversation_key_reason_without_key" in f for f in result["block_failures"][0]["failures"]))
+
+    def test_cache_only_conversation_key_miss_can_be_eligible(self):
+        result = self._run_case(shape_overrides={
+            "conversation_key_present": True,
+            "conversation_key_cache_only": True,
+            "conversation_cache_lease": "miss",
+            "conversation_cache_cached_prompt_tokens": 0,
+            "conversation_cache_retained_handoff": False,
+        })
+        self.assertEqual(result["overall_status"], "PASS")
+        self.assertGreaterEqual(result["eligibility"]["eligible_request_fraction"], 0.10)
+
+    def test_cache_only_conversation_key_unsafe_native_rejections(self):
+        cases = [
+            (
+                {
+                    "conversation_key_present": True,
+                    "conversation_key_cache_only": False,
+                },
+                "eligible_with_sticky_conversation_key",
+            ),
+            (
+                {
+                    "conversation_key_present": True,
+                    "conversation_key_cache_only": True,
+                },
+                "eligible_without_cache_only_miss_proof",
+            ),
+            (
+                {
+                    "conversation_key_present": True,
+                    "conversation_key_cache_only": True,
+                    "conversation_cache_lease": "missing",
+                    "conversation_cache_cached_prompt_tokens": 0,
+                    "conversation_cache_retained_handoff": False,
+                },
+                "eligible_without_cache_lease",
+            ),
+            (
+                {
+                    "conversation_key_present": True,
+                    "conversation_key_cache_only": True,
+                    "conversation_cache_lease": "hit",
+                    "conversation_cache_cached_prompt_tokens": 12,
+                    "conversation_cache_retained_handoff": False,
+                },
+                "eligible_with_cache_hit",
+            ),
+            (
+                {
+                    "conversation_key_present": True,
+                    "conversation_key_cache_only": True,
+                    "conversation_cache_lease": "miss",
+                    "conversation_cache_cached_prompt_tokens": 0,
+                    "conversation_cache_retained_handoff": True,
+                },
+                "eligible_with_retained_handoff",
+            ),
+        ]
+        for overrides, expected in cases:
+            with self.subTest(expected=expected):
+                result = self._run_case(shape_overrides=overrides)
+                self.assertEqual(result["reason"], "block_invalid")
+                self.assertTrue(any(expected in f for f in result["block_failures"][0]["failures"]))
+
+    def test_cache_only_conversation_key_hit_remains_ordinary(self):
+        result = self._run_case(eligible_blocks=0, ineligible_shape_overrides={
+            "conversation_key_present": True,
+            "conversation_key_cache_only": True,
+            "conversation_cache_lease": "hit",
+            "conversation_cache_cached_prompt_tokens": 16,
+            "conversation_cache_retained_handoff": False,
+        })
+        self.assertEqual(result["overall_status"], "FAIL")
+        self.assertIn("eligible_request_fraction_below_floor", result["hard_failures"])
+
+    def test_conversation_cache_token_proof_is_strictly_typed_and_consistent(self):
+        cases = [
+            (
+                {"conversation_cache_cached_prompt_tokens": False},
+                "sticky_key_with_cached_prompt_tokens",
+                False,
+            ),
+            (
+                {
+                    "conversation_key_present": False,
+                    "conversation_cache_cached_prompt_tokens": False,
+                    "pre_capacity_selector_reason": "sampling",
+                },
+                "field_invalid:conversation_cache_cached_prompt_tokens",
+                False,
+            ),
+            (
+                {
+                    "conversation_key_present": True,
+                    "conversation_key_cache_only": True,
+                    "conversation_cache_lease": "miss",
+                    "conversation_cache_cached_prompt_tokens": 1,
+                    "conversation_cache_retained_handoff": False,
+                },
+                "conversation_cache_miss_with_cached_prompt_tokens",
+                True,
+            ),
+            (
+                {
+                    "conversation_key_present": True,
+                    "conversation_key_cache_only": True,
+                    "conversation_cache_lease": "missing",
+                    "conversation_cache_cached_prompt_tokens": 1,
+                    "conversation_cache_retained_handoff": False,
+                },
+                "conversation_cache_missing_with_cached_prompt_tokens",
+                True,
+            ),
+            (
+                {
+                    "conversation_key_present": True,
+                    "conversation_key_cache_only": True,
+                    "conversation_cache_lease": "hit",
+                    "conversation_cache_cached_prompt_tokens": 0,
+                    "conversation_cache_retained_handoff": False,
+                },
+                "conversation_cache_hit_without_cached_prompt_tokens",
+                True,
+            ),
+        ]
+        for overrides, expected, eligible_shape in cases:
+            with self.subTest(expected=expected):
+                result = self._run_case(
+                    shape_overrides=overrides if eligible_shape else None,
+                    eligible_blocks=2 if eligible_shape else 0,
+                    ineligible_shape_overrides=None if eligible_shape else overrides,
+                )
+                self.assertEqual(result["reason"], "block_invalid")
+                self.assertTrue(any(expected in f for f in result["block_failures"][0]["failures"]))
+
+    def test_keyed_requests_can_reject_for_earlier_selector_reasons(self):
+        result = self._run_case(eligible_blocks=0, ineligible_shape_overrides={
+            "conversation_key_present": True,
+            "conversation_key_cache_only": False,
+            "pre_capacity_selector_reason": "sampling",
+        })
+        self.assertIn("eligible_request_fraction_below_floor", result["hard_failures"])
+
+    def test_conversation_key_proof_must_match_paired_blocks(self):
+        result = self._run_case(
+            shape_overrides={
+                "conversation_key_present": True,
+                "conversation_key_cache_only": True,
+                "conversation_cache_lease": "miss",
+                "conversation_cache_cached_prompt_tokens": 0,
+                "conversation_cache_retained_handoff": False,
+            },
+            disabled_shape_overrides={
+                "conversation_key_present": False,
+                "conversation_key_cache_only": self._DELETE,
+                "conversation_cache_lease": self._DELETE,
+                "conversation_cache_cached_prompt_tokens": self._DELETE,
+                "conversation_cache_retained_handoff": self._DELETE,
+            },
+        )
+        self.assertEqual(result["overall_status"], "FAIL")
+        self.assertTrue(any("shape_sample_mismatch:block 0" in f for f in result["hard_failures"]))
 
     def test_selector_inconsistency(self):
         result = self._run_case(shape_overrides={"pre_capacity_eligible": True, "pre_capacity_selector_reason": "sampling"})
@@ -200,6 +363,7 @@ class NativeMTPPostGatewayReplayAnalyzeTests(unittest.TestCase):
         header_policy_sha=None,
         block_policy_sha=None,
         shape_overrides=None,
+        disabled_shape_overrides=None,
         ineligible_shape_overrides=None,
         drop_mixed_block=None,
         duplicate_block=False,
@@ -265,6 +429,12 @@ class NativeMTPPostGatewayReplayAnalyzeTests(unittest.TestCase):
                 )
             ]
             disabled_shapes = [dict(shape, effective_path="ordinary") for shape in shapes]
+            if block == 0 and disabled_shape_overrides:
+                disabled_shapes = [dict(shape, **disabled_shape_overrides) for shape in disabled_shapes]
+                for shape in disabled_shapes:
+                    for key, value in list(shape.items()):
+                        if value is self._DELETE:
+                            del shape[key]
             records.append(self._block(block, "mtp_disabled", disabled_shapes, disabled_ttft, disabled_itl, disabled_ordinary_tps, disabled_e2e_tps, block_policy_sha or policy_sha))
             if block != drop_mixed_block:
                 records.append(self._block(block, "observed_mixed", shapes, mixed_ttft, mixed_itl, mixed_ordinary_tps, mixed_e2e_tps, block_policy_sha or policy_sha))
@@ -283,7 +453,12 @@ class NativeMTPPostGatewayReplayAnalyzeTests(unittest.TestCase):
             "pre_capacity_eligible": eligible,
             "effective_path": effective_path,
         }
+        if key_present:
+            shape["conversation_key_cache_only"] = False
         shape.update(overrides or {})
+        for key, value in list(shape.items()):
+            if value is NativeMTPPostGatewayReplayAnalyzeTests._DELETE:
+                del shape[key]
         return shape
 
     @staticmethod

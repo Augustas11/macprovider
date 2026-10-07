@@ -1,0 +1,16 @@
+{
+  "exit": 1,
+  "placeholder_fields": [
+    "batch_evidence_sha256",
+    "correctness_evidence_sha256",
+    "quality_evidence_sha256",
+    "security_negative_evidence_sha256",
+    "state_rollback_evidence_sha256"
+  ],
+  "stderr_tail": [
+    "native_mtp_admission_sidecar: $.entries[0].quality_evidence_sha256: is the pending-evidence placeholder; bind the real evidence digest"
+  ],
+  "tuple_benchmark_policy_sha256": "30934c07e5b6ca6dfa569505bbfdb2fd118be719cba81ddf99193a4ebe72d581",
+  "tuple_input": "docs/research/spec048-r015/evidence-2026-10-02-a3b-formal/admission-tuple-input.json",
+  "tuple_runtime_revision": "ef4ff8568c38c640bc90a8176dc3acfe943a288d"
+}

@@ -174,12 +174,12 @@ final class NativeMTPStatusSink: @unchecked Sendable, Equatable {
     }
 
     private let lock = NSLock()
-    private let supported: Bool
-    private let configuredEnabled: Bool
-    private let family: String
-    private let proposalDepth: Int
-    private let throughputDeltaPPM: Int
-    private let resetGeneration: UInt64
+    private var supported: Bool
+    private var configuredEnabled: Bool
+    private var family: String
+    private var proposalDepth: Int
+    private var throughputDeltaPPM: Int
+    private var resetGeneration: UInt64
     private var counters: Counters
     private var activeNativeRows = 0
     private var activeRowsAllDepthZero = false
@@ -220,6 +220,33 @@ final class NativeMTPStatusSink: @unchecked Sendable, Equatable {
             resetGeneration: resetGeneration,
             lastReason: reason
         )
+    }
+
+    /// Takes over `other`'s configuration and counters in place. A running
+    /// scheduler holds this instance in its configuration, so the runtime
+    /// re-publishes status into it (tuple admitted after the self-test,
+    /// disabled, warm swap) instead of replacing it: a replaced sink would
+    /// leave the scheduler recording into an object status never reads.
+    func adopt(_ other: NativeMTPStatusSink) {
+        guard other !== self else { return }
+        let state = other.lock.withLock {
+            (other.supported, other.configuredEnabled, other.family, other.proposalDepth,
+             other.throughputDeltaPPM, other.resetGeneration, other.counters,
+             other.disabledBySaturation, other.lastReason)
+        }
+        lock.withLock {
+            supported = state.0
+            configuredEnabled = state.1
+            family = state.2
+            proposalDepth = state.3
+            throughputDeltaPPM = state.4
+            resetGeneration = state.5
+            counters = state.6
+            disabledBySaturation = state.7
+            lastReason = state.8
+            activeNativeRows = 0
+            activeRowsAllDepthZero = false
+        }
     }
 
     func beginRound(requestedDepths: [Int]) {

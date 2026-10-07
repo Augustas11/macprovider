@@ -1,0 +1,256 @@
+{
+  "binaries": {
+    "lab_cli_sha256": "3e2135b38cca06e2619499bf8ef7bec7884ca4567377117f132cfbfc468ceb98",
+    "lab_cli_source_commit": "71f22d36c3ef11c99d3572f63bb0283f73f19aa5",
+    "metallib_sha256": "84e487182336648a826132e50e7a4cd2cae0bc77ac6eafa89cc72f3a964fdbaf",
+    "release_source_commit": "71f22d36c3ef11c99d3572f63bb0283f73f19aa5",
+    "signed_cli_cdhash": "df44bcf4ef55e543eb49c75187e868b0fce1a8a2",
+    "signed_cli_contains_lab_journey_command": false,
+    "signed_cli_sha256": "a6ea51d7ad19359a21fac63995194523264035fbca2ab32dceeede9d9da739bb",
+    "signed_cli_team": "YF7XNRJUG4",
+    "signed_cli_version": "1.8.217"
+  },
+  "counts": {
+    "FAIL": 11,
+    "NOT_APPLICABLE": 2,
+    "PASS": 9,
+    "RECORDED": 1
+  },
+  "evidence_class": "rehearsal_pre_release_no_signature",
+  "generated_at": "2026-10-06T11:33:53Z",
+  "items": [
+    {
+      "binary": "n/a (repository state)",
+      "check_record": "checks/item1-conformance.json",
+      "check_record_sha256": "7fe0d2a3764ab9d2422c57aa01b2c0041807c713c833d65916ba8c6d2c89398f",
+      "item": "item1-conformance",
+      "status": "FAIL",
+      "summary": "0/21 required requirements conformant; 21 pending (operator promotion gate, expected before a native release)",
+      "title": "R014.1 owner requirements conformant in CONFORMANCE.json"
+    },
+    {
+      "binary": "production origin (read-only GET)",
+      "check_record": "checks/item1-revocation-feed.json",
+      "check_record_sha256": "0b2343f1a086d4dfcbc2c74c13228702c49554c12a71ca5b8509e90a6e629bdf",
+      "item": "item1-revocation-feed",
+      "status": "FAIL",
+      "summary": "no emergency-revocation feed is published at the hard-coded production origin (NativeMTPRevocationFeed.swift:218); absence of the tuple cannot be proven and a released provider fails closed with revocation_state_unavailable (ModelRuntime.swift:8742-8752)",
+      "title": "R014.1 tuple absent from the authenticated emergency-revocation feed"
+    },
+    {
+      "binary": "lab build of release source",
+      "check_record": "checks/item1-sidecar-tuple-binding.json",
+      "check_record_sha256": "cbfdccac12b33ab2c67e76d8d7fa63a8e2c3203b5ec2e894c1fff50b21531d8f",
+      "item": "item1-sidecar-tuple-binding",
+      "status": "FAIL",
+      "summary": "lab-generated sidecar is admitted by the production serve-path loader and its tuple sha recomputes in the repository generator; but the only sidecar that can be generated today binds the lab harness identity (ephemeral key, lab provider revision), not the signed release CDHash/source commit, and no production generator input exists for this release (see delivery-path.md)",
+      "title": "R014.1 admission sidecar generation and its tuple-sha binding"
+    },
+    {
+      "binary": "release source",
+      "check_record": "checks/item2-upstream-dependency.json",
+      "check_record_sha256": "b30356edcc32edf8c35ea09b3e6dfea9335db8a59dcf31770f851bb9f86bc312",
+      "item": "item2-upstream-dependency",
+      "status": "PASS",
+      "summary": "release source pins mlx-swift-lm b181102984a4; SPEC-048 at the release commit records the R003 review closed for it: True",
+      "title": "R014.2 immutable upstream dependency passes SPEC-048-R003"
+    },
+    {
+      "binary": "signed release + lab build",
+      "check_record": "checks/item3-capability-negatives.json",
+      "check_record_sha256": "043a940328bc8ad4eb4d3350e43f87f0a5ca19b099bf692c35374000de4c7cb6",
+      "item": "item3-capability-negatives",
+      "status": "PASS",
+      "summary": "21/21 negative sub-checks hold (lab manifest mutations on the hardware observer; release-binary serve-path rejections with ordinary decode still serving)",
+      "title": "R014.3 capability/manifest negatives"
+    },
+    {
+      "binary": "lab build of release source",
+      "check_record": "checks/item3-greedy-parity.json",
+      "check_record_sha256": "8e01cc18804d76954d6dbe7611cf906af8f57d6524efe0bdbf828600154ecfb5",
+      "item": "item3-greedy-parity",
+      "status": "PASS",
+      "summary": "native output equals isolated ordinary output (token IDs, bytes, usage, terminal) for greedy and seeded-sampled rows",
+      "title": "R014.3 exact greedy parity"
+    },
+    {
+      "binary": "lab build of release source",
+      "check_record": "checks/item3-state-rollback.json",
+      "check_record_sha256": "02036246657b71bf1d3347f0a5e05c00034375db3f08be8ad0892a923f4ca1eb",
+      "item": "item3-state-rollback",
+      "status": "PASS",
+      "summary": "forced rejection on every round and at the paged/hybrid block boundary keeps output parity",
+      "title": "R014.3 cache/state rollback"
+    },
+    {
+      "binary": "lab build of release source",
+      "check_record": "checks/item3-termination.json",
+      "check_record_sha256": "fc08511abcbdd730a716f9a4f91d36db5f212566af6e64a75d1c98c4572fc68a",
+      "item": "item3-termination",
+      "status": "PASS",
+      "summary": "stream/non-stream stop parity and mid-stream cancellation release",
+      "title": "R014.3 termination"
+    },
+    {
+      "binary": "lab build of release source",
+      "check_record": "checks/item3-mixed-row.json",
+      "check_record_sha256": "dfc50aaa3245ebbf1c3cf9df1fe6c326c3f8aa1cd5693fac115fdffe2996c620",
+      "item": "item3-mixed-row",
+      "status": "FAIL",
+      "summary": "FAILED checks journey-mixed-0.parity, journey-mixed-1.parity, journey-mixed-2.parity, journey-mixed-3.parity \u2014 fixture: one 8-row batch mixes native, load-gated, and ineligible ordinary rows with per-row parity against the ordinary batched oracle",
+      "title": "R014.3 mixed-row"
+    },
+    {
+      "binary": "lab build of release source",
+      "check_record": "checks/item3-capacity.json",
+      "check_record_sha256": "04e3c0a6055cca821a7985737e5581d9ad0a6d0a533e9aaa929f30f670409ba0",
+      "item": "item3-capacity",
+      "status": "PASS",
+      "summary": "load gate holds native rows at depth zero above the bound and resolves every hold; slots unchanged; prompt cap selects ordinary",
+      "title": "R014.3 capacity"
+    },
+    {
+      "binary": "lab 280f0e95d (release source minus version bump)",
+      "check_record": "checks/item3-fairness.json",
+      "check_record_sha256": "afa4dbb81357aeb84f1efbacbeb19a20e58e1e24ffa464d36d4c7a66f5a41b55",
+      "item": "item3-fairness",
+      "status": "PASS",
+      "summary": "under mixed native/ordinary load the Holm-corrected p95 TTFT upper bound (ready wait + prefill) is +2.8% at s2 and +1.2% at s8, inside the R007 10% ordinary-row wait bound; no dedicated ready-to-decode-wait fixture exists in the release harness",
+      "title": "R014.3 fairness"
+    },
+    {
+      "binary": "lab build + signed release",
+      "check_record": "checks/item3-accounting.json",
+      "check_record_sha256": "7deb8e9b43ef29e2c1e5321cdeb8e97417fdc8efca60f38db280e7e228cf605c",
+      "item": "item3-accounting",
+      "status": "FAIL",
+      "summary": "usage tokens and terminal reasons match ordinary for every native row (lab); receipt/billing invariance for native rows cannot be exercised end to end because no released provider can admit the tuple (item1-revocation-feed, delivery-path.md)",
+      "title": "R014.3 accounting"
+    },
+    {
+      "binary": "n/a",
+      "check_record": "checks/item4-mxfp8.json",
+      "check_record_sha256": "b1d7b959d90f0d06dbb69a1b58226002bd4eb906ea38021d3ffaeb93a38b235f",
+      "item": "item4-mxfp8",
+      "status": "NOT_APPLICABLE",
+      "summary": "tuple quantization is mlx_affine 4-bit, not MXFP8; R012 MXFP8 gate does not apply",
+      "title": "R014.4 independent MXFP8 qualification"
+    },
+    {
+      "binary": "signed release + repository records",
+      "check_record": "checks/item5-cb15-a5-pkv13.json",
+      "check_record_sha256": "6507481a06ae26aee63718eeba4b401b249d41541e826c4b8795f0fd721ac34b",
+      "item": "item5-cb15-a5-pkv13",
+      "status": "FAIL",
+      "summary": "the signed release attaches paged KV and batches the tuple on the Studio, but the release's signed continuous-batching policy carries no entries, no committed FR-CB15/FR-PKV13 enable-gate record names qwen/qwen3.6-35b-a3b, and Gate A5 is recorded NOT GREEN (M7 decision)",
+      "title": "R014.5 SPEC-038 FR-CB15/Gate A5 and SPEC-039 FR-PKV13 for the tuple"
+    },
+    {
+      "binary": "lab 280f0e95d (release source minus version bump)",
+      "check_record": "checks/item5-r015.json",
+      "check_record_sha256": "23e42c7324f08a4390189f26bee254ec936dd7d1057faa32557810f57d521dad",
+      "item": "item5-r015",
+      "status": "RECORDED",
+      "summary": "existing R015 evidence status FAIL (not re-run): one-slot decode-throughput corrected lower bounds +10.0% to +13.6% against the +15% gate (native step cost); s2 gated cell FAIL, s8 gated cell PASS; fix is draft PR #1862, out of scope",
+      "title": "R014.5 SPEC-048-R015 on every advertised tuple"
+    },
+    {
+      "binary": "lab build of release source",
+      "check_record": "checks/item6-serving-journey.json",
+      "check_record_sha256": "82517f066e0209fd2dde58f0b41762aeb77bf5d8ccdf2d749b9de30db3cfb5fb",
+      "item": "item6-serving-journey",
+      "status": "FAIL",
+      "summary": "no signed JOURNEY-NATIVE-MTP-SERVING result exists for the tuple; the lab hardware steps report executed_steps_status=fail journey_complete=False, and steps 01-03, 10, 11, the coordinator canary half of 12, 14, and 15 are pending in the harness",
+      "title": "R014.6 signed JOURNEY-NATIVE-MTP-SERVING result"
+    },
+    {
+      "binary": "n/a",
+      "check_record": "checks/item7-audit.json",
+      "check_record_sha256": "0529e9be0c6de52646a56130edae7b7e42a2eff7d6b377f263871c5a857555f6",
+      "item": "item7-audit",
+      "status": "NOT_APPLICABLE",
+      "summary": "three-lane frozen-diff review runs at release freeze; out of scope for this rehearsal",
+      "title": "R014.7 frozen-diff three-lane review"
+    },
+    {
+      "binary": "signed release",
+      "check_record": "checks/item8-isolated-loopback.json",
+      "check_record_sha256": "5bd48a50926cddc2983a7c0746d9b619ddd0064f00254f214785ac1684f379fd",
+      "item": "item8-isolated-loopback",
+      "status": "PASS",
+      "summary": "signed release serves no-join on isolated loopback: native MTP default-off, status object present, ordinary streaming/non-streaming and 8-way continuous batching on the tuple",
+      "title": "R014.8 release candidate revalidated in isolated loopback"
+    },
+    {
+      "binary": "signed release",
+      "check_record": "checks/item8-native-admission-e2e.json",
+      "check_record_sha256": "bfedb93d7689923b6fb9c25e1f31fd68615aa24f7e2153ceee81ba085eba1bcd",
+      "item": "item8-native-admission-e2e",
+      "status": "FAIL",
+      "summary": "signed release joined the isolated loopback coordinator and served real buyer requests through the gateway, but native MTP was never admitted: the release serve path rejects with revocation_state_unavailable and no tuple offer reached the coordinator",
+      "title": "R014.8 native admission end to end with buyer requests (isolated coordinator)"
+    },
+    {
+      "binary": "signed release + isolated coordinator built from release source",
+      "check_record": "checks/item8-config-enable-disable.json",
+      "check_record_sha256": "7739c464a7da3a3318a41e520bc9e3e817efbc84c95d60032d90bdc1f6773667",
+      "item": "item8-config-enable-disable",
+      "status": "FAIL",
+      "summary": "coordinator config-enable (pool.native_mtp_canary) loaded the signed bank but the tuple could not be enabled because the provider never offers it; disable leaves ordinary decode serving every request",
+      "title": "R014.8 config-enable the tuple, then disable and fall back to ordinary"
+    },
+    {
+      "binary": "published v1.8.217 assets",
+      "check_record": "checks/item8-release-asset-identity.json",
+      "check_record_sha256": "53bda0751915fc7b069fb1edc9fe9cc726c30d64b0959f148276b90a9b87bd61",
+      "item": "item8-release-asset-identity",
+      "status": "PASS",
+      "summary": "published v1.8.217: Malibu.app-embedded CLI and tarball CLI are byte-identical (a6ea51d7ad19\u2026), signed code identity matches, checksums match",
+      "title": "R014.8 Malibu.app vs tarball CLI byte identity"
+    },
+    {
+      "binary": "published v1.8.207 -> v1.8.217",
+      "check_record": "checks/item8-updater-path.json",
+      "check_record_sha256": "8ebe4b5b61912baa07a33b5977d3b980d4c77a8b3516c7f11801764996e3d7ef",
+      "item": "item8-updater-path",
+      "status": "FAIL",
+      "summary": "v1.8.207 updater reports it is up to date: the newest signed discovery transport (release-discovery-v1-2393341797793794) still targets v1.8.207@d98b74a6a158000dabaecb89d75886b6817e9d0f, so v1.8.217 is not offered to the previous stable until the post-publication rollout publishes its transport",
+      "title": "R014.8 previous-stable updater path"
+    },
+    {
+      "binary": "all running",
+      "check_record": "checks/item9-no-unreleased-live.json",
+      "check_record_sha256": "b2ee521c12d58042b839bdf393708e28c6e0534daf75dd11a44797e9cb2c8167",
+      "item": "item9-no-unreleased-live",
+      "status": "FAIL",
+      "summary": "2 live-connected process(es) run unreleased bytes",
+      "title": "R014.9 no unreleased local binary connected to the live coordinator"
+    }
+  ],
+  "lab_lock": {
+    "acquired_at": "2026-10-06T10:31:53Z",
+    "foreign_lock_waits": 0,
+    "released_at": "2026-10-06T11:33:53Z"
+  },
+  "requirement_id": "SPEC-048-R014",
+  "run": {
+    "finished_at": "2026-10-06T11:33:31Z",
+    "phase_errors": {},
+    "phases": [
+      "live"
+    ],
+    "started_at": "2026-10-06T11:33:30Z"
+  },
+  "schema": "macprovider.native-mtp-r014-rehearsal-result.v1",
+  "tuple": {
+    "hardware": {
+      "hw_model": "Mac15,14",
+      "memsize": "274877906944",
+      "os_build": "26A434"
+    },
+    "max_native_active_rows": 1,
+    "max_prompt_tokens": 4096,
+    "model_key": "qwen/qwen3.6-35b-a3b",
+    "qualified_slots": 8
+  }
+}

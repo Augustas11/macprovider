@@ -547,7 +547,7 @@ enum ContinuousBatchingSignedPolicy {
 extension AutotuneStaticInputs {
     func loadContinuousBatchingPolicy(
         candidateCatalog catalog: AutotuneStaticSelection<CandidateCatalog>,
-        baseURL: URL = URL(string: "https://coordinator.malibu.tech")!
+        baseURL: URL = StaticFeedOrigin.base
     ) async -> ContinuousBatchingPolicyLoadResult {
         guard !catalog.usedFallback,
               catalog.signerKeyID != nil,

@@ -1,0 +1,6 @@
+$ <operator-home>/mtp-r014-journey-217/src/phase3-binary/.build/arm64-apple-macosx/release/macprovider-cli native-mtp-hardware-e2e --root <operator-home>/mtp-r014-journey-217/work/neg-symlink-weight-file --model-id qwen/qwen3.6-35b-a3b --max-batch 2
+exit=1
+--- stdout
+
+--- stderr
+Error: MLX snapshot directory is not a plain snapshot: not a regular single-link file

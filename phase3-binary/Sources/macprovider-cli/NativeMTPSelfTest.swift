@@ -351,7 +351,12 @@ enum NativeMTPSelfTest {
             bonusTokens: try uint64(countersObject, "bonus"),
             committedTokens: try uint64(countersObject, "committed")
         )
-        guard counters.committedTokens == UInt64(expectedTokenIDs.count) else {
+        let fixedProposalDepth = try int(object, "fixed_proposal_depth", min: 1, max: NativeMTPSelfTestChallenge.maxProposalDepth)
+        guard committedCountConsistent(
+            tokens: UInt64(expectedTokenIDs.count),
+            committed: counters.committedTokens,
+            depth: UInt64(fixedProposalDepth)
+        ) else {
             throw NativeMTPSelfTestError.missingOrInvalidField("expected_counters.committed")
         }
         return NativeMTPSelfTestChallenge(
@@ -363,7 +368,7 @@ enum NativeMTPSelfTest {
             mtpManifestSHA256: try sha256(object, "mtp_manifest_sha256"),
             promptTokenIDs: promptTokenIDs,
             maxCompletionTokens: try int(object, "max_completion_tokens", min: 1, max: NativeMTPSelfTestChallenge.maxCompletionTokens),
-            fixedProposalDepth: try int(object, "fixed_proposal_depth", min: 1, max: NativeMTPSelfTestChallenge.maxProposalDepth),
+            fixedProposalDepth: fixedProposalDepth,
             expectedTokenIDs: expectedTokenIDs,
             expectedTokenIDSHA256: expectedTokenIDSHA256,
             expectedTerminalReason: try printableString(object, "expected_terminal_reason", maxBytes: 64),
@@ -413,6 +418,16 @@ enum NativeMTPSelfTest {
             return NativeMTPSelfTestEvaluation(passed: false, reason: .committedStateMismatch)
         }
         return NativeMTPSelfTestEvaluation(passed: true, reason: .passed)
+    }
+
+    /// `expected_counters.committed` against the expected sequence (SPEC-031
+    /// R033). The first output token is sampled by the prefill forward,
+    /// outside every verify round, so the scheduler commits one token fewer
+    /// than it emits; a round ending on a terminal may commit up to `depth`
+    /// candidates past the emitted sequence. Same bound as the coordinator.
+    static func committedCountConsistent(tokens: UInt64, committed: UInt64, depth: UInt64) -> Bool {
+        guard tokens > 0 else { return committed == 0 }
+        return committed + 1 >= tokens && committed + 1 <= tokens + depth
     }
 
     static func tokenDigest(_ tokens: [Int]) -> String {
