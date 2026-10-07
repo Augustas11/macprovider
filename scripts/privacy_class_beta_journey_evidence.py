@@ -34,7 +34,6 @@ import ipaddress
 import json
 import re
 import subprocess
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -44,6 +43,7 @@ from check_spec_governance import (
     DuplicateJSONKeyError,
     JOURNEY_RESULT_PAYLOAD_SCHEMA,
     _unique_json_object,
+    verify_pinned_public_ecdsa_sha256,
 )
 
 
@@ -2392,15 +2392,8 @@ class Checks:
         expect(provider_identity.get("binary_sha256") == identity["binary_sha256"] and provider_identity.get("asset") == f"macprovider-cli-v{identity['binary_version']}-darwin-arm64.tar.gz", errors, "release metadata must bind the tested binary bytes")
         for key in approved:
             expect(approved[key] == identity[key], errors, f"cryptographically verified release identity {key} must equal step-01")
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "payload.json").write_bytes(payload)
-            (root / "payload.sig").write_bytes(signature)
-            (root / "invalid.json").write_bytes(invalid_payload)
-            (root / "invalid.sig").write_bytes(invalid_signature)
-            (root / "public.pem").write_bytes(public_key)
-            verified = subprocess.run(["openssl", "dgst", "-sha256", "-verify", str(root / "public.pem"), "-signature", str(root / "payload.sig"), str(root / "payload.json")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0
-            invalid_verified = subprocess.run(["openssl", "dgst", "-sha256", "-verify", str(root / "public.pem"), "-signature", str(root / "invalid.sig"), str(root / "invalid.json")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0
+        verified = verify_pinned_public_ecdsa_sha256(public_key, self.trusted_release_public_key_sha256, payload, signature)
+        invalid_verified = verify_pinned_public_ecdsa_sha256(public_key, self.trusted_release_public_key_sha256, invalid_payload, invalid_signature)
         expect(verified, errors, "release metadata signature must cryptographically verify over exact bytes")
         invalid_doc = parse_json(invalid_payload.decode("utf-8"), V2_SOURCE_CONTRACT["release-derived-approval.json"]["release_invalid_metadata"])
         invalid_identity = invalid_doc.get("provider_code_identity") if isinstance(invalid_doc, dict) else None

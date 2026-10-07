@@ -152,3 +152,23 @@ also passed. These are targeted results for the current working diff, not final
 frozen-candidate proof. G003 remains pending a fresh full audit and CI against a
 new frozen SHA. No G003 pass, hardware proof, rollout clearance, production
 change, or activation authorization is claimed.
+
+### `dda5168d1fad38207c51203b20d3250f9042d762` audit and CI disposition
+
+The full 74-file candidate received these frozen-SHA review results:
+
+- Security: CLEAR, 0 CRITICAL / 0 HIGH / 0 MEDIUM.
+- Architecture: CLEAR, 0 CRITICAL / 0 HIGH / 0 MEDIUM.
+- Code: 0 findings. The reviewer left a COMMENT only because LSP was
+  unavailable; replacement validation is still required.
+
+Required CI run `37557833947` did not pass. Deploy job `112588057931` failed the
+static signed-privacy workflow guard because public signature verification made
+a direct OpenSSL call. The root cause is verification at the wrong abstraction
+layer, not a need to weaken the signing guard.
+
+The narrow correction is assigned to the primary implementation owner: move
+public verification to the existing trusted public API helper without weakening
+the signing guard. G003 remains pending a new frozen SHA, replacement validation,
+fresh full audits, and successful CI. The `dda5168d1fad38207c51203b20d3250f9042d762`
+review results are retained as historical evidence and are not a G003 pass.
