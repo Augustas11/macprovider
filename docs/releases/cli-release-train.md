@@ -355,10 +355,12 @@ proof that the fix has shipped in the private 222 candidate or a public release.
 
 Layer2 [signing run 37597017902](https://github.com/Augustas11/macprovider/actions/runs/37597017902)
 and creator [signing run 37597062267](https://github.com/Augustas11/macprovider/actions/runs/37597062267)
-succeeded. External-runtime
+succeeded, as did external-runtime
 [signing/promotion run 37597012552](https://github.com/Augustas11/macprovider/actions/runs/37597012552)
-was still running at this update. Workflow success alone is not landed
-conformance: artifact verification and reviewed integration remain pending.
+(completed 2026-10-07 09:09Z). All three exported envelopes passed targeted
+signature, artifact-binding, expiry and current-selector verification. Reviewed
+integration remains pending; only the external-runtime result promotes its
+three mapped rows. Workflow success alone is not landed conformance.
 These evidence-only workflows neither publish a CLI nor activate an external
 Creator launch.
 
