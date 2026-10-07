@@ -303,12 +303,13 @@ private final class NativeMTPJourneyRunner {
         override: NativeMTPLabProposalOverride
     ) async throws -> NativeMTPJourneyStep {
         var step = NativeMTPJourneyStep(id: "step-05-cache-state-boundary")
-        step.uncovered = [
-            "actual aligned-prefix hidden/cache state equality against ordinary decode; current state observer records native-only digests and does not expose ordinary afterDecode committed-prefix cache events",
-        ]
-        let stateObserver = NativeMTPStateDigestObserver()
-        guard await native.installLabNativeMTPStateDigestObserver(stateObserver) else {
-            throw NativeMTPHardwareE2EError.assertionFailed("native runtime cannot install native-MTP state digest observer")
+        let ordinaryStateObserver = NativeMTPStateDigestObserver()
+        let nativeStateObserver = NativeMTPStateDigestObserver()
+        guard await ordinary.installLabNativeMTPStateDigestObserver(ordinaryStateObserver),
+              await native.installLabNativeMTPStateDigestObserver(nativeStateObserver) else {
+            _ = await ordinary.installLabNativeMTPStateDigestObserver(nil)
+            _ = await native.installLabNativeMTPStateDigestObserver(nil)
+            throw NativeMTPHardwareE2EError.assertionFailed("runtimes cannot install paired native-MTP state digest observers")
         }
         do {
             let cases = [
@@ -369,21 +370,50 @@ private final class NativeMTPJourneyRunner {
                 step.check("\(id).state_probe_terminal_equal", nativeProbe.terminalStatus == oracleProbe.terminalStatus)
                 step.check("\(id).state_probe_native_counters_present", nativeProbe.nativeMTPCounters != nil)
                 step.check("\(id).token_counter_terminal_digest_parity", stateDigest != nil && stateDigest == oracleStateDigest)
-                let stateRecords = stateObserver.snapshot().filter { $0.requestID == id }
+                let ordinaryStateRecords = ordinaryStateObserver.snapshot().filter { $0.requestID == id }
+                let ordinaryAfterDecode = ordinaryStateRecords.filter { $0.phase == .ordinaryAfterDecode }
+                let stateRecords = nativeStateObserver.snapshot().filter { $0.requestID == id }
                 let phases = Set(stateRecords.map(\.phase))
                 let afterVerify = stateRecords.filter { $0.phase == .afterVerify }
-                let terminalPhasePresent = phases.contains(.afterFinalize) || phases.contains(.abort)
+                let afterFinalize = stateRecords.filter { $0.phase == .afterFinalize }
+                let beforeAbort = stateRecords.filter { $0.phase == .beforeAbort }
+                let afterAbort = stateRecords.filter { $0.phase == .afterAbort }
+                let terminalPhasePresent = phases.contains(.afterFinalize) || phases.contains(.afterAbort) || phases.contains(.abort)
+                let ordinaryCacheByTokenCount = Dictionary(ordinaryAfterDecode.map { ($0.committedKVTokenCount, $0.cacheDigestSHA256) }, uniquingKeysWith: { _, latest in latest })
+                let alignedFinalizePairs = afterFinalize.compactMap { nativeRecord -> (native: NativeMTPStateDigestRecord, ordinaryCache: String)? in
+                    guard let ordinaryCache = ordinaryCacheByTokenCount[nativeRecord.committedKVTokenCount] else { return nil }
+                    return (nativeRecord, ordinaryCache)
+                }
+                let alignedPrefixCacheMatches = !afterFinalize.isEmpty
+                    && alignedFinalizePairs.count == afterFinalize.count
+                    && alignedFinalizePairs.allSatisfy { $0.native.cacheDigestSHA256 == $0.ordinaryCache }
+                let abortPairs = Array(zip(beforeAbort, afterAbort))
+                let abortStateStable = !abortPairs.isEmpty && beforeAbort.count == afterAbort.count && abortPairs.allSatisfy { before, after in
+                    before.committedKVTokenCount == after.committedKVTokenCount
+                        && before.cacheDigestSHA256 == after.cacheDigestSHA256
+                        && before.drafterDigestSHA256 == after.drafterDigestSHA256
+                }
+                step.check("\(id).ordinary_state_observer_after_decode", !ordinaryAfterDecode.isEmpty)
                 step.check("\(id).native_state_observer_records", !stateRecords.isEmpty)
                 step.check("\(id).native_state_observer_after_verify", !afterVerify.isEmpty)
                 step.check("\(id).native_state_observer_terminal_phase", terminalPhasePresent)
-                step.check("\(id).native_state_observer_raw_digest_shape", stateRecords.allSatisfy {
+                step.check("\(id).state_observer_raw_digest_shape", (ordinaryStateRecords + stateRecords).allSatisfy {
                     isSHA256Hex($0.digestSHA256)
                         && isSHA256Hex($0.cacheDigestSHA256)
                         && ($0.drafterDigestSHA256.map { isSHA256Hex($0) } ?? true)
                         && ($0.pendingTargetDigestSHA256.map { isSHA256Hex($0) } ?? true)
                 })
+                step.check("\(id).aligned_prefix_cache_digest_comparison", alignedPrefixCacheMatches)
+                let recomputedDrafterRecords = stateRecords.filter {
+                    $0.phase == .afterFinalize && $0.drafterRecomputeDigestSHA256 != nil
+                }
+                step.check("\(id).independent_drafter_recomputation_observed", !afterFinalize.isEmpty && recomputedDrafterRecords.count == afterFinalize.count)
+                step.check("\(id).independent_drafter_recomputation_equal", recomputedDrafterRecords.allSatisfy {
+                    $0.drafterDigestSHA256 != nil && $0.drafterDigestSHA256 == $0.drafterRecomputeDigestSHA256
+                })
                 if id.hasPrefix("journey-reject-all-") {
-                    step.check("\(id).native_state_observer_reject_abort", phases.contains(.abort))
+                    step.check("\(id).native_state_observer_reject_abort", phases.contains(.beforeAbort) && phases.contains(.afterAbort))
+                    step.check("\(id).abort_cache_and_drafter_state_stable", abortStateStable)
                 }
                 step.details[id] = [
                     "forced_rounds": forced,
@@ -392,16 +422,22 @@ private final class NativeMTPJourneyRunner {
                     "rejected": delta.rejectedTokens,
                     "token_counter_terminal_digest": stateDigest ?? "",
                     "state_probe_tokens": nativeProbe.generatedTokens.count,
-                    "state_observer_phases": Array(phases.map(\.rawValue)).sorted(),
-                    "state_observer_record_count": stateRecords.count,
+                    "ordinary_state_observer_record_count": ordinaryStateRecords.count,
+                    "native_state_observer_phases": Array(phases.map(\.rawValue)).sorted(),
+                    "native_state_observer_record_count": stateRecords.count,
+                    "aligned_prefix_cache_pairs": alignedFinalizePairs.count,
+                    "independent_drafter_recompute_records": recomputedDrafterRecords.count,
+                    "abort_state_pairs": abortPairs.count,
                     "state_observer_latest_cache_sha256": stateRecords.last?.cacheDigestSHA256 ?? "",
                     "state_observer_latest_target_sha256": stateRecords.last?.pendingTargetDigestSHA256 ?? "",
-                    "state_observer_scope": "native_only_no_ordinary_cache_comparison",
+                    "state_observer_scope": "ordinary_after_decode_vs_native_after_finalize_cache_digest",
                 ]
             }
+            _ = await ordinary.installLabNativeMTPStateDigestObserver(nil)
             _ = await native.installLabNativeMTPStateDigestObserver(nil)
             return step
         } catch {
+            _ = await ordinary.installLabNativeMTPStateDigestObserver(nil)
             _ = await native.installLabNativeMTPStateDigestObserver(nil)
             throw error
         }
@@ -411,115 +447,161 @@ private final class NativeMTPJourneyRunner {
     /// string, a max-tokens terminal, and a sampled row.
     private func streamingStop(ordinary: ModelRuntime, native: ModelRuntime, recorder: NativeMTPHardwareAdmissionRecorder) async throws -> NativeMTPJourneyStep {
         var step = NativeMTPJourneyStep(id: "step-06-streaming-stop")
-        step.uncovered = [
-            "stop string verified to span a native proposal/round boundary; current journey evidence proves stream/non-stream parity, consumer cancellation release, and post-output fault handling",
-        ]
-        let cases: [(String, String, [String]?, Int, Double)] = [
-            ("journey-stream-stop", "Count from one to thirty in English words, separated by commas.", [" twelve"], 256, 0),
-            ("journey-stream-length", "Write a long essay about the history of printing.", nil, 160, 0),
-            // The A3B response did not reach EOS inside 64 tokens, so that cap
-            // accidentally duplicated the length-terminal case instead of
-            // exercising the model's end-of-sequence terminal.
-            ("journey-stream-eos", "Reply with exactly the single word OK and nothing else.", nil, 512, 0),
-            ("journey-stream-sampled", "Invent a recipe for a winter soup.", nil, 160, 0.7),
-        ]
-        var terminals: [String: String] = [:]
-        for (id, prompt, stop, maxTokens, temperature) in cases {
-            // Distinct scheduler ids per mode: a reused id would replay the
-            // retained terminal result instead of generating again. Each
-            // mode compares with ordinary under the same id (same seed).
-            let plainID = id + "-ns"
-            let streamID = id + "-s"
-            let plain = try makeRequest(id: plainID, prompt: prompt, maxTokens: maxTokens, temperature: temperature, topP: 1, stop: stop)
-            let streamed = try makeRequest(id: streamID, prompt: prompt, maxTokens: maxTokens, temperature: temperature, topP: 1, stop: stop, stream: true)
-            let expected = try await ordinary.complete(plain)
-            let nonStreaming = try await native.complete(plain)
-            let (expectedStream, expectedText) = try await streamCollect(streamed, runtime: ordinary)
-            let (streamingResult, text) = try await streamCollect(streamed, runtime: native)
-            step.check("\(id).non_streaming_parity", same(expected, nonStreaming))
-            step.check("\(id).streaming_parity", same(expectedStream, streamingResult))
-            step.check("\(id).streamed_text_equals_content", text == streamingResult.content && expectedText == expectedStream.content)
-            if temperature == 0 {
-                step.check("\(id).streaming_equals_non_streaming", same(expected, streamingResult))
-            }
-            step.check("\(id).native_admitted", lastPath(recorder, plainID) == .nativeMTP && lastPath(recorder, streamID) == .nativeMTP)
-            terminals[id] = expected.finishReason
+        let phaseTrap = NativeMTPLabPhaseTrap(cancellations: [:])
+        let phaseTrapInstalled = await native.installLabNativeMTPPhaseTrap(phaseTrap)
+        let commitObserver = NativeMTPLabCommittedTokenTimingObserver()
+        let commitObserverInstalled = await native.installLabNativeMTPCommitTimingObserver(commitObserver)
+        guard phaseTrapInstalled, commitObserverInstalled else {
+            _ = await native.installLabNativeMTPPhaseTrap(nil)
+            _ = await native.installLabNativeMTPCommitTimingObserver(nil)
+            throw NativeMTPHardwareE2EError.assertionFailed("native runtime cannot install step-06 phase/commit observers")
         }
-        step.check("stop_terminal_observed", terminals["journey-stream-stop"] == "stop")
-        step.check("length_terminal_observed", terminals["journey-stream-length"] == "length")
-        step.check("eos_terminal_observed", terminals["journey-stream-eos"] == "stop")
-
-        let earlyStopID = "journey-stream-early-consumer-stop"
-        let earlyStopRequest = try makeRequest(
-            id: earlyStopID,
-            prompt: "Write a long numbered explanation of how sailors navigate by stars.",
-            maxTokens: 512,
-            temperature: 0,
-            topP: 1,
-            stream: true
-        )
-        let earlyStopChunks = NativeMTPJourneyCounter()
-        let earlyStopHandle = try await native.acquireRequestHandle(earlyStopRequest)
-        var earlyStopCancelled = false
-        var earlyStopCompleted = false
         do {
-            _ = try await native.stream(
-                earlyStopRequest,
-                with: earlyStopHandle,
-                shouldCancel: { earlyStopChunks.value >= 4 }
-            ) { chunk in
-                if case .content(let text) = chunk, !text.isEmpty { earlyStopChunks.increment() }
+            let cases: [(String, String, [String]?, Int, Double)] = [
+                ("journey-stream-stop", "Count from one to thirty in English words, separated by commas.", [" twelve"], 256, 0),
+                ("journey-stream-length", "Write a long essay about the history of printing.", nil, 160, 0),
+                // The A3B response did not reach EOS inside 64 tokens, so that cap
+                // accidentally duplicated the length-terminal case instead of
+                // exercising the model's end-of-sequence terminal.
+                ("journey-stream-eos", "Reply with exactly the single word OK and nothing else.", nil, 512, 0),
+                ("journey-stream-sampled", "Invent a recipe for a winter soup.", nil, 160, 0.7),
+            ]
+            var terminals: [String: String] = [:]
+            var streamResults: [String: CompletionResult] = [:]
+            for (id, prompt, stop, maxTokens, temperature) in cases {
+                // Distinct scheduler ids per mode: a reused id would replay the
+                // retained terminal result instead of generating again. Each
+                // mode compares with ordinary under the same id (same seed).
+                let plainID = id + "-ns"
+                let streamID = id + "-s"
+                let plain = try makeRequest(id: plainID, prompt: prompt, maxTokens: maxTokens, temperature: temperature, topP: 1, stop: stop)
+                let streamed = try makeRequest(id: streamID, prompt: prompt, maxTokens: maxTokens, temperature: temperature, topP: 1, stop: stop, stream: true)
+                let expected = try await ordinary.complete(plain)
+                let nonStreaming = try await native.complete(plain)
+                let (expectedStream, expectedText) = try await streamCollect(streamed, runtime: ordinary)
+                let (streamingResult, text) = try await streamCollect(streamed, runtime: native)
+                step.check("\(id).non_streaming_parity", same(expected, nonStreaming))
+                step.check("\(id).streaming_parity", same(expectedStream, streamingResult))
+                step.check("\(id).streamed_text_equals_content", text == streamingResult.content && expectedText == expectedStream.content)
+                if temperature == 0 {
+                    step.check("\(id).streaming_equals_non_streaming", same(expected, streamingResult))
+                }
+                step.check("\(id).native_admitted", lastPath(recorder, plainID) == .nativeMTP && lastPath(recorder, streamID) == .nativeMTP)
+                terminals[id] = expected.finishReason
+                streamResults[id] = streamingResult
             }
-            earlyStopCompleted = true
-        } catch is CancellationError {
-            earlyStopCancelled = true
-        } catch {
-            step.details["early_consumer_stop_error"] = String(describing: error)
-        }
-        await native.unregisterInFlight(earlyStopHandle.registrationID)
-        let earlyStopIdle = try await waitForSchedulerIdle(native)
-        step.check("early_consumer_stop.native_admitted", lastPath(recorder, earlyStopID) == .nativeMTP)
-        step.check("early_consumer_stop.after_visible_output", earlyStopChunks.value >= 4)
-        step.check("early_consumer_stop.cancelled_not_completed", earlyStopCancelled && !earlyStopCompleted)
-        step.check("early_consumer_stop.scheduler_released_row", earlyStopIdle)
-        let faultID = "journey-stream-postoutput-fault"
-        let fault = NativeMTPLabPostoutputFault(requestIDs: [faultID])
-        let faultInstalled = await native.installLabNativeMTPPostoutputFault(fault)
-        let faultBefore = await native.currentSnapshot().nativeMTPStatus
-        let faultRequest = try makeRequest(
-            id: faultID,
-            prompt: "Write a long numbered field guide to constellations used by navigators.",
-            maxTokens: 512,
-            temperature: 0,
-            topP: 1,
-            stream: true
-        )
-        var faultChunks = 0
-        var faultCompleted = false
-        var faultErrored = false
-        do {
-            _ = try await streamCollect(faultRequest, runtime: native) { piece in
-                if !piece.isEmpty { faultChunks += 1 }
-            }
-            faultCompleted = true
-        } catch {
-            faultErrored = true
-            step.details["postoutput_fault_error"] = String(describing: error)
-        }
-        _ = await native.installLabNativeMTPPostoutputFault(nil)
-        let faultAfter = await native.currentSnapshot().nativeMTPStatus
-        step.check("postoutput_fault.installed", faultInstalled)
-        step.check("postoutput_fault.native_admitted", lastPath(recorder, faultID) == .nativeMTP)
-        step.check("postoutput_fault.after_visible_output", faultChunks > 0)
-        step.check("postoutput_fault.failed_not_completed", faultErrored && !faultCompleted)
-        step.check("postoutput_fault.counter_incremented", faultAfter.postoutputFailures > faultBefore.postoutputFailures)
-        step.check("postoutput_fault.hook_fired", fault.snapshot().contains(faultID))
+            step.check("stop_terminal_observed", terminals["journey-stream-stop"] == "stop")
+            step.check("length_terminal_observed", terminals["journey-stream-length"] == "length")
+            step.check("eos_terminal_observed", terminals["journey-stream-eos"] == "stop")
 
-        step.details["terminals"] = terminals
-        step.details["early_consumer_stop_chunks"] = earlyStopChunks.value
-        step.details["postoutput_fault_chunks"] = faultChunks
-        step.details["postoutput_fault_fired"] = fault.snapshot()
-        return step
+            let stopStreamID = "journey-stream-stop-s"
+            let stopPhaseEvents = phaseTrap.snapshot().filter { $0.requestIDs.contains(stopStreamID) }
+            let stopCommitEvents = commitObserver.snapshot().filter { $0.requestID == stopStreamID }
+            let stopBeforeFinalizeEvents = stopPhaseEvents.filter { $0.phase == .beforeFinalize }
+            let stopOutputCounts = stopCommitEvents.map(\.outputCount)
+            let stopGeneratedTokens = streamResults["journey-stream-stop"]?.generatedCompletionTokens ?? 0
+            let stopAPITokenCount = streamResults["journey-stream-stop"]?.completionTokens ?? 0
+            let stopFinalVisibleTokenCount = stopOutputCounts.max() ?? 0
+            step.check("stop_round_boundary.phase_events_observed", !stopPhaseEvents.isEmpty)
+            step.check("stop_round_boundary.proposal_verify_finalize_events",
+                stopPhaseEvents.contains { $0.phase == .afterProposal }
+                    && stopPhaseEvents.contains { $0.phase == .afterVerify }
+                    && !stopBeforeFinalizeEvents.isEmpty)
+            step.check("stop_round_boundary.spans_multiple_native_finalize_rounds", stopBeforeFinalizeEvents.count >= 2)
+            step.check("stop_round_boundary.commit_token_positions_observed", !stopCommitEvents.isEmpty)
+            step.check("stop_round_boundary.stop_tokens_stripped_after_visible_prefix",
+                stopGeneratedTokens > stopFinalVisibleTokenCount && stopFinalVisibleTokenCount > 0)
+            step.check("stop_round_boundary.visible_prefix_crossed_commit_positions",
+                stopOutputCounts.contains { $0 > 0 && $0 < stopFinalVisibleTokenCount })
+            step.details["stop_round_boundary"] = [
+                "request_id": stopStreamID,
+                "stop_text": " twelve",
+                "finish_reason": streamResults["journey-stream-stop"]?.finishReason ?? "",
+                "api_completion_tokens": stopAPITokenCount,
+                "visible_output_tokens_from_commit_events": stopFinalVisibleTokenCount,
+                "generated_completion_tokens": stopGeneratedTokens,
+                "phase_events": phaseEventDetails(stopPhaseEvents),
+                "commit_output_counts": stopOutputCounts,
+            ]
+
+            let earlyStopID = "journey-stream-early-consumer-stop"
+            let earlyStopRequest = try makeRequest(
+                id: earlyStopID,
+                prompt: "Write a long numbered explanation of how sailors navigate by stars.",
+                maxTokens: 512,
+                temperature: 0,
+                topP: 1,
+                stream: true
+            )
+            let earlyStopChunks = NativeMTPJourneyCounter()
+            let earlyStopHandle = try await native.acquireRequestHandle(earlyStopRequest)
+            var earlyStopCancelled = false
+            var earlyStopCompleted = false
+            do {
+                _ = try await native.stream(
+                    earlyStopRequest,
+                    with: earlyStopHandle,
+                    shouldCancel: { earlyStopChunks.value >= 4 }
+                ) { chunk in
+                    if case .content(let text) = chunk, !text.isEmpty { earlyStopChunks.increment() }
+                }
+                earlyStopCompleted = true
+            } catch is CancellationError {
+                earlyStopCancelled = true
+            } catch {
+                step.details["early_consumer_stop_error"] = String(describing: error)
+            }
+            await native.unregisterInFlight(earlyStopHandle.registrationID)
+            let earlyStopIdle = try await waitForSchedulerIdle(native)
+            step.check("early_consumer_stop.native_admitted", lastPath(recorder, earlyStopID) == .nativeMTP)
+            step.check("early_consumer_stop.after_visible_output", earlyStopChunks.value >= 4)
+            step.check("early_consumer_stop.cancelled_not_completed", earlyStopCancelled && !earlyStopCompleted)
+            step.check("early_consumer_stop.scheduler_released_row", earlyStopIdle)
+            let faultID = "journey-stream-postoutput-fault"
+            let fault = NativeMTPLabPostoutputFault(requestIDs: [faultID])
+            let faultInstalled = await native.installLabNativeMTPPostoutputFault(fault)
+            let faultBefore = await native.currentSnapshot().nativeMTPStatus
+            let faultRequest = try makeRequest(
+                id: faultID,
+                prompt: "Write a long numbered field guide to constellations used by navigators.",
+                maxTokens: 512,
+                temperature: 0,
+                topP: 1,
+                stream: true
+            )
+            var faultChunks = 0
+            var faultCompleted = false
+            var faultErrored = false
+            do {
+                _ = try await streamCollect(faultRequest, runtime: native) { piece in
+                    if !piece.isEmpty { faultChunks += 1 }
+                }
+                faultCompleted = true
+            } catch {
+                faultErrored = true
+                step.details["postoutput_fault_error"] = String(describing: error)
+            }
+            _ = await native.installLabNativeMTPPostoutputFault(nil)
+            let faultAfter = await native.currentSnapshot().nativeMTPStatus
+            step.check("postoutput_fault.installed", faultInstalled)
+            step.check("postoutput_fault.native_admitted", lastPath(recorder, faultID) == .nativeMTP)
+            step.check("postoutput_fault.after_visible_output", faultChunks > 0)
+            step.check("postoutput_fault.failed_not_completed", faultErrored && !faultCompleted)
+            step.check("postoutput_fault.counter_incremented", faultAfter.postoutputFailures > faultBefore.postoutputFailures)
+            step.check("postoutput_fault.hook_fired", fault.snapshot().contains(faultID))
+
+            step.details["terminals"] = terminals
+            step.details["early_consumer_stop_chunks"] = earlyStopChunks.value
+            step.details["postoutput_fault_chunks"] = faultChunks
+            step.details["postoutput_fault_fired"] = fault.snapshot()
+            _ = await native.installLabNativeMTPPhaseTrap(nil)
+            _ = await native.installLabNativeMTPCommitTimingObserver(nil)
+            return step
+        } catch {
+            _ = await native.installLabNativeMTPPhaseTrap(nil)
+            _ = await native.installLabNativeMTPCommitTimingObserver(nil)
+            throw error
+        }
     }
 
     /// step-07 + step-08: one batch at the tuple's qualified slots mixing a
@@ -621,9 +703,12 @@ private final class NativeMTPJourneyRunner {
             ("journey-cancel-before-finalize", .beforeFinalize),
         ]
         step.uncovered = [
-            "phase-cancel hidden cache/drafter rollback equality; current phase trap proves cancellation, release, and no later native phase for the trapped row but does not expose an ordinary-vs-native rollback cache comparison",
+            "after-proposal pre-backend cancellation does not emit before/after abort digest events",
+            "independent deterministic drafter recomputation after cancellation; observer proves pre/post abort stability but does not recompute drafter state independently",
         ]
         for (id, phase) in phaseCases {
+            let stateObserver = NativeMTPStateDigestObserver()
+            let observerInstalled = await native.installLabNativeMTPStateDigestObserver(stateObserver)
             let trap = NativeMTPLabPhaseTrap(cancellations: [phase: [id]])
             let installed = await native.installLabNativeMTPPhaseTrap(trap)
             let request = try makeRequest(
@@ -643,19 +728,34 @@ private final class NativeMTPJourneyRunner {
                 step.details["\(id).error"] = String(describing: error)
             }
             _ = await native.installLabNativeMTPPhaseTrap(nil)
+            _ = await native.installLabNativeMTPStateDigestObserver(nil)
             let events = trap.snapshot()
+            let stateRecords = stateObserver.snapshot().filter { $0.requestID == id }
+            let beforeAbort = stateRecords.filter { $0.phase == (phase == .afterProposal ? .afterProposal : .beforeAbort) }
+            let afterAbort = stateRecords.filter { $0.phase == .afterAbort }
+            let abortPairs = Array(zip(beforeAbort, afterAbort))
+            let abortStateStable = !abortPairs.isEmpty && beforeAbort.count == afterAbort.count && abortPairs.allSatisfy { before, after in
+                before.committedKVTokenCount == after.committedKVTokenCount
+                    && before.cacheDigestSHA256 == after.cacheDigestSHA256
+                    && before.drafterDigestSHA256 == after.drafterDigestSHA256
+            }
             let idle = try await waitForSchedulerIdle(native)
+            step.check("\(id).state_observer_installed", observerInstalled)
             step.check("\(id).trap_installed", installed)
             step.check("\(id).native_admitted", lastPath(recorder, id) == .nativeMTP)
             step.check("\(id).trap_fired", events.contains { $0.phase == phase && $0.cancelledRequestIDs.contains(id) })
             step.check("\(id).cancelled_not_completed", failed && !completed)
             step.check("\(id).no_later_native_phase_after_cancel", !hasLaterPhaseEvent(events: events, requestID: id, phase: phase))
+            step.check("\(id).pre_post_abort_digest_observed", !beforeAbort.isEmpty && !afterAbort.isEmpty)
+            step.check("\(id).pre_post_abort_cache_and_drafter_stable", abortStateStable)
             step.check("\(id).scheduler_released_row", idle)
-            step.details["\(id).events"] = events.map { [
-                "phase": $0.phase.rawValue,
-                "request_ids": $0.requestIDs,
-                "cancelled_request_ids": $0.cancelledRequestIDs,
-            ] }
+            step.details["\(id).events"] = phaseEventDetails(events)
+            step.details["\(id).abort_state"] = [
+                "before_abort_records": beforeAbort.count,
+                "after_abort_records": afterAbort.count,
+                "matched_pairs": abortPairs.count,
+                "pending_target_digest_ignored": true,
+            ]
         }
 
         let request = try makeRequest(
@@ -981,6 +1081,16 @@ private final class NativeMTPJourneyRunner {
             try await Task.sleep(nanoseconds: 100_000_000)
         }
         return false
+    }
+
+    private func phaseEventDetails(_ events: [NativeMTPLabPhaseTrap.Event]) -> [[String: Any]] {
+        events.map { event in
+            [
+                "phase": event.phase.rawValue,
+                "request_ids": event.requestIDs,
+                "cancelled_request_ids": event.cancelledRequestIDs,
+            ]
+        }
     }
 
     private func hasLaterPhaseEvent(

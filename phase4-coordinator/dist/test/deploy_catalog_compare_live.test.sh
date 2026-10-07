@@ -56,7 +56,7 @@ run_sign_catalog() {
 compare_line="$(line_of 'catalog-release.py compare-live --incoming')"
 live_verify_line="$(line_of 'verify-directory --directory /opt/macprovider/autotune/\$_live')"
 [ "$live_verify_line" -lt "$compare_line" ] || fail "the live release must pass verify-directory before compare-live"
-preflight_line="$(line_of 'failed remote verify-directory preflight')"
+preflight_line="$(line_of 'failed remote verify-directory/native-MTP revocation preflight')"
 backup_line="$(line_of 'remote-config backup saved at')"
 stage_line="$(line_of 'mv \$_autotune_stage \$_autotune_release')"
 activate_line="$(line_of 'activating verified autotune release $AUTOTUNE_RELEASE_ID')"
