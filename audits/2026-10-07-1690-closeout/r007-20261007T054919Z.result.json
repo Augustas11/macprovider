@@ -1,0 +1,131 @@
+{
+  "authority": "official_production_remeasure_with_operator_pre_post_state",
+  "capture_wrapper_sha256": "dfeb2b2379446f45030f4973d30256d4b4f68c27e2706bf0998dbc079cb7d77a",
+  "class_postconditions": {
+    "base_url": "https://api.malibu.tech",
+    "captured_at": "2026-10-07T05:50:59Z",
+    "classes": {
+      "disabled": {
+        "buyer_authorized": true,
+        "credential_fingerprint": "88146bd67d7b4ae453d515ebda51071fd9740521a6ca7f20486794bf53043617",
+        "lifecycle": "paused",
+        "pool_exists": true,
+        "pool_fingerprint": "6f24df3b36ea0ecdfff04636c8629a28c76577681044c917726496dc48c241c8",
+        "routeable": false
+      },
+      "unauthorized": {
+        "buyer_authorized": false,
+        "credential_fingerprint": "88146bd67d7b4ae453d515ebda51071fd9740521a6ca7f20486794bf53043617",
+        "lifecycle": "created",
+        "pool_exists": true,
+        "pool_fingerprint": "563caa35badc81a4561d7a6a3c2ca9388f58fea86cac60097306c70b50c9d7ea",
+        "routeable": false
+      },
+      "unknown": {
+        "credential_fingerprint": "88146bd67d7b4ae453d515ebda51071fd9740521a6ca7f20486794bf53043617",
+        "pool_exists": false,
+        "pool_fingerprint": "527639b5128532315887c6d7702a67bf8780b2423729121f93f5880587b50938"
+      }
+    },
+    "expires_at": "2026-10-07T05:55:59Z",
+    "fingerprint_salt": "3e06bd31363f5a7ff81ae9c4a1b5dd76a7002030130253e6a14449a9f63259ae",
+    "operator_capture_boundary": true,
+    "proof_authority": "trusted_operator_capture_not_server_signed",
+    "run_nonce": "f285ad84008328a736c77a3958b95218",
+    "samples_per_class": 200,
+    "samples_sha256": "7fa825c1efe7dd3ea9e5de368e047178cd731289ecb4859f52c10e8ea0b55064",
+    "schema": "macprovider.r007-class-preconditions.v1",
+    "sha256": "c21fe92205326faa8733dea49a9d7096cd64487d1f44df52f99933c066077df2",
+    "state_hold": true,
+    "tool_sha256": "94acbc1044eb682a1a5ba267057d5ba632ff245693c29f6e9f44a0865b788c61"
+  },
+  "class_preconditions": {
+    "base_url": "https://api.malibu.tech",
+    "captured_at": "2026-10-07T05:49:20Z",
+    "classes": {
+      "disabled": {
+        "buyer_authorized": true,
+        "credential_fingerprint": "88146bd67d7b4ae453d515ebda51071fd9740521a6ca7f20486794bf53043617",
+        "lifecycle": "paused",
+        "pool_exists": true,
+        "pool_fingerprint": "6f24df3b36ea0ecdfff04636c8629a28c76577681044c917726496dc48c241c8",
+        "routeable": false
+      },
+      "unauthorized": {
+        "buyer_authorized": false,
+        "credential_fingerprint": "88146bd67d7b4ae453d515ebda51071fd9740521a6ca7f20486794bf53043617",
+        "lifecycle": "created",
+        "pool_exists": true,
+        "pool_fingerprint": "563caa35badc81a4561d7a6a3c2ca9388f58fea86cac60097306c70b50c9d7ea",
+        "routeable": false
+      },
+      "unknown": {
+        "credential_fingerprint": "88146bd67d7b4ae453d515ebda51071fd9740521a6ca7f20486794bf53043617",
+        "pool_exists": false,
+        "pool_fingerprint": "527639b5128532315887c6d7702a67bf8780b2423729121f93f5880587b50938"
+      }
+    },
+    "expires_at": "2026-10-07T05:54:20Z",
+    "file_sha256": "8134195bfac6735f463d5c4a76048612a16b9f6c3dd22563cc704eeecf066304",
+    "fingerprint_salt": "3e06bd31363f5a7ff81ae9c4a1b5dd76a7002030130253e6a14449a9f63259ae",
+    "operator_capture_boundary": true,
+    "proof_authority": "trusted_operator_capture_not_server_signed",
+    "run_nonce": "f285ad84008328a736c77a3958b95218",
+    "samples_per_class": 200,
+    "schema": "macprovider.r007-class-preconditions.v1",
+    "state_hold": true,
+    "tool_sha256": "94acbc1044eb682a1a5ba267057d5ba632ff245693c29f6e9f44a0865b788c61"
+  },
+  "environment": "production",
+  "experimental_client_changes": false,
+  "measurement_result_sha256": "c045ae020acbeffecd1e7088de7a400b345ff154257916a333cbe9cd32c1e224",
+  "notes": [
+    "Isolated-candidate CONFORMANCE is not a live Trusted Pool launch.",
+    "This script does not fill CONFORMANCE evidence[].",
+    "A production remeasure is complete only when environment=production, --allow-production is set, HTTP samples were taken from a production host, and R007 bounds pass.",
+    "The unauthorized class means an existing pool for which the credential is not authorized; its lifecycle/routeability may add a second rejection predicate."
+  ],
+  "pool_rejection_timing": {
+    "classes_covered": [
+      "unknown",
+      "unauthorized",
+      "disabled"
+    ],
+    "disabled_p50_ms": 163.3687070570886,
+    "floor_ms": 150,
+    "mann_whitney_p_value": 0.3055863155282874,
+    "method": "operator_http_probe",
+    "p95_delta_ms": 0.5310340784490108,
+    "p99_delta_ms": 1.5552667900919914,
+    "sample_count_per_class": 200,
+    "statistical_test": "two-sided Mann-Whitney U with normal approximation; fail if p < 0.01",
+    "unauthorized_p50_ms": 163.41971280053258,
+    "unknown_p50_ms": 163.68892136961222
+  },
+  "production_host": true,
+  "production_remeasure_complete": true,
+  "source": "http",
+  "state_hold_locks": [
+    "macprovider-pearl-updater",
+    "coordinator-deploy"
+  ],
+  "within_r007_bounds": true,
+  "tool_source": {
+    "path": "scripts/measure-pool-rejection-timing-floor.py",
+    "base_commit": "eedd1c1456242afab775072bef622a68c3b634a0",
+    "git_blob": "109a2db5fcca121e617ff26986a69222303a344b",
+    "sha256": "94acbc1044eb682a1a5ba267057d5ba632ff245693c29f6e9f44a0865b788c61"
+  },
+  "samples_sha256": "7fa825c1efe7dd3ea9e5de368e047178cd731289ecb4859f52c10e8ea0b55064",
+  "command_shape": {
+    "environment": "production",
+    "allow_production": true,
+    "base_url": "https://api.malibu.tech",
+    "samples": 200,
+    "floor_ms": 150,
+    "credential_source": "environment_variable",
+    "class_preconditions_required": true,
+    "private_operator_postconditions_verified": true,
+    "experimental_client_changes": false
+  }
+}

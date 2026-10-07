@@ -533,6 +533,17 @@ class TrustedPoolExternalRuntimeCaptureTests(unittest.TestCase):
         write(self.capture / "controls/uppercase-selector/response.json", {"error": {"code": "engine_unavailable"}})
         self.assert_rejected("error.code")
 
+    def test_payable_ledger_requires_settled_attempt_number(self) -> None:
+        for kind in ("nonstream", "stream"):
+            with self.subTest(kind=kind):
+                path = self.capture / f"requests/{kind}/ledger.json"
+                rows = json.loads(path.read_text())
+                original = rows[0].pop("attempt_n")
+                write(path, rows)
+                self.assert_rejected(f"{kind} ledger.attempt_n")
+                rows[0]["attempt_n"] = original
+                write(path, rows)
+
     def test_native_selector_pool_must_refuse_not_spill_to_global(self) -> None:
         self.assertNotIn("no-selector-no-pool", BUILDER.NEGATIVE_CONTROLS)
         self.assertEqual((503, "engine_unavailable"), BUILDER.NEGATIVE_CONTROLS["pool-native-selector"])

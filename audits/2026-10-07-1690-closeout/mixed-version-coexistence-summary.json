@@ -1,0 +1,32 @@
+{
+  "schema_version": "macprovider.mixed-version-coexistence-summary.v1",
+  "window_started_at": "2026-10-07T05:40:35Z",
+  "window_ended_at": "2026-10-07T05:41:02.668772Z",
+  "private_summary_sha256": "64163ea0b74fda908320c9d9189ce0aea3fc84b91c99433f8653c1727472c1d2",
+  "coordinator_version": "v1.8.221",
+  "gateway_version": "v1.8.221",
+  "studio_hardware_model": "Mac15,14",
+  "cohorts": [
+    {"scope": "live_native", "port": 8080, "cli_version": "1.8.217", "ready": true},
+    {"scope": "llamacpp_pool", "port": 18120, "cli_version": "1.8.222", "ready": true},
+    {"scope": "ollama_pool", "port": 18122, "cli_version": "1.8.222", "ready": true}
+  ],
+  "claims": {
+    "coordinator_gateway_service_identity_stable_in_window": true,
+    "provider_identities_stable_in_window": true,
+    "distinct_live_and_pool_process_scopes": true,
+    "pool_active_routeable_after": true,
+    "accepted_ids_include_cli_217_219_222": true,
+    "formal_rolling_restart_proven": false,
+    "filtered_poolz_row_observed": false,
+    "rollback_readiness_proven": false
+  },
+  "probe_mutations": {"admin_post": false, "paid_request": false, "pause": false, "restart": false, "config_write": false},
+  "rollback_preflight": {
+    "target_tier": "v1-only",
+    "exit_code": 3,
+    "blocked": true,
+    "reason": "v1-only target cannot replay current policy-core v2, runtime classes and extension history; roll forward instead"
+  },
+  "scope": "bounded coexistence proof only; no claim that other campaigns never restart these services"
+}

@@ -53,6 +53,7 @@ PRODUCTION_HOSTS = {
 REQUIRED_CLASSES = ("unknown", "unauthorized", "disabled")
 CLASS_PRECONDITIONS_SCHEMA = "macprovider.r007-class-preconditions.v1"
 CLASS_PRECONDITIONS_MAX_AGE_SECONDS = 5 * 60
+UNAUTHORIZED_ALLOWED_LIFECYCLES = {"created", "active", "paused", "draining", "retired"}
 MIN_SAMPLES = 8
 MIN_FLOOR_MS = 50
 MAX_P95_DELTA_MS = 15.0
@@ -391,11 +392,16 @@ def validate_class_assertions(name: str, proof: dict[str, Any]) -> dict[str, Any
             raise SystemExit("class preconditions unauthorized.pool_exists must be true")
         if proof.get("buyer_authorized") is not False:
             raise SystemExit("class preconditions unauthorized.buyer_authorized must be false")
-        if proof.get("lifecycle") != "active":
-            raise SystemExit("class preconditions unauthorized.lifecycle must be active")
-        if proof.get("routeable") is not True:
-            raise SystemExit("class preconditions unauthorized.routeable must be true")
-        return {"pool_exists": True, "buyer_authorized": False, "lifecycle": "active", "routeable": True}
+        lifecycle = proof.get("lifecycle")
+        if lifecycle not in UNAUTHORIZED_ALLOWED_LIFECYCLES:
+            raise SystemExit(
+                "class preconditions unauthorized.lifecycle must be one of "
+                + ", ".join(sorted(UNAUTHORIZED_ALLOWED_LIFECYCLES))
+            )
+        routeable = proof.get("routeable")
+        if not isinstance(routeable, bool):
+            raise SystemExit("class preconditions unauthorized.routeable must be boolean")
+        return {"pool_exists": True, "buyer_authorized": False, "lifecycle": lifecycle, "routeable": routeable}
     if name == "disabled":
         if proof.get("pool_exists") is not True:
             raise SystemExit("class preconditions disabled.pool_exists must be true")
@@ -619,8 +625,9 @@ def build_result(
     production_host: bool,
     allow_production: bool,
     class_preconditions: dict[str, Any] | None = None,
+    authority: str | None = None,
 ) -> dict[str, Any]:
-    production_remeasure_complete = bool(
+    production_remeasure_complete = authority != "measurement_pending_postconditions" and bool(
         environment == "production"
         and allow_production
         and production_host
@@ -640,10 +647,14 @@ def build_result(
             "A production remeasure is complete only when environment=production, "
             "--allow-production is set, HTTP samples were taken from a production host, "
             "and R007 bounds pass.",
+            "The unauthorized class means an existing pool for which the credential is not authorized; "
+            "its lifecycle/routeability may add a second rejection predicate.",
         ],
     }
     if class_preconditions is not None:
         result["class_preconditions"] = class_preconditions
+    if authority is not None:
+        result["authority"] = authority
     return result
 
 
@@ -738,9 +749,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.environment == "production" and not args.allow_production:
             raise SystemExit("production environment requires --allow-production")
         source = "http"
+        production_measurement = production_host or args.environment == "production"
+        if production_measurement and not args.unauthorized_pool_id:
+            raise SystemExit(
+                "production HTTP measurement requires --unauthorized-pool-id; "
+                "credential-only unauthorized class cannot prove active unauthorized vs paused disabled state"
+            )
         plan = plan_from_args(args)
         class_preconditions = None
-        if production_host or args.environment == "production":
+        if production_measurement:
             if not args.class_preconditions_json:
                 raise SystemExit("--class-preconditions-json is required before production HTTP measurement")
         if args.class_preconditions_json:
@@ -769,6 +786,9 @@ def main(argv: list[str] | None = None) -> int:
         production_host=production_host,
         allow_production=args.allow_production,
         class_preconditions=class_preconditions,
+        authority="measurement_pending_postconditions"
+        if source == "http" and (production_host or args.environment == "production")
+        else None,
     )
     json.dump(result, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")

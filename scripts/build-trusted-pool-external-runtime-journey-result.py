@@ -487,9 +487,8 @@ def check_settlement(capture: Path, kind: str, run: dict[str, Any], pool: dict[s
     require(len(payable) == 1, f"{kind} must have exactly one payable ledger row")
     credit = payable[0]
     require(credit.get("request_id") == settled_key[0], f"{kind} payable ledger request_id must equal the settled attempt")
-    if "attempt_n" in credit:
-        require(as_int(credit.get("attempt_n"), f"{kind} ledger.attempt_n") == settled_key[1],
-                f"{kind} payable ledger attempt_n must equal the settled attempt")
+    require(as_int(credit.get("attempt_n"), f"{kind} ledger.attempt_n") == settled_key[1],
+            f"{kind} payable ledger attempt_n must equal the settled attempt")
     require(credit.get("provider_id") == run["member_provider_id"], f"{kind} ledger provider must be the member")
     require(as_int(credit.get("provider_credits"), f"{kind} ledger.provider_credits") > 0, f"{kind} ledger provider_credits must be positive")
     require(as_int(credit.get("quarantined"), f"{kind} ledger.quarantined") == 0, f"{kind} ledger row must not be quarantined")

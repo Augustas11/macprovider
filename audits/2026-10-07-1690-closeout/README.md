@@ -35,9 +35,25 @@ SPEC-006 and SPEC-042 permit that native route. The replacement negative is
 return 503 `engine_unavailable`, with zero route snapshots and ledger rows.
 The corrected contract requires a new complete capture before signing.
 
+The replacement `trusted-pool-external-runtime-20261007T053807Z` capture
+passes all 11 builder steps against coordinator/gateway v1.8.221 and signed
+CLI v1.8.222. Both llama.cpp requests have closed verified v4 receipts,
+one payable enforce ledger credit, and matching debit/finality/ledger token
+counts. All four corrected controls refuse with zero snapshots/ledger rows.
+The run has zero holds/missing trailers; the single pre-existing hold remains
+byte-identical global context. Buyer-visible usage vs debit remains the
+explicit E2E-F1 observation, not a concealed failure.
+Redacted artifact:
+`journeys/evidence/trusted-pool-external-runtime-20261007T053807Z.redacted.json`.
+SHA-256: `f696f31eb981f47ba310c25c6e71313ada7f9678a289b2970f74e7e5d47f37db`.
+The operator-authored identity was qualified as `github-user:<login>` before
+redaction to avoid collision with the public repository owner in accepted IDs;
+the original metadata and all original HTTP/SQL captures remain private.
+This artifact is unsigned until the protected workflow signs reviewed main.
+
 ## Production SPEC-043-R007 timing
 
-Four runs used Pearl's public production gateway, the unchanged 150 ms server
+Five runs used Pearl's public production gateway, the unchanged 150 ms server
 floor, 200 samples per class, and class order shuffled each round. The llama.cpp
 pool was paused only for each run and verified active/routeable after restoration.
 Gateway-wide service and the Ollama pool were not paused. Credentials and pool
@@ -48,7 +64,8 @@ identities are absent from the retained numeric samples and evaluator outputs.
 | 04:29:13 | Original client, TLS context per request | 18.3721 | 0.4294 | 0.3883 | FAIL (p95 > 15 ms) |
 | 04:33:03 | Same client with experimental shared TLS context | 0.3881 | 2.7482 | 0.3303 | PASS, diagnostic comparison only |
 | 04:39:02 | Corrected repository tool, no context monkeypatch | 0.7843 | 1.7374 | 0.5286 | PASS, historical production remeasure |
-| 05:24:07 | Corrected repository tool with fail-closed redirects | 1.0472 | 2.9109 | 0.0606 | PASS, current official production remeasure |
+| 05:24:07 | Corrected repository tool with fail-closed redirects | 1.0472 | 2.9109 | 0.0606 | PASS, historical class-unbound measurement |
+| 05:49:19 | Corrected tool with private pre/post class-state binding | 0.5310 | 1.5553 | 0.3056 | PASS, current official production remeasure |
 
 The comparison supports eliminating repeated client TLS setup as measurement
 noise; it does not establish a universal absence of a timing oracle. All runs,
@@ -56,31 +73,49 @@ including the failure, are retained as `r007-<timestamp>.samples.json` and
 `r007-<timestamp>.result.json`. The experimental result is explicitly
 machine-marked `diagnostic_only` / `production_remeasure_complete: false`;
 its original evaluator claim and original output SHA-256 are recorded without
-treating that claim as authoritative. The official result binds its source
+treating that claim as authoritative. The earlier runs lack the new pre/post
+class-state binding and are historical comparisons, not current closeout
+authority; their original outputs and source claims remain intact.
+The official result binds its source
 blob, tool SHA-256, sample SHA-256 and nonexperimental command shape.
 Evaluation uses nearest-rank percentiles and
 the unchanged thresholds: p95 <= 15 ms, p99 <= 25 ms, minimum two-sided
 Mann–Whitney p >= 0.01. The final client requires exactly HTTP 503 and parsed
 JSON `error.code == "pool_unavailable"`; each sample still opens a fresh HTTP
 connection and rejects all redirects without forwarding credentials. The current
-05:24:07 measurement tool SHA-256 is
-`ab947c8dcb3a30992e1d80e10556c802858f348a83d5b17a5b051d2ca4238378`.
+05:49:19 measurement tool SHA-256 is
+`94acbc1044eb682a1a5ba267057d5ba632ff245693c29f6e9f44a0865b788c61`.
 The earlier results retain their original source hashes as historical evidence.
-A later tool hardening additionally requires fresh private class-precondition
-proof before future production HTTP measurements.
+Private operator captures at 05:49:20Z and 05:50:59Z bind distinct unknown,
+existing unauthorized, and paused buyer-authorized pool inputs, the credential,
+tool, samples, nonce and salt. The post-check precedes the pre-check's expiry;
+both Pearl deployment locks cover the entire pause/capture/measure/restore window.
+The unauthorized pool was `created` and nonrouteable: it satisfies the existing
+pool/nonmembership class, but adds a lifecycle rejection predicate. This is not
+a pure active-routeable authorization-isolation test. Public projections are
+salted, operator-authored proof, not server-signed attestations; raw admin
+responses remain private. The tool first emits a pending result, and only the
+operator finalizer promotes it after verifying the actual post-check.
 
 Targeted regression command:
 `PYTHONDONTWRITEBYTECODE=1 python3 -W error::ResourceWarning -m unittest
-scripts.tests.test_pool_rejection_timing_floor` — 28 tests PASS.
+scripts.tests.test_pool_rejection_timing_floor` — 30 tests PASS.
+
+## Mixed-version coexistence
+
+`mixed-version-coexistence-summary.json` retains the read-only 05:40:35–05:41:02Z
+window: coordinator/gateway v1.8.221 and native CLI 217 plus pool CLIs 222
+were ready with stable service/provider identities and distinct process scopes.
+Accepted IDs include cohorts 217, 219 and 222. This is bounded coexistence
+evidence, not a formal rolling-restart proof or a whole-session no-restart claim.
+The v1-only rollback preflight correctly refused incompatible manifest history
+(exit 3); rollback readiness is not claimed. The filtered `/poolz` row was not
+derived by this collector. Original private snapshots remain operator-only.
 
 ## Still blocking completion
 
 - Protected signatures for the fresh isolated captures and signed production
   external-runtime journey remain pending.
-- R007 class-state binding is being tightened after review found that client
-  labels alone do not prove unknown/unauthorized/disabled preconditions.
-  Existing numeric runs are retained, but no issue-closeout authority is claimed
-  until a fresh measurement binds those states and distinct inputs.
 - Before operator-approved cleanup, the gateway had 20 global ACTIVE
   settlement-held reservations. The scoped
   released-binary relay-blind reconciler returned `held=1`, `errors=0` for the
@@ -95,8 +130,8 @@ scripts.tests.test_pool_rejection_timing_floor` — 28 tests PASS.
   journey's old global-zero hold check is broader than SPEC-022-R012 and
   SPEC-042-R013/R014: their forward acceptance requirements concern the
   pool requests' own finality, debit and ledger credit. Global draining is a
-  separate rollback precondition. A versioned run-scoped check is being
-  implemented; unrelated backlog remains explicit operational context, not
+  separate rollback precondition. The versioned run-scoped check now passes
+  for the fresh production capture; unrelated backlog remains explicit operational context, not
   a global-health or rollback-readiness claim. Financial SQL has not been
   manually rewritten.
 - A carried #1863 MEDIUM concerned startup TPS trusting stream fragmentation
@@ -107,6 +142,6 @@ scripts.tests.test_pool_rejection_timing_floor` — 28 tests PASS.
   toolchain lacks XCTest. Its generated lockfile change was restored. GitHub
   macOS/Xcode verification, combined review, and reviewed signed rollout
   remain pending; no unreviewed local binary has replaced a live provider.
-- Formal mixed-version evidence and qualification for the current pool models
-  remain pending. Public external Creator launch is a separate SPEC-043 scope;
+- Final acceptance of the bounded mixed-version proof and qualification for
+  the current pool models remain pending. Public external Creator launch is a separate SPEC-043 scope;
   no named external operator or hardware-backed production root is fabricated.
