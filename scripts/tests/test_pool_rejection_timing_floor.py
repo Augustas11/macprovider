@@ -173,6 +173,21 @@ class _PoolUnavailableHandler(BaseHTTPRequestHandler):
         return
 
 
+class _FakeHTTPResponse:
+    def __init__(self, *, status: int, body: bytes):
+        self.status = status
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self) -> bytes:
+        return self.body
+
+
 class PoolRejectionTimingCredentialTests(unittest.TestCase):
     def setUp(self):
         self.mod = load_module()
@@ -274,6 +289,82 @@ class PoolRejectionTimingCredentialTests(unittest.TestCase):
         rounds = [tuple(pool_to_class[pool] for _, _, pool in seen[i : i + 3]) for i in range(0, 24, 3)]
         self.assertTrue(all(sorted(r) == ["disabled", "unauthorized", "unknown"] for r in rounds))
         self.assertGreater(len(set(rounds)), 1, "class order must vary across rounds")
+
+    def test_measure_http_rejects_404_even_with_pool_unavailable_code(self):
+        plan = self.mod.class_plan(
+            unknown_pool_id="unknownpoolxxxxxxxxxxx",
+            pool_id="pausedpoolxxxxxxxxxxxx",
+            unauthorized_pool_id="foreignpoolxxxxxxxxxxx",
+            authorized={"Authorization": "Bearer sk-auth"},
+            unauthorized=None,
+        )
+        body = b'{"error":{"code":"pool_unavailable","message":"Pool unavailable"}}'
+        with mock.patch.object(self.mod.ssl, "create_default_context", return_value=object()), mock.patch.object(
+            self.mod.urllib.request,
+            "urlopen",
+            return_value=_FakeHTTPResponse(status=404, body=body),
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                self.mod.measure_http(
+                    "https://gateway.example",
+                    plan=plan,
+                    samples=1,
+                    timeout_s=5,
+                    rng=random.Random(1),
+                )
+        self.assertIn("status=404", str(raised.exception))
+
+    def test_measure_http_rejects_incidental_pool_unavailable_message(self):
+        plan = self.mod.class_plan(
+            unknown_pool_id="unknownpoolxxxxxxxxxxx",
+            pool_id="pausedpoolxxxxxxxxxxxx",
+            unauthorized_pool_id="foreignpoolxxxxxxxxxxx",
+            authorized={"Authorization": "Bearer sk-auth"},
+            unauthorized=None,
+        )
+        body = b'{"error":{"code":"rate_limited","message":"mentions pool_unavailable only in text"}}'
+        with mock.patch.object(self.mod.ssl, "create_default_context", return_value=object()), mock.patch.object(
+            self.mod.urllib.request,
+            "urlopen",
+            return_value=_FakeHTTPResponse(status=503, body=body),
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                self.mod.measure_http(
+                    "https://gateway.example",
+                    plan=plan,
+                    samples=1,
+                    timeout_s=5,
+                    rng=random.Random(1),
+                )
+        self.assertIn("error.code='rate_limited'", str(raised.exception))
+
+    def test_measure_http_reuses_one_tls_context_for_all_samples(self):
+        plan = self.mod.class_plan(
+            unknown_pool_id="unknownpoolxxxxxxxxxxx",
+            pool_id="pausedpoolxxxxxxxxxxxx",
+            unauthorized_pool_id="foreignpoolxxxxxxxxxxx",
+            authorized={"Authorization": "Bearer sk-auth"},
+            unauthorized=None,
+        )
+        body = b'{"error":{"code":"pool_unavailable","message":"Pool unavailable"}}'
+        tls_context = object()
+        with mock.patch.object(self.mod.ssl, "create_default_context", return_value=tls_context) as make_context:
+            with mock.patch.object(
+                self.mod.urllib.request,
+                "urlopen",
+                return_value=_FakeHTTPResponse(status=503, body=body),
+            ) as urlopen:
+                measured = self.mod.measure_http(
+                    "https://gateway.example",
+                    plan=plan,
+                    samples=2,
+                    timeout_s=5,
+                    rng=random.Random(1),
+                )
+        self.assertEqual(make_context.call_count, 1)
+        self.assertEqual(urlopen.call_count, 6)
+        self.assertTrue(all(call.kwargs["context"] is tls_context for call in urlopen.call_args_list))
+        self.assertEqual({k: len(v) for k, v in measured.items()}, {"unknown": 2, "unauthorized": 2, "disabled": 2})
 
 
 if __name__ == "__main__":

@@ -238,6 +238,21 @@ def class_plan(
     }
 
 
+def require_pool_unavailable_rejection(status: int, payload: bytes) -> None:
+    text = payload.decode("utf-8", errors="replace")
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"unexpected rejection status={status} body={text[:300]}") from exc
+    code = None
+    if isinstance(parsed, dict):
+        error = parsed.get("error")
+        if isinstance(error, dict):
+            code = error.get("code")
+    if status != 503 or code != "pool_unavailable":
+        raise SystemExit(f"unexpected rejection status={status} error.code={code!r} body={text[:300]}")
+
+
 def measure_http(
     base_url: str,
     *,
@@ -249,6 +264,7 @@ def measure_http(
     import time
 
     rng = rng or random.SystemRandom()
+    ctx = ssl.create_default_context()
 
     def one(credential: dict[str, str], select_pool: str) -> float:
         body = json.dumps(
@@ -267,19 +283,19 @@ def measure_http(
                 "X-MacProvider-Pool-Select": select_pool,
             },
         )
-        ctx = ssl.create_default_context()
         start = time.perf_counter()
         try:
             with urllib.request.urlopen(req, timeout=timeout_s, context=ctx) as resp:
                 payload = resp.read()
                 status = resp.status
         except urllib.error.HTTPError as exc:
-            payload = exc.read()
-            status = exc.code
+            try:
+                payload = exc.read()
+                status = exc.code
+            finally:
+                exc.close()
         elapsed_ms = (time.perf_counter() - start) * 1000.0
-        text = payload.decode("utf-8", errors="replace")
-        if status not in (404, 503) or "pool_unavailable" not in text:
-            raise SystemExit(f"unexpected rejection status={status} body={text[:300]}")
+        require_pool_unavailable_rejection(status, payload)
         return elapsed_ms
 
     measured: dict[str, list[float]] = {name: [] for name in REQUIRED_CLASSES}

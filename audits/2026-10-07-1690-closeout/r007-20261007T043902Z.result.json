@@ -1,0 +1,46 @@
+{
+  "environment": "production",
+  "notes": [
+    "Isolated-candidate CONFORMANCE is not a live Trusted Pool launch.",
+    "This script does not fill CONFORMANCE evidence[].",
+    "A production remeasure is complete only when environment=production, --allow-production is set, HTTP samples were taken from a production host, and R007 bounds pass."
+  ],
+  "pool_rejection_timing": {
+    "classes_covered": [
+      "unknown",
+      "unauthorized",
+      "disabled"
+    ],
+    "disabled_p50_ms": 164.2462476156652,
+    "floor_ms": 150,
+    "mann_whitney_p_value": 0.5286210749038869,
+    "method": "operator_http_probe",
+    "p95_delta_ms": 0.7843119092285633,
+    "p99_delta_ms": 1.7374143935739994,
+    "sample_count_per_class": 200,
+    "statistical_test": "two-sided Mann-Whitney U with normal approximation; fail if p < 0.01",
+    "unauthorized_p50_ms": 163.92368404194713,
+    "unknown_p50_ms": 163.9044638723135
+  },
+  "production_host": true,
+  "production_remeasure_complete": true,
+  "authority": "official_production_remeasure",
+  "tool_source": {
+    "path": "scripts/measure-pool-rejection-timing-floor.py",
+    "base_commit": "eedd1c1456242afab775072bef622a68c3b634a0",
+    "git_blob": "dd8b6246e7f915fe33536634f5999851fc017c66",
+    "sha256": "3f1d4df2a75fd7daaa3dfe3b912b5fd5e5f1069b6d000403d0305d974bd8015a"
+  },
+  "samples_sha256": "0b3e3ea65769ffeadb77e8f569044881868fff38b03b877455edbe29e3abe4c2",
+  "command_shape": {
+    "environment": "production",
+    "allow_production": true,
+    "base_url": "https://api.malibu.tech",
+    "samples": 200,
+    "floor_ms": 150,
+    "credential_source": "environment_variable",
+    "experimental_client_changes": false
+  },
+  "source": "http",
+  "within_r007_bounds": true
+}
