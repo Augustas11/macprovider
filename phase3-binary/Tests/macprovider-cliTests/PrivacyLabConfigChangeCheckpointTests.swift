@@ -36,6 +36,34 @@ final class PrivacyLabConfigChangeCheckpointTests: XCTestCase {
         XCTAssertEqual(done.wait(timeout: .now() + 1), .success)
     }
 
+    func testConstructorOwnsDuplicateWithoutClosingCallerDescriptor() throws {
+        let pair = try Self.makeSocketPair()
+        defer {
+            Darwin.close(pair.0)
+            Darwin.close(pair.1)
+        }
+        let scope = try Self.makeScope()
+        let checkpoint = try PrivacyLabConfigChangeCheckpoint(fd: pair.0, nonceFactory: { "nonce-ok" })
+        XCTAssertFalse(Self.fdIsClosed(pair.0), "constructor owns a close-on-exec dup, not the caller descriptor")
+
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .utility).async {
+            defer { done.signal() }
+            _ = try? Self.readFrame(pair.1)
+            Self.writeFrame([
+                "event": PrivacyLabConfigChangeCheckpoint.ackEvent,
+                "nonce": "nonce-ok",
+                "schema_version": PrivacyLabConfigChangeCheckpoint.schemaVersion,
+            ], fd: pair.1)
+        }
+
+        XCTAssertNoThrow(try checkpoint.signalReady(scope: scope))
+        XCTAssertEqual(done.wait(timeout: .now() + 1), .success)
+        XCTAssertThrowsError(try checkpoint.signalReady(scope: scope)) {
+            XCTAssertEqual($0 as? PrivacyLabConfigChangeCheckpointError, .invalidSocket)
+        }
+    }
+
     func testInvalidFDAndNonSocketAreRejected() throws {
         XCTAssertThrowsError(try PrivacyLabConfigChangeCheckpoint(fd: 2)) {
             XCTAssertEqual($0 as? PrivacyLabConfigChangeCheckpointError, .invalidFD)
@@ -284,5 +312,10 @@ final class PrivacyLabConfigChangeCheckpointTests: XCTestCase {
         data.withUnsafeBytes { raw in
             _ = Darwin.write(fd, raw.baseAddress, raw.count)
         }
+    }
+
+    private static func fdIsClosed(_ fd: Int32) -> Bool {
+        errno = 0
+        return Darwin.fcntl(fd, F_GETFD) == -1 && errno == EBADF
     }
 }

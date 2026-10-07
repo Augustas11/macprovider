@@ -33,17 +33,26 @@ struct PrivacyLabConfigChangeCheckpoint {
     static let maxFrameBytes = 4096
     static let timeoutMilliseconds: Int32 = 2_000
 
-    private let fd: Int32
+    private let socket: OwnedCheckpointSocket
     private let nonceFactory: () -> String
 
     init(fd: Int32, nonceFactory: @escaping () -> String = PrivacyLabConfigChangeCheckpoint.makeNonce) throws {
         guard fd >= 3 else { throw PrivacyLabConfigChangeCheckpointError.invalidFD }
-        try Self.validateConnectedUnixSocket(fd)
-        self.fd = fd
+        let ownedFD = Darwin.fcntl(fd, F_DUPFD_CLOEXEC, 3)
+        guard ownedFD >= 0 else { throw PrivacyLabConfigChangeCheckpointError.invalidFD }
+        do {
+            try Self.validateConnectedUnixSocket(ownedFD)
+        } catch {
+            Darwin.close(ownedFD)
+            throw error
+        }
+        self.socket = OwnedCheckpointSocket(fd: ownedFD)
         self.nonceFactory = nonceFactory
     }
 
     func signalReady(scope: PrivacyLabIdentityScope) throws {
+        let fd = try socket.takeForOneShot()
+        defer { Darwin.close(fd) }
         let nonce = nonceFactory()
         let frame: [String: Any] = [
             "event": Self.readyEvent,
@@ -57,8 +66,8 @@ struct PrivacyLabConfigChangeCheckpoint {
             throw PrivacyLabConfigChangeCheckpointError.oversized
         }
         let deadline = Self.monotonicMilliseconds() + Int64(Self.timeoutMilliseconds)
-        try writeAll(data, deadline: deadline)
-        let ack = try readAck(deadline: deadline)
+        try writeAll(data, fd: fd, deadline: deadline)
+        let ack = try readAck(fd: fd, deadline: deadline)
         guard Set(ack.keys) == ["event", "nonce", "schema_version"],
               ack["event"] as? String == Self.ackEvent,
               ack["schema_version"] as? Int == Self.schemaVersion,
@@ -102,7 +111,7 @@ struct PrivacyLabConfigChangeCheckpoint {
         "\(UInt64.random(in: UInt64.min...UInt64.max))-\(UInt64.random(in: UInt64.min...UInt64.max))"
     }
 
-    private func writeAll(_ data: Data, deadline: Int64) throws {
+    private func writeAll(_ data: Data, fd: Int32, deadline: Int64) throws {
         try data.withUnsafeBytes { rawBuffer in
             guard let base = rawBuffer.baseAddress else { return }
             var written = 0
@@ -120,7 +129,7 @@ struct PrivacyLabConfigChangeCheckpoint {
         }
     }
 
-    private func readAck(deadline: Int64) throws -> [String: Any] {
+    private func readAck(fd: Int32, deadline: Int64) throws -> [String: Any] {
         var buffer = [UInt8]()
         while true {
             try wait(fd: fd, events: Int16(POLLIN), deadline: deadline)
@@ -180,5 +189,33 @@ struct PrivacyLabConfigChangeCheckpoint {
         var ts = timespec()
         clock_gettime(CLOCK_MONOTONIC, &ts)
         return Int64(ts.tv_sec) * 1_000 + Int64(ts.tv_nsec) / 1_000_000
+    }
+}
+
+private final class OwnedCheckpointSocket: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fd: Int32
+
+    init(fd: Int32) {
+        self.fd = fd
+    }
+
+    deinit {
+        lock.lock()
+        let current = fd
+        fd = -1
+        lock.unlock()
+        if current >= 0 {
+            Darwin.close(current)
+        }
+    }
+
+    func takeForOneShot() throws -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+        guard fd >= 0 else { throw PrivacyLabConfigChangeCheckpointError.invalidSocket }
+        let current = fd
+        fd = -1
+        return current
     }
 }

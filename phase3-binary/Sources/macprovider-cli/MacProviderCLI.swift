@@ -2159,7 +2159,14 @@ struct ServeCommand: AsyncParsableCommand {
             guard checkpointFD >= 3, checkpointFD <= Int(Int32.max) else {
                 throw ValidationError("--privacy-lab-config-change-checkpoint-fd must be an inherited descriptor >= 3")
             }
-            labConfigChangeCheckpoint = try PrivacyLabConfigChangeCheckpoint(fd: Int32(checkpointFD))
+            let inheritedFD = Int32(checkpointFD)
+            do {
+                labConfigChangeCheckpoint = try PrivacyLabConfigChangeCheckpoint(fd: inheritedFD)
+                Darwin.close(inheritedFD)
+            } catch {
+                Darwin.close(inheritedFD)
+                throw error
+            }
         } else {
             labConfigChangeCheckpoint = nil
         }
