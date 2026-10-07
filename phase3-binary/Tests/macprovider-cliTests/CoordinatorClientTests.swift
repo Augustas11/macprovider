@@ -3071,6 +3071,90 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertGreaterThan(recovered.cancelCountSnapshot(), 0)
     }
 
+    func testLabScopedPrivacyIdentityCarriesIntoBootstrapRecoveryClient() async throws {
+        let directory = try Self.makeTemporaryDirectory(prefix: "bootstrap-recovery-lab-")
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let configURL = directory.appendingPathComponent("config.yaml")
+        let providerID = "mp-11223344556677889900aabbccddeeff"
+        let staleToken = String(repeating: "1", count: 64)
+        let recoveredToken = String(repeating: "2", count: 64)
+        try Data("""
+        model: model-a
+        coordinator_url: ws://127.0.0.1:19080/v2/provider
+        provider_id: \(providerID)
+        provider_token: \(staleToken)
+        relay_blind_enabled: true
+        privacy_class_beta: true
+        credential_store: protected_file
+        relay_blind_state_directory: \(directory.path)
+        """.utf8).write(to: configURL)
+
+        var config = AppConfig.defaults(configPath: configURL.path)
+        config.coordinatorURL = "ws://127.0.0.1:19080/v2/provider"
+        config.providerID = providerID
+        config.model = "model-a"
+        config.providerToken = staleToken
+        config.relayBlindEnabled = true
+        config.privacyClassBeta = true
+        config.credentialStore = .protectedFile
+        config.relayBlindStateDirectory = directory.path
+        let scope = try PrivacyLabIdentityScope.validated(config: config, isolateLifecycle: true)
+        let receiptKey = Curve25519.Signing.PrivateKey()
+        let privacySigner = try SELivenessTestSigning.generate()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let rejected = FakeProviderWebSocketTask(
+            receiveResults: [.failure(CancellationError())],
+            closeCodeRawValue: 4005,
+            closeReasonText: "invalid_token"
+        )
+        let responder = FakeTier2AuthResponder(
+            outcome: .accepted,
+            providerID: providerID,
+            assignedProviderToken: recoveredToken
+        )
+        let recovered = FakeProviderWebSocketTask(
+            receiveResults: [],
+            receiveOverride: { socket in
+                try await responder.receive(from: socket)
+            }
+        )
+        let factory = FakeProviderWebSocketFactory(sockets: [rejected, recovered])
+        let runtime = try await ModelRuntime(modelID: nil)
+        let credentialStore = InMemoryProviderCredentialStore(values: [providerID: staleToken])
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            attestationGenerator: StaticAttestationGenerator(token: nil),
+            privacySESignerOverride: privacySigner,
+            privacyPostureProbeOverride: CoordinatorClientGreenPrivacyPostureProbe(),
+            webSocketFactory: { factory.makeSocket(for: $0) },
+            sleepAssertionFactory: { nil },
+            receiptIdentitySigningKey: receiptKey,
+            providerCredentialStore: credentialStore,
+            privacyLabIdentityScope: scope
+        ))
+
+        do {
+            try await client.connectAndRunOnceForTest()
+            XCTFail("successful credential recovery should request an authenticated reconnect")
+        } catch is CoordinatorAuthUpgradeReconnect {
+        } catch {
+            XCTFail("unexpected recovery error: \(error)")
+        }
+
+        let recoveredFrames = recovered.sentFrames()
+        let initial = try XCTUnwrap(recoveredFrames.first)
+        let enrollment = try XCTUnwrap(initial["privacy_enrollment"] as? [String: Any])
+        XCTAssertEqual(enrollment["se_public_key"] as? String, privacySigner.publicKeyBase64)
+        XCTAssertEqual(try credentialStore.load(providerID: providerID), recoveredToken)
+    }
+
     func testMalibuOriginDoesNotSuppressCLIOwnedBootstrapRecovery() async throws {
         let directory = try Self.makeTemporaryDirectory(prefix: "bootstrap-malibu-boundary-")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -8770,6 +8854,31 @@ private actor ReconnectAttemptRecorder {
     func currentCount() -> Int {
         count
     }
+}
+
+private struct CoordinatorClientGreenPrivacyPostureProbe: PrivacyPostureProbe {
+    func observe() -> PrivacyPostureObservation {
+        PrivacyPostureObservation(
+            hardenedRuntime: true,
+            libraryValidation: true,
+            getTaskAllow: false,
+            csDebugged: false,
+            pTraced: false,
+            ptDenyAttachApplied: true,
+            coreDumpsDisabled: true,
+            sipEnabled: true,
+            diagnosticEnvClear: true,
+            kvDiskTierDisabled: true,
+            runtimeSource: PrivacyClassConstants.runtimeSource,
+            codeCDHash: String(repeating: "cd", count: 20),
+            teamID: "AB12CD34EF",
+            signingIdentifier: "live.malibu.provider.cli",
+            binaryVersion: CoordinatorClient.binaryVersion,
+            failureReasons: []
+        )
+    }
+
+    func isTracedOrDebugged() -> Bool { false }
 }
 
 private struct StaticAttestationGenerator: Tier2AttestationTokenGenerating, @unchecked Sendable {

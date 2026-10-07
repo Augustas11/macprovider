@@ -3215,6 +3215,7 @@ struct ServeCommand: AsyncParsableCommand {
                     return ManagedDeviceAttestationGenerator(artifactPath: resolved.tier2MDAArtifactPath)
                 }(),
                 seLivenessSignerOverride: labScopedSELivenessSigner,
+                privacySESignerOverride: labScopedPrivacySESigner,
                 providerReceiptPublicKey: providerReceiptPublicKey,
                 providerAdmissionPublicKey: providerAdmissionPublicKey,
                 providerAdmissionNextPublicKey: providerAdmissionNextPublicKey,
@@ -3248,7 +3249,6 @@ struct ServeCommand: AsyncParsableCommand {
                 providerCredentialSource: credentialSource,
                 credentialStatusRuntime: credentialStatusRuntime,
                 admissionIdentityStatusRuntime: admissionIdentityStatusRuntime,
-                privacySESignerOverride: labScopedPrivacySESigner,
                 privacyLabIdentityScope: privacyLabIdentityScope,
                 lifecycleStateStore: lifecycleStateStore,
                 lifecycleOperationID: lifecycleOperationID,

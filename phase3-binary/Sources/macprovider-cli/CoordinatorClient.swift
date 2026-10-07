@@ -490,6 +490,7 @@ actor CoordinatorClient {
     // liveness to the same scoped signer used for privacy posture and Tier2.
     // Tests inject a SELivenessTestSigning double via the init parameter.
     private var seLivenessSigner: (any SELivenessSigning)?
+    private let privacySESigner: (any SEBlobSigner)?
     private let privacyLabIdentityScope: PrivacyLabIdentityScope?
     // M1-1 / XSEC-1: the factory now takes a URLRequest so the binary can
     // attach an Authorization: Bearer header when a provider token is
@@ -860,6 +861,7 @@ actor CoordinatorClient {
             return nil
         }
         var selectedSELivenessSigner = seLivenessSignerOverride
+        var selectedPrivacySESigner: (any SEBlobSigner)?
         var labScopedPrivacySignerForAttestation: (any SEBlobSigner)?
         if config.relayBlindEnabled {
             guard let statePath = config.relayBlindStateDirectory,
@@ -899,6 +901,7 @@ actor CoordinatorClient {
                     signer = production.signer
                     backend = production.backend
                 }
+                selectedPrivacySESigner = signer
                 if privacyLabIdentityScope != nil {
                     labScopedPrivacySignerForAttestation = signer
                     guard let scopedLivenessSigner = Self.labScopedLivenessSigner(
@@ -980,6 +983,7 @@ actor CoordinatorClient {
             #endif
         }
         self.seLivenessSigner = selectedSELivenessSigner
+        self.privacySESigner = selectedPrivacySESigner
         self.webSocketFactory = webSocketFactory
         self.providerToken = config.providerToken.flatMap { value in
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1847,6 +1851,9 @@ actor CoordinatorClient {
             reconnectInitialBackoffNanoseconds: reconnectInitialBackoffNanoseconds,
             receiptKeyRotationTimeoutNanoseconds: receiptKeyRotationTimeoutNanoseconds,
             attestationGenerator: attestationGenerator,
+            seLivenessSignerOverride: seLivenessSigner,
+            privacyPostureProbeOverride: privacyPostureProbe,
+            privacySESignerOverride: privacySESigner,
             webSocketFactory: webSocketFactory,
             sleepAssertionFactory: { nil },
             pairingController: pairingController,
@@ -1856,6 +1863,7 @@ actor CoordinatorClient {
             providerCredentialStore: providerCredentialStore,
             providerCredentialSource: providerCredentialSource,
             credentialStatusRuntime: credentialStatusRuntime,
+            privacyLabIdentityScope: privacyLabIdentityScope,
             watchdogExitHook: watchdogExitHook
         ) else {
             return false
