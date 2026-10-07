@@ -12,7 +12,7 @@ and ordinary rows, each compared with the ordinary batched oracle.
 | Binary | `binary-sha256.txt` (lab build; `mlx.metallib` is the v1.8.217 metallib used by the R015 runs) |
 | Host | Apple M3 Ultra, 256 GB, macOS 26A434 |
 | Command | `MACPROVIDER_NATIVE_MTP_E2E=1 macprovider-cli native-mtp-journey-e2e --root <clone of q36-a3b-cat> --model-id qwen/qwen3.6-35b-a3b --qualified-slots 8 --max-native-active-rows 1 --max-prompt-tokens 4096` |
-| Isolation | lab lock 13:28:34-13:31:32Z, no coordinator join, APFS clone of the fixture; live :8080 untouched |
+| Isolation | exclusive lab window 13:28:34-13:31:32Z, no coordinator join, cloned fixture; live :8080 untouched |
 
 ## Result
 

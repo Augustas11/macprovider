@@ -2,44 +2,40 @@
   "evidence_status": "Historical verdicts and binary identities unchanged; published copies are sanitized, not byte-identical raw originals",
   "files": [
     {
+      "description": "Removed local session worktree and lab-lock command mechanics while preserving D-CB dependency and lab-window planning facts.",
       "original_sha256": "8e31651219670f5697b0bc856262c2c90550d566f1aa134532fd36eda4ce78d4",
       "path": "enablement-plan.md",
-      "published_sha256": "27164b73218473af035455dba0238822ee0249b759e73c7007703ef5c3469133"
+      "published_sha256": "d3bc21cc49697d9f6d42bc310793fc20286bd340f2e514e3557c83df3d4be89e"
     },
     {
-      "original_sha256": "29e4fcda668df2cf880c5820ee18bd901ce7bc5dd9c07a75c84eeb5efe6c2a4c",
-      "path": "evidence-2026-10-06-delivery-rehearsal-26a434/result-g8-rerun.json",
-      "published_sha256": "70ab7f6b0340d095f2b8a5964f787de3378e45b86a049f711aa3a30538646154"
+      "description": "Removed local secret-storage and isolated-home housekeeping details while preserving rehearsal verdicts and release facts.",
+      "original_sha256": "de35602cbe38b7a6fc767288ee8615683cb30475917abdba7a2b7257490d9911",
+      "path": "evidence-2026-10-06-delivery-rehearsal-26a434/README.md",
+      "published_sha256": "f0cd483c91ff3442642e136bb649b70732491e4d999966a3a35defebb0276775"
     },
     {
+      "description": "Removed local credential import and lab-lock path housekeeping while preserving acceptance checks, counters, and inference/accounting evidence.",
       "original_sha256": "f0d51fda14c5d6ed4e41b0dfec5e238b79fcdd63edd47fee7898aecba080db28",
       "path": "evidence-2026-10-06-delivery-rehearsal-26a434/result-full-run.json",
-      "published_sha256": "7a52cff37d9983a500769afad7f28bf0924b80eaa46837faa50f6cb409370581"
+      "published_sha256": "a66f41e644695039942f7a24b0db9a298b8360c53511fb1f54063b6e91dbca3d"
     },
     {
-      "original_sha256": "a024c8a2e5655dd7a0b74c3cd2c9d9b5e94cf4f6e78416ea997aeb2297f67f06",
-      "path": "evidence-2026-10-06-v1.8.217-26a434/result.json",
-      "published_sha256": "3093894a389956e5dd7994a683ddea4ec60f03236868f31d6631f0670c9c3623"
+      "description": "Removed local credential import and lab-lock path housekeeping while preserving G8 accounting and SSE parity evidence.",
+      "original_sha256": "29e4fcda668df2cf880c5820ee18bd901ce7bc5dd9c07a75c84eeb5efe6c2a4c",
+      "path": "evidence-2026-10-06-delivery-rehearsal-26a434/result-g8-rerun.json",
+      "published_sha256": "885a29d6237ebd731761b0f4178f79813fbe23b055bb7fd7ee7d4e8f3612b41f"
     },
     {
-      "original_sha256": "95ccbc7a2cf231cee541ef4164c3fa0a1af7c5d3ebaca004ae541cbb403d6275",
-      "path": "evidence-2026-10-06-v1.8.217-26a434/live-binaries.json",
-      "published_sha256": "aa59021873ff42f049bead5ea0bc242e3b521530690a58a551cb6eaea1b8928e"
+      "description": "Removed lab-lock/path mechanics from isolation description while preserving mixed-row verdict facts.",
+      "original_sha256": "40a83b9344b3ac4b481e5968c7733b2453957d5e02b76d96a4b93baa1356d181",
+      "path": "evidence-2026-10-06-g1-mixed-row-26a434/README.md",
+      "published_sha256": "d8ba677629c3f1b7021018a9ae131a44cc2cbadf665f6c8676b61571c0af42ed"
     },
     {
-      "original_sha256": "f261590f85f6817952a1c1b806f8d4e062fb5da7e59fcd2efd2229d7e922e337",
-      "path": "evidence-2026-10-06-v1.8.217-26a434/lab-lock.json",
-      "published_sha256": "da1b2998d12811afc9bd14d9234660e0d50a4fe9519a58409e413926ee353b53"
-    },
-    {
+      "description": "Removed private runner, lock, path, pool, and local inventory mechanics while preserving signed/lab binary identities and rehearsal verdicts.",
       "original_sha256": "6d143901366967da06811bbcffcb84b68474f338445601b2189a55e3bb85314a",
       "path": "evidence-2026-10-06-v1.8.217-26a434/README.md",
-      "published_sha256": "3d13308de37e573b6b5e808c3e282f92b8d55518cb1fb0e4af423f32dffc0296"
-    },
-    {
-      "original_sha256": "bb86ae353afb07c98a7631d32e29a1be90fc25cd3b07bd443a4708fea6021ef9",
-      "path": "evidence-2026-10-06-v1.8.217-26a434/run-config.json",
-      "published_sha256": "51b38d0130f88f237ab8d70149e5ee2487e3b8157373c8f7b6cfe34b6fb8dda3"
+      "published_sha256": "ca831416b01f4c17223c2b6d2692a43fd0e241f8a23f23264b4fb62404ca366f"
     },
     {
       "original_sha256": "16f5135a684b2c4ccba9a14b3e4e814cc8503f2eb30a1adbb45105127948d882",
@@ -47,59 +43,26 @@
       "published_sha256": "afcf5a6202846afd8d6dfbf7181233e6a05fa310be316cb9953bb9f880627917"
     },
     {
-      "original_sha256": "efe92dc854ec2457a4c82900a004020b33afe738523988fd4f2ef4659baf6111",
-      "path": "evidence-2026-10-06-v1.8.217-26a434/raw/lab-neg-missing-weight-file.log",
-      "published_sha256": "4bb4dce1e3cc0a458b8e2733ffd215c62d6e78430f778984b4bb3b08c575ac5c"
+      "description": "Removed lab-lock local path and owner tag while preserving timing and foreign-lock outcome.",
+      "original_sha256": "f261590f85f6817952a1c1b806f8d4e062fb5da7e59fcd2efd2229d7e922e337",
+      "path": "evidence-2026-10-06-v1.8.217-26a434/lab-lock.json",
+      "published_sha256": "10a9915c7374d7b2ef4c1a5d4dc129a5ffd889e64a2fe8a3decb688ebe0f662c"
     },
     {
-      "original_sha256": "137cd79008e8992b99677e559439f9dcb66aa3a77c5cafb22103eae797090a8d",
-      "path": "evidence-2026-10-06-v1.8.217-26a434/raw/lab-neg-symlink-weight-file.log",
-      "published_sha256": "4fb0987343f59c41f27f0b81166c76f84dd4e8d316631dbfcade063b3266fe1f"
+      "description": "Removed executable paths and PIDs while preserving the four live-binary records, versions, SHA-256 identities, and release-byte flags.",
+      "original_sha256": "95ccbc7a2cf231cee541ef4164c3fa0a1af7c5d3ebaca004ae541cbb403d6275",
+      "path": "evidence-2026-10-06-v1.8.217-26a434/live-binaries.json",
+      "published_sha256": "6b9a0955b544d8dfb19e81dd63061feaf496c1f289308ece14fc8766cd98c639"
     },
     {
-      "original_sha256": "c20e57da47a9086d70523f183af51359c5531aa2e8b089c7ea864a663779b0e9",
-      "path": "evidence-2026-10-06-v1.8.217-26a434/raw/updater-status.log",
-      "published_sha256": "c910007a66f6464b262d3810d2e06f393cbab6bd48b2548558256ec09077d7c0"
-    },
-    {
-      "original_sha256": "57ada6daf4ee563285c9db7c92ec0c91bb3d9197591a44738c56ba11615dd4c0",
-      "path": "evidence-2026-10-06-v1.8.217-26a434/raw/lab-neg-wrong-quant-bits.log",
-      "published_sha256": "8ca514f09e741d943df32343d6f9f39d3278a6f125a6e2926391d40b8c2a554c"
-    },
-    {
-      "original_sha256": "a8858c30bf214ea7aa6febf120f707980f1ba5f6ae8bf814898235b89bbd0863",
-      "path": "evidence-2026-10-06-v1.8.217-26a434/raw/verify-malibu-release-artifacts.log",
-      "published_sha256": "4a63a1c2df55b493462337490245a9ef705c0da80c04c8c85dab28489b7d8cb8"
-    },
-    {
-      "original_sha256": "d981f039e42bd6885c949dccf412d6c1802d733f850f339fe8478e0455320a63",
-      "path": "evidence-2026-10-06-v1.8.217-26a434/raw/lab-neg-extra-weight-file.log",
-      "published_sha256": "2270116fc728ebd90166ee7b20f3ffc542e3b4f8e23d45599a4985c9ee1af56c"
-    },
-    {
-      "original_sha256": "7734bec92af42a7a8192905ec48c00d641c837b24a414ea8f60befc26f6af0b3",
-      "path": "evidence-2026-10-06-v1.8.217-26a434/raw/lab-hardware-e2e.log",
-      "published_sha256": "86518e48fa8b355f938c5d6afdb3cd3ff26df95ae6cccf78cb26eb1e8a2013f4"
+      "original_sha256": "8906c3497377cd35115f3df5e43d6548e8c049bbec787a57543b27a752150fad",
+      "path": "evidence-2026-10-06-v1.8.217-26a434/raw/isolated-coordinator-disabled.log",
+      "published_sha256": "7b0282b3e2386a91e549d1d0599737646303d792b7e7ebd228696c205922592d"
     },
     {
       "original_sha256": "b9855070bfa04b6ff96b121c63c19fe769c7e77f034b8fd2e1dcd93982a83a09",
       "path": "evidence-2026-10-06-v1.8.217-26a434/raw/isolated-coordinator-enabled.log",
       "published_sha256": "bef040a70ed6188a84f37fcf6a8d5f4ff9bc8d7fb56615a00e52e390c14acc76"
-    },
-    {
-      "original_sha256": "51b24b3d720d135a4f741d066d53447d287a62ee6088769a4d906378e1e10a22",
-      "path": "evidence-2026-10-06-v1.8.217-26a434/raw/lab-neg-duplicate-tensor-file.log",
-      "published_sha256": "516655e674ae577f9027fc3cdc87356708251a1855be93d709454e0d1f0bfa9a"
-    },
-    {
-      "original_sha256": "7df4c23100662fb927b4046ba6dbddd970099d6ef9019c59b6b357735c975ea8",
-      "path": "evidence-2026-10-06-v1.8.217-26a434/raw/lab-neg-malformed-safetensors-header.log",
-      "published_sha256": "914646694989a4ac0b2502e10c642e2dc01b17346ceb0417ce2933609a79f287"
-    },
-    {
-      "original_sha256": "25abf3e90efb1caa465741ad5e8c4110331ba4ce5849d103e04345ac597f09a1",
-      "path": "evidence-2026-10-06-v1.8.217-26a434/raw/updater-apply.log",
-      "published_sha256": "d9e5c3080b917a65240a1256d8a87ebf8e30a050a06096ac6f476273f117ea7a"
     },
     {
       "original_sha256": "bf493d34a22c19b0acdaf36eb2f39094a4a5916f9860a68a16e42665c04521ce",
@@ -112,14 +75,19 @@
       "published_sha256": "739165adf4640f756828184d6e98e838149cde1eb14ff41a88d80f20a5340690"
     },
     {
-      "original_sha256": "aa62b436a9db03808af101f70dcdf9ce17ae98fd544a65471d2370a42c3035b8",
-      "path": "evidence-2026-10-06-v1.8.217-26a434/raw/production-generator-rehearsal.log",
-      "published_sha256": "f925dcea099875bf2068a11d6d6950f048f1040e6a14eda5cf76ec7e7404f9b2"
+      "original_sha256": "7734bec92af42a7a8192905ec48c00d641c837b24a414ea8f60befc26f6af0b3",
+      "path": "evidence-2026-10-06-v1.8.217-26a434/raw/lab-hardware-e2e.log",
+      "published_sha256": "86518e48fa8b355f938c5d6afdb3cd3ff26df95ae6cccf78cb26eb1e8a2013f4"
     },
     {
-      "original_sha256": "8906c3497377cd35115f3df5e43d6548e8c049bbec787a57543b27a752150fad",
-      "path": "evidence-2026-10-06-v1.8.217-26a434/raw/isolated-coordinator-disabled.log",
-      "published_sha256": "7b0282b3e2386a91e549d1d0599737646303d792b7e7ebd228696c205922592d"
+      "original_sha256": "51b24b3d720d135a4f741d066d53447d287a62ee6088769a4d906378e1e10a22",
+      "path": "evidence-2026-10-06-v1.8.217-26a434/raw/lab-neg-duplicate-tensor-file.log",
+      "published_sha256": "516655e674ae577f9027fc3cdc87356708251a1855be93d709454e0d1f0bfa9a"
+    },
+    {
+      "original_sha256": "d981f039e42bd6885c949dccf412d6c1802d733f850f339fe8478e0455320a63",
+      "path": "evidence-2026-10-06-v1.8.217-26a434/raw/lab-neg-extra-weight-file.log",
+      "published_sha256": "2270116fc728ebd90166ee7b20f3ffc542e3b4f8e23d45599a4985c9ee1af56c"
     },
     {
       "original_sha256": "8d0d900acdf4ae0e8c9aabf015676378c0ac31d59b0c3c8fad62dbec4e3b6bc6",
@@ -127,14 +95,74 @@
       "published_sha256": "06039d1e9345d150dbd020dc0fb3a3880e133770e8163e4159d020d4afb75d38"
     },
     {
+      "original_sha256": "7df4c23100662fb927b4046ba6dbddd970099d6ef9019c59b6b357735c975ea8",
+      "path": "evidence-2026-10-06-v1.8.217-26a434/raw/lab-neg-malformed-safetensors-header.log",
+      "published_sha256": "914646694989a4ac0b2502e10c642e2dc01b17346ceb0417ce2933609a79f287"
+    },
+    {
+      "original_sha256": "efe92dc854ec2457a4c82900a004020b33afe738523988fd4f2ef4659baf6111",
+      "path": "evidence-2026-10-06-v1.8.217-26a434/raw/lab-neg-missing-weight-file.log",
+      "published_sha256": "4bb4dce1e3cc0a458b8e2733ffd215c62d6e78430f778984b4bb3b08c575ac5c"
+    },
+    {
+      "original_sha256": "137cd79008e8992b99677e559439f9dcb66aa3a77c5cafb22103eae797090a8d",
+      "path": "evidence-2026-10-06-v1.8.217-26a434/raw/lab-neg-symlink-weight-file.log",
+      "published_sha256": "4fb0987343f59c41f27f0b81166c76f84dd4e8d316631dbfcade063b3266fe1f"
+    },
+    {
+      "original_sha256": "57ada6daf4ee563285c9db7c92ec0c91bb3d9197591a44738c56ba11615dd4c0",
+      "path": "evidence-2026-10-06-v1.8.217-26a434/raw/lab-neg-wrong-quant-bits.log",
+      "published_sha256": "8ca514f09e741d943df32343d6f9f39d3278a6f125a6e2926391d40b8c2a554c"
+    },
+    {
+      "original_sha256": "aa62b436a9db03808af101f70dcdf9ce17ae98fd544a65471d2370a42c3035b8",
+      "path": "evidence-2026-10-06-v1.8.217-26a434/raw/production-generator-rehearsal.log",
+      "published_sha256": "f925dcea099875bf2068a11d6d6950f048f1040e6a14eda5cf76ec7e7404f9b2"
+    },
+    {
+      "original_sha256": "25abf3e90efb1caa465741ad5e8c4110331ba4ce5849d103e04345ac597f09a1",
+      "path": "evidence-2026-10-06-v1.8.217-26a434/raw/updater-apply.log",
+      "published_sha256": "d9e5c3080b917a65240a1256d8a87ebf8e30a050a06096ac6f476273f117ea7a"
+    },
+    {
       "original_sha256": "d9610be5784572bc96aa8e8f87e7eac59e7e76297faa5cbe97bcaa84d6ce4549",
       "path": "evidence-2026-10-06-v1.8.217-26a434/raw/updater-check.log",
       "published_sha256": "8564a24201ff6c07760d983096902388025071e867b0e47c56717a2a96252ba1"
+    },
+    {
+      "original_sha256": "c20e57da47a9086d70523f183af51359c5531aa2e8b089c7ea864a663779b0e9",
+      "path": "evidence-2026-10-06-v1.8.217-26a434/raw/updater-status.log",
+      "published_sha256": "c910007a66f6464b262d3810d2e06f393cbab6bd48b2548558256ec09077d7c0"
+    },
+    {
+      "original_sha256": "a8858c30bf214ea7aa6febf120f707980f1ba5f6ae8bf814898235b89bbd0863",
+      "path": "evidence-2026-10-06-v1.8.217-26a434/raw/verify-malibu-release-artifacts.log",
+      "published_sha256": "4a63a1c2df55b493462337490245a9ef705c0da80c04c8c85dab28489b7d8cb8"
+    },
+    {
+      "description": "Removed local credential-import housekeeping while preserving isolated coordinator billing, admission, and request evidence.",
+      "original_sha256": "46910754d6d1ae2f9f56924b35d2f23c2af9ec133c5f17736e70d954492e1160",
+      "path": "evidence-2026-10-06-v1.8.217-26a434/records/isolated-coordinator.json",
+      "published_sha256": "808333acf033b83f90675370b6fd99b109e1622f67db459cd6eda15b1d4ec25d"
+    },
+    {
+      "description": "Removed lab-lock path and owner mechanics while preserving verdicts, counts, binary identities, and run timing.",
+      "original_sha256": "a024c8a2e5655dd7a0b74c3cd2c9d9b5e94cf4f6e78416ea997aeb2297f67f06",
+      "path": "evidence-2026-10-06-v1.8.217-26a434/result.json",
+      "published_sha256": "12aa745a6a2ac8757fecd70ea0d8a7b4d929659ba9547a18fcdf323569f0087f"
+    },
+    {
+      "description": "Removed private host roots, path inventories, lock-owner mechanics, and toolchain storage paths while preserving release, tuple, policy, and port facts.",
+      "original_sha256": "bb86ae353afb07c98a7631d32e29a1be90fc25cd3b07bd443a4708fea6021ef9",
+      "path": "evidence-2026-10-06-v1.8.217-26a434/run-config.json",
+      "published_sha256": "64c4052f206c7685da63a8fc94bf6e06e36de2e9c1ae315bec810148f078530f"
     }
   ],
   "redactions": [
     "Private home roots replaced with <operator-home>",
-    "Private temporary paths replaced with <operator-temp>"
+    "Private temporary paths replaced with <operator-temp>",
+    "Private operational housekeeping removed from publication copies: local agent/worktree inventory, executable/PID inventory, run-config private path inventories, lab-lock owner/path mechanics, and local secret-storage/disposal details.",
+    "Acceptance verdicts, inference/accounting/isolation facts, public-feed facts, and live binary version/SHA/release-byte records are preserved."
   ],
   "schema": "macprovider.evidence-publication-redaction.v1"
 }

@@ -230,8 +230,6 @@
   "lab_lock": {
     "acquired_at": "2026-10-06T10:31:53Z",
     "foreign_lock_waits": 0,
-    "owner": "r014-journey-217",
-    "path": "<operator-home>/.lab-window.lock",
     "released_at": "2026-10-06T11:33:53Z"
   },
   "requirement_id": "SPEC-048-R014",

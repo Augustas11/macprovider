@@ -30,13 +30,16 @@ The runner writes:
 - `result.json` and `result.md` for the summary.
 
 Verdicts are computed from the records, so you can rerun a subset of phases.
-`run-config.json` is a sanitized copy of the configuration used here. Private host roots are replaced with logical placeholders; it is not directly executable.
+`run-config.json` is a publication copy of the configuration. It preserves the
+release, tuple, policy, and port facts needed to interpret the evidence, while
+omitting private host roots and local housekeeping inventories; it is not
+directly executable.
 
 ### Two binaries, by necessity
 
 1. **The signed release**, `macprovider-cli` 1.8.217 (sha256 `a6ea51d7…`,
-   cdhash `df44bcf4…`, Developer ID `YF7XNRJUG4`), from `~/cli217`. The sha
-   was verified before use.
+   cdhash `df44bcf4…`, Developer ID `YF7XNRJUG4`). The sha was verified before
+   use.
 2. **A lab build of the exact release commit** `71f22d36c`, built on the
    Studio with `-DMACPROVIDER_LAB_HARNESS` (sha256 `3e2135b3…`). This is
    needed because the signed binary doesn't contain the hidden
@@ -50,27 +53,25 @@ Verdicts are computed from the records, so you can rerun a subset of phases.
 
 ### Isolation
 
-- **Lab lock.** `~/.lab-window.lock` was held from 2026-10-06T10:31:53Z to
+- **Lab window.** Exclusive lab access was held from 2026-10-06T10:31:53Z to
   11:33:53Z (`lab-lock.json`). No foreign lock was found.
 - **Ports.** Every loopback port is in the 193xx block; the runner refuses
   live ports.
-- **No join.** Every signed `serve` ran `--no-join` with a private
-  `CFFIXED_USER_HOME`, lifecycle root, control socket, and TMPDIR. The one
-  exception is the isolated-coordinator phase: it joined a coordinator and
-  gateway built from the release source on 127.0.0.1, using SQLite, with
-  settlement observe and the job off.
+- **No join.** Every signed `serve` ran `--no-join` in an isolated local
+  lifecycle. The one exception is the isolated-coordinator phase: it joined a
+  coordinator and gateway built from the release source on 127.0.0.1, using
+  SQLite, with settlement observe and the job off.
 - **Clones, not the live store.** Model snapshots and fixtures were
   APFS-cloned into the work directory. The live model store and the shared
   `q36-a3b-cat` fixture were only read.
 - **Updater sandbox.** The updater phase ran the previous release under
   `sandbox-exec`. The sandbox denied every `launchctl` exec and every write to
   the live install, config, LaunchAgents, pools, and `/Applications`.
-- **Contact with production.** Nothing touched the live provider, the
-  `:18120`/`:18130` pools, `<operator-home>/malibu-m1-pool`, Pearl, or any live
-  config. The only contacts with `coordinator.malibu.tech` were read-only
-  public GETs of the native-MTP revocation feed: one by the runner, and one
-  by the released serve path itself. The latter is hard-coded and has no
-  override.
+- **Contact with production.** Nothing touched the live provider, auxiliary
+  provider pools, Pearl, or any live config. The only contacts with
+  `coordinator.malibu.tech` were read-only public GETs of the native-MTP
+  revocation feed: one by the runner, and one by the released serve path
+  itself. The latter is hard-coded and has no override.
 - **Live provider restart (not caused by this run).** The live provider
   restarted at about 10:44Z, outside this run. Its watchdog log shows failed
   `/v1/health` checks from 09:30Z, before the lock was taken. The runner
@@ -176,11 +177,10 @@ The deterministic-composition control rules timing out.
   `v1.8.207@d98b74a6…`, and the coordinator still recommends 1.8.207.
   1.8.217 is GitHub "Latest", but the previous stable won't be offered it
   until the post-publication rollout publishes its transport.
-- **Item 9.** Two `malibu-m1-pool` processes run CLI 1.8.219 (sha
-  `c66be23c…`, Developer ID signed, staged by #1865, not a published release)
-  against `wss://coordinator.malibu.tech`. The live provider and
-  `malibu-1816-native` run the published 1.8.217 bytes. R014.9 requires no
-  unreleased binary on the live coordinator at enablement time.
+- **Item 9.** Two live-connected records report CLI 1.8.219 (sha `c66be23c…`,
+  Developer ID signed, staged by #1865, not a published release). Two other
+  live-connected records report the published 1.8.217 bytes. R014.9 requires
+  no unreleased binary on the live coordinator at enablement time.
 
 ## Sidecar delivery (the main open question)
 

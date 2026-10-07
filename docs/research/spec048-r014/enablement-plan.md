@@ -44,16 +44,10 @@ Two facts shape the work beyond the R014 rehearsal list:
 
 ### D-CB: corrected CB policy entry (input dependency)
 
-- **Who/what (2026-10-06 12:46Z).** No open PR or issue names it
-  (`gh pr list` / `gh issue list` for continuous-batching, catalog,
-  tuple_acceptance: only merged #1803, #1808, #1838, #1672). No remote branch
-  has touched `phase3-binary/catalog/autotune/continuous-batching-policy*` or
-  `scripts/catalog-release.py` since 2026-10-05. The only candidate is the
-  local session worktree
-  `<operator-home>/macprovider-poc/.claude/worktrees/agent-a16d9bba3f1ea0e43`
-  on branch `ops/cb-activation-gates`, created 2026-10-06 12:44Z, no commits
-  yet. ListAgents is not available in this session, so the owner is
-  inferred, not confirmed.
+- **Who/what (2026-10-06 12:46Z).** No published PR, issue, or remote branch
+  named the continuous-batching catalog correction yet. The campaign therefore
+  treats the corrected signed CB policy entry as an external input dependency,
+  not as evidence captured in this publication set.
 - **What the campaign needs from it.** A signed CB policy entry for
   `qwen/qwen3.6-35b-a3b` whose tuple matches the provider's runtime tuple,
   bound (`ContinuousBatchingSignedPolicy.swift:102-109`) to the CLI version
@@ -553,10 +547,10 @@ same code path the lab build exercised with the test key.
 
 ## 6. Studio lab time
 
-All lab work runs under the lab lock (`mkdir ~/.lab-window.lock`) on isolated
-193xx ports, `--no-join`, using clones of the model store. Rows marked "pause"
-need the live provider quiet, so the operator must approve pausing :8080
-first; nothing here pauses it without that approval.
+All lab work runs under an exclusive lab window on isolated 193xx ports,
+`--no-join`, using cloned model inputs. Rows marked "pause" need the live
+provider quiet, so the operator must approve pausing :8080 first; nothing here
+pauses it without that approval.
 
 | Window | Content | Duration | Live :8080 |
 |---|---|---|---|

@@ -16,7 +16,6 @@
     "serving.all_200": true,
     "serving.native_rows_served": true
   },
-  "credentials_import_exit": 0,
   "finished_at": "2026-10-06T17:05:12Z",
   "identity": {
     "key_id": "native-mtp-rehearsal-test-v1",
@@ -29,7 +28,6 @@
   },
   "lab_lock": {
     "acquired_at": "2026-10-06T17:01:59Z",
-    "dir": "<operator-home>/.lab-window.lock",
     "released_at": "2026-10-06T17:05:12Z"
   },
   "phases": {

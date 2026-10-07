@@ -9,8 +9,8 @@ emergency-revocation drill.
 | Source | `mtp/enablement` at `84a28cadc`. The lab-harness build is `swift build -c release --product macprovider-cli -Xswiftc -DMACPROVIDER_LAB_HARNESS`, with the v1.8.217 `mlx.metallib`. |
 | Lab binary | SHA-256 `b2438f77…`, ad-hoc CDHash `9d33390c…` (`rehearsal-release.json` `facts`) |
 | Coordinator, gateway | Built from the same branch. Loopback 19301/19302/19310, SQLite, settlement in observe mode, `enforce_provider_admission: true` |
-| Release | `scripts/native_mtp_rehearsal_release.py` re-cuts the artifact-feed activation and then the native-MTP release with a throwaway Ed25519 key `native-mtp-rehearsal-test-v1`. The private key never left the operator Mac scratchpad. 144 revocation slots were pre-signed. |
-| Runner | `scripts/native_mtp_enablement_rehearsal.py`, under the lab lock, with `--isolate-lifecycle` and an isolated `CFFIXED_USER_HOME`, `HF_HOME` and model store (an APFS clone of the target, no drafter). |
+| Release | `scripts/native_mtp_rehearsal_release.py` re-cuts the artifact-feed activation and then the native-MTP release with the local-only test key `native-mtp-rehearsal-test-v1`. 144 revocation slots were pre-signed. |
+| Runner | `scripts/native_mtp_enablement_rehearsal.py`, under the lab lock, with `--isolate-lifecycle` and isolated local state using a cloned target fixture (no drafter). |
 | Host | Apple M3 Ultra, 256 GB, macOS 26A434. Live :8080, :18120, :18130 and the M1 pool were not touched. |
 
 ## Result (`result-full-run.json`, 16:40–17:01Z)

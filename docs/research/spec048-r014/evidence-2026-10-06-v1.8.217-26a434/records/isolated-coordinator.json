@@ -3,7 +3,6 @@
   "finished_at": "2026-10-06T11:32:55Z",
   "started_at": "2026-10-06T11:30:49Z",
   "steps": {
-    "credentials_import_exit": 0,
     "disabled": {
       "coordinator_db_tokens": {
         "ledger_operator_credits": {
