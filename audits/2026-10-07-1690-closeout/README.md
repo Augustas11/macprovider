@@ -97,6 +97,28 @@ the protected signing workflows run. They do not authorize conformance
 promotion, a live Creator launch, or deployment. Fresh protected signatures and
 their reviewed integration remain a follow-up gate for #1690.
 
+### Fresh post-merge protected signatures
+
+After #1886 landed the reviewed capture bytes on main, protected Layer2
+[run 37625849934](https://github.com/Augustas11/macprovider/actions/runs/37625849934)
+and Creator
+[run 37625855687](https://github.com/Augustas11/macprovider/actions/runs/37625855687)
+both succeeded from `080eb840447e0e09d15046fa94d884d1579ea56f`, signing the
+exact `62a9a459de59f759e09fbe88a9015e738da367ae` captures above. Their envelopes
+passed trusted public-key signature, payload/artifact binding, current-selector,
+expiry, export-manifest and committed-byte checks for all 16 covered mappings.
+The prior envelopes remain historical; no dates or payloads were rewritten.
+
+| Fresh envelope | SHA-256 | Expiry |
+| --- | --- | --- |
+| Layer2 `20261007T122927Z` | `99ad0f6da2a3468f4e3f578830e1f7ce72ccd6f182f09b6e2f4431b2694d4178` | 2026-10-14 |
+| Creator `20261007T122939Z` | `01f96be56f7979a1be6f009983f244b51f5cf3b7caa3ff1357fe8260081ee0f4` | 2026-10-07 |
+
+These signatures are evidence-only. SPEC-042 Layer2 and SPEC-043 Creator rows
+remain pending: no full-row promotion, external Creator launch, deployment,
+CLI publication or fleet activation is authorized. Reviewed integration is
+required, and expiry or further selector drift requires a new capture.
+
 ## Production SPEC-043-R007 timing
 
 Five runs used Pearl's public production gateway, the unchanged 150 ms server
