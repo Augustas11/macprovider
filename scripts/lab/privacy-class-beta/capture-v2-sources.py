@@ -26,7 +26,15 @@ SCRIPTS = REPO_ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from privacy_class_beta_journey_evidence import V2_DB_COLUMNS, V2_DB_TABLES, V2_SOURCE_CONTRACT  # noqa: E402
+from privacy_class_beta_journey_evidence import (  # noqa: E402
+    Bundle,
+    Checks,
+    V2_DB_COLUMNS,
+    V2_DB_TABLES,
+    V2_SOURCE_CONTRACT,
+    V2_SOURCE_PROFILE,
+    V2RawSourceView,
+)
 
 
 EXTRACTOR = Path(__file__).with_name("extract-primary-evidence.py")
@@ -385,6 +393,19 @@ def capture_kind(args: argparse.Namespace) -> None:
 
 def finalize(args: argparse.Namespace) -> None:
     out_root = prepare_output_root(Path(args.out_root))
+    rows = collect_closed_raw_source_rows(out_root)
+    write_json_private(
+        out_root,
+        out_root / INVENTORY_DIR / "FINALIZED.json",
+        {
+            "schema_version": "macprovider.privacy-class-beta-v2-capture-inventory.v1",
+            "captured_at_unix": int(time.time()),
+            "raw_sources": rows,
+        },
+    )
+
+
+def collect_closed_raw_source_rows(out_root: Path) -> list[dict[str, Any]]:
     expected = {relative for _manifest, relative in KINDS.values()}
     raw_root = out_root / "evidence" / "v2-raw"
     if raw_root.is_symlink() or not raw_root.is_dir():
@@ -417,15 +438,107 @@ def finalize(args: argparse.Namespace) -> None:
         if inventory.get("sha256") != digest or inventory.get("bytes") != st.st_size:
             die(f"{kind} finalized source drifted after capture")
         rows.append({"kind": kind, "path": relative, "sha256": digest, "bytes": st.st_size})
-    write_json_private(
-        out_root,
-        out_root / INVENTORY_DIR / "FINALIZED.json",
-        {
-            "schema_version": "macprovider.privacy-class-beta-v2-capture-inventory.v1",
-            "captured_at_unix": int(time.time()),
-            "raw_sources": rows,
-        },
-    )
+    return rows
+
+
+def require_finalized_current(out_root: Path) -> list[dict[str, Any]]:
+    finalized_path = out_root / INVENTORY_DIR / "FINALIZED.json"
+    raw, _resolved, _st = read_source_bytes(finalized_path, MAX_FILE_SOURCE_BYTES)
+    finalized = parse_json_bytes(raw, "FINALIZED capture inventory")
+    if not isinstance(finalized, dict) or set(finalized) != {"schema_version", "captured_at_unix", "raw_sources"}:
+        die("FINALIZED capture inventory has invalid shape")
+    if finalized.get("schema_version") != "macprovider.privacy-class-beta-v2-capture-inventory.v1":
+        die("FINALIZED capture inventory has invalid schema_version")
+    if not isinstance(finalized.get("captured_at_unix"), int) or isinstance(finalized.get("captured_at_unix"), bool):
+        die("FINALIZED capture inventory has invalid captured_at_unix")
+    current = collect_closed_raw_source_rows(out_root)
+    if finalized.get("raw_sources") != current:
+        die("FINALIZED capture inventory is stale")
+    return current
+
+
+def parse_binding(path: Path) -> dict[str, str]:
+    data, _resolved, _st = read_source_bytes(path, MAX_FILE_SOURCE_BYTES)
+    bundle = Bundle("binding", {"step-01-bind-signed-release/binding.txt": data}, b"")
+    return Checks(bundle).binding()
+
+
+def preflight_source_manifest_outputs(out_root: Path) -> dict[str, Path]:
+    targets = {name: out_root / "evidence" / "v2-source" / name for name in sorted(V2_SOURCE_CONTRACT)}
+    for name, path in targets.items():
+        try:
+            path.relative_to(out_root)
+        except ValueError:
+            die(f"source manifest output escaped output root: {name}")
+        if path.exists() or path.is_symlink():
+            die(f"refusing to overwrite output: {path}")
+        absolute = path if path.is_absolute() else Path.cwd() / path
+        probe = Path(absolute.parts[0])
+        for part in absolute.parts[1:]:
+            probe = probe / part
+            try:
+                st = probe.lstat()
+            except FileNotFoundError:
+                break
+            if stat.S_ISLNK(st.st_mode):
+                die(f"source manifest output must not traverse a symlink: {probe}")
+        if path.parent.exists() or path.parent.is_symlink():
+            require_existing_private_dir(path.parent, "source manifest output directory")
+    return targets
+
+
+def compose_source_manifest(out_root: Path, binding: dict[str, str], finalized_by_kind: dict[str, dict[str, Any]], name: str) -> dict[str, Any]:
+    errors: list[str] = []
+
+    def source_bytes(manifest: str, kind: str) -> bytes:
+        if manifest != name:
+            die(f"internal source manifest mismatch: {manifest} != {name}")
+        relative = V2_SOURCE_CONTRACT[manifest][kind]
+        data, _resolved, _st = read_source_bytes(out_root / relative, MAX_FILE_SOURCE_BYTES)
+        row = finalized_by_kind.get(kind)
+        if row is None or row.get("path") != relative:
+            die(f"FINALIZED inventory is missing {kind}")
+        digest = hashlib.sha256(data).hexdigest()
+        if row.get("sha256") != digest or row.get("bytes") != len(data):
+            die(f"{kind} finalized source drifted before compose")
+        return data
+
+    view = V2RawSourceView(source_bytes, binding)
+    derived = view.manifest(name, errors)
+    if errors:
+        die("; ".join(errors))
+    provenance = []
+    for kind, relative in sorted(V2_SOURCE_CONTRACT[name].items()):
+        row = finalized_by_kind.get(kind)
+        if row is None or row.get("path") != relative:
+            die(f"FINALIZED inventory is missing {kind}")
+        provenance.append({"kind": kind, "path": relative, "sha256": row["sha256"]})
+    return {
+        "profile": V2_SOURCE_PROFILE,
+        "provenance": {"raw_sources": provenance},
+        **derived,
+    }
+
+
+def compose_source_manifests(args: argparse.Namespace) -> None:
+    if not args.binding:
+        die("--binding is required with --compose-source-manifests")
+    out_root = prepare_output_root(Path(args.out_root))
+    finalized = require_finalized_current(out_root)
+    finalized_by_kind = {row["kind"]: row for row in finalized}
+    binding = parse_binding(Path(args.binding))
+    targets = preflight_source_manifest_outputs(out_root)
+    manifests = {
+        name: compose_source_manifest(out_root, binding, finalized_by_kind, name)
+        for name in sorted(V2_SOURCE_CONTRACT)
+    }
+    for path in targets.values():
+        mkdir_private_chain(out_root, path.parent)
+    for path in targets.values():
+        if path.exists() or path.is_symlink():
+            die(f"refusing to overwrite output: {path}")
+    for name, doc in manifests.items():
+        write_json_private(out_root, targets[name], doc)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -434,14 +547,22 @@ def main(argv: list[str] | None = None) -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--kind")
     mode.add_argument("--finalize", action="store_true")
+    mode.add_argument("--compose-source-manifests", action="store_true")
     parser.add_argument("--source")
+    parser.add_argument("--binding")
     args = parser.parse_args(argv)
     try:
         if args.finalize:
-            if args.source:
-                die("--source is not accepted with --finalize")
+            if args.source or args.binding:
+                die("--source/--binding are not accepted with --finalize")
             finalize(args)
+        elif args.compose_source_manifests:
+            if args.source:
+                die("--source is not accepted with --compose-source-manifests")
+            compose_source_manifests(args)
         else:
+            if args.binding:
+                die("--binding is accepted only with --compose-source-manifests")
             if not args.source:
                 die("--source is required with --kind")
             capture_kind(args)

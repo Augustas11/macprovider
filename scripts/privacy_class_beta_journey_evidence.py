@@ -918,6 +918,430 @@ def ed25519_sign(seed: bytes, message: bytes) -> tuple[bytes, bytes]:
     return public, big_r + int.to_bytes(s, 32, "little")
 
 
+class V2RawSourceView:
+    """Verifier-owned v0.2 source-fact projection helpers.
+
+    The capture composer uses this same view to derive primary/v2 manifests
+    from finalized raw captures. `Checks` uses it to recompute and compare
+    those manifests, so the source-to-summary rules live in one place.
+    """
+
+    def __init__(
+        self,
+        source_bytes,
+        binding,
+        trusted_release_public_key_sha256: str = TRUSTED_RELEASE_SIGNING_PUBLIC_KEY_SHA256,
+    ) -> None:
+        self._source_bytes = source_bytes
+        self._binding_loader = binding if callable(binding) else None
+        self._binding = None if callable(binding) else binding
+        self.trusted_release_public_key_sha256 = trusted_release_public_key_sha256
+
+    def source_bytes(self, manifest: str, kind: str) -> bytes:
+        return self._source_bytes(manifest, kind)
+
+    def binding(self) -> dict[str, str]:
+        if self._binding is None:
+            self._binding = self._binding_loader()
+        return self._binding
+
+    def source_json(self, manifest: str, kind: str) -> Any:
+        path = V2_SOURCE_CONTRACT[manifest][kind]
+        try:
+            text = self.source_bytes(manifest, kind).decode("utf-8")
+        except UnicodeDecodeError:
+            fail(f"{path} must be UTF-8 JSON")
+        return parse_json(text, path)
+
+    def snapshot(self, manifest: str, kind: str) -> tuple[int, dict[str, list[dict[str, Any]]]]:
+        label = V2_SOURCE_CONTRACT[manifest][kind]
+        doc = self.source_json(manifest, kind)
+        if not isinstance(doc, dict) or set(doc) != {"captured_at_unix", "tables"}:
+            fail(f"{label} must carry exactly captured_at_unix and tables")
+        captured = doc.get("captured_at_unix")
+        tables = doc.get("tables")
+        if not isinstance(captured, int) or isinstance(captured, bool) or captured <= 0:
+            fail(f"{label}.captured_at_unix must be a positive integer")
+        if not isinstance(tables, dict) or set(tables) != set(V2_DB_TABLES):
+            fail(f"{label}.tables must be the closed v2 table set")
+        result: dict[str, list[dict[str, Any]]] = {}
+        for name in V2_DB_TABLES:
+            export = tables[name]
+            if not isinstance(export, dict) or set(export) != {"table", "columns", "dropped_columns", "row_count", "truncated", "rows"}:
+                fail(f"{label}.{name} must be a complete primary row export")
+            columns, rows = export.get("columns"), export.get("rows")
+            if export.get("table") != name or export.get("truncated") is not False or not isinstance(columns, list) or not all(isinstance(item, str) for item in columns):
+                fail(f"{label}.{name} must identify a complete untruncated table")
+            if tuple(columns) != V2_DB_COLUMNS[name]:
+                fail(f"{label}.{name} columns must be the closed public-state projection {list(V2_DB_COLUMNS[name])}")
+            if not isinstance(export.get("dropped_columns"), list) or not isinstance(rows, list) or export.get("row_count") != len(rows):
+                fail(f"{label}.{name} row metadata is invalid")
+            if not all(isinstance(row, dict) and set(row) == set(columns) for row in rows):
+                fail(f"{label}.{name} rows must exactly match columns")
+            result[name] = rows
+        return captured, result
+
+    def clients(self, manifest: str, kind: str) -> tuple[int, dict[str, dict[str, Any]]]:
+        label = V2_SOURCE_CONTRACT[manifest][kind]
+        doc = self.source_json(manifest, kind)
+        if not isinstance(doc, dict) or set(doc) != {"captured_at_unix", "attempts"}:
+            fail(f"{label} must carry exactly captured_at_unix and attempts")
+        captured, attempts = doc.get("captured_at_unix"), doc.get("attempts")
+        if not isinstance(captured, int) or isinstance(captured, bool) or not isinstance(attempts, list):
+            fail(f"{label} has invalid capture types")
+        by_case: dict[str, dict[str, Any]] = {}
+        required = {"case", "status", "provider_id", "response_excerpt"}
+        for attempt in attempts:
+            if not isinstance(attempt, dict) or set(attempt) != required:
+                fail(f"{label} attempt must carry exactly {sorted(required)}")
+            name = attempt.get("case")
+            if not isinstance(name, str) or not name or name in by_case:
+                fail(f"{label} attempt cases must be non-empty and unique")
+            status = attempt.get("status")
+            excerpt = attempt.get("response_excerpt")
+            if not isinstance(status, int) or isinstance(status, bool) or not isinstance(excerpt, dict):
+                fail(f"{label} attempt status/response types are invalid")
+            if attempt.get("provider_id") is not None and not isinstance(attempt.get("provider_id"), str):
+                fail(f"{label} attempt provider_id must be string or null")
+            posture = error_code = None
+            if set(excerpt) == {"usage_macprovider_privacy"}:
+                usage = excerpt["usage_macprovider_privacy"]
+                if not isinstance(usage, dict) or set(usage) != {"posture_verified_at_unix"} or not isinstance(usage["posture_verified_at_unix"], int) or isinstance(usage["posture_verified_at_unix"], bool):
+                    fail(f"{label} successful response excerpt must carry the observed posture time")
+                posture = usage["posture_verified_at_unix"]
+            elif set(excerpt) == {"error"}:
+                error = excerpt["error"]
+                if not isinstance(error, dict) or set(error) != {"code"} or not isinstance(error["code"], str):
+                    fail(f"{label} error response excerpt must carry the actual code")
+                error_code = error["code"]
+            else:
+                fail(f"{label} response excerpt must be the closed usage or error shape")
+            if (status == 200) is not (posture is not None):
+                fail(f"{label} HTTP status must agree with the captured response excerpt")
+            by_case[name] = {**attempt, "error_code": error_code, "privacy_posture_verified_at_unix": posture}
+        return captured, by_case
+
+    @staticmethod
+    def active_enrollments(tables: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+        return [row for row in tables["privacy_class_enrollment"] if row.get("revoked_at_unix") in (None, 0)]
+
+    @staticmethod
+    def privacy_keys(tables: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+        return [row for row in tables["relay_blind_key_records"] if row.get("key_class") == "privacy"]
+
+    @staticmethod
+    def row_identity(rows: list[dict[str, Any]], keys: tuple[str, ...]) -> set[tuple[Any, ...]]:
+        return {tuple(row.get(key) for key in keys) for row in rows}
+
+    def auto_mode(self, errors: list[str]) -> dict[str, Any]:
+        launch = self.source_json("auto-mode.json", "auto_launch")
+        config = self.source_json("auto-mode.json", "auto_config")
+        sessions = self.source_json("auto-mode.json", "auto_sessions")
+        logs = self.source_json("auto-mode.json", "auto_logs")
+        before_at, before = self.snapshot("auto-mode.json", "auto_db_before")
+        after_at, after = self.snapshot("auto-mode.json", "auto_db_after")
+        for value, label, keys in ((launch, "launch", {"cases"}), (config, "config", {"cases"}), (sessions, "sessions", {"cases"}), (logs, "logs", {"lines"})):
+            if not isinstance(value, dict) or set(value) != keys or not isinstance(next(iter(value.values())), list):
+                fail(f"auto-mode {label} capture has an invalid closed shape")
+        required = {"automatic-eligible", "automatic-ineligible", "automatic-hardening-fallback", "explicit-optout", "explicit-relay-blind"}
+
+        def indexed(rows: list[Any], keys: set[str], label: str) -> dict[str, dict[str, Any]]:
+            out = {}
+            for row in rows:
+                if not isinstance(row, dict) or set(row) != keys or not isinstance(row.get("name"), str) or row["name"] in out:
+                    fail(f"auto-mode {label} rows must have a closed shape and unique names")
+                out[row["name"]] = row
+            if set(out) != required:
+                fail(f"auto-mode {label} cases must be exactly {sorted(required)}")
+            return out
+
+        launches = indexed(launch["cases"], {"name", "executable_sha256", "arguments", "started_at_unix"}, "launch")
+        configs = indexed(config["cases"], {"name", "privacy_class_requested", "relay_blind_requested"}, "config")
+        captured_sessions = indexed(sessions["cases"], {"name", "provider_id", "accepted_at_unix", "claims", "effective_mode"}, "session")
+        log_rows = logs["lines"]
+        if not all(isinstance(row, dict) and set(row) == {"name", "stream", "line"} and row.get("name") in required and row.get("stream") in ("stdout", "stderr") and isinstance(row.get("line"), str) for row in log_rows):
+            fail("auto-mode logs must be closed captured output lines")
+        before_keys = self.privacy_keys(before)
+        after_keys = self.privacy_keys(after)
+        expected_modes = {
+            "automatic-eligible": (None, None, "privacy", 1, True),
+            "automatic-ineligible": (None, None, "ordinary", 0, False),
+            "automatic-hardening-fallback": (None, None, "ordinary", 0, False),
+            "explicit-optout": (False, None, "ordinary", 0, False),
+            "explicit-relay-blind": (None, True, "plain_relay_blind", 0, False),
+        }
+        recomputed = []
+        for name in required:
+            cli, cfg, session = launches[name], configs[name], captured_sessions[name]
+            arguments = cli.get("arguments")
+            expect(isinstance(arguments, dict) and set(arguments) == {"privacy_class_beta", "relay_blind_enabled"}, errors, f"{name} launch must capture only the two non-secret mode arguments")
+            expect(cli.get("executable_sha256") == self.binding()["binary_sha256"], errors, f"{name} launch must bind the tested executable bytes")
+            expect(all(isinstance(cli[key], int) and not isinstance(cli[key], bool) for key in ("started_at_unix",)), errors, f"{name} launch time must be integral")
+            requested, relay_requested, outcome, delta, claimed = expected_modes[name]
+            expect(cfg["privacy_class_requested"] is requested and cfg["relay_blind_requested"] is relay_requested, errors, f"{name} config must select the expected mode")
+            expect(arguments == {"privacy_class_beta": requested, "relay_blind_enabled": relay_requested}, errors, f"{name} launch arguments and loaded config must agree")
+            expect(session["effective_mode"] == outcome and isinstance(session["claims"], list), errors, f"{name} session must capture the expected effective mode")
+            provider = session.get("provider_id")
+            before_count = sum(row.get("provider_id") == provider and row.get("revoked_at_unix") in (None, 0) for row in before_keys)
+            after_count = sum(row.get("provider_id") == provider and row.get("revoked_at_unix") in (None, 0) for row in after_keys)
+            expect(after_count - before_count == delta, errors, f"{name} privacy key advertisement delta must be {delta}")
+            expect(("privacy_class" in session["claims"]) is claimed, errors, f"{name} privacy claim must match recomputed mode")
+            expect(before_at <= cli["started_at_unix"] <= session["accepted_at_unix"] <= after_at, errors, f"{name} capture ordering is invalid")
+            reasons: list[str] = []
+            for row in log_rows:
+                if row["name"] != name:
+                    continue
+                match = re.fullmatch(r"privacy_class auto_(?:ineligible|hardening_failed) reasons=([a-z0-9_,]+)", row["line"].rstrip("\n"))
+                if match:
+                    reasons.extend(match.group(1).split(","))
+            if name == "automatic-ineligible":
+                expect(bool(reasons), errors, "automatic-ineligible must carry the actual bounded fallback log")
+            if name == "automatic-hardening-fallback":
+                expect("configuration_changed" in reasons, errors, "automatic hardening fallback must capture configuration_changed")
+            recomputed.append({
+                "name": name, "mode": "off" if requested is False or relay_requested is not None else "automatic",
+                "source": "launch/config/session/log/db", "outcome": outcome, "bounded_reasons": sorted(set(reasons)),
+                "privacy_key_record_count": delta, "claims": session["claims"],
+                "mode_decision_unix": cli["started_at_unix"], "credentials_resolution_unix": session["accepted_at_unix"],
+            })
+        return {"cases": sorted(recomputed, key=lambda item: item["name"])}
+
+    def enrollment(self, errors: list[str]) -> dict[str, Any]:
+        before_at, before = self.snapshot("enrollment.json", "enrollment_before")
+        first_at, first = self.snapshot("enrollment.json", "enrollment_after_first")
+        second_at, second = self.snapshot("enrollment.json", "enrollment_after_second")
+        reuse_at, reuse = self.snapshot("enrollment.json", "enrollment_after_reuse")
+        failed_at, failed = self.snapshot("enrollment.json", "enrollment_after_failed_posture")
+        clients_at, clients = self.clients("enrollment.json", "enrollment_clients")
+        expect(before_at < first_at < second_at < reuse_at < failed_at <= clients_at, errors, "enrollment phase snapshots must be strictly ordered")
+        before_rows, first_rows, second_rows = map(self.active_enrollments, (before, first, second))
+        new_first = [row for row in first_rows if row not in before_rows]
+        new_second = [row for row in second_rows if row not in first_rows]
+        expect(len(new_first) == 1 and len(new_second) == 1, errors, "the two admissions must each add exactly one active enrollment")
+        recomputed = []
+        for case, row, phase in (("first-admission", new_first[0] if new_first else {}, first), ("second-admission", new_second[0] if new_second else {}, second)):
+            attempt = clients.get(case) or {}
+            enrolled = row.get("enrolled_at_unix")
+            posture = attempt.get("privacy_posture_verified_at_unix")
+            expect(attempt.get("status") == 200 and attempt.get("error_code") is None and attempt.get("provider_id") == row.get("provider_id"), errors, f"{case} must be an actual successful client capture")
+            expect(isinstance(enrolled, int) and isinstance(posture, int) and enrolled <= posture <= clients_at, errors, f"{case} must prove enrollment commit before successful posture admission")
+            expect(sum(item.get("provider_id") == row.get("provider_id") for item in second_rows) == 1, errors, f"{case} provider must have one active enrollment")
+            keys = [item for item in self.privacy_keys(phase) if item.get("provider_id") == row.get("provider_id") and item.get("revoked_at_unix") in (None, 0)]
+            expect(bool(keys) and all(isinstance(item.get("accepted_at_unix"), int) and item["accepted_at_unix"] <= enrolled and isinstance(item.get("expires_at_unix"), int) and item["expires_at_unix"] > posture for item in keys), errors, f"{case} enrollment must be backed by fresh accepted privacy key rows")
+            recomputed.append({"provider_id": row.get("provider_id"), "identity_fingerprint": row.get("identity_fingerprint"), "se_fingerprint": row.get("se_fingerprint"), "enrollment_committed_unix": enrolled, "posture_verified_unix": posture, "active_rows_for_provider": 1})
+        pairs = {(row.get("identity_fingerprint"), row.get("se_fingerprint")) for row in second_rows}
+        expect(all(isinstance(identity, str) and re.fullmatch(r"[A-Za-z0-9_-]{43}", identity) and isinstance(se, str) and re.fullmatch(r"[A-Za-z0-9_-]{43}", se) for identity, se in pairs), errors, "enrollment fingerprints must be canonical base64url SHA-256 values")
+        expect(len({row.get("provider_id") for row in second_rows}) == len(second_rows) and len(pairs) == len(second_rows), errors, "active providers must have genuinely distinct identity and Secure Enclave key pairs")
+        expect(self.row_identity(self.active_enrollments(reuse), ("provider_id", "identity_fingerprint", "se_fingerprint", "enrolled_at_unix")) == self.row_identity(second_rows, ("provider_id", "identity_fingerprint", "se_fingerprint", "enrolled_at_unix")), errors, "cross-provider reuse must create no enrollment")
+        expect(self.row_identity(self.active_enrollments(failed), ("provider_id", "identity_fingerprint", "se_fingerprint", "enrolled_at_unix")) == self.row_identity(second_rows, ("provider_id", "identity_fingerprint", "se_fingerprint", "enrolled_at_unix")), errors, "failed posture must create no enrollment")
+        reuse_attempt, failed_attempt = clients.get("cross-provider-reuse") or {}, clients.get("failed-posture") or {}
+        expect(reuse_attempt.get("status") != 200 and reuse_attempt.get("error_code") == "privacy_enrollment_key_in_use", errors, "cross-provider key reuse must return the runtime privacy_enrollment_key_in_use code")
+        expect(failed_attempt.get("status") != 200 and isinstance(failed_attempt.get("error_code"), str) and failed_attempt["error_code"].startswith("privacy_"), errors, "failed posture must carry an actual privacy error")
+        return {
+            "enrollments": recomputed,
+            "cross_provider_reuse": {"result_code": reuse_attempt.get("error_code"), "quarantine_rows_created": len(reuse["privacy_class_quarantine"]) - len(second["privacy_class_quarantine"]), "enrollment_rows_created": len(reuse["privacy_class_enrollment"]) - len(second["privacy_class_enrollment"])},
+            "failed_posture": {"result_code": failed_attempt.get("error_code"), "enrollment_rows_created": len(failed["privacy_class_enrollment"]) - len(reuse["privacy_class_enrollment"])},
+        }
+
+    def key_change_reenroll(self, errors: list[str]) -> dict[str, Any]:
+        initial_at, initial = self.snapshot("reenroll.json", "reenroll_initial")
+        changed_at, changed = self.snapshot("reenroll.json", "reenroll_key_change")
+        retry_at, retry = self.snapshot("reenroll.json", "reenroll_expiry_retry")
+        clear_at, clear = self.snapshot("reenroll.json", "reenroll_operator_clear")
+        after_at, after = self.snapshot("reenroll.json", "reenroll_after")
+        clients_at, clients = self.clients("reenroll.json", "reenroll_clients")
+        expect(initial_at < changed_at < retry_at < clear_at < after_at <= clients_at, errors, "reenroll phase snapshots must be strictly ordered")
+        active_initial = self.active_enrollments(initial)
+        expect(len(active_initial) == 1, errors, "reenroll initial snapshot must have one active enrollment")
+        provider = active_initial[0].get("provider_id") if active_initial else None
+        old_fingerprint = active_initial[0].get("identity_fingerprint") if active_initial else None
+        changed_quarantine = [row for row in changed["privacy_class_quarantine"] if row.get("provider_id") == provider]
+        retry_quarantine = [row for row in retry["privacy_class_quarantine"] if row.get("provider_id") == provider]
+        expect(len(changed_quarantine) == 1 and changed_quarantine[0].get("reason") == "privacy_enrollment_key_changed", errors, "key-change snapshot must hold the runtime quarantine reason")
+        expect(len(retry_quarantine) == 1 and retry_quarantine[0].get("reason") == "privacy_enrollment_key_changed" and retry_quarantine[0].get("quarantined_at_unix", 0) > changed_quarantine[0].get("expires_at_unix", 0), errors, "post-expiry retry must create a later privacy_enrollment_key_changed quarantine")
+        initial_keys = [row for row in self.privacy_keys(initial) if row.get("provider_id") == provider and row.get("revoked_at_unix") in (None, 0)]
+        revoked_keys = [row for row in self.privacy_keys(changed) if row.get("provider_id") == provider and row.get("revoked_at_unix") not in (None, 0)]
+        expect(bool(initial_keys) and len(revoked_keys) >= len(initial_keys), errors, "key change must revoke the provider's active privacy keys")
+        expect(self.row_identity(self.active_enrollments(changed), ("provider_id", "identity_fingerprint", "enrolled_at_unix")) == self.row_identity(active_initial, ("provider_id", "identity_fingerprint", "enrolled_at_unix")), errors, "key change must not replace the enrollment")
+        clear_active = self.active_enrollments(clear)
+        revoked_old = [row for row in clear["privacy_class_enrollment"] if row.get("provider_id") == provider and row.get("identity_fingerprint") == old_fingerprint and row.get("revoked_at_unix") not in (None, 0)]
+        operator_rows = [row for row in clear["privacy_class_operator_clear"] if row.get("provider_id") == provider]
+        rejected = [row for row in clear["relay_blind_reservations"] if row.get("provider_id") == provider and row.get("privacy_class") == 1 and row.get("state") == "rejected" and row.get("terminal_code") == "relay_blind_key_expired"]
+        expect(bool(revoked_old) and not any(row.get("provider_id") == provider for row in clear_active), errors, "operator reenroll must revoke the old active enrollment")
+        expect(len(operator_rows) == 1 and isinstance(operator_rows[0].get("clear_generation"), int) and operator_rows[0]["clear_generation"] > 0, errors, "operator reenroll must durably advance operator-clear generation")
+        expect(not any(row.get("provider_id") == provider for row in clear["privacy_class_quarantine"]) and bool(rejected), errors, "operator reenroll must clear quarantine and reject held reservations")
+        new_active = [row for row in self.active_enrollments(after) if row.get("provider_id") == provider]
+        admission = clients.get("post-reenroll-admission") or {}
+        expect(len(new_active) == 1 and new_active[0].get("identity_fingerprint") != old_fingerprint, errors, "post-reenroll admission must create one new identity")
+        expect(admission.get("status") == 200 and admission.get("provider_id") == provider and isinstance(admission.get("privacy_posture_verified_at_unix"), int) and new_active and new_active[0].get("enrolled_at_unix", 0) <= admission["privacy_posture_verified_at_unix"], errors, "new enrollment must commit before the successful post-reenroll posture")
+        return {
+            "initial": {"active_enrollment_rows": len(active_initial), "identity_fingerprint": old_fingerprint},
+            "key_change": {"quarantine_reason": changed_quarantine[0].get("reason") if changed_quarantine else None, "privacy_key_records_revoked_count": len(revoked_keys), "active_enrollment_replacements": len(self.active_enrollments(changed)) - len(active_initial)},
+            "post_expiry_retry": {"quarantine_reason": retry_quarantine[0].get("reason") if retry_quarantine else None},
+            "operator_reenroll": {"revoked_old_enrollment_count": len(revoked_old), "held_privacy_reservations_rejected_count": len(rejected), "quarantine_rows_remaining": sum(row.get("provider_id") == provider for row in clear["privacy_class_quarantine"])},
+            "after_reenroll": {"new_active_enrollment_rows": len(new_active), "identity_fingerprint": new_active[0].get("identity_fingerprint") if new_active else None},
+        }
+
+    def release_approval(self, errors: list[str]) -> dict[str, Any]:
+        identity = self.binding()
+        payload = self.source_bytes("release-derived-approval.json", "release_metadata")
+        signature = self.source_bytes("release-derived-approval.json", "release_signature")
+        invalid_payload = self.source_bytes("release-derived-approval.json", "release_invalid_metadata")
+        invalid_signature = self.source_bytes("release-derived-approval.json", "release_invalid_signature")
+        public_key = self.source_bytes("release-derived-approval.json", "release_public_key")
+        expect(hashlib.sha256(public_key).hexdigest() == self.trusted_release_public_key_sha256, errors, "release metadata public key must equal the repository-trusted release signing key")
+        metadata_doc = parse_json(payload.decode("utf-8"), V2_SOURCE_CONTRACT["release-derived-approval.json"]["release_metadata"])
+        provider_identity = metadata_doc.get("provider_code_identity") if isinstance(metadata_doc, dict) else None
+        if not isinstance(provider_identity, dict) or set(provider_identity) != {"asset", "member", "binary_version", "binary_sha256", "team_id", "signing_identifier", "slices"}:
+            fail("signed release metadata must carry one closed provider_code_identity")
+        slices = provider_identity.get("slices")
+        if not isinstance(slices, list) or len(slices) != 1 or not isinstance(slices[0], dict) or set(slices[0]) != {"arch", "code_cdhash"}:
+            fail("signed release metadata must carry one closed arm64 slice")
+        approved = {"team_id": provider_identity.get("team_id"), "signing_identifier": provider_identity.get("signing_identifier"), "code_cdhash": slices[0].get("code_cdhash"), "binary_version": provider_identity.get("binary_version")}
+        expect(provider_identity.get("member") == "macprovider-cli" and slices[0].get("arch") == "arm64", errors, "release metadata must name the arm64 macprovider-cli")
+        expect(provider_identity.get("binary_sha256") == identity["binary_sha256"] and provider_identity.get("asset") == f"macprovider-cli-v{identity['binary_version']}-darwin-arm64.tar.gz", errors, "release metadata must bind the tested binary bytes")
+        for key in approved:
+            expect(approved[key] == identity[key], errors, f"cryptographically verified release identity {key} must equal step-01")
+        verified = verify_pinned_public_ecdsa_sha256(public_key, self.trusted_release_public_key_sha256, payload, signature)
+        invalid_verified = verify_pinned_public_ecdsa_sha256(public_key, self.trusted_release_public_key_sha256, invalid_payload, invalid_signature)
+        expect(verified, errors, "release metadata signature must cryptographically verify over exact bytes")
+        invalid_doc = parse_json(invalid_payload.decode("utf-8"), V2_SOURCE_CONTRACT["release-derived-approval.json"]["release_invalid_metadata"])
+        invalid_identity = invalid_doc.get("provider_code_identity") if isinstance(invalid_doc, dict) else None
+        invalid_schema = isinstance(invalid_identity, dict) and set(invalid_identity) == {"asset", "member", "binary_version", "binary_sha256", "team_id", "signing_identifier", "slices"}
+        expect(invalid_verified and not invalid_schema, errors, "invalid metadata fixture must be trusted-key-signed exact bytes that fail the provider identity schema")
+        stats = self.source_json("release-derived-approval.json", "release_file_stats")
+        if not isinstance(stats, dict) or set(stats) != {"metadata", "signature", "public_key"}:
+            fail("release file stats must be a closed lstat capture")
+        stat_keys = {"regular", "symlink", "bytes"}
+        if not all(isinstance(value, dict) and set(value) == stat_keys and isinstance(value.get("regular"), bool) and isinstance(value.get("symlink"), bool) and isinstance(value.get("bytes"), int) for value in stats.values()):
+            fail("release file stats entries must carry regular, symlink, and bytes")
+        expect(stats["metadata"] == {"regular": True, "symlink": False, "bytes": len(payload)} and stats["signature"] == {"regular": True, "symlink": False, "bytes": len(signature)} and stats["public_key"] == {"regular": True, "symlink": False, "bytes": len(public_key)}, errors, "release lstat capture must match the exact exported file bytes")
+        captures = self.source_json("release-derived-approval.json", "release_eligibility")
+        if not isinstance(captures, dict) or set(captures) != {"approved", "denied", "withdrawn", "invalid_metadata"}:
+            fail("release eligibility capture must have approved, denied, withdrawn, and invalid_metadata phases")
+        phase_keys = {"approved_code_identities", "denied_cdhashes", "metadata_directory_present", "provider_id", "client_status", "client_response_excerpt"}
+        for phase, value in captures.items():
+            if not isinstance(value, dict) or set(value) != phase_keys or not isinstance(value.get("approved_code_identities"), list) or not isinstance(value.get("denied_cdhashes"), list):
+                fail(f"release eligibility {phase} capture has an invalid closed shape")
+            if not isinstance(value.get("provider_id"), str) or not isinstance(value.get("client_status"), int) or not isinstance(value.get("client_response_excerpt"), dict):
+                fail(f"release eligibility {phase} client capture types are invalid")
+
+        def release_error(phase: str) -> str | None:
+            excerpt = captures[phase]["client_response_excerpt"]
+            if set(excerpt) == {"usage_macprovider_privacy"}:
+                usage = excerpt["usage_macprovider_privacy"]
+                if not isinstance(usage, dict) or set(usage) != {"posture_verified_at_unix"} or not isinstance(usage["posture_verified_at_unix"], int):
+                    fail(f"release eligibility {phase} success excerpt is invalid")
+                return None
+            if set(excerpt) == {"error"} and isinstance(excerpt["error"], dict) and set(excerpt["error"]) == {"code"} and isinstance(excerpt["error"]["code"], str):
+                return excerpt["error"]["code"]
+            fail(f"release eligibility {phase} response excerpt is invalid")
+            raise AssertionError("unreachable")
+
+        approved_at, _approved_db = self.snapshot("release-derived-approval.json", "release_approved_db")
+        denied_at, denied_db = self.snapshot("release-derived-approval.json", "release_denied_db")
+        withdrawn_at, _withdrawn_db = self.snapshot("release-derived-approval.json", "release_withdrawn_db")
+        expect(approved_at < denied_at < withdrawn_at, errors, "release eligibility DB captures must be ordered")
+        expect(approved in captures["approved"]["approved_code_identities"] and captures["approved"]["client_status"] == 200 and release_error("approved") is None, errors, "verified release identity must be loaded before eligible admission")
+        provider = captures["denied"]["provider_id"]
+        denied_quarantine = [row for row in denied_db["privacy_class_quarantine"] if row.get("provider_id") == provider and row.get("reason") == "posture_denied_code_identity"]
+        denied_revoked = [row for row in self.privacy_keys(denied_db) if row.get("provider_id") == provider and row.get("revoked_at_unix") not in (None, 0)]
+        expect(identity["code_cdhash"] in captures["denied"]["denied_cdhashes"] and release_error("denied") == "posture_denied_code_identity" and bool(denied_quarantine) and bool(denied_revoked), errors, "denied cdhash must produce the actual quarantine and key revocation state")
+        expect(captures["withdrawn"]["metadata_directory_present"] is False and approved not in captures["withdrawn"]["approved_code_identities"] and captures["withdrawn"]["client_status"] != 200 and release_error("withdrawn") is not None, errors, "withdrawal capture must remove release-derived eligibility")
+        expect(captures["invalid_metadata"]["approved_code_identities"] == [] and captures["invalid_metadata"]["client_status"] != 200 and release_error("invalid_metadata") is not None, errors, "trusted-key-signed invalid metadata must contribute no identity and no eligible admission")
+        return {
+            "approved_identity": approved,
+            "metadata": {"signature_result": "verified" if verified else "rejected", "regular_file": stats["metadata"]["regular"] and not stats["metadata"]["symlink"], "signature_regular_file": stats["signature"]["regular"] and not stats["signature"]["symlink"], "failed_metadata_identity_count": len(captures["invalid_metadata"]["approved_code_identities"])},
+            "eligibility": {"before_withdrawal": "eligible" if captures["approved"]["client_status"] == 200 else "ineligible", "after_denied_cdhash": "quarantined" if denied_quarantine else "ineligible", "after_withdrawal_or_expiry": "ineligible" if captures["withdrawn"]["client_status"] != 200 else "eligible"},
+        }
+
+    def directory(self, errors: list[str]) -> dict[str, Any]:
+        envelope_raw = self.source_bytes("directory.json", "directory_envelope")
+        gateway_raw = self.source_bytes("directory.json", "directory_gateway_body")
+        envelope = parse_json(envelope_raw.decode("utf-8"), "directory envelope")
+        public_doc = self.source_json("directory.json", "directory_public_key")
+        headers = self.source_json("directory.json", "directory_gateway_headers")
+        clients = self.source_json("directory.json", "directory_clients")
+        store = self.source_json("directory.json", "directory_store")
+        disclosure = self.source_json("directory.json", "directory_disclosure")
+        if not isinstance(envelope, dict) or set(envelope) != {"version", "key_id", "payload", "signature"}:
+            fail("directory envelope must be a closed object")
+        if not isinstance(public_doc, dict) or set(public_doc) != {"algorithm", "public_key"} or public_doc.get("algorithm") != "ed25519":
+            fail("directory public key capture must be a closed Ed25519 pin")
+        public = b64url_bytes(public_doc.get("public_key"))
+        payload = b64url_bytes(envelope.get("payload"))
+        signature = b64url_bytes(envelope.get("signature"))
+        if public is None or len(public) != 32 or payload is None or signature is None or len(signature) != 64:
+            fail("directory key, payload, and signature must be canonical base64url bytes")
+        canonical = lambda raw: base64.urlsafe_b64encode(raw).decode().rstrip("=")
+        expect(public_doc.get("public_key") == canonical(public) and envelope.get("payload") == canonical(payload) and envelope.get("signature") == canonical(signature), errors, "directory key, payload, and signature encodings must be canonical base64url")
+        key_id = base64.urlsafe_b64encode(hashlib.sha256(public).digest()).decode().rstrip("=")
+        signed = _frame(b"macprovider/spec049/identity-directory/v1") + _frame(payload)
+        signature_ok = ed25519_verify(public, signed, signature)
+        expect(envelope.get("version") == "privacy-identity-directory-envelope-v1" and envelope.get("key_id") == key_id and signature_ok, errors, "directory signature must verify over exact payload bytes under the pinned key")
+        payload_doc = parse_json(payload.decode("utf-8"), "directory payload")
+        if not isinstance(payload_doc, dict) or set(payload_doc) != {"version", "privacy_class", "issued_at_unix", "expires_at_unix", "entries"}:
+            fail("directory payload must be a closed object")
+        entries = payload_doc.get("entries")
+        if not isinstance(entries, list):
+            fail("directory entries must be a list")
+        fingerprints: list[str] = []
+        for entry in entries:
+            if not isinstance(entry, dict) or set(entry) != {"identity_public_key", "fingerprint", "se_public_key_fingerprint", "source", "enrolled_at_unix", "revoked"}:
+                fail("directory entries must be closed objects")
+            identity_key = b64url_bytes(entry.get("identity_public_key"))
+            expect(identity_key is not None and len(identity_key) == 32 and entry.get("identity_public_key") == canonical(identity_key) and canonical(hashlib.sha256(identity_key).digest()) == entry.get("fingerprint"), errors, "directory entry fingerprint must derive from its canonical public key")
+            expect(entry.get("source") in ("enrolled", "operator_pin") and isinstance(entry.get("revoked"), bool), errors, "directory entries must have typed source/revocation fields")
+            fingerprints.append(entry.get("fingerprint"))
+        expect(all(isinstance(item, str) for item in fingerprints) and fingerprints == sorted(fingerprints) and len(fingerprints) == len(set(fingerprints)), errors, "directory entries must be uniquely sorted by fingerprint")
+        issued, expires = payload_doc.get("issued_at_unix"), payload_doc.get("expires_at_unix")
+        expect(payload_doc.get("version") == "privacy-identity-directory-v1" and payload_doc.get("privacy_class") == PRIVACY_CLASS, errors, "directory payload version and privacy class must be exact")
+        expect(isinstance(issued, int) and isinstance(expires, int) and 60 <= expires - issued <= 3600, errors, "directory validity window must be bounded")
+        if not isinstance(headers, dict) or set(headers) != {"status", "cache_control", "content_type", "captured_at_unix", "store_error_code"}:
+            fail("directory gateway headers must be a closed capture")
+        expect(gateway_raw == envelope_raw, errors, "gateway directory response body must be byte-identical to the signed envelope")
+        expect(headers.get("status") == 200 and headers.get("cache_control") == "no-store" and headers.get("content_type") == "application/json" and isinstance(headers.get("captured_at_unix"), int) and issued <= headers["captured_at_unix"] < expires, errors, "gateway capture must be fresh, JSON, and no-store")
+        expect(headers.get("store_error_code") == "privacy_class_unavailable", errors, "directory store error capture must fail closed")
+        if not isinstance(store, dict) or set(store) != {"enrollments", "quarantined_provider_ids"} or not isinstance(store.get("enrollments"), list) or not isinstance(store.get("quarantined_provider_ids"), list):
+            fail("directory store capture must be closed enrollment/quarantine rows")
+        active_store = {row.get("identity_fingerprint") for row in store["enrollments"] if isinstance(row, dict) and row.get("revoked_at_unix") in (None, 0) and row.get("provider_id") not in store["quarantined_provider_ids"]}
+        revoked_store = {row.get("identity_fingerprint") for row in store["enrollments"] if isinstance(row, dict) and (row.get("revoked_at_unix") not in (None, 0) or row.get("provider_id") in store["quarantined_provider_ids"])}
+        active_entries = {row.get("fingerprint") for row in entries if not row.get("revoked") and row.get("source") == "enrolled"}
+        revoked_entries = {row.get("fingerprint") for row in entries if row.get("revoked") and row.get("source") == "enrolled"}
+        expect(active_store <= active_entries and revoked_store <= revoked_entries and bool(active_entries) and bool(revoked_entries), errors, "directory entries must match active and revoked store facts")
+        if not isinstance(clients, dict) or set(clients) != {"captured_at_unix", "attempts"} or not isinstance(clients.get("attempts"), list):
+            fail("directory client negatives must be a closed capture")
+        attempts = {row.get("case"): row for row in clients["attempts"] if isinstance(row, dict) and set(row) == {"case", "accepted", "error_code"}}
+        expect(set(attempts) == {"tampered", "expired", "revoked", "wrong_key"} and all(row.get("accepted") is False and isinstance(row.get("error_code"), str) for row in attempts.values()), errors, "directory client must reject every closed negative case")
+        tampered = bytes([payload[0] ^ 1]) + payload[1:]
+        expect(not ed25519_verify(public, _frame(b"macprovider/spec049/identity-directory/v1") + _frame(tampered), signature), errors, "tampered directory payload must fail signature verification")
+        wrong_public = hashlib.sha256(public).digest()
+        expect(not ed25519_verify(wrong_public, signed, signature), errors, "wrong pinned directory key must fail verification")
+        expect(isinstance(clients.get("captured_at_unix"), int) and clients["captured_at_unix"] >= expires, errors, "expired negative capture must be at or after expiry")
+        if not isinstance(disclosure, dict) or set(disclosure) != {"residual_risks"} or not isinstance(disclosure.get("residual_risks"), list):
+            fail("directory disclosure must be a closed residual-risk capture")
+        expect(disclosure["residual_risks"] == list(PRIVACY_RESIDUAL_RISKS_V2), errors, "directory disclosure must contain the exact v2 residual-risk list")
+        return {
+            "directory": {"signature_result": "verified" if signature_ok else "rejected", "public_key_pin": public_doc["public_key"], "key_id": key_id, "entry_count": len(entries), "revoked_entry_count": sum(row.get("revoked") is True for row in entries), "ttl_seconds": expires - issued, "body_sha256": hashlib.sha256(envelope_raw).hexdigest()},
+            "client_rejections": {name: "rejected" for name in sorted(attempts)},
+            "gateway": {"body_sha256": hashlib.sha256(gateway_raw).hexdigest(), "cache_control": headers.get("cache_control"), "store_error_code": headers.get("store_error_code")},
+            "disclosure": disclosure,
+        }
+
+    def manifest(self, manifest: str, errors: list[str]) -> dict[str, Any]:
+        if manifest == "auto-mode.json":
+            return self.auto_mode(errors)
+        if manifest == "enrollment.json":
+            return self.enrollment(errors)
+        if manifest == "reenroll.json":
+            return self.key_change_reenroll(errors)
+        if manifest == "release-derived-approval.json":
+            return self.release_approval(errors)
+        if manifest == "directory.json":
+            return self.directory(errors)
+        fail(f"unknown v2 source manifest: {manifest}")
+
+
 class Checks:
     """Bundle predicates. Each returns a list of failures; empty means it holds."""
 
@@ -2203,6 +2627,13 @@ class Checks:
             by_case[name] = {**attempt, "error_code": error_code, "privacy_posture_verified_at_unix": posture}
         return captured, by_case
 
+    def v2_view(self) -> V2RawSourceView:
+        return V2RawSourceView(
+            lambda manifest, kind: self.v2_source_bytes(manifest, kind),
+            self.binding,
+            self.trusted_release_public_key_sha256,
+        )
+
     @staticmethod
     def active_enrollments(tables: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
         return [row for row in tables["privacy_class_enrollment"] if row.get("revoked_at_unix") in (None, 0)]
@@ -2218,309 +2649,36 @@ class Checks:
     def p_v2_auto_mode(self, errors: list[str]) -> None:
         doc = self.primary_v2("auto-mode.json")
         self.require_keys(doc, {"schema_version", "profile", "provenance", "raw_source_sha256", "cases"}, "primary/v2/auto-mode.json", errors)
-        launch = self.v2_source_json("auto-mode.json", "auto_launch")
-        config = self.v2_source_json("auto-mode.json", "auto_config")
-        sessions = self.v2_source_json("auto-mode.json", "auto_sessions")
-        logs = self.v2_source_json("auto-mode.json", "auto_logs")
-        before_at, before = self.v2_snapshot("auto-mode.json", "auto_db_before")
-        after_at, after = self.v2_snapshot("auto-mode.json", "auto_db_after")
-        for value, label, keys in ((launch, "launch", {"cases"}), (config, "config", {"cases"}), (sessions, "sessions", {"cases"}), (logs, "logs", {"lines"})):
-            if not isinstance(value, dict) or set(value) != keys or not isinstance(next(iter(value.values())), list):
-                fail(f"auto-mode {label} capture has an invalid closed shape")
-        required = {"automatic-eligible", "automatic-ineligible", "automatic-hardening-fallback", "explicit-optout", "explicit-relay-blind"}
-        def indexed(rows: list[Any], keys: set[str], label: str) -> dict[str, dict[str, Any]]:
-            out = {}
-            for row in rows:
-                if not isinstance(row, dict) or set(row) != keys or not isinstance(row.get("name"), str) or row["name"] in out:
-                    fail(f"auto-mode {label} rows must have a closed shape and unique names")
-                out[row["name"]] = row
-            if set(out) != required:
-                fail(f"auto-mode {label} cases must be exactly {sorted(required)}")
-            return out
-        launches = indexed(launch["cases"], {"name", "executable_sha256", "arguments", "started_at_unix"}, "launch")
-        configs = indexed(config["cases"], {"name", "privacy_class_requested", "relay_blind_requested"}, "config")
-        captured_sessions = indexed(sessions["cases"], {"name", "provider_id", "accepted_at_unix", "claims", "effective_mode"}, "session")
-        log_rows = logs["lines"]
-        if not all(isinstance(row, dict) and set(row) == {"name", "stream", "line"} and row.get("name") in required and row.get("stream") in ("stdout", "stderr") and isinstance(row.get("line"), str) for row in log_rows):
-            fail("auto-mode logs must be closed captured output lines")
-        before_keys = self.privacy_keys(before)
-        after_keys = self.privacy_keys(after)
-        expected_modes = {
-            "automatic-eligible": (None, None, "privacy", 1, True),
-            "automatic-ineligible": (None, None, "ordinary", 0, False),
-            "automatic-hardening-fallback": (None, None, "ordinary", 0, False),
-            "explicit-optout": (False, None, "ordinary", 0, False),
-            "explicit-relay-blind": (None, True, "plain_relay_blind", 0, False),
-        }
-        recomputed = []
-        for name in required:
-            cli, cfg, session = launches[name], configs[name], captured_sessions[name]
-            arguments = cli.get("arguments")
-            expect(isinstance(arguments, dict) and set(arguments) == {"privacy_class_beta", "relay_blind_enabled"}, errors, f"{name} launch must capture only the two non-secret mode arguments")
-            expect(cli.get("executable_sha256") == self.binding()["binary_sha256"], errors, f"{name} launch must bind the tested executable bytes")
-            expect(all(isinstance(cli[key], int) and not isinstance(cli[key], bool) for key in ("started_at_unix",)), errors, f"{name} launch time must be integral")
-            requested, relay_requested, outcome, delta, claimed = expected_modes[name]
-            expect(cfg["privacy_class_requested"] is requested and cfg["relay_blind_requested"] is relay_requested, errors, f"{name} config must select the expected mode")
-            expect(arguments == {"privacy_class_beta": requested, "relay_blind_enabled": relay_requested}, errors, f"{name} launch arguments and loaded config must agree")
-            expect(session["effective_mode"] == outcome and isinstance(session["claims"], list), errors, f"{name} session must capture the expected effective mode")
-            provider = session.get("provider_id")
-            before_count = sum(row.get("provider_id") == provider and row.get("revoked_at_unix") in (None, 0) for row in before_keys)
-            after_count = sum(row.get("provider_id") == provider and row.get("revoked_at_unix") in (None, 0) for row in after_keys)
-            expect(after_count - before_count == delta, errors, f"{name} privacy key advertisement delta must be {delta}")
-            expect(("privacy_class" in session["claims"]) is claimed, errors, f"{name} privacy claim must match recomputed mode")
-            expect(before_at <= cli["started_at_unix"] <= session["accepted_at_unix"] <= after_at, errors, f"{name} capture ordering is invalid")
-            reasons: list[str] = []
-            for row in log_rows:
-                if row["name"] != name:
-                    continue
-                match = re.fullmatch(r"privacy_class auto_(?:ineligible|hardening_failed) reasons=([a-z0-9_,]+)", row["line"].rstrip("\n"))
-                if match:
-                    reasons.extend(match.group(1).split(","))
-            if name == "automatic-ineligible":
-                expect(bool(reasons), errors, "automatic-ineligible must carry the actual bounded fallback log")
-            if name == "automatic-hardening-fallback":
-                expect("configuration_changed" in reasons, errors, "automatic hardening fallback must capture configuration_changed")
-            recomputed.append({
-                "name": name, "mode": "off" if requested is False or relay_requested is not None else "automatic",
-                "source": "launch/config/session/log/db", "outcome": outcome, "bounded_reasons": sorted(set(reasons)),
-                "privacy_key_record_count": delta, "claims": session["claims"],
-                "mode_decision_unix": cli["started_at_unix"], "credentials_resolution_unix": session["accepted_at_unix"],
-            })
+        recomputed = self.v2_view().auto_mode(errors)
         cases = {item.get("name"): item for item in doc.get("cases", []) if isinstance(item, dict)}
         required = {"automatic-eligible", "automatic-ineligible", "automatic-hardening-fallback", "explicit-optout", "explicit-relay-blind"}
         expect(set(cases) == required and len(doc.get("cases", [])) == len(required), errors, "auto-mode summary cases must cover the closed v2 set exactly once")
-        expect(doc.get("cases") == sorted(recomputed, key=lambda item: item["name"]), errors, "auto-mode summary must equal independent raw-source recomputation")
+        expect(doc.get("cases") == recomputed["cases"], errors, "auto-mode summary must equal independent raw-source recomputation")
 
     def p_v2_enrollment(self, errors: list[str]) -> None:
         doc = self.primary_v2("enrollment.json")
         self.require_keys(doc, {"schema_version", "profile", "provenance", "raw_source_sha256", "enrollments", "cross_provider_reuse", "failed_posture"}, "primary/v2/enrollment.json", errors)
-        before_at, before = self.v2_snapshot("enrollment.json", "enrollment_before")
-        first_at, first = self.v2_snapshot("enrollment.json", "enrollment_after_first")
-        second_at, second = self.v2_snapshot("enrollment.json", "enrollment_after_second")
-        reuse_at, reuse = self.v2_snapshot("enrollment.json", "enrollment_after_reuse")
-        failed_at, failed = self.v2_snapshot("enrollment.json", "enrollment_after_failed_posture")
-        clients_at, clients = self.v2_clients("enrollment.json", "enrollment_clients")
-        expect(before_at < first_at < second_at < reuse_at < failed_at <= clients_at, errors, "enrollment phase snapshots must be strictly ordered")
-        before_rows, first_rows, second_rows = map(self.active_enrollments, (before, first, second))
-        new_first = [row for row in first_rows if row not in before_rows]
-        new_second = [row for row in second_rows if row not in first_rows]
-        expect(len(new_first) == 1 and len(new_second) == 1, errors, "the two admissions must each add exactly one active enrollment")
-        recomputed = []
-        for case, row, phase in (("first-admission", new_first[0] if new_first else {}, first), ("second-admission", new_second[0] if new_second else {}, second)):
-            attempt = clients.get(case) or {}
-            enrolled = row.get("enrolled_at_unix")
-            posture = attempt.get("privacy_posture_verified_at_unix")
-            expect(attempt.get("status") == 200 and attempt.get("error_code") is None and attempt.get("provider_id") == row.get("provider_id"), errors, f"{case} must be an actual successful client capture")
-            expect(isinstance(enrolled, int) and isinstance(posture, int) and enrolled <= posture <= clients_at, errors, f"{case} must prove enrollment commit before successful posture admission")
-            expect(sum(item.get("provider_id") == row.get("provider_id") for item in second_rows) == 1, errors, f"{case} provider must have one active enrollment")
-            keys = [item for item in self.privacy_keys(phase) if item.get("provider_id") == row.get("provider_id") and item.get("revoked_at_unix") in (None, 0)]
-            expect(bool(keys) and all(isinstance(item.get("accepted_at_unix"), int) and item["accepted_at_unix"] <= enrolled and isinstance(item.get("expires_at_unix"), int) and item["expires_at_unix"] > posture for item in keys), errors, f"{case} enrollment must be backed by fresh accepted privacy key rows")
-            recomputed.append({"provider_id": row.get("provider_id"), "identity_fingerprint": row.get("identity_fingerprint"), "se_fingerprint": row.get("se_fingerprint"), "enrollment_committed_unix": enrolled, "posture_verified_unix": posture, "active_rows_for_provider": 1})
-        pairs = {(row.get("identity_fingerprint"), row.get("se_fingerprint")) for row in second_rows}
-        expect(all(isinstance(identity, str) and re.fullmatch(r"[A-Za-z0-9_-]{43}", identity) and isinstance(se, str) and re.fullmatch(r"[A-Za-z0-9_-]{43}", se) for identity, se in pairs), errors, "enrollment fingerprints must be canonical base64url SHA-256 values")
-        expect(len({row.get("provider_id") for row in second_rows}) == len(second_rows) and len(pairs) == len(second_rows), errors, "active providers must have genuinely distinct identity and Secure Enclave key pairs")
-        expect(self.row_identity(self.active_enrollments(reuse), ("provider_id", "identity_fingerprint", "se_fingerprint", "enrolled_at_unix")) == self.row_identity(second_rows, ("provider_id", "identity_fingerprint", "se_fingerprint", "enrolled_at_unix")), errors, "cross-provider reuse must create no enrollment")
-        expect(self.row_identity(self.active_enrollments(failed), ("provider_id", "identity_fingerprint", "se_fingerprint", "enrolled_at_unix")) == self.row_identity(second_rows, ("provider_id", "identity_fingerprint", "se_fingerprint", "enrolled_at_unix")), errors, "failed posture must create no enrollment")
-        reuse_attempt, failed_attempt = clients.get("cross-provider-reuse") or {}, clients.get("failed-posture") or {}
-        expect(reuse_attempt.get("status") != 200 and reuse_attempt.get("error_code") == "privacy_enrollment_key_in_use", errors, "cross-provider key reuse must return the runtime privacy_enrollment_key_in_use code")
-        expect(failed_attempt.get("status") != 200 and isinstance(failed_attempt.get("error_code"), str) and failed_attempt["error_code"].startswith("privacy_"), errors, "failed posture must carry an actual privacy error")
-        expect(doc.get("enrollments") == recomputed, errors, "enrollment summary must equal independent snapshot/client recomputation")
-        expect(doc.get("cross_provider_reuse") == {"result_code": reuse_attempt.get("error_code"), "quarantine_rows_created": len(reuse["privacy_class_quarantine"]) - len(second["privacy_class_quarantine"]), "enrollment_rows_created": len(reuse["privacy_class_enrollment"]) - len(second["privacy_class_enrollment"])}, errors, "reuse summary must equal source deltas")
-        expect(doc.get("failed_posture") == {"result_code": failed_attempt.get("error_code"), "enrollment_rows_created": len(failed["privacy_class_enrollment"]) - len(reuse["privacy_class_enrollment"])}, errors, "failed-posture summary must equal source deltas")
+        recomputed = self.v2_view().enrollment(errors)
+        expect(doc.get("enrollments") == recomputed["enrollments"], errors, "enrollment summary must equal independent snapshot/client recomputation")
+        expect(doc.get("cross_provider_reuse") == recomputed["cross_provider_reuse"], errors, "reuse summary must equal source deltas")
+        expect(doc.get("failed_posture") == recomputed["failed_posture"], errors, "failed-posture summary must equal source deltas")
 
     def p_v2_key_change_reenroll(self, errors: list[str]) -> None:
         doc = self.primary_v2("reenroll.json")
         self.require_keys(doc, {"schema_version", "profile", "provenance", "raw_source_sha256", "initial", "key_change", "post_expiry_retry", "operator_reenroll", "after_reenroll"}, "primary/v2/reenroll.json", errors)
-        initial_at, initial = self.v2_snapshot("reenroll.json", "reenroll_initial")
-        changed_at, changed = self.v2_snapshot("reenroll.json", "reenroll_key_change")
-        retry_at, retry = self.v2_snapshot("reenroll.json", "reenroll_expiry_retry")
-        clear_at, clear = self.v2_snapshot("reenroll.json", "reenroll_operator_clear")
-        after_at, after = self.v2_snapshot("reenroll.json", "reenroll_after")
-        clients_at, clients = self.v2_clients("reenroll.json", "reenroll_clients")
-        expect(initial_at < changed_at < retry_at < clear_at < after_at <= clients_at, errors, "reenroll phase snapshots must be strictly ordered")
-        active_initial = self.active_enrollments(initial)
-        expect(len(active_initial) == 1, errors, "reenroll initial snapshot must have one active enrollment")
-        provider = active_initial[0].get("provider_id") if active_initial else None
-        old_fingerprint = active_initial[0].get("identity_fingerprint") if active_initial else None
-        changed_quarantine = [row for row in changed["privacy_class_quarantine"] if row.get("provider_id") == provider]
-        retry_quarantine = [row for row in retry["privacy_class_quarantine"] if row.get("provider_id") == provider]
-        expect(len(changed_quarantine) == 1 and changed_quarantine[0].get("reason") == "privacy_enrollment_key_changed", errors, "key-change snapshot must hold the runtime quarantine reason")
-        expect(len(retry_quarantine) == 1 and retry_quarantine[0].get("reason") == "privacy_enrollment_key_changed" and retry_quarantine[0].get("quarantined_at_unix", 0) > changed_quarantine[0].get("expires_at_unix", 0), errors, "post-expiry retry must create a later privacy_enrollment_key_changed quarantine")
-        initial_keys = [row for row in self.privacy_keys(initial) if row.get("provider_id") == provider and row.get("revoked_at_unix") in (None, 0)]
-        revoked_keys = [row for row in self.privacy_keys(changed) if row.get("provider_id") == provider and row.get("revoked_at_unix") not in (None, 0)]
-        expect(bool(initial_keys) and len(revoked_keys) >= len(initial_keys), errors, "key change must revoke the provider's active privacy keys")
-        expect(self.row_identity(self.active_enrollments(changed), ("provider_id", "identity_fingerprint", "enrolled_at_unix")) == self.row_identity(active_initial, ("provider_id", "identity_fingerprint", "enrolled_at_unix")), errors, "key change must not replace the enrollment")
-        clear_active = self.active_enrollments(clear)
-        revoked_old = [row for row in clear["privacy_class_enrollment"] if row.get("provider_id") == provider and row.get("identity_fingerprint") == old_fingerprint and row.get("revoked_at_unix") not in (None, 0)]
-        operator_rows = [row for row in clear["privacy_class_operator_clear"] if row.get("provider_id") == provider]
-        rejected = [row for row in clear["relay_blind_reservations"] if row.get("provider_id") == provider and row.get("privacy_class") == 1 and row.get("state") == "rejected" and row.get("terminal_code") == "relay_blind_key_expired"]
-        expect(bool(revoked_old) and not any(row.get("provider_id") == provider for row in clear_active), errors, "operator reenroll must revoke the old active enrollment")
-        expect(len(operator_rows) == 1 and isinstance(operator_rows[0].get("clear_generation"), int) and operator_rows[0]["clear_generation"] > 0, errors, "operator reenroll must durably advance operator-clear generation")
-        expect(not any(row.get("provider_id") == provider for row in clear["privacy_class_quarantine"]) and bool(rejected), errors, "operator reenroll must clear quarantine and reject held reservations")
-        new_active = [row for row in self.active_enrollments(after) if row.get("provider_id") == provider]
-        admission = clients.get("post-reenroll-admission") or {}
-        expect(len(new_active) == 1 and new_active[0].get("identity_fingerprint") != old_fingerprint, errors, "post-reenroll admission must create one new identity")
-        expect(admission.get("status") == 200 and admission.get("provider_id") == provider and isinstance(admission.get("privacy_posture_verified_at_unix"), int) and new_active and new_active[0].get("enrolled_at_unix", 0) <= admission["privacy_posture_verified_at_unix"], errors, "new enrollment must commit before the successful post-reenroll posture")
-        recomputed = {
-            "initial": {"active_enrollment_rows": len(active_initial), "identity_fingerprint": old_fingerprint},
-            "key_change": {"quarantine_reason": changed_quarantine[0].get("reason") if changed_quarantine else None, "privacy_key_records_revoked_count": len(revoked_keys), "active_enrollment_replacements": len(self.active_enrollments(changed)) - len(active_initial)},
-            "post_expiry_retry": {"quarantine_reason": retry_quarantine[0].get("reason") if retry_quarantine else None},
-            "operator_reenroll": {"revoked_old_enrollment_count": len(revoked_old), "held_privacy_reservations_rejected_count": len(rejected), "quarantine_rows_remaining": sum(row.get("provider_id") == provider for row in clear["privacy_class_quarantine"])},
-            "after_reenroll": {"new_active_enrollment_rows": len(new_active), "identity_fingerprint": new_active[0].get("identity_fingerprint") if new_active else None},
-        }
+        recomputed = self.v2_view().key_change_reenroll(errors)
         expect(all(doc.get(key) == value for key, value in recomputed.items()), errors, "reenroll summary must equal independent phase-snapshot/client recomputation")
 
     def p_v2_release_approval(self, errors: list[str]) -> None:
         doc = self.primary_v2("release-derived-approval.json")
         self.require_keys(doc, {"schema_version", "profile", "provenance", "raw_source_sha256", "approved_identity", "metadata", "eligibility"}, "primary/v2/release-derived-approval.json", errors)
-        identity = self.binding()
-        payload = self.v2_source_bytes("release-derived-approval.json", "release_metadata")
-        signature = self.v2_source_bytes("release-derived-approval.json", "release_signature")
-        invalid_payload = self.v2_source_bytes("release-derived-approval.json", "release_invalid_metadata")
-        invalid_signature = self.v2_source_bytes("release-derived-approval.json", "release_invalid_signature")
-        public_key = self.v2_source_bytes("release-derived-approval.json", "release_public_key")
-        expect(hashlib.sha256(public_key).hexdigest() == self.trusted_release_public_key_sha256, errors, "release metadata public key must equal the repository-trusted release signing key")
-        metadata_doc = parse_json(payload.decode("utf-8"), V2_SOURCE_CONTRACT["release-derived-approval.json"]["release_metadata"])
-        provider_identity = metadata_doc.get("provider_code_identity") if isinstance(metadata_doc, dict) else None
-        if not isinstance(provider_identity, dict) or set(provider_identity) != {"asset", "member", "binary_version", "binary_sha256", "team_id", "signing_identifier", "slices"}:
-            fail("signed release metadata must carry one closed provider_code_identity")
-        slices = provider_identity.get("slices")
-        if not isinstance(slices, list) or len(slices) != 1 or not isinstance(slices[0], dict) or set(slices[0]) != {"arch", "code_cdhash"}:
-            fail("signed release metadata must carry one closed arm64 slice")
-        approved = {"team_id": provider_identity.get("team_id"), "signing_identifier": provider_identity.get("signing_identifier"), "code_cdhash": slices[0].get("code_cdhash"), "binary_version": provider_identity.get("binary_version")}
-        expect(provider_identity.get("member") == "macprovider-cli" and slices[0].get("arch") == "arm64", errors, "release metadata must name the arm64 macprovider-cli")
-        expect(provider_identity.get("binary_sha256") == identity["binary_sha256"] and provider_identity.get("asset") == f"macprovider-cli-v{identity['binary_version']}-darwin-arm64.tar.gz", errors, "release metadata must bind the tested binary bytes")
-        for key in approved:
-            expect(approved[key] == identity[key], errors, f"cryptographically verified release identity {key} must equal step-01")
-        verified = verify_pinned_public_ecdsa_sha256(public_key, self.trusted_release_public_key_sha256, payload, signature)
-        invalid_verified = verify_pinned_public_ecdsa_sha256(public_key, self.trusted_release_public_key_sha256, invalid_payload, invalid_signature)
-        expect(verified, errors, "release metadata signature must cryptographically verify over exact bytes")
-        invalid_doc = parse_json(invalid_payload.decode("utf-8"), V2_SOURCE_CONTRACT["release-derived-approval.json"]["release_invalid_metadata"])
-        invalid_identity = invalid_doc.get("provider_code_identity") if isinstance(invalid_doc, dict) else None
-        invalid_schema = isinstance(invalid_identity, dict) and set(invalid_identity) == {"asset", "member", "binary_version", "binary_sha256", "team_id", "signing_identifier", "slices"}
-        expect(invalid_verified and not invalid_schema, errors, "invalid metadata fixture must be trusted-key-signed exact bytes that fail the provider identity schema")
-        stats = self.v2_source_json("release-derived-approval.json", "release_file_stats")
-        if not isinstance(stats, dict) or set(stats) != {"metadata", "signature", "public_key"}:
-            fail("release file stats must be a closed lstat capture")
-        stat_keys = {"regular", "symlink", "bytes"}
-        if not all(isinstance(value, dict) and set(value) == stat_keys and isinstance(value.get("regular"), bool) and isinstance(value.get("symlink"), bool) and isinstance(value.get("bytes"), int) for value in stats.values()):
-            fail("release file stats entries must carry regular, symlink, and bytes")
-        expect(stats["metadata"] == {"regular": True, "symlink": False, "bytes": len(payload)} and stats["signature"] == {"regular": True, "symlink": False, "bytes": len(signature)} and stats["public_key"] == {"regular": True, "symlink": False, "bytes": len(public_key)}, errors, "release lstat capture must match the exact exported file bytes")
-        captures = self.v2_source_json("release-derived-approval.json", "release_eligibility")
-        if not isinstance(captures, dict) or set(captures) != {"approved", "denied", "withdrawn", "invalid_metadata"}:
-            fail("release eligibility capture must have approved, denied, withdrawn, and invalid_metadata phases")
-        phase_keys = {"approved_code_identities", "denied_cdhashes", "metadata_directory_present", "provider_id", "client_status", "client_response_excerpt"}
-        for phase, value in captures.items():
-            if not isinstance(value, dict) or set(value) != phase_keys or not isinstance(value.get("approved_code_identities"), list) or not isinstance(value.get("denied_cdhashes"), list):
-                fail(f"release eligibility {phase} capture has an invalid closed shape")
-            if not isinstance(value.get("provider_id"), str) or not isinstance(value.get("client_status"), int) or not isinstance(value.get("client_response_excerpt"), dict):
-                fail(f"release eligibility {phase} client capture types are invalid")
-        def release_error(phase: str) -> str | None:
-            excerpt = captures[phase]["client_response_excerpt"]
-            if set(excerpt) == {"usage_macprovider_privacy"}:
-                usage = excerpt["usage_macprovider_privacy"]
-                if not isinstance(usage, dict) or set(usage) != {"posture_verified_at_unix"} or not isinstance(usage["posture_verified_at_unix"], int):
-                    fail(f"release eligibility {phase} success excerpt is invalid")
-                return None
-            if set(excerpt) == {"error"} and isinstance(excerpt["error"], dict) and set(excerpt["error"]) == {"code"} and isinstance(excerpt["error"]["code"], str):
-                return excerpt["error"]["code"]
-            fail(f"release eligibility {phase} response excerpt is invalid")
-            raise AssertionError("unreachable")
-        approved_at, approved_db = self.v2_snapshot("release-derived-approval.json", "release_approved_db")
-        denied_at, denied_db = self.v2_snapshot("release-derived-approval.json", "release_denied_db")
-        withdrawn_at, withdrawn_db = self.v2_snapshot("release-derived-approval.json", "release_withdrawn_db")
-        expect(approved_at < denied_at < withdrawn_at, errors, "release eligibility DB captures must be ordered")
-        expect(approved in captures["approved"]["approved_code_identities"] and captures["approved"]["client_status"] == 200 and release_error("approved") is None, errors, "verified release identity must be loaded before eligible admission")
-        provider = captures["denied"]["provider_id"]
-        denied_quarantine = [row for row in denied_db["privacy_class_quarantine"] if row.get("provider_id") == provider and row.get("reason") == "posture_denied_code_identity"]
-        denied_revoked = [row for row in self.privacy_keys(denied_db) if row.get("provider_id") == provider and row.get("revoked_at_unix") not in (None, 0)]
-        expect(identity["code_cdhash"] in captures["denied"]["denied_cdhashes"] and release_error("denied") == "posture_denied_code_identity" and bool(denied_quarantine) and bool(denied_revoked), errors, "denied cdhash must produce the actual quarantine and key revocation state")
-        expect(captures["withdrawn"]["metadata_directory_present"] is False and approved not in captures["withdrawn"]["approved_code_identities"] and captures["withdrawn"]["client_status"] != 200 and release_error("withdrawn") is not None, errors, "withdrawal capture must remove release-derived eligibility")
-        expect(captures["invalid_metadata"]["approved_code_identities"] == [] and captures["invalid_metadata"]["client_status"] != 200 and release_error("invalid_metadata") is not None, errors, "trusted-key-signed invalid metadata must contribute no identity and no eligible admission")
-        recomputed = {
-            "approved_identity": approved,
-            "metadata": {"signature_result": "verified" if verified else "rejected", "regular_file": stats["metadata"]["regular"] and not stats["metadata"]["symlink"], "signature_regular_file": stats["signature"]["regular"] and not stats["signature"]["symlink"], "failed_metadata_identity_count": len(captures["invalid_metadata"]["approved_code_identities"])},
-            "eligibility": {"before_withdrawal": "eligible" if captures["approved"]["client_status"] == 200 else "ineligible", "after_denied_cdhash": "quarantined" if denied_quarantine else "ineligible", "after_withdrawal_or_expiry": "ineligible" if captures["withdrawn"]["client_status"] != 200 else "eligible"},
-        }
+        recomputed = self.v2_view().release_approval(errors)
         expect(all(doc.get(key) == value for key, value in recomputed.items()), errors, "release summary must equal signature, identity, configuration, and client recomputation")
 
     def p_v2_directory(self, errors: list[str]) -> None:
         doc = self.primary_v2("directory.json")
         self.require_keys(doc, {"schema_version", "profile", "provenance", "raw_source_sha256", "directory", "client_rejections", "gateway", "disclosure"}, "primary/v2/directory.json", errors)
-        envelope_raw = self.v2_source_bytes("directory.json", "directory_envelope")
-        gateway_raw = self.v2_source_bytes("directory.json", "directory_gateway_body")
-        envelope = parse_json(envelope_raw.decode("utf-8"), "directory envelope")
-        public_doc = self.v2_source_json("directory.json", "directory_public_key")
-        headers = self.v2_source_json("directory.json", "directory_gateway_headers")
-        clients = self.v2_source_json("directory.json", "directory_clients")
-        store = self.v2_source_json("directory.json", "directory_store")
-        disclosure = self.v2_source_json("directory.json", "directory_disclosure")
-        if not isinstance(envelope, dict) or set(envelope) != {"version", "key_id", "payload", "signature"}:
-            fail("directory envelope must be a closed object")
-        if not isinstance(public_doc, dict) or set(public_doc) != {"algorithm", "public_key"} or public_doc.get("algorithm") != "ed25519":
-            fail("directory public key capture must be a closed Ed25519 pin")
-        public = b64url_bytes(public_doc.get("public_key"))
-        payload = b64url_bytes(envelope.get("payload"))
-        signature = b64url_bytes(envelope.get("signature"))
-        if public is None or len(public) != 32 or payload is None or signature is None or len(signature) != 64:
-            fail("directory key, payload, and signature must be canonical base64url bytes")
-        canonical = lambda raw: base64.urlsafe_b64encode(raw).decode().rstrip("=")
-        expect(public_doc.get("public_key") == canonical(public) and envelope.get("payload") == canonical(payload) and envelope.get("signature") == canonical(signature), errors, "directory key, payload, and signature encodings must be canonical base64url")
-        key_id = base64.urlsafe_b64encode(hashlib.sha256(public).digest()).decode().rstrip("=")
-        signed = _frame(b"macprovider/spec049/identity-directory/v1") + _frame(payload)
-        signature_ok = ed25519_verify(public, signed, signature)
-        expect(envelope.get("version") == "privacy-identity-directory-envelope-v1" and envelope.get("key_id") == key_id and signature_ok, errors, "directory signature must verify over exact payload bytes under the pinned key")
-        payload_doc = parse_json(payload.decode("utf-8"), "directory payload")
-        if not isinstance(payload_doc, dict) or set(payload_doc) != {"version", "privacy_class", "issued_at_unix", "expires_at_unix", "entries"}:
-            fail("directory payload must be a closed object")
-        entries = payload_doc.get("entries")
-        if not isinstance(entries, list):
-            fail("directory entries must be a list")
-        fingerprints: list[str] = []
-        for entry in entries:
-            if not isinstance(entry, dict) or set(entry) != {"identity_public_key", "fingerprint", "se_public_key_fingerprint", "source", "enrolled_at_unix", "revoked"}:
-                fail("directory entries must be closed objects")
-            identity_key = b64url_bytes(entry.get("identity_public_key"))
-            expect(identity_key is not None and len(identity_key) == 32 and entry.get("identity_public_key") == canonical(identity_key) and canonical(hashlib.sha256(identity_key).digest()) == entry.get("fingerprint"), errors, "directory entry fingerprint must derive from its canonical public key")
-            expect(entry.get("source") in ("enrolled", "operator_pin") and isinstance(entry.get("revoked"), bool), errors, "directory entries must have typed source/revocation fields")
-            fingerprints.append(entry.get("fingerprint"))
-        expect(all(isinstance(item, str) for item in fingerprints) and fingerprints == sorted(fingerprints) and len(fingerprints) == len(set(fingerprints)), errors, "directory entries must be uniquely sorted by fingerprint")
-        issued, expires = payload_doc.get("issued_at_unix"), payload_doc.get("expires_at_unix")
-        expect(payload_doc.get("version") == "privacy-identity-directory-v1" and payload_doc.get("privacy_class") == PRIVACY_CLASS, errors, "directory payload version and privacy class must be exact")
-        expect(isinstance(issued, int) and isinstance(expires, int) and 60 <= expires - issued <= 3600, errors, "directory validity window must be bounded")
-        if not isinstance(headers, dict) or set(headers) != {"status", "cache_control", "content_type", "captured_at_unix", "store_error_code"}:
-            fail("directory gateway headers must be a closed capture")
-        expect(gateway_raw == envelope_raw, errors, "gateway directory response body must be byte-identical to the signed envelope")
-        expect(headers.get("status") == 200 and headers.get("cache_control") == "no-store" and headers.get("content_type") == "application/json" and isinstance(headers.get("captured_at_unix"), int) and issued <= headers["captured_at_unix"] < expires, errors, "gateway capture must be fresh, JSON, and no-store")
-        expect(headers.get("store_error_code") == "privacy_class_unavailable", errors, "directory store error capture must fail closed")
-        if not isinstance(store, dict) or set(store) != {"enrollments", "quarantined_provider_ids"} or not isinstance(store.get("enrollments"), list) or not isinstance(store.get("quarantined_provider_ids"), list):
-            fail("directory store capture must be closed enrollment/quarantine rows")
-        active_store = {row.get("identity_fingerprint") for row in store["enrollments"] if isinstance(row, dict) and row.get("revoked_at_unix") in (None, 0) and row.get("provider_id") not in store["quarantined_provider_ids"]}
-        revoked_store = {row.get("identity_fingerprint") for row in store["enrollments"] if isinstance(row, dict) and (row.get("revoked_at_unix") not in (None, 0) or row.get("provider_id") in store["quarantined_provider_ids"])}
-        active_entries = {row.get("fingerprint") for row in entries if not row.get("revoked") and row.get("source") == "enrolled"}
-        revoked_entries = {row.get("fingerprint") for row in entries if row.get("revoked") and row.get("source") == "enrolled"}
-        expect(active_store <= active_entries and revoked_store <= revoked_entries and bool(active_entries) and bool(revoked_entries), errors, "directory entries must match active and revoked store facts")
-        if not isinstance(clients, dict) or set(clients) != {"captured_at_unix", "attempts"} or not isinstance(clients.get("attempts"), list):
-            fail("directory client negatives must be a closed capture")
-        attempts = {row.get("case"): row for row in clients["attempts"] if isinstance(row, dict) and set(row) == {"case", "accepted", "error_code"}}
-        expect(set(attempts) == {"tampered", "expired", "revoked", "wrong_key"} and all(row.get("accepted") is False and isinstance(row.get("error_code"), str) for row in attempts.values()), errors, "directory client must reject every closed negative case")
-        # Independently prove the cryptographic negative cases: the exact
-        # signature fails after a payload-bit mutation, another pinned key
-        # cannot verify it, and the captured clock lies past expiry.
-        tampered = bytes([payload[0] ^ 1]) + payload[1:]
-        expect(not ed25519_verify(public, _frame(b"macprovider/spec049/identity-directory/v1") + _frame(tampered), signature), errors, "tampered directory payload must fail signature verification")
-        wrong_public = hashlib.sha256(public).digest()
-        expect(not ed25519_verify(wrong_public, signed, signature), errors, "wrong pinned directory key must fail verification")
-        expect(isinstance(clients.get("captured_at_unix"), int) and clients["captured_at_unix"] >= expires, errors, "expired negative capture must be at or after expiry")
-        if not isinstance(disclosure, dict) or set(disclosure) != {"residual_risks"} or not isinstance(disclosure.get("residual_risks"), list):
-            fail("directory disclosure must be a closed residual-risk capture")
-        expect(disclosure["residual_risks"] == list(PRIVACY_RESIDUAL_RISKS_V2), errors, "directory disclosure must contain the exact v2 residual-risk list")
-        recomputed = {
-            "directory": {"signature_result": "verified" if signature_ok else "rejected", "public_key_pin": public_doc["public_key"], "key_id": key_id, "entry_count": len(entries), "revoked_entry_count": sum(row.get("revoked") is True for row in entries), "ttl_seconds": expires - issued, "body_sha256": hashlib.sha256(envelope_raw).hexdigest()},
-            "client_rejections": {name: "rejected" for name in sorted(attempts)},
-            "gateway": {"body_sha256": hashlib.sha256(gateway_raw).hexdigest(), "cache_control": headers.get("cache_control"), "store_error_code": headers.get("store_error_code")},
-            "disclosure": disclosure,
-        }
+        recomputed = self.v2_view().directory(errors)
         expect(all(doc.get(key) == value for key, value in recomputed.items()), errors, "directory summary must equal signature, store, gateway, client, and disclosure recomputation")
 
 
