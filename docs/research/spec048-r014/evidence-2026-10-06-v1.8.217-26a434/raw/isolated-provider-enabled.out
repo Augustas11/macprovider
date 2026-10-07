@@ -8,7 +8,7 @@ malibu-cli config
   coordinator_url: ws://127.0.0.1:19302/ws/provider
   provider_id: r014-isolated-provider
   endpoint_url: <unset, WS-tunneled>
-  config: /Users/a1/mtp-r014-journey-217/work/isolated/provider/config.yaml
+  config: <operator-home>/mtp-r014-journey-217/work/isolated/provider/config.yaml
   log_level: info
   log_format: json
   tier2_mda_artifact_path: <unset>

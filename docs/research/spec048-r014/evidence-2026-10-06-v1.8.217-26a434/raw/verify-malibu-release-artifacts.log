@@ -1,25 +1,25 @@
-$ bash /Users/a1/mtp-r014-journey-217/src/scripts/verify-malibu-release-artifacts.sh /Users/a1/mtp-r014-journey-217/work/release-assets/Malibu-v1.8.217.dmg --provider-tarball /Users/a1/mtp-r014-journey-217/work/release-assets/macprovider-cli-v1.8.217-darwin-arm64.tar.gz
+$ bash <operator-home>/mtp-r014-journey-217/src/scripts/verify-malibu-release-artifacts.sh <operator-home>/mtp-r014-journey-217/work/release-assets/Malibu-v1.8.217.dmg --provider-tarball <operator-home>/mtp-r014-journey-217/work/release-assets/macprovider-cli-v1.8.217-darwin-arm64.tar.gz
 exit=0
 --- stdout
 verified Malibu 1.8.217 ships free of the frozen Sparkle trust anchor
-Processing: /Users/a1/mtp-r014-journey-217/work/release-assets/Malibu-v1.8.217.dmg
+Processing: <operator-home>/mtp-r014-journey-217/work/release-assets/Malibu-v1.8.217.dmg
 The validate action worked!
-[verify-malibu-release] ok: /Users/a1/mtp-r014-journey-217/work/release-assets/Malibu-v1.8.217.dmg
+[verify-malibu-release] ok: <operator-home>/mtp-r014-journey-217/work/release-assets/Malibu-v1.8.217.dmg
 
 --- stderr
 hdiutil: WARNING: 'hdiutil attach -nobrowse -mountpoint ...' is deprecated. Please use 'diskutil image attach --mountOptions nobrowse --mountPoint ...' instead.
---prepared:/private/var/folders/r1/g0r55c9n5pqg1n1sfvqss9t00000gn/T/malibu-dmg.IBMAs7/Malibu.app/Contents/MacOS/mlx.metallib
---validated:/private/var/folders/r1/g0r55c9n5pqg1n1sfvqss9t00000gn/T/malibu-dmg.IBMAs7/Malibu.app/Contents/MacOS/mlx.metallib
---prepared:/private/var/folders/r1/g0r55c9n5pqg1n1sfvqss9t00000gn/T/malibu-dmg.IBMAs7/Malibu.app/Contents/MacOS/macprovider-cli
---validated:/private/var/folders/r1/g0r55c9n5pqg1n1sfvqss9t00000gn/T/malibu-dmg.IBMAs7/Malibu.app/Contents/MacOS/macprovider-cli
---prepared:/private/var/folders/r1/g0r55c9n5pqg1n1sfvqss9t00000gn/T/malibu-dmg.IBMAs7/Malibu.app/Contents/MacOS/mlx-swift_Cmlx.bundle
---validated:/private/var/folders/r1/g0r55c9n5pqg1n1sfvqss9t00000gn/T/malibu-dmg.IBMAs7/Malibu.app/Contents/MacOS/mlx-swift_Cmlx.bundle
---prepared:/private/var/folders/r1/g0r55c9n5pqg1n1sfvqss9t00000gn/T/malibu-dmg.IBMAs7/Malibu.app/Contents/MacOS/swift-nio_NIOPosix.bundle
---validated:/private/var/folders/r1/g0r55c9n5pqg1n1sfvqss9t00000gn/T/malibu-dmg.IBMAs7/Malibu.app/Contents/MacOS/swift-nio_NIOPosix.bundle
-/var/folders/r1/g0r55c9n5pqg1n1sfvqss9t00000gn/T//malibu-dmg.IBMAs7/Malibu.app: valid on disk
-/var/folders/r1/g0r55c9n5pqg1n1sfvqss9t00000gn/T//malibu-dmg.IBMAs7/Malibu.app: satisfies its Designated Requirement
-/Users/a1/mtp-r014-journey-217/work/release-assets/Malibu-v1.8.217.dmg: rejected
+--prepared:/private<operator-temp>
+--validated:/private<operator-temp>
+--prepared:/private<operator-temp>
+--validated:/private<operator-temp>
+--prepared:/private<operator-temp>
+--validated:/private<operator-temp>
+--prepared:/private<operator-temp>
+--validated:/private<operator-temp>
+<operator-temp> valid on disk
+<operator-temp> satisfies its Designated Requirement
+<operator-home>/mtp-r014-journey-217/work/release-assets/Malibu-v1.8.217.dmg: rejected
 source=Insufficient Context
-/var/folders/r1/g0r55c9n5pqg1n1sfvqss9t00000gn/T//malibu-dmg.IBMAs7/Malibu.app: accepted
+<operator-temp> accepted
 source=Notarized Developer ID
 origin=Developer ID Application: Superposition Technologies Pte. Ltd. (YF7XNRJUG4)

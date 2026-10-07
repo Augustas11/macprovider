@@ -2,7 +2,7 @@
   {
     "connects_live": true,
     "coordinator_url": "wss://coordinator.malibu.tech/ws/provider",
-    "exe": "/Users/a1/malibu-m1-pool/bin/cli-1.8.219/macprovider-cli",
+    "exe": "<operator-home>/malibu-m1-pool/bin/cli-1.8.219/macprovider-cli",
     "no_join": false,
     "pid": 57027,
     "published_binary_sha256_for_version": null,
@@ -14,7 +14,7 @@
   {
     "connects_live": true,
     "coordinator_url": "wss://coordinator.malibu.tech/ws/provider",
-    "exe": "/Users/a1/malibu-m1-pool/bin/cli-1.8.219/macprovider-cli",
+    "exe": "<operator-home>/malibu-m1-pool/bin/cli-1.8.219/macprovider-cli",
     "no_join": false,
     "pid": 63505,
     "published_binary_sha256_for_version": null,
@@ -26,7 +26,7 @@
   {
     "connects_live": true,
     "coordinator_url": "wss://coordinator.malibu.tech/ws/provider",
-    "exe": "/Users/a1/malibu-1816-native/bin/cli-1.8.217/macprovider-cli",
+    "exe": "<operator-home>/malibu-1816-native/bin/cli-1.8.217/macprovider-cli",
     "no_join": false,
     "pid": 66454,
     "published_binary_sha256_for_version": "a6ea51d7ad19359a21fac63995194523264035fbca2ab32dceeede9d9da739bb",
@@ -38,7 +38,7 @@
   {
     "connects_live": true,
     "coordinator_url": "wss://coordinator.malibu.tech/ws/provider",
-    "exe": "/Users/a1/macprovider/macprovider-cli",
+    "exe": "<operator-home>/macprovider/macprovider-cli",
     "no_join": false,
     "pid": 82372,
     "published_binary_sha256_for_version": "a6ea51d7ad19359a21fac63995194523264035fbca2ab32dceeede9d9da739bb",

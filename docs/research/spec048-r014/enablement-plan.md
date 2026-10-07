@@ -50,7 +50,7 @@ Two facts shape the work beyond the R014 rehearsal list:
   has touched `phase3-binary/catalog/autotune/continuous-batching-policy*` or
   `scripts/catalog-release.py` since 2026-10-05. The only candidate is the
   local session worktree
-  `/Users/augstar/macprovider-poc/.claude/worktrees/agent-a16d9bba3f1ea0e43`
+  `<operator-home>/macprovider-poc/.claude/worktrees/agent-a16d9bba3f1ea0e43`
   on branch `ops/cb-activation-gates`, created 2026-10-06 12:44Z, no commits
   yet. ListAgents is not available in this session, so the owner is
   inferred, not confirmed.

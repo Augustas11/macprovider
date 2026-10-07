@@ -1,4 +1,4 @@
-$ sandbox-exec -f /Users/a1/mtp-r014-journey-217/work/updater/sandbox.sb /Users/a1/mtp-r014-journey-217/work/updater/home/macprovider/macprovider-cli update
+$ sandbox-exec -f <operator-home>/mtp-r014-journey-217/work/updater/sandbox.sb <operator-home>/mtp-r014-journey-217/work/updater/home/macprovider/macprovider-cli update
 exit=1
 --- stdout
 

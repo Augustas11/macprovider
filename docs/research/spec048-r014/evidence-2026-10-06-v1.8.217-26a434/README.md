@@ -30,7 +30,7 @@ The runner writes:
 - `result.json` and `result.md` for the summary.
 
 Verdicts are computed from the records, so you can rerun a subset of phases.
-`run-config.json` is the exact config used here: lab-host paths, no secrets.
+`run-config.json` is a sanitized copy of the configuration used here. Private host roots are replaced with logical placeholders; it is not directly executable.
 
 ### Two binaries, by necessity
 
@@ -66,7 +66,7 @@ Verdicts are computed from the records, so you can rerun a subset of phases.
   `sandbox-exec`. The sandbox denied every `launchctl` exec and every write to
   the live install, config, LaunchAgents, pools, and `/Applications`.
 - **Contact with production.** Nothing touched the live provider, the
-  `:18120`/`:18130` pools, `/Users/a1/malibu-m1-pool`, Pearl, or any live
+  `:18120`/`:18130` pools, `<operator-home>/malibu-m1-pool`, Pearl, or any live
   config. The only contacts with `coordinator.malibu.tech` were read-only
   public GETs of the native-MTP revocation feed: one by the runner, and one
   by the released serve path itself. The latter is hard-coded and has no
