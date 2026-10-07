@@ -4498,12 +4498,11 @@ actor ContinuousBatchScheduler {
         row.outputTokens.append(contentsOf: visibleTokens)
         #if DEBUG || MACPROVIDER_LAB_HARNESS
         if !visibleTokens.isEmpty {
-            let outputCount = row.outputTokens.count
             for offset in visibleTokens.indices {
                 labNativeMTPCommitTimingObserver?.record(
                     requestID: row.request.id,
                     ordinal: firstVisibleIndex + offset,
-                    outputCount: outputCount
+                    outputCount: firstVisibleIndex + offset + 1
                 )
             }
         }

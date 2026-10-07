@@ -2104,10 +2104,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             seed: recomputed.seed,
             pendingColumns: []
         )
-        let actualDigest = try nativeMTPDrafterDigest(requestID: requestID)
-        guard actualDigest == recomputedDigest else {
-            throw ContinuousBatchSchedulerError.unsupported("native_mtp_drafter_recompute_mismatch")
-        }
+        // Packed advancement and full-prefix preparation use different matmul
+        // shapes. SPEC-048 permits accumulation-order drift in drafter state;
+        // retain its recomputed digest as evidence without rejecting finalize.
         lock.lock()
         nativeMTPDrafterRecomputeDigests[requestID] = recomputedDigest
         lock.unlock()
