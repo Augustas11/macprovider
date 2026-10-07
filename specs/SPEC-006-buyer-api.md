@@ -1,7 +1,10 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.45 (2026-10-07, exclusive pool views and served-route disclosure)
+**Version:** 0.9.46 (2026-10-07, source-export authenticity foundation)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.46 (2026-10-07, issue #1880 — source-export authenticity foundation):**
+- §5.4.3.1 defines the producer-signed export envelope and reviewed key registry used as an authenticity building block for pool-model evidence. An authenticated envelope alone proves no refusal, accounting outcome, complete snapshot, or conformance. This version introduces no producer endpoint and no exception to SPEC-017 unserved-input redaction.
 
 **Change log v0.9.45 (2026-10-07, issue #1880 — pool view and refusal isolation):**
 - Clarifies SPEC-006-R018: an authorized pool view contains only that pool's current model entries, excluding global catalog rows and model classes. Pool-model disclosure is committed only for a successfully served response and uses the actual immutable route snapshot. Refusals carry neither pool-model header. SPEC-017 unknown-model redaction and pre-quota pool selection remain unchanged.
@@ -1964,6 +1967,76 @@ A SPEC-042-R015 pool model is a model a Trusted Pool creator signed into one poo
 5. **Copy.** Buyer docs MUST say that a pool model's identity and price are signed by the pool creator, that the artifact hash names the bytes the provider's CLI hashed and not proof that the serving process loaded them, and that the network does not verify the model (SPEC-042-R004 administrative trust).
 
 Promotion requires tests for: the default lists and the OpenRouter document excluding pool models; the pool view listing only the selected pool's entries with the exact closed object; an unauthorized, other-pool, or global request for a `pool/...` id answering as an unknown model; both disclosure headers on a successfully served pool-model response with the exact route snapshot digest; their absence on refusals before response commitment and on other models, including stale-selection, failover, and wrong-engine paths; the gateway dropping malformed or refused-response values; and the price fields equalling the SPEC-005-R015 reservation inputs.
+
+#### 5.4.3.1 Source-export authenticity foundation (v0.9.46, #1880)
+
+Pool-model acceptance evidence requires proof from the service that observed
+the fact. The envelope and registry contracts in
+`schemas/source-authenticated-export-envelope-v1.schema.json` and
+`schemas/source-evidence-key-registry-v1.schema.json` define the first
+authenticity layer. The authoritative semantic and cryptographic validator is
+`scripts/source_authenticated_evidence.py`; JSON Schema validation alone is
+insufficient. This layer is private evidence transport, not a new buyer API.
+
+The closed envelope has exactly `schema_version`, `signed`, and `signatures`.
+Its version is `macprovider.source-authenticated-export-envelope.v1` and it
+contains exactly one Ed25519 signature. The signed body version is
+`macprovider.source-authenticated-export.v1`; its exact fields are
+`schema_version`, `producer`, `role`, `instance_id`, `source_sha`, `export_id`,
+`run_id`, `challenge_nonce`, `generated_at`, `request_scopes`, `snapshot`, and
+`records`. Producer is `gateway` or `coordinator`; source identity is a
+40-lowercase-hex reviewed commit, export identity is a UUID, the challenge is
+32 random bytes encoded as canonical unpadded base64url, and generation time
+is UTC with exactly millisecond precision. Request scopes are sorted unique
+64-lowercase-hex opaque commitments. Envelope inputs are capped at 2 MiB,
+records and request scopes at 1,000 each. Unknown envelope fields, duplicate
+JSON keys, floats, unsafe integers, non-ASCII strings and oversized or deeply
+nested inputs are rejected. This restricted canonical subset uses compact
+sorted UTF-8 JSON and makes no claim of general Unicode/number JCS support.
+
+Each signature object has exactly `algorithm` (`ed25519`), `key_id`,
+`signed_sha256`, and `signature`. The digest is SHA-256 of the canonical signed
+body. Ed25519 verifies the bytes
+`macprovider.source-authenticated-export.v1\n` followed by that body; signing
+the digest alone is invalid. The signature is canonical unpadded base64url
+encoding exactly 64 bytes. The actual cryptographic domain, caller expectation
+and registry permission MUST all be
+`macprovider.source-authenticated-export.v1`; a challenge-response key or
+caller-selected alias cannot authorize an export.
+
+The reviewed registry is obtained from verifier source, never from the
+captured envelope or an operator-provided registry override. Its closed
+versioned structure binds each unique key ID to a 32-byte Ed25519 public key,
+producer, deployment instance, permitted roles and actual signature domain,
+UTC validity/revocation bounds, and explicit reviewed source SHA allowlist.
+Duplicate key IDs are invalid. Missing or empty approved registry fails
+closed. Key rotation may retain inactive historical public keys; only the
+selected signer determines current eligibility, and an expired or revoked
+selected signer fails verification. Export generation must fall within that
+signer's validity interval. Private source keys are distinct from provider
+receipt, payout, and static-feed keys and are never capture inputs.
+
+The trusted caller supplies expected producer, role, deployment instance,
+reviewed source commit, run, fresh challenge nonce and verification time. All
+must match the signed body and selected registry entry; the body cannot
+authorize its own source or key. Generation cannot be in the future or outside
+the caller's bounded freshness interval (default 300 seconds). A protected
+acceptance consumer must also establish reviewed release/deployment provenance
+independently and enforce run/challenge use; the foundation performs no
+stateful one-time challenge consumption.
+
+`snapshot` and `records` are opaque canonical objects at this layer. Their
+signature does not establish projection completeness, row absence, a refund,
+dispatch/finality closure, or correspondence to private request intent. A
+future producing-service contract MUST define closed role-specific projections,
+authenticated bounded export access, complete authoritative snapshots, actual
+accounting joins and privacy-preserving intent verification before acceptance
+can consume them. Missing source facts cannot be replaced by an operator's
+labels, empty captures or a protected signer's own signature. No producer
+endpoint or acceptance integration is enabled by this foundation, and
+SPEC-006-R018 remains pending. SPEC-017's blank unserved model rule is
+unchanged; raw rejected model/selector/account input MUST NOT be persisted or
+published through this envelope as a workaround.
 
 ### 5.5 `GET /v1/usage`
 
