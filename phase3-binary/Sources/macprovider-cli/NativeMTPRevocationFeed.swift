@@ -642,10 +642,10 @@ private extension NativeMTPRevocationFeedError {
     }
 }
 
-private final class NativeMTPRevocationNoRedirectDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+final class NativeMTPRevocationNoRedirectDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let lock = NSLock()
-    fileprivate var maxBytes = 0
-    fileprivate var continuation: CheckedContinuation<NativeMTPRevocationFetchResponse, Error>?
+    var maxBytes = 0
+    var continuation: CheckedContinuation<NativeMTPRevocationFetchResponse, Error>?
     private var statusCode: Int?
     private var body = Data()
     private var completed = false
@@ -676,7 +676,9 @@ private final class NativeMTPRevocationNoRedirectDelegate: NSObject, URLSessionD
             completionHandler(.cancel)
             return
         }
-        guard http.statusCode == 200 else {
+        // The caller owns bounded 429 retries; other failures keep their
+        // transport/HTTP classification for authenticated-cache fallback.
+        guard http.statusCode == 200 || http.statusCode == 429 else {
             resume(throwing: NativeMTPRevocationFeedError.invalidHTTPStatus(http.statusCode))
             completionHandler(.cancel)
             return

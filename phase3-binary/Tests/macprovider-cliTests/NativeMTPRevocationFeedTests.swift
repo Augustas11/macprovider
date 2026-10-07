@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 import XCTest
 @testable import macprovider_cli
@@ -435,6 +436,49 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         XCTAssertTrue(state.isRevoked(tupleSHA256: tuple))
     }
 
+    func testDefaultRevocationTransportReturns429ForRetryLoop() async throws {
+        let server = try RevocationLoopbackHTTPResponder(
+            response: "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"retry\":true}\n"
+        )
+        defer { server.stop() }
+        let url = try XCTUnwrap(URL(string: "http://127.0.0.1:\(server.port)/v1/native-mtp-revocations.revoker-a.json"))
+
+        let response = try await Self.fetchWithDefaultRevocationDelegate(url: url, maxBytes: 64)
+
+        XCTAssertEqual(response.statusCode, 429)
+        XCTAssertEqual(response.body, Data("{\"retry\":true}\n".utf8))
+        XCTAssertFalse(response.redirected)
+    }
+
+    func testDefaultRevocationTransportRejectsRedirectsBeforeFollowing() async throws {
+        let target = try RevocationLoopbackHTTPResponder(
+            response: "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+        )
+        defer { target.stop() }
+        let redirect = try RevocationLoopbackHTTPResponder(
+            response: "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:\(target.port)/v1/native-mtp-revocations.revoker-a.json\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        defer { redirect.stop() }
+        let url = try XCTUnwrap(URL(string: "http://127.0.0.1:\(redirect.port)/v1/native-mtp-revocations.revoker-a.json"))
+
+        await XCTAssertThrowsNativeMTPRevocationError(.redirectRejected) {
+            _ = try await Self.fetchWithDefaultRevocationDelegate(url: url, maxBytes: 64)
+        }
+        XCTAssertEqual(target.connections, 0)
+    }
+
+    func testDefaultRevocationTransportBoundsRateLimitedBodies() async throws {
+        let server = try RevocationLoopbackHTTPResponder(
+            response: "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: 65\r\nConnection: close\r\n\r\n"
+        )
+        defer { server.stop() }
+        let url = try XCTUnwrap(URL(string: "http://127.0.0.1:\(server.port)/v1/native-mtp-revocations.revoker-a.json"))
+
+        await XCTAssertThrowsNativeMTPRevocationError(.payloadTooLarge("network")) {
+            _ = try await Self.fetchWithDefaultRevocationDelegate(url: url, maxBytes: 64)
+        }
+    }
+
     func testNetworkFirstAcceptsFreshNetworkAndFallsBackToCurrentCacheOnTransportFailure() async throws {
         let signer = Curve25519.Signing.PrivateKey()
         let store = MemoryRevocationStore()
@@ -640,6 +684,22 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         ])
     }
 
+    private static func fetchWithDefaultRevocationDelegate(
+        url: URL,
+        maxBytes: Int
+    ) async throws -> NativeMTPRevocationFetchResponse {
+        let delegate = NativeMTPRevocationNoRedirectDelegate()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpShouldSetCookies = false
+        delegate.maxBytes = maxBytes
+        let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        return try await withCheckedThrowingContinuation { continuation in
+            delegate.continuation = continuation
+            session.dataTask(with: URLRequest(url: url)).resume()
+        }
+    }
+
     private static func verifier(signer: Curve25519.Signing.PrivateKey) -> NativeMTPRevocationEd25519Verifier {
         NativeMTPRevocationEd25519Verifier(publicKeysByKeyID: [
             "native-mtp-revoker-v1": signer.publicKey.rawRepresentation.base64EncodedString(),
@@ -715,6 +775,57 @@ private final class MemoryRevocationStore: NativeMTPRevocationStore, @unchecked 
         cachedSignature = signatureData
         cacheAnchor = anchor
         self.anchor = anchor
+    }
+}
+
+private final class RevocationLoopbackHTTPResponder: @unchecked Sendable {
+    let port: Int
+    private let fd: Int32
+    private let lock = NSLock()
+    private var accepted = 0
+    var connections: Int { lock.withLock { accepted } }
+
+    init(response: String) throws {
+        let listener = socket(AF_INET, SOCK_STREAM, 0)
+        guard listener >= 0 else { throw URLError(.cannotCreateFile) }
+        var address = sockaddr_in()
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        address.sin_port = 0
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let bound = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(listener, $0, length)
+            }
+        }
+        guard bound == 0, listen(listener, 8) == 0 else {
+            close(listener)
+            throw URLError(.cannotConnectToHost)
+        }
+        _ = withUnsafeMutablePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getsockname(listener, $0, &length)
+            }
+        }
+        fd = listener
+        port = Int(UInt16(bigEndian: address.sin_port))
+        let bytes = Array(response.utf8)
+        Thread.detachNewThread { [weak self] in
+            while true {
+                let client = accept(listener, nil, nil)
+                guard client >= 0 else { return }
+                self?.lock.withLock { self?.accepted += 1 }
+                var buffer = [UInt8](repeating: 0, count: 4096)
+                _ = read(client, &buffer, buffer.count)
+                _ = bytes.withUnsafeBytes { write(client, $0.baseAddress, bytes.count) }
+                close(client)
+            }
+        }
+    }
+
+    func stop() {
+        shutdown(fd, SHUT_RDWR)
+        close(fd)
     }
 }
 
