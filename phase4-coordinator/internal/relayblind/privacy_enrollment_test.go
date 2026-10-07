@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
@@ -19,6 +20,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -395,6 +397,36 @@ func TestQuarantineWriteFailureLatchesUntilDurable(t *testing.T) {
 	}
 }
 
+func TestOlderOperatorClearDoesNotClearNewQuarantineLatch(t *testing.T) {
+	f := newEnrollmentFixture(t, nil)
+	if err := f.acceptClaim(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.posture(0); err != nil {
+		t.Fatal(err)
+	}
+	if err := markOperatorClear(context.Background(), f.store.db, f.providerID, f.now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.db.Exec(`DROP TABLE relay_blind_reservations`); err != nil {
+		t.Fatal(err)
+	}
+	f.now = f.now.Add(500 * time.Millisecond)
+	f.rekey(0x66)
+	if err := f.acceptClaim(); err == nil {
+		t.Fatal("key change accepted while the quarantine write failed")
+	}
+	if err := f.store.migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if q, err := f.auth.isQuarantined(context.Background(), f.providerID, f.now); err != nil || !q {
+		t.Fatalf("old operator clear erased newer latch = %v, %v", q, err)
+	}
+	if q, err := f.store.IsQuarantined(context.Background(), f.providerID, f.now); err != nil || !q {
+		t.Fatalf("newer latch did not become durable = %v, %v", q, err)
+	}
+}
+
 // An operator unquarantine after a failed quarantine write wins over the
 // in-memory latch; the latch never re-creates a quarantine the operator lifted.
 func TestOperatorUnquarantineClearsQuarantineLatch(t *testing.T) {
@@ -423,6 +455,275 @@ func TestOperatorUnquarantineClearsQuarantineLatch(t *testing.T) {
 	}
 	if q, err := f.store.IsQuarantined(context.Background(), f.providerID, f.now); err != nil || q {
 		t.Fatalf("latch re-created the quarantine = %v, %v", q, err)
+	}
+}
+
+func TestOperatorUnquarantineRacingLatchedRetryWins(t *testing.T) {
+	f := newEnrollmentFixture(t, nil)
+	if err := f.acceptClaim(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.posture(0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.db.Exec(`DROP TABLE relay_blind_reservations`); err != nil {
+		t.Fatal(err)
+	}
+	f.rekey(0x67)
+	if err := f.acceptClaim(); err == nil {
+		t.Fatal("key change accepted while the quarantine write failed")
+	}
+	if err := f.store.migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := storeDBPath(t, f.store)
+	operatorStore, err := OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer operatorStore.Close()
+
+	checked := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseRetry := func() { releaseOnce.Do(func() { close(release) }) }
+	f.store.retryLatchedQuarantineAfterClearCheck = func() {
+		close(checked)
+		<-release
+	}
+	defer func() { f.store.retryLatchedQuarantineAfterClearCheck = nil }()
+
+	done := make(chan struct {
+		q   bool
+		err error
+	}, 1)
+	go func() {
+		q, err := f.auth.isQuarantined(context.Background(), f.providerID, f.now)
+		done <- struct {
+			q   bool
+			err error
+		}{q: q, err: err}
+	}()
+	select {
+	case <-checked:
+	case <-time.After(5 * time.Second):
+		releaseRetry()
+		t.Fatal("retry did not reach clear check")
+	}
+	unquarantined := make(chan error, 1)
+	go func() {
+		unquarantined <- operatorStore.Unquarantine(context.Background(), f.providerID)
+	}()
+	select {
+	case err := <-unquarantined:
+		if err != nil {
+			releaseRetry()
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		releaseRetry()
+		t.Fatal("operator unquarantine blocked behind retry")
+	}
+	releaseRetry()
+	var result struct {
+		q   bool
+		err error
+	}
+	select {
+	case result = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("retry did not finish after release")
+	}
+	f.store.retryLatchedQuarantineAfterClearCheck = nil
+	if result.err != nil || !result.q {
+		t.Fatalf("racing retry did not fail closed = %v, %v", result.q, result.err)
+	}
+	if q, err := f.auth.isQuarantined(context.Background(), f.providerID, f.now); err != nil || q {
+		t.Fatalf("operator clear did not win after racing retry = %v, %v", q, err)
+	}
+	if q, err := f.store.IsQuarantined(context.Background(), f.providerID, f.now); err != nil || q {
+		t.Fatalf("racing retry re-created durable quarantine = %v, %v", q, err)
+	}
+}
+
+func storeDBPath(t *testing.T, store *Store) string {
+	t.Helper()
+	rows, err := store.db.Query(`PRAGMA database_list`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var seq int
+		var name, file string
+		if err := rows.Scan(&seq, &name, &file); err != nil {
+			t.Fatal(err)
+		}
+		if name == "main" {
+			return file
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	t.Fatal("main sqlite database path not found")
+	return ""
+}
+
+func TestOldRetryDoesNotClearNewerQuarantineLatch(t *testing.T) {
+	f := newEnrollmentFixture(t, nil)
+	if err := f.acceptClaim(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.posture(0); err != nil {
+		t.Fatal(err)
+	}
+	f.auth.mu.Lock()
+	f.auth.quarantineSeq++
+	oldToken := f.auth.quarantineSeq
+	f.auth.pendingQuarantine[f.providerID] = pendingQuarantine{reason: "old", clearGeneration: 0, token: oldToken}
+	f.auth.mu.Unlock()
+
+	checked := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseRetry := func() { releaseOnce.Do(func() { close(release) }) }
+	f.store.retryLatchedQuarantineAfterClearCheck = func() {
+		close(checked)
+		<-release
+	}
+	defer func() { f.store.retryLatchedQuarantineAfterClearCheck = nil }()
+
+	done := make(chan struct {
+		q   bool
+		err error
+	}, 1)
+	go func() {
+		q, err := f.auth.isQuarantined(context.Background(), f.providerID, f.now)
+		done <- struct {
+			q   bool
+			err error
+		}{q: q, err: err}
+	}()
+	select {
+	case <-checked:
+	case <-time.After(5 * time.Second):
+		releaseRetry()
+		t.Fatal("retry did not reach clear check")
+	}
+	f.auth.mu.Lock()
+	f.auth.quarantineSeq++
+	newToken := f.auth.quarantineSeq
+	f.auth.pendingQuarantine[f.providerID] = pendingQuarantine{reason: "new", clearGeneration: 0, token: newToken}
+	f.auth.mu.Unlock()
+	releaseRetry()
+	var result struct {
+		q   bool
+		err error
+	}
+	select {
+	case result = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("retry did not finish after release")
+	}
+	f.store.retryLatchedQuarantineAfterClearCheck = nil
+	if result.err != nil || !result.q {
+		t.Fatalf("old retry did not fail closed = %v, %v", result.q, result.err)
+	}
+	f.auth.mu.Lock()
+	pending, ok := f.auth.pendingQuarantine[f.providerID]
+	f.auth.mu.Unlock()
+	if !ok || pending.token != newToken || pending.reason != "new" {
+		t.Fatalf("newer latch was cleared by old retry: %+v present=%v", pending, ok)
+	}
+}
+
+func TestOlderFailedQuarantineDoesNotOverwriteNewerLatch(t *testing.T) {
+	f := newEnrollmentFixture(t, nil)
+	if _, err := f.store.db.Exec(`DROP TABLE relay_blind_reservations`); err != nil {
+		t.Fatal(err)
+	}
+
+	checked := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseOld := func() { releaseOnce.Do(func() { close(release) }) }
+	firstHook := make(chan struct{}, 1)
+	f.store.quarantineAndRevokeBeforeWrite = func() {
+		select {
+		case firstHook <- struct{}{}:
+			close(checked)
+			<-release
+		default:
+		}
+	}
+	defer func() { f.store.quarantineAndRevokeBeforeWrite = nil }()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- f.auth.recordQuarantine(context.Background(), f.providerID, f.now, "old")
+	}()
+	select {
+	case <-checked:
+	case <-time.After(5 * time.Second):
+		releaseOld()
+		t.Fatal("old quarantine did not reach write hook")
+	}
+	if err := f.auth.recordQuarantine(context.Background(), f.providerID, f.now, "new"); err == nil {
+		releaseOld()
+		t.Fatal("new quarantine write unexpectedly succeeded")
+	}
+	releaseOld()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("old quarantine write unexpectedly succeeded")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("old quarantine did not finish after release")
+	}
+	f.auth.mu.Lock()
+	pending, ok := f.auth.pendingQuarantine[f.providerID]
+	f.auth.mu.Unlock()
+	if !ok || pending.reason != "new" {
+		t.Fatalf("older failed write overwrote newer latch: %+v present=%v", pending, ok)
+	}
+}
+
+func TestStoreMigratesLegacyOperatorClearGeneration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE privacy_class_operator_clear (provider_id TEXT PRIMARY KEY, cleared_at_unix INTEGER NOT NULL);
+INSERT INTO privacy_class_operator_clear(provider_id,cleared_at_unix) VALUES('provider-a',1800000000);`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var generation int64
+	if err := store.db.QueryRow(`SELECT clear_generation FROM privacy_class_operator_clear WHERE provider_id='provider-a'`).Scan(&generation); err != nil {
+		t.Fatal(err)
+	}
+	if generation != 0 {
+		t.Fatalf("legacy generation = %d", generation)
+	}
+	if err := markOperatorClear(context.Background(), store.db, "provider-a", time.Unix(1_800_000_001, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT clear_generation FROM privacy_class_operator_clear WHERE provider_id='provider-a'`).Scan(&generation); err != nil {
+		t.Fatal(err)
+	}
+	if generation != 1 {
+		t.Fatalf("generation after clear = %d", generation)
 	}
 }
 

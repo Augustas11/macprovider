@@ -65,10 +65,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_privacy_enrollment_active_se ON privacy_cl
 CREATE INDEX IF NOT EXISTS idx_privacy_enrollment_revoked ON privacy_class_enrollment(revoked_at_unix);
 CREATE TABLE IF NOT EXISTS privacy_class_operator_clear (
   provider_id TEXT PRIMARY KEY,
-  cleared_at_unix INTEGER NOT NULL
+  cleared_at_unix INTEGER NOT NULL,
+  clear_generation INTEGER NOT NULL DEFAULT 0
 );`)
 	if err != nil {
 		return fmt.Errorf("%w: migrate privacy enrollment: %v", ErrStoreUnavailable, err)
+	}
+	if err := s.addColumnIfMissing(ctx, "privacy_class_operator_clear", "clear_generation", `ALTER TABLE privacy_class_operator_clear ADD COLUMN clear_generation INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
 	}
 	return nil
 }
@@ -210,30 +214,47 @@ type execer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
+type rowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 // markOperatorClear records an operator unquarantine or reenroll, so an
 // in-memory quarantine latch from before it is dropped, not re-applied.
 func markOperatorClear(ctx context.Context, db execer, providerID string, now time.Time) error {
-	if _, err := db.ExecContext(ctx, `INSERT INTO privacy_class_operator_clear(provider_id,cleared_at_unix) VALUES(?,?) ON CONFLICT(provider_id) DO UPDATE SET cleared_at_unix=excluded.cleared_at_unix`, providerID, now.Unix()); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO privacy_class_operator_clear(provider_id,cleared_at_unix,clear_generation) VALUES(?,?,1) ON CONFLICT(provider_id) DO UPDATE SET cleared_at_unix=excluded.cleared_at_unix, clear_generation=privacy_class_operator_clear.clear_generation+1`, providerID, now.Unix()); err != nil {
 		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
 	return nil
 }
 
-// OperatorClearedSince reports an operator unquarantine or reenroll of the
-// provider at or after since.
-func (s *Store) OperatorClearedSince(ctx context.Context, providerID string, since time.Time) (bool, error) {
+// OperatorClearGeneration returns the current durable operator-clear sequence
+// for providerID. A latched quarantine stores this value before attempting the
+// durable write, so only later operator clears can supersede the latch.
+func (s *Store) OperatorClearGeneration(ctx context.Context, providerID string) (int64, error) {
 	if s == nil || s.db == nil {
-		return false, ErrStoreUnavailable
+		return 0, ErrStoreUnavailable
 	}
-	var cleared int64
-	err := s.db.QueryRowContext(ctx, `SELECT cleared_at_unix FROM privacy_class_operator_clear WHERE provider_id=?`, providerID).Scan(&cleared)
+	var generation int64
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(clear_generation,0) FROM privacy_class_operator_clear WHERE provider_id=?`, providerID).Scan(&generation)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	return generation, nil
+}
+
+func operatorClearedAfterGenerationTx(ctx context.Context, db rowQuerier, providerID string, generation int64) (bool, error) {
+	var current int64
+	err := db.QueryRowContext(ctx, `SELECT COALESCE(clear_generation,0) FROM privacy_class_operator_clear WHERE provider_id=?`, providerID).Scan(&current)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
-	return cleared >= since.Unix(), nil
+	return current > generation, nil
 }
 
 // ListPrivacyEnrollments returns every active enrollment and every

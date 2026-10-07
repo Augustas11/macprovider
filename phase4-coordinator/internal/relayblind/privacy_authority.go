@@ -63,6 +63,7 @@ type PrivacyAuthority struct {
 	epochs            map[string]uint64
 	closedGen         map[privacySessionID]uint64
 	generation        uint64
+	quarantineSeq     uint64
 }
 
 type privacySessionID struct {
@@ -815,6 +816,11 @@ func (a *PrivacyAuthority) failQuarantine(ctx context.Context, providerID string
 
 func (a *PrivacyAuthority) recordQuarantine(ctx context.Context, providerID string, now time.Time, reason string) error {
 	dur := time.Duration(a.quarantine) * time.Second
+	a.mu.Lock()
+	a.quarantineSeq++
+	token := a.quarantineSeq
+	a.mu.Unlock()
+	clearGeneration, clearGenErr := a.store.OperatorClearGeneration(ctx, providerID)
 	// The in-memory invalidation runs even when the store write fails, so a
 	// posture failure never leaves the live session eligible.
 	writeErr := a.store.QuarantineAndRevokePrivacy(ctx, providerID, reason, now, dur, a.replayRetention)
@@ -822,9 +828,14 @@ func (a *PrivacyAuthority) recordQuarantine(ctx context.Context, providerID stri
 	// A failed durable write keeps an in-memory latch that blocks the
 	// provider and retries the write until it lands.
 	if writeErr != nil {
-		a.pendingQuarantine[providerID] = pendingQuarantine{reason: reason, at: time.Now()}
+		if clearGenErr != nil {
+			clearGeneration = unknownOperatorClearGeneration
+		}
+		if pending, ok := a.pendingQuarantine[providerID]; !ok || pending.token <= token {
+			a.pendingQuarantine[providerID] = pendingQuarantine{reason: reason, clearGeneration: clearGeneration, token: token}
+		}
 	} else {
-		delete(a.pendingQuarantine, providerID)
+		a.deletePendingQuarantineThroughLocked(providerID, token)
 	}
 	a.epochs[providerID]++
 	epoch := a.epochs[providerID]
@@ -876,18 +887,23 @@ func (a *PrivacyAuthority) isQuarantined(ctx context.Context, providerID string,
 	pending, latched := a.pendingQuarantine[providerID]
 	a.mu.Unlock()
 	if latched {
-		// An operator unquarantine or reenroll after the latch wins: the
-		// latch is dropped instead of re-creating the quarantine.
-		if cleared, err := a.store.OperatorClearedSince(ctx, providerID, pending.at); err == nil && cleared {
+		// An operator unquarantine or reenroll after the latch wins. The
+		// retry and the generation check are one transaction, so a retry
+		// cannot re-create a quarantine that the operator already lifted.
+		dur := time.Duration(a.quarantine) * time.Second
+		cleared, err := a.store.RetryLatchedQuarantine(ctx, providerID, pending.reason, pending.clearGeneration, now, dur, a.replayRetention)
+		if err == nil && cleared {
 			a.mu.Lock()
-			delete(a.pendingQuarantine, providerID)
+			current := a.deletePendingQuarantineThroughLocked(providerID, pending.token)
 			a.mu.Unlock()
+			if !current {
+				return true, nil
+			}
 			return a.store.IsQuarantined(ctx, providerID, now)
 		}
-		dur := time.Duration(a.quarantine) * time.Second
-		if err := a.store.QuarantineAndRevokePrivacy(ctx, providerID, pending.reason, now, dur, a.replayRetention); err == nil {
+		if err == nil {
 			a.mu.Lock()
-			delete(a.pendingQuarantine, providerID)
+			a.deletePendingQuarantineThroughLocked(providerID, pending.token)
 			a.mu.Unlock()
 		}
 		return true, nil
@@ -897,8 +913,27 @@ func (a *PrivacyAuthority) isQuarantined(ctx context.Context, providerID string,
 
 // pendingQuarantine is a quarantine whose durable write failed.
 type pendingQuarantine struct {
-	reason string
-	at     time.Time
+	reason          string
+	clearGeneration int64
+	token           uint64
+}
+
+// unknownOperatorClearGeneration is intentionally above any practical operator
+// clear sequence. If the baseline cannot be read, recovery fails closed: later
+// checks may still make the quarantine durable, but they do not discard the
+// latch merely because an operator-clear row exists.
+const unknownOperatorClearGeneration int64 = 1 << 62
+
+func (a *PrivacyAuthority) deletePendingQuarantineThroughLocked(providerID string, token uint64) bool {
+	pending, ok := a.pendingQuarantine[providerID]
+	if !ok {
+		return true
+	}
+	if pending.token > token {
+		return false
+	}
+	delete(a.pendingQuarantine, providerID)
+	return true
 }
 
 // postureStillCurrent reports whether the session that received the

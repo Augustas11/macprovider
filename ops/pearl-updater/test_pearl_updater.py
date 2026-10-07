@@ -7235,6 +7235,17 @@ class PearlUpdaterTests(unittest.TestCase):
         )
         for name in self.catalog_assets:
             shutil.copyfile(self.bundle / name, work / name)
+        metadata = json.loads((self.bundle / "pearl-release.json").read_text())
+        for component in components:
+            metadata["components"][component.asset.removesuffix("-linux-amd64")] = {
+                "asset": component.asset,
+                "sha256": component.sha256,
+                "embedded_version": component.embedded_version,
+            }
+        metadata_path = work / "pearl-release.json"
+        signature_path = work / "pearl-release.json.sig"
+        metadata_path.write_text(json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n")
+        self.sign(metadata_path, signature_path)
         runner = updater_module.Updater(
             self.config,
             public_key=self.public,
@@ -7250,6 +7261,12 @@ class PearlUpdaterTests(unittest.TestCase):
             isolate_candidate_network=False,
         )
         staged = runner.stage_candidate_validation(release, self.root)
+        self.assertEqual((staged.directory / metadata_path.name).read_bytes(), metadata_path.read_bytes())
+        self.assertEqual((staged.directory / signature_path.name).read_bytes(), signature_path.read_bytes())
+        runner.verify_signature(
+            staged.directory / metadata_path.name,
+            staged.directory / signature_path.name,
+        )
         yaml_path = runner.stage_candidate_config(staged.directory, "staged.yaml", "config: readable\n")
         result = runner.run_candidate_command(
             [str(staged.directory / staged.coordinator.asset), str(yaml_path)],
