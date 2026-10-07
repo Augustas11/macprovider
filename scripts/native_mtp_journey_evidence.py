@@ -58,6 +58,7 @@ EVIDENCE_SCHEMAS = {
     RELEASE: "macprovider.native-mtp-release-evidence.v1",
 }
 EXPIRY_DAYS = {SERVING: 90, RELEASE: 30}
+R015_POLICY_SCHEMA = "macprovider.native-mtp-r015-policy.v1"
 
 SERVING_REQUIREMENTS = sorted([
     "SPEC-023-R024", "SPEC-030-R021", "SPEC-031-R033", "SPEC-036-R018", "SPEC-038-R018", "SPEC-039-R015",
@@ -294,8 +295,8 @@ def _sidecar_generator():
     return module
 
 
-def admission_tuple_sha256(sidecar: bytes, entry_index: object) -> str:
-    """The canonical SPEC-023-R024 identity of one entry of a signed sidecar."""
+def validated_sidecar_entry(sidecar: bytes, entry_index: object) -> tuple[dict, str]:
+    """Return the selected sidecar entry and its canonical SPEC-023-R024 identity."""
     generator = _sidecar_generator()
     try:
         body = generator.validate_sidecar(generator.strict_json_loads(sidecar.decode("utf-8")))
@@ -303,7 +304,14 @@ def admission_tuple_sha256(sidecar: bytes, entry_index: object) -> str:
         fail(f"native-mtp-admission.json: {exc}")
     if not isinstance(entry_index, int) or isinstance(entry_index, bool) or not 0 <= entry_index < len(body["entries"]):
         fail("step-01 details.entry_index must name one sidecar entry")
-    return generator.admission_tuple_sha256(body["release_id"], sha256(sidecar), body["entries"][entry_index])
+    entry = body["entries"][entry_index]
+    return entry, generator.admission_tuple_sha256(body["release_id"], sha256(sidecar), entry)
+
+
+def admission_tuple_sha256(sidecar: bytes, entry_index: object) -> str:
+    """The canonical SPEC-023-R024 identity of one entry of a signed sidecar."""
+    _, tuple_sha = validated_sidecar_entry(sidecar, entry_index)
+    return tuple_sha
 
 
 # --------------------------------------------------------------------------- serving
@@ -321,10 +329,16 @@ def compose_serving(bundle: Bundle, *, captured_at: str, expires_at: str | None 
     sidecar = bundle.require("native-mtp-admission.json")
     policy = bundle.require("r015-policy.json")
     entry_index = steps["step-01-bind-tuple"]["details"].get("entry_index")
-    tuple_sha = admission_tuple_sha256(sidecar, entry_index)
-    entry = parse_json(sidecar, "native-mtp-admission.json")["entries"][entry_index]
+    entry, tuple_sha = validated_sidecar_entry(sidecar, entry_index)
+    if entry["provider_revision"] != entry["source_commit"] or entry["ordinary_baseline"]["provider_revision"] != entry["source_commit"]:
+        fail("selected sidecar entry provider_revision must equal source_commit")
     if entry["benchmark_policy_sha256"] != sha256(policy):
         fail("r015-policy.json is not the benchmark policy the sidecar entry binds")
+    policy_body = parse_json(policy, "r015-policy.json")
+    if not isinstance(policy_body, dict) or policy_body.get("schema") != R015_POLICY_SCHEMA:
+        fail(f"r015-policy.json schema must be {R015_POLICY_SCHEMA}")
+    if policy_body.get("provider_commit") != entry["source_commit"]:
+        fail("r015-policy.json provider_commit must equal the selected sidecar entry source_commit")
     observations: dict[str, bool] = {}
     for name, step_id, check, required in OBSERVATION_SOURCES:
         value = steps[step_id]["checks"].get(check)
@@ -497,6 +511,10 @@ def signed_expiry_date(expires_at: str) -> str:
 
 
 def project_payload(kind: str, evidence: dict, source: str, evidence_sha256: str, bundle: Bundle, *, source_sha: str, evidence_sha: str) -> dict[str, Any]:
+    if kind == SERVING and serving_source_commit(bundle) != source_sha:
+        fail("--source-sha must equal the selected sidecar entry source_commit")
+    if kind == RELEASE and evidence["source_commit"] != source_sha:
+        fail("--source-sha must equal the release evidence source_commit")
     steps = [item["step_id"] for item in evidence["steps"]]
     return {
         "schema_version": PAYLOAD_SCHEMA,
@@ -544,6 +562,16 @@ def git_file_bytes(root: Path, commit: str, relative: str) -> bytes | None:
     return completed.stdout if completed.returncode == 0 else None
 
 
+def serving_source_commit(bundle: Bundle) -> str:
+    step, _ = step_artifact(bundle, "step-01-bind-tuple")
+    entry_index = step["details"].get("entry_index")
+    entry, _ = validated_sidecar_entry(bundle.require("native-mtp-admission.json"), entry_index)
+    source_commit = entry["source_commit"]
+    if entry["provider_revision"] != source_commit or entry["ordinary_baseline"]["provider_revision"] != source_commit:
+        fail("selected sidecar entry provider_revision must equal source_commit")
+    return source_commit
+
+
 def build_payload(root: Path, kind: str, source: str, *, source_sha: str, evidence_sha: str, now: datetime | None = None) -> dict[str, Any]:
     for label, value in (("--source-sha", source_sha), ("--evidence-sha", evidence_sha)):
         if not OBJECT_ID_RE.fullmatch(value):
@@ -553,8 +581,6 @@ def build_payload(root: Path, kind: str, source: str, *, source_sha: str, eviden
     data = (root / source).read_bytes()
     evidence = parse_json(data, source)
     bundle = validate_evidence(root, kind, source, evidence, now=now)
-    if kind == RELEASE and evidence["source_commit"] != source_sha:
-        fail("--source-sha must equal the release evidence source_commit")
     if git_file_bytes(root, evidence_sha, source) != data:
         fail("committed evidence bytes must match --evidence-sha")
     for relative, content in [(MANIFEST_NAME, bundle.manifest), *bundle.files.items()]:

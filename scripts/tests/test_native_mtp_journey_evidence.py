@@ -21,11 +21,17 @@ CAPTURED = "2026-10-06T12:00:00Z"
 NOW = datetime(2026, 10, 7, tzinfo=timezone.utc)
 
 
-def sidecar_and_policy() -> tuple[bytes, bytes]:
-    policy = b'{"policy":"frozen r015"}'
+def sidecar_and_policy(source_commit: str = "a" * 40) -> tuple[bytes, bytes]:
+    policy = json.dumps({
+        "schema": contract.R015_POLICY_SCHEMA,
+        "provider_commit": source_commit,
+        "policy": "frozen r015",
+    }, sort_keys=True).encode()
     tuple_input = sidecar_fixture.tuple_input()
     tuple_input["entry"]["benchmark_policy_sha256"] = contract.sha256(policy)
     release = sidecar_fixture.release_input("streamvc-autotune-static-test", b"{}", b"{}")
+    release["entry"]["provider_revision"] = source_commit
+    release["entry"]["source_commit"] = source_commit
     generator = contract._sidecar_generator()
     return generator.build(tuple_input, release), policy
 
@@ -76,7 +82,11 @@ class ServingEvidenceTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.repo = Repo(pathlib.Path(self.tmp.name))
-        self.sidecar, self.policy = sidecar_and_policy()
+        self.repo.write("README", b"base\n")
+        self.base = self.repo.commit("base")
+        self.repo.write("phase3-binary/tested-source.swift", b"let tested = true\n")
+        self.source = self.repo.commit("tested source")
+        self.sidecar, self.policy = sidecar_and_policy(self.source)
         self.dir = "journeys/evidence/native-mtp-serving-20261006T120000Z"
 
     def tearDown(self):
@@ -104,14 +114,40 @@ class ServingEvidenceTest(unittest.TestCase):
         self.assertEqual(evidence["expires_at"], "2027-01-04T12:00:00Z")
         source = f"{self.dir}.redacted.json"
         self.repo.write(source, json.dumps(evidence, indent=2).encode())
-        sha = self.repo.commit("evidence")
-        payload = contract.build_payload(self.repo.root, "serving", source, source_sha=sha, evidence_sha=sha, now=NOW)
+        evidence_sha = self.repo.commit("evidence")
+        payload = contract.build_payload(self.repo.root, "serving", source, source_sha=self.source, evidence_sha=evidence_sha, now=NOW)
         self.assertEqual(payload["journey_id"], "JOURNEY-NATIVE-MTP-SERVING")
         self.assertEqual(contract.validate_signed_payload(self.repo.root, payload, "SPEC-048-R007", ["JOURNEY-NATIVE-MTP-SERVING"]), [])
         self.assertTrue(contract.validate_signed_payload(self.repo.root, payload, "SPEC-048-R014", ["JOURNEY-NATIVE-MTP-SERVING"]))
         overclaim = copy.deepcopy(payload)
         overclaim["requirement_ids"].append("SPEC-048-R014")
         self.assertTrue(contract.validate_signed_payload(self.repo.root, overclaim, "SPEC-048-R007", ["JOURNEY-NATIVE-MTP-SERVING"]))
+        retargeted = copy.deepcopy(payload)
+        retargeted["repository"]["commit"] = self.base
+        self.assertIn(
+            "selected sidecar entry source_commit",
+            "\n".join(contract.validate_signed_payload(self.repo.root, retargeted, "SPEC-048-R007", ["JOURNEY-NATIVE-MTP-SERVING"])),
+        )
+
+    def test_serving_source_sha_must_equal_selected_sidecar_source_commit(self):
+        evidence = self.compose(self.files())
+        source = f"{self.dir}.redacted.json"
+        self.repo.write(source, json.dumps(evidence, indent=2).encode())
+        evidence_sha = self.repo.commit("evidence")
+        with self.assertRaisesRegex(contract.NativeMTPEvidenceError, "selected sidecar entry source_commit"):
+            contract.build_payload(self.repo.root, "serving", source, source_sha=self.base, evidence_sha=evidence_sha, now=NOW)
+
+    def test_serving_source_sha_cannot_be_falsely_retargeted_to_squash_commit(self):
+        evidence = self.compose(self.files())
+        source = f"{self.dir}.redacted.json"
+        self.repo.write(source, json.dumps(evidence, indent=2).encode())
+        self.repo.commit("evidence before squash retarget")
+        self.repo.write("phase3-binary/squash.swift", b"let squash = true\n")
+        squash = self.repo.commit("simulated squash source")
+        self.repo.write("docs/post-squash-confirmation.txt", b"post-squash confirmation\n")
+        evidence_sha = self.repo.commit("post-squash evidence holder")
+        with self.assertRaisesRegex(contract.NativeMTPEvidenceError, "selected sidecar entry source_commit"):
+            contract.build_payload(self.repo.root, "serving", source, source_sha=squash, evidence_sha=evidence_sha, now=NOW)
 
     def test_a_failed_or_missing_check_cannot_compose(self):
         checks = serving_checks()
@@ -129,8 +165,26 @@ class ServingEvidenceTest(unittest.TestCase):
 
     def test_policy_and_tuple_bindings_are_recomputed(self):
         files = self.files()
-        files["r015-policy.json"] = b'{"policy":"other"}'
+        files["r015-policy.json"] = json.dumps({
+            "schema": contract.R015_POLICY_SCHEMA,
+            "provider_commit": self.source,
+            "policy": "other",
+        }, sort_keys=True).encode()
         with self.assertRaisesRegex(contract.NativeMTPEvidenceError, "benchmark policy"):
+            self.compose(files)
+        files = self.files()
+        files["r015-policy.json"] = json.dumps({
+            "schema": contract.R015_POLICY_SCHEMA,
+            "provider_commit": self.base,
+            "policy": "frozen r015",
+        }, sort_keys=True).encode()
+        tuple_input = sidecar_fixture.tuple_input()
+        tuple_input["entry"]["benchmark_policy_sha256"] = contract.sha256(files["r015-policy.json"])
+        release = sidecar_fixture.release_input("streamvc-autotune-static-test", b"{}", b"{}")
+        release["entry"]["provider_revision"] = self.source
+        release["entry"]["source_commit"] = self.source
+        files["native-mtp-admission.json"] = contract._sidecar_generator().build(tuple_input, release)
+        with self.assertRaisesRegex(contract.NativeMTPEvidenceError, "provider_commit"):
             self.compose(files)
         with self.assertRaisesRegex(contract.NativeMTPEvidenceError, "entry_index"):
             self.compose(self.files(details01={"entry_index": 3}))
@@ -163,7 +217,7 @@ class ReleaseEvidenceTest(unittest.TestCase):
         self.base = self.repo.commit("base")
         self.repo.write("phase3-binary/feature.swift", b"let native = true\n")
         self.head = self.repo.commit("campaign")
-        self.sidecar, _ = sidecar_and_policy()
+        self.sidecar, _ = sidecar_and_policy(self.head)
         self.dir = "journeys/evidence/native-mtp-release-20261006T120000Z"
 
     def tearDown(self):
