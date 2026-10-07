@@ -53,6 +53,19 @@ func TestStrictJSONRejectsTrailingBoundsDepthAndUnsafeValues(t *testing.T) {
 	}
 }
 
+func TestCanonicalBytesDoesNotHTMLEscapeStrings(t *testing.T) {
+	got, err := canonicalBytes(map[string]any{
+		"note": `reviewed <tag>&value "quoted" \ slash`,
+	})
+	if err != nil {
+		t.Fatalf("canonicalBytes: %v", err)
+	}
+	want := `{"note":"reviewed <tag>&value \"quoted\" \\ slash"}`
+	if string(got) != want {
+		t.Fatalf("canonical bytes = %q, want %q", got, want)
+	}
+}
+
 func TestRegistryValidationMatchesPythonClosedContract(t *testing.T) {
 	pub, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

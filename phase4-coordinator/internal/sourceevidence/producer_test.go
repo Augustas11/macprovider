@@ -1,14 +1,17 @@
 package sourceevidence
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -48,7 +51,7 @@ func TestProducerSignsSortedCoordinatorProjection(t *testing.T) {
 			"revoked_at":        nil,
 			"reviewed_source_constraints": map[string]any{
 				"source_sha_allowlist": []any{"0123456789abcdef0123456789abcdef01234567"},
-				"notes":                "test key",
+				"notes":                `test key <>& "quoted" \ slash`,
 			},
 		}},
 	}
@@ -126,5 +129,36 @@ validate_envelope(load_json_file(pathlib.Path(sys.argv[1])), load_json_file(path
 	cmd.Env = append(os.Environ(), "PYTHONDONTWRITEBYTECODE=1")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("Python rejected Go-produced envelope: %v\n%s", err, output)
+	}
+}
+
+func TestLoadSecretBytesPrefersHexForAmbiguousAllHexMaterial(t *testing.T) {
+	dir := t.TempDir()
+	cases := []struct {
+		name string
+		hex  string
+	}{
+		{name: "32 byte seed", hex: strings.Repeat("a1", 32)},
+		{name: "64 byte private key", hex: strings.Repeat("b2", 64)},
+		{name: "hmac key", hex: strings.Repeat("c3", 32)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(dir, strings.ReplaceAll(tc.name, " ", "_")+".secret")
+			if err := os.WriteFile(path, []byte(tc.hex), 0o600); err != nil {
+				t.Fatalf("write secret: %v", err)
+			}
+			got, err := LoadSecretBytes(path)
+			if err != nil {
+				t.Fatalf("LoadSecretBytes: %v", err)
+			}
+			want, err := hex.DecodeString(tc.hex)
+			if err != nil {
+				t.Fatalf("hex fixture: %v", err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("decoded %d bytes, want hex-decoded %d bytes", len(got), len(want))
+			}
+		})
 	}
 }

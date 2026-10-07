@@ -677,6 +677,8 @@ def main(argv: list[str] | None = None) -> int:
             max_age_seconds=require_int(args.max_age_seconds, "--max-age-seconds", 1, 86400),
         )
         registry_path = _default_registry_path()
+        if not registry_path.is_file():
+            fail("$registry", f"reviewed production registry is not enrolled at {registry_path}; fail closed")
         registry = load_json_file(registry_path, "$registry")
         envelope = load_json_file(args.envelope, "$envelope")
         result = validate_envelope(envelope, registry, expected, openssl_bin=args.openssl)

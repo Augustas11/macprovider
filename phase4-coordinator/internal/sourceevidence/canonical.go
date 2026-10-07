@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -264,8 +265,7 @@ func writeCanonical(buf *bytes.Buffer, v any) {
 			buf.WriteString("false")
 		}
 	case string:
-		b, _ := json.Marshal(x)
-		buf.Write(b)
+		buf.WriteString(strconv.Quote(x))
 	case int:
 		buf.WriteString(fmt.Sprintf("%d", x))
 	case int64:
@@ -292,8 +292,7 @@ func writeCanonical(buf *bytes.Buffer, v any) {
 			if i > 0 {
 				buf.WriteByte(',')
 			}
-			kb, _ := json.Marshal(k)
-			buf.Write(kb)
+			buf.WriteString(strconv.Quote(k))
 			buf.WriteByte(':')
 			writeCanonical(buf, x[k])
 		}

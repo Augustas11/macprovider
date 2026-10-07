@@ -471,6 +471,9 @@ class SourceAuthenticatedEvidenceTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 2)
             self.assertIn("source-evidence-key-registry-v1.json", result.stderr)
+            self.assertIn("reviewed production registry is not enrolled", result.stderr)
+            self.assertIn("fail closed", result.stderr)
+            self.assertEqual(result.stdout, "")
 
 
 if __name__ == "__main__":

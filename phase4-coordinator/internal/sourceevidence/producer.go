@@ -273,13 +273,17 @@ func LoadSecretBytes(path string) ([]byte, error) {
 	if trimmed == "" {
 		return nil, fmt.Errorf("source evidence secret file is empty")
 	}
+	// All-hex secret material is accepted as hex before base64 so 32-byte
+	// seeds and HMAC keys written as 64 hex characters decode deterministically.
+	if len(trimmed)%2 == 0 && strings.Trim(trimmed, "0123456789abcdefABCDEF") == "" {
+		if decoded, err := hex.DecodeString(trimmed); err == nil {
+			return decoded, nil
+		}
+	}
 	if decoded, err := base64.RawURLEncoding.DecodeString(trimmed); err == nil {
 		return decoded, nil
 	}
 	if decoded, err := base64.StdEncoding.DecodeString(trimmed); err == nil {
-		return decoded, nil
-	}
-	if decoded, err := hex.DecodeString(trimmed); err == nil {
 		return decoded, nil
 	}
 	if base64URLRE.MatchString(trimmed) {
