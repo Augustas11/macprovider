@@ -7145,7 +7145,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     request: request,
                     snapshot: snapshot,
                     admission: nativeMTPAdmission,
-                    lease: nil,
+                    lease: nil as ConversationCacheLease?,
                     leaseAllowed: false,
                     completion: completion,
                     stream: false
