@@ -522,6 +522,9 @@ struct ServeCommand: AsyncParsableCommand {
     @Flag(name: .customLong("lab-identity-scope"), help: "Use an isolated privacy lab identity scope. Requires --isolate-lifecycle, protected_file credentials, a literal loopback coordinator, and an explicit 0700 relay-blind state root.")
     var labIdentityScope = false
 
+    @Option(name: .customLong("privacy-lab-config-change-checkpoint-fd"), help: .private)
+    var privacyLabConfigChangeCheckpointFD: Int?
+
     // Internal marker for CandidateProviderRunner. Stage 1 owns warmup and
     // throughput measurement for these non-joining subprocesses.
     @Flag(name: .customLong("autotune-candidate"), help: .private)
@@ -536,6 +539,20 @@ struct ServeCommand: AsyncParsableCommand {
         }
         if labIdentityScope && !isolateLifecycle {
             throw ValidationError("--lab-identity-scope requires --isolate-lifecycle")
+        }
+        if privacyLabConfigChangeCheckpointFD != nil {
+            guard labIdentityScope else {
+                throw ValidationError("--privacy-lab-config-change-checkpoint-fd requires --lab-identity-scope")
+            }
+            guard isolateLifecycle else {
+                throw ValidationError("--privacy-lab-config-change-checkpoint-fd requires --isolate-lifecycle")
+            }
+            guard !noJoin else {
+                throw ValidationError("--privacy-lab-config-change-checkpoint-fd requires coordinator join")
+            }
+            guard !autotuneCandidate else {
+                throw ValidationError("--privacy-lab-config-change-checkpoint-fd is incompatible with --autotune-candidate")
+            }
         }
     }
 
@@ -1989,6 +2006,17 @@ struct ServeCommand: AsyncParsableCommand {
         )
     }
 
+    static func samePrivacyLabIdentityInputs(_ checked: AppConfig, _ serving: AppConfig) -> Bool {
+        checked.credentialStore == serving.credentialStore
+            && normalizedCoordinatorURL(checked.coordinatorURL) == normalizedCoordinatorURL(serving.coordinatorURL)
+    }
+
+    private static func normalizedCoordinatorURL(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     /// SPEC-049-R007/R024 ordering. Privacy mode is decided from non-secret
     /// inputs only (flag > `MACPROVIDER_PRIVACY_CLASS_BETA` > `privacy_class_beta`,
     /// and an explicit `relay_blind_enabled: false` opts out). In privacy mode
@@ -2003,7 +2031,9 @@ struct ServeCommand: AsyncParsableCommand {
         load: (_ resolveCredentials: Bool) throws -> AppConfig,
         canonicalReexec: (AppConfig) throws -> Void,
         harden: (AppConfig) throws -> Void,
-        automatic: PrivacyAutoEnrollmentHooks? = nil
+        automatic: PrivacyAutoEnrollmentHooks? = nil,
+        sameLabIdentityInputs: ((AppConfig, AppConfig) -> Bool)? = nil,
+        automaticPostHardenCheckpoint: ((AppConfig) throws -> Void)? = nil
     ) throws -> AppConfig {
         let bootstrap = try load(false)
         // A fallback after the automatic check may serve only ordinary mode.
@@ -2023,6 +2053,9 @@ struct ServeCommand: AsyncParsableCommand {
             }
             return resolved
         }
+        if automaticPostHardenCheckpoint != nil, PrivacyAutoEnrollment.mode(bootstrap) != .automatic {
+            throw PrivacyLabConfigChangeCheckpointError.malformed
+        }
         switch PrivacyAutoEnrollment.mode(bootstrap) {
         case .forced:
             let candidate = PrivacyAutoEnrollment.withStateDirectory(bootstrap)
@@ -2030,7 +2063,8 @@ struct ServeCommand: AsyncParsableCommand {
             try harden(candidate)
             let final = PrivacyAutoEnrollment.withStateDirectory(try load(true))
             // The checked snapshot must be the one that serves.
-            guard PrivacyAutoEnrollment.sameEligibilityInputs(candidate, final) else {
+            guard PrivacyAutoEnrollment.sameEligibilityInputs(candidate, final),
+                  sameLabIdentityInputs?(candidate, final) ?? true else {
                 throw PrivacyAutoEnrollmentError.configurationChanged
             }
             return final
@@ -2052,11 +2086,13 @@ struct ServeCommand: AsyncParsableCommand {
                 automatic.log(PrivacyAutoEnrollment.hardeningFailedLine(hardeningFailures))
                 return try ordinaryAfterAutomaticCheck(try load(true))
             }
+            try automaticPostHardenCheckpoint?(candidate)
             let final = try load(true)
             // The checked snapshot must be the one that serves; a change
             // between the two reads falls back to ordinary serving.
             guard PrivacyAutoEnrollment.mode(final) == .automatic,
-                  PrivacyAutoEnrollment.sameEligibilityInputs(candidate, PrivacyAutoEnrollment.enable(final)) else {
+                  PrivacyAutoEnrollment.sameEligibilityInputs(candidate, PrivacyAutoEnrollment.enable(final)),
+                  sameLabIdentityInputs?(candidate, final) ?? true else {
                 automatic.log(PrivacyAutoEnrollment.hardeningFailedLine([PrivacyHardeningCode.configurationChanged]))
                 return try ordinaryAfterAutomaticCheck(final)
             }
@@ -2118,6 +2154,15 @@ struct ServeCommand: AsyncParsableCommand {
         let serveMarkerStore = AutoUpdateMarkerStore()
         let isolateLifecycleForPrivacy = isolateLifecycle
         let labIdentityScopeForPrivacy = labIdentityScope
+        let labConfigChangeCheckpoint: PrivacyLabConfigChangeCheckpoint?
+        if let checkpointFD = privacyLabConfigChangeCheckpointFD {
+            guard checkpointFD >= 3, checkpointFD <= Int(Int32.max) else {
+                throw ValidationError("--privacy-lab-config-change-checkpoint-fd must be an inherited descriptor >= 3")
+            }
+            labConfigChangeCheckpoint = try PrivacyLabConfigChangeCheckpoint(fd: Int32(checkpointFD))
+        } else {
+            labConfigChangeCheckpoint = nil
+        }
         var resolved = try Self.resolveServeConfig(
             load: { resolveCredentials in
                 try ConfigLoader.load(cli: cliOverrides, resolveCredentials: resolveCredentials)
@@ -2165,7 +2210,24 @@ struct ServeCommand: AsyncParsableCommand {
                         requested: labIdentityScopeForPrivacy
                     )
                 }
-            )
+            ),
+            sameLabIdentityInputs: labIdentityScopeForPrivacy ? Self.samePrivacyLabIdentityInputs : nil,
+            automaticPostHardenCheckpoint: labConfigChangeCheckpoint.map { checkpoint in
+                { config in
+                    guard labIdentityScopeForPrivacy,
+                          isolateLifecycleForPrivacy else {
+                        throw PrivacyLabConfigChangeCheckpointError.malformed
+                    }
+                    guard let scope = try Self.validatePrivacyLabIdentityScopeIfRequested(
+                        config: config,
+                        isolateLifecycle: isolateLifecycleForPrivacy,
+                        requested: labIdentityScopeForPrivacy
+                    ) else {
+                        throw PrivacyLabConfigChangeCheckpointError.malformed
+                    }
+                    try checkpoint.signalReady(scope: scope)
+                }
+            }
         )
 
         let privacyLabIdentityScope = try Self.validatePrivacyLabIdentityScopeIfRequested(

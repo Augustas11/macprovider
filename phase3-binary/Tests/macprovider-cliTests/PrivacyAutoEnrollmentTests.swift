@@ -140,6 +140,164 @@ final class PrivacyAutoEnrollmentTests: XCTestCase {
         XCTAssertEqual(logged, ["privacy_class auto_ineligible reasons=state_directory_unavailable\n"])
     }
 
+    func testAutomaticLabScopeCredentialOrCoordinatorDriftFallsBackOrdinarily() throws {
+        for (name, finalCredentialStore, finalCoordinatorURL) in [
+            ("credential", "keychain", "ws://127.0.0.1:19080/v2/provider"),
+            ("coordinator", "protected_file", "wss://coordinator.malibu.tech/v2/provider"),
+        ] {
+            let checked = try autoTempConfig("""
+            credential_store: protected_file
+            coordinator_url: ws://127.0.0.1:19080/v2/provider
+            relay_blind_state_directory: /private/tmp/privacy-auto-lab-state
+            provider_token: PLAIN-TOKEN
+
+            """)
+            let final = try autoTempConfig("""
+            credential_store: \(finalCredentialStore)
+            coordinator_url: \(finalCoordinatorURL)
+            relay_blind_state_directory: /private/tmp/privacy-auto-lab-state
+            provider_token: PLAIN-TOKEN
+
+            """)
+            defer {
+                try? FileManager.default.removeItem(at: checked)
+                try? FileManager.default.removeItem(at: final)
+            }
+            var logged: [String] = []
+            var checkpointCalls = 0
+
+            let resolved = try ServeCommand.resolveServeConfig(
+                load: { resolveCredentials in
+                    try ConfigLoader.load(
+                        cli: CLIOverrides(configPath: (resolveCredentials ? final : checked).path),
+                        environment: [:],
+                        resolveCredentials: resolveCredentials
+                    )
+                },
+                canonicalReexec: { _ in },
+                harden: { _ in XCTFail("forced-mode hardening ran in automatic mode") },
+                automatic: PrivacyAutoEnrollmentHooks(
+                    eligibility: { _ in [] },
+                    harden: { _ in [] },
+                    log: { logged.append($0) }
+                ),
+                sameLabIdentityInputs: ServeCommand.samePrivacyLabIdentityInputs,
+                automaticPostHardenCheckpoint: { _ in checkpointCalls += 1 }
+            )
+
+            XCTAssertFalse(resolved.privacyClassBeta, name)
+            XCTAssertFalse(resolved.relayBlindEnabled, name)
+            XCTAssertEqual(resolved.providerToken, "PLAIN-TOKEN", name)
+            XCTAssertEqual(logged, ["privacy_class auto_hardening_failed reasons=configuration_changed\n"], name)
+            XCTAssertEqual(checkpointCalls, 1, name)
+        }
+    }
+
+    func testAutomaticCheckpointRunsAfterHardeningBeforeFinalLoad() throws {
+        let yaml = try autoTempConfig("provider_token: PLAIN-TOKEN\n")
+        defer { try? FileManager.default.removeItem(at: yaml) }
+        var events: [String] = []
+
+        let resolved = try ServeCommand.resolveServeConfig(
+            load: { resolveCredentials in
+                events.append("load:\(resolveCredentials)")
+                return try ConfigLoader.load(
+                    cli: CLIOverrides(configPath: yaml.path),
+                    environment: [:],
+                    resolveCredentials: resolveCredentials
+                )
+            },
+            canonicalReexec: { _ in events.append("reexec") },
+            harden: { _ in events.append("harden") },
+            automatic: PrivacyAutoEnrollmentHooks(
+                eligibility: { _ in events.append("eligibility"); return [] },
+                harden: { _ in events.append("auto-harden"); return [] },
+                log: { _ in }
+            ),
+            automaticPostHardenCheckpoint: { _ in events.append("checkpoint") }
+        )
+
+        XCTAssertEqual(events, ["load:false", "eligibility", "reexec", "auto-harden", "checkpoint", "load:true"])
+        XCTAssertTrue(resolved.privacyClassBeta)
+    }
+
+    func testAutomaticCheckpointAbsentOnEligibilityOrHardeningFailure() throws {
+        let yaml = try autoTempConfig("provider_token: PLAIN-TOKEN\n")
+        defer { try? FileManager.default.removeItem(at: yaml) }
+        var checkpointCalls = 0
+        _ = try ServeCommand.resolveServeConfig(
+            load: { try ConfigLoader.load(cli: CLIOverrides(configPath: yaml.path), environment: [:], resolveCredentials: $0) },
+            canonicalReexec: { _ in },
+            harden: { _ in XCTFail("forced-mode hardening ran in automatic mode") },
+            automatic: PrivacyAutoEnrollmentHooks(
+                eligibility: { _ in [PrivacyHardeningCode.stateDirectoryUnavailable] },
+                harden: { _ in XCTFail("automatic hardening ran after failed eligibility"); return [] },
+                log: { _ in }
+            ),
+            automaticPostHardenCheckpoint: { _ in checkpointCalls += 1 }
+        )
+        XCTAssertEqual(checkpointCalls, 0)
+
+        _ = try ServeCommand.resolveServeConfig(
+            load: { try ConfigLoader.load(cli: CLIOverrides(configPath: yaml.path), environment: [:], resolveCredentials: $0) },
+            canonicalReexec: { _ in },
+            harden: { _ in XCTFail("forced-mode hardening ran in automatic mode") },
+            automatic: PrivacyAutoEnrollmentHooks(
+                eligibility: { _ in [] },
+                harden: { _ in [PrivacyHardeningCode.ptDenyAttach] },
+                log: { _ in }
+            ),
+            automaticPostHardenCheckpoint: { _ in checkpointCalls += 1 }
+        )
+        XCTAssertEqual(checkpointCalls, 0)
+    }
+
+    func testAutomaticCheckpointThrowRefusesLabLaunch() throws {
+        let yaml = try autoTempConfig("provider_token: PLAIN-TOKEN\n")
+        defer { try? FileManager.default.removeItem(at: yaml) }
+        var events: [String] = []
+
+        XCTAssertThrowsError(try ServeCommand.resolveServeConfig(
+            load: { resolveCredentials in
+                events.append("load:\(resolveCredentials)")
+                return try ConfigLoader.load(
+                    cli: CLIOverrides(configPath: yaml.path),
+                    environment: [:],
+                    resolveCredentials: resolveCredentials
+                )
+            },
+            canonicalReexec: { _ in events.append("reexec") },
+            harden: { _ in XCTFail("forced-mode hardening ran in automatic mode") },
+            automatic: PrivacyAutoEnrollmentHooks(
+                eligibility: { _ in events.append("eligibility"); return [] },
+                harden: { _ in events.append("auto-harden"); return [] },
+                log: { _ in }
+            ),
+            automaticPostHardenCheckpoint: { _ in
+                events.append("checkpoint")
+                throw PrivacyLabConfigChangeCheckpointError.timeout
+            }
+        )) { error in
+            XCTAssertEqual(error as? PrivacyLabConfigChangeCheckpointError, .timeout)
+        }
+        XCTAssertEqual(events, ["load:false", "eligibility", "reexec", "auto-harden", "checkpoint"])
+    }
+
+    func testCheckpointRequiresAutomaticMode() throws {
+        let yaml = try autoTempConfig("privacy_class_beta: true\n")
+        defer { try? FileManager.default.removeItem(at: yaml) }
+
+        XCTAssertThrowsError(try ServeCommand.resolveServeConfig(
+            load: { try ConfigLoader.load(cli: CLIOverrides(configPath: yaml.path), environment: [:], resolveCredentials: $0) },
+            canonicalReexec: { _ in },
+            harden: { _ in },
+            automatic: PrivacyAutoEnrollmentHooks(eligibility: { _ in [] }, harden: { _ in [] }, log: { _ in }),
+            automaticPostHardenCheckpoint: { _ in XCTFail("checkpoint ran outside automatic mode") }
+        )) { error in
+            XCTAssertEqual(error as? PrivacyLabConfigChangeCheckpointError, .malformed)
+        }
+    }
+
     func testHardeningFailureInAutomaticModeServesOrdinarily() throws {
         let yaml = try autoTempConfig("provider_token: PLAIN-TOKEN\n")
         defer { try? FileManager.default.removeItem(at: yaml) }

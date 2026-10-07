@@ -466,6 +466,60 @@ final class PrivacyRuntimeHardeningTests: XCTestCase {
         XCTAssertEqual(credentialLoads, 0)
     }
 
+    func testForcedLabScopeCredentialOrCoordinatorDriftRefusesServingSnapshot() throws {
+        let stateRoot = try makeOwnerOnlyLabStateRoot()
+        defer { try? FileManager.default.removeItem(at: stateRoot) }
+
+        for (name, finalCredentialStore, finalCoordinatorURL) in [
+            ("credential", "keychain", "ws://127.0.0.1:19080/v2/provider"),
+            ("coordinator", "protected_file", "wss://coordinator.malibu.tech/v2/provider"),
+        ] {
+            let checked = try tempConfig("""
+            privacy_class_beta: true
+            relay_blind_enabled: true
+            credential_store: protected_file
+            coordinator_url: ws://127.0.0.1:19080/v2/provider
+            relay_blind_state_directory: \(stateRoot.path)
+            provider_token: PRIVACY-TOKEN-CANARY
+
+            """)
+            let final = try tempConfig("""
+            privacy_class_beta: true
+            relay_blind_enabled: true
+            credential_store: \(finalCredentialStore)
+            coordinator_url: \(finalCoordinatorURL)
+            relay_blind_state_directory: \(stateRoot.path)
+            provider_token: PRIVACY-TOKEN-CANARY
+
+            """)
+            defer {
+                try? FileManager.default.removeItem(at: checked)
+                try? FileManager.default.removeItem(at: final)
+            }
+
+            XCTAssertThrowsError(try ServeCommand.resolveServeConfig(
+                load: { resolveCredentials in
+                    try ConfigLoader.load(
+                        cli: CLIOverrides(configPath: (resolveCredentials ? final : checked).path),
+                        environment: [:],
+                        resolveCredentials: resolveCredentials
+                    )
+                },
+                canonicalReexec: { _ in },
+                harden: { config in
+                    _ = try ServeCommand.validatePrivacyLabIdentityScopeIfRequested(
+                        config: config,
+                        isolateLifecycle: true,
+                        requested: true
+                    )
+                },
+                sameLabIdentityInputs: ServeCommand.samePrivacyLabIdentityInputs
+            )) { error in
+                XCTAssertEqual(error as? PrivacyAutoEnrollmentError, .configurationChanged, name)
+            }
+        }
+    }
+
     func testNonLabIsolatedPrivacyKeepsPreviousCredentialOrdering() throws {
         let yaml = try tempConfig("""
         relay_blind_enabled: true
