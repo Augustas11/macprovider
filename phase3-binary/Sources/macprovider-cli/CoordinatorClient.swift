@@ -794,6 +794,7 @@ actor CoordinatorClient {
         providerCredentialSource: ProviderCredentialStatus.Source = .cliKeychain,
         credentialStatusRuntime: ProviderCredentialStatusRuntime = ProviderCredentialStatusRuntime(.unconfigured),
         admissionIdentityStatusRuntime: ProviderAdmissionIdentityStatusRuntime = ProviderAdmissionIdentityStatusRuntime(),
+        privacyLabIdentityScope: PrivacyLabIdentityScope? = nil,
         lifecycleStateStore: ProviderLifecycleStateStore = ProviderLifecycleStateStore(),
         lifecycleOperationID: String? = nil,
         operatorPausedInitially: Bool = false,
@@ -868,7 +869,8 @@ actor CoordinatorClient {
             let modelScope = config.supportedModels ?? [config.modelCatalogModelID ?? config.model].compactMap { $0 }
             let runtime: RelayBlindProviderRuntime
             do {
-                let root = URL(fileURLWithPath: statePath, isDirectory: true)
+                let root = privacyLabIdentityScope?.stateRoot
+                    ?? URL(fileURLWithPath: statePath, isDirectory: true)
                 let keys = try RelayBlindKeyManager(
                     directory: root,
                     models: modelScope,
@@ -892,7 +894,7 @@ actor CoordinatorClient {
                     signer = privacySESignerOverride
                     backend = Self.privacySEBackend(privacySESignerOverride)
                 } else {
-                    let production = Self.loadPrivacySEIdentity()
+                    let production = Self.loadPrivacySEIdentity(scope: privacyLabIdentityScope)
                     signer = production.signer
                     backend = production.backend
                 }
@@ -7425,10 +7427,14 @@ actor CoordinatorClient {
     }
 
     /// Production SE failure exits. `CoordinatorClient.init` returning nil does not stop `serve`.
-    private static func loadPrivacySEIdentity() -> (signer: any SEBlobSigner, backend: String) {
+    private static func loadPrivacySEIdentity(scope: PrivacyLabIdentityScope? = nil) -> (signer: any SEBlobSigner, backend: String) {
         #if arch(arm64)
         do {
-            let identity = try SecureEnclaveIdentity.loadOrCreate(quiet: true)
+            let identity = try SecureEnclaveIdentity.loadOrCreate(
+                label: scope?.secureEnclaveLabel,
+                quiet: true,
+                fileBackedURL: scope?.secureEnclaveFileURL
+            )
             return (identity, identity.backendName)
         } catch {
             FileHandle.standardError.write(Data("FATAL privacy_class_se_identity_failed\n".utf8))

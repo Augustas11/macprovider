@@ -87,17 +87,28 @@ enum PrivacyAutoEnrollment {
     /// creates a Secure Enclave key or state directory. Only an eligible host
     /// loads or creates them (SPEC-049-R024); they persist if the later
     /// hardening fails, which is harmless for ordinary serving.
-    static var live: PrivacyAutoEnrollmentHooks { PrivacyAutoEnrollmentHooks(
+    static var live: PrivacyAutoEnrollmentHooks { liveHooks() }
+
+    static func liveHooks(
+        labIdentityScope: @escaping @Sendable (AppConfig) throws -> PrivacyLabIdentityScope? = { _ in nil }
+    ) -> PrivacyAutoEnrollmentHooks { PrivacyAutoEnrollmentHooks(
         eligibility: { config in
             var reasons = PrivacyRuntimeHardening.automaticEligibilityFailures(syscalls: .live, config: config)
             #if !arch(arm64)
             reasons.append(PrivacyHardeningCode.notArm64)
             #endif
             guard reasons.isEmpty else { return reasons }
-            if !secureEnclaveIdentityAvailable() {
+            let labScope: PrivacyLabIdentityScope?
+            do {
+                labScope = try labIdentityScope(config)
+            } catch {
+                reasons.append(PrivacyHardeningCode.stateDirectoryUnavailable)
+                return reasons
+            }
+            if !secureEnclaveIdentityAvailable(labScope: labScope) {
                 reasons.append(PrivacyHardeningCode.seIdentityUnavailable)
             }
-            if !prepareStateDirectory(config.relayBlindStateDirectory) {
+            if labScope == nil && !prepareStateDirectory(config.relayBlindStateDirectory) {
                 reasons.append(PrivacyHardeningCode.stateDirectoryUnavailable)
             }
             return reasons
@@ -114,9 +125,13 @@ enum PrivacyAutoEnrollment {
     ) }
 
     /// Loads or creates the Secure Enclave identity the posture key uses.
-    static func secureEnclaveIdentityAvailable() -> Bool {
+    static func secureEnclaveIdentityAvailable(labScope: PrivacyLabIdentityScope? = nil) -> Bool {
         #if arch(arm64)
-        return (try? SecureEnclaveIdentity.loadOrCreate(quiet: true)) != nil
+        return (try? SecureEnclaveIdentity.loadOrCreate(
+            label: labScope?.secureEnclaveLabel,
+            quiet: true,
+            fileBackedURL: labScope?.secureEnclaveFileURL
+        )) != nil
         #else
         return false
         #endif

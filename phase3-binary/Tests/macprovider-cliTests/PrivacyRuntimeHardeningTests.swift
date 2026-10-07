@@ -428,6 +428,82 @@ final class PrivacyRuntimeHardeningTests: XCTestCase {
         XCTAssertEqual(credentialLoads, 0)
     }
 
+    func testForcedLabScopeRejectionStopsBeforeProviderTokenLoad() throws {
+        let stateRoot = try makeOwnerOnlyLabStateRoot()
+        defer { try? FileManager.default.removeItem(at: stateRoot) }
+        let yaml = try tempConfig("""
+        relay_blind_enabled: true
+        privacy_class_beta: true
+        credential_store: protected_file
+        coordinator_url: wss://coordinator.malibu.tech/v2/provider
+        relay_blind_state_directory: \(stateRoot.path)
+        provider_token: PRIVACY-TOKEN-CANARY
+
+        """)
+        defer { try? FileManager.default.removeItem(at: yaml) }
+
+        var credentialLoads = 0
+        XCTAssertThrowsError(try ServeCommand.resolveServeConfig(
+            load: { resolveCredentials in
+                if resolveCredentials { credentialLoads += 1 }
+                return try ConfigLoader.load(
+                    cli: CLIOverrides(configPath: yaml.path),
+                    environment: [:],
+                    resolveCredentials: resolveCredentials
+                )
+            },
+            canonicalReexec: { _ in },
+            harden: { config in
+                _ = try ServeCommand.validatePrivacyLabIdentityScopeIfRequested(
+                    config: config,
+                    isolateLifecycle: true,
+                    requested: true
+                )
+            }
+        )) { error in
+            XCTAssertEqual(error as? PrivacyLabIdentityScopeError, .loopbackLiteralRequired)
+        }
+        XCTAssertEqual(credentialLoads, 0)
+    }
+
+    func testNonLabIsolatedPrivacyKeepsPreviousCredentialOrdering() throws {
+        let yaml = try tempConfig("""
+        relay_blind_enabled: true
+        privacy_class_beta: true
+        credential_store: protected_file
+        coordinator_url: wss://coordinator.malibu.tech/v2/provider
+        relay_blind_state_directory: /tmp/privacy-class-state
+        provider_token: PRIVACY-TOKEN-CANARY
+
+        """)
+        defer { try? FileManager.default.removeItem(at: yaml) }
+
+        var events: [String] = []
+        let resolved = try ServeCommand.resolveServeConfig(
+            load: { resolveCredentials in
+                events.append("load:\(resolveCredentials)")
+                return try ConfigLoader.load(
+                    cli: CLIOverrides(configPath: yaml.path),
+                    environment: [:],
+                    resolveCredentials: resolveCredentials
+                )
+            },
+            canonicalReexec: { _ in events.append("reexec") },
+            harden: { config in
+                events.append("harden")
+                XCTAssertNil(try ServeCommand.validatePrivacyLabIdentityScopeIfRequested(
+                    config: config,
+                    isolateLifecycle: true,
+                    requested: false
+                ))
+            }
+        )
+
+        XCTAssertEqual(events, ["load:false", "reexec", "harden", "load:true"])
+        XCTAssertEqual(resolved.providerToken, "PRIVACY-TOKEN-CANARY")
+        XCTAssertTrue(resolved.privacyClassBeta)
+    }
+
     func testNonPrivacyServeConfigOrderAndResultUnchanged() throws {
         let yaml = try tempConfig("""
         relay_blind_enabled: true
@@ -532,6 +608,17 @@ private func tempConfig(_ text: String) throws -> URL {
         .appendingPathComponent("privacy-class-config-\(UUID().uuidString).yaml")
     try Data(text.utf8).write(to: url)
     return url
+}
+
+private func makeOwnerOnlyLabStateRoot() throws -> URL {
+    let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+        .appendingPathComponent("privacy-lab-state-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(
+        at: root,
+        withIntermediateDirectories: false,
+        attributes: [.posixPermissions: 0o700]
+    )
+    return root
 }
 
 private func jsonContainsSecret(_ json: String, _ secret: Data) -> Bool {

@@ -102,6 +102,44 @@ final class PrivacyAutoEnrollmentTests: XCTestCase {
         XCTAssertEqual(logged, ["privacy_class auto_ineligible reasons=sip_disabled,code_signature_invalid\n"])
     }
 
+    func testAutomaticLabScopeIneligibilityFallsBackOrdinarily() throws {
+        let yaml = try autoTempConfig("provider_token: PLAIN-TOKEN\n")
+        defer { try? FileManager.default.removeItem(at: yaml) }
+        var events: [String] = []
+        var logged: [String] = []
+
+        let resolved = try ServeCommand.resolveServeConfig(
+            load: { resolveCredentials in
+                events.append("load:\(resolveCredentials)")
+                return try ConfigLoader.load(
+                    cli: CLIOverrides(configPath: yaml.path),
+                    environment: [:],
+                    resolveCredentials: resolveCredentials
+                )
+            },
+            canonicalReexec: { _ in events.append("reexec") },
+            harden: { _ in XCTFail("hardening ran after lab scope ineligibility") },
+            automatic: PrivacyAutoEnrollmentHooks(
+                eligibility: { config in
+                    events.append("eligibility")
+                    XCTAssertTrue(config.privacyClassBeta)
+                    return [PrivacyHardeningCode.stateDirectoryUnavailable]
+                },
+                harden: { _ in
+                    XCTFail("automatic hardening ran after lab scope ineligibility")
+                    return []
+                },
+                log: { logged.append($0) }
+            )
+        )
+
+        XCTAssertEqual(events, ["load:false", "eligibility", "load:true", "reexec"])
+        XCTAssertFalse(resolved.privacyClassBeta)
+        XCTAssertFalse(resolved.relayBlindEnabled)
+        XCTAssertEqual(resolved.providerToken, "PLAIN-TOKEN")
+        XCTAssertEqual(logged, ["privacy_class auto_ineligible reasons=state_directory_unavailable\n"])
+    }
+
     func testHardeningFailureInAutomaticModeServesOrdinarily() throws {
         let yaml = try autoTempConfig("provider_token: PLAIN-TOKEN\n")
         defer { try? FileManager.default.removeItem(at: yaml) }

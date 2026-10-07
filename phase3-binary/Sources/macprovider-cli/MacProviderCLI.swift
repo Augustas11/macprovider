@@ -519,6 +519,9 @@ struct ServeCommand: AsyncParsableCommand {
     @Flag(name: .customLong("isolate-lifecycle"), help: "Keep launchd/lease/control files off the live 8080 incumbent while still joining a coordinator. Requires --credential-store protected_file. Lab only.")
     var isolateLifecycle = false
 
+    @Flag(name: .customLong("lab-identity-scope"), help: "Use an isolated privacy lab identity scope. Requires --isolate-lifecycle, protected_file credentials, a literal loopback coordinator, and an explicit 0700 relay-blind state root.")
+    var labIdentityScope = false
+
     // Internal marker for CandidateProviderRunner. Stage 1 owns warmup and
     // throughput measurement for these non-joining subprocesses.
     @Flag(name: .customLong("autotune-candidate"), help: .private)
@@ -530,6 +533,9 @@ struct ServeCommand: AsyncParsableCommand {
         }
         if isolateLifecycle && autotuneCandidate {
             throw ValidationError("--isolate-lifecycle is incompatible with --autotune-candidate")
+        }
+        if labIdentityScope && !isolateLifecycle {
+            throw ValidationError("--lab-identity-scope requires --isolate-lifecycle")
         }
     }
 
@@ -1970,6 +1976,19 @@ struct ServeCommand: AsyncParsableCommand {
         return host == "localhost" || host == "127.0.0.1" || host == "::1"
     }
 
+    @discardableResult
+    static func validatePrivacyLabIdentityScopeIfRequested(
+        config: AppConfig,
+        isolateLifecycle: Bool,
+        requested: Bool
+    ) throws -> PrivacyLabIdentityScope? {
+        try PrivacyLabIdentityScope.validatedIfRequested(
+            config: config,
+            isolateLifecycle: isolateLifecycle,
+            requested: requested
+        )
+    }
+
     /// SPEC-049-R007/R024 ordering. Privacy mode is decided from non-secret
     /// inputs only (flag > `MACPROVIDER_PRIVACY_CLASS_BETA` > `privacy_class_beta`,
     /// and an explicit `relay_blind_enabled: false` opts out). In privacy mode
@@ -2097,6 +2116,8 @@ struct ServeCommand: AsyncParsableCommand {
             pagedKV: pagedKVCLIOverrides
         )
         let serveMarkerStore = AutoUpdateMarkerStore()
+        let isolateLifecycleForPrivacy = isolateLifecycle
+        let labIdentityScopeForPrivacy = labIdentityScope
         var resolved = try Self.resolveServeConfig(
             load: { resolveCredentials in
                 try ConfigLoader.load(cli: cliOverrides, resolveCredentials: resolveCredentials)
@@ -2116,6 +2137,11 @@ struct ServeCommand: AsyncParsableCommand {
                 }
             },
             harden: { loaded in
+                _ = try Self.validatePrivacyLabIdentityScopeIfRequested(
+                    config: loaded,
+                    isolateLifecycle: isolateLifecycleForPrivacy,
+                    requested: labIdentityScopeForPrivacy
+                )
                 // SPEC-049-R007: after canonical re-exec, before credentials, model
                 // load, HTTPServer, or CoordinatorClient. The live probe calls
                 // ptrace(PT_DENY_ATTACH); tests inject a probe and never do.
@@ -2131,7 +2157,21 @@ struct ServeCommand: AsyncParsableCommand {
             },
             // SPEC-049-R024: automatic mode only for a serving provider that
             // joins the coordinator; autotune candidates and --no-join stay off.
-            automatic: autotuneCandidate || noJoin ? nil : PrivacyAutoEnrollment.live
+            automatic: autotuneCandidate || noJoin ? nil : PrivacyAutoEnrollment.liveHooks(
+                labIdentityScope: { config in
+                    try PrivacyLabIdentityScope.validatedIfRequested(
+                        config: config,
+                        isolateLifecycle: isolateLifecycleForPrivacy,
+                        requested: labIdentityScopeForPrivacy
+                    )
+                }
+            )
+        )
+
+        let privacyLabIdentityScope = try Self.validatePrivacyLabIdentityScopeIfRequested(
+            config: resolved,
+            isolateLifecycle: isolateLifecycleForPrivacy,
+            requested: labIdentityScopeForPrivacy
         )
 
         // v1.8.53 can leave its one-shot reload helper alive long enough to
@@ -3118,6 +3158,7 @@ struct ServeCommand: AsyncParsableCommand {
                 providerCredentialSource: credentialSource,
                 credentialStatusRuntime: credentialStatusRuntime,
                 admissionIdentityStatusRuntime: admissionIdentityStatusRuntime,
+                privacyLabIdentityScope: privacyLabIdentityScope,
                 lifecycleStateStore: lifecycleStateStore,
                 lifecycleOperationID: lifecycleOperationID,
                 operatorPausedInitially: operatorPausedInitially,
