@@ -2733,9 +2733,13 @@ final class ModelManagementStore: ObservableObject {
                 poolModelID: bundle.modelEntry.poolModelID,
                 bundleJSON: result.stdout
             )
-            statusLine = String(localized: "Proposal ready for pool \(poolID). Send it to the pool creator; signing is required before this model can become eligible to earn on that pool, and qualifying settled requests are still required while the pool requirements are met.", comment: "BYOM propose done")
+            let proposalReadyStatus = Self.proposalReadyStatusLine(poolID: poolID)
+            statusLine = proposalReadyStatus
             operation = .idle
             await refresh(currentModelID: currentModelID, peer: peerEvidence)
+            if operation == .idle, listState != .unavailable, poolProposal?.candidateID == row.id, poolProposal?.poolID == poolID {
+                statusLine = proposalReadyStatus
+            }
         } catch {
             recordFailure(operation: "propose", from: currentModelID, to: row.id, reason: safeOperationError(error))
         }
@@ -2743,6 +2747,10 @@ final class ModelManagementStore: ObservableObject {
 
     func dismissPoolProposal() {
         poolProposal = nil
+    }
+
+    private static func proposalReadyStatusLine(poolID: String) -> String {
+        String(localized: "Proposal ready for pool \(poolID). Send it to the pool creator; signing is required before this model can become eligible to earn on that pool, and qualifying settled requests are still required while the pool requirements are met.", comment: "BYOM propose done")
     }
 
     /// BYOM admission actions need a fresh provider observation and no other

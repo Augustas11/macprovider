@@ -2744,6 +2744,7 @@ extension ModelManagementTests {
         let proposal = try XCTUnwrap(store.poolProposal)
         XCTAssertEqual(proposal.poolModelID, "pool/\(Self.poolID)/my-model")
         XCTAssertEqual(proposal.bundleJSON, Self.proposalJSON(candidateID: "local-candidate"))
+        XCTAssertEqual(cli.invocations[2].prefix(3), ["models", "catalog-economics", "--json"], "successful proposal refreshes the list before preserving the proposal-ready copy")
         XCTAssertTrue(store.statusLine.contains("signing is required before this model can become eligible to earn on that pool"))
         XCTAssertTrue(store.statusLine.contains("qualifying settled requests"))
         XCTAssertTrue(store.statusLine.contains("while the pool requirements are met"))
@@ -2754,6 +2755,42 @@ extension ModelManagementTests {
         await store.propose(refreshed, poolID: Self.poolID)
         XCTAssertNil(store.poolProposal)
         XCTAssertEqual(store.statusLine, "models propose: openai_compatible_loopback has no exact artifact identity a pool entry can name")
+    }
+
+    @MainActor
+    func testProposalRefreshDoesNotRestoreDismissedProposalNotice() async throws {
+        let cli = FakeModelCLI(
+            results: [
+                ModelCLIResult(exitCode: 0, stdout: catalogEconomicsJSON(rows: [localOnlyBYOMRowJSON()], generatedAt: Self.recentTimestamp()), stderr: ""),
+                ModelCLIResult(exitCode: 0, stdout: Self.proposalJSON(candidateID: "local-candidate"), stderr: ""),
+                ModelCLIResult(exitCode: 0, stdout: catalogEconomicsJSON(rows: [localOnlyBYOMRowJSON()], generatedAt: Self.recentTimestamp(), projectionSequence: 2), stderr: ""),
+            ],
+            returnDelaysNanoseconds: [nil, nil, 100_000_000]
+        )
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.proposeDismissed.\(UUID().uuidString)")!
+        )
+        await store.refresh(
+            currentModelID: "other/model",
+            peer: peer(for: [MalibuModelCapabilityManifest.readySwitch, MalibuModelCapabilityManifest.catalogEconomics])
+        )
+        let row = try XCTUnwrap(store.rows.first { $0.id == "local-candidate" })
+
+        let proposeTask = Task { @MainActor in
+            await store.propose(row, poolID: Self.poolID)
+        }
+        for _ in 0..<2_000 {
+            if cli.invocations.count >= 3 { break }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertEqual(cli.invocations.count, 3, "proposal reached the delayed list refresh")
+        store.dismissPoolProposal()
+        await proposeTask.value
+
+        XCTAssertNil(store.poolProposal)
+        XCTAssertFalse(store.statusLine.contains("signing is required before this model can become eligible to earn on that pool"))
     }
 
     @MainActor
