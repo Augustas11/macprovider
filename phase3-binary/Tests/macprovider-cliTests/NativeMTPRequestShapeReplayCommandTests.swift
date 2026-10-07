@@ -34,7 +34,45 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
         XCTAssertEqual(plan.pendingReason, "cache_shape_missing_anonymous_group:cache-miss")
     }
 
-    func testCacheHitNeedsWarmupProofBeforeReplayCanPass() throws {
+    func testCacheMissWithAnonymousGroupRequiresActualLeaseObserverProof() throws {
+        let url = try writeCapture([
+            shape(
+                "cache-miss-proof",
+                conversationKey: true,
+                cacheOnly: true,
+                lease: "miss",
+                cachedTokens: 0,
+                extra: ["anonymous_cache_group_sha256": String(repeating: "a", count: 64)]
+            ),
+        ])
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
+        let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
+        XCTAssertNil(plan.pendingReason)
+        let row = plan.blocks[0].rows[0]
+        XCTAssertFalse(row.requiresCacheWarmup)
+        let projection = NativeMTPRequestShapeReplayRunner.admissionProjectionRows(
+            path: .ordinary,
+            block: plan.blocks[0],
+            admissions: [],
+            requestsByID: [row.requestID: try NativeMTPRequestShapeReplayRunner.makeRequest(
+                modelID: "test-model",
+                requestID: row.requestID,
+                prompt: "synthetic",
+                maxTokens: row.requestedMaxCompletionTokens,
+                temperature: row.temperature,
+                topP: row.topP,
+                stream: row.stream
+            )],
+            actualCachedPromptTokensByID: [row.requestID: 0],
+            cacheEventsByRequestID: [row.requestID: [cacheEvent(row: row)]],
+            maxContextTokens: row.promptTokens + row.maxCompletionTokens
+        )
+        XCTAssertEqual(projection.first?["reproduced"] as? Bool, true)
+        XCTAssertEqual(projection.first?["actual_conversation_cache_attempted"] as? Bool, true)
+        XCTAssertEqual(projection.first?["actual_conversation_cache_lease"] as? String, "miss")
+    }
+
+    func testCacheHitWithAnonymousGroupIsRunnableForWarmupProof() throws {
         let url = try writeCapture([
             shape(
                 "cache-hit",
@@ -47,7 +85,141 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
         ])
         let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
         let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
-        XCTAssertEqual(plan.pendingReason, "cache_hit_replay_requires_runtime_warmup_proof:cache-hit")
+        XCTAssertNil(plan.pendingReason)
+        XCTAssertTrue(plan.blocks[0].rows[0].requiresCacheWarmup)
+        XCTAssertEqual(plan.blocks[0].rows[0].expectedCachedPromptTokens, 128)
+    }
+
+    func testStickyCacheHitWithAnonymousGroupIsRunnableForWarmupProof() throws {
+        let url = try writeCapture([
+            shape(
+                "sticky-hit",
+                conversationKey: true,
+                cacheOnly: false,
+                lease: "hit",
+                cachedTokens: 128,
+                extra: ["anonymous_cache_group_sha256": String(repeating: "a", count: 64)]
+            ),
+        ])
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
+        let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
+        XCTAssertNil(plan.pendingReason)
+        let row = plan.blocks[0].rows[0]
+        XCTAssertTrue(row.requiresCacheWarmup)
+        XCTAssertFalse(row.conversationCacheOnly)
+        XCTAssertEqual(row.expectedCachedPromptTokens, 128)
+        let projection = NativeMTPRequestShapeReplayRunner.admissionProjectionRows(
+            path: .ordinary,
+            block: plan.blocks[0],
+            admissions: [],
+            requestsByID: [row.requestID: try NativeMTPRequestShapeReplayRunner.makeRequest(
+                modelID: "test-model",
+                requestID: row.requestID,
+                prompt: "synthetic",
+                maxTokens: row.requestedMaxCompletionTokens,
+                temperature: row.temperature,
+                topP: row.topP,
+                stream: row.stream
+            ).withConversationKey("conv:sticky", cacheOnly: false)],
+            actualCachedPromptTokensByID: [row.requestID: row.expectedCachedPromptTokens],
+            cacheEventsByRequestID: [row.requestID: [cacheEvent(row: row)]],
+            maxContextTokens: row.promptTokens + row.maxCompletionTokens
+        )
+        XCTAssertEqual(projection.first?["reproduced"] as? Bool, true)
+        XCTAssertEqual(projection.first?["actual_conversation_key_sticky"] as? Bool, true)
+        XCTAssertEqual(projection.first?["actual_conversation_cache_attempted"] as? Bool, true)
+        XCTAssertEqual(projection.first?["actual_conversation_cache_lease"] as? String, "hit")
+    }
+
+    func testStickyCacheMissWithAnonymousGroupRequiresActualLeaseObserverProof() throws {
+        let url = try writeCapture([
+            shape(
+                "sticky-miss-proof",
+                conversationKey: true,
+                cacheOnly: false,
+                lease: "miss",
+                cachedTokens: 0,
+                extra: ["anonymous_cache_group_sha256": String(repeating: "a", count: 64)]
+            ),
+        ])
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
+        let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
+        XCTAssertNil(plan.pendingReason)
+        let row = plan.blocks[0].rows[0]
+        XCTAssertFalse(row.requiresCacheWarmup)
+        let projection = NativeMTPRequestShapeReplayRunner.admissionProjectionRows(
+            path: .ordinary,
+            block: plan.blocks[0],
+            admissions: [],
+            requestsByID: [row.requestID: try NativeMTPRequestShapeReplayRunner.makeRequest(
+                modelID: "test-model",
+                requestID: row.requestID,
+                prompt: "synthetic",
+                maxTokens: row.requestedMaxCompletionTokens,
+                temperature: row.temperature,
+                topP: row.topP,
+                stream: row.stream
+            ).withConversationKey("conv:sticky", cacheOnly: false)],
+            actualCachedPromptTokensByID: [row.requestID: 0],
+            cacheEventsByRequestID: [row.requestID: [cacheEvent(row: row)]],
+            maxContextTokens: row.promptTokens + row.maxCompletionTokens
+        )
+        XCTAssertEqual(projection.first?["reproduced"] as? Bool, true)
+        XCTAssertEqual(projection.first?["actual_conversation_key_sticky"] as? Bool, true)
+        XCTAssertEqual(projection.first?["actual_conversation_cache_attempted"] as? Bool, true)
+        XCTAssertEqual(projection.first?["actual_conversation_cache_lease"] as? String, "miss")
+    }
+
+    func testRetainedCacheHandoffRequiresExactRuntimeObserverProof() throws {
+        let url = try writeCapture([
+            shape(
+                "retained-hit",
+                conversationKey: true,
+                cacheOnly: true,
+                lease: "hit",
+                cachedTokens: 128,
+                extra: [
+                    "anonymous_cache_group_sha256": String(repeating: "a", count: 64),
+                    "conversation_cache_retained_handoff": true,
+                ]
+            ),
+        ])
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
+        let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
+        XCTAssertNil(plan.pendingReason)
+        let row = plan.blocks[0].rows[0]
+        let request = try NativeMTPRequestShapeReplayRunner.makeRequest(
+            modelID: "test-model",
+            requestID: row.requestID,
+            prompt: "synthetic",
+            maxTokens: row.requestedMaxCompletionTokens,
+            temperature: row.temperature,
+            topP: row.topP,
+            stream: row.stream
+        )
+        let pendingProjection = NativeMTPRequestShapeReplayRunner.admissionProjectionRows(
+            path: .ordinary,
+            block: plan.blocks[0],
+            admissions: [],
+            requestsByID: [row.requestID: request],
+            actualCachedPromptTokensByID: [row.requestID: row.expectedCachedPromptTokens],
+            cacheEventsByRequestID: [row.requestID: [cacheEvent(row: row, retainedHandoff: false)]],
+            maxContextTokens: row.promptTokens + row.maxCompletionTokens
+        )
+        XCTAssertEqual(pendingProjection.first?["reproduced"] as? Bool, false)
+        XCTAssertTrue((pendingProjection.first?["pending_reason"] as? String)?.contains("conversation_cache_observation_mismatch") == true)
+
+        let reproducedProjection = NativeMTPRequestShapeReplayRunner.admissionProjectionRows(
+            path: .ordinary,
+            block: plan.blocks[0],
+            admissions: [],
+            requestsByID: [row.requestID: request],
+            actualCachedPromptTokensByID: [row.requestID: row.expectedCachedPromptTokens],
+            cacheEventsByRequestID: [row.requestID: [cacheEvent(row: row)]],
+            maxContextTokens: row.promptTokens + row.maxCompletionTokens
+        )
+        XCTAssertEqual(reproducedProjection.first?["reproduced"] as? Bool, true)
+        XCTAssertEqual(reproducedProjection.first?["actual_conversation_cache_retained_handoff"] as? Bool, true)
     }
 
     func testAnonymousCacheGroupNullLoadsAsNil() throws {
@@ -93,6 +265,8 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
             block: block,
             admissions: [],
             requestsByID: [row.requestID: matchingRequest],
+            actualCachedPromptTokensByID: [row.requestID: row.expectedCachedPromptTokens],
+            cacheEventsByRequestID: [row.requestID: [cacheEvent(row: row)]],
             maxContextTokens: maxContextTokens
         )
         XCTAssertEqual(reproduced.first?["reproduced"] as? Bool, true)
@@ -112,22 +286,86 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
             block: block,
             admissions: [],
             requestsByID: [row.requestID: changedRequest],
+            actualCachedPromptTokensByID: [row.requestID: row.expectedCachedPromptTokens],
+            cacheEventsByRequestID: [row.requestID: [cacheEvent(row: row)]],
             maxContextTokens: maxContextTokens
         )
         XCTAssertEqual(changed.first?["reproduced"] as? Bool, false)
         XCTAssertEqual(changed.first?["pending_reason"] as? String, "stream_flag_mismatch:\(row.requestID)")
+
+        let cacheMismatch = NativeMTPRequestShapeReplayRunner.admissionProjectionRows(
+            path: .ordinary,
+            block: block,
+            admissions: [],
+            requestsByID: [row.requestID: matchingRequest],
+            actualCachedPromptTokensByID: [row.requestID: row.expectedCachedPromptTokens + 1],
+            cacheEventsByRequestID: [row.requestID: [cacheEvent(row: row)]],
+            maxContextTokens: maxContextTokens
+        )
+        XCTAssertEqual(cacheMismatch.first?["reproduced"] as? Bool, false)
+        XCTAssertTrue((cacheMismatch.first?["pending_reason"] as? String)?.contains("conversation_cache_state_mismatch:") == true)
+
+        let missingCacheObservation = NativeMTPRequestShapeReplayRunner.admissionProjectionRows(
+            path: .ordinary,
+            block: block,
+            admissions: [],
+            requestsByID: [row.requestID: matchingRequest],
+            actualCachedPromptTokensByID: [row.requestID: row.expectedCachedPromptTokens],
+            cacheEventsByRequestID: [:],
+            maxContextTokens: maxContextTokens
+        )
+        XCTAssertEqual(missingCacheObservation.first?["reproduced"] as? Bool, false)
+        XCTAssertTrue((missingCacheObservation.first?["pending_reason"] as? String)?.contains("conversation_cache_observation_missing") == true)
+
+        let duplicateCacheObservation = NativeMTPRequestShapeReplayRunner.admissionProjectionRows(
+            path: .ordinary,
+            block: block,
+            admissions: [],
+            requestsByID: [row.requestID: matchingRequest],
+            actualCachedPromptTokensByID: [row.requestID: row.expectedCachedPromptTokens],
+            cacheEventsByRequestID: [row.requestID: [cacheEvent(row: row), cacheEvent(row: row)]],
+            maxContextTokens: maxContextTokens
+        )
+        XCTAssertEqual(duplicateCacheObservation.first?["reproduced"] as? Bool, false)
+        XCTAssertTrue((duplicateCacheObservation.first?["pending_reason"] as? String)?.contains("conversation_cache_observation_duplicate") == true)
 
         let missing = NativeMTPRequestShapeReplayRunner.admissionProjectionRows(
             path: .ordinary,
             block: block,
             admissions: [],
             requestsByID: [:],
+            actualCachedPromptTokensByID: [:],
+            cacheEventsByRequestID: [row.requestID: [cacheEvent(row: row)]],
             maxContextTokens: maxContextTokens
         )
         XCTAssertEqual(missing.first?["reproduced"] as? Bool, false)
         XCTAssertEqual(missing.first?["pending_reason"] as? String, "request_reproduction_missing_parsed_request:\(row.requestID)")
     }
 
+
+    func testSyntheticStandInPreservesRequestMaxTokensForWarmupCaps() throws {
+        let url = try writeCapture([
+            shape("warmup-cap", extra: [
+                "requested_max_completion_tokens": 512,
+                "effective_max_output_tokens": 512,
+            ]),
+        ])
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
+        let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 1, seed: 48015)
+        let row = try XCTUnwrap(plan.blocks[0].runnableRows.first)
+        XCTAssertEqual(row.requestedMaxCompletionTokens, 512)
+        let warmupBase = try NativeMTPRequestShapeReplayRunner.makeRequest(
+            modelID: "test-model",
+            requestID: "warmup-\(row.requestID)",
+            prompt: "synthetic",
+            maxTokens: 7,
+            temperature: row.temperature,
+            topP: row.topP,
+            stream: row.stream
+        )
+        let warmupRequest = try NativeMTPRequestShapeReplayRunner.applySyntheticStandIn(for: row, to: warmupBase)
+        XCTAssertEqual(warmupRequest.maxTokens, 7)
+    }
 
     func testCombinedSafeFeaturesAreAppliedBeforeReproductionComparison() throws {
         let url = try writeCapture([
@@ -162,6 +400,8 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
             block: block,
             admissions: [],
             requestsByID: [row.requestID: replayRequest],
+            actualCachedPromptTokensByID: [row.requestID: row.expectedCachedPromptTokens],
+            cacheEventsByRequestID: [row.requestID: [cacheEvent(row: row)]],
             maxContextTokens: row.promptTokens + row.maxCompletionTokens
         )
         XCTAssertEqual(row.expectedSelectorReason, "logit_controls")
@@ -202,9 +442,7 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
         let url = try writeCapture([
             shape("eligible-a"),
             shape("eligible-b"),
-            shape("sticky", conversationKey: true, lease: "miss", extra: [
-                "anonymous_cache_group_sha256": String(repeating: "b", count: 64),
-            ]),
+            shape("unknown", extra: ["unknown_top_level_keys_present": true]),
         ])
         let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
         let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
@@ -235,7 +473,8 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
         XCTAssertTrue(plan.sampleCoverageComplete)
         XCTAssertEqual(plan.blocks[0].rows.count, 11)
         XCTAssertEqual(plan.runnableRowsPerBlock, 11)
-        XCTAssertEqual(plan.runnableWavesPerBlock, 2)
+        XCTAssertEqual(plan.runnableWavesPerBlock, 11)
+        XCTAssertTrue(plan.blocks[0].runnableWaves.allSatisfy { $0.count == 1 })
         XCTAssertEqual(plan.sampleCoverageExport["omitted_sample_shape_count"] as? Int, 0)
         XCTAssertEqual(plan.blocks[0].rows.last?.requestID, "mixed-b0-r10-eligible-10")
     }
@@ -244,7 +483,7 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
         let url = try writeCapture([
             shape("eligible-a"),
             shape("eligible-b"),
-            shape("ineligible", conversationKey: true, lease: "miss", extra: ["anonymous_cache_group_sha256": String(repeating: "f", count: 64)]),
+            shape("ineligible", extra: ["unknown_top_level_keys_present": true]),
         ])
         let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
         let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
@@ -256,9 +495,15 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
     func testRunnableWavesSerializeRepeatedAnonymousCacheGroups() throws {
         let group = String(repeating: "d", count: 64)
         let url = try writeCapture([
-            shape("cache-a", conversationKey: true, cacheOnly: true, lease: "miss", extra: ["anonymous_cache_group_sha256": group]),
+            shape("cache-a", conversationKey: true, cacheOnly: true, lease: "hit", cachedTokens: 128, extra: [
+                "anonymous_cache_group_sha256": group,
+                "unknown_top_level_keys_present": true,
+            ]),
             shape("ordinary"),
-            shape("cache-b", conversationKey: true, cacheOnly: true, lease: "miss", extra: ["anonymous_cache_group_sha256": group]),
+            shape("cache-b", conversationKey: true, cacheOnly: true, lease: "hit", cachedTokens: 128, extra: [
+                "anonymous_cache_group_sha256": group,
+                "unknown_top_level_keys_present": true,
+            ]),
         ])
         let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
         let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
@@ -269,7 +514,7 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
 
     func testSanitizedExportDoesNotCarryRawOrRecoverableFields() throws {
         let url = try writeCapture([
-            shape("safe", conversationKey: true, lease: "miss", extra: [
+            shape("safe", conversationKey: true, lease: "not_applicable", extra: [
                 "anonymous_cache_group_sha256": String(repeating: "c", count: 64),
                 "unknown_top_level_keys_present": true,
             ]),
@@ -405,6 +650,36 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
         XCTAssertTrue(plan.blocks[0].runnableRows.contains { $0.shapeID == "eligible" })
         XCTAssertFalse(plan.sampleCoverageComplete)
         XCTAssertEqual(plan.sampleCoverageExport["pending_sample_shape_count"] as? Int, 1)
+    }
+
+    private func cacheEvent(
+        row: NativeMTPRequestShapeReplayRow,
+        state: String? = nil,
+        cachedTokens: Int? = nil,
+        retainedHandoff: Bool? = nil,
+        cacheOnly: Bool? = nil
+    ) -> NativeMTPLabConversationCacheObserver.Event {
+        let actualCacheOnly = row.requiresCacheProof ? (cacheOnly ?? row.conversationCacheOnly) : false
+        let expectedAttempted = row.requiresCacheProof
+            && ["hit", "miss", "missing"].contains(row.conversationCacheLease)
+        let actualState = state ?? (expectedAttempted ? row.conversationCacheLease : "not_applicable")
+        return NativeMTPLabConversationCacheObserver.Event(
+            eventSource: NativeMTPLabConversationCacheObserver.eventSource,
+            requestID: row.requestID,
+            monotonicNanoseconds: 1,
+            surface: "unit_test",
+            keyPresent: row.requiresCacheProof,
+            cacheOnly: actualCacheOnly,
+            leaseAllowed: expectedAttempted,
+            leaseObserved: actualState == "hit" || actualState == "miss",
+            state: actualState,
+            cachedTokens: cachedTokens ?? row.expectedCachedPromptTokens,
+            lcp: cachedTokens ?? row.expectedCachedPromptTokens,
+            trimBy: 0,
+            retainedHandoff: retainedHandoff ?? row.conversationCacheRetainedHandoff,
+            usableRetainedHandoff: false,
+            recurrentCheckpointCount: 0
+        )
     }
 
     private func writeCapture(_ shapes: [[String: Any]]) throws -> URL {

@@ -34,6 +34,33 @@ final class NativeMTPAdmissionFeedTests: XCTestCase {
         [keyID: key.publicKey.rawRepresentation.base64EncodedString()]
     }
 
+    private final class AdmissionFetchRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var requests: [(String, Int)] = []
+        private var attemptsByName: [String: Int] = [:]
+
+        func response(url: URL, maxBytes: Int) -> NativeMTPAdmissionFeed.FetchResponse {
+            let name = url.lastPathComponent
+            let attempt: Int
+            lock.lock()
+            requests.append((url.absoluteString, maxBytes))
+            attempt = (attemptsByName[name] ?? 0) + 1
+            attemptsByName[name] = attempt
+            lock.unlock()
+
+            if name == "native-mtp-admission", attempt == 1 {
+                return NativeMTPAdmissionFeed.FetchResponse(statusCode: 429, body: Data())
+            }
+            return NativeMTPAdmissionFeed.FetchResponse(statusCode: 200, body: Data(name.utf8))
+        }
+
+        func snapshot() -> [(String, Int)] {
+            lock.lock()
+            defer { lock.unlock() }
+            return requests
+        }
+    }
+
     func testPrecheckAcceptsOnlyTheReleaseSignerAndRelease() throws {
         let key = Curve25519.Signing.PrivateKey()
         let members = try signedMembers(key: key)
@@ -176,39 +203,34 @@ final class NativeMTPAdmissionFeedTests: XCTestCase {
 
     func testRemoteFetchUsesExactOriginAndBoundedRetry() async throws {
         let baseURL = URL(string: "https://feeds.example:9443/root")!
-        var requests: [(String, Int)] = []
-        var admissionAttempts = 0
+        let recorder = AdmissionFetchRecorder()
         let members = try await NativeMTPAdmissionFeed.fetchMembers(
             fetcher: { url, maxBytes in
-                requests.append((url.absoluteString, maxBytes))
-                if url.lastPathComponent == "native-mtp-admission" {
-                    admissionAttempts += 1
-                    if admissionAttempts == 1 {
-                        return NativeMTPAdmissionFeed.FetchResponse(statusCode: 429, body: Data())
-                    }
-                }
-                return NativeMTPAdmissionFeed.FetchResponse(statusCode: 200, body: Data(url.lastPathComponent.utf8))
+                recorder.response(url: url, maxBytes: maxBytes)
             },
             baseURL: baseURL,
             sleeper: { _ in }
         )
+        let requests = recorder.snapshot()
+
+        let expectedCountsByURL = [
+            "https://feeds.example:9443/root/v1/native-mtp-admission": 2,
+            "https://feeds.example:9443/root/v1/native-mtp-admission.sig": 1,
+            "https://feeds.example:9443/root/v1/native-mtp-artifact-manifest": 1,
+            "https://feeds.example:9443/root/v1/native-mtp-selftest-bank": 1,
+            "https://feeds.example:9443/root/v1/native-mtp-selftest-bank.sig": 1,
+        ]
+        let countsByURL = Dictionary(grouping: requests, by: { $0.0 }).mapValues(\.count)
+        let maxBytesByURL = Dictionary(grouping: requests, by: { $0.0 }).mapValues { Set($0.map { $0.1 }) }
 
         XCTAssertEqual(String(data: members.sidecar, encoding: .utf8), "native-mtp-admission")
-        XCTAssertEqual(
-            requests.map(\.0),
-            [
-                "https://feeds.example:9443/v1/native-mtp-admission",
-                "https://feeds.example:9443/v1/native-mtp-admission",
-                "https://feeds.example:9443/v1/native-mtp-admission.sig",
-                "https://feeds.example:9443/v1/native-mtp-artifact-manifest",
-                "https://feeds.example:9443/v1/native-mtp-selftest-bank",
-                "https://feeds.example:9443/v1/native-mtp-selftest-bank.sig",
-            ]
-        )
-        XCTAssertEqual(requests[0].1, NativeMTPAdmissionSidecar.maxSidecarBytes)
-        XCTAssertEqual(requests[2].1, NativeMTPAdmissionSidecar.maxSignatureBytes)
-        XCTAssertEqual(requests[3].1, NativeMTPAdmissionFeed.maxManifestBytes)
-        XCTAssertEqual(requests[4].1, NativeMTPAdmissionSidecar.maxSelfTestChallengeBankBytes)
+        XCTAssertEqual(countsByURL, expectedCountsByURL)
+        XCTAssertTrue(requests.allSatisfy { $0.0.hasPrefix("https://feeds.example:9443/root/v1/") })
+        XCTAssertEqual(maxBytesByURL["https://feeds.example:9443/root/v1/native-mtp-admission"], [NativeMTPAdmissionSidecar.maxSidecarBytes])
+        XCTAssertEqual(maxBytesByURL["https://feeds.example:9443/root/v1/native-mtp-admission.sig"], [NativeMTPAdmissionSidecar.maxSignatureBytes])
+        XCTAssertEqual(maxBytesByURL["https://feeds.example:9443/root/v1/native-mtp-artifact-manifest"], [NativeMTPAdmissionFeed.maxManifestBytes])
+        XCTAssertEqual(maxBytesByURL["https://feeds.example:9443/root/v1/native-mtp-selftest-bank"], [NativeMTPAdmissionSidecar.maxSelfTestChallengeBankBytes])
+        XCTAssertEqual(maxBytesByURL["https://feeds.example:9443/root/v1/native-mtp-selftest-bank.sig"], [NativeMTPAdmissionSidecar.maxSignatureBytes])
     }
 
     func testRemoteFetchRejectsInvalidOriginBeforeFetch() async throws {

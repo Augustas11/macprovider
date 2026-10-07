@@ -1604,6 +1604,7 @@ actor ModelRuntime: ModelRuntimeServing {
     #if DEBUG || MACPROVIDER_LAB_HARNESS
     private var labNativeMTPCommitTimingObserver: NativeMTPLabCommittedTokenTimingObserver?
     private var labNativeMTPDecodeOutputCap: NativeMTPLabDecodeOutputCap?
+    private var labNativeMTPConversationCacheObserver: NativeMTPLabConversationCacheObserver?
     #endif
 
     var loadedModelID: String? {
@@ -6321,6 +6322,15 @@ actor ModelRuntime: ModelRuntimeServing {
                 allowRetainedPagedKVHandoff: true
             )
             : nil
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        recordLabNativeMTPConversationCacheBegin(
+            request: request,
+            surface: "attached_complete",
+            leaseAllowed: conversationCacheAllowed,
+            lease: lease,
+            modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
+        )
+        #endif
         CBTrace.log(schedulerRequestID, "rt_cb_lease cached=\(lease?.cachedPromptTokens ?? -1)")
         if conversationCacheAllowed,
            try await serialRouteCanaryCachedHitMissingRetainedHandoff(
@@ -6531,6 +6541,13 @@ actor ModelRuntime: ModelRuntimeServing {
         if let continuousBatchScheduler {
             await continuousBatchScheduler.installLabNativeMTPCommitTimingObserver(observer)
         }
+        return true
+    }
+
+    /// Lab-only replay hook: record sanitized conversation-cache begin outcomes
+    /// for normal runtime paths without exposing raw keys, prompts, or token IDs.
+    func installLabNativeMTPConversationCacheObserver(_ observer: NativeMTPLabConversationCacheObserver?) async -> Bool {
+        labNativeMTPConversationCacheObserver = observer
         return true
     }
 
@@ -6758,6 +6775,15 @@ actor ModelRuntime: ModelRuntimeServing {
                 allowRetainedPagedKVHandoff: true
             )
             : nil
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        recordLabNativeMTPConversationCacheBegin(
+            request: request,
+            surface: "attached_stream",
+            leaseAllowed: conversationCacheAllowed,
+            lease: lease,
+            modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
+        )
+        #endif
         if conversationCacheAllowed,
            try await serialRouteCanaryCachedHitMissingRetainedHandoff(
             lease,
@@ -7232,6 +7258,7 @@ actor ModelRuntime: ModelRuntimeServing {
             outputCap: labNativeMTPDecodeOutputCap,
             timingObserver: labNativeMTPCommitTimingObserver
         )
+        let labConversationCacheObserver = labNativeMTPConversationCacheObserver
         #else
         let labSerialHooks: LabSerialDecodeHooks? = nil
         #endif
@@ -7339,6 +7366,19 @@ actor ModelRuntime: ModelRuntimeServing {
                             cold: coldContext
                         )
                         : nil
+                    #if DEBUG || MACPROVIDER_LAB_HARNESS
+                    if let labConversationCacheObserver {
+                        labConversationCacheObserver.record(NativeMTPLabConversationCacheObserver.event(
+                            requestID: request.requestID,
+                            surface: "serial_complete",
+                            keyPresent: Self.nonEmpty(request.conversationKey) != nil,
+                            cacheOnly: request.conversationCacheOnly,
+                            leaseAllowed: conversationCacheAllowed,
+                            lease: lease,
+                            modelHasRecurrentLayers: ConversationCacheLayers.hasRecurrentLayers(context.model.newCache(parameters: nil))
+                        ))
+                    }
+                    #endif
                         do {
                             let generationContext = Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
                             let kvCache: [KVCache]
@@ -7916,6 +7956,7 @@ actor ModelRuntime: ModelRuntimeServing {
             outputCap: labNativeMTPDecodeOutputCap,
             timingObserver: labNativeMTPCommitTimingObserver
         )
+        let labConversationCacheObserver = labNativeMTPConversationCacheObserver
         #else
         let labSerialHooks: LabSerialDecodeHooks? = nil
         #endif
@@ -8112,6 +8153,19 @@ actor ModelRuntime: ModelRuntimeServing {
                             cold: coldContext
                         )
                         : nil
+                    #if DEBUG || MACPROVIDER_LAB_HARNESS
+                    if let labConversationCacheObserver {
+                        labConversationCacheObserver.record(NativeMTPLabConversationCacheObserver.event(
+                            requestID: request.requestID,
+                            surface: "serial_stream",
+                            keyPresent: Self.nonEmpty(request.conversationKey) != nil,
+                            cacheOnly: request.conversationCacheOnly,
+                            leaseAllowed: conversationCacheAllowed,
+                            lease: lease,
+                            modelHasRecurrentLayers: ConversationCacheLayers.hasRecurrentLayers(generationContext.model.newCache(parameters: nil))
+                        ))
+                    }
+                    #endif
                     let kvCache: [KVCache]
                     var iteratorInput: LMInput
                     if let reusableCache = lease?.reusableCache, let lcp = lease?.lcp {
@@ -10301,6 +10355,27 @@ actor ModelRuntime: ModelRuntimeServing {
             #endif
         }
     }
+
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    private func recordLabNativeMTPConversationCacheBegin(
+        request: ChatCompletionRequest,
+        surface: String,
+        leaseAllowed: Bool,
+        lease: ConversationCacheLease?,
+        modelHasRecurrentLayers: Bool
+    ) {
+        guard let observer = labNativeMTPConversationCacheObserver else { return }
+        observer.record(NativeMTPLabConversationCacheObserver.event(
+            requestID: request.requestID,
+            surface: surface,
+            keyPresent: Self.nonEmpty(request.conversationKey) != nil,
+            cacheOnly: request.conversationCacheOnly,
+            leaseAllowed: leaseAllowed,
+            lease: lease,
+            modelHasRecurrentLayers: modelHasRecurrentLayers
+        ))
+    }
+    #endif
 
     #if DEBUG || MACPROVIDER_LAB_HARNESS
     static func labSerialDecodeHooks(

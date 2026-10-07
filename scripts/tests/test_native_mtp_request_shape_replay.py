@@ -194,12 +194,16 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
             self.assertEqual(len(blocks), 2)
             disabled = next(block for block in blocks if block["path"] == "mtp_disabled")
             mixed = next(block for block in blocks if block["path"] == "observed_mixed")
-            self.assertEqual([shape["shape_id"] for shape in mixed["request_shapes"]], ["eligible", "logit"])
+            self.assertEqual([shape["shape_id"] for shape in mixed["request_shapes"]], ["eligible", "cache-hit", "logit"])
             self.assertEqual(mixed["request_shapes"][0]["completion_tokens"], 11)
             self.assertEqual(mixed["request_shapes"][0]["pre_capacity_selector_reason"], "eligible")
             self.assertEqual(mixed["request_shapes"][0]["effective_path"], "native_mtp")
-            self.assertEqual(mixed["request_shapes"][1]["pre_capacity_selector_reason"], "logit_controls")
+            self.assertEqual(mixed["request_shapes"][1]["pre_capacity_selector_reason"], "conversation_key")
             self.assertEqual(mixed["request_shapes"][1]["effective_path"], "ordinary")
+            self.assertEqual(mixed["request_shapes"][1]["conversation_cache_lease"], "hit")
+            self.assertEqual(mixed["request_shapes"][1]["conversation_cache_cached_prompt_tokens"], 128)
+            self.assertEqual(mixed["request_shapes"][2]["pre_capacity_selector_reason"], "logit_controls")
+            self.assertEqual(mixed["request_shapes"][2]["effective_path"], "ordinary")
             self.assertTrue(all(shape["effective_path"] == "ordinary" for shape in disabled["request_shapes"]))
             self.assertGreater(disabled["ordinary_row_p95_ttft_seconds"], 0)
             self.assertGreater(mixed["ordinary_row_throughput_tps"], 0)
@@ -231,7 +235,7 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "actual_admission_mismatch"):
                 replay.convert_replay_to_analyzer_jsonl(mismatch, policy)
 
-            incomplete = self._write_replay_result(root, policy, mutate_completion=lambda record: record.update({"committed_timing_events": 0}) if record["request_id"] == "native_mtp-b0-r1-logit" else None)
+            incomplete = self._write_replay_result(root, policy, mutate_completion=lambda record: record.update({"committed_timing_events": 0}) if record["request_id"] == "native_mtp-b0-r2-logit" else None)
             with self.assertRaisesRegex(ValueError, "committed_timing_events_mismatch"):
                 replay.convert_replay_to_analyzer_jsonl(incomplete, policy)
 
@@ -284,7 +288,7 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "qualification_status_not_qualified"):
                 replay.convert_replay_to_analyzer_jsonl(pending_run, policy)
 
-            target_unmatched = self._write_replay_result(root, policy, mutate_completion=lambda record: record.update({"target_completion_matched": False}) if record["request_id"] == "native_mtp-b0-r1-logit" else None)
+            target_unmatched = self._write_replay_result(root, policy, mutate_completion=lambda record: record.update({"target_completion_matched": False}) if record["request_id"] == "native_mtp-b0-r2-logit" else None)
             with self.assertRaisesRegex(ValueError, "target_completion_mismatch"):
                 replay.convert_replay_to_analyzer_jsonl(target_unmatched, policy)
 
@@ -306,6 +310,99 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
             bad_filter.write_text("".join(json.dumps(record, sort_keys=True) + "\n" for record in data), "utf-8")
             with self.assertRaisesRegex(ValueError, "header_sample_filter_included_count_invalid"):
                 replay.convert_replay_to_analyzer_jsonl(bad_filter, policy)
+
+    def test_convert_rejects_cache_hit_without_trusted_warmup_proof(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            policy = self._write_policy(root)
+
+            missing_proof = self._write_replay_result(
+                root,
+                policy,
+                mutate_run=lambda record: record.update({"cache_warmup_proofs": []}) if record.get("path") == "native_mtp" else None,
+            )
+            with self.assertRaisesRegex(ValueError, "cache_hit_without_warmup_proof"):
+                replay.convert_replay_to_analyzer_jsonl(missing_proof, policy)
+
+            bad_begin = self._write_replay_result(
+                root,
+                policy,
+                mutate_run=lambda record: record["cache_warmup_proofs"][0].update({"warmup_execution_path": "synthetic_shortcut"}) if record.get("path") == "native_mtp" else None,
+            )
+            with self.assertRaisesRegex(ValueError, "warmup_execution_path_invalid"):
+                replay.convert_replay_to_analyzer_jsonl(bad_begin, policy)
+
+            wrong_canonical = self._write_replay_result(
+                root,
+                policy,
+                mutate_run=lambda record: record["cache_warmup_proofs"][0].update({"warmup_canonical_tokens": 127}) if record.get("path") == "native_mtp" else None,
+            )
+            with self.assertRaisesRegex(ValueError, "warmup_canonical_tokens_mismatch"):
+                replay.convert_replay_to_analyzer_jsonl(wrong_canonical, policy)
+
+            wrong_generated_sum = self._write_replay_result(
+                root,
+                policy,
+                mutate_run=lambda record: record["cache_warmup_proofs"][0].update({"warmup_generated_completion_tokens": 31}) if record.get("path") == "native_mtp" else None,
+            )
+            with self.assertRaisesRegex(ValueError, "warmup_canonical_token_sum_mismatch"):
+                replay.convert_replay_to_analyzer_jsonl(wrong_generated_sum, policy)
+
+            wrong_finish = self._write_replay_result(
+                root,
+                policy,
+                mutate_run=lambda record: record["cache_warmup_proofs"][0].update({"warmup_finish_reason": "stop"}) if record.get("path") == "native_mtp" else None,
+            )
+            with self.assertRaisesRegex(ValueError, "warmup_finish_reason_invalid"):
+                replay.convert_replay_to_analyzer_jsonl(wrong_finish, policy)
+
+            wrong_actual_cached = self._write_replay_result(
+                root,
+                policy,
+                mutate=lambda record: record.update({"actual_cached_prompt_tokens": 0, "cache_state_matches": True, "matches": True}) if record.get("shape_id") == "cache-hit" and record.get("actual_effective_path") == "ordinary" else None,
+            )
+            with self.assertRaisesRegex(ValueError, "actual_cached_prompt_tokens_mismatch"):
+                replay.convert_replay_to_analyzer_jsonl(wrong_actual_cached, policy)
+
+            claimed_miss_by_zero_tokens = self._write_replay_result(
+                root,
+                policy,
+                mutate=lambda record: record.update({"actual_cached_prompt_tokens": 0, "actual_conversation_cache_lease": "not_applicable", "actual_conversation_cache_attempted": False, "cache_state_matches": True, "matches": True}) if record.get("shape_id") == "cache-hit" and record.get("actual_effective_path") == "ordinary" else None,
+            )
+            with self.assertRaisesRegex(ValueError, "actual_conversation_cache_attempted_mismatch|actual_conversation_cache_lease_mismatch"):
+                replay.convert_replay_to_analyzer_jsonl(claimed_miss_by_zero_tokens, policy)
+
+            sticky_hit = self._write_replay_result(root, policy, include_sticky=True)
+            sticky_records = replay.convert_replay_to_analyzer_jsonl(sticky_hit, policy)
+            sticky_mixed = next(block for block in sticky_records if block.get("path") == "observed_mixed")
+            sticky_shape = next(shape for shape in sticky_mixed["request_shapes"] if shape["shape_id"] == "sticky-hit")
+            self.assertFalse(sticky_shape["conversation_key_cache_only"])
+            self.assertEqual(sticky_shape["conversation_cache_lease"], "hit")
+
+            sticky_measured_as_cache_only = self._write_replay_result(
+                root,
+                policy,
+                include_sticky=True,
+                mutate_run=lambda record: [proof.update({"measured_cache_only": True}) for proof in record["cache_warmup_proofs"] if proof["request_id"].endswith("sticky-hit")] if record.get("path") == "native_mtp" else None,
+            )
+            with self.assertRaisesRegex(ValueError, "warmup_measured_cache_only_mismatch"):
+                replay.convert_replay_to_analyzer_jsonl(sticky_measured_as_cache_only, policy)
+
+            int_bool_observation = self._write_replay_result(
+                root,
+                policy,
+                mutate=lambda record: record.update({"actual_conversation_key_cache_only": 1}) if record.get("shape_id") == "cache-hit" and record.get("actual_effective_path") == "ordinary" else None,
+            )
+            with self.assertRaisesRegex(ValueError, "conversation_key_cache_only_bool_type_invalid"):
+                replay.convert_replay_to_analyzer_jsonl(int_bool_observation, policy)
+
+            missing_source = self._write_replay_result(
+                root,
+                policy,
+                mutate=lambda record: record.update({"cache_observation_source": "unsourced_counter"}) if record.get("shape_id") == "cache-hit" and record.get("actual_effective_path") == "ordinary" else None,
+            )
+            with self.assertRaisesRegex(ValueError, "cache_observation_source_invalid"):
+                replay.convert_replay_to_analyzer_jsonl(missing_source, policy)
 
     def _project(self, capture, bounds):
         return replay.project_capture(
@@ -490,15 +587,18 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
         replay._write_json(path, policy)
         return path
 
-    def _write_replay_result(self, root, policy, *, blocks=1, pending=False, mutate=None, mutate_completion=None, mutate_shape=None, mutate_run=None):
+    def _write_replay_result(self, root, policy, *, blocks=1, pending=False, include_sticky=False, mutate=None, mutate_completion=None, mutate_shape=None, mutate_run=None):
         policy_sha = replay._sha256_file(policy)
         capture_sha = "c" * 64
         bench_policy_sha = "1" * 64
         target_sha = "d" * 64
         shapes = [
             self._replay_shape("eligible", 11, target_sha),
-            self._replay_shape("logit", 7, target_sha),
+            self._replay_shape("cache-hit", 5, target_sha, key=True, cache_only=True, lease="hit", cached=128, group="3" * 64),
         ]
+        if include_sticky:
+            shapes.append(self._replay_shape("sticky-hit", 6, target_sha, key=True, cache_only=False, lease="hit", cached=128, group="4" * 64))
+        shapes.append(self._replay_shape("logit", 7, target_sha))
         if mutate_shape:
             for shape in shapes:
                 mutate_shape(shape)
@@ -560,10 +660,14 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
                 records.extend([
                     self._replay_run(block_index, "ordinary", policy_sha, bench_policy_sha, capture_sha, [
                         ("eligible", 11, "mode_off", "ordinary"),
+                        ("cache-hit", 5, "mode_off", "ordinary"),
+                        *([("sticky-hit", 6, "mode_off", "ordinary")] if include_sticky else []),
                         ("logit", 7, "mode_off", "ordinary"),
                     ], mutate=mutate, mutate_completion=mutate_completion, mutate_run=mutate_run),
                     self._replay_run(block_index, "native_mtp", policy_sha, bench_policy_sha, capture_sha, [
                         ("eligible", 11, "eligible", "native_mtp"),
+                        ("cache-hit", 5, "conversation_key", "ordinary"),
+                        *([("sticky-hit", 6, "conversation_key", "ordinary")] if include_sticky else []),
                         ("logit", 7, "logit_controls", "ordinary"),
                     ], mutate=mutate, mutate_completion=mutate_completion, mutate_run=mutate_run),
                 ])
@@ -571,7 +675,7 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
         path.write_text("".join(json.dumps(record, sort_keys=True) + "\n" for record in records), "utf-8")
         return path
 
-    def _replay_shape(self, shape_id, target_tokens, target_sha):
+    def _replay_shape(self, shape_id, target_tokens, target_sha, *, key=False, cache_only=False, lease="not_applicable", cached=0, group=None):
         logit_shape = shape_id == "logit"
         return {
             "shape_id": shape_id,
@@ -587,12 +691,12 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
             "pre_capacity_selector_reason": "mode_off",
             "pre_capacity_eligible": False,
             "effective_path": "ordinary",
-            "conversation_key_present": False,
-            "conversation_key_cache_only": False,
-            "conversation_cache_lease": "not_applicable",
-            "conversation_cache_cached_prompt_tokens": 0,
+            "conversation_key_present": key,
+            "conversation_key_cache_only": cache_only,
+            "conversation_cache_lease": lease,
+            "conversation_cache_cached_prompt_tokens": cached,
             "conversation_cache_retained_handoff": False,
-            "anonymous_cache_group_sha256": None,
+            "anonymous_cache_group_sha256": group,
             "served_model_hash_sha256": target_sha,
             "served_weights_manifest_sha256": "2" * 64,
             "stop_sequences": 0,
@@ -658,6 +762,12 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
             total += target_tokens
             expected_reason = "mode_off" if path == "ordinary" else reason
             expected_path = "ordinary" if path == "ordinary" else effective_path
+            expected_cached = 128 if shape_id in {"cache-hit", "sticky-hit"} else 0
+            expected_cache_only = shape_id == "cache-hit"
+            expected_sticky = shape_id == "sticky-hit"
+            expected_attempted = shape_id in {"cache-hit", "sticky-hit"}
+            expected_lease = "hit" if shape_id in {"cache-hit", "sticky-hit"} else "not_applicable"
+            expected_retained = False
             admission = {
                 "request_id": request_id,
                 "shape_id": shape_id,
@@ -666,6 +776,20 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
                 "expected_effective_max_output_tokens": 96,
                 "actual_effective_max_output_tokens": 96,
                 "budget_matches": True,
+                "expected_cached_prompt_tokens": expected_cached,
+                "actual_cached_prompt_tokens": expected_cached,
+                "cache_state_matches": True,
+                "expected_conversation_key_cache_only": expected_cache_only,
+                "actual_conversation_key_cache_only": expected_cache_only,
+                "expected_conversation_key_sticky": expected_sticky,
+                "actual_conversation_key_sticky": expected_sticky,
+                "expected_conversation_cache_attempted": expected_attempted,
+                "actual_conversation_cache_attempted": expected_attempted,
+                "expected_conversation_cache_lease": expected_lease,
+                "actual_conversation_cache_lease": expected_lease,
+                "expected_conversation_cache_retained_handoff": expected_retained,
+                "actual_conversation_cache_retained_handoff": expected_retained,
+                "cache_observation_source": replay.REPLAY_CACHE_OBSERVATION_SOURCE,
                 "expected_selector_reason": expected_reason,
                 "actual_selector_reason": reason,
                 "expected_effective_path": expected_path,
@@ -691,6 +815,24 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
             if mutate_completion:
                 mutate_completion(completion)
             completions.append(completion)
+        cache_warmup_proofs = [
+            {
+                "request_id": f"{path}-b{block_index}-r{offset}-{shape_id}",
+                "warmup_request_id": f"warmup-{path}-b{block_index}-r{offset}-{shape_id}",
+                "warmup_completion_tokens": 1,
+                "warmup_generated_completion_tokens": 32,
+                "warmup_cached_prompt_tokens": 0,
+                "expected_measured_cached_prompt_tokens": 128,
+                "warmup_prompt_tokens": 96,
+                "warmup_canonical_tokens": 128,
+                "warmup_finish_reason": "length",
+                "warmup_cache_only": False,
+                "measured_cache_only": shape_id == "cache-hit",
+                "warmup_execution_path": replay.REPLAY_CACHE_WARMUP_EXECUTION_PATH,
+            }
+            for offset, (shape_id, _, _, _) in enumerate(rows)
+            if shape_id in {"cache-hit", "sticky-hit"}
+        ]
         result = {
             "schema": replay.REPLAY_RESULT_SCHEMA,
             "record_type": "run",
@@ -716,6 +858,7 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
             "target_completion_mismatch_request_ids": [],
             "committed_timing_observation_complete": True,
             "completion_tokens_by_request": completions,
+            "cache_warmup_proofs": cache_warmup_proofs,
             "effective_paths": [
                 {"request_id": item["request_id"], "effective_path": item["actual_effective_path"], "selector_reason": item["actual_selector_reason"], "other_active_rows": 0}
                 for item in admissions

@@ -121,6 +121,7 @@ REPLAY_RUN_KEYS = {
     "completion_tokens_by_request",
     "effective_paths",
     "admission_projection",
+    "cache_warmup_proofs",
 }
 REPLAY_BASE_SHAPE_KEYS = {
     "shape_id",
@@ -197,6 +198,22 @@ REPLAY_COMPLETION_KEYS = {
     "ttft_seconds",
     "inter_token_gaps",
 }
+REPLAY_CACHE_OBSERVATION_SOURCE = "native_mtp_lab_conversation_cache_observer_v1"
+REPLAY_CACHE_WARMUP_EXECUTION_PATH = "normal_model_runtime"
+REPLAY_CACHE_WARMUP_PROOF_KEYS = {
+    "request_id",
+    "warmup_request_id",
+    "warmup_completion_tokens",
+    "warmup_generated_completion_tokens",
+    "warmup_cached_prompt_tokens",
+    "expected_measured_cached_prompt_tokens",
+    "warmup_prompt_tokens",
+    "warmup_canonical_tokens",
+    "warmup_finish_reason",
+    "warmup_cache_only",
+    "measured_cache_only",
+    "warmup_execution_path",
+}
 REPLAY_ADMISSION_KEYS = {
     "request_id",
     "shape_id",
@@ -205,6 +222,20 @@ REPLAY_ADMISSION_KEYS = {
     "expected_effective_max_output_tokens",
     "actual_effective_max_output_tokens",
     "budget_matches",
+    "expected_cached_prompt_tokens",
+    "actual_cached_prompt_tokens",
+    "cache_state_matches",
+    "expected_conversation_key_cache_only",
+    "actual_conversation_key_cache_only",
+    "expected_conversation_key_sticky",
+    "actual_conversation_key_sticky",
+    "expected_conversation_cache_attempted",
+    "actual_conversation_cache_attempted",
+    "expected_conversation_cache_lease",
+    "actual_conversation_cache_lease",
+    "expected_conversation_cache_retained_handoff",
+    "actual_conversation_cache_retained_handoff",
+    "cache_observation_source",
     "expected_selector_reason",
     "actual_selector_reason",
     "expected_effective_path",
@@ -1077,6 +1108,8 @@ def _load_replay_runs(path: Path, policy: dict, policy_sha: str, capture_sha256:
         for key in ("completion_tokens_by_request", "admission_projection"):
             if not isinstance(run.get(key), list) or not run[key]:
                 failures.append(f"run[{run_index}]:{key}_invalid")
+        if not isinstance(run.get("cache_warmup_proofs"), list):
+            failures.append(f"run[{run_index}]:cache_warmup_proofs_invalid")
         if "effective_paths" in run and not isinstance(run.get("effective_paths"), list):
             failures.append(f"run[{run_index}]:effective_paths_invalid")
     if failures:
@@ -1261,8 +1294,12 @@ def _request_shape_for_analyzer(shape: object, header: dict) -> dict:
         if lease == "hit" and cached <= 0:
             failures.append("cache_hit_without_cached_prompt_tokens")
     elif key_present is True:
-        if lease != "not_applicable" or cached != 0 or retained:
-            failures.append("sticky_key_with_cache_proof")
+        if lease == "not_applicable" and cached == 0 and not retained:
+            pass
+        elif lease == "hit" and _is_count(cached) and cached > 0 and not retained:
+            pass
+        else:
+            failures.append("sticky_key_cache_proof_invalid")
     if shape.get("effective_path") != "ordinary":
         failures.append("capture_shape_effective_path_not_ordinary")
     if failures:
@@ -1324,6 +1361,146 @@ def _indexed_completion_timings(run: dict, run_label: str) -> dict[str, dict]:
     if failures:
         raise ValueError("replay timing invalid: " + "; ".join(sorted(set(failures))))
     return timings
+
+
+def _shape_cache_expectation(shape: dict) -> dict[str, object]:
+    key_present = shape.get("conversation_key_present") is True
+    cache_only = shape.get("conversation_key_cache_only") is True
+    lease = shape.get("conversation_cache_lease")
+    cached = shape.get("conversation_cache_cached_prompt_tokens")
+    retained = shape.get("conversation_cache_retained_handoff") is True
+    attempted = key_present and lease in {"miss", "hit", "missing"}
+    expected_cached = int(cached) if attempted and _is_count(cached) else 0
+    return {
+        "cached_prompt_tokens": expected_cached,
+        "cache_only": cache_only,
+        "sticky": key_present and not cache_only,
+        "attempted": attempted,
+        "lease": lease if isinstance(lease, str) else "missing",
+        "retained_handoff": retained,
+    }
+
+
+def _shape_expected_cached_prompt_tokens(shape: dict) -> int:
+    return int(_shape_cache_expectation(shape)["cached_prompt_tokens"])
+
+
+def _indexed_cache_warmup_proofs(run: dict, run_label: str) -> dict[str, dict]:
+    proofs: dict[str, dict] = {}
+    failures: list[str] = []
+    for index, item in enumerate(run.get("cache_warmup_proofs", [])):
+        failures.extend(_strict_object(item, REPLAY_CACHE_WARMUP_PROOF_KEYS, f"{run_label}.cache_warmup[{index}]"))
+        if not isinstance(item, dict):
+            continue
+        request_id = item.get("request_id")
+        warmup_request_id = item.get("warmup_request_id")
+        if not (isinstance(request_id, str) and SAFE_ID.match(request_id)):
+            failures.append(f"{run_label}.cache_warmup[{index}]:request_id_invalid")
+            continue
+        if request_id in proofs:
+            failures.append(f"{run_label}.cache_warmup[{index}]:duplicate_request_id")
+        if not (isinstance(warmup_request_id, str) and SAFE_ID.match(warmup_request_id)):
+            failures.append(f"{run_label}.cache_warmup[{index}]:warmup_request_id_invalid")
+        for key in (
+            "warmup_completion_tokens",
+            "warmup_generated_completion_tokens",
+            "warmup_cached_prompt_tokens",
+            "expected_measured_cached_prompt_tokens",
+            "warmup_prompt_tokens",
+            "warmup_canonical_tokens",
+        ):
+            if not _is_count(item.get(key)):
+                failures.append(f"{run_label}.cache_warmup[{index}]:{key}_invalid")
+        if _is_count(item.get("warmup_completion_tokens")) and item["warmup_completion_tokens"] <= 0:
+            failures.append(f"{run_label}.cache_warmup[{index}]:warmup_completion_tokens_invalid")
+        if _is_count(item.get("warmup_generated_completion_tokens")) and item["warmup_generated_completion_tokens"] <= 0:
+            failures.append(f"{run_label}.cache_warmup[{index}]:warmup_generated_completion_tokens_invalid")
+        if item.get("warmup_finish_reason") != "length":
+            failures.append(f"{run_label}.cache_warmup[{index}]:warmup_finish_reason_invalid")
+        if item.get("warmup_cache_only") is not False:
+            failures.append(f"{run_label}.cache_warmup[{index}]:warmup_cache_only_invalid")
+        if not _is_bool(item.get("measured_cache_only")):
+            failures.append(f"{run_label}.cache_warmup[{index}]:measured_cache_only_invalid")
+        if item.get("warmup_execution_path") != REPLAY_CACHE_WARMUP_EXECUTION_PATH:
+            failures.append(f"{run_label}.cache_warmup[{index}]:warmup_execution_path_invalid")
+        proofs[request_id] = item
+    if failures:
+        raise ValueError("replay cache warmup proof invalid: " + "; ".join(sorted(set(failures))))
+    return proofs
+
+
+def _is_bool(value: object) -> bool:
+    return isinstance(value, bool)
+
+
+def _validate_cache_observations(run: dict, rows: list[dict], shapes_by_id: dict[str, dict], run_label: str) -> None:
+    proofs = _indexed_cache_warmup_proofs(run, run_label)
+    rows_by_request_id = {row["request_id"]: row for row in rows}
+    failures: list[str] = []
+    for row_index, row in enumerate(rows):
+        shape = shapes_by_id.get(row.get("shape_id"))
+        if not isinstance(shape, dict):
+            failures.append(f"{run_label}.admission[{row_index}]:shape_template_missing")
+            continue
+        expectation = _shape_cache_expectation(shape)
+        expected_cached = int(expectation["cached_prompt_tokens"])
+        row_expected = row.get("expected_cached_prompt_tokens")
+        row_actual = row.get("actual_cached_prompt_tokens")
+        cache_state_matches = row.get("cache_state_matches")
+        if row.get("cache_observation_source") != REPLAY_CACHE_OBSERVATION_SOURCE:
+            failures.append(f"{run_label}.admission[{row_index}]:cache_observation_source_invalid")
+        observed_pairs = (
+            ("conversation_key_cache_only", expectation["cache_only"]),
+            ("conversation_key_sticky", expectation["sticky"]),
+            ("conversation_cache_attempted", expectation["attempted"]),
+            ("conversation_cache_lease", expectation["lease"]),
+            ("conversation_cache_retained_handoff", expectation["retained_handoff"]),
+        )
+        for suffix, expected in observed_pairs:
+            expected_key = f"expected_{suffix}"
+            actual_key = f"actual_{suffix}"
+            row_expected_observed = row.get(expected_key)
+            row_actual_observed = row.get(actual_key)
+            if isinstance(expected, bool) and (not _is_bool(row_expected_observed) or not _is_bool(row_actual_observed)):
+                failures.append(f"{run_label}.admission[{row_index}]:{suffix}_bool_type_invalid")
+                continue
+            if row_expected_observed != expected:
+                failures.append(f"{run_label}.admission[{row_index}]:{expected_key}_mismatch")
+            if row_actual_observed != expected:
+                failures.append(f"{run_label}.admission[{row_index}]:{actual_key}_mismatch")
+        if not _is_count(row_expected):
+            failures.append(f"{run_label}.admission[{row_index}]:expected_cached_prompt_tokens_invalid")
+            continue
+        if not _is_count(row_actual):
+            failures.append(f"{run_label}.admission[{row_index}]:actual_cached_prompt_tokens_invalid")
+            continue
+        if row_expected != expected_cached:
+            failures.append(f"{run_label}.admission[{row_index}]:expected_cached_prompt_tokens_mismatch")
+        if row_actual != expected_cached:
+            failures.append(f"{run_label}.admission[{row_index}]:actual_cached_prompt_tokens_mismatch")
+        if cache_state_matches is not True or row_actual != row_expected:
+            failures.append(f"{run_label}.admission[{row_index}]:cache_state_mismatch")
+        proof = proofs.get(row["request_id"])
+        if expected_cached > 0:
+            if proof is None:
+                failures.append(f"{run_label}.admission[{row_index}]:cache_hit_without_warmup_proof")
+            else:
+                if proof.get("expected_measured_cached_prompt_tokens") != expected_cached:
+                    failures.append(f"{run_label}.admission[{row_index}]:warmup_expected_cached_prompt_tokens_mismatch")
+                if proof.get("warmup_canonical_tokens") != expected_cached:
+                    failures.append(f"{run_label}.admission[{row_index}]:warmup_canonical_tokens_mismatch")
+                if proof.get("measured_cache_only") != expectation["cache_only"]:
+                    failures.append(f"{run_label}.admission[{row_index}]:warmup_measured_cache_only_mismatch")
+                if _is_count(proof.get("warmup_prompt_tokens")) and _is_count(proof.get("warmup_generated_completion_tokens")):
+                    if proof["warmup_prompt_tokens"] + proof["warmup_generated_completion_tokens"] != expected_cached:
+                        failures.append(f"{run_label}.admission[{row_index}]:warmup_canonical_token_sum_mismatch")
+        elif proof is not None:
+            failures.append(f"{run_label}.admission[{row_index}]:unexpected_cache_warmup_proof")
+    unknown_proofs = sorted(set(proofs) - set(rows_by_request_id))
+    if unknown_proofs:
+        failures.append(f"{run_label}:cache_warmup_unknown_request_ids:{','.join(unknown_proofs)}")
+    if failures:
+        raise ValueError("replay cache observation invalid: " + "; ".join(sorted(set(failures))))
 
 
 def _admission_rows(run: dict, run_label: str) -> list[dict]:
@@ -1431,6 +1608,7 @@ def convert_replay_to_analyzer_jsonl(
     policy, policy_sha = _load_policy_for_analyzer(policy_path)
     header, runs = _load_replay_runs(replay_path, policy, policy_sha, capture_sha256)
     shape_templates_by_id: dict[str, dict] = {}
+    replay_shapes_by_id: dict[str, dict] = {}
     shape_budgets_by_id: dict[str, int] = {}
     ordered_shape_ids: list[str] = []
     for shape in header["request_shapes"]:
@@ -1439,6 +1617,7 @@ def convert_replay_to_analyzer_jsonl(
         if shape_id in shape_templates_by_id:
             raise ValueError(f"replay header duplicate shape_id: {shape_id}")
         shape_templates_by_id[shape_id] = template
+        replay_shapes_by_id[shape_id] = shape
         shape_budgets_by_id[shape_id] = int(shape["effective_max_output_tokens"])
         ordered_shape_ids.append(shape_id)
     by_block: dict[int, dict[str, dict]] = {}
@@ -1468,6 +1647,8 @@ def convert_replay_to_analyzer_jsonl(
             continue
         mixed_rows = _admission_rows(paths["native_mtp"], f"block[{block_index}].native_mtp")
         disabled_rows = _admission_rows(paths["ordinary"], f"block[{block_index}].ordinary")
+        _validate_cache_observations(paths["native_mtp"], mixed_rows, replay_shapes_by_id, f"block[{block_index}].native_mtp")
+        _validate_cache_observations(paths["ordinary"], disabled_rows, replay_shapes_by_id, f"block[{block_index}].ordinary")
         mixed_by_shape: dict[str, list[dict]] = {}
         disabled_by_shape: dict[str, list[dict]] = {}
         for row in mixed_rows:

@@ -192,26 +192,45 @@ final class NativeMTPRequestShapeReplayRunner {
         maxContextTokens: Int,
         sampleCoverageComplete: Bool
     ) async throws -> NativeMTPRequestShapeReplayRunResult {
-        let started = Date()
-        let requests = try await makeRequests(block: block, path: path, runtime: runtime)
+        let preparedRequests = try await makeRequests(block: block, path: path, runtime: runtime)
+        let requests = preparedRequests.measured
+        let warmupsByRequestID = Dictionary(grouping: preparedRequests.cacheWarmups, by: \.requestID)
+        var warmupProofs: [[String: Any]] = []
         let timingObserver = NativeMTPLabCommittedTokenTimingObserver()
-        guard await runtime.installLabNativeMTPCommitTimingObserver(timingObserver) else {
-            throw NativeMTPRequestShapeReplayError.pending("committed_token_timing_observer_unavailable:\(path.rawValue)")
-        }
-        let outputCap = NativeMTPLabDecodeOutputCap(capsByRequestID: Dictionary(
-            uniqueKeysWithValues: block.runnableRows.map { ($0.requestID, $0.targetCompletionTokens) }
-        ))
-        guard await runtime.installLabNativeMTPDecodeOutputCap(outputCap) else {
-            _ = await runtime.installLabNativeMTPCommitTimingObserver(nil)
-            throw NativeMTPRequestShapeReplayError.pending("decode_output_cap_unavailable:\(path.rawValue)")
-        }
-        let requestsByID = Dictionary(uniqueKeysWithValues: requests.compactMap { request in
+        let cacheObserver = NativeMTPLabConversationCacheObserver()
+        var requestsByID = Dictionary(uniqueKeysWithValues: requests.compactMap { request in
             request.requestID.map { ($0, request) }
         })
         let results: [NativeMTPRequestShapeReplayRequestResult]
+        var measuredWaveResults: [[NativeMTPRequestShapeReplayRequestResult]] = []
         do {
             var waveResults: [NativeMTPRequestShapeReplayRequestResult] = []
             for rowWave in block.runnableWaves {
+                for row in rowWave {
+                    if let warmups = warmupsByRequestID[row.requestID] {
+                        let warmupRun = try await runCacheWarmups(warmups, runtime: runtime)
+                        warmupProofs.append(contentsOf: warmupRun.proofs)
+                        for request in warmupRun.measuredRequests {
+                            guard let requestID = request.requestID else { continue }
+                            requestsByID[requestID] = request
+                        }
+                    }
+                }
+                guard await runtime.installLabNativeMTPConversationCacheObserver(cacheObserver) else {
+                    throw NativeMTPRequestShapeReplayError.pending("conversation_cache_observer_unavailable:\(path.rawValue)")
+                }
+                guard await runtime.installLabNativeMTPCommitTimingObserver(timingObserver) else {
+                    _ = await runtime.installLabNativeMTPConversationCacheObserver(nil)
+                    throw NativeMTPRequestShapeReplayError.pending("committed_token_timing_observer_unavailable:\(path.rawValue)")
+                }
+                let outputCap = NativeMTPLabDecodeOutputCap(capsByRequestID: Dictionary(
+                    uniqueKeysWithValues: rowWave.map { ($0.requestID, $0.targetCompletionTokens) }
+                ))
+                guard await runtime.installLabNativeMTPDecodeOutputCap(outputCap) else {
+                    _ = await runtime.installLabNativeMTPCommitTimingObserver(nil)
+                    _ = await runtime.installLabNativeMTPConversationCacheObserver(nil)
+                    throw NativeMTPRequestShapeReplayError.pending("decode_output_cap_unavailable:\(path.rawValue)")
+                }
                 let results = try await withThrowingTaskGroup(of: NativeMTPRequestShapeReplayRequestResult.self) { group in
                     for row in rowWave {
                         guard let request = requestsByID[row.requestID] else {
@@ -233,20 +252,29 @@ final class NativeMTPRequestShapeReplayRunner {
                     }
                     return values
                 }
+                _ = await runtime.installLabNativeMTPDecodeOutputCap(nil)
+                _ = await runtime.installLabNativeMTPCommitTimingObserver(nil)
+                _ = await runtime.installLabNativeMTPConversationCacheObserver(nil)
+                measuredWaveResults.append(results)
                 waveResults.append(contentsOf: results)
             }
             results = waveResults.sorted { $0.requestID < $1.requestID }
         } catch {
             _ = await runtime.installLabNativeMTPDecodeOutputCap(nil)
             _ = await runtime.installLabNativeMTPCommitTimingObserver(nil)
+            _ = await runtime.installLabNativeMTPConversationCacheObserver(nil)
             throw error
         }
         _ = await runtime.installLabNativeMTPDecodeOutputCap(nil)
         _ = await runtime.installLabNativeMTPCommitTimingObserver(nil)
-        let ended = Date()
+        _ = await runtime.installLabNativeMTPConversationCacheObserver(nil)
         let timingEvents = Dictionary(grouping: timingObserver.snapshot(), by: \.requestID)
         let timedResults = results.map { result in
             result.withCommitEvents(timingEvents[result.requestID] ?? [])
+        }
+        let timedResultsByID = Dictionary(uniqueKeysWithValues: timedResults.map { ($0.requestID, $0) })
+        let timedWaveResults = measuredWaveResults.map { wave in
+            wave.compactMap { timedResultsByID[$0.requestID] }
         }
         let resultIDs = Set(timedResults.map(\.requestID))
         let admissions: [NativeMTPHardwareAdmissionRecorder.RequestAdmission]
@@ -267,23 +295,26 @@ final class NativeMTPRequestShapeReplayRunner {
         let observedRows = timedResults.filter { result in
             ordinaryAdmissionIDs.contains(result.requestID)
         }
-        let observedStart = observedRows.map(\.startedAt).min() ?? started
-        let observedEnd = observedRows.map(\.endedAt).max() ?? ended
-        let observedWall = max(observedEnd.timeIntervalSince(observedStart), 0.000_001)
+        let observedWall = max(Self.measuredWallSeconds(for: timedWaveResults) { result in
+            ordinaryAdmissionIDs.contains(result.requestID)
+        }, 0.000_001)
         let observedCompletion = observedRows.reduce(0) { $0 + $1.completion.completionTokens }
         let allCompletion = timedResults.reduce(0) { $0 + $1.completion.completionTokens }
-        let allWall = max(ended.timeIntervalSince(started), 0.000_001)
+        let allWall = max(Self.measuredWallSeconds(for: timedWaveResults) { _ in true }, 0.000_001)
         let admittedIDs = Set(admissions.compactMap(\.requestID))
         let missingAdmissionIDs = timedResults.map(\.requestID).filter { !admittedIDs.contains($0) }
         let targetMismatchIDs = timedResults.compactMap { result -> String? in
             guard let row = block.row(requestID: result.requestID) else { return result.requestID }
             return result.completion.completionTokens == row.targetCompletionTokens ? nil : result.requestID
         }
+        let cacheEvents = Self.cacheObservationEventsByRequestID(cacheObserver.snapshot(), measuredRequestIDs: resultIDs)
         let projections = Self.admissionProjectionRows(
             path: path,
             block: block,
             admissions: admissions,
             requestsByID: requestsByID,
+            actualCachedPromptTokensByID: Dictionary(uniqueKeysWithValues: timedResults.map { ($0.requestID, $0.completion.cachedPromptTokens) }),
+            cacheEventsByRequestID: cacheEvents,
             maxContextTokens: maxContextTokens
         )
         return NativeMTPRequestShapeReplayRunResult(
@@ -302,7 +333,8 @@ final class NativeMTPRequestShapeReplayRunner {
             missingAdmissionRequestIDs: missingAdmissionIDs,
             targetMismatchRequestIDs: targetMismatchIDs,
             sampleCoverageComplete: sampleCoverageComplete,
-            admissionProjections: projections
+            admissionProjections: projections,
+            cacheWarmupProofs: warmupProofs
         )
     }
 
@@ -310,7 +342,7 @@ final class NativeMTPRequestShapeReplayRunner {
         block: NativeMTPRequestShapeReplayBlock,
         path: NativeMTPRequestShapeReplayPath,
         runtime: ModelRuntime
-    ) async throws -> [ChatCompletionRequest] {
+    ) async throws -> NativeMTPRequestShapeReplayPreparedRequests {
         let snapshot = await runtime.currentSnapshot()
         guard let container = snapshot.container else {
             throw NativeMTPRequestShapeReplayError.assertionFailed("runtime has no loaded container")
@@ -320,7 +352,47 @@ final class NativeMTPRequestShapeReplayRunner {
         let modelID = self.modelID
         return try await container.perform { context in
             var requests: [ChatCompletionRequest] = []
+            var warmups: [NativeMTPRequestShapeReplayCacheWarmup] = []
             for row in block.runnableRows {
+                if row.requiresCacheWarmup {
+                    guard let anonymousGroup = row.anonymousCacheGroupSHA256 else {
+                        throw NativeMTPRequestShapeReplayError.pending("cache_warmup_missing_anonymous_group:\(row.requestID)")
+                    }
+                    let fit = try await Self.cacheWarmupFit(
+                        row: row,
+                        modelID: modelID,
+                        context: context,
+                        thinkingToggle: thinkingToggle,
+                        preserveThinking: preserveThinking
+                    )
+                    var warmupRequest = try Self.makeRequest(
+                        modelID: modelID,
+                        requestID: "warmup-\(row.requestID)",
+                        prompt: fit.prompt,
+                        maxTokens: fit.generatedCompletionTokens,
+                        temperature: row.temperature,
+                        topP: row.topP,
+                        stream: row.stream
+                    )
+                    warmupRequest = try Self.applySyntheticStandIn(for: row, to: warmupRequest)
+                    let isolatedKey = "lab-cache-b\(block.index)-\(path.rawValue)-\(anonymousGroup)"
+                    warmupRequest = warmupRequest.withConversationKey(isolatedKey, cacheOnly: false)
+                    warmups.append(NativeMTPRequestShapeReplayCacheWarmup(
+                        row: row,
+                        modelID: modelID,
+                        requestID: row.requestID,
+                        warmupRequestID: warmupRequest.requestID ?? "warmup-\(row.requestID)",
+                        expectedMeasuredCachedPromptTokens: row.conversationCacheCachedPromptTokens,
+                        measuredCacheOnly: row.conversationCacheOnly,
+                        request: warmupRequest,
+                        warmupPrompt: fit.prompt,
+                        warmupPromptTokenCount: fit.promptTokens,
+                        targetGeneratedCompletionTokens: fit.generatedCompletionTokens,
+                        targetMeasuredPromptTokens: row.promptTokens
+                    ))
+                    continue
+                }
+
                 let prompt = try await Self.syntheticPrompt(
                     row: row,
                     modelID: modelID,
@@ -344,7 +416,7 @@ final class NativeMTPRequestShapeReplayRunner {
                 }
                 requests.append(request)
             }
-            return requests
+            return NativeMTPRequestShapeReplayPreparedRequests(measured: requests, cacheWarmups: warmups)
         }
     }
 
@@ -416,9 +488,15 @@ final class NativeMTPRequestShapeReplayRunner {
         modelID: String,
         context: ModelContext,
         thinkingToggle: Bool,
-        preserveThinking: Bool
+        preserveThinking: Bool,
+        targetTokens: Int? = nil,
+        initialText: String? = nil
     ) async throws -> String {
-        func servedCount(_ text: String) async throws -> Int {
+        try await syntheticText(
+            row: row,
+            targetTokens: targetTokens ?? row.promptTokens,
+            initialText: initialText ?? "Native MTP R015 mixed replay synthetic prompt \(row.requestID)."
+        ) { text in
             var request = try makeRequest(
                 modelID: modelID,
                 requestID: row.requestID,
@@ -429,30 +507,38 @@ final class NativeMTPRequestShapeReplayRunner {
                 stream: row.stream
             )
             request = try applySyntheticStandIn(for: row, to: request)
-            let input = try ModelRuntime.userInput(
+            return try await preparedPromptTokenIDs(
                 for: request,
-                templateSupportsThinkingToggle: thinkingToggle,
-                templateSupportsPreserveThinking: preserveThinking
-            )
-            return try await context.processor.prepare(input: input).text.tokens.size
+                context: context,
+                thinkingToggle: thinkingToggle,
+                preserveThinking: preserveThinking
+            ).count
         }
-        var text = "Native MTP R015 mixed replay synthetic prompt \(row.requestID)."
+    }
+
+    private static func syntheticText(
+        row: NativeMTPRequestShapeReplayRow,
+        targetTokens: Int,
+        initialText: String,
+        servedCount: (String) async throws -> Int
+    ) async throws -> String {
+        var text = initialText
         var count = try await servedCount(text)
-        guard count <= row.promptTokens else {
+        guard count <= targetTokens else {
             throw NativeMTPRequestShapeReplayError.pending(
-                "synthetic_prompt_token_count_unavailable:\(row.requestID):wanted_\(row.promptTokens):got_\(count)"
+                "synthetic_prompt_token_count_unavailable:\(row.requestID):wanted_\(targetTokens):got_\(count)"
             )
         }
         let fragments = [
             " a", " the", " of", " to", " and", " in", " is", " x", " y", " z",
             " 0", " 1", " 2", " 3", " 4", ".", ",", "\nA", "\nB", " replay"
         ]
-        while count < row.promptTokens {
+        while count < targetTokens {
             var best: (fragment: String, count: Int)?
             for fragment in fragments {
                 let candidateCount = try await servedCount(text + fragment)
-                guard candidateCount > count, candidateCount <= row.promptTokens else { continue }
-                if candidateCount == row.promptTokens {
+                guard candidateCount > count, candidateCount <= targetTokens else { continue }
+                if candidateCount == targetTokens {
                     best = (fragment, candidateCount)
                     break
                 }
@@ -462,13 +548,185 @@ final class NativeMTPRequestShapeReplayRunner {
             }
             guard let selected = best else {
                 throw NativeMTPRequestShapeReplayError.pending(
-                    "synthetic_prompt_token_count_unavailable:\(row.requestID):wanted_\(row.promptTokens):got_\(count)"
+                    "synthetic_prompt_token_count_unavailable:\(row.requestID):wanted_\(targetTokens):got_\(count)"
                 )
             }
             text += selected.fragment
             count = selected.count
         }
         return text
+    }
+
+    private static func cacheWarmupFit(
+        row: NativeMTPRequestShapeReplayRow,
+        modelID: String,
+        context: ModelContext,
+        thinkingToggle: Bool,
+        preserveThinking: Bool
+    ) async throws -> NativeMTPRequestShapeReplayCacheWarmupFit {
+        let cachedTokens = row.conversationCacheCachedPromptTokens
+        let candidates = cacheWarmupGeneratedTokenCandidates(
+            cachedTokens: cachedTokens,
+            targetCompletionTokens: row.targetCompletionTokens
+        )
+        for generatedCompletionTokens in candidates {
+            let promptTarget = cachedTokens - generatedCompletionTokens
+            do {
+                let prompt = try await syntheticPrompt(
+                    row: row,
+                    modelID: modelID,
+                    context: context,
+                    thinkingToggle: thinkingToggle,
+                    preserveThinking: preserveThinking,
+                    targetTokens: promptTarget
+                )
+                let request = try applySyntheticStandIn(
+                    for: row,
+                    to: makeRequest(
+                        modelID: modelID,
+                        requestID: "warmup-\(row.requestID)",
+                        prompt: prompt,
+                        maxTokens: generatedCompletionTokens,
+                        temperature: row.temperature,
+                        topP: row.topP,
+                        stream: row.stream
+                    )
+                )
+                let promptTokens = try await preparedPromptTokenIDs(
+                    for: request,
+                    context: context,
+                    thinkingToggle: thinkingToggle,
+                    preserveThinking: preserveThinking
+                ).count
+                guard promptTokens + generatedCompletionTokens == cachedTokens else { continue }
+                return NativeMTPRequestShapeReplayCacheWarmupFit(
+                    prompt: prompt,
+                    promptTokens: promptTokens,
+                    generatedCompletionTokens: generatedCompletionTokens
+                )
+            } catch NativeMTPRequestShapeReplayError.pending(_) {
+                continue
+            }
+        }
+        throw NativeMTPRequestShapeReplayError.pending(
+            "cache_warmup_two_turn_geometry_unavailable:\(row.requestID):expected_cached_\(cachedTokens)"
+        )
+    }
+
+    private static func cacheWarmupGeneratedTokenCandidates(
+        cachedTokens: Int,
+        targetCompletionTokens: Int
+    ) -> [Int] {
+        guard cachedTokens > 1 else { return [] }
+        let proposed = [
+            min(max(1, targetCompletionTokens), cachedTokens - 1),
+            max(1, cachedTokens / 2),
+            max(1, cachedTokens / 4),
+            64, 32, 16, 8, 4, 2, 1,
+        ]
+        var seen = Set<Int>()
+        return proposed.compactMap { value in
+            guard value > 0, value < cachedTokens, !seen.contains(value) else { return nil }
+            seen.insert(value)
+            return value
+        }
+    }
+
+    private static func measuredRequestAfterCacheWarmup(
+        _ warmup: NativeMTPRequestShapeReplayCacheWarmup,
+        result: CompletionResult,
+        context: ModelContext,
+        thinkingToggle: Bool,
+        preserveThinking: Bool
+    ) async throws -> ChatCompletionRequest {
+        let canonicalTokens = result.promptTokens + result.generatedCompletionTokens
+        guard result.promptTokens == warmup.warmupPromptTokenCount,
+              result.generatedCompletionTokens == warmup.targetGeneratedCompletionTokens,
+              canonicalTokens == warmup.expectedMeasuredCachedPromptTokens else {
+            throw NativeMTPRequestShapeReplayError.pending(
+                "cache_warmup_canonical_token_count_mismatch:\(warmup.requestID):expected_\(warmup.expectedMeasuredCachedPromptTokens):prompt_\(result.promptTokens):generated_\(result.generatedCompletionTokens)"
+            )
+        }
+        guard result.finishReason == "length" else {
+            throw NativeMTPRequestShapeReplayError.pending(
+                "cache_warmup_finish_reason_mismatch:\(warmup.requestID):expected_length:actual_\(result.finishReason)"
+            )
+        }
+        guard !result.content.isEmpty else {
+            throw NativeMTPRequestShapeReplayError.pending("cache_warmup_assistant_content_unavailable:\(warmup.requestID)")
+        }
+        let row = warmup.row
+        let prompt = try await syntheticText(
+            row: row,
+            targetTokens: warmup.targetMeasuredPromptTokens,
+            initialText: "Native MTP R015 cache continuation \(row.requestID)."
+        ) { nextUserText in
+            var request = try makeRequest(
+                modelID: warmup.modelID,
+                requestID: row.requestID,
+                messages: [
+                    ["role": "user", "content": warmup.warmupPrompt],
+                    ["role": "assistant", "content": result.content],
+                    ["role": "user", "content": nextUserText],
+                ],
+                maxTokens: row.requestedMaxCompletionTokens,
+                temperature: row.temperature,
+                topP: row.topP,
+                stream: row.stream
+            )
+            request = try applySyntheticStandIn(for: row, to: request)
+            return try await preparedPromptTokenIDs(
+                for: request,
+                context: context,
+                thinkingToggle: thinkingToggle,
+                preserveThinking: preserveThinking
+            ).count
+        }
+        var measuredRequest = try makeRequest(
+            modelID: warmup.modelID,
+            requestID: row.requestID,
+            messages: [
+                ["role": "user", "content": warmup.warmupPrompt],
+                ["role": "assistant", "content": result.content],
+                ["role": "user", "content": prompt],
+            ],
+            maxTokens: row.requestedMaxCompletionTokens,
+            temperature: row.temperature,
+            topP: row.topP,
+            stream: row.stream
+        )
+        measuredRequest = try applySyntheticStandIn(for: row, to: measuredRequest)
+        measuredRequest = measuredRequest.withConversationKey(
+            warmup.request.conversationKey,
+            cacheOnly: row.conversationCacheOnly
+        )
+        let measuredTokens = try await preparedPromptTokenIDs(
+            for: measuredRequest,
+            context: context,
+            thinkingToggle: thinkingToggle,
+            preserveThinking: preserveThinking
+        ).count
+        guard measuredTokens == warmup.targetMeasuredPromptTokens else {
+            throw NativeMTPRequestShapeReplayError.pending(
+                "cache_measured_prompt_geometry_unavailable:\(warmup.requestID):wanted_\(warmup.targetMeasuredPromptTokens):got_\(measuredTokens)"
+            )
+        }
+        return measuredRequest
+    }
+
+
+    private static func preparedPromptTokenIDs(
+        for request: ChatCompletionRequest,
+        context: ModelContext,
+        thinkingToggle: Bool,
+        preserveThinking: Bool
+    ) async throws -> [Int32] {
+        let input = try ModelRuntime.userInput(
+            for: request,
+            templateSupportsThinkingToggle: thinkingToggle,
+            templateSupportsPreserveThinking: preserveThinking
+        )
+        return try await context.processor.prepare(input: input).text.tokens.asArray(Int32.self)
     }
 
     static func makeRequest(
@@ -480,9 +738,29 @@ final class NativeMTPRequestShapeReplayRunner {
         topP: Double,
         stream: Bool = true
     ) throws -> ChatCompletionRequest {
+        try makeRequest(
+            modelID: modelID,
+            requestID: requestID,
+            messages: [["role": "user", "content": prompt]],
+            maxTokens: maxTokens,
+            temperature: temperature,
+            topP: topP,
+            stream: stream
+        )
+    }
+
+    static func makeRequest(
+        modelID: String,
+        requestID: String,
+        messages: [[String: Any]],
+        maxTokens: Int?,
+        temperature: Double,
+        topP: Double,
+        stream: Bool = true
+    ) throws -> ChatCompletionRequest {
         var object: [String: Any] = [
             "model": modelID,
-            "messages": [["role": "user", "content": prompt]],
+            "messages": messages,
             "temperature": temperature,
             "top_p": topP,
             "stream": stream,
@@ -505,8 +783,8 @@ final class NativeMTPRequestShapeReplayRunner {
             "top_p": row.topP,
             "stream": row.stream,
         ]
-        if let requestedMaxCompletionTokens = row.requestedMaxCompletionTokens {
-            object["max_tokens"] = requestedMaxCompletionTokens
+        if let maxTokens = request.maxTokens {
+            object["max_tokens"] = maxTokens
         }
         Self.applyCapturedLogitControls(from: row, to: &object)
         if row.boolFeature("structured_output_requested") {
@@ -696,6 +974,85 @@ final class NativeMTPRequestShapeReplayRunner {
         return object
     }
 
+
+    private static func measuredWallSeconds(
+        for waves: [[NativeMTPRequestShapeReplayRequestResult]],
+        including include: (NativeMTPRequestShapeReplayRequestResult) -> Bool
+    ) -> Double {
+        waves.reduce(0) { total, wave in
+            let included = wave.filter(include)
+            guard let started = included.map(\.startedAt).min(),
+                  let ended = included.map(\.endedAt).max() else {
+                return total
+            }
+            return total + max(ended.timeIntervalSince(started), 0)
+        }
+    }
+
+    private static func runCacheWarmups(
+        _ warmups: [NativeMTPRequestShapeReplayCacheWarmup],
+        runtime: ModelRuntime
+    ) async throws -> NativeMTPRequestShapeReplayCacheWarmupRun {
+        let snapshot = await runtime.currentSnapshot()
+        guard let container = snapshot.container else {
+            throw NativeMTPRequestShapeReplayError.assertionFailed("runtime has no loaded container")
+        }
+        let thinkingToggle = snapshot.templateSupportsThinkingToggle
+        let preserveThinking = snapshot.templateSupportsPreserveThinking
+        var proofs: [[String: Any]] = []
+        var measuredRequests: [ChatCompletionRequest] = []
+        for warmup in warmups {
+            let result = try await runUnmeasuredRequest(warmup.request, runtime: runtime)
+            let canonicalTokens = result.promptTokens + result.generatedCompletionTokens
+            let measuredRequest = try await container.perform { context in
+                try await measuredRequestAfterCacheWarmup(
+                    warmup,
+                    result: result,
+                    context: context,
+                    thinkingToggle: thinkingToggle,
+                    preserveThinking: preserveThinking
+                )
+            }
+            proofs.append([
+                "request_id": warmup.requestID,
+                "warmup_request_id": warmup.warmupRequestID,
+                "warmup_completion_tokens": result.completionTokens,
+                "warmup_generated_completion_tokens": result.generatedCompletionTokens,
+                "warmup_cached_prompt_tokens": result.cachedPromptTokens,
+                "expected_measured_cached_prompt_tokens": warmup.expectedMeasuredCachedPromptTokens,
+                "warmup_prompt_tokens": warmup.warmupPromptTokenCount,
+                "warmup_canonical_tokens": canonicalTokens,
+                "warmup_finish_reason": result.finishReason,
+                "warmup_cache_only": warmup.request.conversationCacheOnly,
+                "measured_cache_only": warmup.measuredCacheOnly,
+                "warmup_execution_path": "normal_model_runtime",
+            ])
+            measuredRequests.append(measuredRequest)
+        }
+        return NativeMTPRequestShapeReplayCacheWarmupRun(proofs: proofs, measuredRequests: measuredRequests)
+    }
+
+    private static func runUnmeasuredRequest(
+        _ request: ChatCompletionRequest,
+        runtime: ModelRuntime
+    ) async throws -> CompletionResult {
+        let handle = try await runtime.acquireRequestHandle(request)
+        do {
+            let completion: CompletionResult
+            if request.stream {
+                completion = try await runtime.stream(request, with: handle, shouldCancel: { false }) { _ in }
+            } else {
+                let (result, _) = try await runtime.completeWithServedSnapshot(request, with: handle, shouldCancel: { false })
+                completion = result
+            }
+            await runtime.unregisterInFlight(handle.registrationID)
+            return completion
+        } catch {
+            await runtime.unregisterInFlight(handle.registrationID)
+            throw error
+        }
+    }
+
     private static func runStreamingRequest(
         _ request: ChatCompletionRequest,
         runtime: ModelRuntime,
@@ -741,11 +1098,23 @@ final class NativeMTPRequestShapeReplayRunner {
         )
     }
 
+    private static func cacheObservationEventsByRequestID(
+        _ events: [NativeMTPLabConversationCacheObserver.Event],
+        measuredRequestIDs: Set<String>
+    ) -> [String: [NativeMTPLabConversationCacheObserver.Event]] {
+        Dictionary(grouping: events.compactMap { event -> NativeMTPLabConversationCacheObserver.Event? in
+            guard let requestID = event.requestID, measuredRequestIDs.contains(requestID) else { return nil }
+            return event
+        }, by: { $0.requestID ?? "" })
+    }
+
     static func admissionProjectionRows(
         path: NativeMTPRequestShapeReplayPath,
         block: NativeMTPRequestShapeReplayBlock,
         admissions: [NativeMTPHardwareAdmissionRecorder.RequestAdmission],
         requestsByID: [String: ChatCompletionRequest],
+        actualCachedPromptTokensByID: [String: Int],
+        cacheEventsByRequestID: [String: [NativeMTPLabConversationCacheObserver.Event]],
         maxContextTokens: Int
     ) -> [[String: Any]] {
         let admissionsByID = Dictionary(uniqueKeysWithValues: admissions.compactMap { item in
@@ -769,7 +1138,16 @@ final class NativeMTPRequestShapeReplayRunner {
             } else {
                 reproductionPending = "request_reproduction_missing_parsed_request:\(row.requestID)"
             }
-            let reproduced = reproductionPending == nil
+            let expectedCachedPromptTokens = row.expectedCachedPromptTokens
+            let actualCachedPromptTokens = actualCachedPromptTokensByID[row.requestID]
+            let cacheObservation = Self.cacheObservation(row: row, events: cacheEventsByRequestID[row.requestID] ?? [])
+            let cacheStateMatches = actualCachedPromptTokens == expectedCachedPromptTokens
+                && cacheObservation.pendingReason == nil
+            let cachedTokenPendingReason = actualCachedPromptTokens == expectedCachedPromptTokens
+                ? nil
+                : "conversation_cache_state_mismatch:\(row.requestID):expected_\(expectedCachedPromptTokens):actual_\(actualCachedPromptTokens.map(String.init) ?? "missing")"
+            let combinedPending = reproductionPending ?? cachedTokenPendingReason ?? cacheObservation.pendingReason
+            let reproduced = combinedPending == nil
             return [
                 "request_id": row.requestID,
                 "shape_id": row.shapeID,
@@ -778,17 +1156,112 @@ final class NativeMTPRequestShapeReplayRunner {
                 "expected_effective_max_output_tokens": row.maxCompletionTokens,
                 "actual_effective_max_output_tokens": actualBudget.map { $0 as Any } ?? NSNull(),
                 "budget_matches": budgetMatches,
+                "expected_cached_prompt_tokens": expectedCachedPromptTokens,
+                "actual_cached_prompt_tokens": actualCachedPromptTokens.map { $0 as Any } ?? NSNull(),
+                "cache_state_matches": cacheStateMatches,
+                "expected_conversation_key_cache_only": cacheObservation.expectedCacheOnly,
+                "actual_conversation_key_cache_only": cacheObservation.actualCacheOnly,
+                "expected_conversation_key_sticky": cacheObservation.expectedSticky,
+                "actual_conversation_key_sticky": cacheObservation.actualSticky,
+                "expected_conversation_cache_attempted": cacheObservation.expectedAttempted,
+                "actual_conversation_cache_attempted": cacheObservation.actualAttempted,
+                "expected_conversation_cache_lease": cacheObservation.expectedLease,
+                "actual_conversation_cache_lease": cacheObservation.actualLease,
+                "expected_conversation_cache_retained_handoff": cacheObservation.expectedRetainedHandoff,
+                "actual_conversation_cache_retained_handoff": cacheObservation.actualRetainedHandoff,
+                "cache_observation_source": cacheObservation.source,
                 "expected_selector_reason": expectedReason,
                 "actual_selector_reason": actualReason,
                 "expected_effective_path": expectedPath,
                 "actual_effective_path": actualPath,
                 "matches": expectedReason == actualReason && expectedPath == actualPath && budgetMatches && reproduced,
                 "reproduced": reproduced,
-                "pending_reason": reproductionPending.map { $0 as Any } ?? NSNull(),
+                "pending_reason": combinedPending.map { $0 as Any } ?? NSNull(),
             ] as [String: Any]
         }
     }
 
+
+    private static func cacheObservation(
+        row: NativeMTPRequestShapeReplayRow,
+        events: [NativeMTPLabConversationCacheObserver.Event]
+    ) -> NativeMTPRequestShapeReplayCacheObservation {
+        let expectedCacheOnly = row.requiresCacheProof ? row.conversationCacheOnly : false
+        let expectedSticky = row.requiresCacheProof && !row.conversationCacheOnly
+        let expectedAttempted = row.requiresCacheProof
+            && ["hit", "miss", "missing"].contains(row.conversationCacheLease)
+        let expectedLease = expectedAttempted ? row.conversationCacheLease : "not_applicable"
+        let expectedRetainedHandoff = expectedAttempted ? row.conversationCacheRetainedHandoff : false
+
+        guard events.count == 1, let event = events.first else {
+            return NativeMTPRequestShapeReplayCacheObservation(
+                expectedCacheOnly: expectedCacheOnly,
+                actualCacheOnly: false,
+                expectedSticky: expectedSticky,
+                actualSticky: false,
+                expectedAttempted: expectedAttempted,
+                actualAttempted: false,
+                expectedLease: expectedLease,
+                actualLease: "missing",
+                expectedRetainedHandoff: expectedRetainedHandoff,
+                actualRetainedHandoff: false,
+                source: NativeMTPLabConversationCacheObserver.eventSource,
+                pendingReason: events.isEmpty
+                    ? "conversation_cache_observation_missing:\(row.requestID)"
+                    : "conversation_cache_observation_duplicate:\(row.requestID):count_\(events.count)"
+            )
+        }
+
+        let actualCacheOnly = event.keyPresent ? event.cacheOnly : false
+        let actualSticky = event.keyPresent && !event.cacheOnly
+        let actualAttempted = event.keyPresent
+            && event.leaseAllowed
+            && (event.leaseObserved || event.state == "missing")
+        let actualLease = actualAttempted ? event.state : "not_applicable"
+        let actualRetainedHandoff = actualAttempted ? event.retainedHandoff : false
+        var mismatches: [String] = []
+        if event.eventSource != NativeMTPLabConversationCacheObserver.eventSource {
+            mismatches.append("source")
+        }
+        if event.keyPresent != row.requiresCacheProof {
+            mismatches.append("key_present")
+        }
+        if actualCacheOnly != expectedCacheOnly {
+            mismatches.append("cache_only")
+        }
+        if actualSticky != expectedSticky {
+            mismatches.append("sticky")
+        }
+        if actualAttempted != expectedAttempted {
+            mismatches.append("attempted")
+        }
+        if actualLease != expectedLease {
+            mismatches.append("lease")
+        }
+        if actualRetainedHandoff != expectedRetainedHandoff {
+            mismatches.append("retained_handoff")
+        }
+        if actualAttempted && event.cachedTokens != row.expectedCachedPromptTokens {
+            mismatches.append("cached_prompt_tokens")
+        }
+        if actualAttempted && event.state == "hit" && event.lcp < event.cachedTokens {
+            mismatches.append("lcp")
+        }
+        return NativeMTPRequestShapeReplayCacheObservation(
+            expectedCacheOnly: expectedCacheOnly,
+            actualCacheOnly: actualCacheOnly,
+            expectedSticky: expectedSticky,
+            actualSticky: actualSticky,
+            expectedAttempted: expectedAttempted,
+            actualAttempted: actualAttempted,
+            expectedLease: expectedLease,
+            actualLease: actualLease,
+            expectedRetainedHandoff: expectedRetainedHandoff,
+            actualRetainedHandoff: actualRetainedHandoff,
+            source: event.eventSource,
+            pendingReason: mismatches.isEmpty ? nil : "conversation_cache_observation_mismatch:\(row.requestID):\(mismatches.joined(separator: ","))"
+        )
+    }
 
     private static func resolvedMaxOutputTokens(row: NativeMTPRequestShapeReplayRow, maxContextTokens: Int) -> Int? {
         let remaining = maxContextTokens - row.promptTokens
@@ -817,7 +1290,8 @@ final class NativeMTPRequestShapeReplayRunner {
         guard abs(request.topP - row.topP) < 0.000_000_1 else {
             return "top_p_mismatch:\(row.requestID)"
         }
-        guard row.intFeature("requested_n") == (jsonInt(request.promptSource.n) ?? 1) else {
+        let requestedN = jsonNumber(request.promptSource.n).map { Int($0) } ?? 1
+        guard row.intFeature("requested_n") == requestedN else {
             return "requested_n_mismatch:\(row.requestID)"
         }
         let stopLengths = request.stop.map { $0.utf8.count }
@@ -1311,6 +1785,7 @@ struct NativeMTPRequestShapeReplayShape {
         return NativeMTPSelectorReason.eligible.rawValue
     }
 
+
     func boolFeature(_ key: String) -> Bool {
         features[key] as? Bool ?? false
     }
@@ -1649,6 +2124,9 @@ struct NativeMTPRequestShapeReplayRow {
     let temperature: Double
     let topP: Double
     let conversationCacheOnly: Bool
+    let conversationCacheLease: String
+    let conversationCacheCachedPromptTokens: Int
+    let conversationCacheRetainedHandoff: Bool
     let anonymousCacheGroupSHA256: String?
     let requiresCacheProof: Bool
     let pendingReason: String?
@@ -1676,15 +2154,20 @@ struct NativeMTPRequestShapeReplayRow {
         self.temperature = shape.temperature
         self.topP = shape.topP
         self.conversationCacheOnly = shape.conversationCacheOnly
+        self.conversationCacheLease = shape.conversationCacheLease
+        self.conversationCacheCachedPromptTokens = shape.conversationCacheCachedPromptTokens
+        self.conversationCacheRetainedHandoff = shape.conversationCacheRetainedHandoff
         self.anonymousCacheGroupSHA256 = shape.anonymousCacheGroupSHA256
         self.requiresCacheProof = shape.conversationKeyPresent
         let projectedReason = shape.projectedSelectorReason
         if shape.conversationKeyPresent && shape.anonymousCacheGroupSHA256 == nil {
             self.pendingReason = "cache_shape_missing_anonymous_group:\(shape.shapeID)"
-        } else if shape.conversationCacheLease == "hit"
-                    || shape.conversationCacheCachedPromptTokens > 0
-                    || shape.conversationCacheRetainedHandoff {
-            self.pendingReason = "cache_hit_replay_requires_runtime_warmup_proof:\(shape.shapeID)"
+        } else if (shape.conversationCacheLease == "hit" || shape.conversationCacheCachedPromptTokens > 0)
+                    && shape.conversationCacheCachedPromptTokens < ConversationCache.lcpThreshold {
+            self.pendingReason = "cache_hit_replay_requires_lcp_threshold_geometry:\(shape.shapeID)"
+        } else if (shape.conversationCacheLease == "hit" || shape.conversationCacheCachedPromptTokens > 0)
+                    && shape.conversationCacheCachedPromptTokens >= shape.promptTokens {
+            self.pendingReason = "cache_hit_replay_requires_prefix_shorter_than_prompt:\(shape.shapeID)"
         } else if projectedReason == NativeMTPSelectorReason.eligible.rawValue
                     && shape.targetCompletionTokens < 2 {
             self.pendingReason = "ordinary_itl_requires_target_completion_at_least_2:\(shape.shapeID)"
@@ -1722,6 +2205,9 @@ struct NativeMTPRequestShapeReplayRow {
             temperature: temperature,
             topP: topP,
             conversationCacheOnly: conversationCacheOnly,
+            conversationCacheLease: conversationCacheLease,
+            conversationCacheCachedPromptTokens: conversationCacheCachedPromptTokens,
+            conversationCacheRetainedHandoff: conversationCacheRetainedHandoff,
             anonymousCacheGroupSHA256: anonymousCacheGroupSHA256,
             requiresCacheProof: requiresCacheProof,
             pendingReason: pendingReason,
@@ -1746,6 +2232,9 @@ struct NativeMTPRequestShapeReplayRow {
         temperature: Double,
         topP: Double,
         conversationCacheOnly: Bool,
+        conversationCacheLease: String,
+        conversationCacheCachedPromptTokens: Int,
+        conversationCacheRetainedHandoff: Bool,
         anonymousCacheGroupSHA256: String?,
         requiresCacheProof: Bool,
         pendingReason: String?,
@@ -1767,6 +2256,9 @@ struct NativeMTPRequestShapeReplayRow {
         self.temperature = temperature
         self.topP = topP
         self.conversationCacheOnly = conversationCacheOnly
+        self.conversationCacheLease = conversationCacheLease
+        self.conversationCacheCachedPromptTokens = conversationCacheCachedPromptTokens
+        self.conversationCacheRetainedHandoff = conversationCacheRetainedHandoff
         self.anonymousCacheGroupSHA256 = anonymousCacheGroupSHA256
         self.requiresCacheProof = requiresCacheProof
         self.pendingReason = pendingReason
@@ -1775,6 +2267,14 @@ struct NativeMTPRequestShapeReplayRow {
         self.replayFeatures = replayFeatures
         self.metricsClass = metricsClass
         self.exportedShape = exportedShape
+    }
+
+    var requiresCacheWarmup: Bool {
+        conversationCacheCachedPromptTokens > 0
+    }
+
+    var expectedCachedPromptTokens: Int {
+        requiresCacheWarmup ? conversationCacheCachedPromptTokens : 0
     }
 
     func boolFeature(_ key: String) -> Bool {
@@ -1915,6 +2415,51 @@ enum NativeMTPRequestShapeReplayPath: String {
     case nativeMTP = "native_mtp"
 }
 
+struct NativeMTPRequestShapeReplayCacheObservation {
+    let expectedCacheOnly: Bool
+    let actualCacheOnly: Bool
+    let expectedSticky: Bool
+    let actualSticky: Bool
+    let expectedAttempted: Bool
+    let actualAttempted: Bool
+    let expectedLease: String
+    let actualLease: String
+    let expectedRetainedHandoff: Bool
+    let actualRetainedHandoff: Bool
+    let source: String
+    let pendingReason: String?
+}
+
+struct NativeMTPRequestShapeReplayPreparedRequests {
+    let measured: [ChatCompletionRequest]
+    let cacheWarmups: [NativeMTPRequestShapeReplayCacheWarmup]
+}
+
+struct NativeMTPRequestShapeReplayCacheWarmupFit {
+    let prompt: String
+    let promptTokens: Int
+    let generatedCompletionTokens: Int
+}
+
+struct NativeMTPRequestShapeReplayCacheWarmupRun {
+    let proofs: [[String: Any]]
+    let measuredRequests: [ChatCompletionRequest]
+}
+
+struct NativeMTPRequestShapeReplayCacheWarmup {
+    let row: NativeMTPRequestShapeReplayRow
+    let modelID: String
+    let requestID: String
+    let warmupRequestID: String
+    let expectedMeasuredCachedPromptTokens: Int
+    let measuredCacheOnly: Bool
+    let request: ChatCompletionRequest
+    let warmupPrompt: String
+    let warmupPromptTokenCount: Int
+    let targetGeneratedCompletionTokens: Int
+    let targetMeasuredPromptTokens: Int
+}
+
 struct NativeMTPRequestShapeReplayRequestResult {
     let requestID: String
     let startedAt: Date
@@ -1980,6 +2525,7 @@ struct NativeMTPRequestShapeReplayRunResult {
     let targetMismatchRequestIDs: [String]
     let sampleCoverageComplete: Bool
     let admissionProjections: [[String: Any]]
+    let cacheWarmupProofs: [[String: Any]]
 
     func record(policySHA256: String, benchPolicySHA256: String, captureSHA256: String) -> [String: Any] {
         let projectionMatches = admissionProjections.allSatisfy { row in
@@ -2014,6 +2560,7 @@ struct NativeMTPRequestShapeReplayRunResult {
             "target_completion_observation_complete": targetMismatchRequestIDs.isEmpty,
             "target_completion_mismatch_request_ids": targetMismatchRequestIDs,
             "committed_timing_observation_complete": requests.allSatisfy(\.committedTimingComplete),
+            "cache_warmup_proofs": cacheWarmupProofs,
             "completion_tokens_by_request": requests.map { result in
                 [
                     "request_id": result.requestID,
@@ -2022,6 +2569,7 @@ struct NativeMTPRequestShapeReplayRunResult {
                     "target_completion_matched": result.targetCompletionMatched,
                     "target_stop_triggered": result.targetStopTriggered,
                     "generated_completion_tokens": result.completion.generatedCompletionTokens,
+                    "cached_prompt_tokens": result.completion.cachedPromptTokens,
                     "committed_timing_events": result.commitEvents.count,
                     "ttft_seconds": result.ttftSeconds as Any,
                     "inter_token_gaps": result.interTokenGaps,

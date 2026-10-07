@@ -4931,6 +4931,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let cancelBefore = queued("cancel-before", promptTokens: [51, 52, 53])
         try await eventually { await scheduler.metrics().waitingCount == 5 }
         await scheduler.cancel(requestID: "cancel-before")
+        try await eventually { await backend.finishedRequests().contains("cancel-before") }
 
         await decodeGate.open()
         try await eventually { await backend.prefillCallCount() == 2 }
@@ -5632,7 +5633,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let backend = ScriptedBackend(
             scripts: [:],
             prefillTokens: ["cancelled": 10, "peer": 20],
-            nativeTargetTopTokens: ["cancelled": [11], "peer": [21]]
+            nativeTargetTopTokens: ["cancelled": [11, 12], "peer": [21, 22]]
         )
         let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
         let scheduler = try await makeScheduler(
@@ -5696,6 +5697,16 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 requestIDs: ["cancelled", "peer"],
                 cancelledRequestIDs: ["cancelled"]
             ),
+            NativeMTPLabPhaseTrap.Event(
+                phase: .afterVerify,
+                requestIDs: ["peer"],
+                cancelledRequestIDs: []
+            ),
+            NativeMTPLabPhaseTrap.Event(
+                phase: .beforeFinalize,
+                requestIDs: ["peer"],
+                cancelledRequestIDs: []
+            ),
         ])
         let reservedRoundBytes = await scheduler.nativeMTPReservedRoundBytesSnapshot()
         XCTAssertEqual(reservedRoundBytes, 0)
@@ -5708,7 +5719,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let backend = ScriptedBackend(
             scripts: [:],
             prefillTokens: ["cancelled": 10, "peer": 20],
-            nativeTargetTopTokens: ["cancelled": [11], "peer": [21]]
+            nativeTargetTopTokens: ["cancelled": [11, 12], "peer": [21, 22]]
         )
         let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
         let scheduler = try await makeScheduler(
@@ -5771,6 +5782,11 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
 
         XCTAssertEqual(trap.snapshot(), [
             NativeMTPLabPhaseTrap.Event(
+                phase: .afterProposal,
+                requestIDs: ["cancelled", "peer"],
+                cancelledRequestIDs: []
+            ),
+            NativeMTPLabPhaseTrap.Event(
                 phase: .afterVerify,
                 requestIDs: ["cancelled", "peer"],
                 cancelledRequestIDs: ["cancelled"]
@@ -5792,7 +5808,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let backend = ScriptedBackend(
             scripts: [:],
             prefillTokens: ["cancelled": 10, "peer": 20],
-            nativeTargetTopTokens: ["cancelled": [11], "peer": [21]]
+            nativeTargetTopTokens: ["cancelled": [11, 12], "peer": [21, 22]]
         )
         let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
         let scheduler = try await makeScheduler(
@@ -5851,6 +5867,16 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(rowsByID["peer"]?.acceptedTokenIDs, [21])
 
         XCTAssertEqual(trap.snapshot(), [
+            NativeMTPLabPhaseTrap.Event(
+                phase: .afterProposal,
+                requestIDs: ["cancelled", "peer"],
+                cancelledRequestIDs: []
+            ),
+            NativeMTPLabPhaseTrap.Event(
+                phase: .afterVerify,
+                requestIDs: ["cancelled", "peer"],
+                cancelledRequestIDs: []
+            ),
             NativeMTPLabPhaseTrap.Event(
                 phase: .beforeFinalize,
                 requestIDs: ["cancelled", "peer"],
