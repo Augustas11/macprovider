@@ -58,6 +58,18 @@ train.
 
 ## Next CLI candidate — net changes vs 1.8.207
 
+Privacy automatic enrollment [#1871](https://github.com/Augustas11/macprovider/pull/1871)
+remains an open draft as of 2026-10-07, at source commit
+`28b917af6c10ebd7a945174808e43c51b71730aa`. Exact-head
+[CI](https://github.com/Augustas11/macprovider/actions/runs/37587669957) and
+[spec-index](https://github.com/Augustas11/macprovider/actions/runs/37587670019)
+passed, and the source-built CLI release build passed on the designated Studio.
+Positive privacy E2E acceptance and the final full-product freeze audit remain
+pending; these build/check results are not signed-package or fleet acceptance.
+The PR is not merged, is not included in a candidate cut from `main`, and is not
+ready for a candidate cut or fleet activation. No candidate identity is reserved
+by this entry.
+
 Private signed compatibility set
 `Augustas11/macprovider:v1.8.212@d806dcf203a94f813aadbe458c8de578be476bd0`
 was produced by acceptance run [37075501296](https://github.com/Augustas11/macprovider/actions/runs/37075501296)
@@ -85,6 +97,7 @@ are consumed and must not be reused.
 
 | Net change in CLI / Malibu / installer | Status | PR |
 |---|---|---|
+| Automatic privacy-class eligibility and enrollment, preserving explicit opt-out and refusing ineligible posture; fleet availability still requires accepted E2E, reviewed signed identity, and rollout. | in progress; privacy E2E acceptance pending; not in a `main` candidate | [#1871](https://github.com/Augustas11/macprovider/pull/1871) (#1749) |
 | Operator pause remains authoritative when coordinator drain first moves the provider to `network_offline` or `coordinator_unavailable`; only the operator command may write those pause transitions. | merged `9384e5280` 2026-10-03 | #1834 (#1770) |
 | Qwen3.6 35B-A3B ordinary decode uses the fused A3B MoE kernels (fork pin `Augustas11/mlx-swift-lm@b1811029`): decode and verify rows of at most 7 tokens stay fused at any batch size in chunks of at most 7, prefill stays on the stock kernel, and exact per-tensor layout validation gates the path. Studio qualification: ordinary decode 1.25x / 1.15x / 0.97x vs stock at 1 / 2 / 8 rows, 0 parity mismatches in 36 paired blocks, bit-identical run to run. `MLX_LM_QWEN35_FUSED_MOE=0` disables it. `KVBuildIdentity` changes, so prior KV cold-tier entries miss once. Native MTP stays default-off; the native-MTP lab tooling is compiled only under `DEBUG \|\| MACPROVIDER_LAB_HARNESS`, and signed R024 `proposal_depth` is capped at 6. | merged `280f0e95d` 2026-10-05 | #1832 (#1770) |
 | Privacy-class work settles under production `enforce`: a relay-blind route snapshot, a provider-signed content-free `relay-blind-settlement-v1` receipt, and the `relay_blind_settled` outcome, which is never `verified`. The provider withholds the receipt on any unvalidated usage or frame failure. | merged `d4d73c253` 2026-10-05 | #1853 (#1749) |
