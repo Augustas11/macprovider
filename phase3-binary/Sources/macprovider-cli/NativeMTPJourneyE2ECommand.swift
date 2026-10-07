@@ -131,11 +131,6 @@ private final class NativeMTPJourneyRunner {
         }
         let gateRecorder = NativeMTPLoadGateRecorder()
         _ = await native.installLabNativeMTPLoadGateRecorder(gateRecorder)
-        let stateObserver = NativeMTPStateDigestObserver()
-        guard await native.installLabNativeMTPStateDigestObserver(stateObserver) else {
-            throw NativeMTPHardwareE2EError.assertionFailed("native runtime cannot install native-MTP state digest observer")
-        }
-
         // A throwing step is a failed step, recorded with its error; the run
         // continues so one failure does not hide the others.
         var steps: [NativeMTPJourneyStep] = []
@@ -153,7 +148,7 @@ private final class NativeMTPJourneyRunner {
             try await serialOracle(ordinary: ordinary, native: native, recorder: recorder, proposalDepth: fixture.admission.maxProposalDepth)
         }
         await run("step-05-cache-state-boundary") {
-            try await cacheStateBoundary(ordinary: ordinary, native: native, recorder: recorder, override: override, stateObserver: stateObserver)
+            try await cacheStateBoundary(ordinary: ordinary, native: native, recorder: recorder, override: override)
         }
         await run("step-06-streaming-stop") {
             try await streamingStop(ordinary: ordinary, native: native, recorder: recorder)
@@ -170,16 +165,17 @@ private final class NativeMTPJourneyRunner {
         await run("step-09-cancellation") {
             try await cancellation(ordinary: ordinary, native: native, recorder: recorder)
         }
-        await run("step-10-warm-swap") {
-            try await warmSwapBoundary(ordinary: ordinary, native: native, recorder: recorder, fixture: fixture)
-        }
         await run("step-12-native-selftest") {
             try await selfTest(ordinary: ordinary, native: native, fixture: fixture)
         }
-        let passed = steps.allSatisfy(\.passed)
+        await run("step-10-warm-swap") {
+            try await warmSwapBoundary(ordinary: ordinary, native: native, recorder: recorder, fixture: fixture)
+        }
+        let reportSteps = steps.sorted { stepOrder($0.id) < stepOrder($1.id) }
+        let passed = reportSteps.allSatisfy(\.passed)
         // pass only when every executed step is complete; partial when any
         // passing step leaves journey clauses uncovered.
-        let executedStatus = !passed ? "fail" : (steps.allSatisfy { $0.uncovered.isEmpty } ? "pass" : "partial")
+        let executedStatus = !passed ? "fail" : (reportSteps.allSatisfy { $0.uncovered.isEmpty } ? "pass" : "partial")
         let document: [String: Any] = [
             "schema": "macprovider.native-mtp-journey-hardware-result.v1",
             // Covers only the hardware steps below; never a journey verdict.
@@ -219,9 +215,22 @@ private final class NativeMTPJourneyRunner {
                 "ram_gb": fixture.machine.ramGB,
                 "os_version": fixture.machine.osVersion,
             ],
-            "steps": steps.map(\.document),
+            "steps": reportSteps.map(\.document),
         ]
         return (document, passed)
+    }
+
+    private func stepOrder(_ id: String) -> Int {
+        switch id {
+        case "step-04-serial-token-oracle": return 4
+        case "step-05-cache-state-boundary": return 5
+        case "step-06-streaming-stop": return 6
+        case "step-07-08-mixed-multirow-capacity": return 7
+        case "step-09-cancellation": return 9
+        case "step-10-warm-swap": return 10
+        case "step-12-native-selftest": return 12
+        default: return Int.max
+        }
     }
 
     // MARK: steps
@@ -291,104 +300,120 @@ private final class NativeMTPJourneyRunner {
         ordinary: ModelRuntime,
         native: ModelRuntime,
         recorder: NativeMTPHardwareAdmissionRecorder,
-        override: NativeMTPLabProposalOverride,
-        stateObserver: NativeMTPStateDigestObserver
+        override: NativeMTPLabProposalOverride
     ) async throws -> NativeMTPJourneyStep {
         var step = NativeMTPJourneyStep(id: "step-05-cache-state-boundary")
-        let cases = [
-            ("journey-reject-all-0", "Tell a detailed story about a lighthouse keeper (journey-reject-all-0)."),
-            ("journey-boundary-0", "Tell a detailed story about a lighthouse keeper (journey-boundary-0)."),
-            ("journey-boundary-1", "Tell a detailed story about a lighthouse keeper (journey-boundary-1)."),
+        step.uncovered = [
+            "actual aligned-prefix hidden/cache state equality against ordinary decode; current state observer records native-only digests and does not expose ordinary afterDecode committed-prefix cache events",
         ]
-        for (id, prompt) in cases {
-            let request = try makeRequest(
-                id: id,
-                prompt: prompt,
-                maxTokens: 256,
-                temperature: 0,
-                topP: 1
-            )
-            let expected = try await ordinary.complete(request)
-            let before = await native.currentSnapshot().nativeMTPStatus
-            let actual = try await native.complete(request)
-            let delta = NativeMTPStatusDelta(before: before, after: await native.currentSnapshot().nativeMTPStatus)
-            let forced = override.overriddenRounds(requestID: id)
-            step.check("\(id).parity", same(expected, actual))
-            step.check("\(id).native_admitted", lastPath(recorder, id) == .nativeMTP)
-            step.check("\(id).forced_rejections_applied", forced > 0)
-            // Every forced proposal must be rejected (natural rejections can only
-            // add); on the reject-all row every proposal is forced.
-            step.check("\(id).every_forced_proposal_rejected", forced > 0 && delta.rejectedTokens >= UInt64(forced))
-            if id.hasPrefix("journey-reject-all-") {
-                step.check("\(id).all_rejected", delta.proposedTokens == UInt64(forced) && delta.rejectedTokens == delta.proposedTokens)
-            }
-            let promptTokenIDs = try await servedPromptTokens(prompt, runtime: ordinary)
-            let oracleProbe = try await ordinary.labTokenProbe(
-                id: "\(id)-state-oracle",
-                promptTokenIDs: promptTokenIDs,
-                maxCompletionTokens: 64,
-                nativeDepth: nil
-            )
-            let nativeProbe = try await native.labTokenProbe(
-                id: "\(id)-state-native",
-                promptTokenIDs: promptTokenIDs,
-                maxCompletionTokens: 64,
-                nativeDepth: 1
-            )
-            let stateDigest = nativeProbe.nativeMTPCounters.flatMap { counters in
-                committedStateDigest(
-                    promptTokenIDs: promptTokenIDs,
-                    result: nativeProbe,
-                    counters: counters
-                )
-            }
-            let oracleStateDigest = nativeProbe.nativeMTPCounters.flatMap { counters in
-                committedStateDigest(
-                    promptTokenIDs: promptTokenIDs,
-                    result: oracleProbe,
-                    counters: counters
-                )
-            }
-            step.check("\(id).state_probe_tokens_equal", !nativeProbe.generatedTokens.isEmpty && nativeProbe.generatedTokens == oracleProbe.generatedTokens)
-            step.check("\(id).state_probe_terminal_equal", nativeProbe.terminalStatus == oracleProbe.terminalStatus)
-            step.check("\(id).state_probe_native_counters_present", nativeProbe.nativeMTPCounters != nil)
-            step.check("\(id).token_counter_terminal_digest_parity", stateDigest != nil && stateDigest == oracleStateDigest)
-            let stateRecords = stateObserver.snapshot().filter { $0.requestID == id }
-            let phases = Set(stateRecords.map(\.phase))
-            let afterVerify = stateRecords.filter { $0.phase == .afterVerify }
-            let terminalPhasePresent = phases.contains(.afterFinalize) || phases.contains(.abort)
-            step.check("\(id).state_observer_records", !stateRecords.isEmpty)
-            step.check("\(id).state_observer_after_verify", !afterVerify.isEmpty)
-            step.check("\(id).state_observer_terminal_phase", terminalPhasePresent)
-            step.check("\(id).state_observer_raw_digest_shape", stateRecords.allSatisfy {
-                isSHA256Hex($0.digestSHA256)
-                    && isSHA256Hex($0.cacheDigestSHA256)
-                    && ($0.drafterDigestSHA256.map { isSHA256Hex($0) } ?? true)
-                    && ($0.pendingTargetDigestSHA256.map { isSHA256Hex($0) } ?? true)
-            })
-            if id.hasPrefix("journey-reject-all-") {
-                step.check("\(id).state_observer_reject_abort", phases.contains(.abort))
-            }
-            step.details[id] = [
-                "forced_rounds": forced,
-                "proposed": delta.proposedTokens,
-                "accepted": delta.acceptedTokens,
-                "rejected": delta.rejectedTokens,
-                "token_counter_terminal_digest": stateDigest ?? "",
-                "state_probe_tokens": nativeProbe.generatedTokens.count,
-                "state_observer_phases": Array(phases.map(\.rawValue)).sorted(),
-                "state_observer_record_count": stateRecords.count,
-                "state_observer_latest_cache_sha256": stateRecords.last?.cacheDigestSHA256 ?? "",
-                "state_observer_latest_target_sha256": stateRecords.last?.pendingTargetDigestSHA256 ?? "",
-            ]
+        let stateObserver = NativeMTPStateDigestObserver()
+        guard await native.installLabNativeMTPStateDigestObserver(stateObserver) else {
+            throw NativeMTPHardwareE2EError.assertionFailed("native runtime cannot install native-MTP state digest observer")
         }
-        return step
+        do {
+            let cases = [
+                ("journey-reject-all-0", "Tell a detailed story about a lighthouse keeper (journey-reject-all-0)."),
+                ("journey-boundary-0", "Tell a detailed story about a lighthouse keeper (journey-boundary-0)."),
+                ("journey-boundary-1", "Tell a detailed story about a lighthouse keeper (journey-boundary-1)."),
+            ]
+            for (id, prompt) in cases {
+                let request = try makeRequest(
+                    id: id,
+                    prompt: prompt,
+                    maxTokens: 256,
+                    temperature: 0,
+                    topP: 1
+                )
+                let expected = try await ordinary.complete(request)
+                let before = await native.currentSnapshot().nativeMTPStatus
+                let actual = try await native.complete(request)
+                let delta = NativeMTPStatusDelta(before: before, after: await native.currentSnapshot().nativeMTPStatus)
+                let forced = override.overriddenRounds(requestID: id)
+                step.check("\(id).parity", same(expected, actual))
+                step.check("\(id).native_admitted", lastPath(recorder, id) == .nativeMTP)
+                step.check("\(id).forced_rejections_applied", forced > 0)
+                // Every forced proposal must be rejected (natural rejections can only
+                // add); on the reject-all row every proposal is forced.
+                step.check("\(id).every_forced_proposal_rejected", forced > 0 && delta.rejectedTokens >= UInt64(forced))
+                if id.hasPrefix("journey-reject-all-") {
+                    step.check("\(id).all_rejected", delta.proposedTokens == UInt64(forced) && delta.rejectedTokens == delta.proposedTokens)
+                }
+                let promptTokenIDs = try await servedPromptTokens(prompt, runtime: ordinary)
+                let oracleProbe = try await ordinary.labTokenProbe(
+                    id: "\(id)-state-oracle",
+                    promptTokenIDs: promptTokenIDs,
+                    maxCompletionTokens: 64,
+                    nativeDepth: nil
+                )
+                let nativeProbe = try await native.labTokenProbe(
+                    id: "\(id)-state-native",
+                    promptTokenIDs: promptTokenIDs,
+                    maxCompletionTokens: 64,
+                    nativeDepth: 1
+                )
+                let stateDigest = nativeProbe.nativeMTPCounters.flatMap { counters in
+                    committedStateDigest(
+                        promptTokenIDs: promptTokenIDs,
+                        result: nativeProbe,
+                        counters: counters
+                    )
+                }
+                let oracleStateDigest = nativeProbe.nativeMTPCounters.flatMap { counters in
+                    committedStateDigest(
+                        promptTokenIDs: promptTokenIDs,
+                        result: oracleProbe,
+                        counters: counters
+                    )
+                }
+                step.check("\(id).state_probe_tokens_equal", !nativeProbe.generatedTokens.isEmpty && nativeProbe.generatedTokens == oracleProbe.generatedTokens)
+                step.check("\(id).state_probe_terminal_equal", nativeProbe.terminalStatus == oracleProbe.terminalStatus)
+                step.check("\(id).state_probe_native_counters_present", nativeProbe.nativeMTPCounters != nil)
+                step.check("\(id).token_counter_terminal_digest_parity", stateDigest != nil && stateDigest == oracleStateDigest)
+                let stateRecords = stateObserver.snapshot().filter { $0.requestID == id }
+                let phases = Set(stateRecords.map(\.phase))
+                let afterVerify = stateRecords.filter { $0.phase == .afterVerify }
+                let terminalPhasePresent = phases.contains(.afterFinalize) || phases.contains(.abort)
+                step.check("\(id).native_state_observer_records", !stateRecords.isEmpty)
+                step.check("\(id).native_state_observer_after_verify", !afterVerify.isEmpty)
+                step.check("\(id).native_state_observer_terminal_phase", terminalPhasePresent)
+                step.check("\(id).native_state_observer_raw_digest_shape", stateRecords.allSatisfy {
+                    isSHA256Hex($0.digestSHA256)
+                        && isSHA256Hex($0.cacheDigestSHA256)
+                        && ($0.drafterDigestSHA256.map { isSHA256Hex($0) } ?? true)
+                        && ($0.pendingTargetDigestSHA256.map { isSHA256Hex($0) } ?? true)
+                })
+                if id.hasPrefix("journey-reject-all-") {
+                    step.check("\(id).native_state_observer_reject_abort", phases.contains(.abort))
+                }
+                step.details[id] = [
+                    "forced_rounds": forced,
+                    "proposed": delta.proposedTokens,
+                    "accepted": delta.acceptedTokens,
+                    "rejected": delta.rejectedTokens,
+                    "token_counter_terminal_digest": stateDigest ?? "",
+                    "state_probe_tokens": nativeProbe.generatedTokens.count,
+                    "state_observer_phases": Array(phases.map(\.rawValue)).sorted(),
+                    "state_observer_record_count": stateRecords.count,
+                    "state_observer_latest_cache_sha256": stateRecords.last?.cacheDigestSHA256 ?? "",
+                    "state_observer_latest_target_sha256": stateRecords.last?.pendingTargetDigestSHA256 ?? "",
+                    "state_observer_scope": "native_only_no_ordinary_cache_comparison",
+                ]
+            }
+            _ = await native.installLabNativeMTPStateDigestObserver(nil)
+            return step
+        } catch {
+            _ = await native.installLabNativeMTPStateDigestObserver(nil)
+            throw error
+        }
     }
 
     /// step-06: streaming equals non-streaming equals ordinary for a stop
     /// string, a max-tokens terminal, and a sampled row.
     private func streamingStop(ordinary: ModelRuntime, native: ModelRuntime, recorder: NativeMTPHardwareAdmissionRecorder) async throws -> NativeMTPJourneyStep {
         var step = NativeMTPJourneyStep(id: "step-06-streaming-stop")
+        step.uncovered = [
+            "stop string verified to span a native proposal/round boundary; current journey evidence proves stream/non-stream parity, consumer cancellation release, and post-output fault handling",
+        ]
         let cases: [(String, String, [String]?, Int, Double)] = [
             ("journey-stream-stop", "Count from one to thirty in English words, separated by commas.", [" twelve"], 256, 0),
             ("journey-stream-length", "Write a long essay about the history of printing.", nil, 160, 0),
@@ -595,6 +620,9 @@ private final class NativeMTPJourneyRunner {
             ("journey-cancel-after-verify", .afterVerify),
             ("journey-cancel-before-finalize", .beforeFinalize),
         ]
+        step.uncovered = [
+            "phase-cancel hidden cache/drafter rollback equality; current phase trap proves cancellation, release, and no later native phase for the trapped row but does not expose an ordinary-vs-native rollback cache comparison",
+        ]
         for (id, phase) in phaseCases {
             let trap = NativeMTPLabPhaseTrap(cancellations: [phase: [id]])
             let installed = await native.installLabNativeMTPPhaseTrap(trap)
@@ -621,6 +649,7 @@ private final class NativeMTPJourneyRunner {
             step.check("\(id).native_admitted", lastPath(recorder, id) == .nativeMTP)
             step.check("\(id).trap_fired", events.contains { $0.phase == phase && $0.cancelledRequestIDs.contains(id) })
             step.check("\(id).cancelled_not_completed", failed && !completed)
+            step.check("\(id).no_later_native_phase_after_cancel", !hasLaterPhaseEvent(events: events, requestID: id, phase: phase))
             step.check("\(id).scheduler_released_row", idle)
             step.details["\(id).events"] = events.map { [
                 "phase": $0.phase.rawValue,
@@ -714,6 +743,7 @@ private final class NativeMTPJourneyRunner {
             throw NativeMTPHardwareE2EError.assertionFailed("warm-swap old request did not reach in-flight streaming boundary")
         }
 
+        let oldPreSwapStatus = await native.currentSnapshot().nativeMTPStatus
         let swappedModelID = modelID + "-warm-swap-alias"
         let postSwapSnapshot = try await native.labCompleteWarmSwapForNativeMTPJourney(
             modelID: swappedModelID,
@@ -750,10 +780,10 @@ private final class NativeMTPJourneyRunner {
         step.check("old_request_served_old_tuple", oldServedSnapshot.modelID == modelID && oldServedSnapshot.modelHash == fixture.targetIdentity.digest)
         step.check("old_request_parity", same(expectedOld, oldResult))
         step.check("old_streamed_text_equals_content", oldText.value == oldResult.content && expectedOldText == expectedOld.content)
-        step.check("old_request_native_counters_bound", oldAfter.resetGeneration > oldBefore.resetGeneration
-            && oldAfter.proposedTokens > 0
-            && oldAfter.targetForwards > 0
-            && oldAfter.mtpForwards > 0)
+        step.check("old_request_native_counters_bound", oldPreSwapStatus.resetGeneration == oldBefore.resetGeneration
+            && oldPreSwapStatus.proposedTokens > oldBefore.proposedTokens
+            && oldPreSwapStatus.targetForwards > oldBefore.targetForwards
+            && oldPreSwapStatus.mtpForwards > oldBefore.mtpForwards)
         step.check("same_runtime_alias_differs", swappedModelID != modelID)
         step.check("same_runtime_identity_published", postSwapSnapshot.modelID == swappedModelID && postSwapSnapshot.modelHash == fixture.targetIdentity.digest)
         step.check("same_runtime_hash_algorithm_actual", postSwapSnapshot.modelHashAlgorithm == ModelArtifactIdentity.snapshotManifestV1)
@@ -769,9 +799,11 @@ private final class NativeMTPJourneyRunner {
             "model_id": modelID,
             "model_hash": fixture.targetIdentity.digest,
             "native_reset_generation": oldStartSnapshot.nativeMTPStatus.resetGeneration,
-            "proposed": oldAfter.proposedTokens,
-            "accepted": oldAfter.acceptedTokens,
-            "rejected": oldAfter.rejectedTokens,
+            "pre_swap_proposed": oldPreSwapStatus.proposedTokens,
+            "pre_swap_accepted": oldPreSwapStatus.acceptedTokens,
+            "pre_swap_rejected": oldPreSwapStatus.rejectedTokens,
+            "pre_swap_target_forwards": oldPreSwapStatus.targetForwards,
+            "pre_swap_mtp_forwards": oldPreSwapStatus.mtpForwards,
             "chunks_before_swap": oldChunks.value,
         ]
         step.details["post_swap_tuple"] = [
@@ -949,6 +981,22 @@ private final class NativeMTPJourneyRunner {
             try await Task.sleep(nanoseconds: 100_000_000)
         }
         return false
+    }
+
+    private func hasLaterPhaseEvent(
+        events: [NativeMTPLabPhaseTrap.Event],
+        requestID: String,
+        phase: NativeMTPLabPhaseTrapPhase
+    ) -> Bool {
+        let order: [NativeMTPLabPhaseTrapPhase: Int] = [
+            .afterProposal: 0,
+            .afterVerify: 1,
+            .beforeFinalize: 2,
+        ]
+        guard let trappedOrder = order[phase] else { return true }
+        return events.contains { event in
+            (order[event.phase] ?? Int.max) > trappedOrder && event.requestIDs.contains(requestID)
+        }
     }
 
     private func streamCollect(_ request: ChatCompletionRequest, runtime: ModelRuntime) async throws -> (CompletionResult, String) {

@@ -2465,16 +2465,58 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             }
         }
         if let state = row.state {
-            let keys = state.keys.sorted()
-            Self.update(&hasher, label: "lm_state_count", value: String(keys.count))
-            for key in keys {
-                Self.update(&hasher, label: "lm_state_key", value: key)
-                try Self.updateArrayDigest(&hasher, label: "lm_state_value", array: state[key]!)
-            }
+            try Self.updateLMOutputStateDigest(&hasher, state: state)
         } else {
             Self.update(&hasher, label: "lm_state_count", value: "0")
         }
         return Self.hexString(hasher.finalize())
+    }
+
+
+    private static func updateLMOutputStateDigest(_ hasher: inout SHA256, state: LMOutput.State) throws {
+        var count = 0
+        var entries: [(String, () throws -> Void)] = []
+        if let lastHidden = state[mtpLastHiddenStatesKey] {
+            entries.append(("mtp.lastHiddenStates", {
+                try updateArrayDigest(&hasher, label: "lm_state.mtp.lastHiddenStates", array: lastHidden)
+            }))
+        }
+        if let positionDeltas = state[mtpPositionDeltasKey] {
+            entries.append(("mtp.positionDeltas", {
+                try updateArrayDigest(&hasher, label: "lm_state.mtp.positionDeltas", array: positionDeltas)
+            }))
+        }
+        if let sharedKV = state[mtpSharedKVStatesKey] {
+            for key in sharedKV.keys.sorted() {
+                guard let pair = sharedKV[key] else { continue }
+                entries.append(("mtp.sharedKVStates.\(key).k", {
+                    try updateArrayDigest(&hasher, label: "lm_state.mtp.sharedKVStates.\(key).k", array: pair.0)
+                }))
+                entries.append(("mtp.sharedKVStates.\(key).v", {
+                    try updateArrayDigest(&hasher, label: "lm_state.mtp.sharedKVStates.\(key).v", array: pair.1)
+                }))
+            }
+        }
+        if let offsets = state[mtpSharedKVOffsetsKey] {
+            for key in offsets.keys.sorted() {
+                entries.append(("mtp.sharedKVOffsets.\(key)", {
+                    update(&hasher, label: "lm_state.mtp.sharedKVOffsets.\(key)", value: String(offsets[key] ?? 0))
+                }))
+            }
+        }
+        if let sourceIndices = state[mtpSharedKVSourceIndicesKey] {
+            for key in sourceIndices.keys.sorted() {
+                entries.append(("mtp.sharedKVSourceIndices.\(key)", {
+                    update(&hasher, label: "lm_state.mtp.sharedKVSourceIndices.\(key)", value: String(sourceIndices[key] ?? 0))
+                }))
+            }
+        }
+        count = entries.count
+        update(&hasher, label: "lm_state_count", value: String(count))
+        for (key, body) in entries.sorted(by: { $0.0 < $1.0 }) {
+            update(&hasher, label: "lm_state_key", value: key)
+            try body()
+        }
     }
 
     private func nativeMTPDrafterDigest(requestID: String) throws -> String? {

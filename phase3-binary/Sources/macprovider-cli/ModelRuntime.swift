@@ -2587,15 +2587,20 @@ actor ModelRuntime: ModelRuntimeServing {
         self.nativeMTPMode = nativeMTPMode
         self.nativeMTPCapability = nativeMTPCapability
         self.nativeMTPSchedulerSupported = nativeMTPSchedulerSupported
-        self.nativeMTPRequestShapeCapture = try NativeMTPRequestShapeCaptureConfig
-            .fromEnvironment()
-            .map {
-                try NativeMTPRequestShapeCapture(
-                    config: $0,
-                    nativeMTPMode: nativeMTPMode,
-                    runningBuildIdentity: Self.nativeMTPRunningBuildIdentity()
-                )
-            }
+        do {
+            self.nativeMTPRequestShapeCapture = try NativeMTPRequestShapeCaptureConfig
+                .fromEnvironment()
+                .map {
+                    try NativeMTPRequestShapeCapture(
+                        config: $0,
+                        nativeMTPMode: nativeMTPMode,
+                        runningBuildIdentity: Self.nativeMTPRunningBuildIdentity()
+                    )
+                }
+        } catch {
+            fputs("event=native_mtp_request_shape_capture outcome=disabled reason=\(error)\n", stderr)
+            self.nativeMTPRequestShapeCapture = nil
+        }
         #if DEBUG || MACPROVIDER_LAB_HARNESS
         self.testNativeMTPAdmissionObserver = testNativeMTPAdmissionObserver
         self.testNativeMTPAdmissionRequestObserver = testNativeMTPAdmissionRequestObserver
@@ -6485,6 +6490,14 @@ actor ModelRuntime: ModelRuntimeServing {
         return true
     }
 
+    /// Lab-only replay hook: record commit-time timestamps for buyer-visible
+    /// output tokens without exposing token values.
+    func installLabNativeMTPCommitTimingObserver(_ observer: NativeMTPLabCommittedTokenTimingObserver?) async -> Bool {
+        guard let continuousBatchScheduler else { return false }
+        await continuousBatchScheduler.installLabNativeMTPCommitTimingObserver(observer)
+        return true
+    }
+
     /// Lab-only journey hook: freeze one exact batch composition before any
     /// prefill/decode work starts. Returns false unless the scheduler is idle.
     func installLabBatchComposition(_ requestIDs: [String]?) async -> Bool {
@@ -7103,11 +7116,11 @@ actor ModelRuntime: ModelRuntimeServing {
             shouldCancel: shouldCancel,
             drainCancelled: drainCancelled
         ) {
-            nativeMTPRequestShapeCapture?.record(
+            self.nativeMTPRequestShapeCapture?.record(
                 request: request,
                 snapshot: snapshot,
                 admission: nativeMTPAdmission,
-                lease: nil,
+                lease: nil as ConversationCacheLease?,
                 leaseAllowed: false,
                 completion: completion,
                 stream: false
@@ -7128,7 +7141,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 }
                 let completion = try Self.validateStructuredCompletion(result, request: request)
                     .withModelHashObservedIfMissing(Self.validObservedModelHash(snapshot.modelHash))
-                nativeMTPRequestShapeCapture?.record(
+                self.nativeMTPRequestShapeCapture?.record(
                     request: request,
                     snapshot: snapshot,
                     admission: nativeMTPAdmission,
@@ -7152,11 +7165,11 @@ actor ModelRuntime: ModelRuntimeServing {
             }
             let completion = try Self.validateStructuredCompletion(result, request: request)
                 .withModelHashObservedIfMissing(Self.validObservedModelHash(snapshot.modelHash))
-            nativeMTPRequestShapeCapture?.record(
+            self.nativeMTPRequestShapeCapture?.record(
                 request: request,
                 snapshot: snapshot,
                 admission: nativeMTPAdmission,
-                lease: nil,
+                lease: nil as ConversationCacheLease?,
                 leaseAllowed: false,
                 completion: completion,
                 stream: false
@@ -7402,14 +7415,15 @@ actor ModelRuntime: ModelRuntimeServing {
                             modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
                             settlementDisposition: .eligibleOwner
                         ), request: request)
-                        nativeMTPRequestShapeCapture?.record(
+                        self.nativeMTPRequestShapeCapture?.record(
                             request: request,
                             snapshot: snapshot,
                             admission: nativeMTPAdmission,
                             lease: lease,
                             leaseAllowed: conversationCacheAllowed,
                             completion: completion,
-                            stream: false
+                            stream: false,
+                            resolvedMaxCompletionTokens: request.maxTokens ?? max(1, maxContextTokens - promptTokenIds.count)
                         )
                         if let lease {
                             let fullTokens = promptTokenIds + resultTokenIDs.map(Int32.init)
@@ -7714,14 +7728,15 @@ actor ModelRuntime: ModelRuntimeServing {
             )
         }
         if let completion = batchedCompletion {
-            nativeMTPRequestShapeCapture?.record(
+            self.nativeMTPRequestShapeCapture?.record(
                 request: request,
                 snapshot: snapshot,
                 admission: nativeMTPAdmission,
-                lease: nil,
+                lease: nil as ConversationCacheLease?,
                 leaseAllowed: false,
                 completion: completion,
-                stream: true
+                stream: true,
+                resolvedMaxCompletionTokens: request.maxTokens
             )
             return completion
         }
@@ -7750,11 +7765,11 @@ actor ModelRuntime: ModelRuntimeServing {
                 request: request,
                 buyerVisibleContent: structuredAccumulator.content
             )
-            nativeMTPRequestShapeCapture?.record(
+            self.nativeMTPRequestShapeCapture?.record(
                 request: request,
                 snapshot: snapshot,
                 admission: nativeMTPAdmission,
-                lease: nil,
+                lease: nil as ConversationCacheLease?,
                 leaseAllowed: false,
                 completion: validated,
                 stream: true
@@ -7780,11 +7795,11 @@ actor ModelRuntime: ModelRuntimeServing {
                 request: request,
                 buyerVisibleContent: structuredAccumulator.content
             )
-            nativeMTPRequestShapeCapture?.record(
+            self.nativeMTPRequestShapeCapture?.record(
                 request: request,
                 snapshot: snapshot,
                 admission: nativeMTPAdmission,
-                lease: nil,
+                lease: nil as ConversationCacheLease?,
                 leaseAllowed: false,
                 completion: validated,
                 stream: true
@@ -8206,14 +8221,15 @@ actor ModelRuntime: ModelRuntimeServing {
                             request: request,
                             buyerVisibleContent: structuredAccumulator.content
                         )
-                        nativeMTPRequestShapeCapture?.record(
+                        self.nativeMTPRequestShapeCapture?.record(
                             request: request,
                             snapshot: snapshot,
                             admission: nativeMTPAdmission,
                             lease: lease,
                             leaseAllowed: conversationCacheAllowed,
                             completion: validated,
-                            stream: true
+                            stream: true,
+                            resolvedMaxCompletionTokens: request.maxTokens ?? max(1, maxContextTokens - promptTokenIds.count)
                         )
                         if let lease {
                             let fullTokens = promptTokenIds + resultTokenIDs.map(Int32.init)

@@ -1,6 +1,6 @@
-import json
 import contextlib
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,54 +9,124 @@ from scripts import native_mtp_request_shape_replay as replay
 
 
 class NativeMTPRequestShapeReplayTests(unittest.TestCase):
-    def test_project_selector_ordering_and_analyzer_strip(self):
+    def test_project_selector_ordering_and_pending_replay_contract(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             capture = self._write_capture(root, [
-                self._shape("cache-miss", key=True, cache_only=True, lease="miss", cached=0, observed_count=2),
-                self._shape("sticky-unknown", key=True, cache_only=False, features={"unknown_top_level_keys": True}),
+                self._shape("cache-miss", key=True, cache_only=True, lease="miss", cached=0),
+                self._shape("sticky-unknown", key=True, cache_only=False, unknown_top_level=True),
                 self._shape("cache-hit", key=True, cache_only=True, lease="hit", cached=9),
-                self._shape("unknown", features={"unknown_top_level_keys": True}),
-                self._shape("reasoning", features={"reasoning_or_template": True}),
-                self._shape("state", features={"unsupported_state_cache": True}),
+                self._shape("unknown", unknown_top_level=True),
+                self._shape("reasoning", reasoning=True),
+                self._shape("ordinary"),
             ])
             bounds = self._write_bounds(root)
-            policy, plan = replay.project_capture(
-                capture,
-                bounds,
-                blocks=10,
-                privacy_review_id="privacy-1770-r015",
-                privacy_reviewed_at="2026-10-07T00:00:00Z",
-                preregistration_digest="a" * 64,
-                seed=48015,
-            )
-        reasons = {shape["shape_id"]: shape["pre_capacity_selector_reason"] for shape in plan["blocks"][0]["request_shapes"]}
-        self.assertEqual(reasons["cache-miss:1"], "eligible")
-        self.assertEqual(reasons["cache-miss:2"], "eligible")
+            policy, plan = self._project(capture, bounds)
+        reasons = {shape["shape_id"]: shape["pre_capacity_selector_reason"] for shape in plan["blocks"][0]["request_shape_templates"]}
+        self.assertEqual(reasons["cache-miss"], "eligible")
         self.assertEqual(reasons["sticky-unknown"], "unknown_request_field")
         self.assertEqual(reasons["cache-hit"], "conversation_key")
-        self.assertEqual(reasons["unknown"], "unknown_request_field")
         self.assertEqual(reasons["reasoning"], "reasoning_or_template")
-        self.assertEqual(reasons["state"], "unsupported_state_cache")
-        emitted = plan["blocks"][0]["request_shapes"][0]
-        self.assertNotIn("features", emitted)
+        self.assertEqual(plan["qualification_status"], "PENDING_REAL_LAB_REPLAY")
+        self.assertEqual(plan["replay_requirements"]["status"], "PENDING")
+        emitted = plan["blocks"][0]["request_shape_templates"][0]
         self.assertNotIn("prompt_tokens", emitted)
-        self.assertNotIn("cache_group", emitted)
+        self.assertNotIn("served_model_hash_sha256", emitted)
+        self.assertNotIn("build_cdhash", json.dumps(plan["blocks"]))
         self.assertEqual(policy["sample_digest_sha256"], plan["sample_digest_sha256"])
-        self.assertEqual(plan["sample_report"]["captured_request_count"], 7)
-        self.assertEqual(plan["sample_report"]["projected_request_count_per_block"], 7)
+        self.assertEqual(plan["sample_report"]["captured_request_count"], 6)
         self.assertIn("no population representativeness", plan["sample_report"]["representativeness_claim"])
-        notice = plan["blocks"][0]["replay_requests"][0]["synthetic_content_notice"]
-        self.assertIn("synthetic prompt content", notice)
+
+    def test_selector_order_keeps_unknown_before_sticky_and_tools(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            capture = self._write_capture(root, [
+                self._shape("sticky-tool", key=True, cache_only=False, tools=True),
+                self._shape("unknown-tool", tools=True, unknown_top_level=True),
+                self._shape("logprobs-logit", logprobs=True, logit_bias=True),
+                self._shape("tools-logit-bias", tools=True, logit_bias=True),
+                self._shape("sticky-presence", key=True, cache_only=False, presence_penalty=True),
+            ])
+            bounds = self._write_bounds(root)
+            _, plan = self._project(capture, bounds)
+        reasons = {shape["shape_id"]: shape["pre_capacity_selector_reason"] for shape in plan["blocks"][0]["request_shape_templates"]}
+        self.assertEqual(reasons["sticky-tool"], "conversation_key")
+        self.assertEqual(reasons["unknown-tool"], "unknown_request_field")
+        self.assertEqual(reasons["logprobs-logit"], "logprobs")
+        self.assertEqual(reasons["tools-logit-bias"], "tools")
+        self.assertEqual(reasons["sticky-presence"], "logit_controls")
+
+    def test_tuple_bounds_drive_capability_and_sampling_reasons(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            capture = self._write_capture(root, [
+                self._shape("too-long", prompt_tokens=2048),
+                self._shape("max-too-high", max_completion_tokens=513),
+                self._shape("sampled", temperature=0.5),
+                self._shape("bad-top-p", top_p=1.5),
+            ])
+            bounds = self._write_bounds(root, maximum_prompt_tokens=1024, request_feature_profile="native_mtp_greedy_text_v1")
+            _, plan = self._project(capture, bounds)
+        reasons = {shape["shape_id"]: shape["pre_capacity_selector_reason"] for shape in plan["blocks"][0]["request_shape_templates"]}
+        self.assertEqual(reasons["too-long"], "capability_mismatch")
+        self.assertEqual(reasons["max-too-high"], "capability_mismatch")
+        self.assertEqual(reasons["sampled"], "sampling")
+        self.assertEqual(reasons["bad-top-p"], "sampling")
+
+
+    def test_sampler_support_allows_high_finite_temperature_on_sampled_tuple(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            capture = self._write_capture(root, [
+                self._shape("hot-sampled", temperature=99),
+                self._shape("negative-temp", temperature=-0.1),
+            ])
+            bounds = self._write_bounds(root, request_feature_profile="native_mtp_sampled_text_v1")
+            _, plan = self._project(capture, bounds)
+        reasons = {shape["shape_id"]: shape["pre_capacity_selector_reason"] for shape in plan["blocks"][0]["request_shape_templates"]}
+        self.assertEqual(reasons["hot-sampled"], "eligible")
+        self.assertEqual(reasons["negative-temp"], "sampling")
+
+    def test_runtime_request_shape_uses_exact_sanitized_capture_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime_shape = self._shape(
+                "runtime-sampled",
+                temperature=0.7,
+                top_p=0.9,
+                top_logprobs=True,
+                unknown_stream_options=True,
+                response_format="json_object",
+            )
+            capture = root / "runtime.jsonl"
+            capture.write_text(json.dumps(self._header()) + "\n" + json.dumps(runtime_shape) + "\n", "utf-8")
+            _, shapes = replay.load_capture(capture)
+        shape = shapes[0]
+        self.assertEqual(shape.requested_temperature, 0.7)
+        self.assertEqual(shape.requested_top_p, 0.9)
+        self.assertEqual(shape.top_logprobs_requested, True)
+        self.assertEqual(shape.unknown_stream_option_keys_present, True)
+        self.assertEqual(shape.response_format_kind, "json_object")
+        self.assertNotIn("prompt", runtime_shape)
+        self.assertNotIn("model", runtime_shape)
+
+    def test_runtime_request_shape_rejects_missing_selector_proof_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime_shape = self._shape("runtime-missing")
+            runtime_shape.pop("requested_temperature")
+            capture = root / "runtime-missing.jsonl"
+            capture.write_text(json.dumps(self._header()) + "\n" + json.dumps(runtime_shape) + "\n", "utf-8")
+            with self.assertRaisesRegex(ValueError, "requested_temperature:field_invalid"):
+                replay.load_capture(capture)
 
     def test_privacy_rejects_raw_prompt_key_and_duplicate_json(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             capture = root / "capture.jsonl"
-            header = self._header(request_count=1, completion_tokens=64)
             bad = self._shape("bad")
             bad["prompt"] = "raw buyer prompt"
-            capture.write_text(json.dumps(header) + "\n" + json.dumps(bad) + "\n", "utf-8")
+            capture.write_text(json.dumps(self._header()) + "\n" + json.dumps(bad) + "\n", "utf-8")
             with self.assertRaisesRegex(ValueError, "raw_text_field"):
                 replay.load_capture(capture)
             duplicate = root / "duplicate.jsonl"
@@ -64,113 +134,43 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "duplicate JSON key"):
                 replay.load_capture(duplicate)
 
-    def test_tuple_bounds_drive_capability_and_sampling_reasons(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            capture = self._write_capture(root, [
-                self._shape("too-long", prompt_tokens=2048),
-                self._shape("sampled", features={"temperature": 0.5}),
-            ])
-            bounds = self._write_bounds(root, maximum_prompt_tokens=1024, request_feature_profile="native_mtp_greedy_text_v1")
-            _, plan = replay.project_capture(
-                capture,
-                bounds,
-                blocks=10,
-                privacy_review_id="privacy-1770-r015",
-                privacy_reviewed_at="2026-10-07T00:00:00Z",
-                preregistration_digest="b" * 64,
-                seed=1,
-            )
-        reasons = {shape["shape_id"]: shape["pre_capacity_selector_reason"] for shape in plan["blocks"][0]["request_shapes"]}
-        self.assertEqual(reasons["too-long"], "capability_mismatch")
-        self.assertEqual(reasons["sampled"], "sampling")
-
-
-    def test_capture_counts_must_match_observed_shapes(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            shape = self._shape("two", observed_count=2, completion_tokens=10)
-            capture = root / "capture.jsonl"
-            header = self._header(request_count=1, completion_tokens=20)
-            capture.write_text(json.dumps(header) + "\n" + json.dumps(shape) + "\n", "utf-8")
-            with self.assertRaisesRegex(ValueError, "captured_request_count_mismatch"):
-                replay.load_capture(capture)
-
-    def test_selector_order_keeps_sticky_before_later_tool_reason(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            capture = self._write_capture(root, [
-                self._shape("sticky-tool", key=True, cache_only=False, features={"tools": True}),
-                self._shape("logprobs-logit", features={"logprobs": True, "logit_bias_present": True}),
-            ])
-            bounds = self._write_bounds(root)
-            _, plan = replay.project_capture(
-                capture,
-                bounds,
-                blocks=10,
-                privacy_review_id="privacy-1770-r015",
-                privacy_reviewed_at="2026-10-07T00:00:00Z",
-                preregistration_digest="c" * 64,
-                seed=1,
-            )
-        reasons = {shape["shape_id"]: shape["pre_capacity_selector_reason"] for shape in plan["blocks"][0]["request_shapes"]}
-        self.assertEqual(reasons["sticky-tool"], "conversation_key")
-        self.assertEqual(reasons["logprobs-logit"], "logprobs")
-
-    def test_sse_metrics_use_observed_timestamps(self):
-        observations = [
-            replay.observation_from_sse(10.0, [
-                (10.2, b'data: {"choices":[{"delta":{"content":"a"}}]}\n\n'),
-                (10.5, b'data: {"choices":[{"delta":{"content":"b"}}]}\n\n'),
-                (10.7, b'data: [DONE]\n\n'),
-            ]),
-            replay.observation_from_sse(20.0, [
-                (20.1, b'data: {"choices":[{"delta":{"content":"a"}}]}\n\n'),
-                (20.4, b'data: {"choices":[{"delta":{"content":"b"}}]}\n\n'),
-                (20.6, b'data: {"choices":[{"delta":{"content":"c"}}]}\n\n'),
-                (20.8, b'data: [DONE]\n\n'),
-            ]),
-        ]
-        metrics = replay.metrics_from_observations(observations)
-        self.assertGreater(metrics["ordinary_row_p95_ttft_seconds"], 0)
-        self.assertGreater(metrics["ordinary_row_p95_itl_seconds"], 0)
-        self.assertGreater(metrics["ordinary_row_throughput_tps"], 0)
-        self.assertGreater(metrics["end_to_end_aggregate_throughput_tps"], 0)
-
-    def test_run_requires_local_no_join_signed_candidate(self):
+    def test_projection_tool_refuses_to_claim_real_replay(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             plan = root / "plan.json"
-            policy = root / "policy.json"
-            out = root / "out.jsonl"
             plan.write_text(json.dumps({"schema": replay.PLAN_SCHEMA, "blocks": []}), "utf-8")
-            policy.write_text(json.dumps({"preregistration_digest_sha256": "a" * 64, "privacy_review_id": "p", "sample_digest_sha256": "b" * 64}), "utf-8")
-            with contextlib.redirect_stdout(io.StringIO()):
-                code = replay.main(["run", "--plan", str(plan), "--policy", str(policy), "--output", str(out), "--endpoint", "https://coordinator.malibu.tech/v1/chat/completions"])
-            self.assertEqual(code, 1)
+            with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                code = replay.main(["run", "--plan", str(plan)])
+            self.assertEqual(code, 2)
+            self.assertIn("replay runner disabled", stdout.getvalue())
 
-    def _header(self, *, request_count=1, completion_tokens=64):
+    def _project(self, capture, bounds):
+        return replay.project_capture(
+            capture,
+            bounds,
+            blocks=10,
+            privacy_review_id="privacy-1770-r015",
+            privacy_reviewed_at="2026-10-07T00:00:00Z",
+            preregistration_digest="a" * 64,
+            seed=48015,
+            sampling_plan_id="r015-bounded-prospective-sample",
+            sample_period_start="2026-10-07T00:00:00Z",
+            sample_period_end="2026-10-07T01:00:00Z",
+        )
+
+    def _header(self):
         return {
             "schema": replay.CAPTURE_SCHEMA,
             "record_type": "header",
             "captured_at": "2026-10-07T00:00:00Z",
             "native_mtp_mode": "off",
             "capture_requires_native_mtp_off": True,
-            "served_identity": "local-no-join",
+            "served_identity": "per_record_sha256",
             "build_source_commit": "deadbeef",
             "build_cdhash": "cdhashfixture",
             "cli_version": "fixture",
             "max_records": 100,
             "max_bytes": 100000,
-            "privacy_review_id": "privacy-1770-r015",
-            "privacy_reviewed_at": "2026-10-07T00:00:00Z",
-            "capture_stage": "post_gateway_provider_bound",
-            "capture_mode": "mtp_off",
-            "sampling_plan_id": "r015-last7d-bounded",
-            "sample_period_start": "2026-09-30T00:00:00Z",
-            "sample_period_end": "2026-10-07T00:00:00Z",
-            "captured_request_count": request_count,
-            "captured_completion_tokens": completion_tokens,
         }
 
     def _shape(
@@ -179,43 +179,98 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
         *,
         prompt_tokens=256,
         completion_tokens=64,
+        max_completion_tokens=96,
         key=False,
-        cache_only=None,
-        lease=None,
-        cached=None,
-        retained=None,
-        features=None,
-        observed_count=1,
+        cache_only=False,
+        lease="not_applicable",
+        cached=0,
+        retained=False,
+        stream=True,
+        stop_sequences=0,
+        temperature=0,
+        top_p=1,
+        requested_n=1,
+        top_k=False,
+        min_p=False,
+        frequency_penalty=False,
+        presence_penalty=False,
+        repetition_penalty=False,
+        logit_bias=False,
+        tools=False,
+        tool_choice=False,
+        tool_turn=False,
+        response_format="text",
+        logprobs=False,
+        top_logprobs=False,
+        logit_controls=False,
+        reasoning=False,
+        multimodal=False,
+        unknown_top_level=False,
+        unknown_stream_options=False,
+        pre_reason="mode_off",
+        pre_eligible=False,
     ):
-        shape = {
+        if key and cache_only and lease == "not_applicable":
+            lease = "miss"
+        reason = pre_reason
+        eligible = pre_eligible
+        return {
             "schema": replay.CAPTURE_SCHEMA,
-            "record_type": "shape",
+            "record_type": "request_shape",
+            "sequence": 1,
             "shape_id": shape_id,
-            "observed_count": observed_count,
+            "captured_at": "2026-10-07T00:00:01Z",
+            "served_model_hash_sha256": "a" * 64,
+            "served_weights_manifest_sha256": "b" * 64,
+            "native_mtp_tuple_sha256": "none",
+            "native_mtp_served_snapshot_id_sha256": "none",
+            "native_mtp_target_generation": 0,
+            "stream": stream,
+            "stop_sequences": stop_sequences,
+            "requested_temperature": temperature,
+            "requested_top_p": top_p,
+            "requested_n": requested_n,
+            "requested_max_completion_tokens": max_completion_tokens,
+            "resolved_max_completion_tokens": max_completion_tokens,
+            "sampling_requested": temperature != 0 or top_p != 1,
+            "multiple_completions_requested": requested_n != 1,
+            "top_k_present": top_k,
+            "min_p_nonzero": min_p,
+            "frequency_penalty_nonzero": frequency_penalty,
+            "presence_penalty_nonzero": presence_penalty,
+            "repetition_penalty_nondefault": repetition_penalty,
+            "logit_bias_present": logit_bias,
+            "tools_present": tools or tool_choice or tool_turn,
+            "tool_choice_present": tool_choice,
+            "tool_turn_state_present": tool_turn,
+            "structured_output_requested": response_format != "text",
+            "response_format_kind": response_format,
+            "logprobs_requested": logprobs or top_logprobs,
+            "top_logprobs_requested": top_logprobs,
+            "logit_controls_requested": presence_penalty or frequency_penalty or min_p or repetition_penalty or logit_bias,
+            "reasoning_or_template_model": reasoning,
+            "multimodal_requested": multimodal,
+            "unknown_request_fields_present": unknown_top_level or unknown_stream_options,
+            "unknown_top_level_keys_present": unknown_top_level,
+            "unknown_stream_option_keys_present": unknown_stream_options,
+            "conversation_key_present": key,
+            "conversation_key_cache_only": cache_only,
+            "conversation_cache_lease": lease,
+            "conversation_cache_cached_prompt_tokens": cached,
+            "conversation_cache_retained_handoff": retained,
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
-            "conversation_key_present": key,
-            "features": features or {},
+            "generated_completion_tokens": completion_tokens,
+            "max_completion_tokens_requested": max_completion_tokens,
+            "pre_capacity_selector_reason": reason,
+            "pre_capacity_eligible": eligible,
+            "effective_path": "ordinary",
         }
-        if key:
-            shape["conversation_key_cache_only"] = bool(cache_only)
-            if cache_only:
-                shape["conversation_cache_lease"] = lease
-                shape["conversation_cache_cached_prompt_tokens"] = cached
-                shape["conversation_cache_retained_handoff"] = False if retained is None else retained
-                shape["cache_group"] = "group-" + shape_id
-        return shape
 
     def _write_capture(self, root, shapes):
         capture = root / "capture.jsonl"
-        request_count = sum(shape.get("observed_count", 1) for shape in shapes)
-        completion_tokens = sum(shape.get("observed_count", 1) * shape["completion_tokens"] for shape in shapes)
         capture.write_text(
-            "\n".join(
-                json.dumps(record, sort_keys=True)
-                for record in [self._header(request_count=request_count, completion_tokens=completion_tokens), *shapes]
-            )
-            + "\n",
+            "\n".join(json.dumps(record, sort_keys=True) for record in [self._header(), *shapes]) + "\n",
             "utf-8",
         )
         return capture

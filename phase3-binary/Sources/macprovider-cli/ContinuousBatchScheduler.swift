@@ -841,6 +841,38 @@ final class NativeMTPLabPhaseTrap: @unchecked Sendable {
     }
 }
 
+
+final class NativeMTPLabCommittedTokenTimingObserver: @unchecked Sendable {
+    struct Event: Equatable, Sendable {
+        let requestID: String
+        let monotonicNanoseconds: UInt64
+        /// Zero-based ordinal in the buyer-visible output token stream.
+        let ordinal: Int
+        /// Buyer-visible output token count after this commit is applied.
+        let outputCount: Int
+    }
+
+    private let lock = NSLock()
+    private var events: [Event] = []
+
+    func record(requestID: String, ordinal: Int, outputCount: Int) {
+        lock.lock()
+        events.append(Event(
+            requestID: requestID,
+            monotonicNanoseconds: DispatchTime.now().uptimeNanoseconds,
+            ordinal: ordinal,
+            outputCount: outputCount
+        ))
+        lock.unlock()
+    }
+
+    func snapshot() -> [Event] {
+        lock.lock()
+        defer { lock.unlock() }
+        return events
+    }
+}
+
 final class NativeMTPLabPostoutputFault: @unchecked Sendable {
     private let lock = NSLock()
     private var requestIDs: Set<String>
@@ -1784,6 +1816,7 @@ actor ContinuousBatchScheduler {
     private var labNativeMTPProposalOverride: NativeMTPLabProposalOverride?
     private var labNativeMTPPhaseTrap: NativeMTPLabPhaseTrap?
     private var labNativeMTPPostoutputFault: NativeMTPLabPostoutputFault?
+    private var labNativeMTPCommitTimingObserver: NativeMTPLabCommittedTokenTimingObserver?
     /// Lab-only batch-composition fence. The journey harness installs the exact
     /// request order before submitting a batch; the pump stays stopped until
     /// every named row is queued, then consumes them in that order.
@@ -3896,6 +3929,12 @@ actor ContinuousBatchScheduler {
         labNativeMTPPostoutputFault = fault
     }
 
+    /// Lab-only: record scheduler commit-time timestamps for buyer-visible
+    /// output tokens without recording token values.
+    func installLabNativeMTPCommitTimingObserver(_ observer: NativeMTPLabCommittedTokenTimingObserver?) {
+        labNativeMTPCommitTimingObserver = observer
+    }
+
     /// Lab-only: hold the pump until every named request is queued, then order
     /// those rows exactly as supplied. Only an idle scheduler may install it.
     func installLabBatchComposition(_ requestIDs: [String]?) -> Bool {
@@ -4353,6 +4392,18 @@ actor ContinuousBatchScheduler {
 
         let firstVisibleIndex = row.outputTokens.count
         row.outputTokens.append(contentsOf: visibleTokens)
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if !visibleTokens.isEmpty {
+            let outputCount = row.outputTokens.count
+            for offset in visibleTokens.indices {
+                labNativeMTPCommitTimingObserver?.record(
+                    requestID: row.request.id,
+                    ordinal: firstVisibleIndex + offset,
+                    outputCount: outputCount
+                )
+            }
+        }
+        #endif
         if row.request.serialToolStopObserver?.observe(visibleTokens) == true {
             // Match the existing asynchronous stopEarly boundary: the token
             // that completed the call is visible, and the next applied token
