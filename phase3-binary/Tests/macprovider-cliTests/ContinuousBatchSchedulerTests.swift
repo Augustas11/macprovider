@@ -5697,6 +5697,83 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         try await eventually { await allocator.freeBlockCount() == 16 }
     }
 
+    func testNativeMTPAfterVerifyTrapCancelsOnlySelectedRowBeforeFinalize() async throws {
+        let cancelledRecorder = TokenEventRecorder()
+        let peerRecorder = TokenEventRecorder()
+        let backend = ScriptedBackend(
+            scripts: [:],
+            prefillTokens: ["cancelled": 10, "peer": 20],
+            nativeTargetTopTokens: ["cancelled": [11], "peer": [21]]
+        )
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 2,
+            maxPrefillRowsPerIteration: 2,
+            backend: backend,
+            allocator: allocator
+        )
+        let trap = NativeMTPLabPhaseTrap(cancellations: [.afterVerify: ["cancelled"]])
+        await scheduler.installLabNativeMTPPhaseTrap(trap)
+
+        let cancelled = Task {
+            try await scheduler.submit(Self.nativeRequest(
+                id: "cancelled",
+                promptTokens: [1],
+                maxOutputTokens: 2,
+                proposals: [11],
+                maximumDepth: 1
+            ), tokenSink: { event in
+                cancelledRecorder.append(event)
+            })
+        }
+        let peer = Task {
+            try await scheduler.submit(Self.nativeRequest(
+                id: "peer",
+                promptTokens: [2],
+                maxOutputTokens: 2,
+                proposals: [21],
+                maximumDepth: 1
+            ), tokenSink: { event in
+                peerRecorder.append(event)
+            })
+        }
+
+        let cancelledResult = try await cancelled.value
+        let peerResult = try await peer.value
+
+        XCTAssertEqual(cancelledResult.terminalStatus, .cancelled)
+        XCTAssertEqual(cancelledResult.outputTokens, [])
+        XCTAssertEqual(cancelledRecorder.events().map(\.token), [10])
+        XCTAssertEqual(peerResult.terminalStatus, .length)
+        XCTAssertEqual(peerResult.outputTokens, [20, 21])
+        XCTAssertEqual(peerRecorder.events().map(\.token), [20, 21])
+
+        let verifyBatch = try XCTUnwrap(await backend.nativeVerifyBatches().first)
+        XCTAssertEqual(Set(verifyBatch), ["cancelled", "peer"])
+        let firstFinalization = try XCTUnwrap(await backend.nativeFinalizations().first)
+        XCTAssertEqual(Set(firstFinalization.map(\.requestID)), ["cancelled", "peer"])
+        let rowsByID = Dictionary(uniqueKeysWithValues: firstFinalization.map { ($0.requestID, $0) })
+        XCTAssertEqual(rowsByID["cancelled"]?.shouldCommit, false)
+        XCTAssertEqual(rowsByID["cancelled"]?.committedProposalTokenCount, 0)
+        XCTAssertEqual(rowsByID["cancelled"]?.committedInputTokenCount, 0)
+        XCTAssertEqual(rowsByID["cancelled"]?.acceptedTokenIDs, [])
+        XCTAssertEqual(rowsByID["peer"]?.shouldCommit, true)
+        XCTAssertEqual(rowsByID["peer"]?.committedProposalTokenCount, 1)
+        XCTAssertEqual(rowsByID["peer"]?.committedInputTokenCount, 2)
+        XCTAssertEqual(rowsByID["peer"]?.acceptedTokenIDs, [21])
+
+        XCTAssertEqual(trap.snapshot(), [
+            NativeMTPLabPhaseTrap.Event(
+                phase: .afterVerify,
+                requestIDs: ["cancelled", "peer"],
+                cancelledRequestIDs: ["cancelled"]
+            ),
+        ])
+        let reservedRoundBytes = await scheduler.nativeMTPReservedRoundBytesSnapshot()
+        XCTAssertEqual(reservedRoundBytes, 0)
+        try await eventually { await allocator.freeBlockCount() == 16 }
+    }
+
     func testNativeMTPBeforeFinalizeTrapCancelsOnlySelectedRowBeforeCommit() async throws {
         let cancelledRecorder = TokenEventRecorder()
         let peerRecorder = TokenEventRecorder()

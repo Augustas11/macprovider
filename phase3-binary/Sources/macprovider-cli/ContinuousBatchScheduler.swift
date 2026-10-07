@@ -3517,20 +3517,7 @@ actor ContinuousBatchScheduler {
             requestIDs: prepared.map { $0.row.request.id }
         ) ?? []
         if !afterVerifyCancelled.isEmpty {
-            cancelledIDs.formUnion(prepared.map { $0.row.request.id })
-            let abortError: (any Error)?
-            do {
-                try await abortNativeMTPRound(prepared)
-                abortError = nil
-            } catch {
-                abortError = error
-            }
-            if let abortError {
-                record(.cleanupFailed)
-                ContinuousBatchingPolicy.logForwardFailed(abortError)
-            }
-            await processCancellations()
-            return
+            cancelledIDs.formUnion(afterVerifyCancelled)
         }
         #endif
         let stalePreparedRows = staleNativeMTPRows(prepared.map(\.row))

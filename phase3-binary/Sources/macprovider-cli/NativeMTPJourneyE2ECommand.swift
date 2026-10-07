@@ -707,21 +707,40 @@ private final class NativeMTPJourneyRunner {
             let observerInstalled = await native.installLabNativeMTPStateDigestObserver(stateObserver)
             let trap = NativeMTPLabPhaseTrap(cancellations: [phase: [id]])
             let installed = await native.installLabNativeMTPPhaseTrap(trap)
+            let peerID = "\(id)-peer"
+            let prompt = "Write a very long story about a journey across a desert and include many vivid details."
             let request = try makeRequest(
                 id: id,
-                prompt: "Write a very long story about a journey across a desert and include many vivid details.",
+                prompt: prompt,
                 maxTokens: 256,
                 temperature: 0,
                 topP: 1
             )
+            let peerRequest = try makeRequest(
+                id: peerID,
+                prompt: prompt,
+                maxTokens: 256,
+                temperature: 0,
+                topP: 1,
+                conversationKey: "conv:\(peerID)"
+            )
+            let cancelledTask = Task { try await native.complete(request) }
+            let peerTask = Task { try await native.complete(peerRequest) }
             var completed = false
             var failed = false
+            var peerCompleted = false
             do {
-                _ = try await native.complete(request)
+                _ = try await cancelledTask.value
                 completed = true
             } catch {
                 failed = true
                 step.details["\(id).error"] = String(describing: error)
+            }
+            do {
+                _ = try await peerTask.value
+                peerCompleted = true
+            } catch {
+                step.details["\(peerID).error"] = String(describing: error)
             }
             _ = await native.installLabNativeMTPPhaseTrap(nil)
             _ = await native.installLabNativeMTPStateDigestObserver(nil)
@@ -740,8 +759,13 @@ private final class NativeMTPJourneyRunner {
             step.check("\(id).trap_installed", installed)
             step.check("\(id).native_admitted", lastPath(recorder, id) == .nativeMTP)
             step.check("\(id).trap_fired", events.contains { $0.phase == phase && $0.cancelledRequestIDs.contains(id) })
+            step.check("\(id).ordinary_peer_selected_ordinary", lastPath(recorder, peerID) == .ordinary)
+            step.check("\(id).ordinary_peer_not_cancelled", events.allSatisfy { !$0.cancelledRequestIDs.contains(peerID) })
+            step.check("\(id).ordinary_peer_completed", peerCompleted)
             step.check("\(id).cancelled_not_completed", failed && !completed)
-            step.check("\(id).no_later_native_phase_after_cancel", !hasLaterPhaseEvent(events: events, requestID: id, phase: phase))
+            if phase == .afterProposal {
+                step.check("\(id).no_later_native_phase_after_cancel", !hasLaterPhaseEvent(events: events, requestID: id, phase: phase))
+            }
             step.check("\(id).pre_post_abort_digest_observed", !beforeAbort.isEmpty && !afterAbort.isEmpty)
             step.check("\(id).pre_post_abort_cache_and_drafter_stable", abortStateStable)
             step.check("\(id).after_abort_fresh_drafter_recomputation", !afterAbort.isEmpty && afterAbort.allSatisfy {
