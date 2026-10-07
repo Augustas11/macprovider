@@ -38,10 +38,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeEvidenceError(w, http.StatusServiceUnavailable, "source_evidence_unavailable", "source evidence unavailable")
 		return
 	}
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, h.maxBody))
-	dec.DisallowUnknownFields()
 	var req ExportRequest
-	if err := dec.Decode(&req); err != nil {
+	if err := decodeStrictJSONFromReader(http.MaxBytesReader(w, r.Body, h.maxBody), h.maxBody, &req); err != nil {
 		writeEvidenceError(w, http.StatusBadRequest, "invalid_source_evidence_request", "invalid source evidence request")
 		return
 	}

@@ -1187,6 +1187,7 @@ func (b *billingRecorder) logNoDispatchClosure(terminalKind string, status int, 
 	if b == nil {
 		return
 	}
+	b.model = ""
 	if b.server == nil || b.server.sourceEvidence == nil || b.server.reqLogStore == nil || b.state == nil || b.req == nil {
 		b.logBuyerFailure(status, msg)
 		return
@@ -1209,9 +1210,6 @@ func (b *billingRecorder) logNoDispatchClosure(terminalKind string, status int, 
 		PrefHeader:            sanitizeRequestLogText(b.req.Header.Get("X-MacProvider-Pref")),
 		ProviderHeader:        sanitizeRequestLogText(b.req.Header.Get("X-MacProvider-Provider")),
 		Retried:               0,
-	}
-	if terminalKind == sourceevidence.TerminalModelNotFound {
-		row.Model = ""
 	}
 	if b.relayBlind != nil {
 		inputCap, outputCap := b.relayBlind.InputTokenUpperBound, b.relayBlind.MaxOutputTokens

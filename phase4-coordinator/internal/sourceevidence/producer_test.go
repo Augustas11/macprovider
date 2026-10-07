@@ -5,7 +5,9 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -98,5 +100,31 @@ func TestProducerSignsSortedCoordinatorProjection(t *testing.T) {
 	}
 	if !ed25519.Verify(pub, append([]byte(SignDomain+"\n"), signedBytes...), rawSig) {
 		t.Fatalf("signature did not verify")
+	}
+
+	// Validate the actual Go-produced bytes with the protected Python consumer,
+	// so independently valid signatures cannot conceal a projection mismatch.
+	envelopeBytes, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	envelopePath := filepath.Join(dir, "export.json")
+	if err := os.WriteFile(envelopePath, envelopeBytes, 0o600); err != nil {
+		t.Fatalf("write envelope: %v", err)
+	}
+	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatalf("repository path: %v", err)
+	}
+	const consumer = `import sys, pathlib
+sys.path.insert(0, sys.argv[3] + "/scripts")
+from source_authenticated_evidence import ExpectedExport, load_json_file, parse_timestamp_ms, validate_envelope
+expected = ExpectedExport(producer="coordinator", role="no_dispatch_refusal", instance_id="coordinator-prod-a", source_sha="0123456789abcdef0123456789abcdef01234567", run_id="run-1880", challenge_nonce="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", domain="macprovider.source-authenticated-export.v1", now=parse_timestamp_ms("2026-10-07T12:00:01.000Z"))
+validate_envelope(load_json_file(pathlib.Path(sys.argv[1])), load_json_file(pathlib.Path(sys.argv[2])), expected)
+`
+	cmd := exec.Command("python3", "-c", consumer, envelopePath, registryPath, repoRoot)
+	cmd.Env = append(os.Environ(), "PYTHONDONTWRITEBYTECODE=1")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Python rejected Go-produced envelope: %v\n%s", err, output)
 	}
 }

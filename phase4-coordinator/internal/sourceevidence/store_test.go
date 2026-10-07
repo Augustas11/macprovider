@@ -49,6 +49,48 @@ func TestStoreRejectsGlobalRequestIDCollision(t *testing.T) {
 	}
 }
 
+func TestStoreRejectsPoolUnavailableWithNonblankModel(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newTestStore(t)
+	row := testNoDispatchRow("acct-model", "external-model", "55555555-5555-4555-8555-555555555555", 503, "Pool unavailable")
+	row.Model = "private-pool-model"
+	if err := store.RecordNoDispatch(ctx, ClosureInput{TerminalKind: TerminalPoolUnavailable, Row: row}); err == nil {
+		t.Fatalf("pool-unavailable closure with nonblank model unexpectedly succeeded")
+	}
+}
+
+func TestResolveClosedRejectsTamperedPoolUnavailableModel(t *testing.T) {
+	ctx := context.Background()
+	store, db := newTestStore(t)
+	row := testNoDispatchRow("acct-tamper", "external-tamper", "66666666-6666-4666-8666-666666666666", 503, "Pool unavailable")
+	if err := store.RecordNoDispatch(ctx, ClosureInput{TerminalKind: TerminalPoolUnavailable, Row: row}); err != nil {
+		t.Fatalf("RecordNoDispatch: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE request_log SET model = 'private-pool-model' WHERE request_id = ?`, row.RequestID); err != nil {
+		t.Fatalf("tamper request_log: %v", err)
+	}
+	_, err := store.ResolveClosedBatch(ctx, []Scope{{AccountID: row.AccountID, ExternalRequestID: row.ExternalRequestID, RequiredInternalRequestID: row.RequestID}})
+	if err == nil {
+		t.Fatalf("ResolveClosedBatch accepted tampered pool-unavailable model")
+	}
+}
+
+func TestResolveClosedBatchRejectsMissingScopeAllOrNothing(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newTestStore(t)
+	row := testNoDispatchRow("acct-batch", "external-batch", "88888888-8888-4888-8888-888888888888", 404, "")
+	if err := store.RecordNoDispatch(ctx, ClosureInput{TerminalKind: TerminalModelNotFound, Row: row}); err != nil {
+		t.Fatalf("RecordNoDispatch: %v", err)
+	}
+	_, err := store.ResolveClosedBatch(ctx, []Scope{
+		{AccountID: row.AccountID, ExternalRequestID: row.ExternalRequestID, RequiredInternalRequestID: row.RequestID},
+		{AccountID: "acct-missing", ExternalRequestID: "external-missing", RequiredInternalRequestID: "99999999-9999-4999-8999-999999999999"},
+	})
+	if err == nil {
+		t.Fatalf("ResolveClosedBatch accepted a batch with a missing scope")
+	}
+}
+
 func newTestStore(t *testing.T) (*Store, *sql.DB) {
 	t.Helper()
 	reqLog, err := requestlog.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))

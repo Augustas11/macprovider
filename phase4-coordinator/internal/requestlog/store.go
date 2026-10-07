@@ -512,7 +512,7 @@ func insertReturningID(ctx context.Context, db execer, row Row) (int64, error) {
 			accountIDArg, row.RequestID,
 		).Scan(&existing)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		attemptN = &existing
 	}

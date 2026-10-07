@@ -81,13 +81,16 @@ func (s *Store) RecordNoDispatch(ctx context.Context, in ClosureInput) error {
 	if in.Row.ProviderAssignedID != "" {
 		return fmt.Errorf("%w: provider assigned", ErrUnavailable)
 	}
+	if in.Row.Model != "" {
+		return fmt.Errorf("%w: no-dispatch model must be blank", ErrUnavailable)
+	}
 	if in.Row.RequestID == "" || in.Row.AccountID == "" || in.Row.ExternalRequestID == "" {
 		return fmt.Errorf("%w: missing request identity", ErrUnavailable)
 	}
 	if in.TerminalKind != TerminalModelNotFound && in.TerminalKind != TerminalPoolUnavailable {
 		return fmt.Errorf("%w: unsupported terminal", ErrUnavailable)
 	}
-	if in.TerminalKind == TerminalModelNotFound && (in.Row.Status != 404 || in.Row.Model != "" || in.Row.Error != "No provider has advertised the requested model") {
+	if in.TerminalKind == TerminalModelNotFound && (in.Row.Status != 404 || in.Row.Error != "No provider has advertised the requested model") {
 		return fmt.Errorf("%w: model-not-found row mismatch", ErrUnavailable)
 	}
 	if in.TerminalKind == TerminalPoolUnavailable && (in.Row.Status != 503 || in.Row.Error != "Pool unavailable") {
@@ -128,19 +131,30 @@ INSERT INTO coordinator_source_no_dispatch_closures (
 }
 
 func (s *Store) ResolveClosed(ctx context.Context, scope Scope) (ResolvedRecord, error) {
-	if s == nil {
-		return ResolvedRecord{}, ErrDisabled
+	records, err := s.ResolveClosedBatch(ctx, []Scope{scope})
+	if err != nil {
+		return ResolvedRecord{}, err
 	}
-	requestScope := ScopeCommitment(s.hmacKey, scope)
-	var out ResolvedRecord
-	out.Scope = scope
+	if len(records) != 1 {
+		return ResolvedRecord{}, ErrScopeNotClosed
+	}
+	return records[0], nil
+}
+
+func (s *Store) ResolveClosedBatch(ctx context.Context, scopes []Scope) ([]ResolvedRecord, error) {
+	if s == nil {
+		return nil, ErrDisabled
+	}
+	if len(scopes) == 0 {
+		return nil, ErrInvalidRequest
+	}
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return out, err
+		return nil, err
 	}
 	defer conn.Close()
 	if _, err := conn.ExecContext(ctx, `BEGIN`); err != nil {
-		return out, err
+		return nil, err
 	}
 	committed := false
 	defer func() {
@@ -148,8 +162,27 @@ func (s *Store) ResolveClosed(ctx context.Context, scope Scope) (ResolvedRecord,
 			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		}
 	}()
+	out := make([]ResolvedRecord, 0, len(scopes))
+	for _, scope := range scopes {
+		resolved, err := s.resolveClosedInReadTx(ctx, conn, scope)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, resolved)
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return nil, err
+	}
+	committed = true
+	return out, nil
+}
+
+func (s *Store) resolveClosedInReadTx(ctx context.Context, conn *sql.Conn, scope Scope) (ResolvedRecord, error) {
+	requestScope := ScopeCommitment(s.hmacKey, scope)
+	var out ResolvedRecord
+	out.Scope = scope
 	var c closureRow
-	err = conn.QueryRowContext(ctx, `
+	err := conn.QueryRowContext(ctx, `
 SELECT id, request_scope_commitment, internal_request_commitment, request_id, request_log_id, terminal_kind,
        request_log_status, request_log_error_message, request_log_model_blank, closed_at_utc, created_at_utc
   FROM coordinator_source_no_dispatch_closures
@@ -175,9 +208,12 @@ SELECT id, request_scope_commitment, internal_request_commitment, request_id, re
 		return out, fmt.Errorf("%w: provider assigned", ErrScopeNotClosed)
 	}
 	out.ProviderSet = provider.Valid && provider.String != ""
+	if model != "" || !c.RequestLogModelBlank {
+		return out, fmt.Errorf("%w: privacy redaction", ErrScopeNotClosed)
+	}
 	switch c.TerminalKind {
 	case TerminalModelNotFound:
-		if model != "" || !c.RequestLogModelBlank || out.LogStatus != 404 || errorMsg != "No provider has advertised the requested model" || c.RequestLogErrorMessage != errorMsg {
+		if out.LogStatus != 404 || errorMsg != "No provider has advertised the requested model" || c.RequestLogErrorMessage != errorMsg {
 			return out, fmt.Errorf("%w: privacy redaction", ErrScopeNotClosed)
 		}
 	case TerminalPoolUnavailable:
@@ -210,10 +246,6 @@ SELECT id, request_scope_commitment, internal_request_commitment, request_id, re
 			return out, fmt.Errorf("%w: settlement rows after closure", ErrScopeNotClosed)
 		}
 	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return out, err
-	}
-	committed = true
 	out.Closure = c
 	out.ClosureIDHMAC = ClosureIDCommitment(s.hmacKey, c.ID)
 	out.Absence = absence

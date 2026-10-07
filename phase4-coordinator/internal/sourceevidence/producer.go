@@ -6,9 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"regexp"
 	"sort"
@@ -24,6 +22,7 @@ const (
 	maxRunIDBytes       = 128
 	maxLookupIDBytes    = 128
 	maxSafeIntegerInt64 = int64(9007199254740991)
+	registrySchema      = "macprovider.source-evidence-key-registry.v1"
 )
 
 var (
@@ -33,6 +32,9 @@ var (
 	requestIDRE  = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 	keyIDRE      = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 	instanceIDRE = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
+	roleRE       = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+	domainRE     = regexp.MustCompile(`^[a-z][a-z0-9_.:-]{0,127}$`)
+	utcMillisRE  = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$`)
 	base64URLRE  = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 )
 
@@ -69,7 +71,7 @@ func NewProducer(store *Store, cfg Config, prov FixedProvenance) (*Producer, err
 	if prov.Now == nil {
 		prov.Now = func() time.Time { return time.Now().UTC() }
 	}
-	registry, err := loadJSONFileBounded(prov.ReviewedRegistryPath, defaultMaxBodyBytes)
+	registry, err := loadStrictJSONFileBounded(prov.ReviewedRegistryPath, defaultMaxBodyBytes)
 	if err != nil {
 		return nil, fmt.Errorf("reviewed registry: %w", err)
 	}
@@ -109,11 +111,11 @@ func (p *Producer) Export(ctx context.Context, req ExportRequest) (ExportEnvelop
 	requestScopes := make([]string, 0, len(req.Scopes))
 	seen := make(map[string]struct{}, len(req.Scopes))
 	generatedAt := p.prov.Now().UTC()
-	for _, scope := range req.Scopes {
-		resolved, err := p.store.ResolveClosed(ctx, scope)
-		if err != nil {
-			return ExportEnvelope{}, fmt.Errorf("%w: %v", ErrScopeNotClosed, err)
-		}
+	resolvedRecords, err := p.store.ResolveClosedBatch(ctx, req.Scopes)
+	if err != nil {
+		return ExportEnvelope{}, fmt.Errorf("%w: %v", ErrScopeNotClosed, err)
+	}
+	for _, resolved := range resolvedRecords {
 		if closedAt, err := time.Parse(time.RFC3339Nano, resolved.Closure.ClosedAtUTC); err != nil {
 			return ExportEnvelope{}, fmt.Errorf("%w: closure timestamp", ErrScopeNotClosed)
 		} else if closedAt.After(generatedAt) {
@@ -288,89 +290,71 @@ func LoadSecretBytes(path string) ([]byte, error) {
 	return nil, fmt.Errorf("source evidence secret file is not base64url, base64, or hex")
 }
 
-type reviewedRegistry struct {
-	SchemaVersion string                `json:"schema_version"`
-	Keys          []reviewedRegistryKey `json:"keys"`
-}
-
-type reviewedRegistryKey struct {
-	KeyID                     string                    `json:"key_id"`
-	Algorithm                 string                    `json:"algorithm"`
-	PublicKey                 string                    `json:"public_key"`
-	Producer                  string                    `json:"producer"`
-	InstanceID                string                    `json:"instance_id"`
-	PermittedRoles            []string                  `json:"permitted_roles"`
-	PermittedDomains          []string                  `json:"permitted_domains"`
-	NotBefore                 string                    `json:"not_before"`
-	NotAfter                  string                    `json:"not_after"`
-	RevokedAt                 *string                   `json:"revoked_at"`
-	ReviewedSourceConstraints reviewedSourceConstraints `json:"reviewed_source_constraints"`
-}
-
-type reviewedSourceConstraints struct {
-	SourceSHAAllowlist []string `json:"source_sha_allowlist"`
-}
-
 func authorizeRegistryKey(registry any, prov FixedProvenance, publicKey ed25519.PublicKey) error {
-	b, err := json.Marshal(registry)
-	if err != nil {
+	root, ok := registry.(map[string]any)
+	if !ok {
+		return fmt.Errorf("%w: registry root must be object", ErrProvenanceMissing)
+	}
+	if err := requireExactKeys(root, []string{"schema_version", "keys"}, "registry"); err != nil {
 		return err
 	}
-	var parsed reviewedRegistry
-	if err := json.Unmarshal(b, &parsed); err != nil {
-		return err
+	if root["schema_version"] != registrySchema {
+		return fmt.Errorf("%w: registry schema mismatch", ErrProvenanceMissing)
 	}
-	var selected *reviewedRegistryKey
+	keys, ok := root["keys"].([]any)
+	if !ok || len(keys) == 0 {
+		return fmt.Errorf("%w: registry keys missing", ErrProvenanceMissing)
+	}
+	var selected map[string]any
 	seen := map[string]struct{}{}
-	for i := range parsed.Keys {
-		key := &parsed.Keys[i]
-		if !keyIDRE.MatchString(key.KeyID) {
-			return fmt.Errorf("%w: invalid registry key id", ErrProvenanceMissing)
+	for i, raw := range keys {
+		key, ok := raw.(map[string]any)
+		if !ok {
+			return fmt.Errorf("%w: registry key row must be object", ErrProvenanceMissing)
 		}
-		if _, ok := seen[key.KeyID]; ok {
+		if err := validateReviewedRegistryRow(key, i); err != nil {
+			return err
+		}
+		keyID := key["key_id"].(string)
+		if _, ok := seen[keyID]; ok {
 			return fmt.Errorf("%w: duplicate registry key id", ErrProvenanceMissing)
 		}
-		seen[key.KeyID] = struct{}{}
-		if key.KeyID == prov.KeyID {
+		seen[keyID] = struct{}{}
+		if keyID == prov.KeyID {
 			selected = key
 		}
 	}
 	if selected == nil {
 		return fmt.Errorf("%w: key id not in registry", ErrProvenanceMissing)
 	}
-	if selected.Algorithm != "ed25519" || selected.Producer != ProducerName || selected.InstanceID != prov.InstanceID || !instanceIDRE.MatchString(selected.InstanceID) {
+	if selected["algorithm"] != "ed25519" || selected["producer"] != ProducerName || selected["instance_id"] != prov.InstanceID {
 		return fmt.Errorf("%w: key identity not authorized", ErrProvenanceMissing)
 	}
-	pub, err := base64.RawURLEncoding.DecodeString(selected.PublicKey)
+	pub, err := decodeRegistryPublicKey(selected["public_key"].(string))
 	if err != nil || !ed25519.PublicKey(pub).Equal(publicKey) {
 		return fmt.Errorf("%w: key public material mismatch", ErrProvenanceMissing)
 	}
-	if !contains(selected.PermittedRoles, ProducerRole) || !contains(selected.PermittedDomains, SignDomain) || !contains(selected.ReviewedSourceConstraints.SourceSHAAllowlist, prov.SourceSHA) {
+	roles := stringArray(selected["permitted_roles"])
+	domains := stringArray(selected["permitted_domains"])
+	constraints := selected["reviewed_source_constraints"].(map[string]any)
+	shas := stringArray(constraints["source_sha_allowlist"])
+	if !contains(roles, ProducerRole) || !contains(domains, SignDomain) || !contains(shas, prov.SourceSHA) {
 		return fmt.Errorf("%w: key constraints do not authorize producer", ErrProvenanceMissing)
 	}
 	now := prov.Now().UTC()
-	notBefore, err := time.Parse(time.RFC3339, selected.NotBefore)
-	if err != nil {
-		notBefore, err = time.Parse("2006-01-02T15:04:05.000Z", selected.NotBefore)
-	}
+	notBefore, err := parseRegistryMillis(selected["not_before"].(string))
 	if err != nil {
 		return fmt.Errorf("%w: key not_before invalid", ErrProvenanceMissing)
 	}
-	notAfter, err := time.Parse(time.RFC3339, selected.NotAfter)
-	if err != nil {
-		notAfter, err = time.Parse("2006-01-02T15:04:05.000Z", selected.NotAfter)
-	}
+	notAfter, err := parseRegistryMillis(selected["not_after"].(string))
 	if err != nil {
 		return fmt.Errorf("%w: key not_after invalid", ErrProvenanceMissing)
 	}
-	if now.Before(notBefore) || !now.Before(notAfter) {
+	if !notBefore.Before(notAfter) || now.Before(notBefore) || !now.Before(notAfter) {
 		return fmt.Errorf("%w: selected key inactive", ErrProvenanceMissing)
 	}
-	if selected.RevokedAt != nil && strings.TrimSpace(*selected.RevokedAt) != "" {
-		revokedAt, err := time.Parse(time.RFC3339, *selected.RevokedAt)
-		if err != nil {
-			revokedAt, err = time.Parse("2006-01-02T15:04:05.000Z", *selected.RevokedAt)
-		}
+	if revokedRaw := selected["revoked_at"]; revokedRaw != nil {
+		revokedAt, err := parseRegistryMillis(revokedRaw.(string))
 		if err != nil || !now.Before(revokedAt) {
 			return fmt.Errorf("%w: selected key revoked", ErrProvenanceMissing)
 		}
@@ -378,31 +362,139 @@ func authorizeRegistryKey(registry any, prov FixedProvenance, publicKey ed25519.
 	return nil
 }
 
-func loadJSONFileBounded(path string, maxBytes int64) (any, error) {
-	if strings.TrimSpace(path) == "" {
-		return nil, fmt.Errorf("path is required")
+func validateReviewedRegistryRow(key map[string]any, index int) error {
+	path := fmt.Sprintf("registry.keys[%d]", index)
+	if err := requireExactKeys(key, []string{"key_id", "algorithm", "public_key", "producer", "instance_id", "permitted_roles", "permitted_domains", "not_before", "not_after", "revoked_at", "reviewed_source_constraints"}, path); err != nil {
+		return err
 	}
-	if maxBytes <= 0 {
-		maxBytes = defaultMaxBodyBytes
+	if s, ok := key["key_id"].(string); !ok || !keyIDRE.MatchString(s) {
+		return fmt.Errorf("%w: invalid registry key id", ErrProvenanceMissing)
 	}
-	f, err := os.Open(path)
+	if key["algorithm"] != "ed25519" {
+		return fmt.Errorf("%w: registry algorithm must be ed25519", ErrProvenanceMissing)
+	}
+	if pub, ok := key["public_key"].(string); !ok {
+		return fmt.Errorf("%w: registry public key invalid", ErrProvenanceMissing)
+	} else if _, err := decodeRegistryPublicKey(pub); err != nil {
+		return fmt.Errorf("%w: registry public key invalid", ErrProvenanceMissing)
+	}
+	if s, ok := key["producer"].(string); !ok || (s != "gateway" && s != "coordinator") {
+		return fmt.Errorf("%w: registry producer invalid", ErrProvenanceMissing)
+	}
+	if s, ok := key["instance_id"].(string); !ok || !instanceIDRE.MatchString(s) {
+		return fmt.Errorf("%w: registry instance id invalid", ErrProvenanceMissing)
+	}
+	if err := validateUniqueStringArray(key["permitted_roles"], roleRE, 16, path+".permitted_roles"); err != nil {
+		return err
+	}
+	if err := validateUniqueStringArray(key["permitted_domains"], domainRE, 16, path+".permitted_domains"); err != nil {
+		return err
+	}
+	notBefore, ok := key["not_before"].(string)
+	if !ok {
+		return fmt.Errorf("%w: registry not_before invalid", ErrProvenanceMissing)
+	}
+	notAfter, ok := key["not_after"].(string)
+	if !ok {
+		return fmt.Errorf("%w: registry not_after invalid", ErrProvenanceMissing)
+	}
+	start, err := parseRegistryMillis(notBefore)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("%w: registry not_before invalid", ErrProvenanceMissing)
 	}
-	defer f.Close()
-	dec := json.NewDecoder(io.LimitReader(f, maxBytes+1))
-	dec.UseNumber()
-	var out any
-	if err := dec.Decode(&out); err != nil {
-		return nil, err
+	end, err := parseRegistryMillis(notAfter)
+	if err != nil || !start.Before(end) {
+		return fmt.Errorf("%w: registry validity window invalid", ErrProvenanceMissing)
 	}
-	if dec.InputOffset() > maxBytes {
-		return nil, fmt.Errorf("json file too large")
+	if revoked := key["revoked_at"]; revoked != nil {
+		s, ok := revoked.(string)
+		if !ok {
+			return fmt.Errorf("%w: registry revoked_at invalid", ErrProvenanceMissing)
+		}
+		if _, err := parseRegistryMillis(s); err != nil {
+			return fmt.Errorf("%w: registry revoked_at invalid", ErrProvenanceMissing)
+		}
 	}
-	if err := validateCanonical(out); err != nil {
-		return nil, err
+	constraints, ok := key["reviewed_source_constraints"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("%w: registry constraints invalid", ErrProvenanceMissing)
 	}
-	return out, nil
+	if err := requireExactKeys(constraints, []string{"source_sha_allowlist", "notes"}, path+".reviewed_source_constraints"); err != nil {
+		return err
+	}
+	if err := validateUniqueStringArray(constraints["source_sha_allowlist"], hex40RE, 64, path+".reviewed_source_constraints.source_sha_allowlist"); err != nil {
+		return err
+	}
+	if notes, ok := constraints["notes"].(string); !ok || len(notes) == 0 || len(notes) > 512 || strings.TrimSpace(notes) != notes {
+		return fmt.Errorf("%w: registry notes invalid", ErrProvenanceMissing)
+	}
+	return nil
+}
+
+func requireExactKeys(obj map[string]any, allowed []string, path string) error {
+	allowedSet := map[string]struct{}{}
+	for _, key := range allowed {
+		allowedSet[key] = struct{}{}
+		if _, ok := obj[key]; !ok {
+			return fmt.Errorf("%w: %s missing %s", ErrProvenanceMissing, path, key)
+		}
+	}
+	for key := range obj {
+		if _, ok := allowedSet[key]; !ok {
+			return fmt.Errorf("%w: %s unknown %s", ErrProvenanceMissing, path, key)
+		}
+	}
+	return nil
+}
+
+func validateUniqueStringArray(raw any, pattern *regexp.Regexp, maxItems int, path string) error {
+	values, ok := raw.([]any)
+	if !ok || len(values) == 0 || len(values) > maxItems {
+		return fmt.Errorf("%w: %s invalid", ErrProvenanceMissing, path)
+	}
+	seen := map[string]struct{}{}
+	for _, item := range values {
+		s, ok := item.(string)
+		if !ok || !pattern.MatchString(s) {
+			return fmt.Errorf("%w: %s invalid", ErrProvenanceMissing, path)
+		}
+		if _, ok := seen[s]; ok {
+			return fmt.Errorf("%w: %s duplicate", ErrProvenanceMissing, path)
+		}
+		seen[s] = struct{}{}
+	}
+	return nil
+}
+
+func stringArray(raw any) []string {
+	values, _ := raw.([]any)
+	out := make([]string, 0, len(values))
+	for _, item := range values {
+		out = append(out, item.(string))
+	}
+	return out
+}
+
+func decodeRegistryPublicKey(value string) ([]byte, error) {
+	if strings.Contains(value, "=") || !base64URLRE.MatchString(value) {
+		return nil, fmt.Errorf("invalid base64url")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil || len(raw) != ed25519.PublicKeySize || base64.RawURLEncoding.EncodeToString(raw) != value {
+		return nil, fmt.Errorf("invalid base64url public key")
+	}
+	return raw, nil
+}
+
+func parseRegistryMillis(value string) (time.Time, error) {
+	if !utcMillisRE.MatchString(value) {
+		return time.Time{}, fmt.Errorf("timestamp must be UTC milliseconds")
+	}
+	return time.Parse("2006-01-02T15:04:05.000Z", value)
+}
+
+func loadJSONFileBounded(path string, maxBytes int64) (any, error) {
+	return loadStrictJSONFileBounded(path, maxBytes)
 }
 
 func sha256Hex(b []byte) string {
