@@ -70,6 +70,34 @@ func requestedPoolModelEntry(model, poolID string, snap trustpool.Snapshot) (poo
 	return poolmanifest.PoolModelEntry{}, false
 }
 
+// shouldBindPoolModelRefusalToRequestLog reports whether an otherwise refused
+// pool/ request should keep the requested id in internal request_log evidence.
+// It never consults a foreign pool. The selected pool's current and immediately
+// prior entries are the only same-pool history this process can prove.
+func shouldBindPoolModelRefusalToRequestLog(model, selectedPoolID string, snap trustpool.Snapshot) bool {
+	if selectedPoolID == "" || !snap.Exists {
+		return false
+	}
+	idPool, _, ok := poolmanifest.ParsePoolModelID(model)
+	if !ok {
+		return false
+	}
+	if idPool != selectedPoolID {
+		return true
+	}
+	for _, entry := range snap.ModelEntries {
+		if entry.PoolModelID == model {
+			return true
+		}
+	}
+	for _, entry := range snap.PriorModelEntries {
+		if entry.PoolModelID == model {
+			return true
+		}
+	}
+	return false
+}
+
 // providerRuntimeClass is the coordinator runtime class of a session: an
 // absent runtime_source is native mlx_cache.
 func providerRuntimeClass(p pool.Provider) string {
@@ -428,14 +456,49 @@ func (b *billingRecorder) poolManifestVerification(ctx context.Context, store *b
 	return snap, true, f
 }
 
-// setPoolModelResponseHeaders adds the SPEC-006-R018 disclosure headers to a
-// response for a pool model (never for any other model).
-func setPoolModelResponseHeaders(w http.ResponseWriter, manifestCoreDigest string) {
-	if w == nil || !isLowerHex64(manifestCoreDigest) {
+// poolModelDisclosureCoreDigest returns the manifest core digest from the
+// actual pool_manifest route snapshot recorded for the current dispatch
+// attempt.
+func (b *billingRecorder) poolModelDisclosureCoreDigest() (string, bool) {
+	if b == nil || b.state == nil || !b.dispatchedThisAttempt || b.settlementRouteSnapshot == nil || !b.hasSettlementAttemptN {
+		return "", false
+	}
+	snap := b.settlementRouteSnapshot
+	if !snap.PoolManifestSourced() || snap.PoolModelID == "" || snap.AttemptN != int64(b.settlementAttemptN) {
+		return "", false
+	}
+	if snap.RequestID != b.requestID || snap.ModelID != b.model || snap.PoolModelID != b.model || snap.PoolID != b.state.poolID {
+		return "", false
+	}
+	if b.state.provider.ProviderID == "" || snap.ProviderID != b.state.provider.ProviderID {
+		return "", false
+	}
+	if b.state.provider.AssignedID == "" || snap.ProviderSessionID == nil || *snap.ProviderSessionID != b.state.provider.AssignedID {
+		return "", false
+	}
+	if !isLowerHex64(snap.ManifestCoreDigest) {
+		return "", false
+	}
+	return snap.ManifestCoreDigest, true
+}
+
+// publishPoolModelDisclosureHeaders applies the SPEC-006-R018 disclosure
+// headers at the first buyer-visible commit. Only 2xx responses for a
+// dispatched attempt with an actual pool_manifest route snapshot may carry
+// them; every refused/error response strips any earlier candidate values.
+func publishPoolModelDisclosureHeaders(h http.Header, rec *billingRecorder, code int) {
+	if h == nil {
 		return
 	}
-	w.Header().Set(poolModelDisclosureHeader, poolmanifest.PoolModelDisclosureClass)
-	w.Header().Set(poolManifestCoreDigestHeader, manifestCoreDigest)
+	if code >= 200 && code < 300 {
+		if digest, ok := rec.poolModelDisclosureCoreDigest(); ok {
+			h.Set(poolModelDisclosureHeader, poolmanifest.PoolModelDisclosureClass)
+			h.Set(poolManifestCoreDigestHeader, digest)
+			return
+		}
+	}
+	h.Del(poolModelDisclosureHeader)
+	h.Del(poolManifestCoreDigestHeader)
 }
 
 // poolModelListEntry is the SPEC-006-R018 pool view model object.

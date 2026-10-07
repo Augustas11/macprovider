@@ -434,8 +434,12 @@ func TestSPEC1816PoolModelFailClosed(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newPoolModelHarness(t, fx)
-			if rec := postChat(t, h.server, h.body(), externalRuntimePoolHeaders(h.poolID)); rec.Code == http.StatusOK {
+			rec := postChat(t, h.server, h.body(), externalRuntimePoolHeaders(h.poolID))
+			if rec.Code == http.StatusOK {
 				t.Fatalf("pool-model route served: %s", rec.Body.String())
+			}
+			if rec.Header().Get("X-MacProvider-Model-Disclosure") != "" || rec.Header().Get("X-MacProvider-Pool-Manifest-Core-Digest") != "" {
+				t.Fatalf("refused pool-model route disclosed headers: %v", rec.Header())
 			}
 			if rows := queryRouteSnapshotBYOMBindings(t, h.dbPath); len(rows) != 0 {
 				t.Fatalf("route snapshot recorded: %v", rows)
@@ -444,10 +448,27 @@ func TestSPEC1816PoolModelFailClosed(t *testing.T) {
 	}
 }
 
+func TestSPEC1816PoolModelRefusalDoesNotDisclose(t *testing.T) {
+	h := newPoolModelHarness(t, poolModelFixture{})
+	rec := postChat(t, h.server, h.body(), withEngine(externalRuntimePoolHeaders(h.poolID), "ollama_loopback"))
+	if rec.Code == http.StatusOK {
+		t.Fatalf("wrong engine served: %s", rec.Body.String())
+	}
+	if rec.Header().Get("X-MacProvider-Model-Disclosure") != "" || rec.Header().Get("X-MacProvider-Pool-Manifest-Core-Digest") != "" {
+		t.Fatalf("wrong-engine refusal disclosed pool-model headers: %v", rec.Header())
+	}
+	if rows := queryRouteSnapshotBYOMBindings(t, h.dbPath); len(rows) != 0 {
+		t.Fatalf("route snapshot recorded for refusal: %v", rows)
+	}
+}
+
 // SPEC-006-R018: the default /v1/models never lists a pool model; the
 // authorized pool view lists the entry with the closed disclosure object.
 func TestSPEC1816PoolModelListing(t *testing.T) {
 	h := newPoolModelHarness(t, poolModelFixture{})
+	h.server.SetRoutingClasses(map[string]config.ModelClassConfig{
+		"global-class": {Objective: "latency", Models: []string{"creator-model"}},
+	})
 	get := func(headers http.Header) (int, map[string]any) {
 		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 		for k, values := range headers {
@@ -471,8 +492,12 @@ func TestSPEC1816PoolModelListing(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("pool view status=%d", code)
 	}
+	rows := view["data"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("selected pool view listed %d rows, want only the selected pool entry: %v", len(rows), view)
+	}
 	var found, listed map[string]any
-	for _, m := range view["data"].([]any) {
+	for _, m := range rows {
 		if m.(map[string]any)["id"] == h.modelID {
 			listed = m.(map[string]any)
 			found = listed["macprovider_pool_model"].(map[string]any)

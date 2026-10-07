@@ -152,7 +152,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.44",
+      "version": "0.9.45",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -11199,8 +11199,8 @@
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
-        "rationale": "#1816 (campaign branch, unshipped): the pool-scoped /v1/models view with the closed macprovider_pool_model object and price disclosure, capacity counted through the routing predicate, the disclosure and core-digest response headers, and unknown-model behavior outside the pool are implemented in the coordinator and gateway and tested. Still missing: signed journey evidence from a deployed build, and the open freeze audit R1 LOW gateway items (duplicate selector header, embedded pool id binding). Pending until the evidence exists."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1880",
+        "rationale": "#1816 shipped bounded pool serving and disclosure, but the complete 2026-10-07 production journey failed. #1880 clarifies and repairs selected-view exclusivity and served-route-only disclosure under SPEC-006 v0.9.45. Unknown-model request-log redaction remains required by SPEC-017; exact refusal binding and pre-quota zero-state proof need source-authenticated evidence. Pending until a fresh complete signed journey from reviewed deployed code satisfies all applicable prerequisites; unit tests do not promote this row."
       }
     },
     {

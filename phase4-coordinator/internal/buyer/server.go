@@ -2307,27 +2307,29 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	// SPEC-006-R018: an authenticated request carrying an authorized pool
 	// selection also lists that pool's signed model entries; the default
 	// list never does, and an unauthorized selection fails closed.
-	if strings.TrimSpace(r.Header.Get("X-MacProvider-Pool")) != "" {
+	selectedPoolView := strings.TrimSpace(r.Header.Get("X-MacProvider-Pool")) != ""
+	if selectedPoolView {
 		poolModels, err := s.poolModelListEntries(r)
 		if err != nil {
 			s.writePoolUnavailable(w, s.now())
 			return
 		}
-		data = append(data, poolModels...)
-	}
-	for name, class := range s.snapshotModelClasses() {
-		data = append(data, modelEntry{
-			ID: name, Object: "model", Created: s.createdAt, OwnedBy: "macprovider",
-			Objective: class.Objective, Members: append([]string(nil), modelClassMembers(&class)...),
-			ComputeIntegrity: unavailableModelComputeIntegrityStatus(),
-		})
-	}
-	if pillarAActive {
-		for i := range data {
-			if data[i].Objective != "" {
-				continue
+		data = poolModels
+	} else {
+		for name, class := range s.snapshotModelClasses() {
+			data = append(data, modelEntry{
+				ID: name, Object: "model", Created: s.createdAt, OwnedBy: "macprovider",
+				Objective: class.Objective, Members: append([]string(nil), modelClassMembers(&class)...),
+				ComputeIntegrity: unavailableModelComputeIntegrityStatus(),
+			})
+		}
+		if pillarAActive {
+			for i := range data {
+				if data[i].Objective != "" {
+					continue
+				}
+				s.applyHashVerification(&data[i], providers, cfg)
 			}
-			s.applyHashVerification(&data[i], providers, cfg)
 		}
 	}
 	sort.Slice(data, func(i, j int) bool {
@@ -2590,6 +2592,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.poolID = poolHeader
+		state.poolID = poolHeader
 		req.poolSnapshot = snap
 		req.poolSnapshotSet = true
 	}
@@ -2663,16 +2666,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	poolModelRequested := false
 	if poolmanifest.IsPoolModelID(req.Model) {
 		if _, ok := requestedPoolModelEntry(req.Model, req.poolID, req.poolSnapshot); !ok || !req.poolSnapshotSet {
-			rec.setModel("")
+			if !shouldBindPoolModelRefusalToRequestLog(req.Model, req.poolID, req.poolSnapshot) {
+				rec.setModel("")
+			}
 			rec.logBuyerFailure(http.StatusNotFound, "No provider has advertised the requested model")
 			writeError(w, http.StatusNotFound, "model_not_found", "No provider has advertised the requested model")
 			return
 		}
 		poolModelRequested = true
-		// SPEC-006-R018: every response for a pool model discloses its
-		// pool-attested status and the authorizing core digest (selection
-		// re-reads this same snapshot).
-		setPoolModelResponseHeaders(w, req.poolSnapshot.ManifestCoreDigest)
 	}
 	if !poolModelRequested && !s.pool.ModelKnown(req.Model) && s.resolveModelClass(req.Model) == nil {
 		// The buyer-supplied string of an unserved model is never persisted:
