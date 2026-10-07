@@ -66,8 +66,8 @@ struct PrivacyLabIdentityScope: Equatable, Sendable {
         }
         let defaultRoot = ConfigLoader.expandTilde(PrivacyAutoEnrollment.defaultStateDirectory)
         guard rawRoot != defaultRoot else { throw PrivacyLabIdentityScopeError.stateRootDefault }
-        let root = URL(fileURLWithPath: rawRoot, isDirectory: true).standardizedFileURL
-        guard root.path == rawRoot else { throw PrivacyLabIdentityScopeError.stateRootNotCanonical }
+        try validateLexicallyCanonicalRootPath(rawRoot)
+        let root = URL(fileURLWithPath: rawRoot, isDirectory: true)
         try rejectSymlinkComponents(root)
         try validateExistingOwnerDirectory(root)
 
@@ -105,6 +105,19 @@ struct PrivacyLabIdentityScope: Equatable, Sendable {
         }
         guard scheme == "ws" || scheme == "wss" else { return false }
         return host == "127.0.0.1" || host == "::1" || host == "[::1]"
+    }
+
+    private static func validateLexicallyCanonicalRootPath(_ raw: String) throws {
+        guard raw.hasPrefix("/"),
+              raw != "/",
+              !raw.hasSuffix("/"),
+              !raw.contains("//") else {
+            throw PrivacyLabIdentityScopeError.stateRootNotCanonical
+        }
+        let components = raw.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard components.dropFirst().allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
+            throw PrivacyLabIdentityScopeError.stateRootNotCanonical
+        }
     }
 
     private static func rejectSymlinkComponents(_ root: URL) throws {

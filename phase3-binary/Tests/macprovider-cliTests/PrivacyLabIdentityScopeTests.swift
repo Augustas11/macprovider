@@ -63,6 +63,7 @@ final class PrivacyLabIdentityScopeTests: XCTestCase {
         )
 
         XCTAssertEqual(first, repeated)
+        XCTAssertEqual(first.stateRoot.path, firstRoot.path)
         XCTAssertNotEqual(first.secureEnclaveLabel, second.secureEnclaveLabel)
         XCTAssertNotEqual(first.secureEnclaveFileURL, second.secureEnclaveFileURL)
         XCTAssertEqual(first.secureEnclaveFileURL.deletingLastPathComponent().path, firstRoot.path)
@@ -124,10 +125,17 @@ final class PrivacyLabIdentityScopeTests: XCTestCase {
             XCTAssertEqual($0 as? PrivacyLabIdentityScopeError, .stateRootRequired)
         }
 
-        var nonCanonical = labConfig(root: root)
-        nonCanonical.relayBlindStateDirectory = root.appendingPathComponent("..").appendingPathComponent(root.lastPathComponent).path
-        XCTAssertThrowsError(try PrivacyLabIdentityScope.validated(config: nonCanonical, isolateLifecycle: true)) {
-            XCTAssertEqual($0 as? PrivacyLabIdentityScopeError, .stateRootNotCanonical)
+        for path in [
+            root.path + "/",
+            root.path.replacingOccurrences(of: "/tmp/", with: "/tmp//"),
+            root.appendingPathComponent(".").path,
+            root.appendingPathComponent("..").appendingPathComponent(root.lastPathComponent).path,
+        ] {
+            var nonCanonical = labConfig(root: root)
+            nonCanonical.relayBlindStateDirectory = path
+            XCTAssertThrowsError(try PrivacyLabIdentityScope.validated(config: nonCanonical, isolateLifecycle: true), path) {
+                XCTAssertEqual($0 as? PrivacyLabIdentityScopeError, .stateRootNotCanonical, path)
+            }
         }
 
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.path)
