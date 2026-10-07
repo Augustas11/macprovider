@@ -77,6 +77,28 @@ def load_builder():
 
 BUILDER = load_builder()
 
+
+class TrustedPoolModelHeaderTests(unittest.TestCase):
+    def test_combines_repeated_vary_without_hiding_evidence_headers(self):
+        status, parsed = BUILDER.parse_headers(
+            b"HTTP/2 200\r\nVary: Authorization\r\nvary: X-Api-Key\r\nVary: X-Demo-Token\r\n"
+            b"X-Request-ID: request-1\r\n\r\n", "response.headers"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(parsed["vary"], "Authorization, X-Api-Key, X-Demo-Token")
+        self.assertEqual(parsed["x-request-id"], "request-1")
+
+    def test_rejects_repeated_evidence_headers_even_when_identical(self):
+        for name in ("Date", "X-Request-ID", "X-MacProvider-Engine",
+                     "X-MacProvider-Model-Disclosure", "X-MacProvider-Pool-Manifest-Core-Digest"):
+            with self.subTest(name=name), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    BUILDER.parse_headers(
+                        f"HTTP/2 200\r\n{name}: value\r\n{name.lower()}: value\r\n\r\n".encode(),
+                        "response.headers",
+                    )
+
+
 FAKE_CLI = r'''#!/usr/bin/env python3
 import hashlib, json, sys
 from pathlib import Path
@@ -651,6 +673,68 @@ class TrustedPoolModelCaptureTests(CaptureCase):
               [{"request_id": "req-rotation-attestation-removal-inflight", "prompt_tokens": 5, "completion_tokens": 1,
                 "token_source": "pool_operator_attested", "outcome": "settled"}])
         self.assert_rejected("no buyer-final debit")
+
+    def test_receipt_fenced_attempt_rejects_uncovered_extra_route(self) -> None:
+        base = self.capture / "rotation/attestation-removal/inflight"
+        route_rows = json.loads((base / "route_snapshots.json").read_text())
+        extra_route = dict(route_rows[0], attempt_n=2)
+        snap = json.loads(extra_route["route_snapshot_json"])
+        snap["attempt_n"] = 2
+        extra_route["route_snapshot_json"] = json.dumps(snap, sort_keys=True)
+        extra_route["route_snapshot_digest"] = self.fixture.snapshot_digest(extra_route["route_snapshot_json"])
+        route_rows.append(extra_route)
+        write(base / "route_snapshots.json", route_rows)
+        ledger_rows = json.loads((base / "ledger.json").read_text())
+        ledger_rows.append(dict(ledger_rows[0], id=8, attempt_n=2))
+        write(base / "ledger.json", ledger_rows)
+        request_rows = json.loads((base / "request_log.json").read_text())
+        request_rows.append(dict(request_rows[0], attempt_n=2))
+        write(base / "request_log.json", request_rows)
+        self.assert_rejected("every routed attempt must have exactly one attempt output")
+
+    def test_accepts_ledger_only_pool_manifest_fence(self) -> None:
+        def make_ledger_only() -> None:
+            base = self.capture / "rotation/attestation-removal/inflight"
+            write(base / "attempt_outputs.json", "")
+            write(base / "receipt_verdicts.json", "")
+            write(base / "usage_events.json", "")
+            self.mutate_rows("rotation/attestation-removal/inflight/ledger.json",
+                             usage_source="byte_estimated", gross_credits=0, provider_credits=0, payable=0, quarantined=1,
+                             quarantine_reason="pool_manifest_route_not_settlement_eligible",
+                             created_at_utc=iso(self.fixture.nb[7] + 30, ".123456789"))
+
+        make_ledger_only()
+        self.build()
+        for label, mutate, fragment in (
+            ("bad reason", lambda: self.mutate_rows("rotation/attestation-removal/inflight/ledger.json",
+                                                    quarantine_reason="pool_route_fence_wrong"), "recognized pool fence reason"),
+            ("payable", lambda: self.mutate_rows("rotation/attestation-removal/inflight/ledger.json", payable=1), "no payable credit"),
+            ("credited", lambda: self.mutate_rows("rotation/attestation-removal/inflight/ledger.json", provider_credits=5),
+             "zeroed and quarantined"),
+            ("usage source", lambda: self.mutate_rows("rotation/attestation-removal/inflight/ledger.json",
+                                                      usage_source="pool_operator_attested"), "byte_estimated"),
+            ("receipt reason without receipt", lambda: self.mutate_rows("rotation/attestation-removal/inflight/ledger.json",
+                                                                        quarantine_reason="pool_route_fence_not_settlement_eligible"),
+             "receipt pool-route fence"),
+            ("held reservation", lambda: self.mutate_rows("rotation/attestation-removal/inflight/quota_reservations.json",
+                                                          status="reserved", settlement_hold=1), "must not be held"),
+            ("unexpected receipt", lambda: write(self.capture / "rotation/attestation-removal/inflight/receipt_verdicts.json", [{
+                "request_id": "coord-req-rotation-attestation-removal-inflight", "attempt_n": 1, "provider_id": GGUF_PROV,
+                "receipt_result": "valid", "settlement_outcome": "quarantined", "reason": "pool_route_fence_not_settlement_eligible",
+                "closed": 1, "pool_label_status": "verified", "route_snapshot_digest": json.loads(
+                    (self.capture / "rotation/attestation-removal/inflight/route_snapshots.json").read_text())[0]["route_snapshot_digest"],
+                "provider_reported_model_hash": GGUF_HASH, "expected_catalog_model_hash": GGUF_HASH,
+                "model_id": self.fixture.gguf_id, "model_hash": GGUF_HASH,
+                "received_at_unix_ms": (self.fixture.nb[7] + 30) * 1000,
+            }]), "every routed attempt must have exactly one attempt output"),
+            ("settled too early", lambda: self.mutate_rows("rotation/attestation-removal/inflight/ledger.json",
+                                                           created_at_utc=iso(self.fixture.nb[7] - 1)), "settle after it"),
+        ):
+            with self.subTest(label=label):
+                self.setUp()
+                make_ledger_only()
+                mutate()
+                self.assert_rejected(fragment)
 
     def test_accepts_entry_revoked_reason_for_the_removal(self) -> None:
         self.mutate_json("admission/model-admission-events.json", lambda rows: rows[6].update(reason_code="pool_manifest_entry_revoked"))
