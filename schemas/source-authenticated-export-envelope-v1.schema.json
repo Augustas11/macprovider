@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Augustas11/macprovider/schemas/source-authenticated-export-envelope-v1.schema.json",
+  "title": "MacProvider source-authenticated export envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "signed", "signatures"],
+  "properties": {
+    "schema_version": {"const": "macprovider.source-authenticated-export-envelope.v1"},
+    "signed": {"$ref": "#/$defs/signed"},
+    "signatures": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {"$ref": "#/$defs/signature"}
+    }
+  },
+  "$defs": {
+    "ascii": {"type": "string", "pattern": "^[ -~]+$"},
+    "key_id": {"type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$"},
+    "producer": {"enum": ["gateway", "coordinator"]},
+    "role": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+    "instance_id": {"type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$"},
+    "source_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+    "utc_ms": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"},
+    "hex64": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "base64url_32": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"},
+    "base64url_64": {"type": "string", "pattern": "^[A-Za-z0-9_-]{86}$"},
+    "json_safe": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        {"type": "string", "pattern": "^[ -~]*$", "maxLength": 4096},
+        {"type": "array", "maxItems": 1000, "items": {"$ref": "#/$defs/json_safe"}},
+        {
+          "type": "object",
+          "maxProperties": 128,
+          "propertyNames": {"type": "string", "pattern": "^[ -~]{1,128}$"},
+          "additionalProperties": {"$ref": "#/$defs/json_safe"}
+        }
+      ]
+    },
+    "signed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "producer", "role", "instance_id", "source_sha", "export_id", "run_id", "challenge_nonce", "generated_at", "request_scopes", "snapshot", "records"],
+      "properties": {
+        "schema_version": {"const": "macprovider.source-authenticated-export.v1"},
+        "producer": {"$ref": "#/$defs/producer"},
+        "role": {"$ref": "#/$defs/role"},
+        "instance_id": {"$ref": "#/$defs/instance_id"},
+        "source_sha": {"$ref": "#/$defs/source_sha"},
+        "export_id": {"$ref": "#/$defs/uuid"},
+        "run_id": {"$ref": "#/$defs/instance_id"},
+        "challenge_nonce": {"$ref": "#/$defs/base64url_32"},
+        "generated_at": {"$ref": "#/$defs/utc_ms"},
+        "request_scopes": {
+          "type": "array",
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "description": "Request scopes must be sorted lexicographically and unique. JSON Schema enforces uniqueness; scripts/source_authenticated_evidence.py is the authoritative sortedness validator.",
+          "items": {"$ref": "#/$defs/hex64"}
+        },
+        "snapshot": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/json_safe"}
+        },
+        "records": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "type": "object",
+            "additionalProperties": {"$ref": "#/$defs/json_safe"}
+          }
+        }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "key_id", "signed_sha256", "signature"],
+      "properties": {
+        "algorithm": {"const": "ed25519"},
+        "key_id": {"$ref": "#/$defs/key_id"},
+        "signed_sha256": {"$ref": "#/$defs/hex64"},
+        "signature": {"$ref": "#/$defs/base64url_64"}
+      }
+    }
+  }
+}
