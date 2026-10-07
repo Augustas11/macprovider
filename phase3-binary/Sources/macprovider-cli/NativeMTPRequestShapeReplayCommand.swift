@@ -208,7 +208,7 @@ final class NativeMTPRequestShapeReplayRunner {
             for rowWave in block.runnableWaves {
                 for row in rowWave {
                     if let warmups = warmupsByRequestID[row.requestID] {
-                        let warmupRun = try await runCacheWarmups(warmups, runtime: runtime)
+                        let warmupRun = try await Self.runCacheWarmups(warmups, runtime: runtime)
                         warmupProofs.append(contentsOf: warmupRun.proofs)
                         for request in warmupRun.measuredRequests {
                             guard let requestID = request.requestID else { continue }
