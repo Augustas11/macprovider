@@ -1,4 +1,5 @@
 import XCTest
+import Darwin
 @testable import Malibu
 
 /// Pins the wall-clock budget the App gives `macprovider-cli autotune
@@ -26,6 +27,33 @@ import XCTest
 /// value shorter than realistic per-machine autotune runtime will
 /// reproduce that failure on some tier.
 final class AutotuneRecommendationRunnerTimeoutTests: XCTestCase {
+    private enum FixtureError: Error {
+        case signalTrapNotReady
+    }
+
+    private func startSIGTERMIgnoringShell() throws -> Process {
+        let ready = Pipe()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        // Publish readiness only after the ignored signal disposition exists.
+        // A fixed startup sleep can send SIGTERM before the trap is installed.
+        process.arguments = ["-c", "trap '' 15; printf 'ready\\n'; while :; do sleep 1; done"]
+        process.standardOutput = ready
+        try process.run()
+        defer { try? ready.fileHandleForReading.close() }
+        var descriptor = pollfd(fd: ready.fileHandleForReading.fileDescriptor, events: Int16(POLLIN), revents: 0)
+        guard Darwin.poll(&descriptor, 1, 5_000) > 0,
+              ready.fileHandleForReading.readData(ofLength: 6) == Data("ready\n".utf8),
+              process.isRunning else {
+            if process.isRunning {
+                _ = Darwin.kill(process.processIdentifier, SIGKILL)
+                process.waitUntilExit()
+            }
+            throw FixtureError.signalTrapNotReady
+        }
+        return process
+    }
+
     /// Realistic worst-case autotune runtime the App must budget for.
     /// Rationale: per-candidate strict worst case is 720s
     /// (`readyTimeoutSec = 120s` + prewarm `probeOnce = 300s` +
@@ -90,11 +118,7 @@ final class AutotuneRecommendationRunnerTimeoutTests: XCTestCase {
         // Do NOT use `sleep … & wait`: on some /bin/sh builds, an ignored
         // SIGTERM still interrupts `wait`, so the script exits before grace
         // and the wall-clock assertion flakes (CI saw ~0.06s elapsed).
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", "trap '' 15; while :; do sleep 1; done"]
-        try process.run()
-        Thread.sleep(forTimeInterval: 0.1)
+        let process = try startSIGTERMIgnoringShell()
         let before = Date()
         AutotuneRecommendationRunner.terminateAutotuneSubtree(
             process: process,
@@ -128,11 +152,7 @@ final class AutotuneRecommendationRunnerTimeoutTests: XCTestCase {
 
     func testTerminateWithoutSIGKILLEscalationLeavesUncooperativeChildAlive() throws {
         // Recovery path must not SIGKILL before the CLI can restore launchd.
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", "trap '' 15; while :; do sleep 1; done"]
-        try process.run()
-        Thread.sleep(forTimeInterval: 0.1)
+        let process = try startSIGTERMIgnoringShell()
         AutotuneRecommendationRunner.terminateAutotuneSubtree(
             process: process,
             graceSeconds: 0.3,
