@@ -1193,7 +1193,8 @@ final class NativeMTPRequestShapeReplayRunner {
         let expectedLease = expectedAttempted ? row.conversationCacheLease : "not_applicable"
         let expectedRetainedHandoff = expectedAttempted ? row.conversationCacheRetainedHandoff : false
 
-        guard events.count == 1, let event = events.first else {
+        let eventSelection = Self.terminalCacheObservationEvent(row: row, events: events)
+        guard let event = eventSelection.event else {
             return NativeMTPRequestShapeReplayCacheObservation(
                 expectedCacheOnly: expectedCacheOnly,
                 actualCacheOnly: false,
@@ -1206,9 +1207,7 @@ final class NativeMTPRequestShapeReplayRunner {
                 expectedRetainedHandoff: expectedRetainedHandoff,
                 actualRetainedHandoff: false,
                 source: NativeMTPLabConversationCacheObserver.eventSource,
-                pendingReason: events.isEmpty
-                    ? "conversation_cache_observation_missing:\(row.requestID)"
-                    : "conversation_cache_observation_duplicate:\(row.requestID):count_\(events.count)"
+                pendingReason: eventSelection.pendingReason ?? "conversation_cache_observation_missing:\(row.requestID)"
             )
         }
 
@@ -1263,6 +1262,38 @@ final class NativeMTPRequestShapeReplayRunner {
         )
     }
 
+
+    private static func terminalCacheObservationEvent(
+        row: NativeMTPRequestShapeReplayRow,
+        events: [NativeMTPLabConversationCacheObserver.Event]
+    ) -> (event: NativeMTPLabConversationCacheObserver.Event?, pendingReason: String?) {
+        guard !events.isEmpty else {
+            return (nil, "conversation_cache_observation_missing:\(row.requestID)")
+        }
+        guard events.count <= 2 else {
+            return (nil, "conversation_cache_observation_duplicate:\(row.requestID):count_\(events.count)")
+        }
+        guard events.count == 2 else {
+            return (events[0], nil)
+        }
+        let first = events[0]
+        let second = events[1]
+        guard first.requestID == second.requestID else {
+            return (nil, "conversation_cache_observation_invalid_chain:\(row.requestID):request_id_mismatch")
+        }
+        if first.surface == second.surface {
+            return (nil, "conversation_cache_observation_duplicate:\(row.requestID):count_2")
+        }
+        guard first.monotonicNanoseconds < second.monotonicNanoseconds else {
+            return (nil, "conversation_cache_observation_invalid_chain:\(row.requestID):nonmonotonic")
+        }
+        let validCompleteFallback = first.surface == "attached_complete" && second.surface == "serial_complete"
+        let validStreamFallback = first.surface == "attached_stream" && second.surface == "serial_stream"
+        guard validCompleteFallback || validStreamFallback else {
+            return (nil, "conversation_cache_observation_invalid_chain:\(row.requestID):surfaces_\(first.surface)_\(second.surface)")
+        }
+        return (second, nil)
+    }
     private static func resolvedMaxOutputTokens(row: NativeMTPRequestShapeReplayRow, maxContextTokens: Int) -> Int? {
         let remaining = maxContextTokens - row.promptTokens
         guard remaining > 0 else { return nil }
@@ -2569,7 +2600,6 @@ struct NativeMTPRequestShapeReplayRunResult {
                     "target_completion_matched": result.targetCompletionMatched,
                     "target_stop_triggered": result.targetStopTriggered,
                     "generated_completion_tokens": result.completion.generatedCompletionTokens,
-                    "cached_prompt_tokens": result.completion.cachedPromptTokens,
                     "committed_timing_events": result.commitEvents.count,
                     "ttft_seconds": result.ttftSeconds as Any,
                     "inter_token_gaps": result.interTokenGaps,

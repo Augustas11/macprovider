@@ -342,6 +342,105 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
         XCTAssertEqual(missing.first?["pending_reason"] as? String, "request_reproduction_missing_parsed_request:\(row.requestID)")
     }
 
+    func testAttachedToSerialCacheObserverChainUsesTerminalSerialEvent() throws {
+        let url = try writeCapture([
+            shape(
+                "cache-chain",
+                conversationKey: true,
+                cacheOnly: true,
+                lease: "hit",
+                cachedTokens: 128,
+                extra: ["anonymous_cache_group_sha256": String(repeating: "b", count: 64)]
+            ),
+        ])
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
+        let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 1, seed: 48015)
+        let block = plan.blocks[0]
+        let row = try XCTUnwrap(block.runnableRows.first)
+        let request = try NativeMTPRequestShapeReplayRunner.makeRequest(
+            modelID: "test-model",
+            requestID: row.requestID,
+            prompt: "synthetic",
+            maxTokens: row.requestedMaxCompletionTokens,
+            temperature: row.temperature,
+            topP: row.topP,
+            stream: row.stream
+        ).withConversationKey("conv:cache", cacheOnly: true)
+        let projection = NativeMTPRequestShapeReplayRunner.admissionProjectionRows(
+            path: .ordinary,
+            block: block,
+            admissions: [],
+            requestsByID: [row.requestID: request],
+            actualCachedPromptTokensByID: [row.requestID: row.expectedCachedPromptTokens],
+            cacheEventsByRequestID: [row.requestID: [
+                cacheEvent(row: row, state: "miss", cachedTokens: 0, surface: "attached_complete", monotonicNanoseconds: 10),
+                cacheEvent(row: row, state: "hit", cachedTokens: row.expectedCachedPromptTokens, surface: "serial_complete", monotonicNanoseconds: 20),
+            ]],
+            maxContextTokens: row.promptTokens + row.maxCompletionTokens
+        )
+        XCTAssertEqual(projection.first?["reproduced"] as? Bool, true)
+        XCTAssertEqual(projection.first?["actual_conversation_cache_lease"] as? String, "hit")
+    }
+
+    func testInvalidCacheObserverChainsStayPending() throws {
+        let url = try writeCapture([
+            shape(
+                "cache-invalid-chain",
+                conversationKey: true,
+                cacheOnly: true,
+                lease: "hit",
+                cachedTokens: 128,
+                extra: ["anonymous_cache_group_sha256": String(repeating: "b", count: 64)]
+            ),
+        ])
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
+        let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 1, seed: 48015)
+        let block = plan.blocks[0]
+        let row = try XCTUnwrap(block.runnableRows.first)
+        let request = try NativeMTPRequestShapeReplayRunner.makeRequest(
+            modelID: "test-model",
+            requestID: row.requestID,
+            prompt: "synthetic",
+            maxTokens: row.requestedMaxCompletionTokens,
+            temperature: row.temperature,
+            topP: row.topP,
+            stream: row.stream
+        ).withConversationKey("conv:cache", cacheOnly: true)
+        func projection(_ events: [NativeMTPLabConversationCacheObserver.Event]) -> [String: Any] {
+            NativeMTPRequestShapeReplayRunner.admissionProjectionRows(
+                path: .ordinary,
+                block: block,
+                admissions: [],
+                requestsByID: [row.requestID: request],
+                actualCachedPromptTokensByID: [row.requestID: row.expectedCachedPromptTokens],
+                cacheEventsByRequestID: [row.requestID: events],
+                maxContextTokens: row.promptTokens + row.maxCompletionTokens
+            )[0]
+        }
+
+        let reversed = projection([
+            cacheEvent(row: row, surface: "serial_complete", monotonicNanoseconds: 10),
+            cacheEvent(row: row, surface: "attached_complete", monotonicNanoseconds: 20),
+        ])
+        XCTAssertEqual(reversed["reproduced"] as? Bool, false)
+        XCTAssertTrue((reversed["pending_reason"] as? String)?.contains("conversation_cache_observation_invalid_chain") == true)
+
+        let mixed = projection([
+            cacheEvent(row: row, surface: "attached_complete", monotonicNanoseconds: 10),
+            cacheEvent(row: row, surface: "serial_stream", monotonicNanoseconds: 20),
+        ])
+        XCTAssertEqual(mixed["reproduced"] as? Bool, false)
+        XCTAssertTrue((mixed["pending_reason"] as? String)?.contains("conversation_cache_observation_invalid_chain") == true)
+
+        let ambiguous = projection([
+            cacheEvent(row: row, surface: "attached_complete", monotonicNanoseconds: 10),
+            cacheEvent(row: row, surface: "serial_complete", monotonicNanoseconds: 20),
+            cacheEvent(row: row, surface: "serial_complete", monotonicNanoseconds: 30),
+        ])
+        XCTAssertEqual(ambiguous["reproduced"] as? Bool, false)
+        XCTAssertTrue((ambiguous["pending_reason"] as? String)?.contains("conversation_cache_observation_duplicate") == true)
+    }
+
 
     func testSyntheticStandInPreservesRequestMaxTokensForWarmupCaps() throws {
         let url = try writeCapture([
@@ -657,7 +756,9 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
         state: String? = nil,
         cachedTokens: Int? = nil,
         retainedHandoff: Bool? = nil,
-        cacheOnly: Bool? = nil
+        cacheOnly: Bool? = nil,
+        surface: String = "unit_test",
+        monotonicNanoseconds: UInt64 = 1
     ) -> NativeMTPLabConversationCacheObserver.Event {
         let actualCacheOnly = row.requiresCacheProof ? (cacheOnly ?? row.conversationCacheOnly) : false
         let expectedAttempted = row.requiresCacheProof
@@ -666,8 +767,8 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
         return NativeMTPLabConversationCacheObserver.Event(
             eventSource: NativeMTPLabConversationCacheObserver.eventSource,
             requestID: row.requestID,
-            monotonicNanoseconds: 1,
-            surface: "unit_test",
+            monotonicNanoseconds: monotonicNanoseconds,
+            surface: surface,
             keyPresent: row.requiresCacheProof,
             cacheOnly: actualCacheOnly,
             leaseAllowed: expectedAttempted,
