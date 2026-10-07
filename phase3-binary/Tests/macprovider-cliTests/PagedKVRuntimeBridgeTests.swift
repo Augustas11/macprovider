@@ -2805,6 +2805,125 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         _ = try await allocator.reattach(retained, conversationKey: "conv:a")
     }
 
+    func testLabStateDigestObserverRecordsPagedKVCacheLogicalPrefix() async throws {
+        let descriptor = Self.bridgeDescriptor(blockSizeTokens: 4, maxPhysicalBlocks: 4)
+        let backend = PagedKVSharedForwardBackend(
+            container: ModelContainer(context: ModelContext(
+                configuration: ModelConfiguration(id: descriptor.modelID),
+                model: RuntimeBridgeFakeModel(nextTokenByInput: [:]),
+                processor: StandInUserInputProcessor(),
+                tokenizer: RuntimeBridgeFakeTokenizer()
+            )),
+            descriptor: descriptor,
+            layerCount: 1,
+            contiguousCacheBridge: RuntimeBridgeRecordingCacheBridge()
+        )
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks
+        )
+        let handle = try await allocator.allocate(conversationKey: "conv:digest", maxTokens: 8, initialTokens: 3)
+        let binding = try await allocator.binding(for: handle)
+        let paged = PagedKVCache(descriptor: descriptor, binding: binding)
+        paged.state = [
+            MLXArray([Float](repeating: 1, count: 6), [1, 2, 3, 1]),
+            MLXArray([Float](repeating: 2, count: 6), [1, 2, 3, 1]),
+        ]
+        XCTAssertEqual(paged.offset, 3)
+        XCTAssertEqual(paged.storedTokens, 3)
+        try backend.installRowStateForTest(caches: [paged], requestID: "digest-row", binding: binding)
+
+        let observer = NativeMTPStateDigestObserver()
+        backend.installLabNativeMTPStateDigestObserver(observer)
+        try await backend.recordLabNativeMTPStateDigest(phase: .ordinaryAfterDecode, requestIDs: ["digest-row"])
+
+        let records = observer.snapshot()
+        let record = try XCTUnwrap(records.first)
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(record.requestID, "digest-row")
+        XCTAssertEqual(record.phase, .ordinaryAfterDecode)
+        XCTAssertEqual(record.committedKVTokenCount, 3)
+        XCTAssertEqual(record.cacheDigestSHA256.count, 64)
+        XCTAssertEqual(record.digestSHA256.count, 64)
+    }
+
+    func testLabStateDigestObserverFailsClosedForPagedSlidingWindowCache() async throws {
+        let descriptor = Self.bridgeDescriptor(blockSizeTokens: 4, maxPhysicalBlocks: 4)
+        let backend = PagedKVSharedForwardBackend(
+            container: ModelContainer(context: ModelContext(
+                configuration: ModelConfiguration(id: descriptor.modelID),
+                model: RuntimeBridgeFakeModel(nextTokenByInput: [:]),
+                processor: StandInUserInputProcessor(),
+                tokenizer: RuntimeBridgeFakeTokenizer()
+            )),
+            descriptor: descriptor,
+            layerCount: 1,
+            contiguousCacheBridge: RuntimeBridgeRecordingCacheBridge()
+        )
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks
+        )
+        let handle = try await allocator.allocate(conversationKey: "conv:window", maxTokens: 8, initialTokens: 3)
+        let binding = try await allocator.binding(for: handle)
+        let paged = PagedKVCache(
+            descriptor: descriptor,
+            binding: binding,
+            attentionWindowTokens: 2
+        )
+        paged.state = [
+            MLXArray([Float](repeating: 1, count: 6), [1, 2, 3, 1]),
+            MLXArray([Float](repeating: 2, count: 6), [1, 2, 3, 1]),
+        ]
+        try backend.installRowStateForTest(caches: [paged], requestID: "window-row", binding: binding)
+
+        let observer = NativeMTPStateDigestObserver()
+        backend.installLabNativeMTPStateDigestObserver(observer)
+        do {
+            try await backend.recordLabNativeMTPStateDigest(phase: .ordinaryAfterDecode, requestIDs: ["window-row"])
+            XCTFail("sliding-window paged cache must stay fail-closed for state digesting")
+        } catch ContinuousBatchSchedulerError.unsupported(let reason) {
+            XCTAssertEqual(reason, "native_mtp_observer_unsupported_sliding_window_state")
+        }
+        XCTAssertEqual(observer.snapshot(), [])
+    }
+
+    func testLabStateDigestObserverFailsClosedForUnknownCacheKind() async throws {
+        let descriptor = Self.bridgeDescriptor(blockSizeTokens: 4, maxPhysicalBlocks: 4)
+        let backend = PagedKVSharedForwardBackend(
+            container: ModelContainer(context: ModelContext(
+                configuration: ModelConfiguration(id: descriptor.modelID),
+                model: RuntimeBridgeFakeModel(nextTokenByInput: [:]),
+                processor: StandInUserInputProcessor(),
+                tokenizer: RuntimeBridgeFakeTokenizer()
+            )),
+            descriptor: descriptor,
+            layerCount: 1,
+            contiguousCacheBridge: RuntimeBridgeRecordingCacheBridge()
+        )
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks
+        )
+        let handle = try await allocator.allocate(conversationKey: "conv:unknown", maxTokens: 8, initialTokens: 3)
+        let binding = try await allocator.binding(for: handle)
+        let cache = RuntimeBridgeUnknownKVCache(offset: 3, state: [
+            MLXArray([Float](repeating: 1, count: 6), [1, 2, 3, 1]),
+            MLXArray([Float](repeating: 2, count: 6), [1, 2, 3, 1]),
+        ])
+        try backend.installRowStateForTest(caches: [cache], requestID: "unknown-row", binding: binding)
+
+        let observer = NativeMTPStateDigestObserver()
+        backend.installLabNativeMTPStateDigestObserver(observer)
+        do {
+            try await backend.recordLabNativeMTPStateDigest(phase: .ordinaryAfterDecode, requestIDs: ["unknown-row"])
+            XCTFail("unknown cache kind must stay fail-closed for state digesting")
+        } catch ContinuousBatchSchedulerError.unsupported(let reason) {
+            XCTAssertEqual(reason, "native_mtp_observer_unsupported_cache_kind")
+        }
+        XCTAssertEqual(observer.snapshot(), [])
+    }
+
     func testAttachedModelRuntimeServesFreshGreedyRequestsThroughScheduler() async throws {
         guard PagedKVMetallibGate.defaultMetallibExists() else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
@@ -3951,6 +4070,42 @@ private final class RuntimeBridgeRecordingNativeMTPBackend: ContinuousBatchSched
 
     func cancelInFlight() async {
         await base.cancelInFlight()
+    }
+}
+
+private final class RuntimeBridgeUnknownKVCache: KVCache {
+    var offset: Int
+    var maxSize: Int? { nil }
+    var state: [MLXArray]
+    var metaState: [String] = ["runtime_bridge_unknown_kv_cache"]
+    var isTrimmable: Bool { false }
+
+    init(offset: Int, state: [MLXArray]) {
+        self.offset = offset
+        self.state = state
+    }
+
+    func innerState() -> [MLXArray] { state }
+
+    func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+        offset += keys.ndim >= 3 ? keys.dim(keys.ndim - 2) : 0
+        state = [keys, values]
+        return (keys, values)
+    }
+
+    @discardableResult
+    func trim(_ n: Int) -> Int { 0 }
+
+    func makeMask(
+        n: Int,
+        windowSize: Int?,
+        returnArray: Bool
+    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        .none
+    }
+
+    func copy() -> any KVCache {
+        RuntimeBridgeUnknownKVCache(offset: offset, state: state)
     }
 }
 

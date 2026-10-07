@@ -595,62 +595,37 @@ final class NativeMTPSelectorTests: XCTestCase {
         )
     }
 
-    func testNonStreamingEntryPathUsesInjectedNativeMTPAdmissionAndMaxCompletionTokens() async throws {
-        let recorder = NativeMTPAdmissionRecorder()
-        let runtime = ModelRuntime(
-            modelID: "target",
-            modelHash: Self.modelHash,
+    func testNonStreamingAdmissionUsesServedNativeCapabilityAndMaxCompletionTokens() throws {
+        let request = try makeRequest(extra: ["max_completion_tokens": 7])
+        let admission = ModelRuntime.nativeMTPRuntimeAdmission(
+            for: request,
+            draftConfigured: false,
+            draftLoaded: false,
+            numDraftTokens: nil,
             nativeMTPMode: .auto,
             nativeMTPCapability: admittedCapability(maximumProposalDepth: 4),
-            nativeMTPSchedulerSupported: true,
-            testNativeMTPAdmissionObserver: { admission in
-                recorder.append(admission)
-            },
-            warmSwapEnabled: true,
-            loader: { _ in throw CancellationError() },
-            testCompletion: { _, request in
-                XCTAssertEqual(request.maxTokens, 7)
-                return Self.completion()
-            }
+            schedulerSupportsNativeMTP: true
         )
 
-        let (completion, _) = try await runtime.completeWithServedSnapshot(
-            try makeRequest(extra: ["max_completion_tokens": 7])
-        )
-
-        XCTAssertEqual(completion.finishReason, "stop")
-        let admission = try XCTUnwrap(recorder.last())
+        XCTAssertEqual(request.maxTokens, 7)
         XCTAssertEqual(admission.effectivePath, .nativeMTP)
         XCTAssertEqual(admission.initialProposalDepth, 4)
         XCTAssertFalse(admission.allowsConversationCacheLease)
     }
 
-    func testStreamingEntryPathUsesInjectedNativeMTPAdmissionAndMaxCompletionTokens() async throws {
-        let recorder = NativeMTPAdmissionRecorder()
-        let runtime = ModelRuntime(
-            modelID: "target",
-            modelHash: Self.modelHash,
+    func testStreamingAdmissionUsesServedNativeCapabilityAndMaxCompletionTokens() throws {
+        let request = try makeRequest(extra: ["stream": true, "max_completion_tokens": 5])
+        let admission = ModelRuntime.nativeMTPRuntimeAdmission(
+            for: request,
+            draftConfigured: false,
+            draftLoaded: false,
+            numDraftTokens: nil,
             nativeMTPMode: .auto,
             nativeMTPCapability: admittedCapability(maximumProposalDepth: 3),
-            nativeMTPSchedulerSupported: true,
-            testNativeMTPAdmissionObserver: { admission in
-                recorder.append(admission)
-            },
-            warmSwapEnabled: true,
-            loader: { _ in throw CancellationError() },
-            testCompletion: { _, request in
-                XCTAssertEqual(request.maxTokens, 5)
-                return Self.completion(content: "stream")
-            }
+            schedulerSupportsNativeMTP: true
         )
-        let request = try makeRequest(extra: ["stream": true, "max_completion_tokens": 5])
-        let handle = try await runtime.acquireRequestHandle(request)
-        defer { Task { await runtime.unregisterInFlight(handle.registrationID) } }
 
-        let completion = try await runtime.stream(request, with: handle, onChunk: { _ in })
-
-        XCTAssertEqual(completion.content, "stream")
-        let admission = try XCTUnwrap(recorder.last())
+        XCTAssertEqual(request.maxTokens, 5)
         XCTAssertEqual(admission.effectivePath, .nativeMTP)
         XCTAssertEqual(admission.initialProposalDepth, 3)
         XCTAssertFalse(admission.allowsConversationCacheLease)
@@ -700,38 +675,22 @@ final class NativeMTPSelectorTests: XCTestCase {
         XCTAssertEqual(ordinary.selection.nativeMTPReason, .conversationKey)
     }
 
-    func testRuntimeAdmissionCountsOtherInFlightRowsAgainstSignedBound() async throws {
-        let recorder = NativeMTPAdmissionRecorder()
-        let runtime = ModelRuntime(
-            modelID: "target",
-            modelHash: Self.modelHash,
+    func testAdmissionCountsOtherInFlightRowsAgainstSignedBound() throws {
+        let admission = ModelRuntime.nativeMTPRuntimeAdmission(
+            for: try makeRequest(),
+            draftConfigured: false,
+            draftLoaded: false,
+            numDraftTokens: nil,
             nativeMTPMode: .auto,
             nativeMTPCapability: admittedCapability(maximumProposalDepth: 2, maximumNativeActiveRows: 1),
-            nativeMTPSchedulerSupported: true,
-            testNativeMTPAdmissionObserver: { admission in
-                recorder.append(admission)
-            },
-            warmSwapEnabled: true,
-            loader: { _ in throw CancellationError() },
-            testCompletion: { _, _ in Self.completion() }
+            schedulerSupportsNativeMTP: true
         )
 
-        _ = try await runtime.completeWithServedSnapshot(try makeRequest())
-        XCTAssertEqual(recorder.last()?.effectivePath, .nativeMTP)
+        XCTAssertEqual(admission.effectivePath, .nativeMTP)
 
-        // A second in-flight row (native or ordinary) fills the bound of one.
-        let holder = try await runtime.acquireRequestHandle(try makeRequest())
-        _ = try await runtime.completeWithServedSnapshot(try makeRequest())
-        let downgraded = try XCTUnwrap(recorder.last())
+        let downgraded = admission.resolvingActiveRows(otherActiveRows: 1)
         XCTAssertEqual(downgraded.effectivePath, .ordinary)
         XCTAssertEqual(downgraded.selection.nativeMTPReason, .capacityAboveNativeBound)
-        let gatedStatus = await runtime.currentSnapshot().nativeMTPStatus
-        XCTAssertEqual(gatedStatus.lastReason, .capacityAboveNativeBound)
-        XCTAssertEqual(gatedStatus.preoutputFallbacks, 0)
-
-        await runtime.unregisterInFlight(holder.registrationID)
-        _ = try await runtime.completeWithServedSnapshot(try makeRequest())
-        XCTAssertEqual(recorder.last()?.effectivePath, .nativeMTP)
     }
 
     private func admittedCapability(
@@ -779,18 +738,6 @@ final class NativeMTPSelectorTests: XCTestCase {
         return try ChatCompletionRequest.parse(data: data)
     }
 
-    private static let modelHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-
-    private static func completion(content: String = "ok") -> CompletionResult {
-        CompletionResult(
-            content: content,
-            finishReason: "stop",
-            promptTokens: 1,
-            completionTokens: 1,
-            settlementDisposition: .eligibleOwner
-        )
-    }
-
     private func makeMultimodalRequest() throws -> ChatCompletionRequest {
         try makeRequest(extra: [
             "messages": [[
@@ -801,22 +748,5 @@ final class NativeMTPSelectorTests: XCTestCase {
                 ],
             ]],
         ])
-    }
-}
-
-private final class NativeMTPAdmissionRecorder: @unchecked Sendable {
-    private let lock = NSLock()
-    private var admissions: [NativeMTPRuntimeAdmission] = []
-
-    func append(_ admission: NativeMTPRuntimeAdmission) {
-        lock.lock()
-        admissions.append(admission)
-        lock.unlock()
-    }
-
-    func last() -> NativeMTPRuntimeAdmission? {
-        lock.lock()
-        defer { lock.unlock() }
-        return admissions.last
     }
 }

@@ -2722,13 +2722,14 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             Self.update(&hasher, label: "layer", value: String(layerIndex))
             Self.update(&hasher, label: "type", value: String(describing: type(of: cache)))
             Self.update(&hasher, label: "offset", value: String(cache.offset))
-            guard let cacheKind = CacheKind.recognized(from: cache) else {
-                throw ContinuousBatchSchedulerError.unsupported("native_mtp_observer_unsupported_cache_kind")
+            let digestShape = try rowTargetCacheDigestShape(for: cache)
+            switch digestShape {
+            case .paged(let storedTokens, let blockSizeTokens):
+                Self.update(&hasher, label: "paged_stored_tokens", value: String(storedTokens))
+                Self.update(&hasher, label: "paged_block_size_tokens", value: String(blockSizeTokens))
+            case .standard:
+                break
             }
-            if case .slidingWindow = cacheKind {
-                throw ContinuousBatchSchedulerError.unsupported("native_mtp_observer_unsupported_sliding_window_state")
-            }
-            let logicalTokens: Int? = cacheKind == .pagedAttention ? cache.offset : nil
             let state = cache.state
             Self.update(&hasher, label: "slot_count", value: String(state.count))
             for (slotIndex, array) in state.enumerated() {
@@ -2736,11 +2737,42 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     &hasher,
                     label: "slot_\(slotIndex)",
                     array: array,
-                    logicalTokens: logicalTokens
+                    logicalTokens: digestShape.logicalTokens
                 )
             }
         }
         return Self.hexString(hasher.finalize())
+    }
+
+    private enum RowTargetCacheDigestShape {
+        case paged(storedTokens: Int, blockSizeTokens: Int)
+        case standard(logicalTokens: Int?)
+
+        var logicalTokens: Int? {
+            switch self {
+            case .paged(let storedTokens, _): return storedTokens
+            case .standard(let logicalTokens): return logicalTokens
+            }
+        }
+    }
+
+    private func rowTargetCacheDigestShape(for cache: KVCache) throws -> RowTargetCacheDigestShape {
+        if let paged = cache as? PagedKVCache {
+            guard paged.attentionWindowTokens == nil else {
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_observer_unsupported_sliding_window_state")
+            }
+            guard paged.offset == paged.storedTokens else {
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_observer_paged_cache_offset_mismatch")
+            }
+            return .paged(storedTokens: paged.storedTokens, blockSizeTokens: paged.blockSizeTokens)
+        }
+        guard let cacheKind = CacheKind.recognized(from: cache) else {
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_observer_unsupported_cache_kind")
+        }
+        if case .slidingWindow = cacheKind {
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_observer_unsupported_sliding_window_state")
+        }
+        return .standard(logicalTokens: cacheKind == .pagedAttention ? cache.offset : nil)
     }
 
 

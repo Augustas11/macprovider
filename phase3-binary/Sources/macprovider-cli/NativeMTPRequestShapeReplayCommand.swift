@@ -1335,10 +1335,10 @@ final class NativeMTPRequestShapeReplayRunner {
         guard numericFeatureMatches(request.promptSource.minP, row: row, key: "requested_min_p") else {
             return "min_p_numeric_mismatch:\(row.requestID)"
         }
-        guard numericFeatureMatches(request.promptSource.presencePenalty, row: row, key: "requested_presence_penalty") else {
+        guard numericFeatureMatches(request.promptSource.presencePenalty, row: row, key: "requested_presence_penalty", absentDefault: 0.0) else {
             return "presence_penalty_numeric_mismatch:\(row.requestID)"
         }
-        guard numericFeatureMatches(request.promptSource.frequencyPenalty, row: row, key: "requested_frequency_penalty") else {
+        guard numericFeatureMatches(request.promptSource.frequencyPenalty, row: row, key: "requested_frequency_penalty", absentDefault: 0.0) else {
             return "frequency_penalty_numeric_mismatch:\(row.requestID)"
         }
         guard numericFeatureMatches(request.promptSource.repetitionPenalty, row: row, key: "requested_repetition_penalty") else {
@@ -1391,10 +1391,18 @@ final class NativeMTPRequestShapeReplayRunner {
         actual == row.boolFeature(key)
     }
 
-    private static func numericFeatureMatches(_ actual: MacProviderCore.JSONValue?, row: NativeMTPRequestShapeReplayRow, key: String) -> Bool {
+    private static func numericFeatureMatches(
+        _ actual: MacProviderCore.JSONValue?,
+        row: NativeMTPRequestShapeReplayRow,
+        key: String,
+        absentDefault: Double? = nil
+    ) -> Bool {
         let expected = row.jsonFeature(key)
         guard let expected else { return jsonNumber(actual) == nil }
-        guard let actual = jsonNumber(actual), let expectedNumber = anyNumber(expected) else { return false }
+        guard let expectedNumber = anyNumber(expected) else { return false }
+        guard let actual = jsonNumber(actual) else {
+            return absentDefault.map { abs($0 - expectedNumber) < 0.000_000_1 } ?? false
+        }
         return abs(actual - expectedNumber) < 0.000_000_1
     }
 

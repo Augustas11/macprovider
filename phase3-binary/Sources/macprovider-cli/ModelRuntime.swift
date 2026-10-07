@@ -300,6 +300,8 @@ public struct RuntimeSnapshot: @unchecked Sendable {
     public let specDecodeGeneration: Int
     public let continuousBatching: RuntimeContinuousBatchingSnapshot?
     public let nativeMTPStatus: NativeMTPStatusSnapshot
+    let nativeMTPCapability: NativeMTPCapability?
+    let schedulerSupportsNativeMTP: Bool
     let nativeMTPTupleOffer: NativeMTPPublishedTupleOffer?
 
     init(
@@ -319,6 +321,8 @@ public struct RuntimeSnapshot: @unchecked Sendable {
         specDecodeGeneration: Int = 0,
         continuousBatching: RuntimeContinuousBatchingSnapshot? = nil,
         nativeMTPStatus: NativeMTPStatusSnapshot = NativeMTPStatusSink.disabled().snapshot(),
+        nativeMTPCapability: NativeMTPCapability? = nil,
+        schedulerSupportsNativeMTP: Bool = false,
         nativeMTPTupleOffer: NativeMTPPublishedTupleOffer? = nil
     ) {
         self.state = state
@@ -339,6 +343,8 @@ public struct RuntimeSnapshot: @unchecked Sendable {
         self.specDecodeGeneration = specDecodeGeneration
         self.continuousBatching = continuousBatching
         self.nativeMTPStatus = nativeMTPStatus
+        self.nativeMTPCapability = nativeMTPCapability
+        self.schedulerSupportsNativeMTP = schedulerSupportsNativeMTP
         self.nativeMTPTupleOffer = nativeMTPTupleOffer
     }
 
@@ -1273,10 +1279,6 @@ actor ModelRuntime: ModelRuntimeServing {
         for request: ChatCompletionRequest,
         snapshot: RuntimeSnapshot
     ) -> NativeMTPRuntimeAdmission {
-        let capability = currentNativeMTPCapability ?? nativeMTPCapability
-        let schedulerSupportsNativeMTP = currentNativeMTPDrafterContainer != nil
-            && continuousBatchScheduler != nil
-            || nativeMTPSchedulerSupported
         let otherActiveRows = inFlightCancellations.count - 1
         let admission = Self.nativeMTPRuntimeAdmission(
             for: request,
@@ -1284,9 +1286,9 @@ actor ModelRuntime: ModelRuntimeServing {
             draftLoaded: snapshot.hasTargetCompatibleDraft,
             numDraftTokens: snapshot.numDraftTokens,
             nativeMTPMode: nativeMTPMode,
-            nativeMTPCapability: capability,
-            schedulerSupportsNativeMTP: schedulerSupportsNativeMTP
-        ).binding(to: currentNativeMTPTupleOffer.map {
+            nativeMTPCapability: snapshot.nativeMTPCapability,
+            schedulerSupportsNativeMTP: snapshot.schedulerSupportsNativeMTP
+        ).binding(to: snapshot.nativeMTPTupleOffer.map {
             NativeMTPTupleFence(
                 admissionTupleSHA256: $0.nativeMTPAdmissionTupleSHA256,
                 servedSnapshotID: $0.servedSnapshotID,
@@ -3281,6 +3283,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 }
             ),
             nativeMTPStatus: currentNativeMTPStatusSink.snapshot(),
+            nativeMTPCapability: currentNativeMTPCapability,
+            schedulerSupportsNativeMTP: currentServedSchedulerSupportsNativeMTP(),
             nativeMTPTupleOffer: currentNativeMTPTupleOffer
         )
     }
@@ -3371,6 +3375,7 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     private func requestStartSnapshot() -> RuntimeSnapshot {
+        let schedulerSupportsNativeMTP = currentServedSchedulerSupportsNativeMTP()
         if state == .loading {
             return RuntimeSnapshot(
                 state: .ready,
@@ -3387,6 +3392,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 templateSupportsPreserveThinking: currentTemplateSupportsPreserveThinking,
                 specDecodeGeneration: currentSpecDecodeGeneration,
                 nativeMTPStatus: currentNativeMTPStatusSink.snapshot(),
+                nativeMTPCapability: currentNativeMTPCapability,
+                schedulerSupportsNativeMTP: schedulerSupportsNativeMTP,
                 nativeMTPTupleOffer: currentNativeMTPTupleOffer
             )
         }
@@ -3405,8 +3412,14 @@ actor ModelRuntime: ModelRuntimeServing {
             templateSupportsPreserveThinking: currentTemplateSupportsPreserveThinking,
             specDecodeGeneration: currentSpecDecodeGeneration,
             nativeMTPStatus: currentNativeMTPStatusSink.snapshot(),
+            nativeMTPCapability: currentNativeMTPCapability,
+            schedulerSupportsNativeMTP: schedulerSupportsNativeMTP,
             nativeMTPTupleOffer: currentNativeMTPTupleOffer
         )
+    }
+
+    private func currentServedSchedulerSupportsNativeMTP() -> Bool {
+        currentNativeMTPDrafterContainer != nil && continuousBatchScheduler != nil
     }
 
     func swapSignals() -> AsyncStream<SwapSignal> {
@@ -6627,6 +6640,11 @@ actor ModelRuntime: ModelRuntimeServing {
         guard let continuousBatchScheduler else {
             throw ContinuousBatchSchedulerError.requestFailed("lab_probe_scheduler_unavailable")
         }
+        if nativeDepth != nil {
+            guard currentServedSchedulerSupportsNativeMTP(), currentNativeMTPCapability != nil else {
+                throw ContinuousBatchSchedulerError.requestFailed("lab_probe_native_mtp_unavailable")
+            }
+        }
         let base = ContinuousBatchSchedulerRequest(
             id: id,
             conversationKey: "",
@@ -6639,7 +6657,7 @@ actor ModelRuntime: ModelRuntimeServing {
             nativeMTPMaximumProposalDepth: nativeDepth ?? 0,
             nativeMTPCompleteWindowBytesByDepth: nativeDepth == nil
                 ? []
-                : ((currentNativeMTPCapability ?? nativeMTPCapability)?.completeWindowBytesByDepth ?? []),
+                : (currentNativeMTPCapability?.completeWindowBytesByDepth ?? []),
             nativeMTPTupleFence: nil,
             nativeMTPIntegrityProbe: nativeDepth != nil
         )
