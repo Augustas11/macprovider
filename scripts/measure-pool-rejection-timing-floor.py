@@ -753,7 +753,7 @@ def main(argv: list[str] | None = None) -> int:
         if production_measurement and not args.unauthorized_pool_id:
             raise SystemExit(
                 "production HTTP measurement requires --unauthorized-pool-id; "
-                "credential-only unauthorized class cannot prove active unauthorized vs paused disabled state"
+                "credential-only unauthorized class cannot prove a distinct existing unauthorized pool vs the paused disabled pool"
             )
         plan = plan_from_args(args)
         class_preconditions = None

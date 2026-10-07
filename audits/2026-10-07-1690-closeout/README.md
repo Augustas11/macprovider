@@ -145,3 +145,24 @@ derived by this collector. Original private snapshots remain operator-only.
 - Final acceptance of the bounded mixed-version proof and qualification for
   the current pool models remain pending. Public external Creator launch is a separate SPEC-043 scope;
   no named external operator or hardware-backed production root is fabricated.
+
+## Freeze verification and carried limitations
+
+The focused Python regression command covering timing, external-runtime evidence,
+and BYOM contract locks passed 102 tests in 6.604s. A first invocation failed
+because it named a nonexistent lock-test module; the corrected command passed.
+The subsequent timing-only wording correction passed all 30 timing tests in
+5.888s. The measured tool remains anchored to commit `8daa9f1d6317` and its
+recorded exact blob/hash, rather than implying the later wording was measured.
+The PR declaration check passed. A local full governance run was terminated
+when its resource use exceeded the operator-host boundary; its result is not a
+PASS. GitHub Actions owns the full governance and build/test gates.
+
+Security review carries three non-gating LOW limitations: published pool IDs
+can reveal linkage to salted timing fingerprints; custom Ollama prompt hashes
+are unsalted and reveal equality/dictionary matches; Ollama model evidence binds
+the filesystem mapping, not cryptographically the running process. The Ollama
+tool is operator-only/nonbilling and is operational measurement, not strict
+same-M0 native-token/cache/perplexity qualification. None of these observations
+grants settlement trust, completes model qualification, or activates an external
+Creator launch.

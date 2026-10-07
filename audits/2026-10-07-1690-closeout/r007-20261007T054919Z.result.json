@@ -113,6 +113,7 @@
   "tool_source": {
     "path": "scripts/measure-pool-rejection-timing-floor.py",
     "base_commit": "eedd1c1456242afab775072bef622a68c3b634a0",
+    "source_commit": "8daa9f1d63177534fb22a5d858c371b5a8b8b872",
     "git_blob": "109a2db5fcca121e617ff26986a69222303a344b",
     "sha256": "94acbc1044eb682a1a5ba267057d5ba632ff245693c29f6e9f44a0865b788c61"
   },
