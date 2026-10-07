@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import datetime as dt
+import hashlib
 import importlib.util
 import io
 import json
@@ -32,6 +34,57 @@ def passing_samples() -> dict[str, list[float]]:
         "unauthorized": [50.3, 50.1, 50.4, 50.2, 50.0, 50.3, 50.2, 50.1],
         "disabled": [50.1, 50.2, 50.3, 50.4, 50.2, 50.1, 50.5, 50.0],
     }
+
+
+def utc_z(value: dt.datetime) -> str:
+    return value.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def class_preconditions_payload(
+    mod,
+    *,
+    plan: dict[str, tuple[dict[str, str], str]],
+    base_url: str,
+    samples: int,
+    captured_at: dt.datetime | None = None,
+    expires_at: dt.datetime | None = None,
+) -> dict[str, object]:
+    captured_at = captured_at or dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    expires_at = expires_at or (captured_at + dt.timedelta(minutes=5))
+    salt = "a" * 64
+    classes = {}
+    for name, (credential, pool_id) in plan.items():
+        proof = {
+            "pool_fingerprint": mod.fingerprint_value(salt, pool_id),
+            "credential_fingerprint": mod.fingerprint_credential(salt, credential),
+        }
+        if name == "unknown":
+            proof["pool_exists"] = False
+        elif name == "unauthorized":
+            proof.update({"pool_exists": True, "buyer_authorized": False, "lifecycle": "created", "routeable": False})
+        elif name == "disabled":
+            proof.update({"pool_exists": True, "buyer_authorized": True, "lifecycle": "paused", "routeable": False})
+        classes[name] = proof
+    return {
+        "schema": mod.CLASS_PRECONDITIONS_SCHEMA,
+        "proof_authority": "trusted_operator_capture_not_server_signed",
+        "operator_capture_boundary": True,
+        "state_hold": True,
+        "captured_at": utc_z(captured_at),
+        "expires_at": utc_z(expires_at),
+        "fingerprint_salt": salt,
+        "run_nonce": "b" * 32,
+        "tool_sha256": mod.current_tool_sha256(),
+        "base_url": base_url,
+        "samples_per_class": samples,
+        "classes": classes,
+    }
+
+
+def write_json(path: Path, payload: object) -> str:
+    text = json.dumps(payload, sort_keys=True)
+    path.write_text(text, encoding="utf-8")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 class PoolRejectionTimingFloorTests(unittest.TestCase):
@@ -80,6 +133,25 @@ class PoolRejectionTimingFloorTests(unittest.TestCase):
                 ]
             )
         self.assertIn("refusing production host", str(raised.exception))
+
+    def test_production_http_requires_fresh_class_preconditions(self):
+        with self.assertRaises(SystemExit) as raised:
+            self.mod.main(
+                [
+                    "--base-url",
+                    "https://api.malibu.tech",
+                    "--environment",
+                    "production",
+                    "--allow-production",
+                    "--pool-id",
+                    "pool-a",
+                    "--unauthorized-pool-id",
+                    "pool-b",
+                    "--authorized-account",
+                    "acct-a",
+                ]
+            )
+        self.assertIn("--class-preconditions-json is required", str(raised.exception))
 
     def test_refuses_missing_source(self):
         with self.assertRaises(SystemExit) as raised:
@@ -173,6 +245,86 @@ class _PoolUnavailableHandler(BaseHTTPRequestHandler):
         return
 
 
+class _FakeHTTPResponse:
+    def __init__(self, *, status: int, body: bytes):
+        self.status = status
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self) -> bytes:
+        return self.body
+
+
+class _FakeOpener:
+    def __init__(self, response: _FakeHTTPResponse):
+        self.response = response
+        self.requests = []
+
+    def open(self, request, *, timeout):
+        self.requests.append((request, timeout))
+        return self.response
+
+
+class _RedirectingHandler(BaseHTTPRequestHandler):
+    status_code = 302
+    location = ""
+    seen: list[tuple[str, str, str]] = []
+
+    def do_POST(self):  # noqa: N802 - http.server API
+        length = int(self.headers.get("Content-Length", "0"))
+        self.rfile.read(length)
+        type(self).seen.append(
+            (
+                self.headers.get("Authorization", ""),
+                self.headers.get("X-MacProvider-Account", ""),
+                self.headers.get("X-MacProvider-Pool-Select", ""),
+            )
+        )
+        self.send_response(type(self).status_code)
+        self.send_header("Location", type(self).location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *args):
+        return
+
+
+class _RedirectTargetHandler(BaseHTTPRequestHandler):
+    seen: list[tuple[str, str, str, str]] = []
+
+    def do_GET(self):  # noqa: N802 - http.server API
+        self._record()
+
+    def do_POST(self):  # noqa: N802 - http.server API
+        length = int(self.headers.get("Content-Length", "0"))
+        self.rfile.read(length)
+        self._record()
+
+    def _record(self):
+        type(self).seen.append(
+            (
+                self.command,
+                self.path,
+                self.headers.get("Authorization", ""),
+                self.headers.get("X-MacProvider-Account", ""),
+            )
+        )
+        body = b'{"error":{"code":"pool_unavailable","message":"target should not be reached"}}'
+        self.send_response(503)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        return
+
+
 class PoolRejectionTimingCredentialTests(unittest.TestCase):
     def setUp(self):
         self.mod = load_module()
@@ -239,6 +391,410 @@ class PoolRejectionTimingCredentialTests(unittest.TestCase):
         self.assertEqual(plan["unauthorized"], ({"X-MacProvider-Account": "acct-b"}, "p"))
         self.assertEqual(plan["disabled"], ({"X-MacProvider-Account": "acct-a"}, "p"))
 
+    def test_class_plan_rejects_non_distinct_pool_classes_and_credentials(self):
+        authorized = {"Authorization": "Bearer sk-auth"}
+        unauthorized = {"Authorization": "Bearer sk-other"}
+        with self.assertRaises(SystemExit) as raised:
+            self.mod.class_plan(
+                unknown_pool_id="samepool",
+                pool_id="samepool",
+                unauthorized_pool_id="foreignpool",
+                authorized=authorized,
+                unauthorized=None,
+            )
+        self.assertIn("unknown pool id", str(raised.exception))
+
+        with self.assertRaises(SystemExit) as raised:
+            self.mod.class_plan(
+                unknown_pool_id="unknownpool",
+                pool_id="samepool",
+                unauthorized_pool_id="samepool",
+                authorized=authorized,
+                unauthorized=None,
+            )
+        self.assertIn("unauthorized pool id", str(raised.exception))
+
+        with self.assertRaises(SystemExit) as raised:
+            self.mod.class_plan(
+                unknown_pool_id="samepool",
+                pool_id="disabledpool",
+                unauthorized_pool_id="samepool",
+                authorized=authorized,
+                unauthorized=None,
+            )
+        self.assertIn("unknown pool id", str(raised.exception))
+
+        with self.assertRaises(SystemExit) as raised:
+            self.mod.class_plan(
+                unknown_pool_id="unknownpool",
+                pool_id="disabledpool",
+                unauthorized_pool_id="",
+                authorized=authorized,
+                unauthorized=authorized,
+            )
+        self.assertIn("credential headers must differ", str(raised.exception))
+
+        plan = self.mod.class_plan(
+            unknown_pool_id="unknownpool",
+            pool_id="disabledpool",
+            unauthorized_pool_id="",
+            authorized=authorized,
+            unauthorized=unauthorized,
+        )
+        self.assertEqual(plan["unauthorized"], (unauthorized, "disabledpool"))
+
+    def test_production_http_requires_class_preconditions_before_any_probe(self):
+        with mock.patch.dict(os.environ, {"AUTH_KEY": "sk-auth"}), mock.patch.object(
+            self.mod,
+            "measure_http",
+        ) as measure_http:
+            with self.assertRaises(SystemExit) as raised:
+                self.mod.main(
+                    [
+                        "--base-url", "https://api.malibu.tech",
+                        "--environment", "production",
+                        "--allow-production",
+                        "--pool-id", "pausedpoolxxxxxxxxxxxx",
+                        "--unauthorized-pool-id", "foreignpoolxxxxxxxxxxx",
+                        "--authorized-key-env", "AUTH_KEY",
+                    ]
+                )
+        self.assertIn("--class-preconditions-json", str(raised.exception))
+        measure_http.assert_not_called()
+
+    def test_valid_production_class_preconditions_remain_pending_until_postconditions(self):
+        base_url = "https://api.malibu.tech"
+        samples = 8
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "proof.json"
+            authorized = {"Authorization": "Bearer sk-auth"}
+            plan = self.mod.class_plan(
+                unknown_pool_id="zzzzzzzzzzzzzzzzzzzzzz",
+                pool_id="pausedpoolxxxxxxxxxxxx",
+                unauthorized_pool_id="foreignpoolxxxxxxxxxxx",
+                authorized=authorized,
+                unauthorized=None,
+            )
+            expected_file_sha = write_json(
+                path,
+                class_preconditions_payload(self.mod, plan=plan, base_url=base_url, samples=samples),
+            )
+            buf = io.StringIO()
+            with mock.patch.dict(os.environ, {"AUTH_KEY": "sk-auth"}), mock.patch.object(
+                self.mod,
+                "measure_http",
+                return_value=passing_samples(),
+            ) as measure_http, redirect_stdout(buf):
+                code = self.mod.main(
+                    [
+                        "--base-url", base_url,
+                        "--environment", "production",
+                        "--allow-production",
+                        "--pool-id", "pausedpoolxxxxxxxxxxxx",
+                        "--unauthorized-pool-id", "foreignpoolxxxxxxxxxxx",
+                        "--authorized-key-env", "AUTH_KEY",
+                        "--samples", str(samples),
+                        "--class-preconditions-json", str(path),
+                    ]
+                )
+        self.assertEqual(code, 0)
+        measure_http.assert_called_once()
+        out = buf.getvalue()
+        result = json.loads(out)
+        self.assertEqual(result["class_preconditions"]["file_sha256"], expected_file_sha)
+        self.assertEqual(result["class_preconditions"]["tool_sha256"], self.mod.current_tool_sha256())
+        self.assertEqual(result["authority"], "measurement_pending_postconditions")
+        self.assertNotIn("sk-auth", out)
+        self.assertNotIn("pausedpoolxxxxxxxxxxxx", out)
+        self.assertFalse(result["production_remeasure_complete"])
+
+    def test_production_credential_only_unauthorized_mode_rejected_before_any_probe(self):
+        base_url = "https://api.malibu.tech"
+        with mock.patch.dict(os.environ, {"AUTH_KEY": "sk-auth", "UNAUTH_KEY": "sk-other"}), mock.patch.object(
+            self.mod,
+            "measure_http",
+        ) as measure_http:
+            with self.assertRaises(SystemExit) as raised:
+                self.mod.main(
+                    [
+                        "--base-url", base_url,
+                        "--environment", "production",
+                        "--allow-production",
+                        "--pool-id", "pausedpoolxxxxxxxxxxxx",
+                        "--authorized-key-env", "AUTH_KEY",
+                        "--unauthorized-key-env", "UNAUTH_KEY",
+                    ]
+                )
+        self.assertIn("--unauthorized-pool-id", str(raised.exception))
+        measure_http.assert_not_called()
+
+    def test_stale_class_preconditions_fail_before_any_probe(self):
+        base_url = "https://api.malibu.tech"
+        samples = 8
+        now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "proof.json"
+            authorized = {"Authorization": "Bearer sk-auth"}
+            plan = self.mod.class_plan(
+                unknown_pool_id="zzzzzzzzzzzzzzzzzzzzzz",
+                pool_id="pausedpoolxxxxxxxxxxxx",
+                unauthorized_pool_id="foreignpoolxxxxxxxxxxx",
+                authorized=authorized,
+                unauthorized=None,
+            )
+            write_json(
+                path,
+                class_preconditions_payload(
+                    self.mod,
+                    plan=plan,
+                    base_url=base_url,
+                    samples=samples,
+                    captured_at=now - dt.timedelta(minutes=10),
+                    expires_at=now - dt.timedelta(minutes=5),
+                ),
+            )
+            with mock.patch.dict(os.environ, {"AUTH_KEY": "sk-auth"}), mock.patch.object(
+                self.mod,
+                "measure_http",
+            ) as measure_http:
+                with self.assertRaises(SystemExit) as raised:
+                    self.mod.main(
+                        [
+                            "--base-url", base_url,
+                            "--environment", "production",
+                            "--allow-production",
+                            "--pool-id", "pausedpoolxxxxxxxxxxxx",
+                            "--unauthorized-pool-id", "foreignpoolxxxxxxxxxxx",
+                            "--authorized-key-env", "AUTH_KEY",
+                            "--samples", str(samples),
+                            "--class-preconditions-json", str(path),
+                        ]
+                    )
+        self.assertIn("stale", str(raised.exception))
+        measure_http.assert_not_called()
+
+    def test_transplanted_class_preconditions_fail_before_any_probe(self):
+        base_url = "https://api.malibu.tech"
+        samples = 8
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "proof.json"
+            authorized = {"Authorization": "Bearer sk-auth"}
+            plan = self.mod.class_plan(
+                unknown_pool_id="zzzzzzzzzzzzzzzzzzzzzz",
+                pool_id="pausedpoolxxxxxxxxxxxx",
+                unauthorized_pool_id="foreignpoolxxxxxxxxxxx",
+                authorized=authorized,
+                unauthorized=None,
+            )
+            payload = class_preconditions_payload(self.mod, plan=plan, base_url=base_url, samples=samples)
+            payload["base_url"] = "https://api.attacker.example"
+            write_json(path, payload)
+            with mock.patch.dict(os.environ, {"AUTH_KEY": "sk-auth"}), mock.patch.object(
+                self.mod,
+                "measure_http",
+            ) as measure_http:
+                with self.assertRaises(SystemExit) as raised:
+                    self.mod.main(
+                        [
+                            "--base-url", base_url,
+                            "--environment", "production",
+                            "--allow-production",
+                            "--pool-id", "pausedpoolxxxxxxxxxxxx",
+                            "--unauthorized-pool-id", "foreignpoolxxxxxxxxxxx",
+                            "--authorized-key-env", "AUTH_KEY",
+                            "--samples", str(samples),
+                            "--class-preconditions-json", str(path),
+                        ]
+                    )
+        self.assertIn("base_url", str(raised.exception))
+        measure_http.assert_not_called()
+
+    def test_rejects_overlapping_class_plan_inputs(self):
+        with self.assertRaises(SystemExit) as raised:
+            self.mod.class_plan(
+                unknown_pool_id="samepool",
+                pool_id="samepool",
+                unauthorized_pool_id="foreignpool",
+                authorized={"Authorization": "Bearer sk-auth"},
+                unauthorized=None,
+            )
+        self.assertIn("unknown pool id must differ", str(raised.exception))
+
+        with self.assertRaises(SystemExit) as raised:
+            self.mod.class_plan(
+                unknown_pool_id="unknownpool",
+                pool_id="pausedpool",
+                unauthorized_pool_id="foreignpool",
+                authorized={"Authorization": "Bearer sk-auth"},
+                unauthorized={"Authorization": "Bearer sk-auth"},
+            )
+        self.assertIn("credential headers must differ", str(raised.exception))
+
+    def test_class_preconditions_validate_selected_private_class_state(self):
+        plan = self.mod.class_plan(
+            unknown_pool_id="unknownpoolxxxxxxxxxxx",
+            pool_id="pausedpoolxxxxxxxxxxxx",
+            unauthorized_pool_id="foreignpoolxxxxxxxxxxx",
+            authorized={"Authorization": "Bearer sk-auth"},
+            unauthorized=None,
+        )
+        salt = "1" * 64
+        base_url = "https://api.malibu.tech"
+        samples = 200
+        payload = {
+            "schema": self.mod.CLASS_PRECONDITIONS_SCHEMA,
+            "proof_authority": "trusted_operator_capture_not_server_signed",
+            "operator_capture_boundary": True,
+            "state_hold": True,
+            "captured_at": "2026-10-07T05:24:00Z",
+            "expires_at": "2026-10-07T05:29:00Z",
+            "fingerprint_salt": salt,
+            "run_nonce": "3" * 32,
+            "tool_sha256": self.mod.current_tool_sha256(),
+            "base_url": base_url,
+            "samples_per_class": samples,
+            "classes": {
+                "unknown": {
+                    "pool_fingerprint": self.mod.fingerprint_value(salt, "unknownpoolxxxxxxxxxxx"),
+                    "credential_fingerprint": self.mod.fingerprint_credential(salt, {"Authorization": "Bearer sk-auth"}),
+                    "pool_exists": False,
+                },
+                "unauthorized": {
+                    "pool_fingerprint": self.mod.fingerprint_value(salt, "foreignpoolxxxxxxxxxxx"),
+                    "credential_fingerprint": self.mod.fingerprint_credential(salt, {"Authorization": "Bearer sk-auth"}),
+                    "pool_exists": True,
+                    "buyer_authorized": False,
+                    "lifecycle": "created",
+                    "routeable": False,
+                },
+                "disabled": {
+                    "pool_fingerprint": self.mod.fingerprint_value(salt, "pausedpoolxxxxxxxxxxxx"),
+                    "credential_fingerprint": self.mod.fingerprint_credential(salt, {"Authorization": "Bearer sk-auth"}),
+                    "pool_exists": True,
+                    "buyer_authorized": True,
+                    "lifecycle": "paused",
+                    "routeable": False,
+                },
+            },
+        }
+        validated = self.mod.validate_class_preconditions_payload(
+            payload,
+            plan=plan,
+            base_url=base_url,
+            samples=samples,
+            file_sha256="0" * 64,
+            now=self.mod.dt.datetime(2026, 10, 7, 5, 25, tzinfo=self.mod.dt.timezone.utc),
+        )
+        self.assertEqual(validated["file_sha256"], "0" * 64)
+        self.assertEqual(validated["classes"]["unauthorized"]["lifecycle"], "created")
+        self.assertFalse(validated["classes"]["unauthorized"]["routeable"])
+        self.assertEqual(validated["classes"]["disabled"]["lifecycle"], "paused")
+        self.assertNotIn("sk-auth", json.dumps(validated))
+
+    def test_class_preconditions_reject_stale_and_wrong_fingerprint(self):
+        plan = self.mod.class_plan(
+            unknown_pool_id="unknownpoolxxxxxxxxxxx",
+            pool_id="pausedpoolxxxxxxxxxxxx",
+            unauthorized_pool_id="foreignpoolxxxxxxxxxxx",
+            authorized={"Authorization": "Bearer sk-auth"},
+            unauthorized=None,
+        )
+        salt = "2" * 64
+        base_url = "https://api.malibu.tech"
+        samples = 200
+        payload = {
+            "schema": self.mod.CLASS_PRECONDITIONS_SCHEMA,
+            "proof_authority": "trusted_operator_capture_not_server_signed",
+            "operator_capture_boundary": True,
+            "state_hold": True,
+            "captured_at": "2026-10-07T05:24:00Z",
+            "expires_at": "2026-10-07T05:29:00Z",
+            "fingerprint_salt": salt,
+            "run_nonce": "4" * 32,
+            "tool_sha256": self.mod.current_tool_sha256(),
+            "base_url": base_url,
+            "samples_per_class": samples,
+            "classes": {
+                "unknown": {
+                    "pool_fingerprint": "0" * 64,
+                    "credential_fingerprint": self.mod.fingerprint_credential(salt, {"Authorization": "Bearer sk-auth"}),
+                    "pool_exists": False,
+                },
+                "unauthorized": {
+                    "pool_fingerprint": self.mod.fingerprint_value(salt, "foreignpoolxxxxxxxxxxx"),
+                    "credential_fingerprint": self.mod.fingerprint_credential(salt, {"Authorization": "Bearer sk-auth"}),
+                    "pool_exists": True,
+                    "buyer_authorized": False,
+                    "lifecycle": "created",
+                    "routeable": False,
+                },
+                "disabled": {
+                    "pool_fingerprint": self.mod.fingerprint_value(salt, "pausedpoolxxxxxxxxxxxx"),
+                    "credential_fingerprint": self.mod.fingerprint_credential(salt, {"Authorization": "Bearer sk-auth"}),
+                    "pool_exists": True,
+                    "buyer_authorized": True,
+                    "lifecycle": "paused",
+                    "routeable": False,
+                },
+            },
+        }
+        with self.assertRaises(SystemExit) as raised:
+            self.mod.validate_class_preconditions_payload(
+                payload,
+                plan=plan,
+                base_url=base_url,
+                samples=samples,
+                file_sha256="0" * 64,
+                now=self.mod.dt.datetime(2026, 10, 7, 5, 25, tzinfo=self.mod.dt.timezone.utc),
+            )
+        self.assertIn("pool_fingerprint does not match", str(raised.exception))
+
+        payload["classes"]["unknown"]["pool_fingerprint"] = self.mod.fingerprint_value(salt, "unknownpoolxxxxxxxxxxx")
+        with self.assertRaises(SystemExit) as raised:
+            self.mod.validate_class_preconditions_payload(
+                payload,
+                plan=plan,
+                base_url=base_url,
+                samples=samples,
+                file_sha256="0" * 64,
+                now=self.mod.dt.datetime(2026, 10, 7, 5, 31, tzinfo=self.mod.dt.timezone.utc),
+            )
+        self.assertIn("is stale", str(raised.exception))
+
+    def test_class_preconditions_reject_invalid_unauthorized_lifecycle_and_routeable_type(self):
+        plan = self.mod.class_plan(
+            unknown_pool_id="unknownpoolxxxxxxxxxxx",
+            pool_id="pausedpoolxxxxxxxxxxxx",
+            unauthorized_pool_id="foreignpoolxxxxxxxxxxx",
+            authorized={"Authorization": "Bearer sk-auth"},
+            unauthorized=None,
+        )
+        base_url = "https://api.malibu.tech"
+        samples = 8
+        payload = class_preconditions_payload(self.mod, plan=plan, base_url=base_url, samples=samples)
+        payload["classes"]["unauthorized"]["lifecycle"] = "deleted"
+        with self.assertRaises(SystemExit) as raised:
+            self.mod.validate_class_preconditions_payload(
+                payload,
+                plan=plan,
+                base_url=base_url,
+                samples=samples,
+                file_sha256="0" * 64,
+            )
+        self.assertIn("unauthorized.lifecycle", str(raised.exception))
+
+        payload = class_preconditions_payload(self.mod, plan=plan, base_url=base_url, samples=samples)
+        payload["classes"]["unauthorized"]["routeable"] = "false"
+        with self.assertRaises(SystemExit) as raised:
+            self.mod.validate_class_preconditions_payload(
+                payload,
+                plan=plan,
+                base_url=base_url,
+                samples=samples,
+                file_sha256="0" * 64,
+            )
+        self.assertIn("unauthorized.routeable", str(raised.exception))
+
     def test_measure_http_sends_bearer_and_shuffles_class_order(self):
         _PoolUnavailableHandler.seen = []
         server = ThreadingHTTPServer(("127.0.0.1", 0), _PoolUnavailableHandler)
@@ -274,6 +830,128 @@ class PoolRejectionTimingCredentialTests(unittest.TestCase):
         rounds = [tuple(pool_to_class[pool] for _, _, pool in seen[i : i + 3]) for i in range(0, 24, 3)]
         self.assertTrue(all(sorted(r) == ["disabled", "unauthorized", "unknown"] for r in rounds))
         self.assertGreater(len(set(rounds)), 1, "class order must vary across rounds")
+
+    def test_measure_http_rejects_404_even_with_pool_unavailable_code(self):
+        plan = self.mod.class_plan(
+            unknown_pool_id="unknownpoolxxxxxxxxxxx",
+            pool_id="pausedpoolxxxxxxxxxxxx",
+            unauthorized_pool_id="foreignpoolxxxxxxxxxxx",
+            authorized={"Authorization": "Bearer sk-auth"},
+            unauthorized=None,
+        )
+        body = b'{"error":{"code":"pool_unavailable","message":"Pool unavailable"}}'
+        fake_opener = _FakeOpener(_FakeHTTPResponse(status=404, body=body))
+        with mock.patch.object(self.mod.ssl, "create_default_context", return_value=object()), mock.patch.object(
+            self.mod,
+            "build_url_opener",
+            return_value=fake_opener,
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                self.mod.measure_http(
+                    "https://gateway.example",
+                    plan=plan,
+                    samples=1,
+                    timeout_s=5,
+                    rng=random.Random(1),
+                )
+        self.assertIn("status=404", str(raised.exception))
+        self.assertEqual(len(fake_opener.requests), 1)
+
+    def test_measure_http_rejects_incidental_pool_unavailable_message(self):
+        plan = self.mod.class_plan(
+            unknown_pool_id="unknownpoolxxxxxxxxxxx",
+            pool_id="pausedpoolxxxxxxxxxxxx",
+            unauthorized_pool_id="foreignpoolxxxxxxxxxxx",
+            authorized={"Authorization": "Bearer sk-auth"},
+            unauthorized=None,
+        )
+        body = b'{"error":{"code":"rate_limited","message":"mentions pool_unavailable only in text"}}'
+        fake_opener = _FakeOpener(_FakeHTTPResponse(status=503, body=body))
+        with mock.patch.object(self.mod.ssl, "create_default_context", return_value=object()), mock.patch.object(
+            self.mod,
+            "build_url_opener",
+            return_value=fake_opener,
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                self.mod.measure_http(
+                    "https://gateway.example",
+                    plan=plan,
+                    samples=1,
+                    timeout_s=5,
+                    rng=random.Random(1),
+                )
+        self.assertIn("error.code='rate_limited'", str(raised.exception))
+        self.assertEqual(len(fake_opener.requests), 1)
+
+    def test_measure_http_reuses_one_tls_context_for_all_samples(self):
+        plan = self.mod.class_plan(
+            unknown_pool_id="unknownpoolxxxxxxxxxxx",
+            pool_id="pausedpoolxxxxxxxxxxxx",
+            unauthorized_pool_id="foreignpoolxxxxxxxxxxx",
+            authorized={"Authorization": "Bearer sk-auth"},
+            unauthorized=None,
+        )
+        body = b'{"error":{"code":"pool_unavailable","message":"Pool unavailable"}}'
+        tls_context = object()
+        fake_opener = _FakeOpener(_FakeHTTPResponse(status=503, body=body))
+        with mock.patch.object(self.mod.ssl, "create_default_context", return_value=tls_context) as make_context:
+            with mock.patch.object(
+                self.mod,
+                "build_url_opener",
+                return_value=fake_opener,
+            ) as build_opener:
+                measured = self.mod.measure_http(
+                    "https://gateway.example",
+                    plan=plan,
+                    samples=2,
+                    timeout_s=5,
+                    rng=random.Random(1),
+                )
+        self.assertEqual(make_context.call_count, 1)
+        build_opener.assert_called_once_with(tls_context)
+        self.assertEqual(len(fake_opener.requests), 6)
+        self.assertEqual({k: len(v) for k, v in measured.items()}, {"unknown": 2, "unauthorized": 2, "disabled": 2})
+
+    def test_measure_http_rejects_cross_origin_redirects_without_forwarding_credentials(self):
+        plan = self.mod.class_plan(
+            unknown_pool_id="unknownpoolxxxxxxxxxxx",
+            pool_id="pausedpoolxxxxxxxxxxxx",
+            unauthorized_pool_id="foreignpoolxxxxxxxxxxx",
+            authorized={"Authorization": "Bearer sk-auth"},
+            unauthorized=None,
+        )
+        for status_code in (301, 302, 303, 307, 308):
+            with self.subTest(status_code=status_code):
+                _RedirectTargetHandler.seen = []
+                target = ThreadingHTTPServer(("127.0.0.1", 0), _RedirectTargetHandler)
+                target_thread = threading.Thread(target=target.serve_forever, daemon=True)
+                target_thread.start()
+                try:
+                    _RedirectingHandler.status_code = status_code
+                    _RedirectingHandler.location = f"http://127.0.0.1:{target.server_address[1]}/redirected"
+                    _RedirectingHandler.seen = []
+                    origin = ThreadingHTTPServer(("127.0.0.1", 0), _RedirectingHandler)
+                    origin_thread = threading.Thread(target=origin.serve_forever, daemon=True)
+                    origin_thread.start()
+                    try:
+                        with self.assertRaises(SystemExit) as raised:
+                            self.mod.measure_http(
+                                f"http://127.0.0.1:{origin.server_address[1]}",
+                                plan=plan,
+                                samples=1,
+                                timeout_s=5,
+                                rng=random.Random(1),
+                            )
+                    finally:
+                        origin.shutdown()
+                        origin.server_close()
+                finally:
+                    target.shutdown()
+                    target.server_close()
+                self.assertIn(f"status={status_code}", str(raised.exception))
+                self.assertEqual(_RedirectTargetHandler.seen, [])
+                self.assertEqual(len(_RedirectingHandler.seen), 1)
+                self.assertEqual(_RedirectingHandler.seen[0][0], "Bearer sk-auth")
 
 
 if __name__ == "__main__":

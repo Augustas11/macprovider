@@ -1819,7 +1819,7 @@ class BYOMJourneyGovernanceSourceTests(unittest.TestCase):
 
 
 class BYOMJourneyConformanceMappingTests(unittest.TestCase):
-    """Signed promotions stay mapped; changed implementations await fresh proof."""
+    """Preserve signed mappings without promoting evidence for changed selectors."""
 
     def test_promoted_requirements_are_conformant_and_mapped(self) -> None:
         conformance = json.loads((REPO_ROOT / "specs" / "CONFORMANCE.json").read_text(encoding="utf-8"))
@@ -1846,8 +1846,26 @@ class BYOMJourneyConformanceMappingTests(unittest.TestCase):
                     )
                     self.assertIn("fresh signed JOURNEY-NETWORK-MODEL-ADMISSION", row["gap"]["rationale"])
                     continue
-                self.assertEqual("conformant", row["state"], requirement_id)
-                self.assertIsNone(row["gap"], requirement_id)
+                if requirement_id in ("SPEC-046-R001", "SPEC-046-R008"):
+                    self.assertEqual("pending", row["state"], requirement_id)
+                    gap = row["gap"]
+                    self.assertEqual("UNKNOWN", gap["verdict"], requirement_id)
+                    self.assertEqual("@Augustas11", gap["owner"], requirement_id)
+                    self.assertEqual(
+                        "https://github.com/Augustas11/macprovider/issues/1690",
+                        gap["issue"],
+                        requirement_id,
+                    )
+                    self.assertIn("changed selector", gap["rationale"], requirement_id)
+                    self.assertIn("fresh independently trusted signed", gap["rationale"], requirement_id)
+                    self.assertIn(
+                        "scripts/tests/test_byom_contract_lock.py:class BYOMContractLockTests",
+                        row["tests"],
+                        requirement_id,
+                    )
+                else:
+                    self.assertEqual("conformant", row["state"], requirement_id)
+                    self.assertIsNone(row["gap"], requirement_id)
                 sha_items = [
                     item
                     for item in row["evidence"]

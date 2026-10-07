@@ -1,0 +1,29 @@
+{
+  "environment": "production",
+  "notes": [
+    "Isolated-candidate CONFORMANCE is not a live Trusted Pool launch.",
+    "This script does not fill CONFORMANCE evidence[].",
+    "A production remeasure is complete only when environment=production, --allow-production is set, HTTP samples were taken from a production host, and R007 bounds pass."
+  ],
+  "pool_rejection_timing": {
+    "classes_covered": [
+      "unknown",
+      "unauthorized",
+      "disabled"
+    ],
+    "disabled_p50_ms": 164.28239503875375,
+    "floor_ms": 150,
+    "mann_whitney_p_value": 0.3882570432234151,
+    "method": "operator_http_probe",
+    "p95_delta_ms": 18.372124992311,
+    "p99_delta_ms": 0.42944634333252907,
+    "sample_count_per_class": 200,
+    "statistical_test": "two-sided Mann-Whitney U with normal approximation; fail if p < 0.01",
+    "unauthorized_p50_ms": 164.06179405748844,
+    "unknown_p50_ms": 164.30353606119752
+  },
+  "production_host": true,
+  "production_remeasure_complete": false,
+  "source": "http",
+  "within_r007_bounds": false
+}

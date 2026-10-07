@@ -64,7 +64,12 @@ func TestClaimPayoutReadySurvivesConcurrentRouteSnapshotWriter(t *testing.T) {
 			for i := 0; i < perWorker; i++ {
 				snapshot := testRouteSnapshot()
 				snapshot.RequestID = fmt.Sprintf("req-claim-route-%d-%d", w, i)
-				if _, err := store.InsertRouteSnapshot(context.Background(), snapshot); err != nil {
+				// Match the bounded production caller so transient writer pressure
+				// exercises route-snapshot retries, not a single busy wait.
+				ctx, cancel := context.WithTimeout(context.Background(), 1400*time.Millisecond)
+				_, err := store.InsertRouteSnapshot(ctx, snapshot)
+				cancel()
+				if err != nil {
 					fail(fmt.Errorf("route snapshot %d/%d: %w", w, i, err))
 				}
 			}

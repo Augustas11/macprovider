@@ -93,11 +93,42 @@ def make_capture(root: Path) -> Path:
         "pool_operator_account_id": OPERATOR_ACCOUNT,
     })
     write(capture / "preconditions.json", {
-        key: {"status": "pass", "observed": {"passed": True, "gateway_schema": 14, "build": "v1.8.200", "contains_commit": "747557cc"}, "checked_at": "2026-09-26T00:00:00Z"}
+        key: {"status": "pass", "observed": {"passed": True, "gateway_schema": 18, "build": "v1.8.221", "contains_commit": "747557cc"}, "checked_at": "2026-09-26T00:00:00Z"}
         for key in ("P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "payout-disabled")
     })
     write(capture / "gateway-holds.json", {
-        phase: {"held_reservations": 0, "missing_trailer_log_count": 0} for phase in ("before", "after")
+        "schema_version": BUILDER.GATEWAY_HOLDS_SCHEMA,
+        "scope": {
+            "run_id": "trusted-pool-external-runtime-20260926T010203Z",
+            "buyer_account_id": BUYER,
+            "pool_id": POOL,
+            "request_ids": [
+                "req-ns-1",
+                "req-st-1",
+                "req-no-pool-selector",
+                "req-pool-native-selector",
+                "req-pool-ollama-selector",
+                "req-uppercase-selector",
+            ],
+            "window_started_at": "2026-09-26T01:00:00Z",
+            "window_ended_at": "2026-09-26T01:10:00Z",
+        },
+        "campaign": {
+            "held_reservations": 0,
+            "missing_trailer_log_count": 0,
+            "window_buyer_request_ids": [
+                "req-ns-1",
+                "req-st-1",
+                "req-no-pool-selector",
+                "req-pool-native-selector",
+                "req-pool-ollama-selector",
+                "req-uppercase-selector",
+            ],
+        },
+        "global_backlog": {
+            "baseline": {"held_reservations": 1, "missing_trailer_log_count": 2, "held_rows_sha256": "1" * 64},
+            "after": {"held_reservations": 1, "missing_trailer_log_count": 2, "held_rows_sha256": "1" * 64},
+        },
     })
     write(capture / "pool/get-pool.json", {"pool": {
         "pool_id": POOL, "creator_account_id": OPERATOR_ACCOUNT, "lifecycle": "active", "routeable": True,
@@ -128,7 +159,7 @@ def make_capture(root: Path) -> Path:
                 {"choices": [], "usage": {"prompt_tokens": tokens[0], "completion_tokens": tokens[1]}},
             ]
             write(base / "response.sse", "".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n")
-        write(base / "request_log.json", [{"request_id": coord, "attempt_n": 1, "status": "ok", "pool_id": POOL}])
+        write(base / "request_log.json", [{"request_id": coord, "external_request_id": rid, "attempt_n": 1, "status": "ok", "pool_id": POOL}])
         write(base / "route_snapshots.json", [{
             "request_id": coord, "attempt_n": 1, "route_snapshot_mode": "enforce", "pool_id": POOL,
             "runtime_source": "llamacpp_loopback", "manifest_version": 1, "manifest_core_digest": DIGEST,
@@ -142,14 +173,14 @@ def make_capture(root: Path) -> Path:
         }])
         write(base / "ledger.json", [{
             "id": 7, "request_id": coord, "provider_id": MEMBER, "status": "credited", "charged_prompt_tokens": tokens[0],
-            "completion_tokens": tokens[1], "usage_source": "pool_operator_attested", "provider_credits": 900,
+            "completion_tokens": tokens[1], "usage_source": "provider_reported", "provider_credits": 900, "attempt_n": 1,
             "quarantined": 0, "settlement_policy_mode": "enforce", "payable": 1,
         }])
         write(base / "quota_reservations.json", [{"request_id": rid, "status": "settled", "settled_tokens": sum(tokens), "settlement_hold": 0}])
         write(base / "usage_events.json", [{"request_id": rid, "prompt_tokens": tokens[0], "completion_tokens": tokens[1], "token_source": "pool_operator_attested", "outcome": "settled"}])
         write(base / "finality.json", {
             "request_id": coord, "closed": True, "outcome": "verified", "token_source": "pool_operator_attested",
-            "prompt_tokens": tokens[0], "completion_tokens": tokens[1], "total_tokens": sum(tokens),
+            "attempt_n": 1, "prompt_tokens": tokens[0], "completion_tokens": tokens[1], "total_tokens": sum(tokens),
         })
     for name, (status, code) in BUILDER.NEGATIVE_CONTROLS.items():
         base = capture / "controls" / name
@@ -186,6 +217,7 @@ def valid_signed(**overrides):
             "gguf_artifact_id": "gguf-q4-k-m",
             "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
             "pool_id": POOL,
+            "buyer_account_fingerprint": "f" * 64,
             "manifest_version": 1,
             "manifest_core_digest": DIGEST,
             "runtime_source": "llamacpp_loopback",
@@ -310,6 +342,24 @@ class TrustedPoolExternalRuntimeCaptureTests(unittest.TestCase):
         self.assertEqual(BUILDER.EVIDENCE_SCHEMA, evidence["schema_version"])
         self.assertEqual(list(TRUSTED_POOL_EXTERNAL_RUNTIME_STEP_ID_ORDER), [s["id"] for s in evidence["steps"]])
         self.assertEqual(["SPEC-022-R012", "SPEC-042-R013", "SPEC-042-R014"], evidence["requirement_ids"])
+        nonstream_settlement = evidence["requests"]["nonstream"]["settlement"]
+        self.assertEqual("pool_operator_attested", nonstream_settlement["usage_source"])
+        self.assertEqual("provider_reported", nonstream_settlement["ledger"]["usage_source"])
+        self.assertEqual(0, evidence["gateway_holds"]["campaign"]["held_reservations"])
+        self.assertEqual(1, evidence["gateway_holds"]["global_backlog"]["baseline"]["held_reservations"])
+        self.assertEqual(evidence["gateway_holds"]["global_backlog"]["baseline"], evidence["gateway_holds"]["global_backlog"]["after"])
+        self.assertFalse(evidence["gateway_holds"]["global_health_claim"])
+        self.assertEqual(
+            sorted([
+                "req-ns-1",
+                "req-st-1",
+                "req-no-pool-selector",
+                "req-pool-native-selector",
+                "req-pool-ollama-selector",
+                "req-uppercase-selector",
+            ]),
+            evidence["gateway_holds"]["scope"]["request_ids"],
+        )
         # E2E-F1: buyer-visible prompt tokens differ from the debit; recorded, not failed.
         self.assertFalse(evidence["observations"]["buyer_visible_usage_equals_debit"])
         text = json.dumps(evidence)
@@ -331,9 +381,17 @@ class TrustedPoolExternalRuntimeCaptureTests(unittest.TestCase):
         self.mutate_rows("requests/nonstream/receipt_verdicts.json", settlement_outcome="quarantined")
         self.assert_rejected("receipt verdict")
 
+    def test_rejects_transplanted_receipt_verdict(self) -> None:
+        self.mutate_rows("requests/nonstream/receipt_verdicts.json", request_id="coord-other")
+        self.assert_rejected("receipt verdict request_id")
+
     def test_rejects_global_or_observe_route(self) -> None:
         self.mutate_rows("requests/stream/route_snapshots.json", route_snapshot_mode="observe")
         self.assert_rejected("route_snapshot_mode")
+
+    def test_rejects_transplanted_route_snapshot_attempt(self) -> None:
+        self.mutate_rows("requests/nonstream/route_snapshots.json", request_id="coord-other")
+        self.assert_rejected("route snapshot attempt")
 
     def test_rejects_wrong_gguf_identity(self) -> None:
         self.mutate_rows("requests/stream/route_snapshots.json", artifact_hash="f" * 64)
@@ -343,13 +401,129 @@ class TrustedPoolExternalRuntimeCaptureTests(unittest.TestCase):
         self.mutate_rows("requests/nonstream/usage_events.json", completion_tokens=13)
         self.assert_rejected("tokens must be equal")
 
+    def test_rejects_positive_settlement_request_id_drift(self) -> None:
+        self.mutate_rows("requests/nonstream/quota_reservations.json", request_id="req-unrelated")
+        self.assert_rejected("reservation request_id")
+
     def test_rejects_quarantined_or_second_payable_credit(self) -> None:
         self.mutate_rows("requests/nonstream/ledger.json", quarantined=1)
         self.assert_rejected("quarantined")
 
+    def test_rejects_ledger_pool_operator_attested_source(self) -> None:
+        self.mutate_rows("requests/nonstream/ledger.json", usage_source="pool_operator_attested")
+        self.assert_rejected("ledger usage_source must be provider_reported")
+
+    def test_rejects_ledger_byte_estimated_source(self) -> None:
+        self.mutate_rows("requests/nonstream/ledger.json", usage_source="byte_estimated")
+        self.assert_rejected("ledger usage_source must be provider_reported")
+
+    def test_rejects_attempt_source_mutation(self) -> None:
+        self.mutate_rows("requests/nonstream/attempt_outputs.json", usage_source="provider_reported")
+        self.assert_rejected("pool_operator_attested normal_done attempt output")
+
+    def test_rejects_transplanted_attempt_output(self) -> None:
+        self.mutate_rows("requests/nonstream/attempt_outputs.json", request_id="coord-other")
+        self.assert_rejected("settled attempt output")
+
+    def test_rejects_settled_attempt_without_trusted_route_snapshot(self) -> None:
+        request_log = json.loads((self.capture / "requests/nonstream/request_log.json").read_text())
+        request_log.append({"request_id": "coord-nonstream-retry", "external_request_id": "req-ns-1", "attempt_n": 2, "status": "ok", "pool_id": POOL})
+        write(self.capture / "requests/nonstream/request_log.json", request_log)
+        for relative in (
+            "requests/nonstream/attempt_outputs.json",
+            "requests/nonstream/receipt_verdicts.json",
+            "requests/nonstream/ledger.json",
+        ):
+            self.mutate_rows(relative, request_id="coord-nonstream-retry", attempt_n=2)
+        self.mutate_object("requests/nonstream/finality.json", request_id="coord-nonstream-retry", attempt_n=2)
+        self.assert_rejected("settled attempt must have a trusted route snapshot")
+
+    def test_rejects_transplanted_ledger_credit(self) -> None:
+        self.mutate_rows("requests/nonstream/ledger.json", request_id="coord-other")
+        self.assert_rejected("payable ledger request_id")
+
+    def test_rejects_transplanted_finality(self) -> None:
+        self.mutate_object("requests/nonstream/finality.json", request_id="coord-other")
+        self.assert_rejected("finality request_id")
+
     def test_rejects_held_reservation(self) -> None:
         self.mutate_rows("requests/stream/quota_reservations.json", settlement_hold=1)
         self.assert_rejected("held")
+
+    def test_accepts_historical_global_backlog_when_campaign_is_clean(self) -> None:
+        value = json.loads((self.capture / "gateway-holds.json").read_text())
+        value["global_backlog"]["baseline"] = {"held_reservations": 11, "missing_trailer_log_count": 7, "held_rows_sha256": "2" * 64}
+        value["global_backlog"]["after"] = {"held_reservations": 11, "missing_trailer_log_count": 7, "held_rows_sha256": "2" * 64}
+        write(self.capture / "gateway-holds.json", value)
+        evidence = self.build()
+        self.assertEqual({"held_reservations": 11, "missing_trailer_log_count": 7, "held_rows_sha256": "2" * 64},
+                         evidence["gateway_holds"]["global_backlog"]["baseline"])
+
+    def test_accepts_window_quota_ids_for_paid_and_reserving_control_only(self) -> None:
+        value = json.loads((self.capture / "gateway-holds.json").read_text())
+        value["campaign"]["window_buyer_request_ids"] = ["req-ns-1", "req-st-1", "req-pool-ollama-selector"]
+        write(self.capture / "gateway-holds.json", value)
+        evidence = self.build()
+        self.assertEqual(["req-ns-1", "req-pool-ollama-selector", "req-st-1"],
+                         evidence["gateway_holds"]["campaign"]["window_buyer_request_ids"])
+
+    def test_rejects_legacy_global_zero_holds_shape(self) -> None:
+        write(self.capture / "gateway-holds.json", {
+            phase: {"held_reservations": 0, "missing_trailer_log_count": 0} for phase in ("before", "after")
+        })
+        self.assert_rejected("gateway-holds.json keys")
+
+    def test_rejects_gateway_hold_scope_drift(self) -> None:
+        value = json.loads((self.capture / "gateway-holds.json").read_text())
+        value["scope"]["pool_id"] = "other-pool"
+        write(self.capture / "gateway-holds.json", value)
+        self.assert_rejected("scope.pool_id")
+
+    def test_rejects_gateway_hold_request_id_drift(self) -> None:
+        value = json.loads((self.capture / "gateway-holds.json").read_text())
+        value["scope"]["request_ids"][-1] = "req-unrelated"
+        write(self.capture / "gateway-holds.json", value)
+        self.assert_rejected("six generated request IDs")
+
+    def test_rejects_gateway_hold_window_buyer_request_id_drift(self) -> None:
+        value = json.loads((self.capture / "gateway-holds.json").read_text())
+        value["campaign"]["window_buyer_request_ids"].append("req-concurrent-buyer-row")
+        write(self.capture / "gateway-holds.json", value)
+        self.assert_rejected("subset of the six generated request IDs")
+
+    def test_rejects_gateway_hold_missing_paid_quota_id(self) -> None:
+        value = json.loads((self.capture / "gateway-holds.json").read_text())
+        value["campaign"]["window_buyer_request_ids"] = ["req-ns-1", "req-pool-ollama-selector"]
+        write(self.capture / "gateway-holds.json", value)
+        self.assert_rejected("paid request IDs")
+
+    def test_rejects_gateway_hold_window_outside_run(self) -> None:
+        value = json.loads((self.capture / "gateway-holds.json").read_text())
+        value["scope"]["window_started_at"] = "2026-09-26T02:00:00Z"
+        value["scope"]["window_ended_at"] = "2026-09-26T02:10:00Z"
+        write(self.capture / "gateway-holds.json", value)
+        self.assert_rejected("window must cover")
+
+    def test_rejects_campaign_hold_or_missing_trailer(self) -> None:
+        for field in ("held_reservations", "missing_trailer_log_count"):
+            with self.subTest(field=field):
+                self.capture = make_capture(self.root)
+                value = json.loads((self.capture / "gateway-holds.json").read_text())
+                value["campaign"][field] = 1
+                write(self.capture / "gateway-holds.json", value)
+                self.assert_rejected(f"campaign.{field} must be 0")
+
+    def test_rejects_mutated_global_backlog(self) -> None:
+        value = json.loads((self.capture / "gateway-holds.json").read_text())
+        value["global_backlog"]["after"]["held_reservations"] = 2
+        write(self.capture / "gateway-holds.json", value)
+        self.assert_rejected("global_backlog after must equal baseline")
+
+    def test_rejects_same_count_different_global_backlog_hash(self) -> None:
+        value = json.loads((self.capture / "gateway-holds.json").read_text())
+        value["global_backlog"]["after"]["held_rows_sha256"] = "2" * 64
+        write(self.capture / "gateway-holds.json", value)
+        self.assert_rejected("global_backlog after must equal baseline")
 
     def test_rejects_control_that_dispatched(self) -> None:
         write(self.capture / "controls/pool-ollama-selector/route_snapshots.json", [{"request_id": "x"}])
@@ -358,6 +532,24 @@ class TrustedPoolExternalRuntimeCaptureTests(unittest.TestCase):
     def test_rejects_control_wrong_code(self) -> None:
         write(self.capture / "controls/uppercase-selector/response.json", {"error": {"code": "engine_unavailable"}})
         self.assert_rejected("error.code")
+
+    def test_payable_ledger_requires_settled_attempt_number(self) -> None:
+        for kind in ("nonstream", "stream"):
+            with self.subTest(kind=kind):
+                path = self.capture / f"requests/{kind}/ledger.json"
+                rows = json.loads(path.read_text())
+                original = rows[0].pop("attempt_n")
+                write(path, rows)
+                self.assert_rejected(f"{kind} ledger.attempt_n")
+                rows[0]["attempt_n"] = original
+                write(path, rows)
+
+    def test_native_selector_pool_must_refuse_not_spill_to_global(self) -> None:
+        self.assertNotIn("no-selector-no-pool", BUILDER.NEGATIVE_CONTROLS)
+        self.assertEqual((503, "engine_unavailable"), BUILDER.NEGATIVE_CONTROLS["pool-native-selector"])
+        headers = self.capture / "controls/pool-native-selector/response.headers"
+        headers.write_text(headers.read_text().replace("503", "200", 1))
+        self.assert_rejected("control pool-native-selector status must be 503")
 
     def test_rejects_delegated_member(self) -> None:
         rows = json.loads((self.capture / "pool/trustpool-events.json").read_text())
@@ -513,6 +705,14 @@ class TrustedPoolExternalRuntimeCaptureTests(unittest.TestCase):
             ("raw id as a fingerprint", lambda e: e["pool"].__setitem__("creator_account_fingerprint", OPERATOR_ACCOUNT)),
             ("raw member", lambda e: e["pool"].__setitem__("member_fingerprints", [MEMBER])),
             ("raw provider", lambda e: e["requests"]["nonstream"]["response"].__setitem__("provider_fingerprint", MEMBER)),
+            ("campaign hold", lambda e: e["gateway_holds"]["campaign"].__setitem__("held_reservations", 1)),
+            ("global health claim", lambda e: e["gateway_holds"].__setitem__("global_health_claim", True)),
+            ("missing request id", lambda e: e["gateway_holds"]["scope"]["request_ids"].pop()),
+            ("mutated backlog", lambda e: e["gateway_holds"]["global_backlog"]["after"].__setitem__("held_reservations", 99)),
+            ("transplanted pool", lambda e: e["gateway_holds"]["scope"].__setitem__("pool_id", "other-pool")),
+            ("transplanted buyer", lambda e: e["gateway_holds"]["scope"].__setitem__("buyer_account_fingerprint", "0" * 64)),
+            ("transplanted control id", lambda e: e["negative_controls"]["uppercase-selector"].__setitem__("request_id", "req-other")),
+            ("window misses captured_at", lambda e: e["gateway_holds"]["scope"].__setitem__("window_started_at", "2026-09-26T02:00:00Z")),
         ):
             with self.subTest(label=label):
                 bad = json.loads(json.dumps(evidence))
