@@ -269,8 +269,12 @@ event with
   revokes the old grant (`delegation_revoked`, naming the old grant's
   binding) and signs a new grant for the new core's `manifest_terms_digest`.
   The operator then appends `member_admitted` with the new `delegation_id`.
-  The binding sweep binds the live offer within seconds; no new offer is
-  needed.
+  After re-delegation, the member resubmits its offer with
+  `macprovider-cli models offer <candidate> --json`. Re-delegation alone
+  does not rebind the revoked offer. Confirm `pool_manifest_bound`, the
+  effective manifest version, and pool-scoped `catalog_priced` status before
+  sending new buyer traffic; the price-change production drill required
+  this re-offer (§9).
 - A legacy grant that names a full `manifest_core_digest` keeps working
   exactly as before: it binds only that exact core and needs a
   re-delegation after every rotation, window-only included. Re-delegate it

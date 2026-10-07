@@ -742,6 +742,102 @@ class EvidenceModeBindingTests(unittest.TestCase):
         self.assertLess(trap, created)
 
 
+class DiscoveryLedgerClassificationTests(unittest.TestCase):
+    """Exercise the wrapper's shipped ledger classifier without a Swift run."""
+
+    requirement_ids = tuple(f"SPEC-046-R{number:03d}" for number in range(1, 9))
+
+    def setUp(self) -> None:
+        self.scratch = Path(tempfile.mkdtemp(prefix="byom-discovery-ledger-"))
+        self.addCleanup(shutil.rmtree, self.scratch, True)
+        (self.scratch / "specs").mkdir()
+        wrapper = (REPO_ROOT / "scripts" / "test-byom-discovery-journey.sh").read_text(encoding="utf-8")
+        start = 'DISCOVERY_LEDGER_STATE="$(python3 - "$REQUIREMENT_IDS" <<\'PY\'\n'
+        _, marker, remainder = wrapper.partition(start)
+        self.assertTrue(marker, "wrapper ledger classifier marker moved")
+        classifier, marker, _ = remainder.partition("\nPY\n)")
+        self.assertTrue(marker, "wrapper ledger classifier terminator moved")
+        self.classifier = classifier
+
+    @staticmethod
+    def row(requirement_id: str, state: str, *sources: str) -> dict:
+        return {
+            "requirement_id": requirement_id,
+            "state": state,
+            "evidence": [
+                {"artifact": f"sha256:{index:064x}", "source": source}
+                for index, source in enumerate(sources, start=1)
+            ],
+        }
+
+    def classify(self, rows: list[dict]) -> subprocess.CompletedProcess:
+        (self.scratch / "specs" / "CONFORMANCE.json").write_text(
+            json.dumps({"requirements": rows}), encoding="utf-8"
+        )
+        return subprocess.run(
+            [sys.executable, "-c", self.classifier, ",".join(self.requirement_ids)],
+            cwd=self.scratch,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_current_split_sources_are_retained_per_row(self) -> None:
+        """R001/R008 may await fresh evidence while restored rows use a newer envelope."""
+        old = "journeys/evidence/old.journey-result.signed.json"
+        newer = "journeys/evidence/newer.journey-result.signed.json"
+        rows = [
+            self.row(requirement_id, "pending" if requirement_id in {"SPEC-046-R001", "SPEC-046-R008"} else "conformant", old if requirement_id == "SPEC-046-R002" or requirement_id in {"SPEC-046-R001", "SPEC-046-R008"} else newer)
+            for requirement_id in self.requirement_ids
+        ]
+        completed = self.classify(rows)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        lines = completed.stdout.splitlines()
+        self.assertEqual(lines[0], "retained")
+        self.assertEqual(len(lines), 9)
+        self.assertIn(f"SPEC-046-R002\t{old}", lines)
+        self.assertIn(f"SPEC-046-R003\t{newer}", lines)
+
+    def test_fresh_rows_can_restore_a_three_source_conformant_ledger(self) -> None:
+        old = "journeys/evidence/old.journey-result.signed.json"
+        newer = "journeys/evidence/newer.journey-result.signed.json"
+        fresh = "journeys/evidence/fresh.journey-result.signed.json"
+        rows = [
+            self.row(requirement_id, "conformant", fresh if requirement_id in {"SPEC-046-R001", "SPEC-046-R008"} else old if requirement_id == "SPEC-046-R002" else newer)
+            for requirement_id in self.requirement_ids
+        ]
+        completed = self.classify(rows)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.splitlines()[0], "conformant")
+        self.assertIn(f"SPEC-046-R001\t{fresh}", completed.stdout.splitlines())
+        self.assertIn(f"SPEC-046-R003\t{newer}", completed.stdout.splitlines())
+
+    def test_legacy_stale_selector_set_remains_supported(self) -> None:
+        source = "journeys/evidence/legacy.journey-result.signed.json"
+        legacy_pending = set(self.requirement_ids) - {"SPEC-046-R002"}
+        completed = self.classify(
+            [self.row(requirement_id, "pending" if requirement_id in legacy_pending else "conformant", source) for requirement_id in self.requirement_ids]
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.splitlines()[0], "retained")
+
+    def test_retained_rows_reject_missing_or_ambiguous_signed_sources(self) -> None:
+        source = "journeys/evidence/one.journey-result.signed.json"
+        other = "journeys/evidence/two.journey-result.signed.json"
+        rows = [
+            self.row(requirement_id, "pending" if requirement_id == "SPEC-046-R001" else "conformant", source)
+            for requirement_id in self.requirement_ids
+        ]
+        rows[2] = self.row("SPEC-046-R003", "conformant", source, other)
+        completed = self.classify(rows)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("must each have exactly one signed source", completed.stderr)
+
+        rows[2] = self.row("SPEC-046-R003", "conformant")
+        completed = self.classify(rows)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("must each have exactly one signed source", completed.stderr)
+
+
 class WrapperEvidenceArtifactTests(unittest.TestCase):
     """The CI wrapper must only ever delete artifacts it created (R3 MEDIUM).
 
