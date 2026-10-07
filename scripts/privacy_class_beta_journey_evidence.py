@@ -1285,30 +1285,71 @@ class V2RawSourceView:
         entries = payload_doc.get("entries")
         if not isinstance(entries, list):
             fail("directory entries must be a list")
+        def canonical_b64url32(value: Any) -> bytes | None:
+            raw = b64url_bytes(value)
+            if raw is None or len(raw) != 32 or value != canonical(raw):
+                return None
+            return raw
+
         fingerprints: list[str] = []
+        enrolled_entries: set[tuple[str, str, int, bool]] = set()
+        operator_pin_entries = 0
         for entry in entries:
             if not isinstance(entry, dict) or set(entry) != {"identity_public_key", "fingerprint", "se_public_key_fingerprint", "source", "enrolled_at_unix", "revoked"}:
                 fail("directory entries must be closed objects")
             identity_key = b64url_bytes(entry.get("identity_public_key"))
             expect(identity_key is not None and len(identity_key) == 32 and entry.get("identity_public_key") == canonical(identity_key) and canonical(hashlib.sha256(identity_key).digest()) == entry.get("fingerprint"), errors, "directory entry fingerprint must derive from its canonical public key")
-            expect(entry.get("source") in ("enrolled", "operator_pin") and isinstance(entry.get("revoked"), bool), errors, "directory entries must have typed source/revocation fields")
+            se_fingerprint = canonical_b64url32(entry.get("se_public_key_fingerprint"))
+            enrolled_at = entry.get("enrolled_at_unix")
+            source = entry.get("source")
+            revoked = entry.get("revoked")
+            expect(se_fingerprint is not None and isinstance(enrolled_at, int) and not isinstance(enrolled_at, bool) and enrolled_at >= 0 and source in ("enrolled", "operator_pin") and isinstance(revoked, bool), errors, "directory entries must have typed source/revocation/enrollment fields and canonical 32-byte SE fingerprints")
+            if source == "enrolled" and isinstance(entry.get("fingerprint"), str) and se_fingerprint is not None and isinstance(enrolled_at, int) and not isinstance(enrolled_at, bool) and isinstance(revoked, bool):
+                enrolled_entries.add((entry["fingerprint"], entry["se_public_key_fingerprint"], enrolled_at, revoked))
+            elif source == "operator_pin":
+                operator_pin_entries += 1
             fingerprints.append(entry.get("fingerprint"))
         expect(all(isinstance(item, str) for item in fingerprints) and fingerprints == sorted(fingerprints) and len(fingerprints) == len(set(fingerprints)), errors, "directory entries must be uniquely sorted by fingerprint")
         issued, expires = payload_doc.get("issued_at_unix"), payload_doc.get("expires_at_unix")
         expect(payload_doc.get("version") == "privacy-identity-directory-v1" and payload_doc.get("privacy_class") == PRIVACY_CLASS, errors, "directory payload version and privacy class must be exact")
-        expect(isinstance(issued, int) and isinstance(expires, int) and 60 <= expires - issued <= 3600, errors, "directory validity window must be bounded")
+        expect(isinstance(issued, int) and not isinstance(issued, bool) and issued >= 0 and isinstance(expires, int) and not isinstance(expires, bool) and expires >= 0 and 60 <= expires - issued <= 3600, errors, "directory validity window must be bounded")
         if not isinstance(headers, dict) or set(headers) != {"status", "cache_control", "content_type", "captured_at_unix", "store_error_code"}:
             fail("directory gateway headers must be a closed capture")
         expect(gateway_raw == envelope_raw, errors, "gateway directory response body must be byte-identical to the signed envelope")
-        expect(headers.get("status") == 200 and headers.get("cache_control") == "no-store" and headers.get("content_type") == "application/json" and isinstance(headers.get("captured_at_unix"), int) and issued <= headers["captured_at_unix"] < expires, errors, "gateway capture must be fresh, JSON, and no-store")
+        expect(headers.get("status") == 200 and headers.get("cache_control") == "no-store" and headers.get("content_type") == "application/json" and isinstance(headers.get("captured_at_unix"), int) and not isinstance(headers.get("captured_at_unix"), bool) and headers.get("captured_at_unix") >= 0 and issued <= headers["captured_at_unix"] < expires, errors, "gateway capture must be fresh, JSON, and no-store")
         expect(headers.get("store_error_code") == "privacy_class_unavailable", errors, "directory store error capture must fail closed")
         if not isinstance(store, dict) or set(store) != {"enrollments", "quarantined_provider_ids"} or not isinstance(store.get("enrollments"), list) or not isinstance(store.get("quarantined_provider_ids"), list):
             fail("directory store capture must be closed enrollment/quarantine rows")
-        active_store = {row.get("identity_fingerprint") for row in store["enrollments"] if isinstance(row, dict) and row.get("revoked_at_unix") in (None, 0) and row.get("provider_id") not in store["quarantined_provider_ids"]}
-        revoked_store = {row.get("identity_fingerprint") for row in store["enrollments"] if isinstance(row, dict) and (row.get("revoked_at_unix") not in (None, 0) or row.get("provider_id") in store["quarantined_provider_ids"])}
-        active_entries = {row.get("fingerprint") for row in entries if not row.get("revoked") and row.get("source") == "enrolled"}
-        revoked_entries = {row.get("fingerprint") for row in entries if row.get("revoked") and row.get("source") == "enrolled"}
-        expect(active_store <= active_entries and revoked_store <= revoked_entries and bool(active_entries) and bool(revoked_entries), errors, "directory entries must match active and revoked store facts")
+        quarantined_provider_ids = store["quarantined_provider_ids"]
+        expect(all(isinstance(item, str) and item for item in quarantined_provider_ids) and len(quarantined_provider_ids) == len(set(quarantined_provider_ids)), errors, "directory quarantined provider ids must be non-empty unique strings")
+        quarantined = set(quarantined_provider_ids) if all(isinstance(item, str) for item in quarantined_provider_ids) else set()
+        store_entries: set[tuple[str, str, int, bool]] = set()
+        seen_store_rows: set[tuple[str, str, str, int]] = set()
+        for row in store["enrollments"]:
+            if not isinstance(row, dict) or set(row) != {"provider_id", "identity_fingerprint", "se_fingerprint", "enrolled_at_unix", "revoked_at_unix"}:
+                fail("directory enrollment store rows must be closed provider/identity/SE/enrollment/revocation facts")
+            provider_id = row.get("provider_id")
+            identity_fingerprint = row.get("identity_fingerprint")
+            se_fingerprint = row.get("se_fingerprint")
+            enrolled_at = row.get("enrolled_at_unix")
+            revoked_at = row.get("revoked_at_unix")
+            valid_row = (
+                isinstance(provider_id, str) and bool(provider_id) and
+                canonical_b64url32(identity_fingerprint) is not None and
+                canonical_b64url32(se_fingerprint) is not None and
+                isinstance(enrolled_at, int) and not isinstance(enrolled_at, bool) and enrolled_at >= 0 and
+                (revoked_at is None or (isinstance(revoked_at, int) and not isinstance(revoked_at, bool) and revoked_at >= 0))
+            )
+            expect(valid_row, errors, "directory enrollment store rows must carry typed canonical fingerprints and timestamps")
+            if valid_row:
+                store_key = (provider_id, identity_fingerprint, se_fingerprint, enrolled_at)
+                expect(store_key not in seen_store_rows, errors, "directory enrollment store rows must not contain duplicates")
+                seen_store_rows.add(store_key)
+                store_entries.add((identity_fingerprint, se_fingerprint, enrolled_at, revoked_at not in (None, 0) or provider_id in quarantined))
+        active_entries = {row for row in enrolled_entries if row[3] is False}
+        revoked_entries = {row for row in enrolled_entries if row[3] is True}
+        expect(operator_pin_entries == 0, errors, "directory operator_pin entries require raw configured operator pin facts")
+        expect(store_entries == enrolled_entries and bool(active_entries) and bool(revoked_entries), errors, "directory enrolled entries must exactly match store identity/SE/enrollment/revocation facts")
         if not isinstance(clients, dict) or set(clients) != {"captured_at_unix", "attempts"} or not isinstance(clients.get("attempts"), list):
             fail("directory client negatives must be a closed capture")
         attempts = {row.get("case"): row for row in clients["attempts"] if isinstance(row, dict) and set(row) == {"case", "accepted", "error_code"}}
@@ -1317,7 +1358,7 @@ class V2RawSourceView:
         expect(not ed25519_verify(public, _frame(b"macprovider/spec049/identity-directory/v1") + _frame(tampered), signature), errors, "tampered directory payload must fail signature verification")
         wrong_public = hashlib.sha256(public).digest()
         expect(not ed25519_verify(wrong_public, signed, signature), errors, "wrong pinned directory key must fail verification")
-        expect(isinstance(clients.get("captured_at_unix"), int) and clients["captured_at_unix"] >= expires, errors, "expired negative capture must be at or after expiry")
+        expect(isinstance(clients.get("captured_at_unix"), int) and not isinstance(clients.get("captured_at_unix"), bool) and clients["captured_at_unix"] >= 0 and clients["captured_at_unix"] >= expires, errors, "expired negative capture must be at or after expiry")
         if not isinstance(disclosure, dict) or set(disclosure) != {"residual_risks"} or not isinstance(disclosure.get("residual_risks"), list):
             fail("directory disclosure must be a closed residual-risk capture")
         expect(disclosure["residual_risks"] == list(PRIVACY_RESIDUAL_RISKS_V2), errors, "directory disclosure must contain the exact v2 residual-risk list")

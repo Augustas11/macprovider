@@ -235,7 +235,7 @@ class ComposerFixture:
         self.put("directory.json", "directory_public_key", {"algorithm": "ed25519", "public_key": b64url(public)})
         self.put("directory.json", "directory_gateway_headers", {"status": 200, "cache_control": "no-store", "content_type": "application/json", "captured_at_unix": 900, "store_error_code": "privacy_class_unavailable"})
         self.put("directory.json", "directory_clients", {"captured_at_unix": 1000, "attempts": [{"case": name, "accepted": False, "error_code": "privacy_directory_rejected"} for name in ("tampered", "expired", "revoked", "wrong_key")]})
-        self.put("directory.json", "directory_store", {"enrollments": [{"provider_id": "p-dir-a", "identity_fingerprint": entries[0]["fingerprint"], "revoked_at_unix": None}, {"provider_id": "p-dir-r", "identity_fingerprint": entries[1]["fingerprint"], "revoked_at_unix": 850}], "quarantined_provider_ids": []})
+        self.put("directory.json", "directory_store", {"enrollments": [{"provider_id": "p-dir-r" if row["revoked"] else "p-dir-a", "identity_fingerprint": row["fingerprint"], "se_fingerprint": row["se_public_key_fingerprint"], "enrolled_at_unix": row["enrolled_at_unix"], "revoked_at_unix": 850 if row["revoked"] else None} for row in entries], "quarantined_provider_ids": []})
         self.put("directory.json", "directory_disclosure", {"residual_risks": list(contract.PRIVACY_RESIDUAL_RISKS_V2)})
 
         for manifest, sources in contract.V2_SOURCE_CONTRACT.items():

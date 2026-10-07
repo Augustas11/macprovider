@@ -615,8 +615,8 @@ class PrivacyClassBetaV2RawEvidenceTests(unittest.TestCase):
     def directory_fixture(self, mutation: str | None = None) -> contract.Bundle:
         active_public, _ = contract.ed25519_sign(b"A" * 32, b"identity")
         revoked_public, _ = contract.ed25519_sign(b"B" * 32, b"identity")
-        entries = [
-            {
+        def entry(public: bytes, enrolled: int, revoked: bool) -> dict:
+            return {
                 "identity_public_key": self.b64url(public),
                 "fingerprint": self.b64url(hashlib.sha256(public).digest()),
                 "se_public_key_fingerprint": self.b64url(hashlib.sha256(b"se-" + public).digest()),
@@ -624,10 +624,41 @@ class PrivacyClassBetaV2RawEvidenceTests(unittest.TestCase):
                 "enrolled_at_unix": enrolled,
                 "revoked": revoked,
             }
+
+        entries = [
+            entry(public, enrolled, revoked)
             for public, enrolled, revoked in ((active_public, 50, False), (revoked_public, 60, True))
         ]
         entries.sort(key=lambda row: row["fingerprint"])
+        store = {
+            "enrollments": [
+                {"provider_id": "provider-active", "identity_fingerprint": next(row["fingerprint"] for row in entries if not row["revoked"]), "se_fingerprint": next(row["se_public_key_fingerprint"] for row in entries if not row["revoked"]), "enrolled_at_unix": next(row["enrolled_at_unix"] for row in entries if not row["revoked"]), "revoked_at_unix": None},
+                {"provider_id": "provider-revoked", "identity_fingerprint": next(row["fingerprint"] for row in entries if row["revoked"]), "se_fingerprint": next(row["se_public_key_fingerprint"] for row in entries if row["revoked"]), "enrolled_at_unix": next(row["enrolled_at_unix"] for row in entries if row["revoked"]), "revoked_at_unix": 90},
+            ],
+            "quarantined_provider_ids": [],
+        }
+        if mutation == "malformed_se":
+            entries[0]["se_public_key_fingerprint"] = "not-base64url"
+        elif mutation == "extra_enrolled":
+            extra_public, _ = contract.ed25519_sign(b"E" * 32, b"identity")
+            entries.append(entry(extra_public, 70, False))
+            entries.sort(key=lambda row: row["fingerprint"])
+        elif mutation == "missing_enrolled":
+            entries = entries[:1]
+        elif mutation == "se_mismatch":
+            entries[0]["se_public_key_fingerprint"] = self.b64url(b"M" * 32)
+        elif mutation == "timestamp_mismatch":
+            entries[0]["enrolled_at_unix"] += 1
+        elif mutation == "operator_pin":
+            entries[0]["source"] = "operator_pin"
+        elif mutation == "boolean_timestamp":
+            entries[0]["enrolled_at_unix"] = True
+        elif mutation == "duplicate_store_rows":
+            store["enrollments"].append(dict(store["enrollments"][0]))
         payload_doc = {"version": "privacy-identity-directory-v1", "privacy_class": contract.PRIVACY_CLASS, "issued_at_unix": 100, "expires_at_unix": 400, "entries": entries}
+        if mutation == "boolean_issued":
+            payload_doc["issued_at_unix"] = True
+            payload_doc["expires_at_unix"] = 301
         payload = json.dumps(payload_doc, sort_keys=True, separators=(",", ":")).encode()
         directory_public, signature = contract.ed25519_sign(b"D" * 32, contract._frame(b"macprovider/spec049/identity-directory/v1") + contract._frame(payload))
         envelope = {
@@ -640,13 +671,6 @@ class PrivacyClassBetaV2RawEvidenceTests(unittest.TestCase):
         gateway_raw = envelope_raw
         public_capture = {"algorithm": "ed25519", "public_key": self.b64url(directory_public)}
         headers = {"status": 200, "cache_control": "no-store", "content_type": "application/json", "captured_at_unix": 200, "store_error_code": "privacy_class_unavailable"}
-        store = {
-            "enrollments": [
-                {"provider_id": "provider-active", "identity_fingerprint": next(row["fingerprint"] for row in entries if not row["revoked"]), "revoked_at_unix": None},
-                {"provider_id": "provider-revoked", "identity_fingerprint": next(row["fingerprint"] for row in entries if row["revoked"]), "revoked_at_unix": 90},
-            ],
-            "quarantined_provider_ids": [],
-        }
         if mutation == "tampered":
             payload_doc["privacy_class"] = "tampered"
             envelope["payload"] = self.b64url(json.dumps(payload_doc, sort_keys=True, separators=(",", ":")).encode())
@@ -661,6 +685,8 @@ class PrivacyClassBetaV2RawEvidenceTests(unittest.TestCase):
             store["quarantined_provider_ids"] = ["provider-active"]
         elif mutation == "body_mismatch":
             gateway_raw += b"\n"
+        elif mutation == "boolean_header_captured":
+            headers["captured_at_unix"] = True
         clients = {
             "captured_at_unix": 400,
             "attempts": [
@@ -668,6 +694,8 @@ class PrivacyClassBetaV2RawEvidenceTests(unittest.TestCase):
                 for case in ("tampered", "expired", "revoked", "wrong_key")
             ],
         }
+        if mutation == "boolean_client_captured":
+            clients["captured_at_unix"] = True
         sources = {
             "directory_envelope": envelope_raw,
             "directory_public_key": public_capture,
@@ -691,8 +719,19 @@ class PrivacyClassBetaV2RawEvidenceTests(unittest.TestCase):
             "tampered": "directory signature must verify",
             "wrong_key": "directory signature must verify",
             "expired": "gateway capture must be fresh",
-            "revoked": "directory entries must match active and revoked store facts",
+            "revoked": "exactly match store identity/SE/enrollment/revocation facts",
             "body_mismatch": "byte-identical",
+            "malformed_se": "canonical 32-byte SE fingerprints",
+            "extra_enrolled": "exactly match store identity/SE/enrollment/revocation facts",
+            "missing_enrolled": "exactly match store identity/SE/enrollment/revocation facts",
+            "se_mismatch": "exactly match store identity/SE/enrollment/revocation facts",
+            "timestamp_mismatch": "exactly match store identity/SE/enrollment/revocation facts",
+            "operator_pin": "operator_pin entries require raw configured operator pin facts",
+            "boolean_timestamp": "canonical 32-byte SE fingerprints",
+            "duplicate_store_rows": "must not contain duplicates",
+            "boolean_issued": "directory validity window must be bounded",
+            "boolean_header_captured": "gateway capture must be fresh",
+            "boolean_client_captured": "expired negative capture must be at or after expiry",
         }
         for mutation, message in expected.items():
             with self.subTest(mutation=mutation):
