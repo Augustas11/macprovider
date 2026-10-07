@@ -114,42 +114,62 @@ Decision: **IN PROGRESS**
 
 ### Current pre-next-freeze evidence
 
-Published SHA `eb8f6e63cdeb353aa99886a51a12933a95d8cbe3` is the latest
-source-bound G003 tooling freeze. Full code, security, and architecture audits
-covered the complete 77-file diff at that SHA. Security and architecture were
-CLEAR with 0 CRITICAL / 0 HIGH / 0 MEDIUM findings. Code review reported 0
-findings with a COMMENT because required CI was not green.
+Published source/docs freeze `0a6265a16e32e26da933fd82ca7dc92f51b7a590`
+remains historical source-bound evidence. Full audits covered
+`eedd1c1456242afab775072bef622a68c3b634a0..0a6265a16e32e26da933fd82ca7dc92f51b7a590`
+across 83 files. Security was CLEAR with 0 CRITICAL / 0 HIGH / 0 MEDIUM / 0 LOW.
+Code review was COMMENT with 0 CRITICAL / 0 HIGH / 0 MEDIUM / 1 LOW for lab
+snapshot drift, now fixed locally. Architecture source review was CLEAR with
+0 CRITICAL / 0 HIGH / 0 MEDIUM; its documentation LOW is fixed by durable
+source-freeze wording.
 
-Governance run `37559346376` completed successfully. Required CI run
-`37559346356` remains in progress overall: Swift is SUCCESS, deploy is pending,
-and coordinator job `112592958252` failed in the pre-existing settlement
-contention fixture
-`TestInsertSettlementAttemptOutputSurvivesConcurrentRouteSnapshotWriter` with
-`SQLITE_BUSY`. The relay-blind package passed separately in that run, but it is
-not used here to infer the failed coordinator gate or the overall privacy
-status.
+Source commit `6ffed2295` binds collector captures to bounded observed source
+bytes. Its collector unit selector passed 12 tests in 6.725s. Source commit
+`cbbcded01` adds the lab checkpoint and fixes the snapshot LOW; validation is
+parser-only, with no SwiftPM, hardware, or G003 PASS claim.
 
-Commit `7a8cb3e75` is an unpublished ancestor of current local HEAD and contains
-a test-only correction for that settlement fixture. It sets up the dedicated
-route journal through the production-equivalent path while preserving the
-existing busy-timeout behavior and assertions. The module-local two-test billing
-selector passed in 0.883s. This result has not run through required CI.
+Source commit `1c1ee9cc7` addresses an inherited trust-pool false positive
+where opaque signed-control signature JSON was scanned as promise text. The fix
+limits promise-claim scanning to the reason field while preserving existing
+crypto, action, and path guards. Independent security review endorsed the
+approach. An agent-reported exact four-test selector passed in 0.732s.
 
-Current local HEAD `07176b6eb05b8e82f873eb7bd114120b148dd458` adds the limited
-Secure Enclave lab-evidence scope. Full-diff audits for `07176b6eb` are running
-and are not yet complete; architecture review covered the full 83-file diff at
-that SHA and is CLEAR with 0 CRITICAL / 0 HIGH / 0 MEDIUM. Code and security
-audits remain pending. The scope remains limited to lab proof. Local
-parser/static validation has passed, including actual-host IPv6 bracket parsing
-and scoped-file `lstat` checks for owner, private-mode, regular file, and
-symlink-negative handling. No full test suite was run for this scope. Intended
-scope constraints are: default off, explicit `--lab-identity-scope` flag
-required, loopback-protected source, current user/euid-owned `0700`
-protected-file handling, and no production or general Tier 2 behavior change.
-Final source freeze, final audits, CI, and hardware evidence remain pending.
+Governance run `37561750120` completed successfully. Required CI run
+`37561750046` is terminal failed: deploy succeeded, coordinator failed in
+`TestAdminHandler_SignedLifecycleRetireRequiresDeliveryDrain` with HTTP 400
+`prohibited_promise_claim` where 202 was expected, Swift failed because a
+physical `/private/tmp` path normalized to `/tmp`, and `ci-required` failed. The
+earlier billing fixture failure is not reported in this run. The coordinator
+failure is addressed by committed source `1c1ee9cc7`; the Swift path failure is
+addressed by committed source `1f35e3f3d`, a two-file lexical lab-root fix.
+Validation for `1f35e3f3d` is parser-only plus diff PASS; actual Foundation
+dot/dotdot behavior is retained. No SwiftPM PASS is claimed for that fix.
+
+Published head `1f35e3f3d9bb228f976bfa05905c80183fda93ea` has fresh required
+CI run `37564004290` and governance run `37564004526` RUNNING. Latest poll for
+`37564004290`: coordinator go vet/test SUCCESS, gateway SUCCESS, and
+phase7/lint/nginx/resolve/spec014 SUCCESS. Swift is FAILED: checkpoint source
+compiled, but tests failed to compile because static helpers `makeSocketPair`,
+`makeScope`, and `withCheckpointPair` were called bare from instance context.
+Deploy, Stats, integration, and spec015 are still RUNNING. No full-green result
+is claimed here; the prior
+`37561750046` terminal failure remains historical evidence until superseded by
+terminal green gates.
+
+Ran targeted checks recorded for this checkpoint: collector unit selector
+12 tests in 6.725s, security selectors in 0.983s and 0.370s, two governance
+selectors in 0.117s, diff check PASS, code targeted selectors PASS, and the
+trust-pool four-test selector in 0.732s. Planned gates remain required CI,
+fresh final audits after the trust-pool fix, and hardware evidence.
+
+Operator clarification: there is no Mac MLX TEE. Fleet acceptance remains the
+operator-constrained beta/device-bound self-attested posture; this record does
+not claim remaining actual acceptance criteria are complete, shrink the
+issue-closure scope, or upgrade the trust model.
 
 No physical hardware PASS, G003 completion, ops activation authorization, merge,
-release, rollout, stronger `#1749` closure, or production change is claimed.
+release, rollout, remaining `#1749` acceptance-criteria closure, code CI pass,
+G006 completion, or production change is claimed.
 
 Two successive G003 freezes, `dda5168d1fad38207c51203b20d3250f9042d762` and
 `9b8e6ecfab519623ede13cec0d54fd016aaee633`, are now historical evidence rather
