@@ -27,6 +27,10 @@ enum NativeMTPAdmissionFeed {
     }
 
     enum FetchError: Error, Equatable {
+        case invalidOrigin
+        case invalidHTTPStatus(Int)
+        case redirectRejected
+        case transportFailed(String)
         case fetchFailed(String)
         case oversized(String)
         case signatureInvalid
@@ -34,6 +38,21 @@ enum NativeMTPAdmissionFeed {
         case signerMismatch
         case storeFailed(String)
     }
+
+    struct FetchResponse: Equatable, Sendable {
+        let statusCode: Int
+        let body: Data
+        let redirected: Bool
+
+        init(statusCode: Int, body: Data, redirected: Bool = false) {
+            self.statusCode = statusCode
+            self.body = body
+            self.redirected = redirected
+        }
+    }
+
+    typealias Fetcher = @Sendable (URL, Int) async throws -> FetchResponse
+    typealias Sleeper = @Sendable (UInt64) async throws -> Void
 
     /// The private directory holding the admission set of one release.
     static func releaseDirectory(root: URL, releaseID: String) -> URL {
@@ -61,6 +80,21 @@ enum NativeMTPAdmissionFeed {
         return try materialize(members, releaseID: releaseID, root: root)
     }
 
+    /// Production remote admission fetch: exact static-feed origin, no
+    /// redirects, bounded member bodies, and bounded 429 retry.
+    static func fetchAndMaterialize(
+        releaseID: String,
+        signerKeyID: String,
+        trustedPublicKeys: [String: String],
+        fetcher: Fetcher = defaultFetch,
+        baseURL: URL = productionBaseURL,
+        root: URL = defaultRoot()
+    ) async throws -> URL {
+        let members = try await fetchMembers(fetcher: fetcher, baseURL: baseURL)
+        try precheck(members, releaseID: releaseID, signerKeyID: signerKeyID, trustedPublicKeys: trustedPublicKeys)
+        return try materialize(members, releaseID: releaseID, root: root)
+    }
+
     static func fetchMembers(fetch: (URL) async throws -> Data, baseURL: URL) async throws -> Members {
         func get(_ name: String, limit: Int) async throws -> Data {
             let url = AutotuneStaticInputs.staticFeedURL(baseURL: baseURL, name: name)
@@ -80,6 +114,204 @@ enum NativeMTPAdmissionFeed {
             bank: try await get("native-mtp-selftest-bank", limit: NativeMTPAdmissionSidecar.maxSelfTestChallengeBankBytes),
             bankSignature: try await get("native-mtp-selftest-bank.sig", limit: NativeMTPAdmissionSidecar.maxSignatureBytes)
         )
+    }
+
+    static func fetchMembers(
+        fetcher: Fetcher = defaultFetch,
+        baseURL: URL,
+        sleeper: Sleeper = defaultSleep
+    ) async throws -> Members {
+        func get(_ name: String, limit: Int) async throws -> Data {
+            let url = try memberURL(baseURL: baseURL, name: name)
+            return try await fetch(url, maxBytes: limit, fetcher: fetcher, sleeper: sleeper)
+        }
+        return Members(
+            sidecar: try await get("native-mtp-admission", limit: NativeMTPAdmissionSidecar.maxSidecarBytes),
+            signature: try await get("native-mtp-admission.sig", limit: NativeMTPAdmissionSidecar.maxSignatureBytes),
+            manifest: try await get("native-mtp-artifact-manifest", limit: maxManifestBytes),
+            bank: try await get("native-mtp-selftest-bank", limit: NativeMTPAdmissionSidecar.maxSelfTestChallengeBankBytes),
+            bankSignature: try await get("native-mtp-selftest-bank.sig", limit: NativeMTPAdmissionSidecar.maxSignatureBytes)
+        )
+    }
+
+    private static func memberURL(baseURL: URL, name: String) throws -> URL {
+        guard baseURL.scheme == "https" || StaticFeedOrigin.isLabLoopback(baseURL),
+              baseURL.host?.isEmpty == false,
+              baseURL.user == nil,
+              baseURL.password == nil,
+              baseURL.fragment == nil else {
+            throw FetchError.invalidOrigin
+        }
+        let url = AutotuneStaticInputs.staticFeedURL(baseURL: baseURL, name: name).absoluteURL
+        guard url.scheme == baseURL.scheme,
+              url.host == baseURL.host,
+              url.port == baseURL.port,
+              url.user == nil,
+              url.password == nil,
+              url.fragment == nil else {
+            throw FetchError.invalidOrigin
+        }
+        return url
+    }
+
+    static func defaultFetch(url: URL, maxBytes: Int) async throws -> FetchResponse {
+        guard maxBytes > 0 else { throw FetchError.oversized(url.lastPathComponent) }
+        guard url.scheme == "https" || StaticFeedOrigin.isLabLoopback(url),
+              url.user == nil,
+              url.password == nil,
+              url.fragment == nil else {
+            throw FetchError.invalidOrigin
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 15
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let delegate = NoRedirectDelegate()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpShouldSetCookies = false
+        configuration.timeoutIntervalForRequest = 15
+        configuration.timeoutIntervalForResource = 20
+        delegate.maxBytes = maxBytes
+        let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        return try await withCheckedThrowingContinuation { continuation in
+            delegate.continuation = continuation
+            session.dataTask(with: request).resume()
+        }
+    }
+
+    private static func fetch(
+        _ url: URL,
+        maxBytes: Int,
+        fetcher: Fetcher,
+        sleeper: Sleeper = defaultSleep
+    ) async throws -> Data {
+        var response = try await fetcher(url, maxBytes)
+        for _ in 0..<AutotuneStaticInputs.rateLimitRetries where response.statusCode == 429 {
+            try await sleeper(AutotuneStaticInputs.rateLimitRetryNanoseconds)
+            response = try await fetcher(url, maxBytes)
+        }
+        if response.redirected || (response.statusCode >= 300 && response.statusCode < 400) {
+            throw FetchError.redirectRejected
+        }
+        guard response.statusCode == 200 else {
+            throw FetchError.invalidHTTPStatus(response.statusCode)
+        }
+        guard !response.body.isEmpty, response.body.count <= maxBytes else {
+            throw FetchError.oversized(url.lastPathComponent)
+        }
+        return response.body
+    }
+
+    private static func defaultSleep(_ nanoseconds: UInt64) async throws {
+        try await Task.sleep(nanoseconds: nanoseconds)
+    }
+
+    final class NoRedirectDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+        var maxBytes = 0
+        var continuation: CheckedContinuation<FetchResponse, Error>?
+
+        private let lock = NSLock()
+        private var statusCode: Int?
+        private var body = Data()
+        private var completed = false
+
+        func urlSession(
+            _ session: URLSession,
+            task: URLSessionTask,
+            willPerformHTTPRedirection response: HTTPURLResponse,
+            newRequest request: URLRequest,
+            completionHandler: @escaping (URLRequest?) -> Void
+        ) {
+            completionHandler(nil)
+            resume(throwing: FetchError.redirectRejected)
+            task.cancel()
+        }
+
+        func urlSession(
+            _ session: URLSession,
+            dataTask: URLSessionDataTask,
+            didReceive response: URLResponse,
+            completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+        ) {
+            guard !isCompleted else {
+                completionHandler(.cancel)
+                return
+            }
+            guard let http = response as? HTTPURLResponse else {
+                completionHandler(.cancel)
+                resume(throwing: FetchError.transportFailed("missing_http_response"))
+                return
+            }
+            if http.statusCode >= 300 && http.statusCode < 400 {
+                completionHandler(.cancel)
+                resume(throwing: FetchError.redirectRejected)
+                return
+            }
+            guard http.statusCode == 200 || http.statusCode == 429 else {
+                completionHandler(.cancel)
+                resume(throwing: FetchError.invalidHTTPStatus(http.statusCode))
+                return
+            }
+            if maxBytes > 0, http.expectedContentLength > Int64(maxBytes) {
+                completionHandler(.cancel)
+                resume(throwing: FetchError.oversized("network"))
+                return
+            }
+            statusCode = http.statusCode
+            completionHandler(.allow)
+        }
+
+        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+            guard !isCompleted else { return }
+            guard maxBytes > 0, data.count <= maxBytes - body.count else {
+                resume(throwing: FetchError.oversized("network"))
+                dataTask.cancel()
+                return
+            }
+            body.append(data)
+        }
+
+        func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+            if isCompleted { return }
+            if let error {
+                resume(throwing: FetchError.transportFailed(String(describing: error)))
+                return
+            }
+            guard let statusCode else {
+                resume(throwing: FetchError.transportFailed("missing_http_status"))
+                return
+            }
+            resume(returning: FetchResponse(statusCode: statusCode, body: body))
+        }
+
+        private var isCompleted: Bool {
+            lock.lock()
+            let value = completed
+            lock.unlock()
+            return value
+        }
+
+        private func resume(returning response: FetchResponse) {
+            lock.lock()
+            guard !completed else { lock.unlock(); return }
+            completed = true
+            let continuation = continuation
+            self.continuation = nil
+            lock.unlock()
+            continuation?.resume(returning: response)
+        }
+
+        private func resume(throwing error: Error) {
+            lock.lock()
+            guard !completed else { lock.unlock(); return }
+            completed = true
+            let continuation = continuation
+            self.continuation = nil
+            lock.unlock()
+            continuation?.resume(throwing: error)
+        }
     }
 
     /// Rejects bytes the loader would reject anyway, before anything is

@@ -146,6 +146,119 @@ final class NativeMTPAdmissionFeedTests: XCTestCase {
         }
     }
 
+    func testRemoteFetchRejectsRedirectedMember() async throws {
+        do {
+            _ = try await NativeMTPAdmissionFeed.fetchMembers(
+                fetcher: { _, _ in
+                    NativeMTPAdmissionFeed.FetchResponse(statusCode: 302, body: Data("redirect".utf8), redirected: true)
+                },
+                baseURL: URL(string: "https://feeds.example")!
+            )
+            XCTFail("redirected member accepted")
+        } catch {
+            XCTAssertEqual(error as? NativeMTPAdmissionFeed.FetchError, .redirectRejected)
+        }
+    }
+
+    func testRemoteFetchRejectsOversizedMemberBeforePrecheck() async throws {
+        do {
+            _ = try await NativeMTPAdmissionFeed.fetchMembers(
+                fetcher: { _, maxBytes in
+                    NativeMTPAdmissionFeed.FetchResponse(statusCode: 200, body: Data(count: maxBytes + 1))
+                },
+                baseURL: URL(string: "https://feeds.example")!
+            )
+            XCTFail("oversized member accepted")
+        } catch {
+            XCTAssertEqual(error as? NativeMTPAdmissionFeed.FetchError, .oversized("native-mtp-admission"))
+        }
+    }
+
+    func testRemoteFetchUsesExactOriginAndBoundedRetry() async throws {
+        let baseURL = URL(string: "https://feeds.example:9443/root")!
+        var requests: [(String, Int)] = []
+        var admissionAttempts = 0
+        let members = try await NativeMTPAdmissionFeed.fetchMembers(
+            fetcher: { url, maxBytes in
+                requests.append((url.absoluteString, maxBytes))
+                if url.lastPathComponent == "native-mtp-admission" {
+                    admissionAttempts += 1
+                    if admissionAttempts == 1 {
+                        return NativeMTPAdmissionFeed.FetchResponse(statusCode: 429, body: Data())
+                    }
+                }
+                return NativeMTPAdmissionFeed.FetchResponse(statusCode: 200, body: Data(url.lastPathComponent.utf8))
+            },
+            baseURL: baseURL,
+            sleeper: { _ in }
+        )
+
+        XCTAssertEqual(String(data: members.sidecar, encoding: .utf8), "native-mtp-admission")
+        XCTAssertEqual(
+            requests.map(\.0),
+            [
+                "https://feeds.example:9443/v1/native-mtp-admission",
+                "https://feeds.example:9443/v1/native-mtp-admission",
+                "https://feeds.example:9443/v1/native-mtp-admission.sig",
+                "https://feeds.example:9443/v1/native-mtp-artifact-manifest",
+                "https://feeds.example:9443/v1/native-mtp-selftest-bank",
+                "https://feeds.example:9443/v1/native-mtp-selftest-bank.sig",
+            ]
+        )
+        XCTAssertEqual(requests[0].1, NativeMTPAdmissionSidecar.maxSidecarBytes)
+        XCTAssertEqual(requests[2].1, NativeMTPAdmissionSidecar.maxSignatureBytes)
+        XCTAssertEqual(requests[3].1, NativeMTPAdmissionFeed.maxManifestBytes)
+        XCTAssertEqual(requests[4].1, NativeMTPAdmissionSidecar.maxSelfTestChallengeBankBytes)
+    }
+
+    func testRemoteFetchRejectsInvalidOriginBeforeFetch() async throws {
+        var called = false
+        do {
+            _ = try await NativeMTPAdmissionFeed.fetchMembers(
+                fetcher: { _, _ in
+                    called = true
+                    return NativeMTPAdmissionFeed.FetchResponse(statusCode: 200, body: Data("unused".utf8))
+                },
+                baseURL: URL(string: "http://feeds.example")!
+            )
+            XCTFail("invalid origin accepted")
+        } catch {
+            XCTAssertEqual(error as? NativeMTPAdmissionFeed.FetchError, .invalidOrigin)
+            XCTAssertFalse(called)
+        }
+    }
+
+    func testAdmissionDelegateRejectsOverflowBeforeAppendingTail() async throws {
+        let delegate = NativeMTPAdmissionFeed.NoRedirectDelegate()
+        delegate.maxBytes = 4
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let request = URLRequest(url: URL(string: "https://feeds.example/v1/native-mtp-admission")!)
+        let task = session.dataTask(with: request)
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Content-Length": "4"]
+        )!
+        var disposition: URLSession.ResponseDisposition?
+
+        do {
+            _ = try await withCheckedThrowingContinuation { continuation in
+                delegate.continuation = continuation
+                delegate.urlSession(session, dataTask: task, didReceive: response) { disposition = $0 }
+                delegate.urlSession(session, dataTask: task, didReceive: Data("123".utf8))
+                delegate.urlSession(session, dataTask: task, didReceive: Data("45".utf8))
+                delegate.urlSession(session, dataTask: task, didReceive: Data(repeating: 0x36, count: 1024 * 1024))
+                delegate.urlSession(session, task: task, didCompleteWithError: nil)
+            } as NativeMTPAdmissionFeed.FetchResponse
+            XCTFail("overflow accepted")
+        } catch {
+            XCTAssertEqual(error as? NativeMTPAdmissionFeed.FetchError, .oversized("network"))
+            XCTAssertEqual(disposition, .allow)
+        }
+    }
+
     // MARK: - Store-layout projection (drafter delivery)
 
     private let targetRevision = String(repeating: "1", count: 40)

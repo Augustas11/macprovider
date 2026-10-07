@@ -1198,8 +1198,7 @@ struct ServeCommand: AsyncParsableCommand {
             guard let fetched = try? await NativeMTPAdmissionFeed.fetchAndMaterialize(
                 releaseID: catalogTrust.releaseID,
                 signerKeyID: AutotuneStaticInputs.keyID,
-                trustedPublicKeys: staticInputs.trustedPublicKeys,
-                fetch: staticInputs.fetch
+                trustedPublicKeys: staticInputs.trustedPublicKeys
             ) else {
                 return nil
             }
