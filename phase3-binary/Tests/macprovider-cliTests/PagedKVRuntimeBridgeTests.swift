@@ -2806,6 +2806,10 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testLabStateDigestObserverRecordsPagedKVCacheLogicalPrefix() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
         let descriptor = Self.bridgeDescriptor(blockSizeTokens: 4, maxPhysicalBlocks: 4)
         let backend = PagedKVSharedForwardBackend(
             container: ModelContainer(context: ModelContext(
@@ -2848,6 +2852,10 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testLabDrafterStateDigestIgnoresPhysicalPaddingBeyondCommittedPrefix() throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
         let paddedKey = MLXArray([Float](arrayLiteral: 1, 2, 99, 100), [1, 1, 4, 1])
         let paddedValue = MLXArray([Float](arrayLiteral: 3, 4, 101, 102), [1, 1, 4, 1])
         let compactKey = MLXArray([Float](arrayLiteral: 1, 2), [1, 1, 2, 1])
@@ -2873,6 +2881,10 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testLabStateDigestObserverFailsClosedForPagedSlidingWindowCache() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
         let descriptor = Self.bridgeDescriptor(blockSizeTokens: 4, maxPhysicalBlocks: 4)
         let backend = PagedKVSharedForwardBackend(
             container: ModelContainer(context: ModelContext(
@@ -2914,6 +2926,10 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testLabStateDigestObserverFailsClosedForUnknownCacheKind() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
         let descriptor = Self.bridgeDescriptor(blockSizeTokens: 4, maxPhysicalBlocks: 4)
         let backend = PagedKVSharedForwardBackend(
             container: ModelContainer(context: ModelContext(
