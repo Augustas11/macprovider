@@ -633,6 +633,21 @@ smoke_names() { # <all|base> - feed names the deploy smoke fetches
   fail "deploy smoke must fetch the five native-MTP admission files for a native-MTP-bound release"
 grep -q 'native-MTP smoke failed: no current revocation slot' "$DEPLOY_SH" ||
   fail "deploy smoke must require a current revocation slot for a native-MTP-bound release"
+grep -q 'native_mtp_revocation_slots.py verify-current' "$DEPLOY_SH" ||
+  fail "deploy must preflight the native-MTP current revocation slot before activation"
+native_preflight_line="$(grep -nF 'native_mtp_revocation_slots.py verify-current' "$DEPLOY_SH" | head -n1 | cut -d: -f1)"
+native_activation_line="$(grep -nF 'ln -sfn releases/$AUTOTUNE_RELEASE_DIR_NAME' "$DEPLOY_SH" | tail -n1 | cut -d: -f1)"
+native_restart_line="$(grep -nF 'systemctl restart macprovider-coordinator' "$DEPLOY_SH" | head -n1 | cut -d: -f1)"
+[ -n "$native_preflight_line" ] && [ -n "$native_activation_line" ] && [ -n "$native_restart_line" ] &&
+  [ "$native_preflight_line" -lt "$native_activation_line" ] &&
+  [ "$native_preflight_line" -lt "$native_restart_line" ] ||
+  fail "native-MTP revocation preflight must run before autotune/current activation and restart"
+grep -q 'sudo -u macprovider python3 -I .*native_mtp_revocation_slots.py verify-current' "$DEPLOY_SH" ||
+  fail "native-MTP revocation preflight must run as the macprovider service user"
+grep -q 'chmod 0755 \\$_native_preflight' "$DEPLOY_SH" ||
+  fail "native-MTP revocation preflight scratch must be traversable by the macprovider service user"
+grep -q 'staged catalog release failed remote verify-directory/native-MTP revocation preflight' "$DEPLOY_SH" ||
+  fail "native-MTP revocation preflight failure must abort before live activation"
 grep -q '"/v1/catalog-artifacts|autotune-artifacts.json|$STATIC_ARTIFACTS_JSON"' "$DEPLOY_SH" &&
   grep -q '"/v1/catalog-artifacts.sig|autotune-artifacts.json.sig|$STATIC_ARTIFACTS_SIG"' "$DEPLOY_SH" ||
   fail "deploy smoke must fetch the served artifact feed for an artifact-bound release"

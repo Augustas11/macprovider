@@ -52,6 +52,28 @@ class RevocationSlotsTest(unittest.TestCase):
             "--slot-minutes", str(minutes), "--out", str(out),
         ])
 
+    def write_admission_and_trusted_keys(self):
+        admission = self.dir / "native-mtp-admission.json"
+        admission.write_text(json.dumps({"revocation_signer_key_id": self.KEY_ID}))
+        trusted = self.dir / "trusted-keys.json"
+        trusted.write_text(json.dumps({
+            "schema_version": "macprovider.autotune-keys.v1",
+            "keys": {
+                self.KEY_ID: {
+                    "public_key_base64": self.public_key,
+                    "status": "active",
+                },
+            },
+        }))
+        return admission, trusted
+
+    def verify_current(self, directory: pathlib.Path, now: str) -> int:
+        admission, trusted = self.write_admission_and_trusted_keys()
+        return slots.main([
+            "verify-current", "--dir", str(directory), "--admission", str(admission),
+            "--trusted-keys", str(trusted), "--now", now,
+        ])
+
     def test_build_signs_one_canonical_body_per_slot_and_verifies(self):
         out = self.dir / "slots"
         self.assertEqual(self.build(out), 0)
@@ -104,6 +126,36 @@ class RevocationSlotsTest(unittest.TestCase):
         )
         first = min(json.loads(path.read_bytes())["generation"] for path in emergency.glob("*.json"))
         self.assertGreater(first, served)
+
+    def test_verify_current_requires_readable_current_signed_slot(self):
+        valid = self.dir / "valid"
+        self.build(valid, start="2026-10-07T00:00:00Z")
+        self.assertEqual(self.verify_current(valid, "2026-10-07T00:05:00Z"), 0)
+
+        missing = self.dir / "missing"
+        missing.mkdir()
+        self.assertEqual(self.verify_current(missing, "2026-10-07T00:05:00Z"), 1)
+        self.assertEqual(self.verify_current(valid, "2026-10-08T01:00:00Z"), 1)
+
+        tampered = self.dir / "tampered"
+        self.build(tampered, start="2026-10-07T00:00:00Z")
+        current = tampered / f"{int(datetime(2026, 10, 7, tzinfo=timezone.utc).timestamp())}.json"
+        value = json.loads(current.read_bytes())
+        value["revoked_admission_tuple_sha256"] = []
+        current.write_bytes(slots.canonical_bytes(value))
+        self.assertEqual(self.verify_current(tampered, "2026-10-07T00:05:00Z"), 1)
+
+    def test_verify_current_rejects_retired_or_missing_revocation_signer(self):
+        out = self.dir / "slots"
+        self.build(out, start="2026-10-07T00:00:00Z")
+        admission, trusted = self.write_admission_and_trusted_keys()
+        keyring = json.loads(trusted.read_text())
+        keyring["keys"][self.KEY_ID]["status"] = "retired"
+        trusted.write_text(json.dumps(keyring))
+        self.assertEqual(slots.main([
+            "verify-current", "--dir", str(out), "--admission", str(admission),
+            "--trusted-keys", str(trusted), "--now", "2026-10-07T00:05:00Z",
+        ]), 1)
 
 
 if __name__ == "__main__":

@@ -51,6 +51,7 @@ MAX_REVOKED = 4096
 WINDOW = timedelta(hours=1)
 # SPEC-023 §12.5: a slot must be younger than the 15-minute first-install
 # bound for its whole service time.
+CURRENT_FRESHNESS = timedelta(minutes=15)
 MAX_SLOT_MINUTES = 10
 MAX_SLOTS = 4096
 # PKCS#8 DER prefix of an Ed25519 private key; the 32-byte seed follows.
@@ -228,6 +229,54 @@ def verify_slots(directory: pathlib.Path, key_id: str, public_key_base64: str) -
     return len(names)
 
 
+def trusted_public_key_base64(trusted_keys: pathlib.Path, key_id: str) -> str:
+    value = json.loads(trusted_keys.read_text("utf-8"))
+    if value.get("schema_version") != "macprovider.autotune-keys.v1" or not isinstance(value.get("keys"), dict):
+        fail(f"{trusted_keys.name}: invalid trusted-keys schema")
+    row = value["keys"].get(key_id)
+    if not isinstance(row, dict):
+        fail(f"{trusted_keys.name}: missing revocation signer key_id {key_id!r}")
+    if row.get("status") not in {"active", "bridge"}:
+        fail(f"{trusted_keys.name}: revocation signer key_id {key_id!r} is not active or bridge")
+    public_key = row.get("public_key_base64")
+    if not isinstance(public_key, str):
+        fail(f"{trusted_keys.name}: revocation signer key_id {key_id!r} has no public_key_base64")
+    return public_key
+
+
+def admission_revocation_key_id(admission: pathlib.Path) -> str:
+    value = json.loads(admission.read_text("utf-8"))
+    key_id = value.get("revocation_signer_key_id")
+    if not isinstance(key_id, str) or not KEY_ID.fullmatch(key_id):
+        fail(f"{admission.name}: revocation_signer_key_id is missing or invalid")
+    return key_id
+
+
+def current_slot(directory: pathlib.Path, now: datetime) -> tuple[str, dict[str, object]]:
+    best_path: pathlib.Path | None = None
+    best_value: dict[str, object] | None = None
+    best_issued: datetime | None = None
+    for path in sorted(directory.iterdir()):
+        if not re.fullmatch(r"[0-9]+\.json", path.name):
+            continue
+        value = json.loads(path.read_bytes())
+        issued = parse_utc(str(value.get("issued_at", "")), path.name)
+        expires = parse_utc(str(value.get("expires_at", "")), path.name)
+        if issued > now or now >= expires:
+            continue
+        if now - issued > CURRENT_FRESHNESS:
+            continue
+        generation = int(value["generation"])
+        best_generation = -1 if best_value is None else int(best_value["generation"])
+        if best_issued is None or issued > best_issued or (issued == best_issued and generation > best_generation):
+            best_path = path
+            best_value = value
+            best_issued = issued
+    if best_path is None or best_value is None:
+        fail(f"{directory}: no issued, unexpired, fresh current slot")
+    return best_path.name, best_value
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -243,15 +292,27 @@ def main(argv: list[str] | None = None) -> int:
     verify.add_argument("--dir", type=pathlib.Path, required=True)
     verify.add_argument("--key-id", required=True)
     verify.add_argument("--public-key-base64", required=True)
+    current = sub.add_parser("verify-current")
+    current.add_argument("--dir", type=pathlib.Path, required=True)
+    current.add_argument("--admission", type=pathlib.Path, required=True)
+    current.add_argument("--trusted-keys", type=pathlib.Path, required=True)
+    current.add_argument("--now", default=None, help="RFC3339 UTC seconds; defaults to current UTC time")
     args = parser.parse_args(argv)
     try:
         if args.command == "build":
             bodies = slot_bodies(args.key_id, load_revoked(args.revoked), parse_utc(args.start, "--start"), args.days, args.slot_minutes)
             sign_slots(bodies, args.key_id, args.key_file, args.out)
             print(f"native-mtp-revocation-slots: signed {len(bodies)} slots into {args.out}")
-        else:
+        elif args.command == "verify":
             count = verify_slots(args.dir, args.key_id, args.public_key_base64)
             print(f"native-mtp-revocation-slots: verified {count} slots")
+        else:
+            key_id = admission_revocation_key_id(args.admission)
+            public_key = trusted_public_key_base64(args.trusted_keys, key_id)
+            verify_slots(args.dir, key_id, public_key)
+            now = datetime.now(timezone.utc) if args.now is None else parse_utc(args.now, "--now")
+            name, _ = current_slot(args.dir, now)
+            print(f"native-mtp-revocation-slots: current slot {name} verified for {key_id}")
     except (SlotError, OSError, ValueError, subprocess.CalledProcessError) as error:
         print(f"native-mtp-revocation-slots: {error}", file=sys.stderr)
         return 1

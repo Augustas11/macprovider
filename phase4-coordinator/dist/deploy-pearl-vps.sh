@@ -3664,9 +3664,25 @@ if ! $SSH "set -e
   for _f in $CATALOG_RELEASE_FILES; do cp $DEPLOY_TMP/\$_f \$_preflight/\$_f; done
   _rc=0
   python3 -I $DEPLOY_TMP/scripts/catalog-release.py verify-directory --directory \$_preflight --tier2-public-key-file $DEPLOY_TMP/tier2-catalog.pub || _rc=\$?
+  if [ \$_rc -eq 0 ] && [ '$AUTOTUNE_NATIVE_MTP_BOUND' = bound ]; then
+    _native_preflight=\$(mktemp -d -t macprovider-native-mtp-preflight.XXXXXXXX)
+    trap 'rm -rf \"\$_preflight\" \"\$_native_preflight\"' EXIT
+    chmod 0755 \$_native_preflight
+    install -m 0755 $DEPLOY_TMP/scripts/native_mtp_revocation_slots.py \$_native_preflight/native_mtp_revocation_slots.py
+    install -m 0644 $DEPLOY_TMP/native-mtp-admission.json \$_native_preflight/native-mtp-admission.json
+    install -m 0644 $DEPLOY_TMP/trusted-keys.json \$_native_preflight/trusted-keys.json
+    sudo -u macprovider test -d $NATIVE_MTP_REVOCATIONS_DIR
+    sudo -u macprovider test -r $NATIVE_MTP_REVOCATIONS_DIR
+    sudo -u macprovider test -x $NATIVE_MTP_REVOCATIONS_DIR
+    sudo -u macprovider python3 -I \$_native_preflight/native_mtp_revocation_slots.py verify-current \
+      --dir $NATIVE_MTP_REVOCATIONS_DIR \
+      --admission \$_native_preflight/native-mtp-admission.json \
+      --trusted-keys \$_native_preflight/trusted-keys.json || _rc=\$?
+  fi
   rm -rf \$_preflight
+  [ -z \"\${_native_preflight:-}\" ] || rm -rf \$_native_preflight
   exit \$_rc"; then
-  echo "aborting deploy: staged catalog release failed remote verify-directory preflight on the VPS (before config backup or release staging)" >&2
+  echo "aborting deploy: staged catalog release failed remote verify-directory/native-MTP revocation preflight on the VPS (before config backup or release staging)" >&2
   exit 1
 fi
 
