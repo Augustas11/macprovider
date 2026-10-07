@@ -106,7 +106,7 @@ def make_capture(root: Path) -> Path:
                 "req-ns-1",
                 "req-st-1",
                 "req-no-pool-selector",
-                "req-no-selector-no-pool",
+                "req-pool-native-selector",
                 "req-pool-ollama-selector",
                 "req-uppercase-selector",
             ],
@@ -120,7 +120,7 @@ def make_capture(root: Path) -> Path:
                 "req-ns-1",
                 "req-st-1",
                 "req-no-pool-selector",
-                "req-no-selector-no-pool",
+                "req-pool-native-selector",
                 "req-pool-ollama-selector",
                 "req-uppercase-selector",
             ],
@@ -354,7 +354,7 @@ class TrustedPoolExternalRuntimeCaptureTests(unittest.TestCase):
                 "req-ns-1",
                 "req-st-1",
                 "req-no-pool-selector",
-                "req-no-selector-no-pool",
+                "req-pool-native-selector",
                 "req-pool-ollama-selector",
                 "req-uppercase-selector",
             ]),
@@ -532,6 +532,13 @@ class TrustedPoolExternalRuntimeCaptureTests(unittest.TestCase):
     def test_rejects_control_wrong_code(self) -> None:
         write(self.capture / "controls/uppercase-selector/response.json", {"error": {"code": "engine_unavailable"}})
         self.assert_rejected("error.code")
+
+    def test_native_selector_pool_must_refuse_not_spill_to_global(self) -> None:
+        self.assertNotIn("no-selector-no-pool", BUILDER.NEGATIVE_CONTROLS)
+        self.assertEqual((503, "engine_unavailable"), BUILDER.NEGATIVE_CONTROLS["pool-native-selector"])
+        headers = self.capture / "controls/pool-native-selector/response.headers"
+        headers.write_text(headers.read_text().replace("503", "200", 1))
+        self.assert_rejected("control pool-native-selector status must be 503")
 
     def test_rejects_delegated_member(self) -> None:
         rows = json.loads((self.capture / "pool/trustpool-events.json").read_text())

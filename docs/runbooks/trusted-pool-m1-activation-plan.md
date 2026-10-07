@@ -805,10 +805,15 @@ Negative controls in the same session (each must be 503, 0 route snapshots,
 
 - same body, no `X-MacProvider-Pool-Select` → 503 `engine_unavailable`
   (global route, selector set);
-- same, no selector and no pool → 503 `byom_non_settlement_unavailable`;
+- pool header with `X-MacProvider-Engine-Select: native` → 503
+  `engine_unavailable` (the pool allows only llama.cpp);
 - pool header with `X-MacProvider-Engine-Select: ollama` → 503
   `engine_unavailable`;
 - `X-MacProvider-Engine-Select: LLAMACPP` → 400 `invalid_engine_selection`.
+
+Do not use a request with neither selector as a negative control: this same
+catalog model may be served legitimately by a native global provider. A 200
+native response in that case does not violate the pool-only external-engine gate.
 
 ### Expected settlement (per request)
 

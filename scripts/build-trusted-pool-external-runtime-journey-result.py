@@ -86,7 +86,7 @@ REQUEST_KINDS = ("nonstream", "stream")
 # name -> (HTTP status, error.code); run plan §5A negative controls.
 NEGATIVE_CONTROLS = {
     "no-pool-selector": (503, "engine_unavailable"),
-    "no-selector-no-pool": (503, "byom_non_settlement_unavailable"),
+    "pool-native-selector": (503, "engine_unavailable"),
     "pool-ollama-selector": (503, "engine_unavailable"),
     "uppercase-selector": (400, "invalid_engine_selection"),
 }

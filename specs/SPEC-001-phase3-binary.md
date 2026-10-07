@@ -1198,7 +1198,7 @@ produced by elapsed time including prefill (0 when the probe fails or does not
 run). A loopback runtime (v1.9.29) measures the same quantity through its
 upstream (FR-20) with the same formula and a trusted tokenizer recount of the
 assistant content, so the value is the one cross-runtime quantity SPEC-002
-v1.6.8 routes on. A warm swap carries the value forward without re-probing. Its wire
+v1.6.9 routes on. A warm swap carries the value forward without re-probing. Its wire
 semantics are unchanged by v1.9.20.
 
 **Local capacity provenance (v1.9.20, capability `capacity_provenance_v1`).**

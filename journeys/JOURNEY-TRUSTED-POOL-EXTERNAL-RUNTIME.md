@@ -104,13 +104,15 @@ All of these are captured, with timestamps, in `preconditions.json` (below).
    while ledger `usage_source = provider_reported` names SPEC-005 usage
    measurement.
 9. `step-09-negative-controls` - in the same session: no pool header (503
-   `engine_unavailable`), no selector and no pool (503
-   `byom_non_settlement_unavailable`), pool header with
+   `engine_unavailable`), pool header with `X-MacProvider-Engine-Select: native`
+   (503 `engine_unavailable`, because this pool allows only llama.cpp), pool header with
    `X-MacProvider-Engine-Select: ollama` (503 `engine_unavailable`), and
    `X-MacProvider-Engine-Select: LLAMACPP` (400 `invalid_engine_selection`).
    Each leaves zero route snapshots and zero ledger rows. The coordinator
    records a route snapshot before it dispatches to a provider, so zero
    snapshots also means zero upstream calls.
+   A request with neither selector is not a negative control: the same catalog
+   model may legitimately have an eligible native provider on the global route.
 10. `step-10-gateway-holds` - the six generated gateway request ids (two
     paid requests and four negative controls) are bound to a bounded window,
     the buyer account and the pool; within that run scope the held-reservation
@@ -151,7 +153,7 @@ capture/
   requests/<kind>/quota_reservations.json
   requests/<kind>/usage_events.json
   requests/<kind>/finality.json         # the finality GET body
-  controls/<name>/response.headers      # name: no-pool-selector, no-selector-no-pool,
+  controls/<name>/response.headers      # name: no-pool-selector, pool-native-selector,
   controls/<name>/response.json         #   pool-ollama-selector, uppercase-selector
   controls/<name>/route_snapshots.json
   controls/<name>/ledger.json
@@ -307,7 +309,8 @@ carrying:
 - `candidate_identity`: `coordinator_version`, `accepted_id`,
   `member_cli_sha256`, `llama_server_build`, `gguf_sha256`,
   `gguf_artifact_id`, `model_id`, `pool_id`, `manifest_version`,
-  `manifest_core_digest`, `runtime_source`, `fingerprint_salt` (64 hex).
+  `manifest_core_digest`, `runtime_source`, `buyer_account_fingerprint`,
+  `fingerprint_salt` (64 hex).
 
 The payload is signed in CI (`production-release`,
 `MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM`, key id
