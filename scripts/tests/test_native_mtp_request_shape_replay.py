@@ -184,16 +184,21 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
             out = root / "analyzer.jsonl"
             code = replay.main(["convert", "--replay", str(replay_jsonl), "--policy", str(policy), "--out", str(out)])
             self.assertEqual(code, 0)
+            replay_header = json.loads(replay_jsonl.read_text("utf-8").splitlines()[0])
+            self.assertIsNone(replay_header["request_shapes"][0]["requested_max_completion_tokens"])
+            self.assertIn("stop_sequence_utf8_lengths", replay_header["request_shapes"][0])
+            self.assertIn("tool_parameter_schema_geometries", replay_header["request_shapes"][0])
+            self.assertIn("requested_top_logprobs", replay_header["request_shapes"][0])
             header, blocks = analyzer._load_jsonl(out)
             self.assertEqual(header["sample_digest_sha256"], "b" * 64)
             self.assertEqual(len(blocks), 2)
             disabled = next(block for block in blocks if block["path"] == "mtp_disabled")
             mixed = next(block for block in blocks if block["path"] == "observed_mixed")
-            self.assertEqual([shape["shape_id"] for shape in mixed["request_shapes"]], ["eligible", "tool"])
+            self.assertEqual([shape["shape_id"] for shape in mixed["request_shapes"]], ["eligible", "logit"])
             self.assertEqual(mixed["request_shapes"][0]["completion_tokens"], 11)
             self.assertEqual(mixed["request_shapes"][0]["pre_capacity_selector_reason"], "eligible")
             self.assertEqual(mixed["request_shapes"][0]["effective_path"], "native_mtp")
-            self.assertEqual(mixed["request_shapes"][1]["pre_capacity_selector_reason"], "tools")
+            self.assertEqual(mixed["request_shapes"][1]["pre_capacity_selector_reason"], "logit_controls")
             self.assertEqual(mixed["request_shapes"][1]["effective_path"], "ordinary")
             self.assertTrue(all(shape["effective_path"] == "ordinary" for shape in disabled["request_shapes"]))
             self.assertGreater(disabled["ordinary_row_p95_ttft_seconds"], 0)
@@ -226,11 +231,11 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "actual_admission_mismatch"):
                 replay.convert_replay_to_analyzer_jsonl(mismatch, policy)
 
-            incomplete = self._write_replay_result(root, policy, mutate_completion=lambda record: record.update({"committed_timing_events": 0}) if record["request_id"] == "native_mtp-b0-r1-tool" else None)
+            incomplete = self._write_replay_result(root, policy, mutate_completion=lambda record: record.update({"committed_timing_events": 0}) if record["request_id"] == "native_mtp-b0-r1-logit" else None)
             with self.assertRaisesRegex(ValueError, "committed_timing_events_mismatch"):
                 replay.convert_replay_to_analyzer_jsonl(incomplete, policy)
 
-            pending_row = self._write_replay_result(root, policy, mutate=lambda record: record.update({"pending_reason": "cache_warmup_missing"}) if record.get("shape_id") == "tool" and record.get("actual_effective_path") == "ordinary" else None)
+            pending_row = self._write_replay_result(root, policy, mutate=lambda record: record.update({"pending_reason": "cache_warmup_missing"}) if record.get("shape_id") == "logit" and record.get("actual_effective_path") == "ordinary" else None)
             with self.assertRaisesRegex(ValueError, "row_pending"):
                 replay.convert_replay_to_analyzer_jsonl(pending_row, policy)
 
@@ -246,7 +251,32 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "request_shape_unknown_fields:synthetic_content"):
                 replay.convert_replay_to_analyzer_jsonl(synthetic, policy)
 
-            token_mismatch = self._write_replay_result(root, policy, mutate=lambda record: record.update({"target_completion_tokens": 99}) if record.get("shape_id") == "tool" and record.get("actual_effective_path") == "ordinary" else None)
+
+            missing_geometry = self._write_replay_result(root, policy, mutate_shape=lambda shape: shape.pop("tool_parameter_schema_geometries") if shape["shape_id"] == "logit" else None)
+            with self.assertRaisesRegex(ValueError, "request_shape_missing_fields:.*tool_parameter_schema_geometries"):
+                replay.convert_replay_to_analyzer_jsonl(missing_geometry, policy)
+
+            top_logprobs_missing = self._write_replay_result(root, policy, mutate_shape=lambda shape: shape.update({"logprobs_requested": True, "top_logprobs_requested": True, "requested_top_logprobs": None}) if shape["shape_id"] == "logit" else None)
+            with self.assertRaisesRegex(ValueError, "requested_top_logprobs_missing"):
+                replay.convert_replay_to_analyzer_jsonl(top_logprobs_missing, policy)
+
+            missing_budget = self._write_replay_result(root, policy, mutate=lambda record: record.pop("actual_effective_max_output_tokens") if record.get("shape_id") == "logit" and record.get("actual_effective_path") == "ordinary" else None)
+            with self.assertRaisesRegex(ValueError, "actual_effective_max_output_tokens_invalid"):
+                replay.convert_replay_to_analyzer_jsonl(missing_budget, policy)
+
+            wrong_budget = self._write_replay_result(root, policy, mutate=lambda record: record.update({"actual_effective_max_output_tokens": 95}) if record.get("shape_id") == "logit" and record.get("actual_effective_path") == "ordinary" else None)
+            with self.assertRaisesRegex(ValueError, "actual_effective_max_output_tokens_mismatch|effective_max_output_token_budget_mismatch"):
+                replay.convert_replay_to_analyzer_jsonl(wrong_budget, policy)
+
+            echoed_budget_match = self._write_replay_result(root, policy, mutate=lambda record: record.update({"actual_effective_max_output_tokens": 95, "budget_matches": True}) if record.get("shape_id") == "logit" and record.get("actual_effective_path") == "ordinary" else None)
+            with self.assertRaisesRegex(ValueError, "actual_effective_max_output_tokens_mismatch|effective_max_output_token_budget_mismatch"):
+                replay.convert_replay_to_analyzer_jsonl(echoed_budget_match, policy)
+
+            budget_false = self._write_replay_result(root, policy, mutate=lambda record: record.update({"budget_matches": False}) if record.get("shape_id") == "logit" and record.get("actual_effective_path") == "ordinary" else None)
+            with self.assertRaisesRegex(ValueError, "budget_mismatch"):
+                replay.convert_replay_to_analyzer_jsonl(budget_false, policy)
+
+            token_mismatch = self._write_replay_result(root, policy, mutate=lambda record: record.update({"target_completion_tokens": 99}) if record.get("shape_id") == "logit" and record.get("actual_effective_path") == "ordinary" else None)
             with self.assertRaisesRegex(ValueError, "sample_completion_token_mismatch"):
                 replay.convert_replay_to_analyzer_jsonl(token_mismatch, policy)
 
@@ -254,7 +284,7 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "qualification_status_not_qualified"):
                 replay.convert_replay_to_analyzer_jsonl(pending_run, policy)
 
-            target_unmatched = self._write_replay_result(root, policy, mutate_completion=lambda record: record.update({"target_completion_matched": False}) if record["request_id"] == "native_mtp-b0-r1-tool" else None)
+            target_unmatched = self._write_replay_result(root, policy, mutate_completion=lambda record: record.update({"target_completion_matched": False}) if record["request_id"] == "native_mtp-b0-r1-logit" else None)
             with self.assertRaisesRegex(ValueError, "target_completion_mismatch"):
                 replay.convert_replay_to_analyzer_jsonl(target_unmatched, policy)
 
@@ -262,11 +292,11 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "ordinary_observed_throughput_tps_mismatch"):
                 replay.convert_replay_to_analyzer_jsonl(throughput_mismatch, policy)
 
-            missing_identity = self._write_replay_result(root, policy, mutate_shape=lambda shape: shape.pop("served_model_hash_sha256") if shape["shape_id"] == "tool" else None)
+            missing_identity = self._write_replay_result(root, policy, mutate_shape=lambda shape: shape.pop("served_model_hash_sha256") if shape["shape_id"] == "logit" else None)
             with self.assertRaisesRegex(ValueError, "served_model_hash_sha256_invalid"):
                 replay.convert_replay_to_analyzer_jsonl(missing_identity, policy)
 
-            wrong_identity = self._write_replay_result(root, policy, mutate_shape=lambda shape: shape.update({"served_model_hash_sha256": "9" * 64}) if shape["shape_id"] == "tool" else None)
+            wrong_identity = self._write_replay_result(root, policy, mutate_shape=lambda shape: shape.update({"served_model_hash_sha256": "9" * 64}) if shape["shape_id"] == "logit" else None)
             with self.assertRaisesRegex(ValueError, "served_model_hash_sha256_not_target"):
                 replay.convert_replay_to_analyzer_jsonl(wrong_identity, policy)
 
@@ -364,7 +394,8 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
             "native_mtp_target_generation": 0,
             "stream": stream,
             "stop_sequences": stop_sequences,
-            "stop_sequence_utf8_length_buckets": [],
+            "stop_sequence_utf8_lengths": [1] * stop_sequences,
+            "stop_sequence_utf8_length_buckets": {"1_4": stop_sequences} if stop_sequences else {},
             "requested_temperature": temperature,
             "requested_top_p": top_p,
             "requested_top_k": None,
@@ -386,6 +417,7 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
             "logit_bias_geometry": {"present": logit_bias},
             "tools_present": tools or tool_choice or tool_turn,
             "tool_count": 1 if tools else 0,
+            "tool_parameter_schema_geometries": [{"byte_count": 2, "max_depth": 1, "object_count": 1, "array_count": 0, "property_count": 0}] if tools else [],
             "tool_choice_present": tool_choice,
             "tool_choice_kind": "auto" if tool_choice else "none",
             "tool_turn_state_present": tool_turn,
@@ -396,6 +428,7 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
             "response_schema_geometry": {"kind": response_format},
             "logprobs_requested": logprobs or top_logprobs,
             "top_logprobs_requested": top_logprobs,
+            "requested_top_logprobs": 1 if top_logprobs else None,
             "logit_controls_requested": presence_penalty or frequency_penalty or min_p or repetition_penalty or logit_bias,
             "reasoning_or_template_model": reasoning,
             "multimodal_requested": multimodal,
@@ -464,7 +497,7 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
         target_sha = "d" * 64
         shapes = [
             self._replay_shape("eligible", 11, target_sha),
-            self._replay_shape("tool", 7, target_sha),
+            self._replay_shape("logit", 7, target_sha),
         ]
         if mutate_shape:
             for shape in shapes:
@@ -493,7 +526,21 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
             "exports_recoverable_cache_groups": False,
             "completion_length_binding": replay.EXPECTED_COMPLETION_LENGTH_BINDING,
             "target_stop_control": replay.EXPECTED_TARGET_STOP_CONTROL,
-            "synthetic_stand_ins": {"tools": {"tool_count": 1}},
+            "synthetic_stand_ins": {
+                "logit_controls": "replays exact sanitized numeric top_k/min_p/penalty controls when present; logit_bias rows stay pending because token IDs are not exported",
+                "structured_output": "replays json_object exactly; json_schema uses redacted schema preserving captured property arity/depth class where safe",
+                "tools": "uses redacted synthetic tool names/messages and parameter schemas preserving captured counts and safe schema geometry",
+                "stop_sequence": "uses redacted UTF-8 literals preserving captured exact byte lengths",
+                "logprobs": "replays logprobs and exact top_logprobs numeric value when captured",
+                "unknown_request_field": {
+                    "top_level_key": "replay_unknown_selector_field",
+                    "stream_option_key": "replay_unknown_stream_option",
+                    "value_type": "boolean",
+                },
+                "pending_geometry": {
+                    "logit_bias": "requires token IDs, which are not exported",
+                },
+            },
             "run_metrics_version": 1,
             "sample_filter_included_count": len(shapes),
             "sample_filter_excluded_count": 0,
@@ -513,11 +560,11 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
                 records.extend([
                     self._replay_run(block_index, "ordinary", policy_sha, bench_policy_sha, capture_sha, [
                         ("eligible", 11, "mode_off", "ordinary"),
-                        ("tool", 7, "mode_off", "ordinary"),
+                        ("logit", 7, "mode_off", "ordinary"),
                     ], mutate=mutate, mutate_completion=mutate_completion, mutate_run=mutate_run),
                     self._replay_run(block_index, "native_mtp", policy_sha, bench_policy_sha, capture_sha, [
                         ("eligible", 11, "eligible", "native_mtp"),
-                        ("tool", 7, "tools", "ordinary"),
+                        ("logit", 7, "logit_controls", "ordinary"),
                     ], mutate=mutate, mutate_completion=mutate_completion, mutate_run=mutate_run),
                 ])
         path = root / f"replay-{len(list(root.glob('replay-*.jsonl')))}.jsonl"
@@ -525,12 +572,13 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
         return path
 
     def _replay_shape(self, shape_id, target_tokens, target_sha):
+        logit_shape = shape_id == "logit"
         return {
             "shape_id": shape_id,
             "stream": True,
             "requested_temperature": 0,
             "requested_top_p": 1,
-            "requested_max_completion_tokens": 96,
+            "requested_max_completion_tokens": None if shape_id == "eligible" else 96,
             "effective_max_output_tokens": 96,
             "prompt_tokens": 256,
             "target_completion_tokens": target_tokens,
@@ -547,6 +595,58 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
             "anonymous_cache_group_sha256": None,
             "served_model_hash_sha256": target_sha,
             "served_weights_manifest_sha256": "2" * 64,
+            "stop_sequences": 0,
+            "stop_sequence_utf8_lengths": [],
+            "stop_sequence_utf8_length_buckets": {},
+            "sampling_requested": False,
+            "multiple_completions_requested": False,
+            "requested_top_k": None,
+            "requested_min_p": None,
+            "requested_presence_penalty": 0.5 if logit_shape else 0,
+            "requested_frequency_penalty": 0,
+            "requested_repetition_penalty": None,
+            "requested_n": 1,
+            "top_k_present": False,
+            "min_p_nonzero": False,
+            "frequency_penalty_nonzero": False,
+            "presence_penalty_nonzero": logit_shape,
+            "repetition_penalty_nondefault": False,
+            "logit_bias_present": False,
+            "logit_bias_geometry": {
+                "entry_count": 0,
+                "positive_count": 0,
+                "negative_count": 0,
+                "zero_count": 0,
+                "min_value": None,
+                "max_value": None,
+                "max_abs_bucket": "none",
+            },
+            "tools_present": False,
+            "tool_count": 0,
+            "tool_parameter_schema_geometries": [],
+            "tool_choice_present": False,
+            "tool_choice_kind": "absent",
+            "tool_turn_state_present": False,
+            "tool_message_count": 0,
+            "assistant_tool_call_count": 0,
+            "structured_output_requested": False,
+            "response_format_kind": "text",
+            "response_schema_geometry": {
+                "byte_count": 0,
+                "max_depth": 0,
+                "object_count": 0,
+                "array_count": 0,
+                "property_count": 0,
+            },
+            "logprobs_requested": False,
+            "top_logprobs_requested": False,
+            "requested_top_logprobs": None,
+            "logit_controls_requested": logit_shape,
+            "reasoning_or_template_model": False,
+            "multimodal_requested": False,
+            "unknown_request_fields_present": False,
+            "unknown_top_level_keys_present": False,
+            "unknown_stream_option_keys_present": False,
         }
 
     def _replay_run(self, block_index, path, policy_sha, bench_policy_sha, capture_sha, rows, *, mutate=None, mutate_completion=None, mutate_run=None):
@@ -563,6 +663,9 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
                 "shape_id": shape_id,
                 "target_completion_tokens": target_tokens,
                 "effective_max_output_tokens": 96,
+                "expected_effective_max_output_tokens": 96,
+                "actual_effective_max_output_tokens": 96,
+                "budget_matches": True,
                 "expected_selector_reason": expected_reason,
                 "actual_selector_reason": reason,
                 "expected_effective_path": expected_path,

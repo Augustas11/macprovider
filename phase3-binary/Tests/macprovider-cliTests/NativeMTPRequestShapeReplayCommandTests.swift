@@ -68,6 +68,106 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
         XCTAssertFalse(plan.blocks[0].rows[0].stream)
     }
 
+    func testAdmissionProjectionReproductionUsesExplicitOptionalPendingState() throws {
+        let url = try writeCapture([
+            shape("projection"),
+        ])
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
+        let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 1, seed: 48015)
+        let block = plan.blocks[0]
+        let row = try XCTUnwrap(block.runnableRows.first)
+        let request = try NativeMTPRequestShapeReplayRunner.makeRequest(
+            modelID: "test-model",
+            requestID: row.requestID,
+            prompt: "synthetic",
+            maxTokens: row.requestedMaxCompletionTokens,
+            temperature: row.temperature,
+            topP: row.topP,
+            stream: row.stream
+        )
+        let matchingRequest = try NativeMTPRequestShapeReplayRunner.applySyntheticStandIn(for: row, to: request)
+        let maxContextTokens = row.promptTokens + row.maxCompletionTokens
+
+        let reproduced = NativeMTPRequestShapeReplayRunner.admissionProjectionRows(
+            path: .ordinary,
+            block: block,
+            admissions: [],
+            requestsByID: [row.requestID: matchingRequest],
+            maxContextTokens: maxContextTokens
+        )
+        XCTAssertEqual(reproduced.first?["reproduced"] as? Bool, true)
+        XCTAssertTrue(reproduced.first?["pending_reason"] is NSNull)
+
+        let changedRequest = try NativeMTPRequestShapeReplayRunner.makeRequest(
+            modelID: "test-model",
+            requestID: row.requestID,
+            prompt: "synthetic",
+            maxTokens: row.requestedMaxCompletionTokens,
+            temperature: row.temperature,
+            topP: row.topP,
+            stream: !row.stream
+        )
+        let changed = NativeMTPRequestShapeReplayRunner.admissionProjectionRows(
+            path: .ordinary,
+            block: block,
+            admissions: [],
+            requestsByID: [row.requestID: changedRequest],
+            maxContextTokens: maxContextTokens
+        )
+        XCTAssertEqual(changed.first?["reproduced"] as? Bool, false)
+        XCTAssertEqual(changed.first?["pending_reason"] as? String, "stream_flag_mismatch:\(row.requestID)")
+
+        let missing = NativeMTPRequestShapeReplayRunner.admissionProjectionRows(
+            path: .ordinary,
+            block: block,
+            admissions: [],
+            requestsByID: [:],
+            maxContextTokens: maxContextTokens
+        )
+        XCTAssertEqual(missing.first?["reproduced"] as? Bool, false)
+        XCTAssertEqual(missing.first?["pending_reason"] as? String, "request_reproduction_missing_parsed_request:\(row.requestID)")
+    }
+
+
+    func testCombinedSafeFeaturesAreAppliedBeforeReproductionComparison() throws {
+        let url = try writeCapture([
+            shape("combined-safe", extra: [
+                "stop_sequences": 1,
+                "stop_sequence_utf8_lengths": [3],
+                "stop_sequence_utf8_length_buckets": ["1_4": 1],
+                "requested_top_k": 40,
+                "top_k_present": true,
+                "logit_controls_requested": true,
+                "logprobs_requested": true,
+                "top_logprobs_requested": true,
+                "requested_top_logprobs": 3,
+            ]),
+        ])
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
+        let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 1, seed: 48015)
+        let block = plan.blocks[0]
+        let row = try XCTUnwrap(block.runnableRows.first)
+        let baseRequest = try NativeMTPRequestShapeReplayRunner.makeRequest(
+            modelID: "test-model",
+            requestID: row.requestID,
+            prompt: "synthetic",
+            maxTokens: row.requestedMaxCompletionTokens,
+            temperature: row.temperature,
+            topP: row.topP,
+            stream: row.stream
+        )
+        let replayRequest = try NativeMTPRequestShapeReplayRunner.applySyntheticStandIn(for: row, to: baseRequest)
+        let projection = NativeMTPRequestShapeReplayRunner.admissionProjectionRows(
+            path: .ordinary,
+            block: block,
+            admissions: [],
+            requestsByID: [row.requestID: replayRequest],
+            maxContextTokens: row.promptTokens + row.maxCompletionTokens
+        )
+        XCTAssertEqual(row.expectedSelectorReason, "logit_controls")
+        XCTAssertEqual(projection.first?["reproduced"] as? Bool, true)
+        XCTAssertTrue(projection.first?["pending_reason"] is NSNull)
+    }
     func testShorterTargetThanAdmissionBudgetRemainsRunnableWithDecodeCapHook() throws {
         let url = try writeCapture([
             shape("short-target", extra: ["completion_tokens": 64, "generated_completion_tokens": 64, "effective_max_output_tokens": 128]),
@@ -192,6 +292,35 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
         let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
         XCTAssertNil(plan.blocks[0].rows[0].requestedMaxCompletionTokens)
         XCTAssertEqual(plan.blocks[0].rows[0].maxCompletionTokens, 96)
+        XCTAssertEqual(plan.maxContextTokens, 1536 + 96)
+    }
+
+    func testIncoherentNullableMaxCompletionContextsStayPending() throws {
+        let url = try writeCapture([
+            shape("nil-a", extra: ["requested_max_completion_tokens": NSNull(), "prompt_tokens": 1000, "effective_max_output_tokens": 64]),
+            shape("nil-b", extra: ["requested_max_completion_tokens": NSNull(), "prompt_tokens": 1100, "effective_max_output_tokens": 64]),
+        ])
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
+        let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
+        XCTAssertTrue(plan.pendingSampleReasons.contains("nil_max_replay_requires_single_context_geometry:nil-a"))
+        XCTAssertTrue(plan.pendingSampleReasons.contains("nil_max_replay_requires_single_context_geometry:nil-b"))
+        XCTAssertEqual(plan.runnableRowsPerBlock, 0)
+    }
+
+    func testToolMessagesWithoutMatchingAssistantCallsStayPending() throws {
+        let url = try writeCapture([
+            shape("orphan-tool", extra: [
+                "tools_present": true,
+                "tool_count": 1,
+                "tool_parameter_schema_geometries": [["byte_count": 80, "max_depth": 2, "object_count": 1, "array_count": 0, "property_count": 1]],
+                "tool_turn_state_present": true,
+                "tool_message_count": 2,
+                "assistant_tool_call_count": 1,
+            ]),
+        ])
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
+        let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
+        XCTAssertEqual(plan.pendingReason, "tool_turn_replay_requires_assistant_call_for_each_tool_message:orphan-tool")
     }
 
     func testCapturedNumericControlsArePreservedAndRunnableWhenExactValuesExist() throws {
@@ -221,24 +350,34 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
         XCTAssertEqual((exported["requested_repetition_penalty"] as? NSNumber)?.doubleValue, 1.1)
     }
 
-    func testGeometryOnlyControlsStayPendingUntilSafeReplayFixturesExist() throws {
+    func testSafeGeometryControlsAreRunnableAndLogitBiasStaysPending() throws {
         let url = try writeCapture([
-            shape("stop", extra: ["stop_sequences": 1, "stop_sequence_utf8_length_buckets": ["1_8": 1]]),
+            shape("stop", extra: ["stop_sequences": 1, "stop_sequence_utf8_lengths": [8], "stop_sequence_utf8_length_buckets": ["5_16": 1]]),
             shape("bias", extra: ["logit_bias_present": true, "logit_controls_requested": true]),
-            shape("tool", extra: ["tools_present": true, "tool_count": 1]),
+            shape("tool", extra: [
+                "tools_present": true,
+                "tool_count": 1,
+                "tool_parameter_schema_geometries": [["byte_count": 80, "max_depth": 2, "object_count": 1, "array_count": 0, "property_count": 1]],
+            ]),
             shape("schema", extra: [
                 "structured_output_requested": true,
                 "response_format_kind": "json_schema",
                 "response_schema_geometry": ["byte_count": 48, "max_depth": 2, "object_count": 1, "array_count": 0, "property_count": 1],
             ]),
+            shape("top-logprobs", extra: [
+                "logprobs_requested": true,
+                "top_logprobs_requested": true,
+                "requested_top_logprobs": 3,
+            ]),
         ])
         let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
         let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
-        XCTAssertEqual(plan.runnableRowsPerBlock, 0)
-        XCTAssertTrue(plan.pendingSampleReasons.contains("stop_sequence_replay_requires_safe_literals:stop"))
+        XCTAssertEqual(plan.runnableRowsPerBlock, 4)
+        XCTAssertTrue(plan.blocks[0].runnableRows.contains { $0.shapeID == "stop" })
+        XCTAssertTrue(plan.blocks[0].runnableRows.contains { $0.shapeID == "tool" })
+        XCTAssertTrue(plan.blocks[0].runnableRows.contains { $0.shapeID == "schema" })
+        XCTAssertTrue(plan.blocks[0].runnableRows.contains { $0.shapeID == "top-logprobs" })
         XCTAssertTrue(plan.pendingSampleReasons.contains("logit_bias_replay_requires_safe_token_geometry:bias"))
-        XCTAssertTrue(plan.pendingSampleReasons.contains("tool_shape_replay_requires_safe_tool_fixture:tool"))
-        XCTAssertTrue(plan.pendingSampleReasons.contains("response_schema_replay_requires_safe_schema_fixture:schema"))
     }
 
     func testUnknownRequestShapeRemainsRunnableAsRepresentativeFallbackRow() throws {
@@ -312,6 +451,7 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
             "native_mtp_target_generation": 1,
             "stream": true,
             "stop_sequences": 0,
+            "stop_sequence_utf8_lengths": [],
             "stop_sequence_utf8_length_buckets": [:],
             "requested_temperature": 0.0,
             "requested_top_p": 1.0,
@@ -334,6 +474,7 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
             "logit_bias_geometry": ["entry_count": 0, "numeric_value_count": 0, "positive_count": 0, "negative_count": 0, "zero_count": 0, "min_value": NSNull(), "max_value": NSNull(), "max_abs_bucket": "none"],
             "tools_present": false,
             "tool_count": 0,
+            "tool_parameter_schema_geometries": [],
             "tool_choice_present": false,
             "tool_choice_kind": "absent",
             "tool_turn_state_present": false,
@@ -344,6 +485,7 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
             "response_schema_geometry": ["byte_count": 0, "max_depth": 0, "object_count": 0, "array_count": 0, "property_count": 0],
             "logprobs_requested": false,
             "top_logprobs_requested": false,
+            "requested_top_logprobs": NSNull(),
             "logit_controls_requested": false,
             "reasoning_or_template_model": false,
             "multimodal_requested": false,

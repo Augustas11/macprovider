@@ -147,18 +147,23 @@ final class NativeMTPRequestShapeReplayRunner {
             }
         }
 
-        let fixture = try await loadFixture(maxPromptTokens: plan.promptTokenTarget, maxCompletionTokens: plan.maxCompletionTokens)
+        let fixture = try await loadFixture(maxPromptTokens: plan.promptTokenTarget, maxCompletionTokens: plan.maxCompletionTokens, maxContextTokens: plan.maxContextTokens)
         for block in plan.blocks {
             let paths: [NativeMTPRequestShapeReplayPath] = block.nativeFirst ? [.nativeMTP, .ordinary] : [.ordinary, .nativeMTP]
             for path in paths {
                 let runtime = path == .nativeMTP ? fixture.runtimes.native : fixture.runtimes.ordinary
-                let result = try await runPath(path, block: block, runtime: runtime, fixture: fixture, sampleCoverageComplete: plan.sampleCoverageComplete)
-                try writer.write(result.record(policySHA256: policySHA256, benchPolicySHA256: benchPolicySHA256, captureSHA256: captureSHA256))
+                do {
+                    let result = try await runPath(path, block: block, runtime: runtime, fixture: fixture, maxContextTokens: plan.maxContextTokens, sampleCoverageComplete: plan.sampleCoverageComplete)
+                    try writer.write(result.record(policySHA256: policySHA256, benchPolicySHA256: benchPolicySHA256, captureSHA256: captureSHA256))
+                } catch NativeMTPRequestShapeReplayError.pending(let reason) {
+                    try writer.write(pendingRecord(reason: "block_\(block.index)_\(path.rawValue)_pending:\(reason)", plan: plan))
+                    return
+                }
             }
         }
     }
 
-    private func loadFixture(maxPromptTokens: Int, maxCompletionTokens: Int) async throws -> NativeMTPHardwareRuntimeFixture {
+    private func loadFixture(maxPromptTokens: Int, maxCompletionTokens: Int, maxContextTokens: Int) async throws -> NativeMTPHardwareRuntimeFixture {
         let maxBlocks = NativeMTPHardwareE2ERunner.sizedMaxPhysicalBlocks(
             slots: NativeMTPRequestShapeReplayPlan.qualifiedSlots,
             promptTokens: maxPromptTokens,
@@ -173,7 +178,7 @@ final class NativeMTPRequestShapeReplayRunner {
             maxPhysicalBlocks: maxBlocks
         )
         return try await runner.loadRuntimeFixture(
-            maxContextTokens: maxPromptTokens + maxCompletionTokens + 256,
+            maxContextTokens: maxContextTokens,
             ordinaryAdmissionRecorder: NativeMTPHardwareAdmissionRecorder(),
             nativeAdmissionRecorder: NativeMTPHardwareAdmissionRecorder()
         )
@@ -184,6 +189,7 @@ final class NativeMTPRequestShapeReplayRunner {
         block: NativeMTPRequestShapeReplayBlock,
         runtime: ModelRuntime,
         fixture: NativeMTPHardwareRuntimeFixture,
+        maxContextTokens: Int,
         sampleCoverageComplete: Bool
     ) async throws -> NativeMTPRequestShapeReplayRunResult {
         let started = Date()
@@ -199,11 +205,11 @@ final class NativeMTPRequestShapeReplayRunner {
             _ = await runtime.installLabNativeMTPCommitTimingObserver(nil)
             throw NativeMTPRequestShapeReplayError.pending("decode_output_cap_unavailable:\(path.rawValue)")
         }
+        let requestsByID = Dictionary(uniqueKeysWithValues: requests.compactMap { request in
+            request.requestID.map { ($0, request) }
+        })
         let results: [NativeMTPRequestShapeReplayRequestResult]
         do {
-            let requestsByID = Dictionary(uniqueKeysWithValues: requests.compactMap { request in
-                request.requestID.map { ($0, request) }
-            })
             var waveResults: [NativeMTPRequestShapeReplayRequestResult] = []
             for rowWave in block.runnableWaves {
                 let results = try await withThrowingTaskGroup(of: NativeMTPRequestShapeReplayRequestResult.self) { group in
@@ -273,7 +279,13 @@ final class NativeMTPRequestShapeReplayRunner {
             guard let row = block.row(requestID: result.requestID) else { return result.requestID }
             return result.completion.completionTokens == row.targetCompletionTokens ? nil : result.requestID
         }
-        let projections = Self.admissionProjectionRows(path: path, block: block, admissions: admissions)
+        let projections = Self.admissionProjectionRows(
+            path: path,
+            block: block,
+            admissions: admissions,
+            requestsByID: requestsByID,
+            maxContextTokens: maxContextTokens
+        )
         return NativeMTPRequestShapeReplayRunResult(
             blockIndex: block.index,
             path: path,
@@ -310,12 +322,8 @@ final class NativeMTPRequestShapeReplayRunner {
             var requests: [ChatCompletionRequest] = []
             for row in block.runnableRows {
                 let prompt = try await Self.syntheticPrompt(
-                    requestID: row.requestID,
-                    targetTokens: row.promptTokens,
+                    row: row,
                     modelID: modelID,
-                    maxTokens: row.maxCompletionTokens,
-                    temperature: row.temperature,
-                    topP: row.topP,
                     context: context,
                     thinkingToggle: thinkingToggle,
                     preserveThinking: preserveThinking
@@ -404,25 +412,23 @@ final class NativeMTPRequestShapeReplayRunner {
     }
 
     private static func syntheticPrompt(
-        requestID: String,
-        targetTokens: Int,
+        row: NativeMTPRequestShapeReplayRow,
         modelID: String,
-        maxTokens: Int,
-        temperature: Double,
-        topP: Double,
         context: ModelContext,
         thinkingToggle: Bool,
         preserveThinking: Bool
     ) async throws -> String {
         func servedCount(_ text: String) async throws -> Int {
-            let request = try makeRequest(
+            var request = try makeRequest(
                 modelID: modelID,
-                requestID: requestID,
+                requestID: row.requestID,
                 prompt: text,
-                maxTokens: maxTokens,
-                temperature: temperature,
-                topP: topP
+                maxTokens: row.requestedMaxCompletionTokens,
+                temperature: row.temperature,
+                topP: row.topP,
+                stream: row.stream
             )
+            request = try applySyntheticStandIn(for: row, to: request)
             let input = try ModelRuntime.userInput(
                 for: request,
                 templateSupportsThinkingToggle: thinkingToggle,
@@ -430,23 +436,23 @@ final class NativeMTPRequestShapeReplayRunner {
             )
             return try await context.processor.prepare(input: input).text.tokens.size
         }
-        var text = "Native MTP R015 mixed replay synthetic prompt \(requestID)."
+        var text = "Native MTP R015 mixed replay synthetic prompt \(row.requestID)."
         var count = try await servedCount(text)
-        guard count <= targetTokens else {
+        guard count <= row.promptTokens else {
             throw NativeMTPRequestShapeReplayError.pending(
-                "synthetic_prompt_token_count_unavailable:\(requestID):wanted_\(targetTokens):got_\(count)"
+                "synthetic_prompt_token_count_unavailable:\(row.requestID):wanted_\(row.promptTokens):got_\(count)"
             )
         }
         let fragments = [
             " a", " the", " of", " to", " and", " in", " is", " x", " y", " z",
             " 0", " 1", " 2", " 3", " 4", ".", ",", "\nA", "\nB", " replay"
         ]
-        while count < targetTokens {
+        while count < row.promptTokens {
             var best: (fragment: String, count: Int)?
             for fragment in fragments {
                 let candidateCount = try await servedCount(text + fragment)
-                guard candidateCount > count, candidateCount <= targetTokens else { continue }
-                if candidateCount == targetTokens {
+                guard candidateCount > count, candidateCount <= row.promptTokens else { continue }
+                if candidateCount == row.promptTokens {
                     best = (fragment, candidateCount)
                     break
                 }
@@ -456,7 +462,7 @@ final class NativeMTPRequestShapeReplayRunner {
             }
             guard let selected = best else {
                 throw NativeMTPRequestShapeReplayError.pending(
-                    "synthetic_prompt_token_count_unavailable:\(requestID):wanted_\(targetTokens):got_\(count)"
+                    "synthetic_prompt_token_count_unavailable:\(row.requestID):wanted_\(row.promptTokens):got_\(count)"
                 )
             }
             text += selected.fragment
@@ -465,7 +471,7 @@ final class NativeMTPRequestShapeReplayRunner {
         return text
     }
 
-    private static func makeRequest(
+    static func makeRequest(
         modelID: String,
         requestID: String,
         prompt: String,
@@ -488,11 +494,10 @@ final class NativeMTPRequestShapeReplayRunner {
         return try ChatCompletionRequest.parse(data: data).withRequestID(requestID)
     }
 
-    private static func applySyntheticStandIn(
+    static func applySyntheticStandIn(
         for row: NativeMTPRequestShapeReplayRow,
         to request: ChatCompletionRequest
     ) throws -> ChatCompletionRequest {
-        guard let standIn = row.syntheticStandIn else { return request }
         var object: [String: Any] = [
             "model": request.model,
             "messages": request.messages.map(Self.messageJSONObject),
@@ -503,24 +508,144 @@ final class NativeMTPRequestShapeReplayRunner {
         if let requestedMaxCompletionTokens = row.requestedMaxCompletionTokens {
             object["max_tokens"] = requestedMaxCompletionTokens
         }
-        switch standIn {
-        case .logitControls:
-            Self.applyCapturedLogitControls(from: row, to: &object)
-        case .structuredOutput:
-            object["response_format"] = ["type": "json_object"]
-        case .logprobs:
+        Self.applyCapturedLogitControls(from: row, to: &object)
+        if row.boolFeature("structured_output_requested") {
+            object["response_format"] = Self.syntheticResponseFormat(for: row)
+        }
+        if row.boolFeature("tools_present") || row.boolFeature("tool_choice_present") || row.boolFeature("tool_turn_state_present") {
+            object["tools"] = Self.syntheticTools(for: row)
+            object["messages"] = Self.syntheticMessages(for: row, request: request)
+            if row.boolFeature("tool_choice_present") {
+                object["tool_choice"] = Self.syntheticToolChoice(for: row)
+            }
+        }
+        if row.boolFeature("logprobs_requested") || row.boolFeature("top_logprobs_requested") {
             object["logprobs"] = true
-        case .unknownRequestField:
-            if row.boolFeature("unknown_top_level_keys_present") {
-                object["replay_unknown_selector_field"] = true
+            if row.boolFeature("top_logprobs_requested"), let value = row.jsonFeature("requested_top_logprobs") {
+                object["top_logprobs"] = value
             }
-            if row.boolFeature("unknown_stream_option_keys_present") {
-                object["stream_options"] = ["replay_unknown_stream_option": true]
-            }
+        }
+        if row.intFeature("stop_sequences") > 0 {
+            object["stop"] = Self.syntheticStopSequences(for: row)
+        }
+        if row.boolFeature("unknown_top_level_keys_present") {
+            object["replay_unknown_selector_field"] = true
+        }
+        if row.boolFeature("unknown_stream_option_keys_present") {
+            object["stream_options"] = ["replay_unknown_stream_option": true]
         }
         return try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: object))
             .withRequestID(request.requestID)
             .withConversationKey(request.conversationKey, cacheOnly: request.conversationCacheOnly)
+    }
+
+    private static func syntheticMessages(
+        for row: NativeMTPRequestShapeReplayRow,
+        request: ChatCompletionRequest
+    ) -> [[String: Any]] {
+        var messages = request.messages.map(Self.messageJSONObject)
+        let assistantCalls = max(0, row.intFeature("assistant_tool_call_count"))
+        let toolMessages = max(0, row.intFeature("tool_message_count"))
+        guard assistantCalls > 0 || toolMessages > 0 else { return messages }
+        let calls: [[String: Any]] = (0..<assistantCalls).map { index in
+            [
+                "id": String(format: "call_replay%010d", index),
+                "type": "function",
+                "function": [
+                    "name": "replay_tool_0",
+                    "arguments": "{}",
+                ],
+            ]
+        }
+        messages.append([
+            "role": "assistant",
+            "content": NSNull(),
+            "tool_calls": calls,
+        ])
+        for index in 0..<toolMessages {
+            messages.append([
+                "role": "tool",
+                "tool_call_id": String(format: "call_replay%010d", index),
+                "content": "redacted replay tool result",
+            ])
+        }
+        return messages
+    }
+
+    private static func syntheticStopSequences(for row: NativeMTPRequestShapeReplayRow) -> [String] {
+        row.intArrayFeature("stop_sequence_utf8_lengths").map { length in
+            String(repeating: "x", count: max(1, length))
+        }
+    }
+
+    private static func syntheticTools(for row: NativeMTPRequestShapeReplayRow) -> [[String: Any]] {
+        let count = max(0, row.intFeature("tool_count"))
+        let geometries = row.dictionaryArrayFeature("tool_parameter_schema_geometries")
+        return (0..<count).map { index in
+            let parameters = Self.syntheticJSONSchema(from: geometries.indices.contains(index) ? geometries[index] : [:])
+            return [
+                "type": "function",
+                "function": [
+                    "name": "replay_tool_\(index)",
+                    "description": "Redacted replay-only tool preserving captured safe geometry.",
+                    "parameters": parameters,
+                ],
+            ]
+        }
+    }
+
+    private static func syntheticToolChoice(for row: NativeMTPRequestShapeReplayRow) -> Any {
+        switch row.stringFeature("tool_choice_kind") {
+        case "none", "auto", "required":
+            return row.stringFeature("tool_choice_kind") ?? "auto"
+        case "function":
+            return ["type": "function", "function": ["name": "replay_tool_0"]]
+        default:
+            return "auto"
+        }
+    }
+
+    private static func syntheticResponseFormat(for row: NativeMTPRequestShapeReplayRow) -> [String: Any] {
+        switch row.stringFeature("response_format_kind") {
+        case "json_schema":
+            return [
+                "type": "json_schema",
+                "json_schema": [
+                    "name": "replay_schema",
+                    "strict": true,
+                    "schema": Self.syntheticJSONSchema(from: row.dictionaryFeature("response_schema_geometry") ?? [:]),
+                ],
+            ]
+        default:
+            return ["type": "json_object"]
+        }
+    }
+
+    private static func syntheticJSONSchema(from geometry: [String: Any]) -> [String: Any] {
+        let propertyCount = max(0, (geometry["property_count"] as? NSNumber)?.intValue ?? 0)
+        let maxDepth = max(0, (geometry["max_depth"] as? NSNumber)?.intValue ?? 0)
+        func schemaWithDepth(_ depth: Int) -> [String: Any] {
+            guard depth > 3 else { return ["type": "string"] }
+            return [
+                "type": "object",
+                "properties": ["child": schemaWithDepth(depth - 2)],
+                "required": ["child"],
+                "additionalProperties": false,
+            ]
+        }
+        var properties: [String: Any] = [:]
+        var required: [String] = []
+        for index in 0..<propertyCount {
+            let name = "p\(index)"
+            properties[name] = index == 0 ? schemaWithDepth(maxDepth - 2) : ["type": "string"]
+            required.append(name)
+        }
+        return [
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": false,
+        ]
     }
 
     private static func applyCapturedLogitControls(
@@ -616,10 +741,12 @@ final class NativeMTPRequestShapeReplayRunner {
         )
     }
 
-    private static func admissionProjectionRows(
+    static func admissionProjectionRows(
         path: NativeMTPRequestShapeReplayPath,
         block: NativeMTPRequestShapeReplayBlock,
-        admissions: [NativeMTPHardwareAdmissionRecorder.RequestAdmission]
+        admissions: [NativeMTPHardwareAdmissionRecorder.RequestAdmission],
+        requestsByID: [String: ChatCompletionRequest],
+        maxContextTokens: Int
     ) -> [[String: Any]] {
         let admissionsByID = Dictionary(uniqueKeysWithValues: admissions.compactMap { item in
             item.requestID.map { ($0, item) }
@@ -634,20 +761,283 @@ final class NativeMTPRequestShapeReplayRunner {
                     : DecodePath.ordinary.rawValue)
             let actualReason = admission?.admission.selection.nativeMTPReason?.rawValue ?? "missing"
             let actualPath = admission?.admission.effectivePath.rawValue ?? "missing"
+            let actualBudget = Self.resolvedMaxOutputTokens(row: row, maxContextTokens: maxContextTokens)
+            let budgetMatches = actualBudget == row.maxCompletionTokens
+            let reproductionPending: String?
+            if let request = requestsByID[row.requestID] {
+                reproductionPending = Self.reproductionPendingReason(row: row, request: request, maxContextTokens: maxContextTokens)
+            } else {
+                reproductionPending = "request_reproduction_missing_parsed_request:\(row.requestID)"
+            }
+            let reproduced = reproductionPending == nil
             return [
                 "request_id": row.requestID,
                 "shape_id": row.shapeID,
                 "target_completion_tokens": row.targetCompletionTokens,
                 "effective_max_output_tokens": row.maxCompletionTokens,
+                "expected_effective_max_output_tokens": row.maxCompletionTokens,
+                "actual_effective_max_output_tokens": actualBudget.map { $0 as Any } ?? NSNull(),
+                "budget_matches": budgetMatches,
                 "expected_selector_reason": expectedReason,
                 "actual_selector_reason": actualReason,
                 "expected_effective_path": expectedPath,
                 "actual_effective_path": actualPath,
-                "matches": expectedReason == actualReason && expectedPath == actualPath,
-                "reproduced": true,
-                "pending_reason": NSNull(),
+                "matches": expectedReason == actualReason && expectedPath == actualPath && budgetMatches && reproduced,
+                "reproduced": reproduced,
+                "pending_reason": reproductionPending.map { $0 as Any } ?? NSNull(),
             ] as [String: Any]
         }
+    }
+
+
+    private static func resolvedMaxOutputTokens(row: NativeMTPRequestShapeReplayRow, maxContextTokens: Int) -> Int? {
+        let remaining = maxContextTokens - row.promptTokens
+        guard remaining > 0 else { return nil }
+        guard let requested = row.requestedMaxCompletionTokens else { return remaining }
+        return min(requested, remaining)
+    }
+
+    private static func reproductionPendingReason(
+        row: NativeMTPRequestShapeReplayRow,
+        request: ChatCompletionRequest,
+        maxContextTokens: Int
+    ) -> String? {
+        if request.maxTokens != row.requestedMaxCompletionTokens {
+            return "requested_max_completion_tokens_mismatch:\(row.requestID)"
+        }
+        guard resolvedMaxOutputTokens(row: row, maxContextTokens: maxContextTokens) == row.maxCompletionTokens else {
+            return "effective_max_output_tokens_mismatch:\(row.requestID)"
+        }
+        guard request.stream == row.stream else {
+            return "stream_flag_mismatch:\(row.requestID)"
+        }
+        guard abs(request.temperature - row.temperature) < 0.000_000_1 else {
+            return "temperature_mismatch:\(row.requestID)"
+        }
+        guard abs(request.topP - row.topP) < 0.000_000_1 else {
+            return "top_p_mismatch:\(row.requestID)"
+        }
+        guard row.intFeature("requested_n") == (jsonInt(request.promptSource.n) ?? 1) else {
+            return "requested_n_mismatch:\(row.requestID)"
+        }
+        let stopLengths = request.stop.map { $0.utf8.count }
+        guard stopLengths == row.intArrayFeature("stop_sequence_utf8_lengths") else {
+            return "stop_sequence_geometry_mismatch:\(row.requestID)"
+        }
+        guard numericFeatureMatches(request.promptSource.topK, row: row, key: "requested_top_k") else {
+            return "top_k_numeric_mismatch:\(row.requestID)"
+        }
+        guard numericFeatureMatches(request.promptSource.minP, row: row, key: "requested_min_p") else {
+            return "min_p_numeric_mismatch:\(row.requestID)"
+        }
+        guard numericFeatureMatches(request.promptSource.presencePenalty, row: row, key: "requested_presence_penalty") else {
+            return "presence_penalty_numeric_mismatch:\(row.requestID)"
+        }
+        guard numericFeatureMatches(request.promptSource.frequencyPenalty, row: row, key: "requested_frequency_penalty") else {
+            return "frequency_penalty_numeric_mismatch:\(row.requestID)"
+        }
+        guard numericFeatureMatches(request.promptSource.repetitionPenalty, row: row, key: "requested_repetition_penalty") else {
+            return "repetition_penalty_numeric_mismatch:\(row.requestID)"
+        }
+        if row.boolFeature("logit_bias_present") || isPresent(request.promptSource.logitBias) {
+            return "logit_bias_replay_requires_safe_token_geometry:\(row.requestID)"
+        }
+        guard boolFeatureMatches(isRequestedLogprobs(request.promptSource.logprobs), row: row, key: "logprobs_requested") else {
+            return "logprobs_presence_mismatch:\(row.requestID)"
+        }
+        guard numericFeatureMatches(request.promptSource.topLogprobs, row: row, key: "requested_top_logprobs") else {
+            return "top_logprobs_numeric_mismatch:\(row.requestID)"
+        }
+        guard toolCount(request.promptSource.tools) == row.intFeature("tool_count") else {
+            return "tool_count_mismatch:\(row.requestID)"
+        }
+        guard toolParameterSchemaGeometries(request.promptSource.tools).allSatisfyGeometry(row.dictionaryArrayFeature("tool_parameter_schema_geometries")) else {
+            return "tool_schema_geometry_mismatch:\(row.requestID)"
+        }
+        guard toolChoiceKind(request.promptSource.toolChoice) == (row.stringFeature("tool_choice_kind") ?? "absent") else {
+            return "tool_choice_kind_mismatch:\(row.requestID)"
+        }
+        let actualToolMessages = request.messages.filter { $0.role == .tool }.count
+        let actualAssistantToolCalls = request.messages.reduce(0) { $0 + ($1.toolCalls?.count ?? 0) }
+        guard actualToolMessages == row.intFeature("tool_message_count") else {
+            return "tool_message_count_mismatch:\(row.requestID)"
+        }
+        guard actualAssistantToolCalls == row.intFeature("assistant_tool_call_count") else {
+            return "assistant_tool_call_count_mismatch:\(row.requestID)"
+        }
+        guard responseFormatKind(request.responseFormat) == (row.stringFeature("response_format_kind") ?? "text") else {
+            return "response_format_kind_mismatch:\(row.requestID)"
+        }
+        guard geometryMatches(responseSchemaGeometry(request.responseFormat), row.dictionaryFeature("response_schema_geometry")) else {
+            return "response_schema_geometry_mismatch:\(row.requestID)"
+        }
+        let unknownTopLevel = !request.topLevelKeys.isSubset(of: NativeMTPSelector.admittedTopLevelKeys)
+        guard unknownTopLevel == row.boolFeature("unknown_top_level_keys_present") else {
+            return "unknown_top_level_key_mismatch:\(row.requestID)"
+        }
+        let unknownStreamOptions = !request.streamOptionKeys.isSubset(of: NativeMTPSelector.admittedStreamOptionKeys)
+        guard unknownStreamOptions == row.boolFeature("unknown_stream_option_keys_present") else {
+            return "unknown_stream_option_key_mismatch:\(row.requestID)"
+        }
+        return nil
+    }
+
+    private static func boolFeatureMatches(_ actual: Bool, row: NativeMTPRequestShapeReplayRow, key: String) -> Bool {
+        actual == row.boolFeature(key)
+    }
+
+    private static func numericFeatureMatches(_ actual: JSONValue?, row: NativeMTPRequestShapeReplayRow, key: String) -> Bool {
+        let expected = row.jsonFeature(key)
+        guard let expected else { return jsonNumber(actual) == nil }
+        guard let actual = jsonNumber(actual), let expectedNumber = anyNumber(expected) else { return false }
+        return abs(actual - expectedNumber) < 0.000_000_1
+    }
+
+    private static func jsonNumber(_ value: JSONValue?) -> Double? {
+        switch value {
+        case .int(let int): return Double(int)
+        case .double(let double): return double
+        default: return nil
+        }
+    }
+
+    private static func jsonInt(_ value: JSONValue?) -> Int? {
+        guard case .int(let int)? = value else { return nil }
+        return int
+    }
+
+    private static func anyNumber(_ value: Any) -> Double? {
+        (value as? NSNumber)?.doubleValue
+    }
+
+    private static func isPresent(_ value: JSONValue?) -> Bool {
+        switch value {
+        case nil, .null: return false
+        default: return true
+        }
+    }
+
+    private static func isRequestedLogprobs(_ value: JSONValue?) -> Bool {
+        switch value {
+        case .bool(let bool): return bool
+        default: return false
+        }
+    }
+
+    private static func toolCount(_ value: JSONValue?) -> Int {
+        guard case .array(let tools)? = value else { return 0 }
+        return tools.count
+    }
+
+    private static func toolParameterSchemaGeometries(_ value: JSONValue?) -> [[String: Any]] {
+        guard case .array(let tools)? = value else { return [] }
+        return tools.map { tool in
+            guard case .object(let toolObject) = tool,
+                  case .object(let functionObject)? = toolObject["function"],
+                  let parameters = functionObject["parameters"] else {
+                return jsonGeometry(.object([:]))
+            }
+            return jsonGeometry(parameters)
+        }
+    }
+
+    private static func responseFormatKind(_ responseFormat: ResponseFormat) -> String {
+        switch responseFormat {
+        case .text: return "text"
+        case .jsonObject: return "json_object"
+        case .jsonSchema(_): return "json_schema"
+        }
+    }
+
+    private static func responseSchemaGeometry(_ responseFormat: ResponseFormat) -> [String: Any] {
+        guard case .jsonSchema(let spec) = responseFormat else {
+            return zeroJSONGeometry()
+        }
+        return jsonGeometry(spec.schema)
+    }
+
+    private static func toolChoiceKind(_ value: JSONValue?) -> String {
+        switch value {
+        case nil, .null:
+            return "absent"
+        case .string(let string):
+            switch string {
+            case "none", "auto", "required": return string
+            default: return "string_other"
+            }
+        case .object(let object):
+            if case .string(let type)? = object["type"], type == "function" {
+                return "function"
+            }
+            return "object_other"
+        default:
+            return "other"
+        }
+    }
+
+    private static func jsonGeometry(_ value: JSONValue) -> [String: Any] {
+        [
+            "byte_count": (try? value.deterministicJSONString().utf8.count) ?? 0,
+            "max_depth": jsonContainerDepth(value),
+            "object_count": jsonObjectCount(value),
+            "array_count": jsonArrayCount(value),
+            "property_count": jsonSchemaPropertyCount(value),
+        ]
+    }
+
+    private static func zeroJSONGeometry() -> [String: Any] {
+        ["byte_count": 0, "max_depth": 0, "object_count": 0, "array_count": 0, "property_count": 0]
+    }
+
+    private static func jsonContainerDepth(_ value: JSONValue) -> Int {
+        switch value {
+        case .object(let object): return 1 + (object.values.map(jsonContainerDepth).max() ?? 0)
+        case .array(let array): return 1 + (array.map(jsonContainerDepth).max() ?? 0)
+        default: return 0
+        }
+    }
+
+    private static func jsonObjectCount(_ value: JSONValue) -> Int {
+        switch value {
+        case .object(let object): return 1 + object.values.reduce(0) { $0 + jsonObjectCount($1) }
+        case .array(let array): return array.reduce(0) { $0 + jsonObjectCount($1) }
+        default: return 0
+        }
+    }
+
+    private static func jsonArrayCount(_ value: JSONValue) -> Int {
+        switch value {
+        case .object(let object): return object.values.reduce(0) { $0 + jsonArrayCount($1) }
+        case .array(let array): return 1 + array.reduce(0) { $0 + jsonArrayCount($1) }
+        default: return 0
+        }
+    }
+
+    private static func jsonSchemaPropertyCount(_ value: JSONValue) -> Int {
+        switch value {
+        case .object(let object):
+            let here: Int
+            if case .object(let properties)? = object["properties"] {
+                here = properties.count
+            } else {
+                here = 0
+            }
+            return here + object.values.reduce(0) { $0 + jsonSchemaPropertyCount($1) }
+        case .array(let array):
+            return array.reduce(0) { $0 + jsonSchemaPropertyCount($1) }
+        default:
+            return 0
+        }
+    }
+
+    private static func geometryMatches(_ actual: [String: Any], _ expected: [String: Any]?) -> Bool {
+        let expected = expected ?? zeroJSONGeometry()
+        for key in ["byte_count", "max_depth", "object_count", "array_count", "property_count"] {
+            let actualInt = (actual[key] as? NSNumber)?.intValue ?? actual[key] as? Int
+            let expectedInt = (expected[key] as? NSNumber)?.intValue ?? expected[key] as? Int
+            guard actualInt == expectedInt else { return false }
+        }
+        return true
     }
 
     private static func requireDirectory(_ url: URL) throws {
@@ -938,6 +1328,20 @@ struct NativeMTPRequestShapeReplayShape {
         return value
     }
 
+    func intArrayFeature(_ key: String) -> [Int] {
+        if let values = features[key] as? [Int] { return values }
+        guard let values = features[key] as? [Any] else { return [] }
+        return values.compactMap { ($0 as? NSNumber)?.intValue }
+    }
+
+    func dictionaryFeature(_ key: String) -> [String: Any]? {
+        features[key] as? [String: Any]
+    }
+
+    func dictionaryArrayFeature(_ key: String) -> [[String: Any]] {
+        features[key] as? [[String: Any]] ?? []
+    }
+
     var sanitizedExport: [String: Any] {
         var object: [String: Any] = [
             "shape_id": shapeID,
@@ -970,17 +1374,18 @@ struct NativeMTPRequestShapeReplayShape {
 
     private static func sanitizedFeatures(_ object: [String: Any]) -> [String: Any] {
         let keys = [
-            "stop_sequences", "stop_sequence_utf8_length_buckets",
+            "stop_sequences", "stop_sequence_utf8_lengths", "stop_sequence_utf8_length_buckets",
             "sampling_requested", "multiple_completions_requested",
             "requested_top_k", "requested_min_p", "requested_presence_penalty",
             "requested_frequency_penalty", "requested_repetition_penalty", "requested_n",
             "top_k_present", "min_p_nonzero", "frequency_penalty_nonzero",
             "presence_penalty_nonzero", "repetition_penalty_nondefault",
             "logit_bias_present", "logit_bias_geometry", "tools_present", "tool_count",
+            "tool_parameter_schema_geometries",
             "tool_choice_present", "tool_choice_kind", "tool_turn_state_present",
             "tool_message_count", "assistant_tool_call_count",
             "structured_output_requested", "response_format_kind", "response_schema_geometry",
-            "logprobs_requested", "top_logprobs_requested", "logit_controls_requested",
+            "logprobs_requested", "top_logprobs_requested", "requested_top_logprobs", "logit_controls_requested",
             "reasoning_or_template_model", "multimodal_requested",
             "unknown_request_fields_present", "unknown_top_level_keys_present",
             "unknown_stream_option_keys_present",
@@ -1065,6 +1470,7 @@ struct NativeMTPRequestShapeReplayPlan {
     let promptTokenTarget: Int
     let requestedMaxCompletionTokens: Int?
     let maxCompletionTokens: Int
+    let maxContextTokens: Int
     let sampleShapeCount: Int
     let omittedSampleShapeCount: Int
     let pendingSampleShapeCount: Int
@@ -1105,6 +1511,7 @@ struct NativeMTPRequestShapeReplayPlan {
         let promptTarget = rows.map(\.promptTokens).max() ?? NativeMTPBenchPolicy.gatedPromptTokens
         let maxCompletion = rows.map(\.maxCompletionTokens).max() ?? NativeMTPBenchPolicy.gatedMaxTokens
         let requestedMaxCompletion = rows.compactMap(\.requestedMaxCompletionTokens).max() ?? maxCompletion
+        let maxContext = Self.contextTokenTarget(rows: rows, promptTarget: promptTarget, maxCompletion: maxCompletion)
         let cell = NativeMTPBenchCell(
             slots: qualifiedSlots,
             promptTokens: NativeMTPBenchPolicy.gatedPromptTokens,
@@ -1125,6 +1532,7 @@ struct NativeMTPRequestShapeReplayPlan {
             promptTokenTarget: promptTarget,
             requestedMaxCompletionTokens: requestedMaxCompletion,
             maxCompletionTokens: maxCompletion,
+            maxContextTokens: maxContext,
             sampleShapeCount: sampleShapeCount,
             omittedSampleShapeCount: omittedSampleShapeCount,
             pendingSampleShapeCount: pendingSampleShapeCount,
@@ -1132,12 +1540,46 @@ struct NativeMTPRequestShapeReplayPlan {
         )
     }
 
+    private static func contextTokenTarget(
+        rows: [NativeMTPRequestShapeReplayRow],
+        promptTarget: Int,
+        maxCompletion: Int
+    ) -> Int {
+        let nilRequestedTargets = Set(rows.compactMap { row -> Int? in
+            row.requestedMaxCompletionTokens == nil ? row.promptTokens + row.maxCompletionTokens : nil
+        })
+        if nilRequestedTargets.count == 1,
+           let target = nilRequestedTargets.first,
+           rows.allSatisfy({ $0.pendingReason != nil || $0.promptTokens + $0.maxCompletionTokens <= target }) {
+            return target
+        }
+        return promptTarget + maxCompletion + 256
+    }
+
     private static func projectedRows(_ shapes: [NativeMTPRequestShapeReplayShape]) throws -> [NativeMTPRequestShapeReplayRow] {
         guard !shapes.isEmpty else {
             throw NativeMTPRequestShapeReplayError.invalidCapture("no shapes to replay")
         }
+        let nilRequestedTargets = Set(shapes.compactMap { shape -> Int? in
+            shape.requestedMaxCompletionTokens == nil ? shape.promptTokens + max(1, shape.maxCompletionTokens) : nil
+        })
+        let nilMaxContextCoherent: Bool
+        if nilRequestedTargets.isEmpty {
+            nilMaxContextCoherent = true
+        } else if nilRequestedTargets.count == 1, let target = nilRequestedTargets.first {
+            nilMaxContextCoherent = shapes.allSatisfy { shape in
+                shape.promptTokens + max(1, shape.maxCompletionTokens) <= target
+            }
+        } else {
+            nilMaxContextCoherent = false
+        }
         return shapes.enumerated().map { index, shape in
-            NativeMTPRequestShapeReplayRow(shape: shape, captureIndex: index, blockIndex: 0)
+            NativeMTPRequestShapeReplayRow(
+                shape: shape,
+                captureIndex: index,
+                blockIndex: 0,
+                nilMaxContextCoherent: nilMaxContextCoherent
+            )
         }
     }
 }
@@ -1216,7 +1658,12 @@ struct NativeMTPRequestShapeReplayRow {
     let metricsClass: NativeMTPRequestShapeReplayMetricsClass
     let exportedShape: [String: Any]
 
-    init(shape: NativeMTPRequestShapeReplayShape, captureIndex: Int, blockIndex: Int) {
+    init(
+        shape: NativeMTPRequestShapeReplayShape,
+        captureIndex: Int,
+        blockIndex: Int,
+        nilMaxContextCoherent: Bool = true
+    ) {
         self.shapeID = shape.shapeID
         self.captureIndex = captureIndex
         self.blockIndex = blockIndex
@@ -1241,6 +1688,8 @@ struct NativeMTPRequestShapeReplayRow {
         } else if projectedReason == NativeMTPSelectorReason.eligible.rawValue
                     && shape.targetCompletionTokens < 2 {
             self.pendingReason = "ordinary_itl_requires_target_completion_at_least_2:\(shape.shapeID)"
+        } else if shape.requestedMaxCompletionTokens == nil && !nilMaxContextCoherent {
+            self.pendingReason = "nil_max_replay_requires_single_context_geometry:\(shape.shapeID)"
         } else if projectedReason == NativeMTPSelectorReason.multipleCompletions.rawValue {
             self.pendingReason = "multiple_completions_rejected_by_ingest_validation:\(shape.shapeID)"
         } else if projectedReason == NativeMTPSelectorReason.multimodal.rawValue {
@@ -1345,39 +1794,59 @@ struct NativeMTPRequestShapeReplayRow {
         return value
     }
 
+    func intArrayFeature(_ key: String) -> [Int] {
+        if let values = replayFeatures[key] as? [Int] { return values }
+        guard let values = replayFeatures[key] as? [Any] else { return [] }
+        return values.compactMap { ($0 as? NSNumber)?.intValue }
+    }
+
+    func dictionaryFeature(_ key: String) -> [String: Any]? {
+        replayFeatures[key] as? [String: Any]
+    }
+
+    func dictionaryArrayFeature(_ key: String) -> [[String: Any]] {
+        replayFeatures[key] as? [[String: Any]] ?? []
+    }
+
 }
 
 enum NativeMTPReplaySyntheticStandIn {
     static let disclosure: [String: Any] = [
         "logit_controls": "replays exact sanitized numeric top_k/min_p/penalty controls when present; logit_bias rows stay pending because token IDs are not exported",
-        "structured_output": "replays json_object exactly; json_schema rows stay pending until a safe schema fixture API exists",
-        "logprobs": ["logprobs": true],
+        "structured_output": "replays json_object exactly; json_schema uses redacted schema preserving captured property arity/depth class where safe",
+        "tools": "uses redacted synthetic tool names/messages and parameter schemas preserving captured counts and safe schema geometry",
+        "stop_sequence": "uses redacted UTF-8 literals preserving captured exact byte lengths",
+        "logprobs": "replays logprobs and exact top_logprobs numeric value when captured",
         "unknown_request_field": [
             "top_level_key": "replay_unknown_selector_field",
             "stream_option_key": "replay_unknown_stream_option",
             "value_type": "boolean",
         ],
         "pending_geometry": [
-            "stop_sequences": "requires safe stop literals or selector fixture",
-            "tools": "requires safe tool/schema and tool-turn fixture",
-            "top_logprobs": "requires exact requested top_logprobs value",
+            "logit_bias": "requires token IDs, which are not exported",
         ],
     ]
 
     case logitControls
     case structuredOutput
+    case tools
     case logprobs
+    case stopSequence
     case unknownRequestField
 
     init?(reason: String, shape: NativeMTPRequestShapeReplayShape) {
+        if shape.intFeature("stop_sequences") > 0 {
+            self = .stopSequence
+            return
+        }
         switch reason {
         case NativeMTPSelectorReason.logitControls.rawValue:
             self = .logitControls
         case NativeMTPSelectorReason.structuredOutput.rawValue:
-            guard shape.stringFeature("response_format_kind") == "json_object" else { return nil }
             self = .structuredOutput
+        case NativeMTPSelectorReason.tools.rawValue:
+            self = .tools
         case NativeMTPSelectorReason.logprobs.rawValue:
-            guard !shape.boolFeature("top_logprobs_requested") else { return nil }
             self = .logprobs
         case NativeMTPSelectorReason.unknownRequestField.rawValue:
             self = .unknownRequestField
@@ -1388,7 +1857,10 @@ enum NativeMTPReplaySyntheticStandIn {
 
     static func pendingReason(shape: NativeMTPRequestShapeReplayShape) -> String? {
         if shape.intFeature("stop_sequences") > 0 {
-            return "stop_sequence_replay_requires_safe_literals:\(shape.shapeID)"
+            let stopLengths = shape.intArrayFeature("stop_sequence_utf8_lengths")
+            if stopLengths.count != shape.intFeature("stop_sequences") || stopLengths.contains(where: { $0 <= 0 }) {
+                return "stop_sequence_replay_requires_exact_length_geometry:\(shape.shapeID)"
+            }
         }
         if shape.boolFeature("logit_bias_present") {
             return "logit_bias_replay_requires_safe_token_geometry:\(shape.shapeID)"
@@ -1408,13 +1880,25 @@ enum NativeMTPReplaySyntheticStandIn {
         if shape.boolFeature("repetition_penalty_nondefault") && shape.jsonFeature("requested_repetition_penalty") == nil {
             return "repetition_penalty_replay_requires_exact_numeric_value:\(shape.shapeID)"
         }
-        if shape.boolFeature("tools_present") || shape.boolFeature("tool_choice_present") || shape.boolFeature("tool_turn_state_present") {
-            return "tool_shape_replay_requires_safe_tool_fixture:\(shape.shapeID)"
+        if shape.boolFeature("tools_present")
+            && shape.intFeature("tool_count") > 0
+            && shape.dictionaryArrayFeature("tool_parameter_schema_geometries").count != shape.intFeature("tool_count") {
+            return "tool_shape_replay_requires_safe_tool_geometry:\(shape.shapeID)"
         }
-        if shape.boolFeature("structured_output_requested") && shape.stringFeature("response_format_kind") != "json_object" {
-            return "response_schema_replay_requires_safe_schema_fixture:\(shape.shapeID)"
+        if shape.intFeature("tool_message_count") > shape.intFeature("assistant_tool_call_count") {
+            return "tool_turn_replay_requires_assistant_call_for_each_tool_message:\(shape.shapeID)"
         }
-        if shape.boolFeature("top_logprobs_requested") {
+        if shape.boolFeature("tool_choice_present")
+            && shape.stringFeature("tool_choice_kind") == "function"
+            && shape.intFeature("tool_count") <= 0 {
+            return "tool_choice_replay_requires_tool_fixture:\(shape.shapeID)"
+        }
+        if shape.boolFeature("structured_output_requested")
+            && shape.stringFeature("response_format_kind") == "json_schema"
+            && shape.dictionaryFeature("response_schema_geometry") == nil {
+            return "response_schema_replay_requires_safe_schema_geometry:\(shape.shapeID)"
+        }
+        if shape.boolFeature("top_logprobs_requested") && shape.jsonFeature("requested_top_logprobs") == nil {
             return "top_logprobs_replay_requires_exact_value:\(shape.shapeID)"
         }
         return nil
@@ -1612,6 +2096,20 @@ enum NativeMTPRequestShapeReplayError: Error, CustomStringConvertible {
         case .pending(let message): return "pending: \(message)"
         case .assertionFailed(let message): return "assertion failed: \(message)"
         }
+    }
+}
+
+private extension Array where Element == [String: Any] {
+    func allSatisfyGeometry(_ expected: [[String: Any]]) -> Bool {
+        guard count == expected.count else { return false }
+        for index in indices {
+            for key in ["byte_count", "max_depth", "object_count", "array_count", "property_count"] {
+                let actualInt = (self[index][key] as? NSNumber)?.intValue ?? self[index][key] as? Int
+                let expectedInt = (expected[index][key] as? NSNumber)?.intValue ?? expected[index][key] as? Int
+                guard actualInt == expectedInt else { return false }
+            }
+        }
+        return true
     }
 }
 #endif

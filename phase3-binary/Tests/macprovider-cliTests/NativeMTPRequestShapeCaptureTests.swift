@@ -54,8 +54,14 @@ final class NativeMTPRequestShapeCaptureTests: XCTestCase {
         XCTAssertEqual(shape["tool_choice_kind"] as? String, "function")
         XCTAssertEqual(shape["tool_message_count"] as? Int, 1)
         XCTAssertEqual(shape["assistant_tool_call_count"] as? Int, 1)
+        let stopLengths = try XCTUnwrap(shape["stop_sequence_utf8_lengths"] as? [Any])
+        XCTAssertEqual(stopLengths.compactMap { ($0 as? NSNumber)?.intValue }, [10])
+        XCTAssertEqual(shape["requested_top_logprobs"] as? Int, 3)
         XCTAssertEqual((shape["logit_bias_geometry"] as? [String: Any])?["entry_count"] as? Int, 2)
         XCTAssertEqual((shape["response_schema_geometry"] as? [String: Any])?["property_count"] as? Int, 1)
+        let toolGeometries = try XCTUnwrap(shape["tool_parameter_schema_geometries"] as? [[String: Any]])
+        XCTAssertEqual(toolGeometries.count, 1)
+        XCTAssertEqual(toolGeometries[0]["property_count"] as? Int, 1)
         let anonymous = try XCTUnwrap(shape["anonymous_cache_group_sha256"] as? String)
         XCTAssertEqual(anonymous.count, 64)
         XCTAssertNil(shape["messages"])
@@ -189,6 +195,8 @@ final class NativeMTPRequestShapeCaptureTests: XCTestCase {
             object["repetition_penalty"] = 1.1
             object["stop"] = ["SECRETSTOP"]
             object["logit_bias"] = ["123": 5, "456": -2]
+            object["logprobs"] = true
+            object["top_logprobs"] = 3
             object["tools"] = [[
                 "type": "function",
                 "function": [

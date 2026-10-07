@@ -238,6 +238,7 @@ final class NativeMTPRequestShapeCapture: @unchecked Sendable {
             "native_mtp_target_generation": admission.tupleFence.map { Int($0.targetGeneration) } ?? 0,
             "stream": stream,
             "stop_sequences": request.stop.count,
+            "stop_sequence_utf8_lengths": request.stop.map { $0.utf8.count },
             "stop_sequence_utf8_length_buckets": Self.stopLengthBuckets(request.stop),
             "requested_temperature": request.temperature,
             "requested_top_p": request.topP,
@@ -260,6 +261,7 @@ final class NativeMTPRequestShapeCapture: @unchecked Sendable {
             "logit_bias_geometry": Self.logitBiasGeometry(request.promptSource.logitBias),
             "tools_present": toolsPresent || toolChoicePresent || toolTurnStatePresent,
             "tool_count": Self.arrayCount(request.promptSource.tools),
+            "tool_parameter_schema_geometries": Self.toolParameterSchemaGeometries(request.promptSource.tools),
             "tool_choice_present": toolChoicePresent,
             "tool_choice_kind": Self.toolChoiceKind(request.promptSource.toolChoice),
             "tool_turn_state_present": toolTurnStatePresent,
@@ -271,6 +273,7 @@ final class NativeMTPRequestShapeCapture: @unchecked Sendable {
             "logprobs_requested": !NativeMTPRequestShapeCapture.isAbsentNullOrFalse(request.promptSource.logprobs)
                 || topLogprobsPresent,
             "top_logprobs_requested": topLogprobsPresent,
+            "requested_top_logprobs": Self.jsonNumberOrNull(request.promptSource.topLogprobs),
             "logit_controls_requested": request.presencePenalty != 0.0
                 || request.frequencyPenalty != 0.0
                 || logitBiasPresent
@@ -497,6 +500,28 @@ final class NativeMTPRequestShapeCapture: @unchecked Sendable {
         return entries.count
     }
 
+    private static func toolParameterSchemaGeometries(_ value: JSONValue?) -> [[String: Any]] {
+        guard case .array(let tools)? = value else { return [] }
+        return tools.map { tool in
+            guard case .object(let toolObject) = tool,
+                  case .object(let functionObject)? = toolObject["function"],
+                  let parameters = functionObject["parameters"] else {
+                return jsonGeometry(.object([:]))
+            }
+            return jsonGeometry(parameters)
+        }
+    }
+
+    private static func jsonGeometry(_ value: JSONValue) -> [String: Any] {
+        [
+            "byte_count": (try? value.deterministicJSONString().utf8.count) ?? 0,
+            "max_depth": jsonContainerDepth(value),
+            "object_count": jsonObjectCount(value),
+            "array_count": jsonArrayCount(value),
+            "property_count": jsonSchemaPropertyCount(value),
+        ]
+    }
+
     private static func toolChoiceKind(_ value: JSONValue?) -> String {
         switch value {
         case nil, .null:
@@ -587,13 +612,7 @@ final class NativeMTPRequestShapeCapture: @unchecked Sendable {
                 "property_count": 0,
             ]
         }
-        return [
-            "byte_count": (try? spec.schema.deterministicJSONString().utf8.count) ?? 0,
-            "max_depth": jsonContainerDepth(spec.schema),
-            "object_count": jsonObjectCount(spec.schema),
-            "array_count": jsonArrayCount(spec.schema),
-            "property_count": jsonSchemaPropertyCount(spec.schema),
-        ]
+        return jsonGeometry(spec.schema)
     }
 
     private static func jsonContainerDepth(_ value: JSONValue) -> Int {

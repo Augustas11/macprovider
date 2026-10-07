@@ -122,7 +122,7 @@ REPLAY_RUN_KEYS = {
     "effective_paths",
     "admission_projection",
 }
-REPLAY_SHAPE_KEYS = {
+REPLAY_BASE_SHAPE_KEYS = {
     "shape_id",
     "served_model_hash_sha256",
     "served_weights_manifest_sha256",
@@ -145,6 +145,47 @@ REPLAY_SHAPE_KEYS = {
     "conversation_cache_retained_handoff",
     "anonymous_cache_group_sha256",
 }
+REPLAY_FEATURE_KEYS = {
+    "stop_sequences",
+    "stop_sequence_utf8_lengths",
+    "stop_sequence_utf8_length_buckets",
+    "sampling_requested",
+    "multiple_completions_requested",
+    "requested_top_k",
+    "requested_min_p",
+    "requested_presence_penalty",
+    "requested_frequency_penalty",
+    "requested_repetition_penalty",
+    "requested_n",
+    "top_k_present",
+    "min_p_nonzero",
+    "frequency_penalty_nonzero",
+    "presence_penalty_nonzero",
+    "repetition_penalty_nondefault",
+    "logit_bias_present",
+    "logit_bias_geometry",
+    "tools_present",
+    "tool_count",
+    "tool_parameter_schema_geometries",
+    "tool_choice_present",
+    "tool_choice_kind",
+    "tool_turn_state_present",
+    "tool_message_count",
+    "assistant_tool_call_count",
+    "structured_output_requested",
+    "response_format_kind",
+    "response_schema_geometry",
+    "logprobs_requested",
+    "top_logprobs_requested",
+    "requested_top_logprobs",
+    "logit_controls_requested",
+    "reasoning_or_template_model",
+    "multimodal_requested",
+    "unknown_request_fields_present",
+    "unknown_top_level_keys_present",
+    "unknown_stream_option_keys_present",
+}
+REPLAY_SHAPE_KEYS = REPLAY_BASE_SHAPE_KEYS | REPLAY_FEATURE_KEYS
 REPLAY_COMPLETION_KEYS = {
     "request_id",
     "target_completion_tokens",
@@ -161,6 +202,9 @@ REPLAY_ADMISSION_KEYS = {
     "shape_id",
     "target_completion_tokens",
     "effective_max_output_tokens",
+    "expected_effective_max_output_tokens",
+    "actual_effective_max_output_tokens",
+    "budget_matches",
     "expected_selector_reason",
     "actual_selector_reason",
     "expected_effective_path",
@@ -219,6 +263,7 @@ CAPTURE_SHAPE_KEYS = {
     "native_mtp_target_generation",
     "stream",
     "stop_sequences",
+    "stop_sequence_utf8_lengths",
     "stop_sequence_utf8_length_buckets",
     "requested_temperature",
     "requested_top_p",
@@ -241,6 +286,7 @@ CAPTURE_SHAPE_KEYS = {
     "logit_bias_geometry",
     "tools_present",
     "tool_count",
+    "tool_parameter_schema_geometries",
     "tool_choice_present",
     "tool_choice_kind",
     "tool_turn_state_present",
@@ -251,6 +297,7 @@ CAPTURE_SHAPE_KEYS = {
     "response_schema_geometry",
     "logprobs_requested",
     "top_logprobs_requested",
+    "requested_top_logprobs",
     "logit_controls_requested",
     "reasoning_or_template_model",
     "multimodal_requested",
@@ -517,6 +564,7 @@ def _shape_from_record(record: object, path: str) -> tuple[CapturedShape | None,
         if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
             failures.append(f"{path}.{key}:field_invalid")
     sanitized_geometry_keys = {
+        "stop_sequence_utf8_lengths",
         "stop_sequence_utf8_length_buckets",
         "requested_top_k",
         "requested_min_p",
@@ -525,10 +573,12 @@ def _shape_from_record(record: object, path: str) -> tuple[CapturedShape | None,
         "requested_repetition_penalty",
         "logit_bias_geometry",
         "tool_count",
+        "tool_parameter_schema_geometries",
         "tool_choice_kind",
         "tool_message_count",
         "assistant_tool_call_count",
         "response_schema_geometry",
+        "requested_top_logprobs",
         "anonymous_cache_group_sha256",
     }
     sanitized_geometry = {key: record.get(key) for key in sanitized_geometry_keys if key in record}
@@ -1034,11 +1084,143 @@ def _load_replay_runs(path: Path, policy: dict, policy_sha: str, capture_sha256:
     return header or {}, runs
 
 
+def _is_finite_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _validate_replay_shape_metadata(shape: dict, failures: list[str]) -> None:
+    missing = sorted(key for key in REPLAY_SHAPE_KEYS if key not in shape)
+    if missing:
+        failures.append("request_shape_missing_fields:" + ",".join(missing))
+    for key in (
+        "stream",
+        "pre_capacity_eligible",
+        "sampling_requested",
+        "multiple_completions_requested",
+        "top_k_present",
+        "min_p_nonzero",
+        "frequency_penalty_nonzero",
+        "presence_penalty_nonzero",
+        "repetition_penalty_nondefault",
+        "logit_bias_present",
+        "tools_present",
+        "tool_choice_present",
+        "tool_turn_state_present",
+        "structured_output_requested",
+        "logprobs_requested",
+        "top_logprobs_requested",
+        "logit_controls_requested",
+        "reasoning_or_template_model",
+        "multimodal_requested",
+        "unknown_request_fields_present",
+        "unknown_top_level_keys_present",
+        "unknown_stream_option_keys_present",
+    ):
+        if key in shape and not isinstance(shape[key], bool):
+            failures.append(f"{key}_invalid")
+    for key in (
+        "prompt_tokens",
+        "target_completion_tokens",
+        "effective_max_output_tokens",
+        "stop_sequences",
+        "requested_n",
+        "tool_count",
+        "tool_message_count",
+        "assistant_tool_call_count",
+    ):
+        if key in shape and (not _is_count(shape[key]) or key in {"prompt_tokens", "target_completion_tokens", "effective_max_output_tokens", "requested_n"} and shape[key] <= 0):
+            failures.append(f"{key}_invalid")
+    for key in (
+        "completion_tokens",
+        "generated_completion_tokens",
+        "conversation_cache_cached_prompt_tokens",
+    ):
+        if key in shape and not _is_count(shape[key]):
+            failures.append(f"{key}_invalid")
+    requested_max = shape.get("requested_max_completion_tokens")
+    if "requested_max_completion_tokens" in shape and requested_max is not None and (not _is_count(requested_max) or requested_max <= 0):
+        failures.append("requested_max_completion_tokens_invalid")
+    for key in (
+        "requested_temperature",
+        "requested_top_p",
+        "requested_presence_penalty",
+        "requested_frequency_penalty",
+    ):
+        if key in shape and not _is_finite_number(shape[key]):
+            failures.append(f"{key}_invalid")
+    if "requested_top_p" in shape and _is_finite_number(shape["requested_top_p"]) and not (0 <= float(shape["requested_top_p"]) <= 1):
+        failures.append("requested_top_p_invalid")
+    if "requested_temperature" in shape and _is_finite_number(shape["requested_temperature"]) and float(shape["requested_temperature"]) < 0:
+        failures.append("requested_temperature_invalid")
+    for key in ("requested_top_k", "requested_min_p", "requested_repetition_penalty", "requested_top_logprobs"):
+        if key in shape and shape[key] is not None and not _is_finite_number(shape[key]):
+            failures.append(f"{key}_invalid")
+    if "stop_sequence_utf8_lengths" in shape:
+        lengths = shape["stop_sequence_utf8_lengths"]
+        if not isinstance(lengths, list) or any(not _is_count(item) for item in lengths):
+            failures.append("stop_sequence_utf8_lengths_invalid")
+        elif _is_count(shape.get("stop_sequences")) and len(lengths) != shape["stop_sequences"]:
+            failures.append("stop_sequence_utf8_lengths_count_mismatch")
+    if "stop_sequence_utf8_length_buckets" in shape and not isinstance(shape["stop_sequence_utf8_length_buckets"], dict):
+        failures.append("stop_sequence_utf8_length_buckets_invalid")
+    if "logit_bias_geometry" in shape and not isinstance(shape["logit_bias_geometry"], dict):
+        failures.append("logit_bias_geometry_invalid")
+    if "tool_parameter_schema_geometries" in shape:
+        tool_geometries = shape["tool_parameter_schema_geometries"]
+        if not isinstance(tool_geometries, list) or any(not isinstance(item, dict) for item in tool_geometries):
+            failures.append("tool_parameter_schema_geometries_invalid")
+        elif shape.get("tools_present") and _is_count(shape.get("tool_count")) and shape["tool_count"] > 0 and len(tool_geometries) != shape["tool_count"]:
+            failures.append("tool_parameter_schema_geometries_count_mismatch")
+    if "response_schema_geometry" in shape and not isinstance(shape["response_schema_geometry"], dict):
+        failures.append("response_schema_geometry_invalid")
+    if shape.get("response_format_kind") not in {"text", "json_object", "json_schema"}:
+        failures.append("response_format_kind_invalid")
+    if not (isinstance(shape.get("tool_choice_kind"), str) and SAFE_ID.match(shape["tool_choice_kind"])):
+        failures.append("tool_choice_kind_invalid")
+    if shape.get("sampling_requested") != (shape.get("requested_temperature") != 0 or shape.get("requested_top_p") != 1):
+        failures.append("sampling_requested_inconsistent")
+    if shape.get("multiple_completions_requested") != (shape.get("requested_n") != 1):
+        failures.append("multiple_completions_requested_inconsistent")
+    if shape.get("tools_present") is False and (shape.get("tool_choice_present") or shape.get("tool_turn_state_present")):
+        failures.append("tools_present_inconsistent")
+    if shape.get("top_k_present") and shape.get("requested_top_k") is None:
+        failures.append("requested_top_k_missing")
+    if shape.get("min_p_nonzero") and shape.get("requested_min_p") is None:
+        failures.append("requested_min_p_missing")
+    if shape.get("presence_penalty_nonzero") and shape.get("requested_presence_penalty") == 0:
+        failures.append("requested_presence_penalty_missing")
+    if shape.get("frequency_penalty_nonzero") and shape.get("requested_frequency_penalty") == 0:
+        failures.append("requested_frequency_penalty_missing")
+    if shape.get("repetition_penalty_nondefault") and shape.get("requested_repetition_penalty") is None:
+        failures.append("requested_repetition_penalty_missing")
+    expected_logit_controls = any(
+        shape.get(key)
+        for key in (
+            "presence_penalty_nonzero",
+            "frequency_penalty_nonzero",
+            "min_p_nonzero",
+            "repetition_penalty_nondefault",
+            "logit_bias_present",
+        )
+    )
+    if shape.get("logit_controls_requested") != expected_logit_controls:
+        failures.append("logit_controls_requested_inconsistent")
+    if shape.get("structured_output_requested") != (shape.get("response_format_kind") != "text"):
+        failures.append("structured_output_requested_inconsistent")
+    if shape.get("logprobs_requested") is False and shape.get("top_logprobs_requested"):
+        failures.append("logprobs_requested_inconsistent")
+    if shape.get("top_logprobs_requested") and shape.get("requested_top_logprobs") is None:
+        failures.append("requested_top_logprobs_missing")
+    if shape.get("unknown_request_fields_present") != (shape.get("unknown_top_level_keys_present") or shape.get("unknown_stream_option_keys_present")):
+        failures.append("unknown_request_fields_present_inconsistent")
+
+
 def _request_shape_for_analyzer(shape: object, header: dict) -> dict:
     failures = _strict_object(shape, REPLAY_SHAPE_KEYS, "request_shape")
     if not isinstance(shape, dict):
         raise ValueError("request_shape invalid: " + "; ".join(failures))
     failures.extend(_privacy_violations(shape, "request_shape"))
+    _validate_replay_shape_metadata(shape, failures)
     shape_id = shape.get("shape_id")
     if not (isinstance(shape_id, str) and SAFE_ID.match(shape_id)):
         failures.append("shape_id_invalid")
@@ -1170,6 +1352,23 @@ def _admission_rows(run: dict, run_label: str) -> list[dict]:
             failures.append(f"{run_label}.admission[{index}]:actual_admission_missing")
         if item.get("matches") is not True:
             failures.append(f"{run_label}.admission[{index}]:actual_admission_mismatch")
+        if item.get("budget_matches") is not True:
+            failures.append(f"{run_label}.admission[{index}]:budget_mismatch")
+        for budget_key in ("effective_max_output_tokens", "expected_effective_max_output_tokens", "actual_effective_max_output_tokens"):
+            if not (_is_count(item.get(budget_key)) and item[budget_key] > 0):
+                failures.append(f"{run_label}.admission[{index}]:{budget_key}_invalid")
+        if (
+            _is_count(item.get("effective_max_output_tokens"))
+            and _is_count(item.get("expected_effective_max_output_tokens"))
+            and item["effective_max_output_tokens"] != item["expected_effective_max_output_tokens"]
+        ):
+            failures.append(f"{run_label}.admission[{index}]:expected_effective_max_output_tokens_mismatch")
+        if (
+            _is_count(item.get("expected_effective_max_output_tokens"))
+            and _is_count(item.get("actual_effective_max_output_tokens"))
+            and item["expected_effective_max_output_tokens"] != item["actual_effective_max_output_tokens"]
+        ):
+            failures.append(f"{run_label}.admission[{index}]:actual_effective_max_output_tokens_mismatch")
         if item.get("actual_effective_path") not in {"ordinary", "native_mtp"}:
             failures.append(f"{run_label}.admission[{index}]:actual_effective_path_invalid")
         if not isinstance(item.get("actual_selector_reason"), str):
@@ -1232,6 +1431,7 @@ def convert_replay_to_analyzer_jsonl(
     policy, policy_sha = _load_policy_for_analyzer(policy_path)
     header, runs = _load_replay_runs(replay_path, policy, policy_sha, capture_sha256)
     shape_templates_by_id: dict[str, dict] = {}
+    shape_budgets_by_id: dict[str, int] = {}
     ordered_shape_ids: list[str] = []
     for shape in header["request_shapes"]:
         template = _request_shape_for_analyzer(shape, header)
@@ -1239,6 +1439,7 @@ def convert_replay_to_analyzer_jsonl(
         if shape_id in shape_templates_by_id:
             raise ValueError(f"replay header duplicate shape_id: {shape_id}")
         shape_templates_by_id[shape_id] = template
+        shape_budgets_by_id[shape_id] = int(shape["effective_max_output_tokens"])
         ordered_shape_ids.append(shape_id)
     by_block: dict[int, dict[str, dict]] = {}
     for run in runs:
@@ -1286,17 +1487,24 @@ def convert_replay_to_analyzer_jsonl(
                 continue
             mixed_actuals = {(row["actual_selector_reason"], row["actual_effective_path"], row["target_completion_tokens"]) for row in mixed_by_shape[shape_id]}
             disabled_actuals = {(row["actual_selector_reason"], row["actual_effective_path"], row["target_completion_tokens"]) for row in disabled_by_shape[shape_id]}
+            mixed_budgets = {(row["effective_max_output_tokens"], row["expected_effective_max_output_tokens"], row["actual_effective_max_output_tokens"], row["budget_matches"]) for row in mixed_by_shape[shape_id]}
+            disabled_budgets = {(row["effective_max_output_tokens"], row["expected_effective_max_output_tokens"], row["actual_effective_max_output_tokens"], row["budget_matches"]) for row in disabled_by_shape[shape_id]}
             if len(mixed_actuals) != 1 or len(disabled_actuals) != 1:
                 failures.append(f"block {block_index}:shape {shape_id}:admission_not_stable")
                 block_failed = True
                 continue
             mixed_reason, mixed_path, mixed_tokens = next(iter(mixed_actuals))
             disabled_reason, disabled_path, disabled_tokens = next(iter(disabled_actuals))
+            mixed_budget = next(iter(mixed_budgets))
+            disabled_budget = next(iter(disabled_budgets))
             if disabled_reason != "mode_off" or disabled_path != "ordinary":
                 failures.append(f"block {block_index}:shape {shape_id}:disabled_actual_path_invalid")
                 block_failed = True
             if mixed_tokens != disabled_tokens or mixed_tokens != shape_templates_by_id[shape_id]["completion_tokens"]:
                 failures.append(f"block {block_index}:shape {shape_id}:sample_completion_token_mismatch")
+                block_failed = True
+            if mixed_budget != disabled_budget or mixed_budget != (shape_budgets_by_id[shape_id], shape_budgets_by_id[shape_id], shape_budgets_by_id[shape_id], True):
+                failures.append(f"block {block_index}:shape {shape_id}:effective_max_output_token_budget_mismatch")
                 block_failed = True
             eligible = mixed_reason == "eligible"
             if mixed_path == "native_mtp" and not eligible:
