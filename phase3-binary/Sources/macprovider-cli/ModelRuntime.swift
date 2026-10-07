@@ -947,6 +947,34 @@ public struct WarmSwapDisabledError: Error, CustomStringConvertible {
 
 public struct DrainCancelledError: Error { }
 
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+private enum LabWarmSwapHookError: Error, CustomStringConvertible {
+    case invalidTargetIdentity
+    case artifactMismatch
+    case containerUnavailable
+    case runtimeNotReady(String)
+    case noInFlightRequest
+    case publicationMismatch
+
+    var description: String {
+        switch self {
+        case .invalidTargetIdentity:
+            return "lab warm-swap target identity is invalid"
+        case .artifactMismatch:
+            return "lab warm-swap artifact digest does not match the loaded runtime artifact"
+        case .containerUnavailable:
+            return "lab warm-swap requires a loaded container"
+        case .runtimeNotReady(let state):
+            return "lab warm-swap requires a ready runtime, got \(state)"
+        case .noInFlightRequest:
+            return "lab warm-swap requires an in-flight request"
+        case .publicationMismatch:
+            return "lab warm-swap publication did not expose the requested identity"
+        }
+    }
+}
+#endif
+
 struct ModelRuntimeLoadError: Error, CustomStringConvertible {
     let target: String
     let reason: String?
@@ -6428,6 +6456,61 @@ actor ModelRuntime: ModelRuntimeServing {
     func installLabBatchComposition(_ requestIDs: [String]?) async -> Bool {
         guard let continuousBatchScheduler else { return false }
         return await continuousBatchScheduler.installLabBatchComposition(requestIDs)
+    }
+
+    /// Lab-only JOURNEY-NATIVE-MTP-SERVING step-10 hook: publish a new
+    /// model identity through the same actor path used after warm-swap load
+    /// and drain, without contacting the control socket or reloading bytes.
+    /// It refuses to run unless real work is in flight, so the journey proves
+    /// that the old request's already-captured snapshot survives the same
+    /// runtime instance publishing a fresh identity with native-MTP cleared.
+    func labCompleteWarmSwapForNativeMTPJourney(
+        modelID newModelID: String,
+        artifactSHA256: String
+    ) async throws -> RuntimeSnapshot {
+        let trimmedModelID = newModelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedModelID.isEmpty else {
+            throw LabWarmSwapHookError.invalidTargetIdentity
+        }
+        guard artifactSHA256.count == 64, artifactSHA256.allSatisfy({ $0.isHexDigit }) else {
+            throw LabWarmSwapHookError.invalidTargetIdentity
+        }
+        guard artifactSHA256 == currentModelHash else {
+            throw LabWarmSwapHookError.artifactMismatch
+        }
+        guard trimmedModelID != currentModelID else {
+            throw LabWarmSwapHookError.invalidTargetIdentity
+        }
+        guard let container = currentContainer else {
+            throw LabWarmSwapHookError.containerUnavailable
+        }
+        guard state == .ready else {
+            throw LabWarmSwapHookError.runtimeNotReady(String(describing: state))
+        }
+        guard !inFlightCancellations.isEmpty else {
+            throw LabWarmSwapHookError.noInFlightRequest
+        }
+        try transitionToLoading(target: trimmedModelID)
+        try enterDrainPhase()
+        await completeSwapAtomically(
+            container: container,
+            modelID: trimmedModelID,
+            modelHash: artifactSHA256,
+            modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1,
+            weightsManifestSHA256: currentWeightsManifestSHA256,
+            tokenizerConfigSHA256: currentTokenizerConfigSHA256,
+            chatTemplateSHA256: currentChatTemplateSHA256,
+            draftModelID: nil,
+            draftContainer: nil,
+            draftFailureReason: nil,
+            modelCapabilities: currentPagedKVModelCapabilities,
+            adoptionKnobs: nil
+        )
+        let snapshot = await currentSnapshot()
+        guard snapshot.modelID == trimmedModelID, snapshot.modelHash == artifactSHA256 else {
+            throw LabWarmSwapHookError.publicationMismatch
+        }
+        return snapshot
     }
 
     /// Lab-only token-level probe through the attached scheduler, the same

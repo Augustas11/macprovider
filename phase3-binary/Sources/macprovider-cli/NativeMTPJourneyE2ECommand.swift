@@ -1,5 +1,4 @@
 import ArgumentParser
-import CryptoKit
 import Foundation
 import MacProviderCore
 import MLXLMCommon
@@ -147,7 +146,7 @@ private final class NativeMTPJourneyRunner {
             }
         }
         await run("step-04-serial-token-oracle") {
-            try await serialOracle(ordinary: ordinary, native: native, recorder: recorder)
+            try await serialOracle(ordinary: ordinary, native: native, recorder: recorder, proposalDepth: fixture.admission.maxProposalDepth)
         }
         await run("step-05-cache-state-boundary") {
             try await cacheStateBoundary(ordinary: ordinary, native: native, recorder: recorder, override: override)
@@ -166,6 +165,9 @@ private final class NativeMTPJourneyRunner {
         }
         await run("step-09-cancellation") {
             try await cancellation(ordinary: ordinary, native: native, recorder: recorder)
+        }
+        await run("step-10-warm-swap") {
+            try await warmSwapBoundary(ordinary: ordinary, native: native, recorder: recorder, fixture: fixture)
         }
         await run("step-12-native-selftest") {
             try await selfTest(ordinary: ordinary, native: native, fixture: fixture)
@@ -186,13 +188,13 @@ private final class NativeMTPJourneyRunner {
                 "step-07-mixed-multirow",
                 "step-08-capacity-and-depth-zero",
                 "step-09-cancellation",
+                "step-10-warm-swap",
                 "step-12-native-canary (provider-local self-test half)",
             ],
             "pending_steps": [
                 "step-01-bind-tuple",
                 "step-02-capability-negatives",
                 "step-03-artifact-security-negatives",
-                "step-10-warm-swap",
                 "step-11-accounting",
                 "step-12-native-canary (coordinator SPEC-031-R033 half)",
                 "step-14-studio-and-tier-benchmark",
@@ -222,7 +224,7 @@ private final class NativeMTPJourneyRunner {
 
     /// step-04: native output equals isolated ordinary output (tokens, text,
     /// usage, terminal) for greedy and seeded sampled rows, streaming off.
-    private func serialOracle(ordinary: ModelRuntime, native: ModelRuntime, recorder: NativeMTPHardwareAdmissionRecorder) async throws -> NativeMTPJourneyStep {
+    private func serialOracle(ordinary: ModelRuntime, native: ModelRuntime, recorder: NativeMTPHardwareAdmissionRecorder, proposalDepth: Int) async throws -> NativeMTPJourneyStep {
         var step = NativeMTPJourneyStep(id: "step-04-serial-token-oracle")
         let cases: [(String, String, Double, Double)] = [
             ("journey-serial-greedy-0", "Explain in three sentences why the sky appears blue.", 0, 1),
@@ -269,10 +271,12 @@ private final class NativeMTPJourneyRunner {
         // At depth one each round is all-accepted or none-accepted; both must
         // occur (partial acceptance needs depth >= 2, which this tuple lacks).
         step.check("acceptance_all_and_none_observed", accepted > 0 && rejected > 0)
-        step.uncovered = ["partial acceptance within a round (needs proposal depth >= 2)"]
+        step.check("partial_acceptance_tuple_inapplicable", proposalDepth == 1)
         step.details["requests"] = compared
         step.details["accepted"] = accepted
         step.details["rejected"] = rejected
+        step.details["proposal_depth"] = proposalDepth
+        step.details["partial_acceptance_inapplicability"] = "partial acceptance within one round requires proposal depth >= 2; this exact tuple signs depth 1"
         return step
     }
 
@@ -286,11 +290,18 @@ private final class NativeMTPJourneyRunner {
         override: NativeMTPLabProposalOverride
     ) async throws -> NativeMTPJourneyStep {
         var step = NativeMTPJourneyStep(id: "step-05-cache-state-boundary")
-        step.uncovered = ["committed-state digest parity after each forced rejection (only output parity is compared)"]
-        for id in ["journey-reject-all-0", "journey-boundary-0", "journey-boundary-1"] {
+        step.uncovered = [
+            "hidden KV/hybrid-state callback parity after each forced rejection; labTokenProbe exposes committed tokens, terminal status, and native counters but not an independent hidden-state snapshot",
+        ]
+        let cases = [
+            ("journey-reject-all-0", "Tell a detailed story about a lighthouse keeper (journey-reject-all-0)."),
+            ("journey-boundary-0", "Tell a detailed story about a lighthouse keeper (journey-boundary-0)."),
+            ("journey-boundary-1", "Tell a detailed story about a lighthouse keeper (journey-boundary-1)."),
+        ]
+        for (id, prompt) in cases {
             let request = try makeRequest(
                 id: id,
-                prompt: "Tell a detailed story about a lighthouse keeper (\(id)).",
+                prompt: prompt,
                 maxTokens: 256,
                 temperature: 0,
                 topP: 1
@@ -309,11 +320,44 @@ private final class NativeMTPJourneyRunner {
             if id.hasPrefix("journey-reject-all-") {
                 step.check("\(id).all_rejected", delta.proposedTokens == UInt64(forced) && delta.rejectedTokens == delta.proposedTokens)
             }
+            let promptTokenIDs = try await servedPromptTokens(prompt, runtime: ordinary)
+            let oracleProbe = try await ordinary.labTokenProbe(
+                id: "\(id)-state-oracle",
+                promptTokenIDs: promptTokenIDs,
+                maxCompletionTokens: 64,
+                nativeDepth: nil
+            )
+            let nativeProbe = try await native.labTokenProbe(
+                id: "\(id)-state-native",
+                promptTokenIDs: promptTokenIDs,
+                maxCompletionTokens: 64,
+                nativeDepth: 1
+            )
+            let stateDigest = nativeProbe.nativeMTPCounters.flatMap { counters in
+                committedStateDigest(
+                    promptTokenIDs: promptTokenIDs,
+                    result: nativeProbe,
+                    counters: counters
+                )
+            }
+            let oracleStateDigest = nativeProbe.nativeMTPCounters.flatMap { counters in
+                committedStateDigest(
+                    promptTokenIDs: promptTokenIDs,
+                    result: oracleProbe,
+                    counters: counters
+                )
+            }
+            step.check("\(id).state_probe_tokens_equal", !nativeProbe.generatedTokens.isEmpty && nativeProbe.generatedTokens == oracleProbe.generatedTokens)
+            step.check("\(id).state_probe_terminal_equal", nativeProbe.terminalStatus == oracleProbe.terminalStatus)
+            step.check("\(id).state_probe_native_counters_present", nativeProbe.nativeMTPCounters != nil)
+            step.check("\(id).token_counter_terminal_digest_parity", stateDigest != nil && stateDigest == oracleStateDigest)
             step.details[id] = [
                 "forced_rounds": forced,
                 "proposed": delta.proposedTokens,
                 "accepted": delta.acceptedTokens,
                 "rejected": delta.rejectedTokens,
+                "token_counter_terminal_digest": stateDigest ?? "",
+                "state_probe_tokens": nativeProbe.generatedTokens.count,
             ]
         }
         return step
@@ -502,6 +546,127 @@ private final class NativeMTPJourneyRunner {
         return step
     }
 
+    /// step-10: hold an old native request across a runtime-publication
+    /// boundary, then publish a fresh model identity with native-MTP disabled.
+    /// The old request's served snapshot and counters stay bound to the old
+    /// tuple; the first request against the new identity cannot inherit native
+    /// capability or native counters.
+    private func warmSwapBoundary(
+        ordinary: ModelRuntime,
+        native: ModelRuntime,
+        recorder: NativeMTPHardwareAdmissionRecorder,
+        fixture: NativeMTPHardwareRuntimeFixture
+    ) async throws -> NativeMTPJourneyStep {
+        var step = NativeMTPJourneyStep(id: "step-10-warm-swap")
+        let oldRequest = try makeRequest(
+            id: "journey-warm-swap-old-native",
+            prompt: "Write a compact but detailed explanation of how lighthouses use lenses to focus light.",
+            maxTokens: 512,
+            temperature: 0,
+            topP: 1,
+            stream: true
+        )
+        let oldHandle = try await native.acquireRequestHandle(oldRequest)
+        let oldStartSnapshot = oldHandle.snapshot
+        let oldBefore = oldStartSnapshot.nativeMTPStatus
+        let oldChunks = NativeMTPJourneyCounter()
+        let oldText = NativeMTPJourneyText()
+        let oldTask = Task {
+            let result = try await native.stream(oldRequest, with: oldHandle) { chunk in
+                if case .content(let piece) = chunk, !piece.isEmpty {
+                    oldText.append(piece)
+                    oldChunks.increment()
+                }
+            }
+            return (result, oldHandle.snapshot)
+        }
+        var observedInFlight = false
+        for _ in 0..<100 {
+            if oldChunks.value >= 8 {
+                observedInFlight = true
+                break
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        guard observedInFlight else {
+            oldTask.cancel()
+            await native.unregisterInFlight(oldHandle.registrationID)
+            throw NativeMTPHardwareE2EError.assertionFailed("warm-swap old request did not reach in-flight streaming boundary")
+        }
+
+        let swappedModelID = modelID + "-warm-swap-alias"
+        let postSwapSnapshot = try await native.labCompleteWarmSwapForNativeMTPJourney(
+            modelID: swappedModelID,
+            artifactSHA256: fixture.targetIdentity.digest
+        )
+
+        let (expectedOld, expectedOldText) = try await streamCollect(oldRequest, runtime: ordinary)
+        let (oldResult, oldServedSnapshot): (CompletionResult, RuntimeSnapshot)
+        do {
+            (oldResult, oldServedSnapshot) = try await oldTask.value
+        } catch {
+            await native.unregisterInFlight(oldHandle.registrationID)
+            throw error
+        }
+        await native.unregisterInFlight(oldHandle.registrationID)
+        let oldAfter = await native.currentSnapshot().nativeMTPStatus
+
+        let postSwapBeforeNewRequest = oldAfter
+        let newRequest = try makeRequest(
+            id: "journey-warm-swap-new-ordinary",
+            model: swappedModelID,
+            prompt: "Name three ocean currents and give one fact about each.",
+            maxTokens: 96,
+            temperature: 0,
+            topP: 1
+        )
+        let newResult = try await native.complete(newRequest)
+        let postSwapAfter = await native.currentSnapshot().nativeMTPStatus
+        let newDelta = NativeMTPStatusDelta(before: postSwapBeforeNewRequest, after: postSwapAfter)
+        let newAdmissions = recorder.requestSnapshot().filter { $0.requestID == "journey-warm-swap-new-ordinary" }
+        step.check("old_request_started_before_swap", oldStartSnapshot.modelID == modelID && oldStartSnapshot.modelHash == fixture.targetIdentity.digest)
+        step.check("old_request_start_native_enabled", oldStartSnapshot.nativeMTPStatus.enabled && oldStartSnapshot.nativeMTPStatus.resetGeneration > 0)
+        step.check("old_request_observed_inflight_at_swap", observedInFlight)
+        step.check("old_request_served_old_tuple", oldServedSnapshot.modelID == modelID && oldServedSnapshot.modelHash == fixture.targetIdentity.digest)
+        step.check("old_request_parity", same(expectedOld, oldResult))
+        step.check("old_streamed_text_equals_content", oldText.value == oldResult.content && expectedOldText == expectedOld.content)
+        step.check("old_request_native_counters_bound", oldAfter.resetGeneration > oldBefore.resetGeneration
+            && oldAfter.proposedTokens > 0
+            && oldAfter.targetForwards > 0
+            && oldAfter.mtpForwards > 0)
+        step.check("same_runtime_alias_differs", swappedModelID != modelID)
+        step.check("same_runtime_identity_published", postSwapSnapshot.modelID == swappedModelID && postSwapSnapshot.modelHash == fixture.targetIdentity.digest)
+        step.check("same_runtime_hash_algorithm_actual", postSwapSnapshot.modelHashAlgorithm == ModelArtifactIdentity.snapshotManifestV1)
+        step.check("same_runtime_native_disabled", !postSwapSnapshot.nativeMTPStatus.enabled && !postSwapSnapshot.nativeMTPStatus.supported && postSwapSnapshot.nativeMTPStatus.lastReason == .warmSwap)
+        step.check("new_request_completed", !newResult.content.isEmpty && newResult.modelHashObserved == fixture.targetIdentity.digest)
+        step.check("new_request_no_native_counters", newDelta.proposedTokens == 0
+            && newDelta.acceptedTokens == 0
+            && newDelta.rejectedTokens == 0
+            && newDelta.targetForwards == 0
+            && newDelta.mtpForwards == 0)
+        step.check("new_request_not_native_admitted", !newAdmissions.isEmpty && newAdmissions.allSatisfy { $0.admission.effectivePath != .nativeMTP })
+        step.details["old_tuple"] = [
+            "model_id": modelID,
+            "model_hash": fixture.targetIdentity.digest,
+            "native_reset_generation": oldStartSnapshot.nativeMTPStatus.resetGeneration,
+            "proposed": oldAfter.proposedTokens,
+            "accepted": oldAfter.acceptedTokens,
+            "rejected": oldAfter.rejectedTokens,
+            "chunks_before_swap": oldChunks.value,
+        ]
+        step.details["post_swap_tuple"] = [
+            "model_id": swappedModelID,
+            "model_hash": fixture.targetIdentity.digest,
+            "model_hash_algorithm": postSwapSnapshot.modelHashAlgorithm ?? "",
+            "native_enabled": postSwapSnapshot.nativeMTPStatus.enabled,
+            "native_supported": postSwapSnapshot.nativeMTPStatus.supported,
+            "native_reset_generation": postSwapSnapshot.nativeMTPStatus.resetGeneration,
+            "new_request_finish_reason": newResult.finishReason,
+            "new_request_native_admissions": newAdmissions.filter { $0.admission.effectivePath == .nativeMTP }.count,
+        ]
+        return step
+    }
+
     /// step-12 (provider-local half): the `native_mtp_selftest_v1` request
     /// shape at the fixed depth is exact against the ordinary oracle and
     /// deterministic across runs, so its counters and committed-state digest
@@ -589,6 +754,7 @@ private final class NativeMTPJourneyRunner {
 
     private func makeRequest(
         id: String,
+        model: String? = nil,
         prompt: String,
         maxTokens: Int,
         temperature: Double,
@@ -598,7 +764,7 @@ private final class NativeMTPJourneyRunner {
         conversationKey: String? = nil
     ) throws -> ChatCompletionRequest {
         var object: [String: Any] = [
-            "model": modelID,
+            "model": model ?? modelID,
             "messages": [["role": "user", "content": prompt]],
             "max_tokens": maxTokens,
             "temperature": temperature,
@@ -687,6 +853,22 @@ private final class NativeMTPJourneyRunner {
             )
             return try await context.processor.prepare(input: input).text.tokens.asArray(Int.self)
         }
+    }
+
+    private func committedStateDigest(
+        promptTokenIDs: [Int],
+        result: ContinuousBatchSchedulerResult,
+        counters: NativeMTPSelfTestCounters
+    ) -> String {
+        NativeMTPSelfTestDigest.committedStateDigest(
+            promptTokenIDs: promptTokenIDs,
+            generatedTokenIDs: result.generatedTokens,
+            acceptedTokens: Int(clamping: counters.acceptedTokens),
+            rejectedTokens: Int(clamping: counters.rejectedTokens),
+            bonusTokens: Int(clamping: counters.bonusTokens),
+            committedTokens: Int(clamping: counters.committedTokens),
+            terminalReason: result.terminalStatus
+        )
     }
 
     private func prompt(container: ModelContainer, minimumTokens: Int) async throws -> String {
