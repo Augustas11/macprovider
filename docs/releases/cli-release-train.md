@@ -381,12 +381,19 @@ promotion, external Creator launch or binary release is claimed.
 
 The release/closure gates still outstanding are:
 
-- Verify and land the protected signed evidence, plus fresh signed BYOM evidence
-  for the changed contract. The latest fresh BYOM attempt failed during
-  compilation and is not passing acceptance evidence.
-- Cut a reviewed signed CLI containing the merged startup fix; prove final
-  tarball/DMG embedded CLI byte identity, signing/notarization, and updater
-  acceptance from the previous stable version before publication/promotion.
+- Layer2/Creator protected signatures landed in #1887 (`743f9ec0d`), with
+  unchanged pending conformance states. Fresh BYOM discovery capture
+  [`20261007T161811Z`](../../journeys/evidence/provider-byom-discovery-20261007T161811Z.redacted.json)
+  passed all ten hermetic steps on `9c8c87dbff8ee00ba2c72f7923e1dce268c42e78`,
+  superseding the failed compilation attempt as current unsigned evidence.
+  Review, protected signing and signed-evidence integration remain pending;
+  this capture does not change CONFORMANCE or prove released-CLI acceptance.
+- [CLI v1.8.223](https://github.com/Augustas11/macprovider/releases/tag/v1.8.223)
+  was published from reviewed `9c8c87dbff8ee00ba2c72f7923e1dce268c42e78` by
+  [release run 37642806955](https://github.com/Augustas11/macprovider/actions/runs/37642806955).
+  Incorporate the final tarball/DMG byte-identity and signing/notarization proof,
+  and complete previous-stable updater and paid-buyer acceptance. Publication
+  success alone does not complete those closure gates.
 - Complete formal mixed-version rollout/rollback acceptance. Recorded
   217/219/222 coexistence is not a rolling-restart proof; a refused v1-only
   rollback preflight is not rollback readiness.

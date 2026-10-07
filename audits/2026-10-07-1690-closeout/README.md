@@ -270,6 +270,24 @@ same-M0 native-token/cache/perplexity qualification. None of these observations
 grants settlement trust, completes model qualification, or activates an external
 Creator launch.
 
+### Fresh BYOM discovery capture after contract changes
+
+The fresh
+[`provider-byom-discovery-20261007T161811Z.redacted.json`](../../journeys/evidence/provider-byom-discovery-20261007T161811Z.redacted.json)
+records all ten hermetic discovery steps passing on reviewed source
+`9c8c87dbff8ee00ba2c72f7923e1dce268c42e78`. The exact-source locked CLI build
+passed in 91.85 seconds; the complete capture passed in 164.876 seconds.
+The capture contract validated the closed CLI documents, required observations,
+redaction, source identity and document digests. This supersedes the failed
+relocated-cache attempt as current unsigned discovery evidence; historical
+signed captures remain unchanged.
+
+The harness exercised loopback fixtures only. No buyer traffic, provider credit,
+runtime installation, weight download or production configuration change was
+performed. This is not released-CLI updater, paid-buyer, or rollout acceptance.
+Protected signing and reviewed signature integration are still pending; no
+CONFORMANCE state is changed by this capture. #1690 remains open.
+
 ### Approved capability-aware Ollama qualification
 
 On 2026-10-07 the operator approved the separate
