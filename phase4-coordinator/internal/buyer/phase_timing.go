@@ -250,6 +250,7 @@ func (w *noPriorDispatchResponseWriter) mark(code int, explicit bool) {
 		return
 	}
 	w.claimed = true
+	publishPoolModelDisclosureHeaders(w.Header(), w.rec, code)
 	w.stampNoChargeMarker(code)
 	w.rec.claimBuyerTerminal(code)
 }

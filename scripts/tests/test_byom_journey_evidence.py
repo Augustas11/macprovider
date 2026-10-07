@@ -1836,6 +1836,16 @@ class BYOMJourneyConformanceMappingTests(unittest.TestCase):
                 digest = hashlib.sha256(signed_path.read_bytes()).hexdigest()
                 row = rows[requirement_id]
                 self.assertIn(journey_id, row["journeys"], requirement_id)
+                if requirement_id == "SPEC-047-R005" and row["state"] == "pending":
+                    self.assertEqual([], row["evidence"], requirement_id)
+                    self.assertEqual("CODE_BUG", row["gap"]["verdict"], requirement_id)
+                    self.assertEqual(
+                        "https://github.com/Augustas11/macprovider/issues/1880",
+                        row["gap"]["issue"],
+                        requirement_id,
+                    )
+                    self.assertIn("fresh signed JOURNEY-NETWORK-MODEL-ADMISSION", row["gap"]["rationale"])
+                    continue
                 if requirement_id in ("SPEC-046-R001", "SPEC-046-R008"):
                     self.assertEqual("pending", row["state"], requirement_id)
                     gap = row["gap"]

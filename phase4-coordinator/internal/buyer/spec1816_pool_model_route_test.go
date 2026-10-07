@@ -291,6 +291,55 @@ func queryPoolModelLedger(t *testing.T, dbPath string) poolModelLedger {
 	return row
 }
 
+func assertNoPoolModelSettlementArtifacts(t *testing.T, dbPath string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, table := range []string{"ledger_request_credits", "settlement_attempt_outputs"} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if count != 0 {
+			t.Fatalf("%s rows=%d, want 0", table, count)
+		}
+	}
+}
+
+func assertPoolModelRefusalLoggedBlank(t *testing.T, rec *httptest.ResponseRecorder, dbPath, requestID string, wantStatus int, wantCode string) {
+	t.Helper()
+	if rec.Code != wantStatus {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), wantCode) {
+		t.Fatalf("body=%s, want %s", rec.Body.String(), wantCode)
+	}
+	if rec.Header().Get("X-MacProvider-Model-Disclosure") != "" || rec.Header().Get("X-MacProvider-Pool-Manifest-Core-Digest") != "" {
+		t.Fatalf("refusal disclosed pool-model headers: %v", rec.Header())
+	}
+	rows := queryAllRequestLogRows(t, dbPath)
+	if len(rows) != 1 {
+		t.Fatalf("request log rows=%d, want 1: %+v", len(rows), rows)
+	}
+	row := rows[0]
+	if row.Model != "" {
+		t.Fatalf("request_log.model=%q, want blank", row.Model)
+	}
+	if row.Status != wantStatus {
+		t.Fatalf("request_log.status=%d, want %d", row.Status, wantStatus)
+	}
+	if !row.ExternalRequestID.Valid || row.ExternalRequestID.String != requestID {
+		t.Fatalf("external_request_id=%#v, want %q", row.ExternalRequestID, requestID)
+	}
+	if rows := queryRouteSnapshotBYOMBindings(t, dbPath); len(rows) != 0 {
+		t.Fatalf("route snapshot recorded for refusal: %v", rows)
+	}
+	assertNoPoolModelSettlementArtifacts(t, dbPath)
+}
+
 func TestSPEC1816PoolModelRoutesSettlesAndDiscloses(t *testing.T) {
 	for name, fx := range map[string]poolModelFixture{
 		"native mlx_cache entry":         {},
@@ -424,6 +473,50 @@ func TestSPEC1816PoolModelExcludedOutsideItsPool(t *testing.T) {
 	}
 }
 
+func TestSPEC1816PoolModelEarlyRefusalsBlankRequestLogModel(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body    func(*poolModelHarness) []byte
+		headers func(*poolModelHarness) http.Header
+		mutate  func(*poolModelHarness)
+	}{
+		"selected pool foreign model": {
+			body: func(*poolModelHarness) []byte {
+				return []byte(`{"model":"pool/AAAAAAAAAAAAAAAAAAAAAA/creator-model","messages":[{"role":"user","content":"hi"}]}`)
+			},
+			headers: func(h *poolModelHarness) http.Header { return externalRuntimePoolHeaders(h.poolID) },
+		},
+		"unknown same pool slug": {
+			body: func(h *poolModelHarness) []byte {
+				return []byte(`{"model":"pool/` + h.poolID + `/missing-model","messages":[{"role":"user","content":"hi"}]}`)
+			},
+			headers: func(h *poolModelHarness) http.Header { return externalRuntimePoolHeaders(h.poolID) },
+		},
+		"removed prior entry": {
+			body:    func(h *poolModelHarness) []byte { return h.body() },
+			headers: func(h *poolModelHarness) http.Header { return externalRuntimePoolHeaders(h.poolID) },
+			mutate: func(h *poolModelHarness) {
+				loadTrustedPoolLayer2Snapshot(t, h.trustPools, 0, rotated(h.routeable, nil))
+			},
+		},
+		"no selected pool": {
+			body:    func(h *poolModelHarness) []byte { return h.body() },
+			headers: func(*poolModelHarness) http.Header { return globalRouteHeaders() },
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newPoolModelHarness(t, poolModelFixture{})
+			if tc.mutate != nil {
+				tc.mutate(h)
+			}
+			requestID := "blank-model-" + strings.NewReplacer(" ", "-", "/", "-").Replace(name)
+			headers := tc.headers(h)
+			headers.Set("X-Request-ID", requestID)
+			rec := postChat(t, h.server, tc.body(h), headers)
+			assertPoolModelRefusalLoggedBlank(t, rec, h.dbPath, requestID, http.StatusNotFound, "model_not_found")
+		})
+	}
+}
+
 // Fail-closed: missing bounds, an unrebound binding, or an unattested
 // delegated member selects no session and records nothing.
 func TestSPEC1816PoolModelFailClosed(t *testing.T) {
@@ -434,8 +527,12 @@ func TestSPEC1816PoolModelFailClosed(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newPoolModelHarness(t, fx)
-			if rec := postChat(t, h.server, h.body(), externalRuntimePoolHeaders(h.poolID)); rec.Code == http.StatusOK {
+			rec := postChat(t, h.server, h.body(), externalRuntimePoolHeaders(h.poolID))
+			if rec.Code == http.StatusOK {
 				t.Fatalf("pool-model route served: %s", rec.Body.String())
+			}
+			if rec.Header().Get("X-MacProvider-Model-Disclosure") != "" || rec.Header().Get("X-MacProvider-Pool-Manifest-Core-Digest") != "" {
+				t.Fatalf("refused pool-model route disclosed headers: %v", rec.Header())
 			}
 			if rows := queryRouteSnapshotBYOMBindings(t, h.dbPath); len(rows) != 0 {
 				t.Fatalf("route snapshot recorded: %v", rows)
@@ -444,10 +541,34 @@ func TestSPEC1816PoolModelFailClosed(t *testing.T) {
 	}
 }
 
+func TestSPEC1816PoolModelRefusalDoesNotDisclose(t *testing.T) {
+	h := newPoolModelHarness(t, poolModelFixture{})
+	requestID := "blank-model-wrong-engine"
+	headers := withEngine(externalRuntimePoolHeaders(h.poolID), "ollama_loopback")
+	headers.Set("X-Request-ID", requestID)
+	rec := postChat(t, h.server, h.body(), headers)
+	assertPoolModelRefusalLoggedBlank(t, rec, h.dbPath, requestID, http.StatusServiceUnavailable, "engine_unavailable")
+}
+
+func TestSPEC1816PoolModelNoEligibleMemberBlanksRequestLogModel(t *testing.T) {
+	h := newPoolModelHarness(t, poolModelFixture{})
+	next := h.routeable
+	next.Members = []string{"missing-provider"}
+	loadTrustedPoolLayer2Snapshot(t, h.trustPools, 0, next)
+	requestID := "blank-model-no-eligible-member"
+	headers := externalRuntimePoolHeaders(h.poolID)
+	headers.Set("X-Request-ID", requestID)
+	rec := postChat(t, h.server, h.body(), headers)
+	assertPoolModelRefusalLoggedBlank(t, rec, h.dbPath, requestID, http.StatusServiceUnavailable, "pool_no_eligible_member")
+}
+
 // SPEC-006-R018: the default /v1/models never lists a pool model; the
 // authorized pool view lists the entry with the closed disclosure object.
 func TestSPEC1816PoolModelListing(t *testing.T) {
 	h := newPoolModelHarness(t, poolModelFixture{})
+	h.server.SetRoutingClasses(map[string]config.ModelClassConfig{
+		"global-class": {Objective: "latency", Models: []string{"creator-model"}},
+	})
 	get := func(headers http.Header) (int, map[string]any) {
 		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 		for k, values := range headers {
@@ -471,8 +592,12 @@ func TestSPEC1816PoolModelListing(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("pool view status=%d", code)
 	}
+	rows := view["data"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("selected pool view listed %d rows, want only the selected pool entry: %v", len(rows), view)
+	}
 	var found, listed map[string]any
-	for _, m := range view["data"].([]any) {
+	for _, m := range rows {
 		if m.(map[string]any)["id"] == h.modelID {
 			listed = m.(map[string]any)
 			found = listed["macprovider_pool_model"].(map[string]any)

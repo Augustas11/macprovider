@@ -836,10 +836,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 17.7 fallback usage_events insert in settleAfterCommit
 		// uses the SAME window_date as the original reservation
 		// (avoids drift for streams that cross UTC midnight).
-		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, model, retryExhausted, priorProviderDispatch, deadlines, structuredStreaming, window, timing)
+		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, model, poolID, retryExhausted, priorProviderDispatch, deadlines, structuredStreaming, window, timing)
 		return
 	}
-	s.forwardNonStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, retryExhausted, priorProviderDispatch, window)
+	s.forwardNonStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, model, poolID, retryExhausted, priorProviderDispatch, window)
 }
 
 func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Request, accountID string, buildUpReq func() (*http.Request, error)) (*http.Response, bool, bool, error) {
@@ -1026,7 +1026,7 @@ func (b *coord503PrefixErrBody) Read(p []byte) (int, error) {
 
 func (b *coord503PrefixErrBody) Close() error { return nil }
 
-func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, retryExhausted, priorProviderDispatch bool, window string) {
+func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, model, poolID string, retryExhausted, priorProviderDispatch bool, window string) {
 	body, err := readLimitedBody(resp.Body, maxUpstreamResponseBodyBytes)
 	if err != nil {
 		// A coordinator that declared finality trailers records a 200 after
@@ -1200,7 +1200,11 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	emitProviderAttribution(w.Header(), resp.Header)
-	copyReceiptEligibleHeaders(w.Header(), resp.Header)
+	if poolModelDisclosureAllowed(poolID, model, resp.Header) {
+		copyReceiptEligibleHeaders(w.Header(), resp.Header)
+	} else {
+		copyReceiptEligibleHeadersWithoutPoolModelDisclosure(w.Header(), resp.Header)
+	}
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
 	maybeSetPrivacySuccessHeaders(w, r)
 	w.WriteHeader(http.StatusOK)
@@ -1233,7 +1237,7 @@ func emitProviderAttribution(dst, src http.Header) {
 	}
 }
 
-func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, model string, retryExhausted, priorProviderDispatch bool, deadlines *requestDeadlines, structuredStreaming bool, reservationWindow string, timing *gatewayPhaseTiming) {
+func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, model, poolID string, retryExhausted, priorProviderDispatch bool, deadlines *requestDeadlines, structuredStreaming bool, reservationWindow string, timing *gatewayPhaseTiming) {
 	upstreamCtx := deadlines.Context()
 	cancelUpstream := deadlines.Cancel
 	passNoProvider := func(body []byte) {
@@ -1303,7 +1307,11 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		defer timing.observeCoordinatorTrailers(resp.Trailer)
 	}
 	emitProviderAttribution(w.Header(), resp.Header)
-	copyCleanHeaders(w.Header(), resp.Header)
+	if poolModelDisclosureAllowed(poolID, model, resp.Header) {
+		copyCleanHeaders(w.Header(), resp.Header)
+	} else {
+		copyCleanHeadersWithoutPoolModelDisclosure(w.Header(), resp.Header)
+	}
 	w.Header().Set("X-MacProvider-Gateway-FirstByte-Unix-Ms", strconv.FormatInt(s.now().UnixMilli(), 10))
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	// Issue #190 R2 security HIGH: keep no-store (set at handler
@@ -2141,7 +2149,7 @@ func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r 
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "no_provider_available", "No provider available")
 		return
 	}
-	copyCleanHeaders(w.Header(), resp.Header)
+	copyCleanHeadersWithoutPoolModelDisclosure(w.Header(), resp.Header)
 	w.Header().Set("X-Request-ID", requestID(r))
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
 	// H1/M4/M-R2-2: this forwards the coordinator's body verbatim, so its
@@ -2298,7 +2306,7 @@ func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, 
 	// passThroughNoProviderCoordinatorError stays unchanged because
 	// no provider was selected on its callers' paths.
 	emitProviderAttribution(w.Header(), resp.Header)
-	copyReceiptEligibleHeaders(w.Header(), resp.Header)
+	copyReceiptEligibleHeadersWithoutPoolModelDisclosure(w.Header(), resp.Header)
 	w.Header().Set("X-Request-ID", requestID(r))
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
 	// H1/M4/M-R2-2: preserve the coordinator's own retryable verdict from

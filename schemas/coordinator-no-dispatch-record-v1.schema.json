@@ -1,0 +1,249 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Augustas11/macprovider/schemas/coordinator-no-dispatch-record-v1.schema.json",
+  "title": "MacProvider coordinator no-dispatch source record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source",
+    "record_kind",
+    "request_scope_commitment",
+    "projection_status",
+    "terminal_kind",
+    "privacy",
+    "request_log_summary",
+    "settlement_absence",
+    "closure"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "macprovider.coordinator-no-dispatch-record.v1"
+    },
+    "source": {
+      "const": "coordinator"
+    },
+    "record_kind": {
+      "const": "no_dispatch_terminal"
+    },
+    "request_scope_commitment": {
+      "$ref": "#/$defs/hex64"
+    },
+    "projection_status": {
+      "const": "closed_terminal"
+    },
+    "terminal_kind": {
+      "enum": [
+        "model_not_found_no_dispatch",
+        "pool_unavailable_no_dispatch"
+      ]
+    },
+    "privacy": {
+      "$ref": "#/$defs/privacy"
+    },
+    "request_log_summary": {
+      "$ref": "#/$defs/request_log_summary"
+    },
+    "settlement_absence": {
+      "$ref": "#/$defs/settlement_absence"
+    },
+    "closure": {
+      "$ref": "#/$defs/closure"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "terminal_kind": {
+            "const": "model_not_found_no_dispatch"
+          }
+        },
+        "required": [
+          "terminal_kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "request_log_summary": {
+            "properties": {
+              "status": {
+                "const": 404
+              },
+              "error_message_class": {
+                "const": "no_provider_advertised_requested_model"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "terminal_kind": {
+            "const": "pool_unavailable_no_dispatch"
+          }
+        },
+        "required": [
+          "terminal_kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "request_log_summary": {
+            "properties": {
+              "status": {
+                "const": 503
+              },
+              "error_message_class": {
+                "const": "pool_unavailable"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "hex64": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "utc_ms": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+    },
+    "privacy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "raw_account_id_emitted",
+        "raw_external_request_id_emitted",
+        "raw_internal_request_id_emitted",
+        "raw_rejected_model_emitted",
+        "request_log_model_blank_for_unserved"
+      ],
+      "properties": {
+        "raw_account_id_emitted": {
+          "const": false
+        },
+        "raw_external_request_id_emitted": {
+          "const": false
+        },
+        "raw_internal_request_id_emitted": {
+          "const": false
+        },
+        "raw_rejected_model_emitted": {
+          "const": false
+        },
+        "request_log_model_blank_for_unserved": {
+          "const": true
+        }
+      }
+    },
+    "request_log_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "count",
+        "status",
+        "attempt_n",
+        "provider_assigned",
+        "error_message_class",
+        "terminal_kind_source"
+      ],
+      "properties": {
+        "count": {
+          "const": 1
+        },
+        "status": {
+          "enum": [
+            404,
+            503
+          ]
+        },
+        "attempt_n": {
+          "const": 0
+        },
+        "provider_assigned": {
+          "const": false
+        },
+        "error_message_class": {
+          "enum": [
+            "no_provider_advertised_requested_model",
+            "pool_unavailable"
+          ]
+        },
+        "terminal_kind_source": {
+          "const": "coordinator_source_no_dispatch_closures.terminal_kind"
+        }
+      }
+    },
+    "settlement_table_absence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "count",
+        "max_id"
+      ],
+      "properties": {
+        "count": {
+          "const": 0
+        },
+        "max_id": {
+          "const": 0
+        }
+      }
+    },
+    "settlement_absence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fence",
+        "ledger_request_credits",
+        "settlement_route_snapshots",
+        "settlement_attempt_outputs",
+        "settlement_receipt_verdicts"
+      ],
+      "properties": {
+        "fence": {
+          "const": "sqlite_triggers_no_future_writes_v1"
+        },
+        "ledger_request_credits": {
+          "$ref": "#/$defs/settlement_table_absence"
+        },
+        "settlement_route_snapshots": {
+          "$ref": "#/$defs/settlement_table_absence"
+        },
+        "settlement_attempt_outputs": {
+          "$ref": "#/$defs/settlement_table_absence"
+        },
+        "settlement_receipt_verdicts": {
+          "$ref": "#/$defs/settlement_table_absence"
+        }
+      }
+    },
+    "closure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "closed_at_utc",
+        "closure_id_hmac"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "macprovider.coordinator-no-dispatch-closure.v1"
+        },
+        "closed_at_utc": {
+          "$ref": "#/$defs/utc_ms",
+          "description": "UTC millisecond closure time. The typed verifier requires this timestamp to be less than or equal to signed.generated_at."
+        },
+        "closure_id_hmac": {
+          "$ref": "#/$defs/hex64"
+        }
+      }
+    }
+  }
+}

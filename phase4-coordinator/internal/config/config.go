@@ -85,6 +85,7 @@ type Config struct {
 	Referrals                    ReferralConfig               `yaml:"referrals"`
 	Storage                      StorageConfig                `yaml:"storage"`
 	TrustedPools                 TrustedPoolsConfig           `yaml:"trusted_pools"`
+	SourceEvidence               SourceEvidenceConfig         `yaml:"source_evidence"`
 	Logging                      LoggingConfig                `yaml:"logging"`
 	Rewards                      RewardsConfig                `yaml:"rewards"`
 	Settlement                   SettlementConfig             `yaml:"settlement"`
@@ -1317,6 +1318,17 @@ type StorageConfig struct {
 	AuditLogRetentionDays int `yaml:"audit_log_retention_days"`
 }
 
+// SourceEvidenceConfig gates the coordinator-owned source export endpoint. The
+// endpoint is disabled by default and still fails closed until a reviewed
+// release wires immutable source, instance, key, and registry pins in code.
+type SourceEvidenceConfig struct {
+	Enabled               bool   `yaml:"enabled"`
+	SigningPrivateKeyPath string `yaml:"signing_private_key_path"`
+	ScopeHMACKeyPath      string `yaml:"scope_hmac_key_path"`
+	MaxScopes             int    `yaml:"max_scopes"`
+	MaxBodyBytes          int64  `yaml:"max_body_bytes"`
+}
+
 // TrustedPoolsConfig is the coordinator-side SPEC-043 enablement switch. Default
 // false keeps the existing coordinator from advertising pool support. When true,
 // startup must reconstruct the durable trustpool ledger and wire buyer routing
@@ -1802,6 +1814,11 @@ func Default() Config {
 			AuditLogPruneOnStartup:   true,
 			AuditLogRetentionDays:    90,
 		},
+		SourceEvidence: SourceEvidenceConfig{
+			Enabled:      false,
+			MaxScopes:    100,
+			MaxBodyBytes: 64 << 10,
+		},
 		TrustedPools: TrustedPoolsConfig{
 			Enabled:                          false,
 			RefreshIntervalS:                 30,
@@ -2232,6 +2249,20 @@ func finalizeLoadedConfig(cfg *Config) error {
 	for i, credential := range cfg.TrustedPools.CreatorAdminCredentials {
 		if err := validateOperatorSecretStrength(fmt.Sprintf("trusted_pools.creator_admin_credentials[%d].token", i), credential.Token); err != nil {
 			return err
+		}
+	}
+	if cfg.SourceEvidence.MaxScopes < 0 || cfg.SourceEvidence.MaxScopes > 1000 {
+		return fmt.Errorf("source_evidence.max_scopes must be in [0,1000]")
+	}
+	if cfg.SourceEvidence.MaxBodyBytes < 0 || cfg.SourceEvidence.MaxBodyBytes > 1<<20 {
+		return fmt.Errorf("source_evidence.max_body_bytes must be in [0,1048576]")
+	}
+	if cfg.SourceEvidence.Enabled {
+		if strings.TrimSpace(cfg.SourceEvidence.SigningPrivateKeyPath) == "" {
+			return fmt.Errorf("source_evidence.signing_private_key_path is required when source evidence is enabled")
+		}
+		if strings.TrimSpace(cfg.SourceEvidence.ScopeHMACKeyPath) == "" {
+			return fmt.Errorf("source_evidence.scope_hmac_key_path is required when source evidence is enabled")
 		}
 	}
 	return nil

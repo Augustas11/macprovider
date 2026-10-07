@@ -426,7 +426,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	if authn.WalletSession != nil {
 		filterModelsForWalletSession(body, walletModelAllowlist(authn.WalletSession.Session))
 	}
-	copyCleanHeaders(w.Header(), resp.Header)
+	copyCleanHeadersWithoutPoolModelDisclosure(w.Header(), resp.Header)
 	writeJSON(w, http.StatusOK, body)
 }
 
@@ -444,7 +444,7 @@ func sanitizeModelsResponse(body map[string]any, poolID string) {
 		return
 	}
 	candidates := make([]sanitizedModelCandidate, 0, len(data))
-	modelIDs := make(map[string]struct{}, len(data))
+	modelIDCounts := make(map[string]int, len(data))
 	for _, item := range data {
 		model, ok := item.(map[string]any)
 		if !ok {
@@ -473,20 +473,32 @@ func sanitizeModelsResponse(body map[string]any, poolID string) {
 		if !ok {
 			continue
 		}
-		// A pool/ id is listed only with its closed pool-model object, in
-		// that pool's view; the default list never carries one.
-		if strings.HasPrefix(id, "pool/") {
+		// A selected pool view is exclusive to that pool's signed entries;
+		// the default list never carries a pool/ id.
+		if poolID != "" {
 			pm, ok := clean["macprovider_pool_model"].(map[string]any)
 			if !ok || pm["pool_model_id"] != id {
 				continue
 			}
+		} else if strings.HasPrefix(id, "pool/") {
+			continue
 		}
 		clean["compute_integrity"] = makeModelComputeIntegrityUnavailableStatus()
-		modelIDs[id] = struct{}{}
-		candidates = append(candidates, sanitizedModelCandidate{entry: clean, rawMembers: rawMembers})
+		modelIDCounts[id]++
+		candidates = append(candidates, sanitizedModelCandidate{id: id, entry: clean, rawMembers: rawMembers})
 	}
 	sanitized := make([]any, 0, len(candidates))
+	modelIDs := make(map[string]struct{}, len(candidates))
 	for _, candidate := range candidates {
+		if poolID != "" && modelIDCounts[candidate.id] != 1 {
+			continue
+		}
+		modelIDs[candidate.id] = struct{}{}
+	}
+	for _, candidate := range candidates {
+		if _, ok := modelIDs[candidate.id]; !ok {
+			continue
+		}
 		if members, ok := sanitizeMemberReferences(candidate.rawMembers, modelIDs); ok {
 			candidate.entry["members"] = members
 		}
@@ -496,6 +508,7 @@ func sanitizeModelsResponse(body map[string]any, poolID string) {
 }
 
 type sanitizedModelCandidate struct {
+	id         string
 	entry      map[string]any
 	rawMembers any
 }
@@ -1633,14 +1646,26 @@ func writeSpec019PreflightError(w http.ResponseWriter, status int, code, message
 }
 
 func copyCleanHeaders(dst, src http.Header) {
-	copyCleanHeadersWithReceipt(dst, src, false)
+	copyCleanHeadersFiltered(dst, src, false, true)
+}
+
+func copyCleanHeadersWithoutPoolModelDisclosure(dst, src http.Header) {
+	copyCleanHeadersFiltered(dst, src, false, false)
 }
 
 func copyReceiptEligibleHeaders(dst, src http.Header) {
-	copyCleanHeadersWithReceipt(dst, src, true)
+	copyCleanHeadersFiltered(dst, src, true, true)
 }
 
-func copyCleanHeadersWithReceipt(dst, src http.Header, allowReceipt bool) {
+func copyReceiptEligibleHeadersWithoutPoolModelDisclosure(dst, src http.Header) {
+	copyCleanHeadersFiltered(dst, src, true, false)
+}
+
+func copyCleanHeadersFiltered(dst, src http.Header, allowReceipt bool, allowPoolModelDisclosure bool) {
+	if !allowPoolModelDisclosure {
+		dst.Del(poolModelDisclosureResponseHeader)
+		dst.Del(poolManifestCoreDigestResponseHeader)
+	}
 	for key, values := range src {
 		if strings.EqualFold(key, "Content-Length") || strings.EqualFold(key, "Trailer") {
 			continue
@@ -1683,9 +1708,12 @@ func copyCleanHeadersWithReceipt(dst, src http.Header, allowReceipt bool) {
 			continue
 		}
 		// SPEC-006-R018 (#1816): a pool model's disclosure headers survive
-		// the strip only as the exact literal / 64 lowercase hex.
+		// successful pool-model dispatch only as the exact literal / 64
+		// lowercase hex. Callers that do not have gateway-validated served
+		// pool-model context pass allowPoolModelDisclosure=false so stale or
+		// spoofed upstream values cannot imply an accepted pool route.
 		if value, ok := buyerVisiblePoolModelHeader(key, values); ok {
-			if value != "" {
+			if allowPoolModelDisclosure && value != "" {
 				dst.Set(http.CanonicalHeaderKey(key), value)
 			}
 			continue

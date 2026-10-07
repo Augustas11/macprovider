@@ -1,7 +1,16 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.44 (2026-10-05, relay-blind settled disclosure)
+**Version:** 0.9.47 (2026-10-07, coordinator no-dispatch source exports)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.47 (2026-10-07, issue #1880 — coordinator no-dispatch source exports):**
+- §5.4.3.2 defines a private operator-authenticated coordinator export for strictly bounded no-dispatch terminals, with immutable source provenance, atomic terminal fencing and closed fact projections. This does not promote acceptance or permit raw rejected-input disclosure.
+
+**Change log v0.9.46 (2026-10-07, issue #1880 — source-export authenticity foundation):**
+- §5.4.3.1 defines the producer-signed export envelope and reviewed key registry used as an authenticity building block for pool-model evidence. An authenticated envelope alone proves no refusal, accounting outcome, complete snapshot, or conformance. This version introduces no producer endpoint and no exception to SPEC-017 unserved-input redaction.
+
+**Change log v0.9.45 (2026-10-07, issue #1880 — pool view and refusal isolation):**
+- Clarifies SPEC-006-R018: an authorized pool view contains only that pool's current model entries, excluding global catalog rows and model classes. Pool-model disclosure is committed only for a successfully served response and uses the actual immutable route snapshot. Refusals carry neither pool-model header. SPEC-017 unknown-model redaction and pre-quota pool selection remain unchanged.
 
 **Change log v0.9.44 (2026-10-05, issue #1851 — relay-blind settled disclosure):**
 - §1.6 properties 7 and 9 gain the SPEC-022 v0.3.0 R-10.6 and R-10.7 buyer
@@ -1955,12 +1964,140 @@ Engines differ. Buyer docs MUST say that engines differ in throughput, time to f
 A SPEC-042-R015 pool model is a model a Trusted Pool creator signed into one pool's policy. It is reachable only through the authenticated pool selection of SPEC-042-R002/R010, resolved before quota reservation exactly as for any pool route. Without an authorized selection of that pool, the gateway and coordinator treat a `pool/...` model id exactly as an unknown model: a global route, another pool's route, and an unauthorized pool all get the response they would get for a model that does not exist, so no pool's model set leaks.
 
 1. **Default `/v1/models`.** The default response (§5.3), the tier-1 disclosure (§5.3.1), and `GET /v1/openrouter/models` (§5.3.2) MUST NOT contain a pool model.
-2. **Pool view.** An authenticated `GET /v1/models` request carrying an authorized pool selection lists that pool's current entries and nothing from any other pool. Each pool model is a model object with `id` equal to its `pool_model_id`, `object: "model"`, and a closed `macprovider_pool_model` object with exactly: `pool_id`; `pool_model_id`; `disclosure_class` (`"pool_attested_unverified"`); `disclosure_text` (`"Pool-attested, not network-verified"` or a localization with the same meaning); `runtime_sources` (the entry's `allowed_runtime_sources`); `artifact_hash_algorithm`; `artifact_hash`; `max_context_tokens`; `price` (exactly `prompt_rate_per_mtok`, `prompt_cache_hit_rate_per_mtok`, `completion_rate_per_mtok`, and the `default` row's `global_multiplier_ppm`, the values a new reservation would use under SPEC-005-R015); `price_source` (`"pool_creator_signed"`); `manifest_version`; and `manifest_core_digest`. The object MUST NOT alias a SPEC-010 canonical id, carry a catalog-verified hash status, or imply global availability. An entry whose bindings are all ineligible is still listed, without `is_ready`-style availability claims.
+2. **Pool view.** An authenticated `GET /v1/models` request carrying an authorized pool selection lists only that pool's current entries, excluding global catalog models, model classes, and entries from any other pool. Each pool model is a model object with `id` equal to its `pool_model_id`, `object: "model"`, and a closed `macprovider_pool_model` object with exactly: `pool_id`; `pool_model_id`; `disclosure_class` (`"pool_attested_unverified"`); `disclosure_text` (`"Pool-attested, not network-verified"` or a localization with the same meaning); `runtime_sources` (the entry's `allowed_runtime_sources`); `artifact_hash_algorithm`; `artifact_hash`; `max_context_tokens`; `price` (exactly `prompt_rate_per_mtok`, `prompt_cache_hit_rate_per_mtok`, `completion_rate_per_mtok`, and the `default` row's `global_multiplier_ppm`, the values a new reservation would use under SPEC-005-R015); `price_source` (`"pool_creator_signed"`); `manifest_version`; and `manifest_core_digest`. The object MUST NOT alias a SPEC-010 canonical id, carry a catalog-verified hash status, or imply global availability. An entry whose bindings are all ineligible is still listed, without `is_ready`-style availability claims.
 3. **Chat requests.** A chat request on that pool's authorized route naming a `pool_model_id` is priced under SPEC-005-R015 and routed under SPEC-042-R004/R005. When no member is eligible the existing `pool_no_eligible_member` applies; there is no spill to a catalog model or to global.
-4. **Response disclosure.** Every coordinator response served for a pool model carries `X-MacProvider-Model-Disclosure: pool_attested_unverified` and `X-MacProvider-Pool-Manifest-Core-Digest` set to the route snapshot's 64-lowercase-hex `manifest_core_digest`, next to the existing `X-MacProvider-Engine` (§5.4.2). The gateway forwards each only when it is byte-exactly that literal or 64 lowercase hex respectively, and drops any other value. A response for any other model never carries either header.
+4. **Response disclosure.** Every successful coordinator response served for a pool model carries `X-MacProvider-Model-Disclosure: pool_attested_unverified` and `X-MacProvider-Pool-Manifest-Core-Digest` set to the route snapshot's 64-lowercase-hex `manifest_core_digest`, next to the existing `X-MacProvider-Engine` (§5.4.2). The gateway forwards each only when it is byte-exactly that literal or 64 lowercase hex respectively, and drops any other value. The disclosure is committed at the first successful response write, only after actual provider dispatch, using that attempt's immutable route snapshot. A refused response, including a refusal after selection but before the first successful write, carries neither header. A response for any other model never carries either header. Once a successful streaming response is committed, a later stream failure does not retroactively change its headers.
 5. **Copy.** Buyer docs MUST say that a pool model's identity and price are signed by the pool creator, that the artifact hash names the bytes the provider's CLI hashed and not proof that the serving process loaded them, and that the network does not verify the model (SPEC-042-R004 administrative trust).
 
-Promotion requires tests for: the default lists and the OpenRouter document excluding pool models; the pool view listing only the selected pool's entries with the exact closed object; an unauthorized, other-pool, or global request for a `pool/...` id answering as an unknown model; both disclosure headers on a pool-model response, their absence elsewhere, and the gateway dropping malformed values; and the price fields equalling the SPEC-005-R015 reservation inputs.
+Promotion requires tests for: the default lists and the OpenRouter document excluding pool models; the pool view listing only the selected pool's entries with the exact closed object; an unauthorized, other-pool, or global request for a `pool/...` id answering as an unknown model; both disclosure headers on a successfully served pool-model response with the exact route snapshot digest; their absence on refusals before response commitment and on other models, including stale-selection, failover, and wrong-engine paths; the gateway dropping malformed or refused-response values; and the price fields equalling the SPEC-005-R015 reservation inputs.
+
+#### 5.4.3.1 Source-export authenticity foundation (v0.9.46, #1880)
+
+Pool-model acceptance evidence requires proof from the service that observed
+the fact. The envelope and registry contracts in
+`schemas/source-authenticated-export-envelope-v1.schema.json` and
+`schemas/source-evidence-key-registry-v1.schema.json` define the first
+authenticity layer. The authoritative semantic and cryptographic validator is
+`scripts/source_authenticated_evidence.py`; JSON Schema validation alone is
+insufficient. This layer is private evidence transport, not a new buyer API.
+
+The closed envelope has exactly `schema_version`, `signed`, and `signatures`.
+Its version is `macprovider.source-authenticated-export-envelope.v1` and it
+contains exactly one Ed25519 signature. The signed body version is
+`macprovider.source-authenticated-export.v1`; its exact fields are
+`schema_version`, `producer`, `role`, `instance_id`, `source_sha`, `export_id`,
+`run_id`, `challenge_nonce`, `generated_at`, `request_scopes`, `snapshot`, and
+`records`. Producer is `gateway` or `coordinator`; source identity is a
+40-lowercase-hex reviewed commit, export identity is a UUID, the challenge is
+32 random bytes encoded as canonical unpadded base64url, and generation time
+is UTC with exactly millisecond precision. Request scopes are sorted unique
+64-lowercase-hex opaque commitments. Envelope inputs are capped at 2 MiB,
+records and request scopes at 1,000 each. Unknown envelope fields, duplicate
+JSON keys, floats, unsafe integers, non-ASCII strings and oversized or deeply
+nested inputs are rejected. This restricted canonical subset uses compact
+sorted UTF-8 JSON and makes no claim of general Unicode/number JCS support.
+
+Each signature object has exactly `algorithm` (`ed25519`), `key_id`,
+`signed_sha256`, and `signature`. The digest is SHA-256 of the canonical signed
+body. Ed25519 verifies the bytes
+`macprovider.source-authenticated-export.v1\n` followed by that body; signing
+the digest alone is invalid. The signature is canonical unpadded base64url
+encoding exactly 64 bytes. The actual cryptographic domain, caller expectation
+and registry permission MUST all be
+`macprovider.source-authenticated-export.v1`; a challenge-response key or
+caller-selected alias cannot authorize an export.
+
+The reviewed registry is obtained from verifier source, never from the
+captured envelope or an operator-provided registry override. Its closed
+versioned structure binds each unique key ID to a 32-byte Ed25519 public key,
+producer, deployment instance, permitted roles and actual signature domain,
+UTC validity/revocation bounds, and explicit reviewed source SHA allowlist.
+Duplicate key IDs are invalid. Missing or empty approved registry fails
+closed. Key rotation may retain inactive historical public keys; only the
+selected signer determines current eligibility, and an expired or revoked
+selected signer fails verification. Export generation must fall within that
+signer's validity interval. Private source keys are distinct from provider
+receipt, payout, and static-feed keys and are never capture inputs.
+
+The trusted caller supplies expected producer, role, deployment instance,
+reviewed source commit, run, fresh challenge nonce and verification time. All
+must match the signed body and selected registry entry; the body cannot
+authorize its own source or key. Generation cannot be in the future or outside
+the caller's bounded freshness interval (default 300 seconds). A protected
+acceptance consumer must also establish reviewed release/deployment provenance
+independently and enforce run/challenge use; the foundation performs no
+stateful one-time challenge consumption.
+
+`snapshot` and `records` are opaque canonical objects at this layer. Their
+signature does not establish projection completeness, row absence, a refund,
+dispatch/finality closure, or correspondence to private request intent. A
+future producing-service contract MUST define closed role-specific projections,
+authenticated bounded export access, complete authoritative snapshots, actual
+accounting joins and privacy-preserving intent verification before acceptance
+can consume them. Missing source facts cannot be replaced by an operator's
+labels, empty captures or a protected signer's own signature. No producer
+endpoint or acceptance integration is enabled by this foundation, and
+SPEC-006-R018 remains pending. SPEC-017's blank unserved model rule is
+unchanged; raw rejected model/selector/account input MUST NOT be persisted or
+published through this envelope as a workaround.
+
+#### 5.4.3.2 Coordinator no-dispatch source exports (v0.9.47, #1880)
+
+The coordinator MAY provide `POST /admin/evidence/source-exports/coordinator-v1`
+on its existing private administrative surface, authenticated only by its
+operator-only credential. Buyer, provider, gateway-service, portal and creator
+credentials MUST NOT authorize export. The surface is disabled by default,
+bounded, non-cacheable, and does not broaden public gateway access. Invalid
+or unavailable export requests return constant errors without reflecting raw
+inputs. The closed request, snapshot and record contracts are
+`schemas/coordinator-source-export-request-v1.schema.json`,
+`schemas/coordinator-source-snapshot-v1.schema.json`, and
+`schemas/coordinator-no-dispatch-record-v1.schema.json`.
+
+The request supplies only a run ID, fresh challenge nonce, and bounded private
+lookup scopes binding authenticated account, external request ID, exact
+coordinator internal request ID and a stale-request time fence. These lookup
+identities are ephemeral administrative input and MUST NOT appear in exported
+records, responses, diagnostics or public evidence. Source SHA, instance,
+signer identity, registry and its digest, signature domain and source freshness
+policy are producer-owned reviewed build/release facts, never request or
+reloadable-config selectors. Missing immutable source provenance, fixed
+reviewed registry authorization or matching signing material fails closed.
+The signer uses §5.4.3.1 unchanged with producer `coordinator` and role
+`no_dispatch_refusal`; producer-specific facts belong in its closed snapshot.
+
+This first producer supports only two no-dispatch chat terminals: unknown
+unserved model (`model_not_found_no_dispatch`, status 404), and pool
+unavailability before provider selection (`pool_unavailable_no_dispatch`,
+status 503). Both persist a blank unserved model and the existing constant
+failure message under SPEC-017 §5.2b.2. Historical blank `error_code` is not
+terminal authority. Raw rejected model, prompt, message, selector, account or
+request-identity material MUST NOT be copied into exported evidence. Export
+identity uses distinct domain-separated HMAC commitments over unambiguous
+length-prefixed private identity tuples; a caller's time fence is excluded
+from the source-owned terminal identity.
+
+A `closed_terminal` record requires the request-log row and immutable terminal
+closure to be committed atomically, with exactly one matching source request,
+no provider assignment and zero route, credit, output and receipt-verdict rows.
+A durable database fence MUST prevent subsequent request-scoped settlement
+inserts, updates or deletes. Merely observing zero current rows or an export
+watermark is insufficient. Export rechecks the exact source row, closure,
+active fence and zero settlement facts in one consistent source read
+transaction. Ambiguous, stale, missing, unclosed, changed or unavailable scopes
+fail the whole export; this version signs no partial or synthetic empty proof.
+Optional evidence failure MUST NOT manufacture a closure or change buyer
+accounting behavior.
+
+Every record is strictly schema-validated and binds the matching constant
+terminal kind/status, redaction facts, source-owned opaque identity, zero
+settlement facts and closure timestamp. Unknown fields or inconsistent facts
+fail validation. The first producer proves only those coordinator facts;
+gateway intent, quota/refund, no-forward pre-quota refusals, provider attempts,
+retry/failover, `/v1/models`, pool approval and acceptance finality remain
+separate source obligations. No protected acceptance integration or conformance
+promotion follows from a producer signature alone; SPEC-006-R018 stays pending
+until the complete joined, released and signed journey passes.
 
 ### 5.5 `GET /v1/usage`
 

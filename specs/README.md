@@ -14,7 +14,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-003 | Open Onboarding: Distribution, Lifecycle & Onboarding UX | 0.12.0 | normative | pending | pending: 5 | [SPEC-003-open-onboarding.md](SPEC-003-open-onboarding.md) |
 | SPEC-004 | Smart Router | 0.3.6 | normative | pending | pending corpus migration | [SPEC-004-smart-router.md](SPEC-004-smart-router.md) |
 | SPEC-005 | Billing, Settlement, and Provider Rewards | 0.6.17 | normative | complete | conformant: 2, pending: 13 | [SPEC-005-billing.md](SPEC-005-billing.md) |
-| SPEC-006 | Buyer API Gateway: Mac Provider's first public buyer surface | 0.9.44 | normative | complete | conformant: 2, pending: 16 | [SPEC-006-buyer-api.md](SPEC-006-buyer-api.md) |
+| SPEC-006 | Buyer API Gateway: Mac Provider's first public buyer surface | 0.9.47 | normative | complete | conformant: 2, pending: 16 | [SPEC-006-buyer-api.md](SPEC-006-buyer-api.md) |
 | SPEC-007 | Internal Operator Protocol Explorer | 0.5.1 | normative | pending | pending corpus migration | [SPEC-007-explorer.md](SPEC-007-explorer.md) |
 | SPEC-008 | Tier-2 Trust Layer | 0.7.0 | normative | pending | pending: 4 | [SPEC-008-tier2.md](SPEC-008-tier2.md) |
 | SPEC-009 | MacProvider Console v2 | 0.1 | normative | pending | pending corpus migration | [SPEC-009-console-v2.md](SPEC-009-console-v2.md) |
@@ -55,7 +55,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-044 | Malibu Model Catalog Economics | 0.2.10 | draft | complete | pending: 12 | [SPEC-044-malibu-model-catalog-economics.md](SPEC-044-malibu-model-catalog-economics.md) |
 | SPEC-045 | Local Consumer Endpoint Mode | 0.1.0 | draft | complete | conformant: 4, pending: 4 | [SPEC-045-local-consumer-endpoint-mode.md](SPEC-045-local-consumer-endpoint-mode.md) |
 | SPEC-046 | Provider BYOM Discovery | 0.5.0 | draft | complete | conformant: 6, pending: 3 | [SPEC-046-provider-byom-discovery.md](SPEC-046-provider-byom-discovery.md) |
-| SPEC-047 | Network Model Admission | 0.2.7 | draft | complete | conformant: 8, pending: 4 | [SPEC-047-network-model-admission.md](SPEC-047-network-model-admission.md) |
+| SPEC-047 | Network Model Admission | 0.2.7 | draft | complete | conformant: 7, pending: 5 | [SPEC-047-network-model-admission.md](SPEC-047-network-model-admission.md) |
 | SPEC-048 | Native Multi-Token Prediction Serving | 0.1.26 | draft | complete | pending: 16 | [SPEC-048-native-mtp-serving.md](SPEC-048-native-mtp-serving.md) |
 | SPEC-049 | Operator-Constrained Privacy Class | 0.1.5 | draft | complete | pending: 23 | [SPEC-049-operator-constrained-privacy-class.md](SPEC-049-operator-constrained-privacy-class.md) |
 <!-- AUTOGEN:spec-index END -->
