@@ -13,15 +13,8 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 )
 
-// #1690 VM e2e F-4: the settlement attempt output insert read (overlap
-// SELECT) and then wrote in a deferred transaction on the shared handle,
-// while route snapshots commit on their own handle to the same file (as
-// cmd/coordinator wires routeSnapshotDB). A commit between the read and the
-// write fails the upgrade with SQLITE_BUSY_SNAPSHOT (517) or SQLITE_BUSY
-// without honouring busy_timeout, and the enforce credit loses its evidence.
-// Concurrent writers must leave every attempt output recorded.
-func TestInsertSettlementAttemptOutputSurvivesConcurrentRouteSnapshotWriter(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+func newContentionStoreWithRouteSnapshotJournal(t *testing.T, dbPath string) (*Store, *sql.DB) {
+	t.Helper()
 	reqStore, err := requestlog.OpenStore(dbPath)
 	if err != nil {
 		t.Fatal(err)
@@ -39,8 +32,35 @@ func TestInsertSettlementAttemptOutputSurvivesConcurrentRouteSnapshotWriter(t *t
 	routeSnapshotDB.SetMaxIdleConns(4)
 	t.Cleanup(func() { _ = routeSnapshotDB.Close() })
 	store.SetRouteSnapshotDB(routeSnapshotDB)
+	routeSnapshotJournalDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(dbPath+".route-snapshots"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routeSnapshotJournalDB.SetMaxOpenConns(1)
+	routeSnapshotJournalDB.SetMaxIdleConns(1)
+	t.Cleanup(func() { _ = routeSnapshotJournalDB.Close() })
+	store.SetRouteSnapshotJournalDB(routeSnapshotJournalDB)
+	if err := store.InitRouteSnapshotJournal(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	// Production wiring (cmd/coordinator routeSnapshotSQLiteBusyTimeout).
 	store.SetRouteSnapshotBusyTimeout(500 * time.Millisecond)
+	return store, routeSnapshotJournalDB
+}
+
+// #1690 VM e2e F-4: the settlement attempt output insert read (overlap
+// SELECT) and then wrote in a deferred transaction on the shared handle,
+// while route snapshots committed a primary-table mirror on their own handle
+// to the same file. A commit between the read and the write failed the upgrade
+// with SQLITE_BUSY_SNAPSHOT (517) or SQLITE_BUSY without honouring
+// busy_timeout, and the enforce credit lost its evidence. Production now
+// synchronously records the route snapshot in the dedicated journal before the
+// best-effort primary mirror, but the mirror still writes the shared file under
+// pressure. Concurrent writers must leave every attempt output and every
+// authoritative route-snapshot journal row recorded.
+func TestInsertSettlementAttemptOutputSurvivesConcurrentRouteSnapshotWriter(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	store, routeSnapshotJournalDB := newContentionStoreWithRouteSnapshotJournal(t, dbPath)
 
 	const workers, perWorker = 4, 40
 	var wg sync.WaitGroup
@@ -92,5 +112,12 @@ func TestInsertSettlementAttemptOutputSurvivesConcurrentRouteSnapshotWriter(t *t
 	}
 	if outputs != workers*perWorker {
 		t.Fatalf("settlement attempt outputs=%d, want %d", outputs, workers*perWorker)
+	}
+	var journalRows int
+	if err := routeSnapshotJournalDB.QueryRow(`SELECT COUNT(*) FROM settlement_route_snapshot_journal WHERE request_id LIKE 'req-route-%'`).Scan(&journalRows); err != nil {
+		t.Fatal(err)
+	}
+	if journalRows != workers*perWorker {
+		t.Fatalf("route snapshot journal rows=%d, want %d", journalRows, workers*perWorker)
 	}
 }
