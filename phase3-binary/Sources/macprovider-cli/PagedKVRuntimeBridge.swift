@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import MLX
 import MLXLMCommon
@@ -9,6 +10,43 @@ enum PagedKVContiguousCacheBridgeError: Error, Equatable {
     case invalidLayerState
     case blockTableMismatch
     case trimShortfall
+}
+
+enum NativeMTPStateDigestPhase: String, Sendable {
+    case afterProposal = "after_proposal"
+    case afterVerify = "after_verify"
+    case beforeFinalize = "before_finalize"
+    case afterFinalize = "after_finalize"
+    case abort = "abort"
+}
+
+struct NativeMTPStateDigestRecord: Equatable, Sendable {
+    let requestID: String
+    let phase: NativeMTPStateDigestPhase
+    let digestSHA256: String
+    let cacheDigestSHA256: String
+    let drafterDigestSHA256: String?
+    let pendingTargetDigestSHA256: String?
+    let committedKVTokenCount: Int
+    let proposedTokens: Int
+    let committedProposalTokens: Int?
+}
+
+final class NativeMTPStateDigestObserver: @unchecked Sendable {
+    private let lock = NSLock()
+    private var records: [NativeMTPStateDigestRecord] = []
+
+    func record(_ record: NativeMTPStateDigestRecord) {
+        lock.lock()
+        records.append(record)
+        lock.unlock()
+    }
+
+    func snapshot() -> [NativeMTPStateDigestRecord] {
+        lock.lock()
+        defer { lock.unlock() }
+        return records
+    }
 }
 
 struct PagedKVContiguousCacheHandoff {
@@ -611,6 +649,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     private var activeOperations = 0
     private var cancelRequested = false
     private var cancellationWaiters: [CheckedContinuation<Void, Never>] = []
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    private var labNativeMTPStateDigestObserver: NativeMTPStateDigestObserver?
+    #endif
 
     init(
         container: ModelContainer,
@@ -1145,6 +1186,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 requestIDs: inputs.map(\.requestID),
                 transactions: pendingByRequestID.mapValues { $0 }
             )
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            try self.recordNativeMTPStateDigest(
+                phase: .afterVerify,
+                requestIDs: inputs.map(\.requestID),
+                transactions: pendingByRequestID
+            )
+            #endif
             for (index, input) in inputs.enumerated() {
                 try self.setRowState(rowStates[index], for: input.requestID, binding: input.binding)
             }
@@ -1191,11 +1239,25 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     try self.validateNativeMTPFinalizeInputs(
                         presentInputs,
                         transactions: transactions)
+                    #if DEBUG || MACPROVIDER_LAB_HARNESS
+                    try self.recordNativeMTPStateDigest(
+                        phase: .abort,
+                        inputs: presentInputs,
+                        transactions: transactions
+                    )
+                    #endif
                 }
                 return
             }
             let transactions = try self.consumeNativeMTPPendingTransactions(for: inputs)
             try self.validateNativeMTPFinalizeInputs(inputs, transactions: transactions)
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            try self.recordNativeMTPStateDigest(
+                phase: .beforeFinalize,
+                inputs: inputs,
+                transactions: transactions
+            )
+            #endif
             let committing = inputs.filter(\.shouldCommit).compactMap { input in
                 transactions[input.requestID].map { (input, $0) }
             }
@@ -1234,8 +1296,23 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             for (input, _) in committing {
                 self.invalidateDecodeSession(containing: input.requestID)
             }
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            try self.recordNativeMTPStateDigest(
+                phase: .afterFinalize,
+                inputs: inputs,
+                transactions: transactions
+            )
+            #endif
         }
     }
+
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    func installLabNativeMTPStateDigestObserver(_ observer: NativeMTPStateDigestObserver?) {
+        lock.lock()
+        labNativeMTPStateDigestObserver = observer
+        lock.unlock()
+    }
+    #endif
 
     func finish(requestID: String) {
         invalidateDecodeSession(containing: requestID)
@@ -2268,6 +2345,247 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             }
         }
     }
+
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    private func recordNativeMTPStateDigest(
+        phase: NativeMTPStateDigestPhase,
+        requestIDs: [String],
+        transactions: [String: NativeMTPPendingTransaction]
+    ) throws {
+        lock.lock()
+        let observer = labNativeMTPStateDigestObserver
+        lock.unlock()
+        guard let observer else { return }
+        for requestID in requestIDs {
+            guard let transaction = transactions[requestID] else { continue }
+            let digest = try nativeMTPStateDigest(
+                requestID: requestID,
+                transaction: transaction
+            )
+            observer.record(NativeMTPStateDigestRecord(
+                requestID: requestID,
+                phase: phase,
+                digestSHA256: digest.combined,
+                cacheDigestSHA256: digest.cache,
+                drafterDigestSHA256: digest.drafter,
+                pendingTargetDigestSHA256: digest.pendingTarget,
+                committedKVTokenCount: rowStateTokenCount(for: requestID),
+                proposedTokens: transaction.proposalTokenCount,
+                committedProposalTokens: nil
+            ))
+        }
+    }
+
+    private func recordNativeMTPStateDigest(
+        phase: NativeMTPStateDigestPhase,
+        inputs: [ContinuousBatchNativeMTPFinalizeInput],
+        transactions: [String: NativeMTPPendingTransaction]
+    ) throws {
+        lock.lock()
+        let observer = labNativeMTPStateDigestObserver
+        lock.unlock()
+        guard let observer else { return }
+        for input in inputs {
+            guard let transaction = transactions[input.requestID] else { continue }
+            let digest = try nativeMTPStateDigest(
+                requestID: input.requestID,
+                transaction: transaction
+            )
+            observer.record(NativeMTPStateDigestRecord(
+                requestID: input.requestID,
+                phase: phase,
+                digestSHA256: digest.combined,
+                cacheDigestSHA256: digest.cache,
+                drafterDigestSHA256: digest.drafter,
+                pendingTargetDigestSHA256: digest.pendingTarget,
+                committedKVTokenCount: rowStateTokenCount(for: input.requestID),
+                proposedTokens: input.proposalTokenCount,
+                committedProposalTokens: input.committedProposalTokenCount
+            ))
+        }
+    }
+
+    private func rowStateTokenCount(for requestID: String) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let row = rows[requestID] else { return 0 }
+        return row.caches.map(\.offset).max() ?? 0
+    }
+
+    private func nativeMTPStateDigest(
+        requestID: String,
+        transaction: NativeMTPPendingTransaction
+    ) throws -> (combined: String, cache: String, drafter: String?, pendingTarget: String?) {
+        let cacheDigest = try rowCacheStateDigest(requestID: requestID)
+        let drafterDigest = try nativeMTPDrafterDigest(requestID: requestID)
+        let pendingDigest = try nativeMTPPendingTargetDigest(transaction)
+        var hasher = SHA256()
+        Self.update(&hasher, label: "schema", value: "macprovider.native-mtp-state-observer.v1")
+        Self.update(&hasher, label: "request_id", value: requestID)
+        Self.update(&hasher, label: "cache", value: cacheDigest)
+        Self.update(&hasher, label: "drafter", value: drafterDigest ?? "none")
+        Self.update(&hasher, label: "pending_target", value: pendingDigest ?? "none")
+        return (
+            combined: Self.hexString(hasher.finalize()),
+            cache: cacheDigest,
+            drafter: drafterDigest,
+            pendingTarget: pendingDigest
+        )
+    }
+
+    private func rowCacheStateDigest(requestID: String) throws -> String {
+        lock.lock()
+        let row = rows[requestID]
+        lock.unlock()
+        guard let row else {
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_observer_missing_row_state")
+        }
+        var hasher = SHA256()
+        Self.update(&hasher, label: "kind", value: "row-cache")
+        for (layerIndex, cache) in row.caches.enumerated() {
+            Self.update(&hasher, label: "layer", value: String(layerIndex))
+            Self.update(&hasher, label: "type", value: String(describing: type(of: cache)))
+            Self.update(&hasher, label: "offset", value: String(cache.offset))
+            guard let cacheKind = CacheKind.recognized(from: cache) else {
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_observer_unsupported_cache_kind")
+            }
+            if case .slidingWindow = cacheKind {
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_observer_unsupported_sliding_window_state")
+            }
+            let logicalTokens: Int? = cacheKind == .pagedAttention ? cache.offset : nil
+            let state = cache.state
+            Self.update(&hasher, label: "slot_count", value: String(state.count))
+            for (slotIndex, array) in state.enumerated() {
+                try Self.updateArrayDigest(
+                    &hasher,
+                    label: "slot_\(slotIndex)",
+                    array: array,
+                    logicalTokens: logicalTokens
+                )
+            }
+        }
+        if let state = row.state {
+            let keys = state.keys.sorted()
+            Self.update(&hasher, label: "lm_state_count", value: String(keys.count))
+            for key in keys {
+                Self.update(&hasher, label: "lm_state_key", value: key)
+                try Self.updateArrayDigest(&hasher, label: "lm_state_value", array: state[key]!)
+            }
+        } else {
+            Self.update(&hasher, label: "lm_state_count", value: "0")
+        }
+        return Self.hexString(hasher.finalize())
+    }
+
+    private func nativeMTPDrafterDigest(requestID: String) throws -> String? {
+        lock.lock()
+        let state = nativeMTPDrafterStates[requestID]
+        let seed = nativeMTPDrafterSeedTokens[requestID]
+        let pendingColumns = nativeMTPPendingDrafterColumns[requestID] ?? []
+        lock.unlock()
+        guard state != nil || seed != nil || !pendingColumns.isEmpty else { return nil }
+        var hasher = SHA256()
+        Self.update(&hasher, label: "kind", value: "drafter")
+        if let state {
+            Self.update(&hasher, label: "next_position", value: String(state.nextPosition))
+            Self.update(&hasher, label: "proposal_appended", value: String(state.proposalAppended))
+            for (layerIndex, cache) in state.cache.enumerated() {
+                Self.update(&hasher, label: "layer", value: String(layerIndex))
+                for (slotIndex, array) in cache.state.enumerated() {
+                    try Self.updateArrayDigest(&hasher, label: "slot_\(slotIndex)", array: array)
+                }
+            }
+        }
+        Self.update(&hasher, label: "seed", value: seed.map(String.init) ?? "none")
+        Self.update(&hasher, label: "pending_column_count", value: String(pendingColumns.count))
+        for (index, column) in pendingColumns.enumerated() {
+            Self.update(&hasher, label: "pending_token_\(index)", value: String(column.token))
+            try Self.updateArrayDigest(&hasher, label: "pending_hidden_\(index)", array: column.hidden)
+        }
+        return Self.hexString(hasher.finalize())
+    }
+
+    private func nativeMTPPendingTargetDigest(_ transaction: NativeMTPPendingTransaction) throws -> String? {
+        var hasher = SHA256()
+        Self.update(&hasher, label: "kind", value: "pending-target")
+        Self.update(&hasher, label: "proposal_count", value: String(transaction.proposalTokenCount))
+        Self.update(&hasher, label: "current_token", value: String(transaction.currentToken))
+        Self.update(&hasher, label: "proposal_tokens", value: transaction.proposalTokens.map(String.init).joined(separator: ","))
+        try Self.updateArrayDigest(&hasher, label: "last_hidden", array: transaction.targetState.lastHidden)
+        if let positionDeltas = transaction.targetState.positionDeltas {
+            try Self.updateArrayDigest(&hasher, label: "position_deltas", array: positionDeltas)
+        } else {
+            Self.update(&hasher, label: "position_deltas", value: "none")
+        }
+        for (layerIndex, layer) in transaction.layers.enumerated() {
+            Self.update(&hasher, label: "layer", value: String(layerIndex))
+            Self.update(&hasher, label: "input_count", value: String(layer.inputTokenCount))
+            Self.update(&hasher, label: "proposal_count", value: String(layer.proposalTokenCount))
+        }
+        return Self.hexString(hasher.finalize())
+    }
+
+    private static func updateArrayDigest(
+        _ hasher: inout SHA256,
+        label: String,
+        array: MLXArray
+    ) throws {
+        try updateArrayDigest(&hasher, label: label, array: array, logicalTokens: nil)
+    }
+
+    private static func updateArrayDigest(
+        _ hasher: inout SHA256,
+        label: String,
+        array: MLXArray,
+        logicalTokens: Int?
+    ) throws {
+        switch array.dtype {
+        case .float16, .bfloat16, .float32, .int32, .int64, .uint32, .uint64, .bool:
+            break
+        default:
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_observer_unsupported_dtype")
+        }
+        let canonical = try canonicalLogicalArray(array, logicalTokens: logicalTokens)
+        let data = canonical.asData(access: .copy)
+        update(&hasher, label: "\(label).dtype", value: String(describing: data.dType))
+        update(&hasher, label: "\(label).dtype_bits", value: String(canonical.itemSize * 8))
+        update(&hasher, label: "\(label).shape", value: data.shape.map(String.init).joined(separator: "x"))
+        update(&hasher, label: "\(label).bytes", data: data.data)
+    }
+
+    private static func canonicalLogicalArray(
+        _ array: MLXArray,
+        logicalTokens: Int?
+    ) throws -> MLXArray {
+        guard let logicalTokens else { return array }
+        guard logicalTokens >= 0, array.ndim >= 3 else {
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_observer_invalid_kv_shape")
+        }
+        let sequenceAxis = array.ndim - 2
+        guard logicalTokens <= array.dim(sequenceAxis) else {
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_observer_logical_length_exceeds_state")
+        }
+        if logicalTokens == array.dim(sequenceAxis) { return array }
+        return array[0 ..< logicalTokens, axis: sequenceAxis]
+    }
+
+    private static func update(_ hasher: inout SHA256, label: String, value: String) {
+        update(&hasher, label: label, data: Data(value.utf8))
+    }
+
+    private static func update(_ hasher: inout SHA256, label: String, data: Data) {
+        hasher.update(data: Data(label.utf8))
+        hasher.update(data: Data([0]))
+        var count = UInt64(data.count).littleEndian
+        withUnsafeBytes(of: &count) { hasher.update(bufferPointer: $0) }
+        hasher.update(data: data)
+        hasher.update(data: Data([0xff]))
+    }
+
+    private static func hexString<S: Sequence>(_ bytes: S) -> String where S.Element == UInt8 {
+        bytes.map { String(format: "%02x", $0) }.joined()
+    }
+    #endif
 
     private func storeDecodeSession(_ session: DecodeSession?) {
         lock.lock()

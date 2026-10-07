@@ -797,6 +797,76 @@ struct ContinuousBatchNativeMTPFinalizeInput: Sendable, Equatable {
     let shouldCommit: Bool
 }
 
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+enum NativeMTPLabPhaseTrapPhase: String, Sendable {
+    case afterProposal = "after_proposal"
+    case afterVerify = "after_verify"
+    case beforeFinalize = "before_finalize"
+}
+
+final class NativeMTPLabPhaseTrap: @unchecked Sendable {
+    struct Event: Equatable, Sendable {
+        let phase: NativeMTPLabPhaseTrapPhase
+        let requestIDs: [String]
+        let cancelledRequestIDs: [String]
+    }
+
+    private let lock = NSLock()
+    private var cancellations: [NativeMTPLabPhaseTrapPhase: Set<String>]
+    private var events: [Event] = []
+
+    init(cancellations: [NativeMTPLabPhaseTrapPhase: Set<String>]) {
+        self.cancellations = cancellations
+    }
+
+    func trigger(phase: NativeMTPLabPhaseTrapPhase, requestIDs: [String]) -> Set<String> {
+        lock.lock()
+        defer { lock.unlock() }
+        let cancelled = (cancellations[phase] ?? []).intersection(requestIDs)
+        if !cancelled.isEmpty {
+            cancellations[phase]?.subtract(cancelled)
+        }
+        events.append(Event(
+            phase: phase,
+            requestIDs: requestIDs,
+            cancelledRequestIDs: cancelled.sorted()
+        ))
+        return cancelled
+    }
+
+    func snapshot() -> [Event] {
+        lock.lock()
+        defer { lock.unlock() }
+        return events
+    }
+}
+
+final class NativeMTPLabPostoutputFault: @unchecked Sendable {
+    private let lock = NSLock()
+    private var requestIDs: Set<String>
+    private var fired: [String] = []
+
+    init(requestIDs: Set<String>) {
+        self.requestIDs = requestIDs
+    }
+
+    func shouldFault(requestIDs candidates: [String]) -> Set<String> {
+        lock.lock()
+        defer { lock.unlock() }
+        let faulted = requestIDs.intersection(candidates)
+        requestIDs.subtract(faulted)
+        fired += faulted.sorted()
+        return faulted
+    }
+
+    func snapshot() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return fired
+    }
+}
+#endif
+
 struct ContinuousBatchTerminalKVCommitInput: Sendable, Equatable {
     let requestID: String
     let currentToken: Int
@@ -1712,6 +1782,8 @@ actor ContinuousBatchScheduler {
     #if DEBUG || MACPROVIDER_LAB_HARNESS
     private var labNativeMTPLoadGateRecorder: NativeMTPLoadGateRecorder?
     private var labNativeMTPProposalOverride: NativeMTPLabProposalOverride?
+    private var labNativeMTPPhaseTrap: NativeMTPLabPhaseTrap?
+    private var labNativeMTPPostoutputFault: NativeMTPLabPostoutputFault?
     /// Lab-only batch-composition fence. The journey harness installs the exact
     /// request order before submitting a batch; the pump stays stopped until
     /// every named row is queued, then consumes them in that order.
@@ -3140,6 +3212,18 @@ actor ContinuousBatchScheduler {
             }
             return
         }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        let afterProposalCancelled = labNativeMTPPhaseTrap?.trigger(
+            phase: .afterProposal,
+            requestIDs: preReserved.map { $0.row.request.id }
+        ) ?? []
+        if !afterProposalCancelled.isEmpty {
+            cancelledIDs.formUnion(preReserved.map { $0.row.request.id })
+            await abortPreReservedNativeMTPRows(preReserved)
+            await processCancellations()
+            return
+        }
+        #endif
         let stalePreReservedRows = staleNativeMTPRows(preReserved.map(\.row))
         guard stalePreReservedRows.isEmpty else {
             await abortPreReservedNativeMTPRows(preReserved)
@@ -3312,6 +3396,28 @@ actor ContinuousBatchScheduler {
             }
             return
         }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        let afterVerifyCancelled = labNativeMTPPhaseTrap?.trigger(
+            phase: .afterVerify,
+            requestIDs: prepared.map { $0.row.request.id }
+        ) ?? []
+        if !afterVerifyCancelled.isEmpty {
+            cancelledIDs.formUnion(prepared.map { $0.row.request.id })
+            let abortError: (any Error)?
+            do {
+                try await abortNativeMTPRound(prepared)
+                abortError = nil
+            } catch {
+                abortError = error
+            }
+            if let abortError {
+                record(.cleanupFailed)
+                ContinuousBatchingPolicy.logForwardFailed(abortError)
+            }
+            await processCancellations()
+            return
+        }
+        #endif
         let stalePreparedRows = staleNativeMTPRows(prepared.map(\.row))
         guard stalePreparedRows.isEmpty else {
             let abortError: (any Error)?
@@ -3372,6 +3478,53 @@ actor ContinuousBatchScheduler {
             }
             return
         }
+
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        let postoutputFaulted = labNativeMTPPostoutputFault?.shouldFault(
+            requestIDs: prepared.filter { nativeMTPRowHasBuyerVisibleOutput($0.row) }.map { $0.row.request.id }
+        ) ?? []
+        if !postoutputFaulted.isEmpty {
+            recordNativeMTPPostoutputFailureIfVisible(
+                sink: nativeMTPStatusSink,
+                rows: prepared.filter { postoutputFaulted.contains($0.row.request.id) }.map(\.row)
+            )
+            let abortError: (any Error)?
+            do {
+                try await abortNativeMTPRound(prepared)
+                abortError = nil
+            } catch {
+                abortError = error
+            }
+            record(.batchForwardFailed)
+            if let abortError {
+                ContinuousBatchingPolicy.logForwardFailed(abortError)
+            }
+            for item in prepared {
+                if let removed = activeDecode.removeValue(forKey: item.row.request.id) {
+                    let released = await release(removed.handle)
+                    finish(
+                        removed,
+                        status: released ? .batchFailed : .requestFailed,
+                        errorCode: released
+                            ? (abortError == nil
+                                ? "continuous_batching_native_mtp_lab_postoutput_fault"
+                                : "continuous_batching_native_mtp_abort_failed")
+                            : "continuous_batching_cleanup_failed"
+                    )
+                    if !released { return }
+                }
+            }
+            return
+        }
+
+        let beforeFinalizeCancelled = labNativeMTPPhaseTrap?.trigger(
+            phase: .beforeFinalize,
+            requestIDs: prepared.map { $0.row.request.id }
+        ) ?? []
+        if !beforeFinalizeCancelled.isEmpty {
+            cancelledIDs.formUnion(beforeFinalizeCancelled)
+        }
+        #endif
 
         var acceptedByID: [String: NativeMTPAcceptedRow] = [:]
         for accepted in acceptedRows {
@@ -3718,6 +3871,29 @@ actor ContinuousBatchScheduler {
     /// boundary step. Never installed outside lab builds.
     func installLabNativeMTPProposalOverride(_ override: NativeMTPLabProposalOverride?) {
         labNativeMTPProposalOverride = override
+    }
+
+
+    /// Lab-only journey hook: attach the backend state digest observer that
+    /// proves hidden KV/recurrent state across verification and finalize.
+    /// Returns false when this scheduler is not backed by the native paged-KV
+    /// shared-forward backend.
+    func installLabNativeMTPStateDigestObserver(_ observer: NativeMTPStateDigestObserver?) -> Bool {
+        guard let pagedBackend = backend as? PagedKVSharedForwardBackend else { return false }
+        pagedBackend.installLabNativeMTPStateDigestObserver(observer)
+        return true
+    }
+
+    /// Lab-only: inject cancellation at precise native-MTP round boundaries
+    /// before the backend finalize commit point.
+    func installLabNativeMTPPhaseTrap(_ trap: NativeMTPLabPhaseTrap?) {
+        labNativeMTPPhaseTrap = trap
+    }
+
+    /// Lab-only: fail a native row after it already has buyer-visible output,
+    /// proving the run records post-output failures without retry stitching.
+    func installLabNativeMTPPostoutputFault(_ fault: NativeMTPLabPostoutputFault?) {
+        labNativeMTPPostoutputFault = fault
     }
 
     /// Lab-only: hold the pump until every named request is queued, then order

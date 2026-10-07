@@ -131,6 +131,10 @@ private final class NativeMTPJourneyRunner {
         }
         let gateRecorder = NativeMTPLoadGateRecorder()
         _ = await native.installLabNativeMTPLoadGateRecorder(gateRecorder)
+        let stateObserver = NativeMTPStateDigestObserver()
+        guard await native.installLabNativeMTPStateDigestObserver(stateObserver) else {
+            throw NativeMTPHardwareE2EError.assertionFailed("native runtime cannot install native-MTP state digest observer")
+        }
 
         // A throwing step is a failed step, recorded with its error; the run
         // continues so one failure does not hide the others.
@@ -149,7 +153,7 @@ private final class NativeMTPJourneyRunner {
             try await serialOracle(ordinary: ordinary, native: native, recorder: recorder, proposalDepth: fixture.admission.maxProposalDepth)
         }
         await run("step-05-cache-state-boundary") {
-            try await cacheStateBoundary(ordinary: ordinary, native: native, recorder: recorder, override: override)
+            try await cacheStateBoundary(ordinary: ordinary, native: native, recorder: recorder, override: override, stateObserver: stateObserver)
         }
         await run("step-06-streaming-stop") {
             try await streamingStop(ordinary: ordinary, native: native, recorder: recorder)
@@ -287,12 +291,10 @@ private final class NativeMTPJourneyRunner {
         ordinary: ModelRuntime,
         native: ModelRuntime,
         recorder: NativeMTPHardwareAdmissionRecorder,
-        override: NativeMTPLabProposalOverride
+        override: NativeMTPLabProposalOverride,
+        stateObserver: NativeMTPStateDigestObserver
     ) async throws -> NativeMTPJourneyStep {
         var step = NativeMTPJourneyStep(id: "step-05-cache-state-boundary")
-        step.uncovered = [
-            "hidden KV/hybrid-state callback parity after each forced rejection; labTokenProbe exposes committed tokens, terminal status, and native counters but not an independent hidden-state snapshot",
-        ]
         let cases = [
             ("journey-reject-all-0", "Tell a detailed story about a lighthouse keeper (journey-reject-all-0)."),
             ("journey-boundary-0", "Tell a detailed story about a lighthouse keeper (journey-boundary-0)."),
@@ -351,6 +353,22 @@ private final class NativeMTPJourneyRunner {
             step.check("\(id).state_probe_terminal_equal", nativeProbe.terminalStatus == oracleProbe.terminalStatus)
             step.check("\(id).state_probe_native_counters_present", nativeProbe.nativeMTPCounters != nil)
             step.check("\(id).token_counter_terminal_digest_parity", stateDigest != nil && stateDigest == oracleStateDigest)
+            let stateRecords = stateObserver.snapshot().filter { $0.requestID == id }
+            let phases = Set(stateRecords.map(\.phase))
+            let afterVerify = stateRecords.filter { $0.phase == .afterVerify }
+            let terminalPhasePresent = phases.contains(.afterFinalize) || phases.contains(.abort)
+            step.check("\(id).state_observer_records", !stateRecords.isEmpty)
+            step.check("\(id).state_observer_after_verify", !afterVerify.isEmpty)
+            step.check("\(id).state_observer_terminal_phase", terminalPhasePresent)
+            step.check("\(id).state_observer_raw_digest_shape", stateRecords.allSatisfy {
+                isSHA256Hex($0.digestSHA256)
+                    && isSHA256Hex($0.cacheDigestSHA256)
+                    && ($0.drafterDigestSHA256.map { isSHA256Hex($0) } ?? true)
+                    && ($0.pendingTargetDigestSHA256.map { isSHA256Hex($0) } ?? true)
+            })
+            if id.hasPrefix("journey-reject-all-") {
+                step.check("\(id).state_observer_reject_abort", phases.contains(.abort))
+            }
             step.details[id] = [
                 "forced_rounds": forced,
                 "proposed": delta.proposedTokens,
@@ -358,6 +376,10 @@ private final class NativeMTPJourneyRunner {
                 "rejected": delta.rejectedTokens,
                 "token_counter_terminal_digest": stateDigest ?? "",
                 "state_probe_tokens": nativeProbe.generatedTokens.count,
+                "state_observer_phases": Array(phases.map(\.rawValue)).sorted(),
+                "state_observer_record_count": stateRecords.count,
+                "state_observer_latest_cache_sha256": stateRecords.last?.cacheDigestSHA256 ?? "",
+                "state_observer_latest_target_sha256": stateRecords.last?.pendingTargetDigestSHA256 ?? "",
             ]
         }
         return step
@@ -401,12 +423,77 @@ private final class NativeMTPJourneyRunner {
         step.check("stop_terminal_observed", terminals["journey-stream-stop"] == "stop")
         step.check("length_terminal_observed", terminals["journey-stream-length"] == "length")
         step.check("eos_terminal_observed", terminals["journey-stream-eos"] == "stop")
-        step.uncovered = [
-            "stop string verified to span a proposal/round boundary",
-            "early consumer stop (covered only as step-09 cancellation)",
-            "post-output injected failure with no retry or stitching",
-        ]
+
+        let earlyStopID = "journey-stream-early-consumer-stop"
+        let earlyStopRequest = try makeRequest(
+            id: earlyStopID,
+            prompt: "Write a long numbered explanation of how sailors navigate by stars.",
+            maxTokens: 512,
+            temperature: 0,
+            topP: 1,
+            stream: true
+        )
+        let earlyStopChunks = NativeMTPJourneyCounter()
+        let earlyStopHandle = try await native.acquireRequestHandle(earlyStopRequest)
+        var earlyStopCancelled = false
+        var earlyStopCompleted = false
+        do {
+            _ = try await native.stream(
+                earlyStopRequest,
+                with: earlyStopHandle,
+                shouldCancel: { earlyStopChunks.value >= 4 }
+            ) { chunk in
+                if case .content(let text) = chunk, !text.isEmpty { earlyStopChunks.increment() }
+            }
+            earlyStopCompleted = true
+        } catch is CancellationError {
+            earlyStopCancelled = true
+        } catch {
+            step.details["early_consumer_stop_error"] = String(describing: error)
+        }
+        await native.unregisterInFlight(earlyStopHandle.registrationID)
+        let earlyStopIdle = try await waitForSchedulerIdle(native)
+        step.check("early_consumer_stop.native_admitted", lastPath(recorder, earlyStopID) == .nativeMTP)
+        step.check("early_consumer_stop.after_visible_output", earlyStopChunks.value >= 4)
+        step.check("early_consumer_stop.cancelled_not_completed", earlyStopCancelled && !earlyStopCompleted)
+        step.check("early_consumer_stop.scheduler_released_row", earlyStopIdle)
+        let faultID = "journey-stream-postoutput-fault"
+        let fault = NativeMTPLabPostoutputFault(requestIDs: [faultID])
+        let faultInstalled = await native.installLabNativeMTPPostoutputFault(fault)
+        let faultBefore = await native.currentSnapshot().nativeMTPStatus
+        let faultRequest = try makeRequest(
+            id: faultID,
+            prompt: "Write a long numbered field guide to constellations used by navigators.",
+            maxTokens: 512,
+            temperature: 0,
+            topP: 1,
+            stream: true
+        )
+        var faultChunks = 0
+        var faultCompleted = false
+        var faultErrored = false
+        do {
+            _ = try await streamCollect(faultRequest, runtime: native) { piece in
+                if !piece.isEmpty { faultChunks += 1 }
+            }
+            faultCompleted = true
+        } catch {
+            faultErrored = true
+            step.details["postoutput_fault_error"] = String(describing: error)
+        }
+        _ = await native.installLabNativeMTPPostoutputFault(nil)
+        let faultAfter = await native.currentSnapshot().nativeMTPStatus
+        step.check("postoutput_fault.installed", faultInstalled)
+        step.check("postoutput_fault.native_admitted", lastPath(recorder, faultID) == .nativeMTP)
+        step.check("postoutput_fault.after_visible_output", faultChunks > 0)
+        step.check("postoutput_fault.failed_not_completed", faultErrored && !faultCompleted)
+        step.check("postoutput_fault.counter_incremented", faultAfter.postoutputFailures > faultBefore.postoutputFailures)
+        step.check("postoutput_fault.hook_fired", fault.snapshot().contains(faultID))
+
         step.details["terminals"] = terminals
+        step.details["early_consumer_stop_chunks"] = earlyStopChunks.value
+        step.details["postoutput_fault_chunks"] = faultChunks
+        step.details["postoutput_fault_fired"] = fault.snapshot()
         return step
     }
 
@@ -503,7 +590,45 @@ private final class NativeMTPJourneyRunner {
     /// row still matches ordinary.
     private func cancellation(ordinary: ModelRuntime, native: ModelRuntime, recorder: NativeMTPHardwareAdmissionRecorder) async throws -> NativeMTPJourneyStep {
         var step = NativeMTPJourneyStep(id: "step-09-cancellation")
-        step.uncovered = ["cancellation at the proposal, verification, and commit boundaries (only mid-stream is exercised)"]
+        let phaseCases: [(String, NativeMTPLabPhaseTrapPhase)] = [
+            ("journey-cancel-after-proposal", .afterProposal),
+            ("journey-cancel-after-verify", .afterVerify),
+            ("journey-cancel-before-finalize", .beforeFinalize),
+        ]
+        for (id, phase) in phaseCases {
+            let trap = NativeMTPLabPhaseTrap(cancellations: [phase: [id]])
+            let installed = await native.installLabNativeMTPPhaseTrap(trap)
+            let request = try makeRequest(
+                id: id,
+                prompt: "Write a very long story about a journey across a desert and include many vivid details.",
+                maxTokens: 256,
+                temperature: 0,
+                topP: 1
+            )
+            var completed = false
+            var failed = false
+            do {
+                _ = try await native.complete(request)
+                completed = true
+            } catch {
+                failed = true
+                step.details["\(id).error"] = String(describing: error)
+            }
+            _ = await native.installLabNativeMTPPhaseTrap(nil)
+            let events = trap.snapshot()
+            let idle = try await waitForSchedulerIdle(native)
+            step.check("\(id).trap_installed", installed)
+            step.check("\(id).native_admitted", lastPath(recorder, id) == .nativeMTP)
+            step.check("\(id).trap_fired", events.contains { $0.phase == phase && $0.cancelledRequestIDs.contains(id) })
+            step.check("\(id).cancelled_not_completed", failed && !completed)
+            step.check("\(id).scheduler_released_row", idle)
+            step.details["\(id).events"] = events.map { [
+                "phase": $0.phase.rawValue,
+                "request_ids": $0.requestIDs,
+                "cancelled_request_ids": $0.cancelledRequestIDs,
+            ] }
+        }
+
         let request = try makeRequest(
             id: "journey-cancel-0",
             prompt: "Write a very long story about a journey across a desert.",
@@ -531,12 +656,7 @@ private final class NativeMTPJourneyRunner {
         step.check("native_admitted", lastPath(recorder, "journey-cancel-0") == .nativeMTP)
         step.check("cancellation_threshold_reached", chunks.value >= 16)
         step.check("cancelled_not_completed", cancelledCleanly && !completedNormally)
-        var idle = false
-        for _ in 0..<50 {
-            let scheduler = await native.currentSnapshot().continuousBatching?.scheduler
-            if scheduler?.activeDecodeRows == 0, scheduler?.waitingCount == 0 { idle = true; break }
-            try await Task.sleep(nanoseconds: 100_000_000)
-        }
+        let idle = try await waitForSchedulerIdle(native)
         step.check("scheduler_released_row", idle)
         let follow = try makeRequest(id: "journey-cancel-follow", prompt: "Name three rivers in Europe.", maxTokens: 96, temperature: 0, topP: 1)
         let expected = try await ordinary.complete(follow)
@@ -822,18 +942,44 @@ private final class NativeMTPJourneyRunner {
         return try await complete(requests, runtime: runtime, staggerMS: 0)
     }
 
+    private func waitForSchedulerIdle(_ runtime: ModelRuntime) async throws -> Bool {
+        for _ in 0..<50 {
+            let scheduler = await runtime.currentSnapshot().continuousBatching?.scheduler
+            if scheduler?.activeDecodeRows == 0, scheduler?.waitingCount == 0 { return true }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return false
+    }
+
     private func streamCollect(_ request: ChatCompletionRequest, runtime: ModelRuntime) async throws -> (CompletionResult, String) {
+        try await streamCollect(request, runtime: runtime, onContent: nil)
+    }
+
+    private func streamCollect(
+        _ request: ChatCompletionRequest,
+        runtime: ModelRuntime,
+        onContent: ((String) -> Void)?
+    ) async throws -> (CompletionResult, String) {
         let text = NativeMTPJourneyText()
         let handle = try await runtime.acquireRequestHandle(request)
         do {
             let result = try await runtime.stream(request, with: handle) { chunk in
-                if case .content(let piece) = chunk { text.append(piece) }
+                if case .content(let piece) = chunk {
+                    text.append(piece)
+                    onContent?(piece)
+                }
             }
             await runtime.unregisterInFlight(handle.registrationID)
             return (result, text.value)
         } catch {
             await runtime.unregisterInFlight(handle.registrationID)
             throw error
+        }
+    }
+
+    private func isSHA256Hex(_ value: String) -> Bool {
+        value.count == 64 && value.utf8.allSatisfy { byte in
+            (byte >= 48 && byte <= 57) || (byte >= 97 && byte <= 102)
         }
     }
 

@@ -1600,6 +1600,7 @@ actor ModelRuntime: ModelRuntimeServing {
     private let testStreamChunks: [StreamChunk]
     private let testSpeculativeCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)?
     private let testSpeculativeStream: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)?
+    private let nativeMTPRequestShapeCapture: NativeMTPRequestShapeCapture?
 
     var loadedModelID: String? {
         currentModelID
@@ -2586,6 +2587,15 @@ actor ModelRuntime: ModelRuntimeServing {
         self.nativeMTPMode = nativeMTPMode
         self.nativeMTPCapability = nativeMTPCapability
         self.nativeMTPSchedulerSupported = nativeMTPSchedulerSupported
+        self.nativeMTPRequestShapeCapture = try NativeMTPRequestShapeCaptureConfig
+            .fromEnvironment()
+            .map {
+                try NativeMTPRequestShapeCapture(
+                    config: $0,
+                    nativeMTPMode: nativeMTPMode,
+                    runningBuildIdentity: Self.nativeMTPRunningBuildIdentity()
+                )
+            }
         #if DEBUG || MACPROVIDER_LAB_HARNESS
         self.testNativeMTPAdmissionObserver = testNativeMTPAdmissionObserver
         self.testNativeMTPAdmissionRequestObserver = testNativeMTPAdmissionRequestObserver
@@ -3107,6 +3117,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.nativeMTPMode = nativeMTPMode
         self.nativeMTPCapability = nativeMTPCapability
         self.nativeMTPSchedulerSupported = nativeMTPSchedulerSupported
+        self.nativeMTPRequestShapeCapture = nil
         #if DEBUG || MACPROVIDER_LAB_HARNESS
         self.testNativeMTPAdmissionObserver = testNativeMTPAdmissionObserver
         self.testNativeMTPAdmissionRequestObserver = testNativeMTPAdmissionRequestObserver
@@ -6451,6 +6462,29 @@ actor ModelRuntime: ModelRuntimeServing {
         return true
     }
 
+    /// Lab-only journey hook: install the hidden-state digest observer on the
+    /// backend used by this runtime's scheduler.
+    func installLabNativeMTPStateDigestObserver(_ observer: NativeMTPStateDigestObserver?) async -> Bool {
+        guard let continuousBatchScheduler else { return false }
+        return await continuousBatchScheduler.installLabNativeMTPStateDigestObserver(observer)
+    }
+
+    /// Lab-only journey hook: inject cancellation at precise native-MTP round
+    /// boundaries before backend finalize commits.
+    func installLabNativeMTPPhaseTrap(_ trap: NativeMTPLabPhaseTrap?) async -> Bool {
+        guard let continuousBatchScheduler else { return false }
+        await continuousBatchScheduler.installLabNativeMTPPhaseTrap(trap)
+        return true
+    }
+
+    /// Lab-only journey hook: inject a failure after buyer-visible native output
+    /// so the harness can prove no retry stitching happens.
+    func installLabNativeMTPPostoutputFault(_ fault: NativeMTPLabPostoutputFault?) async -> Bool {
+        guard let continuousBatchScheduler else { return false }
+        await continuousBatchScheduler.installLabNativeMTPPostoutputFault(fault)
+        return true
+    }
+
     /// Lab-only journey hook: freeze one exact batch composition before any
     /// prefill/decode work starts. Returns false unless the scheduler is idle.
     func installLabBatchComposition(_ requestIDs: [String]?) async -> Bool {
@@ -7069,6 +7103,15 @@ actor ModelRuntime: ModelRuntimeServing {
             shouldCancel: shouldCancel,
             drainCancelled: drainCancelled
         ) {
+            nativeMTPRequestShapeCapture?.record(
+                request: request,
+                snapshot: snapshot,
+                admission: nativeMTPAdmission,
+                lease: nil,
+                leaseAllowed: false,
+                completion: completion,
+                stream: false
+            )
             return (completion, snapshot)
         }
         CBTrace.log(request.requestID, "rt_serial_path")
@@ -7083,7 +7126,18 @@ actor ModelRuntime: ModelRuntimeServing {
                 let result = try await Self.withDrainCancellation(drainCancelled) {
                     try await testSpeculativeCompletion(snapshot, request)
                 }
-                return (try Self.validateStructuredCompletion(result, request: request).withModelHashObservedIfMissing(Self.validObservedModelHash(snapshot.modelHash)), snapshot)
+                let completion = try Self.validateStructuredCompletion(result, request: request)
+                    .withModelHashObservedIfMissing(Self.validObservedModelHash(snapshot.modelHash))
+                nativeMTPRequestShapeCapture?.record(
+                    request: request,
+                    snapshot: snapshot,
+                    admission: nativeMTPAdmission,
+                    lease: nil,
+                    leaseAllowed: false,
+                    completion: completion,
+                    stream: false
+                )
+                return (completion, snapshot)
             } catch let error as DrainCancelledError {
                 throw error
             } catch let error as CancellationError {
@@ -7096,7 +7150,18 @@ actor ModelRuntime: ModelRuntimeServing {
             let result = try await Self.withDrainCancellation(drainCancelled) {
                 try await testCompletion(snapshot, request)
             }
-            return (try Self.validateStructuredCompletion(result, request: request).withModelHashObservedIfMissing(Self.validObservedModelHash(snapshot.modelHash)), snapshot)
+            let completion = try Self.validateStructuredCompletion(result, request: request)
+                .withModelHashObservedIfMissing(Self.validObservedModelHash(snapshot.modelHash))
+            nativeMTPRequestShapeCapture?.record(
+                request: request,
+                snapshot: snapshot,
+                admission: nativeMTPAdmission,
+                lease: nil,
+                leaseAllowed: false,
+                completion: completion,
+                stream: false
+            )
+            return (completion, snapshot)
         }
         guard let container = snapshot.container else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
@@ -7337,6 +7402,15 @@ actor ModelRuntime: ModelRuntimeServing {
                             modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
                             settlementDisposition: .eligibleOwner
                         ), request: request)
+                        nativeMTPRequestShapeCapture?.record(
+                            request: request,
+                            snapshot: snapshot,
+                            admission: nativeMTPAdmission,
+                            lease: lease,
+                            leaseAllowed: conversationCacheAllowed,
+                            completion: completion,
+                            stream: false
+                        )
                         if let lease {
                             let fullTokens = promptTokenIds + resultTokenIDs.map(Int32.init)
                             guard Self.serialHybridCacheCanPublishTerminalCheckpoint(
@@ -7640,6 +7714,15 @@ actor ModelRuntime: ModelRuntimeServing {
             )
         }
         if let completion = batchedCompletion {
+            nativeMTPRequestShapeCapture?.record(
+                request: request,
+                snapshot: snapshot,
+                admission: nativeMTPAdmission,
+                lease: nil,
+                leaseAllowed: false,
+                completion: completion,
+                stream: true
+            )
             return completion
         }
         if speculativeCacheWrapValidated,
@@ -7662,11 +7745,21 @@ actor ModelRuntime: ModelRuntimeServing {
                 idleState.noteContent()
                 onChunk(.content(completion.content))
             }
-            return try Self.validateStructuredStreamingCompletion(
+            let validated = try Self.validateStructuredStreamingCompletion(
                 completion,
                 request: request,
                 buyerVisibleContent: structuredAccumulator.content
             )
+            nativeMTPRequestShapeCapture?.record(
+                request: request,
+                snapshot: snapshot,
+                admission: nativeMTPAdmission,
+                lease: nil,
+                leaseAllowed: false,
+                completion: validated,
+                stream: true
+            )
+            return validated
         }
         if let testCompletion {
             let completion = try await Self.withDrainCancellation(drainCancelled) {
@@ -7682,11 +7775,21 @@ actor ModelRuntime: ModelRuntimeServing {
                 idleState.noteContent()
                 onChunk(.content(completion.content))
             }
-            return try Self.validateStructuredStreamingCompletion(
+            let validated = try Self.validateStructuredStreamingCompletion(
                 completion,
                 request: request,
                 buyerVisibleContent: structuredAccumulator.content
             )
+            nativeMTPRequestShapeCapture?.record(
+                request: request,
+                snapshot: snapshot,
+                admission: nativeMTPAdmission,
+                lease: nil,
+                leaseAllowed: false,
+                completion: validated,
+                stream: true
+            )
+            return validated
         }
         guard let container = snapshot.container else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
@@ -8102,6 +8205,15 @@ actor ModelRuntime: ModelRuntimeServing {
                             completion,
                             request: request,
                             buyerVisibleContent: structuredAccumulator.content
+                        )
+                        nativeMTPRequestShapeCapture?.record(
+                            request: request,
+                            snapshot: snapshot,
+                            admission: nativeMTPAdmission,
+                            lease: lease,
+                            leaseAllowed: conversationCacheAllowed,
+                            completion: validated,
+                            stream: true
                         )
                         if let lease {
                             let fullTokens = promptTokenIds + resultTokenIDs.map(Int32.init)
