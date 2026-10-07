@@ -2021,6 +2021,20 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         lock.unlock()
     }
 
+    private func labNativeMTPFlushPrefixTokens(
+        requestID: String,
+        columns: [(token: Int, hidden: MLXArray)]
+    ) throws -> [Int] {
+        guard labNativeMTPObserverInstalled(), !columns.isEmpty else { return [] }
+        lock.lock()
+        let previousTargetBonus = labNativeMTPCommittedPrefixTargetBonus[requestID]
+        lock.unlock()
+        guard let previousTargetBonus else {
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_drafter_recompute_missing_target_bonus")
+        }
+        return [previousTargetBonus] + columns.dropLast().map(\.token)
+    }
+
     private func labSnapshotNativeMTPPendingColumns(
         requestIDs: [String]
     ) -> [String: [(token: Int, hidden: MLXArray)]] {
@@ -2365,7 +2379,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             let columns = labPendingColumns[requestID] ?? []
             try labRecordNativeMTPCommittedPrefix(
                 requestID: requestID,
-                tokens: columns.map(\.token),
+                tokens: try labNativeMTPFlushPrefixTokens(requestID: requestID, columns: columns),
                 hidden: columns.map(\.hidden),
                 positionDeltas: nil,
                 targetBonusToken: columns.last?.token ?? {
