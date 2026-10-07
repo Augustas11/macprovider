@@ -76,12 +76,26 @@ Signed envelopes accompany the existing redacted captures under
 `journeys/evidence/`. Targeted integration verification passed the pinned public
 key signatures, payload/artifact binding, expiry and current implementation/test
 selector checks for all 19 covered requirements (3 external, 4 Layer2, 12
-creator). Downloaded redacted captures match committed bytes; envelope hashes
+creator) at the original integration base. Downloaded redacted captures match committed bytes; envelope hashes
 match workflow export manifests. External-runtime workflow output promotes only
 SPEC-022-R012 and SPEC-042-R013/R014. Other rows and spec-level status are
 preserved. Layer2 and creator remain evidence-only: their signatures do not
 promote full SPEC-042/043 rows or authorize a Creator launch. Short-lived
 isolated evidence must be recaptured after expiry, not extended by re-signing.
+
+Post-#1883/#1876 revalidation against `62a9a459de59f759e09fbe88a9015e738da367ae`
+still passes all three external-runtime promotion rows. The older Layer2
+SPEC-042-R010 gateway selector and creator SPEC-043-R007 buyer selector have
+changed, so those two signed captures are historical, not current-base evidence.
+No Layer2 or creator conformance claim is made from them.
+
+Fresh isolated captures passed on that exact merged source:
+`journeys/evidence/trusted-pool-layer2-20261007T122927Z.redacted.json` and
+`journeys/evidence/trusted-pool-creator-mvp-20261007T122939Z.redacted.json`.
+These are **unsigned** until their reviewed capture commit lands on main and
+the protected signing workflows run. They do not authorize conformance
+promotion, a live Creator launch, or deployment. Fresh protected signatures and
+their reviewed integration remain a follow-up gate for #1690.
 
 ## Production SPEC-043-R007 timing
 
