@@ -886,14 +886,14 @@ final class NativeMTPRequestShapeReplayRunner {
         actual == row.boolFeature(key)
     }
 
-    private static func numericFeatureMatches(_ actual: JSONValue?, row: NativeMTPRequestShapeReplayRow, key: String) -> Bool {
+    private static func numericFeatureMatches(_ actual: MacProviderCore.JSONValue?, row: NativeMTPRequestShapeReplayRow, key: String) -> Bool {
         let expected = row.jsonFeature(key)
         guard let expected else { return jsonNumber(actual) == nil }
         guard let actual = jsonNumber(actual), let expectedNumber = anyNumber(expected) else { return false }
         return abs(actual - expectedNumber) < 0.000_000_1
     }
 
-    private static func jsonNumber(_ value: JSONValue?) -> Double? {
+    private static func jsonNumber(_ value: MacProviderCore.JSONValue?) -> Double? {
         switch value {
         case .int(let int): return Double(int)
         case .double(let double): return double
@@ -901,7 +901,7 @@ final class NativeMTPRequestShapeReplayRunner {
         }
     }
 
-    private static func jsonInt(_ value: JSONValue?) -> Int? {
+    private static func jsonInt(_ value: MacProviderCore.JSONValue?) -> Int? {
         guard case .int(let int)? = value else { return nil }
         return int
     }
@@ -910,26 +910,26 @@ final class NativeMTPRequestShapeReplayRunner {
         (value as? NSNumber)?.doubleValue
     }
 
-    private static func isPresent(_ value: JSONValue?) -> Bool {
+    private static func isPresent(_ value: MacProviderCore.JSONValue?) -> Bool {
         switch value {
         case nil, .null: return false
         default: return true
         }
     }
 
-    private static func isRequestedLogprobs(_ value: JSONValue?) -> Bool {
+    private static func isRequestedLogprobs(_ value: MacProviderCore.JSONValue?) -> Bool {
         switch value {
         case .bool(let bool): return bool
         default: return false
         }
     }
 
-    private static func toolCount(_ value: JSONValue?) -> Int {
+    private static func toolCount(_ value: MacProviderCore.JSONValue?) -> Int {
         guard case .array(let tools)? = value else { return 0 }
         return tools.count
     }
 
-    private static func toolParameterSchemaGeometries(_ value: JSONValue?) -> [[String: Any]] {
+    private static func toolParameterSchemaGeometries(_ value: MacProviderCore.JSONValue?) -> [[String: Any]] {
         guard case .array(let tools)? = value else { return [] }
         return tools.map { tool in
             guard case .object(let toolObject) = tool,
@@ -956,7 +956,7 @@ final class NativeMTPRequestShapeReplayRunner {
         return jsonGeometry(spec.schema)
     }
 
-    private static func toolChoiceKind(_ value: JSONValue?) -> String {
+    private static func toolChoiceKind(_ value: MacProviderCore.JSONValue?) -> String {
         switch value {
         case nil, .null:
             return "absent"
@@ -975,7 +975,7 @@ final class NativeMTPRequestShapeReplayRunner {
         }
     }
 
-    private static func jsonGeometry(_ value: JSONValue) -> [String: Any] {
+    private static func jsonGeometry(_ value: MacProviderCore.JSONValue) -> [String: Any] {
         [
             "byte_count": (try? value.deterministicJSONString().utf8.count) ?? 0,
             "max_depth": jsonContainerDepth(value),
@@ -989,7 +989,7 @@ final class NativeMTPRequestShapeReplayRunner {
         ["byte_count": 0, "max_depth": 0, "object_count": 0, "array_count": 0, "property_count": 0]
     }
 
-    private static func jsonContainerDepth(_ value: JSONValue) -> Int {
+    private static func jsonContainerDepth(_ value: MacProviderCore.JSONValue) -> Int {
         switch value {
         case .object(let object): return 1 + (object.values.map(jsonContainerDepth).max() ?? 0)
         case .array(let array): return 1 + (array.map(jsonContainerDepth).max() ?? 0)
@@ -997,7 +997,7 @@ final class NativeMTPRequestShapeReplayRunner {
         }
     }
 
-    private static func jsonObjectCount(_ value: JSONValue) -> Int {
+    private static func jsonObjectCount(_ value: MacProviderCore.JSONValue) -> Int {
         switch value {
         case .object(let object): return 1 + object.values.reduce(0) { $0 + jsonObjectCount($1) }
         case .array(let array): return array.reduce(0) { $0 + jsonObjectCount($1) }
@@ -1005,7 +1005,7 @@ final class NativeMTPRequestShapeReplayRunner {
         }
     }
 
-    private static func jsonArrayCount(_ value: JSONValue) -> Int {
+    private static func jsonArrayCount(_ value: MacProviderCore.JSONValue) -> Int {
         switch value {
         case .object(let object): return object.values.reduce(0) { $0 + jsonArrayCount($1) }
         case .array(let array): return 1 + array.reduce(0) { $0 + jsonArrayCount($1) }
@@ -1013,7 +1013,7 @@ final class NativeMTPRequestShapeReplayRunner {
         }
     }
 
-    private static func jsonSchemaPropertyCount(_ value: JSONValue) -> Int {
+    private static func jsonSchemaPropertyCount(_ value: MacProviderCore.JSONValue) -> Int {
         switch value {
         case .object(let object):
             let here: Int
