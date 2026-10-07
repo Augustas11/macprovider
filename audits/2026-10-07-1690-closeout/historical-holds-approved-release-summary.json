@@ -1,0 +1,10 @@
+{
+  "authorized_scope": "19 historical September 30 holds",
+  "released_count": 19,
+  "reserved_tokens_released": 17433,
+  "active_held_before": 20,
+  "active_held_after": 1,
+  "newer_relay_blind_hold_untouched": true,
+  "buyer_debits": 0,
+  "cash_transfers": 0
+}

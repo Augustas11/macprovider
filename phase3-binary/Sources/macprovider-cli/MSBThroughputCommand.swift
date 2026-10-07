@@ -1,4 +1,5 @@
 import ArgumentParser
+import CryptoKit
 import Darwin
 import Foundation
 import MLX
@@ -352,6 +353,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             peakRSSMB: peakRSSMB,
             leftovers: nil,
             timestamp: ISO8601DateFormatter().string(from: Date()),
+            promptTokenSHA256: batchedPrompts.map(msbPromptTokenSHA256),
             productionSerialTTFTSecondsRuns: serialRunTTFTSeconds,
             peakPhysFootprintMB: msbLifetimePeakPhysFootprintMB(pid: getpid())
         )
@@ -1046,6 +1048,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             aggregateRunTPS: aggregateRunTPS,
             perRowP50: perRowP50,
             peakRSSMB: peakRSSMB,
+            promptTokenSHA256: prompts.map(msbPromptTokenSHA256),
             leftovers: MSBLeftoversEvidence(
                 usageRows: usageRows,
                 usagePass: usagePass,
@@ -1109,6 +1112,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             aggregateRunTPS: aggregateRunTPS,
             perRowP50: serialP50 > 0 ? aggregateP50 / Double(parallelRows) : 0,
             peakRSSMB: peakRSSMB,
+            promptTokenSHA256: prompts.map(msbPromptTokenSHA256),
             leftovers: MSBLeftoversEvidence(
                 usageRows: nil,
                 usagePass: nil,
@@ -1234,6 +1238,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             aggregateRunTPS: [try msbAggregateThroughput(twoRow.batched.rowSamples).aggregateTokensPerSecond],
             perRowP50: twoRow.batched.perRowTokensPerSecond,
             peakRSSMB: peakRSSMB,
+            promptTokenSHA256: prompts.map(msbPromptTokenSHA256),
             leftovers: MSBLeftoversEvidence(
                 usageRows: twoRow.usage,
                 usagePass: msbUsageAttributionPass(
@@ -1331,6 +1336,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             aggregateRunTPS: [],
             perRowP50: 0,
             peakRSSMB: memoryRSSMB(),
+            promptTokenSHA256: prompts.map(msbPromptTokenSHA256),
             leftovers: MSBLeftoversEvidence(
                 usageRows: [cancelledResult, healthyResult].map(Self.usageRow),
                 usagePass: cancelledResult.requestID != healthyResult.requestID
@@ -1411,6 +1417,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             aggregateRunTPS: [],
             perRowP50: 0,
             peakRSSMB: memoryRSSMB(),
+            promptTokenSHA256: [msbPromptTokenSHA256(prompt)],
             leftovers: MSBLeftoversEvidence(
                 usageRows: [first, replay].map(Self.usageRow),
                 usagePass: first.promptTokens == prompt.count
@@ -1541,6 +1548,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             aggregateRunTPS: [],
             perRowP50: 0,
             peakRSSMB: memoryRSSMB(),
+            promptTokenSHA256: prompts.map(msbPromptTokenSHA256),
             leftovers: MSBLeftoversEvidence(
                 usageRows: ([queuedResult] + activeRows).map(Self.usageRow),
                 usagePass: queuedResult.terminalStatus == .rejected && activeCompleted,
@@ -1576,6 +1584,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         aggregateRunTPS: [Double],
         perRowP50: Double,
         peakRSSMB: Int,
+        promptTokenSHA256: [String] = [],
         leftovers: MSBLeftoversEvidence,
         summary: String,
         fileLabel: String? = nil
@@ -1616,7 +1625,8 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             perRowFractionOfPagedSingleRow: engineSingleP50 > 0 ? perRowP50 / engineSingleP50 : 0,
             peakRSSMB: peakRSSMB,
             leftovers: leftovers,
-            timestamp: ISO8601DateFormatter().string(from: Date())
+            timestamp: ISO8601DateFormatter().string(from: Date()),
+            promptTokenSHA256: promptTokenSHA256
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -1679,25 +1689,94 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     }
 
     static func buildPromptTokens(context: ModelContext, index: Int, tokens: Int) -> [Int] {
-        let text = Self.buildPromptText(index: index, targetTokens: tokens)
-        var encoded = context.tokenizer.encode(text: text, addSpecialTokens: true)
-        var salt = 0
-        let tail = context.tokenizer.encode(
-            text: " Continue document \(index) with one more concrete detail:",
-            addSpecialTokens: false
-        )
-        let boundedTail = tail.count < tokens ? tail : Array(tail.suffix(tokens))
-        let headCount = max(tokens - boundedTail.count, 0)
-        while encoded.count < headCount {
-            let more = context.tokenizer.encode(
-                text: " \(index)-\(salt) " + Self.corpus[(index + salt) % Self.corpus.count],
-                addSpecialTokens: false
+        Self.msbBuildPromptTokens(index: index, targetTokens: tokens) { text, addSpecialTokens in
+            context.tokenizer.encode(
+                text: text,
+                addSpecialTokens: addSpecialTokens
             )
-            encoded.append(contentsOf: more)
+        }
+    }
+
+    static func promptBoundedTailText(index: Int) -> String {
+        " Continue document \(index) with one more concrete detail:"
+    }
+
+    static func promptExtensionText(index: Int, salt: Int) -> String {
+        " \(index)-\(salt) " + Self.corpus[(index + salt) % Self.corpus.count]
+    }
+
+    static func msbBoundedPromptTailTokens(_ tail: [Int], targetTokens: Int) -> [Int] {
+        tail.count < targetTokens ? tail : Array(tail.suffix(max(targetTokens, 0)))
+    }
+
+    static func msbPromptHeadTokenCount(targetTokens: Int, boundedTailCount: Int) -> Int {
+        max(targetTokens - boundedTailCount, 0)
+    }
+
+    static func msbExtendPromptHeadTokens(
+        initial: [Int],
+        headCount: Int,
+        extensionTokens: (Int) -> [Int]
+    ) -> [Int] {
+        var encoded = initial
+        var salt = 0
+        while encoded.count < headCount {
+            encoded.append(contentsOf: extensionTokens(salt))
+            salt += 1
+        }
+        return encoded
+    }
+
+    static func msbBuildPromptTokens(
+        index: Int,
+        targetTokens: Int,
+        encode: (String, Bool) -> [Int]
+    ) -> [Int] {
+        var encoded = encode(Self.buildPromptText(index: index, targetTokens: targetTokens), true)
+        let boundedTail = Self.msbBoundedPromptTailTokens(
+            encode(Self.promptBoundedTailText(index: index), false),
+            targetTokens: targetTokens
+        )
+        let headCount = Self.msbPromptHeadTokenCount(
+            targetTokens: targetTokens,
+            boundedTailCount: boundedTail.count
+        )
+        encoded = Self.msbExtendPromptHeadTokens(initial: encoded, headCount: headCount) { salt in
+            encode(Self.promptExtensionText(index: index, salt: salt), false)
+        }
+        return Array(encoded.prefix(headCount)) + boundedTail
+    }
+
+    static func msbBuildPromptTokens(
+        index: Int,
+        targetTokens: Int,
+        encode: (String, Bool) async throws -> [Int]
+    ) async throws -> [Int] {
+        var encoded = try await encode(Self.buildPromptText(index: index, targetTokens: targetTokens), true)
+        let boundedTail = Self.msbBoundedPromptTailTokens(
+            try await encode(Self.promptBoundedTailText(index: index), false),
+            targetTokens: targetTokens
+        )
+        let headCount = Self.msbPromptHeadTokenCount(
+            targetTokens: targetTokens,
+            boundedTailCount: boundedTail.count
+        )
+        var salt = 0
+        while encoded.count < headCount {
+            guard salt < Self.maxPromptExtensionAttempts else {
+                throw MSBPromptBuildError.extensionLimitExceeded(index: index, targetTokens: targetTokens)
+            }
+            let next = try await encode(Self.promptExtensionText(index: index, salt: salt), false)
+            guard !next.isEmpty else {
+                throw MSBPromptBuildError.zeroProgressExtension(index: index, salt: salt, targetTokens: targetTokens)
+            }
+            encoded.append(contentsOf: next)
             salt += 1
         }
         return Array(encoded.prefix(headCount)) + boundedTail
     }
+
+    static let maxPromptExtensionAttempts = 10_000
 
     /// A distinct, topically-varied prompt string seeded by `index`, long enough
     /// to tokenize past `targetTokens`.
@@ -1748,6 +1827,32 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     }
 }
 
+enum MSBPromptBuildError: Error, CustomStringConvertible, Equatable {
+    case zeroProgressExtension(index: Int, salt: Int, targetTokens: Int)
+    case extensionLimitExceeded(index: Int, targetTokens: Int)
+
+    var description: String {
+        switch self {
+        case .zeroProgressExtension(let index, let salt, let targetTokens):
+            return "msb prompt \(index) tokenizer returned zero extension tokens at salt \(salt) before target \(targetTokens)"
+        case .extensionLimitExceeded(let index, let targetTokens):
+            return "msb prompt \(index) could not reach \(targetTokens) tokens after \(MSBThroughputCommand.maxPromptExtensionAttempts) extensions"
+        }
+    }
+}
+
+/// SHA-256 of an actual prompt token-id sequence. The bytes are deterministic:
+/// a schema tag followed by each token id as little-endian signed 64-bit.
+/// Reports include only this digest, never raw prompt text or token ids.
+func msbPromptTokenSHA256(_ tokens: [Int]) -> String {
+    var data = Data("macprovider.msb.prompt-token-ids.v1.le-int64\n".utf8)
+    for token in tokens {
+        var value = Int64(token).littleEndian
+        withUnsafeBytes(of: &value) { data.append(contentsOf: $0) }
+    }
+    return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+}
+
 // MARK: - Wire schema
 
 struct MSBThroughputReport: Codable, Sendable {
@@ -1783,6 +1888,9 @@ struct MSBThroughputReport: Codable, Sendable {
     let peakRSSMB: Int
     let leftovers: MSBLeftoversEvidence?
     let timestamp: String
+    /// Per-row SHA-256 of the actual prompt token-id arrays used by this run.
+    /// Nil for historical artifacts that predate this additive field.
+    var promptTokenSHA256: [String]? = nil
     /// Serial-path TTFT per timed run, so `msb-loopback` c=1 TTFT has a
     /// native counterpart (#1690 benchmark). Absent on leftover scenarios.
     var productionSerialTTFTSecondsRuns: [Double]? = nil

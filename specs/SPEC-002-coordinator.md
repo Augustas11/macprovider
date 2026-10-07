@@ -1,6 +1,6 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.8 (2026-10-06, cross-runtime throughput estimate)
+**Version:** 1.6.9 (2026-10-07, trusted loopback startup count)
 **Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9); SPEC-003 FR-C9.4 composed contract — base AuthState enum (`bearer_validated`, `self_minted`, `bearerless_duplicate`) introduced in v0.8.3; `mint_failed` reserved value added in v0.8.4.
 
 **Change log v1.6.5 (2026-10-02, issue #1793):** The primary money database
@@ -25,13 +25,22 @@ asynchronously with bounded indexed work and on demand before receipt
 adjudication. Projection pressure no longer converts a durably journaled event
 into missing settlement evidence.
 
+**Change log v1.6.9 (2026-10-07, issue #1690):** Aligns coordinator routing
+semantics with SPEC-001 v1.9.31: for loopback providers, the signed CLI's
+`throughput_tps_estimate` count is the minimum of upstream completion usage and
+trusted pinned-tokenizer recount, with either missing, tool-bearing, identity
+changed, or over-budget count failing closed to 0. Routing behavior is
+unchanged; this only tightens which provider-reported loopback estimates are
+eligible to be non-zero.
+
 **Change log v1.6.8 (2026-10-06, issue #1690):** Defines
 `throughput_tps_estimate`, which the `routing.min_provider_throughput_tps`
 floor, FR-R2 `fast` ordering and the default-mode tie-break all compare, as one
 cross-runtime quantity: completion tokens of a short fixed startup generation
 over the total elapsed request time (prefill, first token and decode), measured
 by the signed CLI the same way for native and loopback runtimes (SPEC-001 FR-17,
-FR-20), and 0 when unmeasured. Routing behavior is unchanged.
+FR-20; loopback count authority tightened by v1.6.9), and 0 when unmeasured.
+Routing behavior is unchanged.
 
 **Change log v1.6.4 (2026-09-30, authenticated dispatch output limit):**
 The coordinator accepts `X-MacProvider-Internal-Max-Output-Tokens` only under
@@ -2005,7 +2014,9 @@ FR-17: at most 8 tokens, one fixed prompt, temperature 0) divided by the total
 elapsed time of that request, prefill, first token and decode included. The
 signed CLI measures it once at `serve` startup with the same formula for a
 native MLX runtime and for every loopback runtime (SPEC-001 FR-20; a loopback
-count is the upstream's own, capped at the content deltas actually streamed).
+count is the minimum of the upstream's own count and the trusted
+pinned-tokenizer recount of the assistant content, with either missing or
+over-budget count failing closed).
 It is 0 when unmeasured (probe failed, did not run, or an autotune candidate),
 which sits below any positive floor. It is a provider-reported startup value,
 not a sustained decode benchmark, and not a billed or attested quantity.
