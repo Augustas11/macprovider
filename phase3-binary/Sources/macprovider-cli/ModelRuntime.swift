@@ -1601,6 +1601,10 @@ actor ModelRuntime: ModelRuntimeServing {
     private let testSpeculativeCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)?
     private let testSpeculativeStream: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)?
     private let nativeMTPRequestShapeCapture: NativeMTPRequestShapeCapture?
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    private var labNativeMTPCommitTimingObserver: NativeMTPLabCommittedTokenTimingObserver?
+    private var labNativeMTPDecodeOutputCap: NativeMTPLabDecodeOutputCap?
+    #endif
 
     var loadedModelID: String? {
         currentModelID
@@ -6474,8 +6478,10 @@ actor ModelRuntime: ModelRuntimeServing {
     /// Replay stops at the observed output length while preserving the original
     /// request budget used by admission and context validation.
     func installLabNativeMTPDecodeOutputCap(_ cap: NativeMTPLabDecodeOutputCap?) async -> Bool {
-        guard let continuousBatchScheduler else { return false }
-        await continuousBatchScheduler.installLabNativeMTPDecodeOutputCap(cap)
+        labNativeMTPDecodeOutputCap = cap
+        if let continuousBatchScheduler {
+            await continuousBatchScheduler.installLabNativeMTPDecodeOutputCap(cap)
+        }
         return true
     }
 
@@ -6521,8 +6527,10 @@ actor ModelRuntime: ModelRuntimeServing {
     /// Lab-only replay hook: record commit-time timestamps for buyer-visible
     /// output tokens without exposing token values.
     func installLabNativeMTPCommitTimingObserver(_ observer: NativeMTPLabCommittedTokenTimingObserver?) async -> Bool {
-        guard let continuousBatchScheduler else { return false }
-        await continuousBatchScheduler.installLabNativeMTPCommitTimingObserver(observer)
+        labNativeMTPCommitTimingObserver = observer
+        if let continuousBatchScheduler {
+            await continuousBatchScheduler.installLabNativeMTPCommitTimingObserver(observer)
+        }
         return true
     }
 
@@ -7218,6 +7226,18 @@ actor ModelRuntime: ModelRuntimeServing {
         guard let container = snapshot.container else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
         }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        let labSerialHooks = try Self.labSerialDecodeHooks(
+            requestID: request.requestID,
+            outputCap: labNativeMTPDecodeOutputCap,
+            timingObserver: labNativeMTPCommitTimingObserver
+        )
+        #else
+        let labSerialHooks: LabSerialDecodeHooks? = nil
+        #endif
+        if labSerialHooks != nil, HarmonyResponseParser.isHarmonyModelID(request.model) {
+            throw Self.labSerialDecodeHookUnsupported("harmony_visible_prefix_accounting")
+        }
 
         let maxContextTokens = maxContextTokens
         let kvBitsOverride = Self.effectiveKVBits(
@@ -7250,7 +7270,10 @@ actor ModelRuntime: ModelRuntimeServing {
                     let lmInput = try await context.processor.prepare(input: input)
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                     let parameters = Self.makeServeGenerateParameters(
-                        maxTokens: request.maxTokens,
+                        maxTokens: Self.labSerialEffectiveMaxTokens(
+                            requestMaxTokens: request.maxTokens,
+                            labOutputCap: labSerialHooks?.outputCap
+                        ),
                         maxContextTokens: maxContextTokens,
                         kvBitsOverride: kvBitsOverride,
                         prefillStepSize: prefillStepSize,
@@ -7267,6 +7290,7 @@ actor ModelRuntime: ModelRuntimeServing {
                        let draftContainer = snapshot.draftContainer,
                        let numDraftTokens = snapshot.numDraftTokens,
                        speculativeCacheWrapValidated,
+                       labSerialHooks == nil,
                        Self.speculativeCacheWindowSafe(
                            promptTokens: promptTokenIds.count,
                            maxTokens: request.maxTokens,
@@ -7349,6 +7373,14 @@ actor ModelRuntime: ModelRuntimeServing {
                                 allowedFunctionNames: Self.toolFunctionNames(from: request.promptSource.tools)
                             )
                             let serialToolStopApplies = Self.serialToolStopApplies(request)
+                            #if DEBUG || MACPROVIDER_LAB_HARNESS
+                            let labCommitTracker = labSerialHooks.map {
+                                LabSerialCommitTracker(requestID: $0.requestID, observer: $0.timingObserver)
+                            }
+                            #else
+                            let labCommitTracker: LabSerialCommitTracker? = nil
+                            #endif
+                            var labSerialHookError: APIError?
                             let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
                                 BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
                                     if !tokens.isEmpty {
@@ -7361,6 +7393,29 @@ actor ModelRuntime: ModelRuntimeServing {
                                     if HarmonyResponseParser.isHarmonyModelID(request.model),
                                        tokens.last.map(Self.isHarmonyTerminalToken) == true {
                                         return GenerateDisposition.stop
+                                    }
+                                    if let labSerialHooks, let labCommitTracker {
+                                        let outputCount: Int
+                                        do {
+                                        outputCount = try Self.labSerialVisibleCommitCount(
+                                            modelID: request.model,
+                                            generatedTokenIDs: tokens,
+                                            decodedText: generationContext.tokenizer.decode(tokenIds: tokens),
+                                            emittedText: nil,
+                                            stopTokenFilter: stopTokenFilter,
+                                            requestStops: request.stop
+                                        )
+                                        } catch let error as APIError {
+                                            labSerialHookError = error
+                                            return GenerateDisposition.stop
+                                        } catch {
+                                            labSerialHookError = Self.labSerialDecodeHookUnsupported("visible_prefix_accounting")
+                                            return GenerateDisposition.stop
+                                        }
+                                        labCommitTracker.record(outputCount: outputCount)
+                                        if let outputCap = labSerialHooks.outputCap, outputCount >= outputCap {
+                                            return GenerateDisposition.stop
+                                        }
                                     }
                                     if serialToolStopApplies,
                                        Self.observeSerialToolStop(
@@ -7377,6 +7432,9 @@ actor ModelRuntime: ModelRuntimeServing {
                             }
                             try drainCancelled.check()
                             try Task.checkCancellation()
+                            if let labSerialHookError {
+                                throw labSerialHookError
+                            }
                             if shouldCancel() {
                                 throw CancellationError()
                             }
@@ -7399,7 +7457,11 @@ actor ModelRuntime: ModelRuntimeServing {
                             requestStops: request.stop
                         )
 
-                        let rawLengthFinish = request.maxTokens.map { result.generationTokenCount >= $0 } ?? false
+                        let rawLengthFinish = Self.labSerialLengthFinish(
+                            generatedCompletionTokens: result.generationTokenCount,
+                            requestMaxTokens: request.maxTokens,
+                            labOutputCap: labSerialHooks?.outputCap
+                        )
                         let harmonyTerminalFinish = Self.isHarmonyTerminalFinish(
                             modelID: request.model,
                             generatedTokenIDs: resultTokenIDs
@@ -7848,6 +7910,18 @@ actor ModelRuntime: ModelRuntimeServing {
         guard let container = snapshot.container else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
         }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        let labSerialHooks = try Self.labSerialDecodeHooks(
+            requestID: request.requestID,
+            outputCap: labNativeMTPDecodeOutputCap,
+            timingObserver: labNativeMTPCommitTimingObserver
+        )
+        #else
+        let labSerialHooks: LabSerialDecodeHooks? = nil
+        #endif
+        if labSerialHooks != nil, HarmonyResponseParser.isHarmonyModelID(request.model) {
+            throw Self.labSerialDecodeHookUnsupported("harmony_visible_prefix_accounting")
+        }
 
         // T2-01: compiled decode env-flag wire-in. When enabled, the
         // decode-bench path uses MLX.compile()-wrapped per-token forwards
@@ -7901,7 +7975,10 @@ actor ModelRuntime: ModelRuntimeServing {
                     let lmInput = try await context.processor.prepare(input: input)
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                     let parameters = Self.makeServeGenerateParameters(
-                        maxTokens: request.maxTokens,
+                        maxTokens: Self.labSerialEffectiveMaxTokens(
+                            requestMaxTokens: request.maxTokens,
+                            labOutputCap: labSerialHooks?.outputCap
+                        ),
                         maxContextTokens: maxContextTokens,
                         kvBitsOverride: kvBitsOverride,
                         prefillStepSize: prefillStepSize,
@@ -7936,6 +8013,7 @@ actor ModelRuntime: ModelRuntimeServing {
                        let draftContainer = snapshot.draftContainer,
                        let numDraftTokens = snapshot.numDraftTokens,
                        speculativeCacheWrapValidated,
+                       labSerialHooks == nil,
                        Self.speculativeCacheWindowSafe(
                            promptTokens: promptTokenIds.count,
                            maxTokens: request.maxTokens,
@@ -8062,6 +8140,14 @@ actor ModelRuntime: ModelRuntimeServing {
                     var streamingParseError: APIError?
                     var harmonyObservedFinalTokenCount = 0
                     var harmonyObservedTokenCount = 0
+                    var labSerialHookError: APIError?
+                    #if DEBUG || MACPROVIDER_LAB_HARNESS
+                    let labCommitTracker = labSerialHooks.map {
+                        LabSerialCommitTracker(requestID: $0.requestID, observer: $0.timingObserver)
+                    }
+                    #else
+                    let labCommitTracker: LabSerialCommitTracker? = nil
+                    #endif
 
                     // SPEC-037 FR-KVP2.5: speculative-decode routing is determined
                     // BEFORE conversationCache.begin() (block above, ahead of the
@@ -8144,12 +8230,36 @@ actor ModelRuntime: ModelRuntimeServing {
                                     stopTokenFilter: stopTokenFilter,
                                     requestStops: request.stop
                                 )
-                                switch textEmitter.step(
+                                let step = textEmitter.step(
                                     candidate: candidate,
                                     structuredAccumulator: structuredAccumulator,
                                     idleState: idleState,
                                     onChunk: onChunk
-                                ) {
+                                )
+                                if let labSerialHooks, let labCommitTracker {
+                                    let outputCount: Int
+                                    do {
+                                        outputCount = try Self.labSerialVisibleCommitCount(
+                                            modelID: request.model,
+                                            generatedTokenIDs: tokens,
+                                            decodedText: decoded,
+                                            emittedText: textEmitter.emittedContent,
+                                            stopTokenFilter: stopTokenFilter,
+                                            requestStops: request.stop
+                                        )
+                                    } catch let error as APIError {
+                                        labSerialHookError = error
+                                        return .stop
+                                    } catch {
+                                        labSerialHookError = Self.labSerialDecodeHookUnsupported("visible_prefix_accounting")
+                                        return .stop
+                                    }
+                                    labCommitTracker.record(outputCount: outputCount)
+                                    if let outputCap = labSerialHooks.outputCap, outputCount >= outputCap {
+                                        return .stop
+                                    }
+                                }
+                                switch step {
                                 case .more:
                                     return .more
                                 case .requestStop:
@@ -8172,6 +8282,9 @@ actor ModelRuntime: ModelRuntimeServing {
                         let generationMS = decodeTimer.durationMilliseconds(until: decodeEndedAt)
                         try drainCancelled.check()
                         try Task.checkCancellation()
+                        if let labSerialHookError {
+                            throw labSerialHookError
+                        }
                         if shouldCancel() {
                             throw CancellationError()
                         }
@@ -8185,7 +8298,11 @@ actor ModelRuntime: ModelRuntimeServing {
                             stopTokenFilter: stopTokenFilter,
                             requestStops: request.stop
                         )
-                        let rawLengthFinish = request.maxTokens.map { result.generationTokenCount >= $0 } ?? false
+                        let rawLengthFinish = Self.labSerialLengthFinish(
+                            generatedCompletionTokens: result.generationTokenCount,
+                            requestMaxTokens: request.maxTokens,
+                            labOutputCap: labSerialHooks?.outputCap
+                        )
                         let harmonyTerminalFinish = Self.isHarmonyTerminalFinish(
                             modelID: request.model,
                             generatedTokenIDs: resultTokenIDs
@@ -10138,6 +10255,122 @@ actor ModelRuntime: ModelRuntimeServing {
             return (String(stripped[..<earliestStop]), true)
         }
         return (stripped, false)
+    }
+
+    struct LabSerialDecodeHooks: Sendable {
+        let requestID: String
+        let outputCap: Int?
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        let timingObserver: NativeMTPLabCommittedTokenTimingObserver?
+        #endif
+    }
+
+    final class LabSerialCommitTracker: @unchecked Sendable {
+        private let requestID: String
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        private let observer: NativeMTPLabCommittedTokenTimingObserver?
+        #endif
+        private var committedOutputCount = 0
+
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        init(requestID: String, observer: NativeMTPLabCommittedTokenTimingObserver?) {
+            self.requestID = requestID
+            self.observer = observer
+        }
+        #else
+        init(requestID: String) {
+            self.requestID = requestID
+        }
+        #endif
+
+        func record(outputCount: Int) {
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            guard let observer else {
+                committedOutputCount = max(committedOutputCount, outputCount)
+                return
+            }
+            let boundedOutputCount = max(committedOutputCount, outputCount)
+            guard boundedOutputCount > committedOutputCount else { return }
+            for ordinal in committedOutputCount ..< boundedOutputCount {
+                observer.record(requestID: requestID, ordinal: ordinal, outputCount: ordinal + 1)
+            }
+            committedOutputCount = boundedOutputCount
+            #else
+            committedOutputCount = max(committedOutputCount, outputCount)
+            _ = requestID
+            #endif
+        }
+    }
+
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    static func labSerialDecodeHooks(
+        requestID: String?,
+        outputCap: NativeMTPLabDecodeOutputCap?,
+        timingObserver: NativeMTPLabCommittedTokenTimingObserver?
+    ) throws -> LabSerialDecodeHooks? {
+        guard outputCap != nil || timingObserver != nil else { return nil }
+        guard let requestID, !requestID.isEmpty else {
+            throw labSerialDecodeHookUnsupported("missing_request_id")
+        }
+        return LabSerialDecodeHooks(
+            requestID: requestID,
+            outputCap: outputCap?.cap(requestID: requestID),
+            timingObserver: timingObserver
+        )
+    }
+    #endif
+
+    static func labSerialVisibleCommitCount(
+        modelID: String,
+        generatedTokenIDs: [Int],
+        decodedText: String,
+        emittedText: String?,
+        stopTokenFilter: StopTokenFilter,
+        requestStops: [String]
+    ) throws -> Int {
+        guard !HarmonyResponseParser.isHarmonyModelID(modelID) else {
+            throw labSerialDecodeHookUnsupported("harmony_visible_prefix_accounting")
+        }
+        let filtered = applyOutputFilters(
+            decodedText,
+            stopTokenFilter: stopTokenFilter,
+            requestStops: requestStops
+        )
+        guard !filtered.hitStop, filtered.text == decodedText else {
+            throw labSerialDecodeHookUnsupported("filtered_visible_prefix_accounting")
+        }
+        if let emittedText, emittedText != decodedText {
+            throw labSerialDecodeHookUnsupported("emitted_visible_prefix_accounting")
+        }
+        return generatedTokenIDs.count
+    }
+
+    static func labSerialLengthFinish(
+        generatedCompletionTokens: Int,
+        requestMaxTokens: Int?,
+        labOutputCap: Int?
+    ) -> Bool {
+        if let labOutputCap {
+            return generatedCompletionTokens >= labOutputCap
+        }
+        return requestMaxTokens.map { generatedCompletionTokens >= $0 } ?? false
+    }
+
+    static func labSerialEffectiveMaxTokens(requestMaxTokens: Int?, labOutputCap: Int?) -> Int? {
+        guard let labOutputCap else { return requestMaxTokens }
+        guard let requestMaxTokens else { return labOutputCap }
+        return min(requestMaxTokens, labOutputCap)
+    }
+
+    private static func labSerialDecodeHookUnsupported(_ reason: String) -> APIError {
+        APIError(
+            status: 502,
+            message: "LAB serial decode replay hook unsupported for this request: \(reason)",
+            type: "upstream_provider_error",
+            code: "lab_serial_decode_hook_unsupported",
+            inferenceRan: false,
+            settlementRan: false
+        )
     }
 
     /// SPEC-024 FR-CI2 hybrid reuse. For a keyed serial request on a model with
