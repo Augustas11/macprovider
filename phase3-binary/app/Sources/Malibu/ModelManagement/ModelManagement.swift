@@ -2733,7 +2733,7 @@ final class ModelManagementStore: ObservableObject {
                 poolModelID: bundle.modelEntry.poolModelID,
                 bundleJSON: result.stdout
             )
-            statusLine = String(localized: "Proposal ready for pool \(poolID). Send it to the pool creator; the model earns only after the creator signs it into the pool, and only on that pool.", comment: "BYOM propose done")
+            statusLine = String(localized: "Proposal ready for pool \(poolID). Send it to the pool creator; signing is required before this model can become eligible to earn on that pool, and qualifying settled requests are still required while the pool requirements are met.", comment: "BYOM propose done")
             operation = .idle
             await refresh(currentModelID: currentModelID, peer: peerEvidence)
         } catch {
@@ -3577,7 +3577,7 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         case "local_inventory_only":
             return String(localized: "Local only — not offered to the network", comment: "BYOM local inventory verdict")
         case "pool_attested_earning":
-            return String(localized: "Earns in its Trusted Pool — pool-attested, not network-verified", comment: "BYOM pool earning verdict")
+            return String(localized: "Eligible to earn in its Trusted Pool on qualifying settled requests — pool-attested, not network-verified", comment: "BYOM pool eligibility verdict")
         default:
             return nil
         }
@@ -3601,8 +3601,8 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
     }
 
     /// A coordinator catalog_priced row with no catalog identity that does
-    /// not claim pool earning right now: its pool binding is read back so
-    /// Malibu can say which pool it belongs to and that it is not earning.
+    /// not claim current pool eligibility: its pool binding is read back so
+    /// Malibu can name the pool and say the binding is inactive.
     var poolScopeCandidate: Bool {
         admissionSource == "coordinator"
             && admissionState == "catalog_priced"
@@ -3610,11 +3610,11 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
             && earningPathClass == "no_earning_path_in_v0_1"
     }
 
-    /// SPEC-043-R014 wording for a coordinator pool binding.
+    /// SPEC-047-R010/R011 wording for a coordinator pool binding.
     func poolBindingLine(_ binding: MalibuBYOMPoolBinding) -> String {
         earningPathClass == "pool_attested_earning"
-            ? String(localized: "Earns in pool \(binding.poolID) as \(binding.poolModelID), pool-attested, not network-verified.", comment: "BYOM pool binding earning line")
-            : String(localized: "Bound to pool \(binding.poolID) as \(binding.poolModelID), but not earning right now; pool-attested, not network-verified.", comment: "BYOM pool binding idle line")
+            ? String(localized: "Eligible to earn on pool \(binding.poolID) as \(binding.poolModelID), only for qualifying settled requests; pool-attested, not network-verified.", comment: "BYOM pool binding eligibility line")
+            : String(localized: "Bound to pool \(binding.poolID) as \(binding.poolModelID), but not currently eligible on this pool; pool-attested, not network-verified.", comment: "BYOM pool binding inactive line")
     }
 
     private var nextActionLabel: String? {
@@ -3641,7 +3641,7 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         case "local_inventory_only":
             return String(localized: "Local only — not offered to the network, so it isn't earning.", comment: "BYOM local inventory disclosure")
         case "pool_attested_earning":
-            return String(localized: "Earns only on its Trusted Pool's routes. It is not a network catalog model and never earns globally.", comment: "BYOM pool earning disclosure")
+            return String(localized: "Eligible to earn only on its Trusted Pool's routes for qualifying settled requests. It is not a network catalog model and is never globally eligible to earn.", comment: "BYOM pool eligibility disclosure")
         default:
             return nil
         }

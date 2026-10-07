@@ -10210,8 +10210,16 @@
       "requirement_id": "SPEC-047-R010",
       "spec_id": "SPEC-047",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ModelsSubcommand.swift:func poolBindingNote",
+        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift:var earningVerdict",
+        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift:func poolBindingLine",
+        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift:var earningDisclosure"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/PoolScopedAdmissionTests.swift:func testStatusReadbackWordingIsPoolScopedAndHonest",
+        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift:func testPoolEarningRowUsesPoolCopyAndOnlyForCoordinatorCatalogPriced"
+      ],
       "journeys": [
         "JOURNEY-NETWORK-MODEL-ADMISSION"
       ],
@@ -10219,8 +10227,8 @@
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1690",
-        "rationale": "SPEC-047 v0.2.2 (#1690) gives the pool-qualified eligibility claim its own ID; v0.2.0 had stated it inside R004. A loopback candidate that earns on SPEC-042 pool routes while it stays catalog_priced MAY show a claim that names the pool, only while every pool route-time predicate holds. The claim is not implemented: no coordinator or CLI surface evaluates the pool route-time predicates for provider guidance or emits a pool-qualified claim, so provider surfaces keep the unqualified R004 catalog_priced rule. Pending until the claim is implemented with its predicate gating and a signed JOURNEY-NETWORK-MODEL-ADMISSION evidences it."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1880",
+        "rationale": "Provider CLI and Malibu pool-qualified copy now describes conditional eligibility on qualifying settled requests, not actual or guaranteed income. The existing pool_attested_earning wire enum is unchanged. Full current-predicate enforcement and fresh signed JOURNEY-NETWORK-MODEL-ADMISSION proof remain pending under #1880; this wording change does not prove actual scoped earnings or complete guided creator approval and recovery."
       }
     },
     {
@@ -11327,7 +11335,7 @@
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1880",
         "rationale": "Creator policy/status, reviewed-artifact, and announcement enumeration of pool models against the active pool_model_entries/v1 extension, activation and announcement failure on mismatch, and creator-admin/Agreement copy are not implemented or evidenced. The buyer API surface is tracked by SPEC-006-R018."
       }
     },
@@ -11354,7 +11362,7 @@
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1880",
         "rationale": "#1816 coordinator lane (merged on the campaign branch, unshipped): admission events record the closed pool_binding object, the pool_manifest signed-manifest actor, the bind edge from offer_submitted and (v0.2.6) from the synthetic-probe interim states sandbox_probe_only, network_visible_unpriced and network_admitted_unsettled, the catalog_priced self-rebind, the pool-manifest bind/rebind/revocation reasons, pool model identity/price, manifest_core_digest provenance, observed_catalog_model_key, pool_attested_earning status (claimed only while the current pool predicate holds), native mlx_cache binding, pool_manifest_catalog_superseded, single-pool cardinality, pool-only route/snapshot/settlement, no settlement_capable, and the generation rebind sweep (internal/ws/model_admission_pool_manifest.go, internal/buyer/pool_model_route.go, test/integration/trusted_pool_model_journey_test.go). Still missing: the coordinator-owned model_admission_probe_evidence.v1 record (probe_evidence_digest is always null) and signed journey evidence from a deployed build. Pending until both exist."
       }
     },

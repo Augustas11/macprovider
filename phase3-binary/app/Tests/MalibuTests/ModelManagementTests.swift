@@ -2615,17 +2615,30 @@ extension ModelManagementTests {
         )
         let row = try XCTUnwrap(try document.validated().rowsForMalibu(currentModelID: nil, warmSwapAvailable: true).first)
         XCTAssertEqual(row.earningPathClass, "pool_attested_earning", "the row passes per-row validation")
-        XCTAssertEqual(row.earningVerdict, "Earns in its Trusted Pool — pool-attested, not network-verified")
+        XCTAssertEqual(row.earningVerdict, "Eligible to earn in its Trusted Pool on qualifying settled requests — pool-attested, not network-verified")
         XCTAssertTrue(row.earningDisclosure?.contains("not a network catalog model") == true)
+        XCTAssertTrue(row.earningDisclosure?.contains("qualifying settled requests") == true)
+        XCTAssertFalse((row.earningVerdict ?? "").localizedCaseInsensitiveContains("current earnings"))
+        XCTAssertFalse((row.earningDisclosure ?? "").localizedCaseInsensitiveContains("guaranteed earnings"))
         XCTAssertEqual(row.blockReason, "Pool-priced by its Trusted Pool creator; no network catalog rate applies.")
         XCTAssertTrue(row.canWithdraw)
         XCTAssertFalse(row.canProposeToPool)
         let bindingStatus = try decodeStatus(Self.poolStatusJSON())
         let line = row.poolBindingLine(try XCTUnwrap(bindingStatus.validPoolBinding))
-        XCTAssertTrue(line.contains("pool \(Self.poolID)"))
+        XCTAssertTrue(line.contains("Eligible to earn on pool \(Self.poolID)"))
+        XCTAssertTrue(line.contains("qualifying settled requests"))
         XCTAssertTrue(line.contains("pool-attested, not network-verified"))
 
-        // Pool earning never validates outside a coordinator catalog_priced binding.
+        let inactiveDocument = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [coordinatorBYOMRowJSON(state: "catalog_priced", nextAction: "withdraw", earningPath: "no_earning_path_in_v0_1", observedAt: observedAt)], generatedAt: observedAt).utf8)
+        )
+        let inactiveRow = try XCTUnwrap(try inactiveDocument.validated().rowsForMalibu(currentModelID: nil, warmSwapAvailable: true).first)
+        let inactiveLine = inactiveRow.poolBindingLine(try XCTUnwrap(bindingStatus.validPoolBinding))
+        XCTAssertTrue(inactiveLine.contains("not currently eligible on this pool"))
+        XCTAssertFalse(inactiveLine.contains("not earning right now"))
+
+        // Pool eligibility never validates outside a coordinator catalog_priced binding.
         let forged = try JSONDecoder().decode(
             MalibuModelCatalogEconomicsDocument.self,
             from: Data(catalogEconomicsJSON(rows: [coordinatorBYOMRowJSON(state: "network_admitted_unsettled", nextAction: "withdraw", earningPath: "pool_attested_earning", observedAt: observedAt)], generatedAt: observedAt).utf8)
@@ -2729,6 +2742,10 @@ extension ModelManagementTests {
         let proposal = try XCTUnwrap(store.poolProposal)
         XCTAssertEqual(proposal.poolModelID, "pool/\(Self.poolID)/my-model")
         XCTAssertEqual(proposal.bundleJSON, Self.proposalJSON(candidateID: "local-candidate"))
+        XCTAssertTrue(store.statusLine.contains("signing is required before this model can become eligible to earn on that pool"))
+        XCTAssertTrue(store.statusLine.contains("qualifying settled requests"))
+        XCTAssertTrue(store.statusLine.contains("while the pool requirements are met"))
+        XCTAssertFalse(store.statusLine.localizedCaseInsensitiveContains("guaranteed earnings"))
 
         store.dismissPoolProposal()
         let refreshed = try XCTUnwrap(store.rows.first { $0.id == "local-candidate" })

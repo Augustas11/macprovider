@@ -571,7 +571,7 @@ private struct PoolProposeSheet: View {
                 .font(.body.monospaced())
                 .lineLimit(2)
                 .truncationMode(.middle)
-            Text(String(localized: "Malibu asks the provider CLI to hash the served model's files, submit the network offer, and build a proposal for the pool creator. The model earns only after the creator signs it into the pool, only on that pool's routes, and it is pool-attested, not network-verified.", comment: "Propose sheet explanation"))
+            Text(String(localized: "Malibu asks the provider CLI to hash the served model's files, submit the network offer, and build a proposal for the pool creator. The creator must sign it into the pool before it can become eligible to earn there; qualifying settled requests are still required while the pool requirements are met. It is pool-attested, not network-verified.", comment: "Propose sheet explanation"))
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -601,7 +601,7 @@ private struct PoolProposalResultSheet: View {
         VStack(alignment: .leading, spacing: 12) {
             Text(String(localized: "Pool proposal", comment: "Proposal sheet title"))
                 .font(.title3.weight(.semibold))
-            Text(String(localized: "Send this to the creator of pool \(proposal.poolID). They add the licence, confirm paid serving and the price, and sign it as \(proposal.poolModelID). Until then this model does not earn.", comment: "Proposal sheet explanation"))
+            Text(String(localized: "Send this to the creator of pool \(proposal.poolID). They add the licence, confirm paid serving and the price, and sign it as \(proposal.poolModelID). Until then this model is not eligible to earn on that pool; after signing, qualifying settled requests are still required while the pool requirements are met.", comment: "Proposal sheet explanation"))
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

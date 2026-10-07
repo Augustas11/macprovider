@@ -182,10 +182,12 @@ final class PoolScopedAdmissionTests: XCTestCase {
 
     func testStatusReadbackWordingIsPoolScopedAndHonest() throws {
         let earning = try XCTUnwrap(poolBindingNote(try decode(Self.statusObject())))
-        XCTAssertTrue(earning.contains("earns only in pool \(Self.poolID)"))
+        XCTAssertTrue(earning.contains("eligible to earn on pool \(Self.poolID) only for qualifying settled requests"))
         XCTAssertTrue(earning.contains("Pool-attested, not network-verified"))
+        XCTAssertFalse(earning.contains("earns only"))
         let idle = try XCTUnwrap(poolBindingNote(try decode(Self.statusObject(earningPath: "no_earning_path_in_v0_1"))))
-        XCTAssertTrue(idle.contains("does not earn right now"))
+        XCTAssertTrue(idle.contains("not currently eligible on this pool"))
+        XCTAssertFalse(idle.contains("does not earn right now"))
         XCTAssertNil(poolBindingNote(try decode(Self.statusObject(
             catalogModelKey: "qwen3-8b",
             earningPath: "not_earning_yet_catalog_or_receipt_path_exists",
