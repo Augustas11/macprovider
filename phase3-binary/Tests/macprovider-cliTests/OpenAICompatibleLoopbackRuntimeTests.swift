@@ -1983,6 +1983,9 @@ extension OpenAICompatibleLoopbackRuntimeTests {
             _ = try accumulator.consume(line: "")
         }
         _ = try accumulator.consume(line: #"data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":8}}"#)
+        _ = try accumulator.consume(line: "")
+        _ = try accumulator.consume(line: "data: [DONE]")
+        _ = try accumulator.consume(line: "")
         let (result, _) = try accumulator.finish()
         XCTAssertEqual(result.content, String(repeating: "x", count: 8))
         XCTAssertEqual(accumulator.contentDeltaCount, 8)

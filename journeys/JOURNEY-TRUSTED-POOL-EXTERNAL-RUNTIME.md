@@ -17,11 +17,12 @@ This journey defines the evidence for one paid buyer request pair (one
 non-streaming, one streaming) served by an external runtime
 (`llamacpp_loopback`) on an operator-owned Trusted Pool whose signed v2 policy
 core allowlists that runtime in `enforce` mode, and settled `verified` with
-usage source `pool_operator_attested`: provider credited, buyer debited exactly
-the finality tokens. It is the "signed enforce-mode pool journey" named by the
-gaps of SPEC-022-R012 (pool-scoped settlement eligibility, R-12 and R-12.8
-signed finality), SPEC-042-R013 (external-runtime serving on Trusted Pools) and
-SPEC-042-R014 (buyer engine selection on pool routes).
+pool-operator-attested attempt/finality/gateway trust and SPEC-005
+`provider_reported` ledger usage measurement: provider credited, buyer debited
+exactly the finality tokens. It is the "signed enforce-mode pool journey" named
+by the gaps of SPEC-022-R012 (pool-scoped settlement eligibility, R-12 and
+R-12.8 signed finality), SPEC-042-R013 (external-runtime serving on Trusted
+Pools) and SPEC-042-R014 (buyer engine selection on pool routes).
 
 This document is a test contract. It is not evidence that the journey passed
 or that any mapped requirement is conformant.
@@ -44,11 +45,12 @@ or that any mapped requirement is conformant.
 All of these are captured, with timestamps, in `preconditions.json` (below).
 
 - `P1`-`P8` of the run plan §1: coordinator and gateway on a build that
-  contains `747557cc` and `ca809589`, gateway schema 14, the step-6 deploy
-  smoke passed, `coordinator.require_settlement_trailers: true` live, an
-  accepted member CLI candidate that contains `747557cc` and the artifact-feed
-  release, trusted pools enabled on coordinator and gateway, the artifact feed
-  served with `gguf-q4-k-m`, and the gateway→coordinator hop direct.
+  contains `747557cc` and `ca809589`, gateway schema at least 14 with the
+  `pool_operator_attested` usage-events CHECK retained, the step-6 deploy smoke
+  passed, `coordinator.require_settlement_trailers: true` live, an accepted
+  member CLI candidate that contains `747557cc` and the artifact-feed release,
+  trusted pools enabled on coordinator and gateway, the artifact feed served
+  with `gguf-q4-k-m`, and the gateway→coordinator hop direct.
 - `payout-disabled`: payout execution is off on the coordinator, so the run
   cannot move a credit to payout-ready.
 - The pool was created, root-registered and manifest-signed with
@@ -91,13 +93,16 @@ All of these are captured, with timestamps, in `preconditions.json` (below).
 7. `step-07-ledger-and-finality` - for each request exactly one payable ledger
    row: the member, `provider_credits > 0`, `quarantined = 0`,
    `settlement_policy_mode = enforce`, `usage_source =
-   pool_operator_attested`; the signed finality is `closed`, `outcome =
+   provider_reported`; the signed finality is `closed`, `outcome =
    verified`, `token_source = pool_operator_attested`.
 8. `step-08-gateway-debit` - for each request the gateway reservation is
    `settled` with `settlement_hold = 0`, one `usage_events` row with
    `token_source = pool_operator_attested`, and `(prompt, completion)` equal
    across `usage_events`, finality and the ledger
-   (`charged_prompt_tokens`, `completion_tokens`).
+   (`charged_prompt_tokens`, `completion_tokens`). The source labels are
+   intentionally not equal: `pool_operator_attested` names settlement trust,
+   while ledger `usage_source = provider_reported` names SPEC-005 usage
+   measurement.
 9. `step-09-negative-controls` - in the same session: no pool header (503
    `engine_unavailable`), no selector and no pool (503
    `byom_non_settlement_unavailable`), pool header with
@@ -106,8 +111,12 @@ All of these are captured, with timestamps, in `preconditions.json` (below).
    Each leaves zero route snapshots and zero ledger rows. The coordinator
    records a route snapshot before it dispatches to a provider, so zero
    snapshots also means zero upstream calls.
-10. `step-10-gateway-holds` - the held-reservation count and the
-    `missing_settlement_finality_trailer` log count are 0 before and after.
+10. `step-10-gateway-holds` - the six generated gateway request ids (two
+    paid requests and four negative controls) are bound to a bounded window,
+    the buyer account and the pool; within that run scope the held-reservation
+    count and the `missing_settlement_finality_trailer` log count are 0. Any
+    pre-existing global backlog is context only, must remain unchanged from
+    baseline to after, and is not a global health claim.
 11. `step-11-redaction` - the redacted evidence has no prompt, completion,
     key, token, or account secret: account and provider ids are
     HMAC-SHA256 fingerprints keyed by a random per-run salt (recorded,
@@ -126,7 +135,7 @@ SQL results use `sqlite3 -readonly -json` (an empty result is an empty file).
 capture/
   run.json                  # operator-authored identifiers (below)
   preconditions.json        # {"P1": {"status": "pass", "observed": {<facts>}, "checked_at": "...Z"}, ... "P8", "payout-disabled"}
-  gateway-holds.json        # {"before": {"held_reservations": 0, "missing_trailer_log_count": 0}, "after": {...}}
+  gateway-holds.json        # v2 scoped campaign gate, with immutable global backlog context
   pool/get-pool.json        # coordinator-cli trust-pool-admin get-pool output
   pool/manifest-accepted.json  # the manifest_accepted event submitted (sign-manifest --out)
   pool/trustpool-events.json   # SELECT event_type, COUNT(*) AS n FROM trustpool_events WHERE pool_id='$POOL_ID' GROUP BY 1;
@@ -156,7 +165,7 @@ characters. The builder refuses anything else in `capture` and `payload`.
 that names no credential (`key`, `token`, `secret`, `auth`, ... are refused);
 a value is a boolean, an integer from 0 to 2^53, or a token of at most 19
 characters (letters, digits and `._:+-`, no whitespace), for example
-`{"gateway_schema": 14, "gateway_version": "v1.8.200", "contains_commit": "747557cc"}`.
+`{"gateway_schema": 18, "gateway_version": "v1.8.221", "contains_commit": "747557cc"}`.
 Identities stay in `run.json` and reach evidence only as salted fingerprints.
 The `payload` step re-checks the committed evidence the same way before it
 signs.
@@ -217,6 +226,48 @@ $G "SELECT request_id, prompt_tokens, completion_tokens, token_source, outcome F
 The controls use the same `route_snapshots.json` and `ledger.json` queries.
 Wait at least one `pending_deadline_seconds` before the verdict, ledger and
 finality captures.
+
+`gateway-holds.json` is versioned because historical global gateway state is
+not a forward acceptance invariant for SPEC-022-R012 / SPEC-042-R013 /
+SPEC-042-R014. The builder requires this exact shape:
+
+```json
+{
+  "schema_version": "macprovider.trusted-pool-external-runtime-gateway-holds.v2",
+  "scope": {
+    "run_id": "<run.json run_id>",
+    "buyer_account_id": "<run.json buyer_account_id>",
+    "pool_id": "<run.json pool_id>",
+    "request_ids": ["<all six X-Request-ID values: two paid, four controls>"],
+    "window_started_at": "...Z",
+    "window_ended_at": "...Z"
+  },
+  "campaign": {
+    "held_reservations": 0,
+    "missing_trailer_log_count": 0,
+    "window_buyer_request_ids": ["<all buyer request ids in the bounded window>"]
+  },
+  "global_backlog": {
+    "baseline": {
+      "held_reservations": 1,
+      "missing_trailer_log_count": 0,
+      "held_rows_sha256": "<canonical JSON sha256 of all active held rows>"
+    },
+    "after": {
+      "held_reservations": 1,
+      "missing_trailer_log_count": 0,
+      "held_rows_sha256": "<same hash if the backlog is unchanged>"
+    }
+  }
+}
+```
+
+The window must cover `run.json.captured_at`. `campaign` is the exact
+buyer/pool/window/request-id scope: `window_buyer_request_ids` must equal the
+six generated ids and the two counts must be zero, so an unrelated same-buyer
+row in the window fails the run. `global_backlog` may be nonzero, but `after`
+must equal `baseline` by both count and held-row hash; it records rollback
+context only.
 
 ## Required journey-result contract
 

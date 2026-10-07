@@ -15,7 +15,8 @@ Goal: one operator-owned Trusted Pool on the production coordinator, v2 policy
 core with `runtime_allowlist = ["llamacpp_loopback"]`, one llama-server member,
 one paid buyer request (non-streaming and streaming) with
 `X-MacProvider-Engine-Select: llamacpp` that settles `verified` /
-`pool_operator_attested`, credits the provider, debits the buyer exactly the
+`pool_operator_attested` for settlement trust, records `provider_reported`
+ledger usage measurement, credits the provider, debits the buyer exactly the
 finality tokens, and produces the signed evidence that moves SPEC-022-R012 from
 `pending`.
 
@@ -155,15 +156,17 @@ non-streaming and a streaming request through `api.malibu.tech` then settled
 `spec022_verified` (v0.4 receipt `verified_settlement`, debit == ledger,
 `X-MacProvider-Engine: mlx_cache`). P1 passes.
 
-### P2. Gateway schema 14
+### P2. Gateway schema at least 14, with `pool_operator_attested`
 
 ```bash
 sqlite3 -readonly /var/lib/macprovider/gateway.db 'SELECT MAX(version) FROM schema_migrations;'
 sqlite3 -readonly /var/lib/macprovider/gateway.db "SELECT sql FROM sqlite_master WHERE name='usage_events';" | grep -c pool_operator_attested
 ```
 
-Pass: `14`, and the CHECK names `pool_operator_attested` (count `1`).
-State 2026-09-25 10:03Z: `14` (after `v1.8.200`).
+Pass: schema version is at least `14`, and the CHECK names
+`pool_operator_attested` (count `1`). Do not roll back or downgrade a newer
+schema. State 2026-09-25 10:03Z: `14` (after `v1.8.200`); state
+2026-10-07: `18`.
 
 ### P3. The deploy's step-6 smoke passed
 
@@ -192,7 +195,9 @@ gateway was restarted after the change (unit start time later than the file
 mtime: `systemctl show macprovider-gateway -p ActiveEnterTimestamp; stat -c %y /opt/macprovider/gateway.yaml`).
 State 2026-09-25: key absent (default `false`).
 
-Also watch after the flip (must stay 0 on normal traffic):
+Also watch after the flip. This is operational context; the signed journey's
+forward acceptance uses the run-scoped `gateway-holds.json` gate below, not a
+global historical-zero invariant:
 
 ```bash
 sudo journalctl -u macprovider-gateway --since '-1h' | grep -c missing_settlement_finality_trailer
@@ -812,7 +817,7 @@ Negative controls in the same session (each must be 503, 0 route snapshots,
 | route snapshot | `pool_id=$POOL_ID`, `manifest_version=1`, `runtime_source=llamacpp_loopback`, `pool_generation`, `pool_operator_account_id=acct-malibu-ops-m1`, `route_snapshot_mode=enforce`, `expected_catalog_model_hash=6c1a2b41…` |
 | attempt output | `usage_source=pool_operator_attested`, `terminal_state=normal_done` |
 | receipt verdict | `receipt_version=4`, `receipt_result=valid`, `settlement_outcome=verified`, `reason=verified_settlement`, `pool_label_status=verified`, `closed=1` |
-| ledger | one payable row, `provider_id=$M1_PROVIDER_ID`, `provider_credits>0`, `quarantined=0`, `settlement_policy_mode=enforce` |
+| ledger | one payable row, `provider_id=$M1_PROVIDER_ID`, `provider_credits>0`, `quarantined=0`, `settlement_policy_mode=enforce`, `usage_source=provider_reported` |
 | finality | `closed=true`, `outcome=verified`, `token_source=pool_operator_attested` |
 | gateway | `quota_reservations.status=settled`, `settlement_hold=0`; `usage_events.token_source=pool_operator_attested`; debit `(prompt, completion)` == finality |
 
@@ -852,9 +857,17 @@ Finality (read-only GET, service token from `gateway.env`, not printed):
 
 Pass criteria: every row in the table above; `usage_events (prompt,
 completion)` == finality `(prompt_tokens, completion_tokens)` == ledger
-`(charged_prompt_tokens, completion_tokens)`; zero `missing_settlement_finality_trailer`
-holds; the negative controls left no rows. Wait at least one
-`pending_deadline_seconds` before reading verdicts as final.
+`(charged_prompt_tokens, completion_tokens)`. `pool_operator_attested` is the
+attempt/finality/gateway trust source; `provider_reported` is the SPEC-005
+ledger measurement source. The negative controls left no route or ledger rows.
+`gateway-holds.json` binds the two paid and four control `X-Request-ID` values
+to the buyer account, pool, and bounded capture window; campaign-scoped holds
+and `missing_settlement_finality_trailer` are zero, and the bounded-window
+buyer request ids are exactly those six ids. A historical global backlog is
+allowed only as immutable rollback context: counts and the canonical held-row
+state hash match between `global_backlog.baseline` and `global_backlog.after`.
+This is not a global health claim. Wait at least one `pending_deadline_seconds`
+before reading verdicts as final.
 
 ### Evidence for SPEC-022-R012 (CONFORMANCE)
 
@@ -882,6 +895,14 @@ The journey is `journeys/JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME.md` (B6). It
 maps SPEC-022-R012, SPEC-042-R013 and SPEC-042-R014 (all still `pending`) and
 fixes the capture layout: file names, the `-json` form of the SQL above, and
 `run.json` / `preconditions.json` / `gateway-holds.json`.
+`gateway-holds.json` uses schema
+`macprovider.trusted-pool-external-runtime-gateway-holds.v2`: `scope`
+contains `run_id`, `buyer_account_id`, `pool_id`, the exact six generated
+gateway request ids, and `window_started_at` / `window_ended_at`; `campaign`
+has zero `held_reservations`, zero `missing_trailer_log_count`, and
+`window_buyer_request_ids` exactly equal to the six generated ids;
+`global_backlog.baseline` and `global_backlog.after` may be nonzero but must
+match by counts and `held_rows_sha256`.
 `scripts/build-trusted-pool-external-runtime-journey-result.py capture` checks
 every pass criterion above and writes the redacted evidence;
 `.github/workflows/promote-signed-trusted-pool-external-runtime-journey.yml`
@@ -896,8 +917,9 @@ directory in that layout:
    `usage`, content sha256 (not content), and every SQL result above plus the
    finality JSON.
 4. The 4 negative controls: status, error code, and the zero-row SQL.
-5. Gateway hold count and the `missing_settlement_finality_trailer` log count
-   before and after.
+5. `gateway-holds.json`: run-scoped zero holds and missing finality-trailer
+   logs for the exact six generated request ids, plus unchanged global backlog
+   context.
 6. Environment: `class: production-operator-internal-pool`,
    `settlement_mode: enforce`, `enforce_activated: true` (pool scope only),
    `payout_ready_mutated: false` (payout is disabled on Pearl).
