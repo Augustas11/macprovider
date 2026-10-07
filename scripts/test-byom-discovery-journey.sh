@@ -86,17 +86,24 @@ python3 scripts/capture-byom-journey-evidence.py \
 
 # Build + preflight are the unsigned promotion path: they require the eight
 # SPEC-046 rows to still be pending. After signed promotion those rows are
-# conformant, so the same commands fail closed on purpose. If only the
-# explicitly documented stale-selector rows are pending, the gate still runs
-# driver + capture, then validates the retained signed envelope instead of
-# attempting a second promotion.
+# conformant, so the same commands fail closed on purpose. A selector change
+# may temporarily leave R001 and/or R008 pending while the other rows retain
+# their independently signed evidence. In that state the gate still runs
+# driver + capture, then validates each row against its own retained envelope
+# instead of incorrectly requiring one envelope to cover the whole ledger.
 DISCOVERY_LEDGER_STATE="$(python3 - "$REQUIREMENT_IDS" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 ids = [item.strip() for item in sys.argv[1].split(",") if item.strip()]
-stale_selector_ids = {
+refresh_pending_ids = {
+    "SPEC-046-R001",
+    # These version-lock selectors are intentionally restored by a fresh
+    # independently trusted discovery promotion, potentially one at a time.
+    "SPEC-046-R008",
+}
+legacy_stale_selector_ids = {
     "SPEC-046-R001",
     # #1816 pool-scoped model changes moved these mapped selectors.
     "SPEC-046-R003",
@@ -114,7 +121,7 @@ rows = {
 }
 states = []
 pending_ids = []
-sources = set()
+sources_by_requirement = {}
 for requirement_id in ids:
     row = rows.get(requirement_id)
     if not isinstance(row, dict):
@@ -123,34 +130,67 @@ for requirement_id in ids:
     states.append(state)
     if state == "pending":
         pending_ids.append(requirement_id)
+    sources = set()
     for item in row.get("evidence") or []:
         if isinstance(item, dict) and str(item.get("artifact", "")).startswith("sha256:"):
             source = item.get("source")
             if isinstance(source, str) and source:
                 sources.add(source)
+    sources_by_requirement[requirement_id] = sources
+
 if all(state == "pending" for state in states):
     print("pending")
-    print("")
-elif all(state == "conformant" for state in states) and len(sources) == 1:
-    print("conformant")
-    print(next(iter(sources)))
 elif (
-    set(pending_ids) == stale_selector_ids
+    (
+        set(pending_ids).issubset(refresh_pending_ids)
+        or set(pending_ids) == legacy_stale_selector_ids
+    )
     and all(state in {"pending", "conformant"} for state in states)
-    and len(sources) == 1
 ):
-    print("retained")
-    print(next(iter(sources)))
+    missing_or_ambiguous = {
+        requirement_id: sorted(sources)
+        for requirement_id, sources in sources_by_requirement.items()
+        if len(sources) != 1
+    }
+    if missing_or_ambiguous:
+        raise SystemExit(
+            "SPEC-046 retained rows must each have exactly one signed source, "
+            f"not {missing_or_ambiguous!r}"
+        )
+    print("conformant" if not pending_ids else "retained")
+    for requirement_id in ids:
+        print(f"{requirement_id}\t{next(iter(sources_by_requirement[requirement_id]))}")
 else:
     raise SystemExit(
         "SPEC-046 discovery rows must be uniformly pending, uniformly "
-        "conformant, or only stale-selector rows pending with one signed "
-        f"source, not {states!r} / {sorted(sources)!r}"
+        "conformant, or only refresh-selector rows pending, "
+        f"not {states!r} / {sorted(pending_ids)!r}"
     )
 PY
 )"
-LEDGER_STATE="${DISCOVERY_LEDGER_STATE%%$'\n'*}"
-SIGNED_SOURCE="${DISCOVERY_LEDGER_STATE#*$'\n'}"
+LEDGER_STATE=""
+RETAINED_SIGNED_ROWS=()
+while IFS= read -r ledger_line; do
+  if [[ -z "$LEDGER_STATE" ]]; then
+    LEDGER_STATE="$ledger_line"
+  else
+    RETAINED_SIGNED_ROWS+=("$ledger_line")
+  fi
+done <<<"$DISCOVERY_LEDGER_STATE"
+
+validate_retained_rows() {
+  local signed_row requirement_id signed_source
+  for signed_row in "${RETAINED_SIGNED_ROWS[@]}"; do
+    IFS=$'\t' read -r requirement_id signed_source <<<"$signed_row"
+    [[ -n "$requirement_id" && -n "$signed_source" ]] || {
+      echo "test-byom-discovery-journey: malformed retained signed-source row" >&2
+      return 1
+    }
+    python3 scripts/validate-signed-journey-result.py \
+      "$signed_source" \
+      --requirement-ids "$requirement_id"
+  done
+}
 
 if [[ "$LEDGER_STATE" == "pending" ]]; then
   # The builder verifies the evidence bytes against a commit that contains them,
@@ -174,15 +214,11 @@ if [[ "$LEDGER_STATE" == "pending" ]]; then
     --journey-id JOURNEY-PROVIDER-BYOM-DISCOVERY
 
   echo "test-byom-discovery-journey: driver, capture, build, and preflight passed"
-elif [[ "$LEDGER_STATE" == "conformant" && -n "$SIGNED_SOURCE" ]]; then
-  python3 scripts/validate-signed-journey-result.py \
-    "$SIGNED_SOURCE" \
-    --requirement-ids "$REQUIREMENT_IDS"
+elif [[ "$LEDGER_STATE" == "conformant" ]]; then
+  validate_retained_rows
   echo "test-byom-discovery-journey: driver, capture, and signed envelope validation passed"
-elif [[ "$LEDGER_STATE" == "retained" && -n "$SIGNED_SOURCE" ]]; then
-  python3 scripts/validate-signed-journey-result.py \
-    "$SIGNED_SOURCE" \
-    --requirement-ids "$REQUIREMENT_IDS"
+elif [[ "$LEDGER_STATE" == "retained" ]]; then
+  validate_retained_rows
   echo "test-byom-discovery-journey: driver, capture, and retained signed envelope validation passed"
 else
   echo "test-byom-discovery-journey: unexpected SPEC-046 ledger state" >&2

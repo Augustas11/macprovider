@@ -29,7 +29,10 @@ staged canary, the canary outcome, and three-lane audits.
 ## Required steps
 
 Steps `step-01-bind-signed-release` through `step-16-redaction-review` are the
-same baseline contract as `JOURNEY-PRIVACY-CLASS-BETA`.
+same baseline contract as `JOURNEY-PRIVACY-CLASS-BETA`, except Step 06 may use
+the same designated Studio only when the reviewed bundle also contains
+`step-06-sip-off-refused/restored-validation.json` from the offline Step06
+helper. The v1 journey still requires a different SIP-disabled lab Mac.
 
 17. `step-17-auto-mode-eligibility` proves automatic eligible, automatic
     ineligible, automatic hardening fallback, explicit opt-out, and explicit
@@ -102,6 +105,20 @@ copies public signature bytes without redaction so verification is over the
 original bytes. The reviewed bundle permits binary bytes only for the two
 closed public release-signature source paths; all other artifacts remain UTF-8
 and subject to the ordinary path, secret, private-key, and needle sweeps.
+
+For same-Studio Step 06, `restored-validation.json` MUST be the closed
+`macprovider.privacy-lab-v2.step06-restored-validation.v1` object produced
+after the Studio is restored. It binds a public projection of the offline
+packet containing only non-secret facts: tested candidate binary digest, team,
+signing identifier and cdhash, provider config digest, release binding-file
+digest, prepared host facts with SIP enabled, and the exact non-live loopback
+listener. It also binds the exact raw Step 06 artifact hashes, restored host
+facts with SIP enabled, and a `connection-observation.json` proving the
+helper-owned exact loopback listener accepted zero connections and zero bytes
+during the run window. The prepared host, restored host, SIP-disabled host text,
+projected listener, and observed listener MUST all match. This is a bounded
+listener observation, not a global packet capture, and the object MUST set
+`physical_pass_claimed` to `false`.
 
 Every database phase capture MUST contain a positive `captured_at_unix` and
 complete, untruncated exports of exactly these public-state tables:

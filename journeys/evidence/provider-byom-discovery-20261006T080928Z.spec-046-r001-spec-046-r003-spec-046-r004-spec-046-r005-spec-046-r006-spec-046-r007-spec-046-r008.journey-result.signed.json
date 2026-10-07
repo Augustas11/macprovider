@@ -1,0 +1,158 @@
+{
+  "schema_version": "macprovider.journey-result-envelope.v1",
+  "signatures": [
+    {
+      "algorithm": "ecdsa-p256-sha256",
+      "key_id": "macprovider-acceptance-p256-v1",
+      "signature": "MEUCIA0YJEh7BVNJxGkcaFH7GTxJSQBv7Elsj5HZhGYOMAh+AiEAgXanRbYlIHTJ7ll/VU8L+k1XzcTkJSD9dq7ma1965s4=",
+      "signed_sha256": "2dba00259706c08a406bb91853c1cac4f422dbf0e2816799e0e363b71028c68b",
+      "verified_at": "2026-10-06T14:17:27Z",
+      "verifier": ".github/workflows/promote-signed-byom-discovery-journey.yml:37477620930:1"
+    }
+  ],
+  "signed": {
+    "schema_version": "macprovider.journey-result.v1",
+    "journey_id": "JOURNEY-PROVIDER-BYOM-DISCOVERY",
+    "requirement_ids": [
+      "SPEC-046-R001",
+      "SPEC-046-R003",
+      "SPEC-046-R004",
+      "SPEC-046-R005",
+      "SPEC-046-R006",
+      "SPEC-046-R007",
+      "SPEC-046-R008"
+    ],
+    "repository": {
+      "name": "Augustas11/macprovider",
+      "commit": "3f61995d90394fb5abd8589e03b7aa7d14cc102e"
+    },
+    "captured_at": "2026-10-06T08:09:28Z",
+    "expires_at": "2026-11-05",
+    "operator": {
+      "role": "release-operator",
+      "identity_fingerprint": "4b5b0c550f52d4126d5ae8cabca0416a9355a6da95179d1d893097baccae2ee0"
+    },
+    "environment": {
+      "class": "hermetic-loopback",
+      "hardware_profile": "operator-hermetic-loopback",
+      "candidate": "3f61995d"
+    },
+    "artifacts": [
+      {
+        "id": "redacted-provider-byom-discovery",
+        "sha256": "01b051c730eab6ed299e3dc5d8cf93d1d74e91fc0d56c0266d27812da597a41f",
+        "source": "journeys/evidence/provider-byom-discovery-20261006T080928Z.redacted.json"
+      }
+    ],
+    "result": {
+      "status": "pass",
+      "summary": "hermetic discovery journey passed ten steps with no buyer traffic and no provider credit"
+    },
+    "steps": [
+      {
+        "id": "step-01-discover-mlx-cache",
+        "status": "pass",
+        "assertion": "MLX-cache candidate discovered read-only with a stable namespace-scoped candidate id.",
+        "artifacts": [
+          "redacted-provider-byom-discovery"
+        ]
+      },
+      {
+        "id": "step-02-discover-loopback-runtime",
+        "status": "pass",
+        "assertion": "Loopback Ollama adapter enumerated one candidate without leaving the host.",
+        "artifacts": [
+          "redacted-provider-byom-discovery"
+        ]
+      },
+      {
+        "id": "step-03-discover-opaque-endpoint",
+        "status": "pass",
+        "assertion": "Opaque OpenAI-compatible candidate reported identity_state opaque_endpoint, null capabilities, and a non-earning local state.",
+        "artifacts": [
+          "redacted-provider-byom-discovery"
+        ]
+      },
+      {
+        "id": "step-04-reject-non-loopback",
+        "status": "pass",
+        "assertion": "Non-loopback adapter origin rejected before any request was issued, and the endpoint never appeared in the projection.",
+        "artifacts": [
+          "redacted-provider-byom-discovery"
+        ]
+      },
+      {
+        "id": "step-05-handle-adapter-failure",
+        "status": "pass",
+        "assertion": "Malformed adapter response surfaced as a closed warning code, not a trust claim.",
+        "artifacts": [
+          "redacted-provider-byom-discovery"
+        ]
+      },
+      {
+        "id": "step-06-evaluate-candidate",
+        "status": "pass",
+        "assertion": "models evaluate ran the bounded local harness against the opaque endpoint and reported health_result passed with one request.",
+        "artifacts": [
+          "redacted-provider-byom-discovery"
+        ]
+      },
+      {
+        "id": "step-07-no-production-mutation",
+        "status": "pass",
+        "assertion": "mutation_summary reported no config, cache, weight, or coordinator mutation, and the fixture digests were unchanged after the run.",
+        "artifacts": [
+          "redacted-provider-byom-discovery"
+        ]
+      },
+      {
+        "id": "step-08-redaction-review",
+        "status": "pass",
+        "assertion": "JSON and stderr carried no prompt, completion, credential, endpoint, or local path material.",
+        "artifacts": [
+          "redacted-provider-byom-discovery"
+        ]
+      },
+      {
+        "id": "step-09-state-boundary",
+        "status": "pass",
+        "assertion": "Evaluated candidate stayed non-routable and non-earning with no coordinator state and no catalog earning path.",
+        "artifacts": [
+          "redacted-provider-byom-discovery"
+        ]
+      },
+      {
+        "id": "step-10-local-state-ladder",
+        "status": "pass",
+        "assertion": "local_only, offerable, and local-default not_offered each reported a closed next action; local_only and not_offered each reported a non-null local transition reason, and offerable reported the nullable reason field with no blocker to name.",
+        "artifacts": [
+          "redacted-provider-byom-discovery"
+        ]
+      }
+    ],
+    "redaction": {
+      "secrets_redacted": true,
+      "operator_identity_redacted": true,
+      "local_account_names_redacted": true
+    },
+    "run_id": "byom-discovery-20261006T080814Z",
+    "execution_mode": "local-provider-discovery",
+    "observations": {
+      "adapter_failure_warned": true,
+      "buyer_traffic_sent": false,
+      "candidate_evaluated": true,
+      "local_state_ladder_verified": true,
+      "loopback_runtime_discovered": true,
+      "mlx_cache_discovered": true,
+      "non_loopback_rejected": true,
+      "opaque_endpoint_candidate_discovered": true,
+      "provider_credit_created": false,
+      "raw_completion_logged": false,
+      "raw_prompt_logged": false,
+      "redacted_artifacts_reviewed": true,
+      "runtime_installed": false,
+      "state_boundary_preserved": true,
+      "weights_downloaded": false
+    }
+  }
+}

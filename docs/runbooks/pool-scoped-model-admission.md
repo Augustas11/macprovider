@@ -32,6 +32,80 @@ Pool creation, keys and the base manifest flow:
 | Pool is `enforce` with the runtime in its allowlist | `get-pool` shows `settlement_mode: enforce` and the engine in `runtime_allowlist` (not needed for native `mlx_cache`) |
 | Provider is a member, and its owner account is the creator or an R016 attested member | `get-pool` `members`; for a non-creator member, the account in the core's `pool_attested_members/v1` and the provider under that account in `trusted_pools.provider_owner_account_ids` (§1) |
 
+## 0.1 Engine support and evidence
+
+A pool entry binds one artifact format to the runtime classes listed in its
+signed `allowed_runtime_sources`. The creator must put every non-native class
+in the core's `runtime_allowlist`; `mlx_cache` is the one native exception and
+MUST NOT be added to that allowlist.
+
+| Artifact and runtime | Pool-entry value | Evidence status | Provider action |
+|---|---|---|---|
+| Native MLX snapshot | `mlx_cache` | Production-proven for #1816. Native paid routes use `coordinator_observed`; no engine selector is sent by the buyer. | Discover the snapshot from the configured Hugging Face cache, propose it, then keep the native `serve` session running. |
+| llama.cpp GGUF | `llamacpp_loopback` | Production-proven for #1816. Attested non-creator paid routes use `pool_operator_attested`; buyers select `llamacpp`. | Run `llama-server`, pin its exact GGUF file with `--llamacpp-model-path`, propose, and run the provider `serve` session. |
+| LM Studio GGUF | `lmstudio_loopback` | Supported by the source/discovery and policy format, but not production-proven by the #1816 journey. | Do not represent it as production-proven. It needs a separate production journey before that claim. |
+| Ollama GGUF | `ollama_loopback` | Supported by the source/discovery and policy format, but not production-proven by the #1816 journey. | Do not represent it as production-proven. It needs a separate production journey before that claim. |
+| mlx_lm.server snapshot | `mlxlm_loopback` | Supported by the source/discovery and policy format, but not production-proven by the #1816 journey. | Do not represent it as production-proven. It needs a separate production journey before that claim. |
+| oMLX snapshot | `omlx_loopback` | Supported by the source/discovery and policy format, but not production-proven by the #1816 journey. | Do not represent it as production-proven. It needs a separate production journey before that claim. |
+
+## 0.2 Creator and provider procedure
+
+1. A provider first runs `macprovider-cli models discover --json`. For a
+   llama.cpp model, it pins the served file instead of trusting its model name:
+
+   ```bash
+   macprovider-cli models propose llamacpp:<served-model-ref> --pool "$POOL_ID" --slug <slug> \
+     --llamacpp-origin http://127.0.0.1:<port> --llamacpp-model-path /absolute/model.gguf \
+     --skip-ollama --skip-lmstudio --json > proposal.json
+   ```
+
+   For native MLX, select the discovered snapshot candidate and use the same
+   `models propose <candidate> --pool "$POOL_ID" --slug <slug> --json`
+   command; pass `--mlx-cache-dir <Hugging-Face-hub-dir>` when the cache is not
+   in its configured location.
+
+2. The creator verifies the artifact hash and licence, fixes the three rates
+   and context limit within the live bounds, adds the runtime to
+   `runtime_allowlist` when it is a loopback class, and signs/submits the v2
+   manifest. The entry is live only after its `not_before` window.
+
+3. When the entry is live, the serving provider reviews before mutation, then
+   submits its offer and restarts its existing `serve` session:
+
+   ```bash
+   macprovider-cli models offer <candidate> --dry-run --json
+   macprovider-cli models offer <candidate> --yes --json
+   macprovider-cli models admission status <candidate> --json
+   ```
+
+   Use the same `--config` and discovery options in these three commands
+   as in the proposal, including the pinned GGUF path and loopback origin
+   for llama.cpp or the configured MLX cache directory.
+
+   The `pool_binding` must show `binding_scope: pool`, the expected
+   `pool_model_id` and active manifest digest; `catalog_model_key` remains
+   `null`. A pool entry is `catalog_priced` only in this pool. It is never a
+   global catalog identity, `settlement_capable`, or network-verified model.
+
+4. A non-creator is a delegated member. The core must attest its owner account
+   for the loopback runtime and the live coordinator map must associate that
+   account with its provider. After any substantive core change—entry or
+   price, attestation, allowlist, settlement mode, predicate, retention,
+   splits, or signer set—the owner re-delegates against the active
+   `manifest_terms_digest`, then repeats `models offer <candidate> --yes
+   --json`. Window-only rotations keep a terms-bound grant and do not need a
+   re-offer.
+
+5. For the production-proven paths, a buyer uses `model=pool/<pool>/<slug>` and
+   `X-MacProvider-Pool-Select`. llama.cpp additionally uses
+   `X-MacProvider-Engine-Select: llamacpp`; native uses no engine selector.
+   Verify each paid request with the read-only SQL in §6: one pool-manifest
+   snapshot, verified verdict, payable positive provider credit, and settled
+   reservation. Native reports `coordinator_observed`; llama.cpp reports
+   `pool_operator_attested`. Earnings are per paid route at the signed entry
+   rates and the frozen multiplier/provider share; a proposal or admission
+   status alone creates no earnings.
+
 **Deploy order and the mixed window.** Deploy the coordinator, then the
 gateway at once (the order of
 [trusted-pool-production-launch.md](trusted-pool-production-launch.md) §9;
@@ -242,11 +316,12 @@ routes only after its rebind.
 
 ## 4. Admission and status
 
-After the new window is active, the member submits (or keeps) its offer for
-the candidate (`macprovider-cli models offer <candidate> --json`) and
-restarts `serve` so its session re-evaluates it. Re-submitting the identical
-offer is idempotent: it answers the candidate's current status (and
-re-evaluates the pool binding), not `409 replay_conflict`.
+After the new window is active, the member reviews its offer with
+`macprovider-cli models offer <candidate> --dry-run --json`, then submits it
+with `macprovider-cli models offer <candidate> --yes --json` and restarts
+`serve` so its session re-evaluates it. Re-submitting the identical offer is
+idempotent: it answers the candidate's current status (and re-evaluates the
+pool binding), not `409 replay_conflict`.
 
 **Delegated (non-creator) members re-delegate only on substantive changes.**
 A new `ProviderPoolDelegationV1` grant binds to the core's policy-terms
@@ -269,8 +344,13 @@ event with
   revokes the old grant (`delegation_revoked`, naming the old grant's
   binding) and signs a new grant for the new core's `manifest_terms_digest`.
   The operator then appends `member_admitted` with the new `delegation_id`.
-  The binding sweep binds the live offer within seconds; no new offer is
-  needed.
+  After re-delegation, the member reviews with
+  `macprovider-cli models offer <candidate> --dry-run --json`, then resubmits
+  with `macprovider-cli models offer <candidate> --yes --json`. Re-delegation
+  alone does not rebind the revoked offer. Confirm `pool_manifest_bound`, the
+  effective manifest version, and pool-scoped `catalog_priced` status before
+  sending new buyer traffic; the price-change production drill required
+  this re-offer (§9).
 - A legacy grant that names a full `manifest_core_digest` keeps working
   exactly as before: it binds only that exact core and needs a
   re-delegation after every rotation, window-only included. Re-delegate it

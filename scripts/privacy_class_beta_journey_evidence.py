@@ -622,6 +622,13 @@ def expect(condition: bool, errors: list[str], message: str) -> None:
         errors.append(message)
 
 
+def step06_loopback_listener(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    match = re.fullmatch(r"(?:127\.0\.0\.1|\[::1\]):([1-9][0-9]{0,4})", value)
+    return match is not None and 1 <= int(match.group(1)) <= 65535 and int(match.group(1)) != 8080
+
+
 def privacy_disclosure(fingerprint: str, residual_risks: tuple[str, ...] = PRIVACY_RESIDUAL_RISKS) -> str:
     block = (
         f"privacy class satisfied; identity fingerprint={fingerprint}\n"
@@ -1725,11 +1732,121 @@ class Checks:
         host = re.search(r"^hw\.model: (\S+)$", self.b.text(f"{base}/host.txt"), re.M)
         expect(host is not None, errors, "lab host model must be recorded")
         if host is not None:
-            expect(host.group(1) != self.binding()["hardware_model"], errors, "SIP-off lab host must be a different Mac")
+            same_hardware = host.group(1) == self.binding()["hardware_model"]
+            if self.profile is PROFILE_V2:
+                expect(same_hardware, errors, "v2 SIP-off host must be the designated Studio hardware")
+                if same_hardware:
+                    self.v2_same_studio_sip_off(base, host.group(1), errors)
+            else:
+                expect(not same_hardware, errors, "SIP-off lab host must be a different Mac")
         expect(self.b.fields(f"{base}/result.txt") == {"exit": "78", "conns_bytes": "0"}, errors, "SIP-off run must exit 78 with zero connection bytes")
         expect(self.b.text(f"{base}/conns.txt") == "", errors, "SIP-off run must make no connection")
         stderr = re.fullmatch(r"FATAL privacy_class_hardening_failed reasons=([a-z0-9_,]+)\n", self.b.text(f"{base}/stderr.txt"))
         expect(stderr is not None and "sip_disabled" in stderr.group(1).split(","), errors, "SIP-off run must be refused with sip_disabled")
+
+    def v2_same_studio_sip_off(self, base: str, hardware_model: str, errors: list[str]) -> None:
+        restored = self.b.json_object(f"{base}/restored-validation.json")
+        expected_restored_keys = {
+            "schema",
+            "step_id",
+            "physical_pass_claimed",
+            "manual_step06_ready_for_import",
+            "packet_sha256",
+            "offline_packet_public_projection",
+            "raw_artifact_sha256",
+            "restored_host",
+            "known_network_observation_limit",
+        }
+        expect(set(restored) == expected_restored_keys, errors, "v2 same-Studio SIP proof must be the closed restored-validation schema")
+        expect(restored.get("schema") == "macprovider.privacy-lab-v2.step06-restored-validation.v1", errors, "v2 same-Studio SIP proof must be the Step06 restored-validation schema")
+        expect(restored.get("step_id") == "step-06-sip-off-refused", errors, "v2 same-Studio SIP proof must bind step-06")
+        expect(restored.get("physical_pass_claimed") is False, errors, "v2 same-Studio restored proof must not claim physical PASS")
+        expect(restored.get("manual_step06_ready_for_import") is True, errors, "v2 same-Studio restored proof must be ready for import")
+        expect(isinstance(restored.get("packet_sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", restored["packet_sha256"]) is not None, errors, "v2 same-Studio restored proof must bind the offline packet digest")
+        projection = restored.get("offline_packet_public_projection")
+        self.v2_same_studio_public_projection(projection, errors)
+
+        raw_hashes = restored.get("raw_artifact_sha256")
+        expected_raw = {"sip.txt", "host.txt", "stderr.txt", "conns.txt", "connection-observation.json", "result.txt"}
+        expect(isinstance(raw_hashes, dict) and set(raw_hashes) == expected_raw, errors, "v2 same-Studio restored proof must bind every Step06 raw artifact hash")
+        if isinstance(raw_hashes, dict):
+            for name in sorted(expected_raw):
+                digest = raw_hashes.get(name)
+                expect(isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None, errors, f"v2 same-Studio restored proof hash for {name} must be SHA-256")
+                if isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest):
+                    expect(digest == self.b.sha256(f"{base}/{name}"), errors, f"v2 same-Studio restored proof hash for {name} must match the reviewed artifact")
+
+        restored_host = restored.get("restored_host")
+        expect(isinstance(restored_host, dict) and set(restored_host) == {"local_hostname", "hardware_model", "sip_status"}, errors, "v2 same-Studio restored host must be closed")
+        if isinstance(restored_host, dict):
+            expect(restored_host.get("hardware_model") == hardware_model, errors, "v2 same-Studio restored host must match the SIP-disabled host hardware")
+            expect(restored_host.get("sip_status") == "System Integrity Protection status: enabled.", errors, "v2 same-Studio restored host must show SIP restored before import")
+            expect(isinstance(restored_host.get("local_hostname"), str) and bool(restored_host["local_hostname"]), errors, "v2 same-Studio restored host must name the prepared Studio host")
+            host_text = self.b.text(f"{base}/host.txt")
+            expect(f"LocalHostName: {restored_host.get('local_hostname')}\n" in host_text, errors, "v2 same-Studio SIP-disabled host must match the restored host name")
+            if isinstance(projection, dict):
+                prepared_host = projection.get("prepared_host")
+                if isinstance(prepared_host, dict):
+                    expect(prepared_host.get("local_hostname") == restored_host.get("local_hostname"), errors, "v2 same-Studio prepared host must match the restored host name")
+                    expect(prepared_host.get("hardware_model") == restored_host.get("hardware_model"), errors, "v2 same-Studio prepared host must match the restored hardware")
+
+        observation = self.b.json_object(f"{base}/connection-observation.json")
+        expected_observation_keys = {
+            "schema",
+            "listener",
+            "accepted_connections",
+            "received_bytes",
+            "window_started_unix",
+            "window_ended_unix",
+            "known_limit",
+        }
+        expect(set(observation) == expected_observation_keys, errors, "v2 same-Studio connection observation must be closed")
+        expect(observation.get("schema") == "macprovider.privacy-lab-v2.step06-connection-observation.v1", errors, "v2 same-Studio connection observation schema must match the helper")
+        expect(step06_loopback_listener(observation.get("listener")), errors, "v2 same-Studio connection observation must bind a non-live loopback listener")
+        expect(all(type(observation.get(key)) is int and observation[key] == 0 for key in ("accepted_connections", "received_bytes")), errors, "v2 same-Studio helper-owned listener must accept zero connections and zero bytes as integer counts")
+        started = observation.get("window_started_unix")
+        ended = observation.get("window_ended_unix")
+        expect(isinstance(started, int) and not isinstance(started, bool) and isinstance(ended, int) and not isinstance(ended, bool) and started > 0 and ended >= started, errors, "v2 same-Studio connection observation must bind a valid run window")
+        expect(observation.get("known_limit") == "helper-owned exact loopback listener during provider run window; not a global packet capture", errors, "v2 same-Studio connection observation must disclose its helper-owned listener limit")
+        if isinstance(projection, dict):
+            expect(projection.get("coordinator_listener") == observation.get("listener"), errors, "v2 same-Studio projected listener must match the observed listener")
+        limit = restored.get("known_network_observation_limit")
+        expect(isinstance(limit, str) and "helper-owned loopback listener accepted zero connections" in limit and "not a global packet capture" in limit, errors, "v2 same-Studio restored proof must disclose the network observation limit")
+
+    def v2_same_studio_public_projection(self, projection: Any, errors: list[str]) -> None:
+        values = self.binding()
+        if not isinstance(projection, dict) or set(projection) != {
+            "schema",
+            "step_id",
+            "candidate",
+            "provider_config_sha256",
+            "binding_file_sha256",
+            "prepared_host",
+            "coordinator_listener",
+        }:
+            errors.append("v2 same-Studio restored proof must include the closed public offline-packet projection")
+            return
+        expect(projection.get("schema") == "macprovider.privacy-lab-v2.step06-offline-packet-public-projection.v1", errors, "v2 same-Studio public projection schema must match")
+        expect(projection.get("step_id") == "step-06-sip-off-refused", errors, "v2 same-Studio public projection must bind step-06")
+        candidate = projection.get("candidate")
+        if not isinstance(candidate, dict) or set(candidate) != {"binary_sha256", "team_id", "signing_identifier", "cdhash"}:
+            errors.append("v2 same-Studio public projection candidate binding must be closed")
+        else:
+            expect(candidate.get("binary_sha256") == values["binary_sha256"], errors, "v2 same-Studio public projection must bind the tested candidate bytes")
+            expect(candidate.get("team_id") == values["team_id"], errors, "v2 same-Studio public projection must bind the tested team id")
+            expect(candidate.get("signing_identifier") == values["signing_identifier"], errors, "v2 same-Studio public projection must bind the tested signing identifier")
+            expect(candidate.get("cdhash") == values["code_cdhash"], errors, "v2 same-Studio public projection must bind the tested cdhash")
+        expect(projection.get("provider_config_sha256") == values["provider_config_sha256"], errors, "v2 same-Studio public projection must bind the tested provider config")
+        expect(projection.get("binding_file_sha256") == self.b.sha256("step-01-bind-signed-release/binding.txt"), errors, "v2 same-Studio public projection must bind the reviewed release binding file")
+        prepared_host = projection.get("prepared_host")
+        if not isinstance(prepared_host, dict) or set(prepared_host) != {"local_hostname", "hardware_model", "sip_status"}:
+            errors.append("v2 same-Studio public projection prepared host must be closed")
+        else:
+            expect(prepared_host.get("hardware_model") == values["hardware_model"], errors, "v2 same-Studio public projection must bind the designated Studio hardware")
+            expect(prepared_host.get("sip_status") == "System Integrity Protection status: enabled.", errors, "v2 same-Studio public projection must be prepared with SIP enabled")
+            expect(isinstance(prepared_host.get("local_hostname"), str) and bool(prepared_host["local_hostname"]), errors, "v2 same-Studio public projection must bind the prepared host name")
+        listener = projection.get("coordinator_listener")
+        expect(step06_loopback_listener(listener), errors, "v2 same-Studio public projection must bind a non-live loopback listener")
 
     # -- step-07 / step-08
 

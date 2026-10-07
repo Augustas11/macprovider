@@ -537,6 +537,138 @@ class PrivacyClassBetaV2RawEvidenceTests(unittest.TestCase):
         with self.assertRaises(contract.PrivacyEvidenceError):
             contract.profile_for_name("automatic")
 
+    def same_studio_sip_off_fixture(self, mutation: str | None = None) -> contract.Bundle:
+        binding = (REPO_ROOT / BUNDLE / "step-01-bind-signed-release" / "binding.txt").read_bytes()
+        identity = contract.Checks(contract.Bundle("fixture", {"step-01-bind-signed-release/binding.txt": binding}, b"")).binding()
+        base = "step-06-sip-off-refused"
+        files = {
+            "step-01-bind-signed-release/binding.txt": binding,
+            f"{base}/sip.txt": b"System Integrity Protection status: disabled.\n",
+            f"{base}/host.txt": f"hw.model: {identity['hardware_model']}\nLocalHostName: Malibu-Studio\n".encode(),
+            f"{base}/stderr.txt": b"FATAL privacy_class_hardening_failed reasons=sip_disabled\n",
+            f"{base}/conns.txt": b"",
+            f"{base}/connection-observation.json": json_bytes({
+                "schema": "macprovider.privacy-lab-v2.step06-connection-observation.v1",
+                "listener": "127.0.0.1:19444",
+                "accepted_connections": 0,
+                "received_bytes": 0,
+                "window_started_unix": 100,
+                "window_ended_unix": 101,
+                "known_limit": "helper-owned exact loopback listener during provider run window; not a global packet capture",
+            }),
+            f"{base}/result.txt": b"exit=78 conns_bytes=0\n",
+        }
+        raw_hashes = {
+            name: hashlib.sha256(files[f"{base}/{name}"]).hexdigest()
+            for name in ("sip.txt", "host.txt", "stderr.txt", "conns.txt", "connection-observation.json", "result.txt")
+        }
+        restored = {
+            "schema": "macprovider.privacy-lab-v2.step06-restored-validation.v1",
+            "step_id": "step-06-sip-off-refused",
+            "physical_pass_claimed": False,
+            "manual_step06_ready_for_import": True,
+            "packet_sha256": "b" * 64,
+            "offline_packet_public_projection": {
+                "schema": "macprovider.privacy-lab-v2.step06-offline-packet-public-projection.v1",
+                "step_id": "step-06-sip-off-refused",
+                "candidate": {
+                    "binary_sha256": identity["binary_sha256"],
+                    "team_id": identity["team_id"],
+                    "signing_identifier": identity["signing_identifier"],
+                    "cdhash": identity["code_cdhash"],
+                },
+                "provider_config_sha256": identity["provider_config_sha256"],
+                "binding_file_sha256": hashlib.sha256(binding).hexdigest(),
+                "prepared_host": {
+                    "local_hostname": "Malibu-Studio",
+                    "hardware_model": identity["hardware_model"],
+                    "sip_status": "System Integrity Protection status: enabled.",
+                },
+                "coordinator_listener": "127.0.0.1:19444",
+            },
+            "raw_artifact_sha256": raw_hashes,
+            "restored_host": {
+                "local_hostname": "Malibu-Studio",
+                "hardware_model": identity["hardware_model"],
+                "sip_status": "System Integrity Protection status: enabled.",
+            },
+            "known_network_observation_limit": "connection-observation.json proves the helper-owned loopback listener accepted zero connections on the reviewed coordinator endpoint during the run window; it is not a global packet capture or physical PASS",
+        }
+        if mutation == "missing_restored":
+            return contract.Bundle("fixture", files, b"")
+        if mutation == "pass_claim":
+            restored["physical_pass_claimed"] = True
+        elif mutation == "accepted_connection":
+            files[f"{base}/connection-observation.json"] = json_bytes({
+                "schema": "macprovider.privacy-lab-v2.step06-connection-observation.v1",
+                "listener": "127.0.0.1:19444",
+                "accepted_connections": 1,
+                "received_bytes": 0,
+                "window_started_unix": 100,
+                "window_ended_unix": 101,
+                "known_limit": "helper-owned exact loopback listener during provider run window; not a global packet capture",
+            })
+            restored["raw_artifact_sha256"]["connection-observation.json"] = hashlib.sha256(files[f"{base}/connection-observation.json"]).hexdigest()
+        elif mutation == "hash_drift":
+            restored["raw_artifact_sha256"]["stderr.txt"] = "0" * 64
+        elif mutation == "sip_not_restored":
+            restored["restored_host"]["sip_status"] = "System Integrity Protection status: disabled."
+        elif mutation == "candidate_drift":
+            restored["offline_packet_public_projection"]["candidate"]["cdhash"] = "0" * 40
+        elif mutation == "config_drift":
+            restored["offline_packet_public_projection"]["provider_config_sha256"] = "0" * 64
+        elif mutation == "binding_drift":
+            restored["offline_packet_public_projection"]["binding_file_sha256"] = "0" * 64
+        elif mutation == "different_hardware":
+            files[f"{base}/host.txt"] = b"hw.model: MacBookAir10,1\nLocalHostName: Malibu-Studio\n"
+            restored["raw_artifact_sha256"]["host.txt"] = hashlib.sha256(files[f"{base}/host.txt"]).hexdigest()
+        elif mutation == "prepared_host_drift":
+            restored["offline_packet_public_projection"]["prepared_host"]["local_hostname"] = "Other-Studio"
+        elif mutation == "listener_drift":
+            restored["offline_packet_public_projection"]["coordinator_listener"] = "127.0.0.1:19445"
+        elif mutation in {"boolean_connections", "boolean_bytes", "invalid_listener_port", "live_listener_port"}:
+            observation = json.loads(files[f"{base}/connection-observation.json"])
+            if mutation == "boolean_connections":
+                observation["accepted_connections"] = False
+            elif mutation == "boolean_bytes":
+                observation["received_bytes"] = False
+            else:
+                listener = "127.0.0.1:99999" if mutation == "invalid_listener_port" else "127.0.0.1:8080"
+                observation["listener"] = listener
+                restored["offline_packet_public_projection"]["coordinator_listener"] = listener
+            files[f"{base}/connection-observation.json"] = json_bytes(observation)
+            restored["raw_artifact_sha256"]["connection-observation.json"] = hashlib.sha256(files[f"{base}/connection-observation.json"]).hexdigest()
+        files[f"{base}/restored-validation.json"] = json_bytes(restored)
+        return contract.Bundle("fixture", files, b"")
+
+    def test_v2_accepts_same_studio_sip_off_only_with_restored_helper_proof(self) -> None:
+        coherent = self.same_studio_sip_off_fixture()
+        v1_errors = contract.Checks(coherent, contract.PROFILE_V1).run("sip_off")
+        self.assertTrue(any("different Mac" in error for error in v1_errors), v1_errors)
+        self.assertEqual([], contract.Checks(coherent, contract.PROFILE_V2).run("sip_off"))
+
+        expected = {
+            "missing_restored": "bundle file is missing",
+            "pass_claim": "must not claim physical PASS",
+            "accepted_connection": "must accept zero connections and zero bytes",
+            "hash_drift": "hash for stderr.txt must match",
+            "sip_not_restored": "must show SIP restored",
+            "candidate_drift": "must bind the tested cdhash",
+            "config_drift": "must bind the tested provider config",
+            "binding_drift": "must bind the reviewed release binding file",
+            "different_hardware": "v2 SIP-off host must be the designated Studio hardware",
+            "prepared_host_drift": "prepared host must match the restored host name",
+            "listener_drift": "projected listener must match the observed listener",
+            "boolean_connections": "as integer counts",
+            "boolean_bytes": "as integer counts",
+            "invalid_listener_port": "must bind a non-live loopback listener",
+            "live_listener_port": "must bind a non-live loopback listener",
+        }
+        for mutation, message in expected.items():
+            with self.subTest(mutation=mutation):
+                errors = contract.Checks(self.same_studio_sip_off_fixture(mutation), contract.PROFILE_V2).run("sip_off")
+                self.assertTrue(any(message in error for error in errors), errors)
+
     def release_fixture(self, *, tamper_signature: bool = False, valid_failed_metadata: bool = False) -> tuple[contract.Bundle, str]:
         binding = (REPO_ROOT / BUNDLE / "step-01-bind-signed-release" / "binding.txt").read_bytes()
         base = contract.Bundle("fixture", {"step-01-bind-signed-release/binding.txt": binding}, b"")
@@ -761,7 +893,7 @@ class PrivacyClassBetaV2RawEvidenceTests(unittest.TestCase):
                     replaced += 1
             self.assertEqual(10, replaced)
             release, fixture_key_digest = self.release_fixture()
-            fixtures = (self.auto_fixture(), self.enrollment_fixture(), self.reenroll_fixture(), release, self.directory_fixture())
+            fixtures = (self.same_studio_sip_off_fixture(), self.auto_fixture(), self.enrollment_fixture(), self.reenroll_fixture(), release, self.directory_fixture())
             for fixture in fixtures:
                 for relative, data in fixture.files.items():
                     if relative == "step-01-bind-signed-release/binding.txt":
@@ -769,6 +901,10 @@ class PrivacyClassBetaV2RawEvidenceTests(unittest.TestCase):
                     destination = bundle_dir / relative
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     destination.write_bytes(data)
+            sweep_path = bundle_dir / "step-16-redaction-review" / "evidence-sweep.json"
+            sweep = json.loads(sweep_path.read_text(encoding="utf-8"))
+            sweep["roots"][0]["files_scanned"] = len([path for path in bundle_dir.rglob("*") if path.is_file() and path.name != contract.MANIFEST_NAME and not path.relative_to(bundle_dir).as_posix().startswith("primary/")]) - 3
+            sweep_path.write_text(json.dumps(sweep, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             results = (bundle_dir / "results.tsv").read_text(encoding="utf-8")
             marker = "2026-10-06T04:44:43Z\tstep-16-redaction-review"
             extension = "".join(
