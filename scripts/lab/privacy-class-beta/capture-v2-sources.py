@@ -16,9 +16,10 @@ import os
 import sqlite3
 import stat
 import sys
+import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -46,6 +47,7 @@ _spec.loader.exec_module(_extractor_limits)
 
 MAX_FILE_SOURCE_BYTES = _extractor_limits.V2_SOURCE_MAX_BYTES
 MAX_DB_SOURCE_BYTES = 256 << 20
+MAX_DB_SIDECAR_SOURCE_BYTES = 256 << 20
 INVENTORY_DIR = "capture-v2-inventory"
 SECRET_COLUMN = (
     "secret",
@@ -227,6 +229,19 @@ def validate_source_stat(st: os.stat_result, max_bytes: int) -> None:
         die(f"source must be between 1 and {max_bytes} bytes")
 
 
+def validate_optional_sidecar_stat(st: os.stat_result, label: str, max_bytes: int) -> None:
+    if not stat.S_ISREG(st.st_mode):
+        die(f"{label} must be a regular file")
+    if st.st_uid != os.getuid():
+        die(f"{label} must be owned by the current lab user")
+    if stat.S_IMODE(st.st_mode) & 0o022:
+        die(f"{label} must not be group- or world-writable")
+    if st.st_nlink != 1:
+        die(f"{label} must not be hard-linked")
+    if st.st_size < 0 or st.st_size > max_bytes:
+        die(f"{label} must be at most {max_bytes} bytes")
+
+
 def require_source_path_matches_fd(path: Path, fd: int, expected: os.stat_result, max_bytes: int) -> None:
     require_no_symlink_components(path, "source", allow_missing_leaf=False)
     try:
@@ -240,6 +255,19 @@ def require_source_path_matches_fd(path: Path, fd: int, expected: os.stat_result
     validate_source_stat(pinned, max_bytes)
     if (pinned.st_dev, pinned.st_ino) != (expected.st_dev, expected.st_ino):
         die("source changed while capturing SQLite snapshot")
+
+
+def stat_identity(st: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def record_cleanup_error(primary: BaseException | None, cleanup: Callable[[], None]) -> BaseException | None:
+    try:
+        cleanup()
+    except BaseException as exc:
+        if primary is None:
+            return exc
+    return primary
 
 
 def read_source_bytes(path: Path, max_bytes: int) -> tuple[bytes, Path, os.stat_result]:
@@ -257,6 +285,201 @@ def source_file(path: Path, max_bytes: int) -> Path:
     fd, resolved, _st = open_source_fd(path, max_bytes)
     os.close(fd)
     return resolved
+
+
+def copy_fd_to_path(fd: int, expected: os.stat_result, target: Path, label: str, max_bytes: int, *, allow_empty: bool) -> None:
+    pinned = os.fstat(fd)
+    if (pinned.st_dev, pinned.st_ino) != (expected.st_dev, expected.st_ino):
+        die(f"{label} changed while being copied")
+    if not stat.S_ISREG(pinned.st_mode):
+        die(f"{label} must be a regular file")
+    if pinned.st_uid != os.getuid():
+        die(f"{label} must be owned by the current lab user")
+    if stat.S_IMODE(pinned.st_mode) & 0o022:
+        die(f"{label} must not be group- or world-writable")
+    if pinned.st_nlink != 1:
+        die(f"{label} must not be hard-linked")
+    if pinned.st_size > max_bytes or (pinned.st_size == 0 and not allow_empty):
+        lower = "between 1 and" if not allow_empty else "at most"
+        die(f"{label} must be {lower} {max_bytes} bytes")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    out_fd = os.open(target, flags, 0o600)
+    try:
+        offset = 0
+        remaining = pinned.st_size
+        while remaining:
+            chunk = os.pread(fd, min(1024 * 1024, remaining), offset)
+            if not chunk:
+                die(f"{label} changed while being copied")
+            written = 0
+            while written < len(chunk):
+                count = os.write(out_fd, chunk[written:])
+                if count <= 0:
+                    die(f"{label} copy failed")
+                written += count
+            offset += len(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(fd)
+        if stat_identity(after) != stat_identity(expected):
+            die(f"{label} changed while being copied")
+    finally:
+        os.close(out_fd)
+
+
+def _sidecar_identity(path: Path, suffix: str) -> os.stat_result | None:
+    sidecar = Path(f"{path}{suffix}")
+    try:
+        st = sidecar.lstat()
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(st.st_mode):
+        die(f"SQLite sidecar must not be a symlink: {sidecar}")
+    validate_optional_sidecar_stat(st, f"SQLite sidecar {suffix}", MAX_DB_SIDECAR_SOURCE_BYTES)
+    return st
+
+
+def _require_sidecar_unchanged(path: Path, suffix: str, expected: os.stat_result | None) -> None:
+    current = _sidecar_identity(path, suffix)
+    if expected is None:
+        if current is not None:
+            die(f"SQLite sidecar {suffix} appeared while capturing snapshot")
+        return
+    if current is None:
+        die(f"SQLite sidecar {suffix} disappeared while capturing snapshot")
+    if stat_identity(current) != stat_identity(expected):
+        die(f"SQLite sidecar {suffix} changed while capturing snapshot")
+
+
+def open_optional_sidecar(path: Path, source_fd: int, source_st: os.stat_result, suffix: str) -> tuple[int, os.stat_result] | None:
+    require_source_path_matches_fd(path, source_fd, source_st, MAX_DB_SOURCE_BYTES)
+    st = _sidecar_identity(path, suffix)
+    if st is None:
+        return None
+    sidecar = Path(f"{path}{suffix}")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(sidecar, flags)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        die(f"SQLite sidecar cannot be opened safely: {exc.strerror}")
+    try:
+        pinned = os.fstat(fd)
+        validate_optional_sidecar_stat(pinned, f"SQLite sidecar {suffix}", MAX_DB_SIDECAR_SOURCE_BYTES)
+        if (pinned.st_dev, pinned.st_ino) != (st.st_dev, st.st_ino):
+            die(f"SQLite sidecar {suffix} changed while being opened")
+        require_source_path_matches_fd(path, source_fd, source_st, MAX_DB_SOURCE_BYTES)
+        current = os.stat(sidecar, follow_symlinks=False)
+        validate_optional_sidecar_stat(current, f"SQLite sidecar {suffix}", MAX_DB_SIDECAR_SOURCE_BYTES)
+        if (current.st_dev, current.st_ino) != (st.st_dev, st.st_ino):
+            die(f"SQLite sidecar {suffix} changed while being opened")
+    except CaptureError:
+        os.close(fd)
+        raise
+    return fd, pinned
+
+
+def collect_sqlite_sidecars(path: Path, source_fd: int, source_st: os.stat_result) -> tuple[dict[str, tuple[int, os.stat_result]], dict[str, os.stat_result | None]]:
+    sidecars: dict[str, tuple[int, os.stat_result]] = {}
+    identities: dict[str, os.stat_result | None] = {}
+    try:
+        for suffix in ("-wal", "-shm"):
+            sidecar = open_optional_sidecar(path, source_fd, source_st, suffix)
+            if sidecar is None:
+                identities[suffix] = None
+                continue
+            sidecars[suffix] = sidecar
+            identities[suffix] = sidecar[1]
+        require_source_path_matches_fd(path, source_fd, source_st, MAX_DB_SOURCE_BYTES)
+        for suffix, expected in identities.items():
+            _require_sidecar_unchanged(path, suffix, expected)
+        return sidecars, identities
+    except BaseException:
+        for fd, _st in sidecars.values():
+            os.close(fd)
+        raise
+
+
+def require_sqlite_tuple_unchanged(path: Path, source_fd: int, source_st: os.stat_result, sidecars: dict[str, tuple[int, os.stat_result]], identities: dict[str, os.stat_result | None]) -> None:
+    require_source_path_matches_fd(path, source_fd, source_st, MAX_DB_SOURCE_BYTES)
+    source_current = os.stat(path, follow_symlinks=False)
+    source_pinned = os.fstat(source_fd)
+    if stat_identity(source_current) != stat_identity(source_st) or stat_identity(source_pinned) != stat_identity(source_st):
+        die("SQLite source changed while capturing snapshot")
+    for suffix, expected in identities.items():
+        _require_sidecar_unchanged(path, suffix, expected)
+        if expected is None:
+            continue
+        fd, pinned = sidecars[suffix]
+        current = os.fstat(fd)
+        if stat_identity(current) != stat_identity(pinned):
+            die(f"SQLite sidecar {suffix} changed while capturing snapshot")
+
+
+def private_temp_parent() -> Path:
+    candidate = Path(tempfile.gettempdir()).resolve(strict=True)
+    require_no_symlink_components(candidate, "temporary snapshot parent", allow_missing_leaf=False)
+    try:
+        st = candidate.lstat()
+    except FileNotFoundError:
+        die(f"temporary snapshot parent is absent: {candidate}")
+    if not stat.S_ISDIR(st.st_mode):
+        die("temporary snapshot parent must be a directory")
+    mode = stat.S_IMODE(st.st_mode)
+    if mode & 0o002 and not mode & stat.S_ISVTX:
+        die("temporary snapshot parent must be private or sticky when world-writable")
+    if st.st_uid not in {0, os.getuid()}:
+        die("temporary snapshot parent must be owned by root or the current lab user")
+    return candidate
+
+
+def private_sqlite_snapshot(path: Path, source_fd: int, source_st: os.stat_result) -> tuple[Path, tempfile.TemporaryDirectory[str]]:
+    require_source_path_matches_fd(path, source_fd, source_st, MAX_DB_SOURCE_BYTES)
+    sidecars, identities = collect_sqlite_sidecars(path, source_fd, source_st)
+    tmp: tempfile.TemporaryDirectory[str] | None = None
+    db: sqlite3.Connection | None = None
+    handoff_tmp = False
+    try:
+        tmp = tempfile.TemporaryDirectory(prefix="privacy-capture-sqlite-", dir=private_temp_parent())
+        tmp_root = Path(tmp.name)
+        os.chmod(tmp_root, 0o700)
+        require_existing_private_dir(tmp_root, "temporary snapshot directory")
+        snapshot = tmp_root / "snapshot.sqlite"
+        require_sqlite_tuple_unchanged(path, source_fd, source_st, sidecars, identities)
+        copy_fd_to_path(source_fd, source_st, snapshot, "SQLite source", MAX_DB_SOURCE_BYTES, allow_empty=False)
+        for suffix, sidecar in sidecars.items():
+            if identities[suffix] is None:
+                continue
+            sidecar_fd, sidecar_st = sidecar
+            copy_fd_to_path(
+                sidecar_fd,
+                sidecar_st,
+                Path(f"{snapshot}{suffix}"),
+                f"SQLite sidecar {suffix}",
+                MAX_DB_SIDECAR_SOURCE_BYTES,
+                allow_empty=True,
+            )
+        require_sqlite_tuple_unchanged(path, source_fd, source_st, sidecars, identities)
+        db = open_readonly_db(snapshot)
+        quick = db.execute("PRAGMA quick_check").fetchone()
+        if not quick or quick[0] != "ok":
+            die("SQLite snapshot quick_check failed")
+        handoff_tmp = True
+        return snapshot, tmp
+    finally:
+        cleanup_error = sys.exc_info()[1]
+        if db is not None:
+            cleanup_error = record_cleanup_error(cleanup_error, db.close)
+        for fd, _st in sidecars.values():
+            cleanup_error = record_cleanup_error(cleanup_error, lambda fd=fd: os.close(fd))
+        if tmp is not None and (not handoff_tmp or (sys.exc_info()[1] is None and cleanup_error is not None)):
+            cleanup_error = record_cleanup_error(cleanup_error, tmp.cleanup)
+        if sys.exc_info()[1] is None and cleanup_error is not None:
+            raise cleanup_error
 
 
 def unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -331,10 +554,17 @@ class SnapshotBudget:
 def export_snapshot(path: Path, source_fd: int | None = None, source_st: os.stat_result | None = None) -> dict[str, Any]:
     if (source_fd is None) != (source_st is None):
         die("internal SQLite source identity mismatch")
-    if source_fd is not None and source_st is not None:
-        require_source_path_matches_fd(path, source_fd, source_st, MAX_DB_SOURCE_BYTES)
-    db = open_readonly_db(path)
+    owned_fd = False
+    snapshot_tmp: tempfile.TemporaryDirectory[str] | None = None
+    db: sqlite3.Connection | None = None
+    if source_fd is None or source_st is None:
+        source_fd, path, source_st = open_source_fd(path, MAX_DB_SOURCE_BYTES)
+        owned_fd = True
     try:
+        if source_fd is not None and source_st is not None:
+            require_source_path_matches_fd(path, source_fd, source_st, MAX_DB_SOURCE_BYTES)
+        snapshot_path, snapshot_tmp = private_sqlite_snapshot(path, source_fd, source_st)
+        db = open_readonly_db(snapshot_path)
         if source_fd is not None and source_st is not None:
             require_source_path_matches_fd(path, source_fd, source_st, MAX_DB_SOURCE_BYTES)
         budget = SnapshotBudget(MAX_FILE_SOURCE_BYTES)
@@ -375,10 +605,16 @@ def export_snapshot(path: Path, source_fd: int | None = None, source_st: os.stat
             require_source_path_matches_fd(path, source_fd, source_st, MAX_DB_SOURCE_BYTES)
         return {"captured_at_unix": int(time.time()), "tables": tables}
     finally:
-        try:
-            db.execute("ROLLBACK")
-        finally:
-            db.close()
+        cleanup_error = sys.exc_info()[1]
+        if db is not None:
+            cleanup_error = record_cleanup_error(cleanup_error, lambda: db.execute("ROLLBACK"))
+            cleanup_error = record_cleanup_error(cleanup_error, db.close)
+        if snapshot_tmp is not None:
+            cleanup_error = record_cleanup_error(cleanup_error, snapshot_tmp.cleanup)
+        if owned_fd and source_fd is not None:
+            cleanup_error = record_cleanup_error(cleanup_error, lambda: os.close(source_fd))
+        if sys.exc_info()[1] is None and cleanup_error is not None:
+            raise cleanup_error
 
 
 def provenance(kind: str, relative: str, source: Path, output: Path, out_root: Path) -> dict[str, Any]:

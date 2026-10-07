@@ -671,6 +671,59 @@ public enum ConfigLoader {
         return config
     }
 
+    /// SPEC-049-R007 credential boundary. Capture the operator YAML once,
+    /// validate the non-credential configuration produced from that captured
+    /// snapshot, and only then resolve credentials from the same captured
+    /// YAML/environment/CLI inputs. This prevents a mutable config file from
+    /// switching privacy mode on between a pre-credential guard and token
+    /// assignment or `--token-file` open.
+    public static func loadAfterNonCredentialValidation(
+        cli: CLIOverrides,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: expandTilde($0)) },
+        readFile: (String) throws -> String = { try String(contentsOfFile: expandTilde($0), encoding: .utf8) },
+        validate: (AppConfig) throws -> Void
+    ) throws -> AppConfig {
+        let configPath = cli.configPath
+            ?? environment["MACPROVIDER_CONFIG"]
+            ?? AppConfig.defaultConfigPath
+        let exists = fileExists(configPath)
+        let capturedText: String?
+        if exists {
+            do {
+                capturedText = try readFile(configPath)
+            } catch {
+                throw ConfigError.unreadableConfig(path: configPath, underlying: String(describing: error))
+            }
+        } else {
+            capturedText = nil
+        }
+        let snapshotExists: (String) -> Bool = { path in
+            path == configPath ? exists : fileExists(path)
+        }
+        let snapshotRead: (String) throws -> String = { path in
+            if path == configPath, let capturedText {
+                return capturedText
+            }
+            return try readFile(path)
+        }
+        let checked = try load(
+            cli: cli,
+            environment: environment,
+            fileExists: snapshotExists,
+            readFile: snapshotRead,
+            resolveCredentials: false
+        )
+        try validate(checked)
+        return try load(
+            cli: cli,
+            environment: environment,
+            fileExists: snapshotExists,
+            readFile: snapshotRead,
+            resolveCredentials: true
+        )
+    }
+
     /// SPEC-049-R001. Privacy class forced on with relay-blind explicitly off
     /// is a configuration error. The hardening probe refuses the same
     /// combination again before any network, with a bounded reason code.

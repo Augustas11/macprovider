@@ -6,6 +6,14 @@ import XCTest
 @testable import macprovider_cli
 
 final class PrivacyPostureResponderTests: XCTestCase {
+    func testStateRootFixtureUsesCanonicalPrivateTemporaryPath() throws {
+        let root = try makeStateRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        XCTAssertFalse(root.path.hasPrefix("/var/"))
+        let attributes = try FileManager.default.attributesOfItem(atPath: root.path)
+        XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.uint16Value, 0o700)
+    }
+
     func testResponseSignaturesVerifyAndSequenceMonotonic() async throws {
         let root = try makeStateRoot()
         let runtime = try makeRuntime(directory: root, models: ["model-a"])
@@ -516,7 +524,15 @@ private func makeStateRoot() throws -> URL {
 }
 
 private func makeStateRootURL() -> URL {
-    URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+    // The lab isolation guard rejects symlink components; macOS may spell its
+    // private user temporary directory through the /var -> /private/var alias.
+    var temporaryRoot = NSTemporaryDirectory()
+    if temporaryRoot.hasPrefix("/var/") {
+        temporaryRoot = "/private" + temporaryRoot
+    } else if temporaryRoot == "/var" {
+        temporaryRoot = "/private/var"
+    }
+    return URL(fileURLWithPath: temporaryRoot, isDirectory: true)
         .appendingPathComponent("macprovider-privacy-posture-\(UUID().uuidString)", isDirectory: true)
 }
 

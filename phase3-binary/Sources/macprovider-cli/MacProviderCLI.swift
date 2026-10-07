@@ -2029,6 +2029,7 @@ struct ServeCommand: AsyncParsableCommand {
     /// re-exec decision.
     static func resolveServeConfig(
         load: (_ resolveCredentials: Bool) throws -> AppConfig,
+        loadAfterNonCredentialValidation: ((_ validate: (AppConfig) throws -> Void) throws -> AppConfig)? = nil,
         canonicalReexec: (AppConfig) throws -> Void,
         harden: (AppConfig) throws -> Void,
         automatic: PrivacyAutoEnrollmentHooks? = nil,
@@ -2045,13 +2046,29 @@ struct ServeCommand: AsyncParsableCommand {
             }
             return final
         }
-        func ordinary() throws -> AppConfig {
-            let resolved = try load(true)
-            try canonicalReexec(resolved)
-            if resolved.privacyClassBeta {
-                try harden(resolved)
+        func validateBeforeCredentialResolution(_ config: AppConfig) throws {
+            try canonicalReexec(config)
+            if config.privacyClassBeta {
+                try harden(config)
             }
+        }
+        func ordinary() throws -> AppConfig {
+            if let loadAfterNonCredentialValidation {
+                return try loadAfterNonCredentialValidation(validateBeforeCredentialResolution)
+            }
+            let resolved = try load(true)
+            try validateBeforeCredentialResolution(resolved)
             return resolved
+        }
+        func ordinaryAfterFailedAutomaticHardening() throws -> AppConfig {
+            if let loadAfterNonCredentialValidation {
+                return try loadAfterNonCredentialValidation { final in
+                    guard !final.privacyClassBeta else {
+                        throw PrivacyAutoEnrollmentError.configurationChanged
+                    }
+                }
+            }
+            return try ordinaryAfterAutomaticCheck(try load(true))
         }
         if automaticPostHardenCheckpoint != nil, PrivacyAutoEnrollment.mode(bootstrap) != .automatic {
             throw PrivacyLabConfigChangeCheckpointError.malformed
@@ -2084,7 +2101,7 @@ struct ServeCommand: AsyncParsableCommand {
                 // Process-wide hardening already applied stays applied; the
                 // provider serves ordinarily and never advertises privacy keys.
                 automatic.log(PrivacyAutoEnrollment.hardeningFailedLine(hardeningFailures))
-                return try ordinaryAfterAutomaticCheck(try load(true))
+                return try ordinaryAfterFailedAutomaticHardening()
             }
             try automaticPostHardenCheckpoint?(candidate)
             let final = try load(true)
@@ -2173,6 +2190,12 @@ struct ServeCommand: AsyncParsableCommand {
         var resolved = try Self.resolveServeConfig(
             load: { resolveCredentials in
                 try ConfigLoader.load(cli: cliOverrides, resolveCredentials: resolveCredentials)
+            },
+            loadAfterNonCredentialValidation: { validate in
+                try ConfigLoader.loadAfterNonCredentialValidation(
+                    cli: cliOverrides,
+                    validate: validate
+                )
             },
             canonicalReexec: { loaded in
                 // #616/#610: repair a stale PATH regular-file entrypoint to install

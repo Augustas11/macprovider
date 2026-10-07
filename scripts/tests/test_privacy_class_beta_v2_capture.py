@@ -53,6 +53,36 @@ def create_db(path: Path, *, missing_column: bool = False, extra_secret: bool = 
         db.close()
 
 
+def set_first_provider_id(path: Path, provider_id: str) -> None:
+    with sqlite3.connect(path) as db:
+        db.execute(f'UPDATE "{V2_DB_TABLES[0]}" SET "provider_id" = ?', (provider_id,))
+
+
+def open_wal_writer(path: Path) -> sqlite3.Connection:
+    db = sqlite3.connect(path)
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA wal_autocheckpoint=0")
+    return db
+
+
+def insert_provider_row(db: sqlite3.Connection, provider_id: str) -> None:
+    db.execute(
+        'INSERT INTO "privacy_class_enrollment" ("provider_id", "identity_fingerprint") VALUES (?, ?)',
+        (provider_id, f"{provider_id}-fingerprint"),
+    )
+    db.commit()
+
+
+def remove_sqlite_sidecars(path: Path) -> None:
+    with sqlite3.connect(path) as db:
+        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        db.execute("PRAGMA journal_mode=DELETE")
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(f"{path}{suffix}")
+        if sidecar.exists():
+            sidecar.unlink()
+
+
 def source_for_kind(root: Path, kind: str) -> Path:
     for sources in V2_SOURCE_CONTRACT.values():
         if kind in sources:
@@ -109,26 +139,231 @@ class CaptureV2SourceTests(unittest.TestCase):
         self.assertEqual(0o700, self.out.stat().st_mode & 0o777)
         self.assertEqual(0o600, raw_path.stat().st_mode & 0o777)
 
-    def test_refuses_db_source_swap_when_sqlite_connection_opens(self) -> None:
+    def test_captures_committed_wal_row_while_writer_connection_stays_open(self) -> None:
+        db_path = self.root / "wal-live.db"
+        create_db(db_path)
+        writer = open_wal_writer(db_path)
+        try:
+            insert_provider_row(writer, "wal-only-provider")
+            self.assertTrue(Path(f"{db_path}-wal").exists())
+            self.assertGreater(Path(f"{db_path}-wal").stat().st_size, 0)
+            fd, source, st = capture.open_source_fd(db_path, capture.MAX_DB_SOURCE_BYTES)
+            try:
+                snapshot = capture.export_snapshot(source, fd, st)
+            finally:
+                os.close(fd)
+            rows = snapshot["tables"]["privacy_class_enrollment"]["rows"]
+            self.assertIn("wal-only-provider", {row["provider_id"] for row in rows})
+        finally:
+            writer.close()
+
+    def test_captures_pinned_db_when_source_path_is_temporarily_swapped_during_snapshot_open(self) -> None:
         db_path = self.root / "live.db"
         attacker_path = self.root / "attacker.db"
         create_db(db_path)
         create_db(attacker_path)
-        original_connect = capture.sqlite3.connect
+        set_first_provider_id(db_path, "trusted-pinned-source")
+        set_first_provider_id(attacker_path, "attacker-source")
+        original_open = capture.open_readonly_db
 
-        def swapping_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
-            db_path.unlink()
+        def swapping_open(path: Path) -> sqlite3.Connection:
+            trusted_hold = self.root / "trusted-source.hold"
+            db_path.rename(trusted_hold)
             attacker_path.rename(db_path)
-            return original_connect(*args, **kwargs)
+            try:
+                return original_open(path)
+            finally:
+                db_path.rename(attacker_path)
+                trusted_hold.rename(db_path)
 
         fd, source, st = capture.open_source_fd(db_path, capture.MAX_DB_SOURCE_BYTES)
         try:
-            capture.sqlite3.connect = swapping_connect
-            with self.assertRaises(capture.CaptureError):
+            capture.open_readonly_db = swapping_open
+            snapshot = capture.export_snapshot(source, fd, st)
+            rows = snapshot["tables"]["privacy_class_enrollment"]["rows"]
+            self.assertIn("trusted-pinned-source", {row["provider_id"] for row in rows})
+            self.assertNotIn("attacker-source", {row["provider_id"] for row in rows})
+        finally:
+            capture.open_readonly_db = original_open
+            os.close(fd)
+
+    def test_refuses_main_db_metadata_change_after_snapshot_source_copy(self) -> None:
+        db_path = self.root / "main-delta.db"
+        create_db(db_path)
+        original_copy = capture.copy_fd_to_path
+
+        def mutating_copy(fd: int, expected: os.stat_result, target: Path, label: str, max_bytes: int, *, allow_empty: bool) -> None:
+            original_copy(fd, expected, target, label, max_bytes, allow_empty=allow_empty)
+            if label == "SQLite source":
+                os.utime(db_path, None)
+
+        fd, source, st = capture.open_source_fd(db_path, capture.MAX_DB_SOURCE_BYTES)
+        try:
+            capture.copy_fd_to_path = mutating_copy
+            with self.assertRaisesRegex(capture.CaptureError, "SQLite source changed"):
                 capture.export_snapshot(source, fd, st)
         finally:
-            capture.sqlite3.connect = original_connect
+            capture.copy_fd_to_path = original_copy
             os.close(fd)
+
+    def test_refuses_wal_delta_after_each_snapshot_copy_phase(self) -> None:
+        for label in ("SQLite source", "SQLite sidecar -wal", "SQLite sidecar -shm"):
+            with self.subTest(label=label):
+                db_path = self.root / f"{label.replace(' ', '_').replace('-', '')}.db"
+                create_db(db_path)
+                writer = open_wal_writer(db_path)
+                insert_provider_row(writer, f"before-{label}")
+                self.assertTrue(Path(f"{db_path}-wal").exists())
+                self.assertTrue(Path(f"{db_path}-shm").exists())
+                original_copy = capture.copy_fd_to_path
+
+                def mutating_copy(fd: int, expected: os.stat_result, target: Path, copy_label: str, max_bytes: int, *, allow_empty: bool) -> None:
+                    original_copy(fd, expected, target, copy_label, max_bytes, allow_empty=allow_empty)
+                    if copy_label == label:
+                        insert_provider_row(writer, f"after-{label}")
+
+                fd, source, st = capture.open_source_fd(db_path, capture.MAX_DB_SOURCE_BYTES)
+                try:
+                    capture.copy_fd_to_path = mutating_copy
+                    with self.assertRaisesRegex(capture.CaptureError, "changed while"):
+                        capture.export_snapshot(source, fd, st)
+                finally:
+                    capture.copy_fd_to_path = original_copy
+                    os.close(fd)
+                    writer.close()
+
+    def test_refuses_sidecar_appearing_after_snapshot_source_copy(self) -> None:
+        db_path = self.root / "sidecar-appears.db"
+        create_db(db_path)
+        remove_sqlite_sidecars(db_path)
+        original_copy = capture.copy_fd_to_path
+
+        def mutating_copy(fd: int, expected: os.stat_result, target: Path, label: str, max_bytes: int, *, allow_empty: bool) -> None:
+            original_copy(fd, expected, target, label, max_bytes, allow_empty=allow_empty)
+            if label == "SQLite source":
+                Path(f"{db_path}-wal").write_bytes(b"new wal")
+
+        fd, source, st = capture.open_source_fd(db_path, capture.MAX_DB_SOURCE_BYTES)
+        try:
+            capture.copy_fd_to_path = mutating_copy
+            with self.assertRaisesRegex(capture.CaptureError, "appeared while capturing snapshot"):
+                capture.export_snapshot(source, fd, st)
+        finally:
+            capture.copy_fd_to_path = original_copy
+            os.close(fd)
+
+    def test_refuses_oversize_sqlite_sidecar(self) -> None:
+        db_path = self.root / "oversize-sidecar.db"
+        create_db(db_path)
+        sidecar = Path(f"{db_path}-wal")
+        sidecar.write_bytes(b"")
+        with sidecar.open("r+b") as handle:
+            handle.truncate(capture.MAX_DB_SIDECAR_SOURCE_BYTES + 1)
+        fd, source, st = capture.open_source_fd(db_path, capture.MAX_DB_SOURCE_BYTES)
+        try:
+            with self.assertRaisesRegex(capture.CaptureError, "SQLite sidecar -wal must be at most"):
+                capture.export_snapshot(source, fd, st)
+        finally:
+            os.close(fd)
+
+    def test_export_cleanup_runs_when_rollback_and_close_fail_after_export_error(self) -> None:
+        db_path = self.root / "cleanup-error.db"
+        create_db(db_path)
+        original_open_source_fd = capture.open_source_fd
+        original_private_snapshot = capture.private_sqlite_snapshot
+        original_open_readonly_db = capture.open_readonly_db
+        captured: dict[str, object] = {}
+        open_count = 0
+
+        class FailingExportDB:
+            def __init__(self, real: sqlite3.Connection) -> None:
+                self.real = real
+
+            def execute(self, sql: str, *args: object) -> object:
+                if sql == "ROLLBACK":
+                    try:
+                        self.real.execute(sql)
+                    finally:
+                        raise RuntimeError("rollback cleanup failed")
+                raise capture.CaptureError("export boom")
+
+            def close(self) -> None:
+                try:
+                    self.real.close()
+                finally:
+                    raise RuntimeError("close cleanup failed")
+
+        def tracking_open_source_fd(path: Path, max_bytes: int) -> tuple[int, Path, os.stat_result]:
+            fd, resolved, st = original_open_source_fd(path, max_bytes)
+            captured["fd"] = fd
+            return fd, resolved, st
+
+        def tracking_private_snapshot(path: Path, source_fd: int, source_st: os.stat_result) -> tuple[Path, tempfile.TemporaryDirectory[str]]:
+            snapshot, tmp = original_private_snapshot(path, source_fd, source_st)
+            captured["tmp"] = Path(tmp.name)
+            return snapshot, tmp
+
+        def failing_export_open(path: Path) -> sqlite3.Connection:
+            nonlocal open_count
+            open_count += 1
+            real = original_open_readonly_db(path)
+            if open_count == 1:
+                return real
+            return FailingExportDB(real)  # type: ignore[return-value]
+
+        try:
+            capture.open_source_fd = tracking_open_source_fd
+            capture.private_sqlite_snapshot = tracking_private_snapshot
+            capture.open_readonly_db = failing_export_open
+            with self.assertRaisesRegex(capture.CaptureError, "export boom"):
+                capture.export_snapshot(db_path)
+            self.assertFalse(captured["tmp"].exists())  # type: ignore[union-attr]
+            with self.assertRaises(OSError):
+                os.fstat(captured["fd"])  # type: ignore[arg-type]
+        finally:
+            capture.open_source_fd = original_open_source_fd
+            capture.private_sqlite_snapshot = original_private_snapshot
+            capture.open_readonly_db = original_open_readonly_db
+
+    def test_private_snapshot_cleans_temp_when_sidecar_close_fails(self) -> None:
+        db_path = self.root / "sidecar-close.db"
+        create_db(db_path)
+        writer = open_wal_writer(db_path)
+        insert_provider_row(writer, "sidecar-close-row")
+        original_collect = capture.collect_sqlite_sidecars
+        original_temp_parent = capture.private_temp_parent
+        original_close = os.close
+        sidecar_fds: list[int] = []
+
+        def tracking_collect(path: Path, source_fd: int, source_st: os.stat_result) -> tuple[dict[str, tuple[int, os.stat_result]], dict[str, os.stat_result | None]]:
+            sidecars, identities = original_collect(path, source_fd, source_st)
+            sidecar_fds.extend(fd for fd, _st in sidecars.values())
+            return sidecars, identities
+
+        def failing_close(fd: int) -> None:
+            if fd in sidecar_fds:
+                raise OSError("sidecar close failed")
+            original_close(fd)
+
+        fd, source, st = capture.open_source_fd(db_path, capture.MAX_DB_SOURCE_BYTES)
+        try:
+            capture.collect_sqlite_sidecars = tracking_collect
+            capture.private_temp_parent = lambda: self.root
+            capture.os.close = failing_close
+            with self.assertRaisesRegex(OSError, "sidecar close failed"):
+                capture.private_sqlite_snapshot(source, fd, st)
+            self.assertEqual([], list(self.root.glob("privacy-capture-sqlite-*")))
+        finally:
+            capture.collect_sqlite_sidecars = original_collect
+            capture.private_temp_parent = original_temp_parent
+            capture.os.close = original_close
+            for sidecar_fd in sidecar_fds:
+                try:
+                    original_close(sidecar_fd)
+                except OSError:
+                    pass
+            original_close(fd)
+            writer.close()
 
     def test_refuses_db_source_replaced_before_sqlite_connection_opens(self) -> None:
         db_path = self.root / "live.db"

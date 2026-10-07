@@ -102,6 +102,126 @@ final class PrivacyAutoEnrollmentTests: XCTestCase {
         XCTAssertEqual(logged, ["privacy_class auto_ineligible reasons=sip_disabled,code_signature_invalid\n"])
     }
 
+    func testIneligibleFallbackHardensChangedPrivacyConfigBeforeCredentialResolution() throws {
+        struct HardenStopped: Error {}
+        let yaml = try autoTempConfig("")
+        defer { try? FileManager.default.removeItem(at: yaml) }
+        var events: [String] = []
+        var logged: [String] = []
+
+        XCTAssertThrowsError(try ServeCommand.resolveServeConfig(
+            load: { resolveCredentials in
+                events.append("load:\(resolveCredentials)")
+                return try ConfigLoader.load(
+                    cli: CLIOverrides(configPath: yaml.path),
+                    environment: [:],
+                    resolveCredentials: resolveCredentials
+                )
+            },
+            loadAfterNonCredentialValidation: { validate in
+                events.append("guarded-load")
+                return try ConfigLoader.loadAfterNonCredentialValidation(
+                    cli: CLIOverrides(configPath: yaml.path),
+                    environment: [:],
+                    validate: validate
+                )
+            },
+            canonicalReexec: { config in
+                events.append("reexec:\(config.privacyClassBeta)")
+                XCTAssertNil(config.providerToken)
+            },
+            harden: { config in
+                events.append("harden:\(config.privacyClassBeta)")
+                XCTAssertTrue(config.privacyClassBeta)
+                XCTAssertNil(config.providerToken)
+                throw HardenStopped()
+            },
+            automatic: PrivacyAutoEnrollmentHooks(
+                eligibility: { _ in
+                    events.append("eligibility")
+                    try? Data("privacy_class_beta: true\nprovider_token: MUST_NOT_RESOLVE\n".utf8).write(to: yaml)
+                    return [PrivacyHardeningCode.sipDisabled]
+                },
+                harden: { _ in
+                    XCTFail("automatic hardening ran on an ineligible host")
+                    return []
+                },
+                log: { logged.append($0) }
+            )
+        )) { error in
+            XCTAssertTrue(error is HardenStopped)
+        }
+        XCTAssertEqual(events, ["load:false", "eligibility", "guarded-load", "reexec:true", "harden:true"])
+        XCTAssertEqual(logged, ["privacy_class auto_ineligible reasons=sip_disabled\n"])
+    }
+
+    func testOrdinaryModeHardensChangedPrivacyConfigBeforeCredentialResolution() throws {
+        struct HardenStopped: Error {}
+        for (name, initialYAML, hooks) in [
+            ("explicit-off", "privacy_class_beta: false\n", Optional<PrivacyAutoEnrollmentHooks>.none),
+            ("missing-hooks", "", Optional<PrivacyAutoEnrollmentHooks>.none),
+        ] {
+            let yaml = try autoTempConfig(initialYAML)
+            defer { try? FileManager.default.removeItem(at: yaml) }
+            var events: [String] = []
+
+            XCTAssertThrowsError(try ServeCommand.resolveServeConfig(
+                load: { resolveCredentials in
+                    events.append("load:\(resolveCredentials)")
+                    let loaded = try ConfigLoader.load(
+                        cli: CLIOverrides(configPath: yaml.path),
+                        environment: [:],
+                        resolveCredentials: resolveCredentials
+                    )
+                    if !resolveCredentials {
+                        try Data("privacy_class_beta: true\nprovider_token: MUST_NOT_RESOLVE\n".utf8).write(to: yaml)
+                    }
+                    return loaded
+                },
+                loadAfterNonCredentialValidation: { validate in
+                    events.append("guarded-load")
+                    return try ConfigLoader.loadAfterNonCredentialValidation(
+                        cli: CLIOverrides(configPath: yaml.path),
+                        environment: [:],
+                        validate: validate
+                    )
+                },
+                canonicalReexec: { config in
+                    events.append("reexec:\(config.privacyClassBeta)")
+                    XCTAssertNil(config.providerToken, name)
+                },
+                harden: { config in
+                    events.append("harden:\(config.privacyClassBeta)")
+                    XCTAssertTrue(config.privacyClassBeta, name)
+                    XCTAssertNil(config.providerToken, name)
+                    throw HardenStopped()
+                },
+                automatic: hooks
+            )) { error in
+                XCTAssertTrue(error is HardenStopped, name)
+            }
+            XCTAssertEqual(events, ["load:false", "guarded-load", "reexec:true", "harden:true"], name)
+        }
+    }
+
+    func testGuardedCredentialLoadUsesCapturedConfigSnapshot() throws {
+        let yaml = try autoTempConfig("provider_token: SNAPSHOT-TOKEN\n")
+        defer { try? FileManager.default.removeItem(at: yaml) }
+
+        let resolved = try ConfigLoader.loadAfterNonCredentialValidation(
+            cli: CLIOverrides(configPath: yaml.path),
+            environment: [:],
+            validate: { checked in
+                XCTAssertFalse(checked.privacyClassBeta)
+                XCTAssertNil(checked.providerToken)
+                try Data("privacy_class_beta: true\nprovider_token: MUTATED-TOKEN\n".utf8).write(to: yaml)
+            }
+        )
+
+        XCTAssertFalse(resolved.privacyClassBeta)
+        XCTAssertEqual(resolved.providerToken, "SNAPSHOT-TOKEN")
+    }
+
     func testAutomaticLabScopeIneligibilityFallsBackOrdinarily() throws {
         let yaml = try autoTempConfig("provider_token: PLAIN-TOKEN\n")
         defer { try? FileManager.default.removeItem(at: yaml) }
