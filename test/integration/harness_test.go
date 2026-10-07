@@ -225,28 +225,28 @@ func reserveProviderPort(t *testing.T) int {
 // path so each scenario can drive HTTP requests and inspect billing
 // rows.
 type scenario struct {
-	t                   *testing.T
-	tempDir             string
+	t       *testing.T
+	tempDir string
 	// privacyDirectoryPublicKey is the canonical base64url SPEC-049-R028
 	// directory key the buyer pins when the scenario enables the class.
 	privacyDirectoryPublicKey string
-	coordinatorDB       string
-	gatewayDB           string
-	coordYAML           string
-	gatewayYAML         string
-	operatorKey         string
-	serviceToken        string
-	keyHashSecret       string
-	demoSecret          string
-	apiKey              string // mp_... full API key (only seeded for chat scenarios)
-	accountID           string
-	gatewayBaseURL      string
-	coordBuyerURL       string // http://127.0.0.1:<port>
-	coordProvURL        string // http://127.0.0.1:<port> (provider/admin/ws port)
-	providerID          string
-	providerEndpointURL string // http://127.0.0.1:<port> — first fake provider HTTP
-	providerToken       string // pre-issued via coordinator-cli for first provider
-	providerSlots       []struct {
+	coordinatorDB             string
+	gatewayDB                 string
+	coordYAML                 string
+	gatewayYAML               string
+	operatorKey               string
+	serviceToken              string
+	keyHashSecret             string
+	demoSecret                string
+	apiKey                    string // mp_... full API key (only seeded for chat scenarios)
+	accountID                 string
+	gatewayBaseURL            string
+	coordBuyerURL             string // http://127.0.0.1:<port>
+	coordProvURL              string // http://127.0.0.1:<port> (provider/admin/ws port)
+	providerID                string
+	providerEndpointURL       string // http://127.0.0.1:<port> — first fake provider HTTP
+	providerToken             string // pre-issued via coordinator-cli for first provider
+	providerSlots             []struct {
 		ID  string
 		URL string
 	}

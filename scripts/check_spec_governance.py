@@ -171,6 +171,11 @@ TRUSTED_POOL_LAYER2_JOURNEY_ID = "JOURNEY-TRUSTED-POOL-LAYER2-MVP"
 # beta result is evidence-only. Its closed contract lives in
 # scripts/privacy_class_beta_journey_evidence.py.
 PRIVACY_CLASS_BETA_JOURNEY_ID = "JOURNEY-PRIVACY-CLASS-BETA"
+PRIVACY_CLASS_BETA_V2_JOURNEY_ID = "JOURNEY-PRIVACY-CLASS-BETA-V2"
+PRIVACY_CLASS_BETA_EVIDENCE_ONLY_JOURNEY_IDS = frozenset({
+    PRIVACY_CLASS_BETA_JOURNEY_ID,
+    PRIVACY_CLASS_BETA_V2_JOURNEY_ID,
+})
 TRUSTED_POOL_LAYER2_EXECUTION_MODE = "isolated-candidate-trusted-pool-layer2-mvp"
 TRUSTED_POOL_LAYER2_ARTIFACT_ID = "redacted-trusted-pool-layer2"
 TRUSTED_POOL_LAYER2_STEP_ID_ORDER = (
@@ -4313,7 +4318,7 @@ def _validate_signed_journey_result(
             result,
             root=root,
         )
-    if journey_id == PRIVACY_CLASS_BETA_JOURNEY_ID:
+    if journey_id in PRIVACY_CLASS_BETA_EVIDENCE_ONLY_JOURNEY_IDS:
         # Re-open the hash-bound evidence and its reviewed bundle, recompute every
         # step and observation, and require the signed payload to equal the
         # builder projection, so a hand-authored payload cannot overclaim.
@@ -4376,7 +4381,7 @@ def _signed_journey_result_satisfies(
                     f"{location}.evidence[{index}].source: trusted-pool Layer 2 journey-result is evidence-only and cannot satisfy conformant requirements"
                 )
                 continue
-            if _signed_journey_result_journey_id(root, source) == PRIVACY_CLASS_BETA_JOURNEY_ID:
+            if _signed_journey_result_journey_id(root, source) in PRIVACY_CLASS_BETA_EVIDENCE_ONLY_JOURNEY_IDS:
                 candidate_errors.append(
                     f"{location}.evidence[{index}].source: privacy-class beta journey-result is evidence-only until SPEC-049-R023's staged canary and audits are recorded and cannot satisfy conformant requirements"
                 )

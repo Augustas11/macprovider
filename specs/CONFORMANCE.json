@@ -10665,7 +10665,8 @@
         "phase3-binary/Tests/macprovider-cliTests/PrivacyAutoEnrollmentTests.swift:testModeResolutionAndOptOuts"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
@@ -10691,7 +10692,8 @@
         "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testIdentityDocumentIsPublicMaterialOnly"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
@@ -10715,7 +10717,8 @@
         "phase4-coordinator/internal/ws/privacy_posture_test.go:TestPrivacyPostureProbeRoundTrip"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
@@ -10742,7 +10745,8 @@
         "phase4-coordinator/internal/config/privacy_class_test.go:TestPrivacyClassAutomaticEnrollmentConfig"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
@@ -10770,7 +10774,8 @@
         "phase4-coordinator/internal/ws/privacy_posture_test.go:TestPrivacyPostureSweepChallengesUnchangedKeys"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
@@ -10797,7 +10802,8 @@
         "phase4-coordinator/internal/relayblind/privacy_authority_test.go:TestPostureDeniedCDHashQuarantinesAndRevokes"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
@@ -10820,7 +10826,8 @@
         "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testLoopbackAndDiskTierRefused"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
@@ -10846,7 +10853,8 @@
         "phase3-binary/Tests/macprovider-cliTests/PrivacyClassCryptoTests.swift:testMemoryOnlyKeyManagerWritesNoAgreementKey"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
@@ -10868,7 +10876,8 @@
         "phase3-binary/Tests/macprovider-cliTests/InferenceRelayPrivacyTests.swift:testPrivacyNonStreamResponseShape"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
@@ -10891,7 +10900,8 @@
         "test/integration/privacy_class_integration_test.go:TestPrivacyClassRedactionNoCanaryInAnyArtifact"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
@@ -10915,7 +10925,8 @@
         "phase3-binary/Tests/macprovider-cliTests/PrivacyClassCryptoTests.swift:testSealerSequenceAndFinal"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
@@ -10941,7 +10952,8 @@
         "test/integration/privacy_class_integration_test.go:TestPrivacyClassAdversarial"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
@@ -10966,7 +10978,8 @@
         "test/integration/privacy_class_integration_test.go:TestPrivacyClassSwiftProviderNonstreamEndToEnd"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
@@ -10991,7 +11004,8 @@
         "phase5-gateway/internal/relayblind/privacy_test.go:TestPrivacyFrameTamperSeqReorderTruncate"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
@@ -11012,7 +11026,8 @@
         "phase5-gateway/internal/router/privacy_class_test.go:TestPrivacyFramesPassThroughVerbatimStreamAndNonStream"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
@@ -11038,7 +11053,8 @@
         "phase5-gateway/cmd/relay-blind-client/directory_test.go:TestPrivacyClientAutoPinsFromSignedDirectory"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
@@ -11063,7 +11079,8 @@
         "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestEnrollmentKeyChangeQuarantinesWithoutReplacing"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
@@ -11088,7 +11105,8 @@
         "phase4-coordinator/cmd/coordinator-cli/privacy_enrollment_test.go:TestPrivacyClassCLIReenrollAndDirectoryKeygen"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
@@ -11111,7 +11129,8 @@
         "phase5-gateway/internal/router/privacy_class_test.go:TestPrivacyErrorCodesMatchCoordinatorInventory"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
@@ -11135,7 +11154,8 @@
         "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientRejectsMissingR020Headers"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
@@ -11162,7 +11182,8 @@
         "test/integration/privacy_enrollment_integration_test.go:TestPrivacyClassDirectorySignedByAnotherKeyRejected"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
@@ -11186,7 +11207,8 @@
         "test/integration/relay_blind_integration_test.go:TestRelayBlindReservationRejectsPoolSelectionBeforeQuota"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
@@ -11203,7 +11225,8 @@
       "implementation": [],
       "tests": [],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
@@ -11229,7 +11252,9 @@
         "phase3-binary/Tests/macprovider-cliTests/PrivacyAutoEnrollmentTests.swift:testAutomaticEligibilityIsReadOnlyAndNamesEveryFailure",
         "phase3-binary/Tests/macprovider-cliTests/PrivacyPostureResponderTests.swift:testEnrollmentClaimIsPublicAndStopsWhenLatched"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -11255,7 +11280,9 @@
         "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestEnrollmentRejectsKeyActiveForAnotherProvider",
         "phase4-coordinator/internal/ws/privacy_enrollment_parse_test.go:TestPrivacyEnrollmentClaimParses"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -11277,7 +11304,9 @@
         "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestEnrollmentPostureKeyChangeQuarantines",
         "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestReenrollAllowsNewKeys"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -11300,7 +11329,9 @@
         "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestReleaseDerivedApprovalAndOverrides",
         "ops/pearl-updater/test_pearl_updater.py::PearlUpdaterTests"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -11329,7 +11360,9 @@
         "phase5-gateway/internal/router/privacy_directory_test.go:TestPrivacyDirectoryPassthrough",
         "phase5-gateway/cmd/relay-blind-client/directory_test.go:TestPrivacyClientDirectoryRejections"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",

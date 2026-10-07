@@ -9,7 +9,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.check_spec_governance import _commit_mapping_selector_matches_current, _extract_mapping_fragment, validate_repository
+from scripts.check_spec_governance import (
+    PRIVACY_CLASS_BETA_V2_JOURNEY_ID,
+    ValidationResult,
+    _commit_mapping_selector_matches_current,
+    _extract_mapping_fragment,
+    _signed_journey_result_satisfies,
+    validate_repository,
+)
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "spec_governance"
@@ -769,6 +776,38 @@ def apply_mutation(repository: dict[str, object], mutation: dict[str, object]) -
 
 
 class GovernanceValidatorTests(unittest.TestCase):
+    def test_privacy_class_beta_v2_signed_result_cannot_satisfy_requirement(self) -> None:
+        envelope = {
+            "schema_version": "macprovider.journey-result-envelope.v1",
+            "signed": {"journey_id": PRIVACY_CLASS_BETA_V2_JOURNEY_ID},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "journeys" / "evidence" / "privacy-class-beta-v2.signed.json"
+            source.parent.mkdir(parents=True)
+            source.write_text(json.dumps(envelope) + "\n", encoding="utf-8")
+            requirement = {
+                "requirement_id": "SPEC-049-R023",
+                "journeys": [PRIVACY_CLASS_BETA_V2_JOURNEY_ID],
+                "evidence": [{
+                    "artifact": f"sha256:{hashlib.sha256(source.read_bytes()).hexdigest()}",
+                    "source": "journeys/evidence/privacy-class-beta-v2.signed.json",
+                }],
+            }
+            result = ValidationResult()
+
+            self.assertFalse(
+                _signed_journey_result_satisfies(
+                    root,
+                    requirement,
+                    "SPEC-049-R023",
+                    result,
+                    trusted_public_key_sha256="",
+                    openssl_bin="openssl",
+                )
+            )
+            self.assertTrue(any("privacy-class beta journey-result is evidence-only" in error for error in result.errors))
+
     def test_valid_fixture_passes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
