@@ -13,10 +13,13 @@ enum PagedKVContiguousCacheBridgeError: Error, Equatable {
 }
 
 enum NativeMTPStateDigestPhase: String, Sendable {
+    case ordinaryAfterDecode = "ordinary_after_decode"
     case afterProposal = "after_proposal"
     case afterVerify = "after_verify"
     case beforeFinalize = "before_finalize"
     case afterFinalize = "after_finalize"
+    case beforeAbort = "before_abort"
+    case afterAbort = "after_abort"
     case abort = "abort"
 }
 
@@ -27,6 +30,7 @@ struct NativeMTPStateDigestRecord: Equatable, Sendable {
     let cacheDigestSHA256: String
     let drafterDigestSHA256: String?
     let pendingTargetDigestSHA256: String?
+    let drafterRecomputeDigestSHA256: String?
     let committedKVTokenCount: Int
     let proposedTokens: Int
     let committedProposalTokens: Int?
@@ -651,6 +655,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     private var cancellationWaiters: [CheckedContinuation<Void, Never>] = []
     #if DEBUG || MACPROVIDER_LAB_HARNESS
     private var labNativeMTPStateDigestObserver: NativeMTPStateDigestObserver?
+    private var nativeMTPDrafterRecomputeDigests: [String: String] = [:]
+    private var labNativeMTPCommittedPrefixTokens: [String: [Int]] = [:]
+    private var labNativeMTPCommittedPrefixHidden: [String: [MLXArray]] = [:]
+    private var labNativeMTPPrefixPositionDeltasUnsupported: Set<String> = []
     #endif
 
     init(
@@ -1234,19 +1242,24 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 // Proposal never mutates drafter state, so an aborted round
                 // only drops its staged target transactions.
                 let transactions = self.consumeAvailableNativeMTPPendingTransactions(for: inputs)
+                let presentInputs = inputs.filter { transactions[$0.requestID] != nil }
                 if !transactions.isEmpty {
-                    let presentInputs = inputs.filter { transactions[$0.requestID] != nil }
                     try self.validateNativeMTPFinalizeInputs(
                         presentInputs,
                         transactions: transactions)
-                    #if DEBUG || MACPROVIDER_LAB_HARNESS
-                    try self.recordNativeMTPStateDigest(
-                        phase: .abort,
-                        inputs: presentInputs,
-                        transactions: transactions
-                    )
-                    #endif
                 }
+                #if DEBUG || MACPROVIDER_LAB_HARNESS
+                try self.recordNativeMTPStateDigest(
+                    phase: .beforeAbort,
+                    inputs: inputs,
+                    transactions: transactions
+                )
+                try self.recordNativeMTPStateDigest(
+                    phase: .afterAbort,
+                    inputs: inputs,
+                    transactions: [:]
+                )
+                #endif
                 return
             }
             let transactions = try self.consumeNativeMTPPendingTransactions(for: inputs)
@@ -1292,6 +1305,25 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     states: advance.states,
                     seedTokens: seeds
                 )
+                #if DEBUG || MACPROVIDER_LAB_HARNESS
+                for (input, transaction) in committing {
+                    let committedProposalTokens = Array(transaction.proposalTokens.prefix(input.committedProposalTokenCount))
+                    let committedTokens = [transaction.currentToken] + committedProposalTokens
+                    try self.labRecordNativeMTPCommittedPrefix(
+                        requestID: input.requestID,
+                        tokens: committedTokens,
+                        hidden: try Self.labHiddenColumns(
+                            transaction.targetState.lastHidden,
+                            count: input.committedInputTokenCount
+                        ),
+                        positionDeltas: transaction.targetState.positionDeltas
+                    )
+                    try await self.labRecomputeNativeMTPDrafterDigest(
+                        targetModel: context.model,
+                        requestID: input.requestID
+                    )
+                }
+                #endif
             }
             for (input, _) in committing {
                 self.invalidateDecodeSession(containing: input.requestID)
@@ -1311,6 +1343,35 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         lock.lock()
         labNativeMTPStateDigestObserver = observer
         lock.unlock()
+    }
+
+    func recordLabNativeMTPOrdinaryStateDigest(requestIDs: [String]) async throws {
+        try recordLabNativeMTPStateDigest(phase: .ordinaryAfterDecode, requestIDs: requestIDs)
+    }
+
+    func recordLabNativeMTPStateDigest(
+        phase: NativeMTPStateDigestPhase,
+        requestIDs: [String]
+    ) async throws {
+        lock.lock()
+        let observer = labNativeMTPStateDigestObserver
+        lock.unlock()
+        guard let observer else { return }
+        for requestID in requestIDs {
+            let digest = try nativeMTPStateDigest(requestID: requestID, transaction: nil)
+            observer.record(NativeMTPStateDigestRecord(
+                requestID: requestID,
+                phase: phase,
+                digestSHA256: digest.combined,
+                cacheDigestSHA256: digest.cache,
+                drafterDigestSHA256: digest.drafter,
+                pendingTargetDigestSHA256: nil,
+                drafterRecomputeDigestSHA256: digest.drafterRecompute,
+                committedKVTokenCount: rowStateTokenCount(for: requestID),
+                proposedTokens: 0,
+                committedProposalTokens: nil
+            ))
+        }
     }
     #endif
 
@@ -1464,6 +1525,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             nativeMTPDrafterStates.removeAll()
             nativeMTPDrafterSeedTokens.removeAll()
             nativeMTPPendingDrafterColumns.removeAll()
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            nativeMTPDrafterRecomputeDigests.removeAll()
+            labNativeMTPCommittedPrefixTokens.removeAll()
+            labNativeMTPCommittedPrefixHidden.removeAll()
+            labNativeMTPPrefixPositionDeltasUnsupported.removeAll()
+            #endif
             if activeOperations == 0 {
                 lock.unlock()
                 handlesToDiscard.forEach { contiguousCacheBridge?.discardContiguousCache(handle: $0) }
@@ -1894,6 +1961,110 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         return result
     }
 
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    private func labNativeMTPObserverInstalled() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return labNativeMTPStateDigestObserver != nil
+    }
+
+    private static func labHiddenColumns(_ hidden: MLXArray, count: Int) throws -> [MLXArray] {
+        guard hidden.ndim == 3, hidden.dim(0) == 1, hidden.dim(1) >= count else {
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_invalid_committed_hidden_history")
+        }
+        return (0..<count).map { hidden[0..., $0 ... $0, 0...] }
+    }
+
+    private func labRecordNativeMTPCommittedPrefix(
+        requestID: String,
+        tokens: [Int],
+        hidden: [MLXArray],
+        positionDeltas: MLXArray?
+    ) throws {
+        guard labNativeMTPObserverInstalled(), !tokens.isEmpty else { return }
+        guard tokens.count == hidden.count else {
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_drafter_recompute_shape_mismatch")
+        }
+        eval(hidden)
+        lock.lock()
+        labNativeMTPCommittedPrefixTokens[requestID, default: []].append(contentsOf: tokens)
+        labNativeMTPCommittedPrefixHidden[requestID, default: []].append(contentsOf: hidden)
+        if positionDeltas != nil {
+            labNativeMTPPrefixPositionDeltasUnsupported.insert(requestID)
+        }
+        nativeMTPDrafterRecomputeDigests.removeValue(forKey: requestID)
+        lock.unlock()
+    }
+
+    private func labSnapshotNativeMTPPendingColumns(
+        requestIDs: [String]
+    ) -> [String: [(token: Int, hidden: MLXArray)]] {
+        lock.lock()
+        defer { lock.unlock() }
+        var snapshot: [String: [(token: Int, hidden: MLXArray)]] = [:]
+        for requestID in requestIDs {
+            if let columns = nativeMTPPendingDrafterColumns[requestID], !columns.isEmpty {
+                snapshot[requestID] = columns
+            }
+        }
+        return snapshot
+    }
+
+    private func labRecomputeNativeMTPDrafterDigest(
+        targetModel: any LanguageModel,
+        requestID: String
+    ) async throws {
+        guard labNativeMTPObserverInstalled(), let drafterContainer else { return }
+        lock.lock()
+        let tokens = labNativeMTPCommittedPrefixTokens[requestID] ?? []
+        let hidden = labNativeMTPCommittedPrefixHidden[requestID] ?? []
+        let unsupportedPositionDeltas = labNativeMTPPrefixPositionDeltasUnsupported.contains(requestID)
+        let seed = nativeMTPDrafterSeedTokens[requestID]
+        lock.unlock()
+        guard let seed, !tokens.isEmpty else { return }
+        guard tokens.count == hidden.count else {
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_drafter_recompute_shape_mismatch")
+        }
+        guard !unsupportedPositionDeltas else {
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_drafter_recompute_position_deltas_unsupported")
+        }
+        let prompt = MLXArray(tokens.map(Int32.init)).reshaped([1, tokens.count])
+        let targetHidden = hidden.count == 1 ? hidden[0] : concatenated(hidden, axis: 1)
+        let recomputed = try await drafterContainer.perform(
+            nonSendable: (targetModel, prompt, targetHidden, seed)
+        ) { drafterContext, values in
+            let (targetModel, prompt, targetHidden, seed) = values
+            guard let drafter = drafterContext.model as? any StatefulMTPDrafterModel else {
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_stateful_drafter_required")
+            }
+            var state = drafter.makeState(parameters: nil)
+            drafter.prepareDrafterState(
+                target: targetModel,
+                promptTokens: prompt,
+                targetHidden: targetHidden,
+                firstBonus: MLXArray([Int32(seed)]),
+                positionDeltas: nil,
+                state: &state,
+                sampler: GenerateParameters(temperature: 0).sampler()
+            )
+            eval(state.cache.flatMap(\.state) + (state.seedToken.map { [$0] } ?? []))
+            return state
+        }
+        let recomputedDigest = try Self.nativeMTPDrafterStateDigest(
+            state: recomputed,
+            seed: seed,
+            pendingColumns: []
+        )
+        let actualDigest = try nativeMTPDrafterDigest(requestID: requestID)
+        guard actualDigest == recomputedDigest else {
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_drafter_recompute_mismatch")
+        }
+        lock.lock()
+        nativeMTPDrafterRecomputeDigests[requestID] = recomputedDigest
+        lock.unlock()
+    }
+    #endif
+
     private func nativeMTPDrafterState(for requestID: String) -> MTPDrafterState? {
         lock.lock()
         defer { lock.unlock() }
@@ -1956,6 +2127,15 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             return (state: state, seed: state.seedToken?.asType(.int32).asArray(Int32.self).first.map(Int.init))
         }
         storeNativeMTPDrafterAdvance(requestIDs: [requestID], states: [prepared.state], seedTokens: [prepared.seed])
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        try labRecordNativeMTPCommittedPrefix(
+            requestID: requestID,
+            tokens: prompt.asArray(Int32.self).map(Int.init),
+            hidden: try Self.labHiddenColumns(targetHidden, count: prompt.dim(1)),
+            positionDeltas: positionDeltas
+        )
+        try await labRecomputeNativeMTPDrafterDigest(targetModel: targetModel, requestID: requestID)
+        #endif
     }
 
     /// Advances a native row's drafter over one prompt chunk `[c, c+n)` of a
@@ -2032,6 +2212,15 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             states: [advanced.state],
             seedTokens: [input.isFinalChunk ? advanced.seed : nil]
         )
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        try labRecordNativeMTPCommittedPrefix(
+            requestID: input.requestID,
+            tokens: input.promptTokens,
+            hidden: try Self.labHiddenColumns(targetHidden, count: chunkCount),
+            positionDeltas: positionDeltas
+        )
+        try await labRecomputeNativeMTPDrafterDigest(targetModel: targetModel, requestID: input.requestID)
+        #endif
     }
 
     /// Row `row`'s last-position hidden state as a `[1, 1, hidden]` array
@@ -2105,6 +2294,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             minimumColumns: minimumColumns
         )
         guard !advanceRows.isEmpty else { return }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        let labPendingColumns = labSnapshotNativeMTPPendingColumns(requestIDs: flushIDs)
+        #endif
         let advanced = try await drafterContainer.perform(
             nonSendable: (advanceRows, targetModel)
         ) { drafterContext, values in
@@ -2131,6 +2323,18 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             states: advanced.states,
             seedTokens: advanced.seeds
         )
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        for requestID in flushIDs {
+            let columns = labPendingColumns[requestID] ?? []
+            try labRecordNativeMTPCommittedPrefix(
+                requestID: requestID,
+                tokens: columns.map(\.token),
+                hidden: columns.map(\.hidden),
+                positionDeltas: nil
+            )
+            try await labRecomputeNativeMTPDrafterDigest(targetModel: targetModel, requestID: requestID)
+        }
+        #endif
     }
 
     private func pendingNativeMTPDrafterAdvanceRows(
@@ -2306,6 +2510,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         nativeMTPDrafterStates.removeValue(forKey: requestID)
         nativeMTPDrafterSeedTokens.removeValue(forKey: requestID)
         nativeMTPPendingDrafterColumns.removeValue(forKey: requestID)
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        nativeMTPDrafterRecomputeDigests.removeValue(forKey: requestID)
+        labNativeMTPCommittedPrefixTokens.removeValue(forKey: requestID)
+        labNativeMTPCommittedPrefixHidden.removeValue(forKey: requestID)
+        labNativeMTPPrefixPositionDeltasUnsupported.remove(requestID)
+        #endif
         lock.unlock()
     }
 
@@ -2369,6 +2579,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 cacheDigestSHA256: digest.cache,
                 drafterDigestSHA256: digest.drafter,
                 pendingTargetDigestSHA256: digest.pendingTarget,
+                drafterRecomputeDigestSHA256: digest.drafterRecompute,
                 committedKVTokenCount: rowStateTokenCount(for: requestID),
                 proposedTokens: transaction.proposalTokenCount,
                 committedProposalTokens: nil
@@ -2386,7 +2597,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         lock.unlock()
         guard let observer else { return }
         for input in inputs {
-            guard let transaction = transactions[input.requestID] else { continue }
+            let transaction = transactions[input.requestID]
             let digest = try nativeMTPStateDigest(
                 requestID: input.requestID,
                 transaction: transaction
@@ -2398,8 +2609,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 cacheDigestSHA256: digest.cache,
                 drafterDigestSHA256: digest.drafter,
                 pendingTargetDigestSHA256: digest.pendingTarget,
+                drafterRecomputeDigestSHA256: digest.drafterRecompute,
                 committedKVTokenCount: rowStateTokenCount(for: input.requestID),
-                proposedTokens: input.proposalTokenCount,
+                proposedTokens: transaction?.proposalTokenCount ?? input.proposalTokenCount,
                 committedProposalTokens: input.committedProposalTokenCount
             ))
         }
@@ -2414,26 +2626,35 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
 
     private func nativeMTPStateDigest(
         requestID: String,
-        transaction: NativeMTPPendingTransaction
-    ) throws -> (combined: String, cache: String, drafter: String?, pendingTarget: String?) {
-        let cacheDigest = try rowCacheStateDigest(requestID: requestID)
+        transaction: NativeMTPPendingTransaction?
+    ) throws -> (combined: String, cache: String, drafter: String?, pendingTarget: String?, drafterRecompute: String?) {
+        let cacheDigest = try rowTargetCacheDigest(requestID: requestID)
         let drafterDigest = try nativeMTPDrafterDigest(requestID: requestID)
-        let pendingDigest = try nativeMTPPendingTargetDigest(transaction)
+        let pendingDigest = try transaction.flatMap { try nativeMTPPendingTargetDigest($0) }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        lock.lock()
+        let recomputeDigest = nativeMTPDrafterRecomputeDigests[requestID]
+        lock.unlock()
+        #else
+        let recomputeDigest: String? = nil
+        #endif
         var hasher = SHA256()
         Self.update(&hasher, label: "schema", value: "macprovider.native-mtp-state-observer.v1")
         Self.update(&hasher, label: "request_id", value: requestID)
         Self.update(&hasher, label: "cache", value: cacheDigest)
         Self.update(&hasher, label: "drafter", value: drafterDigest ?? "none")
         Self.update(&hasher, label: "pending_target", value: pendingDigest ?? "none")
+        Self.update(&hasher, label: "drafter_recompute", value: recomputeDigest ?? "none")
         return (
             combined: Self.hexString(hasher.finalize()),
             cache: cacheDigest,
             drafter: drafterDigest,
-            pendingTarget: pendingDigest
+            pendingTarget: pendingDigest,
+            drafterRecompute: recomputeDigest
         )
     }
 
-    private func rowCacheStateDigest(requestID: String) throws -> String {
+    private func rowTargetCacheDigest(requestID: String) throws -> String {
         lock.lock()
         let row = rows[requestID]
         lock.unlock()
@@ -2464,59 +2685,80 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 )
             }
         }
-        if let state = row.state {
-            try Self.updateLMOutputStateDigest(&hasher, state: state)
-        } else {
-            Self.update(&hasher, label: "lm_state_count", value: "0")
-        }
         return Self.hexString(hasher.finalize())
     }
 
 
+    private enum LMOutputStateDigestEntry {
+        case array(key: String, array: MLXArray)
+        case scalar(key: String, value: String)
+
+        var key: String {
+            switch self {
+            case .array(let key, _), .scalar(let key, _): return key
+            }
+        }
+    }
+
     private static func updateLMOutputStateDigest(_ hasher: inout SHA256, state: LMOutput.State) throws {
-        var count = 0
-        var entries: [(String, () throws -> Void)] = []
+        var entries: [LMOutputStateDigestEntry] = []
         if let lastHidden = state[mtpLastHiddenStatesKey] {
-            entries.append(("mtp.lastHiddenStates", {
-                try updateArrayDigest(&hasher, label: "lm_state.mtp.lastHiddenStates", array: lastHidden)
-            }))
+            entries.append(.array(key: "mtp.lastHiddenStates", array: lastHidden))
         }
         if let positionDeltas = state[mtpPositionDeltasKey] {
-            entries.append(("mtp.positionDeltas", {
-                try updateArrayDigest(&hasher, label: "lm_state.mtp.positionDeltas", array: positionDeltas)
-            }))
+            entries.append(.array(key: "mtp.positionDeltas", array: positionDeltas))
         }
         if let sharedKV = state[mtpSharedKVStatesKey] {
             for key in sharedKV.keys.sorted() {
                 guard let pair = sharedKV[key] else { continue }
-                entries.append(("mtp.sharedKVStates.\(key).k", {
-                    try updateArrayDigest(&hasher, label: "lm_state.mtp.sharedKVStates.\(key).k", array: pair.0)
-                }))
-                entries.append(("mtp.sharedKVStates.\(key).v", {
-                    try updateArrayDigest(&hasher, label: "lm_state.mtp.sharedKVStates.\(key).v", array: pair.1)
-                }))
+                entries.append(.array(key: "mtp.sharedKVStates.\(key).k", array: pair.0))
+                entries.append(.array(key: "mtp.sharedKVStates.\(key).v", array: pair.1))
             }
         }
         if let offsets = state[mtpSharedKVOffsetsKey] {
             for key in offsets.keys.sorted() {
-                entries.append(("mtp.sharedKVOffsets.\(key)", {
-                    update(&hasher, label: "lm_state.mtp.sharedKVOffsets.\(key)", value: String(offsets[key] ?? 0))
-                }))
+                entries.append(.scalar(key: "mtp.sharedKVOffsets.\(key)", value: String(offsets[key] ?? 0)))
             }
         }
         if let sourceIndices = state[mtpSharedKVSourceIndicesKey] {
             for key in sourceIndices.keys.sorted() {
-                entries.append(("mtp.sharedKVSourceIndices.\(key)", {
-                    update(&hasher, label: "lm_state.mtp.sharedKVSourceIndices.\(key)", value: String(sourceIndices[key] ?? 0))
-                }))
+                entries.append(.scalar(key: "mtp.sharedKVSourceIndices.\(key)", value: String(sourceIndices[key] ?? 0)))
             }
         }
-        count = entries.count
-        update(&hasher, label: "lm_state_count", value: String(count))
-        for (key, body) in entries.sorted(by: { $0.0 < $1.0 }) {
-            update(&hasher, label: "lm_state_key", value: key)
-            try body()
+        update(&hasher, label: "lm_state_count", value: String(entries.count))
+        for entry in entries.sorted(by: { $0.key < $1.key }) {
+            update(&hasher, label: "lm_state_key", value: entry.key)
+            switch entry {
+            case .array(let key, let array):
+                try updateArrayDigest(&hasher, label: "lm_state.\(key)", array: array)
+            case .scalar(let key, let value):
+                update(&hasher, label: "lm_state.\(key)", value: value)
+            }
         }
+    }
+
+    private static func nativeMTPDrafterStateDigest(
+        state: MTPDrafterState,
+        seed: Int?,
+        pendingColumns: [(token: Int, hidden: MLXArray)]
+    ) throws -> String {
+        var hasher = SHA256()
+        update(&hasher, label: "kind", value: "drafter")
+        update(&hasher, label: "next_position", value: String(state.nextPosition))
+        update(&hasher, label: "proposal_appended", value: String(state.proposalAppended))
+        for (layerIndex, cache) in state.cache.enumerated() {
+            update(&hasher, label: "layer", value: String(layerIndex))
+            for (slotIndex, array) in cache.state.enumerated() {
+                try updateArrayDigest(&hasher, label: "slot_\(slotIndex)", array: array)
+            }
+        }
+        update(&hasher, label: "seed", value: seed.map(String.init) ?? "none")
+        update(&hasher, label: "pending_column_count", value: String(pendingColumns.count))
+        for (index, column) in pendingColumns.enumerated() {
+            update(&hasher, label: "pending_token_\(index)", value: String(column.token))
+            try updateArrayDigest(&hasher, label: "pending_hidden_\(index)", array: column.hidden)
+        }
+        return hexString(hasher.finalize())
     }
 
     private func nativeMTPDrafterDigest(requestID: String) throws -> String? {
@@ -2526,18 +2768,15 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         let pendingColumns = nativeMTPPendingDrafterColumns[requestID] ?? []
         lock.unlock()
         guard state != nil || seed != nil || !pendingColumns.isEmpty else { return nil }
+        if let state {
+            return try Self.nativeMTPDrafterStateDigest(
+                state: state,
+                seed: seed,
+                pendingColumns: pendingColumns
+            )
+        }
         var hasher = SHA256()
         Self.update(&hasher, label: "kind", value: "drafter")
-        if let state {
-            Self.update(&hasher, label: "next_position", value: String(state.nextPosition))
-            Self.update(&hasher, label: "proposal_appended", value: String(state.proposalAppended))
-            for (layerIndex, cache) in state.cache.enumerated() {
-                Self.update(&hasher, label: "layer", value: String(layerIndex))
-                for (slotIndex, array) in cache.state.enumerated() {
-                    try Self.updateArrayDigest(&hasher, label: "slot_\(slotIndex)", array: array)
-                }
-            }
-        }
         Self.update(&hasher, label: "seed", value: seed.map(String.init) ?? "none")
         Self.update(&hasher, label: "pending_column_count", value: String(pendingColumns.count))
         for (index, column) in pendingColumns.enumerated() {

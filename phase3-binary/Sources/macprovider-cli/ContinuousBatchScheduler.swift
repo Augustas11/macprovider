@@ -873,6 +873,31 @@ final class NativeMTPLabCommittedTokenTimingObserver: @unchecked Sendable {
     }
 }
 
+final class NativeMTPLabDecodeOutputCap: @unchecked Sendable {
+    private let lock = NSLock()
+    private var capsByRequestID: [String: Int]
+
+    init(capsByRequestID: [String: Int]) {
+        self.capsByRequestID = capsByRequestID.mapValues { max(0, $0) }
+    }
+
+    func cap(requestID: String) -> Int? {
+        lock.lock()
+        defer { lock.unlock() }
+        return capsByRequestID[requestID]
+    }
+
+    func setCap(_ cap: Int?, requestID: String) {
+        lock.lock()
+        if let cap {
+            capsByRequestID[requestID] = max(0, cap)
+        } else {
+            capsByRequestID.removeValue(forKey: requestID)
+        }
+        lock.unlock()
+    }
+}
+
 final class NativeMTPLabPostoutputFault: @unchecked Sendable {
     private let lock = NSLock()
     private var requestIDs: Set<String>
@@ -1027,6 +1052,10 @@ protocol ContinuousBatchSchedulerBackend: Sendable {
     func finish(requestID: String)
     /// Returns only after in-flight calls have stopped accessing row bindings.
     func cancelInFlight() async
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    func recordLabNativeMTPOrdinaryStateDigest(requestIDs: [String]) async throws
+    func recordLabNativeMTPStateDigest(phase: NativeMTPStateDigestPhase, requestIDs: [String]) async throws
+    #endif
 }
 
 protocol ContinuousBatchRetainedCacheBridge: Sendable {
@@ -1056,6 +1085,11 @@ extension ContinuousBatchSchedulerBackend {
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_native_mtp_backend_unavailable")
         }
     }
+
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    func recordLabNativeMTPOrdinaryStateDigest(requestIDs: [String]) async throws {}
+    func recordLabNativeMTPStateDigest(phase: NativeMTPStateDigestPhase, requestIDs: [String]) async throws {}
+    #endif
 
     func decodeLockstepWindow(
         rows: [ContinuousBatchDecodeInput],
@@ -1817,6 +1851,7 @@ actor ContinuousBatchScheduler {
     private var labNativeMTPPhaseTrap: NativeMTPLabPhaseTrap?
     private var labNativeMTPPostoutputFault: NativeMTPLabPostoutputFault?
     private var labNativeMTPCommitTimingObserver: NativeMTPLabCommittedTokenTimingObserver?
+    private var labNativeMTPDecodeOutputCap: NativeMTPLabDecodeOutputCap?
     /// Lab-only batch-composition fence. The journey harness installs the exact
     /// request order before submitting a batch; the pump stays stopped until
     /// every named row is queued, then consumes them in that order.
@@ -2735,12 +2770,22 @@ actor ContinuousBatchScheduler {
         var window = configured
         var bounded = false
         for row in rows {
-            let remaining = row.request.maxOutputTokens - row.generatedTokens.count
+            let remaining = remainingDecodeOutputTokens(for: row)
             guard remaining > 0 else { continue }
             window = min(window, remaining)
             bounded = true
         }
         return bounded ? max(1, window) : 1
+    }
+
+    private func remainingDecodeOutputTokens(for row: Row) -> Int {
+        var remaining = row.request.maxOutputTokens - row.generatedTokens.count
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if let cap = labNativeMTPDecodeOutputCap?.cap(requestID: row.request.id) {
+            remaining = min(remaining, cap - row.generatedTokens.count)
+        }
+        #endif
+        return max(0, remaining)
     }
 
     private struct PreparedNativeMTPRow {
@@ -2781,7 +2826,7 @@ actor ContinuousBatchScheduler {
     }
 
     private func nativeMTPMaximumProposalDepth(for row: Row) -> Int {
-        let remainingOutputTokens = max(0, row.request.maxOutputTokens - row.generatedTokens.count)
+        let remainingOutputTokens = remainingDecodeOutputTokens(for: row)
         let remainingProposalCapacity = max(0, remainingOutputTokens - 1)
         if nativeMTPLoadGateEngaged, !row.request.nativeMTPIntegrityProbe {
             return 0
@@ -2880,7 +2925,8 @@ actor ContinuousBatchScheduler {
         var generated = row.generatedTokens
         var selected: [NativeMTPTokenCandidate] = []
         for candidate in acceptedRow.tokenCandidates {
-            guard generated.count < row.request.maxOutputTokens else { break }
+            let generatedLimit = row.generatedTokens.count + remainingDecodeOutputTokens(for: row)
+            guard generated.count < generatedLimit else { break }
             generated.append(candidate.tokenID)
             selected.append(candidate)
             if matchingStopLength(
@@ -3246,15 +3292,51 @@ actor ContinuousBatchScheduler {
             return
         }
         #if DEBUG || MACPROVIDER_LAB_HARNESS
+        do {
+            try await backend.recordLabNativeMTPStateDigest(
+                phase: .afterProposal,
+                requestIDs: preReserved.map { $0.row.request.id }
+            )
+        } catch {
+            record(.batchForwardFailed)
+            ContinuousBatchingPolicy.logForwardFailed(error)
+            await abortPreReservedNativeMTPRows(preReserved)
+            for item in preReserved {
+                let row = item.row
+                if let removed = activeDecode.removeValue(forKey: row.request.id) {
+                    let released = await release(removed.handle)
+                    finish(
+                        removed,
+                        status: released ? .batchFailed : .requestFailed,
+                        errorCode: released
+                            ? "continuous_batching_native_mtp_observer_failed"
+                            : "continuous_batching_cleanup_failed"
+                    )
+                    if !released { return }
+                }
+            }
+            return
+        }
         let afterProposalCancelled = labNativeMTPPhaseTrap?.trigger(
             phase: .afterProposal,
             requestIDs: preReserved.map { $0.row.request.id }
         ) ?? []
         if !afterProposalCancelled.isEmpty {
-            cancelledIDs.formUnion(preReserved.map { $0.row.request.id })
-            await abortPreReservedNativeMTPRows(preReserved)
+            let cancelledReservations = preReserved.filter { afterProposalCancelled.contains($0.row.request.id) }
+            cancelledIDs.formUnion(afterProposalCancelled)
+            await abortPreReservedNativeMTPRows(cancelledReservations)
+            do {
+                try await backend.recordLabNativeMTPStateDigest(
+                    phase: .afterAbort,
+                    requestIDs: cancelledReservations.map { $0.row.request.id }
+                )
+            } catch {
+                record(.batchForwardFailed)
+                ContinuousBatchingPolicy.logForwardFailed(error)
+            }
             await processCancellations()
-            return
+            preReserved.removeAll { afterProposalCancelled.contains($0.row.request.id) }
+            if preReserved.isEmpty { return }
         }
         #endif
         let stalePreReservedRows = staleNativeMTPRows(preReserved.map(\.row))
@@ -3935,6 +4017,12 @@ actor ContinuousBatchScheduler {
         labNativeMTPCommitTimingObserver = observer
     }
 
+    /// Lab-only: cap committed decode outputs per request without changing
+    /// admission, context, or effective max-token validation.
+    func installLabNativeMTPDecodeOutputCap(_ cap: NativeMTPLabDecodeOutputCap?) {
+        labNativeMTPDecodeOutputCap = cap
+    }
+
     /// Lab-only: hold the pump until every named request is queued, then order
     /// those rows exactly as supplied. Only an idle scheduler may install it.
     func installLabBatchComposition(_ requestIDs: [String]?) -> Bool {
@@ -4254,6 +4342,33 @@ actor ContinuousBatchScheduler {
             return output
         }
         let stillActive = Set(activeDecode.keys)
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        do {
+            try await backend.recordLabNativeMTPOrdinaryStateDigest(requestIDs: outputs.compactMap { output in
+                guard healthyOutputIDs.contains(output.requestID),
+                      stillActive.contains(output.requestID),
+                      !invalidOutputIDs.contains(output.requestID)
+                else { return nil }
+                return output.requestID
+            })
+        } catch {
+            record(.batchForwardFailed)
+            ContinuousBatchingPolicy.logForwardFailed(error)
+            for output in outputs where healthyOutputIDs.contains(output.requestID) {
+                guard let removed = activeDecode.removeValue(forKey: output.requestID) else { continue }
+                let released = await release(removed.handle)
+                finish(
+                    removed,
+                    status: released ? .batchFailed : .requestFailed,
+                    errorCode: released
+                        ? "continuous_batching_native_mtp_observer_failed"
+                        : "continuous_batching_cleanup_failed"
+                )
+                if !released { return }
+            }
+            return
+        }
+        #endif
         await applyDecodeOutputs(outputs.filter {
             healthyOutputIDs.contains($0.requestID)
                 && stillActive.contains($0.requestID)
@@ -4367,7 +4482,7 @@ actor ContinuousBatchScheduler {
             terminalStatus = .stop
         } else if earlyStopIDs.contains(row.request.id) {
             terminalStatus = .stop
-        } else if row.generatedTokens.count >= row.request.maxOutputTokens {
+        } else if remainingDecodeOutputTokens(for: row) == 0 {
             terminalStatus = .length
         } else {
             terminalStatus = nil
@@ -4920,7 +5035,7 @@ actor ContinuousBatchScheduler {
 
     private func transitionPrefilledRow(_ row: Row, sampledToken: Int? = nil) async {
         _ = removePromptRow(row.request.id)
-        if row.request.maxOutputTokens == 0 {
+        if remainingDecodeOutputTokens(for: row) == 0 {
             await finishTerminal(row, status: .length)
         } else if let sampledToken {
             activeDecode[row.request.id] = row
