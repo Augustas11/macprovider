@@ -1,5 +1,6 @@
 #if DEBUG || MACPROVIDER_LAB_HARNESS
 import Foundation
+import MacProviderCore
 import XCTest
 @testable import macprovider_cli
 
