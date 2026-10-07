@@ -4043,7 +4043,7 @@ func validateEvent(e DurableEvent) error {
 	if err := ValidatePoolID(e.PoolID); err != nil {
 		return err
 	}
-	if err := ValidatePromiseClaimsText(e.PoolID); err != nil {
+	if err := validatePoolIDPromiseClaims(e.PoolID); err != nil {
 		return err
 	}
 	if e.RootCustodyClass != "" && (e.EventType != EventLifecycleChanged || e.Lifecycle != LifecycleActive || !ProductionRootCustodyClassApproved(e.RootCustodyClass)) {
@@ -4094,16 +4094,19 @@ func validateEvent(e DurableEvent) error {
 		if err != nil {
 			return err
 		}
-		if utf8.Valid(raw) {
-			if err := ValidatePromiseClaimsText(string(raw)); err != nil {
-				return err
-			}
-		}
 		core, err := acceptedPolicyCoreFromManifestSnapshot(e)
 		if err != nil {
+			if utf8.Valid(raw) {
+				if claimErr := ValidatePromiseClaimsText(string(raw)); claimErr != nil {
+					return claimErr
+				}
+			}
 			return err
 		}
 		if err := validateCandidatePolicyCoreClaims(core); err != nil {
+			return err
+		}
+		if err := validatePoolModelEntryPromiseClaims(core); err != nil {
 			return err
 		}
 	case EventLifecycleChanged:
@@ -4162,6 +4165,52 @@ func validateEvent(e DurableEvent) error {
 		}
 	default:
 		return fmt.Errorf("unknown event type %q", e.EventType)
+	}
+	return nil
+}
+
+func validatePoolIDPromiseClaims(poolID string) error {
+	raw, err := base64.RawURLEncoding.DecodeString(poolID)
+	// SPEC-042-R001 pool IDs are opaque 16-byte identity-core digest prefixes,
+	// not creator-authored promise text; legacy/noncanonical aliases still scan.
+	if err == nil && len(raw) == 16 && base64.RawURLEncoding.EncodeToString(raw) == poolID {
+		return nil
+	}
+	return ValidatePromiseClaimsText(poolID)
+}
+
+func validatePoolModelEntryPromiseClaims(core poolmanifest.PolicyCore) error {
+	entries, err := core.PoolModelEntries()
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		_, slug, ok := poolmanifest.ParsePoolModelID(entry.PoolModelID)
+		if !ok {
+			return fmt.Errorf("%w: pool_model_id invalid", ErrProhibitedPromiseClaim)
+		}
+		if err := ValidatePromiseClaimsText(slug, entry.License); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateModelAllowlistPromiseClaims(models []string) error {
+	for _, model := range models {
+		poolID, slug, ok := poolmanifest.ParsePoolModelID(model)
+		if !ok {
+			if err := ValidatePromiseClaimsText(model); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := validatePoolIDPromiseClaims(poolID); err != nil {
+			return err
+		}
+		if err := ValidatePromiseClaimsText(slug); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -4326,7 +4375,10 @@ func validatePublicAnnouncementApproval(a PublicAnnouncementApproval) error {
 	if !validSHA256Hex(a.ManifestCoreDigest) || !validSHA256Hex(a.ReviewedDistributionDigest) {
 		return ErrPublicAnnouncementGate
 	}
-	if err := ValidatePromiseClaimsText(a.OperationID, a.PoolID, a.ApprovalRecordID, a.ApprovedBy); err != nil {
+	if err := validatePoolIDPromiseClaims(a.PoolID); err != nil {
+		return err
+	}
+	if err := ValidatePromiseClaimsText(a.OperationID, a.ApprovalRecordID, a.ApprovedBy); err != nil {
 		return err
 	}
 	return nil
@@ -4340,7 +4392,10 @@ func validateReviewedDistributionArtifact(a ReviewedDistributionArtifact) error 
 	if !validSHA256Hex(a.ManifestCoreDigest) || !validSHA256Hex(a.ReviewedDistributionDigest) || !validSHA256Hex(a.ClaimControlDigest) {
 		return ErrPublicAnnouncementGate
 	}
-	if err := ValidatePromiseClaimsText(a.OperationID, a.PoolID, a.ArtifactURI, a.ReviewedBy); err != nil {
+	if err := validatePoolIDPromiseClaims(a.PoolID); err != nil {
+		return err
+	}
+	if err := ValidatePromiseClaimsText(a.OperationID, a.ArtifactURI, a.ReviewedBy); err != nil {
 		return err
 	}
 	return nil
@@ -4356,7 +4411,10 @@ func validateScannedPublicAnnouncementApproval(a PublicAnnouncementApproval) err
 	if a.ReviewedDistributionDigest != "" && !validSHA256Hex(a.ReviewedDistributionDigest) {
 		return ErrPublicAnnouncementGate
 	}
-	if err := ValidatePromiseClaimsText(a.OperationID, a.PoolID, a.ApprovalRecordID, a.ApprovedBy); err != nil {
+	if err := validatePoolIDPromiseClaims(a.PoolID); err != nil {
+		return err
+	}
+	if err := ValidatePromiseClaimsText(a.OperationID, a.ApprovalRecordID, a.ApprovedBy); err != nil {
 		return err
 	}
 	return nil

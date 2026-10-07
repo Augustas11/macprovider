@@ -2034,6 +2034,155 @@ func TestReconstructEvents_RejectsLifecycleReasonPromiseClaims(t *testing.T) {
 	}
 }
 
+func TestReconstructEvents_AllowsCanonicalOpaquePoolIDContainingClaimSubstring(t *testing.T) {
+	t.Parallel()
+	ts := time.Unix(1800004110, 0).UTC()
+	identity := poolmanifest.IdentityCore{RootIssuerKeyID: "manifest-root-1", GenesisNonce: []byte("claim-ci-0068642")}
+	poolID, err := identity.PoolID()
+	if err != nil {
+		t.Fatalf("identity PoolID: %v", err)
+	}
+	if poolID != "EZBGlbaC7JGB4ylGewxOdA" {
+		t.Fatalf("fixture pool_id = %q, want fixed GLBA collision", poolID)
+	}
+	if err := trustpool.ValidateCanonicalPoolID(poolID); err != nil {
+		t.Fatalf("test fixture pool_id must stay canonical: %v", err)
+	}
+	if err := trustpool.ValidatePromiseClaimsText(poolID); !errors.Is(err, trustpool.ErrProhibitedPromiseClaim) {
+		t.Fatalf("test fixture no longer exercises promise-claim scanner collision: %v", err)
+	}
+	events := []trustpool.DurableEvent{
+		ev("op-create", ts, trustpool.EventPoolCreated, poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+	}
+	if _, err := trustpool.ReconstructEvents(events); err != nil {
+		t.Fatalf("ReconstructEvents canonical opaque pool_id collision error = %v, want nil", err)
+	}
+}
+
+func TestReconstructEvents_AllowsSignedManifestForCanonicalOpaquePoolIDContainingClaimSubstring(t *testing.T) {
+	t.Parallel()
+	ts := time.Unix(1800004111, 0).UTC()
+	root := newRootFixture(t)
+	root.identityCore = poolmanifest.IdentityCore{RootIssuerKeyID: root.authorityRoot.KeyID, GenesisNonce: []byte("claim-ci-0068642")}
+	poolID, err := root.identityCore.PoolID()
+	if err != nil {
+		t.Fatalf("identity PoolID: %v", err)
+	}
+	if poolID != "EZBGlbaC7JGB4ylGewxOdA" {
+		t.Fatalf("fixture pool_id = %q, want fixed GLBA collision", poolID)
+	}
+	root.poolID = poolID
+	events := []trustpool.DurableEvent{
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+		signedRootRegistration(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", root),
+		signedManifestWithPolicyCoreMutation(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root, func(core *poolmanifest.PolicyCore) {
+			withPoolModels(root.poolID, nil)(core)
+			core.ModelAllowlist = []string{"pool/" + root.poolID + "/creator-gguf"}
+		}),
+	}
+	if _, err := trustpool.ReconstructEvents(events); err != nil {
+		t.Fatalf("ReconstructEvents signed canonical opaque pool_id collision error = %v, want nil", err)
+	}
+}
+
+func TestReconstructEvents_RejectsPoolModelEntryPromiseClaims(t *testing.T) {
+	t.Parallel()
+	ts := time.Unix(1800004112, 0).UTC()
+	tests := []struct {
+		name   string
+		mutate func([]poolmanifest.PoolModelEntry) []poolmanifest.PoolModelEntry
+	}{
+		{
+			name: "slug",
+			mutate: func(entries []poolmanifest.PoolModelEntry) []poolmanifest.PoolModelEntry {
+				entries[0].PoolModelID = strings.TrimSuffix(entries[0].PoolModelID, "creator-gguf") + "privacy-pool"
+				return entries[:1]
+			},
+		},
+		{
+			name: "license",
+			mutate: func(entries []poolmanifest.PoolModelEntry) []poolmanifest.PoolModelEntry {
+				entries[0].License = "LicenseRef-HIPAA"
+				return entries[:1]
+			},
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := newRootFixture(t)
+			root.identityCore = poolmanifest.IdentityCore{RootIssuerKeyID: root.authorityRoot.KeyID, GenesisNonce: []byte("claim-ci-0068642")}
+			poolID, err := root.identityCore.PoolID()
+			if err != nil {
+				t.Fatalf("identity PoolID: %v", err)
+			}
+			if poolID != "EZBGlbaC7JGB4ylGewxOdA" {
+				t.Fatalf("fixture pool_id = %q, want fixed GLBA collision", poolID)
+			}
+			root.poolID = poolID
+			events := []trustpool.DurableEvent{
+				ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+					e.CreatorAccountID = "creator-a"
+					e.ApprovalRecordID = "approval-v1"
+				}),
+				signedRootRegistration(t, "op-root-"+tc.name, ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", root),
+				signedManifestWithPolicyCoreMutation(t, "op-manifest-"+tc.name, ts.Add(2*time.Second), root.poolID, 1, root, func(core *poolmanifest.PolicyCore) {
+					allowLlamacpp(core)
+					if err := core.SetPoolExtensions(tc.mutate(poolEntriesFor(root.poolID)), nil); err != nil {
+						t.Fatalf("SetPoolExtensions: %v", err)
+					}
+				}),
+			}
+			if _, err := trustpool.ReconstructEvents(events); !errors.Is(err, trustpool.ErrProhibitedPromiseClaim) {
+				t.Fatalf("ReconstructEvents error = %v, want ErrProhibitedPromiseClaim", err)
+			}
+		})
+	}
+}
+
+func TestReconstructEvents_RejectsMalformedCanonicalLengthPoolIDPromiseClaims(t *testing.T) {
+	t.Parallel()
+	ts := time.Unix(1800004113, 0).UTC()
+	const poolID = "HIPAAaaaaaaaaaaaaaaaaa"
+	if err := trustpool.ValidateCanonicalPoolID(poolID); err != nil {
+		t.Fatalf("test fixture pool_id must retain legacy canonical-validator shape: %v", err)
+	}
+	events := []trustpool.DurableEvent{
+		ev("op-create", ts, trustpool.EventPoolCreated, poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+	}
+	if _, err := trustpool.ReconstructEvents(events); !errors.Is(err, trustpool.ErrProhibitedPromiseClaim) {
+		t.Fatalf("ReconstructEvents error = %v, want ErrProhibitedPromiseClaim", err)
+	}
+}
+
+func TestReconstructEvents_RejectsNonCanonicalPoolIDPromiseClaims(t *testing.T) {
+	t.Parallel()
+	ts := time.Unix(1800004114, 0).UTC()
+	const poolID = "privacy-pool-alias"
+	if err := trustpool.ValidateCanonicalPoolID(poolID); err == nil {
+		t.Fatalf("test fixture pool_id must stay noncanonical")
+	}
+	events := []trustpool.DurableEvent{
+		ev("op-create", ts, trustpool.EventPoolCreated, poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+	}
+	if _, err := trustpool.ReconstructEvents(events); !errors.Is(err, trustpool.ErrProhibitedPromiseClaim) {
+		t.Fatalf("ReconstructEvents error = %v, want ErrProhibitedPromiseClaim", err)
+	}
+}
+
 func TestReconstructEvents_RejectsManifestAndFloorDowngrades(t *testing.T) {
 	t.Parallel()
 	ts := time.Unix(1800004200, 0).UTC()
