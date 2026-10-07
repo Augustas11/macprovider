@@ -1819,7 +1819,7 @@ class BYOMJourneyGovernanceSourceTests(unittest.TestCase):
 
 
 class BYOMJourneyConformanceMappingTests(unittest.TestCase):
-    """Signed SPEC-046/047 promotion must stay mapped; R009 remains the open intake gap."""
+    """Signed promotions stay mapped; changed implementations await fresh proof."""
 
     def test_promoted_requirements_are_conformant_and_mapped(self) -> None:
         conformance = json.loads((REPO_ROOT / "specs" / "CONFORMANCE.json").read_text(encoding="utf-8"))
@@ -1836,6 +1836,16 @@ class BYOMJourneyConformanceMappingTests(unittest.TestCase):
                 digest = hashlib.sha256(signed_path.read_bytes()).hexdigest()
                 row = rows[requirement_id]
                 self.assertIn(journey_id, row["journeys"], requirement_id)
+                if requirement_id == "SPEC-047-R005" and row["state"] == "pending":
+                    self.assertEqual([], row["evidence"], requirement_id)
+                    self.assertEqual("CODE_BUG", row["gap"]["verdict"], requirement_id)
+                    self.assertEqual(
+                        "https://github.com/Augustas11/macprovider/issues/1880",
+                        row["gap"]["issue"],
+                        requirement_id,
+                    )
+                    self.assertIn("fresh signed JOURNEY-NETWORK-MODEL-ADMISSION", row["gap"]["rationale"])
+                    continue
                 self.assertEqual("conformant", row["state"], requirement_id)
                 self.assertIsNone(row["gap"], requirement_id)
                 sha_items = [
