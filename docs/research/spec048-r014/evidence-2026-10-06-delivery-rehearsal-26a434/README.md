@@ -11,7 +11,7 @@ emergency-revocation drill.
 | Coordinator, gateway | Built from the same branch. Loopback 19301/19302/19310, SQLite, settlement in observe mode, `enforce_provider_admission: true` |
 | Release | `scripts/native_mtp_rehearsal_release.py` re-cuts the artifact-feed activation and then the native-MTP release with the local-only test key `native-mtp-rehearsal-test-v1`. 144 revocation slots were pre-signed. |
 | Runner | `scripts/native_mtp_enablement_rehearsal.py`, under the lab lock, with `--isolate-lifecycle` and isolated local state using a cloned target fixture (no drafter). |
-| Host | Apple M3 Ultra, 256 GB, macOS 26A434. Live :8080, :18120, :18130 and the M1 pool were not touched. |
+| Host | Apple M3 Ultra, 256 GB, macOS 26A434. The live provider and auxiliary provider pools were not touched. |
 
 ## Result (`result-full-run.json`, 16:40–17:01Z)
 

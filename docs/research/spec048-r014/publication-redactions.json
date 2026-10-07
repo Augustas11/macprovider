@@ -2,16 +2,16 @@
   "evidence_status": "Historical verdicts and binary identities unchanged; published copies are sanitized, not byte-identical raw originals",
   "files": [
     {
-      "description": "Removed local session worktree and lab-lock command mechanics while preserving D-CB dependency and lab-window planning facts.",
+      "description": "Removed local session worktree, pool inventory, lab-lock command mechanics, and throwaway key storage/disposal prose while preserving D-CB dependency, unreleased-live blocker, test-key, and lab-window planning facts.",
       "original_sha256": "8e31651219670f5697b0bc856262c2c90550d566f1aa134532fd36eda4ce78d4",
       "path": "enablement-plan.md",
-      "published_sha256": "d3bc21cc49697d9f6d42bc310793fc20286bd340f2e514e3557c83df3d4be89e"
+      "published_sha256": "00747f0828a1ed3c830bc1dbcf022d1fe6acab950fcdc1e2dc6b0c2f746cf73d"
     },
     {
-      "description": "Removed local secret-storage and isolated-home housekeeping details while preserving rehearsal verdicts and release facts.",
+      "description": "Removed local secret-storage, isolated-home housekeeping, exact live-port, and pool-name details while preserving rehearsal verdicts, host hardware, isolation, and release facts.",
       "original_sha256": "de35602cbe38b7a6fc767288ee8615683cb30475917abdba7a2b7257490d9911",
       "path": "evidence-2026-10-06-delivery-rehearsal-26a434/README.md",
-      "published_sha256": "f0cd483c91ff3442642e136bb649b70732491e4d999966a3a35defebb0276775"
+      "published_sha256": "70c23e746dc41c0aaddc179fa616203d3bbe919f2a91fbe3f9a5865b2c86ed55"
     },
     {
       "description": "Removed local credential import and lab-lock path housekeeping while preserving acceptance checks, counters, and inference/accounting evidence.",
