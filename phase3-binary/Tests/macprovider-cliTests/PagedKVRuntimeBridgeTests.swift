@@ -2847,6 +2847,31 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(record.digestSHA256.count, 64)
     }
 
+    func testLabDrafterStateDigestIgnoresPhysicalPaddingBeyondCommittedPrefix() throws {
+        let paddedKey = MLXArray([Float](arrayLiteral: 1, 2, 99, 100), [1, 1, 4, 1])
+        let paddedValue = MLXArray([Float](arrayLiteral: 3, 4, 101, 102), [1, 1, 4, 1])
+        let compactKey = MLXArray([Float](arrayLiteral: 1, 2), [1, 1, 2, 1])
+        let compactValue = MLXArray([Float](arrayLiteral: 3, 4), [1, 1, 2, 1])
+        let changedKey = MLXArray([Float](arrayLiteral: 1, 42), [1, 1, 2, 1])
+        let changedValue = MLXArray([Float](arrayLiteral: 3, 4), [1, 1, 2, 1])
+        let paddedCache = KVCacheSimple()
+        paddedCache.state = [paddedKey, paddedValue]
+        let compactCache = KVCacheSimple()
+        compactCache.state = [compactKey, compactValue]
+        let changedCache = KVCacheSimple()
+        changedCache.state = [changedKey, changedValue]
+        let padded = MTPDrafterState(cache: [paddedCache], nextPosition: 2, seedToken: nil, seedHidden: nil)
+        let compact = MTPDrafterState(cache: [compactCache], nextPosition: 2, seedToken: nil, seedHidden: nil)
+        let changed = MTPDrafterState(cache: [changedCache], nextPosition: 2, seedToken: nil, seedHidden: nil)
+
+        let paddedDigest = try PagedKVSharedForwardBackend.nativeMTPDrafterDigestForTest(state: padded, seed: 7)
+        let compactDigest = try PagedKVSharedForwardBackend.nativeMTPDrafterDigestForTest(state: compact, seed: 7)
+        let changedDigest = try PagedKVSharedForwardBackend.nativeMTPDrafterDigestForTest(state: changed, seed: 7)
+
+        XCTAssertEqual(paddedDigest, compactDigest)
+        XCTAssertNotEqual(paddedDigest, changedDigest)
+    }
+
     func testLabStateDigestObserverFailsClosedForPagedSlidingWindowCache() async throws {
         let descriptor = Self.bridgeDescriptor(blockSizeTokens: 4, maxPhysicalBlocks: 4)
         let backend = PagedKVSharedForwardBackend(

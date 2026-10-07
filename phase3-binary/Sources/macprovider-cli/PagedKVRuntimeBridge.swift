@@ -2833,10 +2833,18 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         update(&hasher, label: "kind", value: "drafter")
         update(&hasher, label: "next_position", value: String(state.nextPosition))
         update(&hasher, label: "proposal_appended", value: String(state.proposalAppended))
+        guard state.nextPosition >= 0 else {
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_observer_invalid_drafter_position")
+        }
         for (layerIndex, cache) in state.cache.enumerated() {
             update(&hasher, label: "layer", value: String(layerIndex))
             for (slotIndex, array) in cache.state.enumerated() {
-                try updateArrayDigest(&hasher, label: "slot_\(slotIndex)", array: array)
+                try updateArrayDigest(
+                    &hasher,
+                    label: "slot_\(slotIndex)",
+                    array: array,
+                    logicalTokens: state.nextPosition
+                )
             }
         }
         update(&hasher, label: "seed", value: seed.map(String.init) ?? "none")
@@ -2847,6 +2855,16 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
         return hexString(hasher.finalize())
     }
+
+    #if DEBUG
+    static func nativeMTPDrafterDigestForTest(
+        state: MTPDrafterState,
+        seed: Int?,
+        pendingColumns: [(token: Int, hidden: MLXArray)] = []
+    ) throws -> String {
+        try nativeMTPDrafterStateDigest(state: state, seed: seed, pendingColumns: pendingColumns)
+    }
+    #endif
 
     private func nativeMTPDrafterDigest(requestID: String) throws -> String? {
         lock.lock()
