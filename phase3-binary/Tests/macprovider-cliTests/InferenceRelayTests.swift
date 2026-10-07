@@ -2422,3 +2422,238 @@ final class RelayStreamBatcherConcurrencyTests: XCTestCase {
         XCTAssertFalse(batcher.everyFrameDelivered(sent: 0))
     }
 }
+
+// #1690 BUG-2: the coordinator's cancel_request names the delivered prefix.
+// Chunks the provider sent after the coordinator retired the request never
+// reached the buyer, so the receipt binds the named prefix, not everything
+// sent, and its token count from the per-chunk accounting.
+final class RelayCancelDeliveredBoundaryTests: XCTestCase {
+    private static let hash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
+
+    private func cancelledEndFrame(
+        deliveredOutputBytes: Any?,
+        prefixTable: [Int: Int] = [0: 0, 4: 1, 9: 2, 11: 3, 16: 4]
+    ) async throws -> (end: [String: Any], key: Curve25519.Signing.PrivateKey) {
+        let runtime = FakeBoundaryCancelRuntime(servedSnapshot: RuntimeSnapshot(
+            state: .ready,
+            container: nil,
+            modelID: "mlx-community/Test-Model",
+            modelHash: Self.hash
+        ), prefixTable: prefixTable)
+        let status = ProviderStatus(
+            modelID: "mlx-community/Test-Model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        )
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        let recorder = FrameRecorder()
+        let relay = InferenceRelay(
+            modelRuntime: runtime,
+            providerStatus: status,
+            loadedModelID: "mlx-community/Test-Model",
+            warmSwapEnabled: true,
+            maxActiveRequests: 1,
+            maxBodyBytes: 4096,
+            receiptBuilder: ReceiptBuilder(keyStore: FixedRelayReceiptKeyStore(key: key)),
+            receiptProviderID: "provider-relay-test",
+            sendFrame: { frame in
+                await recorder.append(frame)
+            }
+        )
+        async let requestTask: Void = relay.handleInferenceRequest([
+            "type": "inference_request",
+            "request_id": "req-relay-v04",
+            "stream": true,
+            "body": #"{"model":"mlx-community/Test-Model","stream":true,"messages":[{"role":"user","content":"hello"}]}"#,
+            "settlement": settlementMetadataWire(
+                keyID: receiptKeyID(key.publicKey.rawRepresentation),
+                modelHash: Self.hash
+            ),
+        ])
+        // Every content frame is sent before the cancel arrives.
+        _ = try await waitForFrames({ frames in
+            frames.filter { $0["type"] as? String == "inference_response_chunk" }.count >= 5
+        }, from: { await recorder.frames })
+        var cancel: [String: Any] = ["type": "cancel_request", "request_id": "req-relay-v04", "reason": "buyer_disconnected"]
+        cancel["delivered_output_bytes"] = deliveredOutputBytes
+        try await relay.handleCancelRequest(cancel)
+        try await requestTask
+        let frames = try await waitForFrames({ frames in
+            frames.contains { $0["type"] as? String == "inference_response_end" }
+        }, from: { await recorder.frames })
+        let end = try XCTUnwrap(frames.last { $0["type"] as? String == "inference_response_end" })
+        XCTAssertEqual(end["status"] as? String, "cancelled")
+        return (end, key)
+    }
+
+    private func signedTuple(_ end: [String: Any], key: Curve25519.Signing.PrivateKey) throws -> [String: Any] {
+        let pieces = try XCTUnwrap(end["receipt"] as? String).split(separator: ".")
+        XCTAssertEqual(pieces.count, 2)
+        let tupleBytes = try XCTUnwrap(Data(base64Encoded: String(pieces[0])))
+        let signature = try XCTUnwrap(Data(base64Encoded: String(pieces[1])))
+        XCTAssertTrue(key.publicKey.isValidSignature(signature, for: tupleBytes))
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: tupleBytes) as? [String: Any])
+    }
+
+    func testBoundaryBelowSentBindsThatPrefixAndItsTokenCount() async throws {
+        let (end, key) = try await cancelledEndFrame(deliveredOutputBytes: 9)
+        let tuple = try signedTuple(end, key: key)
+        XCTAssertEqual(tuple["terminal_state"] as? String, "buyer_cancel")
+        let usage = try XCTUnwrap(tuple["usage"] as? [String: Any])
+        XCTAssertEqual((usage["delivered_output_bytes"] as? NSNumber)?.int64Value, 9)
+        XCTAssertEqual((usage["billable_output_tokens"] as? NSNumber)?.int64Value, 2)
+        XCTAssertEqual(tuple["output_hash"] as? String, try buyerCancelOutputHash(content: "Once upon", start: 0))
+        let relayed = try XCTUnwrap(end["usage"] as? [String: Any])
+        XCTAssertEqual(relayed["completion_tokens"] as? Int, 2)
+    }
+
+    func testBoundaryOffAFrameBoundarySignsNoReceipt() async throws {
+        let (end, _) = try await cancelledEndFrame(deliveredOutputBytes: 7)
+        XCTAssertNil(end["receipt"], "a boundary inside a frame cannot be bound: fail closed")
+    }
+
+    func testBoundaryPastTheSentContentSignsNoReceipt() async throws {
+        let (end, _) = try await cancelledEndFrame(deliveredOutputBytes: 64)
+        XCTAssertNil(end["receipt"])
+    }
+
+    func testZeroBoundaryBindsTheEmptyPrefix() async throws {
+        let (end, key) = try await cancelledEndFrame(deliveredOutputBytes: 0)
+        let tuple = try signedTuple(end, key: key)
+        let usage = try XCTUnwrap(tuple["usage"] as? [String: Any])
+        XCTAssertEqual((usage["delivered_output_bytes"] as? NSNumber)?.int64Value, 0)
+        XCTAssertEqual(tuple["output_hash"] as? String, try buyerCancelOutputHash(content: "", start: 0))
+    }
+
+    func testNoBoundaryKeepsSigningEverythingSent() async throws {
+        let (end, key) = try await cancelledEndFrame(deliveredOutputBytes: nil)
+        let tuple = try signedTuple(end, key: key)
+        let usage = try XCTUnwrap(tuple["usage"] as? [String: Any])
+        XCTAssertEqual((usage["delivered_output_bytes"] as? NSNumber)?.int64Value, 16)
+        XCTAssertEqual((usage["billable_output_tokens"] as? NSNumber)?.int64Value, 4)
+        XCTAssertEqual(tuple["output_hash"] as? String, try buyerCancelOutputHash(content: "Once upon a time", start: 0))
+    }
+
+    /// The value as the CLI receives it: decoded by JSONSerialization.
+    private static func jsonValue(_ literal: String) throws -> Any {
+        let object = try JSONSerialization.jsonObject(with: Data(#"{"v":\#(literal)}"#.utf8)) as? [String: Any]
+        return try XCTUnwrap(object?["v"])
+    }
+
+    func testStrictDeliveredOutputBytesDecoding() throws {
+        for (literal, want) in [("0", Int64(0)), ("9", 9), ("9223372036854775807", Int64.max)] {
+            XCTAssertEqual(InferenceRelay.strictDeliveredOutputBytes(try Self.jsonValue(literal)), want, literal)
+        }
+        for literal in ["true", "false", "9.5", "9.0", "1e3", "-1", "9223372036854775808", "18446744073709551616",
+                        "1e30", #""9""#, "null", "[9]"] {
+            XCTAssertNil(InferenceRelay.strictDeliveredOutputBytes(try Self.jsonValue(literal)), literal)
+        }
+        XCTAssertNil(InferenceRelay.strictDeliveredOutputBytes(true))
+    }
+
+    func testMalformedBoundarySignsNoReceipt() async throws {
+        for literal in ["true", "false", "9.5", "9.0", "-1", "18446744073709551616", #""9""#, "null"] {
+            let (end, _) = try await cancelledEndFrame(deliveredOutputBytes: try Self.jsonValue(literal))
+            XCTAssertNil(end["receipt"], "a present but malformed boundary fails closed: \(literal)")
+        }
+    }
+
+    // #1690: a loopback upstream that answered with a plain JSON body has no
+    // per-chunk counts (an empty prefix table); a partial delivery is never
+    // signed with the whole completion's usage.
+    func testPartialBoundaryWithoutAPrefixTableSignsNoReceipt() async throws {
+        let (end, _) = try await cancelledEndFrame(deliveredOutputBytes: 9, prefixTable: [:])
+        XCTAssertNil(end["receipt"])
+        let relayed = try XCTUnwrap(end["usage"] as? [String: Any])
+        XCTAssertNil(relayed["completion_tokens"], "usage for the prefix is unattested")
+    }
+
+    func testBatcherBoundaryMatchesCanonicalBytesOfSentFramesOnly() {
+        var frames: [String] = []
+        let batcher = RelayStreamBatcher(
+            streamInterval: 1,
+            deltaFrame: { delta in (delta["content"] as? String) ?? "" },
+            enqueueFrame: { frames.append($0); return true }
+        )
+        batcher.accept(.content("a\r\n"))
+        batcher.accept(.content("e\u{0301}"))
+        batcher.accept(.content("z"))
+        // Canonical bytes: "a\n" = 2, then "é" (NFC) = 2 more, then 1.
+        XCTAssertEqual(batcher.deliveredContent(sent: 3, deliveredOutputBytes: 4), "a\r\ne\u{0301}")
+        XCTAssertEqual(batcher.deliveredContent(sent: 3, deliveredOutputBytes: 2), "a\r\n")
+        XCTAssertNil(batcher.deliveredContent(sent: 3, deliveredOutputBytes: 3), "inside a frame")
+        XCTAssertNil(batcher.deliveredContent(sent: 2, deliveredOutputBytes: 5), "the frame was never sent")
+        XCTAssertEqual(batcher.deliveredContent(sent: 3, deliveredOutputBytes: 5), "a\r\ne\u{0301}z")
+        XCTAssertEqual(batcher.deliveredContent(sent: 0, deliveredOutputBytes: 0), "")
+        XCTAssertEqual(batcher.deliveredContent(sent: 3, deliveredOutputBytes: nil), batcher.deliveredContent(sent: 3))
+    }
+}
+
+/// Streams "Once upon a time" in four upstream chunks with an attested
+/// per-chunk completion count, then waits for the cancel.
+private actor FakeBoundaryCancelRuntime: ModelRuntimeServing {
+    private let servedSnapshot: RuntimeSnapshot
+    private let prefixTable: [Int: Int]
+
+    init(servedSnapshot: RuntimeSnapshot, prefixTable: [Int: Int]) {
+        self.servedSnapshot = servedSnapshot
+        self.prefixTable = prefixTable
+    }
+
+    var loadedModelHash: String? { nil }
+    var loadedModelHashAlgorithm: String? { nil }
+    var loadedWeightsManifestSHA256: String? { nil }
+    var isLoaded: Bool { true }
+    nonisolated var isSettlementReceiptEligible: Bool { true }
+    nonisolated var settlementRuntimeSource: String? { nil }
+    func setProviderStatus(_ providerStatus: ProviderStatus) {}
+
+    func currentSnapshot() async -> RuntimeSnapshot {
+        servedSnapshot
+    }
+
+    func complete(
+        _ request: ChatCompletionRequest,
+        shouldCancel: @escaping @Sendable () -> Bool
+    ) async throws -> CompletionResult {
+        while !shouldCancel() {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        return CompletionResult(
+            content: "Once upon a time",
+            finishReason: "stop",
+            promptTokens: 5,
+            completionTokens: 4,
+            settlementDisposition: .eligibleOwner,
+            loopbackPrefixCompletionTokens: prefixTable
+        )
+    }
+
+    func completeWithServedSnapshot(
+        _ request: ChatCompletionRequest,
+        shouldCancel: @escaping @Sendable () -> Bool
+    ) async throws -> (CompletionResult, RuntimeSnapshot) {
+        let result = try await complete(request, shouldCancel: shouldCancel)
+        return (result, servedSnapshot)
+    }
+
+    func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle {
+        RequestHandle(snapshot: servedSnapshot, registrationID: 0, drainCancelled: DrainCancelToken())
+    }
+
+    func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws { }
+
+    func stream(
+        _ request: ChatCompletionRequest,
+        with handle: RequestHandle,
+        shouldCancel: @escaping @Sendable () -> Bool,
+        onChunk: @escaping @Sendable (StreamChunk) -> Void
+    ) async throws -> CompletionResult {
+        for piece in ["Once", " upon", " a", " time"] {
+            onChunk(.content(piece))
+        }
+        return try await complete(request, shouldCancel: shouldCancel)
+    }
+
+    func unregisterInFlight(_ id: Int) { }
+}

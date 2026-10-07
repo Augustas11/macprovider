@@ -11,7 +11,16 @@ import pathlib
 import secrets
 import sys
 
-LAB = pathlib.Path(os.environ.get("LAB", "/Users/a1/lab-1690-m6"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import lab_guard  # noqa: E402
+
+try:
+    # Canonical and within LAB_ROOT before any key or config is written.
+    LAB = pathlib.Path(lab_guard.check(os.environ.get("LAB", lab_guard.DEFAULT_ROOT)))
+    # Nothing it reads or writes below LAB may resolve through a symlink.
+    lab_guard.check_tree(str(LAB), ("keys", "run", "static", "db", "models"))
+except ValueError as err:
+    sys.exit(f"refusing: {err}")
 PORTS = {"coord_buyer": 19101, "coord_provider": 19102, "gateway": 19110, "serve": 19120, "llama": 19130}
 PROVIDER_ID = "lab-1690-m6-provider"
 BUYER_ACCOUNT = "acct-lab-1690-buyer"
@@ -31,8 +40,7 @@ def secret_bundle():
         return json.loads(path.read_text())
     bundle = {name: secrets.token_hex(32) for name in (
         "operator_key", "operator_lab_a", "operator_lab_b", "gateway_service_token", "key_hash_secret", "demo_secret")}
-    path.write_text(json.dumps(bundle, indent=2))
-    path.chmod(0o600)
+    lab_guard.write_file(str(LAB), "keys/secrets.json", json.dumps(bundle, indent=2), 0o600)
     return bundle
 
 
@@ -139,10 +147,22 @@ def main():
     # member (pool_setup.py entry --attest) is matched against. A JSON object.
     if os.environ.get("LAB_PROVIDER_OWNER_ACCOUNT_IDS"):
         coord["trusted_pools"]["provider_owner_account_ids"] = json.loads(os.environ["LAB_PROVIDER_OWNER_ACCOUNT_IDS"])
-    (LAB / "run" / "coordinator.yaml").write_text(json.dumps(coord, indent=2))
-    (LAB / "run" / "gateway.yaml").write_text(json.dumps(gateway, indent=2))
-    for p in ("coordinator.yaml", "gateway.yaml"):
-        (LAB / "run" / p).chmod(0o600)
+    # Pearl-shaped e2e (scripts/lab/1690-e2e/pearl_shaped.sh): the production
+    # values the #1690 launch runs with, from phase4-coordinator/dist/
+    # coordinator.yaml and the Pearl overlay (the completion max is a lab
+    # value; Pearl's is not in the repo). Pearl itself is never read.
+    if os.environ.get("E2E_PEARL_SHAPED") == "1":
+        coord["routing"]["min_provider_throughput_tps"] = 1.0
+        coord["settlement"]["verified_model_settlement_mode"] = "enforce"
+        coord["trusted_pools"]["refresh_interval_s"] = 30
+        coord["trusted_pools"]["pool_model_pricing_bounds"] = {
+            "min_prompt_rate_per_mtok": 13500, "max_prompt_rate_per_mtok": 425000,
+            "min_prompt_cache_hit_rate_per_mtok": 3375, "max_prompt_cache_hit_rate_per_mtok": 106250,
+            "min_completion_rate_per_mtok": 27000, "max_completion_rate_per_mtok": 850000}
+        gateway["coordinator"]["require_settlement_trailers"] = True
+        gateway["features"]["trusted_pools"] = {"enabled": True, "coordinator_authorizes": True}
+    lab_guard.write_file(str(LAB), "run/coordinator.yaml", json.dumps(coord, indent=2), 0o600)
+    lab_guard.write_file(str(LAB), "run/gateway.yaml", json.dumps(gateway, indent=2), 0o600)
     print(json.dumps({"ports": PORTS, "provider_id": PROVIDER_ID, "buyer_account": BUYER_ACCOUNT,
                       "settlement_mode": coord["settlement"]["verified_model_settlement_mode"],
                       "require_settlement_trailers": gateway["coordinator"].get("require_settlement_trailers", False),

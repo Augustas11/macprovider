@@ -7,6 +7,22 @@ operator-run production remeasure against the production gateway.
 
 Do not point this at coordinator.malibu.tech / production hosts unless you pass
 both --environment production and --allow-production.
+
+Credentials: production gateways authenticate buyers with
+`Authorization: Bearer <api key>`. Pass the NAMES of environment variables that
+hold the keys (--authorized-key-env / --unauthorized-key-env); key literals are
+never accepted on the command line. The lab account-header mode
+(--authorized-account / --unauthorized-account, sent as X-MacProvider-Account)
+remains for isolated harnesses that trust that header.
+
+Classes (all must answer pool_unavailable):
+  unknown       authorized credential + --unknown-pool-id (no such pool)
+  unauthorized  authorized credential + --unauthorized-pool-id (an existing pool
+                it is not a buyer of), or else the unauthorized credential +
+                --pool-id
+  disabled      authorized credential + --pool-id (a pool it is a buyer of,
+                currently paused)
+Class order is shuffled every round.
 """
 
 from __future__ import annotations
@@ -14,6 +30,8 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import random
 import ssl
 import sys
 import urllib.error
@@ -178,19 +196,61 @@ def load_samples_json(path: str) -> dict[str, list[float]]:
     return out
 
 
-def measure_http(
-    base_url: str,
+def credential_headers(*, account: str = "", api_key: str = "") -> dict[str, str]:
+    """Return the buyer credential headers for one class.
+
+    A Bearer API key is the production gateway credential; the account header is
+    the lab harness credential. Exactly one must be set.
+    """
+    if bool(account) == bool(api_key):
+        raise SystemExit("internal: exactly one of account or api_key is required")
+    if api_key:
+        return {"Authorization": "Bearer " + api_key}
+    return {"X-MacProvider-Account": account}
+
+
+def key_from_env(name: str, flag: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise SystemExit(f"{flag}: environment variable {name!r} is unset or empty")
+    return value
+
+
+def class_plan(
     *,
     unknown_pool_id: str,
     pool_id: str,
-    authorized_account: str,
-    unauthorized_account: str,
+    unauthorized_pool_id: str,
+    authorized: dict[str, str],
+    unauthorized: dict[str, str] | None,
+) -> dict[str, tuple[dict[str, str], str]]:
+    """Map each R007 class to (credential headers, selected pool id)."""
+    if unauthorized_pool_id:
+        unauthorized_case = (authorized, unauthorized_pool_id)
+    elif unauthorized is not None:
+        unauthorized_case = (unauthorized, pool_id)
+    else:
+        raise SystemExit("unauthorized class needs --unauthorized-pool-id or an unauthorized credential")
+    return {
+        "unknown": (authorized, unknown_pool_id),
+        "unauthorized": unauthorized_case,
+        "disabled": (authorized, pool_id),
+    }
+
+
+def measure_http(
+    base_url: str,
+    *,
+    plan: dict[str, tuple[dict[str, str], str]],
     samples: int,
     timeout_s: float,
+    rng: random.Random | None = None,
 ) -> dict[str, list[float]]:
     import time
 
-    def one(account: str, select_pool: str) -> float:
+    rng = rng or random.SystemRandom()
+
+    def one(credential: dict[str, str], select_pool: str) -> float:
         body = json.dumps(
             {
                 "model": "probe",
@@ -203,7 +263,7 @@ def measure_http(
             method="POST",
             headers={
                 "Content-Type": "application/json",
-                "X-MacProvider-Account": account,
+                **credential,
                 "X-MacProvider-Pool-Select": select_pool,
             },
         )
@@ -222,11 +282,14 @@ def measure_http(
             raise SystemExit(f"unexpected rejection status={status} body={text[:300]}")
         return elapsed_ms
 
-    measured = {"unknown": [], "unauthorized": [], "disabled": []}
+    measured: dict[str, list[float]] = {name: [] for name in REQUIRED_CLASSES}
     for _ in range(samples):
-        measured["unknown"].append(one(authorized_account, unknown_pool_id))
-        measured["unauthorized"].append(one(unauthorized_account, pool_id))
-        measured["disabled"].append(one(authorized_account, pool_id))
+        # Shuffle per round so connection warm-up and drift do not bias a class.
+        order = list(REQUIRED_CLASSES)
+        rng.shuffle(order)
+        for name in order:
+            credential, select_pool = plan[name]
+            measured[name].append(one(credential, select_pool))
     return measured
 
 
@@ -272,11 +335,55 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--samples", type=int, default=16)
     parser.add_argument("--method", default="operator_http_probe")
     parser.add_argument("--unknown-pool-id", default="zzzzzzzzzzzzzzzzzzzzzz")
-    parser.add_argument("--pool-id", default="")
-    parser.add_argument("--authorized-account", default="")
-    parser.add_argument("--unauthorized-account", default="")
+    parser.add_argument("--pool-id", default="", help="pool the authorized credential is a buyer of, currently paused (disabled class)")
+    parser.add_argument(
+        "--unauthorized-pool-id",
+        default="",
+        help="existing pool the authorized credential is NOT a buyer of; covers the unauthorized class with one credential",
+    )
+    parser.add_argument("--authorized-key-env", default="", help="NAME of the env var holding the authorized buyer API key (Bearer)")
+    parser.add_argument("--unauthorized-key-env", default="", help="NAME of the env var holding an unauthorized buyer API key (Bearer)")
+    parser.add_argument("--authorized-account", default="", help="lab mode: X-MacProvider-Account of the authorized buyer")
+    parser.add_argument("--unauthorized-account", default="", help="lab mode: X-MacProvider-Account of an unauthorized buyer")
     parser.add_argument("--timeout-s", type=float, default=10.0)
     return parser.parse_args(argv)
+
+
+def plan_from_args(args: argparse.Namespace) -> dict[str, tuple[dict[str, str], str]]:
+    key_mode = bool(args.authorized_key_env or args.unauthorized_key_env)
+    account_mode = bool(args.authorized_account or args.unauthorized_account)
+    if key_mode and account_mode:
+        raise SystemExit("use either --*-key-env (Bearer) or --*-account (lab header), not both")
+    if not args.pool_id:
+        raise SystemExit("--pool-id is required for HTTP measure")
+    if key_mode:
+        if not args.authorized_key_env:
+            raise SystemExit("--authorized-key-env is required with Bearer credentials")
+        authorized = credential_headers(api_key=key_from_env(args.authorized_key_env, "--authorized-key-env"))
+        unauthorized = None
+        if args.unauthorized_key_env:
+            unauthorized = credential_headers(api_key=key_from_env(args.unauthorized_key_env, "--unauthorized-key-env"))
+    elif account_mode:
+        if not args.authorized_account:
+            raise SystemExit("--authorized-account is required in lab account-header mode")
+        authorized = credential_headers(account=args.authorized_account)
+        unauthorized = None
+        if args.unauthorized_account:
+            unauthorized = credential_headers(account=args.unauthorized_account)
+    else:
+        raise SystemExit("HTTP measure needs --authorized-key-env (Bearer) or --authorized-account (lab)")
+    if not args.unauthorized_pool_id and unauthorized is None:
+        raise SystemExit(
+            "unauthorized class needs --unauthorized-pool-id or an unauthorized credential "
+            "(--unauthorized-key-env / --unauthorized-account)"
+        )
+    return class_plan(
+        unknown_pool_id=args.unknown_pool_id,
+        pool_id=args.pool_id,
+        unauthorized_pool_id=args.unauthorized_pool_id,
+        authorized=authorized,
+        unauthorized=unauthorized,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -300,15 +407,10 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.environment == "production" and not args.allow_production:
             raise SystemExit("production environment requires --allow-production")
-        if not args.pool_id or not args.authorized_account or not args.unauthorized_account:
-            raise SystemExit("--pool-id, --authorized-account, and --unauthorized-account are required for HTTP measure")
         source = "http"
         samples = measure_http(
             args.base_url,
-            unknown_pool_id=args.unknown_pool_id,
-            pool_id=args.pool_id,
-            authorized_account=args.authorized_account,
-            unauthorized_account=args.unauthorized_account,
+            plan=plan_from_args(args),
             samples=args.samples,
             timeout_s=args.timeout_s,
         )

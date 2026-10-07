@@ -67,12 +67,112 @@ type RelayStream struct {
 	// cancel terminal can follow and AwaitCancelTerminal returns at once.
 	noCancelTerminal <-chan struct{}
 	cancel           func(string)
+	deliveredOutput  *deliveredOutputBoundary
 }
 
 func (r *RelayStream) Cancel(reason string) {
 	if r.cancel != nil {
 		r.cancel(reason)
 	}
+}
+
+// TrackDeliveredOutput registers how the buyer handler measures the
+// canonical delivered output bytes (SPEC-015 §N.5). A buyer_disconnected
+// cancel_request then carries that count, taken when the request is retired,
+// as delivered_output_bytes (SPEC-001 §6.6), so the provider signs the
+// prefix the buyer actually received (#1690 BUG-2).
+func (r *RelayStream) TrackDeliveredOutput(bytes func() int64) {
+	if r == nil || r.deliveredOutput == nil {
+		return
+	}
+	r.deliveredOutput.mu.Lock()
+	r.deliveredOutput.bytes = bytes
+	r.deliveredOutput.mu.Unlock()
+}
+
+// RecordDelivered runs record, which writes bytes to the buyer and records the
+// bytes the writer accepted into the state TrackDeliveredOutput measures,
+// unless a buyer_disconnected cancel already sent the boundary. It reports
+// whether record ran. A false return means the cancel_request was sent first,
+// so record must not write: those bytes are past the delivered prefix.
+//
+// The write and its accounting run under the boundary lock, so a cancel
+// (from the buyer handler or the relay's context watcher) seals either before
+// the write or after the accepted bytes are recorded, never in between: the
+// sealed boundary always equals the recorded delivered bytes.
+func (r *RelayStream) RecordDelivered(record func()) bool {
+	if r == nil || r.deliveredOutput == nil {
+		record()
+		return true
+	}
+	r.deliveredOutput.mu.Lock()
+	defer r.deliveredOutput.mu.Unlock()
+	if r.deliveredOutput.sealed {
+		return false
+	}
+	record()
+	return true
+}
+
+// NewRelayStreamForTest returns stream with a delivered-output boundary. Its
+// Cancel passes onCancel the delivered_output_bytes a cancel_request for that
+// reason would carry, so buyer-handler tests can observe the boundary.
+func NewRelayStreamForTest(stream RelayStream, onCancel func(reason string, deliveredOutputBytes *int64)) *RelayStream {
+	boundary := &deliveredOutputBoundary{}
+	stream.deliveredOutput = boundary
+	stream.cancel = func(reason string) { onCancel(reason, boundary.sealFor(reason)) }
+	return &stream
+}
+
+// deliveredOutputBoundary is shared by the buyer handler, which records
+// delivered bytes, and every cancel path, which seals it once the request is
+// retired. Recording and sealing hold the same lock, so the boundary sent to
+// the provider equals the prefix the buyer handler binds.
+type deliveredOutputBoundary struct {
+	mu     sync.Mutex
+	sealed bool
+	bytes  func() int64
+	// expected is set at dispatch when the buyer handler will register a
+	// measure (WithDeliveredOutputTracking). A cancel that wins the race
+	// with that registration still sends the boundary: nothing was written
+	// to the buyer yet, so it is 0, and the late registration records
+	// nothing past it.
+	expected bool
+}
+
+type deliveredOutputTrackingKey struct{}
+
+// WithDeliveredOutputTracking marks a dispatch whose buyer handler will call
+// TrackDeliveredOutput, so a buyer_disconnected cancel that fires before that
+// registration still carries delivered_output_bytes (#1690 BUG-2).
+func WithDeliveredOutputTracking(ctx context.Context) context.Context {
+	return context.WithValue(ctx, deliveredOutputTrackingKey{}, true)
+}
+
+func newDeliveredOutputBoundary(ctx context.Context) *deliveredOutputBoundary {
+	expected, _ := ctx.Value(deliveredOutputTrackingKey{}).(bool)
+	return &deliveredOutputBoundary{expected: expected}
+}
+
+// sealFor returns the delivered byte count a cancel_request for reason
+// carries and stops further recording. Only a buyer_disconnected cancel
+// carries one, and only when the buyer handler registered a measure or the
+// dispatch declared that it will.
+func (b *deliveredOutputBoundary) sealFor(reason string) *int64 {
+	if b == nil || reason != "buyer_disconnected" {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.sealed || (b.bytes == nil && !b.expected) {
+		return nil
+	}
+	b.sealed = true
+	var n int64
+	if b.bytes != nil {
+		n = b.bytes()
+	}
+	return &n
 }
 
 // AwaitCancelTerminal waits up to timeout for the provider's "cancelled"
@@ -155,6 +255,7 @@ type relayActive struct {
 	errs                chan error
 	validations         chan RelayBlindValidation
 	relayBlind          *RelayBlindDispatchContext
+	deliveredOutput     *deliveredOutputBoundary
 	validationSeen      bool
 	validationState     string
 	validationErrorCode string
@@ -653,7 +754,7 @@ func (ps *providerSession) cancelActive(requestID string, reason string, err err
 	if !ok {
 		return false
 	}
-	b, _ := json.Marshal(CancelRequest{Type: "cancel_request", RequestID: requestID, Reason: reason})
+	b, _ := json.Marshal(CancelRequest{Type: "cancel_request", RequestID: requestID, Reason: reason, DeliveredOutputBytes: active.deliveredOutput.sealFor(reason)})
 	_ = ps.send(b)
 	if err != nil {
 		select {
@@ -1599,6 +1700,9 @@ func (s *Server) dispatchInference(ctx context.Context, provider pool.Provider, 
 		return nil, err
 	}
 	active.relayBlind = relayContext
+	// The boundary exists, with its tracking expectation, before the
+	// context watcher below can fire.
+	active.deliveredOutput = newDeliveredOutputBoundary(ctx)
 	s.extendProviderReadDeadlineForActive(provider)
 	var maxOutputTokens *int
 	if limit, ok := MaxOutputTokensFromContext(ctx); ok {
@@ -1651,6 +1755,7 @@ func (s *Server) dispatchInference(ctx context.Context, provider pool.Provider, 
 		CancelTerminal:   active.cancelTerminal,
 		noCancelTerminal: active.noCancelTerminal,
 		cancel:           cancel,
+		deliveredOutput:  active.deliveredOutput,
 	}, nil
 }
 

@@ -78,6 +78,13 @@ func TestInternalRoutingAdvertisesBuyerAuthorizationProjection(t *testing.T) {
 		SettlementMode: "observe",
 		Routeable:      false,
 		Generation:     8,
+	}, {
+		PoolID:           "expiredpoolxxxxxxxxxxx",
+		BuyerAccounts:    []string{"acct-b"},
+		SettlementMode:   "observe",
+		Routeable:        false,
+		RouteableExpired: true,
+		Generation:       9,
 	}}); err != nil {
 		t.Fatalf("LoadRouteableSnapshotsAtRevision: %v", err)
 	}
@@ -100,6 +107,7 @@ func TestInternalRoutingAdvertisesBuyerAuthorizationProjection(t *testing.T) {
 			Enabled                      bool                `json:"enabled"`
 			AccountPools                 map[string][]string `json:"account_pools"`
 			BuyerAuthorizationGeneration uint64              `json:"buyer_authorization_generation"`
+			RouteablePools               []string            `json:"routeable_pools"`
 		} `json:"pools"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
@@ -111,10 +119,18 @@ func TestInternalRoutingAdvertisesBuyerAuthorizationProjection(t *testing.T) {
 	if got.Pools.BuyerAuthorizationGeneration != 7 {
 		t.Fatalf("buyer_authorization_generation=%d, want registry revision 7", got.Pools.BuyerAuthorizationGeneration)
 	}
-	if len(got.Pools.AccountPools["acct-a"]) != 2 || got.Pools.AccountPools["acct-a"][0] != "ABCDEFGHIJKLMNOPQRSTUV" || got.Pools.AccountPools["acct-a"][1] != "abcdefghijklmnopqrstuv" {
-		t.Fatalf("acct-a pools=%v, want sorted two-pool projection", got.Pools.AccountPools["acct-a"])
+	// SPEC-043-R007: the non-active (paused) pool is omitted so the gateway
+	// refuses it on the same local lookup path as unknown/unauthorized pools.
+	if len(got.Pools.AccountPools["acct-a"]) != 1 || got.Pools.AccountPools["acct-a"][0] != "abcdefghijklmnopqrstuv" {
+		t.Fatalf("acct-a pools=%v, want only the routeable pool", got.Pools.AccountPools["acct-a"])
 	}
+	// A creator-agreement-expired pool is not routeable either: it is
+	// omitted, so the gateway answers the generic floored pool_unavailable
+	// locally instead of forwarding to pool_policy_stale (SPEC-043-R007).
 	if len(got.Pools.AccountPools["acct-b"]) != 1 || got.Pools.AccountPools["acct-b"][0] != "abcdefghijklmnopqrstuv" {
-		t.Fatalf("acct-b pools=%v, want one-pool projection", got.Pools.AccountPools["acct-b"])
+		t.Fatalf("acct-b pools=%v, want only the routeable pool", got.Pools.AccountPools["acct-b"])
+	}
+	if len(got.Pools.RouteablePools) != 1 || got.Pools.RouteablePools[0] != "abcdefghijklmnopqrstuv" {
+		t.Fatalf("routeable_pools=%v, want only the routeable pool", got.Pools.RouteablePools)
 	}
 }

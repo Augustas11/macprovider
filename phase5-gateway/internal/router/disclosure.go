@@ -190,6 +190,22 @@ type coordinatorPoolsMetadata struct {
 	Enabled                      bool                `json:"enabled"`
 	AccountPools                 map[string][]string `json:"account_pools"`
 	BuyerAuthorizationGeneration uint64              `json:"buyer_authorization_generation"`
+	// RouteablePools lists the pools the coordinator can route now. A
+	// coordinator that omits it routes none for this gateway (fail closed).
+	RouteablePools []string `json:"routeable_pools"`
+}
+
+// Routeable reports whether the coordinator listed poolID as routeable.
+func (m coordinatorPoolsMetadata) Routeable(poolID string) bool {
+	if poolID == "" {
+		return false
+	}
+	for _, p := range m.RouteablePools {
+		if p == poolID {
+			return true
+		}
+	}
+	return false
 }
 
 func (m coordinatorPoolsMetadata) Authorizes(accountID, poolID string) bool {

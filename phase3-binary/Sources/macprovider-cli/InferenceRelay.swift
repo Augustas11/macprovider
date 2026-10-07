@@ -431,7 +431,30 @@ actor InferenceRelay {
             return
         }
 
-        request.state.cancel()
+        // #1690 BUG-2: the coordinator names the delivered prefix it binds.
+        // An absent field leaves the pre-boundary behaviour; a present value
+        // that is not an exact non-negative Int64 fails closed (no receipt).
+        var deliveredOutputBytes: Int64?
+        if let raw = message["delivered_output_bytes"] {
+            deliveredOutputBytes = Self.strictDeliveredOutputBytes(raw) ?? RelayRequestState.invalidDeliveredOutputBytes
+        }
+        request.state.cancel(deliveredOutputBytes: deliveredOutputBytes)
+    }
+
+    /// An exact non-negative integer that fits Int64. JSON booleans (bridged
+    /// as CFBoolean), any floating-point number (the coordinator encodes an
+    /// integer literal), decimal numbers out of Int64 range, and strings are
+    /// rejected.
+    static func strictDeliveredOutputBytes(_ raw: Any) -> Int64? {
+        guard let number = raw as? NSNumber,
+              !(number is NSDecimalNumber),
+              CFGetTypeID(number) == CFNumberGetTypeID(),
+              !CFNumberIsFloatType(number) else { return nil }
+        let value = number.int64Value
+        // The decimal round trip rejects a value the bridge truncated or
+        // wrapped to fit Int64.
+        guard number.stringValue == String(value), value >= 0 else { return nil }
+        return value
     }
 
     func cancelAll() {
@@ -1463,7 +1486,11 @@ actor InferenceRelay {
                 // output the buyer received. It is issued only when every
                 // frame carrying generated output was accepted and sent, and
                 // it binds the content those frames carried.
-                let deliveredContent = consumerSent.flatMap { batcher.deliveredContent(sent: $0) }
+                // #1690 BUG-2: when the coordinator named the delivered
+                // prefix in its cancel_request, bind exactly that prefix.
+                let deliveredContent = consumerSent.flatMap {
+                    batcher.deliveredContent(sent: $0, deliveredOutputBytes: state.deliveredOutputBytes)
+                }
                 // A loopback runtime reports usage for the delivered prefix
                 // only (#1690 E2E-F3); native completions are unchanged.
                 let cancelled = completion.cancelledPrefixUsage(deliveredContent: deliveredContent)
@@ -2247,6 +2274,7 @@ private final class RelayRequestState: @unchecked Sendable {
     private var terminal = false
     private var sentChunks = 0
     private var cancelled = false
+    private var cancelDeliveredOutputBytes: Int64?
     private var currentUsage: [String: Any]?
 
     init(relayBlindSettlement: RelayBlindSettlementAttempt? = nil) {
@@ -2269,6 +2297,19 @@ private final class RelayRequestState: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return cancelled
+    }
+
+    /// A cancel_request whose `delivered_output_bytes` was present but not an
+    /// exact non-negative Int64: no prefix matches it, so no receipt.
+    static let invalidDeliveredOutputBytes: Int64 = -1
+
+    /// The coordinator's delivered-prefix boundary from cancel_request, in
+    /// canonical delivered output bytes; nil when it sent none, and
+    /// `invalidDeliveredOutputBytes` when it sent a malformed value.
+    var deliveredOutputBytes: Int64? {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelDeliveredOutputBytes
     }
 
     var usage: [String: Any]? {
@@ -2305,8 +2346,11 @@ private final class RelayRequestState: @unchecked Sendable {
         }
     }
 
-    func cancel() {
+    func cancel(deliveredOutputBytes: Int64? = nil) {
         lock.lock()
+        if !cancelled {
+            cancelDeliveredOutputBytes = deliveredOutputBytes
+        }
         cancelled = true
         let buffer = buffer
         lock.unlock()
@@ -2347,6 +2391,9 @@ final class RelayStreamBatcher: @unchecked Sendable {
     private var emittedToolCall = false
     private var suppressedPostToolContent = false
     private var enqueuedContent = ""
+    /// Each content frame's enqueue position and the UTF-8 length of
+    /// `enqueuedContent` through it.
+    private var contentFrameEnds: [(frames: Int, bytes: Int)] = []
     private var accepted = 0
     private var dropped = 0
 
@@ -2418,6 +2465,33 @@ final class RelayStreamBatcher: @unchecked Sendable {
         return enqueuedContent
     }
 
+    /// #1690 BUG-2: the content through the coordinator's delivered-prefix
+    /// boundary, given in canonical delivered output bytes (SPEC-015 §N.5).
+    /// The boundary must fall at the end of a content frame that was sent, so
+    /// the prefix is exactly what the buyer received; otherwise nil (fail
+    /// closed). Without a boundary this is `deliveredContent(sent:)`.
+    func deliveredContent(sent: Int, deliveredOutputBytes: Int64?) -> String? {
+        guard let boundary = deliveredOutputBytes else { return deliveredContent(sent: sent) }
+        // A malformed boundary (RelayRequestState.invalidDeliveredOutputBytes)
+        // binds nothing.
+        guard boundary >= 0 else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+        guard !emittedToolCall else { return nil }
+        if boundary == 0 { return "" }
+        // ASCII without CR is already canonical, so most streams skip
+        // re-normalizing every candidate prefix.
+        let canonicalAsIs = !enqueuedContent.utf8.contains { $0 >= 0x80 || $0 == 0x0D }
+        for end in contentFrameEnds.reversed() where end.frames <= sent {
+            if canonicalAsIs && Int64(end.bytes) != boundary { continue }
+            let prefix = String(decoding: enqueuedContent.utf8.prefix(end.bytes), as: UTF8.self)
+            if canonicalAsIs || Int64(PromptCanonicalizer.normalizeLineEndings(prefix).precomposedStringWithCanonicalMapping.utf8.count) == boundary {
+                return prefix
+            }
+        }
+        return nil
+    }
+
     /// The completed output the buyer received, when every accepted frame was
     /// sent and the runtime's final completion is compatible with that stream.
     func deliveredCompleteOutput(sent: Int, completion: CompletionResult) -> InferenceRelay.DeliveredOutput? {
@@ -2442,6 +2516,7 @@ final class RelayStreamBatcher: @unchecked Sendable {
         guard !pendingContent.isEmpty else { return }
         if enqueueLocked(deltaFrame(["content": pendingContent])) {
             enqueuedContent += pendingContent
+            contentFrameEnds.append((frames: accepted, bytes: enqueuedContent.utf8.count))
         }
         pendingContent = ""
         pendingCount = 0

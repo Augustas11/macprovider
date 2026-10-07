@@ -584,7 +584,21 @@ struct OpenAICompatibleStreamAccumulator {
             guard !trimmed.isEmpty else {
                 throw OpenAICompatibleLoopbackRuntimeError.malformedUpstreamResponse
             }
-            let result = try OpenAICompatibleLoopbackRuntime.decodeUpstreamResponse(Data(trimmed.utf8))
+            let decoded = try OpenAICompatibleLoopbackRuntime.decodeUpstreamResponse(Data(trimmed.utf8))
+            // #1690: a plain JSON body has no per-chunk counts, so no proper
+            // prefix of its content has attested usage. The empty table makes
+            // a cancelled partial delivery unattested (never signed) instead
+            // of keeping the whole completion's usage.
+            let result = CompletionResult(
+                content: decoded.content,
+                finishReason: decoded.finishReason,
+                promptTokens: decoded.promptTokens,
+                completionTokens: decoded.completionTokens,
+                generatedCompletionTokens: decoded.generatedCompletionTokens,
+                toolCalls: decoded.toolCalls,
+                settlementDisposition: decoded.settlementDisposition,
+                loopbackPrefixCompletionTokens: [:]
+            )
             decodedFromPlainBody = true
             if !result.content.isEmpty {
                 late.append(.content(result.content))

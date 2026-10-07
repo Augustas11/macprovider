@@ -393,7 +393,15 @@ func (s *Store) journalHotPathSettlementAttemptOutput(ctx context.Context, conn 
 	attempt.AttemptN = int64(in.AttemptN)
 	attempt.ProviderID = in.ProviderID
 	if !IsNativeRuntimeSource(in.ProviderRuntimeSource) && poolAttestedUsage {
-		prompt, completion := in.PromptTokens, in.CompletionTokens
+		// SPEC-022-R012.4 / R-3.4.2: the evidence must equal what the
+		// provider signs, which is its runtime's own prompt count. The
+		// len(body)/4 prompt bound (boundProviderReportedPromptTokens) caps
+		// only the ledger amount; verified credit sync re-bounds billable to
+		// the ledger prompt, so the unbounded evidence credits nothing more.
+		prompt, completion := in.ProviderReportedPromptTokens, in.CompletionTokens
+		if prompt == nil {
+			prompt = in.PromptTokens
+		}
 		if attempt.Output.ObservedInputTokens != nil && attempt.Output.ObservedOutputTokens != nil {
 			prompt, completion = attempt.Output.ObservedInputTokens, attempt.Output.ObservedOutputTokens
 		}
